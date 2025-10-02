@@ -30,48 +30,171 @@ class StatusMonitor:
 
     def get_status_line(self) -> str:
         """
-        Get concise status line for Claude Code status bar.
+        Get concise status line for Claude Code status bar with smart rotation.
 
         Returns:
-            Status line string with emoji indicators
+            3-icon status string with precedence-based rotation
         """
         try:
-            # Check if background agent is running
+            # Core system health (always visible)
             agent_running = self.is_processor_running()
             agent_icon = "🤖" if agent_running else "💤"
 
-            # Check LLM availability
             llm_available = self.llm_client.is_available() and self.llm_client.is_model_available()
             llm_icon = "🧠" if llm_available else "🔌"
 
-            # Get queue stats
+            # Smart third icon with precedence logic
+            third_icon = self._get_priority_status_icon()
+
+            return f"{agent_icon}{llm_icon}{third_icon}"
+
+        except Exception:
+            return "🤖❓"  # Fallback status
+
+    def _get_priority_status_icon(self) -> str:
+        """
+        Get the highest priority status icon using precedence logic.
+
+        Returns:
+            Single emoji representing the most important current status
+        """
+        try:
+            # Get system metrics
             queue_stats = self.queue_manager.get_queue_stats()
             pending = queue_stats.get('pending', {}).get('count', 0)
             processing = queue_stats.get('processing', {}).get('count', 0)
             processed = queue_stats.get('processed', {}).get('count', 0)
 
-            # Get latest insight info
-            latest_info = self.get_latest_insight_info()
+            system_health = self._calculate_system_health()
+            conflicts_count = self._detect_conflicts_count()
+            latest_insight_age = self._get_latest_insight_age_minutes()
+            new_pattern_detected = self._check_new_pattern_detected()
+            is_high_activity = self._is_high_activity_day()
 
-            # Build status line
-            status_parts = [agent_icon, llm_icon]
+            # Precedence order (highest to lowest priority)
+            precedence_checks = [
+                # Critical (immediate attention)
+                ("⚠️", conflicts_count > 0),
+                ("🔴", system_health < 0.5),
 
-            if pending > 0:
-                status_parts.append(f"⏳{pending}")
+                # Active (current activity)
+                (f"⚡{processing}" if processing <= 9 else "⚡9+", processing > 0),
+                (f"⏳{pending}" if pending <= 9 else "⏳9+", pending > 5),
 
-            if processing > 0:
-                status_parts.append(f"⚡{processing}")
+                # Recent Activity (what just happened)
+                ("💡", latest_insight_age is not None and latest_insight_age < 5),
+                ("🎯", new_pattern_detected),
 
-            if processed > 0:
-                status_parts.append(f"✅{processed}")
+                # Status (general health)
+                (f"✅{processed}" if processed <= 99 else "✅99+", processed > 0),
+                ("📈", is_high_activity),
+            ]
 
-            if latest_info:
-                status_parts.append(f"💡{latest_info}")
+            # Return first matching condition
+            for icon, condition in precedence_checks:
+                if condition:
+                    return icon
 
-            return " ".join(status_parts)
+            # Default when no special conditions
+            return "💡"
 
         except Exception:
-            return "🤖 ❓"  # Fallback status
+            return "❓"
+
+    def _calculate_system_health(self) -> float:
+        """Calculate overall system health score (0.0 to 1.0)."""
+        try:
+            score = 1.0
+
+            # Agent health
+            if not self.is_processor_running():
+                score -= 0.4
+
+            # LLM health
+            if not (self.llm_client.is_available() and self.llm_client.is_model_available()):
+                score -= 0.3
+
+            # Queue health
+            queue_stats = self.queue_manager.get_queue_stats()
+            pending = queue_stats.get('pending', {}).get('count', 0)
+            if pending > 20:
+                score -= 0.2
+            elif pending > 10:
+                score -= 0.1
+
+            return max(0.0, score)
+        except:
+            return 0.5
+
+    def _detect_conflicts_count(self) -> int:
+        """Detect number of decision conflicts (simplified heuristic)."""
+        try:
+            # For now, return 0 - this would be enhanced with actual conflict detection
+            # Could check for conflicting decisions in recent timeframe
+            return 0
+        except:
+            return 0
+
+    def _get_latest_insight_age_minutes(self) -> Optional[int]:
+        """Get age of latest insight in minutes."""
+        try:
+            latest_time = None
+            knowledge_dir = self.config.knowledge_dir
+            categories = ['decisions', 'patterns', 'insights', 'strategies']
+
+            for category in categories:
+                category_dir = knowledge_dir / category
+                if category_dir.exists():
+                    for md_file in category_dir.glob('*.md'):
+                        mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
+                        if latest_time is None or mtime > latest_time:
+                            latest_time = mtime
+
+            if latest_time:
+                age = datetime.now() - latest_time
+                return int(age.total_seconds() / 60)
+
+            return None
+        except:
+            return None
+
+    def _check_new_pattern_detected(self) -> bool:
+        """Check if a new pattern was detected recently (simplified heuristic)."""
+        try:
+            # Check if patterns category was updated in last hour
+            patterns_dir = self.config.knowledge_dir / 'patterns'
+            if patterns_dir.exists():
+                for md_file in patterns_dir.glob('*.md'):
+                    mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
+                    age = datetime.now() - mtime
+                    if age < timedelta(hours=1):
+                        return True
+            return False
+        except:
+            return False
+
+    def _is_high_activity_day(self) -> bool:
+        """Check if today has higher than normal activity."""
+        try:
+            # Check if multiple categories were updated today
+            today = datetime.now().date()
+            updated_categories = 0
+
+            knowledge_dir = self.config.knowledge_dir
+            categories = ['decisions', 'patterns', 'insights', 'strategies']
+
+            for category in categories:
+                category_dir = knowledge_dir / category
+                if category_dir.exists():
+                    for md_file in category_dir.glob('*.md'):
+                        mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
+                        if mtime.date() == today:
+                            updated_categories += 1
+                            break  # Only count each category once
+
+            return updated_categories >= 3  # High activity if 3+ categories updated
+        except:
+            return False
 
     def get_detailed_status(self) -> Dict[str, Any]:
         """
