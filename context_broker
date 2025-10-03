@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""
+Context Broker CLI executable.
+
+An intelligent "librarian" that can instantly find relevant context
+from captured knowledge for any request or query.
+"""
+
+import sys
+import os
+
+# Add current directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from context_capture.cli.broker_commands import main
+
+if __name__ == "__main__":
+    main()
