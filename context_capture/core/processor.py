@@ -305,3 +305,35 @@ class ContextProcessor:
     def stop(self) -> None:
         """Stop the processor gracefully."""
         self.running = False
+
+
+def main():
+    """Entry point for running processor as a module."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Context Capture Background Processor")
+    parser.add_argument('--project-dir', type=str, help='Project directory')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+
+    args = parser.parse_args()
+
+    # Set project directory
+    project_dir = Path(args.project_dir) if args.project_dir else Path.cwd()
+
+    # Create config and enable debug if requested
+    config = Config(project_dir=project_dir)
+    if args.debug:
+        config.set('features.debug_mode', True)
+
+    # Create and run processor
+    processor = ContextProcessor(config=config, project_dir=project_dir)
+
+    try:
+        processor.run_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down processor...")
+        processor.stop()
+
+
+if __name__ == '__main__':
+    main()

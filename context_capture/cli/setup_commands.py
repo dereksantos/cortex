@@ -420,7 +420,7 @@ class SetupCLI:
             },
             "statusLine": {
                 "type": "command",
-                "command": f"{python_cmd} -m context_capture.utils.status --format line"
+                "command": f"{python_cmd} -c \"from context_capture.utils.status import StatusMonitor; print(StatusMonitor().get_status_line(), end='')\""
             }
         }
 
@@ -816,7 +816,7 @@ class SetupCLI:
             },
             "statusLine": {
                 "type": "command",
-                "command": f"{python_cmd} -m context_capture.utils.status --format line"
+                "command": f"{python_cmd} -c \"from context_capture.utils.status import StatusMonitor; print(StatusMonitor().get_status_line(), end='')\""
             }
         }
 
