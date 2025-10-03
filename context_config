@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""
+Context Capture Configuration CLI executable.
+
+Provides easy configuration management for the Context Broker
+and provider settings through a command-line interface.
+"""
+
+import sys
+import os
+
+# Add current directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from context_capture.cli.config_commands import main
+
+if __name__ == "__main__":
+    main()
