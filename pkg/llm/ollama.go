@@ -56,6 +56,43 @@ func (c *OllamaClient) IsAvailable() bool {
 	return resp.StatusCode == 200
 }
 
+// ModelsResponse represents the response from /api/tags
+type ModelsResponse struct {
+	Models []ModelInfo `json:"models"`
+}
+
+// ModelInfo represents information about a model
+type ModelInfo struct {
+	Name string `json:"name"`
+}
+
+// IsModelAvailable checks if the configured model is available
+func (c *OllamaClient) IsModelAvailable() bool {
+	resp, err := c.httpClient.Get(c.baseURL + "/api/tags")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	var modelsResp ModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		return false
+	}
+
+	// Check if our model is in the list
+	for _, model := range modelsResp.Models {
+		if model.Name == c.model {
+			return true
+		}
+	}
+
+	return false
+}
+
 // AnalyzeEvent analyzes an event and extracts insights
 func (c *OllamaClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
 	prompt := c.buildAnalysisPrompt(event)

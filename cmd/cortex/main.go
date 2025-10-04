@@ -15,6 +15,7 @@ import (
 	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 const version = "0.1.0"
@@ -94,6 +95,12 @@ func handleCapture() {
 }
 
 func handleInit() {
+	// Check for --auto flag
+	autoSetup := false
+	if len(os.Args) >= 3 && os.Args[2] == "--auto" {
+		autoSetup = true
+	}
+
 	// Get project root
 	projectRoot, err := os.Getwd()
 	if err != nil {
@@ -121,10 +128,115 @@ func handleInit() {
 	fmt.Println("✅ Cortex initialized successfully!")
 	fmt.Printf("   Config: %s\n", configPath)
 	fmt.Printf("   Context directory: %s\n", cfg.ContextDir)
+
+	if autoSetup {
+		fmt.Println("\n🔍 Auto-detecting environment...")
+		runAutoSetup(projectRoot)
+	} else {
+		fmt.Println("\n📖 Next steps:")
+		fmt.Println("   1. Configure your AI tool to use: cortex capture")
+		fmt.Println("   2. Start the processor: cortex daemon")
+		fmt.Println("   3. Search your context: cortex search <query>")
+		fmt.Println("\n💡 Tip: Run 'cortex init --auto' for automatic setup")
+	}
+}
+
+func runAutoSetup(projectRoot string) {
+	// Get absolute path to cortex binary
+	cortexPath, err := os.Executable()
+	if err != nil {
+		cortexPath = fmt.Sprintf("%s/cortex", projectRoot)
+	}
+
+	// Detect Claude Code
+	claudeDir := fmt.Sprintf("%s/.claude", projectRoot)
+	if _, err := os.Stat(claudeDir); err == nil {
+		fmt.Println("\n✅ Detected Claude Code")
+		if err := setupClaudeCode(claudeDir, cortexPath); err != nil {
+			fmt.Printf("   ⚠️  Failed to configure Claude Code: %v\n", err)
+		} else {
+			fmt.Println("   ✅ Configured hooks in .claude/settings.local.json")
+		}
+	} else {
+		fmt.Println("\n❌ Claude Code not detected (.claude directory not found)")
+	}
+
+	// Detect Ollama
+	fmt.Println("\n🧠 Checking Ollama...")
+	client := llm.NewOllamaClient(config.Default())
+	if client.IsAvailable() {
+		fmt.Println("   ✅ Ollama is running")
+
+		// Check for model
+		if client.IsModelAvailable() {
+			fmt.Printf("   ✅ Model '%s' is available\n", config.Default().OllamaModel)
+		} else {
+			fmt.Printf("   ⚠️  Model '%s' not found\n", config.Default().OllamaModel)
+			fmt.Println("   💡 Run: ollama pull mistral:7b")
+		}
+	} else {
+		fmt.Println("   ❌ Ollama is not running")
+		fmt.Println("   💡 Install from: https://ollama.ai")
+	}
+
+	fmt.Println("\n🎉 Auto-setup complete!")
 	fmt.Println("\n📖 Next steps:")
-	fmt.Println("   1. Configure your AI tool to use: cortex capture")
-	fmt.Println("   2. Start the processor: cortex daemon")
-	fmt.Println("   3. Search your context: cortex search <query>")
+	fmt.Println("   1. Start the processor: cortex daemon")
+	fmt.Println("   2. Use Claude Code normally - events will be captured automatically")
+	fmt.Println("   3. View insights: cortex insights")
+}
+
+func setupClaudeCode(claudeDir, cortexPath string) error {
+	settingsPath := fmt.Sprintf("%s/settings.local.json", claudeDir)
+
+	// Read existing settings or create new
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		// File doesn't exist, create new settings
+		settings = make(map[string]interface{})
+	} else {
+		// Parse existing settings
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("failed to parse existing settings: %w", err)
+		}
+	}
+
+	// Configure hooks (preserve existing ones if needed)
+	hooks := map[string]interface{}{
+		"PostToolUse": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s capture", cortexPath),
+					},
+				},
+			},
+		},
+	}
+
+	// Configure status line
+	statusLine := map[string]interface{}{
+		"type":    "command",
+		"command": fmt.Sprintf("%s status", cortexPath),
+	}
+
+	settings["hooks"] = hooks
+	settings["statusLine"] = statusLine
+	// Note: Preserves existing permissions and other settings
+
+	// Write settings
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		return fmt.Errorf("failed to write settings: %w", err)
+	}
+
+	return nil
 }
 
 func handleProcess() {
