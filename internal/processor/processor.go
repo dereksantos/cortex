@@ -142,8 +142,33 @@ func (p *Processor) analyzeEvent(event *events.Event) {
 
 // storeInsight stores an analysis result as an insight
 func (p *Processor) storeInsight(eventID string, analysis *llm.Analysis) error {
-	// This would call storage.StoreInsight - we'll implement that next
-	// For now, just log it
-	log.Printf("Storing insight for event %s: %s", eventID, analysis.Summary)
+	// Store the insight
+	err := p.storage.StoreInsight(
+		eventID,
+		analysis.Category,
+		analysis.Summary,
+		analysis.Importance,
+		analysis.Tags,
+		analysis.Reasoning,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Extract and store entities from tags
+	for _, tag := range analysis.Tags {
+		entityID, err := p.storage.StoreEntity(analysis.Category, tag)
+		if err != nil {
+			log.Printf("Error storing entity: %v", err)
+			continue
+		}
+
+		// Create relationship from event to entity
+		if entityID > 0 {
+			// Store this tag as an entity related to this category
+			_ = p.storage.StoreRelationship(entityID, entityID, "tagged_in", eventID)
+		}
+	}
+
 	return nil
 }

@@ -331,3 +331,305 @@ func (s *Storage) GetStats() (map[string]interface{}, error) {
 
 	return stats, nil
 }
+
+// Entity represents a knowledge graph entity
+type Entity struct {
+	ID        int64
+	Type      string
+	Name      string
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+// Relationship represents a connection between entities
+type Relationship struct {
+	ID           int64
+	FromEntity   *Entity
+	ToEntity     *Entity
+	RelationType string
+	EventID      string
+	CreatedAt    time.Time
+}
+
+// StoreEntity stores or updates an entity
+func (s *Storage) StoreEntity(entityType, name string) (int64, error) {
+	// Try insert first
+	result, err := s.db.Exec(`
+		INSERT INTO entities (type, name, first_seen, last_seen)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(type, name) DO UPDATE SET last_seen = ?
+	`, entityType, name, time.Now(), time.Now(), time.Now())
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to store entity: %w", err)
+	}
+
+	// Get the entity ID
+	var id int64
+	err = s.db.QueryRow(`
+		SELECT id FROM entities WHERE type = ? AND name = ?
+	`, entityType, name).Scan(&id)
+
+	if err != nil {
+		id, _ = result.LastInsertId()
+	}
+
+	return id, nil
+}
+
+// StoreRelationship stores a relationship between entities
+func (s *Storage) StoreRelationship(fromID, toID int64, relationType, eventID string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO relationships (from_entity_id, to_entity_id, relation_type, event_id)
+		VALUES (?, ?, ?, ?)
+	`, fromID, toID, relationType, eventID)
+
+	if err != nil {
+		return fmt.Errorf("failed to store relationship: %w", err)
+	}
+
+	return nil
+}
+
+// GetEntity retrieves an entity by type and name
+func (s *Storage) GetEntity(entityType, name string) (*Entity, error) {
+	var entity Entity
+	err := s.db.QueryRow(`
+		SELECT id, type, name, first_seen, last_seen
+		FROM entities
+		WHERE type = ? AND name = ?
+	`, entityType, name).Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &entity, nil
+}
+
+// GetEntityByID retrieves an entity by ID
+func (s *Storage) GetEntityByID(id int64) (*Entity, error) {
+	var entity Entity
+	err := s.db.QueryRow(`
+		SELECT id, type, name, first_seen, last_seen
+		FROM entities
+		WHERE id = ?
+	`, id).Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &entity, nil
+}
+
+// GetEntitiesByType retrieves all entities of a specific type
+func (s *Storage) GetEntitiesByType(entityType string) ([]*Entity, error) {
+	rows, err := s.db.Query(`
+		SELECT id, type, name, first_seen, last_seen
+		FROM entities
+		WHERE type = ?
+		ORDER BY last_seen DESC
+	`, entityType)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []*Entity
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen); err != nil {
+			continue
+		}
+		entities = append(entities, &entity)
+	}
+
+	return entities, nil
+}
+
+// GetRelatedEntities finds entities related to the given entity
+func (s *Storage) GetRelatedEntities(entityID int64, relationType string) ([]*Entity, error) {
+	query := `
+		SELECT e.id, e.type, e.name, e.first_seen, e.last_seen
+		FROM entities e
+		INNER JOIN relationships r ON (r.to_entity_id = e.id OR r.from_entity_id = e.id)
+		WHERE (r.from_entity_id = ? OR r.to_entity_id = ?)
+		AND e.id != ?
+	`
+
+	args := []interface{}{entityID, entityID, entityID}
+
+	if relationType != "" {
+		query += " AND r.relation_type = ?"
+		args = append(args, relationType)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entities []*Entity
+	seen := make(map[int64]bool)
+
+	for rows.Next() {
+		var entity Entity
+		if err := rows.Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen); err != nil {
+			continue
+		}
+		if !seen[entity.ID] {
+			entities = append(entities, &entity)
+			seen[entity.ID] = true
+		}
+	}
+
+	return entities, nil
+}
+
+// GetRelationships retrieves relationships for an entity
+func (s *Storage) GetRelationships(entityID int64) ([]*Relationship, error) {
+	rows, err := s.db.Query(`
+		SELECT id, from_entity_id, to_entity_id, relation_type, event_id, created_at
+		FROM relationships
+		WHERE from_entity_id = ? OR to_entity_id = ?
+		ORDER BY created_at DESC
+	`, entityID, entityID)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var relationships []*Relationship
+	for rows.Next() {
+		var rel Relationship
+		var fromID, toID int64
+		var eventID sql.NullString
+
+		if err := rows.Scan(&rel.ID, &fromID, &toID, &rel.RelationType, &eventID, &rel.CreatedAt); err != nil {
+			continue
+		}
+
+		// Load from and to entities
+		rel.FromEntity, _ = s.GetEntityByID(fromID)
+		rel.ToEntity, _ = s.GetEntityByID(toID)
+		if eventID.Valid {
+			rel.EventID = eventID.String
+		}
+
+		relationships = append(relationships, &rel)
+	}
+
+	return relationships, nil
+}
+
+// Insight represents an LLM-extracted insight
+type Insight struct {
+	ID         int64
+	EventID    string
+	Category   string
+	Summary    string
+	Importance int
+	Tags       []string
+	Reasoning  string
+	CreatedAt  time.Time
+}
+
+// StoreInsight stores an insight from LLM analysis
+func (s *Storage) StoreInsight(eventID, category, summary string, importance int, tags []string, reasoning string) error {
+	tagsJSON, _ := json.Marshal(tags)
+
+	_, err := s.db.Exec(`
+		INSERT INTO insights (event_id, category, summary, importance, tags, reasoning)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, eventID, category, summary, importance, string(tagsJSON), reasoning)
+
+	if err != nil {
+		return fmt.Errorf("failed to store insight: %w", err)
+	}
+
+	return nil
+}
+
+// GetInsightsByCategory retrieves insights by category
+func (s *Storage) GetInsightsByCategory(category string, limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		FROM insights
+		WHERE category = ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, category, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// GetRecentInsights retrieves recent insights
+func (s *Storage) GetRecentInsights(limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		FROM insights
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// GetImportantInsights retrieves high-importance insights
+func (s *Storage) GetImportantInsights(minImportance, limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		FROM insights
+		WHERE importance >= ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, minImportance, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// scanInsights helper function to scan insight rows
+func (s *Storage) scanInsights(rows *sql.Rows) ([]*Insight, error) {
+	var insights []*Insight
+	for rows.Next() {
+		var insight Insight
+		var tagsJSON string
+
+		if err := rows.Scan(
+			&insight.ID,
+			&insight.EventID,
+			&insight.Category,
+			&insight.Summary,
+			&insight.Importance,
+			&tagsJSON,
+			&insight.Reasoning,
+			&insight.CreatedAt,
+		); err != nil {
+			continue
+		}
+
+		json.Unmarshal([]byte(tagsJSON), &insight.Tags)
+		insights = append(insights, &insight)
+	}
+
+	return insights, nil
+}

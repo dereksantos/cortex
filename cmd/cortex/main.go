@@ -44,6 +44,12 @@ func main() {
 		handleSearch()
 	case "recent":
 		handleRecent()
+	case "insights":
+		handleInsights()
+	case "entities":
+		handleEntities()
+	case "graph":
+		handleGraph()
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
 	case "help", "-h", "--help":
@@ -316,6 +322,190 @@ func handleRecent() {
 	}
 }
 
+func handleInsights() {
+	category := ""
+	limit := 10
+
+	if len(os.Args) >= 3 {
+		category = os.Args[2]
+	}
+	if len(os.Args) >= 4 {
+		fmt.Sscanf(os.Args[3], "%d", &limit)
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Get insights
+	var insights []*storage.Insight
+	if category != "" {
+		insights, err = store.GetInsightsByCategory(category, limit)
+	} else {
+		insights, err = store.GetRecentInsights(limit)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get insights: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display results
+	if len(insights) == 0 {
+		fmt.Println("No insights found")
+		return
+	}
+
+	if category != "" {
+		fmt.Printf("📊 %s Insights:\n\n", category)
+	} else {
+		fmt.Printf("💡 Recent Insights:\n\n")
+	}
+
+	for i, insight := range insights {
+		importance := ""
+		for j := 0; j < insight.Importance && j < 5; j++ {
+			importance += "⭐"
+		}
+
+		fmt.Printf("%d. [%s] %s %s\n", i+1, insight.Category, insight.Summary, importance)
+		if len(insight.Tags) > 0 {
+			fmt.Printf("   Tags: %v\n", insight.Tags)
+		}
+		fmt.Printf("   %s\n", insight.CreatedAt.Format("2006-01-02 15:04"))
+		fmt.Println()
+	}
+}
+
+func handleEntities() {
+	entityType := ""
+	if len(os.Args) >= 3 {
+		entityType = os.Args[2]
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Get entities
+	var entities []*storage.Entity
+	if entityType != "" {
+		entities, err = store.GetEntitiesByType(entityType)
+	} else {
+		// Get all entity types
+		types := []string{"decision", "pattern", "insight", "strategy"}
+		for _, t := range types {
+			typeEntities, _ := store.GetEntitiesByType(t)
+			entities = append(entities, typeEntities...)
+		}
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get entities: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display results
+	if len(entities) == 0 {
+		fmt.Println("No entities found")
+		return
+	}
+
+	fmt.Printf("🔍 Entities:\n\n")
+	for i, entity := range entities {
+		fmt.Printf("%d. [%s] %s\n", i+1, entity.Type, entity.Name)
+		fmt.Printf("   First seen: %s, Last seen: %s\n",
+			entity.FirstSeen.Format("2006-01-02"),
+			entity.LastSeen.Format("2006-01-02"))
+		fmt.Println()
+	}
+}
+
+func handleGraph() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: cortex graph <entity_type> <entity_name>\n")
+		os.Exit(1)
+	}
+
+	entityType := os.Args[2]
+	entityName := ""
+	if len(os.Args) >= 4 {
+		entityName = os.Args[3]
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Get entity
+	entity, err := store.GetEntity(entityType, entityName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Entity not found: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Get relationships
+	relationships, err := store.GetRelationships(entity.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get relationships: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Display entity and relationships
+	fmt.Printf("🌐 Knowledge Graph for: %s (%s)\n\n", entity.Name, entity.Type)
+	fmt.Printf("First seen: %s\n", entity.FirstSeen.Format("2006-01-02"))
+	fmt.Printf("Last seen: %s\n\n", entity.LastSeen.Format("2006-01-02"))
+
+	if len(relationships) == 0 {
+		fmt.Println("No relationships found")
+		return
+	}
+
+	fmt.Printf("Relationships (%d):\n\n", len(relationships))
+	for i, rel := range relationships {
+		if rel.FromEntity != nil && rel.ToEntity != nil {
+			fmt.Printf("%d. %s -[%s]-> %s\n",
+				i+1,
+				rel.FromEntity.Name,
+				rel.RelationType,
+				rel.ToEntity.Name)
+		}
+	}
+}
+
 func loadConfig() (*config.Config, error) {
 	projectRoot, err := os.Getwd()
 	if err != nil {
@@ -336,9 +526,16 @@ Commands:
   capture     Capture event from stdin (used by AI tools)
   init        Initialize Cortex in current directory
   daemon      Start background processor
+  process     Process queue manually (one-time)
+
   search      Search captured context
-  ask         Ask questions about your context
+  recent      Show recent events
+  insights    Show insights [category] [limit]
+  entities    Show entities [type]
+  graph       Show knowledge graph for entity
   stats       Show statistics
+  status      Show status (for status line)
+
   version     Show version
   help        Show this help
 
@@ -352,8 +549,13 @@ Examples:
   # Search context
   cortex search "authentication decisions"
 
-  # Ask questions
-  cortex ask "why did we choose JWT?"
+  # View insights
+  cortex insights decision
+  cortex insights
+
+  # Browse entities
+  cortex entities pattern
+  cortex graph decision "JWT authentication"
 
 For more information: https://github.com/dereksantos/cortex
 `, version)
