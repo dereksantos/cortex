@@ -102,6 +102,22 @@ Add to your `.claude/settings.local.json`:
 }
 ```
 
+#### Cursor
+
+For Cursor IDE, use the LSP adapter:
+
+```bash
+# Send LSP notifications to Cortex
+echo '{
+  "method": "textDocument/didSave",
+  "params": {
+    "textDocument": {"uri": "file:///path/to/file.go"}
+  }
+}' | cortex capture --source cursor
+```
+
+See [Cursor Integration Guide](integrations/cursor/README.md) for full setup instructions.
+
 #### Generic (Any AI Tool)
 
 Pipe events to Cortex via stdin:
@@ -349,6 +365,7 @@ go fmt ./...
 - [x] Async processor with goroutines (5 workers)
 - [x] Full-text search
 - [x] Claude Code integration
+- [x] Cursor LSP adapter
 - [x] Knowledge graph layer (entities, relationships, insights)
 - [x] Auto-setup command (`cortex init --auto`)
 - [x] Cross-platform builds (macOS, Linux, Windows)
@@ -359,7 +376,6 @@ go fmt ./...
 
 - [ ] Enhanced status line with Python compatibility
 - [ ] Vector embeddings (semantic search)
-- [ ] Cursor LSP adapter
 
 ### 📋 Planned
 

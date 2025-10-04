@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/dereksantos/cortex/integrations/claude"
 	"github.com/dereksantos/cortex/internal/capture"
@@ -15,6 +16,7 @@ import (
 	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -70,14 +72,32 @@ func handleCapture() {
 		os.Exit(0)
 	}
 
+	// Check for --source flag
+	source := "claude" // default
+	if len(os.Args) >= 3 && os.Args[2] == "--source" && len(os.Args) >= 4 {
+		source = os.Args[3]
+	}
+
 	// Read stdin
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil || len(data) == 0 {
 		os.Exit(0)
 	}
 
-	// Convert Claude event to generic event
-	event, err := claude.ConvertToEvent(data, cfg.ProjectRoot)
+	var event *events.Event
+
+	// Convert based on source
+	switch source {
+	case "claude":
+		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
+	case "cursor":
+		// Import cursor adapter
+		event, err = convertCursorEvent(data, cfg.ProjectRoot)
+	default:
+		// Try Claude format as fallback
+		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
+	}
+
 	if err != nil {
 		// Try direct capture as fallback
 		cap := capture.New(cfg)
@@ -92,6 +112,43 @@ func handleCapture() {
 	}
 
 	os.Exit(0)
+}
+
+// convertCursorEvent converts Cursor LSP events
+func convertCursorEvent(data []byte, projectRoot string) (*events.Event, error) {
+	// Import cursor package dynamically to avoid circular dependency
+	var lspNotification map[string]interface{}
+	if err := json.Unmarshal(data, &lspNotification); err != nil {
+		return nil, err
+	}
+
+	// Create event from LSP notification
+	eventID := fmt.Sprintf("cursor-%d", time.Now().UnixNano())
+	method, _ := lspNotification["method"].(string)
+	params, _ := lspNotification["params"].(map[string]interface{})
+
+	toolName := "Edit" // default
+	if method == "textDocument/didSave" {
+		toolName = "Write"
+	} else if method == "textDocument/didOpen" {
+		toolName = "Read"
+	}
+
+	event := &events.Event{
+		ID:         eventID,
+		Source:     events.SourceCursor,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   toolName,
+		ToolInput:  params,
+		ToolResult: "success",
+		Context: events.EventContext{
+			ProjectPath: projectRoot,
+			SessionID:   fmt.Sprintf("cursor-%d", time.Now().Unix()),
+		},
+	}
+
+	return event, nil
 }
 
 func handleInit() {
