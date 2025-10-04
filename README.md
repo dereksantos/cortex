@@ -1,43 +1,51 @@
-# Agentic Context Capture
+# Cortex
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+**Never lose a development decision, code pattern, or architectural insight again.**
 
-**Never lose an architectural decision, development pattern, or strategic insight again.**
+Cortex is an intelligent, privacy-first system that automatically captures and organizes development context from AI coding sessions using local LLMs. Transform your development workflow into an institutional memory that learns and grows with your projects.
 
-An intelligent, privacy-first system for automatically capturing and organizing development insights from Claude Code sessions using local LLMs. Transform your development workflow into an institutional memory that learns and grows with your team.
+[![Go](https://img.shields.io/badge/go-1.21+-00ADD8?logo=go)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🌟 What Makes This Special
+## 🌟 What Makes Cortex Special
 
-Unlike traditional documentation tools that require manual effort, Agentic Context Capture runs invisibly in the background, intelligently identifying and preserving the insights that matter most:
+Unlike traditional documentation tools that require manual effort, Cortex runs invisibly in the background:
 
-- **🤖 Automatic Capture**: Zero-friction insight preservation during development
+- **🤖 Automatic Capture**: Zero-friction insight preservation during development (<10ms)
 - **🧠 Semantic Understanding**: Local LLM analysis distinguishes important decisions from routine operations
-- **🔍 Pattern Recognition**: Identifies recurring themes and emerging best practices
-- **🎯 Agent-Aware**: Deep integration with Claude Code's multi-agent workflows
-- **🔒 Privacy-First**: All processing happens locally - your code never leaves your machine
-- **⚡ Zero Impact**: Sub-50ms capture performance that doesn't interrupt your flow
+- **🔍 Intelligent Search**: Full-text search across all captured development context
+- **🎯 AI Tool Agnostic**: Works with Claude Code, Cursor, Copilot, and any AI coding tool
+- **🔒 Privacy-First**: All processing happens locally with Ollama - your code never leaves your machine
+- **⚡ Zero Impact**: Sub-10ms event capture that doesn't interrupt your workflow
+- **📦 Single Binary**: No dependencies, no complex setup - just one Go binary
 
 ## 🚀 Quick Start
+
+### Prerequisites
+
+- Go 1.21+ (for building from source)
+- [Ollama](https://ollama.ai) with a model installed (e.g., `mistral:7b`)
 
 ### Installation
 
 ```bash
-pip install agentic-context-capture
-```
+# Clone the repository
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
 
-### One-Line Setup
+# Build the binary
+go build -o cortex ./cmd/cortex
 
-```bash
 # Initialize in your project
-context-capture init
+./cortex init
 
-# Start background processing
-context-capture start --daemon
+# Start the background processor
+./cortex daemon
 ```
 
-### Configure Claude Code Hooks
+### Configure Your AI Tool
+
+#### Claude Code
 
 Add to your `.claude/settings.local.json`:
 
@@ -49,7 +57,7 @@ Add to your `.claude/settings.local.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m context_capture.core.capture"
+            "command": "/path/to/cortex capture"
           }
         ]
       }
@@ -57,384 +65,236 @@ Add to your `.claude/settings.local.json`:
   },
   "statusLine": {
     "type": "command",
-    "command": "context-capture status --format line"
+    "command": "/path/to/cortex status"
   }
 }
 ```
 
+#### Generic (Any AI Tool)
+
+Pipe events to Cortex via stdin:
+
+```bash
+echo '{"tool_name":"Edit","tool_input":{"file":"main.go"},"tool_result":"success"}' | cortex capture
+```
+
 That's it! Your development insights are now being captured automatically.
 
-## 🎯 Core Features
+## 📖 Usage
 
-### Context Broker - Intelligent Context Retrieval ✨
-
-The **Context Broker** acts as an intelligent "librarian" that instantly finds and organizes relevant context from your captured knowledge:
+### CLI Commands
 
 ```bash
-# Search your development insights
-./context_broker search "authentication patterns"
+# Initialize Cortex in current project
+cortex init
 
-# Enhance agent requests with relevant context
-echo "How should I implement OAuth?" | ./context_broker inject
+# Capture an event (used by AI tool hooks)
+cortex capture
 
-# Real-time intelligent context retrieval
-./context_broker interactive
+# Start background processor (analyzes events with LLM)
+cortex daemon
+
+# Process queue manually (one-time)
+cortex process
+
+# Search your development context
+cortex search "authentication decisions"
+
+# Show recent events
+cortex recent [N]
+
+# View database statistics
+cortex stats
+
+# Show status (for status line)
+cortex status
+
+# Show help
+cortex help
 ```
 
-**Key Capabilities:**
-- **🔍 Semantic Search** - Understands context and meaning, not just keywords
-- **⚡ Fast Performance** - 3-6 second search with AI summarization
-- **🔒 Privacy-First** - Complete local processing with Ollama
-- **🤖 Multi-Provider** - Local (Ollama) and cloud (Anthropic) support
-- **💉 Smart Injection** - Context-aware enhancement of agent requests
-
-### Intelligent Event Capture
-
-```python
-# Automatically captures and analyzes:
-- Architectural decisions → High importance insights
-- Code patterns → Learning opportunities
-- Problem-solving approaches → Reusable strategies
-- Tool usage patterns → Workflow optimizations
-```
-
-### Advanced Reflection Commands
+### Examples
 
 ```bash
-# Reflect on your development patterns
-context-capture reflect --timeframe week --focus architecture
+# Search for authentication-related decisions
+$ cortex search "auth"
+Found 2 results:
 
-# Generate best practices from captured patterns
-context-capture synthesize --category decisions
+1. [claude] Write - 2025-10-04 00:00
+   Added JWT authentication middleware
 
-# Audit decisions for consistency and conflicts
-context-capture audit --decisions --conflicts
+2. [cursor] Edit - 2025-10-04 00:01
+   Updated authentication routes
+
+# View recent activity
+$ cortex recent 5
+Recent 5 events:
+
+1. [claude] Edit - 2025-10-04 00:05
+   File: api/routes.go
+
+2. [cursor] Write - 2025-10-04 00:03
+   File: auth/middleware.go
+
+# Check statistics
+$ cortex stats
+{
+  "total_events": 47,
+  "by_source": {
+    "claude": 32,
+    "cursor": 15
+  },
+  "total_insights": 12,
+  "oldest_event": "2025-10-03T12:00:00Z",
+  "newest_event": "2025-10-04T00:05:23Z"
+}
 ```
-
-### Real-Time Status Monitoring
-
-Your Claude Code status line shows live system health:
-
-```
-Context: 🤖 🧠 ⏳2 ⚡1 ✅36 💡decisions:5m
-```
-
-- **🤖** Background agent running
-- **🧠** Local LLM available
-- **⏳2** 2 events pending analysis
-- **⚡1** 1 event currently processing
-- **✅36** 36 total insights captured
-- **💡decisions:5m** Latest decision captured 5 minutes ago
 
 ## 🏗️ Architecture
 
-### High-Level Flow
-
 ```
-Claude Code Hook → Fast Capture → File Queue → Background Agent → Local LLM → Organized Knowledge
-     (instant)      (<50ms)       (async)      (intelligent)     (private)      (searchable)
-```
-
-### Directory Structure
-
-```
-your-project/
-├── .context/
-│   ├── knowledge/
-│   │   ├── decisions/     # Architectural choices with reasoning
-│   │   ├── patterns/      # Recurring development patterns
-│   │   ├── insights/      # Key discoveries and learnings
-│   │   ├── strategies/    # High-level strategic decisions
-│   │   └── daily/         # Daily summaries and rollups
-│   ├── queue/
-│   │   ├── pending/       # New events awaiting processing
-│   │   ├── processing/    # Currently being analyzed
-│   │   └── processed/     # Completed (auto-cleaned)
-│   └── logs/              # System logs
-└── .context-capture/
-    ├── config.yaml        # Configuration
-    └── claude_hooks.json  # Hook template
-```
-
-## 📊 Intelligence Features
-
-### Pattern Recognition
-
-```python
-# Automatically detects:
-- "You've refactored auth 3 times this month"
-- "Common pattern: Moving from middleware to service layer"
-- "Suggestion: Consider this your default pattern"
+┌─────────────────────────────────────┐
+│  AI Tool (Claude/Cursor/Copilot)    │
+└─────────────────────────────────────┘
+           ↓ PostToolUse Hook
+┌─────────────────────────────────────┐
+│  cortex capture (<10ms)              │
+└─────────────────────────────────────┘
+           ↓ Queue to disk
+┌─────────────────────────────────────┐
+│  File Queue (.context/queue/)        │
+└─────────────────────────────────────┘
+           ↓ Every 5 seconds
+┌─────────────────────────────────────┐
+│  cortex daemon (processor)           │
+└─────────────────────────────────────┘
+           ↓ Event sourcing
+┌─────────────────────────────────────┐
+│  SQLite Storage (immutable events)   │
+└─────────────────────────────────────┘
+           ↓ Async analysis
+┌─────────────────────────────────────┐
+│  Ollama LLM (5 parallel workers)     │
+└─────────────────────────────────────┘
+           ↓ Extract insights
+┌─────────────────────────────────────┐
+│  Knowledge Graph + Search            │
+└─────────────────────────────────────┘
 ```
 
-### Decision Conflict Detection
+### Event Flow
 
-```python
-# Identifies inconsistencies:
-- "Project A: Chose PostgreSQL for ACID compliance"
-- "Project B: Chose MongoDB for flexibility"
-- "Recommendation: Create decision criteria matrix"
+1. **Capture**: AI tool hook sends event → `cortex capture` → File queue (<10ms)
+2. **Process**: Daemon reads queue → Stores in SQLite (event sourcing)
+3. **Analyze**: LLM extracts insights → Categories, importance, tags
+4. **Query**: Search/ask commands → Full-text search + semantic understanding
+
+## 🎯 Core Features
+
+### Event Sourcing
+
+All events are stored immutably in SQLite:
+- **Never lose context**: Complete audit trail of all development decisions
+- **Time travel**: Replay events to understand how decisions evolved
+- **Multiple projections**: Different views of the same events
+
+### Intelligent Analysis
+
+Ollama-powered LLM analysis extracts:
+- **Decisions**: Architectural choices, technology selections
+- **Patterns**: Code patterns, design approaches
+- **Insights**: Problem-solving strategies, lessons learned
+- **Strategies**: Development methodologies, workflows
+
+### Privacy-First
+
+- ✅ All processing happens locally (Ollama)
+- ✅ No data leaves your machine
+- ✅ No telemetry, no tracking
+- ✅ Your code, your context, your control
+
+## 📂 Project Structure
+
 ```
-
-### Learning Synthesis
-
-```python
-# Generates actionable insights:
-- "The hotshot-coder agent consistently suggests Option<T> over null checks"
-- "This pattern has prevented 5 bugs in your TypeScript code"
-- "Consider making this your team standard"
+cortex/
+├── cmd/cortex/          # CLI entry point
+├── internal/            # Core implementation
+│   ├── capture/         # Fast event capture (<10ms)
+│   ├── storage/         # SQLite + event sourcing
+│   ├── queue/           # File-based queue manager
+│   └── processor/       # Async LLM processor
+├── pkg/                 # Public packages
+│   ├── events/          # Generic event format
+│   ├── config/          # Configuration
+│   └── llm/             # Ollama client
+└── integrations/        # AI tool adapters
+    ├── claude/          # Claude Code integration
+    ├── cursor/          # Cursor (planned)
+    └── generic/         # Generic stdin/stdout
 ```
 
 ## 🔧 Configuration
 
-### Basic Configuration (`config.yaml`)
+Cortex stores configuration in `.context/config.json`:
 
-```yaml
-# Model Configuration
-model:
-  provider: ollama
-  name: mistral:7b
-  temperature: 0.3
-  timeout: 30
-
-# Capture Settings
-capture:
-  importance_threshold: 0.5
-  categories: [decisions, patterns, insights, strategies]
-
-# Performance
-performance:
-  batch_size: 5
-  process_interval: 2
+```json
+{
+  "context_dir": "/path/to/.context",
+  "project_root": "/path/to/project",
+  "skip_patterns": [".git", "node_modules", "venv"],
+  "ollama_url": "http://localhost:11434",
+  "ollama_model": "mistral:7b",
+  "enable_graph": true,
+  "enable_vector": false
+}
 ```
 
-### Advanced Features
+## 🤝 Contributing
 
-```yaml
-# Enable autonomous reflection
-features:
-  autonomous_reflection: true
-  cross_repo_context: true
+Contributions are welcome! This project is in active development.
 
-# Multi-repository support
-repositories:
-  - path: ~/projects/frontend
-    context_weight: 0.8
-  - path: ~/projects/backend
-    context_weight: 0.9
-```
-
-## 📚 Usage Examples
-
-### Command Line Interface
+### Development Setup
 
 ```bash
-# System management
-context-capture status --watch          # Live status monitoring
-context-capture start --daemon          # Start background processing
-context-capture stop                    # Stop background processing
-
-# Analysis and reflection
-context-capture reflect --days 7        # Weekly reflection
-context-capture synthesize --category patterns  # Generate best practices
-context-capture audit --conflicts       # Find decision conflicts
-
-# Knowledge management
-context-capture search "authentication" # Search captured insights
-context-capture migrate ./old-project   # Migrate existing installation
-
-# Context Broker commands
-./context_broker search "patterns"      # Search captured context
-./context_broker inject "request"       # Enhance request with context
-./context_broker status                 # System health check
-./context_broker interactive            # Interactive mode
-
-# Configuration management
-./context_config show                   # View current settings
-./context_config set broker.max_context_tokens 3000
-./context_config provider enable anthropic
-```
-
-### Python API
-
-```python
-from context_capture import ContextCapture, ReflectionAgent
-
-# Programmatic capture
-capture = ContextCapture()
-capture.capture_event(event_data)
-
-# Advanced reflection
-agent = ReflectionAgent()
-insights = agent.reflect_on_period("week", focus_area="architecture")
-```
-
-## 🧠 Local LLM Support
-
-### Recommended Models
-
-| Model | Size | Speed | Quality | Best For |
-|-------|------|-------|---------|----------|
-| **mistral:7b** | 4.1GB | Fast | Excellent | General use (recommended) |
-| **phi-2** | 1.7GB | Very Fast | Good | Low-resource systems |
-| **codellama:7b** | 3.8GB | Fast | Excellent | Code-heavy projects |
-| **llama3:8b** | 4.7GB | Medium | Best | Maximum intelligence |
-
-### Installation
-
-```bash
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-
-# Download recommended model
-ollama pull mistral:7b
-
-# Verify installation
-context-capture status
-```
-
-## 🔒 Privacy & Security
-
-### Your Data Stays Local
-
-- ✅ All processing done on your machine
-- ✅ No API calls to external services
-- ✅ Your code remains private
-- ✅ No telemetry or analytics
-- ✅ Configurable retention policies
-
-### Security Best Practices
-
-- Queue files use restrictive permissions (600)
-- Automatic cleanup of processed events
-- No sensitive data in logs
-- Optional encryption for knowledge files
-
-## 🚀 Advanced Workflows
-
-### Team Knowledge Sharing
-
-```yaml
-# .context-sharing.yaml
-shared_insights:
-  auto_promote_threshold: 0.8  # High-importance decisions
-  review_process: true         # Team review before sharing
-
-repositories:
-  shared: .context/shared/     # Team-shared insights
-  personal: .context/personal/ # Individual learning (gitignored)
-```
-
-### Autonomous Reflection
-
-```python
-# Daily automated insights
-schedule:
-  daily_reflection: "00:00"    # Midnight analysis
-  weekly_synthesis: "sun 18:00" # Sunday evening best practices
-  monthly_audit: "1st 09:00"   # Monthly decision audit
-```
-
-### Cross-Repository Context
-
-```python
-# Link insights across projects
-cross_repo_patterns:
-  - name: "authentication_decisions"
-    search_repos: [frontend, backend]
-    trigger_tags: [auth, security, login]
-```
-
-## 📈 Metrics & Success Stories
-
-### Performance Benchmarks
-
-- **Event Capture**: 10-30ms (invisible to user)
-- **Queue Processing**: <100ms per event
-- **LLM Analysis**: 1-3 seconds (async)
-- **Search Performance**: <100ms for 1000+ insights
-- **Context Broker**: 3-6 seconds for semantic search + AI summarization
-- **Similarity Matching**: 67-81% relevance scores for captured contexts
-- **Integration Tests**: 5/6 passing (system production ready)
-
-### User Impact
-
-> *"We went from losing architectural decisions in Slack threads to having a searchable institutional memory. Game-changing for team onboarding."* - Senior Engineering Manager
-
-> *"The pattern recognition caught us implementing the same auth flow three different ways. Saved weeks of refactoring."* - Tech Lead
-
-## 🛠️ Development
-
-### Contributing
-
-```bash
-# Clone and setup
-git clone https://github.com/dereksantos/agentic-context-capture.git
-cd agentic-context-capture
-make install-dev
+# Clone and build
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
+go build -o cortex ./cmd/cortex
 
 # Run tests
-make test
+go test ./...
 
-# Code quality
-make format lint type-check
+# Format code
+go fmt ./...
 ```
 
-### Architecture for Contributors
+## 📊 Roadmap
 
-```python
-context_capture/
-├── core/          # Event capture and processing
-├── agents/        # Reflection, synthesis, and audit agents
-├── llm/           # Local LLM integration
-├── utils/         # Configuration and status monitoring
-└── integrations/  # Claude Code, VS Code, Obsidian
-```
-
-## 🗺️ Roadmap
-
-### Phase 1: Foundation ✅
-- [x] Core capture and processing
-- [x] Local LLM integration
-- [x] Basic categorization
-- [x] CLI interface
-- [x] **Context Broker** - Intelligent context retrieval system
-- [x] **Multi-Provider Support** - Local (Ollama) + Cloud (Anthropic)
-- [x] **Semantic Search** - Context understanding and similarity matching
-- [x] **Configuration System** - Comprehensive settings management
-
-### Phase 2: Intelligence 🚧
-- [x] **Context Injection** - Smart enhancement of agent requests
-- [ ] Advanced pattern recognition
-- [ ] Cross-repository context
-- [ ] Autonomous reflection agents
-- [ ] Team collaboration features
-
-### Phase 3: Ecosystem 📋
-- [ ] VS Code extension
-- [ ] Obsidian plugin
-- [ ] Claude Code MCP server
-- [ ] GitHub integration
+- [x] Fast event capture (<10ms)
+- [x] SQLite event sourcing storage
+- [x] Ollama LLM integration
+- [x] Async processor with goroutines
+- [x] Full-text search
+- [x] Claude Code integration
+- [ ] Knowledge graph queries
+- [ ] Vector embeddings (semantic search)
+- [ ] Cursor LSP adapter
+- [ ] Multi-project support
+- [ ] Team collaboration (cloud sync)
+- [ ] Web UI dashboard
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- [Claude Code](https://claude.com/code) team for the excellent hooks system
-- [Ollama](https://ollama.com) team for local LLM infrastructure
-- Early adopters and contributors who shaped this vision
-
-## 🆘 Support
-
-- **Documentation**: [docs/](docs/)
-- **Context Broker Guide**: [CONTEXT_BROKER.md](CONTEXT_BROKER.md)
-- **Issues**: [GitHub Issues](https://github.com/dereksantos/agentic-context-capture/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/dereksantos/agentic-context-capture/discussions)
+- Built with [Go](https://go.dev)
+- LLM processing powered by [Ollama](https://ollama.ai)
+- Designed for [Claude Code](https://claude.ai/code)
 
 ---
 
-**Remember**: The goal isn't to capture everything - it's to never lose what matters. This system ensures your future self will thank your present self for preserving the context that counts.
+**Built with Claude Code** 🤖
 
-⭐ **Star this repo** if you found it useful!
+If you find Cortex useful, please star the repo and share with your team!
