@@ -217,3 +217,11 @@ docs/_build/
 # Python build artifacts (legacy)
 *.egg-info/
 test_env/
+
+# Go build artifacts
+build/
+dist/
+cortex
+*.exe
+*.tar.gz
+*.zip
