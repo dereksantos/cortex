@@ -214,3 +214,6 @@ playground/
 # Documentation builds
 docs/site/
 docs/_build/
+# Python build artifacts (legacy)
+*.egg-info/
+test_env/
