@@ -1,6 +1,6 @@
-# Contributing to Agentic Context Capture
+# Contributing to Cortex
 
-Thank you for your interest in contributing to Agentic Context Capture! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to Cortex! This document provides guidelines and information for contributors.
 
 ## 🌟 Ways to Contribute
 
@@ -17,30 +17,28 @@ Thank you for your interest in contributing to Agentic Context Capture! This doc
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/dereksantos/agentic-context-capture.git
-   cd agentic-context-capture
+   git clone https://github.com/dereksantos/cortex.git
+   cd cortex
    ```
 
-2. **Install development dependencies**
+2. **Install dependencies**
    ```bash
-   make install-dev
-   # or manually:
-   pip install -e ".[dev]"
-   pre-commit install
+   go mod download
    ```
 
-3. **Verify installation**
+3. **Build and test**
    ```bash
-   make test
-   context-capture --help
+   go build -o cortex ./cmd/cortex
+   go test ./...
+   ./cortex --help
    ```
 
 ### Development Environment
 
-- **Python**: 3.8+ required
-- **Code Style**: We use `black`, `isort`, and `flake8`
-- **Type Checking**: `mypy` for type safety
-- **Testing**: `pytest` with coverage reporting
+- **Go**: 1.21+ required
+- **Code Style**: Use `gofmt` for formatting, `golint` for linting
+- **Testing**: Standard Go testing with `go test`
+- **Tools**: [Ollama](https://ollama.ai) for testing LLM features
 
 ## 🔧 Development Workflow
 
@@ -59,10 +57,9 @@ Thank you for your interest in contributing to Agentic Context Capture! This doc
 
 3. **Run quality checks**
    ```bash
-   make format      # Format code
-   make lint        # Check style and quality
-   make type-check  # Type checking
-   make test        # Run tests
+   go fmt ./...     # Format code
+   go vet ./...     # Check for issues
+   go test ./...    # Run tests
    ```
 
 4. **Commit your changes**
@@ -102,76 +99,80 @@ docs: update installation instructions
 
 ```bash
 # Run all tests
-make test
+go test ./...
 
 # Run with coverage
-make test-cov
+go test -cover ./...
 
-# Run specific test file
-pytest tests/test_capture.py
+# Run specific package tests
+go test ./internal/storage
 
-# Run with specific marker
-pytest -m integration
+# Run with verbose output
+go test -v ./...
 ```
 
 ### Writing Tests
 
-- Place tests in the `tests/` directory
-- Use descriptive test names: `test_capture_should_filter_routine_commands`
-- Mock external dependencies (Ollama, file system when appropriate)
+- Place tests alongside source files (`*_test.go`)
+- Use descriptive test names: `TestCaptureShouldFilterRoutineCommands`
+- Use table-driven tests when appropriate
+- Mock external dependencies (Ollama, file system)
 - Include both unit and integration tests
 - Aim for high coverage on critical paths
 
 Example test structure:
-```python
-def test_capture_should_skip_routine_commands():
-    """Test that routine bash commands are filtered out."""
-    capture = ContextCapture()
-    event_data = {
-        'tool_name': 'Bash',
-        'tool_input': {'command': 'ls -la'}
+```go
+func TestCaptureShouldSkipRoutineCommands(t *testing.T) {
+    capture := capture.New(config.Default())
+
+    event := &events.Event{
+        ToolName: "Bash",
+        ToolInput: map[string]interface{}{
+            "command": "ls -la",
+        },
     }
 
-    assert capture.quick_filter(event_data) is True
+    if !event.ShouldCapture([]string{"node_modules"}) {
+        t.Error("Expected routine command to be filtered")
+    }
+}
 ```
 
 ## 📐 Code Style Guidelines
 
-### Python Code Style
+### Go Code Style
 
-- **Line Length**: 88 characters (Black default)
-- **Imports**: Use `isort` for import organization
-- **Docstrings**: Google-style docstrings for all public functions
-- **Type Hints**: Use type hints for all function signatures
-- **Variable Names**: Descriptive names, avoid abbreviations
+- **Formatting**: Use `gofmt` - no exceptions
+- **Naming**: Follow Go conventions (MixedCaps for exported, mixedCaps for unexported)
+- **Comments**: Document all exported functions, types, and packages
+- **Error Handling**: Always check errors, return them up the call stack
+- **Simplicity**: Prefer simple, clear code over clever code
 
 ### Example Function
 
-```python
-def process_insight_batch(
-    insights: List[Dict[str, Any]],
-    threshold: float = 0.5
-) -> List[ProcessedInsight]:
-    """
-    Process a batch of insights for storage.
+```go
+// ProcessInsightBatch processes a batch of insights for storage.
+// It filters insights below the importance threshold and returns
+// only those that should be stored.
+func ProcessInsightBatch(insights []*Insight, threshold float64) ([]*ProcessedInsight, error) {
+    if threshold < 0 || threshold > 1 {
+        return nil, fmt.Errorf("threshold must be between 0 and 1, got %.2f", threshold)
+    }
 
-    Args:
-        insights: List of raw insight dictionaries
-        threshold: Minimum importance threshold for processing
+    var processed []*ProcessedInsight
 
-    Returns:
-        List of processed insights ready for storage
+    for _, insight := range insights {
+        if insight.Importance >= threshold {
+            p, err := NewProcessedInsight(insight)
+            if err != nil {
+                return nil, fmt.Errorf("failed to process insight: %w", err)
+            }
+            processed = append(processed, p)
+        }
+    }
 
-    Raises:
-        ProcessingError: When insight processing fails
-    """
-    processed = []
-
-    for insight in insights:
-        if insight.get('importance', 0.0) >= threshold:
-            processed.append(ProcessedInsight.from_dict(insight))
-
-    return processed
+    return processed, nil
+}
 ```
 
 ### Documentation Style
@@ -186,28 +187,37 @@ def process_insight_batch(
 ### Package Structure
 
 ```
-context_capture/
-├── core/          # Core functionality (capture, processing, queue)
-├── agents/        # Intelligent agents (reflection, synthesis, audit)
-├── llm/           # LLM integration and providers
-├── utils/         # Utilities (config, status, storage)
-└── integrations/  # External tool integrations
+cortex/
+├── cmd/cortex/          # CLI entry point
+├── internal/            # Internal packages
+│   ├── capture/         # Event capture (<10ms)
+│   ├── storage/         # SQLite + event sourcing
+│   ├── queue/           # File-based queue
+│   └── processor/       # Async LLM processor
+├── pkg/                 # Public packages
+│   ├── events/          # Event format
+│   ├── config/          # Configuration
+│   └── llm/             # Ollama client
+├── integrations/        # AI tool adapters
+│   └── claude/          # Claude Code integration
+├── scripts/             # Build/release scripts
+└── Formula/             # Homebrew formula
 ```
 
 ### Design Principles
 
-1. **Separation of Concerns**: Each module has a single responsibility
-2. **Dependency Injection**: Use configuration objects and dependency injection
-3. **Error Handling**: Graceful degradation, never interrupt user workflow
-4. **Performance**: Optimize for the capture path (<50ms requirement)
-5. **Privacy**: All processing must be local and secure
+1. **Simplicity**: Prefer simple, direct solutions
+2. **Performance**: <10ms event capture requirement
+3. **Error Handling**: Graceful degradation, silent failure for hooks
+4. **Privacy**: All processing is local (Ollama)
+5. **Single Binary**: Zero dependencies for end users
 
 ### Adding New Features
 
-1. **Core Features**: Add to appropriate `core/` module
-2. **Intelligence Features**: Create new agent in `agents/`
-3. **LLM Providers**: Add to `llm/providers.py`
-4. **Integrations**: Add to `integrations/`
+1. **Core Features**: Add to appropriate `internal/` package
+2. **CLI Commands**: Add to `cmd/cortex/main.go`
+3. **AI Tool Integrations**: Add to `integrations/`
+4. **Public APIs**: Add to `pkg/` (used by integrations)
 
 ## 🐛 Bug Reports
 

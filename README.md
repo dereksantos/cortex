@@ -28,22 +28,54 @@ Unlike traditional documentation tools that require manual effort, Cortex runs i
 
 ### Installation
 
+#### Option 1: Homebrew (macOS/Linux) - Recommended
+
 ```bash
-# Clone the repository
-git clone https://github.com/dereksantos/cortex.git
-cd cortex
+# Install from tap (once available)
+brew tap dereksantos/cortex
+brew install cortex
 
-# Build the binary
-go build -o cortex ./cmd/cortex
-
-# Initialize in your project
-./cortex init
-
-# Start the background processor
-./cortex daemon
+# Or install directly
+brew install --HEAD https://raw.githubusercontent.com/dereksantos/cortex/main/Formula/cortex.rb
 ```
 
-### Configure Your AI Tool
+#### Option 2: Install Script
+
+```bash
+# Clone and install
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
+./scripts/install.sh
+```
+
+#### Option 3: Build from Source
+
+```bash
+# Requires Go 1.21+
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
+go build -o cortex ./cmd/cortex
+```
+
+### Quick Setup (Automatic)
+
+The easiest way to get started:
+
+```bash
+cd your-project
+cortex init --auto
+cortex daemon
+```
+
+This automatically:
+- ✅ Detects Claude Code and configures hooks
+- ✅ Checks Ollama availability
+- ✅ Validates your model installation
+- ✅ Provides actionable next steps
+
+### Manual Configuration (Optional)
+
+If you prefer manual setup or use a different AI tool:
 
 #### Claude Code
 
@@ -78,15 +110,13 @@ Pipe events to Cortex via stdin:
 echo '{"tool_name":"Edit","tool_input":{"file":"main.go"},"tool_result":"success"}' | cortex capture
 ```
 
-That's it! Your development insights are now being captured automatically.
-
 ## 📖 Usage
 
 ### CLI Commands
 
 ```bash
 # Initialize Cortex in current project
-cortex init
+cortex init [--auto]         # Use --auto for automatic setup
 
 # Capture an event (used by AI tool hooks)
 cortex capture
@@ -103,6 +133,15 @@ cortex search "authentication decisions"
 # Show recent events
 cortex recent [N]
 
+# View insights extracted by LLM
+cortex insights [category] [limit]
+
+# Browse entities in the knowledge graph
+cortex entities [type]
+
+# Show entity relationships
+cortex graph <type> <name>
+
 # View database statistics
 cortex stats
 
@@ -116,6 +155,14 @@ cortex help
 ### Examples
 
 ```bash
+# Auto-setup in a new project
+$ cortex init --auto
+✅ Cortex initialized successfully!
+🔍 Auto-detecting environment...
+✅ Detected Claude Code
+✅ Ollama is running
+✅ Model 'mistral:7b' is available
+
 # Search for authentication-related decisions
 $ cortex search "auth"
 Found 2 results:
@@ -126,15 +173,38 @@ Found 2 results:
 2. [cursor] Edit - 2025-10-04 00:01
    Updated authentication routes
 
-# View recent activity
-$ cortex recent 5
-Recent 5 events:
+# View extracted insights
+$ cortex insights decision
+📊 decision Insights:
 
-1. [claude] Edit - 2025-10-04 00:05
-   File: api/routes.go
+1. [decision] Chose JWT for stateless authentication ⭐⭐⭐⭐⭐
+   Tags: [authentication, security, jwt]
+   2025-10-04 00:15
 
-2. [cursor] Write - 2025-10-04 00:03
-   File: auth/middleware.go
+2. [decision] Selected SQLite for event sourcing ⭐⭐⭐⭐
+   Tags: [storage, database, architecture]
+   2025-10-04 00:12
+
+# Browse entities in knowledge graph
+$ cortex entities pattern
+🔍 Entities:
+
+1. [pattern] Event Sourcing
+   First seen: 2025-10-03, Last seen: 2025-10-04
+
+2. [pattern] Async Processing
+   First seen: 2025-10-03, Last seen: 2025-10-04
+
+# View entity relationships
+$ cortex graph decision "JWT authentication"
+🌐 Knowledge Graph for: JWT authentication (decision)
+First seen: 2025-10-04
+Last seen: 2025-10-04
+
+Relationships (3):
+1. authentication -[implements]-> JWT authentication
+2. JWT authentication -[affects]-> API security
+3. middleware -[uses]-> JWT authentication
 
 # Check statistics
 $ cortex stats
@@ -144,6 +214,7 @@ $ cortex stats
     "claude": 32,
     "cursor": 15
   },
+  "total_entities": 24,
   "total_insights": 12,
   "oldest_event": "2025-10-03T12:00:00Z",
   "newest_event": "2025-10-04T00:05:23Z"
@@ -270,18 +341,34 @@ go fmt ./...
 
 ## 📊 Roadmap
 
+### ✅ Completed (v0.1.0)
+
 - [x] Fast event capture (<10ms)
 - [x] SQLite event sourcing storage
 - [x] Ollama LLM integration
-- [x] Async processor with goroutines
+- [x] Async processor with goroutines (5 workers)
 - [x] Full-text search
 - [x] Claude Code integration
-- [ ] Knowledge graph queries
+- [x] Knowledge graph layer (entities, relationships, insights)
+- [x] Auto-setup command (`cortex init --auto`)
+- [x] Cross-platform builds (macOS, Linux, Windows)
+- [x] Homebrew formula
+- [x] Generic stdin/stdout integration
+
+### 🚧 In Progress
+
+- [ ] Enhanced status line with Python compatibility
 - [ ] Vector embeddings (semantic search)
 - [ ] Cursor LSP adapter
+
+### 📋 Planned
+
 - [ ] Multi-project support
-- [ ] Team collaboration (cloud sync)
+- [ ] Graph visualization (web UI for relationships)
+- [ ] Team collaboration (cloud sync - optional)
 - [ ] Web UI dashboard
+- [ ] GitHub Actions integration
+- [ ] VS Code extension
 
 ## 📄 License
 
