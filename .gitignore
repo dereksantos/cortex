@@ -221,7 +221,7 @@ test_env/
 # Go build artifacts
 build/
 dist/
-cortex
+/cortex
 *.exe
 *.tar.gz
 *.zip

@@ -321,6 +321,32 @@ func handleProcess() {
 	}
 
 	fmt.Printf("✅ Processed %d events\n", processed)
+
+	// If events were processed, run analysis immediately
+	if processed > 0 {
+		proc := processor.New(cfg, store, queueMgr)
+
+		// Analyze recent events
+		events, err := store.GetRecentEvents(processed)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to get recent events: %v\n", err)
+			return
+		}
+
+		fmt.Printf("🔍 Analyzing %d events with LLM...\n", len(events))
+
+		// Run analysis synchronously for immediate results
+		analyzed := 0
+		for _, event := range events {
+			if err := proc.AnalyzeEventSync(event); err == nil {
+				analyzed++
+			}
+		}
+
+		if analyzed > 0 {
+			fmt.Printf("✅ Analyzed %d events\n", analyzed)
+		}
+	}
 }
 
 func handleDaemon() {

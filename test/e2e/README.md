@@ -1,30 +1,32 @@
 # End-to-End Test Suite for Cortex
 
-This test suite demonstrates Cortex's value in preserving development context across AI coding sessions.
+This test suite validates Cortex's ability to capture and retrieve development context.
 
-## The Problem
+## What These Tests Actually Do
 
-AI coding assistants have **no memory between sessions**. Every new conversation starts from scratch:
+**Important:** These are **functional tests**, not user experience simulations. They validate:
 
-- ❌ Forgets why you chose technology X over Y
-- ❌ Suggests patterns you explicitly rejected
-- ❌ Repeats mistakes you already solved
-- ❌ Recommends approaches banned for security reasons
-- ❌ Inconsistent code style across sessions
+1. ✅ **Event Capture**: Can events be captured and stored in SQLite?
+2. ✅ **Search Functionality**: Can stored events be found via keyword search?
+3. ✅ **LLM Integration**: Does Ollama analyze events correctly? (when available)
+4. ✅ **Command Interface**: Do all CLI commands work as expected?
 
-**Result:** You waste time re-explaining decisions, correcting AI, and maintaining consistency.
+**What these tests DON'T prove:**
+- ❌ Actual time savings (not measured, only estimated)
+- ❌ AI behavior changes (AI not involved in most tests)
+- ❌ Real-world usage patterns (controlled test scenarios)
+- ❌ Developer productivity gains (would require user studies)
 
-## The Solution: Cortex
+## The Hypothesis
 
-Cortex captures and preserves ALL development context:
+Cortex's **hypothesis** is that preserving development context helps developers:
 
-- ✅ **Decisions:** Why you chose X (with full reasoning)
-- ✅ **Patterns:** Established code conventions
-- ✅ **Insights:** Lessons learned from past problems
-- ✅ **Strategies:** Project-specific workflows
-- ✅ **Anti-patterns:** What NOT to do (and why)
+- Recall past decisions faster than from memory
+- Maintain consistency across work sessions
+- Avoid repeating solved problems
+- Guide AI with historical context
 
-**Result:** Query your development history in seconds, guide AI with historical context.
+**These tests validate the mechanics work. Proving the value requires real-world usage.**
 
 ## Test Scenarios
 
