@@ -159,14 +159,32 @@ Relationships (4):
 ./cleanup.sh
 ```
 
-## Impact Metrics
+## What This Test Validates
 
-- **Time to recall decision:** 5 seconds (vs 30 minutes)
-- **Accuracy:** 100% (vs potentially wrong choice)
-- **Context preservation:** Complete reasoning saved
-- **Team alignment:** Everyone sees the same decision
+**Actual validations:**
+- ✅ Event capture works (JSON → SQLite)
+- ✅ Search works (keyword matching)
+- ✅ Event retrieval works (recent, stats commands)
+- ✅ Data persists correctly
 
-## Key Takeaway
+**What this does NOT prove:**
+- ❌ Time savings (no real developer, no baseline measurement)
+- ❌ Memory improvement (no "forgetting" simulated)
+- ❌ AI behavior (no LLM involved in this test)
+- ❌ Business value (functional test only)
 
-**Without Cortex:** "Why did we choose X again?"
-**With Cortex:** `cortex search "X decision"` → Instant answer with full context
+## Honest Assessment
+
+This test shows **the plumbing works**:
+- Database operations function correctly
+- CLI commands don't crash
+- Search finds the right event
+
+**To prove value, you'd need:**
+- Real developers using it over time
+- Measured task completion times
+- Before/after comparisons
+- User experience studies
+
+**Current claim:** "Cortex can capture and retrieve decisions"
+**Not proven:** "Cortex saves X minutes per day"

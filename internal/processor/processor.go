@@ -112,7 +112,7 @@ func (p *Processor) shouldAnalyze(event *events.Event) bool {
 		event.ToolName == "Bash"
 }
 
-// analyzeEvent analyzes a single event with LLM
+// analyzeEvent analyzes a single event with LLM (async)
 func (p *Processor) analyzeEvent(event *events.Event) {
 	// Acquire worker slot
 	p.workersCh <- struct{}{}
@@ -138,6 +138,32 @@ func (p *Processor) analyzeEvent(event *events.Event) {
 	}
 
 	log.Printf("Analyzed event %s: %s (importance: %d)", event.ID, analysis.Category, analysis.Importance)
+}
+
+// AnalyzeEventSync analyzes a single event synchronously
+func (p *Processor) AnalyzeEventSync(event *events.Event) error {
+	// Check if we should analyze this event
+	if !p.shouldAnalyze(event) {
+		return fmt.Errorf("event type %s not eligible for analysis", event.ToolName)
+	}
+
+	// Check if Ollama is available
+	if !p.llm.IsAvailable() {
+		return fmt.Errorf("ollama not available")
+	}
+
+	// Analyze with LLM
+	analysis, err := p.llm.AnalyzeEvent(event)
+	if err != nil {
+		return fmt.Errorf("llm analysis failed: %w", err)
+	}
+
+	// Store the insight
+	if err := p.storeInsight(event.ID, analysis); err != nil {
+		return fmt.Errorf("failed to store insight: %w", err)
+	}
+
+	return nil
 }
 
 // storeInsight stores an analysis result as an insight
