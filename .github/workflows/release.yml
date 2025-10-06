@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Get version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+    - name: Build binaries for all platforms
+      run: |
+        # Linux
+        GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-amd64 ./cmd/cortex
+        GOOS=linux GOARCH=arm64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-arm64 ./cmd/cortex
+
+        # macOS
+        GOOS=darwin GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 ./cmd/cortex
+        GOOS=darwin GOARCH=arm64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 ./cmd/cortex
+
+        # Windows
+        GOOS=windows GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe ./cmd/cortex
+
+    - name: Create checksums
+      run: |
+        sha256sum cortex-${{ steps.get_version.outputs.VERSION }}-* > checksums.txt
+
+    - name: Generate changelog
+      id: changelog
+      run: |
+        # Get the previous tag
+        PREVIOUS_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+
+        if [ -z "$PREVIOUS_TAG" ]; then
+          # First release, get all commits
+          CHANGELOG=$(git log --pretty=format:"- %s" --reverse)
+        else
+          # Get commits since previous tag
+          CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s" --reverse)
+        fi
+
+        # Save to file
+        echo "$CHANGELOG" > changelog.txt
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ steps.get_version.outputs.VERSION }}
+        body_path: changelog.txt
+        files: |
+          cortex-${{ steps.get_version.outputs.VERSION }}-*
+          checksums.txt
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Update Homebrew formula
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: |
+        echo "TODO: Update Homebrew formula with new version and checksums"
+        # This would typically push to a homebrew-tap repository
+        # For now, just a reminder to update manually

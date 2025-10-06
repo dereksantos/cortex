@@ -15,23 +15,25 @@ import (
 
 // Processor handles async event processing
 type Processor struct {
-	cfg       *config.Config
-	storage   *storage.Storage
-	queue     *queue.Manager
-	llm       *llm.OllamaClient
-	running   bool
-	workersCh chan struct{}
+	cfg          *config.Config
+	storage      *storage.Storage
+	queue        *queue.Manager
+	llm          *llm.OllamaClient
+	running      bool
+	workersCh    chan struct{}
+	lastProcessed map[string]time.Time // file path -> last processed time (for deduplication)
 }
 
 // New creates a new Processor
 func New(cfg *config.Config, store *storage.Storage, queueMgr *queue.Manager) *Processor {
 	return &Processor{
-		cfg:       cfg,
-		storage:   store,
-		queue:     queueMgr,
-		llm:       llm.NewOllamaClient(cfg),
-		running:   false,
-		workersCh: make(chan struct{}, 5), // Max 5 concurrent workers
+		cfg:           cfg,
+		storage:       store,
+		queue:         queueMgr,
+		llm:           llm.NewOllamaClient(cfg),
+		running:       false,
+		workersCh:     make(chan struct{}, 5), // Max 5 concurrent workers
+		lastProcessed: make(map[string]time.Time),
 	}
 }
 
@@ -105,6 +107,39 @@ func (p *Processor) shouldAnalyze(event *events.Event) bool {
 		return false
 	}
 
+	// Get file path for deduplication check
+	filePath, hasFilePath := event.ToolInput["file_path"].(string)
+
+	// Check for binary/generated files to skip
+	if hasFilePath {
+		skipExtensions := []string{
+			".pyc", ".o", ".class",
+			".png", ".jpg", ".jpeg", ".gif", ".svg",
+			".zip", ".tar", ".gz", ".pdf",
+		}
+		for _, ext := range skipExtensions {
+			if len(filePath) >= len(ext) && filePath[len(filePath)-len(ext):] == ext {
+				return false
+			}
+		}
+
+		// Special handling for lock files (can be .lock or -lock.json, etc.)
+		lowerPath := toLower(filePath)
+		if contains(lowerPath, ".lock") || contains(lowerPath, "-lock.") {
+			return false
+		}
+
+		// Deduplication: Skip if same file was processed recently (within 30 seconds)
+		if lastTime, exists := p.lastProcessed[filePath]; exists {
+			if event.Timestamp.Sub(lastTime) < 30*time.Second {
+				return false
+			}
+		}
+
+		// Update last processed time
+		p.lastProcessed[filePath] = event.Timestamp
+	}
+
 	// Analyze edits, writes, important commands
 	return event.ToolName == "Edit" ||
 		event.ToolName == "Write" ||
@@ -164,6 +199,33 @@ func (p *Processor) AnalyzeEventSync(event *events.Event) error {
 	}
 
 	return nil
+}
+
+// Helper functions for string operations
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && findSubstring(s, substr)
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+func toLower(s string) string {
+	result := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			result[i] = c + 32
+		} else {
+			result[i] = c
+		}
+	}
+	return string(result)
 }
 
 // storeInsight stores an analysis result as an insight
