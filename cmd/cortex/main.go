@@ -67,6 +67,10 @@ func main() {
 		handleEntities()
 	case "graph":
 		handleGraph()
+	case "session-start":
+		handleSessionStart()
+	case "inject-context":
+		handleInjectContext()
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
 	case "help", "-h", "--help":
@@ -281,6 +285,26 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 					map[string]interface{}{
 						"type":    "command",
 						"command": fmt.Sprintf("%s capture", cortexPath),
+					},
+				},
+			},
+		},
+		"SessionStart": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s session-start", cortexPath),
+					},
+				},
+			},
+		},
+		"UserPromptSubmit": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s inject-context", cortexPath),
 					},
 				},
 			},
@@ -1111,6 +1135,165 @@ func handleGraph() {
 	}
 }
 
+func handleSessionStart() {
+	// Print usage instructions for AI agent
+	instructions := `🤖 Cortex Context Memory Available
+
+Quick Commands:
+  cortex status          # Check if daemon is running
+  cortex daemon &        # Start background processor (if not running)
+  cortex search "query"  # Find relevant context from past work
+  cortex insights        # View extracted decisions and patterns
+  cortex recent          # Show recent development events
+
+💡 Tip: If daemon isn't running, suggest starting it to enable automatic context capture.
+📚 Use 'cortex search' to find relevant past decisions before making new architectural choices.`
+
+	fmt.Println(instructions)
+}
+
+func handleInjectContext() {
+	// Read user prompt from stdin
+	promptData, err := io.ReadAll(os.Stdin)
+	if err != nil || len(promptData) == 0 {
+		// No prompt provided, exit silently
+		os.Exit(0)
+	}
+
+	prompt := string(promptData)
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		// Silent failure - don't block user if Cortex not initialized
+		fmt.Println(prompt)
+		os.Exit(0)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		// Silent failure
+		fmt.Println(prompt)
+		os.Exit(0)
+	}
+	defer store.Close()
+
+	// Search for relevant context (simple keyword search for now)
+	// Extract key terms from prompt (basic approach)
+	query := extractKeyTerms(prompt)
+	if query == "" {
+		// No meaningful terms, just return original prompt
+		fmt.Println(prompt)
+		os.Exit(0)
+	}
+
+	// Search for relevant insights
+	insights, err := store.GetRecentInsights(50)
+	if err != nil || len(insights) == 0 {
+		// No insights available
+		fmt.Println(prompt)
+		os.Exit(0)
+	}
+
+	// Find top 2 most relevant insights (simple text matching)
+	relevant := findRelevantInsights(insights, query, 2)
+	if len(relevant) == 0 {
+		// No relevant context found
+		fmt.Println(prompt)
+		os.Exit(0)
+	}
+
+	// Inject context before the prompt
+	fmt.Println("📚 Relevant Context from Cortex:")
+	for i, insight := range relevant {
+		fmt.Printf("%d. [%s] %s\n", i+1, insight.Category, insight.Summary)
+		if len(insight.Tags) > 0 {
+			fmt.Printf("   Tags: %v\n", insight.Tags)
+		}
+	}
+	fmt.Println()
+	fmt.Println("User Request:")
+	fmt.Println(prompt)
+}
+
+// extractKeyTerms extracts meaningful terms from prompt (basic implementation)
+func extractKeyTerms(prompt string) string {
+	// Remove common words and extract key terms
+	stopWords := map[string]bool{
+		"the": true, "a": true, "an": true, "and": true, "or": true,
+		"but": true, "in": true, "on": true, "at": true, "to": true,
+		"for": true, "of": true, "with": true, "by": true, "from": true,
+		"is": true, "are": true, "was": true, "were": true, "be": true,
+		"have": true, "has": true, "had": true, "do": true, "does": true,
+		"did": true, "will": true, "would": true, "should": true, "could": true,
+		"can": true, "may": true, "might": true, "must": true,
+		"i": true, "you": true, "he": true, "she": true, "it": true,
+		"we": true, "they": true, "them": true, "their": true, "my": true,
+		"help": true, "me": true, "please": true, "want": true, "need": true,
+		"how": true, "what": true, "when": true, "where": true, "why": true,
+	}
+
+	words := strings.Fields(strings.ToLower(prompt))
+	var keyTerms []string
+
+	for _, word := range words {
+		// Clean word (remove punctuation)
+		word = strings.Trim(word, ",.!?;:\"'")
+		// Skip if stop word or too short
+		if len(word) < 3 || stopWords[word] {
+			continue
+		}
+		keyTerms = append(keyTerms, word)
+	}
+
+	return strings.Join(keyTerms, " ")
+}
+
+// findRelevantInsights finds insights matching the query terms
+func findRelevantInsights(insights []*storage.Insight, query string, limit int) []*storage.Insight {
+	type scoredInsight struct {
+		insight *storage.Insight
+		score   int
+	}
+
+	var scored []scoredInsight
+	queryTerms := strings.Fields(strings.ToLower(query))
+
+	for _, insight := range insights {
+		score := 0
+		searchText := strings.ToLower(insight.Summary + " " + strings.Join(insight.Tags, " ") + " " + insight.Category)
+
+		// Count matching terms
+		for _, term := range queryTerms {
+			if strings.Contains(searchText, term) {
+				score++
+			}
+		}
+
+		if score > 0 {
+			scored = append(scored, scoredInsight{insight, score})
+		}
+	}
+
+	// Sort by score (descending)
+	for i := 0; i < len(scored)-1; i++ {
+		for j := i + 1; j < len(scored); j++ {
+			if scored[j].score > scored[i].score {
+				scored[i], scored[j] = scored[j], scored[i]
+			}
+		}
+	}
+
+	// Return top N
+	var result []*storage.Insight
+	for i := 0; i < limit && i < len(scored); i++ {
+		result = append(result, scored[i].insight)
+	}
+
+	return result
+}
+
 func loadConfig() (*config.Config, error) {
 	projectRoot, err := os.Getwd()
 	if err != nil {
@@ -1288,26 +1471,29 @@ Usage:
   cortex <command> [options]
 
 Commands:
-  init        Initialize Cortex in current directory
-  info        Show system info and model recommendations
-  test        Test LLM analysis [decision|pattern|insight]
+  init           Initialize Cortex in current directory
+  info           Show system info and model recommendations
+  test           Test LLM analysis [decision|pattern|insight]
 
-  capture     Capture event from stdin (used by AI tools)
-  ingest      Move queued events to database
-  analyze     Run LLM analysis on recent events [limit]
-  process     Process queue + analyze (backward compat)
-  daemon      Start background processor
+  capture        Capture event from stdin (used by AI tools)
+  ingest         Move queued events to database
+  analyze        Run LLM analysis on recent events [limit]
+  process        Process queue + analyze (backward compat)
+  daemon         Start background processor
 
-  search      Search captured context
-  recent      Show recent events
-  insights    Show insights [category] [limit]
-  entities    Show entities [type]
-  graph       Show knowledge graph for entity
-  stats       Show statistics
-  status      Show status (for status line)
+  search         Search captured context
+  recent         Show recent events
+  insights       Show insights [category] [limit]
+  entities       Show entities [type]
+  graph          Show knowledge graph for entity
+  stats          Show statistics
+  status         Show status (for status line)
 
-  version     Show version
-  help        Show this help
+  session-start  Print session start instructions (for hooks)
+  inject-context Inject relevant context into prompt (for hooks)
+
+  version        Show version
+  help           Show this help
 
 Examples:
   # Get system info and model recommendations
