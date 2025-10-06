@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -200,6 +201,9 @@ func handleInit() {
 		os.Exit(1)
 	}
 
+	// Add .context/ to .gitignore if it exists
+	ensureGitignore(projectRoot)
+
 	fmt.Println("✅ Cortex initialized successfully!")
 	fmt.Printf("   Config: %s\n", configPath)
 	fmt.Printf("   Context directory: %s\n", cfg.ContextDir)
@@ -259,6 +263,43 @@ func runAutoSetup(projectRoot string) {
 	fmt.Println("   1. Start the processor: cortex daemon")
 	fmt.Println("   2. Use Claude Code normally - events will be captured automatically")
 	fmt.Println("   3. View insights: cortex insights")
+}
+
+func ensureGitignore(projectRoot string) {
+	gitignorePath := filepath.Join(projectRoot, ".gitignore")
+
+	// Check if .gitignore exists
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		// No .gitignore file, skip silently
+		return
+	}
+
+	gitignoreContent := string(content)
+
+	// Check if .context/ is already ignored
+	if strings.Contains(gitignoreContent, ".context/") || strings.Contains(gitignoreContent, ".context") {
+		// Already in gitignore
+		return
+	}
+
+	// Append .context/ to gitignore
+	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		// Silent failure - not critical
+		return
+	}
+	defer f.Close()
+
+	// Add newline if file doesn't end with one
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		f.WriteString("\n")
+	}
+
+	// Add .context/ with comment
+	f.WriteString("\n# Cortex context memory (local development context)\n.context/\n")
+
+	fmt.Println("   ✅ Added .context/ to .gitignore")
 }
 
 func setupClaudeCode(claudeDir, cortexPath string) error {
