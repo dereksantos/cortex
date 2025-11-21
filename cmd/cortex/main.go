@@ -72,6 +72,10 @@ func main() {
 		handleSessionStart()
 	case "inject-context":
 		handleInjectContext()
+	case "overview":
+		handleOverview()
+	case "cli":
+		handleCLI()
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
 	case "help", "-h", "--help":
@@ -370,6 +374,59 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		return fmt.Errorf("failed to write settings: %w", err)
+	}
+
+	// Create slash command
+	if err := createSlashCommand(claudeDir, cortexPath); err != nil {
+		// Non-fatal, just warn
+		fmt.Printf("   ⚠️  Could not create slash command: %v\n", err)
+	} else {
+		fmt.Println("   ✅ Created /cortex slash command")
+	}
+
+	return nil
+}
+
+func createSlashCommand(claudeDir, cortexPath string) error {
+	// Ensure commands directory exists
+	commandsDir := filepath.Join(claudeDir, "commands")
+	if err := os.MkdirAll(commandsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create commands directory: %w", err)
+	}
+
+	commandFile := filepath.Join(commandsDir, "cortex.md")
+
+	// Don't overwrite if exists
+	if _, err := os.Stat(commandFile); err == nil {
+		return nil // File exists, skip
+	}
+
+	// Create slash command content
+	content := fmt.Sprintf(`# Cortex Context Memory
+
+Interact with your captured development context.
+
+**Usage:**
+- /cortex - Show context overview
+- /cortex search <query> - Search for relevant context
+- /cortex insights - Show recent insights
+- /cortex status - Check system status
+- /cortex <prompt> - Smart search (anything else)
+
+**Examples:**
+- /cortex → Shows: 📊 47 events, 12 insights
+- /cortex search authentication → Find auth decisions
+- /cortex insights → List recent insights
+- /cortex how did we handle errors → Smart search
+
+---
+
+%s cli "$@"
+`, cortexPath)
+
+	// Write command file
+	if err := os.WriteFile(commandFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write command file: %w", err)
 	}
 
 	return nil
@@ -1176,6 +1233,123 @@ func handleGraph() {
 	}
 }
 
+func handleOverview() {
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Println("❌ Cortex not initialized")
+		fmt.Println("   Run: cortex init --auto")
+		os.Exit(1)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Println("❌ Failed to open storage")
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Get stats
+	stats, err := store.GetStats()
+	if err != nil {
+		fmt.Println("❌ Failed to get stats")
+		os.Exit(1)
+	}
+
+	// Get insights for breakdown
+	insights, _ := store.GetRecentInsights(100)
+
+	// Count by category
+	categoryCount := make(map[string]int)
+	categoryStars := make(map[string]int)
+	for _, insight := range insights {
+		categoryCount[insight.Category]++
+		if insight.Importance >= 4 {
+			categoryStars[insight.Category]++
+		}
+	}
+
+	// Get database size
+	dbPath := filepath.Join(cfg.ContextDir, "db", "events.db")
+	dbInfo, _ := os.Stat(dbPath)
+	dbSize := float64(0)
+	if dbInfo != nil {
+		dbSize = float64(dbInfo.Size()) / 1024 // KB
+	}
+
+	// Check if daemon is running (heuristic: check if processing recently)
+	daemonStatus := "❌ Stopped"
+	if recentEvents, err := store.GetRecentEvents(5); err == nil && len(recentEvents) > 0 {
+		// Check if last event is recent (< 5 min old)
+		if time.Since(recentEvents[0].Timestamp) < 5*time.Minute {
+			daemonStatus = "✅ Running"
+		}
+	}
+
+	// Print overview
+	fmt.Println("📊 Cortex Context Memory")
+	fmt.Println()
+
+	// Events
+	totalEvents := 0
+	if val, ok := stats["total_events"].(int); ok {
+		totalEvents = val
+	}
+	fmt.Printf("Events:     %d captured\n", totalEvents)
+
+	// Insights
+	totalInsights := 0
+	if val, ok := stats["total_insights"].(int); ok {
+		totalInsights = val
+	}
+	fmt.Printf("Insights:   %d extracted\n", totalInsights)
+
+	// Breakdown by category
+	if len(categoryCount) > 0 {
+		for _, cat := range []string{"decision", "pattern", "insight", "strategy"} {
+			if count, ok := categoryCount[cat]; ok {
+				stars := ""
+				for i := 0; i < categoryStars[cat] && i < 5; i++ {
+					stars += "⭐"
+				}
+				if stars == "" {
+					stars = "⭐⭐⭐"
+				}
+				prefix := "  ├─"
+				if cat == "strategy" || (cat == "insight" && categoryCount["strategy"] == 0) {
+					prefix = "  └─"
+				}
+				fmt.Printf("%s %ss:  %d %s\n", prefix, cat, count, stars)
+			}
+		}
+	}
+	fmt.Println()
+
+	// Status
+	fmt.Printf("Status:     🤖 Daemon %s\n", daemonStatus)
+	if dbSize > 1024 {
+		fmt.Printf("Database:   %.1f MB\n", dbSize/1024)
+	} else {
+		fmt.Printf("Database:   %.0f KB\n", dbSize)
+	}
+
+	// Recent activity
+	recentEvents, _ := store.GetRecentEvents(10)
+	recentCount := 0
+	for _, event := range recentEvents {
+		if time.Since(event.Timestamp) < 5*time.Minute {
+			recentCount++
+		}
+	}
+	if recentCount > 0 {
+		fmt.Printf("Recent:     %d events (last 5 min)\n", recentCount)
+	}
+
+	fmt.Println()
+	fmt.Println("💡 Try: /cortex search <query>")
+}
+
 func handleSessionStart() {
 	// Print usage instructions for AI agent
 	instructions := `🤖 Cortex Context Memory Available
@@ -1191,6 +1365,50 @@ Quick Commands:
 📚 Use 'cortex search' to find relevant past decisions before making new architectural choices.`
 
 	fmt.Println(instructions)
+}
+
+func handleCLI() {
+	// Route slash command arguments
+	// Usage: cortex cli [args...]
+
+	args := os.Args[2:] // Skip "cortex" and "cli"
+
+	if len(args) == 0 {
+		// No args - show overview
+		handleOverview()
+		return
+	}
+
+	subcommand := args[0]
+
+	switch subcommand {
+	case "search":
+		// cortex cli search <query>
+		if len(args) < 2 {
+			fmt.Println("Usage: /cortex search <query>")
+			os.Exit(1)
+		}
+		// Reconstruct search query from remaining args
+		query := strings.Join(args[1:], " ")
+		os.Args = []string{"cortex", "search", query}
+		handleSearch()
+
+	case "insights":
+		// cortex cli insights
+		os.Args = []string{"cortex", "insights"}
+		handleInsights()
+
+	case "status":
+		// cortex cli status
+		os.Args = []string{"cortex", "info"}
+		handleInfo()
+
+	default:
+		// Treat entire input as search query
+		query := strings.Join(args, " ")
+		os.Args = []string{"cortex", "search", query}
+		handleSearch()
+	}
 }
 
 func handleInjectContext() {
@@ -1532,6 +1750,8 @@ Commands:
 
   session-start  Print session start instructions (for hooks)
   inject-context Inject relevant context into prompt (for hooks)
+  overview       Show context overview (visual summary)
+  cli            Route slash command arguments (for /cortex)
 
   version        Show version
   help           Show this help
@@ -1565,6 +1785,12 @@ Examples:
   # Browse entities
   cortex entities pattern
   cortex graph decision "JWT authentication"
+
+  # Slash command (Claude Code)
+  /cortex                        # Show overview
+  /cortex search auth            # Search context
+  /cortex insights               # List insights
+  /cortex how did we handle X    # Smart search
 
 For more information: https://github.com/dereksantos/cortex
 `, version)

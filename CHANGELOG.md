@@ -5,58 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2025-01-15
 
 ### Added
-- Initial release of agentic context capture system
-- Core event capture with <50ms performance
-- Local LLM integration with Ollama
+- Initial release of Cortex, an intelligent development context memory system
+- Event sourcing architecture with SQLite database
+- Fast event capture with <10ms performance target
+- Local LLM integration with Ollama for semantic analysis
 - Intelligent insight categorization (decisions, patterns, insights, strategies)
-- Background processing agent with queue management
-- CLI interface with comprehensive commands
+- Background async processing with queue management
+- Comprehensive CLI interface with 28 commands
+- Full-text search with FTS5 support
+- Knowledge graph with entities and relationships
 - Real-time status monitoring for Claude Code
-- Advanced reflection agent for pattern analysis
-- Synthesis agent for best practices generation
-- Audit agent for decision consistency checking
-- Cross-repository context support (planned)
-- Team collaboration features (planned)
+- Auto-initialization with environment detection
+- Privacy-first design - all processing happens locally
 
-### Features
-- **Fast Capture**: Sub-50ms event capture for Claude Code hooks
+### Core Features
+- **Fast Capture**: Sub-10ms event capture for AI tool hooks
 - **Semantic Analysis**: Local LLM distinguishes important events from noise
 - **Pattern Recognition**: Automatic detection of recurring development patterns
 - **Decision Tracking**: Capture and analyze architectural decisions
-- **Knowledge Organization**: Structured storage in searchable markdown files
-- **Privacy-First**: All processing happens locally
-- **Zero-Friction**: Invisible background operation
-- **Multi-Model Support**: Works with various local LLM providers
+- **Knowledge Graph**: Structured entity and relationship storage
+- **Privacy-First**: Zero telemetry, all processing local with Ollama
+- **Zero-Friction**: Silent failure design, doesn't interrupt AI tools
+- **Single Binary**: ~14MB static binary with zero dependencies
 
 ### CLI Commands
-- `context-capture init` - Initialize project with context capture
-- `context-capture start/stop` - Manage background processor
-- `context-capture status` - System health monitoring
-- `context-capture reflect` - Advanced pattern reflection
-- `context-capture synthesize` - Generate best practices
-- `context-capture audit` - Decision consistency analysis
-- `context-capture search` - Search captured insights
-- `context-capture migrate` - Migrate from existing installations
+- `cortex init [--auto]` - Initialize project with auto-detection
+- `cortex capture` - Fast event capture (used by hooks)
+- `cortex daemon` - Background async processor
+- `cortex search <query>` - Full-text search across events and insights
+- `cortex insights [category]` - View categorized insights
+- `cortex entities [type]` - Browse knowledge graph entities
+- `cortex graph <type> <name>` - Show entity relationships
+- `cortex stats` - Database and system statistics
+- `cortex info` - System info and model recommendations
+- `cortex test [type]` - Test LLM analysis functionality
+- `cortex session-start` - Session initialization hook
+- `cortex inject-context` - Context injection for AI prompts
+- `cortex overview` - Visual summary of captured knowledge
+- `cortex cli` - Slash command router for Claude Code
+
+### Integrations
+- **Claude Code**: PostToolUse, SessionStart, UserPromptSubmit hooks
+- **Cursor IDE**: LSP adapter (basic implementation)
+- **Generic**: stdin/stdout interface for any AI tool
 
 ### Technical
-- Modern Python packaging with `pyproject.toml`
-- Comprehensive test suite with pytest
-- Type hints throughout codebase
-- Code quality tools (black, isort, flake8, mypy)
-- Rich CLI with progress indicators
-- Configurable via YAML
-- Extensible agent architecture
-
-## [0.1.0] - 2025-01-01
-
-### Added
-- Initial project structure and core functionality
-- Migration from proof-of-concept to production-ready system
-- Professional packaging and distribution setup
+- Built with Go 1.21+
+- SQLite with event sourcing pattern
+- File-based queue system for reliability
+- Atomic file operations (temp + rename pattern)
+- Graceful degradation when Ollama unavailable
+- Deduplication (30s window per file)
+- 5 parallel async workers for LLM processing
+- Configurable via JSON
+- Cross-platform: macOS, Linux, Windows
 
 ---
 
-For more details about changes, see the [commit history](https://github.com/dereksantos/agentic-context-capture/commits/main).
+For more details about changes, see the [commit history](https://github.com/dereksantos/cortex/commits/main).
