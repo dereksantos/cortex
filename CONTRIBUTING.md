@@ -246,8 +246,8 @@ What actually happens
 
 **Environment**
 - OS: [e.g., macOS 12.0]
-- Python: [e.g., 3.9.0]
-- Package Version: [e.g., 0.1.0]
+- Go Version: [e.g., 1.21.0]
+- Cortex Version: [e.g., 0.1.0]
 - Claude Code Version: [if applicable]
 
 **Additional Context**
@@ -334,12 +334,13 @@ We follow [Semantic Versioning](https://semver.org/):
 
 ### Release Checklist
 
-1. Update version in `pyproject.toml`
+1. Update version in `cmd/cortex/main.go`
 2. Update `CHANGELOG.md`
-3. Run full test suite
-4. Create release PR
-5. Tag release after merge
-6. Publish to PyPI
+3. Run full test suite (`go test ./...`)
+4. Build for all platforms (`scripts/build-all.sh`)
+5. Create release PR
+6. Tag release after merge
+7. GitHub Actions will create release and build artifacts
 
 ## 📞 Getting Help
 
@@ -350,4 +351,4 @@ If you need help with contributing:
 3. **Ask Questions**: Use GitHub Discussions for questions
 4. **Be Specific**: Provide context and details
 
-Thank you for contributing to Agentic Context Capture! 🎉
+Thank you for contributing to Cortex! 🎉
