@@ -173,8 +173,18 @@ func (e *Evaluator) RunSingle(scenarioPath string) (*EvalRun, error) {
 	return run, nil
 }
 
+// CalculateSummary aggregates results into summary statistics (exported for E2E)
+func CalculateSummary(results []EvalResult) RunSummary {
+	return calculateSummaryInternal(results)
+}
+
 // calculateSummary aggregates results into summary statistics
 func (e *Evaluator) calculateSummary(results []EvalResult) RunSummary {
+	return calculateSummaryInternal(results)
+}
+
+// calculateSummaryInternal is the shared implementation
+func calculateSummaryInternal(results []EvalResult) RunSummary {
 	summary := RunSummary{
 		TotalPrompts: len(results),
 	}

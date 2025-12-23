@@ -1,0 +1,140 @@
+id: "e2e-auth-learning-001"
+type: "e2e"
+name: "JWT Auth Learning and Recall"
+description: "Tests if Cortex learns from an auth implementation session and recalls it later"
+domain: "backend"
+
+# Chain 1: Learning session - developer implements JWT auth
+learning_chain:
+  - role: user
+    content: "I need to implement authentication for our API. What approach should we use?"
+
+  - role: assistant
+    content: |
+      For a stateless API, I recommend using JWT (JSON Web Tokens). Here's why:
+
+      1. **Stateless**: No server-side session storage needed
+      2. **Scalable**: Works across multiple servers without session sharing
+      3. **Self-contained**: Token contains all user info needed
+
+      I'll implement it with:
+      - HS256 signing algorithm
+      - 24-hour token expiry
+      - Refresh token rotation for security
+    tool_calls:
+      - tool: Write
+        file: auth/jwt.go
+        content: |
+          package auth
+
+          import (
+              "time"
+              "github.com/golang-jwt/jwt/v5"
+          )
+
+          var secretKey = []byte(os.Getenv("JWT_SECRET"))
+
+          func GenerateToken(userID string) (string, error) {
+              claims := jwt.MapClaims{
+                  "user_id": userID,
+                  "exp":     time.Now().Add(24 * time.Hour).Unix(),
+                  "iat":     time.Now().Unix(),
+              }
+              token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+              return token.SignedString(secretKey)
+          }
+
+          func ValidateToken(tokenString string) (*jwt.MapClaims, error) {
+              token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+                  return secretKey, nil
+              })
+              if err != nil {
+                  return nil, err
+              }
+              claims := token.Claims.(jwt.MapClaims)
+              return &claims, nil
+          }
+
+  - role: user
+    content: "Good. Let's use 24h expiry as you suggested. Where should tokens be sent?"
+
+  - role: assistant
+    content: |
+      Tokens should be sent in the Authorization header with the Bearer scheme:
+
+      ```
+      Authorization: Bearer <token>
+      ```
+
+      I'll create middleware to extract and validate tokens.
+    tool_calls:
+      - tool: Write
+        file: auth/middleware.go
+        content: |
+          package auth
+
+          func AuthMiddleware(next http.Handler) http.Handler {
+              return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                  authHeader := r.Header.Get("Authorization")
+                  if !strings.HasPrefix(authHeader, "Bearer ") {
+                      http.Error(w, "Unauthorized", 401)
+                      return
+                  }
+                  token := strings.TrimPrefix(authHeader, "Bearer ")
+                  claims, err := ValidateToken(token)
+                  if err != nil {
+                      http.Error(w, "Invalid token", 401)
+                      return
+                  }
+                  ctx := context.WithValue(r.Context(), "user", claims)
+                  next.ServeHTTP(w, r.WithContext(ctx))
+              })
+          }
+
+  - role: user
+    content: "Perfect. We decided to use JWT with HS256 and 24h expiry. This is the pattern for our project."
+
+# Chain 2: Recall prompts - new session should remember the decisions
+recall_prompts:
+  - id: "password-reset"
+    prompt: "How should I implement password reset for this application?"
+    ground_truth:
+      must_include:
+        - "token"
+        - "expiry"
+      must_exclude:
+        - "session"
+        - "cookie-based"
+    expected_insights:
+      - "JWT authentication"
+      - "stateless"
+      - "24 hour expiry"
+
+  - id: "new-endpoint-auth"
+    prompt: "I'm adding a new API endpoint. How should I protect it?"
+    ground_truth:
+      must_include:
+        - "middleware"
+        - "Authorization"
+        - "Bearer"
+      must_exclude:
+        - "session"
+        - "cookie"
+    expected_insights:
+      - "AuthMiddleware"
+      - "Bearer token"
+
+  - id: "token-storage"
+    prompt: "Where should the frontend store the auth token?"
+    ground_truth:
+      must_include:
+        - "token"
+      must_exclude:
+        - "session storage on server"
+    expected_insights:
+      - "JWT"
+      - "stateless"
+
+metadata:
+  author: "cortex-eval"
+  tags: "e2e, auth, jwt, learning"
