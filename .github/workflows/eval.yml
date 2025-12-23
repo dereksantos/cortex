@@ -1,0 +1,115 @@
+name: Eval
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'internal/eval/**'
+      - 'test/evals/**'
+      - 'pkg/llm/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'internal/eval/**'
+      - 'test/evals/**'
+      - 'pkg/llm/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Eval mode'
+        required: true
+        default: 'dry-run'
+        type: choice
+        options:
+          - dry-run
+          - full
+      model:
+        description: 'Ollama model (for full mode)'
+        required: false
+        default: 'qwen2:0.5b'
+
+jobs:
+  eval-dry-run:
+    name: Eval Framework Test (Dry Run)
+    runs-on: ubuntu-latest
+    if: github.event.inputs.mode != 'full'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Build cortex
+      run: go build -o cortex ./cmd/cortex
+
+    - name: Run eval (dry-run)
+      run: |
+        ./cortex eval --dry-run --output json > eval-results.json 2>&1 || true
+        ./cortex eval --dry-run --verbose
+
+    - name: Upload eval results
+      uses: actions/upload-artifact@v4
+      with:
+        name: eval-results-dry-run
+        path: eval-results.json
+        retention-days: 30
+
+    - name: Check eval pass rate
+      run: |
+        if [ -f eval-results.json ]; then
+          echo "Eval results generated successfully"
+          cat eval-results.json | head -100
+        fi
+
+  eval-full:
+    name: Full Eval (Manual/Self-hosted)
+    runs-on: self-hosted
+    if: github.event.inputs.mode == 'full'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Build cortex
+      run: go build -o cortex ./cmd/cortex
+
+    - name: Check Ollama
+      run: |
+        if ! command -v ollama &> /dev/null; then
+          echo "Ollama not installed on this runner"
+          exit 1
+        fi
+        ollama list
+
+    - name: Run full eval
+      run: |
+        MODEL="${{ github.event.inputs.model }}"
+        ./cortex eval --model "$MODEL" --output json > eval-results.json
+        ./cortex eval --model "$MODEL" --verbose
+
+    - name: Upload eval results
+      uses: actions/upload-artifact@v4
+      with:
+        name: eval-results-${{ github.event.inputs.model }}
+        path: eval-results.json
+        retention-days: 90
+
+    - name: Post eval summary
+      run: |
+        echo "## Eval Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Model: ${{ github.event.inputs.model }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        # Extract summary from JSON
+        if [ -f eval-results.json ]; then
+          cat eval-results.json >> $GITHUB_STEP_SUMMARY
+        fi

@@ -1,0 +1,56 @@
+id: "security-input-validation-001"
+type: "linear"
+name: "Input Validation Patterns"
+description: "Tests if Cortex helps follow security best practices for input validation"
+domain: "security"
+
+context_chain:
+  - type: pattern
+    content: |
+      Security standards for this project:
+      - Always validate and sanitize user input
+      - Use parameterized queries, never string concatenation for SQL
+      - Validate email format, length limits, allowed characters
+      - Escape output to prevent XSS
+      - Use allowlists over denylists when possible
+
+  - type: code_review
+    content: "PR #91: REJECTED - SQL injection vulnerability. Use parameterized query."
+
+  - type: implementation
+    file: "internal/validation/email.go"
+    content: |
+      func ValidateEmail(email string) error {
+          if len(email) > 254 {
+              return errors.New("email too long")
+          }
+          if !emailRegex.MatchString(email) {
+              return errors.New("invalid email format")
+          }
+          return nil
+      }
+
+test_prompts:
+  - id: "user-input-query"
+    prompt: "I need to query users by name from user input. How should I do this?"
+    ground_truth:
+      must_include:
+        - "parameterized"
+      must_exclude:
+        - "fmt.Sprintf"
+        - "string concatenation"
+        - "+ name +"
+
+  - id: "validate-input"
+    prompt: "How should I validate this form input before saving?"
+    ground_truth:
+      must_include:
+        - "validate"
+        - "sanitize"
+      must_exclude:
+        - "trust"
+        - "skip validation"
+
+metadata:
+  author: "cortex-eval"
+  tags: "security, validation, sql-injection"

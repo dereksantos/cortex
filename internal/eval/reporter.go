@@ -91,9 +91,30 @@ func (r *Reporter) ReportHuman(w io.Writer, run *EvalRun) error {
 	fmt.Fprintf(w, "  Baseline Wins: %d\n", run.Summary.BaselineWins)
 	fmt.Fprintf(w, "  Ties:          %d\n", run.Summary.Ties)
 
+	// Statistical Analysis
+	stats := CalculateStatistics(run.Results)
+	if stats.N > 1 {
+		fmt.Fprintf(w, "\nStatistical Analysis\n")
+		fmt.Fprintf(w, "%s\n", strings.Repeat("-", 40))
+		fmt.Fprintf(w, "Sample Size:     %d\n", stats.N)
+		fmt.Fprintf(w, "Mean Delta:      %.3f (cortex - baseline)\n", stats.MeanDelta)
+		fmt.Fprintf(w, "95%% CI:          [%.3f, %.3f]\n", stats.CI95Lower, stats.CI95Upper)
+		fmt.Fprintf(w, "Cohen's d:       %.3f (%s effect)\n", stats.CohensD, stats.EffectSize)
+		fmt.Fprintf(w, "p-value:         %.4f", stats.PValue)
+		if stats.Significant {
+			fmt.Fprintf(w, " *\n")
+		} else {
+			fmt.Fprintf(w, "\n")
+		}
+		fmt.Fprintf(w, "Win Rate 95%% CI: [%.0f%%, %.0f%%]\n",
+			stats.WinRateCI95Lower*100, stats.WinRateCI95Upper*100)
+	}
+
 	// Verdict
 	fmt.Fprintf(w, "\n")
-	if run.Summary.WinRate > 0.6 {
+	if stats.Significant && stats.MeanDelta > 0 {
+		fmt.Fprintf(w, "Verdict: Cortex provides statistically significant improvement\n")
+	} else if run.Summary.WinRate > 0.6 {
 		fmt.Fprintf(w, "Verdict: Cortex provides significant value\n")
 	} else if run.Summary.WinRate > 0.4 {
 		fmt.Fprintf(w, "Verdict: Cortex provides moderate value\n")

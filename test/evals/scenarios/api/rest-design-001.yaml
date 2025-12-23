@@ -1,0 +1,55 @@
+id: "api-rest-design-001"
+type: "linear"
+name: "REST API Design Patterns"
+description: "Tests if Cortex helps follow REST API conventions"
+domain: "api"
+
+context_chain:
+  - type: pattern
+    content: |
+      REST API conventions for this project:
+      - Use nouns for resources, not verbs (GET /users, not GET /getUsers)
+      - Use HTTP methods correctly: GET=read, POST=create, PUT=update, DELETE=delete
+      - Return appropriate status codes: 200, 201, 400, 404, 500
+      - Use JSON for request/response bodies
+      - Version APIs in URL: /api/v1/...
+
+  - type: decision
+    content: "Use plural nouns for collections: /users, /orders, /products"
+
+  - type: code_review
+    content: "PR #45: Changed POST /createUser to POST /users"
+
+test_prompts:
+  - id: "new-endpoint"
+    prompt: "I need an endpoint to create a new order. What should the route be?"
+    ground_truth:
+      must_include:
+        - "POST"
+        - "/orders"
+      must_exclude:
+        - "/createOrder"
+        - "/addOrder"
+        - "GET"
+
+  - id: "get-single"
+    prompt: "How do I get a single user by ID?"
+    ground_truth:
+      must_include:
+        - "GET"
+        - "/users/"
+      must_exclude:
+        - "POST"
+        - "/getUser"
+
+  - id: "status-codes"
+    prompt: "What status code should I return when creating a new resource?"
+    ground_truth:
+      must_include:
+        - "201"
+      must_exclude:
+        - "200 OK"
+
+metadata:
+  author: "cortex-eval"
+  tags: "api, rest, http"

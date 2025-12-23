@@ -1,0 +1,57 @@
+id: "linear-go-config-001"
+type: "linear"
+name: "Configuration Management"
+description: "Tests if Cortex helps with config patterns"
+domain: "backend"
+
+context_chain:
+  - type: pattern
+    content: |
+      Configuration patterns for this project:
+      - Use environment variables for all config (12-factor app)
+      - Load config at startup, not at runtime
+      - Use a Config struct, not global variables
+      - Validate config before starting the app
+      - Use .env files for local development only
+
+  - type: implementation
+    file: "pkg/config/config.go"
+    content: |
+      type Config struct {
+          DatabaseURL string `env:"DATABASE_URL,required"`
+          Port        int    `env:"PORT" envDefault:"8080"`
+          LogLevel    string `env:"LOG_LEVEL" envDefault:"info"`
+      }
+
+      func Load() (*Config, error) {
+          cfg := &Config{}
+          if err := env.Parse(cfg); err != nil {
+              return nil, fmt.Errorf("failed to parse config: %w", err)
+          }
+          return cfg, nil
+      }
+
+test_prompts:
+  - id: "add-config"
+    prompt: "I need to add a new config value for the API timeout. How should I add it?"
+    ground_truth:
+      must_include:
+        - "environment"
+        - "Config struct"
+      must_exclude:
+        - "hardcode"
+        - "global variable"
+
+  - id: "secrets"
+    prompt: "Where should I store the API secret key?"
+    ground_truth:
+      must_include:
+        - "environment"
+      must_exclude:
+        - "code"
+        - "config file"
+        - "hardcode"
+
+metadata:
+  author: "cortex-eval"
+  tags: "config, environment, 12-factor"
