@@ -35,6 +35,40 @@ type Scenario struct {
 	// E2E-specific fields
 	LearningChain []ConversationTurn `yaml:"learning_chain,omitempty"` // Chain 1: learning session
 	RecallPrompts []RecallPrompt     `yaml:"recall_prompts,omitempty"` // Chain 2: recall tests
+
+	// Multi-path/Tree eval fields
+	Paths []Path `yaml:"paths,omitempty"` // Divergent paths for tree evals
+
+	// Temporal eval fields
+	Phases []TemporalPhase `yaml:"phases,omitempty"` // Time-based context evolution
+
+	// Constraint propagation fields
+	Constraints []Constraint `yaml:"constraints,omitempty"` // Root constraints that must be respected
+}
+
+// Path represents a divergent decision path in tree evals
+type Path struct {
+	ID           string         `yaml:"id"`
+	Name         string         `yaml:"name"`
+	Description  string         `yaml:"description,omitempty"`
+	ContextChain []ContextEvent `yaml:"context_chain"`
+	TestPrompts  []TestPrompt   `yaml:"test_prompts"`
+}
+
+// TemporalPhase represents a time period with specific context
+type TemporalPhase struct {
+	ID           string         `yaml:"id"`
+	Name         string         `yaml:"name"`
+	TimeRange    string         `yaml:"time_range,omitempty"` // e.g., "T0-T10"
+	ContextChain []ContextEvent `yaml:"context_chain"`
+	TestPrompts  []TestPrompt   `yaml:"test_prompts"`
+}
+
+// Constraint represents an architectural constraint that must be respected
+type Constraint struct {
+	ID          string   `yaml:"id"`
+	Content     string   `yaml:"content"`
+	Implications []string `yaml:"implications,omitempty"` // What this constraint means
 }
 
 // ConversationTurn represents a single turn in a learning conversation
@@ -104,14 +138,28 @@ func LoadScenario(path string) (*Scenario, error) {
 	}
 
 	// Validate prompts based on scenario type
-	if scenario.Type == ScenarioE2E {
+	switch scenario.Type {
+	case ScenarioE2E:
 		if len(scenario.RecallPrompts) == 0 {
 			return nil, fmt.Errorf("E2E scenario %s has no recall prompts", scenario.ID)
 		}
 		if len(scenario.LearningChain) == 0 {
 			return nil, fmt.Errorf("E2E scenario %s has no learning chain", scenario.ID)
 		}
-	} else {
+	case ScenarioMultiPath:
+		if len(scenario.Paths) < 2 {
+			return nil, fmt.Errorf("multi-path scenario %s requires at least 2 paths", scenario.ID)
+		}
+		for _, path := range scenario.Paths {
+			if len(path.TestPrompts) == 0 {
+				return nil, fmt.Errorf("path %s in scenario %s has no test prompts", path.ID, scenario.ID)
+			}
+		}
+	case ScenarioTemporal:
+		if len(scenario.Phases) < 2 {
+			return nil, fmt.Errorf("temporal scenario %s requires at least 2 phases", scenario.ID)
+		}
+	default:
 		if len(scenario.TestPrompts) == 0 {
 			return nil, fmt.Errorf("scenario %s has no test prompts", scenario.ID)
 		}

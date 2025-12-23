@@ -893,6 +893,7 @@ func handleEval() {
 	modelOverride := ""
 	e2eMode := false
 	dryRun := false
+	treeMode := false
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -901,6 +902,8 @@ func handleEval() {
 			verbose = true
 		case arg == "--e2e":
 			e2eMode = true
+		case arg == "--tree":
+			treeMode = true
 		case arg == "--dry-run":
 			dryRun = true
 		case arg == "--output" || arg == "-o":
@@ -930,6 +933,7 @@ func handleEval() {
 			fmt.Println("  --scenario, -s <file>  Run a specific scenario file")
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
 			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
+			fmt.Println("  --tree                 Run tree evals (multi-path, temporal)")
 			fmt.Println("  --model, -m <model>    Ollama model to use (e.g., qwen2:0.5b, phi3:mini)")
 			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
@@ -939,6 +943,7 @@ func handleEval() {
 			fmt.Println("Eval Types:")
 			fmt.Println("  linear (default)   Pre-defined context injection")
 			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
+			fmt.Println("  tree (--tree)      Multi-path and temporal evals")
 			fmt.Println()
 			fmt.Println("Models (fast → slow):")
 			fmt.Println("  --dry-run        Mock provider, instant (for framework testing)")
@@ -1012,6 +1017,75 @@ func handleEval() {
 				os.Exit(1)
 			}
 		}
+	} else if treeMode {
+		// Tree mode: multi-path and temporal evals
+		treeEvaluator := eval.NewTreeEvaluator(provider)
+		treeEvaluator.SetVerbose(verbose)
+
+		// Load tree scenarios from the tree directory
+		treeDir := scenarioDir + "/tree"
+		if scenarioPath != "" {
+			treeDir = scenarioPath
+		}
+
+		scenarios, err := eval.LoadScenarios(treeDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load tree scenarios: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Run tree scenarios
+		allResults := make([]eval.EvalResult, 0)
+		scenarioIDs := make([]string, 0)
+
+		for _, scenario := range scenarios {
+			if scenario.Type == eval.ScenarioMultiPath && len(scenario.Paths) >= 2 {
+				treeRun, err := treeEvaluator.RunMultiPath(scenario)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Multi-path eval failed: %v\n", err)
+					continue
+				}
+				scenarioIDs = append(scenarioIDs, scenario.ID)
+				// Convert TreeEvalResult to EvalResult for unified reporting
+				for _, r := range treeRun.Results {
+					allResults = append(allResults, r.EvalResult)
+				}
+
+				// Print tree-specific summary
+				if verbose {
+					fmt.Printf("\nTree Summary for %s:\n", scenario.ID)
+					fmt.Printf("  Path Adherence: %.0f%%\n", treeRun.Summary.AvgPathAdherence*100)
+					fmt.Printf("  Contamination Detected: %d/%d (%.0f%%)\n",
+						treeRun.Summary.ContaminationDetected,
+						treeRun.Summary.ContaminationTests,
+						treeRun.Summary.ContaminationRate*100)
+					for _, ps := range treeRun.Summary.PathStats {
+						fmt.Printf("  Path %s: %.0f%% pass, avg score %.2f\n",
+							ps.PathName, ps.PassRate*100, ps.AvgScore)
+					}
+				}
+			} else if scenario.Type == eval.ScenarioTemporal && len(scenario.Phases) >= 2 {
+				treeRun, err := treeEvaluator.RunTemporal(scenario)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Temporal eval failed: %v\n", err)
+					continue
+				}
+				scenarioIDs = append(scenarioIDs, scenario.ID)
+				for _, r := range treeRun.Results {
+					allResults = append(allResults, r.EvalResult)
+				}
+			}
+		}
+
+		run = &eval.EvalRun{
+			ID:        fmt.Sprintf("tree-eval-%s", time.Now().Format("20060102-150405")),
+			Timestamp: time.Now(),
+			Provider:  provider.Name(),
+			Scenarios: scenarioIDs,
+			Results:   allResults,
+		}
+		run.Summary = eval.CalculateSummary(allResults)
+
 	} else {
 		// Regular mode: pre-defined context injection
 		evaluator := eval.NewEvaluator(provider)

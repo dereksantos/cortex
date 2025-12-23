@@ -1,0 +1,103 @@
+id: "tree-api-migration-001"
+type: "temporal"
+name: "REST to GraphQL Migration"
+description: "Tests temporal context awareness during API migration"
+domain: "architecture"
+
+phases:
+  - id: "phase-1-rest"
+    name: "Phase 1: REST Only"
+    time_range: "T0-T10"
+    context_chain:
+      - type: decision
+        content: "Using REST API with Express/Gin patterns"
+        rationale: "Initial architecture, team familiar with REST"
+
+      - type: implementation
+        file: "api/routes.go"
+        content: |
+          router.GET("/users/:id", handlers.GetUser)
+          router.POST("/users", handlers.CreateUser)
+          router.PUT("/users/:id", handlers.UpdateUser)
+
+      - type: pattern
+        content: "REST conventions: nouns for resources, HTTP verbs for actions"
+
+    test_prompts:
+      - id: "add-endpoint-phase1"
+        prompt: "How do I add a new endpoint for fetching orders?"
+        ground_truth:
+          must_include:
+            - "GET"
+            - "/orders"
+          must_exclude:
+            - "GraphQL"
+            - "Query"
+            - "resolver"
+
+  - id: "phase-2-migration"
+    name: "Phase 2: Migration (Dual Mode)"
+    time_range: "T10-T15"
+    context_chain:
+      - type: decision
+        content: "Migrating to GraphQL for better client flexibility"
+        rationale: "Mobile clients need flexible queries, REST is becoming unwieldy"
+
+      - type: pattern
+        content: |
+          Migration strategy:
+          - New features in GraphQL only
+          - REST endpoints deprecated but still functional
+          - GraphQL schema in schema.graphql
+          - Resolvers in internal/graphql/
+
+    test_prompts:
+      - id: "add-feature-phase2"
+        prompt: "I'm adding a new feature for user notifications. Where should it go?"
+        ground_truth:
+          must_include:
+            - "GraphQL"
+          must_exclude:
+            - "REST endpoint"
+            - "router.GET"
+
+      - id: "which-api-phase2"
+        prompt: "Should I use REST or GraphQL for this new feature?"
+        ground_truth:
+          must_include:
+            - "GraphQL"
+            - "new features"
+          must_exclude:
+            - "REST"
+            - "either"
+
+  - id: "phase-3-graphql"
+    name: "Phase 3: GraphQL Only"
+    time_range: "T15-T20"
+    context_chain:
+      - type: decision
+        content: "REST fully deprecated and removed"
+        rationale: "Migration complete, all clients updated"
+
+      - type: pattern
+        content: |
+          GraphQL only:
+          - All endpoints through /graphql
+          - Schema-first development
+          - No REST endpoints remain
+
+    test_prompts:
+      - id: "add-endpoint-phase3"
+        prompt: "How do I add a new endpoint for fetching products?"
+        ground_truth:
+          must_include:
+            - "schema"
+            - "resolver"
+          must_exclude:
+            - "REST"
+            - "router.GET"
+            - "HTTP endpoint"
+
+metadata:
+  author: "cortex-eval"
+  tags: "tree, temporal, migration, api"
