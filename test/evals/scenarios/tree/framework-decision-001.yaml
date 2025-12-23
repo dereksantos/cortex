@@ -1,0 +1,158 @@
+id: "tree-framework-decision-001"
+type: "multi-path"
+name: "API Framework Decision Tree"
+description: "Tests that framework choices cascade correctly (REST→Gin vs GraphQL→gqlgen)"
+domain: "architecture"
+
+paths:
+  - id: "rest-gin"
+    name: "REST with Gin"
+    description: "Chose REST API, using Gin framework"
+    context_chain:
+      - type: decision
+        content: "API Style: REST"
+        rationale: "Team familiar with REST, simpler debugging, better caching"
+
+      - type: decision
+        content: "Framework: Gin"
+        rationale: "Fast, minimal, good middleware ecosystem"
+
+      - type: implementation
+        file: "internal/api/router.go"
+        content: |
+          func SetupRouter() *gin.Engine {
+              r := gin.Default()
+              r.Use(middleware.Logger())
+              r.Use(middleware.Auth())
+
+              v1 := r.Group("/api/v1")
+              {
+                  v1.GET("/users/:id", handlers.GetUser)
+                  v1.POST("/users", handlers.CreateUser)
+              }
+              return r
+          }
+
+      - type: pattern
+        content: |
+          Gin patterns:
+          - Use gin.Context for request/response
+          - Middleware with c.Next()
+          - c.JSON() for responses
+          - Route groups for versioning
+
+    test_prompts:
+      - id: "add-middleware"
+        prompt: "How do I add rate limiting middleware?"
+        ground_truth:
+          must_include:
+            - "gin"
+            - "middleware"
+            - "c.Next"
+          must_exclude:
+            - "resolver"
+            - "GraphQL"
+            - "schema"
+
+      - id: "add-endpoint"
+        prompt: "How do I add a new endpoint for products?"
+        ground_truth:
+          must_include:
+            - "r.GET"
+            - "handlers"
+          must_exclude:
+            - "Query"
+            - "Mutation"
+            - "resolver"
+
+      - id: "handle-errors"
+        prompt: "How should I handle errors in my handlers?"
+        ground_truth:
+          must_include:
+            - "c.JSON"
+            - "gin.H"
+          must_exclude:
+            - "graphql.Error"
+
+  - id: "graphql-gqlgen"
+    name: "GraphQL with gqlgen"
+    description: "Chose GraphQL API, using gqlgen framework"
+    context_chain:
+      - type: decision
+        content: "API Style: GraphQL"
+        rationale: "Mobile clients need flexible queries, strong typing"
+
+      - type: decision
+        content: "Framework: gqlgen"
+        rationale: "Code-first, type-safe, good Go integration"
+
+      - type: implementation
+        file: "graph/schema.graphqls"
+        content: |
+          type Query {
+              user(id: ID!): User
+              users(limit: Int): [User!]!
+          }
+
+          type Mutation {
+              createUser(input: CreateUserInput!): User!
+          }
+
+          type User {
+              id: ID!
+              email: String!
+              name: String!
+          }
+
+      - type: implementation
+        file: "graph/resolver.go"
+        content: |
+          func (r *queryResolver) User(ctx context.Context, id string) (*model.User, error) {
+              return r.UserService.GetByID(ctx, id)
+          }
+
+      - type: pattern
+        content: |
+          gqlgen patterns:
+          - Schema-first in .graphqls files
+          - Resolvers implement schema
+          - Use dataloaders for N+1
+          - Context for auth/request data
+
+    test_prompts:
+      - id: "add-query"
+        prompt: "How do I add a new query for fetching products?"
+        ground_truth:
+          must_include:
+            - "schema"
+            - "Query"
+            - "resolver"
+          must_exclude:
+            - "r.GET"
+            - "gin"
+            - "router"
+
+      - id: "add-mutation"
+        prompt: "How do I add an endpoint to create orders?"
+        ground_truth:
+          must_include:
+            - "Mutation"
+            - "resolver"
+          must_exclude:
+            - "POST"
+            - "router"
+            - "gin"
+
+      - id: "handle-errors"
+        prompt: "How should I handle errors in my API?"
+        ground_truth:
+          must_include:
+            - "error"
+            - "resolver"
+          must_exclude:
+            - "c.JSON"
+            - "gin.H"
+
+metadata:
+  author: "cortex-eval"
+  tags: "tree, decision-tree, framework, api"
