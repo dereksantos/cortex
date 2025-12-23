@@ -1,0 +1,71 @@
+id: "infra-docker-compose-001"
+type: "linear"
+name: "Docker Compose Setup"
+description: "Tests if Cortex helps with local development infrastructure"
+domain: "infrastructure"
+
+context_chain:
+  - type: implementation
+    file: "docker-compose.yml"
+    content: |
+      version: '3.8'
+      services:
+        postgres:
+          image: postgres:15
+          environment:
+            POSTGRES_DB: app_dev
+            POSTGRES_USER: dev
+            POSTGRES_PASSWORD: devpass
+          ports:
+            - "5432:5432"
+          healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U dev"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
+
+        redis:
+          image: redis:7
+          ports:
+            - "6379:6379"
+
+  - type: pattern
+    content: |
+      Local development setup:
+      - Run docker-compose up -d to start services
+      - Wait for healthcheck before running app
+      - Use localhost:5432 for postgres, localhost:6379 for redis
+      - Environment variables in .env file
+
+test_prompts:
+  - id: "start-dev"
+    prompt: "How do I start the development environment?"
+    ground_truth:
+      must_include:
+        - "docker-compose"
+        - "up"
+      must_exclude:
+        - "install postgres"
+        - "brew install"
+
+  - id: "db-connection"
+    prompt: "What's the database connection string for local development?"
+    ground_truth:
+      must_include:
+        - "5432"
+        - "postgres"
+      must_exclude:
+        - "production"
+
+  - id: "troubleshoot"
+    prompt: "The app can't connect to the database on startup. What should I check?"
+    ground_truth:
+      must_include:
+        - "docker-compose"
+        - "healthcheck"
+      must_exclude:
+        - "install"
+
+metadata:
+  author: "cortex-eval"
+  tags: "infrastructure, docker, local-dev"

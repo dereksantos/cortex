@@ -1,0 +1,59 @@
+id: "linear-go-concurrency-001"
+type: "linear"
+name: "Go Concurrency Patterns"
+description: "Tests if Cortex helps with goroutine and channel patterns"
+domain: "backend"
+
+context_chain:
+  - type: pattern
+    content: |
+      Concurrency patterns for this project:
+      - Always use context for cancellation
+      - Use errgroup for managing multiple goroutines
+      - Prefer channels over shared memory with mutexes
+      - Use sync.WaitGroup for simple fan-out patterns
+      - Always handle goroutine cleanup to prevent leaks
+
+  - type: implementation
+    file: "internal/worker/pool.go"
+    content: |
+      func (p *Pool) Process(ctx context.Context, items []Item) error {
+          g, ctx := errgroup.WithContext(ctx)
+
+          for _, item := range items {
+              item := item // capture
+              g.Go(func() error {
+                  return p.processItem(ctx, item)
+              })
+          }
+
+          return g.Wait()
+      }
+
+  - type: code_review
+    content: "PR #67: Added context cancellation to prevent goroutine leaks"
+
+test_prompts:
+  - id: "parallel-processing"
+    prompt: "I need to process multiple items in parallel. How should I do this?"
+    ground_truth:
+      must_include:
+        - "errgroup"
+        - "context"
+      must_exclude:
+        - "go func"
+        - "naked goroutine"
+
+  - id: "cancellation"
+    prompt: "How do I cancel running goroutines when the request times out?"
+    ground_truth:
+      must_include:
+        - "context"
+        - "cancel"
+      must_exclude:
+        - "kill"
+        - "stop channel"
+
+metadata:
+  author: "cortex-eval"
+  tags: "concurrency, goroutines, go"
