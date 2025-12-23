@@ -1,0 +1,180 @@
+id: "tree-constraint-propagation-001"
+type: "multi-path"
+name: "Constraint Propagation"
+description: "Tests that root constraints propagate to downstream decisions"
+domain: "architecture"
+
+paths:
+  - id: "minimal-deps"
+    name: "Minimal Dependencies"
+    description: "Project constraint: minimize external dependencies"
+    context_chain:
+      - type: constraint
+        content: "CONSTRAINT: Minimize external dependencies"
+        rationale: "Reduce supply chain risk, easier auditing, smaller binary"
+
+      - type: decision
+        content: "Use stdlib where possible, avoid heavy frameworks"
+
+      - type: pattern
+        content: |
+          Dependency rules:
+          - Prefer net/http over gin/echo/chi
+          - Use encoding/json, not jsoniter
+          - Use database/sql, not GORM
+          - Use html/template, not pongo2
+          - Only add dependency if stdlib can't do it
+
+      - type: code_review
+        content: "PR #23: Rejected adding gin - use net/http with custom router"
+
+      - type: code_review
+        content: "PR #45: Rejected GORM - use sqlx (minimal wrapper)"
+
+    test_prompts:
+      - id: "http-framework"
+        prompt: "Which HTTP framework should I use for this new service?"
+        ground_truth:
+          must_include:
+            - "net/http"
+            - "stdlib"
+          must_exclude:
+            - "gin"
+            - "echo"
+            - "fiber"
+
+      - id: "json-library"
+        prompt: "What should I use for JSON parsing?"
+        ground_truth:
+          must_include:
+            - "encoding/json"
+          must_exclude:
+            - "jsoniter"
+            - "easyjson"
+            - "sonic"
+
+      - id: "orm-choice"
+        prompt: "Should I use an ORM for database access?"
+        ground_truth:
+          must_include:
+            - "sql"
+          must_exclude:
+            - "GORM"
+            - "ent"
+
+  - id: "edge-deployment"
+    name: "Edge Deployment"
+    description: "Project constraint: must run on edge/embedded"
+    context_chain:
+      - type: constraint
+        content: "CONSTRAINT: Must run on edge devices with 512MB RAM"
+        rationale: "Deploying to IoT devices, resource constrained"
+
+      - type: decision
+        content: "Optimize for memory, avoid heavy allocations"
+
+      - type: pattern
+        content: |
+          Edge constraints:
+          - No in-memory caching (use disk/sqlite)
+          - Stream large responses, don't buffer
+          - Use sync.Pool for frequent allocations
+          - Prefer SQLite over PostgreSQL client
+          - Binary size under 20MB
+
+      - type: implementation
+        file: "internal/config/limits.go"
+        content: |
+          const (
+              MaxMemoryMB = 256
+              MaxConcurrentRequests = 10
+              UseEmbeddedDB = true
+          )
+
+    test_prompts:
+      - id: "caching"
+        prompt: "How should I implement caching for this service?"
+        ground_truth:
+          must_include:
+            - "sqlite"
+          must_exclude:
+            - "Redis"
+            - "in-memory"
+            - "map"
+
+      - id: "database"
+        prompt: "What database should I use?"
+        ground_truth:
+          must_include:
+            - "SQLite"
+          must_exclude:
+            - "PostgreSQL"
+            - "MySQL"
+            - "MongoDB"
+
+      - id: "large-response"
+        prompt: "How do I handle returning a large list of items?"
+        ground_truth:
+          must_include:
+            - "stream"
+          must_exclude:
+            - "load all"
+            - "buffer"
+
+  - id: "compliance-hipaa"
+    name: "HIPAA Compliance"
+    description: "Project constraint: must be HIPAA compliant"
+    context_chain:
+      - type: constraint
+        content: "CONSTRAINT: HIPAA compliance required"
+        rationale: "Healthcare application, handling PHI"
+
+      - type: decision
+        content: "All PHI must be encrypted at rest and in transit"
+
+      - type: pattern
+        content: |
+          HIPAA requirements:
+          - Encrypt all PHI at rest (AES-256)
+          - TLS 1.2+ for all connections
+          - Audit logging for all PHI access
+          - No PHI in logs or error messages
+          - Access controls on all PHI endpoints
+
+      - type: code_review
+        content: "PR #67: REJECTED - logging user email, PHI cannot be in logs"
+
+    test_prompts:
+      - id: "store-patient-data"
+        prompt: "How should I store patient health records?"
+        ground_truth:
+          must_include:
+            - "encrypt"
+          must_exclude:
+            - "plain text"
+            - "unencrypted"
+
+      - id: "logging-user"
+        prompt: "How should I log user activity for debugging?"
+        ground_truth:
+          must_include:
+            - "audit"
+          must_exclude:
+            - "email"
+            - "name"
+            - "patient"
+            - "PHI"
+
+      - id: "api-security"
+        prompt: "What security should I add to the API?"
+        ground_truth:
+          must_include:
+            - "TLS"
+            - "auth"
+          must_exclude:
+            - "optional"
+            - "HTTP"
+
+metadata:
+  author: "cortex-eval"
+  tags: "tree, constraint, propagation, compliance"
