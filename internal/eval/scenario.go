@@ -18,6 +18,7 @@ const (
 	ScenarioIdiom     ScenarioType = "idiom"
 	ScenarioMultiPath ScenarioType = "multi-path"
 	ScenarioTemporal  ScenarioType = "temporal"
+	ScenarioE2E       ScenarioType = "e2e" // End-to-end with real Cortex pipeline
 )
 
 // Scenario represents an eval test case
@@ -30,6 +31,34 @@ type Scenario struct {
 	ContextChain []ContextEvent    `yaml:"context_chain"`
 	TestPrompts  []TestPrompt      `yaml:"test_prompts"`
 	Metadata     map[string]string `yaml:"metadata,omitempty"`
+
+	// E2E-specific fields
+	LearningChain []ConversationTurn `yaml:"learning_chain,omitempty"` // Chain 1: learning session
+	RecallPrompts []RecallPrompt     `yaml:"recall_prompts,omitempty"` // Chain 2: recall tests
+}
+
+// ConversationTurn represents a single turn in a learning conversation
+type ConversationTurn struct {
+	Role      string     `yaml:"role"` // user, assistant
+	Content   string     `yaml:"content"`
+	ToolCalls []ToolCall `yaml:"tool_calls,omitempty"`
+}
+
+// ToolCall represents a tool invocation during conversation
+type ToolCall struct {
+	Tool    string `yaml:"tool"`              // Write, Edit, Bash, etc.
+	File    string `yaml:"file,omitempty"`    // file_path for file operations
+	Content string `yaml:"content,omitempty"` // tool result or file content
+	Input   string `yaml:"input,omitempty"`   // tool input
+}
+
+// RecallPrompt is a prompt that should benefit from the learning chain
+type RecallPrompt struct {
+	ID          string      `yaml:"id"`
+	Prompt      string      `yaml:"prompt"`
+	GroundTruth GroundTruth `yaml:"ground_truth"`
+	// Expected insights that should be retrieved
+	ExpectedInsights []string `yaml:"expected_insights,omitempty"`
 }
 
 // ContextEvent represents a captured development event in the context chain
@@ -73,8 +102,19 @@ func LoadScenario(path string) (*Scenario, error) {
 	if scenario.ID == "" {
 		return nil, fmt.Errorf("scenario missing required field: id")
 	}
-	if len(scenario.TestPrompts) == 0 {
-		return nil, fmt.Errorf("scenario %s has no test prompts", scenario.ID)
+
+	// Validate prompts based on scenario type
+	if scenario.Type == ScenarioE2E {
+		if len(scenario.RecallPrompts) == 0 {
+			return nil, fmt.Errorf("E2E scenario %s has no recall prompts", scenario.ID)
+		}
+		if len(scenario.LearningChain) == 0 {
+			return nil, fmt.Errorf("E2E scenario %s has no learning chain", scenario.ID)
+		}
+	} else {
+		if len(scenario.TestPrompts) == 0 {
+			return nil, fmt.Errorf("scenario %s has no test prompts", scenario.ID)
+		}
 	}
 
 	return &scenario, nil

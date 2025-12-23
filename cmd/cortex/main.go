@@ -890,12 +890,16 @@ func handleEval() {
 	scenarioDir := "test/evals/scenarios"
 	outputFormat := "human"
 	verbose := false
+	modelOverride := ""
+	e2eMode := false
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch {
 		case arg == "--verbose" || arg == "-v":
 			verbose = true
+		case arg == "--e2e":
+			e2eMode = true
 		case arg == "--output" || arg == "-o":
 			if i+1 < len(os.Args) {
 				outputFormat = os.Args[i+1]
@@ -911,15 +915,33 @@ func handleEval() {
 				scenarioDir = os.Args[i+1]
 				i++
 			}
+		case arg == "--model" || arg == "-m":
+			if i+1 < len(os.Args) {
+				modelOverride = os.Args[i+1]
+				i++
+			}
 		case arg == "--help" || arg == "-h":
 			fmt.Println("Usage: cortex eval [options]")
 			fmt.Println()
 			fmt.Println("Options:")
 			fmt.Println("  --scenario, -s <file>  Run a specific scenario file")
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
+			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
+			fmt.Println("  --model, -m <model>    Ollama model to use (e.g., llama3.2:1b, phi3:mini)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
 			fmt.Println("  --verbose, -v          Show detailed output")
 			fmt.Println("  --help, -h             Show this help")
+			fmt.Println()
+			fmt.Println("Eval Types:")
+			fmt.Println("  linear (default)   Pre-defined context injection")
+			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
+			fmt.Println()
+			fmt.Println("Models (fast → slow):")
+			fmt.Println("  llama3.2:1b      ~1B params, fastest")
+			fmt.Println("  phi3:mini        ~3.8B params, good balance")
+			fmt.Println("  llama3.2:3b      ~3B params")
+			fmt.Println("  mistral:7b       ~7B params (default)")
+			fmt.Println("  llama3.1:8b      ~8B params")
 			return
 		}
 	}
@@ -931,6 +953,11 @@ func handleEval() {
 		os.Exit(1)
 	}
 
+	// Override model if specified
+	if modelOverride != "" {
+		cfg.OllamaModel = modelOverride
+	}
+
 	// Check Ollama availability
 	ollamaClient := llm.NewOllamaClient(cfg)
 	if !ollamaClient.IsAvailable() {
@@ -938,21 +965,56 @@ func handleEval() {
 		os.Exit(1)
 	}
 
-	// Create evaluator
-	evaluator := eval.NewEvaluator(ollamaClient)
-	evaluator.SetVerbose(verbose)
-
-	// Run evaluation
+	// Run evaluation based on mode
 	var run *eval.EvalRun
-	if scenarioPath != "" {
-		run, err = evaluator.RunSingle(scenarioPath)
-	} else {
-		run, err = evaluator.RunAll(scenarioDir)
-	}
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Evaluation failed: %v\n", err)
-		os.Exit(1)
+	if e2eMode {
+		// E2E mode: test full Cortex pipeline
+		e2eEvaluator := eval.NewE2EEvaluator(ollamaClient, cfg)
+		e2eEvaluator.SetVerbose(verbose)
+
+		if scenarioPath != "" {
+			// Load and run single E2E scenario
+			scenario, err := eval.LoadScenario(scenarioPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to load scenario: %v\n", err)
+				os.Exit(1)
+			}
+			results, err := e2eEvaluator.RunE2EScenario(scenario)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "E2E evaluation failed: %v\n", err)
+				os.Exit(1)
+			}
+			run = &eval.EvalRun{
+				ID:        fmt.Sprintf("e2e-eval-%s", time.Now().Format("20060102-150405")),
+				Timestamp: time.Now(),
+				Provider:  ollamaClient.Name(),
+				Scenarios: []string{scenario.ID},
+				Results:   results,
+			}
+			run.Summary = eval.CalculateSummary(results)
+		} else {
+			run, err = e2eEvaluator.RunE2E(scenarioDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "E2E evaluation failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	} else {
+		// Regular mode: pre-defined context injection
+		evaluator := eval.NewEvaluator(ollamaClient)
+		evaluator.SetVerbose(verbose)
+
+		if scenarioPath != "" {
+			run, err = evaluator.RunSingle(scenarioPath)
+		} else {
+			run, err = evaluator.RunAll(scenarioDir)
+		}
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Evaluation failed: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Output results
