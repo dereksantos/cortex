@@ -1,0 +1,54 @@
+id: "idiom-go-naming-001"
+type: "idiom"
+name: "Go Naming Conventions"
+description: "Tests if Cortex helps follow project naming patterns"
+domain: "code-style"
+
+context_chain:
+  - type: pattern
+    content: |
+      Established naming patterns in this project:
+      - Handlers: Handle* (HandleCreateUser, HandleGetOrder)
+      - Services: *Service (UserService, OrderService)
+      - Repositories: *Repository (UserRepository, OrderRepository)
+      - Interfaces: defined where used, not where implemented
+      - Constructors: New* (NewUserService, NewOrderRepository)
+
+  - type: code_review
+    content: "PR #42 rejected: Don't use Manager suffix, use Service instead"
+
+  - type: code_review
+    content: "PR #58 rejected: Interface should be in the consumer package, not provider"
+
+test_prompts:
+  - id: "new-service-name"
+    prompt: "I need to add a new component for handling payments. What should I name the struct?"
+    ground_truth:
+      must_include:
+        - "PaymentService"
+      must_exclude:
+        - "PaymentManager"
+        - "PaymentHandler"
+        - "PaymentController"
+
+  - id: "new-handler-name"
+    prompt: "I'm adding an HTTP endpoint for creating invoices. What should I name the handler function?"
+    ground_truth:
+      must_include:
+        - "HandleCreateInvoice"
+      must_exclude:
+        - "CreateInvoiceHandler"
+        - "InvoiceController"
+
+  - id: "constructor-name"
+    prompt: "I need a constructor for my NotificationService. What should I name it?"
+    ground_truth:
+      must_include:
+        - "NewNotificationService"
+      must_exclude:
+        - "CreateNotificationService"
+        - "MakeNotificationService"
+
+metadata:
+  author: "cortex-eval"
+  tags: "naming, conventions, go"
