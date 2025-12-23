@@ -1,0 +1,54 @@
+id: "linear-go-errors-001"
+type: "linear"
+name: "Go Error Handling Patterns"
+description: "Tests if Cortex helps follow project-specific error handling conventions"
+domain: "code-style"
+
+context_chain:
+  - type: pattern
+    content: |
+      Error Handling Convention:
+      - Always wrap errors with context using fmt.Errorf and %w
+      - Include operation name in error message
+      - Never return bare errors without context
+      - Use errors.Is and errors.As for checking
+
+  - type: implementation
+    file: "internal/storage/storage.go"
+    content: |
+      func (s *Storage) GetUser(id string) (*User, error) {
+          user, err := s.db.Query("SELECT * FROM users WHERE id = ?", id)
+          if err != nil {
+              return nil, fmt.Errorf("storage: get user %s: %w", id, err)
+          }
+          return user, nil
+      }
+
+  - type: decision
+    content: "Rejected pkg/errors in favor of standard library fmt.Errorf with %w verb"
+    rationale: "Go 1.13+ has built-in error wrapping, no need for external package"
+
+test_prompts:
+  - id: "handle-db-error"
+    prompt: "How should I handle this database error in my function?"
+    ground_truth:
+      must_include:
+        - "fmt.Errorf"
+        - "%w"
+      must_exclude:
+        - "return err"
+        - "panic"
+        - "log.Fatal"
+
+  - id: "check-error-type"
+    prompt: "How do I check if an error is a specific type?"
+    ground_truth:
+      must_include:
+        - "errors.Is"
+      must_exclude:
+        - "type assertion"
+        - "err.Error() =="
+
+metadata:
+  author: "cortex-eval"
+  tags: "go, errors, idioms"

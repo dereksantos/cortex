@@ -1,0 +1,67 @@
+id: "linear-database-001"
+type: "linear"
+name: "PostgreSQL Database Decision"
+description: "Tests if Cortex maintains consistency with database technology choice"
+domain: "infrastructure"
+
+context_chain:
+  - type: decision
+    content: "Use PostgreSQL as the primary database"
+    rationale: "Need ACID compliance, complex queries, and JSON support for semi-structured data"
+
+  - type: implementation
+    file: "docker-compose.yml"
+    content: |
+      services:
+        postgres:
+          image: postgres:15
+          environment:
+            POSTGRES_DB: app_dev
+            POSTGRES_USER: app
+          volumes:
+            - postgres_data:/var/lib/postgresql/data
+
+  - type: pattern
+    content: |
+      Database Access Patterns:
+      - Use sqlx for database operations (not raw database/sql)
+      - Migrations managed with goose in db/migrations/
+      - Connection pooling via pgx driver
+      - Use JSONB for flexible schema fields
+
+  - type: insight
+    content: "Rejected MongoDB due to need for complex JOINs and transactions across tables"
+
+test_prompts:
+  - id: "add-new-table"
+    prompt: "How should I add a new table to store user preferences?"
+    ground_truth:
+      must_include:
+        - "migration"
+        - "postgres"
+      must_exclude:
+        - "mongodb"
+        - "nosql"
+        - "create table directly"
+
+  - id: "store-json"
+    prompt: "I need to store some flexible JSON data, how should I do it?"
+    ground_truth:
+      must_include:
+        - "jsonb"
+      must_exclude:
+        - "mongodb"
+        - "document database"
+
+  - id: "query-pattern"
+    prompt: "What library should I use for database queries?"
+    ground_truth:
+      must_include:
+        - "sqlx"
+      must_exclude:
+        - "orm"
+        - "gorm"
+
+metadata:
+  author: "cortex-eval"
+  tags: "database, postgres, infrastructure"

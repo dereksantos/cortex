@@ -18,6 +18,7 @@ import (
 
 	"github.com/dereksantos/cortex/integrations/claude"
 	"github.com/dereksantos/cortex/internal/capture"
+	"github.com/dereksantos/cortex/internal/eval"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
@@ -54,6 +55,8 @@ func main() {
 		handleInfo()
 	case "test":
 		handleTest()
+	case "eval":
+		handleEval()
 	case "stats":
 		handleStats()
 	case "status":
@@ -879,6 +882,98 @@ func validateTestInsight(insight *storage.Insight, expected TestExpectations) bo
 	importanceOK := insight.Importance >= expected.MinImportance
 
 	return categoryOK && conceptsOK && importanceOK
+}
+
+func handleEval() {
+	// Parse flags
+	scenarioPath := ""
+	scenarioDir := "test/evals/scenarios"
+	outputFormat := "human"
+	verbose := false
+
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		switch {
+		case arg == "--verbose" || arg == "-v":
+			verbose = true
+		case arg == "--output" || arg == "-o":
+			if i+1 < len(os.Args) {
+				outputFormat = os.Args[i+1]
+				i++
+			}
+		case arg == "--scenario" || arg == "-s":
+			if i+1 < len(os.Args) {
+				scenarioPath = os.Args[i+1]
+				i++
+			}
+		case arg == "--dir" || arg == "-d":
+			if i+1 < len(os.Args) {
+				scenarioDir = os.Args[i+1]
+				i++
+			}
+		case arg == "--help" || arg == "-h":
+			fmt.Println("Usage: cortex eval [options]")
+			fmt.Println()
+			fmt.Println("Options:")
+			fmt.Println("  --scenario, -s <file>  Run a specific scenario file")
+			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
+			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
+			fmt.Println("  --verbose, -v          Show detailed output")
+			fmt.Println("  --help, -h             Show this help")
+			return
+		}
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check Ollama availability
+	ollamaClient := llm.NewOllamaClient(cfg)
+	if !ollamaClient.IsAvailable() {
+		fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
+		os.Exit(1)
+	}
+
+	// Create evaluator
+	evaluator := eval.NewEvaluator(ollamaClient)
+	evaluator.SetVerbose(verbose)
+
+	// Run evaluation
+	var run *eval.EvalRun
+	if scenarioPath != "" {
+		run, err = evaluator.RunSingle(scenarioPath)
+	} else {
+		run, err = evaluator.RunAll(scenarioDir)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Evaluation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Output results
+	reporter := eval.NewReporter(verbose)
+	switch outputFormat {
+	case "json":
+		if err := reporter.ReportJSON(os.Stdout, run); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write JSON: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		if err := reporter.ReportHuman(os.Stdout, run); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write report: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Exit with error if pass rate is below threshold
+	if run.Summary.PassRate < 0.5 {
+		os.Exit(1)
+	}
 }
 
 func handleDaemon() {

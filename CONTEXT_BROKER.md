@@ -2,6 +2,10 @@
 
 An intelligent "librarian" agent that can instantly find and organize relevant context from captured knowledge for any request or query. The Context Broker acts as the bridge between your captured development insights and AI agents that need contextual information.
 
+## Evolving Communication Architecture
+
+The agentic workflow should evolve itself as the information it can access changes. Agentic processing of the information should compact older data and make current data more accurate.
+
 ## 🎯 Overview
 
 The Context Broker is a privacy-first, intelligent context retrieval system that:
