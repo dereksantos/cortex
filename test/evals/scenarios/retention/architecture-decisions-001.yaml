@@ -1,0 +1,79 @@
+id: "retention-architecture-001"
+type: "temporal"
+name: "Architecture Decision Memory"
+description: "Tests if Cortex remembers architectural decisions and constraints"
+domain: "session-memory"
+
+context_chain:
+  # Past decision: API style
+  - type: decision
+    content: |
+      Architecture decision made in sprint planning:
+      "We're building a REST API, not GraphQL. Keep it simple."
+      Rationale: Team familiarity, simpler tooling, sufficient for our needs
+
+  # Past decision: Database
+  - type: decision
+    content: |
+      Architecture decision:
+      "Use PostgreSQL for all data. No Redis, no MongoDB."
+      Rationale: Single database simplifies operations and transactions
+
+  # Past decision: Deployment
+  - type: decision
+    content: |
+      Infrastructure decision:
+      "Deploy on Railway. No Kubernetes, no AWS directly."
+      Rationale: Simplicity, team size doesn't justify K8s complexity
+
+  # Past correction
+  - type: correction
+    content: |
+      User correction:
+      AI suggested: "Set up a Redis cache for sessions"
+      User said: "No Redis! We store sessions in PostgreSQL. Read the decisions."
+      Rule: No Redis, PostgreSQL only
+
+test_prompts:
+  - id: "api-style"
+    prompt: "Should I add a GraphQL endpoint for this new feature?"
+    ground_truth:
+      must_include:
+        - "REST"
+      must_exclude:
+        - "yes"
+        - "GraphQL endpoint"
+        - "add GraphQL"
+
+  - id: "caching"
+    prompt: "I want to add caching for frequently accessed data. What should I use?"
+    ground_truth:
+      must_include:
+        - "PostgreSQL"
+      must_exclude:
+        - "Redis"
+        - "Memcached"
+
+  - id: "deployment"
+    prompt: "How should I deploy this service?"
+    ground_truth:
+      must_include:
+        - "Railway"
+      must_exclude:
+        - "Kubernetes"
+        - "K8s"
+        - "ECS"
+
+  - id: "session-storage"
+    prompt: "Where should I store user sessions?"
+    ground_truth:
+      must_include:
+        - "PostgreSQL"
+      must_exclude:
+        - "Redis"
+        - "memory"
+        - "JWT only"
+
+metadata:
+  author: "cortex-eval"
+  tags: "retention, architecture, decisions"
