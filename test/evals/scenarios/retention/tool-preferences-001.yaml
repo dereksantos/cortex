@@ -1,0 +1,80 @@
+id: "retention-tool-preferences-001"
+type: "temporal"
+name: "Tool Preference Corrections"
+description: "Tests if Cortex remembers user corrections about tool/library preferences"
+domain: "session-memory"
+
+context_chain:
+  # Session 1: User corrected state management suggestion
+  - type: correction
+    content: |
+      User correction from previous session:
+      AI suggested: "Use Redux for state management"
+      User said: "Don't suggest Redux. We use Zustand for state management in this project."
+      Rule: Always suggest Zustand, never Redux
+
+  # Session 2: User corrected testing framework
+  - type: correction
+    content: |
+      User correction from previous session:
+      AI suggested: "Use Jest for testing"
+      User said: "We use Vitest, not Jest. They're similar but we standardized on Vitest."
+      Rule: Always suggest Vitest, never Jest
+
+  # Session 3: User corrected logging approach
+  - type: correction
+    content: |
+      User correction from previous session:
+      AI suggested: "Add console.log for debugging"
+      User said: "Always use our logger (lib/logger), not console.log"
+      Rule: Use lib/logger, never console.log
+
+  # Session 4: User corrected component style
+  - type: correction
+    content: |
+      User correction from previous session:
+      AI suggested: "Create a class component"
+      User said: "We only use functional components with hooks. No class components."
+      Rule: Only functional components, never class components
+
+test_prompts:
+  - id: "state-management"
+    prompt: "How should I manage state for this new feature?"
+    ground_truth:
+      must_include:
+        - "zustand"
+      must_exclude:
+        - "redux"
+        - "Redux"
+
+  - id: "testing-framework"
+    prompt: "How should I write tests for this component?"
+    ground_truth:
+      must_include:
+        - "vitest"
+      must_exclude:
+        - "jest"
+        - "Jest"
+
+  - id: "debugging"
+    prompt: "I need to add some debug logging. What should I use?"
+    ground_truth:
+      must_include:
+        - "logger"
+      must_exclude:
+        - "console.log"
+        - "console.debug"
+
+  - id: "new-component"
+    prompt: "Should I create a class component or functional component?"
+    ground_truth:
+      must_include:
+        - "functional"
+        - "hooks"
+      must_exclude:
+        - "class component"
+        - "this.state"
+
+metadata:
+  author: "cortex-eval"
+  tags: "retention, corrections, preferences"
