@@ -1,0 +1,127 @@
+id: "tree-database-choice-001"
+type: "multi-path"
+name: "Database Choice Paths"
+description: "Tests that PostgreSQL and MongoDB paths don't contaminate each other"
+domain: "architecture"
+
+paths:
+  - id: "postgresql"
+    name: "PostgreSQL Path"
+    description: "Project chose PostgreSQL for relational data with ACID guarantees"
+    context_chain:
+      - type: decision
+        content: "Use PostgreSQL for the database"
+        rationale: "Need ACID guarantees, complex queries, relational data model"
+
+      - type: implementation
+        file: "internal/db/postgres.go"
+        content: |
+          func NewPostgresDB(connStr string) (*sql.DB, error) {
+              db, err := sql.Open("postgres", connStr)
+              if err != nil {
+                  return nil, err
+              }
+              return db, nil
+          }
+
+      - type: pattern
+        content: |
+          Database patterns:
+          - Use sqlx for queries with named parameters
+          - Migrations managed with goose
+          - Connection pooling with max 25 connections
+          - Use transactions for multi-step operations
+
+    test_prompts:
+      - id: "add-table"
+        prompt: "How should I add a new table to store user preferences?"
+        ground_truth:
+          must_include:
+            - "migration"
+            - "CREATE TABLE"
+          must_exclude:
+            - "collection"
+            - "MongoDB"
+            - "document"
+
+      - id: "query-data"
+        prompt: "How do I query users with their orders?"
+        ground_truth:
+          must_include:
+            - "JOIN"
+            - "SELECT"
+          must_exclude:
+            - "aggregate"
+            - "lookup"
+            - "$match"
+
+      - id: "transaction"
+        prompt: "I need to update multiple tables atomically. How?"
+        ground_truth:
+          must_include:
+            - "transaction"
+            - "BEGIN"
+          must_exclude:
+            - "session"
+            - "MongoDB"
+
+  - id: "mongodb"
+    name: "MongoDB Path"
+    description: "Project chose MongoDB for flexible schema and document model"
+    context_chain:
+      - type: decision
+        content: "Use MongoDB for the database"
+        rationale: "Need flexible schema, document model fits our data, horizontal scaling"
+
+      - type: implementation
+        file: "internal/db/mongo.go"
+        content: |
+          func NewMongoDB(uri string) (*mongo.Client, error) {
+              client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(uri))
+              if err != nil {
+                  return nil, err
+              }
+              return client, nil
+          }
+
+      - type: pattern
+        content: |
+          Database patterns:
+          - Use mongo-driver for all operations
+          - One collection per entity type
+          - Embed related data when possible
+          - Use aggregation pipeline for complex queries
+
+    test_prompts:
+      - id: "add-collection"
+        prompt: "How should I add storage for user preferences?"
+        ground_truth:
+          must_include:
+            - "collection"
+          must_exclude:
+            - "CREATE TABLE"
+            - "migration"
+            - "ALTER"
+
+      - id: "query-data"
+        prompt: "How do I query users with their orders?"
+        ground_truth:
+          must_include:
+            - "aggregate"
+          must_exclude:
+            - "JOIN"
+            - "SELECT FROM"
+
+      - id: "atomic-update"
+        prompt: "I need to update multiple documents atomically. How?"
+        ground_truth:
+          must_include:
+            - "session"
+          must_exclude:
+            - "BEGIN"
+            - "COMMIT"
+            - "sql"
+
+metadata:
+  author: "cortex-eval"
+  tags: "tree, multi-path, database, architecture"
