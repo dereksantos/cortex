@@ -892,6 +892,7 @@ func handleEval() {
 	verbose := false
 	modelOverride := ""
 	e2eMode := false
+	dryRun := false
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -900,6 +901,8 @@ func handleEval() {
 			verbose = true
 		case arg == "--e2e":
 			e2eMode = true
+		case arg == "--dry-run":
+			dryRun = true
 		case arg == "--output" || arg == "-o":
 			if i+1 < len(os.Args) {
 				outputFormat = os.Args[i+1]
@@ -927,7 +930,8 @@ func handleEval() {
 			fmt.Println("  --scenario, -s <file>  Run a specific scenario file")
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
 			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
-			fmt.Println("  --model, -m <model>    Ollama model to use (e.g., llama3.2:1b, phi3:mini)")
+			fmt.Println("  --model, -m <model>    Ollama model to use (e.g., qwen2:0.5b, phi3:mini)")
+			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
 			fmt.Println("  --verbose, -v          Show detailed output")
 			fmt.Println("  --help, -h             Show this help")
@@ -937,11 +941,10 @@ func handleEval() {
 			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
 			fmt.Println()
 			fmt.Println("Models (fast → slow):")
-			fmt.Println("  llama3.2:1b      ~1B params, fastest")
+			fmt.Println("  --dry-run        Mock provider, instant (for framework testing)")
+			fmt.Println("  qwen2:0.5b       ~0.5B params, very fast")
 			fmt.Println("  phi3:mini        ~3.8B params, good balance")
-			fmt.Println("  llama3.2:3b      ~3B params")
 			fmt.Println("  mistral:7b       ~7B params (default)")
-			fmt.Println("  llama3.1:8b      ~8B params")
 			return
 		}
 	}
@@ -958,11 +961,20 @@ func handleEval() {
 		cfg.OllamaModel = modelOverride
 	}
 
-	// Check Ollama availability
-	ollamaClient := llm.NewOllamaClient(cfg)
-	if !ollamaClient.IsAvailable() {
-		fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
-		os.Exit(1)
+	// Select provider based on mode
+	var provider llm.Provider
+	if dryRun {
+		provider = llm.NewMockProvider(10) // 10ms simulated latency
+		if verbose {
+			fmt.Println("Using mock provider (--dry-run mode)")
+		}
+	} else {
+		ollamaClient := llm.NewOllamaClient(cfg)
+		if !ollamaClient.IsAvailable() {
+			fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
+			os.Exit(1)
+		}
+		provider = ollamaClient
 	}
 
 	// Run evaluation based on mode
@@ -970,7 +982,7 @@ func handleEval() {
 
 	if e2eMode {
 		// E2E mode: test full Cortex pipeline
-		e2eEvaluator := eval.NewE2EEvaluator(ollamaClient, cfg)
+		e2eEvaluator := eval.NewE2EEvaluator(provider, cfg)
 		e2eEvaluator.SetVerbose(verbose)
 
 		if scenarioPath != "" {
@@ -988,7 +1000,7 @@ func handleEval() {
 			run = &eval.EvalRun{
 				ID:        fmt.Sprintf("e2e-eval-%s", time.Now().Format("20060102-150405")),
 				Timestamp: time.Now(),
-				Provider:  ollamaClient.Name(),
+				Provider:  provider.Name(),
 				Scenarios: []string{scenario.ID},
 				Results:   results,
 			}
@@ -1002,7 +1014,7 @@ func handleEval() {
 		}
 	} else {
 		// Regular mode: pre-defined context injection
-		evaluator := eval.NewEvaluator(ollamaClient)
+		evaluator := eval.NewEvaluator(provider)
 		evaluator.SetVerbose(verbose)
 
 		if scenarioPath != "" {

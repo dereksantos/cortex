@@ -1,0 +1,67 @@
+id: "idiom-go-logging-001"
+type: "idiom"
+name: "Go Logging Patterns"
+description: "Tests if Cortex helps follow project logging conventions"
+domain: "code-style"
+
+context_chain:
+  - type: pattern
+    content: |
+      Logging standards for this project:
+      - Use slog for all logging (Go 1.21+)
+      - Structured logging with key-value pairs
+      - Always include request_id in request handlers
+      - Never use fmt.Println or log.Println
+      - Log levels: Debug for verbose, Info for normal, Warn for recoverable, Error for failures
+
+  - type: implementation
+    file: "internal/middleware/logging.go"
+    content: |
+      func RequestLogger(next http.Handler) http.Handler {
+          return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+              requestID := uuid.New().String()
+              ctx := context.WithValue(r.Context(), "request_id", requestID)
+              slog.Info("request started",
+                  "request_id", requestID,
+                  "method", r.Method,
+                  "path", r.URL.Path)
+              next.ServeHTTP(w, r.WithContext(ctx))
+          })
+      }
+
+  - type: code_review
+    content: "PR #33: Changed fmt.Println to slog.Info with structured fields"
+
+test_prompts:
+  - id: "add-logging"
+    prompt: "How should I add logging to track when a user is created?"
+    ground_truth:
+      must_include:
+        - "slog"
+      must_exclude:
+        - "fmt.Println"
+        - "log.Println"
+        - "fmt.Printf"
+
+  - id: "error-logging"
+    prompt: "I have an error in my handler, how should I log it?"
+    ground_truth:
+      must_include:
+        - "slog.Error"
+      must_exclude:
+        - "log.Fatal"
+        - "panic"
+        - "fmt.Println"
+
+  - id: "debug-logging"
+    prompt: "I want to add some debug output for troubleshooting. What should I use?"
+    ground_truth:
+      must_include:
+        - "slog.Debug"
+      must_exclude:
+        - "fmt.Println"
+        - "log.Println"
+
+metadata:
+  author: "cortex-eval"
+  tags: "logging, slog, conventions"
