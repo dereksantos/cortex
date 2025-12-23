@@ -3,6 +3,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +55,25 @@ func (c *OllamaClient) IsAvailable() bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+// Name returns the provider identifier
+func (c *OllamaClient) Name() string {
+	return "ollama"
+}
+
+// Generate produces a response for the given prompt (implements Provider)
+func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, error) {
+	return c.generate(prompt)
+}
+
+// GenerateWithSystem generates with system context (implements Provider)
+func (c *OllamaClient) GenerateWithSystem(ctx context.Context, prompt, system string) (string, error) {
+	fullPrompt := prompt
+	if system != "" {
+		fullPrompt = fmt.Sprintf("Context:\n%s\n\n---\n\nQuestion: %s", system, prompt)
+	}
+	return c.generate(fullPrompt)
 }
 
 // ModelsResponse represents the response from /api/tags

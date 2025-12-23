@@ -1,0 +1,50 @@
+id: "linear-auth-jwt-001"
+type: "linear"
+name: "JWT Authentication Decision"
+description: "Tests if Cortex helps maintain consistency with JWT auth decisions"
+domain: "backend"
+
+context_chain:
+  - type: decision
+    content: "Use JWT for stateless authentication"
+    rationale: "Microservices architecture needs stateless auth for horizontal scaling"
+
+  - type: implementation
+    file: "auth/jwt.go"
+    content: |
+      func GenerateToken(userID string) (string, error) {
+          claims := jwt.MapClaims{
+              "user_id": userID,
+              "exp":     time.Now().Add(24 * time.Hour).Unix(),
+          }
+          return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secretKey)
+      }
+
+  - type: pattern
+    content: "Tokens in Authorization header with Bearer prefix, 24h expiry, HS256 signing"
+
+test_prompts:
+  - id: "password-reset"
+    prompt: "How should I implement password reset for this application?"
+    ground_truth:
+      must_include:
+        - "token"
+        - "expiry"
+        - "email"
+      must_exclude:
+        - "session"
+        - "cookie-based auth"
+
+  - id: "refresh-token"
+    prompt: "How do I implement refresh tokens?"
+    ground_truth:
+      must_include:
+        - "token"
+        - "refresh"
+      must_exclude:
+        - "session storage"
+        - "redis session"
+
+metadata:
+  author: "cortex-eval"
+  tags: "auth, jwt, security"
