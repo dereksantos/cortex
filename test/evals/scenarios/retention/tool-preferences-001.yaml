@@ -1,5 +1,5 @@
 id: "retention-tool-preferences-001"
-type: "temporal"
+type: "linear"
 name: "Tool Preference Corrections"
 description: "Tests if Cortex remembers user corrections about tool/library preferences"
 domain: "session-memory"
