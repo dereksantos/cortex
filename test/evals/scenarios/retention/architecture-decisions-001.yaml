@@ -1,5 +1,5 @@
 id: "retention-architecture-001"
-type: "temporal"
+type: "linear"
 name: "Architecture Decision Memory"
 description: "Tests if Cortex remembers architectural decisions and constraints"
 domain: "session-memory"
