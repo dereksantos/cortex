@@ -891,6 +891,7 @@ func handleEval() {
 	outputFormat := "human"
 	verbose := false
 	modelOverride := ""
+	providerName := "ollama"
 	e2eMode := false
 	dryRun := false
 	treeMode := false
@@ -926,6 +927,11 @@ func handleEval() {
 				modelOverride = os.Args[i+1]
 				i++
 			}
+		case arg == "--provider" || arg == "-p":
+			if i+1 < len(os.Args) {
+				providerName = os.Args[i+1]
+				i++
+			}
 		case arg == "--help" || arg == "-h":
 			fmt.Println("Usage: cortex eval [options]")
 			fmt.Println()
@@ -934,7 +940,8 @@ func handleEval() {
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
 			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
 			fmt.Println("  --tree                 Run tree evals (multi-path, temporal)")
-			fmt.Println("  --model, -m <model>    Ollama model to use (e.g., qwen2:0.5b, phi3:mini)")
+			fmt.Println("  --provider, -p <name>  LLM provider: ollama, anthropic (default: ollama)")
+			fmt.Println("  --model, -m <model>    Model to use (provider-specific)")
 			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
 			fmt.Println("  --verbose, -v          Show detailed output")
@@ -945,11 +952,17 @@ func handleEval() {
 			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
 			fmt.Println("  tree (--tree)      Multi-path and temporal evals")
 			fmt.Println()
-			fmt.Println("Models (fast → slow):")
-			fmt.Println("  --dry-run        Mock provider, instant (for framework testing)")
-			fmt.Println("  qwen2:0.5b       ~0.5B params, very fast")
-			fmt.Println("  phi3:mini        ~3.8B params, good balance")
-			fmt.Println("  mistral:7b       ~7B params (default)")
+			fmt.Println("Providers:")
+			fmt.Println("  ollama (default)   Local models via Ollama")
+			fmt.Println("    Models: qwen2:0.5b (fast), phi3:mini, mistral:7b")
+			fmt.Println("  anthropic          Claude models via API (requires ANTHROPIC_API_KEY)")
+			fmt.Println("    Models: claude-3-5-haiku-20241022 (fast, default)")
+			fmt.Println("            claude-3-5-sonnet-20241022 (more capable)")
+			fmt.Println()
+			fmt.Println("Examples:")
+			fmt.Println("  cortex eval -p anthropic                    # Use Claude Haiku")
+			fmt.Println("  cortex eval -p anthropic -m claude-3-5-sonnet-20241022")
+			fmt.Println("  cortex eval -p ollama -m qwen2:0.5b         # Fast local model")
 			return
 		}
 	}
@@ -963,7 +976,11 @@ func handleEval() {
 
 	// Override model if specified
 	if modelOverride != "" {
-		cfg.OllamaModel = modelOverride
+		if providerName == "anthropic" {
+			cfg.AnthropicModel = modelOverride
+		} else {
+			cfg.OllamaModel = modelOverride
+		}
 	}
 
 	// Select provider based on mode
@@ -974,12 +991,28 @@ func handleEval() {
 			fmt.Println("Using mock provider (--dry-run mode)")
 		}
 	} else {
-		ollamaClient := llm.NewOllamaClient(cfg)
-		if !ollamaClient.IsAvailable() {
-			fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
+		switch providerName {
+		case "anthropic":
+			anthropicClient := llm.NewAnthropicClient(cfg)
+			if !anthropicClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "Anthropic API key not set. Set ANTHROPIC_API_KEY environment variable.\n")
+				os.Exit(1)
+			}
+			provider = anthropicClient
+			if verbose {
+				fmt.Printf("Using Anthropic provider (model: %s)\n", anthropicClient.Model())
+			}
+		case "ollama":
+			ollamaClient := llm.NewOllamaClient(cfg)
+			if !ollamaClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
+				os.Exit(1)
+			}
+			provider = ollamaClient
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown provider: %s. Use 'ollama' or 'anthropic'.\n", providerName)
 			os.Exit(1)
 		}
-		provider = ollamaClient
 	}
 
 	// Run evaluation based on mode

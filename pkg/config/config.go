@@ -16,9 +16,13 @@ type Config struct {
 	// Capture settings
 	SkipPatterns []string `json:"skip_patterns"`
 
-	// LLM settings
+	// LLM settings - Ollama
 	OllamaURL   string `json:"ollama_url"`
 	OllamaModel string `json:"ollama_model"`
+
+	// LLM settings - Anthropic
+	AnthropicAPIKey string `json:"anthropic_api_key,omitempty"`
+	AnthropicModel  string `json:"anthropic_model,omitempty"`
 
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
@@ -39,9 +43,10 @@ func Default() *Config {
 			".context",
 			"__pycache__",
 		},
-		OllamaURL:    "http://localhost:11434",
-		OllamaModel:  "mistral:7b",
-		EnableGraph:  true,
+		OllamaURL:      "http://localhost:11434",
+		OllamaModel:    "mistral:7b",
+		AnthropicModel: "claude-3-5-haiku-20241022",
+		EnableGraph:    true,
 		EnableVector: false,
 	}
 }
