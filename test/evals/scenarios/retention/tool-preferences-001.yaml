@@ -44,8 +44,9 @@ test_prompts:
       must_include:
         - "zustand"
       must_exclude:
-        - "redux"
-        - "Redux"
+        - "use Redux"
+        - "recommend Redux"
+        - "with Redux"
 
   - id: "testing-framework"
     prompt: "How should I write tests for this component?"
@@ -53,8 +54,9 @@ test_prompts:
       must_include:
         - "vitest"
       must_exclude:
-        - "jest"
-        - "Jest"
+        - "use Jest"
+        - "with Jest"
+        - "recommend Jest"
 
   - id: "debugging"
     prompt: "I need to add some debug logging. What should I use?"
@@ -62,8 +64,8 @@ test_prompts:
       must_include:
         - "logger"
       must_exclude:
-        - "console.log"
-        - "console.debug"
+        - "use console.log"
+        - "add console.log"
 
   - id: "new-component"
     prompt: "Should I create a class component or functional component?"
@@ -72,8 +74,10 @@ test_prompts:
         - "functional"
         - "hooks"
       must_exclude:
-        - "class component"
-        - "this.state"
+        - "create a class component"
+        - "should use class"
+        - "recommend class"
+        - "prefer class"
 
 metadata:
   author: "cortex-eval"

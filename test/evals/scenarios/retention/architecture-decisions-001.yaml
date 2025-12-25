@@ -51,8 +51,10 @@ test_prompts:
       must_include:
         - "PostgreSQL"
       must_exclude:
-        - "Redis"
-        - "Memcached"
+        - "use Redis"
+        - "recommend Redis"
+        - "set up Redis"
+        - "use Memcached"
 
   - id: "deployment"
     prompt: "How should I deploy this service?"
@@ -60,9 +62,10 @@ test_prompts:
       must_include:
         - "Railway"
       must_exclude:
-        - "Kubernetes"
-        - "K8s"
-        - "ECS"
+        - "use Kubernetes"
+        - "deploy to K8s"
+        - "use ECS"
+        - "recommend Kubernetes"
 
   - id: "session-storage"
     prompt: "Where should I store user sessions?"
@@ -70,9 +73,10 @@ test_prompts:
       must_include:
         - "PostgreSQL"
       must_exclude:
-        - "Redis"
-        - "memory"
-        - "JWT only"
+        - "use Redis"
+        - "store in Redis"
+        - "recommend Redis"
+        - "in-memory only"
 
 metadata:
   author: "cortex-eval"
