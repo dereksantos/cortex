@@ -1,0 +1,26 @@
+id: indent-pattern-conflict
+type: conflict
+name: "Resolve indent style silently"
+description: |
+  Low severity conflict should be resolved silently using best judgment.
+  When there's a minor style conflict, pick the majority pattern and move on.
+
+conflict_topic: "formatting"
+
+evidence:
+  - source: code
+    pattern: "tabs"
+    count: 10
+    weight: 0.8
+
+  - source: code
+    pattern: "spaces"
+    count: 2
+    weight: 0.8
+
+conflict_expected:
+  conflict_detected: true
+  severity: low
+  must_surface: false
+  allowed_patterns:
+    - "tabs"

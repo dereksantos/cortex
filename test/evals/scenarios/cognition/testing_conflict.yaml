@@ -1,0 +1,25 @@
+id: testing-pattern-conflict
+type: conflict
+name: "Detect stdlib vs testify conflict"
+description: |
+  High severity conflict should be surfaced to user.
+  When code uses stdlib testing but docs say testify,
+  the system should detect this and ask the user to decide.
+
+conflict_topic: "testing"
+
+evidence:
+  - source: code
+    pattern: "stdlib testing"
+    count: 4
+    weight: 0.8
+
+  - source: claude_md
+    pattern: "testify"
+    count: 1
+    weight: 1.0
+
+conflict_expected:
+  conflict_detected: true
+  severity: high
+  must_surface: true

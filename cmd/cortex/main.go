@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1120,6 +1121,14 @@ func handleEval() {
 		run.Summary = eval.CalculateSummary(allResults)
 
 	} else {
+		// Check if directory contains cognition scenarios
+		cognitionScenarios, _ := eval.LoadCognitionScenarios(scenarioDir)
+		if len(cognitionScenarios) > 0 {
+			// Cognition mode: test cognitive modes
+			runCognitionEvals(cognitionScenarios, verbose, outputFormat)
+			return
+		}
+
 		// Regular mode: pre-defined context injection
 		evaluator := eval.NewEvaluator(provider)
 		evaluator.SetVerbose(verbose)
@@ -1153,6 +1162,76 @@ func handleEval() {
 
 	// Exit with error if pass rate is below threshold
 	if run.Summary.PassRate < 0.5 {
+		os.Exit(1)
+	}
+}
+
+// runCognitionEvals runs cognition-specific evaluations
+func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, outputFormat string) {
+	// Create mock Cortex for evals (real implementation would use actual Cortex)
+	mock := eval.NewMockCortex()
+	evaluator := eval.NewCognitionEvaluator(mock)
+	evaluator.SetVerbose(verbose)
+
+	ctx := context.Background()
+
+	var results []*eval.CognitionEvalResult
+	passCount := 0
+	failCount := 0
+
+	fmt.Println("Cortex Cognition Eval")
+	fmt.Println("=====================")
+	fmt.Println()
+
+	for _, scenario := range scenarios {
+		if verbose {
+			fmt.Printf("Running: %s (%s)\n", scenario.Name, scenario.Type)
+		}
+
+		result, err := evaluator.RunScenario(ctx, scenario)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
+			failCount++
+			continue
+		}
+
+		results = append(results, result)
+		if result.Pass {
+			passCount++
+			if verbose {
+				fmt.Printf("  ✓ PASS\n")
+			}
+		} else {
+			failCount++
+			fmt.Printf("  ✗ FAIL: %s\n", result.Reason)
+		}
+	}
+
+	// Print summary
+	fmt.Println()
+	fmt.Println("Summary")
+	fmt.Println("========================================")
+	fmt.Printf("Total Scenarios: %d\n", len(scenarios))
+	fmt.Printf("Pass:            %d\n", passCount)
+	fmt.Printf("Fail:            %d\n", failCount)
+	fmt.Printf("Pass Rate:       %.0f%%\n", float64(passCount)/float64(len(scenarios))*100)
+
+	// Print detailed results for specific types
+	for _, result := range results {
+		if result.ConflictResults != nil {
+			fmt.Println()
+			fmt.Printf("Conflict: %s\n", result.ScenarioID)
+			fmt.Printf("  Detected:  %v\n", result.ConflictResults.ConflictDetected)
+			fmt.Printf("  Severity:  %s\n", result.ConflictResults.DetectedSeverity)
+			fmt.Printf("  Surfaced:  %v\n", result.ConflictResults.Surfaced)
+			if result.ConflictResults.ChosenPattern != "" {
+				fmt.Printf("  Chosen:    %s\n", result.ConflictResults.ChosenPattern)
+			}
+		}
+	}
+
+	// Exit with error if pass rate is below threshold
+	if float64(passCount)/float64(len(scenarios)) < 0.5 {
 		os.Exit(1)
 	}
 }

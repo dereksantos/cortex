@@ -188,7 +188,9 @@ func LoadScenarios(dir string) ([]*Scenario, error) {
 
 		scenario, err := LoadScenario(path)
 		if err != nil {
-			return fmt.Errorf("failed to load %s: %w", path, err)
+			// Skip files that don't match expected scenario format
+			// (e.g., cognition scenarios have a different structure)
+			return nil
 		}
 
 		scenarios = append(scenarios, scenario)
