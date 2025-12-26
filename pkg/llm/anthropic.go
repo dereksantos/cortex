@@ -31,10 +31,7 @@ type AnthropicClient struct {
 
 // NewAnthropicClient creates a new Anthropic client
 func NewAnthropicClient(cfg *config.Config) *AnthropicClient {
-	apiKey := cfg.AnthropicAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-	}
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 
 	model := cfg.AnthropicModel
 	if model == "" {
@@ -196,53 +193,13 @@ func (c *AnthropicClient) Model() string {
 
 // AnalyzeEvent analyzes an event and extracts insights
 func (c *AnthropicClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
-	prompt := c.buildAnalysisPrompt(event)
+	filePath, _ := event.ToolInput["file_path"].(string)
+	prompt := BuildAnalysisPrompt(event.ToolName, filePath, event.ToolResult)
 
-	// Call Anthropic with analysis system prompt
 	response, err := c.generate(context.Background(), prompt, AnalysisSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse the response into structured analysis
-	analysis, err := parseAnalysisJSON(response)
-	if err != nil || analysis == nil {
-		// Return raw response as summary if parsing fails
-		return &Analysis{
-			Summary:    response,
-			Category:   "insight",
-			Importance: 5,
-			Tags:       []string{},
-			Reasoning:  "Could not parse structured response",
-		}, nil
-	}
-
-	return analysis, nil
-}
-
-// buildAnalysisPrompt creates a prompt for event analysis
-func (c *AnthropicClient) buildAnalysisPrompt(event *events.Event) string {
-	var filePath string
-	if fp, ok := event.ToolInput["file_path"].(string); ok {
-		filePath = fp
-	}
-
-	prompt := fmt.Sprintf(`Analyze this development event and provide insights:
-
-Tool: %s
-File: %s
-Result: %s
-
-Respond in JSON format:
-{
-  "summary": "Brief summary (1 sentence)",
-  "category": "decision|pattern|insight|strategy|constraint",
-  "importance": 1-10,
-  "tags": ["tag1", "tag2"],
-  "reasoning": "Why this is important for future coding sessions"
-}
-
-JSON:`, event.ToolName, filePath, event.ToolResult)
-
-	return prompt
+	return ParseAnalysisWithFallback(response), nil
 }

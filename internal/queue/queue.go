@@ -89,12 +89,10 @@ func (m *Manager) GetPendingCount() (int, error) {
 	return len(files), nil
 }
 
-// CleanProcessed removes old processed events
-func (m *Manager) CleanProcessed(maxAge int) error {
+// CleanProcessed removes all processed event files
+func (m *Manager) CleanProcessed() error {
 	processedDir := filepath.Join(m.cfg.ContextDir, "queue", "processed")
 
-	// For now, just remove all processed files
-	// In production, would check timestamps
 	files, err := filepath.Glob(filepath.Join(processedDir, "*.json"))
 	if err != nil {
 		return err

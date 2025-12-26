@@ -20,9 +20,8 @@ type Config struct {
 	OllamaURL   string `json:"ollama_url"`
 	OllamaModel string `json:"ollama_model"`
 
-	// LLM settings - Anthropic
-	AnthropicAPIKey string `json:"anthropic_api_key,omitempty"`
-	AnthropicModel  string `json:"anthropic_model,omitempty"`
+	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
+	AnthropicModel string `json:"anthropic_model,omitempty"`
 
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`

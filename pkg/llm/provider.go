@@ -73,6 +73,41 @@ type Analysis struct {
 	Reasoning  string   `json:"reasoning"`
 }
 
+// BuildAnalysisPrompt creates a prompt for event analysis
+func BuildAnalysisPrompt(toolName, filePath, toolResult string) string {
+	return `Analyze this development event and provide insights:
+
+Tool: ` + toolName + `
+File: ` + filePath + `
+Result: ` + toolResult + `
+
+Respond in JSON format:
+{
+  "summary": "Brief summary (1 sentence)",
+  "category": "decision|pattern|insight|strategy|constraint",
+  "importance": 1-10,
+  "tags": ["tag1", "tag2"],
+  "reasoning": "Why this is important for future coding sessions"
+}
+
+JSON:`
+}
+
+// ParseAnalysisWithFallback parses analysis response, returning a fallback on failure
+func ParseAnalysisWithFallback(response string) *Analysis {
+	analysis, err := parseAnalysisJSON(response)
+	if err != nil || analysis == nil {
+		return &Analysis{
+			Summary:    response,
+			Category:   "insight",
+			Importance: 5,
+			Tags:       []string{},
+			Reasoning:  "Could not parse structured response",
+		}
+	}
+	return analysis
+}
+
 // parseAnalysisJSON parses the LLM response into structured analysis
 func parseAnalysisJSON(response string) (*Analysis, error) {
 	start := strings.Index(response, "{")
