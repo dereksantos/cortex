@@ -8,16 +8,14 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dereksantos/cortex/integrations/claude"
+	"github.com/dereksantos/cortex/integrations/cursor"
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/eval"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -26,6 +24,7 @@ import (
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
+	"github.com/dereksantos/cortex/pkg/system"
 )
 
 const version = "0.1.0"
@@ -118,8 +117,7 @@ func handleCapture() {
 	case "claude":
 		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
 	case "cursor":
-		// Import cursor adapter
-		event, err = convertCursorEvent(data, cfg.ProjectRoot)
+		event, err = cursor.ConvertToEvent(data, cfg.ProjectRoot)
 	default:
 		// Try Claude format as fallback
 		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
@@ -139,43 +137,6 @@ func handleCapture() {
 	}
 
 	os.Exit(0)
-}
-
-// convertCursorEvent converts Cursor LSP events
-func convertCursorEvent(data []byte, projectRoot string) (*events.Event, error) {
-	// Import cursor package dynamically to avoid circular dependency
-	var lspNotification map[string]interface{}
-	if err := json.Unmarshal(data, &lspNotification); err != nil {
-		return nil, err
-	}
-
-	// Create event from LSP notification
-	eventID := fmt.Sprintf("cursor-%d", time.Now().UnixNano())
-	method, _ := lspNotification["method"].(string)
-	params, _ := lspNotification["params"].(map[string]interface{})
-
-	toolName := "Edit" // default
-	if method == "textDocument/didSave" {
-		toolName = "Write"
-	} else if method == "textDocument/didOpen" {
-		toolName = "Read"
-	}
-
-	event := &events.Event{
-		ID:         eventID,
-		Source:     events.SourceCursor,
-		EventType:  events.EventToolUse,
-		Timestamp:  time.Now(),
-		ToolName:   toolName,
-		ToolInput:  params,
-		ToolResult: "success",
-		Context: events.EventContext{
-			ProjectPath: projectRoot,
-			SessionID:   fmt.Sprintf("cursor-%d", time.Now().Unix()),
-		},
-	}
-
-	return event, nil
 }
 
 func handleInit() {
@@ -580,7 +541,7 @@ func handleInfo() {
 	fmt.Println()
 
 	// Detect system resources
-	sysInfo, err := detectSystem()
+	sysInfo, err := system.Detect()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not detect system info: %v\n", err)
 	} else {
@@ -1916,94 +1877,6 @@ func loadConfig() (*config.Config, error) {
 
 	configPath := fmt.Sprintf("%s/.context/config.json", projectRoot)
 	return config.Load(configPath)
-}
-
-// detectSystem detects system resources
-func detectSystem() (*SystemInfo, error) {
-	info := &SystemInfo{
-		CPUCores: runtime.NumCPU(),
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-	}
-
-	// Detect RAM based on OS
-	switch runtime.GOOS {
-	case "darwin":
-		info.TotalRAMGB = detectRAMMacOS()
-	case "linux":
-		info.TotalRAMGB = detectRAMLinux()
-	case "windows":
-		info.TotalRAMGB = detectRAMWindows()
-	default:
-		info.TotalRAMGB = 8.0
-	}
-
-	info.AvailableRAMGB = info.TotalRAMGB * 0.7
-	return info, nil
-}
-
-// SystemInfo holds system information
-type SystemInfo struct {
-	OS             string
-	Arch           string
-	CPUCores       int
-	TotalRAMGB     float64
-	AvailableRAMGB float64
-}
-
-func (s *SystemInfo) FormatOS() string {
-	osNames := map[string]string{
-		"darwin":  "macOS",
-		"linux":   "Linux",
-		"windows": "Windows",
-	}
-	goos := runtime.GOOS
-	if name, ok := osNames[goos]; ok {
-		return name
-	}
-	return goos
-}
-
-func detectRAMMacOS() float64 {
-	cmd := exec.Command("sysctl", "-n", "hw.memsize")
-	output, err := cmd.Output()
-	if err != nil {
-		return 8.0
-	}
-	bytes, _ := strconv.ParseInt(strings.TrimSpace(string(output)), 10, 64)
-	return float64(bytes) / (1024 * 1024 * 1024)
-}
-
-func detectRAMLinux() float64 {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 8.0
-	}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "MemTotal:") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				kb, _ := strconv.ParseFloat(fields[1], 64)
-				return kb / (1024 * 1024)
-			}
-		}
-	}
-	return 8.0
-}
-
-func detectRAMWindows() float64 {
-	cmd := exec.Command("wmic", "computersystem", "get", "totalphysicalmemory")
-	output, err := cmd.Output()
-	if err != nil {
-		return 8.0
-	}
-	lines := strings.Split(string(output), "\n")
-	if len(lines) >= 2 {
-		bytes, _ := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64)
-		return float64(bytes) / (1024 * 1024 * 1024)
-	}
-	return 8.0
 }
 
 // checkOllama checks if Ollama is running and returns installed models

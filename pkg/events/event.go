@@ -10,8 +10,9 @@ import (
 type Source string
 
 const (
-	SourceClaude   Source = "claude"
-	SourceCursor   Source = "cursor"
+	SourceClaude Source = "claude"
+	SourceCursor Source = "cursor"
+	// Reserved for future integrations:
 	SourceCopilot  Source = "copilot"
 	SourceWindsurf Source = "windsurf"
 	SourceGeneric  Source = "generic"
@@ -22,11 +23,12 @@ type EventType string
 
 const (
 	EventToolUse EventType = "tool_use"
-	EventEdit    EventType = "edit"
-	EventSearch  EventType = "search"
-	EventAgent   EventType = "agent"
-	EventBuild   EventType = "build"
-	EventTest    EventType = "test"
+	// Reserved for future event types:
+	EventEdit   EventType = "edit"
+	EventSearch EventType = "search"
+	EventAgent  EventType = "agent"
+	EventBuild  EventType = "build"
+	EventTest   EventType = "test"
 )
 
 // Event is the generic event structure for all AI tools

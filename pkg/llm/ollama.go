@@ -116,61 +116,15 @@ func (c *OllamaClient) IsModelAvailable() bool {
 
 // AnalyzeEvent analyzes an event and extracts insights
 func (c *OllamaClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
-	prompt := c.buildAnalysisPrompt(event)
+	filePath, _ := event.ToolInput["file_path"].(string)
+	prompt := BuildAnalysisPrompt(event.ToolName, filePath, event.ToolResult)
 
-	// Call Ollama with analysis system prompt
 	response, err := c.generateInternal(prompt, AnalysisSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse the response into structured analysis
-	analysis, err := parseAnalysisJSON(response)
-	if err != nil || analysis == nil {
-		// Return raw response as summary if parsing fails
-		return &Analysis{
-			Summary:    response,
-			Category:   "insight",
-			Importance: 5,
-			Tags:       []string{},
-			Reasoning:  "Could not parse structured response",
-		}, nil
-	}
-
-	return analysis, nil
-}
-
-// buildAnalysisPrompt creates a prompt for event analysis
-func (c *OllamaClient) buildAnalysisPrompt(event *events.Event) string {
-	var filePath string
-	if fp, ok := event.ToolInput["file_path"].(string); ok {
-		filePath = fp
-	}
-
-	prompt := fmt.Sprintf(`Analyze this development event and provide insights:
-
-Tool: %s
-File: %s
-Result: %s
-
-Respond in JSON format:
-{
-  "summary": "Brief summary (1 sentence)",
-  "category": "decision|pattern|insight|strategy",
-  "importance": 1-10,
-  "tags": ["tag1", "tag2"],
-  "reasoning": "Why this is important"
-}
-
-Focus on:
-- Architectural decisions
-- Code patterns
-- Problem-solving approaches
-- Strategic choices
-
-JSON:`, event.ToolName, filePath, event.ToolResult)
-
-	return prompt
+	return ParseAnalysisWithFallback(response), nil
 }
 
 // generate calls Ollama to generate text (no system prompt)
