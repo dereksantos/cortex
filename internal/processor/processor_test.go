@@ -1,9 +1,14 @@
 package processor
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/queue"
+	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
@@ -234,6 +239,261 @@ func TestProcessor_FileExtensionFiltering(t *testing.T) {
 
 			if !p.shouldAnalyze(event) {
 				t.Errorf("Files with extension %s should be analyzed", ext)
+			}
+		})
+	}
+}
+
+func setupTestProcessor(t *testing.T) (*Processor, *config.Config, func()) {
+	t.Helper()
+
+	tempDir, err := os.MkdirTemp("", "cortex-processor-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+
+	// Create directory structure
+	dirs := []string{
+		filepath.Join(tempDir, "queue", "pending"),
+		filepath.Join(tempDir, "queue", "processing"),
+		filepath.Join(tempDir, "queue", "processed"),
+		filepath.Join(tempDir, "db"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			os.RemoveAll(tempDir)
+			t.Fatalf("failed to create dir %s: %v", dir, err)
+		}
+	}
+
+	cfg := &config.Config{
+		ContextDir:  tempDir,
+		OllamaURL:   "http://localhost:11434",
+		OllamaModel: "mistral:7b",
+	}
+
+	store, err := storage.New(cfg)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("failed to create storage: %v", err)
+	}
+
+	queueMgr := queue.New(cfg, store)
+	processor := New(cfg, store, queueMgr)
+
+	cleanup := func() {
+		processor.Stop()
+		store.Close()
+		os.RemoveAll(tempDir)
+	}
+
+	return processor, cfg, cleanup
+}
+
+func TestNew(t *testing.T) {
+	processor, _, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	if processor == nil {
+		t.Fatal("expected non-nil processor")
+	}
+	if processor.cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if processor.storage == nil {
+		t.Fatal("expected non-nil storage")
+	}
+	if processor.queue == nil {
+		t.Fatal("expected non-nil queue")
+	}
+	if processor.lastProcessed == nil {
+		t.Fatal("expected non-nil lastProcessed map")
+	}
+}
+
+func TestProcessor_StartStop(t *testing.T) {
+	processor, _, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	t.Run("starts successfully", func(t *testing.T) {
+		err := processor.Start()
+		if err != nil {
+			t.Fatalf("failed to start processor: %v", err)
+		}
+		if !processor.running {
+			t.Error("processor should be running after Start")
+		}
+	})
+
+	t.Run("prevents double start", func(t *testing.T) {
+		err := processor.Start()
+		if err == nil {
+			t.Error("expected error when starting already running processor")
+		}
+	})
+
+	t.Run("stops successfully", func(t *testing.T) {
+		processor.Stop()
+		if processor.running {
+			t.Error("processor should not be running after Stop")
+		}
+	})
+
+	t.Run("can restart after stop", func(t *testing.T) {
+		err := processor.Start()
+		if err != nil {
+			t.Fatalf("failed to restart processor: %v", err)
+		}
+		processor.Stop()
+	})
+}
+
+func TestProcessor_LockFileSkipping(t *testing.T) {
+	p := &Processor{
+		lastProcessed: make(map[string]time.Time),
+	}
+
+	lockFiles := []string{
+		"package-lock.json",
+		"yarn.lock",
+		"Gemfile.lock",
+		"poetry.lock",
+		"pnpm-lock.yaml",
+		"composer.lock",
+	}
+
+	for _, lockFile := range lockFiles {
+		t.Run("skips "+lockFile, func(t *testing.T) {
+			event := &events.Event{
+				ToolName:  "Edit",
+				Timestamp: time.Now(),
+				ToolInput: map[string]interface{}{
+					"file_path": lockFile,
+				},
+			}
+
+			if p.shouldAnalyze(event) {
+				t.Errorf("Lock file %s should be skipped", lockFile)
+			}
+		})
+	}
+}
+
+func TestProcessor_HelperFunctions(t *testing.T) {
+	t.Run("contains finds substring", func(t *testing.T) {
+		if !contains("hello world", "world") {
+			t.Error("should find 'world' in 'hello world'")
+		}
+		if contains("hello", "world") {
+			t.Error("should not find 'world' in 'hello'")
+		}
+		if contains("", "test") {
+			t.Error("should not find substring in empty string")
+		}
+		// Note: contains("test", "") returns true in current implementation
+		// because findSubstring finds empty string at position 0
+	})
+
+	t.Run("toLower converts correctly", func(t *testing.T) {
+		tests := []struct {
+			input    string
+			expected string
+		}{
+			{"HELLO", "hello"},
+			{"Hello World", "hello world"},
+			{"already lowercase", "already lowercase"},
+			{"MiXeD123", "mixed123"},
+			{"", ""},
+		}
+
+		for _, tt := range tests {
+			result := toLower(tt.input)
+			if result != tt.expected {
+				t.Errorf("toLower(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		}
+	})
+}
+
+func TestProcessor_NoFilePath(t *testing.T) {
+	p := &Processor{
+		lastProcessed: make(map[string]time.Time),
+	}
+
+	// Event without file_path in ToolInput
+	event := &events.Event{
+		ToolName:  "Task",
+		Timestamp: time.Now(),
+		ToolInput: map[string]interface{}{
+			"description": "some task",
+		},
+	}
+
+	// Should still analyze (Task is in allowed tools)
+	if !p.shouldAnalyze(event) {
+		t.Error("Task events without file_path should be analyzed")
+	}
+}
+
+func TestProcessor_DeduplicationWithDifferentTools(t *testing.T) {
+	p := &Processor{
+		lastProcessed: make(map[string]time.Time),
+	}
+
+	now := time.Now()
+	filePath := "main.go"
+
+	// First: Edit to file
+	edit := &events.Event{
+		ToolName:  "Edit",
+		Timestamp: now,
+		ToolInput: map[string]interface{}{
+			"file_path": filePath,
+		},
+	}
+	if !p.shouldAnalyze(edit) {
+		t.Error("First edit should be analyzed")
+	}
+
+	// Second: Write to same file within 30s
+	write := &events.Event{
+		ToolName:  "Write",
+		Timestamp: now.Add(10 * time.Second),
+		ToolInput: map[string]interface{}{
+			"file_path": filePath,
+		},
+	}
+
+	// Should be deduplicated (same file, regardless of tool)
+	if p.shouldAnalyze(write) {
+		t.Error("Write to same file within 30s should be deduplicated")
+	}
+}
+
+func TestProcessor_CaseInsensitiveLockDetection(t *testing.T) {
+	p := &Processor{
+		lastProcessed: make(map[string]time.Time),
+	}
+
+	// Test case variations
+	lockFiles := []string{
+		"Package-Lock.json",
+		"YARN.LOCK",
+		"Gemfile.LOCK",
+	}
+
+	for _, lockFile := range lockFiles {
+		t.Run("skips "+lockFile, func(t *testing.T) {
+			event := &events.Event{
+				ToolName:  "Edit",
+				Timestamp: time.Now(),
+				ToolInput: map[string]interface{}{
+					"file_path": lockFile,
+				},
+			}
+
+			if p.shouldAnalyze(event) {
+				t.Errorf("Lock file %s should be skipped (case insensitive)", lockFile)
 			}
 		})
 	}

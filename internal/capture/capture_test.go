@@ -203,6 +203,273 @@ func TestCapture_AtomicWrite(t *testing.T) {
 	}
 }
 
+func TestCapture_SkipRoutineBashCommands(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir:   tempDir,
+		SkipPatterns: []string{},
+	}
+
+	cap := New(cfg)
+
+	routineCommands := []string{"ls", "pwd", "echo", "cd", "which", "date"}
+
+	for _, cmd := range routineCommands {
+		t.Run("skips "+cmd, func(t *testing.T) {
+			event := &events.Event{
+				ID:        "bash-" + cmd,
+				Source:    events.SourceClaude,
+				EventType: events.EventToolUse,
+				Timestamp: time.Now(),
+				ToolName:  "Bash",
+				ToolInput: map[string]interface{}{
+					"command": cmd,
+				},
+				ToolResult: "output",
+			}
+
+			err := cap.CaptureEvent(event)
+			if err != nil {
+				t.Fatalf("CaptureEvent failed: %v", err)
+			}
+
+			// Verify event file was NOT created (skipped)
+			eventFile := filepath.Join(tempDir, "queue", "pending", "bash-"+cmd+".json")
+			if _, err := os.Stat(eventFile); !os.IsNotExist(err) {
+				t.Errorf("Routine command '%s' should be skipped", cmd)
+			}
+		})
+	}
+}
+
+func TestCapture_AllowNonRoutineBashCommands(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir:   tempDir,
+		SkipPatterns: []string{},
+	}
+
+	cap := New(cfg)
+
+	allowedCommands := []string{"git status", "go build", "npm install", "make test"}
+
+	for _, cmd := range allowedCommands {
+		t.Run("allows "+cmd, func(t *testing.T) {
+			eventID := "bash-allowed-" + filepath.Base(cmd)
+			event := &events.Event{
+				ID:        eventID,
+				Source:    events.SourceClaude,
+				EventType: events.EventToolUse,
+				Timestamp: time.Now(),
+				ToolName:  "Bash",
+				ToolInput: map[string]interface{}{
+					"command": cmd,
+				},
+				ToolResult: "success",
+			}
+
+			err := cap.CaptureEvent(event)
+			if err != nil {
+				t.Fatalf("CaptureEvent failed: %v", err)
+			}
+
+			// Verify event file WAS created
+			eventFile := filepath.Join(tempDir, "queue", "pending", eventID+".json")
+			if _, err := os.Stat(eventFile); os.IsNotExist(err) {
+				t.Errorf("Non-routine command '%s' should be captured", cmd)
+			}
+		})
+	}
+}
+
+func TestCapture_MultipleSkipPatterns(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir:   tempDir,
+		SkipPatterns: []string{".git", "node_modules", "vendor", "__pycache__"},
+	}
+
+	cap := New(cfg)
+
+	tests := []struct {
+		name     string
+		filePath string
+		shouldSkip bool
+	}{
+		{"skips .git files", ".git/config", true},
+		{"skips node_modules", "node_modules/lodash/index.js", true},
+		{"skips vendor", "vendor/github.com/pkg/errors/errors.go", true},
+		{"skips __pycache__", "__pycache__/module.cpython-39.pyc", true},
+		{"allows src files", "src/main.go", false},
+		{"allows regular files", "README.md", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eventID := "pattern-test-" + filepath.Base(tt.filePath)
+			event := &events.Event{
+				ID:        eventID,
+				Source:    events.SourceClaude,
+				EventType: events.EventToolUse,
+				Timestamp: time.Now(),
+				ToolName:  "Edit",
+				ToolInput: map[string]interface{}{
+					"file_path": tt.filePath,
+				},
+				ToolResult: "modified",
+			}
+
+			err := cap.CaptureEvent(event)
+			if err != nil {
+				t.Fatalf("CaptureEvent failed: %v", err)
+			}
+
+			eventFile := filepath.Join(tempDir, "queue", "pending", eventID+".json")
+			exists := true
+			if _, err := os.Stat(eventFile); os.IsNotExist(err) {
+				exists = false
+			}
+
+			if tt.shouldSkip && exists {
+				t.Errorf("Expected %s to be skipped", tt.filePath)
+			}
+			if !tt.shouldSkip && !exists {
+				t.Errorf("Expected %s to be captured", tt.filePath)
+			}
+		})
+	}
+}
+
+func TestCapture_SkipByToolResult(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir:   tempDir,
+		SkipPatterns: []string{"node_modules"},
+	}
+
+	cap := New(cfg)
+
+	// Event with node_modules in tool result (not file path)
+	event := &events.Event{
+		ID:        "result-skip-test",
+		Source:    events.SourceClaude,
+		EventType: events.EventToolUse,
+		Timestamp: time.Now(),
+		ToolName:  "Grep",
+		ToolInput: map[string]interface{}{
+			"pattern": "TODO",
+		},
+		ToolResult: "Found in node_modules/pkg/file.js:10",
+	}
+
+	err = cap.CaptureEvent(event)
+	if err != nil {
+		t.Fatalf("CaptureEvent failed: %v", err)
+	}
+
+	// Should be skipped because tool result contains skip pattern
+	eventFile := filepath.Join(tempDir, "queue", "pending", "result-skip-test.json")
+	if _, err := os.Stat(eventFile); !os.IsNotExist(err) {
+		t.Error("Event with skip pattern in result should be skipped")
+	}
+}
+
+func TestCapture_LogSlow(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir: tempDir,
+	}
+
+	cap := New(cfg)
+
+	// Manually call logSlow
+	cap.logSlow(100 * time.Millisecond)
+
+	// Verify log file was created
+	logFile := filepath.Join(tempDir, "logs", "capture.log")
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	content := string(data)
+	if content == "" {
+		t.Error("Log file should not be empty")
+	}
+	if !filepath.IsAbs(logFile) {
+		t.Error("Log file path should be absolute")
+	}
+}
+
+func TestCapture_ConcurrentCaptures(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir: tempDir,
+	}
+
+	cap := New(cfg)
+
+	// Capture multiple events concurrently
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			event := &events.Event{
+				ID:        "concurrent-" + string(rune('a'+idx)),
+				Source:    events.SourceClaude,
+				EventType: events.EventToolUse,
+				Timestamp: time.Now(),
+				ToolName:  "Edit",
+				ToolInput: map[string]interface{}{
+					"file_path": "file.go",
+				},
+			}
+			cap.CaptureEvent(event)
+			done <- true
+		}(i)
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+
+	// Verify all events were captured
+	files, _ := filepath.Glob(filepath.Join(tempDir, "queue", "pending", "concurrent-*.json"))
+	if len(files) != 10 {
+		t.Errorf("Expected 10 concurrent captures, got %d", len(files))
+	}
+}
+
 func BenchmarkCapture_CaptureEvent(b *testing.B) {
 	tempDir, err := os.MkdirTemp("", "cortex-bench-*")
 	if err != nil {
