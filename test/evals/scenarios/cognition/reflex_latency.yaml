@@ -1,0 +1,25 @@
+id: reflex-latency
+type: mode
+name: "Reflex latency under 10ms"
+description: "Verify Reflex retrieval completes within latency budget"
+mode: reflex
+
+mode_tests:
+  - id: simple-query
+    input:
+      query:
+        text: "How does authentication work?"
+        limit: 5
+    expected:
+      max_latency: 10ms
+      min_results: 1
+
+  - id: tag-filtered-query
+    input:
+      query:
+        text: "database connection"
+        tags: ["backend", "infrastructure"]
+        limit: 10
+    expected:
+      max_latency: 10ms
+      min_results: 0
