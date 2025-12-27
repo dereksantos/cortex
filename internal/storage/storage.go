@@ -649,3 +649,49 @@ func (s *Storage) scanInsights(rows *sql.Rows) ([]*Insight, error) {
 
 	return insights, nil
 }
+
+// ForgetInsight deletes an insight by ID
+func (s *Storage) ForgetInsight(id int64) error {
+	result, err := s.db.Exec("DELETE FROM insights WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("failed to delete insight: %w", err)
+	}
+
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return fmt.Errorf("insight not found")
+	}
+
+	return nil
+}
+
+// ForgetInsightsByKeyword deletes insights matching a keyword in summary
+func (s *Storage) ForgetInsightsByKeyword(keyword string) (int, error) {
+	pattern := "%" + keyword + "%"
+	result, err := s.db.Exec("DELETE FROM insights WHERE summary LIKE ?", pattern)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete insights: %w", err)
+	}
+
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
+}
+
+// SearchInsights searches insights by keyword
+func (s *Storage) SearchInsights(keyword string, limit int) ([]*Insight, error) {
+	pattern := "%" + keyword + "%"
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		FROM insights
+		WHERE summary LIKE ? OR tags LIKE ? OR category LIKE ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, pattern, pattern, pattern, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
