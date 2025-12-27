@@ -1,0 +1,19 @@
+id: abr-cold-start
+type: benefit
+name: "ABR starts low, improves with Think"
+description: "Measure ABR from cold start through session progression"
+
+benefit_queries:
+  - text: "How does authentication work?"
+    limit: 5
+  - text: "Show me the login handler"
+    limit: 5
+  - text: "What about password hashing?"
+    limit: 5
+  - text: "How are tokens validated?"
+    limit: 5
+  - text: "Explain the auth middleware"
+    limit: 5
+
+expected_abr_threshold: 0.5
+expected_quality_gap: 0.3

@@ -1,0 +1,152 @@
+# Test corpus for cognition evals
+# Results referenced by ID in scenario files
+
+results:
+  # Authentication domain
+  - id: auth_module
+    content: "Authentication module handles user login and session management using JWT tokens"
+    category: pattern
+    score: 0.9
+    tags: [authentication, backend, security]
+
+  - id: jwt_handler
+    content: "JWT tokens are generated with HS256 signing and 24h expiry, stored in httpOnly cookies"
+    category: decision
+    score: 0.85
+    tags: [authentication, jwt, tokens]
+
+  - id: auth_decision
+    content: "Decision: Use JWT for stateless authentication, avoid server-side sessions"
+    category: decision
+    score: 0.95
+    tags: [authentication, jwt, architecture]
+
+  - id: token_validation
+    content: "Token validation via AuthMiddleware with Bearer scheme, returns 401 on invalid"
+    category: pattern
+    score: 0.8
+    tags: [authentication, middleware, security]
+
+  - id: session_manager
+    content: "Session manager tracks active user sessions and handles logout cleanup"
+    category: pattern
+    score: 0.75
+    tags: [authentication, session]
+
+  # Database domain
+  - id: db_schema
+    content: "SQLite schema with users, events, embeddings tables using foreign keys"
+    category: implementation
+    score: 0.85
+    tags: [database, sqlite, schema]
+
+  - id: db_connection
+    content: "Database connection via sql.Open with connection pooling and prepared statements"
+    category: pattern
+    score: 0.8
+    tags: [database, connection, backend]
+
+  - id: db_pool
+    content: "Connection pool configuration: max 10 connections, idle timeout 5 minutes"
+    category: decision
+    score: 0.75
+    tags: [database, infrastructure, config]
+
+  - id: db_config_v1
+    content: "Database config v1: embedded SQLite only, single file storage"
+    category: decision
+    score: 0.6
+    tags: [database, config]
+    timestamp: "2024-01-01T00:00:00Z"
+
+  - id: db_config_v2
+    content: "Database config v2: SQLite for local dev, PostgreSQL option for production"
+    category: decision
+    score: 0.8
+    tags: [database, config]
+    timestamp: "2024-06-01T00:00:00Z"
+
+  - id: db_transactions
+    content: "Use database transactions for multi-table writes, rollback on error"
+    category: pattern
+    score: 0.85
+    tags: [database, transactions]
+
+  # Error handling domain
+  - id: error_pattern
+    content: "Use fmt.Errorf with %w for error wrapping to preserve stack context"
+    category: pattern
+    score: 0.9
+    tags: [errors, go, patterns]
+
+  - id: error_decision
+    content: "Decision: Rejected pkg/errors in favor of stdlib fmt.Errorf for simplicity"
+    category: decision
+    score: 0.95
+    tags: [errors, decisions, dependencies]
+
+  # Testing domain (for conflict detection)
+  - id: stdlib_testing
+    content: "Using t.Errorf and t.Fatalf for test assertions, no external libraries"
+    category: pattern
+    score: 0.85
+    tags: [testing, go, stdlib]
+
+  - id: testify_mention
+    content: "Consider testify/assert for cleaner test assertions"
+    category: insight
+    score: 0.7
+    tags: [testing, dependencies]
+
+  # API domain
+  - id: api_v1
+    content: "API v1: REST endpoints with JSON request/response format"
+    category: pattern
+    score: 0.7
+    tags: [api, rest, backend]
+
+  - id: api_v2
+    content: "API v2: Migrating to GraphQL for flexible queries"
+    category: decision
+    score: 0.8
+    tags: [api, graphql]
+
+  - id: api_decision
+    content: "Decision: Use v2 GraphQL for new endpoints, maintain v1 REST for backwards compatibility"
+    category: decision
+    score: 0.9
+    tags: [api, architecture]
+
+  # Handler patterns
+  - id: handler_pattern
+    content: "Handlers must return (T, error) tuple, not just error"
+    category: constraint
+    score: 0.8
+    tags: [handlers, patterns, go]
+
+  - id: middleware_pattern
+    content: "All endpoints require AuthMiddleware except health checks"
+    category: constraint
+    score: 0.85
+    tags: [middleware, auth, security]
+
+  # Logging domain
+  - id: logging_config
+    content: "Logging levels: DEBUG for development, INFO for production, structured JSON format"
+    category: pattern
+    score: 0.75
+    tags: [logging, config, observability]
+
+  # Cache domain
+  - id: cache_mention
+    content: "Consider adding Redis cache for frequently accessed data in future"
+    category: insight
+    score: 0.5
+    tags: [cache, future, performance]
+
+  # Unrelated (for edge case testing)
+  - id: unrelated_quantum
+    content: "Quantum computing applications in cryptography"
+    category: insight
+    score: 0.3
+    tags: [research, future]

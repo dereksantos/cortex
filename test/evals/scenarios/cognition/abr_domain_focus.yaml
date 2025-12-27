@@ -1,0 +1,19 @@
+id: abr-domain-focus
+type: benefit
+name: "ABR improves faster with focused queries"
+description: "ABR should converge faster when queries are in same domain"
+
+benefit_queries:
+  - text: "What database do we use?"
+    limit: 5
+  - text: "How do we connect to SQLite?"
+    limit: 5
+  - text: "Show me the migration scripts"
+    limit: 5
+  - text: "What about database transactions?"
+    limit: 5
+  - text: "How do we handle connection pooling?"
+    limit: 5
+
+expected_abr_threshold: 0.5
+expected_quality_gap: 0.3
