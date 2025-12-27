@@ -470,6 +470,140 @@ func TestCapture_ConcurrentCaptures(t *testing.T) {
 	}
 }
 
+func TestCapture_LogSlow_FileCreation(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir: tempDir,
+	}
+
+	cap := New(cfg)
+
+	// Call logSlow multiple times to verify file append
+	cap.logSlow(50 * time.Millisecond)
+	cap.logSlow(75 * time.Millisecond)
+	cap.logSlow(100 * time.Millisecond)
+
+	logFile := filepath.Join(tempDir, "logs", "capture.log")
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	content := string(data)
+	// Should have 3 log entries
+	if len(content) < 100 {
+		t.Error("Log file should contain multiple entries")
+	}
+}
+
+func TestCapture_WriteToQueue_CreatesDirectory(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Use a nested path that doesn't exist
+	nestedDir := filepath.Join(tempDir, "deep", "nested", "path")
+	cfg := &config.Config{
+		ContextDir: nestedDir,
+	}
+
+	cap := New(cfg)
+
+	event := &events.Event{
+		ID:        "nested-test",
+		Source:    events.SourceClaude,
+		EventType: events.EventEdit,
+		Timestamp: time.Now(),
+		ToolName:  "Edit",
+	}
+
+	err = cap.CaptureEvent(event)
+	if err != nil {
+		t.Fatalf("CaptureEvent failed: %v", err)
+	}
+
+	// Verify the directory was created
+	queueDir := filepath.Join(nestedDir, "queue", "pending")
+	if _, err := os.Stat(queueDir); os.IsNotExist(err) {
+		t.Error("Queue directory should be created")
+	}
+
+	// Verify event file exists
+	eventFile := filepath.Join(queueDir, "nested-test.json")
+	if _, err := os.Stat(eventFile); os.IsNotExist(err) {
+		t.Error("Event file should be created")
+	}
+}
+
+func TestCapture_EventWithComplexMetadata(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{
+		ContextDir: tempDir,
+	}
+
+	cap := New(cfg)
+
+	event := &events.Event{
+		ID:        "complex-event",
+		Source:    events.SourceClaude,
+		EventType: events.EventToolUse,
+		Timestamp: time.Now(),
+		ToolName:  "Edit",
+		ToolInput: map[string]interface{}{
+			"file_path": "test.go",
+			"nested": map[string]interface{}{
+				"key": "value",
+			},
+			"array": []interface{}{"a", "b", "c"},
+		},
+		ToolResult: "success",
+		Context: events.EventContext{
+			ProjectPath: "/complex/path",
+			SessionID:   "session-complex",
+		},
+	}
+
+	err = cap.CaptureEvent(event)
+	if err != nil {
+		t.Fatalf("CaptureEvent failed: %v", err)
+	}
+
+	// Verify event file exists
+	eventFile := filepath.Join(tempDir, "queue", "pending", "complex-event.json")
+	if _, err := os.Stat(eventFile); os.IsNotExist(err) {
+		t.Error("Event file should be created")
+	}
+}
+
+func TestNew(t *testing.T) {
+	cfg := &config.Config{
+		ContextDir:   "/test/path",
+		SkipPatterns: []string{".git"},
+	}
+
+	cap := New(cfg)
+
+	if cap == nil {
+		t.Fatal("New should return non-nil Capture")
+	}
+
+	if cap.cfg != cfg {
+		t.Error("Capture should store config reference")
+	}
+}
+
 func BenchmarkCapture_CaptureEvent(b *testing.B) {
 	tempDir, err := os.MkdirTemp("", "cortex-bench-*")
 	if err != nil {

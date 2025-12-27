@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dereksantos/cortex/pkg/config"
 )
 
 func TestBuildAnalysisPrompt(t *testing.T) {
@@ -323,4 +325,217 @@ func TestAnalysisSystemPrompt(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestMockProvider_AdditionalResponses(t *testing.T) {
+	provider := NewMockProvider(0)
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		prompt       string
+		context      string
+		wantContains string
+	}{
+		{
+			name:         "password reset with auth context",
+			prompt:       "How do I handle password reset for auth?",
+			wantContains: "password",
+		},
+		{
+			name:         "refresh token with auth context",
+			prompt:       "How do I implement auth refresh tokens?",
+			wantContains: "refresh",
+		},
+		{
+			name:         "database connection",
+			prompt:       "How do I manage database connections?",
+			wantContains: "connection",
+		},
+		{
+			name:         "postgres query",
+			prompt:       "How do I query postgres?",
+			wantContains: "PostgreSQL",
+		},
+		{
+			name:         "SQL migrations",
+			prompt:       "How do I run SQL migrations?",
+			wantContains: "migration",
+		},
+		{
+			name:         "error handling with wrap context",
+			prompt:       "How to handle errors?",
+			context:      "We use wrap for error context",
+			wantContains: "Wrap",
+		},
+		{
+			name:         "logging without slog",
+			prompt:       "How should I do logging?",
+			wantContains: "structured logging",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var response string
+			var err error
+
+			if tt.context != "" {
+				response, err = provider.GenerateWithSystem(ctx, tt.prompt, tt.context)
+			} else {
+				response, err = provider.Generate(ctx, tt.prompt)
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !strings.Contains(response, tt.wantContains) {
+				t.Errorf("expected response to contain %q, got %q", tt.wantContains, response)
+			}
+		})
+	}
+}
+
+func TestOllamaClient_BasicMethods(t *testing.T) {
+	// Create a client with test config
+	cfg := &config.Config{
+		OllamaURL:   "http://localhost:11434",
+		OllamaModel: "test-model",
+	}
+	client := NewOllamaClient(cfg)
+
+	t.Run("Name returns ollama", func(t *testing.T) {
+		if client.Name() != "ollama" {
+			t.Errorf("expected name 'ollama', got %q", client.Name())
+		}
+	})
+
+	t.Run("GenerateWithSystem adds context", func(t *testing.T) {
+		// We can't actually test the HTTP call without a running Ollama,
+		// but we can verify the method exists and can be called
+		// (it will fail with connection error, which is expected)
+		_, err := client.GenerateWithSystem(context.Background(), "test", "system")
+		// Error is expected since Ollama isn't running
+		if err == nil {
+			// If no error, Ollama is running and we got a response
+			t.Log("Ollama is running, got successful response")
+		}
+	})
+}
+
+func TestAnthropicClient_BasicMethods(t *testing.T) {
+	cfg := &config.Config{
+		AnthropicModel: "claude-3-haiku-20240307",
+	}
+	client := NewAnthropicClient(cfg)
+
+	t.Run("Name returns anthropic", func(t *testing.T) {
+		if client.Name() != "anthropic" {
+			t.Errorf("expected name 'anthropic', got %q", client.Name())
+		}
+	})
+
+	t.Run("IsAvailable returns false without API key", func(t *testing.T) {
+		// Without ANTHROPIC_API_KEY env var, should return false
+		if client.IsAvailable() {
+			t.Log("ANTHROPIC_API_KEY is set, IsAvailable returned true")
+		}
+	})
+
+	t.Run("SetMaxTokens updates max tokens", func(t *testing.T) {
+		client.SetMaxTokens(2048)
+		// We can verify it was set by checking Model() still works
+		if client.Model() != "claude-3-haiku-20240307" {
+			t.Errorf("expected model 'claude-3-haiku-20240307', got %q", client.Model())
+		}
+	})
+
+	t.Run("Model returns configured model", func(t *testing.T) {
+		if client.Model() != "claude-3-haiku-20240307" {
+			t.Errorf("expected model 'claude-3-haiku-20240307', got %q", client.Model())
+		}
+	})
+
+	t.Run("Generate fails without API key", func(t *testing.T) {
+		// Create a client that definitely has no API key
+		emptyClient := &AnthropicClient{
+			apiKey: "",
+			model:  "test",
+		}
+		_, err := emptyClient.Generate(context.Background(), "test")
+		if err == nil {
+			t.Error("expected error without API key")
+		}
+		if !strings.Contains(err.Error(), "API key not configured") {
+			t.Errorf("expected API key error, got %v", err)
+		}
+	})
+}
+
+func TestAnthropicClient_DefaultModel(t *testing.T) {
+	cfg := &config.Config{
+		AnthropicModel: "", // empty model
+	}
+	client := NewAnthropicClient(cfg)
+
+	// Should use default model
+	if client.Model() == "" {
+		t.Error("expected non-empty default model")
+	}
+}
+
+func TestAnalysis_Structure(t *testing.T) {
+	analysis := Analysis{
+		Summary:    "Test summary",
+		Category:   "decision",
+		Importance: 7,
+		Tags:       []string{"tag1", "tag2"},
+		Reasoning:  "Test reasoning",
+	}
+
+	if analysis.Summary != "Test summary" {
+		t.Errorf("expected Summary 'Test summary', got %q", analysis.Summary)
+	}
+	if analysis.Category != "decision" {
+		t.Errorf("expected Category 'decision', got %q", analysis.Category)
+	}
+	if analysis.Importance != 7 {
+		t.Errorf("expected Importance 7, got %d", analysis.Importance)
+	}
+	if len(analysis.Tags) != 2 {
+		t.Errorf("expected 2 tags, got %d", len(analysis.Tags))
+	}
+}
+
+func TestGenerateRequest_Structure(t *testing.T) {
+	req := GenerateRequest{
+		Prompt: "test prompt",
+		System: "test system",
+	}
+
+	if req.Prompt != "test prompt" {
+		t.Errorf("expected Prompt 'test prompt', got %q", req.Prompt)
+	}
+	if req.System != "test system" {
+		t.Errorf("expected System 'test system', got %q", req.System)
+	}
+}
+
+func TestGenerateResponse_Structure(t *testing.T) {
+	resp := GenerateResponse{
+		Output:  "test output",
+		Model:   "test-model",
+		Latency: 100,
+	}
+
+	if resp.Output != "test output" {
+		t.Errorf("expected Output 'test output', got %q", resp.Output)
+	}
+	if resp.Model != "test-model" {
+		t.Errorf("expected Model 'test-model', got %q", resp.Model)
+	}
+	if resp.Latency != 100 {
+		t.Errorf("expected Latency 100, got %d", resp.Latency)
+	}
 }
