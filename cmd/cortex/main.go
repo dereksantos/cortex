@@ -17,10 +17,14 @@ import (
 	"github.com/dereksantos/cortex/integrations/claude"
 	"github.com/dereksantos/cortex/integrations/cursor"
 	"github.com/dereksantos/cortex/internal/capture"
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/cognition/sources"
 	"github.com/dereksantos/cortex/internal/eval"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -42,6 +46,8 @@ func main() {
 		handleCapture()
 	case "init":
 		handleInit()
+	case "install":
+		handleInstall()
 	case "ingest":
 		handleIngest()
 	case "analyze":
@@ -390,6 +396,214 @@ Interact with your captured development context.
 `, cortexPath)
 
 	// Write command file
+	if err := os.WriteFile(commandFile, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write command file: %w", err)
+	}
+
+	return nil
+}
+
+func handleInstall() {
+	// Get project root and home directory
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get working directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Installing Cortex for Claude Code...")
+	fmt.Println()
+
+	// 1. Detect Claude Code
+	claudeHomeDir := filepath.Join(homeDir, ".claude")
+	claudeProjectDir := filepath.Join(projectRoot, ".claude")
+
+	if _, err := os.Stat(claudeHomeDir); err != nil {
+		fmt.Println("Claude Code not detected at ~/.claude/")
+		fmt.Println("Install Claude Code first: https://claude.ai/claude-code")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Detected Claude Code at %s\n", claudeHomeDir)
+
+	// 2. Ensure .context/ directory exists
+	contextDir := filepath.Join(projectRoot, ".context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create .context directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 3. Ensure .claude/ directory exists in project
+	if err := os.MkdirAll(claudeProjectDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create .claude directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 4. Create/merge settings.local.json with hooks
+	settingsPath := filepath.Join(claudeProjectDir, "settings.local.json")
+	if err := createClaudeSettings(settingsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create settings: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Created %s with hooks\n", settingsPath)
+
+	// 5. Create slash command
+	commandsDir := filepath.Join(claudeProjectDir, "commands")
+	if err := os.MkdirAll(commandsDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create commands directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	commandFile := filepath.Join(commandsDir, "cortex.md")
+	if _, err := os.Stat(commandFile); err == nil {
+		fmt.Printf("Slash command already exists at %s\n", commandFile)
+	} else {
+		if err := createCortexCommand(commandFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create slash command: %v\n", err)
+		} else {
+			fmt.Printf("Created %s\n", commandFile)
+		}
+	}
+
+	// 6. Check LLM availability
+	fmt.Println()
+	fmt.Println("Checking LLM availability...")
+	llmStatus := intllm.DetectLLM()
+
+	if llmStatus.Available {
+		if llmStatus.Provider == "ollama" {
+			fmt.Printf("Ollama installed at %s\n", llmStatus.OllamaPath)
+			fmt.Printf("Model %s available (recommended for Cortex)\n", llmStatus.Model)
+		} else if llmStatus.Provider == "anthropic" {
+			fmt.Println("Anthropic API key configured")
+			if llmStatus.OllamaInstalled {
+				fmt.Printf("Ollama also installed at %s\n", llmStatus.OllamaPath)
+				if len(llmStatus.OllamaModels) > 0 {
+					fmt.Printf("Ollama models available: %s\n", strings.Join(llmStatus.OllamaModels, ", "))
+				}
+			}
+		}
+	} else if llmStatus.OllamaInstalled {
+		fmt.Printf("Ollama installed at %s\n", llmStatus.OllamaPath)
+		fmt.Println("No suitable model found")
+		fmt.Println()
+		fmt.Println("Cortex works best with a local model for background processing.")
+		fmt.Println("Install one with:")
+		fmt.Println("  ollama pull qwen2.5:3b    (3GB, recommended)")
+		fmt.Println("  ollama pull qwen2.5:0.5b  (500MB, lightweight)")
+		fmt.Println()
+		fmt.Println("Or set ANTHROPIC_API_KEY for Claude API usage.")
+	} else {
+		fmt.Println("No local LLM found")
+		fmt.Println()
+		fmt.Println("For full functionality, install Ollama:")
+		fmt.Println("  brew install ollama && ollama pull qwen2.5:3b")
+		fmt.Println()
+		fmt.Println("Or set ANTHROPIC_API_KEY for Claude API usage.")
+	}
+
+	if !llmStatus.Available {
+		fmt.Println()
+		fmt.Println("Without an LLM, Cortex will run in mechanical-only mode (Reflex).")
+	}
+
+	fmt.Println()
+	fmt.Println("Installation complete!")
+	fmt.Println()
+	fmt.Println("Run `claude` to start a session with Cortex enabled.")
+}
+
+func createClaudeSettings(settingsPath string) error {
+	// Read existing settings or create new
+	var settings map[string]interface{}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		// File doesn't exist, create new settings
+		settings = make(map[string]interface{})
+	} else {
+		// Parse existing settings
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("failed to parse existing settings: %w", err)
+		}
+	}
+
+	// Configure hooks (preserve existing ones if needed)
+	hooks := map[string]interface{}{
+		"SessionStart": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": "./cortex session-start",
+					},
+				},
+			},
+		},
+		"UserPromptSubmit": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": "./cortex inject-context",
+					},
+				},
+			},
+		},
+		"PostToolUse": []interface{}{
+			map[string]interface{}{
+				"matcher": "Write|Edit|Bash",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": "./cortex capture",
+					},
+				},
+			},
+		},
+	}
+
+	// Configure status line
+	statusLine := map[string]interface{}{
+		"type":    "command",
+		"command": "./cortex status --format=claude",
+	}
+
+	settings["hooks"] = hooks
+	settings["statusLine"] = statusLine
+
+	// Write settings
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		return fmt.Errorf("failed to write settings: %w", err)
+	}
+
+	return nil
+}
+
+func createCortexCommand(commandFile string) error {
+	content := `---
+description: Query Cortex context memory
+argument-hint: "<query>"
+allowed-tools: Bash(./cortex:*)
+---
+
+Search Cortex for relevant context:
+
+./cortex search "$ARGUMENTS"
+
+If results are found, summarize the relevant insights, decisions, and patterns.
+`
+
 	if err := os.WriteFile(commandFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write command file: %w", err)
 	}
@@ -1086,7 +1300,7 @@ func handleEval() {
 		cognitionScenarios, _ := eval.LoadCognitionScenarios(scenarioDir)
 		if len(cognitionScenarios) > 0 {
 			// Cognition mode: test cognitive modes
-			runCognitionEvals(cognitionScenarios, verbose, outputFormat)
+			runCognitionEvals(cognitionScenarios, verbose, outputFormat, dryRun, provider, cfg)
 			return
 		}
 
@@ -1128,10 +1342,109 @@ func handleEval() {
 }
 
 // runCognitionEvals runs cognition-specific evaluations
-func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, outputFormat string) {
-	// Create mock Cortex for evals (real implementation would use actual Cortex)
-	mock := eval.NewMockCortex()
-	evaluator := eval.NewCognitionEvaluator(mock)
+func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, outputFormat string, dryRun bool, provider llm.Provider, cfg *config.Config) {
+	var cortex cognition.Cortex
+
+	if dryRun {
+		// Mock mode: use MockCortex with test corpus
+		mock := eval.NewMockCortex()
+		corpusPath := "test/evals/corpus/cognition_corpus.yaml"
+		if _, err := mock.WithCorpus(corpusPath); err != nil {
+			if verbose {
+				fmt.Printf("Note: Could not load corpus from %s: %v\n", corpusPath, err)
+			}
+		}
+		cortex = mock
+		if verbose {
+			fmt.Println("Using MockCortex (--dry-run mode)")
+		}
+	} else {
+		// Real mode: use actual Cortex with storage and LLM
+		// Ensure ContextDir is valid, create temp if needed
+		if cfg.ContextDir == "" {
+			tmpDir, err := os.MkdirTemp("", "cortex-eval-*")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create temp directory: %v\n", err)
+				os.Exit(1)
+			}
+			cfg.ContextDir = tmpDir
+			if verbose {
+				fmt.Printf("Using temp storage: %s\n", tmpDir)
+			}
+		}
+		if err := cfg.EnsureDirectories(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create directories: %v\n", err)
+			os.Exit(1)
+		}
+
+		store, err := storage.New(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+
+		// Seed storage with test corpus for evals
+		corpusPath := "test/evals/corpus/cognition_corpus.yaml"
+		corpus, err := eval.LoadCorpusFile(corpusPath)
+		if err != nil {
+			if verbose {
+				fmt.Printf("Note: Could not load corpus from %s: %v\n", corpusPath, err)
+			}
+		} else {
+			seeded := 0
+			for _, item := range corpus.Results {
+				// Convert score (0-1) to importance (1-10)
+				importance := int(item.Score * 10)
+				if importance < 1 {
+					importance = 1
+				}
+				if importance > 10 {
+					importance = 10
+				}
+
+				// Parse timestamp if provided, otherwise use a default "old" timestamp
+				// so items with explicit timestamps can be tested for recency ordering
+				var timestamp time.Time
+				if item.Timestamp != "" {
+					timestamp, _ = time.Parse(time.RFC3339, item.Timestamp)
+				} else {
+					// Default to 6 months ago for items without timestamps
+					// This ensures they don't dominate recency scoring
+					timestamp = time.Now().AddDate(0, -6, 0)
+				}
+
+				// Store as insight with timestamp (Reflex searches insights)
+				err := store.StoreInsightWithTimestamp(
+					item.ID,       // eventID (use corpus ID as reference)
+					item.Category, // category
+					item.Content,  // summary
+					importance,    // importance
+					item.Tags,     // tags
+					"",            // reasoning
+					timestamp,     // timestamp from corpus
+				)
+				if err == nil {
+					seeded++
+				}
+			}
+			if verbose {
+				fmt.Printf("Seeded storage with %d corpus items\n", seeded)
+			}
+		}
+
+		realCortex, err := intcognition.New(store, provider, cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create Cortex: %v\n", err)
+			os.Exit(1)
+		}
+		cortex = realCortex
+		if verbose {
+			fmt.Printf("Using real Cortex (provider: %s)\n", provider.Name())
+		}
+	}
+
+	evaluator := eval.NewCognitionEvaluator(cortex)
 	evaluator.SetVerbose(verbose)
 
 	ctx := context.Background()
@@ -1266,9 +1579,111 @@ func handleStats() {
 }
 
 func handleStatus() {
-	// Simple status line for now
-	// Future: check daemon running, queue size, etc.
+	// Parse flags - handle both --format=value and --format value
+	format := ""
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--format=") {
+			format = strings.TrimPrefix(arg, "--format=")
+			break
+		}
+		if arg == "--format" && i+1 < len(os.Args) {
+			format = os.Args[i+1]
+			break
+		}
+	}
+
+	if format == "claude" {
+		handleClaudeStatus()
+		return
+	}
+
+	// Simple status line for default format
 	fmt.Print("🤖🧠💡")
+}
+
+func handleClaudeStatus() {
+	// Read JSON from stdin (Claude Code context)
+	var claudeContext map[string]interface{}
+	data, err := io.ReadAll(os.Stdin)
+	if err == nil && len(data) > 0 {
+		json.Unmarshal(data, &claudeContext)
+	}
+
+	// Try to load config and get current state
+	cfg, err := loadConfig()
+	if err != nil {
+		// Not initialized yet
+		fmt.Print("◌ Not initialized")
+		return
+	}
+
+	// Open storage to check for data
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Print("◌ No data")
+		return
+	}
+	defer store.Close()
+
+	// Get stats
+	stats, err := store.GetStats()
+	if err != nil {
+		fmt.Print("● Ready")
+		return
+	}
+
+	totalEvents := 0
+	if val, ok := stats["total_events"].(int); ok {
+		totalEvents = val
+	}
+
+	totalInsights := 0
+	if val, ok := stats["total_insights"].(int); ok {
+		totalInsights = val
+	}
+
+	// Determine current mode based on activity
+	// For now, use simple heuristic - check if recent events exist
+	mode := "Ready"
+	spinner := "●"
+
+	if totalEvents == 0 && totalInsights == 0 {
+		mode = "Cold start"
+		spinner = "◌"
+	} else {
+		// Check for recent activity
+		recentEvents, _ := store.GetRecentEvents(5)
+		if len(recentEvents) > 0 {
+			lastEvent := recentEvents[0]
+			timeSince := time.Since(lastEvent.Timestamp)
+
+			if timeSince < 30*time.Second {
+				// Very recent activity
+				mode = "Processing"
+				spinner = getAnimatedSpinner()
+			} else if timeSince < 5*time.Minute {
+				mode = "Active"
+				spinner = "◐"
+			}
+		}
+	}
+
+	// Format output: {spinner} {mode}: {description}
+	if totalEvents > 0 || totalInsights > 0 {
+		fmt.Printf("%s %s: %d events, %d insights", spinner, mode, totalEvents, totalInsights)
+	} else {
+		fmt.Printf("%s %s", spinner, mode)
+	}
+}
+
+// getAnimatedSpinner returns a spinner character based on current time
+// This creates the animation effect when called repeatedly
+func getAnimatedSpinner() string {
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	// Use milliseconds to cycle through spinners
+	idx := (time.Now().UnixMilli() / 250) % 4
+	return spinners[idx]
 }
 
 func handleSearch() {
@@ -1754,40 +2169,43 @@ func handleInjectContext() {
 	}
 	defer store.Close()
 
-	// Search for relevant context (simple keyword search for now)
-	// Extract key terms from prompt (basic approach)
-	query := extractKeyTerms(prompt)
-	if query == "" {
-		// No meaningful terms, just return original prompt
+	// Initialize LLM provider (optional - Reflect will degrade gracefully if nil)
+	var llmProvider llm.Provider
+	anthropic := llm.NewAnthropicClient(cfg)
+	if anthropic.IsAvailable() {
+		llmProvider = anthropic
+	}
+
+	// Create Cortex cognitive pipeline
+	cortex, err := intcognition.New(store, llmProvider, cfg)
+	if err != nil {
+		// Fallback to just printing the prompt
 		fmt.Println(prompt)
 		os.Exit(0)
 	}
 
-	// Search for relevant insights
-	insights, err := store.GetRecentInsights(50)
-	if err != nil || len(insights) == 0 {
-		// No insights available
+	// Register dream sources for background exploration
+	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+	cortex.RegisterSource(sources.NewCortexSource(store))
+
+	// Build query
+	query := cognition.Query{
+		Text:      prompt,
+		Limit:     5,
+		Threshold: 0.3,
+	}
+
+	// Use Fast mode for quick response during active sessions
+	// First message in a session could use Full mode for higher accuracy
+	result, err := cortex.Retrieve(context.Background(), query, cognition.Fast)
+	if err != nil || result.Decision != cognition.Inject {
+		// No relevant context or decision to skip injection
 		fmt.Println(prompt)
 		os.Exit(0)
 	}
 
-	// Find top 2 most relevant insights (simple text matching)
-	relevant := findRelevantInsights(insights, query, 2)
-	if len(relevant) == 0 {
-		// No relevant context found
-		fmt.Println(prompt)
-		os.Exit(0)
-	}
-
-	// Inject context before the prompt
-	fmt.Println("📚 Relevant Context from Cortex:")
-	for i, insight := range relevant {
-		fmt.Printf("%d. [%s] %s\n", i+1, insight.Category, insight.Summary)
-		if len(insight.Tags) > 0 {
-			fmt.Printf("   Tags: %v\n", insight.Tags)
-		}
-	}
-	fmt.Println()
+	// Output formatted context + original prompt
+	fmt.Print(result.Formatted)
 	fmt.Println("User Request:")
 	fmt.Println(prompt)
 }
@@ -1959,6 +2377,7 @@ Usage:
 
 Commands:
   init           Initialize Cortex in current directory
+  install        Install Cortex hooks for Claude Code
   info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 
