@@ -48,6 +48,8 @@ func main() {
 		handleInit()
 	case "install":
 		handleInstall()
+	case "uninstall":
+		handleUninstall()
 	case "ingest":
 		handleIngest()
 	case "analyze":
@@ -609,6 +611,264 @@ If results are found, summarize the relevant insights, decisions, and patterns.
 	}
 
 	return nil
+}
+
+func handleUninstall() {
+	// Get project root
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get working directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Parse flags
+	purge := false
+	for i := 2; i < len(os.Args); i++ {
+		if os.Args[i] == "--purge" {
+			purge = true
+		}
+	}
+
+	fmt.Println("Uninstalling Cortex...")
+	fmt.Println()
+
+	removedSomething := false
+
+	// 1. Remove Cortex hooks from .claude/settings.local.json
+	claudeProjectDir := filepath.Join(projectRoot, ".claude")
+	settingsPath := filepath.Join(claudeProjectDir, "settings.local.json")
+
+	settingsRemoved, err := removeCortexFromSettings(settingsPath)
+	if err != nil {
+		fmt.Printf("Warning: Could not modify settings: %v\n", err)
+	} else if settingsRemoved {
+		fmt.Println("Removed Cortex hooks from .claude/settings.local.json")
+		removedSomething = true
+	}
+
+	// 2. Remove .claude/commands/cortex.md
+	commandFile := filepath.Join(claudeProjectDir, "commands", "cortex.md")
+	if _, err := os.Stat(commandFile); err == nil {
+		if err := os.Remove(commandFile); err != nil {
+			fmt.Printf("Warning: Could not remove slash command: %v\n", err)
+		} else {
+			fmt.Println("Removed .claude/commands/cortex.md")
+			removedSomething = true
+		}
+
+		// Try to remove commands directory if empty
+		commandsDir := filepath.Join(claudeProjectDir, "commands")
+		if isEmpty, _ := isDirEmpty(commandsDir); isEmpty {
+			os.Remove(commandsDir)
+		}
+	}
+
+	// Try to remove .claude directory if empty (only if we created it)
+	if isEmpty, _ := isDirEmpty(claudeProjectDir); isEmpty {
+		os.Remove(claudeProjectDir)
+	}
+
+	// 3. Handle .context/ directory
+	contextDir := filepath.Join(projectRoot, ".context")
+	if _, err := os.Stat(contextDir); err == nil {
+		if purge {
+			// Count events and insights before removal
+			eventCount, insightCount := countContextData(contextDir)
+
+			if err := os.RemoveAll(contextDir); err != nil {
+				fmt.Printf("Warning: Could not remove .context/: %v\n", err)
+			} else {
+				if eventCount > 0 || insightCount > 0 {
+					fmt.Printf("Removed .context/ directory (%d events, %d insights deleted)\n", eventCount, insightCount)
+				} else {
+					fmt.Println("Removed .context/ directory")
+				}
+				removedSomething = true
+			}
+		} else {
+			fmt.Println("Kept .context/ data (use --purge to remove)")
+		}
+	}
+
+	// Summary
+	fmt.Println()
+	if removedSomething {
+		if purge {
+			fmt.Println("Cortex has been completely removed from this project.")
+		} else {
+			fmt.Println("Cortex has been uninstalled from this project.")
+		}
+	} else {
+		fmt.Println("Nothing to uninstall.")
+	}
+}
+
+// removeCortexFromSettings removes Cortex-specific hooks and statusLine from settings
+// Returns true if anything was removed
+func removeCortexFromSettings(settingsPath string) (bool, error) {
+	// Read existing settings
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // File doesn't exist, nothing to remove
+		}
+		return false, fmt.Errorf("failed to read settings: %w", err)
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return false, fmt.Errorf("failed to parse settings: %w", err)
+	}
+
+	modified := false
+
+	// Remove hooks that contain "./cortex" commands
+	if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
+		cleanedHooks := cleanCortexHooks(hooks)
+		if len(cleanedHooks) == 0 {
+			delete(settings, "hooks")
+			modified = true
+		} else if len(cleanedHooks) != len(hooks) {
+			settings["hooks"] = cleanedHooks
+			modified = true
+		}
+	}
+
+	// Remove statusLine if it's a Cortex command
+	if statusLine, ok := settings["statusLine"].(map[string]interface{}); ok {
+		if cmd, ok := statusLine["command"].(string); ok {
+			if strings.Contains(cmd, "cortex") {
+				delete(settings, "statusLine")
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return false, nil
+	}
+
+	// If settings is now empty or only has trivial content, delete the file
+	if len(settings) == 0 {
+		if err := os.Remove(settingsPath); err != nil {
+			return true, fmt.Errorf("failed to remove empty settings file: %w", err)
+		}
+		return true, nil
+	}
+
+	// Write updated settings
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return true, fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		return true, fmt.Errorf("failed to write settings: %w", err)
+	}
+
+	return true, nil
+}
+
+// cleanCortexHooks removes hook entries that contain "./cortex" or "cortex" commands
+func cleanCortexHooks(hooks map[string]interface{}) map[string]interface{} {
+	cleaned := make(map[string]interface{})
+
+	for hookType, hookValue := range hooks {
+		// Each hook type (e.g., "PostToolUse") has an array of hook groups
+		hookGroups, ok := hookValue.([]interface{})
+		if !ok {
+			// Keep non-array values as-is
+			cleaned[hookType] = hookValue
+			continue
+		}
+
+		var cleanedGroups []interface{}
+		for _, group := range hookGroups {
+			groupMap, ok := group.(map[string]interface{})
+			if !ok {
+				cleanedGroups = append(cleanedGroups, group)
+				continue
+			}
+
+			// Check if this group's hooks contain cortex commands
+			groupHooks, ok := groupMap["hooks"].([]interface{})
+			if !ok {
+				cleanedGroups = append(cleanedGroups, group)
+				continue
+			}
+
+			// Filter out cortex hooks
+			var cleanedGroupHooks []interface{}
+			for _, hook := range groupHooks {
+				hookMap, ok := hook.(map[string]interface{})
+				if !ok {
+					cleanedGroupHooks = append(cleanedGroupHooks, hook)
+					continue
+				}
+
+				// Check command field
+				if cmd, ok := hookMap["command"].(string); ok {
+					if strings.Contains(cmd, "cortex") {
+						// Skip this hook (it's a Cortex hook)
+						continue
+					}
+				}
+				cleanedGroupHooks = append(cleanedGroupHooks, hook)
+			}
+
+			// If all hooks in this group were cortex hooks, skip the entire group
+			if len(cleanedGroupHooks) > 0 {
+				groupMap["hooks"] = cleanedGroupHooks
+				cleanedGroups = append(cleanedGroups, groupMap)
+			}
+		}
+
+		// Only keep hook type if it has remaining groups
+		if len(cleanedGroups) > 0 {
+			cleaned[hookType] = cleanedGroups
+		}
+	}
+
+	return cleaned
+}
+
+// isDirEmpty checks if a directory is empty
+func isDirEmpty(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) == 0, nil
+}
+
+// countContextData counts events and insights in the context directory
+func countContextData(contextDir string) (events int, insights int) {
+	// Try to load config and storage to get accurate counts
+	configPath := filepath.Join(contextDir, "config.json")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return 0, 0
+	}
+
+	store, err := storage.New(cfg)
+	if err != nil {
+		return 0, 0
+	}
+	defer store.Close()
+
+	stats, err := store.GetStats()
+	if err != nil {
+		return 0, 0
+	}
+
+	if val, ok := stats["total_events"].(int); ok {
+		events = val
+	}
+	if val, ok := stats["total_insights"].(int); ok {
+		insights = val
+	}
+
+	return events, insights
 }
 
 // handleIngest moves events from queue to database (no analysis)
@@ -2378,6 +2638,7 @@ Usage:
 Commands:
   init           Initialize Cortex in current directory
   install        Install Cortex hooks for Claude Code
+  uninstall      Remove Cortex hooks (--purge to also delete .context/)
   info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 
