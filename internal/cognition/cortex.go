@@ -161,3 +161,9 @@ func (c *Cortex) Insights() <-chan cognition.Result {
 func (c *Cortex) ProactiveQueue() []cognition.Result {
 	return c.dream.ProactiveQueue()
 }
+
+// SetStateWriter sets the state writer for all cognitive modes.
+func (c *Cortex) SetStateWriter(sw *StateWriter) {
+	c.think.SetStateWriter(sw)
+	c.dream.SetStateWriter(sw)
+}

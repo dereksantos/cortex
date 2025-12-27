@@ -26,6 +26,9 @@ type Think struct {
 
 	// State
 	running bool
+
+	// State writer for daemon status updates
+	stateWriter *StateWriter
 }
 
 // NewThink creates a new Think instance.
@@ -45,6 +48,13 @@ func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Thin
 	}
 }
 
+// SetStateWriter sets the state writer for daemon status updates.
+func (t *Think) SetStateWriter(sw *StateWriter) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.stateWriter = sw
+}
+
 // MaybeThink attempts background processing if spare capacity exists.
 func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) {
 	// Check preconditions
@@ -58,12 +68,23 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 		return &cognition.ThinkResult{Status: cognition.ThinkSkippedIdle}, nil
 	}
 	t.running = true
+	stateWriter := t.stateWriter
 	t.mu.Unlock()
+
+	// Write state on start
+	if stateWriter != nil {
+		stateWriter.WriteMode("think", "learning session patterns")
+	}
 
 	defer func() {
 		t.mu.Lock()
 		t.running = false
 		t.mu.Unlock()
+
+		// Write idle state on completion
+		if stateWriter != nil {
+			stateWriter.WriteMode("idle", "")
+		}
 	}()
 
 	start := time.Now()

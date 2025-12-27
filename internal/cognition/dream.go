@@ -56,6 +56,9 @@ type Dream struct {
 	lastDream      time.Time
 	insightsChan   chan cognition.Result
 	proactiveQueue []cognition.Result
+
+	// State writer for daemon status updates
+	stateWriter *StateWriter
 }
 
 // NewDream creates a new Dream instance.
@@ -74,6 +77,13 @@ func (d *Dream) RegisterSource(source cognition.DreamSource) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sources = append(d.sources, source)
+}
+
+// SetStateWriter sets the state writer for daemon status updates.
+func (d *Dream) SetStateWriter(sw *StateWriter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stateWriter = sw
 }
 
 // MaybeDream attempts exploration if the system is idle.
@@ -102,13 +112,24 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 	}
 
 	d.running = true
+	stateWriter := d.stateWriter
 	d.mu.Unlock()
+
+	// Write state on start
+	if stateWriter != nil {
+		stateWriter.WriteMode("dream", "exploring project files")
+	}
 
 	defer func() {
 		d.mu.Lock()
 		d.running = false
 		d.lastDream = time.Now()
 		d.mu.Unlock()
+
+		// Write idle state on completion
+		if stateWriter != nil {
+			stateWriter.WriteMode("idle", "")
+		}
 	}()
 
 	start := time.Now()

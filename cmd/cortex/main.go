@@ -1987,6 +1987,12 @@ func handleDaemon() {
 		// Continue without cognitive features
 	}
 
+	// Create state writer for real-time cognitive mode status
+	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
+	if cortex != nil {
+		cortex.SetStateWriter(stateWriter)
+	}
+
 	// Load persisted session
 	sessionPersister := intcognition.NewSessionPersister(cfg.ContextDir)
 	persistedSession, err := sessionPersister.Load()
@@ -2010,6 +2016,7 @@ func handleDaemon() {
 	fmt.Println("🤖 Cortex daemon started")
 	fmt.Println("   Processing events every 5 seconds...")
 	fmt.Println("   Session persisted every 30 seconds...")
+	fmt.Println("   Status updates every 2 seconds...")
 	fmt.Println("   Press Ctrl+C to stop")
 
 	// Set up signal handling for graceful shutdown
@@ -2020,10 +2027,20 @@ func handleDaemon() {
 	saveTicker := time.NewTicker(30 * time.Second)
 	defer saveTicker.Stop()
 
+	// Periodic state update ticker for stats
+	stateTicker := time.NewTicker(2 * time.Second)
+	defer stateTicker.Stop()
+
+	// Write initial state
+	updateDaemonStats(store, stateWriter)
+
 	// Main daemon loop
 	done := false
 	for !done {
 		select {
+		case <-stateTicker.C:
+			// Periodic state update with current stats
+			updateDaemonStats(store, stateWriter)
 		case <-saveTicker.C:
 			// Periodic session save
 			if cortex != nil {
@@ -2048,8 +2065,36 @@ func handleDaemon() {
 		}
 	}
 
+	// Clean up state file
+	stateWriter.WriteMode("idle", "")
+
 	proc.Stop()
 	fmt.Println("✅ Daemon stopped")
+}
+
+// updateDaemonStats updates the daemon state file with current stats.
+func updateDaemonStats(store *storage.Storage, stateWriter *intcognition.StateWriter) {
+	if store == nil || stateWriter == nil {
+		return
+	}
+
+	stats, err := store.GetStats()
+	if err != nil {
+		return
+	}
+
+	totalEvents := 0
+	if val, ok := stats["total_events"].(int); ok {
+		totalEvents = val
+	}
+
+	totalInsights := 0
+	if val, ok := stats["total_insights"].(int); ok {
+		totalInsights = val
+	}
+
+	// Write idle state with stats (cognitive modes will override when active)
+	stateWriter.WriteModeWithStats("idle", "", totalEvents, totalInsights)
 }
 
 func handleStats() {
@@ -2120,6 +2165,22 @@ func handleClaudeStatus() {
 		return
 	}
 
+	// Check for daemon state file first (real-time cognitive mode status)
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	daemonState, _ := intcognition.ReadDaemonState(statePath)
+
+	// If we have fresh daemon state, use it
+	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
+		spinner := getModeSpinner(daemonState.Mode)
+		modeName := getModeDisplayName(daemonState.Mode)
+		desc := daemonState.Description
+		if desc == "" {
+			desc = getDefaultModeDescription(daemonState.Mode)
+		}
+		fmt.Printf("%s %s: %s", spinner, modeName, desc)
+		return
+	}
+
 	// Open storage to check for data
 	store, err := storage.New(cfg)
 	if err != nil {
@@ -2145,8 +2206,13 @@ func handleClaudeStatus() {
 		totalInsights = val
 	}
 
+	// If daemon state has stats, prefer those (more recent)
+	if daemonState != nil && (daemonState.Stats.Events > 0 || daemonState.Stats.Insights > 0) {
+		totalEvents = daemonState.Stats.Events
+		totalInsights = daemonState.Stats.Insights
+	}
+
 	// Determine current mode based on activity
-	// For now, use simple heuristic - check if recent events exist
 	mode := "Ready"
 	spinner := "●"
 
@@ -2176,6 +2242,70 @@ func handleClaudeStatus() {
 		fmt.Printf("%s %s: %d events, %d insights", spinner, mode, totalEvents, totalInsights)
 	} else {
 		fmt.Printf("%s %s", spinner, mode)
+	}
+}
+
+// getModeSpinner returns the appropriate spinner for a cognitive mode.
+func getModeSpinner(mode string) string {
+	switch mode {
+	case "think":
+		return getThinkSpinner()
+	case "dream":
+		return getDreamSpinner()
+	case "reflex", "reflect", "resolve":
+		return "◑"
+	default:
+		return "●"
+	}
+}
+
+// getThinkSpinner returns an animated spinner for Think mode.
+func getThinkSpinner() string {
+	spinners := []string{"◐", "◓", "◑", "◒"}
+	idx := (time.Now().UnixMilli() / 250) % 4
+	return spinners[idx]
+}
+
+// getDreamSpinner returns an animated spinner for Dream mode.
+func getDreamSpinner() string {
+	spinners := []string{"◒", "◐", "◓", "◑"}
+	idx := (time.Now().UnixMilli() / 250) % 4
+	return spinners[idx]
+}
+
+// getModeDisplayName returns the display name for a cognitive mode.
+func getModeDisplayName(mode string) string {
+	switch mode {
+	case "think":
+		return "Think"
+	case "dream":
+		return "Dream"
+	case "reflex":
+		return "Reflex"
+	case "reflect":
+		return "Reflect"
+	case "resolve":
+		return "Resolve"
+	default:
+		return "Ready"
+	}
+}
+
+// getDefaultModeDescription returns the default description for a mode.
+func getDefaultModeDescription(mode string) string {
+	switch mode {
+	case "think":
+		return "learning session patterns"
+	case "dream":
+		return "exploring project files"
+	case "reflex":
+		return "searching context"
+	case "reflect":
+		return "reranking results"
+	case "resolve":
+		return "deciding injection"
+	default:
+		return ""
 	}
 }
 
