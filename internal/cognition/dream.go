@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 
 	start := time.Now()
 	budget := d.activity.DreamBudget(d.config.MinBudget, d.config.MaxBudget, d.config.GrowthDuration)
+	log.Printf("Dream: starting (budget: %d, sources: %d)", budget, len(d.sources))
 	ops := 0
 	insights := 0
 
@@ -189,6 +191,8 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 			ops++
 		}
 	}
+
+	log.Printf("Dream: completed (%d ops, %d insights, %v)", ops, insights, time.Since(start))
 
 	return &cognition.DreamResult{
 		Status:     cognition.DreamRan,

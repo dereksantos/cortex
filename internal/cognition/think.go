@@ -2,6 +2,7 @@ package cognition
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -89,6 +90,7 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 
 	start := time.Now()
 	budget := t.activity.ThinkBudget(t.config.MinBudget, t.config.MaxBudget)
+	log.Printf("Think: starting (budget: %d)", budget)
 	ops := 0
 
 	// Operation 1: Update topic weights from recent queries
@@ -109,6 +111,8 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 	t.mu.Lock()
 	t.sessionCtx.LastUpdated = time.Now()
 	t.mu.Unlock()
+
+	log.Printf("Think: completed (%d ops, %v)", ops, time.Since(start))
 
 	return &cognition.ThinkResult{
 		Status:     cognition.ThinkRan,

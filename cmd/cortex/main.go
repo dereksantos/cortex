@@ -2816,6 +2816,10 @@ func handleInjectContext() {
 		os.Exit(0)
 	}
 
+	// Create state writer for status updates (shared with daemon)
+	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
+	cortex.SetStateWriter(stateWriter)
+
 	// Register dream sources for background exploration
 	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
 	cortex.RegisterSource(sources.NewCortexSource(store))
