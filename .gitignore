@@ -225,3 +225,4 @@ dist/
 *.exe
 *.tar.gz
 *.zip
+.claude/
