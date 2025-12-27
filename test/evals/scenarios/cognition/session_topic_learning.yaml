@@ -1,0 +1,39 @@
+id: session-topic-learning
+type: session
+name: "Think learns session topics"
+description: "Verify that Think accumulates TopicWeights from session activity"
+
+session_steps:
+  - id: step1
+    query:
+      text: "How does authentication work?"
+      limit: 5
+    expected_result_ids: ["auth_module", "jwt_handler"]
+
+  - id: step2
+    query:
+      text: "Show me the login flow"
+      limit: 5
+    expect_topic_weights:
+      authentication: 0.5
+      login: 0.4
+
+  - id: step3
+    query:
+      text: "What about session tokens?"
+      limit: 5
+    expect_topic_weights:
+      authentication: 0.6
+      session: 0.4
+      tokens: 0.4
+    expect_quality_vs_full: ">= 0.8"
+
+  - id: step4
+    query:
+      text: "How do we validate JWT claims?"
+      limit: 5
+    expect_topic_weights:
+      authentication: 0.7
+      jwt: 0.5
+      validate: 0.4
+    expect_quality_vs_full: ">= 0.85"

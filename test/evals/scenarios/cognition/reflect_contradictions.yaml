@@ -1,0 +1,61 @@
+id: reflect-contradictions
+type: mode
+name: "Reflect contradiction detection"
+description: "Test that Reflect identifies contradicting information"
+mode: reflect
+
+mode_tests:
+  - id: testing-framework-conflict
+    input:
+      query:
+        text: "What testing library should I use?"
+      candidates:
+        - id: "stdlib_testing"
+          content: "Using t.Errorf for assertions, no external libs"
+          category: "pattern"
+          score: 0.7
+        - id: "testify_mention"
+          content: "Consider testify/assert for cleaner assertions"
+          category: "insight"
+          score: 0.6
+    expected:
+      top_result_ids: ["stdlib_testing", "testify_mention"]
+      contradictions_found: ["stdlib_testing", "testify_mention"]
+
+  - id: api-version-conflict
+    input:
+      query:
+        text: "What API version are we using?"
+      candidates:
+        - id: "api_v1"
+          content: "API v1 with REST endpoints"
+          category: "pattern"
+          score: 0.6
+        - id: "api_v2"
+          content: "Migrating to API v2 with GraphQL"
+          category: "decision"
+          score: 0.7
+        - id: "api_decision"
+          content: "Decision: Use v2 for new endpoints"
+          category: "decision"
+          score: 0.5
+    expected:
+      top_result_ids: ["api_decision", "api_v2"]
+      contradictions_found: ["api_v1", "api_v2"]
+
+  - id: database-config-conflict
+    input:
+      query:
+        text: "How is the database configured?"
+      candidates:
+        - id: "db_config_v1"
+          content: "Database config v1: embedded SQLite only"
+          category: "decision"
+          score: 0.5
+        - id: "db_config_v2"
+          content: "Database config v2: SQLite + PostgreSQL option"
+          category: "decision"
+          score: 0.7
+    expected:
+      top_result_ids: ["db_config_v2", "db_config_v1"]
+      contradictions_found: ["db_config_v1", "db_config_v2"]

@@ -540,15 +540,31 @@ type Insight struct {
 
 // StoreInsight stores an insight from LLM analysis
 func (s *Storage) StoreInsight(eventID, category, summary string, importance int, tags []string, reasoning string) error {
+	return s.StoreInsightWithTimestamp(eventID, category, summary, importance, tags, reasoning, time.Time{})
+}
+
+// StoreInsightWithTimestamp stores an insight with a specific timestamp
+func (s *Storage) StoreInsightWithTimestamp(eventID, category, summary string, importance int, tags []string, reasoning string, timestamp time.Time) error {
 	tagsJSON, _ := json.Marshal(tags)
 
-	_, err := s.db.Exec(`
-		INSERT INTO insights (event_id, category, summary, importance, tags, reasoning)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, eventID, category, summary, importance, string(tagsJSON), reasoning)
-
-	if err != nil {
-		return fmt.Errorf("failed to store insight: %w", err)
+	if timestamp.IsZero() {
+		// Use default (current time via SQLite)
+		_, err := s.db.Exec(`
+			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, eventID, category, summary, importance, string(tagsJSON), reasoning)
+		if err != nil {
+			return fmt.Errorf("failed to store insight: %w", err)
+		}
+	} else {
+		// Use provided timestamp
+		_, err := s.db.Exec(`
+			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, eventID, category, summary, importance, string(tagsJSON), reasoning, timestamp)
+		if err != nil {
+			return fmt.Errorf("failed to store insight with timestamp: %w", err)
+		}
 	}
 
 	return nil

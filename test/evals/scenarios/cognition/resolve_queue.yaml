@@ -1,0 +1,45 @@
+id: resolve-queue
+type: mode
+name: "Resolve queue decision"
+description: "Test when Resolve queues for next hook opportunity"
+mode: resolve
+
+mode_tests:
+  - id: proactive-constraint
+    input:
+      query:
+        text: "Adding a new endpoint"
+      results:
+        - id: "middleware_pattern"
+          content: "All endpoints need AuthMiddleware"
+          category: "constraint"
+          score: 0.7
+    expected:
+      decision: queue
+      min_confidence: 0.5
+
+  - id: discovered-pattern
+    input:
+      query:
+        text: "Writing new handler"
+      results:
+        - id: "handler_pattern"
+          content: "Handlers return (T, error) not just error"
+          category: "constraint"
+          score: 0.65
+    expected:
+      decision: queue
+      min_confidence: 0.5
+
+  - id: related-insight
+    input:
+      query:
+        text: "Implementing authentication check"
+      results:
+        - id: "token_validation"
+          content: "Token validation via AuthMiddleware with Bearer scheme"
+          category: "pattern"
+          score: 0.68
+    expected:
+      decision: queue
+      min_confidence: 0.5

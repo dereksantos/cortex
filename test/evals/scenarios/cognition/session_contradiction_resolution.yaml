@@ -1,0 +1,36 @@
+id: session-contradiction-resolution
+type: session
+name: "Think resolves contradictions proactively"
+description: "Verify that Think detects and resolves contradictions for fast retrieval"
+
+session_steps:
+  - id: step1
+    query:
+      text: "What testing framework do we use?"
+      limit: 5
+    # First query sees potential conflict
+    expected_result_ids: ["stdlib_testing", "testify_mention"]
+
+  - id: step2
+    query:
+      text: "Show me test examples"
+      limit: 5
+    # Think should have started resolving the conflict
+    expect_contradiction_resolved: "stdlib_testing"
+    expect_quality_vs_full: ">= 0.8"
+
+  - id: step3
+    query:
+      text: "How do I write assertions?"
+      limit: 5
+    # Contradiction already resolved, fast path works well
+    expect_quality_vs_full: ">= 0.9"
+
+  - id: step4
+    query:
+      text: "What about table-driven tests?"
+      limit: 5
+    expect_topic_weights:
+      testing: 0.7
+      tests: 0.5
+    expect_quality_vs_full: ">= 0.9"

@@ -235,7 +235,8 @@ type SessionStepResult struct {
 	CacheHit        bool    `json:"cache_hit"`
 
 	// SessionContext state
-	ActualTopicWeights map[string]float64 `json:"actual_topic_weights,omitempty"`
+	ActualTopicWeights  map[string]float64 `json:"actual_topic_weights,omitempty"`
+	TopicWeightAccuracy float64            `json:"topic_weight_accuracy,omitempty"` // How well topics match expected
 
 	Pass   bool   `json:"pass"`
 	Reason string `json:"reason,omitempty"`

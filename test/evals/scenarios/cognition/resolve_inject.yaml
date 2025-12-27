@@ -1,0 +1,53 @@
+id: resolve-inject
+type: mode
+name: "Resolve inject decision"
+description: "Test when Resolve decides to inject immediately"
+mode: resolve
+
+mode_tests:
+  - id: high-relevance-inject
+    input:
+      query:
+        text: "How do we handle authentication?"
+      results:
+        - id: "auth_decision"
+          content: "Use JWT with 24h expiry"
+          category: "decision"
+          score: 0.95
+        - id: "auth_module"
+          content: "Auth module handles login and session"
+          category: "pattern"
+          score: 0.85
+    expected:
+      decision: inject
+      min_confidence: 0.7
+
+  - id: multiple-high-quality-results
+    input:
+      query:
+        text: "What error handling pattern do we use?"
+      results:
+        - id: "error_decision"
+          content: "Rejected pkg/errors"
+          category: "decision"
+          score: 0.92
+        - id: "error_pattern"
+          content: "fmt.Errorf with %w"
+          category: "pattern"
+          score: 0.88
+    expected:
+      decision: inject
+      min_confidence: 0.7
+
+  - id: single-strong-result
+    input:
+      query:
+        text: "What database do we use?"
+      results:
+        - id: "db_config_v2"
+          content: "SQLite for local, PostgreSQL for prod"
+          category: "decision"
+          score: 0.9
+    expected:
+      decision: inject
+      min_confidence: 0.6

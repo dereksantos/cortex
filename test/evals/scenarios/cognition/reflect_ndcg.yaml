@@ -1,0 +1,77 @@
+id: reflect-ndcg
+type: mode
+name: "Reflect NDCG quality threshold"
+description: "Verify Reflect achieves minimum NDCG score for reranking"
+mode: reflect
+
+mode_tests:
+  - id: auth-rerank-quality
+    input:
+      query:
+        text: "Explain the authentication flow"
+      candidates:
+        - id: "jwt_handler"
+          content: "JWT tokens generated with HS256 and 24h expiry"
+          category: "decision"
+          score: 0.5
+        - id: "auth_module"
+          content: "Auth module handles login and session management"
+          category: "pattern"
+          score: 0.6
+        - id: "unrelated_quantum"
+          content: "Quantum computing applications"
+          category: "insight"
+          score: 0.4
+        - id: "token_validation"
+          content: "Token validation via AuthMiddleware"
+          category: "pattern"
+          score: 0.55
+    expected:
+      # Auth-related should rank above unrelated
+      top_result_ids: ["jwt_handler", "auth_module", "token_validation", "unrelated_quantum"]
+
+  - id: error-rerank-quality
+    input:
+      query:
+        text: "How do we handle errors?"
+      candidates:
+        - id: "error_decision"
+          content: "Rejected pkg/errors, use stdlib fmt.Errorf"
+          category: "decision"
+          score: 0.4
+        - id: "error_pattern"
+          content: "Use fmt.Errorf with %w for wrapping"
+          category: "pattern"
+          score: 0.5
+        - id: "db_schema"
+          content: "SQLite schema with tables"
+          category: "implementation"
+          score: 0.6
+    expected:
+      # Error-related should rank above unrelated db_schema
+      top_result_ids: ["error_decision", "error_pattern", "db_schema"]
+
+  - id: mixed-domain-rerank
+    input:
+      query:
+        text: "What constraints apply to API handlers?"
+      candidates:
+        - id: "handler_pattern"
+          content: "Handlers must return (T, error)"
+          category: "constraint"
+          score: 0.4
+        - id: "middleware_pattern"
+          content: "All endpoints need AuthMiddleware"
+          category: "constraint"
+          score: 0.45
+        - id: "api_v2"
+          content: "API v2 with GraphQL"
+          category: "decision"
+          score: 0.5
+        - id: "logging_config"
+          content: "Logging levels: DEBUG, INFO"
+          category: "pattern"
+          score: 0.55
+    expected:
+      # Constraints and API should rank above logging
+      top_result_ids: ["handler_pattern", "middleware_pattern", "api_v2", "logging_config"]

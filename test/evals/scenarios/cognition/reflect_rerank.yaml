@@ -1,0 +1,68 @@
+id: reflect-rerank
+type: mode
+name: "Reflect reranking quality"
+description: "Test that Reflect properly reranks candidates for relevance"
+mode: reflect
+
+mode_tests:
+  - id: boost-decisions-over-patterns
+    input:
+      query:
+        text: "How should errors be handled in this project?"
+      candidates:
+        - id: "error_pattern"
+          content: "Use fmt.Errorf with %w for error wrapping"
+          category: "pattern"
+          score: 0.6
+        - id: "logging_config"
+          content: "Configure logging levels in config.yaml"
+          category: "pattern"
+          score: 0.7
+        - id: "error_decision"
+          content: "Decision: Rejected pkg/errors, use stdlib fmt.Errorf"
+          category: "decision"
+          score: 0.4
+    expected:
+      # Decision should rank highest after reranking
+      top_result_ids: ["error_decision", "error_pattern"]
+
+  - id: boost-constraints
+    input:
+      query:
+        text: "What patterns should handlers follow?"
+      candidates:
+        - id: "handler_pattern"
+          content: "Handlers must return (T, error) tuple"
+          category: "constraint"
+          score: 0.5
+        - id: "middleware_pattern"
+          content: "All endpoints require AuthMiddleware"
+          category: "constraint"
+          score: 0.4
+        - id: "logging_config"
+          content: "Configure logging levels"
+          category: "pattern"
+          score: 0.6
+    expected:
+      # Constraints should rank above patterns
+      top_result_ids: ["handler_pattern", "middleware_pattern", "logging_config"]
+
+  - id: database-decision-priority
+    input:
+      query:
+        text: "What database should we use?"
+      candidates:
+        - id: "db_schema"
+          content: "SQLite schema with users, events, embeddings"
+          category: "implementation"
+          score: 0.7
+        - id: "db_connection"
+          content: "Database connection via sql.Open"
+          category: "pattern"
+          score: 0.6
+        - id: "db_config_v2"
+          content: "Database config v2: SQLite for local, PostgreSQL for prod"
+          category: "decision"
+          score: 0.5
+    expected:
+      top_result_ids: ["db_config_v2", "db_schema"]

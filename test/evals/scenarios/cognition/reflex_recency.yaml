@@ -1,0 +1,17 @@
+id: reflex-recency
+type: mode
+name: "Reflex recency weighting"
+description: "Test that Reflex properly weights recent results higher"
+mode: reflex
+
+mode_tests:
+  - id: api-version-preference
+    input:
+      query:
+        text: "API version and endpoints"
+        limit: 5
+    expected:
+      # API-related items should be found
+      result_ids: ["api_decision", "api_v2", "api_v1"]
+      min_results: 2
+      max_latency: 10ms

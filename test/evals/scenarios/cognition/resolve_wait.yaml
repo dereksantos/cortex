@@ -1,0 +1,49 @@
+id: resolve-wait
+type: mode
+name: "Resolve wait decision"
+description: "Test when Resolve needs more context before deciding"
+mode: resolve
+
+mode_tests:
+  - id: ambiguous-results
+    input:
+      query:
+        text: "Should we use tabs or spaces?"
+      results:
+        - id: "formatting_tabs"
+          content: "Uses tabs in go files"
+          category: "pattern"
+          score: 0.5
+        - id: "formatting_spaces"
+          content: "Prettier configured for spaces"
+          category: "pattern"
+          score: 0.48
+    expected:
+      decision: wait
+      min_confidence: 0.2
+
+  - id: low-relevance-results
+    input:
+      query:
+        text: "How does the cache work?"
+      results:
+        - id: "cache_mention"
+          content: "Consider adding Redis cache later"
+          category: "insight"
+          score: 0.4
+    expected:
+      decision: wait
+      min_confidence: 0.2
+
+  - id: no-strong-signal
+    input:
+      query:
+        text: "What observability tools do we use?"
+      results:
+        - id: "logging_config"
+          content: "Logging levels: DEBUG, INFO"
+          category: "pattern"
+          score: 0.45
+    expected:
+      decision: wait
+      min_confidence: 0.2

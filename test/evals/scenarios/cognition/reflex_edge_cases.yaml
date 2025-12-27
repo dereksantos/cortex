@@ -1,0 +1,47 @@
+id: reflex-edge-cases
+type: mode
+name: "Reflex edge case handling"
+description: "Test Reflex behavior with edge cases like empty results and filtering"
+mode: reflex
+
+mode_tests:
+  - id: no-results-graceful
+    input:
+      query:
+        text: "quantum computing blockchain AI neural network"
+        limit: 5
+    expected:
+      min_results: 0
+      max_latency: 10ms
+
+  - id: tag-filtering
+    input:
+      query:
+        text: "backend infrastructure"
+        tags: ["backend", "infrastructure"]
+        limit: 10
+    expected:
+      result_ids: ["db_pool", "db_connection"]
+      min_results: 1
+      max_latency: 10ms
+
+  - id: category-filtering
+    input:
+      query:
+        text: "project decisions"
+        categories: ["decision"]
+        limit: 10
+    expected:
+      result_ids: ["auth_decision", "error_decision", "api_decision", "db_config_v2"]
+      min_results: 2
+      max_latency: 10ms
+
+  - id: threshold-filtering
+    input:
+      query:
+        text: "authentication"
+        threshold: 0.5
+        limit: 10
+    expected:
+      min_results: 0
+      max_latency: 10ms

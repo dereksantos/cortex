@@ -1,0 +1,46 @@
+id: reflex-quality
+type: mode
+name: "Reflex result quality"
+description: "Test that Reflex returns relevant results with proper scoring"
+mode: reflex
+
+mode_tests:
+  - id: auth-query
+    input:
+      query:
+        text: "How does authentication work?"
+        limit: 5
+    expected:
+      result_ids: ["auth_module", "jwt_handler", "auth_decision", "token_validation"]
+      min_results: 2
+      max_latency: 10ms
+
+  - id: jwt-specific-query
+    input:
+      query:
+        text: "JWT token generation and validation"
+        limit: 5
+    expected:
+      result_ids: ["jwt_handler", "token_validation", "auth_decision"]
+      min_results: 2
+      max_latency: 10ms
+
+  - id: database-query
+    input:
+      query:
+        text: "database connection and schema"
+        limit: 5
+    expected:
+      result_ids: ["db_schema", "db_connection", "db_pool"]
+      min_results: 2
+      max_latency: 10ms
+
+  - id: error-handling-query
+    input:
+      query:
+        text: "error handling patterns"
+        limit: 5
+    expected:
+      result_ids: ["error_pattern", "error_decision"]
+      min_results: 1
+      max_latency: 10ms

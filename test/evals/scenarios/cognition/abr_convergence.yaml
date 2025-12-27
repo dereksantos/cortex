@@ -1,0 +1,32 @@
+id: abr-convergence
+type: benefit
+name: "ABR converges to 1.0"
+description: "With enough session activity, Fast+Think should approach Full quality"
+
+benefit_queries:
+  # Warm-up queries across domains
+  - text: "What's the project structure?"
+    limit: 5
+  - text: "How do we handle errors?"
+    limit: 5
+  - text: "What about logging?"
+    limit: 5
+  # Main domain queries
+  - text: "Explain the API architecture"
+    limit: 5
+  - text: "Show me endpoint handlers"
+    limit: 5
+  - text: "How is routing configured?"
+    limit: 5
+  - text: "What middleware do we use?"
+    limit: 5
+  - text: "How do we validate requests?"
+    limit: 5
+  # By now ABR should be near 1.0
+  - text: "Add a new API endpoint"
+    limit: 5
+  - text: "Write the handler tests"
+    limit: 5
+
+expected_abr_threshold: 0.5
+expected_quality_gap: 0.3

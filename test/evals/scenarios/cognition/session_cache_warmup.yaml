@@ -1,0 +1,32 @@
+id: session-cache-warmup
+type: session
+name: "Think warms cache for likely queries"
+description: "Verify that Think predicts and pre-fetches likely queries"
+
+session_steps:
+  - id: step1
+    query:
+      text: "Show me the database schema"
+      limit: 5
+    expected_result_ids: ["db_schema"]
+
+  - id: step2
+    query:
+      text: "How do we connect to the database?"
+      limit: 5
+    expect_cache_hit: false
+    expected_result_ids: ["db_connection"]
+
+  - id: step3
+    query:
+      text: "What about connection pooling?"
+      limit: 5
+    expect_cache_hit: true
+    expect_quality_vs_full: ">= 0.85"
+
+  - id: step4
+    query:
+      text: "How do we handle database transactions?"
+      limit: 5
+    expect_cache_hit: true
+    expect_quality_vs_full: ">= 0.9"
