@@ -656,10 +656,41 @@ Run: ./cortex forget "$ARGUMENTS"
 		fmt.Println("Without an LLM, Cortex will run in mechanical-only mode (Reflex).")
 	}
 
+	// 7. Create plugin structure for distribution
+	pluginDir := filepath.Join(projectRoot, ".claude-plugin")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to create plugin directory: %v\n", err)
+	} else {
+		if err := createPluginJSON(pluginDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create plugin.json: %v\n", err)
+		}
+	}
+
 	fmt.Println()
 	fmt.Println("Installation complete!")
 	fmt.Println()
 	fmt.Println("Run `claude` to start a session with Cortex enabled.")
+}
+
+func createPluginJSON(pluginDir string) error {
+	pluginJSON := `{
+  "name": "cortex",
+  "description": "Persistent context memory for AI coding assistants",
+  "version": "0.1.0",
+  "author": {
+    "name": "Cortex"
+  },
+  "repository": "https://github.com/dereksantos/cortex",
+  "license": "MIT"
+}`
+
+	pluginPath := filepath.Join(pluginDir, "plugin.json")
+	if _, err := os.Stat(pluginPath); err == nil {
+		// File exists, don't overwrite
+		return nil
+	}
+
+	return os.WriteFile(pluginPath, []byte(pluginJSON), 0644)
 }
 
 func createClaudeSettings(settingsPath string) error {
@@ -1937,16 +1968,86 @@ func handleDaemon() {
 		os.Exit(1)
 	}
 
+	// Initialize LLM provider for cognitive modes
+	var llmProvider llm.Provider
+	anthropic := llm.NewAnthropicClient(cfg)
+	if anthropic.IsAvailable() {
+		llmProvider = anthropic
+	} else {
+		ollama := llm.NewOllamaClient(cfg)
+		if ollama.IsAvailable() {
+			llmProvider = ollama
+		}
+	}
+
+	// Create Cortex cognitive pipeline
+	cortex, err := intcognition.New(store, llmProvider, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not initialize cognitive pipeline: %v\n", err)
+		// Continue without cognitive features
+	}
+
+	// Load persisted session
+	sessionPersister := intcognition.NewSessionPersister(cfg.ContextDir)
+	persistedSession, err := sessionPersister.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not load session: %v\n", err)
+	} else if cortex != nil {
+		// Restore session state to Think's SessionContext
+		sessionCtx := cortex.SessionContext()
+		if persistedSession != nil && sessionCtx != nil {
+			sessionCtx.TopicWeights = persistedSession.TopicWeights
+			sessionCtx.WarmCache = persistedSession.WarmCache
+			sessionCtx.ResolvedContradictions = persistedSession.ResolvedContradictions
+			sessionCtx.LastUpdated = persistedSession.LastUpdated
+			fmt.Println("   Restored session state from previous run")
+		}
+	}
+
+	// Create session saver for periodic saves
+	sessionSaver := intcognition.NewSessionSaver(sessionPersister, 30*time.Second)
+
 	fmt.Println("🤖 Cortex daemon started")
 	fmt.Println("   Processing events every 5 seconds...")
+	fmt.Println("   Session persisted every 30 seconds...")
 	fmt.Println("   Press Ctrl+C to stop")
 
-	// Wait for interrupt signal
+	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
+
+	// Periodic session save ticker
+	saveTicker := time.NewTicker(30 * time.Second)
+	defer saveTicker.Stop()
+
+	// Main daemon loop
+	done := false
+	for !done {
+		select {
+		case <-saveTicker.C:
+			// Periodic session save
+			if cortex != nil {
+				sessionSaver.MarkDirty()
+				if sessionSaver.MaybeSave(cortex.SessionContext()) {
+					// Silent save - no output needed
+				}
+			}
+		case <-sigChan:
+			done = true
+		}
+	}
 
 	fmt.Println("\n🛑 Stopping daemon...")
+
+	// Save session on graceful shutdown
+	if cortex != nil {
+		if err := sessionSaver.ForceSave(cortex.SessionContext()); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Could not save session: %v\n", err)
+		} else {
+			fmt.Println("   Session state saved")
+		}
+	}
+
 	proc.Stop()
 	fmt.Println("✅ Daemon stopped")
 }
@@ -2841,6 +2942,65 @@ func handleForget() {
 	}
 
 	fmt.Printf("\nForgot %d insight(s)\n", deleted)
+}
+
+// ensureDaemonRunning checks if the daemon appears to be running.
+// Returns true if running, false otherwise.
+// Prints helpful message if not running.
+func ensureDaemonRunning() bool {
+	// Load config to check for context directory
+	cfg, err := loadConfig()
+	if err != nil {
+		// Config not found means cortex isn't initialized
+		fmt.Fprintln(os.Stderr, "Cortex is not initialized in this project.")
+		fmt.Fprintln(os.Stderr, "Run 'cortex init' or 'cortex install' first.")
+		return false
+	}
+
+	// Check for recent activity by looking at session file
+	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
+	info, err := os.Stat(sessionPath)
+	if err != nil {
+		// Session file doesn't exist - daemon may not be running
+		// But this could also be a fresh install, so just warn
+		fmt.Fprintln(os.Stderr, "Warning: Daemon may not be running.")
+		fmt.Fprintln(os.Stderr, "Start it with: cortex daemon &")
+		return false
+	}
+
+	// Check if session was updated recently (within last 2 minutes)
+	if time.Since(info.ModTime()) > 2*time.Minute {
+		fmt.Fprintln(os.Stderr, "Warning: Daemon may not be running (session stale).")
+		fmt.Fprintln(os.Stderr, "Start it with: cortex daemon &")
+		return false
+	}
+
+	return true
+}
+
+// warnDaemonNotRunning prints a warning if daemon isn't running, but doesn't fail.
+// Use this for commands that work without daemon but work better with it.
+func warnDaemonNotRunning() {
+	cfg, err := loadConfig()
+	if err != nil {
+		return // Silently skip if config not found
+	}
+
+	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
+	info, err := os.Stat(sessionPath)
+	if err != nil || time.Since(info.ModTime()) > 2*time.Minute {
+		fmt.Fprintln(os.Stderr, "Tip: Start 'cortex daemon &' for automatic context capture.")
+	}
+}
+
+// loadConfigWithFallback loads config or creates a default for recovery.
+func loadConfigWithFallback() *config.Config {
+	cfg, err := loadConfig()
+	if err != nil {
+		// Return default config for basic operations
+		return config.Default()
+	}
+	return cfg
 }
 
 func printUsage() {

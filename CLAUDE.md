@@ -29,6 +29,30 @@ Capture → Filter → Store → Retrieve → Inject
 
 **Inject**: Format context for consumption by AI tools
 
+## Quick Start with Claude Code
+
+1. Build: `go build ./cmd/cortex`
+2. Install: `./cortex install`
+3. Start daemon: `./cortex daemon &`
+4. Use Claude Code normally - context is captured automatically
+
+### Slash Commands
+
+- `/cortex <query>` - Search context
+- `/cortex-recall <topic>` - Detailed recall
+- `/cortex-decide <decision>` - Record decision
+- `/cortex-correct <correction>` - Record correction
+- `/cortex-forget <id>` - Remove outdated context
+
+### Manual Commands
+
+```bash
+cortex search "authentication"   # Search for context
+cortex insights                  # View extracted insights
+cortex recent                    # Show recent events
+cortex status                    # Check daemon status
+```
+
 ## Cognitive Architecture
 
 Cortex uses five cognitive modes, inspired by how humans process information:
