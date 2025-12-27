@@ -87,6 +87,8 @@ func main() {
 		handleOverview()
 	case "cli":
 		handleCLI()
+	case "forget":
+		handleForget()
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
 	case "help", "-h", "--help":
@@ -106,10 +108,58 @@ func handleCapture() {
 		os.Exit(0)
 	}
 
-	// Check for --source flag
+	// Parse flags
 	source := "claude" // default
-	if len(os.Args) >= 3 && os.Args[2] == "--source" && len(os.Args) >= 4 {
-		source = os.Args[3]
+	captureType := ""
+	content := ""
+
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		switch {
+		case arg == "--source" && i+1 < len(os.Args):
+			source = os.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--type="):
+			captureType = strings.TrimPrefix(arg, "--type=")
+		case arg == "--type" && i+1 < len(os.Args):
+			captureType = os.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--content="):
+			content = strings.TrimPrefix(arg, "--content=")
+		case arg == "--content" && i+1 < len(os.Args):
+			content = os.Args[i+1]
+			i++
+		}
+	}
+
+	// If --type and --content are provided, create event directly from CLI
+	if captureType != "" && content != "" {
+		event := &events.Event{
+			Source:    events.SourceClaude,
+			EventType: events.EventToolUse,
+			Timestamp: time.Now(),
+			ToolName:  "Capture",
+			ToolInput: map[string]interface{}{
+				"type":    captureType,
+				"content": content,
+			},
+			ToolResult: content,
+			Context: events.EventContext{
+				ProjectPath: cfg.ProjectRoot,
+			},
+			Metadata: map[string]interface{}{
+				"capture_type": captureType,
+				"source":       "cli",
+			},
+		}
+
+		cap := capture.New(cfg)
+		if err := cap.CaptureEvent(event); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to capture: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Captured %s: %s\n", captureType, truncateString(content, 60))
+		os.Exit(0)
 	}
 
 	// Read stdin
@@ -145,6 +195,14 @@ func handleCapture() {
 	}
 
 	os.Exit(0)
+}
+
+// truncateString truncates a string to max length with ellipsis
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func handleInit() {
@@ -470,6 +528,89 @@ func handleInstall() {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to create slash command: %v\n", err)
 		} else {
 			fmt.Printf("Created %s\n", commandFile)
+		}
+	}
+
+	// 5.1 Create additional slash commands
+	additionalCommands := []struct {
+		name    string
+		content string
+	}{
+		{
+			name: "cortex-recall.md",
+			content: `---
+description: Recall what Cortex knows about a topic
+argument-hint: "<topic>"
+allowed-tools: Bash(./cortex:*)
+---
+
+Search Cortex for context related to: $ARGUMENTS
+
+Run: ./cortex search "$ARGUMENTS"
+
+Summarize the relevant insights, decisions, and patterns found.
+`,
+		},
+		{
+			name: "cortex-decide.md",
+			content: `---
+description: Record an architectural decision
+argument-hint: "<decision>"
+allowed-tools: Bash(./cortex:*)
+---
+
+Record this architectural decision in Cortex:
+
+Decision: $ARGUMENTS
+
+Run: ./cortex capture --type=decision --content="$ARGUMENTS"
+
+Confirm the decision was recorded.
+`,
+		},
+		{
+			name: "cortex-correct.md",
+			content: `---
+description: Record a correction (e.g., "we use X not Y")
+argument-hint: "<correction>"
+allowed-tools: Bash(./cortex:*)
+---
+
+Record this correction in Cortex:
+
+Correction: $ARGUMENTS
+
+This will be surfaced in future sessions when relevant.
+
+Run: ./cortex capture --type=correction --content="$ARGUMENTS"
+`,
+		},
+		{
+			name: "cortex-forget.md",
+			content: `---
+description: Mark context as outdated
+argument-hint: "<insight-id or description>"
+allowed-tools: Bash(./cortex:*)
+---
+
+Mark this context as outdated/deprecated:
+
+$ARGUMENTS
+
+Run: ./cortex forget "$ARGUMENTS"
+`,
+		},
+	}
+
+	for _, cmd := range additionalCommands {
+		cmdFile := filepath.Join(commandsDir, cmd.name)
+		if _, err := os.Stat(cmdFile); err != nil {
+			// File doesn't exist, create it
+			if err := os.WriteFile(cmdFile, []byte(cmd.content), 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to create %s: %v\n", cmd.name, err)
+			} else {
+				fmt.Printf("Created %s\n", cmdFile)
+			}
 		}
 	}
 
@@ -2448,6 +2589,13 @@ func handleInjectContext() {
 	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
 	cortex.RegisterSource(sources.NewCortexSource(store))
 
+	// Register Claude history source for session transcript exploration
+	homeDir, _ := os.UserHomeDir()
+	if homeDir != "" {
+		claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
+		cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
+	}
+
 	// Build query
 	query := cognition.Query{
 		Text:      prompt,
@@ -2627,6 +2775,72 @@ func showModelRecommendations(availableRAM float64) {
 
 		fmt.Printf("  %-15s %-10s %s - %s\n", m.Name, m.Size, status, m.Desc)
 	}
+}
+
+func handleForget() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: cortex forget <id-or-keyword>\n")
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  cortex forget 123           # Forget insight by ID\n")
+		fmt.Fprintf(os.Stderr, "  cortex forget \"redux\"       # Forget insights matching keyword\n")
+		os.Exit(1)
+	}
+
+	input := os.Args[2]
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// Try to parse as ID first
+	var id int64
+	if _, err := fmt.Sscanf(input, "%d", &id); err == nil && id > 0 {
+		// Delete by ID
+		if err := store.ForgetInsight(id); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to forget insight: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Forgot insight #%d\n", id)
+		return
+	}
+
+	// Search for matching insights first
+	insights, err := store.SearchInsights(input, 10)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to search insights: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(insights) == 0 {
+		fmt.Printf("No insights found matching '%s'\n", input)
+		return
+	}
+
+	// Show matching insights
+	fmt.Printf("Found %d insight(s) matching '%s':\n\n", len(insights), input)
+	for _, insight := range insights {
+		fmt.Printf("  #%d [%s] %s\n", insight.ID, insight.Category, truncateString(insight.Summary, 60))
+	}
+
+	// Delete by keyword
+	deleted, err := store.ForgetInsightsByKeyword(input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to forget insights: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nForgot %d insight(s)\n", deleted)
 }
 
 func printUsage() {
