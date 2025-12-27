@@ -268,6 +268,139 @@ func TestResolve_MakeDecision(t *testing.T) {
 	}
 }
 
+func TestSessionPersistence(t *testing.T) {
+	// Create temp directory
+	tempDir := t.TempDir()
+
+	// Create a session context with data
+	ctx := &cognition.SessionContext{
+		TopicWeights: map[string]float64{
+			"authentication": 0.8,
+			"database":       0.5,
+		},
+		RecentQueries: []cognition.Query{
+			{Text: "how does auth work"},
+		},
+		WarmCache: map[string][]cognition.Result{
+			"auth": {
+				{ID: "1", Content: "Use JWT tokens", Score: 0.9},
+			},
+		},
+		CachedReflect:          make(map[string][]cognition.Result),
+		ResolvedContradictions: map[string]string{"a:b": "a"},
+		LastUpdated:            time.Now(),
+	}
+
+	// Save session
+	persister := NewSessionPersister(tempDir)
+	if err := persister.Save(ctx); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	// Load session
+	loaded, err := persister.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Verify data
+	if len(loaded.TopicWeights) != 2 {
+		t.Errorf("TopicWeights len = %d, want 2", len(loaded.TopicWeights))
+	}
+	if loaded.TopicWeights["authentication"] != 0.8 {
+		t.Errorf("TopicWeights[authentication] = %v, want 0.8", loaded.TopicWeights["authentication"])
+	}
+
+	// Verify WarmCache was restored
+	if len(loaded.WarmCache) != 1 {
+		t.Errorf("WarmCache len = %d, want 1", len(loaded.WarmCache))
+	}
+	if authResults, ok := loaded.WarmCache["auth"]; !ok || len(authResults) != 1 {
+		t.Errorf("WarmCache[auth] not properly restored")
+	}
+
+	// Verify ResolvedContradictions
+	if loaded.ResolvedContradictions["a:b"] != "a" {
+		t.Errorf("ResolvedContradictions[a:b] = %v, want 'a'", loaded.ResolvedContradictions["a:b"])
+	}
+}
+
+func TestSessionPersistence_LoadMissing(t *testing.T) {
+	tempDir := t.TempDir()
+
+	persister := NewSessionPersister(tempDir)
+	loaded, err := persister.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Should return empty but initialized session
+	if loaded == nil {
+		t.Fatal("Load() returned nil for missing file")
+	}
+	if loaded.TopicWeights == nil {
+		t.Error("Load() returned session with nil TopicWeights")
+	}
+}
+
+func TestNewEmptySessionContext(t *testing.T) {
+	ctx := NewEmptySessionContext()
+
+	if ctx == nil {
+		t.Fatal("NewEmptySessionContext() returned nil")
+	}
+	if ctx.TopicWeights == nil {
+		t.Error("TopicWeights is nil")
+	}
+	if ctx.RecentQueries == nil {
+		t.Error("RecentQueries is nil")
+	}
+	if ctx.WarmCache == nil {
+		t.Error("WarmCache is nil")
+	}
+	if ctx.CachedReflect == nil {
+		t.Error("CachedReflect is nil")
+	}
+	if ctx.ResolvedContradictions == nil {
+		t.Error("ResolvedContradictions is nil")
+	}
+}
+
+func TestSessionSaver(t *testing.T) {
+	tempDir := t.TempDir()
+	persister := NewSessionPersister(tempDir)
+	saver := NewSessionSaver(persister, 100*time.Millisecond)
+
+	ctx := NewEmptySessionContext()
+	ctx.TopicWeights["test"] = 0.5
+
+	// Not dirty initially
+	if saver.MaybeSave(ctx) {
+		t.Error("MaybeSave() should not save when not dirty")
+	}
+
+	// Mark dirty
+	saver.MarkDirty()
+
+	// Should save now
+	if !saver.MaybeSave(ctx) {
+		t.Error("MaybeSave() should save when dirty")
+	}
+
+	// Should not save again immediately (interval not passed)
+	saver.MarkDirty()
+	if saver.MaybeSave(ctx) {
+		t.Error("MaybeSave() should not save before interval passes")
+	}
+
+	// Wait for interval
+	time.Sleep(150 * time.Millisecond)
+	saver.MarkDirty()
+	if !saver.MaybeSave(ctx) {
+		t.Error("MaybeSave() should save after interval passes")
+	}
+}
+
 // Helper function
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStringHelper(s, substr))

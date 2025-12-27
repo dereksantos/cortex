@@ -1,0 +1,48 @@
+{
+  "name": "cortex",
+  "description": "Persistent context memory for AI coding assistants",
+  "version": "0.1.0",
+  "author": {
+    "name": "Cortex"
+  },
+  "repository": "https://github.com/dereksantos/cortex",
+  "license": "MIT",
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{"type": "command", "command": "./cortex session-start"}]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{"type": "command", "command": "./cortex inject-context"}]
+    }],
+    "PostToolUse": [{
+      "matcher": "Write|Edit|Bash",
+      "hooks": [{"type": "command", "command": "./cortex capture"}]
+    }]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "./cortex status --format=claude"
+  },
+  "commands": [
+    {
+      "name": "cortex",
+      "description": "Query Cortex context memory"
+    },
+    {
+      "name": "cortex-recall",
+      "description": "Recall what Cortex knows about a topic"
+    },
+    {
+      "name": "cortex-decide",
+      "description": "Record an architectural decision"
+    },
+    {
+      "name": "cortex-correct",
+      "description": "Record a correction (e.g., \"we use X not Y\")"
+    },
+    {
+      "name": "cortex-forget",
+      "description": "Mark context as outdated"
+    }
+  ]
+}
