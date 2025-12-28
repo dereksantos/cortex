@@ -43,7 +43,7 @@ func Default() *Config {
 			"__pycache__",
 		},
 		OllamaURL:      "http://localhost:11434",
-		OllamaModel:    "mistral:7b",
+		OllamaModel:    "qwen2.5-coder:1.5b",
 		AnthropicModel: "claude-3-5-haiku-20241022",
 		EnableGraph:    true,
 		EnableVector: false,

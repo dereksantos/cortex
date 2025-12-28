@@ -212,7 +212,7 @@ func TestConfigJSON(t *testing.T) {
 		cfg := &Config{
 			ContextDir:     "/test",
 			OllamaURL:      "http://localhost:11434",
-			OllamaModel:    "mistral:7b",
+			OllamaModel:    "qwen2.5-coder:1.5b",
 			AnthropicModel: "", // empty
 		}
 

@@ -296,6 +296,11 @@ type ThinkConfig struct {
 	// that constitutes "high activity" (minimum budget).
 	// Default: 10
 	HighActivityThreshold int
+
+	// MinDisplayDuration is the minimum time to show Think status.
+	// Ensures the mode is visible in status bar before returning to idle.
+	// Default: 2 seconds
+	MinDisplayDuration time.Duration
 }
 
 // DefaultThinkConfig returns sensible defaults for ThinkConfig.
@@ -306,6 +311,7 @@ func DefaultThinkConfig() ThinkConfig {
 		OperationTimeout:      200 * time.Millisecond,
 		ActivityWindow:        1 * time.Minute,
 		HighActivityThreshold: 10,
+		MinDisplayDuration:    2 * time.Second,
 	}
 }
 
@@ -469,19 +475,25 @@ type DreamConfig struct {
 	// MaxCPUPct (0-100) above which Dream skips. 0 disables check.
 	// Default: 50 (lower than Think since we want truly idle system)
 	MaxCPUPct float64
+
+	// MinDisplayDuration is the minimum time to show Dream status.
+	// Ensures the mode is visible in status bar before returning to idle.
+	// Default: 30 seconds
+	MinDisplayDuration time.Duration
 }
 
 // DefaultDreamConfig returns sensible defaults for DreamConfig.
 func DefaultDreamConfig() DreamConfig {
 	return DreamConfig{
-		MaxBudget:        20,
-		MinBudget:        2,
-		GrowthDuration:   10 * time.Minute,
-		OperationTimeout: 1 * time.Second,
-		IdleThreshold:    30 * time.Second,
-		MinInterval:      1 * time.Minute,
-		MaxMemoryPct:     80,
-		MaxCPUPct:        50,
+		MaxBudget:          20,
+		MinBudget:          2,
+		GrowthDuration:     10 * time.Minute,
+		OperationTimeout:   1 * time.Second,
+		IdleThreshold:      30 * time.Second,
+		MinInterval:        1 * time.Minute,
+		MaxMemoryPct:       80,
+		MaxCPUPct:          50,
+		MinDisplayDuration: 30 * time.Second,
 	}
 }
 

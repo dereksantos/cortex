@@ -21,7 +21,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "./cortex status --format=claude"
+    "command": "./cortex status"
   },
   "commands": [
     {

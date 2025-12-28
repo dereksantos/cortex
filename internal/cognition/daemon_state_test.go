@@ -145,3 +145,113 @@ func TestGetDaemonStatePath(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, path)
 	}
 }
+
+func TestTruncatePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "empty path",
+			path:     "",
+			maxLen:   20,
+			expected: "",
+		},
+		{
+			name:     "short filename fits",
+			path:     "/some/long/path/to/file.go",
+			maxLen:   20,
+			expected: "to/file.go",
+		},
+		{
+			name:     "filename only when parent too long",
+			path:     "/some/verylongdirectoryname/file.go",
+			maxLen:   10,
+			expected: "file.go",
+		},
+		{
+			name:     "truncate long filename",
+			path:     "/path/to/very_long_filename_that_exceeds_limit.go",
+			maxLen:   20,
+			expected: "very_long_filenam...",
+		},
+		{
+			name:     "root path",
+			path:     "/file.go",
+			maxLen:   20,
+			expected: "file.go",
+		},
+		{
+			name:     "parent and filename fit exactly",
+			path:     "/foo/bar/test.go",
+			maxLen:   12,
+			expected: "bar/test.go",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := TruncatePath(tt.path, tt.maxLen)
+			if result != tt.expected {
+				t.Errorf("TruncatePath(%q, %d) = %q, want %q", tt.path, tt.maxLen, result, tt.expected)
+			}
+			if len(result) > tt.maxLen {
+				t.Errorf("TruncatePath(%q, %d) result length %d exceeds maxLen %d", tt.path, tt.maxLen, len(result), tt.maxLen)
+			}
+		})
+	}
+}
+
+func TestTruncateInsight(t *testing.T) {
+	tests := []struct {
+		name     string
+		insight  string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "short insight fits",
+			insight:  "Use Zustand for state",
+			maxLen:   30,
+			expected: "Use Zustand for state",
+		},
+		{
+			name:     "truncate at word boundary",
+			insight:  "Always use Zustand for state management in React apps",
+			maxLen:   30,
+			expected: "Always use Zustand for...",
+		},
+		{
+			name:     "truncate long single word",
+			insight:  "Supercalifragilisticexpialidocious is a long word",
+			maxLen:   20,
+			expected: "Supercalifragilis...",
+		},
+		{
+			name:     "exact length",
+			insight:  "Exact length text",
+			maxLen:   17,
+			expected: "Exact length text",
+		},
+		{
+			name:     "very short max",
+			insight:  "Test",
+			maxLen:   3,
+			expected: "Tes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := TruncateInsight(tt.insight, tt.maxLen)
+			if result != tt.expected {
+				t.Errorf("TruncateInsight(%q, %d) = %q, want %q", tt.insight, tt.maxLen, result, tt.expected)
+			}
+			if len(result) > tt.maxLen {
+				t.Errorf("TruncateInsight(%q, %d) result length %d exceeds maxLen %d", tt.insight, tt.maxLen, len(result), tt.maxLen)
+			}
+		})
+	}
+}
