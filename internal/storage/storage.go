@@ -332,6 +332,20 @@ func (s *Storage) GetStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
+// CountEventsBySession counts events for a specific session
+func (s *Storage) CountEventsBySession(sessionID string) (int, error) {
+	var count int
+	// Session ID is stored in the context JSON field
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM events
+		WHERE json_extract(context, '$.session_id') = ?
+	`, sessionID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count events by session: %w", err)
+	}
+	return count, nil
+}
+
 // Entity represents a knowledge graph entity
 type Entity struct {
 	ID        int64
