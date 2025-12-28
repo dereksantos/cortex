@@ -24,11 +24,13 @@ type EventType string
 const (
 	EventToolUse EventType = "tool_use"
 	// Reserved for future event types:
-	EventEdit   EventType = "edit"
-	EventSearch EventType = "search"
-	EventAgent  EventType = "agent"
-	EventBuild  EventType = "build"
-	EventTest   EventType = "test"
+	EventEdit       EventType = "edit"
+	EventSearch     EventType = "search"
+	EventAgent      EventType = "agent"
+	EventBuild      EventType = "build"
+	EventTest       EventType = "test"
+	EventUserPrompt EventType = "user_prompt" // User submitted a prompt
+	EventStop       EventType = "stop"        // Claude finished responding
 )
 
 // Event is the generic event structure for all AI tools
@@ -39,10 +41,16 @@ type Event struct {
 	EventType EventType `json:"event_type"`
 	Timestamp time.Time `json:"timestamp"`
 
-	// Tool information
-	ToolName   string                 `json:"tool_name"`
-	ToolInput  map[string]interface{} `json:"tool_input"`
+	// Tool information (for EventToolUse)
+	ToolName   string                 `json:"tool_name,omitempty"`
+	ToolInput  map[string]interface{} `json:"tool_input,omitempty"`
 	ToolResult string                 `json:"tool_result,omitempty"`
+
+	// User prompt (for EventUserPrompt)
+	Prompt string `json:"prompt,omitempty"`
+
+	// Transcript path (for EventStop, available in all hooks)
+	TranscriptPath string `json:"transcript_path,omitempty"`
 
 	// Context
 	Context EventContext `json:"context"`

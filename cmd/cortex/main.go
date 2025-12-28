@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1265,12 +1267,18 @@ func handleTest() {
 
 	// Validate test type
 	validTypes := map[string]bool{
-		"all": true, "decision": true, "pattern": true, "insight": true,
+		"all": true, "decision": true, "pattern": true, "insight": true, "ollama": true,
 	}
 	if !validTypes[testType] {
 		fmt.Fprintf(os.Stderr, "Invalid test type: %s\n", testType)
-		fmt.Println("Valid types: decision, pattern, insight, all")
+		fmt.Println("Valid types: decision, pattern, insight, ollama, all")
 		os.Exit(1)
+	}
+
+	// Handle ollama benchmark separately
+	if testType == "ollama" {
+		runOllamaBenchmark()
+		return
 	}
 
 	fmt.Println("🧪 Cortex LLM Analysis Test")
@@ -1490,6 +1498,218 @@ func validateTestInsight(insight *storage.Insight, expected TestExpectations) bo
 	importanceOK := insight.Importance >= expected.MinImportance
 
 	return categoryOK && conceptsOK && importanceOK
+}
+
+func runOllamaBenchmark() {
+	cfg := config.Default()
+	cfg.ProjectRoot, _ = os.Getwd()
+
+	fmt.Printf("🔬 Ollama Benchmark (model: %s)\n", cfg.OllamaModel)
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println()
+
+	// Check Ollama availability
+	ollamaRunning, _ := checkOllama()
+	if !ollamaRunning {
+		fmt.Println("❌ Ollama is not running")
+		fmt.Println("   Start with: ollama serve")
+		os.Exit(1)
+	}
+	fmt.Println("✓ Ollama is running")
+	fmt.Println()
+
+	// Create HTTP client with long timeout for benchmarking
+	client := &http.Client{
+		Timeout: 180 * time.Second,
+	}
+
+	// Generate test prompts of different sizes (matching real-world data)
+	// Real tool_results range from 1KB to 40KB based on Claude history analysis
+	prompts := map[string]string{
+		"small (~200B)":  generateTestPrompt(200),
+		"medium (~2KB)":  generateTestPrompt(2000),
+		"large (~10KB)":  generateTestPrompt(10000),
+		"xlarge (~25KB)": generateTestPrompt(25000),
+	}
+
+	// Test each prompt size
+	fmt.Println("Single Request by Prompt Size:")
+	var maxSingleTime time.Duration
+	for _, size := range []string{"small (~200B)", "medium (~2KB)", "large (~10KB)", "xlarge (~25KB)"} {
+		prompt := prompts[size]
+		start := time.Now()
+		_, err := ollamaBenchmarkRequest(client, cfg.OllamaURL, cfg.OllamaModel, prompt)
+		elapsed := time.Since(start)
+		if err != nil {
+			fmt.Printf("  %s: ❌ Error: %v\n", size, err)
+		} else {
+			fmt.Printf("  %s: %.1fs\n", size, elapsed.Seconds())
+			if elapsed > maxSingleTime {
+				maxSingleTime = elapsed
+			}
+		}
+	}
+	fmt.Println()
+
+	// Use medium prompt for concurrency tests (most common real-world size)
+	mediumPrompt := prompts["medium (~2KB)"]
+
+	// Concurrent request tests with higher concurrency
+	fmt.Println("Concurrent Requests (medium prompt):")
+	concurrencyLevels := []int{2, 3, 5, 8, 10}
+	var safeConcurrency int
+	var maxConcurrentTime time.Duration
+
+	for _, concurrency := range concurrencyLevels {
+		times := runConcurrentBenchmark(client, cfg.OllamaURL, cfg.OllamaModel, mediumPrompt, concurrency)
+		if len(times) > 0 {
+			avg, _, max := calcStats(times)
+			warning := ""
+			if max.Seconds() > 30 {
+				warning = " ⚠️  exceeds 30s timeout"
+			} else {
+				safeConcurrency = concurrency
+			}
+			if max > maxConcurrentTime {
+				maxConcurrentTime = max
+			}
+			fmt.Printf("  %2d concurrent: avg %.1fs (max: %.1fs)%s\n", concurrency, avg.Seconds(), max.Seconds(), warning)
+		} else {
+			fmt.Printf("  %2d concurrent: ❌ all requests failed\n", concurrency)
+		}
+	}
+	fmt.Println()
+
+	// Current implementation info
+	fmt.Println("Current Implementation:")
+	fmt.Println("  - Timeout: 30s (hardcoded in pkg/llm/ollama.go:30)")
+	fmt.Println("  - Workers: 5 (hardcoded in internal/processor/processor.go:35)")
+	fmt.Println()
+
+	// Recommendations
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("Recommendations:")
+	if maxSingleTime > 0 {
+		suggestedTimeout := time.Duration(float64(maxSingleTime) * 2)
+		if suggestedTimeout < 60*time.Second {
+			suggestedTimeout = 60 * time.Second
+		}
+		fmt.Printf("  - Suggested timeout: %.0fs (based on large prompt performance)\n", suggestedTimeout.Seconds())
+	}
+	if safeConcurrency > 0 {
+		fmt.Printf("  - Suggested max workers: %d (keeps max under 30s)\n", safeConcurrency)
+	} else {
+		fmt.Println("  - Suggested max workers: 1-2 (high latency detected)")
+	}
+}
+
+func generateTestPrompt(targetSize int) string {
+	base := `Analyze this development event and extract any important insight.
+
+Tool: Write
+File: auth/handler.go
+Result: `
+
+	// Generate realistic filler content
+	filler := `Implemented JWT authentication with refresh tokens. Chose RS256 over HS256 for better security. Added token rotation on each refresh. The authentication module now supports multiple identity providers including OAuth2, SAML, and OpenID Connect. Error handling has been improved with detailed error codes and user-friendly messages. Session management includes automatic cleanup of expired tokens. `
+
+	suffix := `
+
+Respond in JSON format:
+{
+  "summary": "Brief summary (1 sentence)",
+  "category": "decision|pattern|insight|strategy|constraint",
+  "importance": 1-10,
+  "tags": ["tag1", "tag2"],
+  "reasoning": "Why this is important"
+}
+JSON:`
+
+	// Build prompt to target size
+	prompt := base
+	for len(prompt) < targetSize-len(suffix) {
+		prompt += filler
+	}
+	prompt += suffix
+
+	return prompt
+}
+
+func ollamaBenchmarkRequest(client *http.Client, baseURL, model, prompt string) (string, error) {
+	reqBody := map[string]interface{}{
+		"model":  model,
+		"prompt": prompt,
+		"stream": false,
+	}
+	jsonData, _ := json.Marshal(reqBody)
+
+	resp, err := client.Post(baseURL+"/api/generate", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Response string `json:"response"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Response, nil
+}
+
+func runConcurrentBenchmark(client *http.Client, baseURL, model, prompt string, concurrency int) []time.Duration {
+	results := make(chan time.Duration, concurrency)
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			_, err := ollamaBenchmarkRequest(client, baseURL, model, prompt)
+			if err == nil {
+				results <- time.Since(start)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var times []time.Duration
+	for t := range results {
+		times = append(times, t)
+	}
+	return times
+}
+
+func calcStats(times []time.Duration) (avg, min, max time.Duration) {
+	if len(times) == 0 {
+		return 0, 0, 0
+	}
+
+	min = times[0]
+	max = times[0]
+	var total time.Duration
+
+	for _, t := range times {
+		total += t
+		if t < min {
+			min = t
+		}
+		if t > max {
+			max = t
+		}
+	}
+
+	avg = total / time.Duration(len(times))
+	return avg, min, max
 }
 
 func handleEval() {
@@ -2895,14 +3115,28 @@ func handleCLI() {
 }
 
 func handleInjectContext() {
-	// Read user prompt from stdin
-	promptData, err := io.ReadAll(os.Stdin)
-	if err != nil || len(promptData) == 0 {
-		// No prompt provided, exit silently
+	// Read hook data from stdin (JSON from UserPromptSubmit hook)
+	hookData, err := io.ReadAll(os.Stdin)
+	if err != nil || len(hookData) == 0 {
+		// No data provided, exit silently
 		os.Exit(0)
 	}
 
-	prompt := string(promptData)
+	// Parse hook data to extract prompt and session info
+	promptEvent, err := claude.ConvertPromptEvent(hookData, "")
+	var prompt string
+	var sessionID string
+	if err != nil || promptEvent == nil {
+		// Fallback: treat raw input as prompt (backwards compatibility)
+		prompt = string(hookData)
+	} else {
+		prompt = promptEvent.Prompt
+		sessionID = promptEvent.Context.SessionID
+	}
+
+	if prompt == "" {
+		os.Exit(0)
+	}
 
 	// Load config
 	cfg, err := loadConfig()
@@ -2910,6 +3144,11 @@ func handleInjectContext() {
 		// Silent failure - don't block user if Cortex not initialized
 		fmt.Println(prompt)
 		os.Exit(0)
+	}
+
+	// Update project path from hook data if available
+	if promptEvent != nil && promptEvent.Context.WorkingDir != "" {
+		cfg.ProjectRoot = promptEvent.Context.WorkingDir
 	}
 
 	// Open storage
@@ -2920,6 +3159,15 @@ func handleInjectContext() {
 		os.Exit(0)
 	}
 	defer store.Close()
+
+	// Capture the prompt as an event (non-blocking)
+	if promptEvent != nil {
+		promptEvent.Context.ProjectPath = cfg.ProjectRoot
+		go func() {
+			cap := capture.New(cfg)
+			cap.CaptureEvent(promptEvent)
+		}()
+	}
 
 	// Initialize LLM provider (optional - Reflect will degrade gracefully if nil)
 	var llmProvider llm.Provider
@@ -2951,6 +3199,9 @@ func handleInjectContext() {
 		cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
 	}
 
+	// Determine if this is the first prompt of the session
+	isFirstPrompt := isFirstPromptInSession(store, sessionID)
+
 	// Build query
 	query := cognition.Query{
 		Text:      prompt,
@@ -2958,9 +3209,13 @@ func handleInjectContext() {
 		Threshold: 0.3,
 	}
 
-	// Use Fast mode for quick response during active sessions
-	// First message in a session could use Full mode for higher accuracy
-	result, err := cortex.Retrieve(context.Background(), query, cognition.Fast)
+	// Use Full mode for first prompt (sync Think), Fast mode for subsequent
+	mode := cognition.Fast
+	if isFirstPrompt {
+		mode = cognition.Full
+	}
+
+	result, err := cortex.Retrieve(context.Background(), query, mode)
 	if err != nil || result.Decision != cognition.Inject {
 		// No relevant context or decision to skip injection
 		fmt.Println(prompt)
@@ -2971,6 +3226,20 @@ func handleInjectContext() {
 	fmt.Print(result.Formatted)
 	fmt.Println("User Request:")
 	fmt.Println(prompt)
+}
+
+// isFirstPromptInSession checks if this is the first prompt for this session
+func isFirstPromptInSession(store *storage.Storage, sessionID string) bool {
+	if sessionID == "" {
+		return true // Assume first if no session ID
+	}
+
+	// Check if we've seen this session before
+	count, err := store.CountEventsBySession(sessionID)
+	if err != nil {
+		return true // Assume first on error
+	}
+	return count == 0
 }
 
 // extractKeyTerms extracts meaningful terms from prompt (basic implementation)
