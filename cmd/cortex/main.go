@@ -2327,6 +2327,8 @@ func getModeSpinner(mode string) string {
 		return getResolveSpinner()
 	case "insight":
 		return getInsightSpinner()
+	case "digest":
+		return getDigestSpinner()
 	default:
 		return "●"
 	}
@@ -2368,6 +2370,12 @@ func getInsightSpinner() string {
 	return "✦"
 }
 
+// getDigestSpinner returns the Digest mode icon.
+// Tilde represents consolidation/compression.
+func getDigestSpinner() string {
+	return "~"
+}
+
 // getModeDisplayName returns the display name for a cognitive mode.
 func getModeDisplayName(mode string) string {
 	switch mode {
@@ -2381,6 +2389,8 @@ func getModeDisplayName(mode string) string {
 		return "Reflect"
 	case "resolve":
 		return "Resolve"
+	case "digest":
+		return "Digest"
 	default:
 		return "Ready"
 	}
@@ -2400,6 +2410,8 @@ func getDefaultModeDescription(mode string) string {
 		return "Reflecting on search results..."
 	case "resolve":
 		return "Deciding what to inject..."
+	case "digest":
+		return "Consolidating insights..."
 	default:
 		return ""
 	}

@@ -598,9 +598,132 @@ type Dreamer interface {
 	ProactiveQueue() []Result
 }
 
+// DigestConfig controls Digest mode behavior.
+//
+// Digest is a second-pass operation that deduplicates and consolidates
+// insights at query time. It runs after Dream completes and groups
+// similar insights to reduce noise.
+type DigestConfig struct {
+	// MaxMerges is the maximum number of merge operations per session.
+	// Default: 10
+	MaxMerges int
+
+	// SimilarityThreshold is the minimum similarity score (0-1) to consider
+	// two insights as duplicates. Higher = stricter matching.
+	// Default: 0.7
+	SimilarityThreshold float64
+
+	// RecencyBias gives preference to newer insights when merging.
+	// When true, newer insights survive; when false, higher importance wins.
+	// Default: true
+	RecencyBias bool
+
+	// MinDisplayDuration is the minimum time to show Digest status.
+	// Default: 2 seconds
+	MinDisplayDuration time.Duration
+}
+
+// DefaultDigestConfig returns sensible defaults for DigestConfig.
+func DefaultDigestConfig() DigestConfig {
+	return DigestConfig{
+		MaxMerges:           10,
+		SimilarityThreshold: 0.7,
+		RecencyBias:         true,
+		MinDisplayDuration:  2 * time.Second,
+	}
+}
+
+// DigestStatus indicates why MaybeDigest did or didn't run.
+type DigestStatus int
+
+const (
+	// DigestRan indicates the digest session completed.
+	DigestRan DigestStatus = iota
+
+	// DigestSkippedNoDream indicates Dream hasn't run recently.
+	DigestSkippedNoDream
+
+	// DigestSkippedRunning indicates another digest is in progress.
+	DigestSkippedRunning
+
+	// DigestSkippedNoInsights indicates no insights to digest.
+	DigestSkippedNoInsights
+)
+
+func (s DigestStatus) String() string {
+	switch s {
+	case DigestRan:
+		return "ran"
+	case DigestSkippedNoDream:
+		return "skipped_no_dream"
+	case DigestSkippedRunning:
+		return "skipped_running"
+	case DigestSkippedNoInsights:
+		return "skipped_no_insights"
+	default:
+		return "unknown"
+	}
+}
+
+// DigestResult contains the outcome of a MaybeDigest call.
+type DigestResult struct {
+	Status   DigestStatus  // Why digest did or didn't run
+	Groups   int           // Number of duplicate groups found
+	Merged   int           // Number of insights consolidated
+	Duration time.Duration // How long the session took
+}
+
+// DigestedInsight represents an insight with its duplicates grouped.
+type DigestedInsight struct {
+	// Representative is the primary insight (survivor of merge).
+	Representative Result
+
+	// Duplicates are similar insights grouped under the representative.
+	// Empty if this insight has no duplicates.
+	Duplicates []Result
+
+	// Similarity score between representative and duplicates.
+	Similarity float64
+}
+
+// Digester consolidates duplicate insights.
+//
+// Digest is a second-pass operation that runs after Dream. It reads
+// insights from storage, groups similar ones, and returns a deduplicated
+// view. This is a query-time operation - it doesn't modify stored data.
+//
+// The digest process:
+//  1. Fetch recent insights from storage
+//  2. Group by category (decision, pattern, etc.)
+//  3. Within each category, compute pairwise similarity
+//  4. Merge similar insights (similarity > threshold)
+//  5. Return deduplicated results
+//
+// Recency bias: when merging, newer insights become the representative
+// by default, preserving the most recent understanding.
+type Digester interface {
+	// MaybeDigest attempts to consolidate insights after Dream.
+	//
+	// Only runs if:
+	//   - Dream completed recently
+	//   - No other digest in progress
+	//   - Insights exist to process
+	//
+	// Returns immediately if preconditions fail (Status indicates why).
+	MaybeDigest(ctx context.Context) (*DigestResult, error)
+
+	// DigestInsights performs on-demand deduplication of given insights.
+	// This is the core algorithm, usable independently of MaybeDigest.
+	DigestInsights(ctx context.Context, insights []Result) ([]DigestedInsight, error)
+
+	// GetDigestedInsights returns all active insights in deduplicated form.
+	// Convenience method that fetches from storage and digests.
+	GetDigestedInsights(ctx context.Context, limit int) ([]DigestedInsight, error)
+}
+
 // Cortex combines all cognitive modes into a unified retrieval interface.
 //
-// The five modes work together:
+// The six modes work together:
 //
 //	| Mode    | Type       | When              | Purpose                  |
 //	|---------|------------|-------------------|--------------------------|
@@ -609,12 +732,14 @@ type Dreamer interface {
 //	| Resolve | Agentic    | After results     | Injection decision       |
 //	| Think   | Background | Active periods    | Process while working    |
 //	| Dream   | Background | Idle periods      | Deep exploration         |
+//	| Digest  | Background | After Dream       | Consolidate duplicates   |
 type Cortex interface {
 	Reflexer
 	Reflector
 	Resolver
 	Thinker
 	Dreamer
+	Digester
 
 	// Retrieve performs context retrieval using the specified mode.
 	//
@@ -623,6 +748,6 @@ type Cortex interface {
 	//
 	// After retrieval, checks activity level and triggers background mode:
 	//   - Active: MaybeThink() in goroutine
-	//   - Idle:   MaybeDream() in goroutine
+	//   - Idle:   MaybeDream() in goroutine → MaybeDigest() on completion
 	Retrieve(ctx context.Context, q Query, mode RetrieveMode) (*ResolveResult, error)
 }

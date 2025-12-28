@@ -1,0 +1,360 @@
+package cognition
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cognition"
+)
+
+// Digest implements cognition.Digester for consolidating duplicate insights.
+type Digest struct {
+	mu sync.Mutex
+
+	// Components
+	storage *storage.Storage
+
+	// Config
+	config cognition.DigestConfig
+
+	// State
+	running       bool
+	lastDigest    time.Time
+	lastDreamTime time.Time // Set by Dream when it completes
+
+	// State writer for daemon status updates
+	stateWriter *StateWriter
+}
+
+// NewDigest creates a new Digest instance.
+func NewDigest(store *storage.Storage) *Digest {
+	return &Digest{
+		storage: store,
+		config:  cognition.DefaultDigestConfig(),
+	}
+}
+
+// SetStateWriter sets the state writer for daemon status updates.
+func (d *Digest) SetStateWriter(sw *StateWriter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.stateWriter = sw
+}
+
+// NotifyDreamCompleted is called by Dream to signal digest should run.
+func (d *Digest) NotifyDreamCompleted() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastDreamTime = time.Now()
+}
+
+// MaybeDigest attempts to consolidate insights after Dream.
+func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
+	d.mu.Lock()
+
+	// Check if running
+	if d.running {
+		d.mu.Unlock()
+		return &cognition.DigestResult{Status: cognition.DigestSkippedRunning}, nil
+	}
+
+	// Check if Dream ran recently (within last 5 minutes)
+	if time.Since(d.lastDreamTime) > 5*time.Minute {
+		d.mu.Unlock()
+		return &cognition.DigestResult{Status: cognition.DigestSkippedNoDream}, nil
+	}
+
+	d.running = true
+	stateWriter := d.stateWriter
+	d.mu.Unlock()
+
+	// Write state on start
+	if stateWriter != nil {
+		stateWriter.WriteMode("digest", "Consolidating insights...")
+	}
+
+	start := time.Now()
+	minDisplay := d.config.MinDisplayDuration
+
+	defer func() {
+		// Ensure minimum display duration
+		elapsed := time.Since(start)
+		if elapsed < minDisplay {
+			time.Sleep(minDisplay - elapsed)
+		}
+
+		d.mu.Lock()
+		d.running = false
+		d.lastDigest = time.Now()
+		d.mu.Unlock()
+
+		if stateWriter != nil {
+			stateWriter.WriteMode("idle", "")
+		}
+	}()
+
+	// Fetch recent insights
+	insights, err := d.fetchInsightsAsResults(ctx, 100)
+	if err != nil {
+		log.Printf("Digest: failed to fetch insights: %v", err)
+		return &cognition.DigestResult{Status: cognition.DigestSkippedNoInsights}, nil
+	}
+
+	if len(insights) == 0 {
+		return &cognition.DigestResult{Status: cognition.DigestSkippedNoInsights}, nil
+	}
+
+	// Perform digest
+	digested, err := d.DigestInsights(ctx, insights)
+	if err != nil {
+		return nil, fmt.Errorf("digest failed: %w", err)
+	}
+
+	// Count groups with duplicates and total merged
+	groups := 0
+	merged := 0
+	for _, di := range digested {
+		if len(di.Duplicates) > 0 {
+			groups++
+			merged += len(di.Duplicates)
+		}
+	}
+
+	if stateWriter != nil && groups > 0 {
+		stateWriter.WriteMode("digest", fmt.Sprintf("Found %d duplicate groups", groups))
+	}
+
+	log.Printf("Digest: completed (%d insights -> %d unique, %d groups merged, %v)",
+		len(insights), len(digested), groups, time.Since(start))
+
+	return &cognition.DigestResult{
+		Status:   cognition.DigestRan,
+		Groups:   groups,
+		Merged:   merged,
+		Duration: time.Since(start),
+	}, nil
+}
+
+// DigestInsights performs on-demand deduplication of given insights.
+func (d *Digest) DigestInsights(ctx context.Context, insights []cognition.Result) ([]cognition.DigestedInsight, error) {
+	if len(insights) == 0 {
+		return nil, nil
+	}
+
+	// Group by category first
+	byCategory := make(map[string][]cognition.Result)
+	for _, ins := range insights {
+		byCategory[ins.Category] = append(byCategory[ins.Category], ins)
+	}
+
+	var result []cognition.DigestedInsight
+
+	// Process each category
+	for _, categoryInsights := range byCategory {
+		digested := d.digestCategory(categoryInsights)
+		result = append(result, digested...)
+	}
+
+	return result, nil
+}
+
+// digestCategory deduplicates insights within a single category.
+func (d *Digest) digestCategory(insights []cognition.Result) []cognition.DigestedInsight {
+	if len(insights) == 0 {
+		return nil
+	}
+
+	// Track which insights have been merged into another
+	merged := make(map[int]bool)
+	var result []cognition.DigestedInsight
+
+	for i, ins := range insights {
+		if merged[i] {
+			continue
+		}
+
+		// Find duplicates for this insight
+		var duplicates []cognition.Result
+		for j := i + 1; j < len(insights); j++ {
+			if merged[j] {
+				continue
+			}
+
+			sim := textSimilarity(ins.Content, insights[j].Content)
+			if sim >= d.config.SimilarityThreshold {
+				duplicates = append(duplicates, insights[j])
+				merged[j] = true
+			}
+		}
+
+		// Choose representative based on recency or importance
+		representative := ins
+		if len(duplicates) > 0 && !d.config.RecencyBias {
+			// Find highest importance
+			for _, dup := range duplicates {
+				if dup.Score > representative.Score {
+					// Move current representative to duplicates
+					duplicates = append(duplicates, representative)
+					representative = dup
+				}
+			}
+			// Remove representative from duplicates if it was added
+			var filtered []cognition.Result
+			for _, dup := range duplicates {
+				if dup.ID != representative.ID {
+					filtered = append(filtered, dup)
+				}
+			}
+			duplicates = filtered
+		}
+
+		// Calculate average similarity for the group
+		avgSim := 0.0
+		if len(duplicates) > 0 {
+			for _, dup := range duplicates {
+				avgSim += textSimilarity(representative.Content, dup.Content)
+			}
+			avgSim /= float64(len(duplicates))
+		}
+
+		result = append(result, cognition.DigestedInsight{
+			Representative: representative,
+			Duplicates:     duplicates,
+			Similarity:     avgSim,
+		})
+	}
+
+	return result
+}
+
+// GetDigestedInsights returns all active insights in deduplicated form.
+func (d *Digest) GetDigestedInsights(ctx context.Context, limit int) ([]cognition.DigestedInsight, error) {
+	insights, err := d.fetchInsightsAsResults(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	return d.DigestInsights(ctx, insights)
+}
+
+// fetchInsightsAsResults converts storage insights to cognition.Result.
+func (d *Digest) fetchInsightsAsResults(_ context.Context, limit int) ([]cognition.Result, error) {
+	if d.storage == nil {
+		return nil, nil
+	}
+
+	storageInsights, err := d.storage.GetRecentInsights(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []cognition.Result
+	for _, si := range storageInsights {
+		results = append(results, cognition.Result{
+			ID:        fmt.Sprintf("insight:%d", si.ID),
+			Content:   si.Summary,
+			Category:  si.Category,
+			Score:     float64(si.Importance) / 10.0,
+			Timestamp: si.CreatedAt,
+			Tags:      si.Tags,
+			Metadata: map[string]any{
+				"event_id":  si.EventID,
+				"reasoning": si.Reasoning,
+			},
+		})
+	}
+
+	return results, nil
+}
+
+// textSimilarity computes Jaccard similarity between two texts.
+// Returns a value between 0 (no overlap) and 1 (identical).
+func textSimilarity(a, b string) float64 {
+	tokensA := tokenize(a)
+	tokensB := tokenize(b)
+
+	if len(tokensA) == 0 || len(tokensB) == 0 {
+		return 0
+	}
+
+	// Build sets
+	setA := make(map[string]bool)
+	for _, t := range tokensA {
+		setA[t] = true
+	}
+
+	setB := make(map[string]bool)
+	for _, t := range tokensB {
+		setB[t] = true
+	}
+
+	// Compute intersection
+	intersection := 0
+	for t := range setA {
+		if setB[t] {
+			intersection++
+		}
+	}
+
+	// Compute union
+	union := len(setA)
+	for t := range setB {
+		if !setA[t] {
+			union++
+		}
+	}
+
+	if union == 0 {
+		return 0
+	}
+
+	return float64(intersection) / float64(union)
+}
+
+// tokenize splits text into lowercase word tokens.
+func tokenize(text string) []string {
+	// Lowercase and split on non-alphanumeric
+	text = strings.ToLower(text)
+	var tokens []string
+	var current strings.Builder
+
+	for _, r := range text {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			current.WriteRune(r)
+		} else if current.Len() > 0 {
+			tokens = append(tokens, current.String())
+			current.Reset()
+		}
+	}
+
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+
+	// Filter stopwords for better similarity
+	stopwords := map[string]bool{
+		"the": true, "a": true, "an": true, "is": true, "are": true,
+		"was": true, "were": true, "be": true, "been": true, "being": true,
+		"have": true, "has": true, "had": true, "do": true, "does": true,
+		"did": true, "will": true, "would": true, "could": true, "should": true,
+		"may": true, "might": true, "must": true, "can": true,
+		"to": true, "of": true, "in": true, "for": true, "on": true,
+		"with": true, "at": true, "by": true, "from": true, "as": true,
+		"and": true, "or": true, "but": true, "if": true, "then": true,
+		"this": true, "that": true, "these": true, "those": true,
+		"it": true, "its": true, "we": true, "you": true, "they": true,
+	}
+
+	var filtered []string
+	for _, t := range tokens {
+		if len(t) > 1 && !stopwords[t] {
+			filtered = append(filtered, t)
+		}
+	}
+
+	return filtered
+}
