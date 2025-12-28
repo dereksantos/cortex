@@ -464,3 +464,32 @@ func (m *MockCortex) Retrieve(ctx context.Context, q cognition.Query, mode cogni
 func (m *MockCortex) AddProactiveInsight(result cognition.Result) {
 	m.proactiveQueue = append(m.proactiveQueue, result)
 }
+
+// MaybeDigest implements cognition.Digester
+func (m *MockCortex) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
+	return &cognition.DigestResult{
+		Status:   cognition.DigestRan,
+		Groups:   0,
+		Merged:   0,
+		Duration: 10 * time.Millisecond,
+	}, nil
+}
+
+// DigestInsights implements cognition.Digester
+func (m *MockCortex) DigestInsights(ctx context.Context, insights []cognition.Result) ([]cognition.DigestedInsight, error) {
+	// Simple mock: return each insight as its own group
+	var digested []cognition.DigestedInsight
+	for _, ins := range insights {
+		digested = append(digested, cognition.DigestedInsight{
+			Representative: ins,
+			Duplicates:     nil,
+			Similarity:     0,
+		})
+	}
+	return digested, nil
+}
+
+// GetDigestedInsights implements cognition.Digester
+func (m *MockCortex) GetDigestedInsights(ctx context.Context, limit int) ([]cognition.DigestedInsight, error) {
+	return nil, nil
+}

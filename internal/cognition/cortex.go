@@ -18,6 +18,7 @@ type Cortex struct {
 	resolve *Resolve
 	think   *Think
 	dream   *Dream
+	digest  *Digest
 
 	// Shared state
 	activity *ActivityTracker
@@ -37,6 +38,7 @@ func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Co
 	reflect := NewReflect(provider) // provider can be nil, Reflect will degrade gracefully
 	think := NewThink(reflex, reflect, activity)
 	dream := NewDream(store, provider, activity)
+	digest := NewDigest(store)
 	resolve := NewResolve()
 
 	// Connect resolve to think for session context
@@ -48,6 +50,7 @@ func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Co
 		resolve:  resolve,
 		think:    think,
 		dream:    dream,
+		digest:   digest,
 		activity: activity,
 	}, nil
 }
@@ -109,7 +112,14 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 
 	// Step 4: Trigger background mode (non-blocking)
 	if c.activity.IsIdle() {
-		go c.dream.MaybeDream(context.Background())
+		go func() {
+			result, _ := c.dream.MaybeDream(context.Background())
+			// Trigger Digest after Dream completes
+			if result != nil && result.Status == cognition.DreamRan {
+				c.digest.NotifyDreamCompleted()
+				c.digest.MaybeDigest(context.Background())
+			}
+		}()
 	} else {
 		go c.think.MaybeThink(context.Background())
 	}
@@ -166,4 +176,20 @@ func (c *Cortex) ProactiveQueue() []cognition.Result {
 func (c *Cortex) SetStateWriter(sw *StateWriter) {
 	c.think.SetStateWriter(sw)
 	c.dream.SetStateWriter(sw)
+	c.digest.SetStateWriter(sw)
+}
+
+// MaybeDigest attempts to consolidate insights after Dream.
+func (c *Cortex) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
+	return c.digest.MaybeDigest(ctx)
+}
+
+// DigestInsights performs on-demand deduplication of given insights.
+func (c *Cortex) DigestInsights(ctx context.Context, insights []cognition.Result) ([]cognition.DigestedInsight, error) {
+	return c.digest.DigestInsights(ctx, insights)
+}
+
+// GetDigestedInsights returns all active insights in deduplicated form.
+func (c *Cortex) GetDigestedInsights(ctx context.Context, limit int) ([]cognition.DigestedInsight, error) {
+	return c.digest.GetDigestedInsights(ctx, limit)
 }
