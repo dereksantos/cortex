@@ -2103,8 +2103,30 @@ func handleDaemon() {
 }
 
 // updateDaemonStats updates the daemon state file with current stats.
+// Only writes idle state if no cognitive mode is currently active.
 func updateDaemonStats(store *storage.Storage, stateWriter *intcognition.StateWriter) {
 	if store == nil || stateWriter == nil {
+		return
+	}
+
+	// Check if a cognitive mode is currently active - don't overwrite it
+	currentState, _ := intcognition.ReadDaemonState(stateWriter.Path())
+	if currentState != nil && currentState.Mode != "" && currentState.Mode != "idle" {
+		// A cognitive mode is active and fresh - don't overwrite with idle
+		// Just update stats in-place by re-writing with same mode
+		stats, err := store.GetStats()
+		if err != nil {
+			return
+		}
+		totalEvents := 0
+		if val, ok := stats["total_events"].(int); ok {
+			totalEvents = val
+		}
+		totalInsights := 0
+		if val, ok := stats["total_insights"].(int); ok {
+			totalInsights = val
+		}
+		stateWriter.WriteModeWithStats(currentState.Mode, currentState.Description, totalEvents, totalInsights)
 		return
 	}
 
@@ -2123,7 +2145,7 @@ func updateDaemonStats(store *storage.Storage, stateWriter *intcognition.StateWr
 		totalInsights = val
 	}
 
-	// Write idle state with stats (cognitive modes will override when active)
+	// Write idle state with stats (no cognitive mode is active)
 	stateWriter.WriteModeWithStats("idle", "", totalEvents, totalInsights)
 }
 
@@ -2208,6 +2230,15 @@ func displayStatus() {
 		return
 	}
 
+	// Check if daemon is offline (state file exists but is stale)
+	daemonOffline := false
+	if _, err := os.Stat(statePath); err == nil {
+		// State file exists - if daemonState is nil, it means it's stale (daemon stopped)
+		if daemonState == nil {
+			daemonOffline = true
+		}
+	}
+
 	// Open storage to check for data
 	store, err := storage.New(cfg)
 	if err != nil {
@@ -2241,7 +2272,7 @@ func displayStatus() {
 
 	// Determine current mode based on activity
 	mode := "Ready"
-	spinner := "●"
+	spinner := "✓"
 
 	if totalEvents == 0 && totalInsights == 0 {
 		mode = "Cold start"
@@ -2254,18 +2285,25 @@ func displayStatus() {
 			timeSince := time.Since(lastEvent.Timestamp)
 
 			if timeSince < 30*time.Second {
-				// Very recent activity
+				// Very recent activity - still use checkmark
 				mode = "Processing"
-				spinner = getAnimatedSpinner()
+				spinner = "✓"
 			} else if timeSince < 5*time.Minute {
 				mode = "Active"
-				spinner = "◐"
+				spinner = "✓"
 			}
 		}
 	}
 
 	// Format output: natural language sentences (no colons)
-	if totalEvents > 0 || totalInsights > 0 {
+	if daemonOffline {
+		// Daemon is not running - show stopped status
+		if totalEvents > 0 || totalInsights > 0 {
+			fmt.Printf("⏸ Stopped: %d events, %d insights", totalEvents, totalInsights)
+		} else {
+			fmt.Print("⏸ Daemon not running")
+		}
+	} else if totalEvents > 0 || totalInsights > 0 {
 		fmt.Printf("%s Ready with %d events and %d insights", spinner, totalEvents, totalInsights)
 	} else if mode == "Cold start" {
 		fmt.Printf("%s Waiting for first activity...", spinner)
@@ -2294,51 +2332,40 @@ func getModeSpinner(mode string) string {
 	}
 }
 
-// getThinkSpinner returns an animated braille dots spinner for Think mode.
-// Subtle background work feel.
+// getThinkSpinner returns the Think mode icon.
+// Half-filled circle represents processing/learning.
 func getThinkSpinner() string {
-	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	idx := (time.Now().UnixMilli() / 100) % 10
-	return spinners[idx]
+	return "◐"
 }
 
-// getDreamSpinner returns a breathing animation for Dream mode.
-// Organic, exploratory feel.
+// getDreamSpinner returns the Dream mode icon.
+// Cloud represents wandering, exploratory thinking.
 func getDreamSpinner() string {
-	spinners := []string{"○", "◔", "◑", "◕", "●", "◕", "◑", "◔"}
-	idx := (time.Now().UnixMilli() / 200) % 8
-	return spinners[idx]
+	return "☁"
 }
 
-// getReflexSpinner returns a bouncing dot spinner for Reflex mode.
-// Quick pulse feel.
+// getReflexSpinner returns the Reflex mode icon.
+// Lightning represents fast, mechanical search.
 func getReflexSpinner() string {
-	spinners := []string{"∙", "•", "●", "•", "∙"}
-	idx := (time.Now().UnixMilli() / 80) % 5
-	return spinners[idx]
+	return "⚡"
 }
 
-// getReflectSpinner returns an arrow cycle spinner for Reflect mode.
-// Directional, evaluating feel.
+// getReflectSpinner returns the Reflect mode icon.
+// Opposite half-filled circle represents evaluation.
 func getReflectSpinner() string {
-	spinners := []string{"→", "↘", "↓", "↙", "←", "↖", "↑", "↗"}
-	idx := (time.Now().UnixMilli() / 150) % 8
-	return spinners[idx]
+	return "◑"
 }
 
-// getResolveSpinner returns an ellipsis animation for Resolve mode.
-// Deciding feel.
+// getResolveSpinner returns the Resolve mode icon.
+// Play/forward triangle represents deciding/choosing.
 func getResolveSpinner() string {
-	spinners := []string{"·  ", "·· ", "···", "·· ", "·  ", "   "}
-	idx := (time.Now().UnixMilli() / 300) % 6
-	return spinners[idx]
+	return "▸"
 }
 
-// getInsightSpinner returns a special marker for insight discovery.
+// getInsightSpinner returns the Insight mode icon.
+// Star represents discovery.
 func getInsightSpinner() string {
-	spinners := []string{"✦", "★", "✦", "☆"}
-	idx := (time.Now().UnixMilli() / 400) % 4
-	return spinners[idx]
+	return "✦"
 }
 
 // getModeDisplayName returns the display name for a cognitive mode.
@@ -2378,15 +2405,6 @@ func getDefaultModeDescription(mode string) string {
 	}
 }
 
-// getAnimatedSpinner returns a spinner character based on current time
-// This creates the animation effect when called repeatedly
-func getAnimatedSpinner() string {
-	spinners := []string{"◐", "◓", "◑", "◒"}
-	// Use milliseconds to cycle through spinners
-	idx := (time.Now().UnixMilli() / 250) % 4
-	return spinners[idx]
-}
-
 func handleSearch() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: cortex search <query>\n")
@@ -2410,30 +2428,51 @@ func handleSearch() {
 	}
 	defer store.Close()
 
+	// Search insights first (more valuable)
+	insights, err := store.SearchInsights(query, 10)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to search insights: %v\n", err)
+	}
+
 	// Search events
 	events, err := store.SearchEvents(query, 10)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to search: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to search events: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Display results
-	if len(events) == 0 {
+	if len(insights) == 0 && len(events) == 0 {
 		fmt.Println("No results found")
 		return
 	}
 
-	fmt.Printf("Found %d results:\n\n", len(events))
-	for i, event := range events {
-		fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))
-		if event.ToolResult != "" {
-			preview := event.ToolResult
-			if len(preview) > 100 {
-				preview = preview[:100] + "..."
+	// Show insights first
+	if len(insights) > 0 {
+		fmt.Printf("Found %d insights:\n\n", len(insights))
+		for i, insight := range insights {
+			fmt.Printf("%d. [%s] %s\n", i+1, insight.Category, insight.Summary)
+			if len(insight.Tags) > 0 {
+				fmt.Printf("   Tags: %v\n", insight.Tags)
 			}
-			fmt.Printf("   %s\n", preview)
+			fmt.Println()
 		}
-		fmt.Println()
+	}
+
+	// Show events if any
+	if len(events) > 0 {
+		fmt.Printf("Found %d events:\n\n", len(events))
+		for i, event := range events {
+			fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))
+			if event.ToolResult != "" {
+				preview := event.ToolResult
+				if len(preview) > 100 {
+					preview = preview[:100] + "..."
+				}
+				fmt.Printf("   %s\n", preview)
+			}
+			fmt.Println()
+		}
 	}
 }
 

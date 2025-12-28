@@ -40,11 +40,14 @@ func (p *ProjectSource) Sample(ctx context.Context, n int) ([]cognition.DreamIte
 	priorityFiles := []string{
 		"README.md",
 		"CLAUDE.md",
+		"LICENSE",
 		"go.mod",
 		"package.json",
 		"Makefile",
 		"Dockerfile",
 		".env.example",
+		"CONTRIBUTING.md",
+		"CHANGELOG.md",
 	}
 
 	for _, pf := range priorityFiles {
