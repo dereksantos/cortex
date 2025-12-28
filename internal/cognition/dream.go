@@ -116,12 +116,21 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 	stateWriter := d.stateWriter
 	d.mu.Unlock()
 
-	// Write state on start
+	// Write state on start with natural language
 	if stateWriter != nil {
-		stateWriter.WriteMode("dream", "exploring project files")
+		stateWriter.WriteMode("dream", "Dreaming about the codebase...")
 	}
 
+	start := time.Now()
+	minDisplay := d.config.MinDisplayDuration
+
 	defer func() {
+		// Ensure minimum display duration for status visibility
+		elapsed := time.Since(start)
+		if elapsed < minDisplay {
+			time.Sleep(minDisplay - elapsed)
+		}
+
 		d.mu.Lock()
 		d.running = false
 		d.lastDream = time.Now()
@@ -132,8 +141,6 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 			stateWriter.WriteMode("idle", "")
 		}
 	}()
-
-	start := time.Now()
 	budget := d.activity.DreamBudget(d.config.MinBudget, d.config.MaxBudget, d.config.GrowthDuration)
 	log.Printf("Dream: starting (budget: %d, sources: %d)", budget, len(d.sources))
 	ops := 0
@@ -155,8 +162,16 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 				break
 			}
 
+			// Update status with current item being explored
+			if stateWriter != nil {
+				truncPath := TruncatePath(item.Path, 30)
+				if truncPath != "" {
+					stateWriter.WriteMode("dream", fmt.Sprintf("Exploring %s...", truncPath))
+				}
+			}
+
 			// Analyze item for insights
-			insight, err := d.analyzeItem(ctx, item)
+			insight, err := d.analyzeItem(ctx, item, stateWriter)
 			if err != nil || insight == nil {
 				ops++
 				continue
@@ -178,6 +193,14 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 			select {
 			case d.insightsChan <- *insight:
 			default:
+			}
+
+			// Flash insight discovery to user
+			if stateWriter != nil {
+				truncInsight := TruncateInsight(insight.Content, 35)
+				stateWriter.WriteMode("insight", fmt.Sprintf("Discovered %s", truncInsight))
+				// Brief pause to let user see the insight
+				time.Sleep(2 * time.Second)
 			}
 
 			// Queue high-value insights for proactive injection
@@ -203,9 +226,17 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 }
 
 // analyzeItem uses LLM to extract insights from a sampled item.
-func (d *Dream) analyzeItem(ctx context.Context, item cognition.DreamItem) (*cognition.Result, error) {
+func (d *Dream) analyzeItem(ctx context.Context, item cognition.DreamItem, stateWriter *StateWriter) (*cognition.Result, error) {
 	if d.llm == nil || !d.llm.IsAvailable() {
 		return nil, nil
+	}
+
+	// Update status to show we're analyzing
+	if stateWriter != nil {
+		truncPath := TruncatePath(item.Path, 25)
+		if truncPath != "" {
+			stateWriter.WriteMode("dream", fmt.Sprintf("Analyzing %s for patterns...", truncPath))
+		}
 	}
 
 	// Truncate content if too long

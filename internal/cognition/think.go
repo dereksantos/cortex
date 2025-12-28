@@ -72,12 +72,21 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 	stateWriter := t.stateWriter
 	t.mu.Unlock()
 
-	// Write state on start
+	// Write state on start with natural language
 	if stateWriter != nil {
-		stateWriter.WriteMode("think", "learning session patterns")
+		stateWriter.WriteMode("think", "Thinking about session patterns...")
 	}
 
+	start := time.Now()
+	minDisplay := t.config.MinDisplayDuration
+
 	defer func() {
+		// Ensure minimum display duration for status visibility
+		elapsed := time.Since(start)
+		if elapsed < minDisplay {
+			time.Sleep(minDisplay - elapsed)
+		}
+
 		t.mu.Lock()
 		t.running = false
 		t.mu.Unlock()
@@ -87,23 +96,30 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 			stateWriter.WriteMode("idle", "")
 		}
 	}()
-
-	start := time.Now()
 	budget := t.activity.ThinkBudget(t.config.MinBudget, t.config.MaxBudget)
 	log.Printf("Think: starting (budget: %d)", budget)
 	ops := 0
 
 	// Operation 1: Update topic weights from recent queries
+	if stateWriter != nil {
+		stateWriter.WriteMode("think", "Learning from recent queries...")
+	}
 	t.updateTopicWeights()
 	ops++
 
 	// Operation 2: Cache Reflect results for recent queries
 	if ops < budget && len(t.sessionCtx.RecentQueries) > 0 {
+		if stateWriter != nil {
+			stateWriter.WriteMode("think", "Caching results for faster lookups...")
+		}
 		ops += t.cacheReflectResults(ctx, budget-ops)
 	}
 
 	// Operation 3: Pre-resolve contradictions
 	if ops < budget {
+		if stateWriter != nil {
+			stateWriter.WriteMode("think", "Sorting out contradictions...")
+		}
 		ops += t.resolveContradictions()
 	}
 

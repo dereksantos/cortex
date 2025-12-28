@@ -1991,6 +1991,17 @@ func handleDaemon() {
 	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
 	if cortex != nil {
 		cortex.SetStateWriter(stateWriter)
+
+		// Register dream sources for background exploration
+		cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+		cortex.RegisterSource(sources.NewCortexSource(store))
+
+		// Register Claude history source
+		homeDir, _ := os.UserHomeDir()
+		if homeDir != "" {
+			claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
+			cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
+		}
 	}
 
 	// Load persisted session
@@ -2017,6 +2028,7 @@ func handleDaemon() {
 	fmt.Println("   Processing events every 5 seconds...")
 	fmt.Println("   Session persisted every 30 seconds...")
 	fmt.Println("   Status updates every 2 seconds...")
+	fmt.Println("   Cognitive modes check every 10 seconds...")
 	fmt.Println("   Press Ctrl+C to stop")
 
 	// Set up signal handling for graceful shutdown
@@ -2030,6 +2042,13 @@ func handleDaemon() {
 	// Periodic state update ticker for stats
 	stateTicker := time.NewTicker(2 * time.Second)
 	defer stateTicker.Stop()
+
+	// Periodic cognitive mode ticker (Dream when idle, Think when active)
+	cognitiveTicker := time.NewTicker(10 * time.Second)
+	defer cognitiveTicker.Stop()
+
+	// Idle threshold for Dream triggering (30 seconds without events)
+	idleThreshold := 30 * time.Second
 
 	// Write initial state
 	updateDaemonStats(store, stateWriter)
@@ -2047,6 +2066,17 @@ func handleDaemon() {
 				sessionSaver.MarkDirty()
 				if sessionSaver.MaybeSave(cortex.SessionContext()) {
 					// Silent save - no output needed
+				}
+			}
+		case <-cognitiveTicker.C:
+			// Trigger cognitive modes based on activity
+			if cortex != nil {
+				if isUserIdle(store, idleThreshold) {
+					// Idle - run Dream for background exploration
+					go cortex.MaybeDream(context.Background())
+				} else {
+					// Active - run Think for session pattern learning
+					go cortex.MaybeThink(context.Background())
 				}
 			}
 		case <-sigChan:
@@ -2097,6 +2127,22 @@ func updateDaemonStats(store *storage.Storage, stateWriter *intcognition.StateWr
 	stateWriter.WriteModeWithStats("idle", "", totalEvents, totalInsights)
 }
 
+// isUserIdle checks if the user has been idle based on recent captured events.
+// Returns true if no events in the last idleThreshold duration.
+func isUserIdle(store *storage.Storage, idleThreshold time.Duration) bool {
+	if store == nil {
+		return true
+	}
+
+	recentEvents, err := store.GetRecentEvents(1)
+	if err != nil || len(recentEvents) == 0 {
+		return true // No events = idle
+	}
+
+	timeSince := time.Since(recentEvents[0].Timestamp)
+	return timeSince > idleThreshold
+}
+
 func handleStats() {
 	// Load config
 	cfg, err := loadConfig()
@@ -2126,31 +2172,12 @@ func handleStats() {
 }
 
 func handleStatus() {
-	// Parse flags - handle both --format=value and --format value
-	format := ""
-	for i := 2; i < len(os.Args); i++ {
-		arg := os.Args[i]
-		if strings.HasPrefix(arg, "--format=") {
-			format = strings.TrimPrefix(arg, "--format=")
-			break
-		}
-		if arg == "--format" && i+1 < len(os.Args) {
-			format = os.Args[i+1]
-			break
-		}
-	}
-
-	if format == "claude" {
-		handleClaudeStatus()
-		return
-	}
-
-	// Simple status line for default format
-	fmt.Print("🤖🧠💡")
+	// Standardized text-based status output
+	displayStatus()
 }
 
-func handleClaudeStatus() {
-	// Read JSON from stdin (Claude Code context)
+func displayStatus() {
+	// Read JSON from stdin (Claude Code context, if present)
 	var claudeContext map[string]interface{}
 	data, err := io.ReadAll(os.Stdin)
 	if err == nil && len(data) > 0 {
@@ -2172,12 +2199,12 @@ func handleClaudeStatus() {
 	// If we have fresh daemon state, use it
 	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
 		spinner := getModeSpinner(daemonState.Mode)
-		modeName := getModeDisplayName(daemonState.Mode)
 		desc := daemonState.Description
 		if desc == "" {
 			desc = getDefaultModeDescription(daemonState.Mode)
 		}
-		fmt.Printf("%s %s: %s", spinner, modeName, desc)
+		// Natural language format: "{spinner} {description}" - no "Mode:" prefix
+		fmt.Printf("%s %s", spinner, desc)
 		return
 	}
 
@@ -2237,11 +2264,13 @@ func handleClaudeStatus() {
 		}
 	}
 
-	// Format output: {spinner} {mode}: {description}
+	// Format output: natural language sentences (no colons)
 	if totalEvents > 0 || totalInsights > 0 {
-		fmt.Printf("%s %s: %d events, %d insights", spinner, mode, totalEvents, totalInsights)
+		fmt.Printf("%s Ready with %d events and %d insights", spinner, totalEvents, totalInsights)
+	} else if mode == "Cold start" {
+		fmt.Printf("%s Waiting for first activity...", spinner)
 	} else {
-		fmt.Printf("%s %s", spinner, mode)
+		fmt.Printf("%s Watching for activity...", spinner)
 	}
 }
 
@@ -2252,24 +2281,63 @@ func getModeSpinner(mode string) string {
 		return getThinkSpinner()
 	case "dream":
 		return getDreamSpinner()
-	case "reflex", "reflect", "resolve":
-		return "◑"
+	case "reflex":
+		return getReflexSpinner()
+	case "reflect":
+		return getReflectSpinner()
+	case "resolve":
+		return getResolveSpinner()
+	case "insight":
+		return getInsightSpinner()
 	default:
 		return "●"
 	}
 }
 
-// getThinkSpinner returns an animated spinner for Think mode.
+// getThinkSpinner returns an animated braille dots spinner for Think mode.
+// Subtle background work feel.
 func getThinkSpinner() string {
-	spinners := []string{"◐", "◓", "◑", "◒"}
-	idx := (time.Now().UnixMilli() / 250) % 4
+	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	idx := (time.Now().UnixMilli() / 100) % 10
 	return spinners[idx]
 }
 
-// getDreamSpinner returns an animated spinner for Dream mode.
+// getDreamSpinner returns a breathing animation for Dream mode.
+// Organic, exploratory feel.
 func getDreamSpinner() string {
-	spinners := []string{"◒", "◐", "◓", "◑"}
-	idx := (time.Now().UnixMilli() / 250) % 4
+	spinners := []string{"○", "◔", "◑", "◕", "●", "◕", "◑", "◔"}
+	idx := (time.Now().UnixMilli() / 200) % 8
+	return spinners[idx]
+}
+
+// getReflexSpinner returns a bouncing dot spinner for Reflex mode.
+// Quick pulse feel.
+func getReflexSpinner() string {
+	spinners := []string{"∙", "•", "●", "•", "∙"}
+	idx := (time.Now().UnixMilli() / 80) % 5
+	return spinners[idx]
+}
+
+// getReflectSpinner returns an arrow cycle spinner for Reflect mode.
+// Directional, evaluating feel.
+func getReflectSpinner() string {
+	spinners := []string{"→", "↘", "↓", "↙", "←", "↖", "↑", "↗"}
+	idx := (time.Now().UnixMilli() / 150) % 8
+	return spinners[idx]
+}
+
+// getResolveSpinner returns an ellipsis animation for Resolve mode.
+// Deciding feel.
+func getResolveSpinner() string {
+	spinners := []string{"·  ", "·· ", "···", "·· ", "·  ", "   "}
+	idx := (time.Now().UnixMilli() / 300) % 6
+	return spinners[idx]
+}
+
+// getInsightSpinner returns a special marker for insight discovery.
+func getInsightSpinner() string {
+	spinners := []string{"✦", "★", "✦", "☆"}
+	idx := (time.Now().UnixMilli() / 400) % 4
 	return spinners[idx]
 }
 
@@ -2291,19 +2359,20 @@ func getModeDisplayName(mode string) string {
 	}
 }
 
-// getDefaultModeDescription returns the default description for a mode.
+// getDefaultModeDescription returns a natural language description for a mode.
+// These are complete sentences without colons.
 func getDefaultModeDescription(mode string) string {
 	switch mode {
 	case "think":
-		return "learning session patterns"
+		return "Thinking about session patterns..."
 	case "dream":
-		return "exploring project files"
+		return "Dreaming about the codebase..."
 	case "reflex":
-		return "searching context"
+		return "Searching for relevant context..."
 	case "reflect":
-		return "reranking results"
+		return "Reflecting on search results..."
 	case "resolve":
-		return "deciding injection"
+		return "Deciding what to inject..."
 	default:
 		return ""
 	}
