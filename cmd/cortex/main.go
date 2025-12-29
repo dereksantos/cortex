@@ -71,6 +71,8 @@ func main() {
 		handleStats()
 	case "status":
 		handleStatus()
+	case "watch":
+		handleWatch()
 	case "search":
 		handleSearch()
 	case "recent":
@@ -2349,12 +2351,31 @@ func handleDaemon() {
 		case <-cognitiveTicker.C:
 			// Trigger cognitive modes based on activity
 			if cortex != nil {
+				activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
 				if isUserIdle(store, idleThreshold) {
 					// Idle - run Dream for background exploration
-					go cortex.MaybeDream(context.Background())
+					go func() {
+						result, err := cortex.MaybeDream(context.Background())
+						if err == nil && result != nil && result.Status == cognition.DreamRan {
+							activityLogger.Log(&intcognition.ActivityLogEntry{
+								Mode:        "dream",
+								Description: fmt.Sprintf("explored %d items, %d insights", result.Operations, result.Insights),
+								LatencyMs:   result.Duration.Milliseconds(),
+							})
+						}
+					}()
 				} else {
 					// Active - run Think for session pattern learning
-					go cortex.MaybeThink(context.Background())
+					go func() {
+						result, err := cortex.MaybeThink(context.Background())
+						if err == nil && result != nil && result.Status == cognition.ThinkRan {
+							activityLogger.Log(&intcognition.ActivityLogEntry{
+								Mode:        "think",
+								Description: fmt.Sprintf("processed %d operations", result.Operations),
+								LatencyMs:   result.Duration.Milliseconds(),
+							})
+						}
+					}()
 				}
 			}
 		case <-sigChan:
@@ -3347,7 +3368,16 @@ func handleInjectContext() {
 		mode = cognition.Full
 	}
 
+	// Track retrieval timing
+	retrieveStart := time.Now()
 	result, err := cortex.Retrieve(context.Background(), query, mode)
+	retrieveElapsed := time.Since(retrieveStart)
+
+	// Write retrieval stats (best effort, don't block on errors)
+	go func() {
+		writeRetrievalStats(cfg.ContextDir, prompt, mode, result, retrieveElapsed)
+	}()
+
 	if err != nil || result.Decision != cognition.Inject {
 		// No relevant context or decision to skip injection
 		fmt.Println(prompt)
@@ -3720,6 +3750,540 @@ func loadConfigWithFallback() *config.Config {
 	return cfg
 }
 
+// writeRetrievalStats writes retrieval statistics and logs activity.
+// This is called after each cortex.Retrieve() in handleInjectContext.
+func writeRetrievalStats(contextDir string, query string, mode cognition.RetrieveMode, result *cognition.ResolveResult, elapsed time.Duration) {
+	// Read existing stats to update total count
+	existingStats, _ := intcognition.ReadRetrievalStats(contextDir)
+	totalRetrievals := 1
+	if existingStats != nil {
+		totalRetrievals = existingStats.TotalRetrievals + 1
+	}
+
+	// Determine mode string
+	modeStr := "fast"
+	if mode == cognition.Full {
+		modeStr = "full"
+	}
+
+	// Build stats
+	stats := &intcognition.RetrievalStats{
+		LastQuery:       truncateString(query, 100),
+		LastMode:        modeStr,
+		LastReflexMs:    elapsed.Milliseconds(), // Total time as estimate
+		LastReflectMs:   0,
+		LastResults:     0,
+		LastDecision:    "skip",
+		TotalRetrievals: totalRetrievals,
+	}
+
+	if result != nil {
+		stats.LastResults = len(result.Results)
+		stats.LastDecision = result.Decision.String()
+	}
+
+	// For Full mode, estimate reflect took majority of time
+	if mode == cognition.Full && elapsed.Milliseconds() > 50 {
+		stats.LastReflexMs = 10 // Estimate ~10ms for reflex
+		stats.LastReflectMs = elapsed.Milliseconds() - 10
+	}
+
+	// Write stats
+	statsWriter := intcognition.NewRetrievalStatsWriter(contextDir)
+	statsWriter.WriteStats(stats)
+
+	// Log the activity
+	logger := intcognition.NewActivityLogger(contextDir)
+
+	// Log reflex
+	reflexEntry := &intcognition.ActivityLogEntry{
+		Timestamp:   time.Now(),
+		Mode:        "reflex",
+		Description: fmt.Sprintf("%d results for \"%s\"", stats.LastResults, truncateString(query, 30)),
+		Query:       query,
+		Results:     stats.LastResults,
+		LatencyMs:   stats.LastReflexMs,
+	}
+	logger.Log(reflexEntry)
+
+	// If Full mode, also log reflect
+	if mode == cognition.Full {
+		reflectEntry := &intcognition.ActivityLogEntry{
+			Timestamp:   time.Now(),
+			Mode:        "reflect",
+			Description: fmt.Sprintf("reranked results (Full mode)"),
+			LatencyMs:   stats.LastReflectMs,
+		}
+		logger.Log(reflectEntry)
+	}
+
+	// Log resolve decision
+	resolveEntry := &intcognition.ActivityLogEntry{
+		Timestamp:   time.Now(),
+		Mode:        "resolve",
+		Description: fmt.Sprintf("%s decision, %d results", stats.LastDecision, stats.LastResults),
+		Results:     stats.LastResults,
+	}
+	logger.Log(resolveEntry)
+}
+
+func handleWatch() {
+	// Parse flags
+	jsonOutput := false
+	noAnimate := false
+	retrievalOnly := false
+	backgroundOnly := false
+
+	for _, arg := range os.Args[2:] {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--no-animate":
+			noAnimate = true
+		case "--retrieval-only":
+			retrievalOnly = true
+		case "--background-only":
+			backgroundOnly = true
+		case "-h", "--help":
+			fmt.Println("Usage: cortex watch [flags]")
+			fmt.Println("\nFlags:")
+			fmt.Println("  --json             Machine-readable JSON output")
+			fmt.Println("  --no-animate       Static output (single snapshot)")
+			fmt.Println("  --retrieval-only   Show only retrieval stats")
+			fmt.Println("  --background-only  Show only background (daemon) stats")
+			os.Exit(0)
+		}
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
+		os.Exit(1)
+	}
+
+	// Open storage for stats
+	store, err := storage.New(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	// If JSON output, print once and exit
+	if jsonOutput {
+		printWatchJSON(cfg, store)
+		return
+	}
+
+	// If no-animate, print once and exit
+	if noAnimate {
+		printWatchStatic(cfg, store, retrievalOnly, backgroundOnly)
+		return
+	}
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Animation ticker (refresh every 300ms)
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Animation state
+	animFrame := 0
+
+	// Clear screen and hide cursor
+	fmt.Print("\033[2J\033[H\033[?25l")
+	defer fmt.Print("\033[?25h") // Show cursor on exit
+
+	// Initial render
+	printWatchAnimated(cfg, store, retrievalOnly, backgroundOnly, animFrame)
+
+	for {
+		select {
+		case <-ticker.C:
+			animFrame++
+			// Move cursor to top and redraw
+			fmt.Print("\033[H")
+			printWatchAnimated(cfg, store, retrievalOnly, backgroundOnly, animFrame)
+		case <-sigChan:
+			fmt.Print("\033[?25h") // Show cursor
+			fmt.Println("\n\nStopped watching.")
+			return
+		}
+	}
+}
+
+// printWatchJSON outputs all watch data as JSON.
+func printWatchJSON(cfg *config.Config, store *storage.Storage) {
+	type WatchOutput struct {
+		DaemonState    *intcognition.DaemonState    `json:"daemon_state,omitempty"`
+		RetrievalStats *intcognition.RetrievalStats `json:"retrieval_stats,omitempty"`
+		RecentActivity []intcognition.ActivityLogEntry `json:"recent_activity,omitempty"`
+		Stats          map[string]interface{}       `json:"stats,omitempty"`
+	}
+
+	output := WatchOutput{}
+
+	// Get daemon state
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	output.DaemonState, _ = intcognition.ReadDaemonState(statePath)
+
+	// Get retrieval stats
+	output.RetrievalStats, _ = intcognition.ReadRetrievalStats(cfg.ContextDir)
+
+	// Get recent activity
+	output.RecentActivity, _ = intcognition.ReadRecentActivity(cfg.ContextDir, 10)
+
+	// Get storage stats
+	output.Stats, _ = store.GetStats()
+
+	data, _ := json.MarshalIndent(output, "", "  ")
+	fmt.Println(string(data))
+}
+
+// printWatchStatic outputs a single snapshot without animation.
+func printWatchStatic(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
+	// Get all state
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	daemonState, _ := intcognition.ReadDaemonState(statePath)
+	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
+	recentActivity, _ := intcognition.ReadRecentActivity(cfg.ContextDir, 5)
+	stats, _ := store.GetStats()
+
+	// Session data
+	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
+	var topicWeights map[string]float64
+	if sessionData, err := os.ReadFile(sessionPath); err == nil {
+		var session struct {
+			TopicWeights map[string]float64 `json:"topic_weights"`
+		}
+		if json.Unmarshal(sessionData, &session) == nil {
+			topicWeights = session.TopicWeights
+		}
+	}
+
+	// Column widths for pipe-style table
+	col1Width := 28 // Background column
+	col2Width := 28 // Retrieval column
+
+	// Get stats
+	events := 0
+	insights := 0
+	if daemonState != nil {
+		events = daemonState.Stats.Events
+		insights = daemonState.Stats.Insights
+	}
+	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
+		events = statsEvents
+	}
+	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
+		insights = statsInsights
+	}
+
+	// Mode status
+	modeIcon := "○"
+	modeName := "IDLE"
+	modeDesc := ""
+	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
+		modeIcon = getModeSpinner(daemonState.Mode)
+		modeName = strings.ToUpper(daemonState.Mode)
+		modeDesc = daemonState.Description
+		if modeDesc == "" {
+			modeDesc = getDefaultModeDescription(daemonState.Mode)
+		}
+	}
+
+	// Helper to pad cell content
+	padCell := func(content string, width int) string {
+		if len(content) > width {
+			return content[:width]
+		}
+		return content + strings.Repeat(" ", width-len(content))
+	}
+
+	// Print mode header
+	fmt.Printf("┌%s┐\n", strings.Repeat("─", col1Width+col2Width+3))
+	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
+	fmt.Printf("│%s│\n", padCell(modeStr, col1Width+col2Width+3))
+	if modeDesc != "" {
+		descStr := fmt.Sprintf(" %s", truncateString(modeDesc, col1Width+col2Width+1))
+		fmt.Printf("│%s│\n", padCell(descStr, col1Width+col2Width+3))
+	}
+
+	// Two-column table
+	if !retrievalOnly && !backgroundOnly {
+		fmt.Printf("├%s┬%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+		fmt.Printf("│ %s │ %s │\n", padCell("Background", col1Width-1), padCell("Retrieval", col2Width-1))
+		fmt.Printf("├%s┼%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+
+		bgEvents := fmt.Sprintf("Events: %d", events)
+		retQueries := ""
+		if retrievalStats != nil {
+			retQueries = fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(bgEvents, col1Width-1), padCell(retQueries, col2Width-1))
+
+		bgInsights := fmt.Sprintf("Insights: %d", insights)
+		retLatency := ""
+		if retrievalStats != nil && retrievalStats.LastMode != "" {
+			modeTitle := strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
+			retLatency = fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(bgInsights, col1Width-1), padCell(retLatency, col2Width-1))
+
+		topicsStr := ""
+		if len(topicWeights) > 0 {
+			topicList := make([]string, 0)
+			for topic, weight := range topicWeights {
+				if weight > 0.3 {
+					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
+				}
+			}
+			if len(topicList) > 0 {
+				topicsStr = strings.Join(topicList[:min(2, len(topicList))], ", ")
+			}
+		}
+		retResults := ""
+		if retrievalStats != nil {
+			retResults = fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(topicsStr, col1Width-1), padCell(retResults, col2Width-1))
+
+		fmt.Printf("└%s┴%s┘\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+	} else if backgroundOnly {
+		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Events: %d  Insights: %d", events, insights), col1Width+col2Width+1))
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	} else if retrievalOnly && retrievalStats != nil {
+		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals), col1Width+col2Width+1))
+		modeTitle := "N/A"
+		if retrievalStats.LastMode != "" {
+			modeTitle = strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
+		}
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle), col1Width+col2Width+1))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision), col1Width+col2Width+1))
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	} else {
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	}
+
+	// Recent activity table
+	totalWidth := col1Width + col2Width + 3
+	fmt.Println()
+	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
+	fmt.Printf("│ %s │\n", padCell("Recent Activity", totalWidth-2))
+	fmt.Printf("├%s┬%s┬%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+	fmt.Printf("│ %s │ %s │ %s │\n", padCell("Time", 8), padCell("Mode", 6), padCell("Description", totalWidth-23))
+	fmt.Printf("├%s┼%s┼%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+
+	if len(recentActivity) > 0 {
+		for _, entry := range recentActivity {
+			timeStr := entry.Timestamp.Format("15:04:05")
+			modeIcon := getModeSpinner(entry.Mode)
+			desc := truncateString(entry.Description, totalWidth-25)
+			fmt.Printf("│ %s │ %s │ %s │\n", padCell(timeStr, 8), padCell(modeIcon, 6), padCell(desc, totalWidth-23))
+		}
+	} else {
+		fmt.Printf("│ %s │ %s │ %s │\n", padCell("--:--:--", 8), padCell("○", 6), padCell("No activity yet", totalWidth-23))
+	}
+
+	fmt.Printf("└%s┴%s┴%s┘\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+}
+
+// printWatchAnimated outputs the animated watch display.
+func printWatchAnimated(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool, frame int) {
+	// Get all state
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	daemonState, _ := intcognition.ReadDaemonState(statePath)
+	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
+	recentActivity, _ := intcognition.ReadRecentActivity(cfg.ContextDir, 5)
+	stats, _ := store.GetStats()
+
+	// Session data
+	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
+	var topicWeights map[string]float64
+	if sessionData, err := os.ReadFile(sessionPath); err == nil {
+		var session struct {
+			TopicWeights map[string]float64 `json:"topic_weights"`
+		}
+		if json.Unmarshal(sessionData, &session) == nil {
+			topicWeights = session.TopicWeights
+		}
+	}
+
+	// Column widths for pipe-style table
+	col1Width := 28 // Background column
+	col2Width := 28 // Retrieval column
+
+	// Get stats
+	events := 0
+	insights := 0
+	if daemonState != nil {
+		events = daemonState.Stats.Events
+		insights = daemonState.Stats.Insights
+	}
+	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
+		events = statsEvents
+	}
+	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
+		insights = statsInsights
+	}
+
+	// Mode status
+	modeIcon := "○"
+	modeName := "IDLE"
+	modeDesc := ""
+	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
+		modeIcon = getAnimatedModeSpinner(daemonState.Mode, frame)
+		modeName = strings.ToUpper(daemonState.Mode) + "ING"
+		if daemonState.Mode == "dream" {
+			modeName = "DREAMING"
+		} else if daemonState.Mode == "think" {
+			modeName = "THINKING"
+		}
+		modeDesc = daemonState.Description
+		if modeDesc == "" {
+			modeDesc = getDefaultModeDescription(daemonState.Mode)
+		}
+	}
+
+	// Helper to pad cell content
+	padCell := func(content string, width int) string {
+		if len(content) > width {
+			return content[:width]
+		}
+		return content + strings.Repeat(" ", width-len(content))
+	}
+
+	// Print mode header
+	fmt.Printf("┌%s┐\n", strings.Repeat("─", col1Width+col2Width+3))
+	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
+	fmt.Printf("│%s│\n", padCell(modeStr, col1Width+col2Width+3))
+	if modeDesc != "" {
+		descStr := fmt.Sprintf(" %s", truncateString(modeDesc, col1Width+col2Width+1))
+		fmt.Printf("│%s│\n", padCell(descStr, col1Width+col2Width+3))
+	}
+
+	// Two-column table header
+	if !retrievalOnly && !backgroundOnly {
+		fmt.Printf("├%s┬%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+		fmt.Printf("│ %s │ %s │\n", padCell("Background", col1Width-1), padCell("Retrieval", col2Width-1))
+		fmt.Printf("├%s┼%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+
+		// Stats rows
+		bgEvents := fmt.Sprintf("Events: %d", events)
+		retQueries := ""
+		if retrievalStats != nil {
+			retQueries = fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(bgEvents, col1Width-1), padCell(retQueries, col2Width-1))
+
+		bgInsights := fmt.Sprintf("Insights: %d", insights)
+		retLatency := ""
+		if retrievalStats != nil && retrievalStats.LastMode != "" {
+			modeTitle := strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
+			retLatency = fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(bgInsights, col1Width-1), padCell(retLatency, col2Width-1))
+
+		// Topics
+		topicsStr := ""
+		if len(topicWeights) > 0 {
+			topicList := make([]string, 0)
+			for topic, weight := range topicWeights {
+				if weight > 0.3 {
+					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
+				}
+			}
+			if len(topicList) > 0 {
+				topicsStr = strings.Join(topicList[:min(2, len(topicList))], ", ")
+			}
+		}
+		retResults := ""
+		if retrievalStats != nil {
+			retResults = fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision)
+		}
+		fmt.Printf("│ %s │ %s │\n", padCell(topicsStr, col1Width-1), padCell(retResults, col2Width-1))
+
+		fmt.Printf("└%s┴%s┘\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
+	} else if backgroundOnly {
+		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Events: %d  Insights: %d", events, insights), col1Width+col2Width+1))
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	} else if retrievalOnly && retrievalStats != nil {
+		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals), col1Width+col2Width+1))
+		modeTitle := "N/A"
+		if retrievalStats.LastMode != "" {
+			modeTitle = strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
+		}
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle), col1Width+col2Width+1))
+		fmt.Printf("│ %s │\n", padCell(fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision), col1Width+col2Width+1))
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	} else {
+		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+	}
+
+	// Recent activity table
+	totalWidth := col1Width + col2Width + 3
+	fmt.Println()
+	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
+	fmt.Printf("│ %s │\n", padCell("Recent Activity", totalWidth-2))
+	fmt.Printf("├%s┬%s┬%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+	fmt.Printf("│ %s │ %s │ %s │\n", padCell("Time", 8), padCell("Mode", 6), padCell("Description", totalWidth-23))
+	fmt.Printf("├%s┼%s┼%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+
+	if len(recentActivity) > 0 {
+		for _, entry := range recentActivity {
+			timeStr := entry.Timestamp.Format("15:04:05")
+			modeIcon := getAnimatedModeSpinner(entry.Mode, frame)
+			desc := truncateString(entry.Description, totalWidth-25)
+			fmt.Printf("│ %s │ %s │ %s │\n", padCell(timeStr, 8), padCell(modeIcon, 6), padCell(desc, totalWidth-23))
+		}
+	} else {
+		fmt.Printf("│ %s │ %s │ %s │\n", padCell("--:--:--", 8), padCell("○", 6), padCell("No activity yet. Start daemon or use Cortex.", totalWidth-23))
+	}
+
+	fmt.Printf("└%s┴%s┴%s┘\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+
+	fmt.Printf("\nPress Ctrl+C to stop. Refreshing every 300ms...\n")
+}
+
+// getAnimatedModeSpinner returns an animated spinner for a cognitive mode.
+func getAnimatedModeSpinner(mode string, frame int) string {
+	switch mode {
+	case "dream":
+		// Breathing, organic
+		spinners := []string{"○", "◔", "◑", "◕", "●", "◕", "◑", "◔"}
+		return spinners[frame%len(spinners)]
+	case "think":
+		// Braille dots, subtle
+		spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		return spinners[frame%len(spinners)]
+	case "reflect":
+		// Arrow cycle
+		spinners := []string{"→", "↘", "↓", "↙", "←", "↖", "↑", "↗"}
+		return spinners[frame%len(spinners)]
+	case "reflex":
+		// Bouncing dot
+		spinners := []string{"∙", "•", "●", "•", "∙"}
+		return spinners[frame%len(spinners)]
+	case "resolve":
+		// Ellipsis
+		spinners := []string{"·  ", "·· ", "···", "·· ", "·  ", "   "}
+		return spinners[frame%len(spinners)]
+	case "insight", "digest":
+		// Special marker
+		spinners := []string{"✦", "★", "✦", "☆"}
+		return spinners[frame%len(spinners)]
+	default:
+		return "●"
+	}
+}
+
 func printUsage() {
 	fmt.Printf(`Cortex %s - Context memory for AI development
 
@@ -3746,6 +4310,7 @@ Commands:
   graph          Show knowledge graph for entity
   stats          Show statistics
   status         Show status (for status line)
+  watch          Live dashboard of cognitive modes
 
   session-start  Print session start instructions (for hooks)
   inject-context Inject relevant context into prompt (for hooks)
