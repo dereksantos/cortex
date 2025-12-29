@@ -7,6 +7,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -19,6 +20,9 @@ type Cortex struct {
 	think   *Think
 	dream   *Dream
 	digest  *Digest
+
+	// Event routing
+	router *Router
 
 	// Shared state
 	activity *ActivityTracker
@@ -44,6 +48,9 @@ func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Co
 	// Connect resolve to think for session context
 	resolve.SetSessionContext(think.SessionContext())
 
+	// Create event router
+	router := NewRouter(reflex, think, dream)
+
 	return &Cortex{
 		reflex:   reflex,
 		reflect:  reflect,
@@ -51,6 +58,7 @@ func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Co
 		think:    think,
 		dream:    dream,
 		digest:   digest,
+		router:   router,
 		activity: activity,
 	}, nil
 }
@@ -125,6 +133,33 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 	}
 
 	return result, nil
+}
+
+// Ingest routes an event to the appropriate cognitive mode for processing.
+//
+// Event routing logic:
+//   - user_prompt → Think.IngestPrompt() for pattern learning
+//   - tool_use → stored for Reflex indexing
+//   - stop → Dream.QueueTranscript() for deeper analysis
+//
+// This is the main entry point for event-driven cognition.
+func (c *Cortex) Ingest(ctx context.Context, event *events.Event) *RouteResult {
+	if c.router == nil {
+		return &RouteResult{Routed: false}
+	}
+	return c.router.Route(ctx, event)
+}
+
+// IngestBatch processes multiple events through the cognition pipeline.
+func (c *Cortex) IngestBatch(ctx context.Context, evts []*events.Event) int {
+	routed := 0
+	for _, event := range evts {
+		result := c.Ingest(ctx, event)
+		if result != nil && result.Routed {
+			routed++
+		}
+	}
+	return routed
 }
 
 // Reflex performs fast mechanical retrieval.

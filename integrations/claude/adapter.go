@@ -136,3 +136,33 @@ func ConvertPromptEvent(data []byte, projectPath string) (*events.Event, error) 
 		},
 	}, nil
 }
+
+// ConvertStopEvent creates a Stop event from the Stop hook data
+func ConvertStopEvent(data []byte, projectPath string) (*events.Event, error) {
+	var hookEvent ClaudeHookEvent
+	if err := json.Unmarshal(data, &hookEvent); err != nil {
+		return nil, fmt.Errorf("failed to parse Claude hook event: %w", err)
+	}
+
+	eventID := fmt.Sprintf("claude-%d", time.Now().UnixNano())
+	sessionID := hookEvent.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("claude-%d", time.Now().Unix())
+	}
+
+	return &events.Event{
+		ID:             eventID,
+		Source:         events.SourceClaude,
+		EventType:      events.EventStop,
+		Timestamp:      time.Now(),
+		TranscriptPath: hookEvent.TranscriptPath,
+		Context: events.EventContext{
+			ProjectPath: projectPath,
+			SessionID:   sessionID,
+			WorkingDir:  hookEvent.Cwd,
+		},
+		Metadata: map[string]interface{}{
+			"stop_hook_active": hookEvent.StopHookActive,
+		},
+	}, nil
+}

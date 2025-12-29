@@ -85,6 +85,8 @@ func main() {
 		handleSessionStart()
 	case "inject-context":
 		handleInjectContext()
+	case "stop":
+		handleStop()
 	case "overview":
 		handleOverview()
 	case "cli":
@@ -742,6 +744,16 @@ func createClaudeSettings(settingsPath string) error {
 				},
 			},
 		},
+		"Stop": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": "./cortex stop",
+					},
+				},
+			},
+		},
 	}
 
 	// Configure status line
@@ -1110,14 +1122,27 @@ func handleAnalyze() {
 
 	fmt.Printf("🔍 Analyzing %d events with LLM...\n", len(events))
 
-	// Create processor
-	queueMgr := queue.New(cfg, store)
-	proc := processor.New(cfg, store, queueMgr)
+	// Use LLM directly for analysis (cognition modes handle this normally)
+	var llmProvider llm.Provider
+	anthropic := llm.NewAnthropicClient(cfg)
+	if anthropic.IsAvailable() {
+		llmProvider = anthropic
+	} else {
+		ollama := llm.NewOllamaClient(cfg)
+		if ollama.IsAvailable() {
+			llmProvider = ollama
+		}
+	}
 
-	// Run analysis synchronously
+	if llmProvider == nil {
+		fmt.Println("⚠️  No LLM available (check Ollama or ANTHROPIC_API_KEY)")
+		return
+	}
+
+	// Analyze events and store insights
 	analyzed := 0
 	for _, event := range events {
-		if err := proc.AnalyzeEventSync(event); err == nil {
+		if err := analyzeEventWithLLM(event, store, llmProvider); err == nil {
 			analyzed++
 		}
 	}
@@ -1125,7 +1150,7 @@ func handleAnalyze() {
 	if analyzed > 0 {
 		fmt.Printf("✅ Analyzed %d events\n", analyzed)
 	} else {
-		fmt.Println("⚠️  No events were analyzed (check Ollama availability)")
+		fmt.Println("⚠️  No events were analyzed")
 	}
 }
 
@@ -1158,21 +1183,36 @@ func handleProcess() {
 
 	// If events were processed, run analysis immediately
 	if processed > 0 {
-		proc := processor.New(cfg, store, queueMgr)
+		// Get LLM provider
+		var llmProvider llm.Provider
+		anthropic := llm.NewAnthropicClient(cfg)
+		if anthropic.IsAvailable() {
+			llmProvider = anthropic
+		} else {
+			ollama := llm.NewOllamaClient(cfg)
+			if ollama.IsAvailable() {
+				llmProvider = ollama
+			}
+		}
+
+		if llmProvider == nil {
+			fmt.Println("⚠️  No LLM available for analysis")
+			return
+		}
 
 		// Analyze recent events
-		events, err := store.GetRecentEvents(processed)
+		recentEvents, err := store.GetRecentEvents(processed)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to get recent events: %v\n", err)
 			return
 		}
 
-		fmt.Printf("🔍 Analyzing %d events with LLM...\n", len(events))
+		fmt.Printf("🔍 Analyzing %d events with LLM...\n", len(recentEvents))
 
 		// Run analysis synchronously for immediate results
 		analyzed := 0
-		for _, event := range events {
-			if err := proc.AnalyzeEventSync(event); err == nil {
+		for _, event := range recentEvents {
+			if err := analyzeEventWithLLM(event, store, llmProvider); err == nil {
 				analyzed++
 			}
 		}
@@ -1398,6 +1438,18 @@ func handleTest() {
 	passed := 0
 	failed := 0
 
+	// Get LLM provider
+	var llmProvider llm.Provider
+	ollama := llm.NewOllamaClient(cfg)
+	if ollama.IsAvailable() {
+		llmProvider = ollama
+	}
+
+	if llmProvider == nil {
+		fmt.Println("❌ No LLM available for testing")
+		os.Exit(1)
+	}
+
 	for _, i := range testsToRun {
 		test := tests[i]
 		fmt.Printf("Testing: %s\n", test.name)
@@ -1411,11 +1463,8 @@ func handleTest() {
 		}
 
 		// Analyze with LLM
-		queueMgr := queue.New(cfg, store)
-		proc := processor.New(cfg, store, queueMgr)
-
 		startTime := time.Now()
-		if err := proc.AnalyzeEventSync(test.event); err != nil {
+		if err := analyzeEventWithLLM(test.event, store, llmProvider); err != nil {
 			fmt.Printf("❌ FAIL: Analysis failed: %v\n\n", err)
 			failed++
 			continue
@@ -2212,6 +2261,11 @@ func handleDaemon() {
 	if cortex != nil {
 		cortex.SetStateWriter(stateWriter)
 
+		// Route events through cognition pipeline when processor handles them
+		proc.SetEventCallback(func(evts []*events.Event) {
+			cortex.IngestBatch(context.Background(), evts)
+		})
+
 		// Register dream sources for background exploration
 		cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
 		cortex.RegisterSource(sources.NewCortexSource(store))
@@ -2222,6 +2276,10 @@ func handleDaemon() {
 			claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
 			cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
 		}
+
+		// Register transcript queue source (from Stop hooks)
+		transcriptQueueDir := filepath.Join(cfg.ContextDir, "transcript_queue")
+		cortex.RegisterSource(sources.NewTranscriptQueueSource(transcriptQueueDir))
 	}
 
 	// Load persisted session
@@ -2873,6 +2931,80 @@ func handleEntities() {
 	}
 }
 
+// analyzeEventWithLLM analyzes an event using the LLM and stores the insight.
+// Used by CLI commands for sync analysis (daemon uses cognition modes instead).
+func analyzeEventWithLLM(event *events.Event, store *storage.Storage, provider llm.Provider) error {
+	if provider == nil || !provider.IsAvailable() {
+		return fmt.Errorf("LLM not available")
+	}
+
+	// Skip routine events
+	if event.ToolName == "Read" || event.ToolName == "Grep" || event.ToolName == "Glob" {
+		return fmt.Errorf("skipped routine event")
+	}
+
+	// Build prompt for analysis
+	eventDesc := fmt.Sprintf("Tool: %s\n", event.ToolName)
+	if filePath, ok := event.ToolInput["file_path"].(string); ok {
+		eventDesc += fmt.Sprintf("File: %s\n", filePath)
+	}
+	if event.ToolResult != "" && len(event.ToolResult) < 500 {
+		eventDesc += fmt.Sprintf("Result: %s\n", event.ToolResult)
+	}
+
+	prompt := fmt.Sprintf(`Analyze this development event for durable insights:
+
+%s
+
+Extract any decisions, patterns, or constraints. Respond in JSON:
+{
+  "category": "decision|pattern|constraint|correction",
+  "summary": "1-2 sentence insight",
+  "importance": 1-10,
+  "tags": ["tag1", "tag2"]
+}
+
+If nothing significant, respond: NO_INSIGHT`, eventDesc)
+
+	response, err := provider.GenerateWithSystem(context.Background(), prompt, llm.AnalysisSystemPrompt)
+	if err != nil {
+		return err
+	}
+
+	// Check for NO_INSIGHT
+	if strings.Contains(strings.ToUpper(response), "NO_INSIGHT") {
+		return fmt.Errorf("no insight found")
+	}
+
+	// Parse JSON response
+	start := strings.Index(response, "{")
+	end := strings.LastIndex(response, "}")
+	if start == -1 || end == -1 {
+		return fmt.Errorf("invalid response format")
+	}
+
+	var result struct {
+		Category   string   `json:"category"`
+		Summary    string   `json:"summary"`
+		Importance int      `json:"importance"`
+		Tags       []string `json:"tags"`
+	}
+
+	if err := json.Unmarshal([]byte(response[start:end+1]), &result); err != nil {
+		return err
+	}
+
+	// Store insight
+	return store.StoreInsight(
+		event.ID,
+		result.Category,
+		result.Summary,
+		result.Importance,
+		result.Tags,
+		"",
+	)
+}
+
 func handleGraph() {
 	if len(os.Args) < 3 {
 		fmt.Fprintf(os.Stderr, "Usage: cortex graph <entity_type> <entity_name>\n")
@@ -3226,6 +3358,68 @@ func handleInjectContext() {
 	fmt.Print(result.Formatted)
 	fmt.Println("User Request:")
 	fmt.Println(prompt)
+}
+
+// handleStop handles the Stop hook - captures transcript path for Dream analysis
+func handleStop() {
+	// Read hook data from stdin (JSON from Stop hook)
+	hookData, err := io.ReadAll(os.Stdin)
+	if err != nil || len(hookData) == 0 {
+		// No data provided, exit silently
+		os.Exit(0)
+	}
+
+	// Parse hook data to extract transcript path and session info
+	stopEvent, err := claude.ConvertStopEvent(hookData, "")
+	if err != nil || stopEvent == nil {
+		// Can't parse, exit silently
+		os.Exit(0)
+	}
+
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		// Silent failure
+		os.Exit(0)
+	}
+
+	// Update project path from hook data if available
+	if stopEvent.Context.WorkingDir != "" {
+		cfg.ProjectRoot = stopEvent.Context.WorkingDir
+	}
+
+	// Open storage
+	store, err := storage.New(cfg)
+	if err != nil {
+		// Silent failure
+		os.Exit(0)
+	}
+	defer store.Close()
+
+	// Capture the stop event
+	cap := capture.New(cfg)
+	if err := cap.CaptureEvent(stopEvent); err != nil {
+		// Log error but continue
+		fmt.Fprintf(os.Stderr, "Warning: failed to capture stop event: %v\n", err)
+	}
+
+	// Queue transcript for Dream analysis if path is available
+	if stopEvent.TranscriptPath != "" {
+		// Write transcript path to a queue file for daemon to pick up
+		queueDir := filepath.Join(cfg.ContextDir, "transcript_queue")
+		if err := os.MkdirAll(queueDir, 0755); err == nil {
+			queueFile := filepath.Join(queueDir, fmt.Sprintf("%d.json", time.Now().UnixNano()))
+			queueData := map[string]string{
+				"transcript_path": stopEvent.TranscriptPath,
+				"session_id":      stopEvent.Context.SessionID,
+			}
+			if data, err := json.Marshal(queueData); err == nil {
+				os.WriteFile(queueFile, data, 0644)
+			}
+		}
+	}
+
+	os.Exit(0)
 }
 
 // isFirstPromptInSession checks if this is the first prompt for this session

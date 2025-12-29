@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/processor"
-	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -77,16 +75,13 @@ func (e *E2EEvaluator) RunE2EScenario(scenario *Scenario) ([]EvalResult, error) 
 	}
 	defer store.Close()
 
-	// Create queue and processor
-	queueMgr := queue.New(evalCfg, store)
-	proc := processor.New(evalCfg, store, queueMgr)
-
 	if e.verbose {
 		fmt.Println("\n--- Phase 1: Learning Chain ---")
 	}
 
 	// Phase 1: Simulate the learning chain
-	err = e.simulateLearningChain(scenario.LearningChain, store, proc)
+	// Events are stored; analysis happens via cognitive modes (Dream/Think)
+	err = e.simulateLearningChain(scenario.LearningChain, store)
 	if err != nil {
 		return nil, fmt.Errorf("failed to simulate learning chain: %w", err)
 	}
@@ -109,7 +104,7 @@ func (e *E2EEvaluator) RunE2EScenario(scenario *Scenario) ([]EvalResult, error) 
 }
 
 // simulateLearningChain processes the learning conversation through Cortex
-func (e *E2EEvaluator) simulateLearningChain(chain []ConversationTurn, store *storage.Storage, proc *processor.Processor) error {
+func (e *E2EEvaluator) simulateLearningChain(chain []ConversationTurn, store *storage.Storage) error {
 	for i, turn := range chain {
 		if e.verbose {
 			fmt.Printf("  Turn %d [%s]: %s\n", i+1, turn.Role, truncateStr(turn.Content, 60))
@@ -128,15 +123,8 @@ func (e *E2EEvaluator) simulateLearningChain(chain []ConversationTurn, store *st
 				fmt.Printf("    → Captured: %s %s\n", toolCall.Tool, toolCall.File)
 			}
 
-			// Process the event to extract insights (synchronous for eval)
-			if err := proc.AnalyzeEventSync(event); err != nil {
-				// Log but don't fail - some events may not produce insights
-				if e.verbose {
-					fmt.Printf("    → Analysis: %v\n", err)
-				}
-			} else if e.verbose {
-				fmt.Printf("    → Analyzed and stored insights\n")
-			}
+			// Note: Analysis now happens via cognitive modes (Dream/Think)
+			// Events are stored and will be analyzed asynchronously
 		}
 
 		// Also capture the conversation content as context

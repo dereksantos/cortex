@@ -41,6 +41,7 @@ func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Thin
 		sessionCtx: &cognition.SessionContext{
 			TopicWeights:           make(map[string]float64),
 			RecentQueries:          make([]cognition.Query, 0),
+			RecentPrompts:          make([]string, 0),
 			WarmCache:              make(map[string][]cognition.Result),
 			CachedReflect:          make(map[string][]cognition.Result),
 			ResolvedContradictions: make(map[string]string),
@@ -163,6 +164,84 @@ func (t *Think) CacheReflectResult(queryText string, results []cognition.Result)
 	defer t.mu.Unlock()
 
 	t.sessionCtx.CachedReflect[queryText] = results
+}
+
+// IngestPrompt processes a user prompt for pattern learning.
+// First prompt in session → synchronous processing (immediate context learning)
+// Subsequent prompts → async processing, writes hint for next injection
+func (t *Think) IngestPrompt(ctx context.Context, prompt string, sessionID string) {
+	if prompt == "" {
+		return
+	}
+
+	// Track prompt in session context
+	t.mu.Lock()
+	if t.sessionCtx.RecentPrompts == nil {
+		t.sessionCtx.RecentPrompts = make([]string, 0)
+	}
+	t.sessionCtx.RecentPrompts = append(t.sessionCtx.RecentPrompts, prompt)
+	// Keep only last 10 prompts
+	if len(t.sessionCtx.RecentPrompts) > 10 {
+		t.sessionCtx.RecentPrompts = t.sessionCtx.RecentPrompts[len(t.sessionCtx.RecentPrompts)-10:]
+	}
+	isFirst := len(t.sessionCtx.RecentPrompts) == 1
+	t.mu.Unlock()
+
+	if isFirst {
+		// First prompt: sync processing for immediate context
+		t.processPromptSync(ctx, prompt, sessionID)
+	} else {
+		// Subsequent prompts: async processing
+		go t.processPromptAsync(ctx, prompt, sessionID)
+	}
+}
+
+// processPromptSync processes a prompt synchronously (first prompt in session).
+func (t *Think) processPromptSync(ctx context.Context, prompt string, sessionID string) {
+	log.Printf("Think: processing first prompt for session %s (sync)", sessionID)
+
+	// Extract topics from prompt
+	topics := t.extractTopics(prompt)
+
+	// Update topic weights
+	t.mu.Lock()
+	for _, topic := range topics {
+		if weight, exists := t.sessionCtx.TopicWeights[topic]; exists {
+			t.sessionCtx.TopicWeights[topic] = weight + 0.2
+		} else {
+			t.sessionCtx.TopicWeights[topic] = 0.5
+		}
+	}
+	t.sessionCtx.LastUpdated = time.Now()
+	t.mu.Unlock()
+
+	log.Printf("Think: learned %d topics from first prompt", len(topics))
+}
+
+// processPromptAsync processes a prompt asynchronously (subsequent prompts).
+func (t *Think) processPromptAsync(ctx context.Context, prompt string, sessionID string) {
+	log.Printf("Think: processing prompt for session %s (async)", sessionID)
+
+	// Extract and update topics
+	topics := t.extractTopics(prompt)
+
+	t.mu.Lock()
+	for _, topic := range topics {
+		if weight, exists := t.sessionCtx.TopicWeights[topic]; exists {
+			t.sessionCtx.TopicWeights[topic] = weight + 0.1
+		} else {
+			t.sessionCtx.TopicWeights[topic] = 0.3
+		}
+	}
+	t.sessionCtx.LastUpdated = time.Now()
+	t.mu.Unlock()
+
+	// Note: Hint file writing is handled in Phase 3
+}
+
+// extractTopics extracts meaningful topics from a prompt.
+func (t *Think) extractTopics(prompt string) []string {
+	return extractTerms(prompt)
 }
 
 // updateTopicWeights analyzes recent queries to detect session patterns.

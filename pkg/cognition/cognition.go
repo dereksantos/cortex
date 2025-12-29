@@ -251,6 +251,11 @@ type SessionContext struct {
 	// Newer queries are at the end.
 	RecentQueries []Query
 
+	// RecentPrompts tracks raw user prompts for pattern learning.
+	// Think uses these to understand what the user is working on.
+	// Newer prompts are at the end.
+	RecentPrompts []string
+
 	// WarmCache holds pre-computed results for likely next queries.
 	// Keys are query hashes or fingerprints.
 	WarmCache map[string][]Result
