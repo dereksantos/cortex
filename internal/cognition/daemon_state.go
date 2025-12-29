@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -176,4 +177,174 @@ func TruncateInsight(insight string, maxLen int) string {
 	}
 
 	return truncated + "..."
+}
+
+// RetrievalStats tracks statistics about retrieval operations.
+// Written by inject-context hook, read by watch command.
+type RetrievalStats struct {
+	LastQuery       string    `json:"last_query"`
+	LastMode        string    `json:"last_mode"`    // "fast" or "full"
+	LastReflexMs    int64     `json:"last_reflex_ms"`
+	LastReflectMs   int64     `json:"last_reflect_ms"`
+	LastResults     int       `json:"last_results"`
+	LastDecision    string    `json:"last_decision"` // "inject", "skip", "wait"
+	TotalRetrievals int       `json:"total_retrievals"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// RetrievalStatsWriter provides thread-safe writing of retrieval stats.
+type RetrievalStatsWriter struct {
+	mu   sync.Mutex
+	path string
+}
+
+// NewRetrievalStatsWriter creates a writer for the given context directory.
+func NewRetrievalStatsWriter(contextDir string) *RetrievalStatsWriter {
+	return &RetrievalStatsWriter{
+		path: filepath.Join(contextDir, "retrieval_stats.json"),
+	}
+}
+
+// Path returns the stats file path.
+func (w *RetrievalStatsWriter) Path() string {
+	return w.path
+}
+
+// WriteStats atomically writes retrieval stats to the stats file.
+func (w *RetrievalStatsWriter) WriteStats(stats *RetrievalStats) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	stats.UpdatedAt = time.Now()
+
+	data, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal retrieval stats: %w", err)
+	}
+
+	// Atomic write pattern
+	tempPath := w.path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempPath, w.path); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename stats file: %w", err)
+	}
+
+	return nil
+}
+
+// ReadRetrievalStats reads retrieval stats from the stats file.
+// Returns nil if the file doesn't exist.
+func ReadRetrievalStats(contextDir string) (*RetrievalStats, error) {
+	path := filepath.Join(contextDir, "retrieval_stats.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read retrieval stats: %w", err)
+	}
+
+	var stats RetrievalStats
+	if err := json.Unmarshal(data, &stats); err != nil {
+		return nil, fmt.Errorf("failed to parse retrieval stats: %w", err)
+	}
+
+	return &stats, nil
+}
+
+// GetRetrievalStatsPath returns the standard retrieval stats file path.
+func GetRetrievalStatsPath(contextDir string) string {
+	return filepath.Join(contextDir, "retrieval_stats.json")
+}
+
+// ActivityLogEntry represents a single log entry for the watch command.
+type ActivityLogEntry struct {
+	Timestamp   time.Time `json:"timestamp"`
+	Mode        string    `json:"mode"`        // "dream", "think", "reflex", "reflect", "resolve"
+	Description string    `json:"description"`
+	Query       string    `json:"query,omitempty"`
+	Results     int       `json:"results,omitempty"`
+	LatencyMs   int64     `json:"latency_ms,omitempty"`
+}
+
+// ActivityLogger appends activity entries to a log file.
+type ActivityLogger struct {
+	mu   sync.Mutex
+	path string
+}
+
+// NewActivityLogger creates a logger for the given context directory.
+func NewActivityLogger(contextDir string) *ActivityLogger {
+	return &ActivityLogger{
+		path: filepath.Join(contextDir, "activity.log"),
+	}
+}
+
+// Path returns the log file path.
+func (l *ActivityLogger) Path() string {
+	return l.path
+}
+
+// Log appends an activity entry to the log file.
+func (l *ActivityLogger) Log(entry *ActivityLogEntry) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal log entry: %w", err)
+	}
+
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+		return fmt.Errorf("failed to write log entry: %w", err)
+	}
+
+	return nil
+}
+
+// ReadRecentActivity reads the most recent N activity log entries.
+func ReadRecentActivity(contextDir string, limit int) ([]ActivityLogEntry, error) {
+	path := filepath.Join(contextDir, "activity.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read activity log: %w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return nil, nil
+	}
+
+	// Read from end
+	entries := make([]ActivityLogEntry, 0, limit)
+	for i := len(lines) - 1; i >= 0 && len(entries) < limit; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var entry ActivityLogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue // Skip malformed entries
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }

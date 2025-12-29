@@ -1,0 +1,1 @@
+We need to make it so cortex processes can be easily added and configured without too much boilerplate. Lots of tweaking agentic processes and prompts will be needed to make this as useful as possible.
