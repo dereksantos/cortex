@@ -39,6 +39,13 @@ Otherwise respond in JSON:
   "tags": ["tag1", "tag2"]
 }`
 
+// QueuedTranscript represents a transcript queued for Dream analysis.
+type QueuedTranscript struct {
+	Path      string
+	SessionID string
+	QueuedAt  time.Time
+}
+
 // Dream implements cognition.Dreamer for idle-time exploration.
 type Dream struct {
 	mu sync.Mutex
@@ -57,6 +64,9 @@ type Dream struct {
 	lastDream      time.Time
 	insightsChan   chan cognition.Result
 	proactiveQueue []cognition.Result
+
+	// Queued transcripts from Stop hooks
+	queuedTranscripts []QueuedTranscript
 
 	// State writer for daemon status updates
 	stateWriter *StateWriter
@@ -327,4 +337,43 @@ func (d *Dream) ClearProactiveQueue() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.proactiveQueue = nil
+}
+
+// QueueTranscript queues a transcript for Dream analysis during idle time.
+// Called by Router when a Stop event is received.
+func (d *Dream) QueueTranscript(path string, sessionID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Check for duplicates
+	for _, qt := range d.queuedTranscripts {
+		if qt.Path == path {
+			return
+		}
+	}
+
+	d.queuedTranscripts = append(d.queuedTranscripts, QueuedTranscript{
+		Path:      path,
+		SessionID: sessionID,
+		QueuedAt:  time.Now(),
+	})
+
+	log.Printf("Dream: queued transcript %s for analysis", path)
+}
+
+// GetQueuedTranscripts returns a copy of queued transcripts.
+func (d *Dream) GetQueuedTranscripts() []QueuedTranscript {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	result := make([]QueuedTranscript, len(d.queuedTranscripts))
+	copy(result, d.queuedTranscripts)
+	return result
+}
+
+// ClearQueuedTranscripts clears transcripts after processing.
+func (d *Dream) ClearQueuedTranscripts() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.queuedTranscripts = nil
 }

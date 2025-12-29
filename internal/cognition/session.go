@@ -116,6 +116,7 @@ func (p *SessionPersister) Load() (*cognition.SessionContext, error) {
 	ctx := &cognition.SessionContext{
 		TopicWeights:           persisted.TopicWeights,
 		RecentQueries:          make([]cognition.Query, 0),
+		RecentPrompts:          make([]string, 0),
 		WarmCache:              make(map[string][]cognition.Result),
 		CachedReflect:          make(map[string][]cognition.Result),
 		ResolvedContradictions: persisted.ResolvedContradictions,
@@ -148,6 +149,7 @@ func NewEmptySessionContext() *cognition.SessionContext {
 	return &cognition.SessionContext{
 		TopicWeights:           make(map[string]float64),
 		RecentQueries:          make([]cognition.Query, 0),
+		RecentPrompts:          make([]string, 0),
 		WarmCache:              make(map[string][]cognition.Result),
 		CachedReflect:          make(map[string][]cognition.Result),
 		ResolvedContradictions: make(map[string]string),
