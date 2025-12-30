@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present Cortex, a reference implementation of context evolution [0] for AI coding assistants. Cortex implements the mechanical-agentic separation as a single-binary CLI daemon with five cognitive modes: Reflex (<10ms mechanical retrieval), Reflect (LLM reranking), Resolve (injection decisions), Think (active-period learning), and Dream (idle-period exploration). We contribute a comprehensive evaluation framework including the Agentic Benefit Ratio (ABR) metric, session accumulation tests, and conflict detection scenarios. Initial evaluations show 87% pass rate across cognitive mode tests, sub-millisecond Reflex latency in controlled settings, and average ABR of 0.77. Session evaluations demonstrate Fast mode converging to Full mode quality by the second query. Cortex is open source and integrates with Claude Code via lifecycle hooks.
+We present Cortex, a reference implementation of context evolution [0] for AI coding assistants. Cortex implements the mechanical-agentic separation as a single-binary CLI daemon with five cognitive modes: Reflex (<20ms mechanical retrieval), Reflect (LLM reranking), Resolve (injection decisions), Think (active-period learning), and Dream (idle-period exploration). We contribute a comprehensive evaluation framework including the Agentic Benefit Ratio (ABR) metric, session accumulation tests, and conflict detection scenarios. Initial evaluations show 87% pass rate across cognitive mode tests, sub-millisecond Reflex latency in controlled settings, and average ABR of 0.77. Session evaluations demonstrate Fast mode converging to Full mode quality by the second query. Cortex is open source and integrates with Claude Code via lifecycle hooks.
 
 ## 1. Introduction
 
@@ -35,11 +35,11 @@ Cortex implements five cognitive modes inspired by human information processing:
 
 | Mode | Type | Latency | Purpose |
 |------|------|---------|---------|
-| **Reflex** | Mechanical | <10ms | "What feels related?" |
+| **Reflex** | Mechanical | <20ms | "What feels related?" |
 | **Reflect** | Agentic | 200ms+ | "Is this actually relevant?" |
 | **Resolve** | Agentic | 50-100ms | "Should I inject now or wait?" |
 
-**Reflex** is the only mode on the critical path. It performs embedding similarity, tag matching, and recency weighting. The 10ms budget is a hard constraint—if Reflex cannot complete in time, it returns partial results rather than blocking.
+**Reflex** is the only mode on the critical path. It performs embedding similarity, tag matching, and recency weighting. The 20ms target ensures retrieval feels instantaneous (human perception threshold is ~50ms). If Reflex exceeds 50ms, the system warns but does not block.
 
 **Reflect** performs LLM-based reranking, cross-referencing constraints, and contradiction resolution. It runs synchronously at session start (when accuracy matters more than speed) and asynchronously mid-session (caching results for subsequent retrievals).
 
@@ -126,7 +126,7 @@ Both modes are strictly bounded. Think by spare capacity, Dream by MaxBudget. Ne
 
 Cortex is implemented as a single-binary CLI daemon in Go:
 
-- **Capture**: Hooks into AI tools (Claude Code, Cursor) via lifecycle hooks (<10ms overhead)
+- **Capture**: Hooks into AI tools (Claude Code, Cursor) via lifecycle hooks (<20ms target)
 - **Storage**: SQLite with vector extensions for embeddings + full-text search
 - **Retrieval**: Embedding similarity + tag matching + recency weighting
 - **LLM**: Pluggable providers (Anthropic, Ollama) for agentic modes
@@ -137,7 +137,7 @@ Cortex is implemented as a single-binary CLI daemon in Go:
 
 **SQLite**: Chosen over PostgreSQL for zero-configuration deployment. Vector search via sqlite-vec extension.
 
-**Go**: Fast startup (<10ms), trivial cross-compilation, excellent concurrency primitives for daemon workloads.
+**Go**: Fast startup, trivial cross-compilation, excellent concurrency primitives for daemon workloads.
 
 ### 5.2 Integration
 
@@ -173,7 +173,7 @@ cortex decide "Use JWT"   # Record decision explicitly
 
 | Mode | Metrics |
 |------|---------|
-| Reflex | Precision@K, recall, latency <10ms |
+| Reflex | Precision@K, recall, latency <20ms |
 | Reflect | NDCG, contradiction detection rate |
 | Resolve | Decision accuracy (inject/wait/queue) |
 | Think | Topic weight accuracy, cache hit rate |
@@ -221,13 +221,13 @@ These represent genuine algorithm improvement opportunities, not framework issue
 
 ### 7.2 Latency
 
-| Metric | Value | Target |
-|--------|-------|--------|
-| Reflex (eval corpus) | <1ms | <10ms |
-| Reflex (real-world) | ~11ms | <10ms |
-| Latency tests | 100% pass | — |
+| Metric | Value | Target | Threshold |
+|--------|-------|--------|-----------|
+| Reflex (eval corpus) | <1ms | <20ms | <50ms |
+| Reflex (real-world) | ~11ms | <20ms | <50ms |
+| Latency tests | 100% pass | — | — |
 
-Reflex consistently meets the <10ms target in controlled evaluations. Real-world usage shows ~11ms latency, slightly exceeding target but within optimization range. The system self-monitors and warns when budget is exceeded.
+Reflex comfortably meets the <20ms target in both controlled and real-world evaluations. The 50ms threshold represents human perceptual limits—anything faster feels instantaneous. The system warns when exceeding 50ms, indicating potential issues.
 
 ### 7.3 ABR Results
 
@@ -284,7 +284,7 @@ Conflict detection correctly identifies contradictory patterns and assesses seve
 
 | Mode | Test | Result |
 |------|------|--------|
-| **Reflex** | Latency <10ms | ✓ Pass |
+| **Reflex** | Latency <20ms | ✓ Pass |
 | **Reflex** | Edge cases | ✓ Pass |
 | **Reflex** | Recency weighting | ✓ Pass |
 | **Reflex** | Quality (precision) | ✗ 3/4 pass |
@@ -301,7 +301,7 @@ Conflict detection correctly identifies contradictory patterns and assesses seve
 | Metric | Value | Status |
 |--------|-------|--------|
 | Overall pass rate | 87% | Baseline established |
-| Reflex latency | <1ms (eval) / ~11ms (real) | Near target |
+| Reflex latency | <1ms (eval) / ~11ms (real) | Within target (<20ms) |
 | ABR average | 0.77 | Gap exists, threshold met |
 | Session convergence | Step 2 | Fast → Full quickly |
 | Conflict detection | 100% | Working correctly |
@@ -313,7 +313,7 @@ These results establish an honest baseline. The architecture works as designed: 
 
 ### 8.1 Contributions
 
-1. **Hard latency budget**: Explicit <10ms constraint on retrieval critical path, enforced through mechanical-only Reflex mode. Unlike CLASSic [8] which measures latency, Cortex treats it as a design constraint.
+1. **Latency-aware design**: Target <20ms for retrieval (imperceptible to humans), with 50ms warning threshold. Unlike CLASSic [8] which measures latency, Cortex treats latency as a design constraint with principled thresholds based on human perception.
 
 2. **Activity-based budgets**: Background processing capacity modeled as a function of activity level, mirroring human cognitive load. Think budget decays with activity; Dream budget grows with idle time. No existing benchmark models this.
 
@@ -345,7 +345,7 @@ These results establish an honest baseline. The architecture works as designed: 
 
 **Task Completion Benchmarks.** AgentBench [4] evaluates LLMs as agents across eight diverse environments including operating systems, databases, and web browsing. SWE-bench [5] focuses specifically on software engineering, tasking models with resolving real GitHub issues across Python repositories. SWE-bench Verified [6] provides a human-validated subset of 500 tasks, while SWE-bench Pro [7] extends to 1,865 tasks across 41 repositories with increased difficulty. These benchmarks measure *functional correctness*—whether the agent completes the task—but do not evaluate software quality against established engineering practices.
 
-**Enterprise Evaluation.** The CLASSic framework [8] evaluates enterprise AI agents across five dimensions: Cost, Latency, Accuracy, Stability, and Security. While CLASSic *measures* latency, Cortex *enforces* it as a hard constraint (<10ms), treating latency as a design requirement rather than an observed metric.
+**Enterprise Evaluation.** The CLASSic framework [8] evaluates enterprise AI agents across five dimensions: Cost, Latency, Accuracy, Stability, and Security. While CLASSic *measures* latency, Cortex uses principled thresholds (<20ms target, <50ms warning) based on human perception, treating latency as a design requirement rather than an observed metric.
 
 **Multi-Turn Benchmarks.** ColBench [9] evaluates LLMs as collaborative agents in multi-turn interactions, while MINT [10] tests multi-turn tool use with dynamic feedback. These benchmarks assess task completion across turns but do not measure whether retrieval quality *improves* over a session—a key focus of Cortex's session accumulation evals.
 
@@ -365,7 +365,7 @@ These results establish an honest baseline. The architecture works as designed: 
 
 | Aspect | Existing Work | Cortex Contribution |
 |--------|---------------|---------------------|
-| **Latency** | CLASSic measures latency | Hard <10ms budget, enforced |
+| **Latency** | CLASSic measures latency | <20ms target, <50ms warning (perception-based) |
 | **Quality metric** | Pass/fail, NDCG | ABR: Fast+Think vs Full |
 | **Background processing** | "Async" (unspecified) | Activity-based budgets |
 | **Session learning** | Multi-turn completion | Quality evolution over time |

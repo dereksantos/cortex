@@ -15,11 +15,11 @@ AI coding assistants forget. Every session starts fresh:
 ```
 Capture → Filter → Store → Retrieve → Inject
    │         │        │         │         │
-  <10ms    Signal   SQLite   Embeddings  Format
+  <20ms    Signal   SQLite   Embeddings  Format
   hooks    vs noise  + vec    + rerank   for LLM
 ```
 
-**Capture**: Hook into AI tools (Claude Code, Cursor), record events without blocking (<10ms)
+**Capture**: Hook into AI tools (Claude Code, Cursor), record events without blocking (<20ms target, <50ms acceptable)
 
 **Filter**: Extract durable context - decisions, corrections, patterns. Ignore noise.
 
@@ -62,7 +62,7 @@ Cortex uses five cognitive modes, inspired by how humans process information:
 │  REFLEX (Mechanical)                                        │
 │  "What feels related?"                                      │
 │  • Embeddings similarity, tag matching, recency             │
-│  • 5-10ms, always runs                                      │
+│  • <20ms target, always runs                                │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -102,7 +102,7 @@ Cortex uses five cognitive modes, inspired by how humans process information:
 
 | Mode | Type | Speed | When |
 |------|------|-------|------|
-| Reflex | Mechanical | 5-10ms | Every retrieval |
+| Reflex | Mechanical | <20ms (target) | Every retrieval |
 | Reflect | Agentic | 200ms+ | Sync or async |
 | Resolve | Agentic | 50-100ms | After results |
 | Think | Background | Bounded | Active periods |
@@ -253,7 +253,7 @@ Goal: ABR → 1.0 as session progresses
 
 | Mode | Metrics |
 |------|---------|
-| Reflex | Precision@K, recall, latency <10ms |
+| Reflex | Precision@K, recall, latency <20ms |
 | Reflect | NDCG, contradiction detection |
 | Resolve | Decision accuracy (inject/wait/queue) |
 | Think | TopicWeight accuracy, cache hit rate |

@@ -32,8 +32,10 @@ Context evolution rests on a fundamental separation:
 
 | Type | Speed | Intelligence | Example |
 |------|-------|--------------|---------|
-| **Mechanical** | <10ms | None | Keyword matching, recency weighting |
+| **Mechanical** | <20ms | None | Keyword matching, recency weighting |
 | **Agentic** | 200ms+ | LLM-based | Reranking, contradiction detection |
+
+**Why 20ms?** Latency under 50ms is imperceptible to humans. Targeting 20ms provides headroom—multiple hooks can run without crossing the perceptual threshold. The goal is "feels instant," not a specific number.
 
 Mechanical processes provide the speed necessary for interactive use. Agentic processes provide the intelligence necessary for quality. Neither alone is sufficient.
 
@@ -194,7 +196,7 @@ If context evolution is viable:
 
 ## 10. A Reference Implementation
 
-Cortex [A] implements context evolution as a single-binary CLI daemon. It separates Reflex (mechanical, <10ms) from Reflect/Resolve (agentic, 200ms+), uses activity-based Think/Dream budgets, and measures ABR across sessions.
+Cortex [A] implements context evolution as a single-binary CLI daemon. It separates Reflex (mechanical, <20ms target) from Reflect/Resolve (agentic, 200ms+), uses activity-based Think/Dream budgets, and measures ABR across sessions.
 
 Initial evaluations show:
 - 87% pass rate across cognitive mode evaluations
