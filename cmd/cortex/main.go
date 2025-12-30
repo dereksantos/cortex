@@ -1774,6 +1774,7 @@ func handleEval() {
 	e2eMode := false
 	dryRun := false
 	treeMode := false
+	cognitionMode := false
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -1784,6 +1785,8 @@ func handleEval() {
 			e2eMode = true
 		case arg == "--tree":
 			treeMode = true
+		case arg == "--cognition":
+			cognitionMode = true
 		case arg == "--dry-run":
 			dryRun = true
 		case arg == "--output" || arg == "-o":
@@ -1819,6 +1822,7 @@ func handleEval() {
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
 			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
 			fmt.Println("  --tree                 Run tree evals (multi-path, temporal)")
+			fmt.Println("  --cognition            Run cognition evals (cognitive modes)")
 			fmt.Println("  --provider, -p <name>  LLM provider: ollama, anthropic (default: ollama)")
 			fmt.Println("  --model, -m <model>    Model to use (provider-specific)")
 			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
@@ -1830,6 +1834,7 @@ func handleEval() {
 			fmt.Println("  linear (default)   Pre-defined context injection")
 			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
 			fmt.Println("  tree (--tree)      Multi-path and temporal evals")
+			fmt.Println("  cognition (--cognition)  Cognitive modes (Reflex, Reflect, etc.)")
 			fmt.Println()
 			fmt.Println("Providers:")
 			fmt.Println("  ollama (default)   Local models via Ollama")
@@ -1998,8 +2003,22 @@ func handleEval() {
 		}
 		run.Summary = eval.CalculateSummary(allResults)
 
+	} else if cognitionMode {
+		// Cognition mode: test cognitive modes
+		cognitionDir := filepath.Join(scenarioDir, "cognition")
+		cognitionScenarios, err := eval.LoadCognitionScenarios(cognitionDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load cognition scenarios from %s: %v\n", cognitionDir, err)
+			os.Exit(1)
+		}
+		if len(cognitionScenarios) == 0 {
+			fmt.Fprintf(os.Stderr, "No cognition scenarios found in %s\n", cognitionDir)
+			os.Exit(1)
+		}
+		runCognitionEvals(cognitionScenarios, verbose, outputFormat, dryRun, provider, cfg)
+		return
 	} else {
-		// Check if directory contains cognition scenarios
+		// Check if directory contains cognition scenarios (auto-detect)
 		cognitionScenarios, _ := eval.LoadCognitionScenarios(scenarioDir)
 		if len(cognitionScenarios) > 0 {
 			// Cognition mode: test cognitive modes
@@ -2063,17 +2082,25 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 		}
 	} else {
 		// Real mode: use actual Cortex with storage and LLM
-		// Ensure ContextDir is valid, create temp if needed
-		if cfg.ContextDir == "" {
-			tmpDir, err := os.MkdirTemp("", "cortex-eval-*")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create temp directory: %v\n", err)
-				os.Exit(1)
-			}
-			cfg.ContextDir = tmpDir
-			if verbose {
-				fmt.Printf("Using temp storage: %s\n", tmpDir)
-			}
+		// ALWAYS create a temporary directory for test isolation
+		// This ensures evals only see corpus data, not actual project files
+		tmpDir, err := os.MkdirTemp("", "cortex-eval-*")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create temp directory: %v\n", err)
+			os.Exit(1)
+		}
+		defer os.RemoveAll(tmpDir) // Clean up temp directory when done
+
+		// Create a copy of config with temp directory for isolated eval
+		evalCfg := &config.Config{
+			ContextDir:  tmpDir,
+			OllamaURL:   cfg.OllamaURL,
+			OllamaModel: cfg.OllamaModel,
+		}
+		cfg = evalCfg // Use the isolated config
+
+		if verbose {
+			fmt.Printf("Using isolated temp storage: %s\n", tmpDir)
 		}
 		if err := cfg.EnsureDirectories(); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create directories: %v\n", err)
