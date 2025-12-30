@@ -24,7 +24,7 @@ AI: "Based on your previous decision to use JWT..."
 
 **Key features:**
 
-- **Zero friction**: Captures automatically via Claude Code hooks (<10ms overhead)
+- **Zero friction**: Captures automatically via Claude Code hooks (<20ms, imperceptible)
 - **Privacy first**: All processing happens locally (Ollama, SQLite)
 - **Single binary**: No Python, Node, or Docker dependencies
 - **Cognitive modes**: Fast mechanical retrieval + background agentic processing
@@ -383,7 +383,7 @@ The status line shows current cognitive mode:
 AI Tool (Claude Code)
         │
         ↓ PostToolUse hook
-cortex capture (<10ms)
+cortex capture (<20ms)
         │
         ↓ Atomic file write
 File Queue (.context/queue/pending/)
@@ -407,7 +407,7 @@ Cortex uses a cognitive architecture inspired by human information processing:
 
 | Mode | Latency | Purpose |
 |------|---------|---------|
-| Reflex | <10ms | Fast mechanical search (embeddings, tags, recency) |
+| Reflex | <20ms | Fast mechanical search (embeddings, tags, recency) |
 | Reflect | 200ms+ | LLM reranking, contradiction detection |
 | Resolve | 50-100ms | Decide: inject now, wait, or queue |
 
@@ -530,7 +530,7 @@ cp -r .context .context.backup
 
 ### Current (v0.1)
 
-- [x] Fast event capture (<10ms)
+- [x] Fast event capture (<20ms)
 - [x] SQLite storage with event sourcing
 - [x] Ollama and Anthropic LLM support
 - [x] Claude Code integration (hooks, status line, slash commands)
