@@ -1,16 +1,16 @@
 # On Context Evolution
 
-To push the capabilities of LLMs, a multi stage process must execute as a reflext to user input. Reflexes then spawn mechanical and agentic processes alike, with the goal of evolving what is mechanical into more relevant context, optimizing the speed of context engineering, and accuracy. Budgets are assigned to each proceess.
+To push the capabilities of LLMs, a multi stage process must execute as a reflex to user input. Reflexes then spawn mechanical and agentic processes alike, with the goal of evolving what is mechanical into more relevant context, optimizing the speed of context engineering, and accuracy. Budgets are assigned to each proceess.
 
 - on demand use local resources to improve your AI effectiveness.
 
 
 ## Evaluation
 
-Context evolution measurements can be made from temporal context sets, like past conversations, project files, cortex, and all the tools your AI uses. We should start with including 3-5 real world coding tasks, and where inefficiences lie.
+Context evolution measurements can be made from temporal context sets, like past conversations, project file, and all the tools your AI uses. We should start with including 3-5 real world coding tasks, and discover where inefficiences lie.
 
 E.g.
-let s represent the subject of multi session AI tool usage, with context becoming available temporally.
+let `s` represent the subject of multi session AI tool usage, with context becoming available temporally.
 
 Looking to build `s`
 *tool builds a prototype*
@@ -40,3 +40,4 @@ The evolution of context ought to be tuned through some parameters:
 
 ## Agentic Random Reflection
 
+Could dream utilize fractal traversal patterns for randomly learning about a code base more effectively? Mechanical fractal retrieval, and agentic analysis of the context prompted for idea generation, suggesting improvements, and overall improving the outcome of a project.
