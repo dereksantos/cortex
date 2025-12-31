@@ -1775,6 +1775,8 @@ func handleEval() {
 	dryRun := false
 	treeMode := false
 	cognitionMode := false
+	evalType := ""    // New: -t flag for eval type (e2e, cognition, etc.)
+	journeyPath := "" // New: --journey flag for specific journey file
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -1789,6 +1791,16 @@ func handleEval() {
 			cognitionMode = true
 		case arg == "--dry-run":
 			dryRun = true
+		case arg == "-t" || arg == "--type":
+			if i+1 < len(os.Args) {
+				evalType = os.Args[i+1]
+				i++
+			}
+		case arg == "--journey":
+			if i+1 < len(os.Args) {
+				journeyPath = os.Args[i+1]
+				i++
+			}
 		case arg == "--output" || arg == "-o":
 			if i+1 < len(os.Args) {
 				outputFormat = os.Args[i+1]
@@ -1820,7 +1832,9 @@ func handleEval() {
 			fmt.Println("Options:")
 			fmt.Println("  --scenario, -s <file>  Run a specific scenario file")
 			fmt.Println("  --dir, -d <dir>        Scenario directory (default: test/evals/scenarios)")
-			fmt.Println("  --e2e                  Run E2E evals (tests full Cortex pipeline)")
+			fmt.Println("  -t, --type <type>      Eval type: e2e, cognition, tree")
+			fmt.Println("  --journey <file>       Path to E2E journey YAML file (for -t e2e)")
+			fmt.Println("  --e2e                  Run E2E evals (legacy, use -t e2e instead)")
 			fmt.Println("  --tree                 Run tree evals (multi-path, temporal)")
 			fmt.Println("  --cognition            Run cognition evals (cognitive modes)")
 			fmt.Println("  --provider, -p <name>  LLM provider: ollama, anthropic (default: ollama)")
@@ -1832,7 +1846,7 @@ func handleEval() {
 			fmt.Println()
 			fmt.Println("Eval Types:")
 			fmt.Println("  linear (default)   Pre-defined context injection")
-			fmt.Println("  e2e (--e2e)        Full pipeline: capture → process → recall")
+			fmt.Println("  e2e (-t e2e)       E2E journey evals: generative tests with LLM tasks")
 			fmt.Println("  tree (--tree)      Multi-path and temporal evals")
 			fmt.Println("  cognition (--cognition)  Cognitive modes (Reflex, Reflect, etc.)")
 			fmt.Println()
@@ -1847,6 +1861,9 @@ func handleEval() {
 			fmt.Println("  cortex eval -p anthropic                    # Use Claude Haiku")
 			fmt.Println("  cortex eval -p anthropic -m claude-3-5-sonnet-20241022")
 			fmt.Println("  cortex eval -p ollama -m qwen2:0.5b         # Fast local model")
+			fmt.Println("  cortex eval -t e2e -p anthropic -v          # Run E2E journey evals")
+			fmt.Println("  cortex eval -t e2e --journey path/to/journey.yaml")
+			fmt.Println("  cortex eval -t e2e --dry-run -v             # Mock provider, no LLM calls")
 			return
 		}
 	}
@@ -1901,6 +1918,12 @@ func handleEval() {
 
 	// Run evaluation based on mode
 	var run *eval.EvalRun
+
+	// Check for -t e2e (E2E Journey Eval) - new style
+	if evalType == "e2e" {
+		runE2EJourneyEval(provider, journeyPath, dryRun, verbose, outputFormat)
+		return
+	}
 
 	if e2eMode {
 		// E2E mode: test full Cortex pipeline
@@ -2244,6 +2267,227 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 	if float64(passCount)/float64(len(scenarios)) < 0.5 {
 		os.Exit(1)
 	}
+}
+
+// runE2EJourneyEval runs E2E journey-based evaluations.
+// These are generative evals that test actual development outcomes by having
+// an LLM complete implementation tasks with and without Cortex context.
+func runE2EJourneyEval(provider llm.Provider, journeyPath string, dryRun, verbose bool, outputFormat string) {
+	ctx := context.Background()
+
+	// Load journey(s)
+	var journeys []*eval.E2EJourney
+	if journeyPath != "" {
+		// Load specific journey
+		journey, err := eval.LoadE2EJourney(journeyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load journey: %v\n", err)
+			os.Exit(1)
+		}
+		journeys = append(journeys, journey)
+	} else {
+		// Load all journeys from default directory
+		defaultDir := "test/evals/journeys"
+		js, err := eval.LoadE2EJourneys(defaultDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load journeys from %s: %v\n", defaultDir, err)
+			os.Exit(1)
+		}
+		if len(js) == 0 {
+			fmt.Fprintf(os.Stderr, "No E2E journey files found in %s\n", defaultDir)
+			os.Exit(1)
+		}
+		journeys = js
+	}
+
+	if verbose {
+		fmt.Printf("Loaded %d E2E journey(s)\n", len(journeys))
+		if dryRun {
+			fmt.Println("Running in dry-run mode (MockCortex, no real LLM calls for tasks)")
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Cortex E2E Journey Eval")
+	fmt.Println("=======================")
+	fmt.Println()
+
+	passCount := 0
+	failCount := 0
+	var allResults []*eval.E2EJourneyResult
+
+	for _, journey := range journeys {
+		fmt.Printf("Journey: %s\n", journey.Name)
+		fmt.Printf("  ID: %s\n", journey.ID)
+		fmt.Printf("  Sessions: %d | Events: %d | Tasks: %d\n",
+			len(journey.Sessions), journey.TotalEvents(), journey.TotalTasks())
+
+		// Create Cortex instance (mock for dry-run)
+		var cortex cognition.Cortex
+		if dryRun {
+			mock := eval.NewMockCortex()
+			cortex = mock
+		} else {
+			// Create real Cortex with temp storage for isolation
+			tmpDir, err := os.MkdirTemp("", "cortex-e2e-journey-*")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Error: Failed to create temp directory: %v\n", err)
+				failCount++
+				continue
+			}
+			defer os.RemoveAll(tmpDir)
+
+			cfg := &config.Config{
+				ContextDir: tmpDir,
+			}
+			if err := cfg.EnsureDirectories(); err != nil {
+				fmt.Fprintf(os.Stderr, "  Error: Failed to create directories: %v\n", err)
+				failCount++
+				continue
+			}
+
+			store, err := storage.New(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Error: Failed to create storage: %v\n", err)
+				failCount++
+				continue
+			}
+			defer store.Close()
+
+			realCortex, err := intcognition.New(store, provider, cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  Error: Failed to create Cortex: %v\n", err)
+				failCount++
+				continue
+			}
+			cortex = realCortex
+		}
+
+		// Create evaluator and run journey
+		// Pass "." as projectDir since scaffold paths in journey YAML are relative to cwd
+		evaluator := eval.NewJourneyEvaluator(cortex, provider, ".", verbose)
+		result, err := evaluator.RunJourney(ctx, journey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
+			failCount++
+			continue
+		}
+
+		allResults = append(allResults, result)
+
+		// Print result summary
+		if result.Pass {
+			passCount++
+			fmt.Printf("  Result: PASS\n")
+		} else {
+			failCount++
+			fmt.Printf("  Result: FAIL - %s\n", result.Reason)
+		}
+
+		// Print detailed metrics
+		printE2EJourneyResult(result, verbose)
+		fmt.Println()
+	}
+
+	// Print overall summary
+	fmt.Println("Summary")
+	fmt.Println("========================================")
+	fmt.Printf("Total Journeys:  %d\n", len(journeys))
+	fmt.Printf("Pass:            %d\n", passCount)
+	fmt.Printf("Fail:            %d\n", failCount)
+	if len(journeys) > 0 {
+		fmt.Printf("Pass Rate:       %.0f%%\n", float64(passCount)/float64(len(journeys))*100)
+	}
+
+	// JSON output if requested
+	if outputFormat == "json" {
+		printE2EJourneyResultsJSON(allResults)
+	}
+
+	// Exit with error if pass rate is below threshold
+	if len(journeys) > 0 && float64(passCount)/float64(len(journeys)) < 0.5 {
+		os.Exit(1)
+	}
+}
+
+// printE2EJourneyResult prints detailed metrics for a journey result.
+func printE2EJourneyResult(result *eval.E2EJourneyResult, verbose bool) {
+	if result.TreatmentResults == nil || result.BaselineResults == nil {
+		return
+	}
+
+	treatment := result.TreatmentResults
+	baseline := result.BaselineResults
+	comp := result.Comparison
+
+	if verbose {
+		fmt.Println()
+		fmt.Println("  Treatment (Cortex enabled):")
+		fmt.Printf("    Task Completion: %.0f%% (%d/%d)\n",
+			treatment.TaskCompletionRate*100, treatment.TasksCompleted, treatment.TasksTotal)
+		fmt.Printf("    Test Pass Rate:  %.0f%% (%d/%d)\n",
+			treatment.TestPassRate*100, treatment.TestsPassed, treatment.TestsTotal)
+		fmt.Printf("    Avg Turns:       %.1f\n", treatment.AverageTurns)
+		fmt.Printf("    Total Tokens:    %d\n", treatment.TotalTokens)
+		fmt.Printf("    Violations:      %d\n", treatment.PatternViolations)
+
+		fmt.Println()
+		fmt.Println("  Baseline (No memory):")
+		fmt.Printf("    Task Completion: %.0f%% (%d/%d)\n",
+			baseline.TaskCompletionRate*100, baseline.TasksCompleted, baseline.TasksTotal)
+		fmt.Printf("    Test Pass Rate:  %.0f%% (%d/%d)\n",
+			baseline.TestPassRate*100, baseline.TestsPassed, baseline.TestsTotal)
+		fmt.Printf("    Avg Turns:       %.1f\n", baseline.AverageTurns)
+		fmt.Printf("    Total Tokens:    %d\n", baseline.TotalTokens)
+		fmt.Printf("    Violations:      %d\n", baseline.PatternViolations)
+	}
+
+	if comp != nil {
+		fmt.Println()
+		fmt.Println("  Comparison (Treatment vs Baseline):")
+		fmt.Printf("    Task Completion Lift: %+.0f%%\n", comp.TaskCompletionLift*100)
+		fmt.Printf("    Test Pass Lift:       %+.0f%%\n", comp.TestPassLift*100)
+		fmt.Printf("    Turn Reduction:       %+.0f%%\n", comp.TurnReduction*100)
+		fmt.Printf("    Token Reduction:      %+.0f%%\n", comp.TokenReduction*100)
+		fmt.Printf("    Violation Reduction:  %+d\n", comp.ViolationReduction)
+		fmt.Printf("    Overall Lift:         %+.2f\n", comp.OverallLift)
+		if comp.Regression {
+			fmt.Printf("    REGRESSION: %s\n", comp.RegressionDetails)
+		}
+	}
+}
+
+// printE2EJourneyResultsJSON prints results in JSON format.
+func printE2EJourneyResultsJSON(results []*eval.E2EJourneyResult) {
+	type jsonOutput struct {
+		Journeys  int                       `json:"journeys"`
+		PassCount int                       `json:"pass_count"`
+		FailCount int                       `json:"fail_count"`
+		PassRate  float64                   `json:"pass_rate"`
+		Results   []*eval.E2EJourneyResult  `json:"results"`
+	}
+
+	passCount := 0
+	for _, r := range results {
+		if r.Pass {
+			passCount++
+		}
+	}
+
+	output := jsonOutput{
+		Journeys:  len(results),
+		PassCount: passCount,
+		FailCount: len(results) - passCount,
+		PassRate:  float64(passCount) / float64(len(results)),
+		Results:   results,
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to marshal JSON: %v\n", err)
+		return
+	}
+	fmt.Println(string(data))
 }
 
 func handleDaemon() {
