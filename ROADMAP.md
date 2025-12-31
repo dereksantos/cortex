@@ -41,6 +41,57 @@
 
 ---
 
+## Core Innovation: The Cognition Pipeline
+
+Cortex's key innovation is the **bounded intelligence model**: LLMs work with pre-computed data, not unbounded exploration.
+
+> "The LLM must work with the data it is given to make resource consumption more predictable. Cortex is about background processing."
+
+This inverts the typical LLM interaction pattern:
+
+| Traditional | Cortex |
+|-------------|--------|
+| LLM decides what to fetch | Mechanical retrieval first |
+| Unbounded exploration | Bounded budgets |
+| Variable latency | Hard latency constraints (<20ms) |
+| Resource use unpredictable | Resource use proportional to activity |
+
+### The Three Pillars
+
+| Pillar | What It Does | Why It Matters |
+|--------|--------------|----------------|
+| **Budgeting** | Activity-based resource allocation | Predictable compute costs |
+| **Prompts** | Structured LLM contracts | Consistent output format |
+| **Pre-computed Datasets** | Cached context from background processing | Fast retrieval without blocking |
+
+### Pillar Roadmap
+
+#### Budgeting System
+- [x] Think budget (activity-inverse): `budget = MaxBudget × (1 - ActivityLevel)`
+- [x] Dream budget (idle-growth): `budget = min(IdleTime × GrowthRate, MaxBudget)`
+- [x] Activity tracking with sliding window
+- [ ] Budget monitoring dashboard (`cortex watch` enhancement)
+- [ ] Configurable budget profiles (aggressive, conservative, custom)
+- [ ] Budget alerts/limits for runaway processing
+
+#### Prompts
+- [x] Reflect reranking prompt (JSON: ranking[], contradictions[])
+- [x] Dream analysis prompt (JSON: content, category, importance, tags[])
+- [x] Graceful degradation when LLM unavailable
+- [ ] Prompt versioning and migration
+- [ ] Prompt A/B testing framework
+- [ ] Custom prompt injection points for domain-specific extraction
+
+#### Pre-computed Datasets
+- [x] SessionContext (TopicWeights, CachedReflect, ResolvedContradictions)
+- [x] ProactiveQueue (Dream discoveries for opportunistic injection)
+- [x] Session persistence across daemon restarts
+- [ ] Embeddings layer (semantic similarity vs current term-based)
+- [ ] Cross-session pattern learning
+- [ ] Dataset export/import for team sharing
+
+---
+
 ## Gap Analysis
 
 ### Critical Gaps (Blocking Publication)

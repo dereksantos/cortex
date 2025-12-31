@@ -190,6 +190,62 @@ This is how agentic processing benefits mechanical retrieval:
 
 The result: mechanical modes (Reflex, Resolve) run fast while benefiting from agentic processing (Think, Dream, Reflect) that runs in background.
 
+### Bounded Intelligence: The Three Pillars
+
+Cortex inverts the typical LLM pattern. Instead of letting LLMs decide what to fetch (unbounded exploration), Cortex:
+
+1. Performs **mechanical retrieval first** (Reflex, <20ms)
+2. Provides **pre-computed context** from background processing
+3. Uses LLMs only with **bounded budgets** for specific tasks
+
+> "The LLM must work with the data it is given to make resource consumption more predictable."
+
+This is achieved through three pillars:
+
+#### Budgeting System
+
+Think and Dream use inverse budget models for predictable resource consumption:
+
+**Think (Active Periods)**
+```
+ThinkBudget = MaxBudget × (1 - ActivityLevel)
+```
+- High activity (rapid queries) → low budget (spare cycles only)
+- Low activity (pauses) → higher budget
+- Default: MaxBudget=5, MinBudget=1, ActivityWindow=1min
+
+**Dream (Idle Periods)**
+```
+DreamBudget = min(IdleTime × GrowthRate, MaxBudget)
+```
+- Short idle → small budget
+- Long idle → capped at MaxBudget
+- Default: MaxBudget=20, MinBudget=2, GrowthDuration=10min
+
+#### Prompts
+
+Each agentic mode uses a structured prompt that defines its "contract" with the LLM:
+
+| Mode | Prompt Purpose | Output Format |
+|------|----------------|---------------|
+| Reflect | Rerank candidates, detect contradictions | JSON: `{ranking[], contradictions[], reasoning}` |
+| Dream | Extract durable insights from content | JSON: `{content, category, importance, tags[]}` |
+
+Prompt philosophy: Extract **DURABLE**, **ACTIONABLE**, **TEACHABLE** context. Graceful degradation when LLM unavailable.
+
+#### Pre-computed Datasets
+
+Think produces `SessionContext` that accelerates future retrievals:
+
+| Field | Source | Consumer | Purpose |
+|-------|--------|----------|---------|
+| `TopicWeights` | Query pattern analysis | Resolve | Boost scores for session-relevant topics |
+| `CachedReflect` | Background Reflect runs | Fast mode | Pre-computed reranking results |
+| `ResolvedContradictions` | Reflect metadata | Resolve | Avoid re-resolving known conflicts |
+| `ProactiveQueue` | Dream discoveries | Resolve | Opportunistic injection of insights |
+
+This is how Fast mode approaches Full mode quality without blocking on LLM calls.
+
 ## Go Patterns
 
 **Error handling**: Wrap with context, use `fmt.Errorf("failed to X: %w", err)`
