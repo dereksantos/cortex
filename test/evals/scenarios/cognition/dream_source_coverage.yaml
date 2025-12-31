@@ -1,0 +1,21 @@
+id: dream-source-coverage
+type: dream
+name: "Dream explores multiple sources"
+description: "Verify Dream samples from all registered DreamSources including project files, cortex data, claude history, and git history"
+
+# Sources Dream should explore
+dream_sources:
+  - project
+  - cortex
+  - claude-history
+  - git
+
+# At least 2 insights should be generated per dream session
+expected_insights: 2
+
+# At least 50% of sources should be sampled
+# (some sources may be empty, e.g., no claude history or not a git repo)
+expected_coverage: 0.5
+
+# Dream should respect budget constraints
+budget_must_respect: true

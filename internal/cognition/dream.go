@@ -155,6 +155,8 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 	log.Printf("Dream: starting (budget: %d, sources: %d)", budget, len(d.sources))
 	ops := 0
 	insights := 0
+	sourcesCovered := make([]string, 0)
+	seenSources := make(map[string]bool)
 
 	// Sample from each source
 	for _, source := range d.sources {
@@ -165,6 +167,12 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 		items, err := source.Sample(ctx, budget-ops)
 		if err != nil {
 			continue
+		}
+
+		// Track this source as covered if we got items
+		if len(items) > 0 && !seenSources[source.Name()] {
+			sourcesCovered = append(sourcesCovered, source.Name())
+			seenSources[source.Name()] = true
 		}
 
 		for _, item := range items {
@@ -228,11 +236,20 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 	log.Printf("Dream: completed (%d ops, %d insights, %v)", ops, insights, time.Since(start))
 
 	return &cognition.DreamResult{
-		Status:     cognition.DreamRan,
-		Operations: ops,
-		Duration:   time.Since(start),
-		Insights:   insights,
+		Status:         cognition.DreamRan,
+		Operations:     ops,
+		Duration:       time.Since(start),
+		Insights:       insights,
+		SourcesCovered: sourcesCovered,
 	}, nil
+}
+
+// ResetForTesting resets Dream's internal state for testing.
+// Clears the lastDream timestamp so MinInterval check passes.
+func (d *Dream) ResetForTesting() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastDream = time.Time{}
 }
 
 // analyzeItem uses LLM to extract insights from a sampled item.

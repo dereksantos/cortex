@@ -426,6 +426,16 @@ func (m *MockCortex) ProactiveQueue() []cognition.Result {
 	return m.proactiveQueue
 }
 
+// ForceIdle implements cognition.Dreamer (no-op for mock)
+func (m *MockCortex) ForceIdle() {
+	// No-op for mock - always considered idle
+}
+
+// ResetForTesting implements cognition.Dreamer (no-op for mock)
+func (m *MockCortex) ResetForTesting() {
+	// No-op for mock - no interval tracking
+}
+
 // Retrieve implements cognition.Cortex
 func (m *MockCortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition.RetrieveMode) (*cognition.ResolveResult, error) {
 	m.mu.Lock()

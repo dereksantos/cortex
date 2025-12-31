@@ -2168,6 +2168,12 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 			fmt.Fprintf(os.Stderr, "Failed to create Cortex: %v\n", err)
 			os.Exit(1)
 		}
+
+		// Register dream sources for eval (same as daemon)
+		realCortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+		realCortex.RegisterSource(sources.NewCortexSource(store))
+		realCortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+
 		cortex = realCortex
 		if verbose {
 			fmt.Printf("Using real Cortex (provider: %s)\n", provider.Name())
@@ -2309,6 +2315,9 @@ func handleDaemon() {
 		// Register transcript queue source (from Stop hooks)
 		transcriptQueueDir := filepath.Join(cfg.ContextDir, "transcript_queue")
 		cortex.RegisterSource(sources.NewTranscriptQueueSource(transcriptQueueDir))
+
+		// Register git source for commit history exploration
+		cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
 	}
 
 	// Load persisted session
@@ -3378,6 +3387,9 @@ func handleInjectContext() {
 		claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
 		cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
 	}
+
+	// Register git source for commit history exploration
+	cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
 
 	// Determine if this is the first prompt of the session
 	isFirstPrompt := isFirstPromptInSession(store, sessionID)

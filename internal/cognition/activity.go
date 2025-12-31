@@ -140,3 +140,12 @@ func (a *ActivityTracker) RetrieveCount() int {
 
 	return len(a.retrieveTimes)
 }
+
+// ForceIdle clears all retrieve history, making IsIdle() return true.
+// Used for testing Dream mode without waiting for actual idle time.
+func (a *ActivityTracker) ForceIdle() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.retrieveTimes = nil
+}
