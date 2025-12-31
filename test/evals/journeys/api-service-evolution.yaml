@@ -1,0 +1,810 @@
+# =============================================================================
+# API Service Evolution - E2E Journey
+# =============================================================================
+# This journey simulates a realistic 3-month development cycle of an e-commerce
+# API service. It tests Cortex's ability to:
+#   1. Accumulate decisions, patterns, and corrections over time
+#   2. Help LLMs implement features correctly by recalling relevant context
+#   3. Handle decision supersession (e.g., JWT -> OAuth2)
+#   4. Forget outdated context while retaining current decisions
+#
+# Structure:
+#   - 30 sessions across 5 phases (foundation, feature, pivot, maintenance)
+#   - 2 implementation tasks with acceptance criteria (caching, saga pattern)
+#   - 9 query sessions with 18 queries to test recall accuracy
+#   - 51 events (decisions, patterns, corrections, constraints, preferences)
+#   - 2 supersession chains demonstrating decision evolution
+# =============================================================================
+
+id: api-service-evolution
+type: e2e
+name: "API Service Evolution - 3 Month Development Cycle"
+description: |
+  A comprehensive E2E journey that simulates the evolution of an e-commerce API
+  service from initial architecture decisions through feature implementation,
+  a security pivot, and final validation. Tests Cortex's ability to maintain
+  durable context across sessions and help LLMs make consistent decisions.
+
+project:
+  name: "api-service"
+  scaffold: "test/evals/projects/api-service"
+  language: "go"
+  description: "E-commerce API service with products, orders, and authentication"
+
+metadata:
+  duration: "3-months"
+  complexity: "high"
+  domains: "backend,e-commerce,distributed-systems"
+  author: "cortex-eval"
+
+sessions:
+  # ===========================================================================
+  # PHASE 1: FOUNDATION (Sessions 1-5)
+  # Establish tech stack, patterns, and core architectural decisions
+  # ===========================================================================
+
+  - id: session-01
+    phase: foundation
+    context: "Project kickoff - establishing tech stack and core infrastructure"
+    simulated_time: "2025-01-15T09:00:00Z"
+    events:
+      - type: decision
+        id: lang-go
+        content: "Use Go 1.21+ for the backend service"
+        rationale: "Team expertise, strong concurrency support, excellent performance for API workloads"
+        tags: [language, backend, infrastructure]
+        importance: 8
+
+      - type: decision
+        id: db-postgres
+        content: "PostgreSQL 15+ for primary database with UUID primary keys"
+        rationale: "ACID compliance, excellent JSON support, team familiarity, mature ecosystem"
+        tags: [database, infrastructure, persistence]
+        importance: 8
+
+      - type: decision
+        id: cache-redis
+        content: "Redis for ALL caching needs - do NOT use in-memory caching with sync.Map or map[string]"
+        rationale: "Shared cache across service instances, persistence options, TTL support, horizontal scalability"
+        tags: [cache, infrastructure, architecture]
+        importance: 9
+
+      - type: constraint
+        id: no-orm
+        content: "No ORM frameworks - use database/sql with sqlx for query building"
+        rationale: "Explicit SQL for performance visibility, avoid N+1 query problems"
+        tags: [database, patterns]
+        importance: 7
+
+  - id: session-02
+    phase: foundation
+    context: "Establishing error handling and logging patterns"
+    simulated_time: "2025-01-15T14:00:00Z"
+    events:
+      - type: pattern
+        id: error-wrap
+        content: "Always wrap errors with context using fmt.Errorf(\"failed to X: %w\", err)"
+        rationale: "Preserves error chain for debugging, provides operation context"
+        tags: [errors, patterns, debugging]
+        importance: 7
+
+      - type: pattern
+        id: logging-structured
+        content: "Use structured logging with log/slog - NEVER use fmt.Println or log.Printf for application logging"
+        rationale: "Machine-parseable logs, consistent fields, log aggregation compatibility"
+        tags: [logging, observability, patterns]
+        importance: 7
+
+      - type: correction
+        id: no-global-state
+        content: "Don't use global variables or package-level state for service dependencies - use dependency injection via constructor parameters"
+        rationale: "Testability, explicit dependencies, no hidden coupling"
+        tags: [architecture, testing, patterns]
+        importance: 8
+
+      - type: preference
+        id: constructor-naming
+        content: "Name constructors NewXxx (e.g., NewProductService) and accept config via struct or functional options"
+        tags: [naming, patterns]
+        importance: 5
+
+  - id: session-03
+    phase: foundation
+    context: "API design and HTTP patterns"
+    simulated_time: "2025-01-16T10:00:00Z"
+    events:
+      - type: decision
+        id: api-rest
+        content: "RESTful API design with JSON request/response bodies"
+        rationale: "Team familiarity, excellent tooling, client compatibility"
+        tags: [api, http, design]
+        importance: 7
+
+      - type: pattern
+        id: http-handler-pattern
+        content: "HTTP handlers should: 1) Parse request, 2) Validate input, 3) Call service layer, 4) Format response. Never mix business logic into handlers."
+        tags: [http, patterns, architecture]
+        importance: 7
+
+      - type: pattern
+        id: json-response
+        content: "JSON responses use envelope pattern: {\"data\": ..., \"error\": null} for success, {\"data\": null, \"error\": {\"code\": \"...\", \"message\": \"...\"}} for errors"
+        tags: [api, json, patterns]
+        importance: 6
+
+      - type: constraint
+        id: http-status-codes
+        content: "Use appropriate HTTP status codes: 200 OK, 201 Created, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 500 Internal Server Error"
+        tags: [api, http]
+        importance: 6
+
+  - id: session-04
+    phase: foundation
+    context: "Authentication approach - initial JWT decision"
+    simulated_time: "2025-01-17T09:00:00Z"
+    events:
+      - type: decision
+        id: auth-jwt
+        content: "Use JWT tokens for authentication with HS256 signing, 24-hour expiry, and refresh token rotation"
+        rationale: "Stateless auth, scalable across instances, team has JWT experience"
+        tags: [auth, security, jwt]
+        importance: 8
+
+      - type: pattern
+        id: auth-bearer
+        content: "Authentication tokens sent in Authorization header as 'Bearer <token>'"
+        tags: [auth, http, patterns]
+        importance: 7
+
+      - type: pattern
+        id: auth-middleware
+        content: "Use middleware pattern for authentication - wrap handlers that need auth with JWTMiddleware"
+        tags: [auth, middleware, patterns]
+        importance: 7
+
+  - id: session-05
+    phase: foundation
+    context: "Testing patterns and standards"
+    simulated_time: "2025-01-17T14:00:00Z"
+    events:
+      - type: constraint
+        id: testing-stdlib
+        content: "Use standard library testing package ONLY - no testify, gomega, or other assertion libraries"
+        rationale: "Consistent with Go idioms, no external dependencies for testing"
+        tags: [testing, constraints]
+        importance: 8
+
+      - type: pattern
+        id: testing-table
+        content: "Use table-driven tests with t.Run() subtests for comprehensive test coverage"
+        tags: [testing, patterns]
+        importance: 7
+
+      - type: pattern
+        id: testing-setup
+        content: "Use defer for test cleanup, create helper functions with t.Helper() for common setup"
+        tags: [testing, patterns]
+        importance: 6
+
+      - type: correction
+        id: no-mock-libraries
+        content: "Don't use mockgen or gomock - write simple mock structs that implement interfaces manually"
+        rationale: "Simpler, more explicit, no code generation needed"
+        tags: [testing, mocking]
+        importance: 6
+
+  # ===========================================================================
+  # PHASE 2: FEATURE DEVELOPMENT (Sessions 6-15)
+  # Build out core features, including caching task
+  # ===========================================================================
+
+  - id: session-06
+    phase: feature
+    context: "Product service design discussion"
+    simulated_time: "2025-01-20T09:00:00Z"
+    events:
+      - type: decision
+        id: product-service-interface
+        content: "ProductService exposes GetProduct, ListProducts, UpdateInventory methods. Use context.Context as first parameter for all service methods."
+        tags: [product, service, design]
+        importance: 6
+
+      - type: pattern
+        id: service-error-types
+        content: "Define sentinel errors (var ErrNotFound = errors.New(...)) for known error conditions, wrap unexpected errors"
+        tags: [errors, patterns]
+        importance: 6
+
+  - id: session-07
+    phase: feature
+    context: "Discussing product caching strategy"
+    simulated_time: "2025-01-21T10:00:00Z"
+    events:
+      - type: decision
+        id: cache-product
+        content: "Cache product lookups in Redis with 5 minute TTL using pkg/cache.Cache interface"
+        rationale: "Products are read-heavy, changes are infrequent, 5min staleness acceptable"
+        tags: [cache, product, performance]
+        scope: "module"
+        scope_target: "internal/product"
+        importance: 8
+
+      - type: pattern
+        id: cache-aside
+        content: "Implement cache-aside pattern: check cache first, on miss fetch from DB and populate cache, return result"
+        tags: [cache, patterns]
+        importance: 7
+
+      - type: correction
+        id: no-in-memory-cache
+        content: "Do NOT use sync.Map or map[string]*Product for caching - these don't work across service instances. Use Redis via pkg/cache.Cache"
+        tags: [cache, correction]
+        importance: 9
+
+  - id: session-08
+    phase: feature
+    context: "Product service performance issues identified - need to implement caching"
+    simulated_time: "2025-01-22T09:00:00Z"
+    events:
+      - type: pattern
+        id: cache-key-format
+        content: "Cache keys should be namespaced: 'product:{id}' for individual products, 'products:list' for product lists"
+        tags: [cache, patterns]
+        importance: 6
+    task:
+      description: |
+        Implement caching for ProductService.GetProduct using the pkg/cache.Cache interface.
+
+        Requirements:
+        1. Add a cache field to ProductService (type: cache.Cache)
+        2. Modify NewProductService to accept a cache.Cache parameter
+        3. Implement cache-aside pattern in GetProduct:
+           - Check cache first using key "product:{id}"
+           - On cache miss, fetch from DB (existing code)
+           - Store result in cache with 5 minute TTL
+           - Return result
+        4. Products should be serialized as JSON for cache storage
+
+        The pkg/cache.Cache interface is already provided with Get/Set/Delete methods.
+      files_to_modify:
+        - "internal/product/service.go"
+      max_turns: 12
+      timeout: "5m"
+      hints:
+        - "Remember to use pkg/cache.Cache interface, not sync.Map"
+        - "Use json.Marshal/Unmarshal for cache serialization"
+        - "Cache TTL should be 5 minutes (5 * time.Minute)"
+      acceptance:
+        tests_pass:
+          - "TestGetProductCached"
+        patterns_required:
+          - "cache.Cache"
+          - "Get("
+          - "Set("
+          - "time.Minute"
+        patterns_forbidden:
+          - "sync.Map"
+          - "map[string]*Product"
+          - "map[string]Product"
+        imports_required:
+          - "encoding/json"
+        code_review:
+          - "Uses pkg/cache.Cache interface for caching, not in-memory maps"
+          - "Implements cache-aside pattern (check cache first, then DB)"
+          - "Cache key follows 'product:{id}' format"
+          - "TTL is approximately 5 minutes"
+
+  - id: session-09
+    phase: feature
+    context: "Code review feedback on caching implementation"
+    simulated_time: "2025-01-23T10:00:00Z"
+    events:
+      - type: pattern
+        id: cache-invalidation
+        content: "Invalidate product cache on UpdateInventory by calling cache.Delete(\"product:{id}\")"
+        tags: [cache, patterns]
+        scope: "module"
+        scope_target: "internal/product"
+        importance: 6
+
+      - type: preference
+        id: cache-stats
+        content: "Consider adding cache hit/miss metrics for observability"
+        tags: [cache, observability]
+        importance: 4
+
+  - id: session-10
+    phase: feature
+    context: "Verifying team understands caching decisions"
+    simulated_time: "2025-01-24T09:00:00Z"
+    queries:
+      - id: cache-approach-query
+        text: "How should we implement caching in this service?"
+        expected_recall: [cache-redis, cache-product, cache-aside, no-in-memory-cache]
+        expected_not_recall: []
+        expected_content:
+          - "Redis"
+          - "cache.Cache"
+        forbidden_content:
+          - "sync.Map"
+
+      - id: product-cache-query
+        text: "What's the caching strategy for the product service?"
+        expected_recall: [cache-product, cache-key-format]
+        expected_content:
+          - "5 minute"
+          - "TTL"
+
+  - id: session-11
+    phase: feature
+    context: "Order service initial design"
+    simulated_time: "2025-01-27T09:00:00Z"
+    events:
+      - type: decision
+        id: order-service-design
+        content: "OrderService handles CreateOrder, GetOrder, UpdateOrderStatus, CancelOrder. Order state machine: pending -> confirmed -> shipped -> delivered (or cancelled)"
+        tags: [order, service, design]
+        importance: 7
+
+      - type: pattern
+        id: order-validation
+        content: "Orders must have ID, CustomerID, and at least one item. Return ErrInvalidOrder for validation failures."
+        tags: [order, validation, patterns]
+        importance: 6
+
+  - id: session-12
+    phase: feature
+    context: "Discussing reliability patterns for order processing"
+    simulated_time: "2025-01-28T10:00:00Z"
+    events:
+      - type: decision
+        id: saga-pattern
+        content: "Use saga pattern for distributed order transactions - each step has a compensating action for rollback"
+        rationale: "Orders involve multiple services (inventory, payment, notification). Need atomic semantics with compensation on failure."
+        tags: [order, reliability, distributed-systems, saga]
+        importance: 9
+
+      - type: pattern
+        id: saga-state-machine
+        content: |
+          Saga state machine for order creation:
+          - pending: Initial state
+          - reserving_inventory: Reserving items (compensate: release inventory)
+          - processing_payment: Charging customer (compensate: refund payment)
+          - sending_notification: Notifying customer (compensate: send cancellation)
+          - confirmed: All steps succeeded
+          - compensating: Rolling back on failure
+          - failed: Compensation complete, order failed
+        tags: [order, saga, state-machine]
+        importance: 8
+
+      - type: pattern
+        id: saga-compensation
+        content: "Compensating transactions run in reverse order. If payment fails after inventory reserved, must release inventory before failing."
+        tags: [order, saga, compensation]
+        importance: 8
+
+  - id: session-13
+    phase: feature
+    context: "Order service dependency injection requirements"
+    simulated_time: "2025-01-29T09:00:00Z"
+    events:
+      - type: pattern
+        id: saga-dependencies
+        content: |
+          OrderService needs dependency injection for saga pattern:
+          - SetInventoryService(inv InventoryService)
+          - SetPaymentService(pay PaymentService)
+          - SetNotificationService(notif NotificationService)
+          Each service interface should have Execute and Compensate methods.
+        tags: [order, saga, dependency-injection]
+        importance: 8
+
+      - type: constraint
+        id: saga-no-direct-commit
+        content: "Never commit order directly to final state without going through saga steps. Order must transition through state machine."
+        tags: [order, saga, constraints]
+        importance: 8
+
+  - id: session-14
+    phase: feature
+    context: "Order reliability requirements finalized - ready for implementation"
+    simulated_time: "2025-01-30T09:00:00Z"
+    queries:
+      - id: order-reliability-query
+        text: "How should we handle order creation reliably?"
+        expected_recall: [saga-pattern, saga-state-machine, saga-compensation]
+        expected_content:
+          - "saga"
+          - "compensat"
+
+  - id: session-15
+    phase: feature
+    context: "Implementing additional product features"
+    simulated_time: "2025-02-03T09:00:00Z"
+    events:
+      - type: pattern
+        id: inventory-reservation
+        content: "Inventory reservation should be temporary (15 min timeout) until order confirmed. Use Redis SET with TTL for reservation locks."
+        tags: [inventory, order, patterns]
+        importance: 6
+
+      - type: decision
+        id: price-calculation
+        content: "Order total calculated server-side from product prices at time of order. Client-provided totals are ignored for security."
+        tags: [order, pricing, security]
+        importance: 7
+
+  # ===========================================================================
+  # PHASE 3: ORDER PROCESSING (Sessions 16-20)
+  # Implement saga pattern for order service
+  # ===========================================================================
+
+  - id: session-16
+    phase: feature
+    context: "Order processing sprint - implementing saga pattern"
+    simulated_time: "2025-02-10T09:00:00Z"
+    events:
+      - type: pattern
+        id: saga-error-handling
+        content: "Saga errors should include which step failed and compensation status. Use structured errors with StepName, OriginalError, CompensationErrors fields."
+        tags: [saga, errors, order]
+        importance: 7
+    task:
+      description: |
+        Implement saga pattern for OrderService.CreateOrder with proper state transitions and compensation.
+
+        Requirements:
+        1. Add SagaState field to Order (string type with states: pending, reserving, charging, confirming, confirmed, compensating, failed)
+        2. Add dependency injection methods to OrderService:
+           - SetInventoryService(inv interface{}) - interface needs ReserveInventory(orderID string, items []OrderItem) error and ReleaseInventory(orderID string) error
+           - SetPaymentService(pay interface{}) - interface needs ChargePayment(orderID string, amount float64) error and RefundPayment(orderID string) error
+           - SetNotificationService(notif interface{}) - interface needs SendConfirmation(orderID string) error and SendCancellation(orderID string) error
+        3. Implement saga in CreateOrder:
+           - Set initial state to "pending"
+           - Step 1: Reserve inventory (state: reserving)
+           - Step 2: Process payment (state: charging)
+           - Step 3: Send notification (state: confirming)
+           - On success: Set state to "confirmed", update order status to StatusConfirmed
+           - On failure: Run compensation in reverse order (state: compensating), then set state to "failed"
+        4. Update order status based on saga outcome (StatusConfirmed or StatusFailed)
+
+        Note: If no services are injected, saga steps should be no-ops (for backward compatibility with existing tests).
+      files_to_modify:
+        - "internal/order/service.go"
+      max_turns: 15
+      timeout: "8m"
+      hints:
+        - "Add interface types for each service dependency"
+        - "Use a switch statement for saga state transitions"
+        - "Compensation runs in reverse order: notification -> payment -> inventory"
+      acceptance:
+        tests_pass:
+          - "TestCreateOrder_SagaPattern"
+          - "TestCreateOrder_SagaCompensation"
+        patterns_required:
+          - "SagaState"
+          - "SetInventoryService"
+          - "SetPaymentService"
+          - "SetNotificationService"
+          - "compensat"
+        patterns_forbidden:
+          - "// TODO: implement saga"
+          - "// TODO: Implement saga"
+        code_review:
+          - "Implements saga state machine with clear state transitions"
+          - "Has compensation logic that runs in reverse order on failure"
+          - "Supports dependency injection for inventory, payment, and notification services"
+          - "Updates order status to confirmed or failed based on saga outcome"
+
+  - id: session-17
+    phase: feature
+    context: "Order saga implementation review"
+    simulated_time: "2025-02-12T10:00:00Z"
+    events:
+      - type: pattern
+        id: saga-idempotency
+        content: "Saga operations should be idempotent - retrying a step should be safe. Use order ID as idempotency key."
+        tags: [saga, reliability, patterns]
+        importance: 7
+
+      - type: preference
+        id: saga-logging
+        content: "Log saga state transitions with order ID, from-state, to-state, and duration for debugging"
+        tags: [saga, logging, observability]
+        importance: 5
+
+  - id: session-18
+    phase: feature
+    context: "Testing order saga thoroughly"
+    simulated_time: "2025-02-14T09:00:00Z"
+    events:
+      - type: pattern
+        id: saga-testing
+        content: "Test saga with mock services that fail at different steps to verify compensation runs correctly"
+        tags: [saga, testing]
+        importance: 7
+
+  - id: session-19
+    phase: feature
+    context: "Verifying saga pattern understanding"
+    simulated_time: "2025-02-17T09:00:00Z"
+    queries:
+      - id: saga-implementation-query
+        text: "How is the order saga implemented?"
+        expected_recall: [saga-pattern, saga-state-machine, saga-compensation, saga-dependencies]
+        expected_content:
+          - "compensat"
+          - "state"
+
+      - id: saga-failure-query
+        text: "What happens when order creation fails partway through?"
+        expected_recall: [saga-compensation]
+        expected_content:
+          - "reverse"
+          - "compensat"
+
+  - id: session-20
+    phase: feature
+    context: "Order feature complete - moving to next phase"
+    simulated_time: "2025-02-20T09:00:00Z"
+    events:
+      - type: decision
+        id: order-events
+        content: "Emit domain events for order state changes: OrderCreated, OrderConfirmed, OrderShipped, OrderCancelled"
+        rationale: "Enable event-driven integrations, audit trail"
+        tags: [order, events, architecture]
+        importance: 6
+
+  # ===========================================================================
+  # PHASE 4: EVOLUTION/PIVOT (Sessions 21-25)
+  # Business requirement changes - JWT to OAuth2 migration
+  # ===========================================================================
+
+  - id: session-21
+    phase: pivot
+    context: "Enterprise sales team feedback - customer requires OAuth2/OIDC"
+    simulated_time: "2025-03-01T09:00:00Z"
+    events:
+      - type: decision
+        id: enterprise-sso
+        content: "Must support enterprise SSO for Fortune 500 customer - OAuth2/OIDC required"
+        rationale: "Enterprise customer requirement, compliance needs"
+        tags: [auth, enterprise, business]
+        importance: 9
+
+      - type: constraint
+        id: oauth2-timeline
+        content: "OAuth2 migration must be complete by end of Q2 for enterprise launch"
+        tags: [auth, timeline, enterprise]
+        importance: 7
+
+  - id: session-22
+    phase: pivot
+    context: "Auth architecture pivot - switching from JWT to OAuth2"
+    simulated_time: "2025-03-03T10:00:00Z"
+    events:
+      - type: decision
+        id: auth-oauth2
+        content: "Switch authentication from JWT to OAuth2/OIDC for enterprise SSO compatibility. Use standard OAuth2 authorization code flow with PKCE."
+        supersedes: auth-jwt
+        rationale: "Enterprise requirement for SAML/OIDC federation, better security model, industry standard"
+        tags: [auth, oauth2, security, enterprise]
+        importance: 9
+
+      - type: pattern
+        id: oauth2-flow
+        content: |
+          OAuth2 authorization code flow with PKCE:
+          1. Client redirects to /authorize with code_challenge
+          2. User authenticates with IdP
+          3. Callback receives authorization code
+          4. Exchange code for tokens at /token endpoint
+          5. Use access token for API calls
+        tags: [auth, oauth2, patterns]
+        importance: 8
+
+      - type: correction
+        id: no-jwt-new-features
+        content: "Do NOT add new JWT-based authentication code. All new auth features should use OAuth2. Existing JWT code will be deprecated."
+        tags: [auth, jwt, correction]
+        importance: 9
+
+  - id: session-23
+    phase: pivot
+    context: "OAuth2 implementation planning"
+    simulated_time: "2025-03-05T09:00:00Z"
+    events:
+      - type: pattern
+        id: oauth2-middleware
+        content: "Replace JWTMiddleware with OAuth2Middleware that validates access tokens against IdP or uses token introspection"
+        supersedes: auth-middleware
+        tags: [auth, oauth2, middleware]
+        importance: 8
+
+      - type: decision
+        id: oauth2-provider
+        content: "Use Auth0 as OAuth2/OIDC provider for initial enterprise deployment. Abstract behind interface for future provider flexibility."
+        tags: [auth, oauth2, infrastructure]
+        importance: 7
+
+      - type: pattern
+        id: token-refresh
+        content: "Implement token refresh using refresh tokens. Access tokens expire in 15 minutes, refresh tokens in 7 days."
+        tags: [auth, oauth2, tokens]
+        importance: 7
+
+  - id: session-24
+    phase: pivot
+    context: "Verifying auth pivot is understood correctly"
+    simulated_time: "2025-03-07T09:00:00Z"
+    queries:
+      - id: auth-approach-query
+        text: "What authentication approach should we use for new features?"
+        expected_recall: [auth-oauth2, oauth2-flow, no-jwt-new-features]
+        expected_not_recall: [auth-jwt]
+        expected_content:
+          - "OAuth2"
+          - "OIDC"
+        forbidden_content:
+          - "JWT with HS256"
+          - "24-hour expiry"
+
+      - id: auth-middleware-query
+        text: "How should we protect API endpoints?"
+        expected_recall: [oauth2-middleware]
+        expected_not_recall: [auth-middleware]
+        expected_content:
+          - "OAuth2"
+
+  - id: session-25
+    phase: pivot
+    context: "Migration strategy for existing JWT users"
+    simulated_time: "2025-03-10T09:00:00Z"
+    events:
+      - type: decision
+        id: jwt-deprecation
+        content: "JWT authentication deprecated. Maintain backward compatibility for 90 days, then remove. All new clients must use OAuth2."
+        tags: [auth, jwt, deprecation]
+        importance: 7
+
+      - type: pattern
+        id: dual-auth
+        content: "During migration, support both JWT and OAuth2 tokens. Check Authorization header format to determine which validator to use."
+        tags: [auth, migration, patterns]
+        importance: 6
+
+  # ===========================================================================
+  # PHASE 5: VALIDATION (Sessions 26-30)
+  # Final validation of accumulated knowledge
+  # ===========================================================================
+
+  - id: session-26
+    phase: maintenance
+    context: "Onboarding new team member - reviewing project context"
+    simulated_time: "2025-03-15T09:00:00Z"
+    queries:
+      - id: tech-stack-query
+        text: "What tech stack are we using for this project?"
+        expected_recall: [lang-go, db-postgres, cache-redis]
+        expected_content:
+          - "Go"
+          - "PostgreSQL"
+          - "Redis"
+
+      - id: testing-approach-query
+        text: "How should I write tests for this codebase?"
+        expected_recall: [testing-stdlib, testing-table, no-mock-libraries]
+        expected_not_recall: []
+        expected_content:
+          - "standard library"
+          - "table-driven"
+
+  - id: session-27
+    phase: maintenance
+    context: "New developer asking about patterns"
+    simulated_time: "2025-03-17T10:00:00Z"
+    queries:
+      - id: error-handling-query
+        text: "How should I handle errors in this codebase?"
+        expected_recall: [error-wrap, service-error-types]
+        expected_content:
+          - "fmt.Errorf"
+          - "wrap"
+
+      - id: logging-query
+        text: "What logging approach should I use?"
+        expected_recall: [logging-structured]
+        expected_content:
+          - "slog"
+          - "structured"
+        forbidden_content:
+          - "fmt.Println"
+
+  - id: session-28
+    phase: maintenance
+    context: "Comprehensive architecture review"
+    simulated_time: "2025-03-20T09:00:00Z"
+    queries:
+      - id: architecture-decisions-query
+        text: "What are our key architectural decisions?"
+        expected_recall: [lang-go, db-postgres, cache-redis, saga-pattern, auth-oauth2]
+        expected_not_recall: [auth-jwt]
+        expected_content:
+          - "Go"
+          - "PostgreSQL"
+          - "Redis"
+          - "saga"
+          - "OAuth2"
+
+      - id: caching-full-query
+        text: "How do we handle caching in this system?"
+        expected_recall: [cache-redis, cache-product, no-in-memory-cache, cache-aside]
+        expected_content:
+          - "Redis"
+          - "pkg/cache.Cache"
+          - "cache-aside"
+
+  - id: session-29
+    phase: maintenance
+    context: "Security audit preparation"
+    simulated_time: "2025-03-24T09:00:00Z"
+    queries:
+      - id: current-auth-query
+        text: "What is our current authentication strategy?"
+        expected_recall: [auth-oauth2, oauth2-provider, enterprise-sso]
+        expected_not_recall: [auth-jwt]
+        expected_content:
+          - "OAuth2"
+          - "Auth0"
+          - "enterprise"
+        forbidden_content:
+          - "JWT with HS256"
+
+      - id: auth-history-query
+        text: "What authentication approach are we migrating away from?"
+        expected_recall: [jwt-deprecation, auth-jwt]
+        expected_content:
+          - "JWT"
+          - "deprecat"
+
+  - id: session-30
+    phase: maintenance
+    context: "Final validation - comprehensive knowledge test"
+    simulated_time: "2025-03-28T09:00:00Z"
+    queries:
+      - id: full-context-query
+        text: "Summarize the key decisions, patterns, and constraints for this project"
+        expected_recall:
+          - lang-go
+          - db-postgres
+          - cache-redis
+          - error-wrap
+          - logging-structured
+          - testing-stdlib
+          - saga-pattern
+          - auth-oauth2
+        expected_not_recall: [auth-jwt]
+        expected_content:
+          - "Go"
+          - "PostgreSQL"
+          - "Redis"
+          - "saga"
+          - "OAuth2"
+
+      - id: corrections-query
+        text: "What are the things we should NOT do in this codebase?"
+        expected_recall: [no-global-state, no-in-memory-cache, no-jwt-new-features, no-mock-libraries]
+        expected_content:
+          - "global"
+          - "sync.Map"
+          - "JWT"
+          - "mockgen"
+
+      - id: order-reliability-final-query
+        text: "How does order processing ensure reliability?"
+        expected_recall: [saga-pattern, saga-compensation, saga-state-machine]
+        expected_content:
+          - "saga"
+          - "compensat"
+          - "state"
