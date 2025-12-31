@@ -530,3 +530,70 @@ func TestGetImportantInsights(t *testing.T) {
 		}
 	})
 }
+
+func TestMergeInsights(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("merge-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	// Store 3 similar insights (simulating duplicates)
+	store.StoreInsight("merge-event", "decision", "Use JWT for auth", 8, []string{"auth", "jwt"}, "reason1")
+	store.StoreInsight("merge-event", "decision", "Use JWT tokens for authentication", 7, []string{"auth", "tokens"}, "reason2")
+	store.StoreInsight("merge-event", "decision", "JWT authentication decision", 6, []string{"security"}, "reason3")
+
+	// Get all insights to find their IDs
+	insights, err := store.GetInsightsByCategory("decision", 10)
+	if err != nil {
+		t.Fatalf("failed to get insights: %v", err)
+	}
+
+	if len(insights) != 3 {
+		t.Fatalf("expected 3 insights before merge, got %d", len(insights))
+	}
+
+	// Keep the first (highest importance), delete the others
+	keepID := insights[0].ID
+	deleteIDs := []int64{insights[1].ID, insights[2].ID}
+
+	t.Run("merges insights and combines tags", func(t *testing.T) {
+		deleted, err := store.MergeInsights(keepID, deleteIDs)
+		if err != nil {
+			t.Fatalf("failed to merge insights: %v", err)
+		}
+
+		if deleted != 2 {
+			t.Errorf("expected 2 deleted, got %d", deleted)
+		}
+
+		// Check remaining insights
+		remaining, _ := store.GetInsightsByCategory("decision", 10)
+		if len(remaining) != 1 {
+			t.Errorf("expected 1 insight after merge, got %d", len(remaining))
+		}
+
+		// Check tags were merged
+		survivor := remaining[0]
+		expectedTags := map[string]bool{"auth": true, "jwt": true, "tokens": true, "security": true}
+		for _, tag := range survivor.Tags {
+			if !expectedTags[tag] {
+				t.Errorf("unexpected tag: %s", tag)
+			}
+			delete(expectedTags, tag)
+		}
+		if len(expectedTags) > 0 {
+			t.Errorf("missing expected tags: %v", expectedTags)
+		}
+	})
+
+	t.Run("handles empty delete list", func(t *testing.T) {
+		deleted, err := store.MergeInsights(keepID, []int64{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("expected 0 deleted for empty list, got %d", deleted)
+		}
+	})
+}

@@ -475,6 +475,11 @@ func (m *MockCortex) AddProactiveInsight(result cognition.Result) {
 	m.proactiveQueue = append(m.proactiveQueue, result)
 }
 
+// NotifyDreamCompleted implements cognition.Digester
+func (m *MockCortex) NotifyDreamCompleted() {
+	// No-op for mock
+}
+
 // MaybeDigest implements cognition.Digester
 func (m *MockCortex) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
 	return &cognition.DigestResult{
