@@ -716,10 +716,14 @@ type DigestedInsight struct {
 // Recency bias: when merging, newer insights become the representative
 // by default, preserving the most recent understanding.
 type Digester interface {
+	// NotifyDreamCompleted signals that Dream just finished.
+	// Must be called before MaybeDigest will run.
+	NotifyDreamCompleted()
+
 	// MaybeDigest attempts to consolidate insights after Dream.
 	//
 	// Only runs if:
-	//   - Dream completed recently
+	//   - Dream completed recently (NotifyDreamCompleted was called)
 	//   - No other digest in progress
 	//   - Insights exist to process
 	//

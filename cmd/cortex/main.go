@@ -2133,15 +2133,15 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 					importance = 10
 				}
 
-				// Parse timestamp if provided, otherwise use a default "old" timestamp
-				// so items with explicit timestamps can be tested for recency ordering
+				// Parse timestamp if provided, otherwise use recent timestamp
+				// so corpus items can compete with Dream-generated items in scoring
 				var timestamp time.Time
 				if item.Timestamp != "" {
 					timestamp, _ = time.Parse(time.RFC3339, item.Timestamp)
 				} else {
-					// Default to 6 months ago for items without timestamps
-					// This ensures they don't dominate recency scoring
-					timestamp = time.Now().AddDate(0, -6, 0)
+					// Default to 1 week ago - recent enough to score well,
+					// old enough to test recency ordering for items with explicit timestamps
+					timestamp = time.Now().AddDate(0, 0, -7)
 				}
 
 				// Store as insight with timestamp (Reflex searches insights)
@@ -2169,10 +2169,10 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 			os.Exit(1)
 		}
 
-		// Register dream sources for eval (same as daemon)
-		realCortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+		// Only register CortexSource for eval - it reads from storage where
+		// the corpus is seeded. ProjectSource/GitSource would read from the
+		// real filesystem, generating content that doesn't match test expectations.
 		realCortex.RegisterSource(sources.NewCortexSource(store))
-		realCortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
 
 		cortex = realCortex
 		if verbose {

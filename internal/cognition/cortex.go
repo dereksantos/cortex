@@ -226,6 +226,11 @@ func (c *Cortex) SetStateWriter(sw *StateWriter) {
 	c.digest.SetStateWriter(sw)
 }
 
+// NotifyDreamCompleted signals that Dream just finished.
+func (c *Cortex) NotifyDreamCompleted() {
+	c.digest.NotifyDreamCompleted()
+}
+
 // MaybeDigest attempts to consolidate insights after Dream.
 func (c *Cortex) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
 	return c.digest.MaybeDigest(ctx)

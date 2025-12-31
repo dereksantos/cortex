@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,28 +110,47 @@ func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, erro
 		return &cognition.DigestResult{Status: cognition.DigestSkippedNoInsights}, nil
 	}
 
-	// Perform digest
+	// Perform digest and compact storage
 	digested, err := d.DigestInsights(ctx, insights)
 	if err != nil {
 		return nil, fmt.Errorf("digest failed: %w", err)
 	}
 
-	// Count groups with duplicates and total merged
+	// Count groups with duplicates and actually merge them in storage
 	groups := 0
 	merged := 0
 	for _, di := range digested {
 		if len(di.Duplicates) > 0 {
 			groups++
-			merged += len(di.Duplicates)
+
+			// Extract storage IDs and compact
+			keepID := parseInsightID(di.Representative.ID)
+			if keepID > 0 {
+				var deleteIDs []int64
+				for _, dup := range di.Duplicates {
+					if dupID := parseInsightID(dup.ID); dupID > 0 {
+						deleteIDs = append(deleteIDs, dupID)
+					}
+				}
+
+				if len(deleteIDs) > 0 && d.storage != nil {
+					deleted, err := d.storage.MergeInsights(keepID, deleteIDs)
+					if err != nil {
+						log.Printf("Digest: merge failed for group %s: %v", di.Representative.ID, err)
+					} else {
+						merged += deleted
+					}
+				}
+			}
 		}
 	}
 
 	if stateWriter != nil && groups > 0 {
-		stateWriter.WriteMode("digest", fmt.Sprintf("Found %d duplicate groups", groups))
+		stateWriter.WriteMode("digest", fmt.Sprintf("Compacted %d duplicates from %d groups", merged, groups))
 	}
 
-	log.Printf("Digest: completed (%d insights -> %d unique, %d groups merged, %v)",
-		len(insights), len(digested), groups, time.Since(start))
+	log.Printf("Digest: completed (%d insights -> %d unique, %d groups, %d merged, %v)",
+		len(insights), len(digested), groups, merged, time.Since(start))
 
 	return &cognition.DigestResult{
 		Status:   cognition.DigestRan,
@@ -357,4 +377,18 @@ func tokenize(text string) []string {
 	}
 
 	return filtered
+}
+
+// parseInsightID extracts the int64 storage ID from an insight ID string.
+// Format: "insight:123" -> 123
+func parseInsightID(id string) int64 {
+	if !strings.HasPrefix(id, "insight:") {
+		return 0
+	}
+	numStr := strings.TrimPrefix(id, "insight:")
+	num, err := strconv.ParseInt(numStr, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return num
 }

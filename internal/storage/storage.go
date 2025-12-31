@@ -709,3 +709,104 @@ func (s *Storage) SearchInsights(keyword string, limit int) ([]*Insight, error) 
 
 	return s.scanInsights(rows)
 }
+
+// MergeInsights keeps one insight and deletes duplicates, merging their tags.
+// This is the compaction operation called by Digest during idle time.
+func (s *Storage) MergeInsights(keepID int64, deleteIDs []int64) (int, error) {
+	if len(deleteIDs) == 0 {
+		return 0, nil
+	}
+
+	// Start transaction for atomicity
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Get tags from all duplicates to merge into representative
+	var allTags []string
+
+	// First get the representative's current tags
+	var keepTagsJSON string
+	err = tx.QueryRow("SELECT tags FROM insights WHERE id = ?", keepID).Scan(&keepTagsJSON)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get representative tags: %w", err)
+	}
+	json.Unmarshal([]byte(keepTagsJSON), &allTags)
+
+	// Collect tags from duplicates
+	for _, dupID := range deleteIDs {
+		var tagsJSON string
+		err := tx.QueryRow("SELECT tags FROM insights WHERE id = ?", dupID).Scan(&tagsJSON)
+		if err != nil {
+			continue // Skip if not found
+		}
+		var dupTags []string
+		json.Unmarshal([]byte(tagsJSON), &dupTags)
+		allTags = append(allTags, dupTags...)
+	}
+
+	// Dedupe tags
+	tagSet := make(map[string]bool)
+	var uniqueTags []string
+	for _, t := range allTags {
+		if !tagSet[t] {
+			tagSet[t] = true
+			uniqueTags = append(uniqueTags, t)
+		}
+	}
+
+	// Update representative with merged tags
+	mergedTagsJSON, _ := json.Marshal(uniqueTags)
+	_, err = tx.Exec("UPDATE insights SET tags = ? WHERE id = ?", string(mergedTagsJSON), keepID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update representative tags: %w", err)
+	}
+
+	// Delete duplicates
+	deleted := 0
+	for _, dupID := range deleteIDs {
+		result, err := tx.Exec("DELETE FROM insights WHERE id = ?", dupID)
+		if err != nil {
+			continue
+		}
+		affected, _ := result.RowsAffected()
+		deleted += int(affected)
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit merge: %w", err)
+	}
+
+	return deleted, nil
+}
+
+// GetInsightByID retrieves a single insight by ID
+func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
+	var insight Insight
+	var tagsJSON string
+
+	err := s.db.QueryRow(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		FROM insights
+		WHERE id = ?
+	`, id).Scan(
+		&insight.ID,
+		&insight.EventID,
+		&insight.Category,
+		&insight.Summary,
+		&insight.Importance,
+		&tagsJSON,
+		&insight.Reasoning,
+		&insight.CreatedAt,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	json.Unmarshal([]byte(tagsJSON), &insight.Tags)
+	return &insight, nil
+}
