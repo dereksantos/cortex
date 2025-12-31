@@ -546,10 +546,11 @@ func (s DreamStatus) String() string {
 
 // DreamResult contains the outcome of a MaybeDream call.
 type DreamResult struct {
-	Status     DreamStatus   // Why dream did or didn't run
-	Operations int           // Number of operations performed
-	Duration   time.Duration // How long the session took
-	Insights   int           // Number of new insights discovered
+	Status         DreamStatus   // Why dream did or didn't run
+	Operations     int           // Number of operations performed
+	Duration       time.Duration // How long the session took
+	Insights       int           // Number of new insights discovered
+	SourcesCovered []string      // Which sources were sampled
 }
 
 // Dreamer explores diverse sources during idle periods.
@@ -601,6 +602,14 @@ type Dreamer interface {
 	// Resolve checks this queue and may include these in injection decisions
 	// even if not directly relevant to the current query.
 	ProactiveQueue() []Result
+
+	// ForceIdle forces the activity tracker to idle state.
+	// Used for testing Dream mode without waiting for actual idle time.
+	ForceIdle()
+
+	// ResetForTesting resets Dream's internal state for testing.
+	// Clears the lastDream timestamp so MinInterval check passes.
+	ResetForTesting()
 }
 
 // DigestConfig controls Digest mode behavior.

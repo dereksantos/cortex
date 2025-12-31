@@ -1,0 +1,19 @@
+id: dream-insight-quality
+type: dream
+name: "Dream generates useful insights"
+description: "Verify Dream produces insights that can inform future retrievals - patterns, decisions, and relationships extracted from sampled content"
+
+# Test with all available sources
+dream_sources:
+  - project
+  - cortex
+  - git
+
+# Expect more insights when we have good content to analyze
+expected_insights: 3
+
+# Full coverage not required - focus is on insight quality
+expected_coverage: 0.3
+
+# Budget must be respected
+budget_must_respect: true

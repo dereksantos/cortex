@@ -1,0 +1,18 @@
+id: dream-budget-respect
+type: dream
+name: "Dream respects budget constraints"
+description: "Verify Dream mode operates within configured budget limits and doesn't over-consume resources during idle processing"
+
+# Minimal sources for budget test
+dream_sources:
+  - project
+  - cortex
+
+# Lower threshold - focus is on budget not quantity
+expected_insights: 1
+
+# Minimal coverage expected
+expected_coverage: 0.25
+
+# Critical: budget must be respected
+budget_must_respect: true

@@ -207,6 +207,18 @@ func (c *Cortex) ProactiveQueue() []cognition.Result {
 	return c.dream.ProactiveQueue()
 }
 
+// ForceIdle forces the activity tracker to idle state.
+// Used for testing Dream mode without waiting for actual idle time.
+func (c *Cortex) ForceIdle() {
+	c.activity.ForceIdle()
+}
+
+// ResetForTesting resets Dream's internal state for testing.
+// Clears the lastDream timestamp so MinInterval check passes.
+func (c *Cortex) ResetForTesting() {
+	c.dream.ResetForTesting()
+}
+
 // SetStateWriter sets the state writer for all cognitive modes.
 func (c *Cortex) SetStateWriter(sw *StateWriter) {
 	c.think.SetStateWriter(sw)

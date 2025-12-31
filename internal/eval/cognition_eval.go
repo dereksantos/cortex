@@ -430,6 +430,12 @@ func (e *CognitionEvaluator) runPipelineTests(ctx context.Context, scenario *Cog
 func (e *CognitionEvaluator) runDreamTests(ctx context.Context, scenario *CognitionScenario) (*DreamResult, error) {
 	result := &DreamResult{}
 
+	// Reset Dream state so MinInterval check passes between scenarios
+	e.cortex.ResetForTesting()
+
+	// Force idle state so Dream will run (evals don't have natural idle time)
+	e.cortex.ForceIdle()
+
 	// Run Dream
 	dreamResult, err := e.cortex.MaybeDream(ctx)
 	if err != nil {
@@ -440,8 +446,9 @@ func (e *CognitionEvaluator) runDreamTests(ctx context.Context, scenario *Cognit
 
 	result.InsightsGenerated = dreamResult.Insights
 	result.BudgetRespected = dreamResult.Status == cognition.DreamRan
+	result.SourcesCovered = dreamResult.SourcesCovered
 
-	// Check coverage (would need to track which sources were sampled)
+	// Check coverage
 	if len(scenario.DreamSources) > 0 {
 		result.CoverageRatio = float64(len(result.SourcesCovered)) / float64(len(scenario.DreamSources))
 	}
