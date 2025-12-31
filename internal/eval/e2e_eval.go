@@ -281,12 +281,19 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 			return result, nil
 		}
 
+		if e.verbose && turn == 1 {
+			fmt.Printf("  LLM Response (first 500 chars): %.500s\n", response)
+		}
+
 		// Track tokens (estimate based on response length)
 		result.TokensUsed += len(prompt)/4 + len(response)/4
 
 		// Apply generated code to files
 		if err := e.applyGeneratedCode(task, response, result); err != nil {
 			// Continue to next turn if application fails
+			if e.verbose {
+				fmt.Printf("  Code application failed: %v\n", err)
+			}
 			prompt = e.buildRetryPrompt(task, contextStr, err.Error())
 			continue
 		}
@@ -312,6 +319,14 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 			result.Completed = true
 			result.CompletedSuccessfully = true
 			break
+		}
+
+		if e.verbose {
+			fmt.Printf("  Acceptance: build=%v lint=%v tests=%d/%d patterns=%d/%d violations=%d\n",
+				acceptanceResult.BuildsOK, acceptanceResult.LintsOK,
+				acceptanceResult.TestsPassed, acceptanceResult.TestsPassed+acceptanceResult.TestsFailed,
+				len(acceptanceResult.PatternsFound), len(task.Acceptance.PatternsRequired),
+				len(acceptanceResult.Violations))
 		}
 
 		// Build retry prompt with feedback
@@ -551,8 +566,19 @@ func (e *JourneyEvaluator) storeEvent(ctx context.Context, event *E2EEvent) erro
 	// Store in our local tracking map
 	e.storedEvents[event.ID] = storageEvent
 
-	// For now, we store as a cognition result in the mock
-	// In a real implementation, this would go through the storage layer
+	// Integrate with Cortex for retrieval
+	// Check if this is a MockCortex (dry-run mode)
+	if mockCortex, ok := e.cortex.(*MockCortex); ok {
+		// Add directly to corpus for retrieval
+		mockCortex.AddEventToCorpus(
+			event.ID,
+			formatEventContent(event),
+			string(event.Type),
+			event.Tags,
+			event.Importance,
+		)
+	}
+
 	return nil
 }
 
@@ -696,12 +722,18 @@ func (e *JourneyEvaluator) buildTaskPrompt(task *E2ETask, contextStr string) str
 	sb.WriteString(task.Description)
 	sb.WriteString("\n\n")
 
+	// Include current file contents for files to modify
 	if len(task.FilesToModify) > 0 {
-		sb.WriteString("## Files to modify\n")
+		sb.WriteString("## Current File Contents\n\n")
 		for _, f := range task.FilesToModify {
-			sb.WriteString(fmt.Sprintf("- %s\n", f))
+			filePath := filepath.Join(e.workDir, f)
+			content, err := os.ReadFile(filePath)
+			if err == nil {
+				sb.WriteString(fmt.Sprintf("### %s\n```go\n%s\n```\n\n", f, string(content)))
+			} else {
+				sb.WriteString(fmt.Sprintf("### %s\n(file not found)\n\n", f))
+			}
 		}
-		sb.WriteString("\n")
 	}
 
 	if len(task.FilesToCreate) > 0 {
@@ -713,9 +745,10 @@ func (e *JourneyEvaluator) buildTaskPrompt(task *E2ETask, contextStr string) str
 	}
 
 	sb.WriteString("## Instructions\n")
-	sb.WriteString("Provide the complete implementation for each file.\n")
-	sb.WriteString("Use the format:\n")
-	sb.WriteString("```go\n// FILE: path/to/file.go\n<code here>\n```\n")
+	sb.WriteString("Provide the COMPLETE modified file with your implementation.\n")
+	sb.WriteString("You MUST use this EXACT format:\n\n")
+	sb.WriteString("```go\n// FILE: path/to/file.go\n<complete file contents here>\n```\n\n")
+	sb.WriteString("Important: Include the entire file, not just the changed parts.\n")
 
 	return sb.String()
 }
@@ -762,6 +795,16 @@ func (e *JourneyEvaluator) buildRetryPromptWithFeedback(task *E2ETask, contextSt
 func (e *JourneyEvaluator) applyGeneratedCode(task *E2ETask, response string, result *E2ETaskResult) error {
 	// Parse response for file blocks
 	files := parseFileBlocks(response)
+
+	// If no files with explicit paths, try to extract any code block and apply to first file to modify
+	if len(files) == 0 {
+		// Try to extract a code block and apply it to the first file in FilesToModify
+		content := extractFirstCodeBlock(response)
+		if content != "" && len(task.FilesToModify) > 0 {
+			files[task.FilesToModify[0]] = content
+		}
+	}
+
 	if len(files) == 0 {
 		return fmt.Errorf("no file blocks found in response")
 	}
@@ -783,6 +826,29 @@ func (e *JourneyEvaluator) applyGeneratedCode(task *E2ETask, response string, re
 	}
 
 	return nil
+}
+
+// extractFirstCodeBlock extracts the content of the first code block in the response.
+func extractFirstCodeBlock(response string) string {
+	lines := strings.Split(response, "\n")
+	var content strings.Builder
+	inBlock := false
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "```") {
+			if inBlock {
+				// End of first block
+				return strings.TrimSpace(content.String())
+			}
+			inBlock = true
+			continue
+		}
+		if inBlock {
+			content.WriteString(line)
+			content.WriteString("\n")
+		}
+	}
+	return ""
 }
 
 func (e *JourneyEvaluator) isTaskComplete(acceptance *AcceptanceResult, task *E2ETask) bool {
@@ -945,6 +1011,7 @@ func parseFileBlocks(response string) map[string]string {
 	// // FILE: path/to/file.go
 	// <code>
 	// ```
+	// Also supports: ```go:path/to/file.go
 	lines := strings.Split(response, "\n")
 	var currentFile string
 	var currentContent strings.Builder
@@ -961,8 +1028,16 @@ func parseFileBlocks(response string) map[string]string {
 				currentContent.Reset()
 				inBlock = false
 			} else {
-				// Start of block
+				// Start of block - check for filename in block opener
+				// e.g., ```go:greeter.go or ```go greeter.go
 				inBlock = true
+				rest := strings.TrimPrefix(line, "```")
+				// Try format: ```go:filename.go or ```go filename.go
+				if idx := strings.Index(rest, ":"); idx > 0 {
+					currentFile = strings.TrimSpace(rest[idx+1:])
+				} else if parts := strings.Fields(rest); len(parts) >= 2 {
+					currentFile = parts[1]
+				}
 			}
 			continue
 		}
@@ -971,6 +1046,11 @@ func parseFileBlocks(response string) map[string]string {
 			if strings.HasPrefix(line, "// FILE:") {
 				currentFile = strings.TrimSpace(strings.TrimPrefix(line, "// FILE:"))
 			} else if currentFile != "" {
+				currentContent.WriteString(line)
+				currentContent.WriteString("\n")
+			} else if currentFile == "" {
+				// No file specified yet, accumulate content anyway
+				// We'll assign to default file later
 				currentContent.WriteString(line)
 				currentContent.WriteString("\n")
 			}

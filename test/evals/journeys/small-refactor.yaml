@@ -1,0 +1,85 @@
+id: small-refactor
+type: e2e
+name: "Small - Update Function Signature"
+description: |
+  Tests that Cortex context helps LLM correctly update a function signature
+  to follow established patterns (context-first, error returns).
+
+project:
+  name: "user-service"
+  scaffold: "test/evals/projects/user-service"
+  language: "go"
+
+metadata:
+  complexity: "small"
+  estimated_time: "1m"
+
+sessions:
+  # Session 1: Establish the patterns
+  - id: session-01
+    phase: foundation
+    context: "Team establishes Go patterns for service methods"
+    events:
+      - type: decision
+        id: context-first
+        content: "All service methods MUST accept context.Context as the first parameter for cancellation and tracing"
+        rationale: "Enables request cancellation, timeouts, and distributed tracing"
+        tags: [context, patterns, go]
+        importance: 9
+
+      - type: decision
+        id: error-returns
+        content: "Service methods that can fail MUST return (result, error) tuple. Never return zero values for 'not found' cases."
+        rationale: "Explicit error handling, no silent failures"
+        tags: [errors, patterns, go]
+        importance: 9
+
+      - type: pattern
+        id: not-found-error
+        content: "Define ErrUserNotFound = errors.New(\"user not found\") and return it when lookups fail"
+        tags: [errors, patterns]
+        importance: 7
+
+  # Session 2: Update the function
+  - id: session-02
+    phase: refactor
+    context: "Refactoring GetUser to follow established patterns"
+    task:
+      description: |
+        Update the GetUser function in user.go to follow the established patterns:
+        1. Add context.Context as the first parameter
+        2. Change return type from User to (*User, error)
+        3. Return ErrUserNotFound (define it) when user is not found
+        4. Return pointer to user and nil error on success
+      files_to_modify:
+        - "user.go"
+      max_turns: 8
+      timeout: "3m"
+      hints:
+        - "Add 'context' to imports"
+        - "Define var ErrUserNotFound = errors.New(\"user not found\")"
+        - "Change signature to: GetUser(ctx context.Context, id string) (*User, error)"
+      acceptance:
+        tests_pass:
+          - "TestGetUser_WithContext"
+          - "TestGetUser_NotFound"
+        lints_must: false  # Disable lint check - LLM may leave unused imports
+        patterns_required:
+          - "context.Context"
+          - "error"
+          - "ErrUserNotFound"
+        patterns_forbidden:
+          - "panic("
+          - "return User{}"
+
+  # Session 3: Verify understanding
+  - id: session-03
+    phase: maintenance
+    context: "New developer asks about service method patterns"
+    queries:
+      - id: service-patterns-query
+        text: "How should service methods be structured in Go?"
+        expected_recall: [context-first, error-returns, not-found-error]
+        expected_content:
+          - "context.Context"
+          - "error"

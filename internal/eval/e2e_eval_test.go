@@ -163,6 +163,157 @@ func TestJourneyEvaluator_StoreEvent(t *testing.T) {
 	}
 }
 
+func TestJourneyEvaluator_StoreEventAndQueryIntegration(t *testing.T) {
+	// This test verifies that events stored via storeEvent() can be retrieved
+	// via queryContext() when using MockCortex (dry-run mode).
+
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, "/tmp", false)
+
+	ctx := context.Background()
+
+	// Store an event about Redis caching
+	event := &E2EEvent{
+		Type:       EventDecision,
+		ID:         "redis-caching-decision",
+		Content:    "Use Redis for distributed caching instead of local memory",
+		Rationale:  "Allows horizontal scaling",
+		Tags:       []string{"cache", "redis", "architecture"},
+		Importance: 8,
+	}
+
+	err := evaluator.storeEvent(ctx, event)
+	if err != nil {
+		t.Fatalf("storeEvent failed: %v", err)
+	}
+
+	// Verify event was added to local tracking map
+	if _, exists := evaluator.storedEvents["redis-caching-decision"]; !exists {
+		t.Fatal("Event was not stored in storedEvents map")
+	}
+
+	// Verify event was added to MockCortex corpus
+	if _, exists := mockCortex.Corpus["redis-caching-decision"]; !exists {
+		t.Fatal("Event was not added to MockCortex corpus")
+	}
+
+	// Query for the event using a related query
+	results, err := evaluator.queryContext(ctx, "redis caching")
+	if err != nil {
+		t.Fatalf("queryContext failed: %v", err)
+	}
+
+	// Verify the stored event is in the results
+	found := false
+	for _, r := range results {
+		if r.ID == "redis-caching-decision" {
+			found = true
+			// Verify content matches
+			if !stringContains(r.Content, "Redis for distributed caching") {
+				t.Errorf("Expected content to contain 'Redis for distributed caching', got: %s", r.Content)
+			}
+			// Verify category is set correctly
+			if r.Category != "decision" {
+				t.Errorf("Expected category 'decision', got: %s", r.Category)
+			}
+			// Verify tags are set
+			if len(r.Tags) == 0 {
+				t.Error("Expected tags to be set")
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected to find 'redis-caching-decision' in query results, got: %v", results)
+	}
+}
+
+func TestJourneyEvaluator_StoreMultipleEventsAndQuery(t *testing.T) {
+	// Test storing multiple events and querying them
+
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, "/tmp", false)
+
+	ctx := context.Background()
+
+	// Store multiple events
+	events := []*E2EEvent{
+		{
+			Type:       EventDecision,
+			ID:         "jwt-auth-decision",
+			Content:    "Use JWT tokens for API authentication",
+			Tags:       []string{"auth", "jwt", "security"},
+			Importance: 9,
+		},
+		{
+			Type:       EventPattern,
+			ID:         "error-handling-pattern",
+			Content:    "Always wrap errors with context using fmt.Errorf",
+			Tags:       []string{"errors", "patterns"},
+			Importance: 7,
+		},
+		{
+			Type:       EventCorrection,
+			ID:         "no-global-state",
+			Content:    "Do not use global variables for state, use dependency injection",
+			Tags:       []string{"architecture", "state"},
+			Importance: 8,
+		},
+	}
+
+	for _, event := range events {
+		err := evaluator.storeEvent(ctx, event)
+		if err != nil {
+			t.Fatalf("storeEvent failed for %s: %v", event.ID, err)
+		}
+	}
+
+	// Verify all events are in corpus
+	if len(mockCortex.Corpus) != 3 {
+		t.Errorf("Expected 3 items in corpus, got %d", len(mockCortex.Corpus))
+	}
+
+	// Query for authentication-related context
+	results, err := evaluator.queryContext(ctx, "authentication JWT tokens")
+	if err != nil {
+		t.Fatalf("queryContext failed: %v", err)
+	}
+
+	// Should find the JWT auth decision
+	foundJWT := false
+	for _, r := range results {
+		if r.ID == "jwt-auth-decision" {
+			foundJWT = true
+			break
+		}
+	}
+
+	if !foundJWT {
+		t.Error("Expected to find 'jwt-auth-decision' in query results for 'authentication JWT tokens'")
+	}
+
+	// Query for error handling
+	results, err = evaluator.queryContext(ctx, "error handling wrap context")
+	if err != nil {
+		t.Fatalf("queryContext failed: %v", err)
+	}
+
+	foundError := false
+	for _, r := range results {
+		if r.ID == "error-handling-pattern" {
+			foundError = true
+			break
+		}
+	}
+
+	if !foundError {
+		t.Error("Expected to find 'error-handling-pattern' in query results for 'error handling'")
+	}
+}
+
 func TestJourneyEvaluator_CheckPatterns(t *testing.T) {
 	evaluator := &JourneyEvaluator{}
 	evaluator.workDir = t.TempDir()

@@ -1,0 +1,78 @@
+id: trivial-hello-world
+type: e2e
+name: "Trivial - Hello World Greeting"
+description: |
+  Simplest possible E2E journey to verify the eval framework works.
+  Tests that Cortex context helps LLM follow a specific greeting format.
+
+project:
+  name: "hello-service"
+  scaffold: "test/evals/projects/hello-service"
+  language: "go"
+
+metadata:
+  complexity: "trivial"
+  estimated_time: "30s"
+
+sessions:
+  # Session 1: Establish the greeting format decision
+  - id: session-01
+    phase: foundation
+    context: "Team decides on greeting format"
+    events:
+      - type: decision
+        id: greeting-format
+        content: "All greetings must be formatted as 'Hello, {name}!' with comma after Hello and exclamation mark at end. For empty names, return 'Hello, !' exactly - do NOT add default names like 'stranger'."
+        rationale: "Consistent user experience across the application"
+        tags: [greeting, format, ux]
+        importance: 9
+
+      - type: pattern
+        id: greeting-pattern
+        content: "Use fmt.Sprintf(\"Hello, %s!\", name) for greeting format - pass name directly, even if empty"
+        tags: [greeting, implementation]
+        importance: 7
+
+  # Session 2: Implement the greeting
+  - id: session-02
+    phase: feature
+    context: "Implementing the Greet function"
+    task:
+      description: |
+        Implement the Greet function in greeter.go to return a greeting for the given name.
+        The greeting should follow the established format: 'Hello, {name}!'
+        Use fmt.Sprintf to format the string.
+
+        IMPORTANT: The tests expect exact output including for empty strings.
+        For empty name, return 'Hello, !' not 'Hello, stranger!'.
+      files_to_modify:
+        - "greeter.go"
+      max_turns: 5
+      timeout: "2m"
+      hints:
+        - "The greeting format should be 'Hello, {name}!'"
+        - "Use fmt.Sprintf for string formatting"
+        - "For empty names, the output should be 'Hello, !' exactly"
+      acceptance:
+        tests_pass:
+          - "TestGreet"
+        patterns_required:
+          - "Hello,"
+          - "!"
+          - "fmt.Sprintf"
+        patterns_forbidden:
+          - "hello"  # lowercase hello is wrong
+          - "Hi,"    # wrong greeting word
+          - "stranger"  # no default name substitution
+
+  # Session 3: Verify understanding
+  - id: session-03
+    phase: maintenance
+    context: "New developer asks about greeting format"
+    queries:
+      - id: greeting-format-query
+        text: "What format should greetings use?"
+        expected_recall: [greeting-format, greeting-pattern]
+        expected_content:
+          - "Hello,"
+          - "!"

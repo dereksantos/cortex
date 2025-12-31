@@ -475,6 +475,22 @@ func (m *MockCortex) AddProactiveInsight(result cognition.Result) {
 	m.proactiveQueue = append(m.proactiveQueue, result)
 }
 
+// AddEventToCorpus adds an event to the corpus for retrieval.
+// This bridges the gap between event storage and the Retrieve pipeline.
+func (m *MockCortex) AddEventToCorpus(id, content, category string, tags []string, importance int) {
+	m.Corpus[id] = cognition.Result{
+		ID:        id,
+		Content:   content,
+		Category:  category,
+		Score:     float64(importance) / 10.0, // Normalize importance
+		Tags:      tags,
+		Timestamp: time.Now(),
+		Metadata: map[string]any{
+			"importance": importance,
+		},
+	}
+}
+
 // NotifyDreamCompleted implements cognition.Digester
 func (m *MockCortex) NotifyDreamCompleted() {
 	// No-op for mock
