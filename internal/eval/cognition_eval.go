@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -84,6 +85,37 @@ func LoadCognitionScenarios(dir string) ([]*CognitionScenario, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Sort scenarios by type priority for deterministic, isolated execution.
+	// Dream runs LAST to avoid polluting storage for other tests.
+	// Unknown types run last (after conflict) so they don't interfere with known types.
+	sort.Slice(scenarios, func(i, j int) bool {
+		typeOrder := map[CognitionScenarioType]int{
+			CognitionMode:     0, // Foundation: individual modes first
+			CognitionSession:  1, // Session: accumulation with Think
+			CognitionBenefit:  2, // ABR: agentic-mechanical balance
+			CognitionPipeline: 3, // Pipeline: end-to-end
+			CognitionDream:    4, // Dream: runs LAST to avoid pollution
+			CognitionConflict: 5, // Conflict: self-contained, uses scenario Evidence
+		}
+
+		pi, oki := typeOrder[scenarios[i].Type]
+		pj, okj := typeOrder[scenarios[j].Type]
+
+		// Unknown types sort last (use 99 as fallback priority)
+		if !oki {
+			pi = 99
+		}
+		if !okj {
+			pj = 99
+		}
+
+		if pi != pj {
+			return pi < pj
+		}
+		// Within same type, sort alphabetically by ID for determinism
+		return scenarios[i].ID < scenarios[j].ID
+	})
 
 	return scenarios, nil
 }
@@ -442,6 +474,16 @@ func (e *CognitionEvaluator) runDreamTests(ctx context.Context, scenario *Cognit
 		result.Pass = false
 		result.Reason = err.Error()
 		return result, nil
+	}
+
+	// Run Digest after Dream to compact duplicates (mirrors production flow)
+	if dreamResult.Status == cognition.DreamRan && dreamResult.Insights > 0 {
+		e.cortex.NotifyDreamCompleted()
+		digestResult, _ := e.cortex.MaybeDigest(ctx)
+		if digestResult != nil && e.verbose {
+			fmt.Printf("  Digest: merged %d duplicates from %d groups\n",
+				digestResult.Merged, digestResult.Groups)
+		}
 	}
 
 	result.InsightsGenerated = dreamResult.Insights
