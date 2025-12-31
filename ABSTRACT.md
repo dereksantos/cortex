@@ -27,6 +27,29 @@ Here we focus on:
 3. **Integration model** for Claude Code via lifecycle hooks
 4. **Initial results** establishing baseline metrics for future improvement
 
+### 1.3 Bounded Intelligence Model
+
+Cortex introduces a **bounded intelligence model** that inverts typical LLM interaction patterns:
+
+| Traditional Approach | Cortex Approach |
+|----------------------|-----------------|
+| LLM decides what to fetch | Mechanical retrieval first |
+| Unbounded exploration | Bounded budgets |
+| Variable latency | Hard latency constraints (<20ms) |
+| Resource use unpredictable | Resource use proportional to activity |
+
+> "The LLM must work with the data it is given to make resource consumption more predictable."
+
+This model is achieved through three pillars:
+
+1. **Activity-based budgets**: Think/Dream capacity scales inversely with activity. Busy periods get spare cycles only; idle periods enable deeper exploration—but both are bounded.
+
+2. **Structured prompts**: LLMs receive bounded context and produce structured output (JSON with defined schemas). Prompts define the "contract" between Cortex and the LLM.
+
+3. **Pre-computed datasets**: Background processing (Think, Dream) populates caches (`SessionContext`) that mechanical retrieval (Reflex) and decision-making (Resolve) consume. This shifts LLM compute to background, keeping foreground latency low.
+
+The result: resource consumption becomes predictable, scaling with activity level rather than query complexity.
+
 ## 2. Cognitive Architecture
 
 Cortex implements five cognitive modes inspired by human information processing:
