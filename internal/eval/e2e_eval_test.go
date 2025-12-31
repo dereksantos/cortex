@@ -1,0 +1,591 @@
+package eval
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/dereksantos/cortex/pkg/cognition"
+)
+
+func TestNewJourneyEvaluator(t *testing.T) {
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, "/tmp/project", true)
+
+	if evaluator == nil {
+		t.Fatal("NewJourneyEvaluator returned nil")
+	}
+	if evaluator.cortex != mockCortex {
+		t.Error("Cortex not set correctly")
+	}
+	if evaluator.provider != mockProvider {
+		t.Error("Provider not set correctly")
+	}
+	if evaluator.projectDir != "/tmp/project" {
+		t.Errorf("Expected projectDir '/tmp/project', got '%s'", evaluator.projectDir)
+	}
+	if !evaluator.verbose {
+		t.Error("Expected verbose to be true")
+	}
+}
+
+func TestJourneyEvaluator_LoadJourneyAndSetup(t *testing.T) {
+	// Create a minimal journey file
+	journeyContent := `
+id: test-setup-journey
+type: e2e
+name: "Test Setup Journey"
+
+project:
+  name: "test-api"
+  scaffold: "scaffold"
+
+sessions:
+  - id: session-01
+    phase: foundation
+    events:
+      - type: decision
+        id: use-redis
+        content: "Use Redis for caching"
+        tags: [cache, redis]
+
+  - id: session-02
+    phase: feature
+    task:
+      description: "Implement caching"
+      files_to_modify:
+        - "main.go"
+      acceptance:
+        patterns_required:
+          - "redis"
+`
+
+	// Create temporary directory structure
+	tmpDir := t.TempDir()
+	journeyPath := filepath.Join(tmpDir, "journey.yaml")
+	if err := os.WriteFile(journeyPath, []byte(journeyContent), 0644); err != nil {
+		t.Fatalf("Failed to write journey file: %v", err)
+	}
+
+	// Create scaffold directory with a simple Go file
+	scaffoldDir := filepath.Join(tmpDir, "scaffold")
+	if err := os.MkdirAll(scaffoldDir, 0755); err != nil {
+		t.Fatalf("Failed to create scaffold dir: %v", err)
+	}
+
+	goModContent := `module test-api
+
+go 1.21
+`
+	if err := os.WriteFile(filepath.Join(scaffoldDir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		t.Fatalf("Failed to write go.mod: %v", err)
+	}
+
+	mainGoContent := `package main
+
+func main() {
+	// TODO: implement
+}
+`
+	if err := os.WriteFile(filepath.Join(scaffoldDir, "main.go"), []byte(mainGoContent), 0644); err != nil {
+		t.Fatalf("Failed to write main.go: %v", err)
+	}
+
+	// Load journey
+	journey, err := LoadE2EJourney(journeyPath)
+	if err != nil {
+		t.Fatalf("Failed to load journey: %v", err)
+	}
+
+	// Verify journey loaded correctly
+	if journey.ID != "test-setup-journey" {
+		t.Errorf("Expected journey ID 'test-setup-journey', got '%s'", journey.ID)
+	}
+	if len(journey.Sessions) != 2 {
+		t.Errorf("Expected 2 sessions, got %d", len(journey.Sessions))
+	}
+	if journey.TotalEvents() != 1 {
+		t.Errorf("Expected 1 event, got %d", journey.TotalEvents())
+	}
+	if journey.TotalTasks() != 1 {
+		t.Errorf("Expected 1 task, got %d", journey.TotalTasks())
+	}
+
+	// Create evaluator
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, tmpDir, false)
+
+	// Test copyScaffoldProject
+	workDir := t.TempDir()
+	evaluator.workDir = workDir
+
+	err = evaluator.copyScaffoldProject(scaffoldDir)
+	if err != nil {
+		t.Fatalf("copyScaffoldProject failed: %v", err)
+	}
+
+	// Verify files were copied
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); os.IsNotExist(err) {
+		t.Error("go.mod was not copied")
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "main.go")); os.IsNotExist(err) {
+		t.Error("main.go was not copied")
+	}
+}
+
+func TestJourneyEvaluator_StoreEvent(t *testing.T) {
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, "/tmp", false)
+
+	event := &E2EEvent{
+		Type:       EventDecision,
+		ID:         "test-decision",
+		Content:    "Use Redis for caching",
+		Rationale:  "Shared across instances",
+		Tags:       []string{"cache", "redis"},
+		Importance: 8,
+	}
+
+	ctx := context.Background()
+	err := evaluator.storeEvent(ctx, event)
+	if err != nil {
+		t.Fatalf("storeEvent failed: %v", err)
+	}
+
+	// Verify event was stored
+	if _, exists := evaluator.storedEvents["test-decision"]; !exists {
+		t.Error("Event was not stored")
+	}
+}
+
+func TestJourneyEvaluator_CheckPatterns(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+	evaluator.workDir = t.TempDir()
+
+	// Create test file
+	testFile := "test.go"
+	testContent := `package main
+
+import "github.com/redis/go-redis/v9"
+
+func main() {
+	client := redis.NewClient(&redis.Options{})
+	_ = client
+}
+`
+	testPath := filepath.Join(evaluator.workDir, testFile)
+	if err := os.WriteFile(testPath, []byte(testContent), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	// Test required patterns
+	required := []string{"redis.NewClient", "redis.Options"}
+	found, _ := evaluator.checkPatterns([]string{testFile}, required, nil)
+
+	if len(found) != 2 {
+		t.Errorf("Expected 2 patterns found, got %d", len(found))
+	}
+	if !containsString(found, "redis.NewClient") {
+		t.Error("Expected to find 'redis.NewClient'")
+	}
+
+	// Test forbidden patterns
+	forbidden := []string{"sync.Map", "map[string]"}
+	_, violations := evaluator.checkPatterns([]string{testFile}, nil, forbidden)
+
+	if len(violations) != 0 {
+		t.Errorf("Expected 0 violations, got %d", len(violations))
+	}
+
+	// Add forbidden pattern to file
+	badContent := testContent + "\nvar cache = make(map[string]string)\n"
+	if err := os.WriteFile(testPath, []byte(badContent), 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	_, violations = evaluator.checkPatterns([]string{testFile}, nil, forbidden)
+	if len(violations) != 1 {
+		t.Errorf("Expected 1 violation, got %d", len(violations))
+	}
+	if !containsString(violations, "map[string]") {
+		t.Error("Expected violation for 'map[string]'")
+	}
+}
+
+func TestJourneyEvaluator_ParseFileBlocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		expected map[string]string
+	}{
+		{
+			name: "single file block",
+			response: "Here's the implementation:\n\n```go\n// FILE: main.go\npackage main\n\nfunc main() {}\n```",
+			expected: map[string]string{
+				"main.go": "package main\n\nfunc main() {}",
+			},
+		},
+		{
+			name: "multiple file blocks",
+			response: "```go\n// FILE: service.go\npackage service\n\ntype Service struct{}\n```\n\n```go\n// FILE: handler.go\npackage handler\n\nfunc Handle() {}\n```",
+			expected: map[string]string{
+				"service.go": "package service\n\ntype Service struct{}",
+				"handler.go": "package handler\n\nfunc Handle() {}",
+			},
+		},
+		{
+			name:     "no file blocks",
+			response: "Just some explanation without code.",
+			expected: map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseFileBlocks(tt.response)
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("Expected %d files, got %d", len(tt.expected), len(result))
+			}
+
+			for path, expectedContent := range tt.expected {
+				if content, ok := result[path]; !ok {
+					t.Errorf("Expected file '%s' not found", path)
+				} else if content != expectedContent {
+					t.Errorf("Content mismatch for %s:\nexpected:\n%s\ngot:\n%s", path, expectedContent, content)
+				}
+			}
+		})
+	}
+}
+
+func TestJourneyEvaluator_ParseTestOutput(t *testing.T) {
+	tests := []struct {
+		name           string
+		output         string
+		expectedPassed int
+		expectedFailed int
+	}{
+		{
+			name:           "all pass",
+			output:         "=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n--- PASS: TestB (0.00s)\nPASS",
+			expectedPassed: 2,
+			expectedFailed: 0,
+		},
+		{
+			name:           "mixed results",
+			output:         "=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\nFAIL",
+			expectedPassed: 1,
+			expectedFailed: 1,
+		},
+		{
+			name:           "all fail",
+			output:         "=== RUN   TestA\n--- FAIL: TestA (0.00s)\n=== RUN   TestB\n--- FAIL: TestB (0.00s)\nFAIL",
+			expectedPassed: 0,
+			expectedFailed: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			passed, failed := parseTestOutput(tt.output)
+			if passed != tt.expectedPassed {
+				t.Errorf("Expected %d passed, got %d", tt.expectedPassed, passed)
+			}
+			if failed != tt.expectedFailed {
+				t.Errorf("Expected %d failed, got %d", tt.expectedFailed, failed)
+			}
+		})
+	}
+}
+
+func TestJourneyEvaluator_FormatContextForTask(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	results := []cognition.Result{
+		{Category: "decision", Content: "Use Redis for caching"},
+		{Category: "pattern", Content: "Always wrap errors with context"},
+	}
+
+	formatted := evaluator.formatContextForTask(results)
+
+	if formatted == "" {
+		t.Error("Expected non-empty formatted context")
+	}
+	if !stringContains(formatted, "[decision]") {
+		t.Error("Expected category tag in formatted output")
+	}
+	if !stringContains(formatted, "Redis") {
+		t.Error("Expected content in formatted output")
+	}
+}
+
+func TestJourneyEvaluator_CompareResults(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	treatment := &E2ERunResults{
+		TasksTotal:         2,
+		TasksCompleted:     2,
+		TaskCompletionRate: 1.0,
+		TestsTotal:         10,
+		TestsPassed:        10,
+		TestPassRate:       1.0,
+		TotalTurns:         5,
+		TotalTokens:        1000,
+		PatternViolations:  0,
+		CorrectionsNeeded:  0,
+	}
+
+	baseline := &E2ERunResults{
+		TasksTotal:         2,
+		TasksCompleted:     1,
+		TaskCompletionRate: 0.5,
+		TestsTotal:         10,
+		TestsPassed:        7,
+		TestPassRate:       0.7,
+		TotalTurns:         10,
+		TotalTokens:        2000,
+		PatternViolations:  2,
+		CorrectionsNeeded:  3,
+	}
+
+	comparison := evaluator.compareResults(treatment, baseline)
+
+	// Task completion lift: 1.0 - 0.5 = 0.5
+	if comparison.TaskCompletionLift != 0.5 {
+		t.Errorf("Expected TaskCompletionLift 0.5, got %f", comparison.TaskCompletionLift)
+	}
+
+	// Test pass lift: 1.0 - 0.7 = 0.3
+	if !floatEquals(comparison.TestPassLift, 0.3, 0.001) {
+		t.Errorf("Expected TestPassLift ~0.3, got %f", comparison.TestPassLift)
+	}
+
+	// Turn reduction: (10-5)/10 = 0.5
+	if comparison.TurnReduction != 0.5 {
+		t.Errorf("Expected TurnReduction 0.5, got %f", comparison.TurnReduction)
+	}
+
+	// Token reduction: (2000-1000)/2000 = 0.5
+	if comparison.TokenReduction != 0.5 {
+		t.Errorf("Expected TokenReduction 0.5, got %f", comparison.TokenReduction)
+	}
+
+	// Violation reduction: 2 - 0 = 2
+	if comparison.ViolationReduction != 2 {
+		t.Errorf("Expected ViolationReduction 2, got %d", comparison.ViolationReduction)
+	}
+
+	// No regression expected
+	if comparison.Regression {
+		t.Error("Did not expect regression")
+	}
+
+	// Overall lift should be positive
+	if comparison.OverallLift <= 0 {
+		t.Errorf("Expected positive OverallLift, got %f", comparison.OverallLift)
+	}
+}
+
+func TestJourneyEvaluator_CompareResults_Regression(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	treatment := &E2ERunResults{
+		TaskCompletionRate: 0.3,  // Worse than baseline
+		TestPassRate:       0.5,
+	}
+
+	baseline := &E2ERunResults{
+		TaskCompletionRate: 0.8,  // Better than treatment
+		TestPassRate:       0.6,
+	}
+
+	comparison := evaluator.compareResults(treatment, baseline)
+
+	// Should detect regression
+	if !comparison.Regression {
+		t.Error("Expected regression to be detected")
+	}
+
+	// Task completion lift should be negative
+	if comparison.TaskCompletionLift >= 0 {
+		t.Errorf("Expected negative TaskCompletionLift, got %f", comparison.TaskCompletionLift)
+	}
+}
+
+func TestJourneyEvaluator_BuildTaskPrompt(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	task := &E2ETask{
+		Description:   "Implement user authentication",
+		FilesToModify: []string{"auth/handler.go", "auth/middleware.go"},
+		FilesToCreate: []string{"auth/jwt.go"},
+	}
+
+	contextStr := "Use JWT tokens for authentication."
+
+	prompt := evaluator.buildTaskPrompt(task, contextStr)
+
+	// Verify prompt contains key elements
+	if !stringContains(prompt, "Implement user authentication") {
+		t.Error("Expected task description in prompt")
+	}
+	if !stringContains(prompt, "JWT tokens") {
+		t.Error("Expected context in prompt")
+	}
+	if !stringContains(prompt, "auth/handler.go") {
+		t.Error("Expected files to modify in prompt")
+	}
+	if !stringContains(prompt, "auth/jwt.go") {
+		t.Error("Expected files to create in prompt")
+	}
+	if !stringContains(prompt, "// FILE:") {
+		t.Error("Expected file format instructions in prompt")
+	}
+}
+
+func TestJourneyEvaluator_IsTaskComplete(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	tests := []struct {
+		name       string
+		acceptance *AcceptanceResult
+		task       *E2ETask
+		expected   bool
+	}{
+		{
+			name: "all criteria met",
+			acceptance: &AcceptanceResult{
+				BuildsOK:        true,
+				LintsOK:         true,
+				TestsPassed:     2,
+				TestsFailed:     0,
+				PatternsFound:   []string{"pattern1"},
+				PatternsMissing: []string{},
+				Violations:      []string{},
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					TestsPass:         []string{"Test1", "Test2"},
+					PatternsRequired:  []string{"pattern1"},
+					PatternsForbidden: []string{"forbidden"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "build failed",
+			acceptance: &AcceptanceResult{
+				BuildsOK: false,
+			},
+			task:     &E2ETask{Acceptance: TaskAcceptance{}},
+			expected: false,
+		},
+		{
+			name: "tests failed",
+			acceptance: &AcceptanceResult{
+				BuildsOK:    true,
+				LintsOK:     true,
+				TestsFailed: 1,
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					TestsPass: []string{"Test1"},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "pattern missing",
+			acceptance: &AcceptanceResult{
+				BuildsOK:        true,
+				LintsOK:         true,
+				PatternsMissing: []string{"required_pattern"},
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					PatternsRequired: []string{"required_pattern"},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "forbidden pattern found",
+			acceptance: &AcceptanceResult{
+				BuildsOK:   true,
+				LintsOK:    true,
+				Violations: []string{"forbidden_pattern"},
+			},
+			task:     &E2ETask{Acceptance: TaskAcceptance{}},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := evaluator.isTaskComplete(tt.acceptance, tt.task)
+			if result != tt.expected {
+				t.Errorf("Expected isTaskComplete=%v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+// MockProvider implements llm.Provider for testing
+type MockProvider struct {
+	responses []string
+	callCount int
+}
+
+func (m *MockProvider) Generate(ctx context.Context, prompt string) (string, error) {
+	if m.callCount < len(m.responses) {
+		response := m.responses[m.callCount]
+		m.callCount++
+		return response, nil
+	}
+	// Default response with a simple implementation
+	return "```go\n// FILE: main.go\npackage main\n\nfunc main() {}\n```", nil
+}
+
+func (m *MockProvider) GenerateWithSystem(ctx context.Context, prompt, system string) (string, error) {
+	return m.Generate(ctx, prompt)
+}
+
+func (m *MockProvider) IsAvailable() bool {
+	return true
+}
+
+func (m *MockProvider) Name() string {
+	return "mock"
+}
+
+// Ensure cognition.Result is used
+var _ = cognition.Result{}
+
+// stringContains checks if a string contains a substring
+func stringContains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || searchSubstring(s, substr))
+}
+
+func searchSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// floatEquals checks if two floats are approximately equal
+func floatEquals(a, b, tolerance float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}
