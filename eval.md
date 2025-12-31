@@ -42,11 +42,12 @@ Over time a project's artifacts grow beyond the limits that an LLM model can und
 3. [Tree Evaluation (Divergent Patterns)](#tree-evaluation-divergent-patterns)
 4. [Real-World Codebase Understanding](#real-world-codebase-understanding)
 5. [Real-World Eval Metrics](#real-world-eval-metrics)
-6. [Metrics & Scoring](#metrics--scoring)
-7. [Test Data Creation](#test-data-creation)
-8. [Implementation Architecture](#implementation-architecture)
-9. [Statistical Analysis](#statistical-analysis)
-10. [Roadmap](#roadmap)
+6. [End-to-End Generative Eval (P0)](#end-to-end-generative-eval-p0)
+7. [Metrics & Scoring](#metrics--scoring)
+8. [Test Data Creation](#test-data-creation)
+9. [Implementation Architecture](#implementation-architecture)
+10. [Statistical Analysis](#statistical-analysis)
+11. [Roadmap](#roadmap)
 
 ---
 
@@ -1445,6 +1446,285 @@ addresses the "repeat yourself" problem that causes the most user frustration.
 
 ---
 
+## End-to-End Generative Eval (P0)
+
+### Why This Is P0
+
+The evaluations above measure **recall accuracy** - did Cortex remember the right context? But the ultimate question is: **Did Cortex help write better code faster?**
+
+This E2E Generative Eval measures actual outcomes:
+- Did the LLM complete the task correctly?
+- Did it follow established patterns and decisions?
+- How many turns/tokens did it take?
+- How many corrections were needed?
+
+### The Core Hypothesis
+
+```
+If Cortex remembers past decisions across sessions,
+then the LLM will write code that:
+  - Adheres to established patterns (fewer violations)
+  - Requires fewer corrections (less user intervention)
+  - Completes faster (fewer turns/tokens)
+  - Produces higher quality output (tests pass)
+```
+
+### Execution Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  E2E Generative Eval Runner                                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. Setup: Create temp project with scaffold code + tests            │
+│                                                                      │
+│  2. RUN A: Cortex-Assisted (Treatment)                               │
+│     ┌─────────────────────────────────────────────────────────┐     │
+│     │ Fresh Storage                                           │     │
+│     │                                                         │     │
+│     │ Session 1: Decision events → Cortex stores them         │     │
+│     │ Session 8: Implementation task                          │     │
+│     │            → Cortex injects relevant context            │     │
+│     │            → LLM writes code                            │     │
+│     │            → Run tests, check patterns                  │     │
+│     │            → Record outcome                             │     │
+│     └─────────────────────────────────────────────────────────┘     │
+│                                                                      │
+│  3. RUN B: Baseline (Control - No Memory)                            │
+│     ┌─────────────────────────────────────────────────────────┐     │
+│     │ For each task:                                          │     │
+│     │   - Fresh storage (no history from previous sessions)   │     │
+│     │   - LLM writes code without context                     │     │
+│     │   - Run tests, check patterns                           │     │
+│     │   - Record outcome                                      │     │
+│     └─────────────────────────────────────────────────────────┘     │
+│                                                                      │
+│  4. Compare & Report                                                 │
+│     - Task completion rate                                          │
+│     - Test pass rate                                                │
+│     - Pattern violations                                            │
+│     - Turns/tokens to completion                                    │
+│     - Corrections required                                          │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Scenario Structure
+
+```yaml
+# test/evals/journeys/api-service-journey.yaml
+id: api-service-evolution
+type: e2e
+name: "E-Commerce API Service Evolution"
+
+project:
+  name: "api-service"
+  scaffold: "test/evals/projects/api-service"  # Pre-built Go project
+
+sessions:
+  # ============ PHASE 1: Foundation (Sessions 1-5) ============
+  - id: session-01
+    phase: foundation
+    context: "Project kickoff - choosing tech stack"
+    events:
+      - type: decision
+        id: tech-go
+        content: "Use Go for the backend service"
+        tags: [language, backend]
+      - type: decision
+        id: cache-redis
+        content: "Use Redis for caching, NOT in-memory"
+        tags: [cache, architecture]
+
+  # ============ PHASE 2: Implementation Tasks ============
+  - id: session-08
+    phase: feature
+    context: "Add caching to product service"
+
+    # Implementation task for LLM to complete
+    task:
+      description: "Implement caching for the GetProduct function"
+      files_to_modify:
+        - "internal/product/service.go"
+      max_turns: 15
+
+      # Acceptance criteria
+      acceptance:
+        tests_pass:
+          - "TestGetProductCached"
+          - "TestCacheInvalidation"
+        patterns_required:
+          - "redis.Client"        # Must use Redis
+          - "cache.Get"           # Must check cache first
+        patterns_forbidden:
+          - "sync.Map"            # Don't use in-memory
+          - "map[string]"         # Don't use plain maps
+        code_review:
+          - "Uses Redis client, not in-memory cache"
+          - "Implements cache-aside pattern"
+
+  # ============ PHASE 3: Context Evolution ============
+  - id: session-16
+    phase: pivot
+    context: "Business requires OAuth2 for enterprise"
+    events:
+      - type: decision
+        id: auth-oauth2
+        content: "Switch from JWT to OAuth2 for enterprise SSO"
+        supersedes: auth-jwt
+
+  - id: session-18
+    phase: pivot
+    task:
+      description: "Update auth middleware to use OAuth2"
+      acceptance:
+        patterns_required:
+          - "oauth2"
+          - "token.Valid"
+        patterns_forbidden:
+          - "jwt.Parse"          # Should be superseded
+```
+
+### Metrics
+
+| Metric | What It Measures | Formula |
+|--------|------------------|---------|
+| **Task Completion Rate** | Did LLM finish the task? | `completed_tasks / total_tasks` |
+| **Test Pass Rate** | Is the code correct? | `passing_tests / total_tests` |
+| **Pattern Adherence** | Did it follow decisions? | `correct_patterns / expected_patterns` |
+| **Violation Rate** | Did it use forbidden patterns? | `violations / tasks` |
+| **Turns to Complete** | How many LLM interactions? | Count of tool calls |
+| **Token Cost** | How expensive? | Total tokens in/out |
+| **Correction Rate** | How many mistakes needed fixing? | `corrections / completions` |
+| **Time to Complete** | Wall clock time | Elapsed time |
+
+### Key Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Cortex-Assisted (Treatment)                                        │
+│                                                                     │
+│  Session 1: "Use Redis for caching" → stored in Cortex              │
+│  Session 8: LLM implements caching                                  │
+│             → Cortex injects: "Use Redis, not in-memory"            │
+│             → LLM writes correct Redis implementation               │
+│             → Tests pass ✓                                          │
+│             → Turns: 3                                              │
+│             → Violations: 0                                         │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│  Baseline (No Memory)                                               │
+│                                                                     │
+│  Session 1: "Use Redis for caching" → NOT stored                    │
+│  Session 8: LLM implements caching                                  │
+│             → No context about Redis decision                       │
+│             → LLM writes in-memory cache (violation!)               │
+│             → Tests fail ✗                                          │
+│             → User corrects: "No, use Redis"                        │
+│             → LLM rewrites with Redis                               │
+│             → Tests pass ✓                                          │
+│             → Turns: 7 (more expensive!)                            │
+│             → Violations: 1                                         │
+│             → Corrections: 1                                        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Expected Output
+
+```
+E2E Generative Eval: API Service Journey
+========================================
+
+Sessions: 25 | Tasks: 10 | Events stored: 14
+
+Task Results
+------------
+                                    Cortex      Baseline    Δ
+Session 08: Add caching
+  Completed:                        ✓           ✓ (retry)   -
+  Tests passed:                     3/3         3/3         =
+  Pattern violations:               0           1           +1
+  Turns to complete:                4           9           -5
+  Required correction:              No          Yes         ✓
+
+Session 12: Add order processing
+  Completed:                        ✓           ✗           +1
+  Tests passed:                     5/5         2/5         +3
+  Pattern violations:               0           2           +2
+  Turns to complete:                6           15 (limit)  -9
+
+Session 18: Switch to OAuth2
+  Completed:                        ✓           ✓           =
+  Tests passed:                     4/4         4/4         =
+  Pattern violations:               0           1           +1
+  Turns to complete:                5           11          -6
+
+Aggregate Metrics
+-----------------
+                                    Cortex      Baseline    Lift
+Task Completion Rate:               100%        70%         +30%
+Avg Test Pass Rate:                 96%         73%         +23%
+Total Pattern Violations:           0           4           -4
+Avg Turns per Task:                 5.0         11.7        -57%
+Total Token Cost:                   45K         98K         -54%
+Correction Interventions:           0           3           -3
+
+Conclusion: Cortex reduced implementation cost by 54% and eliminated
+pattern violations that would have caused technical debt.
+```
+
+### Implementation Requirements
+
+**1. Scaffold Project**
+```
+test/evals/projects/api-service/
+├── go.mod
+├── internal/
+│   ├── product/
+│   │   ├── service.go        # LLM will modify this
+│   │   └── service_test.go   # Pre-written tests
+│   ├── order/
+│   │   └── ...
+│   └── auth/
+│       └── ...
+└── pkg/
+    └── cache/
+        └── redis.go          # Helper code provided
+```
+
+**2. Test Harness**
+- Orchestrate LLM tool calls
+- Run tests after each task
+- Check pattern presence/absence (grep or AST)
+- Track turns, tokens, time
+
+**3. Journey YAML Files**
+- 20-30 sessions per journey
+- Mix of events (decisions, patterns, corrections) and tasks
+- Acceptance criteria for each task
+
+### Success Criteria
+
+| Metric | Target | Rationale |
+|--------|--------|-----------|
+| Task Completion Lift | +20% | Cortex should help finish more tasks |
+| Pattern Violation Reduction | -80% | Decisions should prevent wrong patterns |
+| Turn Reduction | -40% | Less back-and-forth with context |
+| Zero Regression | 0% | Cortex should never make it worse |
+
+### Challenges & Mitigations
+
+| Challenge | Mitigation |
+|-----------|------------|
+| LLM non-determinism | Run multiple trials, report mean ± stddev |
+| Test isolation | Fresh temp directory per run |
+| "Quality" definition | Combination of tests + pattern checks + LLM-as-judge |
+| Cost of running | Smaller models for iteration, larger for final eval |
+| Defining acceptance | Pre-write tests and reference implementations |
+
+---
+
 ## Metrics & Scoring
 
 ### Primary Metrics
@@ -1764,7 +2044,29 @@ Recommendations:
 
 ## Roadmap
 
-### Phase 1: Foundation
+### Phase 0: E2E Generative Eval (P0 - CURRENT PRIORITY)
+
+**Goal**: Prove Cortex makes code better and faster, not just recall accuracy
+
+```
+Tasks:
+  ⬜ Design journey YAML schema with tasks + acceptance criteria
+  ⬜ Create scaffold Go project with stubs and tests
+  ⬜ Implement E2E eval harness (orchestrate LLM, run tests, check patterns)
+  ⬜ Create first journey: api-service-evolution (20-30 sessions, 10 tasks)
+  ⬜ Run treatment vs baseline comparison
+  ⬜ Generate outcome report (completion rate, violations, turns, cost)
+
+Metrics:
+  - Task Completion Lift: +20%
+  - Pattern Violation Reduction: -80%
+  - Turn Reduction: -40%
+  - Zero Regression: 0%
+
+Deliverable: Proof that Cortex improves actual development outcomes
+```
+
+### Phase 1: Foundation (COMPLETE)
 
 **Goal**: Minimal viable eval framework
 
@@ -1902,6 +2204,7 @@ Deliverable: Optimized Cortex based on eval insights
 
 ---
 
-**Status**: Draft - Ready for implementation
-**Last Updated**: 2025-01-15
+**Status**: Active Development
+**Last Updated**: 2025-12-31
 **Owner**: Cortex Development
+**Current Priority**: Phase 0 - E2E Generative Eval
