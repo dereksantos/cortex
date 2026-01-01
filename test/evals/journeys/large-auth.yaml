@@ -1,0 +1,164 @@
+id: large-auth
+type: e2e
+name: "Large - Add Authentication Middleware"
+description: |
+  Tests that Cortex context helps LLMs implement authentication middleware
+  correctly. Context includes specific patterns for token validation,
+  error handling, and header parsing that baseline would likely miss.
+
+project:
+  name: "auth-service"
+  scaffold: "test/evals/projects/auth-service"
+  language: "go"
+
+metadata:
+  complexity: "large"
+  estimated_time: "5m"
+
+sessions:
+  # Session 1: Auth scheme decision
+  - id: session-01
+    phase: foundation
+    context: "Team decides on authentication approach"
+    events:
+      - type: decision
+        id: auth-scheme
+        content: "Use Bearer token authentication scheme. Do NOT support Basic auth - return 401 for any non-Bearer scheme."
+        rationale: "Bearer tokens are more secure and work better with our JWT infrastructure"
+        tags: [auth, security, bearer]
+        importance: 9
+
+      - type: pattern
+        id: header-parsing
+        content: "Parse Authorization header by splitting on space. First part is scheme (must be 'Bearer'), second part is token."
+        tags: [auth, header, parsing]
+        importance: 8
+
+  # Session 2: Token validation
+  - id: session-02
+    phase: foundation
+    context: "Defining token validation"
+    events:
+      - type: decision
+        id: token-validation
+        content: "For testing, accept 'test-valid-token' as a valid token. In production, use JWT validation. Check token is not empty after extracting from header."
+        rationale: "Allows easy testing while supporting real JWT in production"
+        tags: [auth, token, validation]
+        importance: 9
+
+      - type: pattern
+        id: validation-order
+        content: "Validation order: 1) Check header exists, 2) Check scheme is Bearer, 3) Check token is not empty, 4) Validate token value"
+        tags: [auth, validation, order]
+        importance: 7
+
+  # Session 3: Error handling
+  - id: session-03
+    phase: foundation
+    context: "Defining auth error responses"
+    events:
+      - type: decision
+        id: error-response
+        content: "Return 401 Unauthorized for all auth failures. Do NOT include error details in response body - this is a security practice to avoid leaking info to attackers."
+        rationale: "Security best practice - don't reveal why auth failed"
+        tags: [auth, security, errors]
+        importance: 9
+
+      - type: pattern
+        id: early-return
+        content: "On auth failure, write 401 status and return immediately. Do NOT call next handler. Use http.StatusUnauthorized constant."
+        tags: [auth, middleware, pattern]
+        importance: 8
+
+  # Session 4: Additional security patterns
+  - id: session-04
+    phase: foundation
+    context: "Security hardening discussion"
+    events:
+      - type: pattern
+        id: case-sensitivity
+        content: "Authorization header name is case-insensitive per HTTP spec. Use r.Header.Get() which handles this automatically."
+        tags: [auth, http, headers]
+        importance: 6
+
+      - type: correction
+        id: no-panic
+        content: "Never panic in middleware on invalid input. Always return proper HTTP error status. Middleware must be resilient to malformed requests."
+        tags: [auth, security, error-handling]
+        importance: 8
+
+  # Session 5: Implementation discussion
+  - id: session-05
+    phase: feature
+    context: "Pre-implementation review"
+    events:
+      - type: pattern
+        id: middleware-signature
+        content: "Middleware takes http.Handler and returns http.Handler. Use http.HandlerFunc to convert function to Handler."
+        tags: [middleware, go, http]
+        importance: 7
+
+  # Session 6: Task - Implement auth middleware
+  - id: session-06
+    phase: feature
+    context: "Implementing authentication middleware"
+    task:
+      description: |
+        Implement the AuthMiddleware function in middleware/auth.go.
+
+        The middleware should:
+        - Check for Authorization header
+        - Validate the authentication scheme and token
+        - Return appropriate HTTP status for failures
+        - Call next handler only if auth succeeds
+
+        For testing purposes, a specific test token should be considered valid.
+
+        IMPORTANT: Follow security best practices for auth middleware.
+      files_to_modify:
+        - "middleware/auth.go"
+      max_turns: 10
+      timeout: "4m"
+      hints:
+        - "Check the Authorization header format"
+        - "Use proper HTTP status codes"
+        - "Don't reveal auth failure reasons in response"
+      acceptance:
+        tests_pass:
+          - "TestAuthMiddleware_NoToken"
+          - "TestAuthMiddleware_InvalidToken"
+          - "TestAuthMiddleware_ValidToken"
+          - "TestAuthMiddleware_WrongScheme"
+        patterns_required:
+          - "Authorization"
+          - "Bearer"
+          - "http.StatusUnauthorized"
+          - "401"
+        patterns_forbidden:
+          - "panic"
+          - "log.Fatal"
+          - "Basic"  # Should reject Basic, not implement it
+
+  # Session 7: Code review
+  - id: session-07
+    phase: maintenance
+    context: "Post-implementation review"
+    events:
+      - type: pattern
+        id: test-coverage
+        content: "Auth middleware must have tests for: no token, invalid token, valid token, wrong scheme"
+        tags: [auth, testing]
+        importance: 6
+
+  # Session 8: Knowledge query
+  - id: session-08
+    phase: maintenance
+    context: "New developer asks about auth"
+    queries:
+      - id: auth-query
+        text: "How should authentication be implemented in this project?"
+        expected_recall: [auth-scheme, token-validation, error-response]
+        expected_content:
+          - "Bearer"
+          - "401"
+          - "Unauthorized"
