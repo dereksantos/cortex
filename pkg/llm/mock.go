@@ -90,6 +90,23 @@ func (m *MockProvider) generateResponse(prompt, context string) string {
 		return "Write table-driven tests using t.Run for subtests. Use the []struct pattern for test cases."
 	}
 
+	// Code review judge - detect by looking for "acceptance criteria" or "evaluate each criterion"
+	if strings.Contains(combined, "Acceptance Criteria") ||
+		strings.Contains(combined, "acceptance criteria") ||
+		strings.Contains(combined, "Evaluate each criterion") ||
+		strings.Contains(combined, "evaluate each criterion") {
+		return `{
+  "evaluations": [
+    {
+      "criterion": "Sample acceptance criterion",
+      "passed": true,
+      "confidence": 0.95,
+      "reasoning": "The code appears to meet this criterion based on the implementation."
+    }
+  ]
+}`
+	}
+
 	// Default response
 	return "Based on the project context, follow established patterns and conventions. Ensure consistency with existing code."
 }

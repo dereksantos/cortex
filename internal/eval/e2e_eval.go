@@ -21,11 +21,12 @@ import (
 // It orchestrates LLM tasks, runs tests, checks patterns, and tracks metrics.
 // This differs from E2EEvaluator which handles simpler learning-chain based evals.
 type JourneyEvaluator struct {
-	cortex     cognition.Cortex
-	provider   llm.Provider
-	projectDir string // Path to scaffold project
-	workDir    string // Temp working directory
-	verbose    bool
+	cortex        cognition.Cortex
+	provider      llm.Provider
+	judgeProvider llm.Provider // Separate judge provider for LLM-as-judge (can be same as provider)
+	projectDir    string       // Path to scaffold project
+	workDir       string       // Temp working directory
+	verbose       bool
 
 	// Event storage for tracking stored events during evaluation
 	storedEvents map[string]*events.Event
@@ -43,6 +44,12 @@ func NewJourneyEvaluator(cortex cognition.Cortex, provider llm.Provider, project
 		verbose:      verbose,
 		storedEvents: make(map[string]*events.Event),
 	}
+}
+
+// SetJudgeProvider sets a separate LLM provider for code review judging.
+// If not set, no LLM-as-judge evaluation will be performed.
+func (e *JourneyEvaluator) SetJudgeProvider(provider llm.Provider) {
+	e.judgeProvider = provider
 }
 
 // RunJourney executes a complete E2E journey evaluation.
@@ -299,7 +306,7 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 		}
 
 		// Check acceptance criteria
-		acceptanceResult, err := e.checkAcceptance(ctx, task)
+		acceptanceResult, err := e.checkAcceptance(ctx, task, result.GeneratedCode)
 		if err != nil {
 			result.FailureReason = fmt.Sprintf("acceptance check error: %v", err)
 			return result, nil
@@ -313,6 +320,7 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 		result.LintSucceeded = acceptanceResult.LintsOK
 		result.PatternMatches = acceptanceResult.patternMatches
 		result.PatternViolations = acceptanceResult.patternViolations
+		result.CodeReviewResults = acceptanceResult.CodeReviewResults
 
 		// Check if task is complete
 		if e.isTaskComplete(acceptanceResult, task) {
@@ -322,11 +330,22 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 		}
 
 		if e.verbose {
-			fmt.Printf("  Acceptance: build=%v lint=%v tests=%d/%d patterns=%d/%d violations=%d\n",
+			// Build code review summary
+			codeReviewSummary := ""
+			if len(acceptanceResult.CodeReviewResults) > 0 {
+				passed := 0
+				for _, r := range acceptanceResult.CodeReviewResults {
+					if r.Passed {
+						passed++
+					}
+				}
+				codeReviewSummary = fmt.Sprintf(" code_review=%d/%d", passed, len(acceptanceResult.CodeReviewResults))
+			}
+			fmt.Printf("  Acceptance: build=%v lint=%v tests=%d/%d patterns=%d/%d violations=%d%s\n",
 				acceptanceResult.BuildsOK, acceptanceResult.LintsOK,
 				acceptanceResult.TestsPassed, acceptanceResult.TestsPassed+acceptanceResult.TestsFailed,
 				len(acceptanceResult.PatternsFound), len(task.Acceptance.PatternsRequired),
-				len(acceptanceResult.Violations))
+				len(acceptanceResult.Violations), codeReviewSummary)
 		}
 
 		// Build retry prompt with feedback
@@ -354,7 +373,7 @@ func (e *JourneyEvaluator) runTask(ctx context.Context, task *E2ETask, cortexEna
 }
 
 // checkAcceptance verifies task acceptance criteria.
-func (e *JourneyEvaluator) checkAcceptance(ctx context.Context, task *E2ETask) (*AcceptanceResult, error) {
+func (e *JourneyEvaluator) checkAcceptance(ctx context.Context, task *E2ETask, generatedCode map[string]string) (*AcceptanceResult, error) {
 	result := &AcceptanceResult{
 		BuildsOK: true,
 		LintsOK:  true,
@@ -433,20 +452,59 @@ func (e *JourneyEvaluator) checkAcceptance(ctx context.Context, task *E2ETask) (
 		}
 	}
 
+	// Run LLM-as-judge code review if criteria are specified and judge is available
+	if len(task.Acceptance.CodeReview) > 0 && e.judgeProvider != nil {
+		judge := NewCodeReviewJudge(e.judgeProvider)
+		reviewResults, err := judge.EvaluateCode(ctx, generatedCode, task.Acceptance.CodeReview)
+		if err != nil {
+			// Log error but don't fail the acceptance check
+			if e.verbose {
+				fmt.Printf("  Code review judge error: %v\n", err)
+			}
+		} else {
+			result.CodeReviewResults = reviewResults
+
+			// Calculate pass rate
+			passed := 0
+			for _, r := range reviewResults {
+				if r.Passed {
+					passed++
+				}
+			}
+			result.CodeReviewPass = passed == len(reviewResults)
+
+			// Print verbose output for code review
+			if e.verbose {
+				fmt.Println("  Code Review Results:")
+				for _, r := range reviewResults {
+					status := "X"
+					if r.Passed {
+						status = "OK"
+					}
+					fmt.Printf("    [%s] %s (confidence: %.2f)\n", status, r.Criterion, r.Confidence)
+					if !r.Passed && r.Reasoning != "" {
+						fmt.Printf("        Reason: %s\n", r.Reasoning)
+					}
+				}
+			}
+		}
+	}
+
 	return result, nil
 }
 
 // AcceptanceResult contains the result of checking task acceptance criteria.
 type AcceptanceResult struct {
-	TestsPassed     int
-	TestsFailed     int
-	TestDetails     []TestResult
-	PatternsFound   []string      // Required patterns found
-	PatternsMissing []string      // Required patterns NOT found
-	Violations      []string      // Forbidden patterns found
-	CodeReviewPass  bool          // LLM-as-judge result (optional)
-	BuildsOK        bool
-	LintsOK         bool
+	TestsPassed       int
+	TestsFailed       int
+	TestDetails       []TestResult
+	PatternsFound     []string           // Required patterns found
+	PatternsMissing   []string           // Required patterns NOT found
+	Violations        []string           // Forbidden patterns found
+	CodeReviewPass    bool               // LLM-as-judge result (optional)
+	CodeReviewResults []CodeReviewResult // Detailed results per criterion
+	BuildsOK          bool
+	LintsOK           bool
 
 	// Internal fields for result aggregation
 	patternMatches    []PatternMatch
@@ -788,6 +846,28 @@ func (e *JourneyEvaluator) buildRetryPromptWithFeedback(task *E2ETask, contextSt
 		sb.WriteString(fmt.Sprintf("Forbidden patterns found: %v\n", acceptance.Violations))
 	}
 
+	// Add code review feedback if available
+	if len(acceptance.CodeReviewResults) > 0 {
+		hasFailures := false
+		for _, r := range acceptance.CodeReviewResults {
+			if !r.Passed {
+				hasFailures = true
+				break
+			}
+		}
+		if hasFailures {
+			sb.WriteString("\nCode Review Feedback:\n")
+			for _, r := range acceptance.CodeReviewResults {
+				if !r.Passed {
+					sb.WriteString(fmt.Sprintf("  - FAILED: %s\n", r.Criterion))
+					if r.Reasoning != "" {
+						sb.WriteString(fmt.Sprintf("    Reason: %s\n", r.Reasoning))
+					}
+				}
+			}
+		}
+	}
+
 	sb.WriteString("\nPlease fix these issues and try again.")
 	return sb.String()
 }
@@ -881,6 +961,13 @@ func (e *JourneyEvaluator) isTaskComplete(acceptance *AcceptanceResult, task *E2
 	// No forbidden patterns should be found
 	if len(acceptance.Violations) > 0 {
 		return false
+	}
+
+	// Code review must pass if criteria are specified and results are available
+	if len(task.Acceptance.CodeReview) > 0 && len(acceptance.CodeReviewResults) > 0 {
+		if !acceptance.CodeReviewPass {
+			return false
+		}
 	}
 
 	return true
