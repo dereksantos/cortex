@@ -1,0 +1,105 @@
+id: medium-logging
+type: e2e
+name: "Medium - Add Structured Logging"
+description: |
+  Tests that Cortex context helps LLMs use the correct logging library (slog)
+  and follow established logging patterns. The task description intentionally
+  does NOT specify which logging library to use - the LLM must recall this
+  from stored context.
+
+project:
+  name: "order-service"
+  scaffold: "test/evals/projects/order-service"
+  language: "go"
+
+metadata:
+  complexity: "medium"
+  estimated_time: "2m"
+
+sessions:
+  # Session 1: Establish logging decisions
+  - id: session-01
+    phase: foundation
+    context: "Team decides on logging infrastructure"
+    events:
+      - type: decision
+        id: logging-lib
+        content: "Use log/slog for all logging, NOT fmt.Println or log.Printf. The slog package provides structured logging with levels."
+        rationale: "Structured logging enables better observability and log aggregation"
+        tags: [logging, infrastructure, slog]
+        importance: 9
+
+      - type: pattern
+        id: log-format
+        content: "Log entries must include: operation name as first argument, and use slog.String/slog.Int/slog.Duration for structured attributes"
+        tags: [logging, observability]
+        importance: 7
+
+  # Session 2: Add log level patterns
+  - id: session-02
+    phase: foundation
+    context: "Defining log level usage"
+    events:
+      - type: pattern
+        id: log-levels
+        content: "Use slog.Info() for successful operations, slog.Error() for failures with err attribute, slog.Debug() for verbose/troubleshooting output"
+        tags: [logging, levels]
+        importance: 8
+
+      - type: pattern
+        id: log-attributes
+        content: "Always include relevant context as slog attributes: slog.String(\"order_id\", id), slog.Duration(\"duration\", d), slog.Any(\"error\", err)"
+        tags: [logging, attributes]
+        importance: 6
+
+  # Session 3: Task to add logging
+  - id: session-03
+    phase: feature
+    context: "Adding logging to order processor"
+    task:
+      description: |
+        Add structured logging to the ProcessOrder function in order/processor.go.
+
+        Requirements:
+        - Log when processing starts
+        - Log on successful completion (include duration)
+        - Log on error (include the error details)
+
+        The function currently has no logging. Add appropriate logging calls.
+
+        IMPORTANT: Use the standard library's structured logging capabilities.
+      files_to_modify:
+        - "order/processor.go"
+      max_turns: 8
+      timeout: "3m"
+      hints:
+        - "Use Go's structured logging for better observability"
+        - "Include operation name in log messages"
+        - "Use appropriate log levels for success vs failure"
+      acceptance:
+        tests_pass:
+          - "TestProcessOrder_Success"
+          - "TestProcessOrder_Error"
+        patterns_required:
+          - "slog."
+          - "slog.Info"
+          - "slog.Error"
+          - "log/slog"
+        patterns_forbidden:
+          - "fmt.Println"
+          - "fmt.Printf"
+          - "log.Println"
+          - "log.Printf"
+
+  # Session 4: Verify understanding
+  - id: session-04
+    phase: maintenance
+    context: "New developer asks about logging"
+    queries:
+      - id: logging-query
+        text: "What logging library should I use for this project?"
+        expected_recall: [logging-lib, log-levels]
+        expected_content:
+          - "slog"
+          - "Info"
+          - "Error"
