@@ -1,0 +1,74 @@
+# =============================================================================
+# Cortex Proof - Internal API Location
+# =============================================================================
+# This journey tests Cortex's ability to help LLMs use correct import paths.
+# Context specifies internal/auth, but the task just says "add auth check".
+# Baseline will likely guess pkg/auth or just auth (common conventions).
+# Treatment should recall the correct path: internal/auth
+# =============================================================================
+
+id: cortex-api-location
+type: e2e
+name: "Cortex Proof - Internal API Location"
+description: |
+  Tests that Cortex context helps LLMs use correct import paths.
+  Context specifies internal/auth, but task just says "add auth check".
+  Baseline will likely guess pkg/auth or just auth.
+
+project:
+  name: "api-location-service"
+  scaffold: "test/evals/projects/api-location-service"
+  language: "go"
+
+metadata:
+  complexity: "cortex-proof"
+  tests_recall: true
+
+sessions:
+  - id: session-01
+    phase: foundation
+    context: "Team discusses code organization"
+    events:
+      - type: decision
+        id: auth-location
+        content: "The auth package is located at internal/auth, NOT pkg/auth. Use import \"api-location-service/internal/auth\" for authentication."
+        rationale: "Internal packages prevent external usage"
+        tags: [imports, auth, internal]
+        importance: 9
+
+      - type: pattern
+        id: auth-usage
+        content: "Call auth.Validate(ctx, token) to validate tokens. It returns (*auth.User, error)."
+        tags: [auth, validation]
+        importance: 8
+
+  - id: session-02
+    phase: feature
+    context: "Adding authentication to handlers"
+    task:
+      description: |
+        Add authentication check to ProtectedHandler in handlers/protected.go.
+
+        Requirements:
+        - Extract token from Authorization header (Bearer scheme)
+        - Validate the token using the auth package
+        - Return 401 Unauthorized if token is missing or invalid
+        - Continue to protected resource if valid
+      files_to_modify:
+        - "handlers/protected.go"
+      max_turns: 5
+      timeout: "2m"
+      acceptance:
+        tests_pass:
+          - "TestProtectedHandler_NoToken"
+          - "TestProtectedHandler_ValidToken"
+        patterns_required:
+          - "internal/auth"
+          - "auth.Validate"
+        patterns_forbidden:
+          - "pkg/auth"
+          - "\"auth\""
+        code_review:
+          - "Imports auth from internal/auth not pkg/auth"
+          - "Extracts Bearer token from Authorization header"
+          - "Returns 401 for missing or invalid tokens"

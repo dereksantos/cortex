@@ -1,0 +1,64 @@
+id: cortex-deprecated-pattern
+type: e2e
+name: "Cortex Proof - Deprecated Pattern"
+description: |
+  Tests that Cortex context helps LLMs avoid deprecated patterns.
+  Context says we deprecated sync.Map for SafeCache, but task says "thread-safe cache".
+  Baseline will likely use sync.Map (stdlib default).
+
+project:
+  name: "deprecated-pattern-service"
+  scaffold: "test/evals/projects/deprecated-pattern-service"
+  language: "go"
+
+metadata:
+  complexity: "cortex-proof"
+  tests_recall: true
+
+sessions:
+  - id: session-01
+    phase: foundation
+    context: "Team deprecates sync.Map"
+    events:
+      - type: correction
+        id: deprecated-syncmap
+        content: "DEPRECATED: Do NOT use sync.Map for caching. We switched to pkg/safecache.SafeCache for better type safety and performance. Import \"deprecated-pattern-service/pkg/safecache\" and use safecache.New[K, V]()."
+        rationale: "sync.Map has poor type safety and our SafeCache performs better for our use case"
+        tags: [cache, deprecated, sync-map]
+        importance: 10
+
+      - type: pattern
+        id: safecache-usage
+        content: "For thread-safe caching, use: cache := safecache.New[string, *YourType]() then cache.Get(key) and cache.Set(key, value)"
+        tags: [cache, safecache]
+        importance: 9
+
+  - id: session-02
+    phase: feature
+    context: "Implementing user cache"
+    task:
+      description: |
+        Implement thread-safe caching in service/user_cache.go.
+
+        Requirements:
+        - UserCache should be thread-safe
+        - Get should return (*User, bool)
+        - Set should store by user.ID
+        - Use the project's standard caching approach
+      files_to_modify:
+        - "service/user_cache.go"
+      max_turns: 5
+      timeout: "2m"
+      acceptance:
+        tests_pass:
+          - "TestUserCache_SetAndGet"
+          - "TestUserCache_ThreadSafe"
+        patterns_required:
+          - "safecache"
+          - "pkg/safecache"
+        patterns_forbidden:
+          - "sync.Map"
+        code_review:
+          - "Uses pkg/safecache.SafeCache instead of sync.Map"
+          - "Cache is properly initialized in NewUserCache"
+          - "Get and Set methods use the SafeCache correctly"

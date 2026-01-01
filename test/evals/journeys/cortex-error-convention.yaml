@@ -1,0 +1,140 @@
+# =============================================================================
+# Cortex Proof - Error Handling Convention
+# =============================================================================
+# This journey tests Cortex's ability to recall project-specific error handling
+# conventions when the task description is generic.
+#
+# Key insight:
+#   - Context specifies: "Use pkg/errors.Wrap, NOT fmt.Errorf"
+#   - Task says: "Add error handling" (no mention of which approach)
+#   - Baseline will likely use: fmt.Errorf (standard library default)
+#   - Treatment should recall: pkg/errors.Wrap from stored context
+#
+# This is a "Cortex-proof" scenario - the treatment's success depends entirely
+# on recalling the stored convention, not on the LLM's general knowledge.
+# =============================================================================
+
+id: cortex-error-convention
+type: e2e
+name: "Cortex Proof - Error Handling Convention"
+description: |
+  Tests that Cortex context helps LLMs use project-specific error handling.
+  Context specifies pkg/errors.Wrap, but task just says "add error handling".
+  Baseline will likely use fmt.Errorf (stdlib default).
+
+project:
+  name: "error-service"
+  scaffold: "test/evals/projects/error-service"
+  language: "go"
+  description: "Simple service with functions that need proper error handling"
+
+metadata:
+  complexity: "cortex-proof"
+  tests_recall: true
+  domains: "go,errors,patterns"
+  author: "cortex-eval"
+
+sessions:
+  # ===========================================================================
+  # PHASE 1: FOUNDATION
+  # Establish error handling patterns - this is the key context to recall
+  # ===========================================================================
+
+  - id: session-01
+    phase: foundation
+    context: "Team establishes error handling patterns"
+    simulated_time: "2025-01-15T09:00:00Z"
+    events:
+      - type: decision
+        id: error-wrapping
+        content: "Use github.com/pkg/errors.Wrap() for all error wrapping, NOT fmt.Errorf. This preserves stack traces and enables errors.Cause() for inspection."
+        rationale: "Stack traces help debugging in production, errors.Cause() enables programmatic error inspection"
+        tags: [errors, patterns, pkg-errors]
+        importance: 9
+
+      - type: pattern
+        id: error-context
+        content: "Error messages should include the function name and what was being attempted, e.g., errors.Wrap(err, \"ReadConfig: reading config file\")"
+        tags: [errors, messages, patterns]
+        importance: 8
+
+      - type: correction
+        id: no-fmt-errorf-wrap
+        content: "Do NOT use fmt.Errorf with %w for error wrapping. Always use pkg/errors.Wrap instead."
+        rationale: "pkg/errors provides stack traces that fmt.Errorf does not"
+        tags: [errors, correction]
+        importance: 9
+
+      - type: pattern
+        id: error-new-pattern
+        content: "For creating new errors (not wrapping), use errors.New() from pkg/errors or define sentinel errors with var ErrXxx = errors.New(...)"
+        tags: [errors, patterns]
+        importance: 7
+
+  # ===========================================================================
+  # PHASE 2: FEATURE IMPLEMENTATION
+  # Task to add error handling - deliberately vague about which approach
+  # ===========================================================================
+
+  - id: session-02
+    phase: feature
+    context: "Implementing proper error handling"
+    simulated_time: "2025-01-16T10:00:00Z"
+    task:
+      description: |
+        Add proper error handling to the functions in service/handler.go.
+
+        Requirements:
+        - ReadConfig should wrap file read errors with context
+        - ProcessData should return an error for empty/nil input
+        - Error messages should be descriptive
+      files_to_modify:
+        - "service/handler.go"
+      max_turns: 5
+      timeout: "2m"
+      hints:
+        - "Check if there are any team conventions for error handling"
+        - "Make sure error messages include context about what operation failed"
+      acceptance:
+        tests_pass:
+          - "TestReadConfig_ErrorWrapping"
+          - "TestProcessData_EmptyError"
+        patterns_required:
+          - "errors.Wrap"
+          - "pkg/errors"
+        patterns_forbidden:
+          - "fmt.Errorf(\"%w"
+          - "fmt.Errorf(\"%v"
+        imports_required:
+          - "github.com/pkg/errors"
+        code_review:
+          - "Uses pkg/errors.Wrap instead of fmt.Errorf for error wrapping"
+          - "Error messages include function context (e.g., function name or operation)"
+          - "ProcessData returns a descriptive error for empty/nil input"
+
+  # ===========================================================================
+  # PHASE 3: VALIDATION
+  # Query to verify error handling convention is recalled correctly
+  # ===========================================================================
+
+  - id: session-03
+    phase: validation
+    context: "Verifying error handling conventions"
+    simulated_time: "2025-01-17T09:00:00Z"
+    queries:
+      - id: error-approach-query
+        text: "How should I wrap errors in this codebase?"
+        expected_recall: [error-wrapping, no-fmt-errorf-wrap, error-context]
+        expected_not_recall: []
+        expected_content:
+          - "pkg/errors"
+          - "Wrap"
+        forbidden_content:
+          - "fmt.Errorf"
+
+      - id: error-message-query
+        text: "What should error messages include?"
+        expected_recall: [error-context]
+        expected_content:
+          - "function name"
+          - "context"
