@@ -12,7 +12,8 @@
 | Small Journey | ✅ Done | P0.3 - 100% pass rate |
 | Medium Journey | ✅ Done | P0.4 - Shows +50% test lift |
 | Large Journey | ✅ Done | P0.5 - 75% tests, +10% token efficiency |
-| Complex Journey | 🔄 Stretch | API Evolution - needs LLM-as-judge |
+| LLM-as-Judge | ✅ Done | P1.1 - Semantic code review with `--judge` flag |
+| Complex Journey | 🔄 Stretch | API Evolution - ready for testing with judge |
 
 ---
 
@@ -66,10 +67,11 @@
 
 ---
 
-## P1: LLM-as-Judge Acceptance
+## P1: LLM-as-Judge Acceptance ✅ COMPLETE
 
-### P1.1 - Implement CodeReview Acceptance
+### P1.1 - Implement CodeReview Acceptance ✅
 **Goal**: Use LLM to evaluate response quality instead of brittle parsing
+**Status**: Implemented in commit `5c4f7cc`
 
 ```go
 // internal/eval/e2e_judge.go
