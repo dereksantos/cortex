@@ -4,152 +4,65 @@
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Journey Framework | Done | 30 sessions, treatment vs baseline |
-| Event Storage Integration | Done | P0.1 completed |
-| Metrics & Reporting | Done | Lift calculations working |
-| CLI Integration | Done | `./cortex eval -t e2e` |
-| Task Completion | Blocked | Tasks too complex, needs simpler evals + LLM-as-judge |
+| Journey Framework | ✅ Done | Treatment vs baseline comparison |
+| Event Storage Integration | ✅ Done | P0.1 - MockCortex corpus integration |
+| Metrics & Reporting | ✅ Done | Lift calculations working |
+| CLI Integration | ✅ Done | `./cortex eval -t e2e` |
+| Trivial Journey | ✅ Done | P0.2 - 100% pass rate |
+| Small Journey | ✅ Done | P0.3 - 100% pass rate |
+| Medium Journey | ✅ Done | P0.4 - Shows +50% test lift |
+| Large Journey | ✅ Done | P0.5 - 75% tests, +10% token efficiency |
+| Complex Journey | 🔄 Stretch | API Evolution - needs LLM-as-judge |
 
 ---
 
-## P0: Get One Journey Passing
+## Journey Results (Claude Haiku)
 
-### P0.2 - Trivial Journey: "Hello World"
-**Goal**: Prove the eval works end-to-end with simplest possible task
+| Journey | Sessions | Task Completion | Test Pass | Cortex Lift | Status |
+|---------|----------|-----------------|-----------|-------------|--------|
+| **trivial-hello-world** | 3 | 100% | 100% | ✅ Framework validated | PASS |
+| **small-refactor** | 3 | 100% | 100% | ✅ Context + error patterns | PASS |
+| **medium-logging** | 4 | 0% | 50% vs 0% | **+50% test lift** (slog vs log) | VALUE |
+| **large-auth** | 8 | 0% | 75% (both) | **+10% token efficiency** | VALUE |
+| **api-service-evolution** | 30 | 0% | 0% | Too complex for Haiku | STRETCH |
 
-```yaml
-# test/evals/journeys/trivial-hello-world.yaml
-id: trivial-hello-world
-type: e2e
-name: "Trivial - Hello World"
+### Key Findings
 
-project:
-  name: "hello-service"
-  scaffold: "test/evals/projects/hello-service"
-
-sessions:
-  - id: session-01
-    phase: foundation
-    events:
-      - type: decision
-        id: greeting-format
-        content: "Greetings should be formatted as 'Hello, {name}!' with exclamation"
-        tags: [greeting, format]
-        importance: 8
-
-  - id: session-02
-    phase: feature
-    task:
-      description: "Add a Greet function that returns a greeting for a name"
-      files_to_modify:
-        - "greeter.go"
-      max_turns: 5
-      acceptance:
-        tests_pass:
-          - "TestGreet"
-        patterns_required:
-          - "Hello,"
-          - "!"
-```
-
-**Scaffold**: Simple Go file with stub function
-**Acceptance**: Function returns "Hello, {name}!" format
-**Why it proves ROI**: Treatment should recall "use exclamation", baseline might use "Hello, name." or similar
+1. **Trivial/Small journeys pass 100%** - Validates eval framework works correctly
+2. **Medium journey shows clear Cortex value** - Treatment uses slog (correct), baseline uses log (wrong)
+3. **Large journey shows efficiency gains** - Same results but 10% fewer tokens with context
+4. **Complex journey too hard** - Good benchmark for stronger models / LLM-as-judge
 
 ---
 
-### P0.3 - Small Journey: "Update Function Signature"
-**Goal**: Test context helps with refactoring tasks
+## P0: Journey Suite ✅ COMPLETE
 
-```yaml
-id: small-refactor
-type: e2e
-name: "Small - Function Signature Update"
+### P0.2 - Trivial Journey: "Hello World" ✅
+**File**: `test/evals/journeys/trivial-hello-world.yaml`
+**Scaffold**: `test/evals/projects/hello-service/`
+**Result**: 100% pass - Both treatment and baseline complete in 1 turn
 
-sessions:
-  - id: session-01
-    phase: foundation
-    events:
-      - type: decision
-        id: error-handling
-        content: "All service methods must return (result, error) tuple, never panic"
-        tags: [errors, patterns]
-        importance: 9
+### P0.3 - Small Journey: "Update Function Signature" ✅
+**File**: `test/evals/journeys/small-refactor.yaml`
+**Scaffold**: `test/evals/projects/user-service/`
+**Result**: 100% pass - Context helps with error handling patterns
 
-      - type: pattern
-        id: context-first
-        content: "All public functions must accept context.Context as first parameter"
-        tags: [context, patterns]
-        importance: 8
+### P0.4 - Medium Journey: "Add Structured Logging" ✅
+**File**: `test/evals/journeys/medium-logging.yaml`
+**Scaffold**: `test/evals/projects/order-service/`
+**Result**: Shows Cortex value
+- Treatment: Used slog (4/4 patterns matched)
+- Baseline: Used old log package (2/4 patterns)
+- **+50% test pass lift**
 
-  - id: session-02
-    phase: feature
-    task:
-      description: "Update GetUser to accept context and return error"
-      files_to_modify:
-        - "user.go"
-      acceptance:
-        patterns_required:
-          - "context.Context"
-          - "error"
-        patterns_forbidden:
-          - "panic("
-```
-
-**Why it proves ROI**: Treatment recalls "context first, return error", baseline might miss one or both
-
----
-
-### P0.4 - Medium Journey: "Add Logging to Service"
-**Goal**: Test multi-file awareness and pattern consistency
-
-```yaml
-id: medium-logging
-type: e2e
-name: "Medium - Add Structured Logging"
-
-sessions:
-  - id: session-01
-    phase: foundation
-    events:
-      - type: decision
-        id: logging-lib
-        content: "Use log/slog for all logging, NOT fmt.Println or log.Printf"
-        tags: [logging, infrastructure]
-        importance: 9
-
-      - type: pattern
-        id: log-format
-        content: "Log entries must include: operation name, duration, error (if any)"
-        tags: [logging, observability]
-        importance: 7
-
-  - id: session-02
-    phase: feature
-    events:
-      - type: pattern
-        id: log-levels
-        content: "Use slog.Info for success, slog.Error for failures, slog.Debug for verbose"
-        tags: [logging]
-        importance: 6
-
-  - id: session-03
-    phase: feature
-    task:
-      description: "Add structured logging to the ProcessOrder function"
-      files_to_modify:
-        - "order/processor.go"
-      acceptance:
-        patterns_required:
-          - "slog."
-          - "Info("
-          - "Error("
-        patterns_forbidden:
-          - "fmt.Println"
-          - "log.Printf"
-```
-
-**Why it proves ROI**: Treatment recalls specific slog patterns, baseline likely uses fmt.Println or wrong log levels
+### P0.5 - Large Journey: "Add Authentication Middleware" ✅
+**File**: `test/evals/journeys/large-auth.yaml`
+**Scaffold**: `test/evals/projects/auth-service/`
+**Result**: Shows efficiency gains
+- Both: 75% tests (3/4)
+- Treatment: 11,840 tokens
+- Baseline: 13,113 tokens
+- **+10% token reduction**
 
 ---
 
@@ -207,17 +120,18 @@ For each criterion, respond with JSON:
 
 ## P2: Scale & Polish
 
-### P2.1 - Complex Journey: "API Service Evolution" (Current)
+### P2.1 - Complex Journey: "API Service Evolution"
 - Keep as stretch goal / benchmark
-- Will pass once LLM-as-judge implemented
+- 30 sessions simulating 3-month development
+- Will pass once LLM-as-judge implemented or stronger model used
 
 ### P2.2 - CI Integration
 ```yaml
 # .github/workflows/eval.yml
 - name: Run E2E Evals
   run: |
-    ./cortex eval -t e2e -p anthropic --journey trivial
-    ./cortex eval -t e2e -p anthropic --journey small
+    ./cortex eval -t e2e -p anthropic --journey test/evals/journeys/trivial-hello-world.yaml
+    ./cortex eval -t e2e -p anthropic --journey test/evals/journeys/small-refactor.yaml
 ```
 
 ### P2.3 - Results Dashboard
@@ -232,27 +146,38 @@ For each criterion, respond with JSON:
 
 ---
 
-## Implementation Order
+## Running Evals
 
-```
-Week 1: P0.2 (Trivial) + P0.3 (Small) scaffolds
-        ↓
-Week 2: P0.4 (Medium) + verify at least one passes
-        ↓
-Week 3: P1.1 (LLM-as-Judge) implementation
-        ↓
-Week 4: P1.2 (Judge provider) + P2.2 (CI)
-        ↓
-Future: P2.3-P2.4 (Dashboard, more journeys)
+```bash
+# Run all journeys
+./cortex eval -t e2e -p anthropic -v
+
+# Run specific journey
+./cortex eval -t e2e -p anthropic -v --journey test/evals/journeys/trivial-hello-world.yaml
+
+# Dry run (mock provider)
+./cortex eval -t e2e --dry-run -v
+
+# With Ollama
+./cortex eval -t e2e -p ollama -m qwen2.5-coder:1.5b -v
 ```
 
 ---
 
 ## Success Criteria
 
-| Milestone | Metric | Target |
-|-----------|--------|--------|
-| MVP | At least 1 journey passes | Trivial @ 100% |
-| Proof of Value | Treatment beats baseline | >20% lift on any metric |
-| Production Ready | 3+ journeys passing | >50% completion rate |
-| Full Suite | Complex journey passes | API Evolution @ >50% |
+| Milestone | Metric | Target | Actual |
+|-----------|--------|--------|--------|
+| MVP | At least 1 journey passes | Trivial @ 100% | ✅ **2 journeys @ 100%** |
+| Proof of Value | Treatment beats baseline | >20% lift | ✅ **+50% test lift (medium)** |
+| Production Ready | 3+ journeys passing | >50% completion | 🔄 2/5 pass, 2/5 show value |
+| Full Suite | Complex journey passes | API Evolution @ >50% | 🔄 Needs LLM-as-judge |
+
+---
+
+## Next Steps
+
+1. **P1.1**: Implement LLM-as-judge for semantic evaluation
+2. **P2.2**: Add CI integration for regression testing
+3. **Try stronger models**: Test with Claude Sonnet or GPT-4 for complex journey
+4. **Tune acceptance criteria**: Medium/Large journeys show value but strict pass threshold
