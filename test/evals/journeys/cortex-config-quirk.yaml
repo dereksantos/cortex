@@ -1,0 +1,71 @@
+# =============================================================================
+# Cortex Proof - Config Quirk
+# =============================================================================
+# This journey tests Cortex's ability to help LLMs recall project-specific config.
+# Context specifies Redis port 6380, but the task just says "add Redis connection".
+# Baseline will likely use 6379 (Redis default).
+# Treatment should recall the correct port: 6380
+# =============================================================================
+
+id: cortex-config-quirk
+type: e2e
+name: "Cortex Proof - Config Quirk"
+description: |
+  Tests that Cortex context helps LLMs recall project-specific configuration.
+  Context specifies Redis port 6380, but task just says "add Redis connection".
+  Baseline will use 6379 (Redis default).
+
+project:
+  name: "config-quirk-service"
+  scaffold: "test/evals/projects/config-quirk-service"
+  language: "go"
+
+metadata:
+  complexity: "cortex-proof"
+  tests_recall: true
+
+sessions:
+  - id: session-01
+    phase: foundation
+    context: "Team documents infrastructure quirks"
+    events:
+      - type: decision
+        id: redis-port
+        content: "Redis runs on port 6380 in this project, NOT the default 6379. This is because we run multiple Redis instances and 6379 is used by another service."
+        rationale: "Avoid port conflicts with other services"
+        tags: [redis, config, infrastructure]
+        importance: 9
+
+      - type: pattern
+        id: redis-connection
+        content: "Always configure Redis with Host: localhost, Port: 6380"
+        tags: [redis, connection]
+        importance: 8
+
+  - id: session-02
+    phase: feature
+    context: "Setting up cache connection"
+    task:
+      description: |
+        Complete the Redis client setup in cache/redis.go.
+
+        Requirements:
+        - Configure the Host (use localhost)
+        - Configure the Port appropriately
+        - The client should be ready to connect
+      files_to_modify:
+        - "cache/redis.go"
+      max_turns: 5
+      timeout: "2m"
+      acceptance:
+        tests_pass:
+          - "TestNewRedisClient_CorrectPort"
+          - "TestNewRedisClient_NotDefaultPort"
+          - "TestNewRedisClient_HasHost"
+        patterns_required:
+          - "6380"
+        patterns_forbidden:
+          - "6379"
+        code_review:
+          - "Uses port 6380 not the default 6379"
+          - "Host is configured to localhost"

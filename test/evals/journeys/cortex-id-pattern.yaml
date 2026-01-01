@@ -1,0 +1,142 @@
+# =============================================================================
+# Cortex Proof - ID Naming Pattern
+# =============================================================================
+# This journey tests Cortex's ability to recall project-specific ID format
+# conventions when the task description is generic.
+#
+# Key insight:
+#   - Context specifies: "Use ULID for all identifiers, NOT UUID"
+#   - Task says: "Add a unique ID field" (no mention of format)
+#   - Baseline will likely use: UUID (industry standard default)
+#   - Treatment should recall: ULID from stored context
+#
+# This is a "Cortex-proof" scenario - the treatment's success depends entirely
+# on recalling the stored convention, not on the LLM's general knowledge.
+# =============================================================================
+
+id: cortex-id-pattern
+type: e2e
+name: "Cortex Proof - ID Naming Pattern"
+description: |
+  Tests that Cortex context helps LLMs use project-specific ID format.
+  Context specifies ULID, but task just says "add unique ID".
+  Baseline will likely use UUID (industry standard).
+
+project:
+  name: "id-pattern-service"
+  scaffold: "test/evals/projects/id-pattern-service"
+  language: "go"
+  description: "Simple service with Order model that needs unique ID field"
+
+metadata:
+  complexity: "cortex-proof"
+  tests_recall: true
+  domains: "go,ids,patterns"
+  author: "cortex-eval"
+
+sessions:
+  # ===========================================================================
+  # PHASE 1: FOUNDATION
+  # Establish ID format patterns - this is the key context to recall
+  # ===========================================================================
+
+  - id: session-01
+    phase: foundation
+    context: "Team decides on ID format"
+    simulated_time: "2025-01-15T09:00:00Z"
+    events:
+      - type: decision
+        id: id-format
+        content: "Use ULID for all unique identifiers, NOT UUID. Import github.com/oklog/ulid/v2 and use ulid.Make() to generate IDs."
+        rationale: "ULIDs are sortable by time and more compact than UUIDs"
+        tags: [ids, ulid, patterns]
+        importance: 9
+
+      - type: pattern
+        id: ulid-generation
+        content: "Generate ULIDs with: ulid.Make().String() - this returns a 26-character string"
+        tags: [ulid, generation]
+        importance: 8
+
+      - type: correction
+        id: no-uuid
+        content: "Do NOT use UUID or google/uuid package. Always use ULID from oklog/ulid/v2 instead."
+        rationale: "ULIDs provide time-ordering which helps with database indexing and debugging"
+        tags: [ids, correction]
+        importance: 9
+
+      - type: pattern
+        id: ulid-format
+        content: "ULIDs are 26 characters, uppercase alphanumeric (Crockford's base32). Example: 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        tags: [ulid, format]
+        importance: 7
+
+  # ===========================================================================
+  # PHASE 2: FEATURE IMPLEMENTATION
+  # Task to add ID field - deliberately vague about which format
+  # ===========================================================================
+
+  - id: session-02
+    phase: feature
+    context: "Adding IDs to models"
+    simulated_time: "2025-01-16T10:00:00Z"
+    task:
+      description: |
+        Add a unique ID field to the Order struct in models/order.go.
+
+        Requirements:
+        - Add an ID field (string type)
+        - Generate the ID in NewOrder()
+        - Each order should have a unique ID
+      files_to_modify:
+        - "models/order.go"
+      max_turns: 5
+      timeout: "2m"
+      hints:
+        - "Check if there are any team conventions for ID generation"
+        - "Make sure each order gets a unique identifier"
+      acceptance:
+        tests_pass:
+          - "TestNewOrder_HasID"
+          - "TestNewOrder_UniqueIDs"
+          - "TestOrder_IDNotUUID"
+        patterns_required:
+          - "ulid"
+          - "oklog/ulid"
+        patterns_forbidden:
+          - "uuid"
+          - "google/uuid"
+        imports_required:
+          - "github.com/oklog/ulid/v2"
+        code_review:
+          - "Uses ULID library (oklog/ulid) not UUID"
+          - "ID field is added to Order struct"
+          - "NewOrder generates a unique ID"
+
+  # ===========================================================================
+  # PHASE 3: VALIDATION
+  # Query to verify ID format convention is recalled correctly
+  # ===========================================================================
+
+  - id: session-03
+    phase: validation
+    context: "Verifying ID format conventions"
+    simulated_time: "2025-01-17T09:00:00Z"
+    queries:
+      - id: id-format-query
+        text: "What format should I use for unique identifiers in this codebase?"
+        expected_recall: [id-format, no-uuid, ulid-generation]
+        expected_not_recall: []
+        expected_content:
+          - "ULID"
+          - "oklog/ulid"
+        forbidden_content:
+          - "UUID"
+          - "google/uuid"
+
+      - id: id-generation-query
+        text: "How do I generate a new ID?"
+        expected_recall: [ulid-generation]
+        expected_content:
+          - "ulid.Make()"
+          - "String()"
