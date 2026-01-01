@@ -1777,6 +1777,8 @@ func handleEval() {
 	cognitionMode := false
 	evalType := ""    // New: -t flag for eval type (e2e, cognition, etc.)
 	journeyPath := "" // New: --journey flag for specific journey file
+	judgeProviderName := ""    // --judge or -j: LLM provider for code review judge
+	judgeModelOverride := ""   // --judge-model: Model for judge provider
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -1826,6 +1828,16 @@ func handleEval() {
 				providerName = os.Args[i+1]
 				i++
 			}
+		case arg == "--judge" || arg == "-j":
+			if i+1 < len(os.Args) {
+				judgeProviderName = os.Args[i+1]
+				i++
+			}
+		case arg == "--judge-model":
+			if i+1 < len(os.Args) {
+				judgeModelOverride = os.Args[i+1]
+				i++
+			}
 		case arg == "--help" || arg == "-h":
 			fmt.Println("Usage: cortex eval [options]")
 			fmt.Println()
@@ -1839,6 +1851,8 @@ func handleEval() {
 			fmt.Println("  --cognition            Run cognition evals (cognitive modes)")
 			fmt.Println("  --provider, -p <name>  LLM provider: ollama, anthropic (default: ollama)")
 			fmt.Println("  --model, -m <model>    Model to use (provider-specific)")
+			fmt.Println("  --judge, -j <provider> LLM provider for code review judge (defaults to -p)")
+			fmt.Println("  --judge-model <model>  Model for judge provider")
 			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
 			fmt.Println("  --verbose, -v          Show detailed output")
@@ -1916,12 +1930,59 @@ func handleEval() {
 		}
 	}
 
+	// Setup judge provider (defaults to same as main provider)
+	var judgeProvider llm.Provider
+	if judgeProviderName == "" {
+		judgeProvider = provider // Same as generation provider
+	} else if dryRun {
+		judgeProvider = llm.NewMockProvider(10)
+	} else {
+		// Create separate judge provider config if model override specified
+		judgeCfg := cfg
+		if judgeModelOverride != "" {
+			// Create a copy of config with overridden model
+			judgeCfgCopy := *cfg
+			if judgeProviderName == "anthropic" {
+				judgeCfgCopy.AnthropicModel = judgeModelOverride
+			} else {
+				judgeCfgCopy.OllamaModel = judgeModelOverride
+			}
+			judgeCfg = &judgeCfgCopy
+		}
+
+		switch judgeProviderName {
+		case "anthropic":
+			anthropicClient := llm.NewAnthropicClient(judgeCfg)
+			if !anthropicClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "Anthropic API key not set for judge. Set ANTHROPIC_API_KEY environment variable.\n")
+				os.Exit(1)
+			}
+			judgeProvider = anthropicClient
+			if verbose {
+				fmt.Printf("Using Anthropic judge provider (model: %s)\n", anthropicClient.Model())
+			}
+		case "ollama":
+			ollamaClient := llm.NewOllamaClient(judgeCfg)
+			if !ollamaClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "Ollama is not running for judge. Start with: ollama serve\n")
+				os.Exit(1)
+			}
+			judgeProvider = ollamaClient
+			if verbose {
+				fmt.Printf("Using Ollama judge provider (model: %s)\n", judgeCfg.OllamaModel)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown judge provider: %s. Use 'ollama' or 'anthropic'.\n", judgeProviderName)
+			os.Exit(1)
+		}
+	}
+
 	// Run evaluation based on mode
 	var run *eval.EvalRun
 
 	// Check for -t e2e (E2E Journey Eval) - new style
 	if evalType == "e2e" {
-		runE2EJourneyEval(provider, journeyPath, dryRun, verbose, outputFormat)
+		runE2EJourneyEval(provider, judgeProvider, journeyPath, dryRun, verbose, outputFormat)
 		return
 	}
 
@@ -2272,7 +2333,7 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 // runE2EJourneyEval runs E2E journey-based evaluations.
 // These are generative evals that test actual development outcomes by having
 // an LLM complete implementation tasks with and without Cortex context.
-func runE2EJourneyEval(provider llm.Provider, journeyPath string, dryRun, verbose bool, outputFormat string) {
+func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journeyPath string, dryRun, verbose bool, outputFormat string) {
 	ctx := context.Background()
 
 	// Load journey(s)
@@ -2366,6 +2427,7 @@ func runE2EJourneyEval(provider llm.Provider, journeyPath string, dryRun, verbos
 		// Create evaluator and run journey
 		// Pass "." as projectDir since scaffold paths in journey YAML are relative to cwd
 		evaluator := eval.NewJourneyEvaluator(cortex, provider, ".", verbose)
+		evaluator.SetJudgeProvider(judgeProvider)
 		result, err := evaluator.RunJourney(ctx, journey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)

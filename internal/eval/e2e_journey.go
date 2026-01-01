@@ -303,6 +303,10 @@ type TaskAcceptance struct {
 	// Example: ["Uses Redis client, not in-memory cache", "Implements cache-aside pattern"]
 	CodeReview []string `yaml:"code_review,omitempty"`
 
+	// CodeReviewRequired makes code review a pass/fail gate when true.
+	// Default: false (code review is informational only)
+	CodeReviewRequired *bool `yaml:"code_review_required,omitempty"`
+
 	// BuildsMust specifies that the code must compile successfully
 	// Default: true
 	BuildsMust *bool `yaml:"builds_must,omitempty"`

@@ -90,6 +90,10 @@ sessions:
           - "fmt.Printf"
           - "log.Println"
           - "log.Printf"
+        code_review:
+          - "Uses slog package for structured logging instead of fmt or log"
+          - "Logs include operation timing/duration information"
+          - "Error cases are logged at Error level with error details"
 
   # Session 4: Verify understanding
   - id: session-04

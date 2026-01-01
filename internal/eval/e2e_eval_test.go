@@ -740,3 +740,307 @@ func floatEquals(a, b, tolerance float64) bool {
 	}
 	return diff <= tolerance
 }
+
+func TestJourneyEvaluator_SetJudgeProvider(t *testing.T) {
+	mockCortex := NewMockCortex()
+	mockProvider := &MockProvider{}
+	judgeProvider := &MockProvider{}
+
+	evaluator := NewJourneyEvaluator(mockCortex, mockProvider, "/tmp/project", true)
+
+	if evaluator.judgeProvider != nil {
+		t.Error("Expected judgeProvider to be nil initially")
+	}
+
+	evaluator.SetJudgeProvider(judgeProvider)
+
+	if evaluator.judgeProvider != judgeProvider {
+		t.Error("Expected judgeProvider to be set")
+	}
+}
+
+func TestCodeReviewJudge_EvaluateCode(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           map[string]string
+		criteria       []string
+		mockResponse   string
+		expectedPass   bool
+		expectedCount  int
+	}{
+		{
+			name: "single criterion passes",
+			code: map[string]string{
+				"main.go": "package main\n\nimport \"github.com/redis/go-redis/v9\"\n",
+			},
+			criteria: []string{"Uses Redis client"},
+			mockResponse: `{
+				"evaluations": [
+					{
+						"criterion": "Uses Redis client",
+						"passed": true,
+						"reasoning": "Code imports go-redis v9 package",
+						"confidence": 0.95
+					}
+				]
+			}`,
+			expectedPass:  true,
+			expectedCount: 1,
+		},
+		{
+			name: "single criterion fails",
+			code: map[string]string{
+				"main.go": "package main\n\nvar cache = make(map[string]string)\n",
+			},
+			criteria: []string{"Uses Redis client, not in-memory cache"},
+			mockResponse: `{
+				"evaluations": [
+					{
+						"criterion": "Uses Redis client, not in-memory cache",
+						"passed": false,
+						"reasoning": "Code uses in-memory map instead of Redis",
+						"confidence": 0.9
+					}
+				]
+			}`,
+			expectedPass:  false,
+			expectedCount: 1,
+		},
+		{
+			name:          "empty criteria returns nil",
+			code:          map[string]string{"main.go": "package main"},
+			criteria:      []string{},
+			mockResponse:  "",
+			expectedPass:  true,
+			expectedCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockProvider := &MockProvider{
+				responses: []string{tt.mockResponse},
+			}
+			judge := NewCodeReviewJudge(mockProvider)
+
+			results, err := judge.EvaluateCode(context.Background(), tt.code, tt.criteria)
+			if err != nil {
+				t.Fatalf("EvaluateCode returned error: %v", err)
+			}
+
+			if tt.expectedCount == 0 {
+				if results != nil {
+					t.Errorf("Expected nil results for empty criteria, got %v", results)
+				}
+				return
+			}
+
+			if len(results) != tt.expectedCount {
+				t.Errorf("Expected %d results, got %d", tt.expectedCount, len(results))
+			}
+
+			if tt.expectedCount > 0 {
+				allPassed := true
+				for _, r := range results {
+					if !r.Passed {
+						allPassed = false
+						break
+					}
+				}
+				if allPassed != tt.expectedPass {
+					t.Errorf("Expected all passed=%v, got %v", tt.expectedPass, allPassed)
+				}
+			}
+		})
+	}
+}
+
+func TestCodeReviewJudge_ParseResponse(t *testing.T) {
+	judge := &CodeReviewJudge{}
+
+	tests := []struct {
+		name           string
+		response       string
+		criteria       []string
+		expectedPassed bool
+		expectedNil    bool
+	}{
+		{
+			name: "valid JSON response",
+			response: `Here is my assessment:
+{
+	"evaluations": [
+		{
+			"criterion": "Uses proper error handling",
+			"passed": true,
+			"reasoning": "All errors are wrapped with context",
+			"confidence": 0.85
+		}
+	]
+}`,
+			criteria:       []string{"Uses proper error handling"},
+			expectedPassed: true,
+			expectedNil:    false,
+		},
+		{
+			name:        "non-JSON response returns nil",
+			response:    "The criterion is met. The code properly implements caching.",
+			criteria:    []string{"Implements caching"},
+			expectedNil: true,
+		},
+		{
+			name:        "empty response returns nil",
+			response:    "",
+			criteria:    []string{"Uses Redis"},
+			expectedNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			results := judge.parseJudgeResponse(tt.response, tt.criteria)
+
+			if tt.expectedNil {
+				if results != nil {
+					t.Errorf("Expected nil results, got %v", results)
+				}
+				return
+			}
+
+			if len(results) != len(tt.criteria) {
+				t.Errorf("Expected %d results, got %d", len(tt.criteria), len(results))
+				return
+			}
+
+			if results[0].Passed != tt.expectedPassed {
+				t.Errorf("Expected passed=%v, got %v", tt.expectedPassed, results[0].Passed)
+			}
+
+			if results[0].Criterion != tt.criteria[0] {
+				t.Errorf("Expected criterion=%q, got %q", tt.criteria[0], results[0].Criterion)
+			}
+		})
+	}
+}
+
+func TestJourneyEvaluator_IsTaskComplete_WithCodeReview(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	tests := []struct {
+		name       string
+		acceptance *AcceptanceResult
+		task       *E2ETask
+		expected   bool
+	}{
+		{
+			name: "code review passes",
+			acceptance: &AcceptanceResult{
+				BuildsOK:       true,
+				LintsOK:        true,
+				CodeReviewPass: true,
+				CodeReviewResults: []CodeReviewResult{
+					{Criterion: "Uses Redis", Passed: true},
+					{Criterion: "Implements caching", Passed: true},
+				},
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					CodeReview: []string{"Uses Redis", "Implements caching"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "code review fails",
+			acceptance: &AcceptanceResult{
+				BuildsOK:       true,
+				LintsOK:        true,
+				CodeReviewPass: false,
+				CodeReviewResults: []CodeReviewResult{
+					{Criterion: "Uses Redis", Passed: true},
+					{Criterion: "Implements caching", Passed: false, Reasoning: "Missing cache-aside pattern"},
+				},
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					CodeReview: []string{"Uses Redis", "Implements caching"},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "no code review criteria - passes without results",
+			acceptance: &AcceptanceResult{
+				BuildsOK: true,
+				LintsOK:  true,
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{},
+			},
+			expected: true,
+		},
+		{
+			name: "code review criteria but no results - passes (judge not available)",
+			acceptance: &AcceptanceResult{
+				BuildsOK:          true,
+				LintsOK:           true,
+				CodeReviewPass:    false,
+				CodeReviewResults: []CodeReviewResult{},
+			},
+			task: &E2ETask{
+				Acceptance: TaskAcceptance{
+					CodeReview: []string{"Uses Redis"},
+				},
+			},
+			expected: true, // Passes because no results means judge wasn't run
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := evaluator.isTaskComplete(tt.acceptance, tt.task)
+			if result != tt.expected {
+				t.Errorf("Expected isTaskComplete=%v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestJourneyEvaluator_BuildRetryPromptWithCodeReviewFeedback(t *testing.T) {
+	evaluator := &JourneyEvaluator{}
+
+	task := &E2ETask{
+		Description: "Implement caching with Redis",
+	}
+
+	acceptance := &AcceptanceResult{
+		BuildsOK:       true,
+		LintsOK:        true,
+		CodeReviewPass: false,
+		CodeReviewResults: []CodeReviewResult{
+			{Criterion: "Uses Redis client", Passed: true, Reasoning: "Redis client is imported"},
+			{Criterion: "Implements cache-aside pattern", Passed: false, Reasoning: "Missing read-through caching logic"},
+			{Criterion: "Has proper TTL handling", Passed: false, Reasoning: "No TTL specified for cached values"},
+		},
+	}
+
+	prompt := evaluator.buildRetryPromptWithFeedback(task, "", acceptance)
+
+	// Verify code review feedback is included
+	if !stringContains(prompt, "Code Review Feedback:") {
+		t.Error("Expected 'Code Review Feedback:' in prompt")
+	}
+	if !stringContains(prompt, "FAILED: Implements cache-aside pattern") {
+		t.Error("Expected failed criterion in prompt")
+	}
+	if !stringContains(prompt, "Missing read-through caching logic") {
+		t.Error("Expected reasoning for failed criterion in prompt")
+	}
+	if !stringContains(prompt, "Has proper TTL handling") {
+		t.Error("Expected second failed criterion in prompt")
+	}
+	// Should not include passing criteria
+	if stringContains(prompt, "FAILED: Uses Redis client") {
+		t.Error("Should not include passing criteria as failed")
+	}
+}
