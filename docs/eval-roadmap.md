@@ -1,38 +1,28 @@
 # E2E Generative Eval Roadmap
 
-## Current Status
+**Mandate:** All evals >90% before new features
 
-| Item | Status | Notes |
-|------|--------|-------|
-| Journey Framework | ✅ Done | Treatment vs baseline comparison |
-| Event Storage Integration | ✅ Done | P0.1 - MockCortex corpus integration |
-| Metrics & Reporting | ✅ Done | Lift calculations working |
-| CLI Integration | ✅ Done | `./cortex eval -t e2e` |
-| Trivial Journey | ✅ Done | P0.2 - 100% pass rate |
-| Small Journey | ✅ Done | P0.3 - 100% pass rate |
-| Medium Journey | ✅ Done | P0.4 - Shows +50% test lift |
-| Large Journey | ✅ Done | P0.5 - 75% tests, +10% token efficiency |
-| LLM-as-Judge | ✅ Done | P1.1 - Semantic code review with `--judge` flag |
-| Complex Journey | 🔄 Stretch | API Evolution - ready for testing with judge |
+## Current Status: 50% (5/10)
 
----
-
-## Journey Results (Claude Haiku)
-
-| Journey | Sessions | Task Completion | Test Pass | Cortex Lift | Status |
-|---------|----------|-----------------|-----------|-------------|--------|
-| **trivial-hello-world** | 3 | 100% | 100% | ✅ Framework validated | PASS |
-| **small-refactor** | 3 | 100% | 100% | ✅ Context + error patterns | PASS |
-| **medium-logging** | 4 | 0% | 50% vs 0% | **+50% test lift** (slog vs log) | VALUE |
-| **large-auth** | 8 | 0% | 75% (both) | **+10% token efficiency** | VALUE |
-| **api-service-evolution** | 30 | 0% | 0% | Too complex for Haiku | STRETCH |
+| Journey | Result | Cortex Lift | Issue |
+|---------|--------|-------------|-------|
+| trivial-hello-world | ✅ PASS | 0% | - |
+| small-refactor | ✅ PASS | 0% | - |
+| medium-logging | ✅ PASS | **+57%** | - |
+| cortex-config-quirk | ✅ PASS | +10% | - |
+| cortex-error-handling | ✅ PASS | **+61%** | - |
+| large-auth | ❌ FAIL | 0% completion | Build failures |
+| api-service-evolution | ❌ FAIL | 0% completion | Too complex for Haiku |
+| cortex-internal-api | ❌ FAIL | 0% completion | Build failures |
+| cortex-deprecated-pattern | ❌ FAIL | **-30% regression** | Context hurts |
+| cortex-id-naming | ❌ FAIL | **-20% regression** | Context hurts |
 
 ### Key Findings
 
-1. **Trivial/Small journeys pass 100%** - Validates eval framework works correctly
-2. **Medium journey shows clear Cortex value** - Treatment uses slog (correct), baseline uses log (wrong)
-3. **Large journey shows efficiency gains** - Same results but 10% fewer tokens with context
-4. **Complex journey too hard** - Good benchmark for stronger models / LLM-as-judge
+1. **Cortex helps on knowledge-dependent tasks** - +57% and +61% lift where project-specific patterns matter
+2. **Cortex hurts on simple tasks** - Regressions where baseline already succeeds
+3. **Build failures dominate** - LLM generates placeholder imports, code doesn't compile
+4. **Complex journeys exceed Haiku** - Need Sonnet for API Evolution
 
 ---
 
@@ -168,18 +158,40 @@ For each criterion, respond with JSON:
 
 ## Success Criteria
 
-| Milestone | Metric | Target | Actual |
+| Milestone | Target | Actual | Status |
 |-----------|--------|--------|--------|
-| MVP | At least 1 journey passes | Trivial @ 100% | ✅ **2 journeys @ 100%** |
-| Proof of Value | Treatment beats baseline | >20% lift | ✅ **+50% test lift (medium)** |
-| Production Ready | 3+ journeys passing | >50% completion | 🔄 2/5 pass, 2/5 show value |
-| Full Suite | Complex journey passes | API Evolution @ >50% | 🔄 Needs LLM-as-judge |
+| MVP | 1+ journey passes | 5/10 pass | ✅ |
+| Proof of Value | >20% lift somewhere | +61% (error handling) | ✅ |
+| No Regressions | 0 regressions | 2 regressions | ❌ |
+| **>90% Pass Rate** | 9/10 journeys | 5/10 journeys | ❌ |
 
 ---
 
-## Next Steps
+## Path to >90%
 
-1. **P1.1**: Implement LLM-as-judge for semantic evaluation
-2. **P2.2**: Add CI integration for regression testing
-3. **Try stronger models**: Test with Claude Sonnet or GPT-4 for complex journey
-4. **Tune acceptance criteria**: Medium/Large journeys show value but strict pass threshold
+### Fix Regressions (5/10 → 7/10)
+- [ ] `cortex-deprecated-pattern`: Improve context relevance threshold
+- [ ] `cortex-id-naming`: Improve context relevance threshold
+
+### Fix Build Failures (7/10 → 9/10)
+- [ ] `large-auth`: Investigate why builds fail
+- [ ] `cortex-internal-api`: Investigate why builds fail
+- [ ] Consider: scaffold files with real import paths
+
+### Model Alignment (9/10 → 10/10)
+- [ ] `api-service-evolution`: Tag as Sonnet-required, skip on Haiku runs
+
+---
+
+## Running Evals
+
+```bash
+# Run all journeys
+./cortex eval -t e2e -p anthropic -v
+
+# Run specific journey
+./cortex eval -t e2e -p anthropic -v --journey test/evals/journeys/trivial-hello-world.yaml
+
+# With stronger model
+./cortex eval -t e2e -p anthropic -m claude-3-5-sonnet-20241022 -v
+```
