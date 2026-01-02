@@ -989,6 +989,12 @@ func (e *JourneyEvaluator) isTaskComplete(acceptance *AcceptanceResult, task *E2
 }
 
 func (e *JourneyEvaluator) runBuild() error {
+	// First run go mod tidy to resolve any new dependencies the LLM added
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = e.workDir
+	tidyCmd.CombinedOutput() // Ignore errors - tidy may fail but build might still work
+
+	// Then run go build
 	cmd := exec.Command("go", "build", "./...")
 	cmd.Dir = e.workDir
 	output, err := cmd.CombinedOutput()
