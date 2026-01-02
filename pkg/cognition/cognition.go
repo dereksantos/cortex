@@ -236,6 +236,12 @@ type Resolver interface {
 	Resolve(ctx context.Context, q Query, results []Result) (*ResolveResult, error)
 }
 
+// Nuance represents an implementation detail extracted from a pattern.
+type Nuance struct {
+	Detail string `json:"detail"`
+	Why    string `json:"why"`
+}
+
 // SessionContext captures patterns from current session activity.
 //
 // Think updates this during active work; Resolve reads it to make
@@ -268,6 +274,15 @@ type SessionContext struct {
 	// When Think spots contradictions, it resolves them proactively.
 	// Key format: "id1:id2" (sorted), value: winning ID.
 	ResolvedContradictions map[string]string
+
+	// ExtractedNuances holds implementation gotchas for high-importance patterns.
+	// Key is the pattern/insight ID, value is the list of nuances.
+	// Think extracts these from recent high-importance patterns.
+	ExtractedNuances map[string][]Nuance
+
+	// ProcessedPatternIDs tracks which pattern IDs have already been processed
+	// for nuance extraction to avoid re-processing.
+	ProcessedPatternIDs map[string]bool
 
 	// LastUpdated is when this context was last modified.
 	LastUpdated time.Time

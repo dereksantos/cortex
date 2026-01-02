@@ -2,11 +2,14 @@ package cognition
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // Think implements cognition.Thinker for background processing during active work.
@@ -18,6 +21,8 @@ type Think struct {
 	reflex   *Reflex
 	reflect  *Reflect
 	activity *ActivityTracker
+	llm      llm.Provider
+	storage  *storage.Storage
 
 	// Session state
 	sessionCtx *cognition.SessionContext
@@ -45,9 +50,25 @@ func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Thin
 			WarmCache:              make(map[string][]cognition.Result),
 			CachedReflect:          make(map[string][]cognition.Result),
 			ResolvedContradictions: make(map[string]string),
+			ExtractedNuances:       make(map[string][]cognition.Nuance),
+			ProcessedPatternIDs:    make(map[string]bool),
 		},
 		config: cognition.DefaultThinkConfig(),
 	}
+}
+
+// SetProvider sets the LLM provider for nuance extraction.
+func (t *Think) SetProvider(provider llm.Provider) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.llm = provider
+}
+
+// SetStorage sets the storage for accessing patterns.
+func (t *Think) SetStorage(store *storage.Storage) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.storage = store
 }
 
 // SetStateWriter sets the state writer for daemon status updates.
@@ -122,6 +143,14 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 			stateWriter.WriteMode("think", "Sorting out contradictions...")
 		}
 		ops += t.resolveContradictions()
+	}
+
+	// Operation 4: Extract nuances from high-importance patterns
+	if ops < budget {
+		if stateWriter != nil {
+			stateWriter.WriteMode("think", "Extracting implementation nuances...")
+		}
+		ops += t.extractRecentNuances(ctx, budget-ops)
 	}
 
 	// Update timestamp
@@ -367,6 +396,74 @@ func (t *Think) resolveContradictions() int {
 				}
 			}
 		}
+	}
+
+	return ops
+}
+
+// extractRecentNuances extracts implementation gotchas from high-importance patterns.
+// Returns the number of operations performed.
+func (t *Think) extractRecentNuances(ctx context.Context, budget int) int {
+	// Check if LLM and storage are available
+	t.mu.Lock()
+	llmProvider := t.llm
+	store := t.storage
+	t.mu.Unlock()
+
+	if llmProvider == nil || !llmProvider.IsAvailable() || store == nil {
+		return 0
+	}
+
+	// Get high-importance patterns (importance >= 8 on 0-10 scale, which maps to 0.8 on 0-1 scale)
+	insights, err := store.GetImportantInsights(8, 10)
+	if err != nil {
+		log.Printf("Think: failed to get important insights: %v", err)
+		return 0
+	}
+
+	ops := 0
+	for _, insight := range insights {
+		if ops >= budget {
+			break
+		}
+
+		// Create a unique ID for this pattern
+		patternID := fmt.Sprintf("insight:%d", insight.ID)
+
+		// Skip if already processed
+		t.mu.Lock()
+		if t.sessionCtx.ProcessedPatternIDs[patternID] {
+			t.mu.Unlock()
+			continue
+		}
+		t.mu.Unlock()
+
+		// Extract nuances
+		nuances, err := ExtractNuances(ctx, llmProvider, insight.Summary)
+		if err != nil {
+			log.Printf("Think: failed to extract nuances for %s: %v", patternID, err)
+			ops++
+			continue
+		}
+
+		// Store nuances if any were found
+		t.mu.Lock()
+		t.sessionCtx.ProcessedPatternIDs[patternID] = true
+		if len(nuances) > 0 {
+			// Convert internal Nuance to cognition.Nuance
+			cogNuances := make([]cognition.Nuance, len(nuances))
+			for i, n := range nuances {
+				cogNuances[i] = cognition.Nuance{
+					Detail: n.Detail,
+					Why:    n.Why,
+				}
+			}
+			t.sessionCtx.ExtractedNuances[patternID] = cogNuances
+			log.Printf("Think: extracted %d nuances for pattern %s", len(nuances), patternID)
+		}
+		t.mu.Unlock()
+
+		ops++
 	}
 
 	return ops
