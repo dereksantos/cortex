@@ -218,6 +218,60 @@ func TestFormatter_FormatForInjection(t *testing.T) {
 	}
 }
 
+func TestFormatter_FormatWithSessionContext(t *testing.T) {
+	formatter := NewFormatter()
+
+	results := []cognition.Result{
+		{
+			ID:       "1",
+			Content:  "Use slog for structured logging",
+			Category: "pattern",
+			Tags:     []string{"logging"},
+		},
+	}
+
+	sessionCtx := &cognition.SessionContext{
+		ExtractedNuances: map[string][]cognition.Nuance{
+			"pattern:1": {
+				{Detail: "Log errors before returning", Why: "Ensures errors are captured"},
+				{Detail: "Use slog.Error with err attribute", Why: "Enables error aggregation"},
+			},
+		},
+	}
+
+	output := formatter.FormatForInjection(results, sessionCtx)
+
+	// Check basic structure is preserved
+	if !containsString(output, "Relevant Context from Cortex") {
+		t.Error("Output missing header")
+	}
+
+	// Check nuances section is included
+	if !containsString(output, "Implementation Notes") {
+		t.Error("Output missing Implementation Notes section")
+	}
+
+	// Check nuances are included
+	if !containsString(output, "Log errors before returning") {
+		t.Error("Output missing nuance detail")
+	}
+
+	// Check no session context case
+	noCtxOutput := formatter.FormatForInjection(results)
+	if containsString(noCtxOutput, "Implementation Notes") {
+		t.Error("No session context should not include Implementation Notes")
+	}
+
+	// Check empty nuances case
+	emptyCtx := &cognition.SessionContext{
+		ExtractedNuances: make(map[string][]cognition.Nuance),
+	}
+	emptyOutput := formatter.FormatForInjection(results, emptyCtx)
+	if containsString(emptyOutput, "Implementation Notes") {
+		t.Error("Empty nuances should not include Implementation Notes")
+	}
+}
+
 func TestResolve_MakeDecision(t *testing.T) {
 	resolve := NewResolve()
 
@@ -265,6 +319,44 @@ func TestResolve_MakeDecision(t *testing.T) {
 				t.Errorf("Resolve() decision = %v, want %v", result.Decision, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolve_WithNuances(t *testing.T) {
+	resolve := NewResolve()
+
+	// Set up session context with nuances
+	sessionCtx := &cognition.SessionContext{
+		TopicWeights: make(map[string]float64),
+		ExtractedNuances: map[string][]cognition.Nuance{
+			"logging:pattern": {
+				{Detail: "Log errors before return", Why: "Ensures error capture"},
+			},
+		},
+	}
+	resolve.SetSessionContext(sessionCtx)
+
+	// High-scoring result should trigger injection
+	results := []cognition.Result{
+		{ID: "1", Content: "Use slog for logging", Score: 0.9},
+	}
+
+	result, err := resolve.Resolve(context.Background(), cognition.Query{}, results)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if result.Decision != cognition.Inject {
+		t.Errorf("expected Inject decision, got %v", result.Decision)
+	}
+
+	// Verify nuances are included in formatted output
+	if !containsString(result.Formatted, "Implementation Notes") {
+		t.Error("Formatted output missing Implementation Notes section")
+	}
+
+	if !containsString(result.Formatted, "Log errors before return") {
+		t.Error("Formatted output missing nuance detail")
 	}
 }
 

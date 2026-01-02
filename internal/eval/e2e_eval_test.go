@@ -468,8 +468,9 @@ func TestJourneyEvaluator_FormatContextForTask(t *testing.T) {
 	if formatted == "" {
 		t.Error("Expected non-empty formatted context")
 	}
-	if !stringContains(formatted, "[decision]") {
-		t.Error("Expected category tag in formatted output")
+	// Formatter uses markdown headers for categories
+	if !stringContains(formatted, "Decision") {
+		t.Error("Expected Decision category in formatted output")
 	}
 	if !stringContains(formatted, "Redis") {
 		t.Error("Expected content in formatted output")

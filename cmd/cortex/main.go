@@ -2394,6 +2394,11 @@ func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journe
 		}
 		defer cliCortex.Cleanup()
 
+		// Enable nuance extraction - patterns will be analyzed as they're stored
+		if provider != nil && provider.IsAvailable() {
+			cliCortex.SetLLM(provider)
+		}
+
 		var cortex cognition.Cortex = cliCortex
 
 		// Create evaluator and run journey

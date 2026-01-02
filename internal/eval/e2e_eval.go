@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -771,14 +772,16 @@ func (e *JourneyEvaluator) copyScaffoldProject(scaffoldPath string) error {
 }
 
 func (e *JourneyEvaluator) formatContextForTask(results []cognition.Result) string {
-	var sb strings.Builder
-	sb.WriteString("Relevant context from previous sessions:\n\n")
+	// Use the cognition Formatter to include nuances from SessionContext
+	formatter := intcognition.NewFormatter()
 
-	for _, r := range results {
-		sb.WriteString(fmt.Sprintf("- [%s] %s\n", r.Category, r.Content))
+	// Get SessionContext if cortex is available (includes extracted nuances)
+	var sessionCtx *cognition.SessionContext
+	if e.cortex != nil {
+		sessionCtx = e.cortex.SessionContext()
 	}
 
-	return sb.String()
+	return formatter.FormatForInjection(results, sessionCtx)
 }
 
 func (e *JourneyEvaluator) buildTaskPrompt(task *E2ETask, contextStr string) string {
