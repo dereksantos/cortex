@@ -3091,8 +3091,8 @@ func handleSearch() {
 			fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))
 			if event.ToolResult != "" {
 				preview := event.ToolResult
-				if len(preview) > 100 {
-					preview = preview[:100] + "..."
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
 				}
 				fmt.Printf("   %s\n", preview)
 			}
