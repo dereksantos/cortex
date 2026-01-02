@@ -195,6 +195,14 @@ func (e *JourneyEvaluator) runSession(ctx context.Context, session *E2ESession, 
 			}
 			result.EventsStored++
 		}
+
+		// For CLI mode, run ingest to process events into the database
+		if cliCortex, ok := e.cortex.(*CLICortex); ok {
+			if err := cliCortex.Ingest(); err != nil {
+				return nil, fmt.Errorf("failed to ingest events: %w", err)
+			}
+		}
+
 		if e.verbose {
 			fmt.Printf("  Stored %d events\n", result.EventsStored)
 		}
@@ -625,9 +633,16 @@ func (e *JourneyEvaluator) storeEvent(ctx context.Context, event *E2EEvent) erro
 	e.storedEvents[event.ID] = storageEvent
 
 	// Integrate with Cortex for retrieval
-	// Check if this is a MockCortex (dry-run mode)
+	// Try CLICortex first (preferred for E2E testing)
+	if cliCortex, ok := e.cortex.(*CLICortex); ok {
+		if err := cliCortex.StoreEvent(string(event.Type), formatEventContent(event), event.Tags); err != nil {
+			return fmt.Errorf("failed to store event via CLI: %w", err)
+		}
+		return nil
+	}
+
+	// Fallback to MockCortex (for dry-run mode)
 	if mockCortex, ok := e.cortex.(*MockCortex); ok {
-		// Add directly to corpus for retrieval
 		mockCortex.AddEventToCorpus(
 			event.ID,
 			formatEventContent(event),

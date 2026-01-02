@@ -478,6 +478,9 @@ func (m *MockCortex) AddProactiveInsight(result cognition.Result) {
 // AddEventToCorpus adds an event to the corpus for retrieval.
 // This bridges the gap between event storage and the Retrieve pipeline.
 func (m *MockCortex) AddEventToCorpus(id, content, category string, tags []string, importance int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.Corpus[id] = cognition.Result{
 		ID:        id,
 		Content:   content,

@@ -173,9 +173,9 @@ func TestExtractTerms(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			terms := extractTerms(tt.input)
+			terms := ExtractTerms(tt.input)
 			if len(terms) < tt.minTerms || len(terms) > tt.maxTerms {
-				t.Errorf("extractTerms(%q) = %v (len=%d), want between %d and %d terms",
+				t.Errorf("ExtractTerms(%q) = %v (len=%d), want between %d and %d terms",
 					tt.input, terms, len(terms), tt.minTerms, tt.maxTerms)
 			}
 		})

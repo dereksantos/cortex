@@ -57,7 +57,7 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 
 	// 2. Text search via FTS if query text provided
 	if q.Text != "" {
-		terms := extractTerms(q.Text)
+		terms := ExtractTerms(q.Text)
 		if len(terms) > 0 {
 			// Search insights by text (we need to add this to storage, but for now use GetRecentInsights and filter)
 			insights, err := r.storage.GetRecentInsights(limit * 3)
