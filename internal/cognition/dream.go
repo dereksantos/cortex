@@ -226,6 +226,51 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 				d.mu.Lock()
 				d.proactiveQueue = append(d.proactiveQueue, *insight)
 				d.mu.Unlock()
+
+				// Extract nuances for high-importance insights
+				if stateWriter != nil {
+					stateWriter.WriteMode("dream", "Extracting implementation nuances...")
+				}
+				nuances, err := ExtractNuances(ctx, d.llm, insight.Content)
+				if err == nil && len(nuances) > 0 {
+					// Store nuances as supplemental insights
+					for _, nuance := range nuances {
+						supplementalID := insight.ID + ":nuance"
+						nuanceContent := fmt.Sprintf("NUANCE for '%s': %s (Why: %s)",
+							TruncateInsight(insight.Content, 50), nuance.Detail, nuance.Why)
+
+						if d.storage != nil {
+							d.storage.StoreInsight(
+								supplementalID,
+								"nuance",
+								nuanceContent,
+								int(insight.Score*10),
+								append(insight.Tags, "nuance", "implementation-detail"),
+								"",
+							)
+						}
+
+						// Also send to channel
+						nuanceResult := cognition.Result{
+							ID:        supplementalID,
+							Content:   nuanceContent,
+							Category:  "nuance",
+							Score:     insight.Score,
+							Timestamp: time.Now(),
+							Tags:      append(insight.Tags, "nuance", "implementation-detail"),
+							Metadata: map[string]any{
+								"parent_insight": insight.ID,
+								"nuance_detail":  nuance.Detail,
+								"nuance_why":     nuance.Why,
+							},
+						}
+						select {
+						case d.insightsChan <- nuanceResult:
+						default:
+						}
+					}
+					log.Printf("Dream: extracted %d nuances for insight %s", len(nuances), insight.ID)
+				}
 			}
 
 			insights++
