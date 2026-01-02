@@ -34,7 +34,8 @@ func NewFormatter() *Formatter {
 
 // FormatForInjection formats results as markdown for Claude Code injection.
 // The output is designed to be prepended to the user's prompt.
-func (f *Formatter) FormatForInjection(results []cognition.Result) string {
+// Optionally accepts a SessionContext to include enrichments from background processing.
+func (f *Formatter) FormatForInjection(results []cognition.Result, sessionCtx ...*cognition.SessionContext) string {
 	if len(results) == 0 {
 		return ""
 	}
@@ -86,6 +87,47 @@ func (f *Formatter) FormatForInjection(results []cognition.Result) string {
 	}
 
 	sb.WriteString("---\n\n")
+
+	// Apply enrichments from SessionContext if provided
+	if len(sessionCtx) > 0 && sessionCtx[0] != nil {
+		sb.WriteString(f.formatEnrichments(sessionCtx[0]))
+	}
+
+	return sb.String()
+}
+
+// formatEnrichments adds any background-processed enrichments from SessionContext.
+// This is the single point where all agentic enrichments are formatted.
+func (f *Formatter) formatEnrichments(ctx *cognition.SessionContext) string {
+	var sb strings.Builder
+
+	// Nuances from Think
+	if len(ctx.ExtractedNuances) > 0 {
+		var allNuances []cognition.Nuance
+		for _, ns := range ctx.ExtractedNuances {
+			allNuances = append(allNuances, ns...)
+		}
+
+		if len(allNuances) > 0 {
+			// Limit nuances
+			maxNuances := 5
+			if len(allNuances) > maxNuances {
+				allNuances = allNuances[:maxNuances]
+			}
+
+			sb.WriteString("### Implementation Notes\n")
+			sb.WriteString("*Gotchas to remember:*\n")
+			for _, n := range allNuances {
+				sb.WriteString(fmt.Sprintf("- **%s** — %s\n", n.Detail, n.Why))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Future enrichments can be added here:
+	// - TopicWeights summary
+	// - Proactive insights from Dream
+	// - etc.
 
 	return sb.String()
 }
@@ -168,3 +210,4 @@ func (f *Formatter) EstimateTokens(results []cognition.Result) int {
 	formatted := f.FormatForInjection(results)
 	return len(formatted) / 4
 }
+

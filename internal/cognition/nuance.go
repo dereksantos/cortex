@@ -15,7 +15,13 @@ const NuanceExtractionPrompt = `Given this coding pattern/decision:
 %s
 
 What are the common implementation gotchas or easy-to-miss details?
-Focus on things developers often forget when implementing this.
+
+Focus on:
+1. ORDERING issues - what must happen before or after something else
+2. EDGE CASES - nil checks, empty inputs, boundary conditions
+3. INTEGRATION gotchas - how this interacts with error handling, returns, cleanup
+
+Keep each nuance to one specific, actionable detail.
 
 Respond in JSON:
 {

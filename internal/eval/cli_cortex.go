@@ -13,6 +13,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // CLICortex uses the cortex CLI for real end-to-end testing.
@@ -29,6 +30,16 @@ type CLICortex struct {
 
 	// eventCount tracks stored events for debugging
 	eventCount int
+
+	// llm is an optional LLM provider for nuance extraction.
+	// When set, patterns are automatically analyzed for nuances.
+	llm llm.Provider
+
+	// nuances holds extracted nuances (from LLM or pre-populated).
+	nuances map[string][]cognition.Nuance
+
+	// patternCount tracks patterns for nuance ID generation
+	patternCount int
 }
 
 // NewCLICortex creates a CLI-based Cortex for E2E testing.
@@ -123,6 +134,12 @@ func (c *CLICortex) runCommand(args ...string) (string, error) {
 	return output, nil
 }
 
+// SetLLM sets the LLM provider for automatic nuance extraction.
+// When set, patterns are automatically analyzed as they are stored.
+func (c *CLICortex) SetLLM(provider llm.Provider) {
+	c.llm = provider
+}
+
 // StoreEvent captures an event using the CLI
 func (c *CLICortex) StoreEvent(eventType, content string, tags []string) error {
 	// Use capture command with --type and --content
@@ -138,7 +155,53 @@ func (c *CLICortex) StoreEvent(eventType, content string, tags []string) error {
 	}
 
 	c.eventCount++
+
+	// Extract nuances for patterns if LLM is available
+	if eventType == "pattern" && c.llm != nil && c.llm.IsAvailable() {
+		c.extractNuancesForPattern(content)
+	}
+
 	return nil
+}
+
+// extractNuancesForPattern extracts nuances from a pattern using the LLM.
+// This simulates what Think would do during active work.
+func (c *CLICortex) extractNuancesForPattern(content string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	nuances, err := intcognition.ExtractNuances(ctx, c.llm, content)
+	if err != nil {
+		if c.verbose {
+			fmt.Printf("[CLI] Failed to extract nuances: %v\n", err)
+		}
+		return
+	}
+
+	if len(nuances) == 0 {
+		return
+	}
+
+	// Convert to cognition.Nuance and store
+	c.patternCount++
+	patternID := fmt.Sprintf("pattern:%d", c.patternCount)
+
+	if c.nuances == nil {
+		c.nuances = make(map[string][]cognition.Nuance)
+	}
+
+	cogNuances := make([]cognition.Nuance, len(nuances))
+	for i, n := range nuances {
+		cogNuances[i] = cognition.Nuance{
+			Detail: n.Detail,
+			Why:    n.Why,
+		}
+	}
+	c.nuances[patternID] = cogNuances
+
+	if c.verbose {
+		fmt.Printf("[CLI] Extracted %d nuances for %s\n", len(nuances), patternID)
+	}
 }
 
 // Ingest processes the event queue and runs analysis
@@ -352,10 +415,37 @@ func (c *CLICortex) ResetForTesting() {}
 
 // SessionContext implements cognition.Thinker
 func (c *CLICortex) SessionContext() *cognition.SessionContext {
-	return &cognition.SessionContext{
-		TopicWeights:  make(map[string]float64),
-		RecentQueries: make([]cognition.Query, 0),
+	ctx := &cognition.SessionContext{
+		TopicWeights:     make(map[string]float64),
+		RecentQueries:    make([]cognition.Query, 0),
+		ExtractedNuances: make(map[string][]cognition.Nuance),
 	}
+
+	// Include pre-populated nuances if any
+	if c.nuances != nil {
+		for k, v := range c.nuances {
+			ctx.ExtractedNuances[k] = v
+		}
+	}
+
+	return ctx
+}
+
+// SetNuances pre-populates nuances for E2E testing.
+// This simulates what Think would have extracted from patterns.
+func (c *CLICortex) SetNuances(nuances map[string][]cognition.Nuance) {
+	c.nuances = nuances
+}
+
+// AddNuance adds a single nuance for testing.
+func (c *CLICortex) AddNuance(patternID string, detail, why string) {
+	if c.nuances == nil {
+		c.nuances = make(map[string][]cognition.Nuance)
+	}
+	c.nuances[patternID] = append(c.nuances[patternID], cognition.Nuance{
+		Detail: detail,
+		Why:    why,
+	})
 }
 
 // MaybeDigest implements cognition.Digester (no-op for CLI mode)

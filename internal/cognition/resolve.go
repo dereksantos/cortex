@@ -78,7 +78,8 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 	// Format output if injecting
 	var formatted string
 	if decision == cognition.Inject {
-		formatted = r.formatter.FormatForInjection(results)
+		// Pass SessionContext to formatter for any enrichments (nuances, etc.)
+		formatted = r.formatter.FormatForInjection(results, r.sessionCtx)
 	}
 
 	return &cognition.ResolveResult{
