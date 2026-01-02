@@ -241,7 +241,7 @@ func (t *Think) processPromptAsync(ctx context.Context, prompt string, sessionID
 
 // extractTopics extracts meaningful topics from a prompt.
 func (t *Think) extractTopics(prompt string) []string {
-	return extractTerms(prompt)
+	return ExtractTerms(prompt)
 }
 
 // updateTopicWeights analyzes recent queries to detect session patterns.
@@ -256,7 +256,7 @@ func (t *Think) updateTopicWeights() {
 	// Count term frequency across queries
 	termCounts := make(map[string]int)
 	for _, q := range t.sessionCtx.RecentQueries {
-		terms := extractTerms(q.Text)
+		terms := ExtractTerms(q.Text)
 		for _, term := range terms {
 			termCounts[term]++
 		}

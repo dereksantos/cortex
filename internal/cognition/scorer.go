@@ -91,7 +91,7 @@ func (s *Scorer) textRelevance(content, queryText string) float64 {
 	queryLower := strings.ToLower(queryText)
 
 	// Extract terms from query
-	queryTerms := extractTerms(queryLower)
+	queryTerms := ExtractTerms(queryLower)
 	if len(queryTerms) == 0 {
 		return 0.0
 	}
@@ -195,8 +195,9 @@ func (s *Scorer) importanceScore(metadata map[string]any) float64 {
 	return 0.5
 }
 
-// extractTerms splits text into searchable terms, filtering stopwords.
-func extractTerms(text string) []string {
+// ExtractTerms splits text into searchable terms, filtering stopwords.
+// This is the canonical implementation - use this instead of duplicating stop word logic.
+func ExtractTerms(text string) []string {
 	// Common stopwords to filter
 	stopwords := map[string]bool{
 		"a": true, "an": true, "the": true, "and": true, "or": true,
