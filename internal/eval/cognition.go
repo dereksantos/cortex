@@ -53,6 +53,10 @@ const (
 	// When evidence conflicts (code says X, docs say Y), tests whether the system
 	// detects the conflict, assesses severity, and takes appropriate action
 	CognitionConflict CognitionScenarioType = "conflict"
+
+	// CognitionIdiom tests language/framework idiom adoption
+	// Given project conventions in context, tests whether LLM responses follow them
+	CognitionIdiom CognitionScenarioType = "idiom"
 )
 
 // CognitionScenario represents a cognition eval test case
@@ -87,6 +91,30 @@ type CognitionScenario struct {
 	ConflictTopic    string              `yaml:"conflict_topic,omitempty"`    // e.g., "testing", "error-handling"
 	Evidence         []PatternEvidence   `yaml:"evidence,omitempty"`          // Evidence from different sources
 	ConflictExpected ConflictExpectation `yaml:"conflict_expected,omitempty"` // Expected detection and handling
+
+	// Idiom eval fields
+	ContextChain []IdiomContext `yaml:"context_chain,omitempty"` // Context to inject
+	TestPrompts  []IdiomPrompt  `yaml:"test_prompts,omitempty"`  // Prompts to test
+}
+
+// IdiomContext represents a piece of context for idiom evals
+type IdiomContext struct {
+	Type    string `yaml:"type"`              // pattern, implementation, code_review, decision
+	Content string `yaml:"content"`           // The context content
+	File    string `yaml:"file,omitempty"`    // Optional file path for implementations
+}
+
+// IdiomPrompt represents a test prompt for idiom evals
+type IdiomPrompt struct {
+	ID          string           `yaml:"id"`
+	Prompt      string           `yaml:"prompt"`
+	GroundTruth IdiomGroundTruth `yaml:"ground_truth"`
+}
+
+// IdiomGroundTruth defines expected content in LLM response
+type IdiomGroundTruth struct {
+	MustInclude    []string `yaml:"must_include,omitempty"`
+	MustNotInclude []string `yaml:"must_not_include,omitempty"`
 }
 
 // ModeTest tests a single cognitive mode
@@ -185,6 +213,9 @@ type CognitionEvalResult struct {
 
 	// Conflict results
 	ConflictResults *ConflictResult `json:"conflict_results,omitempty"`
+
+	// Idiom results
+	IdiomResults *IdiomResult `json:"idiom_results,omitempty"`
 
 	// Overall
 	Pass   bool   `json:"pass"`
@@ -348,6 +379,32 @@ type ConflictResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// IdiomResult contains results from an idiom eval
+type IdiomResult struct {
+	PromptResults []IdiomPromptResult `json:"prompt_results"`
+	PassRate      float64             `json:"pass_rate"`
+
+	Pass   bool   `json:"pass"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// IdiomPromptResult contains results from a single idiom prompt test
+type IdiomPromptResult struct {
+	PromptID string `json:"prompt_id"`
+
+	// What was injected as context
+	ContextInjected int `json:"context_injected"` // Number of context items
+
+	// LLM response analysis
+	Response         string   `json:"response,omitempty"` // First 500 chars
+	FoundIncludes    []string `json:"found_includes"`     // must_include items found
+	MissingIncludes  []string `json:"missing_includes"`   // must_include items missing
+	FoundExcludes    []string `json:"found_excludes"`     // must_not_include items found (bad)
+
+	Pass   bool   `json:"pass"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // CognitionRunSummary aggregates cognition eval results
 type CognitionRunSummary struct {
 	TotalScenarios int `json:"total_scenarios"`
@@ -355,12 +412,13 @@ type CognitionRunSummary struct {
 	FailCount      int `json:"fail_count"`
 
 	// By type
-	ModePassRate       float64 `json:"mode_pass_rate"`
-	SessionPassRate    float64 `json:"session_pass_rate"`
-	BenefitPassRate    float64 `json:"benefit_pass_rate"`
-	PipelinePassRate   float64 `json:"pipeline_pass_rate"`
-	DreamPassRate      float64 `json:"dream_pass_rate"`
+	ModePassRate     float64 `json:"mode_pass_rate"`
+	SessionPassRate  float64 `json:"session_pass_rate"`
+	BenefitPassRate  float64 `json:"benefit_pass_rate"`
+	PipelinePassRate float64 `json:"pipeline_pass_rate"`
+	DreamPassRate    float64 `json:"dream_pass_rate"`
 	ConflictPassRate float64 `json:"conflict_pass_rate"`
+	IdiomPassRate    float64 `json:"idiom_pass_rate"`
 
 	// Key metrics
 	AverageABR           float64       `json:"average_abr"`            // Agentic Benefit Ratio

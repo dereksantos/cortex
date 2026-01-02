@@ -7,16 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/llm"
 	"gopkg.in/yaml.v3"
 )
 
 // CognitionEvaluator runs cognition eval scenarios
 type CognitionEvaluator struct {
-	cortex  cognition.Cortex
-	verbose bool
+	cortex   cognition.Cortex
+	provider llm.Provider
+	verbose  bool
 }
 
 // NewCognitionEvaluator creates a new cognition evaluator
@@ -24,6 +27,11 @@ func NewCognitionEvaluator(cortex cognition.Cortex) *CognitionEvaluator {
 	return &CognitionEvaluator{
 		cortex: cortex,
 	}
+}
+
+// SetProvider sets the LLM provider for idiom evals
+func (e *CognitionEvaluator) SetProvider(p llm.Provider) {
+	e.provider = p
 }
 
 // SetVerbose enables verbose output
@@ -60,6 +68,10 @@ func LoadCognitionScenarios(dir string) ([]*CognitionScenario, error) {
 		}
 
 		if info.IsDir() {
+			// Skip the future/ directory - these are aspirational scenarios
+			if info.Name() == "future" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -97,6 +109,7 @@ func LoadCognitionScenarios(dir string) ([]*CognitionScenario, error) {
 			CognitionPipeline: 3, // Pipeline: end-to-end
 			CognitionDream:    4, // Dream: runs LAST to avoid pollution
 			CognitionConflict: 5, // Conflict: self-contained, uses scenario Evidence
+			CognitionIdiom:    6, // Idiom: requires LLM, runs after core tests
 		}
 
 		pi, oki := typeOrder[scenarios[i].Type]
@@ -145,6 +158,8 @@ func (e *CognitionEvaluator) RunScenario(ctx context.Context, scenario *Cognitio
 		result.DreamResults, err = e.runDreamTests(ctx, scenario)
 	case CognitionConflict:
 		result.ConflictResults, err = e.runConflictTests(ctx, scenario)
+	case CognitionIdiom:
+		result.IdiomResults, err = e.runIdiomTests(ctx, scenario)
 	default:
 		return nil, fmt.Errorf("unknown scenario type: %s", scenario.Type)
 	}
@@ -600,6 +615,142 @@ func (e *CognitionEvaluator) runConflictTests(ctx context.Context, scenario *Cog
 	return result, nil
 }
 
+// runIdiomTests tests language/framework idiom adoption
+func (e *CognitionEvaluator) runIdiomTests(ctx context.Context, scenario *CognitionScenario) (*IdiomResult, error) {
+	result := &IdiomResult{
+		PromptResults: make([]IdiomPromptResult, 0, len(scenario.TestPrompts)),
+	}
+
+	if e.provider == nil {
+		result.Pass = false
+		result.Reason = "no LLM provider configured for idiom evals"
+		return result, nil
+	}
+
+	// Build context string from context chain
+	var contextParts []string
+	for _, ctx := range scenario.ContextChain {
+		var part string
+		switch ctx.Type {
+		case "pattern":
+			part = fmt.Sprintf("[Pattern] %s", ctx.Content)
+		case "decision":
+			part = fmt.Sprintf("[Decision] %s", ctx.Content)
+		case "implementation":
+			if ctx.File != "" {
+				part = fmt.Sprintf("[Implementation: %s]\n%s", ctx.File, ctx.Content)
+			} else {
+				part = fmt.Sprintf("[Implementation]\n%s", ctx.Content)
+			}
+		case "code_review":
+			part = fmt.Sprintf("[Code Review] %s", ctx.Content)
+		default:
+			part = ctx.Content
+		}
+		contextParts = append(contextParts, part)
+	}
+	contextStr := strings.Join(contextParts, "\n\n")
+
+	passCount := 0
+
+	for _, testPrompt := range scenario.TestPrompts {
+		pr := IdiomPromptResult{
+			PromptID:        testPrompt.ID,
+			ContextInjected: len(scenario.ContextChain),
+		}
+
+		// Build prompt with context
+		fullPrompt := fmt.Sprintf(`You are a helpful coding assistant. Use the following project context to answer the question.
+
+## Project Context
+
+%s
+
+## Question
+
+%s
+
+Provide a concise answer that follows the project conventions shown in the context.`, contextStr, testPrompt.Prompt)
+
+		// Call LLM
+		response, err := e.provider.Generate(ctx, fullPrompt)
+		if err != nil {
+			pr.Pass = false
+			pr.Reason = fmt.Sprintf("LLM error: %v", err)
+			result.PromptResults = append(result.PromptResults, pr)
+			continue
+		}
+
+		// Truncate response for storage
+		if len(response) > 500 {
+			pr.Response = response[:500] + "..."
+		} else {
+			pr.Response = response
+		}
+
+		responseLower := strings.ToLower(response)
+
+		// Check must_include
+		for _, include := range testPrompt.GroundTruth.MustInclude {
+			if strings.Contains(responseLower, strings.ToLower(include)) {
+				pr.FoundIncludes = append(pr.FoundIncludes, include)
+			} else {
+				pr.MissingIncludes = append(pr.MissingIncludes, include)
+			}
+		}
+
+		// Check must_not_include
+		for _, exclude := range testPrompt.GroundTruth.MustNotInclude {
+			if strings.Contains(responseLower, strings.ToLower(exclude)) {
+				pr.FoundExcludes = append(pr.FoundExcludes, exclude)
+			}
+		}
+
+		// Determine pass: all includes found, no excludes found
+		pr.Pass = len(pr.MissingIncludes) == 0 && len(pr.FoundExcludes) == 0
+		if !pr.Pass {
+			if len(pr.MissingIncludes) > 0 {
+				pr.Reason = fmt.Sprintf("missing: %v", pr.MissingIncludes)
+			}
+			if len(pr.FoundExcludes) > 0 {
+				if pr.Reason != "" {
+					pr.Reason += "; "
+				}
+				pr.Reason += fmt.Sprintf("found forbidden: %v", pr.FoundExcludes)
+			}
+		} else {
+			passCount++
+		}
+
+		if e.verbose {
+			status := "PASS"
+			if !pr.Pass {
+				status = "FAIL"
+			}
+			fmt.Printf("  %s: %s\n", testPrompt.ID, status)
+			if !pr.Pass {
+				fmt.Printf("    Reason: %s\n", pr.Reason)
+			}
+		}
+
+		result.PromptResults = append(result.PromptResults, pr)
+	}
+
+	// Calculate pass rate
+	if len(result.PromptResults) > 0 {
+		result.PassRate = float64(passCount) / float64(len(result.PromptResults))
+	}
+
+	// Overall pass if all prompts pass
+	result.Pass = passCount == len(result.PromptResults)
+	if !result.Pass {
+		result.Reason = fmt.Sprintf("%.0f%% pass rate (%d/%d)",
+			result.PassRate*100, passCount, len(result.PromptResults))
+	}
+
+	return result, nil
+}
+
 // assessSeverity determines how serious a conflict is based on topic
 func assessSeverity(topic string, patterns map[string][]PatternEvidence) ConflictSeverity {
 	// High severity topics: framework choices, dependencies, architecture
@@ -695,6 +846,10 @@ func (e *CognitionEvaluator) calculateOverallResult(result *CognitionEvalResult)
 	case CognitionConflict:
 		if result.ConflictResults != nil && !result.ConflictResults.Pass {
 			return false, result.ConflictResults.Reason
+		}
+	case CognitionIdiom:
+		if result.IdiomResults != nil && !result.IdiomResults.Pass {
+			return false, result.IdiomResults.Reason
 		}
 	}
 	return true, ""

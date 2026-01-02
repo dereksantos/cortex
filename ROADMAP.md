@@ -1,43 +1,56 @@
 # Cortex Roadmap
 
-**Last Updated:** December 2024
-**Current Status:** ~75% Publishable Prototype
-**Target:** Publication-ready v1.0
+**Last Updated:** January 2026
+**Current Status:** Eval Stabilization
+**Mandate:** All evals >90% before new features
 
 ---
 
-## Current Implementation Status
+## Current Eval Results
 
-### Cognitive Modes
+### Cognition Evals: 44% (16/36)
 
-| Mode | Status | Notes |
-|------|--------|-------|
-| **Reflex** | ✅ Complete | Mechanical retrieval working; ~11ms real-world (target <20ms) ✓ |
-| **Reflect** | ✅ Complete | LLM reranking, contradiction detection |
-| **Resolve** | ✅ Complete | Inject/wait/queue/discard decisions |
-| **Think** | ✅ Complete | Activity-inverse budget, session context learning |
-| **Dream** | ⚠️ 60% | Sources partially implemented; git source missing |
-| **Digest** | ✅ Complete | Post-Dream deduplication |
+| Category | Pass/Total | Status | Issues |
+|----------|------------|--------|--------|
+| Reflect | 9/9 | ✅ | - |
+| Reflex | 5/6 | ⚠️ | jwt-specific precision failing |
+| Think (session) | 3/3 | ✅ | - |
+| ABR (benefit) | 3/3 | ✅ | - |
+| Dream | 2/3 | ⚠️ | Source coverage failing |
+| Conflict | 2/2 | ✅ | - |
+| **Unimplemented** | 0/18 | ❌ | linear, e2e, idiom, temporal, multi-path |
 
-### Evaluation Framework
+### E2E Journey Evals: 50% (5/10)
 
-| Eval Type | Status | Scenarios |
-|-----------|--------|-----------|
-| **Mode** | ✅ Complete | 10 scenarios |
-| **Session** | ✅ Complete | 3 scenarios |
-| **Benefit (ABR)** | ✅ Complete | 3 scenarios |
-| **Conflict** | ✅ Complete | 2 scenarios |
-| **Pipeline** | ⚠️ Partial | Implemented, needs review |
-| **Dream** | ❌ Missing | 0 scenarios |
+| Journey | Result | Cortex Lift |
+|---------|--------|-------------|
+| Trivial - Hello World | ✅ PASS | 0% (both succeed) |
+| Small - Function Signature | ✅ PASS | 0% (both succeed) |
+| Medium - Structured Logging | ✅ PASS | **+57% lift** |
+| Cortex Proof - Config Quirk | ✅ PASS | +10% lift |
+| Cortex Proof - Error Handling | ✅ PASS | **+61% lift** |
+| Large - Auth Middleware | ❌ FAIL | 0% completion |
+| API Service Evolution | ❌ FAIL | 0% completion |
+| Cortex Proof - Internal API | ❌ FAIL | 0% completion |
+| Cortex Proof - Deprecated Pattern | ❌ FAIL | **-30% regression** |
+| Cortex Proof - ID Naming | ❌ FAIL | **-20% regression** |
 
-### Integration
+### Summary
 
-| Component | Status |
-|-----------|--------|
-| Claude Code Hooks | ✅ Complete |
-| CLI Commands | ✅ Complete |
-| Daemon | ✅ Complete |
-| Activity Tracking | ✅ Complete |
+| Eval Suite | Current | Target |
+|------------|---------|--------|
+| Cognition | 44% | >90% |
+| E2E Journey | 50% | >90% |
+| **Overall** | **47%** | **>90%** |
+
+---
+
+## Mandate: Evals First
+
+No new features until all evals consistently pass at >90%. This ensures:
+1. Existing functionality is validated before expansion
+2. Regressions are caught immediately
+3. Claims in documentation match reality
 
 ---
 
@@ -92,181 +105,120 @@ This inverts the typical LLM interaction pattern:
 
 ---
 
-## Gap Analysis
+## Gap Analysis: Path to >90%
 
-### Critical Gaps (Blocking Publication)
+### Cognition Evals: 44% → 90%
 
-| Gap | Impact | Resolution |
-|-----|--------|------------|
-| **Dream evals missing** | Cannot validate Dream mode claims in paper | Write 2-3 Dream scenarios |
-| **Git source missing** | Dream incomplete per paper | Implement `sources/git.go` |
-| **Embeddings mismatch** | Paper claims embeddings; code uses keywords | Decision needed (see below) |
+| Gap | Impact | Fix |
+|-----|--------|-----|
+| **18 unimplemented scenario types** | 50% of failures | Remove or implement |
+| **Reflex jwt-specific precision** | 1 test failing | Tune scoring or fix test |
+| **Dream source coverage** | 1 test failing | Fix source sampling |
 
-### High Priority Gaps
+**Decision needed:** The 18 "unimplemented" scenarios (linear, e2e, idiom, temporal, multi-path) were never meant to run in cognition eval. Either:
+- **Option A:** Remove from cognition eval (they belong in other eval types)
+- **Option B:** Implement handlers for each type
 
-| Gap | Impact | Resolution |
-|-----|--------|------------|
-| **Reflex latency ~11ms** | Within <20ms target | ✓ Target met |
-| **Dream source metrics** | Can't measure Dream effectiveness | Add tracking |
-| **No latency timeouts** | Reflect/Resolve could exceed budgets | Add context timeouts |
+### E2E Journey Evals: 50% → 90%
 
-### Medium Priority Gaps
+| Gap | Impact | Fix |
+|-----|--------|-----|
+| **5 journeys at 0% completion** | 50% failures | Investigate why code doesn't build |
+| **2 regressions** | Context hurting | Improve context relevance filtering |
 
-| Gap | Impact | Resolution |
-|-----|--------|------------|
-| **Entity relationships** | Feature incomplete | LLM-based extraction |
-| **Dream insight embeddings** | Dream outputs not indexed | Embed and store |
-
----
-
-## Key Decision: Embeddings Strategy
-
-The paper describes embedding similarity, but implementation uses keyword/tag matching.
-
-| Option | Effort | Recommendation |
-|--------|--------|----------------|
-| **A: Implement embeddings** | Large (2-3 weeks) | Full feature parity |
-| **B: Update paper** | Small (1 day) | Honest about current approach |
-| **C: Mark as future work** | Small (1 day) | Acknowledge gap, publish anyway |
-
-**Current recommendation:** Option C — publish with "Future Work" note, add embeddings in v2.
+**Root causes identified:**
+1. LLM generates placeholder imports (`"path/to/pkg/..."`)
+2. Complex journeys exceed model capability (Haiku)
+3. Injected context adds noise on simple tasks
 
 ---
 
-## Phased Roadmap
+## Phased Roadmap: Eval Stabilization
 
-### Phase 1: Critical Fixes (Week 1)
+### Phase E1: Cleanup (Target: 70%)
 
-**Goal:** Unblock publishable prototype
+**Goal:** Remove false failures, fix obvious bugs
 
-- [ ] **Add Dream eval scenarios**
-  - [ ] `dream_source_coverage.yaml` — Test all sources sampled
-  - [ ] `dream_insight_quality.yaml` — Test insight extraction rate
-  - Effort: 2 days
+- [ ] **Cognition eval cleanup**
+  - [ ] Remove/relocate 18 unimplemented scenario types
+  - [ ] Fix jwt-specific precision test (tune threshold or corpus)
+  - [ ] Fix Dream source coverage (ensure all sources sampled)
 
-- [ ] **Implement Git source**
-  - [ ] Create `internal/cognition/sources/git.go`
-  - [ ] Sample recent commits, diffs, blame
-  - [ ] Extract decision/pattern insights
-  - Effort: 3 days
+- [ ] **E2E journey cleanup**
+  - [ ] Investigate 0% completion journeys - why builds fail
+  - [ ] Fix or remove the 2 regression journeys
 
-- [ ] **Add Dream source coverage metrics**
-  - [ ] Track which sources sampled per Dream cycle
-  - [ ] Report in eval results
-  - Effort: 1 day
-
-**Phase 1 Total:** ~6 days
+**Expected result:** Cognition 80%+, E2E 70%+
 
 ---
 
-### Phase 2: Polish (Week 2)
+### Phase E2: Quality (Target: 85%)
 
-**Goal:** Meet latency guarantees, improve reliability
+**Goal:** Improve context relevance, reduce noise
 
-- [ ] **Optimize Reflex latency**
-  - [ ] Profile current path
-  - [ ] Optimize query order (FTS vs category lookup)
-  - [x] Target: <20ms (currently ~11ms) ✓
-  - Effort: 2-3 days
+- [ ] **Context injection quality**
+  - [ ] Add relevance threshold - don't inject low-confidence results
+  - [ ] Limit context to top-K most relevant items
+  - [ ] Test: regressions should become ties or wins
 
-- [ ] **Add latency timeouts**
-  - [ ] Reflect: 250ms timeout with fallback
-  - [ ] Resolve: 150ms timeout with fallback
-  - [ ] Graceful degradation to Fast path
-  - Effort: 2 days
+- [ ] **Journey acceptance tuning**
+  - [ ] Review failing journeys - are expectations realistic?
+  - [ ] Adjust acceptance criteria where appropriate
 
-**Phase 2 Total:** ~5 days
+**Expected result:** Cognition 85%+, E2E 80%+
 
 ---
 
-### Phase 3: Feature Completeness (Weeks 3-4)
+### Phase E3: Robustness (Target: 90%+)
 
-**Goal:** Full paper-implementation alignment
+**Goal:** Consistent >90% across multiple runs
 
-- [ ] **Embeddings decision**
-  - [ ] If implementing: integrate sqlite-vec, add embedding model
-  - [ ] If not: update paper to reflect keyword-based approach
-  - Effort: 10-15 days (if implementing) or 1 day (if updating paper)
+- [ ] **Flakiness reduction**
+  - [ ] Identify non-deterministic failures
+  - [ ] Add retries or fix root causes
+  - [ ] Run eval suite 3x, all should pass
 
-- [ ] **Entity relationship discovery**
-  - [ ] Simple: concept co-occurrence graph
-  - [ ] Or: LLM-based relationship extraction
-  - Effort: 5 days
+- [ ] **Model capability alignment**
+  - [ ] Tag journeys by required model capability
+  - [ ] Complex journeys require Sonnet, not Haiku
+  - [ ] CI runs appropriate subset per model
 
-- [ ] **Dream insight embeddings**
-  - [ ] Embed Dream outputs
-  - [ ] Store in vector index
-  - [ ] Enable semantic search over insights
-  - Effort: 3 days
-
-**Phase 3 Total:** 8-23 days (depending on embeddings decision)
+**Expected result:** Consistent 90%+ on both suites
 
 ---
 
-### Phase 4: Literature-Grounded Evals (Weeks 5-6)
+## Blocked Until Evals Pass
 
-**Goal:** Eval scenarios from established software engineering sources
+The following work is **blocked** until >90% evals:
 
-- [ ] **Clean Code evals**
-  - [ ] Naming conventions
-  - [ ] Function size/complexity
-  - [ ] Formatting rules
-
-- [ ] **Refactoring evals**
-  - [ ] Code smell detection
-  - [ ] Transformation suggestions
-
-- [ ] **DDD evals**
-  - [ ] Bounded context enforcement
-  - [ ] Ubiquitous language consistency
-
-- [ ] **Design Patterns evals**
-  - [ ] Pattern recognition
-  - [ ] Appropriate pattern suggestion
-
-**Phase 4 Total:** ~10 days
+| Feature | Reason Blocked |
+|---------|----------------|
+| Embeddings implementation | Can't validate without passing evals |
+| Git Dream source | Core evals must pass first |
+| Entity relationships | Polish feature, not priority |
+| Literature-grounded evals | Need base evals working first |
+| New cognitive modes | No expansion until stability |
 
 ---
 
-## Timeline Summary
+## Success Criteria
 
-| Phase | Duration | Milestone |
-|-------|----------|-----------|
-| Phase 1: Critical | 1 week | 85% publishable |
-| Phase 2: Polish | 1 week | 95% publishable |
-| Phase 3: Complete | 2-3 weeks | 100% paper-aligned |
-| Phase 4: Literature | 1-2 weeks | Quality-grounded evals |
+| Milestone | Cognition | E2E Journey | Overall |
+|-----------|-----------|-------------|---------|
+| Current | 44% | 50% | 47% |
+| Phase E1 | 80% | 70% | 75% |
+| Phase E2 | 85% | 80% | 82% |
+| Phase E3 | 90%+ | 90%+ | **90%+** |
 
-**Minimum viable publication:** 2 weeks (Phases 1-2)
-**Full feature parity:** 5-6 weeks (Phases 1-4)
-
----
-
-## Success Metrics
-
-### For Publication
-
-- [ ] All cognitive modes implemented and tested
-- [ ] Dream evals pass at >80%
-- [x] Reflex latency <20ms (P95) — currently ~11ms ✓
-- [ ] ABR average >0.75
-- [ ] Overall eval pass rate >90%
-
-### For v1.0 Release
-
-- [ ] Embeddings implemented OR paper updated
-- [ ] Entity relationships working
-- [ ] Literature-grounded evals for 3+ books
-- [ ] Real-project validation (not just synthetic corpus)
+**Mandate complete when:** 3 consecutive runs of full eval suite all pass at >90%.
 
 ---
 
 ## Open Questions
 
-1. **Embeddings:** Implement true vector similarity or stay with keyword matching?
-2. **Entity relationships:** Simple co-occurrence or LLM-based extraction?
-3. **Literature evals:** Which books to prioritize first?
-4. **Real-world testing:** Which project to use for validation beyond Cortex itself?
+1. **Unimplemented scenarios:** Remove from cognition eval or implement handlers?
+2. **Regression journeys:** Fix context injection or remove journeys?
+3. **Model requirements:** Which journeys are Haiku-appropriate vs Sonnet-required?
 
 ---
 
@@ -279,11 +231,11 @@ The paper describes embedding similarity, but implementation uses keyword/tag ma
 - [x] Session accumulation evals
 - [x] Conflict detection evals
 - [x] Claude Code integration
-- [x] `--cognition` flag for eval command
-- [x] Test isolation for evals (temp DB with corpus)
-- [x] ABSTRACT.md with initial results (87% pass, ABR 0.77)
-- [x] Related Work section with benchmark positioning
+- [x] CLI-based Cortex for E2E testing
+- [x] LLM-as-judge for code review acceptance
+- [x] 5 Cortex-proof E2E journeys
+- [x] Established eval baseline (47% overall)
 
 ---
 
-*This roadmap is a living document. Update as gaps are closed and priorities shift.*
+*This roadmap is a living document. Mandate: >90% evals before new features.*

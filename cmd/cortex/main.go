@@ -2266,6 +2266,7 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 
 	evaluator := eval.NewCognitionEvaluator(cortex)
 	evaluator.SetVerbose(verbose)
+	evaluator.SetProvider(provider)
 
 	ctx := context.Background()
 
@@ -2383,46 +2384,17 @@ func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journe
 		fmt.Printf("  Sessions: %d | Events: %d | Tasks: %d\n",
 			len(journey.Sessions), journey.TotalEvents(), journey.TotalTasks())
 
-		// Create Cortex instance (mock for dry-run)
-		var cortex cognition.Cortex
-		if dryRun {
-			mock := eval.NewMockCortex()
-			cortex = mock
-		} else {
-			// Create real Cortex with temp storage for isolation
-			tmpDir, err := os.MkdirTemp("", "cortex-e2e-journey-*")
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error: Failed to create temp directory: %v\n", err)
-				failCount++
-				continue
-			}
-			defer os.RemoveAll(tmpDir)
-
-			cfg := &config.Config{
-				ContextDir: tmpDir,
-			}
-			if err := cfg.EnsureDirectories(); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error: Failed to create directories: %v\n", err)
-				failCount++
-				continue
-			}
-
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error: Failed to create storage: %v\n", err)
-				failCount++
-				continue
-			}
-			defer store.Close()
-
-			realCortex, err := intcognition.New(store, provider, cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error: Failed to create Cortex: %v\n", err)
-				failCount++
-				continue
-			}
-			cortex = realCortex
+		// Create CLI-based Cortex for E2E testing
+		// This tests the real system end-to-end via CLI commands
+		cliCortex, err := eval.NewCLICortex(verbose)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: Failed to create CLI Cortex: %v\n", err)
+			failCount++
+			continue
 		}
+		defer cliCortex.Cleanup()
+
+		var cortex cognition.Cortex = cliCortex
 
 		// Create evaluator and run journey
 		// Pass "." as projectDir since scaffold paths in journey YAML are relative to cwd
