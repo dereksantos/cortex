@@ -1,0 +1,22 @@
+id: testing-patterns
+name: "Go testing conventions"
+
+context:
+  - type: decision
+    content: "Use standard library testing only, no testify or assertion libraries"
+  - type: pattern
+    content: "Table-driven tests with t.Run subtests for organization"
+  - type: pattern
+    content: "Test function naming: TestType_Method for method tests"
+
+tests:
+  - id: testing-lib
+    query: "What testing library should I use?"
+    expect:
+      includes: ["standard library", "testing"]
+      excludes: ["testify", "assert"]
+
+  - id: test-structure
+    query: "How should I structure my tests?"
+    expect:
+      includes: ["table", "t.Run"]

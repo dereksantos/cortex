@@ -22,6 +22,7 @@ import (
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/cognition/sources"
 	"github.com/dereksantos/cortex/internal/eval"
+	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/queue"
@@ -67,6 +68,8 @@ func main() {
 		handleTest()
 	case "eval":
 		handleEval()
+	case "evalv2":
+		handleEvalV2()
 	case "stats":
 		handleStats()
 	case "status":
@@ -1779,6 +1782,7 @@ func handleEval() {
 	journeyPath := "" // New: --journey flag for specific journey file
 	judgeProviderName := ""    // --judge or -j: LLM provider for code review judge
 	judgeModelOverride := ""   // --judge-model: Model for judge provider
+	persistMode := "all"       // --persist: Persistence mode (all, sqlite, jsonl, none)
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -1838,6 +1842,11 @@ func handleEval() {
 				judgeModelOverride = os.Args[i+1]
 				i++
 			}
+		case arg == "--persist":
+			if i+1 < len(os.Args) {
+				persistMode = os.Args[i+1]
+				i++
+			}
 		case arg == "--help" || arg == "-h":
 			fmt.Println("Usage: cortex eval [options]")
 			fmt.Println()
@@ -1855,6 +1864,7 @@ func handleEval() {
 			fmt.Println("  --judge-model <model>  Model for judge provider")
 			fmt.Println("  --dry-run              Use mock provider (no LLM calls, instant)")
 			fmt.Println("  --output, -o <format>  Output format: human, json (default: human)")
+			fmt.Println("  --persist <mode>       Persist results: all, sqlite, jsonl, none (default: all)")
 			fmt.Println("  --verbose, -v          Show detailed output")
 			fmt.Println("  --help, -h             Show this help")
 			fmt.Println()
@@ -1982,7 +1992,7 @@ func handleEval() {
 
 	// Check for -t e2e (E2E Journey Eval) - new style
 	if evalType == "e2e" {
-		runE2EJourneyEval(provider, judgeProvider, journeyPath, dryRun, verbose, outputFormat)
+		runE2EJourneyEval(provider, judgeProvider, journeyPath, dryRun, verbose, outputFormat, persistMode, cfg)
 		return
 	}
 
@@ -2126,6 +2136,15 @@ func handleEval() {
 		}
 	}
 
+	// Set model on run for persistence
+	if run != nil {
+		if providerName == "anthropic" {
+			run.Model = cfg.AnthropicModel
+		} else {
+			run.Model = cfg.OllamaModel
+		}
+	}
+
 	// Output results
 	reporter := eval.NewReporter(verbose)
 	switch outputFormat {
@@ -2138,6 +2157,21 @@ func handleEval() {
 		if err := reporter.ReportHuman(os.Stdout, run); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to write report: %v\n", err)
 			os.Exit(1)
+		}
+	}
+
+	// Persist results
+	if persistMode != "none" {
+		persister, err := eval.NewPersister(cfg, eval.ParsePersistMode(persistMode))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create persister: %v\n", err)
+		} else {
+			defer persister.Close()
+			if err := persister.PersistRun(run); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
+			} else if verbose {
+				fmt.Printf("Results persisted (mode: %s)\n", persistMode)
+			}
 		}
 	}
 
@@ -2334,7 +2368,7 @@ func runCognitionEvals(scenarios []*eval.CognitionScenario, verbose bool, output
 // runE2EJourneyEval runs E2E journey-based evaluations.
 // These are generative evals that test actual development outcomes by having
 // an LLM complete implementation tasks with and without Cortex context.
-func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journeyPath string, dryRun, verbose bool, outputFormat string) {
+func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journeyPath string, dryRun, verbose bool, outputFormat string, persistMode string, cfg *config.Config) {
 	ctx := context.Background()
 
 	// Load journey(s)
@@ -2405,6 +2439,13 @@ func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journe
 		// Pass "." as projectDir since scaffold paths in journey YAML are relative to cwd
 		evaluator := eval.NewJourneyEvaluator(cortex, provider, ".", verbose)
 		evaluator.SetJudgeProvider(judgeProvider)
+		// Set provider info for persistence
+		providerName := provider.Name()
+		modelName := cfg.OllamaModel
+		if providerName == "anthropic" {
+			modelName = cfg.AnthropicModel
+		}
+		evaluator.SetProviderInfo(providerName, modelName)
 		result, err := evaluator.RunJourney(ctx, journey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  Error: %v\n", err)
@@ -2441,6 +2482,24 @@ func runE2EJourneyEval(provider llm.Provider, judgeProvider llm.Provider, journe
 	// JSON output if requested
 	if outputFormat == "json" {
 		printE2EJourneyResultsJSON(allResults)
+	}
+
+	// Persist results
+	if persistMode != "none" && len(allResults) > 0 {
+		persister, err := eval.NewPersister(cfg, eval.ParsePersistMode(persistMode))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to create persister: %v\n", err)
+		} else {
+			defer persister.Close()
+			for _, result := range allResults {
+				if err := persister.PersistE2EJourney(result); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: Failed to persist journey %s: %v\n", result.JourneyID, err)
+				}
+			}
+			if verbose {
+				fmt.Printf("Results persisted (mode: %s)\n", persistMode)
+			}
+		}
 	}
 
 	// Exit with error if pass rate is below threshold
@@ -2527,6 +2586,190 @@ func printE2EJourneyResultsJSON(results []*eval.E2EJourneyResult) {
 		return
 	}
 	fmt.Println(string(data))
+}
+
+// handleEvalV2 runs the simplified unified eval system.
+// Usage: cortex evalv2 [-s scenario.yaml] [-d dir] [-p provider] [-v]
+func handleEvalV2() {
+	// Parse flags
+	scenarioPath := ""
+	scenarioDir := "test/evals/v2"
+	providerName := "ollama"
+	modelOverride := ""
+	verbose := false
+	outputFormat := "human"
+	dryRun := false
+
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		switch {
+		case arg == "-v" || arg == "--verbose":
+			verbose = true
+		case arg == "--dry-run":
+			dryRun = true
+		case arg == "-s" || arg == "--scenario":
+			if i+1 < len(os.Args) {
+				scenarioPath = os.Args[i+1]
+				i++
+			}
+		case arg == "-d" || arg == "--dir":
+			if i+1 < len(os.Args) {
+				scenarioDir = os.Args[i+1]
+				i++
+			}
+		case arg == "-p" || arg == "--provider":
+			if i+1 < len(os.Args) {
+				providerName = os.Args[i+1]
+				i++
+			}
+		case arg == "-m" || arg == "--model":
+			if i+1 < len(os.Args) {
+				modelOverride = os.Args[i+1]
+				i++
+			}
+		case arg == "-o" || arg == "--output":
+			if i+1 < len(os.Args) {
+				outputFormat = os.Args[i+1]
+				i++
+			}
+		case arg == "--summary":
+			// Show ABR trend
+			persister, err := evalv2.NewPersister()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
+				os.Exit(1)
+			}
+			defer persister.Close()
+
+			abrs, err := persister.GetTrend(10)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to get trend: %v\n", err)
+				os.Exit(1)
+			}
+
+			evalv2.ReportTrend(os.Stdout, abrs)
+			return
+		case arg == "-h" || arg == "--help":
+			fmt.Println(`Usage: cortex evalv2 [options]
+
+Unified eval system measuring ABR (Agentic Benefit Ratio).
+
+Options:
+  -s, --scenario FILE    Run single scenario
+  -d, --dir DIR          Scenario directory (default: test/evals/v2)
+  -p, --provider NAME    LLM provider: ollama, anthropic (default: ollama)
+  -m, --model NAME       Model override
+  -o, --output FORMAT    Output: human, json (default: human)
+  -v, --verbose          Verbose output
+  --dry-run              Use mock provider
+  --summary              Show ABR trend over recent runs
+  -h, --help             Show this help
+
+Examples:
+  cortex evalv2                    # Run all scenarios
+  cortex evalv2 -s auth.yaml       # Run single scenario
+  cortex evalv2 --summary          # Show ABR trend`)
+			return
+		}
+	}
+
+	// Create provider
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Apply model override
+	if modelOverride != "" {
+		if providerName == "anthropic" {
+			cfg.AnthropicModel = modelOverride
+		} else {
+			cfg.OllamaModel = modelOverride
+		}
+	}
+
+	var provider llm.Provider
+	if dryRun {
+		provider = llm.NewMockProvider(10) // 10ms delay
+		if verbose {
+			fmt.Println("Using mock provider (dry-run mode)")
+		}
+	} else {
+		switch providerName {
+		case "ollama":
+			ollamaClient := llm.NewOllamaClient(cfg)
+			if !ollamaClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "Ollama is not running. Start with: ollama serve\n")
+				os.Exit(1)
+			}
+			provider = ollamaClient
+		case "anthropic":
+			anthropicClient := llm.NewAnthropicClient(cfg)
+			if !anthropicClient.IsAvailable() {
+				fmt.Fprintf(os.Stderr, "ANTHROPIC_API_KEY not set\n")
+				os.Exit(1)
+			}
+			provider = anthropicClient
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown provider: %s\n", providerName)
+			os.Exit(1)
+		}
+	}
+
+	// Create evaluator
+	evaluator := evalv2.New(provider)
+	evaluator.SetVerbose(verbose)
+
+	// Run eval
+	var results *evalv2.Results
+	if scenarioPath != "" {
+		scenario, err := evalv2.Load(scenarioPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load scenario: %v\n", err)
+			os.Exit(1)
+		}
+		scenarioResult, err := evaluator.RunScenario(scenario)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to run scenario: %v\n", err)
+			os.Exit(1)
+		}
+		results = evalv2.CalculateResults([]evalv2.ScenarioResult{*scenarioResult}, provider.Name(), "")
+	} else {
+		results, err = evaluator.Run(scenarioDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to run evals: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Report results
+	switch outputFormat {
+	case "json":
+		evalv2.ReportJSON(os.Stdout, results)
+	default:
+		evalv2.Report(os.Stdout, results)
+	}
+
+	// Persist results
+	persister, err := evalv2.NewPersister()
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
+		}
+	} else {
+		defer persister.Close()
+		if err := persister.Persist(results); err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
+			}
+		}
+	}
+
+	// Exit with error if ABR < threshold
+	if !results.Pass {
+		os.Exit(1)
+	}
 }
 
 func handleDaemon() {

@@ -1,0 +1,22 @@
+id: db-patterns
+name: "Database patterns"
+
+context:
+  - type: decision
+    content: "Use SQLite for storage with connection pooling"
+  - type: pattern
+    content: "Database schema with users, events, embeddings tables using foreign keys"
+  - type: pattern
+    content: "Connection pool configuration: max 10 connections, idle timeout 5 minutes"
+
+tests:
+  - id: db-choice
+    query: "What database should I use?"
+    expect:
+      includes: ["SQLite"]
+      excludes: ["PostgreSQL", "MySQL"]
+
+  - id: connection-pooling
+    query: "How do we handle database connections?"
+    expect:
+      includes: ["pool", "connection"]
