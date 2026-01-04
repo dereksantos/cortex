@@ -1,0 +1,35 @@
+id: go-naming
+name: "Go Naming Conventions"
+
+context:
+  - type: pattern
+    content: |
+      Established naming patterns in this project:
+      - Handlers: Handle* (HandleCreateUser, HandleGetOrder)
+      - Services: *Service (UserService, OrderService)
+      - Repositories: *Repository (UserRepository, OrderRepository)
+      - Interfaces: defined where used, not where implemented
+      - Constructors: New* (NewUserService, NewOrderRepository)
+  - type: decision
+    content: "PR #42 rejected: Don't use Manager suffix, use Service instead"
+  - type: decision
+    content: "PR #58 rejected: Interface should be in the consumer package, not provider"
+
+tests:
+  - id: new-service-name
+    query: "I need to add a new component for handling payments. What should I name the struct?"
+    expect:
+      includes: ["PaymentService"]
+      excludes: ["PaymentManager", "PaymentHandler", "PaymentController"]
+
+  - id: new-handler-name
+    query: "I'm adding an HTTP endpoint for creating invoices. What should I name the handler function?"
+    expect:
+      includes: ["HandleCreateInvoice"]
+      excludes: ["CreateInvoiceHandler", "InvoiceController"]
+
+  - id: constructor-name
+    query: "I need a constructor for my NotificationService. What should I name it?"
+    expect:
+      includes: ["NewNotificationService"]
+      excludes: ["CreateNotificationService", "MakeNotificationService"]
