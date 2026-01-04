@@ -1,0 +1,47 @@
+id: go-logging
+name: "Go Logging Patterns"
+
+context:
+  - type: pattern
+    content: |
+      Logging standards for this project:
+      - Use slog for all logging (Go 1.21+)
+      - Structured logging with key-value pairs
+      - Always include request_id in request handlers
+      - Never use fmt.Println or log.Println
+      - Log levels: Debug for verbose, Info for normal, Warn for recoverable, Error for failures
+  - type: pattern
+    content: |
+      Example logging middleware:
+      func RequestLogger(next http.Handler) http.Handler {
+          return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+              requestID := uuid.New().String()
+              ctx := context.WithValue(r.Context(), "request_id", requestID)
+              slog.Info("request started",
+                  "request_id", requestID,
+                  "method", r.Method,
+                  "path", r.URL.Path)
+              next.ServeHTTP(w, r.WithContext(ctx))
+          })
+      }
+  - type: decision
+    content: "PR #33: Changed fmt.Println to slog.Info with structured fields"
+
+tests:
+  - id: add-logging
+    query: "How should I add logging to track when a user is created?"
+    expect:
+      includes: ["slog"]
+      excludes: ["fmt.Println", "log.Println", "fmt.Printf"]
+
+  - id: error-logging
+    query: "I have an error in my handler, how should I log it?"
+    expect:
+      includes: ["slog.Error"]
+      excludes: ["log.Fatal", "panic", "fmt.Println"]
+
+  - id: debug-logging
+    query: "I want to add some debug output for troubleshooting. What should I use?"
+    expect:
+      includes: ["slog.Debug"]
+      excludes: ["fmt.Println", "log.Println"]
