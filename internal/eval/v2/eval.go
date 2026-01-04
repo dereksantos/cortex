@@ -12,7 +12,7 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// Evaluator runs scenarios and measures ABR.
+// Evaluator runs scenarios and compares Cortex vs baseline.
 type Evaluator struct {
 	provider llm.Provider
 	verbose  bool
@@ -62,30 +62,27 @@ func (e *Evaluator) RunScenario(s *Scenario) (*ScenarioResult, error) {
 		fmt.Printf("Running scenario: %s\n", s.ID)
 	}
 
-	// Create isolated Cortex instance
+	// Create isolated Cortex instance for this scenario
 	cortex, err := newCLICortex(e.verbose)
 	if err != nil {
 		return nil, fmt.Errorf("create cortex: %w", err)
 	}
 	defer cortex.cleanup()
 
-	// Store context
+	// Store context in Cortex
 	for _, ctx := range s.Context {
 		if err := cortex.store(ctx.Type, ctx.Content); err != nil {
 			return nil, fmt.Errorf("store context: %w", err)
 		}
 	}
 
-	// Ingest events
+	// Ingest events into database
 	if err := cortex.ingest(); err != nil {
 		return nil, fmt.Errorf("ingest: %w", err)
 	}
 
 	// Run tests
 	var testResults []TestResult
-	var totalABR float64
-	passCount := 0
-
 	for _, test := range s.Tests {
 		result, err := e.runTest(cortex, test)
 		if err != nil {
@@ -95,86 +92,75 @@ func (e *Evaluator) RunScenario(s *Scenario) (*ScenarioResult, error) {
 			continue
 		}
 		testResults = append(testResults, *result)
-		totalABR += result.ABR
-		if result.Pass {
-			passCount++
-		}
 	}
 
 	if len(testResults) == 0 {
-		return nil, fmt.Errorf("no tests passed")
+		return nil, fmt.Errorf("no tests completed")
 	}
 
-	avgABR := totalABR / float64(len(testResults))
-	passRate := float64(passCount) / float64(len(testResults))
-
-	return &ScenarioResult{
-		ScenarioID: s.ID,
-		Name:       s.Name,
-		Tests:      testResults,
-		ABR:        avgABR,
-		PassRate:   passRate,
-		Pass:       avgABR >= ABRThreshold,
-	}, nil
+	return CalculateScenarioResult(s.ID, s.Name, testResults), nil
 }
 
-// runTest executes a single test within a scenario.
+// runTest executes a single test: baseline vs cortex.
 func (e *Evaluator) runTest(cortex *cliCortex, test Test) (*TestResult, error) {
 	if e.verbose {
 		fmt.Printf("  Test: %s\n", test.ID)
 	}
 
-	// Get context with Fast mode (mechanical retrieval only)
-	fastContext, err := cortex.search(test.Query)
-	if err != nil {
-		return nil, fmt.Errorf("fast search: %w", err)
-	}
-
-	// Get context with Full mode (with agentic reranking)
-	// For now, Full mode uses the same search since we don't have mode flags yet
-	// TODO: Add --mode=full flag to cortex search
-	fullContext := fastContext
-
-	// Generate responses with LLM
 	ctx := context.Background()
 
-	fastPrompt := buildPrompt(test.Query, fastContext)
-	fastResponse, err := e.provider.Generate(ctx, fastPrompt)
+	// 1. BASELINE: Generate response WITHOUT any context
+	baselineResponse, err := e.provider.Generate(ctx, test.Query)
 	if err != nil {
-		return nil, fmt.Errorf("fast generate: %w", err)
+		return nil, fmt.Errorf("baseline generate: %w", err)
+	}
+	baselineScore := Score(baselineResponse, test.Expect)
+
+	// 2. CORTEX: Search for relevant context
+	cortexContext, err := cortex.search(test.Query)
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
 	}
 
-	fullPrompt := buildPrompt(test.Query, fullContext)
-	fullResponse, err := e.provider.Generate(ctx, fullPrompt)
+	// 3. CORTEX: Generate response WITH context
+	cortexPrompt := buildPrompt(test.Query, cortexContext)
+	cortexResponse, err := e.provider.Generate(ctx, cortexPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("full generate: %w", err)
+		return nil, fmt.Errorf("cortex generate: %w", err)
 	}
+	cortexScore := Score(cortexResponse, test.Expect)
 
-	// Score responses
-	fastScore := Score(fastResponse, test.Expect)
-	fullScore := Score(fullResponse, test.Expect)
-	abr := CalculateABR(fastScore, fullScore)
+	// 4. Calculate lift and winner
+	lift := CalculateLift(cortexScore, baselineScore)
+	winner := DetermineWinner(cortexScore, baselineScore)
 
 	if e.verbose {
-		fmt.Printf("    Fast: %.2f, Full: %.2f, ABR: %.2f\n", fastScore, fullScore, abr)
+		fmt.Printf("    Baseline: %.2f, Cortex: %.2f, Lift: %+.0f%%, Winner: %s\n",
+			baselineScore, cortexScore, lift*100, winner)
 	}
 
 	return &TestResult{
-		TestID:    test.ID,
-		Query:     test.Query,
-		FastScore: fastScore,
-		FullScore: fullScore,
-		ABR:       abr,
-		Pass:      abr >= ABRThreshold,
+		TestID:        test.ID,
+		Query:         test.Query,
+		BaselineScore: baselineScore,
+		CortexScore:   cortexScore,
+		Lift:          lift,
+		Winner:        winner,
+		Pass:          cortexScore >= baselineScore, // Cortex doesn't hurt
 	}, nil
 }
 
 // buildPrompt creates a prompt with context for the LLM.
-func buildPrompt(query, context string) string {
-	if context == "" {
+func buildPrompt(query, cortexContext string) string {
+	if cortexContext == "" {
 		return query
 	}
-	return fmt.Sprintf("Context:\n%s\n\nQuestion: %s", context, query)
+	return fmt.Sprintf(`You have access to the following context from previous work:
+
+%s
+
+Based on this context, answer the following question:
+%s`, cortexContext, query)
 }
 
 // cliCortex is a minimal CLI wrapper for eval purposes.
@@ -209,7 +195,7 @@ func newCLICortex(verbose bool) (*cliCortex, error) {
 		verbose:   verbose,
 	}
 
-	// Initialize
+	// Initialize Cortex in temp directory
 	if _, err := c.run("init"); err != nil {
 		c.cleanup()
 		return nil, err
