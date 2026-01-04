@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 )
 
 // Report writes human-readable results to the given writer.
 func Report(w io.Writer, results *Results) {
 	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "Eval Results\n")
-	fmt.Fprintf(w, "============\n\n")
+	fmt.Fprintf(w, "Eval Results: Baseline vs Cortex\n")
+	fmt.Fprintf(w, "=================================\n\n")
 
 	fmt.Fprintf(w, "Provider: %s\n", results.Provider)
 	if results.Model != "" {
@@ -22,16 +21,21 @@ func Report(w io.Writer, results *Results) {
 	// Summary
 	fmt.Fprintf(w, "Summary\n")
 	fmt.Fprintf(w, "-------\n")
-	fmt.Fprintf(w, "ABR:       %.2f", results.ABR)
-	if results.ABR >= ABRThreshold {
-		fmt.Fprintf(w, " (PASS)\n")
-	} else {
-		fmt.Fprintf(w, " (FAIL, need >= %.2f)\n", ABRThreshold)
-	}
-	fmt.Fprintf(w, "Pass Rate: %.0f%% (%d/%d scenarios)\n",
-		results.PassRate*100,
-		countPassing(results.Scenarios),
-		len(results.Scenarios))
+	fmt.Fprintf(w, "Avg Baseline Score: %.2f\n", results.AvgBaselineScore)
+	fmt.Fprintf(w, "Avg Cortex Score:   %.2f\n", results.AvgCortexScore)
+	fmt.Fprintf(w, "Avg Lift:           %+.0f%%\n", results.AvgLift*100)
+	fmt.Fprintf(w, "\n")
+
+	// Win/Loss
+	fmt.Fprintf(w, "Win/Loss\n")
+	fmt.Fprintf(w, "--------\n")
+	total := results.TotalCortexWins + results.TotalBaselineWins + results.TotalTies
+	fmt.Fprintf(w, "Cortex Wins:   %d/%d (%.0f%%)\n",
+		results.TotalCortexWins, total, percent(results.TotalCortexWins, total))
+	fmt.Fprintf(w, "Baseline Wins: %d/%d (%.0f%%)\n",
+		results.TotalBaselineWins, total, percent(results.TotalBaselineWins, total))
+	fmt.Fprintf(w, "Ties:          %d/%d (%.0f%%)\n",
+		results.TotalTies, total, percent(results.TotalTies, total))
 	fmt.Fprintf(w, "\n")
 
 	// Scenarios
@@ -40,17 +44,18 @@ func Report(w io.Writer, results *Results) {
 	for _, s := range results.Scenarios {
 		status := "PASS"
 		if !s.Pass {
-			status = "FAIL"
+			status = "REGRESS"
 		}
-		fmt.Fprintf(w, "%-40s ABR: %.2f [%s]\n", truncate(s.ScenarioID, 40), s.ABR, status)
+		fmt.Fprintf(w, "%-35s Lift: %+5.0f%% [%s]\n",
+			truncate(s.ScenarioID, 35), s.AvgLift*100, status)
 	}
 	fmt.Fprintf(w, "\n")
 
 	// Verdict
 	if results.Pass {
-		fmt.Fprintf(w, "VERDICT: PASS - ABR %.2f >= %.2f threshold\n", results.ABR, ABRThreshold)
+		fmt.Fprintf(w, "VERDICT: PASS - Cortex helps or doesn't hurt (lift: %+.0f%%)\n", results.AvgLift*100)
 	} else {
-		fmt.Fprintf(w, "VERDICT: FAIL - ABR %.2f < %.2f threshold\n", results.ABR, ABRThreshold)
+		fmt.Fprintf(w, "VERDICT: FAIL - Cortex causes regressions (lift: %+.0f%%)\n", results.AvgLift*100)
 	}
 }
 
@@ -65,53 +70,51 @@ func ReportJSON(w io.Writer, results *Results) error {
 func ReportSummary(w io.Writer, results *Results) {
 	status := "PASS"
 	if !results.Pass {
-		status = "FAIL"
+		status := "FAIL"
+		fmt.Fprintf(w, "Lift: %+.0f%% [%s] - Cortex: %d wins, Baseline: %d wins\n",
+			results.AvgLift*100, status, results.TotalCortexWins, results.TotalBaselineWins)
+		return
 	}
-	fmt.Fprintf(w, "ABR: %.2f [%s] (%d scenarios)\n",
-		results.ABR, status, len(results.Scenarios))
+	fmt.Fprintf(w, "Lift: %+.0f%% [%s] - Cortex: %d wins, Baseline: %d wins\n",
+		results.AvgLift*100, status, results.TotalCortexWins, results.TotalBaselineWins)
 }
 
-// ReportTrend writes ABR trend over recent runs.
-func ReportTrend(w io.Writer, abrs []float64) {
-	if len(abrs) == 0 {
+// ReportTrend writes lift trend over recent runs.
+func ReportTrend(w io.Writer, lifts []float64) {
+	if len(lifts) == 0 {
 		fmt.Fprintf(w, "No previous runs.\n")
 		return
 	}
 
-	fmt.Fprintf(w, "ABR Trend (last %d runs)\n", len(abrs))
-	fmt.Fprintf(w, "------------------------\n")
+	fmt.Fprintf(w, "Lift Trend (last %d runs)\n", len(lifts))
+	fmt.Fprintf(w, "-------------------------\n")
 
-	// ASCII chart
-	maxWidth := 40
-	for i, abr := range abrs {
-		barLen := int(abr * float64(maxWidth))
-		bar := strings.Repeat("=", barLen)
-		fmt.Fprintf(w, "%2d: [%-40s] %.2f\n", i+1, bar, abr)
+	// ASCII chart - show lift as bar from -100% to +100%
+	for i, lift := range lifts {
+		bar := liftBar(lift)
+		fmt.Fprintf(w, "%2d: %s %+.0f%%\n", i+1, bar, lift*100)
 	}
 
 	// Trend direction
-	if len(abrs) >= 2 {
-		first := abrs[0]
-		last := abrs[len(abrs)-1]
+	if len(lifts) >= 2 {
+		first := lifts[0]
+		last := lifts[len(lifts)-1]
 		diff := last - first
 		if diff > 0.05 {
-			fmt.Fprintf(w, "\nTrend: IMPROVING (+%.2f)\n", diff)
+			fmt.Fprintf(w, "\nTrend: IMPROVING\n")
 		} else if diff < -0.05 {
-			fmt.Fprintf(w, "\nTrend: DECLINING (%.2f)\n", diff)
+			fmt.Fprintf(w, "\nTrend: DECLINING\n")
 		} else {
 			fmt.Fprintf(w, "\nTrend: STABLE\n")
 		}
 	}
 }
 
-func countPassing(scenarios []ScenarioResult) int {
-	count := 0
-	for _, s := range scenarios {
-		if s.Pass {
-			count++
-		}
+func percent(n, total int) float64 {
+	if total == 0 {
+		return 0
 	}
-	return count
+	return float64(n) / float64(total) * 100
 }
 
 func truncate(s string, max int) string {
@@ -119,4 +122,42 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+// liftBar creates an ASCII bar for lift visualization
+// Negative lift shows bars going left, positive going right
+func liftBar(lift float64) string {
+	// Scale: -1.0 to +1.0 maps to -20 to +20 chars
+	width := 20
+	center := width
+
+	// Clamp lift to -1.0 to +1.0
+	if lift > 1.0 {
+		lift = 1.0
+	}
+	if lift < -1.0 {
+		lift = -1.0
+	}
+
+	bar := make([]byte, width*2+1)
+	for i := range bar {
+		bar[i] = ' '
+	}
+	bar[center] = '|' // Center marker
+
+	if lift >= 0 {
+		// Positive: fill right of center
+		chars := int(lift * float64(width))
+		for i := 0; i < chars; i++ {
+			bar[center+1+i] = '+'
+		}
+	} else {
+		// Negative: fill left of center
+		chars := int(-lift * float64(width))
+		for i := 0; i < chars; i++ {
+			bar[center-1-i] = '-'
+		}
+	}
+
+	return "[" + string(bar) + "]"
 }

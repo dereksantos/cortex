@@ -47,14 +47,19 @@ func (p *Persister) init() error {
 		timestamp TEXT NOT NULL,
 		provider TEXT,
 		model TEXT,
-		abr REAL,
+		avg_baseline_score REAL,
+		avg_cortex_score REAL,
+		avg_lift REAL,
+		cortex_wins INTEGER,
+		baseline_wins INTEGER,
+		ties INTEGER,
 		pass_rate REAL,
 		pass BOOLEAN,
 		scenarios_json TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_eval_runs_timestamp ON eval_runs(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_eval_runs_abr ON eval_runs(abr);
+	CREATE INDEX IF NOT EXISTS idx_eval_runs_lift ON eval_runs(avg_lift);
 	`
 	_, err := p.db.Exec(schema)
 	return err
@@ -71,9 +76,12 @@ func (p *Persister) Persist(results *Results) error {
 	}
 
 	_, err = p.db.Exec(`
-		INSERT INTO eval_runs (id, timestamp, provider, model, abr, pass_rate, pass, scenarios_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, results.Timestamp, results.Provider, results.Model, results.ABR, results.PassRate, results.Pass, string(scenariosJSON))
+		INSERT INTO eval_runs (id, timestamp, provider, model, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, results.Timestamp, results.Provider, results.Model,
+		results.AvgBaselineScore, results.AvgCortexScore, results.AvgLift,
+		results.TotalCortexWins, results.TotalBaselineWins, results.TotalTies,
+		results.PassRate, results.Pass, string(scenariosJSON))
 
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
@@ -85,7 +93,8 @@ func (p *Persister) Persist(results *Results) error {
 // GetLatest returns the most recent eval run.
 func (p *Persister) GetLatest() (*Results, error) {
 	row := p.db.QueryRow(`
-		SELECT timestamp, provider, model, abr, pass_rate, pass, scenarios_json
+		SELECT timestamp, provider, model, avg_baseline_score, avg_cortex_score, avg_lift,
+		       cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json
 		FROM eval_runs
 		ORDER BY timestamp DESC
 		LIMIT 1
@@ -93,7 +102,10 @@ func (p *Persister) GetLatest() (*Results, error) {
 
 	var r Results
 	var scenariosJSON string
-	err := row.Scan(&r.Timestamp, &r.Provider, &r.Model, &r.ABR, &r.PassRate, &r.Pass, &scenariosJSON)
+	err := row.Scan(&r.Timestamp, &r.Provider, &r.Model,
+		&r.AvgBaselineScore, &r.AvgCortexScore, &r.AvgLift,
+		&r.TotalCortexWins, &r.TotalBaselineWins, &r.TotalTies,
+		&r.PassRate, &r.Pass, &scenariosJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -108,10 +120,10 @@ func (p *Persister) GetLatest() (*Results, error) {
 	return &r, nil
 }
 
-// GetTrend returns ABR values over the last N runs.
+// GetTrend returns lift values over the last N runs.
 func (p *Persister) GetTrend(n int) ([]float64, error) {
 	rows, err := p.db.Query(`
-		SELECT abr FROM eval_runs
+		SELECT avg_lift FROM eval_runs
 		ORDER BY timestamp DESC
 		LIMIT ?
 	`, n)
@@ -120,21 +132,21 @@ func (p *Persister) GetTrend(n int) ([]float64, error) {
 	}
 	defer rows.Close()
 
-	var abrs []float64
+	var lifts []float64
 	for rows.Next() {
-		var abr float64
-		if err := rows.Scan(&abr); err != nil {
+		var lift float64
+		if err := rows.Scan(&lift); err != nil {
 			return nil, err
 		}
-		abrs = append(abrs, abr)
+		lifts = append(lifts, lift)
 	}
 
 	// Reverse to get chronological order
-	for i, j := 0, len(abrs)-1; i < j; i, j = i+1, j-1 {
-		abrs[i], abrs[j] = abrs[j], abrs[i]
+	for i, j := 0, len(lifts)-1; i < j; i, j = i+1, j-1 {
+		lifts[i], lifts[j] = lifts[j], lifts[i]
 	}
 
-	return abrs, nil
+	return lifts, nil
 }
 
 // Close closes the database connection.
