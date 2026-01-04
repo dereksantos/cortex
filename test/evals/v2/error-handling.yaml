@@ -1,0 +1,22 @@
+id: error-handling
+name: "Error handling patterns"
+
+context:
+  - type: pattern
+    content: "Wrap errors with context using fmt.Errorf and %w verb"
+  - type: decision
+    content: "Log errors BEFORE returning, not after"
+  - type: pattern
+    content: "Use sentinel errors for common cases like ErrNotFound, ErrUnauthorized"
+
+tests:
+  - id: wrap-errors
+    query: "How should I handle errors?"
+    expect:
+      includes: ["wrap", "context"]
+
+  - id: log-timing
+    query: "When should I log errors?"
+    expect:
+      includes: ["before", "return"]
+      excludes: ["after"]

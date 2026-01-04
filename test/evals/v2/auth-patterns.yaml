@@ -1,0 +1,27 @@
+id: auth-patterns
+name: "JWT authentication patterns"
+
+context:
+  - type: decision
+    content: "Use JWT for stateless authentication, avoid server-side sessions"
+  - type: pattern
+    content: "JWT tokens are generated with HS256 signing and 24h expiry, stored in httpOnly cookies"
+  - type: pattern
+    content: "Token validation via AuthMiddleware with Bearer scheme, returns 401 on invalid"
+
+tests:
+  - id: auth-approach
+    query: "How should I implement authentication?"
+    expect:
+      includes: ["JWT", "stateless"]
+      excludes: ["session", "cookie-based"]
+
+  - id: token-expiry
+    query: "What's the token expiry policy?"
+    expect:
+      includes: ["24h", "expiry"]
+
+  - id: validation-pattern
+    query: "How do I validate tokens?"
+    expect:
+      includes: ["middleware", "401"]
