@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+	"unsafe"
 
+	"github.com/viterin/vek"
 	_ "modernc.org/sqlite"
 
 	"github.com/dereksantos/cortex/pkg/config"
@@ -108,6 +110,16 @@ func (s *Storage) initSchema() error {
 		FOREIGN KEY(event_id) REFERENCES events(id)
 	);
 
+	-- Vector embeddings for semantic search
+	CREATE TABLE IF NOT EXISTS embeddings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		content_id TEXT NOT NULL,
+		content_type TEXT NOT NULL, -- event, insight
+		vector BLOB NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(content_id, content_type)
+	);
+
 	-- Full-text search index
 	CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
 		event_id,
@@ -126,6 +138,7 @@ func (s *Storage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entity_id);
 	CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
 	CREATE INDEX IF NOT EXISTS idx_insights_event ON insights(event_id);
+	CREATE INDEX IF NOT EXISTS idx_embeddings_content ON embeddings(content_id, content_type);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -242,9 +255,8 @@ func (s *Storage) GetRecentEvents(limit int) ([]*events.Event, error) {
 	return eventList, nil
 }
 
-// SearchEvents performs full-text search on events
+// SearchEvents performs text search on events (fallback when vectors unavailable).
 func (s *Storage) SearchEvents(query string, limit int) ([]*events.Event, error) {
-	// Simple LIKE search for now (we'll enhance with FTS later)
 	searchPattern := "%" + query + "%"
 	rows, err := s.db.Query(`
 		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
@@ -809,4 +821,121 @@ func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
 
 	json.Unmarshal([]byte(tagsJSON), &insight.Tags)
 	return &insight, nil
+}
+
+// VectorSearchResult represents a result from vector similarity search
+type VectorSearchResult struct {
+	ContentID   string
+	ContentType string
+	Content     string
+	Similarity  float64
+}
+
+// StoreEmbedding stores a vector embedding for content
+func (s *Storage) StoreEmbedding(contentID, contentType string, vector []float32) error {
+	// Serialize vector to bytes
+	vectorBytes := vectorToBytes(vector)
+
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO embeddings (content_id, content_type, vector, created_at)
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+	`, contentID, contentType, vectorBytes)
+
+	return err
+}
+
+// SearchByVector finds content similar to the query vector
+func (s *Storage) SearchByVector(queryVector []float32, limit int, threshold float64) ([]VectorSearchResult, error) {
+	// Get all embeddings
+	rows, err := s.db.Query(`
+		SELECT e.content_id, e.content_type, e.vector, ev.tool_result
+		FROM embeddings e
+		LEFT JOIN events ev ON e.content_id = ev.id AND e.content_type = 'event'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []VectorSearchResult
+	for rows.Next() {
+		var contentID, contentType string
+		var vectorBytes []byte
+		var content sql.NullString
+
+		if err := rows.Scan(&contentID, &contentType, &vectorBytes, &content); err != nil {
+			continue
+		}
+
+		storedVector := bytesToVector(vectorBytes)
+		similarity := cosineSimilarity(queryVector, storedVector)
+
+		if similarity >= threshold {
+			results = append(results, VectorSearchResult{
+				ContentID:   contentID,
+				ContentType: contentType,
+				Content:     content.String,
+				Similarity:  similarity,
+			})
+		}
+	}
+
+	// Sort by similarity descending
+	sortBySimilarity(results)
+
+	// Limit results
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
+}
+
+// vectorToBytes serializes a float32 vector to bytes
+func vectorToBytes(v []float32) []byte {
+	buf := make([]byte, len(v)*4)
+	for i, f := range v {
+		bits := *(*uint32)(unsafe.Pointer(&f))
+		buf[i*4] = byte(bits)
+		buf[i*4+1] = byte(bits >> 8)
+		buf[i*4+2] = byte(bits >> 16)
+		buf[i*4+3] = byte(bits >> 24)
+	}
+	return buf
+}
+
+// bytesToVector deserializes bytes to a float32 vector
+func bytesToVector(b []byte) []float32 {
+	v := make([]float32, len(b)/4)
+	for i := range v {
+		bits := uint32(b[i*4]) | uint32(b[i*4+1])<<8 | uint32(b[i*4+2])<<16 | uint32(b[i*4+3])<<24
+		v[i] = *(*float32)(unsafe.Pointer(&bits))
+	}
+	return v
+}
+
+// cosineSimilarity computes cosine similarity between two vectors using SIMD
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	// Convert float32 to float64 for vek
+	a64 := make([]float64, len(a))
+	b64 := make([]float64, len(b))
+	for i := range a {
+		a64[i] = float64(a[i])
+		b64[i] = float64(b[i])
+	}
+	return vek.CosineSimilarity(a64, b64)
+}
+
+// sortBySimilarity sorts results by similarity descending
+func sortBySimilarity(results []VectorSearchResult) {
+	for i := 0; i < len(results); i++ {
+		for j := i + 1; j < len(results); j++ {
+			if results[j].Similarity > results[i].Similarity {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
 }

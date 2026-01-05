@@ -17,8 +17,9 @@ type Config struct {
 	SkipPatterns []string `json:"skip_patterns"`
 
 	// LLM settings - Ollama
-	OllamaURL   string `json:"ollama_url"`
-	OllamaModel string `json:"ollama_model"`
+	OllamaURL            string `json:"ollama_url"`
+	OllamaModel          string `json:"ollama_model"`
+	OllamaEmbeddingModel string `json:"ollama_embedding_model"`
 
 	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
 	AnthropicModel string `json:"anthropic_model,omitempty"`
@@ -42,11 +43,12 @@ func Default() *Config {
 			".context",
 			"__pycache__",
 		},
-		OllamaURL:      "http://localhost:11434",
-		OllamaModel:    "qwen2.5-coder:1.5b",
-		AnthropicModel: "claude-3-5-haiku-20241022",
-		EnableGraph:    true,
-		EnableVector: false,
+		OllamaURL:            "http://localhost:11434",
+		OllamaModel:          "qwen2.5-coder:1.5b",
+		OllamaEmbeddingModel: "nomic-embed-text",
+		AnthropicModel:       "claude-3-5-haiku-20241022",
+		EnableGraph:  true,
+		EnableVector: true,
 	}
 }
 
@@ -97,6 +99,7 @@ func (c *Config) EnsureDirectories() error {
 		filepath.Join(c.ContextDir, "knowledge", "strategies"),
 		filepath.Join(c.ContextDir, "logs"),
 		filepath.Join(c.ContextDir, "db"),
+		filepath.Join(c.ContextDir, "evals"),
 	}
 
 	for _, dir := range dirs {

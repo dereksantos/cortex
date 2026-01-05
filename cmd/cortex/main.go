@@ -1085,6 +1085,28 @@ func handleIngest() {
 	}
 
 	fmt.Printf("✅ Ingested %d events to database\n", processed)
+
+	// Generate embeddings if vector search is enabled
+	if cfg.EnableVector && processed > 0 {
+		ollamaClient := llm.NewOllamaClient(cfg)
+		if ollamaClient.IsAvailable() && ollamaClient.IsEmbeddingModelAvailable() {
+			ctx := context.Background()
+			events, _ := store.GetRecentEvents(processed)
+			embedded := 0
+			for _, event := range events {
+				if event.ToolResult != "" {
+					vec, err := ollamaClient.Embed(ctx, event.ToolResult)
+					if err == nil {
+						store.StoreEmbedding(event.ID, "event", vec)
+						embedded++
+					}
+				}
+			}
+			if embedded > 0 {
+				fmt.Printf("🧠 Generated %d embeddings\n", embedded)
+			}
+		}
+	}
 }
 
 // handleAnalyze runs LLM analysis on recent unanalyzed events
@@ -2482,21 +2504,46 @@ func handleSearch() {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to search insights: %v\n", err)
 	}
 
-	// Search events
-	events, err := store.SearchEvents(query, 10)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to search events: %v\n", err)
-		os.Exit(1)
+	// Search events - use vector search if enabled
+	var vectorResults []storage.VectorSearchResult
+	useVectorSearch := false
+
+	if cfg.EnableVector {
+		ollamaClient := llm.NewOllamaClient(cfg)
+		if ollamaClient.IsAvailable() {
+			ctx := context.Background()
+			queryVec, err := ollamaClient.Embed(ctx, query)
+			if err == nil {
+				vectorResults, err = store.SearchByVector(queryVec, 10, 0.3)
+				if err == nil && len(vectorResults) > 0 {
+					useVectorSearch = true
+				}
+			}
+		}
+	}
+
+	// Fallback to text search if vector search not available
+	var events []*events.Event
+	if !useVectorSearch {
+		events, err = store.SearchEvents(query, 10)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to search events: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Display results
-	if len(insights) == 0 && len(events) == 0 {
+	hasInsights := len(insights) > 0
+	hasEvents := len(events) > 0
+	hasVectorResults := len(vectorResults) > 0
+
+	if !hasInsights && !hasEvents && !hasVectorResults {
 		fmt.Println("No results found")
 		return
 	}
 
 	// Show insights first
-	if len(insights) > 0 {
+	if hasInsights {
 		fmt.Printf("Found %d insights:\n\n", len(insights))
 		for i, insight := range insights {
 			fmt.Printf("%d. [%s] %s\n", i+1, insight.Category, insight.Summary)
@@ -2507,8 +2554,21 @@ func handleSearch() {
 		}
 	}
 
-	// Show events if any
-	if len(events) > 0 {
+	// Show vector search results (semantic matches)
+	if hasVectorResults {
+		fmt.Printf("Found %d semantic matches:\n\n", len(vectorResults))
+		for i, result := range vectorResults {
+			preview := result.Content
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			fmt.Printf("%d. [%.0f%% match] %s\n", i+1, result.Similarity*100, preview)
+			fmt.Println()
+		}
+	}
+
+	// Show text search events (fallback)
+	if hasEvents {
 		fmt.Printf("Found %d events:\n\n", len(events))
 		for i, event := range events {
 			fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))

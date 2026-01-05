@@ -16,16 +16,22 @@ import (
 
 // OllamaClient handles communication with Ollama
 type OllamaClient struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
+	baseURL        string
+	model          string
+	embeddingModel string
+	httpClient     *http.Client
 }
 
 // NewOllamaClient creates a new Ollama client
 func NewOllamaClient(cfg *config.Config) *OllamaClient {
+	embeddingModel := cfg.OllamaEmbeddingModel
+	if embeddingModel == "" {
+		embeddingModel = "nomic-embed-text"
+	}
 	return &OllamaClient{
-		baseURL: cfg.OllamaURL,
-		model:   cfg.OllamaModel,
+		baseURL:        cfg.OllamaURL,
+		model:          cfg.OllamaModel,
+		embeddingModel: embeddingModel,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -104,9 +110,9 @@ func (c *OllamaClient) IsModelAvailable() bool {
 		return false
 	}
 
-	// Check if our model is in the list
+	// Check if our model is in the list (match exactly or with :latest suffix)
 	for _, model := range modelsResp.Models {
-		if model.Name == c.model {
+		if model.Name == c.model || model.Name == c.model+":latest" {
 			return true
 		}
 	}
@@ -167,5 +173,84 @@ func (c *OllamaClient) generateInternal(prompt, system string) (string, error) {
 	}
 
 	return ollamaResp.Response, nil
+}
+
+// EmbedRequest represents a request to Ollama's embedding endpoint
+type EmbedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// EmbedResponse represents a response from Ollama's embedding endpoint
+type EmbedResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
+}
+
+// Embed generates embeddings for text using Ollama
+func (c *OllamaClient) Embed(ctx context.Context, text string) ([]float32, error) {
+	reqBody := EmbedRequest{
+		Model: c.embeddingModel,
+		Input: text,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/embed", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call Ollama embed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama embed returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var embedResp EmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
+		return nil, fmt.Errorf("failed to decode embed response: %w", err)
+	}
+
+	if len(embedResp.Embeddings) == 0 {
+		return nil, fmt.Errorf("no embeddings returned")
+	}
+
+	return embedResp.Embeddings[0], nil
+}
+
+// IsEmbeddingModelAvailable checks if the embedding model is available
+func (c *OllamaClient) IsEmbeddingModelAvailable() bool {
+	resp, err := c.httpClient.Get(c.baseURL + "/api/tags")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return false
+	}
+
+	var modelsResp ModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		return false
+	}
+
+	for _, model := range modelsResp.Models {
+		// Match exactly or with :latest suffix (e.g., "nomic-embed-text" matches "nomic-embed-text:latest")
+		if model.Name == c.embeddingModel || model.Name == c.embeddingModel+":latest" {
+			return true
+		}
+	}
+
+	return false
 }
 
