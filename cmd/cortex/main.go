@@ -1919,6 +1919,9 @@ Examples:
 	evaluator := evalv2.New(provider)
 	evaluator.SetVerbose(verbose)
 
+	// Track start time for duration measurement
+	startTime := time.Now()
+
 	// Run eval
 	var results *evalv2.Results
 	if scenarioPath != "" {
@@ -1941,6 +1944,9 @@ Examples:
 		}
 	}
 
+	// Calculate duration
+	durationMs := time.Since(startTime).Milliseconds()
+
 	// Report results
 	switch outputFormat {
 	case "json":
@@ -1957,7 +1963,7 @@ Examples:
 		}
 	} else {
 		defer persister.Close()
-		if err := persister.Persist(results); err != nil {
+		if err := persister.Persist(results, durationMs); err != nil {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
 			}
