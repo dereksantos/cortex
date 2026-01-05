@@ -129,10 +129,11 @@ type TestResult struct {
 	// Pass: Cortex score >= baseline (Cortex doesn't hurt)
 	Pass bool `json:"pass"`
 
-	// ABR metrics (only populated when expect.ranking is specified)
+	// Retrieval quality metrics (only populated when expect.ranking is specified)
 	HasRanking bool    `json:"has_ranking,omitempty"`
-	FastNDCG   float64 `json:"fast_ndcg,omitempty"` // NDCG for Fast mode (Reflex only)
-	FullNDCG   float64 `json:"full_ndcg,omitempty"` // NDCG for Full mode (Reflex + Reflect)
+	NDCG       float64 `json:"ndcg,omitempty"`      // NDCG against expected ranking (retrieval quality)
+	FastNDCG   float64 `json:"fast_ndcg,omitempty"` // NDCG for Fast mode (= NDCG until Reflect wired)
+	FullNDCG   float64 `json:"full_ndcg,omitempty"` // NDCG for Full mode (1.0 until Reflect wired)
 	ABR        float64 `json:"abr,omitempty"`       // FastNDCG / FullNDCG
 }
 
@@ -152,12 +153,13 @@ type ScenarioResult struct {
 	BaselineWins int `json:"baseline_wins"`
 	Ties         int `json:"ties"`
 
-	// ABR metrics (averaged across tests with ranking)
-	HasABR      bool               `json:"has_abr,omitempty"`
-	AvgFastNDCG float64            `json:"avg_fast_ndcg,omitempty"`
-	AvgFullNDCG float64            `json:"avg_full_ndcg,omitempty"`
-	AvgABR      float64            `json:"avg_abr,omitempty"`
-	ABRByDepth  map[int]float64    `json:"abr_by_depth,omitempty"` // ABR at each tree depth
+	// Retrieval quality metrics (averaged across tests with ranking)
+	HasRanking   bool            `json:"has_ranking,omitempty"`
+	AvgNDCG      float64         `json:"avg_ndcg,omitempty"`      // Retrieval quality
+	NDCGByDepth  map[int]float64 `json:"ndcg_by_depth,omitempty"` // NDCG at each tree depth
+	AvgFastNDCG  float64         `json:"avg_fast_ndcg,omitempty"` // For ABR (= AvgNDCG until Reflect)
+	AvgFullNDCG  float64         `json:"avg_full_ndcg,omitempty"` // For ABR (1.0 until Reflect)
+	AvgABR       float64         `json:"avg_abr,omitempty"`       // FastNDCG / FullNDCG
 
 	// Pass: Cortex doesn't cause regressions (lift >= 0)
 	Pass bool `json:"pass"`
@@ -217,10 +219,10 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 	var totalBaseline, totalCortex, totalLift float64
 	cortexWins, baselineWins, ties := 0, 0, 0
 
-	// ABR aggregation
-	var totalFastNDCG, totalFullNDCG, totalABR float64
-	abrCount := 0
-	abrByDepth := make(map[int][]float64)
+	// Retrieval quality aggregation
+	var totalNDCG, totalFastNDCG, totalFullNDCG, totalABR float64
+	rankingCount := 0
+	ndcgByDepth := make(map[int][]float64)
 
 	for _, t := range tests {
 		totalBaseline += t.BaselineScore
@@ -236,13 +238,14 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 			ties++
 		}
 
-		// Aggregate ABR metrics
+		// Aggregate retrieval quality metrics
 		if t.HasRanking {
+			totalNDCG += t.NDCG
 			totalFastNDCG += t.FastNDCG
 			totalFullNDCG += t.FullNDCG
 			totalABR += t.ABR
-			abrCount++
-			abrByDepth[t.Depth] = append(abrByDepth[t.Depth], t.ABR)
+			rankingCount++
+			ndcgByDepth[t.Depth] = append(ndcgByDepth[t.Depth], t.NDCG)
 		}
 	}
 
@@ -262,21 +265,22 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 		Pass:             avgLift >= LiftThreshold, // Cortex doesn't hurt
 	}
 
-	// Add ABR metrics if any tests had ranking
-	if abrCount > 0 {
-		result.HasABR = true
-		result.AvgFastNDCG = totalFastNDCG / float64(abrCount)
-		result.AvgFullNDCG = totalFullNDCG / float64(abrCount)
-		result.AvgABR = totalABR / float64(abrCount)
+	// Add retrieval quality metrics if any tests had ranking
+	if rankingCount > 0 {
+		result.HasRanking = true
+		result.AvgNDCG = totalNDCG / float64(rankingCount)
+		result.AvgFastNDCG = totalFastNDCG / float64(rankingCount)
+		result.AvgFullNDCG = totalFullNDCG / float64(rankingCount)
+		result.AvgABR = totalABR / float64(rankingCount)
 
-		// Calculate average ABR by depth
-		result.ABRByDepth = make(map[int]float64)
-		for depth, abrs := range abrByDepth {
+		// Calculate average NDCG by depth
+		result.NDCGByDepth = make(map[int]float64)
+		for depth, ndcgs := range ndcgByDepth {
 			sum := 0.0
-			for _, abr := range abrs {
-				sum += abr
+			for _, ndcg := range ndcgs {
+				sum += ndcg
 			}
-			result.ABRByDepth[depth] = sum / float64(len(abrs))
+			result.NDCGByDepth[depth] = sum / float64(len(ndcgs))
 		}
 	}
 

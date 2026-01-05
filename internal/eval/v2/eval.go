@@ -272,6 +272,7 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 		abr := CalculateABR(fastNDCG, fullNDCG)
 
 		result.HasRanking = true
+		result.NDCG = fastNDCG // Retrieval quality against expected
 		result.FastNDCG = fastNDCG
 		result.FullNDCG = fullNDCG
 		result.ABR = abr
