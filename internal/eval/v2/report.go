@@ -46,10 +46,27 @@ func Report(w io.Writer, results *Results) {
 		if !s.Pass {
 			status = "REGRESS"
 		}
-		fmt.Fprintf(w, "%-35s Lift: %+5.0f%% [%s]\n",
-			truncate(s.ScenarioID, 35), s.AvgLift*100, status)
+		line := fmt.Sprintf("%-35s Lift: %+5.0f%%", truncate(s.ScenarioID, 35), s.AvgLift*100)
+		if s.HasABR {
+			line += fmt.Sprintf(" ABR: %.2f", s.AvgABR)
+		}
+		fmt.Fprintf(w, "%s [%s]\n", line, status)
 	}
 	fmt.Fprintf(w, "\n")
+
+	// ABR by depth (if any)
+	for _, s := range results.Scenarios {
+		if s.HasABR && len(s.ABRByDepth) > 1 {
+			fmt.Fprintf(w, "ABR by Depth (%s)\n", s.ScenarioID)
+			fmt.Fprintf(w, "----------------\n")
+			for depth := 0; depth < 10; depth++ {
+				if abr, ok := s.ABRByDepth[depth]; ok {
+					fmt.Fprintf(w, "  Depth %d: %.2f\n", depth, abr)
+				}
+			}
+			fmt.Fprintf(w, "\n")
+		}
+	}
 
 	// Verdict
 	if results.Pass {

@@ -113,6 +113,7 @@ tree:
           expect:
             includes: ["Redis", "cache.Cache"]
             excludes: ["sync.Map"]
+            ranking: ["Redis", "cache.Cache", "sync.Map"]
 
         - id: product-cache-query
           query: "What's the caching strategy for the product service?"
@@ -153,6 +154,7 @@ tree:
               query: "How is the order saga implemented?"
               expect:
                 includes: ["compensat", "state"]
+                ranking: ["saga", "compensat", "state machine"]
 
             - id: saga-failure-query
               query: "What happens when order creation fails partway through?"
@@ -206,6 +208,7 @@ tree:
                   expect:
                     includes: ["OAuth2", "OIDC"]
                     excludes: ["JWT"]
+                    ranking: ["OAuth2", "OIDC", "SSO"]
 
                 - id: auth-middleware-query
                   query: "How should we protect API endpoints?"
@@ -260,3 +263,4 @@ tree:
                       expect:
                         includes: ["Go", "PostgreSQL", "Redis", "saga", "OAuth2"]
                         excludes: ["JWT"]
+                        ranking: ["Go", "PostgreSQL", "Redis", "saga", "OAuth2"]
