@@ -257,22 +257,27 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 		Pass:          cortexScore >= baselineScore, // Cortex doesn't hurt
 	}
 
-	// 5. Calculate ABR metrics if ranking is specified
+	// 5. Calculate retrieval quality metrics if ranking is specified
 	if len(test.Expect.Ranking) > 0 {
-		// Parse search results into lines for ranking comparison
-		actualResults := parseSearchResults(cortexContext)
+		// Parse Fast mode results (already retrieved above)
+		fastResults := parseSearchResults(cortexContext)
+		fastNDCG := ScoreRanking(test.Expect.Ranking, fastResults)
 
-		// Calculate Fast NDCG (current search = Reflex only)
-		fastNDCG := ScoreRanking(test.Expect.Ranking, actualResults)
-
-		// Full NDCG = 1.0 (ideal) until Reflect mode is wired up
-		// TODO: When Reflect is available, run search with --mode=full
-		fullNDCG := 1.0
+		// Run Full mode search (Reflex + Reflect)
+		fullContext, err := cortex.searchWithMode(test.Query, "full", 5)
+		fullNDCG := 1.0 // Default to ideal if Full mode fails
+		if err == nil && fullContext != "" {
+			fullResults := parseSearchResults(fullContext)
+			fullNDCG = ScoreRanking(test.Expect.Ranking, fullResults)
+			if fullNDCG == 0 {
+				fullNDCG = 1.0 // Avoid division by zero
+			}
+		}
 
 		abr := CalculateABR(fastNDCG, fullNDCG)
 
 		result.HasRanking = true
-		result.NDCG = fastNDCG // Retrieval quality against expected
+		result.NDCG = fastNDCG // Primary retrieval quality metric
 		result.FastNDCG = fastNDCG
 		result.FullNDCG = fullNDCG
 		result.ABR = abr
@@ -415,7 +420,11 @@ func (c *cliCortex) ingest() error {
 }
 
 func (c *cliCortex) search(query string) (string, error) {
-	out, err := c.run("search", query, "--limit=5")
+	return c.searchWithMode(query, "fast", 5)
+}
+
+func (c *cliCortex) searchWithMode(query, mode string, limit int) (string, error) {
+	out, err := c.run("search", fmt.Sprintf("--mode=%s", mode), fmt.Sprintf("--limit=%d", limit), query)
 	if err != nil {
 		if strings.Contains(err.Error(), "No results") || strings.Contains(err.Error(), "No events") {
 			return "", nil
