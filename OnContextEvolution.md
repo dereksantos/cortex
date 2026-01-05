@@ -14,9 +14,15 @@ Large language models operate statelessly—each interaction begins fresh, forge
 
 ## 1. The Problem of Stateless Intelligence
 
+REWORD TO-->**Local Temporal Learning** ?? I want to make this more about 
+OR-->**Evolving Temporal Perfomance of LLMs**
+
 AI coding assistants are remarkably capable in isolation, yet remarkably forgetful in practice. A developer explains an architectural decision; the assistant forgets by the next session. A correction is made; it must be repeated tomorrow. Constraints are established; they are violated next week.
+**There's nothing really new or innovative in this paragrah.**
 
 This is not a failure of intelligence but of *memory architecture*. Current approaches optimize for single-turn performance, treating each interaction as independent. But software development is inherently temporal—decisions compound, patterns emerge, and context evolves.
+
+REVISE-->Current approaches optimize for single-turn performance, treating each interaction as independent. **this isnt necessarily true, ACE looks at the entire session. This paper ought to word as we are building on these ideas.**
 
 ### 1.1 What Context Evolution Means
 
@@ -36,6 +42,8 @@ Context evolution rests on a fundamental separation:
 | **Agentic** | 200ms+ | LLM-based | Reranking, contradiction detection |
 
 **Why 20ms?** Latency under 50ms is imperceptible to humans. Targeting 20ms provides headroom—multiple hooks can run without crossing the perceptual threshold. The goal is "feels instant," not a specific number.
+
+As other agentic processes may also depend on LLMs, so reducing response time is crucial for agentic processes.
 
 Mechanical processes provide the speed necessary for interactive use. Agentic processes provide the intelligence necessary for quality. Neither alone is sufficient.
 
@@ -153,6 +161,8 @@ Context evolution is not one-size-fits-all. Key parameters:
 
 These parameters define the *behavior* of context evolution, separate from any specific implementation.
 
+**Do we need more options here?**
+
 ---
 
 ## 7. Agentic Random Reflection
@@ -165,6 +175,8 @@ The idea:
 3. **Pattern discovery** — Surface insights not yet queried
 
 This "agentic random reflection" could improve project outcomes by exploring what the developer hasn't thought to ask about—yet.
+
+**I intend to build this in**
 
 ---
 
@@ -218,6 +230,8 @@ What remains is to build, evaluate, and iterate.
 ---
 
 ## References
+
+**References need more revision**
 
 [1] Agentic Context Engineering. arXiv:2510.04618, 2024.
 
