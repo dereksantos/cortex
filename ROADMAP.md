@@ -1,7 +1,7 @@
 # Cortex Roadmap
 
 **Last Updated:** January 2026
-**Current Status:** Eval Consolidation
+**Current Status:** Semantic Search Working, ABR Optimization
 **North Star:** ABR ≥ 0.9
 
 ---
@@ -10,9 +10,11 @@
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Cognition | 90% (19/21) | >90% |
-| E2E | 70% | >90% |
+| Semantic Lift | +35% | >0% |
+| Win Rate | 44% (8/18) | >50% |
 | ABR | 0.77 | ≥0.9 |
+
+Latest run (qwen2:0.5b): Cortex wins 8/18, baseline wins 2/18, ties 8/18.
 
 ---
 
@@ -38,80 +40,86 @@ ABR is the single metric that validates Cortex's core innovation: bounded intell
 
 ---
 
-## Roadmap: Eval Consolidation
+## Roadmap
 
-### Phase 1: Consolidate Eval System
+### Phase 1: Consolidate Eval System ✅ DONE
 
 **Goal:** Reduce complexity, single source of truth
 
-- [ ] Merge 23 eval files → 5 files
-- [ ] Remove all mocks, use CLICortex everywhere
-- [ ] SQLite-only persistence (drop JSONL)
+- [x] Merge 23 eval files → 5 files (commit befe426)
+- [x] Remove all mocks, use CLICortex everywhere
+- [x] SQLite-only persistence (drop JSONL)
 
-**Files to delete:**
-- `e2e_eval.go`, `e2e_journey.go`
-- `cognition.go`, `cognition_eval.go`
-- `mock_cortex.go`
-- `tree.go`, `stats.go`
-- `persist_jsonl.go`
-
-**Target structure:**
+**Achieved structure:**
 ```
-internal/eval/
-├── eval.go       # ~400 lines (runner + types)
-├── scenario.go   # ~150 lines (YAML loading)
-├── persist.go    # ~100 lines (SQLite only)
-├── measure.go    # ~100 lines (ABR calculation)
-└── report.go     # ~100 lines (output formatting)
+internal/eval/v2/
+├── eval.go       # 286 lines (runner + types)
+├── scenario.go   # 104 lines (YAML loading)
+├── persist.go    # 155 lines (SQLite only)
+├── measure.go    # 218 lines (scoring)
+└── report.go     # 163 lines (output formatting)
 
-Total: ~850 lines (down from ~11,000)
+Total: 926 lines (down from ~11,000)
 ```
 
 ---
 
-### Phase 2: Simplify Scenarios
+### Phase 2: Simplify Scenarios ✅ DONE
 
 **Goal:** Adding an eval = adding a YAML file only
 
-- [ ] Single YAML format: `context` + `tests`
-- [ ] Remove 7 scenario types (mode, session, benefit, pipeline, dream, conflict, idiom)
-- [ ] Every scenario just establishes context and runs tests
-- [ ] Unified runner for all scenarios
+- [x] Single YAML format: `context` + `tests`
+- [x] Remove legacy scenario types
+- [x] Every scenario just establishes context and runs tests
+- [x] Unified runner for all scenarios
 
-**New format:**
+**Active scenarios:** 7 in `test/evals/v2/`
+- auth-patterns, db-patterns, error-handling
+- go-logging, go-naming, go-testing, testing-patterns
+
+**Format:**
 ```yaml
 id: auth-middleware
 context:
-  - event: correction
+  - type: decision
     content: "We use JWT, not sessions"
-  - event: decision
-    content: "Auth middleware goes in pkg/middleware"
 tests:
-  - query: "How do we handle authentication?"
-    expect_contains: ["JWT", "middleware"]
-    expect_abr: ">= 0.9"
+  - id: auth-approach
+    query: "How do we handle authentication?"
+    expect:
+      includes: ["JWT"]
+      excludes: ["session"]
 ```
 
 ---
 
-### Phase 3: ABR Dashboard
+### Phase 3: ABR Dashboard 🔄 IN PROGRESS
 
 **Goal:** Track ABR over time, make progress visible
 
-- [ ] Single table: `eval_results(id, scenario_id, abr, latency_ms, timestamp)`
+- [x] SQLite persistence for eval results (`evals_v2.db`)
 - [ ] CLI: `cortex eval --summary` shows ABR trend
-- [ ] Pass criteria: ABR ≥ 0.9
 - [ ] Historical comparison: "ABR improved from 0.77 to 0.85"
+- [ ] Pass criteria enforcement: ABR ≥ 0.9
 
 ---
 
-## Blocked Until Evals Pass
+### Phase 4: ABR Optimization 📋 NEXT
 
-The following work is **blocked** until ABR ≥ 0.9:
+**Goal:** Improve ABR from 0.77 → 0.9
+
+Potential improvements:
+- [ ] Better embedding model selection
+- [ ] Retrieval tuning (top-k, similarity threshold)
+- [ ] Context formatting for LLM consumption
+- [ ] Larger/better LLM for eval (Claude Haiku vs qwen2:0.5b)
+
+---
+
+## Blocked Until ABR ≥ 0.9
 
 | Feature | Reason Blocked |
 |---------|----------------|
-| Embeddings implementation | Can't validate without ABR baseline |
 | Git Dream source | Core evals must pass first |
 | Entity relationships | Polish feature, not priority |
 | Cross-session learning | Need single-session working first |
@@ -128,6 +136,9 @@ The following work is **blocked** until ABR ≥ 0.9:
 
 ## Recently Completed
 
+- [x] **Semantic search with embeddings** - nomic-embed-text, +35% lift
+- [x] **Eval consolidation** - 23 files → 5 files (926 lines)
+- [x] **Unified scenario format** - single YAML pattern
 - [x] Cognition evals: 44% → 90% (19/21 passing)
 - [x] E2E evals: 50% → 70%
 - [x] CLICortex for true E2E testing via CLI commands
@@ -142,12 +153,12 @@ The following work is **blocked** until ABR ≥ 0.9:
 
 ## Success Criteria
 
-| Phase | ABR | Cognition | E2E |
-|-------|-----|-----------|-----|
-| Current | 0.77 | 90% | 70% |
-| Phase 1 | 0.80 | 90% | 80% |
-| Phase 2 | 0.85 | 95% | 85% |
-| Phase 3 | **≥0.90** | **95%** | **90%** |
+| Phase | Status | Key Metric |
+|-------|--------|------------|
+| Phase 1: Consolidate | ✅ Done | 926 lines (was 11k) |
+| Phase 2: Scenarios | ✅ Done | 7 active scenarios |
+| Phase 3: Dashboard | 🔄 In Progress | `--summary` flag |
+| Phase 4: Optimize | 📋 Next | ABR ≥ 0.9 |
 
 **Mandate complete when:** ABR ≥ 0.9 sustained over 3 consecutive runs.
 

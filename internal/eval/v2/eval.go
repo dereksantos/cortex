@@ -74,6 +74,9 @@ func (e *Evaluator) RunScenario(s *Scenario) (*ScenarioResult, error) {
 		if err := cortex.store(ctx.Type, ctx.Content); err != nil {
 			return nil, fmt.Errorf("store context: %w", err)
 		}
+		if e.verbose {
+			fmt.Printf("  [stored] %s: %s\n", ctx.Type, truncateVerbose(ctx.Content, 60))
+		}
 	}
 
 	// Ingest events into database
@@ -122,6 +125,23 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test) (*TestResult, error) {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 
+	if e.verbose {
+		fmt.Printf("    Query: %s\n", test.Query)
+		if cortexContext == "" {
+			fmt.Printf("    [search] No context retrieved\n")
+		} else {
+			fmt.Printf("    [search] Retrieved %d chars:\n", len(cortexContext))
+			// Show first 200 chars of context
+			preview := cortexContext
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			for _, line := range strings.Split(preview, "\n") {
+				fmt.Printf("      | %s\n", line)
+			}
+		}
+	}
+
 	// 3. CORTEX: Generate response WITH context
 	cortexPrompt := buildPrompt(test.Query, cortexContext)
 	cortexResponse, err := e.provider.Generate(ctx, cortexPrompt)
@@ -135,8 +155,10 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test) (*TestResult, error) {
 	winner := DetermineWinner(cortexScore, baselineScore)
 
 	if e.verbose {
-		fmt.Printf("    Baseline: %.2f, Cortex: %.2f, Lift: %+.0f%%, Winner: %s\n",
-			baselineScore, cortexScore, lift*100, winner)
+		fmt.Printf("    [baseline] %.2f - %s\n", baselineScore, truncateVerbose(baselineResponse, 80))
+		fmt.Printf("    [cortex]   %.2f - %s\n", cortexScore, truncateVerbose(cortexResponse, 80))
+		fmt.Printf("    [expect]   includes=%v excludes=%v\n", test.Expect.Includes, test.Expect.Excludes)
+		fmt.Printf("    Lift: %+.0f%%, Winner: %s\n", lift*100, winner)
 	}
 
 	return &TestResult{
@@ -222,12 +244,18 @@ func (c *cliCortex) run(args ...string) (string, error) {
 }
 
 func (c *cliCortex) store(eventType, content string) error {
-	_, err := c.run("capture", "--type="+eventType, "--content="+content)
+	out, err := c.run("capture", "--type="+eventType, "--content="+content)
+	if c.verbose && out != "" {
+		fmt.Printf("    [capture] %s\n", truncateVerbose(out, 60))
+	}
 	return err
 }
 
 func (c *cliCortex) ingest() error {
-	_, err := c.run("ingest")
+	out, err := c.run("ingest")
+	if c.verbose && out != "" {
+		fmt.Printf("  [ingest] %s\n", truncateVerbose(out, 60))
+	}
 	return err
 }
 
@@ -245,4 +273,14 @@ func (c *cliCortex) search(query string) (string, error) {
 // Timestamp returns a formatted timestamp for results.
 func Timestamp() string {
 	return time.Now().Format("2006-01-02T15:04:05Z")
+}
+
+// truncateVerbose truncates a string for verbose output, replacing newlines.
+func truncateVerbose(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
