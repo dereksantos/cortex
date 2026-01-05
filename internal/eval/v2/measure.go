@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"math"
 	"strings"
 )
 
@@ -45,10 +46,72 @@ func CalculateLift(cortexScore, baselineScore float64) float64 {
 	return (cortexScore - baselineScore) / baselineScore
 }
 
+// ScoreRanking computes NDCG for retrieval results against expected ranking.
+// Returns NDCG score from 0.0 to 1.0.
+// expectedRanking: substrings in ideal order (most relevant first)
+// actualResults: retrieved results as strings
+func ScoreRanking(expectedRanking []string, actualResults []string) float64 {
+	if len(expectedRanking) == 0 {
+		return 0
+	}
+
+	// Build relevance scores: items earlier in expected ranking are more relevant
+	// Relevance = len(expectedRanking) - position (so first item has highest score)
+	relevanceMap := make(map[int]float64)
+	for i, expected := range expectedRanking {
+		relevance := float64(len(expectedRanking) - i)
+		// Find which actual result contains this expected substring
+		for j, actual := range actualResults {
+			if strings.Contains(strings.ToLower(actual), strings.ToLower(expected)) {
+				relevanceMap[j] = relevance
+				break
+			}
+		}
+	}
+
+	// Calculate DCG (Discounted Cumulative Gain)
+	dcg := 0.0
+	for i := 0; i < len(actualResults) && i < len(expectedRanking); i++ {
+		if rel, ok := relevanceMap[i]; ok {
+			dcg += rel / math.Log2(float64(i+2)) // +2 because log2(1) = 0
+		}
+	}
+
+	// Calculate IDCG (Ideal DCG) - perfect ranking
+	idcg := 0.0
+	for i := 0; i < len(expectedRanking); i++ {
+		rel := float64(len(expectedRanking) - i)
+		idcg += rel / math.Log2(float64(i+2))
+	}
+
+	if idcg == 0 {
+		return 0
+	}
+	return dcg / idcg
+}
+
+// CalculateABR computes Agentic Benefit Ratio.
+// ABR = NDCG(Fast) / NDCG(Full)
+// Goal: ABR → 1.0 as Think improves Fast mode.
+func CalculateABR(fastNDCG, fullNDCG float64) float64 {
+	if fullNDCG == 0 {
+		if fastNDCG == 0 {
+			return 1.0 // Both zero = equivalent
+		}
+		return 1.0 // Fast better than Full (unusual but possible)
+	}
+	abr := fastNDCG / fullNDCG
+	if abr > 1.0 {
+		return 1.0 // Cap at 1.0
+	}
+	return abr
+}
+
 // TestResult holds the result of a single test.
 type TestResult struct {
 	TestID string `json:"test_id"`
 	Query  string `json:"query"`
+	Depth  int    `json:"depth"` // Tree depth (for ABR progression tracking)
 
 	// Baseline: LLM response WITHOUT any Cortex context
 	BaselineScore float64 `json:"baseline_score"`
@@ -65,6 +128,12 @@ type TestResult struct {
 
 	// Pass: Cortex score >= baseline (Cortex doesn't hurt)
 	Pass bool `json:"pass"`
+
+	// ABR metrics (only populated when expect.ranking is specified)
+	HasRanking bool    `json:"has_ranking,omitempty"`
+	FastNDCG   float64 `json:"fast_ndcg,omitempty"` // NDCG for Fast mode (Reflex only)
+	FullNDCG   float64 `json:"full_ndcg,omitempty"` // NDCG for Full mode (Reflex + Reflect)
+	ABR        float64 `json:"abr,omitempty"`       // FastNDCG / FullNDCG
 }
 
 // ScenarioResult holds the result of running a scenario.
@@ -82,6 +151,13 @@ type ScenarioResult struct {
 	CortexWins   int `json:"cortex_wins"`
 	BaselineWins int `json:"baseline_wins"`
 	Ties         int `json:"ties"`
+
+	// ABR metrics (averaged across tests with ranking)
+	HasABR      bool               `json:"has_abr,omitempty"`
+	AvgFastNDCG float64            `json:"avg_fast_ndcg,omitempty"`
+	AvgFullNDCG float64            `json:"avg_full_ndcg,omitempty"`
+	AvgABR      float64            `json:"avg_abr,omitempty"`
+	ABRByDepth  map[int]float64    `json:"abr_by_depth,omitempty"` // ABR at each tree depth
 
 	// Pass: Cortex doesn't cause regressions (lift >= 0)
 	Pass bool `json:"pass"`
@@ -141,6 +217,11 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 	var totalBaseline, totalCortex, totalLift float64
 	cortexWins, baselineWins, ties := 0, 0, 0
 
+	// ABR aggregation
+	var totalFastNDCG, totalFullNDCG, totalABR float64
+	abrCount := 0
+	abrByDepth := make(map[int][]float64)
+
 	for _, t := range tests {
 		totalBaseline += t.BaselineScore
 		totalCortex += t.CortexScore
@@ -154,12 +235,21 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 		default:
 			ties++
 		}
+
+		// Aggregate ABR metrics
+		if t.HasRanking {
+			totalFastNDCG += t.FastNDCG
+			totalFullNDCG += t.FullNDCG
+			totalABR += t.ABR
+			abrCount++
+			abrByDepth[t.Depth] = append(abrByDepth[t.Depth], t.ABR)
+		}
 	}
 
 	n := float64(len(tests))
 	avgLift := totalLift / n
 
-	return &ScenarioResult{
+	result := &ScenarioResult{
 		ScenarioID:       scenarioID,
 		Name:             name,
 		Tests:            tests,
@@ -171,6 +261,26 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 		Ties:             ties,
 		Pass:             avgLift >= LiftThreshold, // Cortex doesn't hurt
 	}
+
+	// Add ABR metrics if any tests had ranking
+	if abrCount > 0 {
+		result.HasABR = true
+		result.AvgFastNDCG = totalFastNDCG / float64(abrCount)
+		result.AvgFullNDCG = totalFullNDCG / float64(abrCount)
+		result.AvgABR = totalABR / float64(abrCount)
+
+		// Calculate average ABR by depth
+		result.ABRByDepth = make(map[int]float64)
+		for depth, abrs := range abrByDepth {
+			sum := 0.0
+			for _, abr := range abrs {
+				sum += abr
+			}
+			result.ABRByDepth[depth] = sum / float64(len(abrs))
+		}
+	}
+
+	return result
 }
 
 // CalculateResults aggregates scenario results into overall results.
