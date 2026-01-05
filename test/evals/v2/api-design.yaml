@@ -1,0 +1,23 @@
+id: api-design
+name: "REST API design patterns"
+context:
+  - type: decision
+    content: "Use RESTful conventions with plural nouns for resources (e.g., /users, /orders)"
+  - type: pattern
+    content: "API versioning via URL prefix /api/v1/, never break existing versions"
+  - type: pattern
+    content: "Return 201 Created with Location header for POST, 204 No Content for DELETE"
+tests:
+  - id: endpoint-naming
+    query: "How should I name my API endpoint for fetching products?"
+    expect:
+      includes: ["GET", "/products"]
+      excludes: ["getProducts", "fetch_products"]
+  - id: versioning
+    query: "How do we handle API versioning?"
+    expect:
+      includes: ["v1", "URL", "prefix"]
+  - id: response-codes
+    query: "What status code should I return when creating a resource?"
+    expect:
+      includes: ["201", "Created"]

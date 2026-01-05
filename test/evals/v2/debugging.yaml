@@ -1,0 +1,22 @@
+id: debugging
+name: "Debugging and troubleshooting patterns"
+context:
+  - type: pattern
+    content: "Add request_id to all log entries for request tracing across services"
+  - type: decision
+    content: "Use structured logging with slog, include context like user_id and operation"
+  - type: pattern
+    content: "When debugging production issues, check logs first, then metrics, then traces"
+tests:
+  - id: request-tracing
+    query: "How do I trace a request across multiple services?"
+    expect:
+      includes: ["request_id", "trace"]
+  - id: log-context
+    query: "What information should I include in my log messages?"
+    expect:
+      includes: ["user_id", "context", "structured"]
+  - id: prod-debugging
+    query: "There's an issue in production. Where should I start investigating?"
+    expect:
+      includes: ["logs"]
