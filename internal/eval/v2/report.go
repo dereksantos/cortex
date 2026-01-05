@@ -47,21 +47,21 @@ func Report(w io.Writer, results *Results) {
 			status = "REGRESS"
 		}
 		line := fmt.Sprintf("%-35s Lift: %+5.0f%%", truncate(s.ScenarioID, 35), s.AvgLift*100)
-		if s.HasABR {
-			line += fmt.Sprintf(" ABR: %.2f", s.AvgABR)
+		if s.HasRanking {
+			line += fmt.Sprintf(" NDCG: %.2f", s.AvgNDCG)
 		}
 		fmt.Fprintf(w, "%s [%s]\n", line, status)
 	}
 	fmt.Fprintf(w, "\n")
 
-	// ABR by depth (if any)
+	// NDCG by depth (if any)
 	for _, s := range results.Scenarios {
-		if s.HasABR && len(s.ABRByDepth) > 1 {
-			fmt.Fprintf(w, "ABR by Depth (%s)\n", s.ScenarioID)
-			fmt.Fprintf(w, "----------------\n")
+		if s.HasRanking && len(s.NDCGByDepth) > 1 {
+			fmt.Fprintf(w, "Retrieval NDCG by Depth (%s)\n", s.ScenarioID)
+			fmt.Fprintf(w, "----------------------------\n")
 			for depth := 0; depth < 10; depth++ {
-				if abr, ok := s.ABRByDepth[depth]; ok {
-					fmt.Fprintf(w, "  Depth %d: %.2f\n", depth, abr)
+				if ndcg, ok := s.NDCGByDepth[depth]; ok {
+					fmt.Fprintf(w, "  Depth %d: %.2f\n", depth, ndcg)
 				}
 			}
 			fmt.Fprintf(w, "\n")
