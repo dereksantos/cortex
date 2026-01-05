@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -2476,12 +2477,28 @@ func getDefaultModeDescription(mode string) string {
 }
 
 func handleSearch() {
-	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "Usage: cortex search <query>\n")
+	// Parse flags
+	searchFlags := flag.NewFlagSet("search", flag.ExitOnError)
+	modeFlag := searchFlags.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
+	limitFlag := searchFlags.Int("limit", 5, "Maximum number of results")
+	searchFlags.Parse(os.Args[2:])
+
+	args := searchFlags.Args()
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] <query>\n")
 		os.Exit(1)
 	}
 
-	query := os.Args[2]
+	query := strings.Join(args, " ")
+
+	// Determine retrieval mode
+	var mode cognition.RetrieveMode
+	switch *modeFlag {
+	case "full":
+		mode = cognition.Full
+	default:
+		mode = cognition.Fast
+	}
 
 	// Load config
 	cfg, err := loadConfig()
@@ -2498,89 +2515,69 @@ func handleSearch() {
 	}
 	defer store.Close()
 
-	// Search insights first (more valuable)
-	insights, err := store.SearchInsights(query, 10)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to search insights: %v\n", err)
-	}
-
-	// Search events - use vector search if enabled
-	var vectorResults []storage.VectorSearchResult
-	useVectorSearch := false
-
-	if cfg.EnableVector {
-		ollamaClient := llm.NewOllamaClient(cfg)
-		if ollamaClient.IsAvailable() {
-			ctx := context.Background()
-			queryVec, err := ollamaClient.Embed(ctx, query)
-			if err == nil {
-				vectorResults, err = store.SearchByVector(queryVec, 10, 0.3)
-				if err == nil && len(vectorResults) > 0 {
-					useVectorSearch = true
-				}
+	// Initialize LLM provider (required for Full mode, optional for Fast)
+	var llmProvider llm.Provider
+	if mode == cognition.Full {
+		// Try Anthropic first, then Ollama
+		anthropic := llm.NewAnthropicClient(cfg)
+		if anthropic.IsAvailable() {
+			llmProvider = anthropic
+		} else {
+			ollama := llm.NewOllamaClient(cfg)
+			if ollama.IsAvailable() {
+				llmProvider = ollama
 			}
 		}
+		if llmProvider == nil {
+			fmt.Fprintf(os.Stderr, "Warning: No LLM provider available, falling back to fast mode\n")
+			mode = cognition.Fast
+		}
 	}
 
-	// Fallback to text search if vector search not available
-	var events []*events.Event
-	if !useVectorSearch {
-		events, err = store.SearchEvents(query, 10)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to search events: %v\n", err)
-			os.Exit(1)
-		}
+	// Create Cortex cognitive pipeline
+	cortex, err := intcognition.New(store, llmProvider, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create cognitive pipeline: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build query
+	q := cognition.Query{
+		Text:  query,
+		Limit: *limitFlag,
+	}
+
+	// Retrieve using cognitive pipeline
+	start := time.Now()
+	result, err := cortex.Retrieve(context.Background(), q, mode)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Search failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Display results
-	hasInsights := len(insights) > 0
-	hasEvents := len(events) > 0
-	hasVectorResults := len(vectorResults) > 0
-
-	if !hasInsights && !hasEvents && !hasVectorResults {
+	if result == nil || len(result.Results) == 0 {
 		fmt.Println("No results found")
 		return
 	}
 
-	// Show insights first
-	if hasInsights {
-		fmt.Printf("Found %d insights:\n\n", len(insights))
-		for i, insight := range insights {
-			fmt.Printf("%d. [%s] %s\n", i+1, insight.Category, insight.Summary)
-			if len(insight.Tags) > 0 {
-				fmt.Printf("   Tags: %v\n", insight.Tags)
-			}
-			fmt.Println()
-		}
+	// Show mode and timing
+	modeStr := "Fast (Reflex)"
+	if mode == cognition.Full {
+		modeStr = "Full (Reflex + Reflect)"
 	}
+	fmt.Printf("Mode: %s | Results: %d | Time: %v\n\n", modeStr, len(result.Results), elapsed.Round(time.Millisecond))
 
-	// Show vector search results (semantic matches)
-	if hasVectorResults {
-		fmt.Printf("Found %d semantic matches:\n\n", len(vectorResults))
-		for i, result := range vectorResults {
-			preview := result.Content
-			if len(preview) > 500 {
-				preview = preview[:500] + "..."
-			}
-			fmt.Printf("%d. [%.0f%% match] %s\n", i+1, result.Similarity*100, preview)
-			fmt.Println()
+	// Show results
+	for i, r := range result.Results {
+		preview := r.Content
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
 		}
-	}
-
-	// Show text search events (fallback)
-	if hasEvents {
-		fmt.Printf("Found %d events:\n\n", len(events))
-		for i, event := range events {
-			fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))
-			if event.ToolResult != "" {
-				preview := event.ToolResult
-				if len(preview) > 500 {
-					preview = preview[:500] + "..."
-				}
-				fmt.Printf("   %s\n", preview)
-			}
-			fmt.Println()
-		}
+		fmt.Printf("%d. [%.0f%% match] %s\n", i+1, r.Score*100, preview)
+		fmt.Println()
 	}
 }
 
