@@ -8,32 +8,37 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // Reflex implements cognition.Reflexer for fast mechanical retrieval.
-// Must complete in <10ms using storage primitives only (no LLM calls).
+// Uses semantic search (embeddings) when available, falls back to text search.
+// Target latency: <50ms with embeddings, <10ms without.
 type Reflex struct {
-	storage *storage.Storage
-	scorer  *Scorer
+	storage  *storage.Storage
+	embedder llm.Embedder // optional, for semantic search
+	scorer   *Scorer
 }
 
 // NewReflex creates a new Reflex instance.
-func NewReflex(store *storage.Storage) *Reflex {
+// embedder is optional - if nil, falls back to text-based search.
+func NewReflex(store *storage.Storage, embedder llm.Embedder) *Reflex {
 	return &Reflex{
-		storage: store,
-		scorer:  NewScorer(),
+		storage:  store,
+		embedder: embedder,
+		scorer:   NewScorer(),
 	}
 }
 
-// Reflex performs fast mechanical retrieval using FTS, tags, and recency.
-// This is a purely mechanical operation with no LLM calls.
+// Reflex performs fast mechanical retrieval using semantic search or text matching.
+// Tries embedding-based vector search first, falls back to text search.
 func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Result, error) {
 	start := time.Now()
 	defer func() {
 		elapsed := time.Since(start)
-		if elapsed > 10*time.Millisecond {
+		if elapsed > 50*time.Millisecond {
 			// Log warning but don't fail - latency target is aspirational
-			fmt.Printf("[reflex] warning: took %v (target <10ms)\n", elapsed)
+			fmt.Printf("[reflex] warning: took %v (target <50ms)\n", elapsed)
 		}
 	}()
 
@@ -55,11 +60,24 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 		}
 	}
 
-	// 2. Text search via FTS if query text provided
-	if q.Text != "" {
+	// 2. Semantic search via embeddings if available
+	semanticDone := false
+	if q.Text != "" && r.embedder != nil && r.embedder.IsEmbeddingAvailable() {
+		queryVec, err := r.embedder.Embed(ctx, q.Text)
+		if err == nil && len(queryVec) > 0 {
+			vectorResults, err := r.storage.SearchByVector(queryVec, limit, 0.3)
+			if err == nil && len(vectorResults) > 0 {
+				candidates = append(candidates, r.vectorResultsToResults(vectorResults)...)
+				semanticDone = true
+			}
+		}
+	}
+
+	// 3. Text search fallback if semantic search unavailable or returned nothing
+	if q.Text != "" && !semanticDone {
 		terms := ExtractTerms(q.Text)
 		if len(terms) > 0 {
-			// Search insights by text (we need to add this to storage, but for now use GetRecentInsights and filter)
+			// Search insights by text
 			insights, err := r.storage.GetRecentInsights(limit * 3)
 			if err == nil {
 				for _, insight := range insights {
@@ -69,16 +87,15 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 				}
 			}
 
-			// Also search events for broader context
-			searchQuery := joinTerms(terms)
-			eventList, err := r.storage.SearchEvents(searchQuery, limit)
+			// Also search events for broader context (search each term with OR logic)
+			eventList, err := r.storage.SearchEventsMultiTerm(terms, limit)
 			if err == nil {
 				candidates = append(candidates, r.eventsToResults(eventList)...)
 			}
 		}
 	}
 
-	// 3. If still low on candidates, add recent important insights
+	// 4. If still low on candidates, add recent important insights
 	if len(candidates) < limit {
 		important, err := r.storage.GetImportantInsights(5, limit)
 		if err == nil {
@@ -86,7 +103,7 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 		}
 	}
 
-	// 4. If still low, add recent insights as fallback
+	// 5. If still low, add recent insights as fallback
 	if len(candidates) < limit/2 {
 		recent, err := r.storage.GetRecentInsights(limit)
 		if err == nil {
@@ -208,6 +225,27 @@ func (r *Reflex) eventsToResults(eventList []*events.Event) []cognition.Result {
 	return results
 }
 
+// vectorResultsToResults converts vector search results to cognition results.
+func (r *Reflex) vectorResultsToResults(vectorResults []storage.VectorSearchResult) []cognition.Result {
+	results := make([]cognition.Result, 0, len(vectorResults))
+	for _, vr := range vectorResults {
+		content := vr.Content
+		if len(content) > 500 {
+			content = content[:500] + "..."
+		}
+		results = append(results, cognition.Result{
+			ID:       vr.ContentType + "-" + vr.ContentID,
+			Content:  content,
+			Category: vr.ContentType,
+			Score:    vr.Similarity,
+			Metadata: map[string]any{
+				"semantic_match": true,
+			},
+		})
+	}
+	return results
+}
+
 // containsIgnoreCase checks if s contains substr (case-insensitive).
 func containsIgnoreCase(s, substr string) bool {
 	sLower := make([]byte, len(s))
@@ -259,16 +297,3 @@ func bytesContains(a, b []byte) bool {
 	return false
 }
 
-// joinTerms joins terms with spaces for search query.
-func joinTerms(terms []string) string {
-	if len(terms) == 0 {
-		return ""
-	}
-
-	result := terms[0]
-	for i := 1; i < len(terms); i++ {
-		result += " " + terms[i]
-	}
-
-	return result
-}

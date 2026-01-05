@@ -1998,6 +1998,7 @@ func handleDaemon() {
 
 	// Initialize LLM provider for cognitive modes
 	var llmProvider llm.Provider
+	var embedder llm.Embedder
 	anthropic := llm.NewAnthropicClient(cfg)
 	if anthropic.IsAvailable() {
 		llmProvider = anthropic
@@ -2006,10 +2007,13 @@ func handleDaemon() {
 		if ollama.IsAvailable() {
 			llmProvider = ollama
 		}
+		if ollama.IsEmbeddingAvailable() {
+			embedder = ollama
+		}
 	}
 
 	// Create Cortex cognitive pipeline
-	cortex, err := intcognition.New(store, llmProvider, cfg)
+	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not initialize cognitive pipeline: %v\n", err)
 		// Continue without cognitive features
@@ -2534,8 +2538,15 @@ func handleSearch() {
 		}
 	}
 
+	// Initialize embedder for semantic search (always try, falls back gracefully)
+	var embedder llm.Embedder
+	ollamaClient := llm.NewOllamaClient(cfg)
+	if ollamaClient.IsEmbeddingAvailable() {
+		embedder = ollamaClient
+	}
+
 	// Create Cortex cognitive pipeline
-	cortex, err := intcognition.New(store, llmProvider, cfg)
+	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create cognitive pipeline: %v\n", err)
 		os.Exit(1)
@@ -2557,16 +2568,41 @@ func handleSearch() {
 		os.Exit(1)
 	}
 
-	// Display results
-	if result == nil || len(result.Results) == 0 {
-		fmt.Println("No results found")
-		return
-	}
-
-	// Show mode and timing
+	// Determine mode string for output
 	modeStr := "Fast (Reflex)"
 	if mode == cognition.Full {
 		modeStr = "Full (Reflex + Reflect)"
+	}
+
+	// Display results
+	if result == nil || len(result.Results) == 0 {
+		// Fallback: search events directly when Reflex returns nothing.
+		// Extract terms from natural language query for better matching.
+		terms := intcognition.ExtractTerms(query)
+		var eventResults []*events.Event
+		var err error
+		if len(terms) > 0 {
+			eventResults, err = store.SearchEventsMultiTerm(terms, *limitFlag)
+		} else {
+			eventResults, err = store.SearchEvents(query, *limitFlag)
+		}
+		if err != nil || len(eventResults) == 0 {
+			fmt.Println("No results found")
+			return
+		}
+		fmt.Printf("Mode: %s (fallback) | Results: %d | Time: %v\n\n", modeStr, len(eventResults), elapsed.Round(time.Millisecond))
+		for i, ev := range eventResults {
+			preview := ev.ToolResult
+			if preview == "" {
+				preview = ev.ToolName
+			}
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			fmt.Printf("%d. [%s] %s\n", i+1, ev.EventType, preview)
+			fmt.Println()
+		}
+		return
 	}
 	fmt.Printf("Mode: %s | Results: %d | Time: %v\n\n", modeStr, len(result.Results), elapsed.Round(time.Millisecond))
 
@@ -3118,13 +3154,19 @@ func handleInjectContext() {
 
 	// Initialize LLM provider (optional - Reflect will degrade gracefully if nil)
 	var llmProvider llm.Provider
+	var embedder llm.Embedder
 	anthropic := llm.NewAnthropicClient(cfg)
 	if anthropic.IsAvailable() {
 		llmProvider = anthropic
 	}
+	// Try Ollama for embeddings
+	ollama := llm.NewOllamaClient(cfg)
+	if ollama.IsEmbeddingAvailable() {
+		embedder = ollama
+	}
 
 	// Create Cortex cognitive pipeline
-	cortex, err := intcognition.New(store, llmProvider, cfg)
+	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {
 		// Fallback to just printing the prompt
 		fmt.Println(prompt)
