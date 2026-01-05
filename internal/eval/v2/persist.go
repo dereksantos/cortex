@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// CortexVersion is the current version of Cortex.
+const CortexVersion = "0.1.0"
 
 // Persister saves eval results to SQLite.
 type Persister struct {
@@ -55,18 +60,81 @@ func (p *Persister) init() error {
 		ties INTEGER,
 		pass_rate REAL,
 		pass BOOLEAN,
-		scenarios_json TEXT
+		scenarios_json TEXT,
+		git_commit_sha TEXT,
+		git_branch TEXT,
+		run_duration_ms INTEGER,
+		cortex_version TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_eval_runs_timestamp ON eval_runs(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_eval_runs_lift ON eval_runs(avg_lift);
+
+	CREATE TABLE IF NOT EXISTS eval_scenario_results (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		run_id TEXT NOT NULL,
+		scenario_id TEXT NOT NULL,
+		scenario_name TEXT,
+		avg_baseline_score REAL,
+		avg_cortex_score REAL,
+		avg_lift REAL,
+		cortex_wins INTEGER,
+		baseline_wins INTEGER,
+		ties INTEGER,
+		has_ranking BOOLEAN,
+		avg_ndcg REAL,
+		avg_fast_ndcg REAL,
+		avg_full_ndcg REAL,
+		avg_abr REAL,
+		pass BOOLEAN,
+		FOREIGN KEY(run_id) REFERENCES eval_runs(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_scenario_results_run_id ON eval_scenario_results(run_id);
+	CREATE INDEX IF NOT EXISTS idx_scenario_results_scenario_id ON eval_scenario_results(scenario_id);
 	`
 	_, err := p.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migrate: add new columns to existing eval_runs table if missing
+	migrations := []string{
+		"ALTER TABLE eval_runs ADD COLUMN git_commit_sha TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN git_branch TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN run_duration_ms INTEGER",
+		"ALTER TABLE eval_runs ADD COLUMN cortex_version TEXT",
+	}
+	for _, m := range migrations {
+		p.db.Exec(m) // Ignore errors (column already exists)
+	}
+
+	return nil
+}
+
+// getGitInfo retrieves the current git commit SHA and branch.
+// Returns empty strings if git is not available or not in a git repository.
+func getGitInfo() (commitSHA, branch string) {
+	// Get commit SHA
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		commitSHA = strings.TrimSpace(string(out))
+	}
+
+	// Get branch name
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	out, err = cmd.Output()
+	if err == nil {
+		branch = strings.TrimSpace(string(out))
+	}
+
+	return commitSHA, branch
 }
 
 // Persist saves eval results to the database.
-func (p *Persister) Persist(results *Results) error {
+// durationMs is the elapsed time for the eval run in milliseconds.
+func (p *Persister) Persist(results *Results, durationMs int64) error {
 	id := fmt.Sprintf("eval-%s", time.Now().Format("20060102-150405"))
 	results.Timestamp = Timestamp()
 
@@ -75,16 +143,36 @@ func (p *Persister) Persist(results *Results) error {
 		return fmt.Errorf("marshal scenarios: %w", err)
 	}
 
+	// Get git info
+	commitSHA, branch := getGitInfo()
+
+	// Insert main run record
 	_, err = p.db.Exec(`
-		INSERT INTO eval_runs (id, timestamp, provider, model, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO eval_runs (id, timestamp, provider, model, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, git_commit_sha, git_branch, run_duration_ms, cortex_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, results.Timestamp, results.Provider, results.Model,
 		results.AvgBaselineScore, results.AvgCortexScore, results.AvgLift,
 		results.TotalCortexWins, results.TotalBaselineWins, results.TotalTies,
-		results.PassRate, results.Pass, string(scenariosJSON))
+		results.PassRate, results.Pass, string(scenariosJSON),
+		commitSHA, branch, durationMs, CortexVersion)
 
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
+	}
+
+	// Insert scenario results for easy querying
+	for _, scenario := range results.Scenarios {
+		_, err = p.db.Exec(`
+			INSERT INTO eval_scenario_results (run_id, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, has_ranking, avg_ndcg, avg_fast_ndcg, avg_full_ndcg, avg_abr, pass)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, id, scenario.ScenarioID, scenario.Name,
+			scenario.AvgBaselineScore, scenario.AvgCortexScore, scenario.AvgLift,
+			scenario.CortexWins, scenario.BaselineWins, scenario.Ties,
+			scenario.HasRanking, scenario.AvgNDCG, scenario.AvgFastNDCG, scenario.AvgFullNDCG, scenario.AvgABR,
+			scenario.Pass)
+		if err != nil {
+			return fmt.Errorf("insert scenario result %s: %w", scenario.ScenarioID, err)
+		}
 	}
 
 	return nil
