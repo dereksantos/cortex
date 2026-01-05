@@ -1,0 +1,24 @@
+id: security-practices
+name: "Security best practices"
+context:
+  - type: decision
+    content: "Never log sensitive data like passwords, tokens, or PII"
+  - type: pattern
+    content: "Validate and sanitize all user input at API boundaries using validation middleware"
+  - type: decision
+    content: "Secrets stored in environment variables, never committed to git"
+tests:
+  - id: logging-secrets
+    query: "Should I log the user's password for debugging?"
+    expect:
+      includes: ["never", "sensitive"]
+      excludes: ["yes", "sure"]
+  - id: input-validation
+    query: "How should I handle user input from the request body?"
+    expect:
+      includes: ["validate", "sanitize"]
+  - id: secrets-storage
+    query: "Where should I store API keys and database credentials?"
+    expect:
+      includes: ["environment", "variable"]
+      excludes: ["commit", "code", "hardcode"]

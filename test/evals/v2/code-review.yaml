@@ -1,0 +1,24 @@
+id: code-review
+name: "Code review and PR practices"
+context:
+  - type: pattern
+    content: "PR titles follow conventional commits: feat:, fix:, refactor:, docs:, test:"
+  - type: decision
+    content: "PRs should be small and focused, ideally under 400 lines changed"
+  - type: pattern
+    content: "Every PR requires at least one approval before merge, no self-merging"
+tests:
+  - id: pr-title
+    query: "How should I title my PR that adds a new user registration feature?"
+    expect:
+      includes: ["feat:"]
+      excludes: ["Added", "New"]
+  - id: pr-size
+    query: "My PR has 800 lines of changes. Is that okay?"
+    expect:
+      includes: ["small", "split", "focused"]
+  - id: merge-approval
+    query: "Can I merge my own PR?"
+    expect:
+      includes: ["approval", "review"]
+      excludes: ["yes", "sure"]

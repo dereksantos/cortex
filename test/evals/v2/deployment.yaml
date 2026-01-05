@@ -1,0 +1,23 @@
+id: deployment
+name: "Deployment and configuration patterns"
+context:
+  - type: decision
+    content: "Use feature flags for gradual rollouts, not long-lived feature branches"
+  - type: pattern
+    content: "Configuration loaded from environment with sensible defaults, fail fast on missing required config"
+  - type: decision
+    content: "All deployments go through staging first, production requires manual approval"
+tests:
+  - id: feature-rollout
+    query: "How should I roll out a new experimental feature?"
+    expect:
+      includes: ["feature flag", "gradual"]
+  - id: config-loading
+    query: "How should I handle configuration for different environments?"
+    expect:
+      includes: ["environment"]
+  - id: production-deploy
+    query: "Can I deploy directly to production?"
+    expect:
+      includes: ["staging", "approval"]
+      excludes: ["yes", "directly"]
