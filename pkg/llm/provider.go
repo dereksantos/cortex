@@ -51,6 +51,17 @@ type Provider interface {
 	Name() string
 }
 
+// Embedder defines the interface for embedding text into vectors.
+// This is separate from Provider since embedding is mechanical (fast, deterministic)
+// while generation is agentic (slow, variable).
+type Embedder interface {
+	// Embed converts text to a vector embedding
+	Embed(ctx context.Context, text string) ([]float32, error)
+
+	// IsEmbeddingAvailable checks if embedding is ready
+	IsEmbeddingAvailable() bool
+}
+
 // GenerateRequest represents a generation request
 type GenerateRequest struct {
 	Prompt string

@@ -29,7 +29,8 @@ type Cortex struct {
 }
 
 // New creates a new Cortex instance with all cognitive modes.
-func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Cortex, error) {
+// embedder is optional - if provided, enables semantic search in Reflex.
+func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, cfg *config.Config) (*Cortex, error) {
 	if store == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
@@ -38,8 +39,8 @@ func New(store *storage.Storage, provider llm.Provider, cfg *config.Config) (*Co
 	activity := NewActivityTracker()
 
 	// Create modes
-	reflex := NewReflex(store)
-	reflect := NewReflect(provider) // provider can be nil, Reflect will degrade gracefully
+	reflex := NewReflex(store, embedder) // embedder can be nil, falls back to text search
+	reflect := NewReflect(provider)      // provider can be nil, Reflect will degrade gracefully
 	think := NewThink(reflex, reflect, activity)
 	dream := NewDream(store, provider, activity)
 	digest := NewDigest(store)

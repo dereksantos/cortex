@@ -302,6 +302,81 @@ func (s *Storage) SearchEvents(query string, limit int) ([]*events.Event, error)
 	return eventList, nil
 }
 
+// SearchEventsMultiTerm searches events matching ANY of the provided terms (OR logic).
+// This enables natural language queries like "how to implement caching" to match
+// content containing any of the extracted keywords.
+func (s *Storage) SearchEventsMultiTerm(terms []string, limit int) ([]*events.Event, error) {
+	if len(terms) == 0 {
+		return nil, nil
+	}
+
+	// Build dynamic WHERE clause with OR for each term
+	var conditions []string
+	var args []any
+	for _, term := range terms {
+		pattern := "%" + term + "%"
+		conditions = append(conditions, "(tool_result LIKE ? OR tool_name LIKE ? OR tool_input LIKE ?)")
+		args = append(args, pattern, pattern, pattern)
+	}
+	args = append(args, limit)
+
+	query := `
+		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
+		FROM events
+		WHERE ` + joinConditions(conditions, " OR ") + `
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var eventList []*events.Event
+	for rows.Next() {
+		var event events.Event
+		var toolInputJSON, contextJSON, metadataJSON string
+
+		err := rows.Scan(
+			&event.ID,
+			&event.Source,
+			&event.EventType,
+			&event.Timestamp,
+			&event.ToolName,
+			&toolInputJSON,
+			&event.ToolResult,
+			&contextJSON,
+			&metadataJSON,
+		)
+
+		if err != nil {
+			continue
+		}
+
+		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
+		json.Unmarshal([]byte(contextJSON), &event.Context)
+		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
+
+		eventList = append(eventList, &event)
+	}
+
+	return eventList, nil
+}
+
+// joinConditions joins SQL conditions with a separator.
+func joinConditions(conditions []string, sep string) string {
+	if len(conditions) == 0 {
+		return ""
+	}
+	result := conditions[0]
+	for i := 1; i < len(conditions); i++ {
+		result += sep + conditions[i]
+	}
+	return result
+}
+
 // GetStats returns storage statistics
 func (s *Storage) GetStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})

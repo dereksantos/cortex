@@ -254,3 +254,8 @@ func (c *OllamaClient) IsEmbeddingModelAvailable() bool {
 	return false
 }
 
+// IsEmbeddingAvailable satisfies the llm.Embedder interface.
+func (c *OllamaClient) IsEmbeddingAvailable() bool {
+	return c.IsAvailable() && c.IsEmbeddingModelAvailable()
+}
+
