@@ -1,0 +1,40 @@
+id: auth-evolution
+name: "Auth decision evolution over time"
+
+tree:
+  # Root: Initial JWT decision
+  context:
+    - type: decision
+      content: "Use JWT for stateless authentication"
+
+  tests:
+    - id: initial-auth
+      query: "How should I implement authentication?"
+      expect:
+        includes: ["JWT"]
+
+  children:
+    # Session 2: Add token details
+    - context:
+        - type: pattern
+          content: "JWT tokens use HS256 signing with 24h expiry and refresh tokens"
+
+      tests:
+        - id: token-details
+          query: "What's our token expiry policy?"
+          expect:
+            includes: ["24h"]
+
+      children:
+        # Session 3: Pivot to OAuth2 (supersedes JWT)
+        - context:
+            - type: decision
+              content: "Migrate to OAuth2 for SSO support with external identity providers"
+              supersedes: "Use JWT for stateless authentication"
+
+          tests:
+            - id: post-pivot
+              query: "How should I implement authentication?"
+              expect:
+                includes: ["OAuth2", "SSO"]
+                excludes: ["JWT"]

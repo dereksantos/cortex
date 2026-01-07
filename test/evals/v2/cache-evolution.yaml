@@ -1,0 +1,55 @@
+# Multi-session journey: Cache implementation evolves over time
+# Tests context accumulation across development phases
+id: cache-evolution
+name: "Cache implementation evolution"
+
+tree:
+  # Session 1: Initial cache decision
+  context:
+    - type: decision
+      content: "Use Redis for ALL caching needs - do NOT use in-memory caching with sync.Map or map[string]"
+    - type: pattern
+      content: "Redis client initialized in main.go and passed via dependency injection to services"
+
+  tests:
+    - id: cache-type
+      query: "What should I use for caching user sessions?"
+      expect:
+        includes: ["Redis"]
+        excludes: ["sync.Map", "in-memory"]
+
+  children:
+    # Session 2: Add cache configuration details
+    - context:
+        - type: pattern
+          content: "Redis connection pool: max 10 connections, idle timeout 5 minutes, connection timeout 3 seconds"
+        - type: pattern
+          content: "Cache keys use format: {service}:{entity}:{id}, e.g., 'users:profile:123'"
+
+      tests:
+        - id: key-format
+          query: "How should I format cache keys?"
+          expect:
+            includes: ["service", "entity", "id"]
+
+        - id: pool-config
+          query: "What's the Redis connection pool configuration?"
+          expect:
+            includes: ["10", "connection"]
+
+      children:
+        # Session 3: Add TTL patterns
+        - context:
+            - type: decision
+              content: "Default cache TTL is 1 hour. User sessions use 24 hours. Rate limit counters use 1 minute."
+
+          tests:
+            - id: ttl-policy
+              query: "What TTL should I use for caching API responses?"
+              expect:
+                includes: ["1 hour", "TTL"]
+
+            - id: session-ttl
+              query: "How long should user sessions be cached?"
+              expect:
+                includes: ["24"]
