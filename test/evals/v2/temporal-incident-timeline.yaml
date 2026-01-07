@@ -1,0 +1,53 @@
+# Temporal Reasoning: Incident timeline
+# Tests understanding of when events happened and their sequence
+
+id: temporal-incident-timeline
+name: "Temporal: Incident timeline"
+
+difficulty:
+  depth: 1
+  breadth: 6
+  category: temporal-reasoning
+
+context:
+  - type: pattern
+    content: "INC-500 Timeline: 14:00 UTC - Alerts fired for high error rate."
+  - type: pattern
+    content: "INC-500 Timeline: 14:05 UTC - On-call engineer acknowledged. Started investigation."
+  - type: pattern
+    content: "INC-500 Timeline: 14:20 UTC - Root cause identified: bad config deployed at 13:45 UTC."
+  - type: pattern
+    content: "INC-500 Timeline: 14:35 UTC - Config rollback initiated."
+  - type: pattern
+    content: "INC-500 Timeline: 14:45 UTC - Rollback complete. Errors subsiding."
+  - type: pattern
+    content: "INC-500 Timeline: 15:00 UTC - All clear. Incident resolved. Total duration: 1 hour."
+
+tests:
+  - id: when-started
+    query: "When did INC-500 alerts fire?"
+    expect:
+      includes: ["14:00"]
+      excludes: ["13:45", "14:05"]
+      ranking: ["14:00", "UTC", "alerts"]
+
+  - id: root-cause-timing
+    query: "When was the bad config deployed that caused INC-500?"
+    expect:
+      includes: ["13:45"]
+      excludes: ["14:00", "14:20"]
+      ranking: ["13:45", "deployed"]
+
+  - id: time-to-identify
+    query: "How long did it take to identify the root cause after alerts fired?"
+    expect:
+      includes: ["20", "minutes"]
+      excludes: ["5", "35"]
+      ranking: ["20", "minutes", "root cause"]
+
+  - id: sequence-order
+    query: "What happened immediately after the root cause was identified?"
+    expect:
+      includes: ["rollback"]
+      excludes: ["acknowledged", "resolved"]
+      ranking: ["rollback", "14:35"]

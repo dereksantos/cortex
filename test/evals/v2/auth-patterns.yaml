@@ -15,13 +15,16 @@ tests:
     expect:
       includes: ["JWT", "stateless"]
       excludes: ["session", "cookie-based"]
+      ranking: ["JWT", "stateless", "HS256"]
 
   - id: token-expiry
     query: "What's the token expiry policy?"
     expect:
       includes: ["24h", "expiry"]
+      ranking: ["24h", "expiry", "httpOnly"]
 
   - id: validation-pattern
     query: "How do I validate tokens?"
     expect:
       includes: ["middleware", "401"]
+      ranking: ["AuthMiddleware", "Bearer", "401"]

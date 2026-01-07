@@ -13,12 +13,15 @@ tests:
     expect:
       includes: ["feat:"]
       excludes: ["Added", "New"]
+      ranking: ["feat:", "conventional commit", "PR title"]
   - id: pr-size
     query: "My PR has 800 lines of changes. Is that okay?"
     expect:
       includes: ["small", "split", "focused"]
+      ranking: ["small", "focused", "400 lines", "split"]
   - id: merge-approval
     query: "Can I merge my own PR?"
     expect:
       includes: ["approval", "review"]
       excludes: ["yes", "sure"]
+      ranking: ["approval", "review", "no self-merging"]

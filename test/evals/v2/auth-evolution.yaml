@@ -12,6 +12,7 @@ tree:
       query: "How should I implement authentication?"
       expect:
         includes: ["JWT"]
+        ranking: ["JWT", "stateless"]
 
   children:
     # Session 2: Add token details
@@ -24,6 +25,7 @@ tree:
           query: "What's our token expiry policy?"
           expect:
             includes: ["24h"]
+            ranking: ["24h", "expiry", "HS256", "refresh"]
 
       children:
         # Session 3: Pivot to OAuth2 (supersedes JWT)
@@ -38,3 +40,4 @@ tree:
               expect:
                 includes: ["OAuth2", "SSO"]
                 excludes: ["JWT"]
+                ranking: ["OAuth2", "SSO", "identity provider"]

@@ -24,6 +24,14 @@ func Report(w io.Writer, results *Results) {
 	fmt.Fprintf(w, "Avg Baseline Score: %.2f\n", results.AvgBaselineScore)
 	fmt.Fprintf(w, "Avg Cortex Score:   %.2f\n", results.AvgCortexScore)
 	fmt.Fprintf(w, "Avg Lift:           %+.0f%%\n", results.AvgLift*100)
+
+	// Show ABR if any scenario has ranking
+	for _, s := range results.Scenarios {
+		if s.HasRanking && s.AvgABR > 0 {
+			fmt.Fprintf(w, "Avg ABR:            %.2f\n", s.AvgABR)
+			break
+		}
+	}
 	fmt.Fprintf(w, "\n")
 
 	// Win/Loss
@@ -47,8 +55,8 @@ func Report(w io.Writer, results *Results) {
 			status = "REGRESS"
 		}
 		line := fmt.Sprintf("%-35s Lift: %+5.0f%%", truncate(s.ScenarioID, 35), s.AvgLift*100)
-		if s.HasRanking {
-			line += fmt.Sprintf(" NDCG: %.2f", s.AvgNDCG)
+		if s.HasRanking && s.AvgABR > 0 {
+			line += fmt.Sprintf("  ABR: %.2f", s.AvgABR)
 		}
 		fmt.Fprintf(w, "%s [%s]\n", line, status)
 	}

@@ -1,0 +1,49 @@
+# Knowledge Updates: Library and dependency migrations
+# Tests recognizing when libraries have been replaced
+
+id: updates-library-migrations
+name: "Updates: Library migrations"
+
+difficulty:
+  depth: 2
+  breadth: 3
+  category: knowledge-updates
+
+context:
+  # Old decisions
+  - type: decision
+    content: "2023-06: Use Moment.js for all date/time handling in frontend."
+  - type: decision
+    content: "2023-06: Use Request library for HTTP calls in Node.js backend."
+  - type: decision
+    content: "2023-09: Use Class-based React components with lifecycle methods."
+
+  # Migration decisions (supersede old ones)
+  - type: correction
+    content: "2024-01 MIGRATION: Moment.js is deprecated. Use date-fns instead. Moment.js removed from package.json."
+  - type: correction
+    content: "2024-02 MIGRATION: Request library is deprecated. Use native fetch or axios. Request removed from dependencies."
+  - type: correction
+    content: "2024-03 MIGRATION: Migrated all class components to functional components with hooks. No new class components allowed."
+
+tests:
+  - id: date-library
+    query: "What library should I use for date formatting?"
+    expect:
+      includes: ["date-fns"]
+      excludes: ["Moment", "moment.js", "Moment.js"]
+      ranking: ["date-fns", "deprecated", "removed"]
+
+  - id: http-client
+    query: "How do I make HTTP requests from the backend?"
+    expect:
+      includes: ["fetch", "axios"]
+      excludes: ["Request", "request"]
+      ranking: ["fetch", "axios", "deprecated"]
+
+  - id: react-components
+    query: "Should I use class components or functional components in React?"
+    expect:
+      includes: ["functional", "hooks"]
+      excludes: ["class", "lifecycle"]
+      ranking: ["functional", "hooks"]

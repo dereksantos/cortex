@@ -21,15 +21,18 @@ tests:
     expect:
       includes: ["PaymentService"]
       excludes: ["PaymentManager", "PaymentHandler", "PaymentController"]
+      ranking: ["PaymentService", "Service", "New"]
 
   - id: new-handler-name
     query: "I'm adding an HTTP endpoint for creating invoices. What should I name the handler function?"
     expect:
       includes: ["HandleCreateInvoice"]
       excludes: ["CreateInvoiceHandler", "InvoiceController"]
+      ranking: ["HandleCreateInvoice", "Handle"]
 
   - id: constructor-name
     query: "I need a constructor for my NotificationService. What should I name it?"
     expect:
       includes: ["NewNotificationService"]
       excludes: ["CreateNotificationService", "MakeNotificationService"]
+      ranking: ["NewNotificationService", "New"]

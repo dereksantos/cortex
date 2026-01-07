@@ -1,0 +1,45 @@
+# Adversarial eval: Tests appropriate abstention
+#
+# These scenarios test:
+# 1. Model should NOT make up answers when context doesn't contain info
+# 2. Model should acknowledge when it doesn't know
+# 3. Model should NOT hallucinate project-specific details
+
+id: adversarial-abstention
+name: "Adversarial: Appropriate abstention"
+
+difficulty:
+  depth: 1
+  breadth: 1
+  adversarial: true
+
+context:
+  # Limited context - intentionally missing info about some topics
+  - type: decision
+    content: "Use PostgreSQL for all relational data storage."
+  - type: pattern
+    content: "Database migrations handled via golang-migrate with SQL files in db/migrations/"
+
+tests:
+  # Question about something NOT in context - model should abstain
+  - id: no-cache-info
+    query: "What caching layer does this project use?"
+    expect:
+      includes: ["not specified", "no information", "don't have", "context doesn't", "not mentioned"]
+      excludes: ["Redis", "Memcached", "use"]
+      ranking: ["not specified", "context", "don't know"]
+
+  - id: no-auth-info
+    query: "How is authentication implemented in this project?"
+    expect:
+      includes: ["not specified", "no information", "don't have", "context doesn't", "not mentioned"]
+      excludes: ["JWT", "OAuth", "session", "implement"]
+      ranking: ["not specified", "context", "don't know"]
+
+  # Question that IS in context - should answer
+  - id: has-db-info
+    query: "What database does this project use?"
+    expect:
+      includes: ["PostgreSQL"]
+      excludes: ["not specified", "don't know"]
+      ranking: ["PostgreSQL", "relational"]

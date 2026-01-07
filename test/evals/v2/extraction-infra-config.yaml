@@ -1,0 +1,51 @@
+# Information Extraction: Infrastructure configuration
+# Tests recall of specific numbers, thresholds, and config values
+
+id: extraction-infra-config
+name: "Extraction: Infrastructure configuration"
+
+difficulty:
+  depth: 1
+  breadth: 5
+  category: information-extraction
+
+context:
+  - type: decision
+    content: "Database connection pool: min 5, max 25, idle timeout 10 minutes. Use pgbouncer in transaction mode."
+  - type: pattern
+    content: "Redis cluster: 3 masters, 3 replicas. Max memory 4GB per node. Eviction policy: volatile-lru."
+  - type: decision
+    content: "Kubernetes resources: API pods get 512Mi memory request, 1Gi limit. CPU 250m request, 500m limit."
+  - type: pattern
+    content: "Log retention: 30 days in Elasticsearch, 90 days in S3 cold storage. Logs over 1MB are truncated."
+  - type: decision
+    content: "Circuit breaker: Open after 5 failures in 30 seconds. Half-open after 60 seconds. Close after 3 successes."
+
+tests:
+  - id: pool-max
+    query: "What's the maximum database connection pool size?"
+    expect:
+      includes: ["25"]
+      excludes: ["5", "10"]
+      ranking: ["25", "max", "pool"]
+
+  - id: redis-memory
+    query: "How much memory is allocated per Redis node?"
+    expect:
+      includes: ["4GB"]
+      excludes: ["1GB", "2GB"]
+      ranking: ["4GB", "memory", "node"]
+
+  - id: pod-memory-limit
+    query: "What's the memory limit for API pods?"
+    expect:
+      includes: ["1Gi"]
+      excludes: ["512Mi", "2Gi"]
+      ranking: ["1Gi", "limit", "memory"]
+
+  - id: circuit-breaker-threshold
+    query: "How many failures trigger the circuit breaker?"
+    expect:
+      includes: ["5"]
+      excludes: ["3", "10"]
+      ranking: ["5", "failures", "circuit"]

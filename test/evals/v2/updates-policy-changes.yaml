@@ -1,0 +1,60 @@
+# Knowledge Updates: Policy and process changes
+# Tests recognizing when organizational policies have changed
+
+id: updates-policy-changes
+name: "Updates: Policy changes"
+
+difficulty:
+  depth: 2
+  breadth: 4
+  category: knowledge-updates
+
+context:
+  # Old policies
+  - type: decision
+    content: "Q1 Policy: Code reviews require 1 approval. Self-merge allowed for hotfixes."
+  - type: decision
+    content: "Q1 Policy: Deploy to production on any weekday. No weekend deploys."
+  - type: decision
+    content: "Q1 Policy: Feature flags managed in config files. Manual toggle via PR."
+  - type: decision
+    content: "Q1 Policy: On-call rotation is weekly. One primary, no backup."
+
+  # Updated policies
+  - type: correction
+    content: "Q3 Policy UPDATE: Code reviews now require 2 approvals. Self-merge never allowed, including hotfixes."
+  - type: correction
+    content: "Q3 Policy UPDATE: Production deploys only Tuesday-Thursday. Monday/Friday freeze."
+  - type: correction
+    content: "Q3 Policy UPDATE: Feature flags managed in LaunchDarkly. No more config file flags."
+  - type: correction
+    content: "Q3 Policy UPDATE: On-call rotation is daily. Primary and secondary required."
+
+tests:
+  - id: review-approvals
+    query: "How many approvals do I need for a code review?"
+    expect:
+      includes: ["2"]
+      excludes: ["1", "one"]
+      ranking: ["2", "approvals"]
+
+  - id: deploy-days
+    query: "Can I deploy to production on Friday?"
+    expect:
+      includes: ["no", "freeze"]
+      excludes: ["yes", "any", "weekday"]
+      ranking: ["no", "freeze", "Tuesday", "Thursday"]
+
+  - id: feature-flags
+    query: "Where do I manage feature flags?"
+    expect:
+      includes: ["LaunchDarkly"]
+      excludes: ["config", "file", "PR"]
+      ranking: ["LaunchDarkly"]
+
+  - id: oncall-structure
+    query: "How is on-call structured?"
+    expect:
+      includes: ["daily", "secondary"]
+      excludes: ["weekly", "no backup"]
+      ranking: ["daily", "primary", "secondary"]

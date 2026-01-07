@@ -1,0 +1,49 @@
+# Temporal Reasoning: Sprint planning history
+# Tests understanding of what was planned/done in which sprint
+
+id: temporal-sprint-planning
+name: "Temporal: Sprint planning"
+
+difficulty:
+  depth: 1
+  breadth: 4
+  category: temporal-reasoning
+
+context:
+  - type: pattern
+    content: "Sprint 22 (Oct 1-14): Planned: User dashboard redesign. Completed: Dashboard redesign, fixed 3 critical bugs."
+  - type: pattern
+    content: "Sprint 23 (Oct 15-28): Planned: API rate limiting, billing integration. Completed: Rate limiting only. Billing pushed to Sprint 24."
+  - type: pattern
+    content: "Sprint 24 (Oct 29 - Nov 11): Planned: Billing integration (carryover), mobile responsive. Completed: Both completed successfully."
+  - type: pattern
+    content: "Sprint 25 (Nov 12-25): Planned: Performance optimization, caching layer. In progress currently."
+
+tests:
+  - id: when-billing-done
+    query: "When was billing integration completed?"
+    expect:
+      includes: ["Sprint 24", "Nov"]
+      excludes: ["Sprint 23", "Oct 15"]
+      ranking: ["Sprint 24", "Nov 11"]
+
+  - id: what-slipped
+    query: "What was pushed from Sprint 23 to Sprint 24?"
+    expect:
+      includes: ["billing", "Billing"]
+      excludes: ["rate limiting", "dashboard"]
+      ranking: ["billing", "carryover", "pushed"]
+
+  - id: current-sprint
+    query: "What sprint is currently in progress?"
+    expect:
+      includes: ["Sprint 25", "25"]
+      excludes: ["Sprint 24", "Sprint 23"]
+      ranking: ["Sprint 25", "in progress"]
+
+  - id: sprint-22-outcome
+    query: "What extra work was done in Sprint 22 beyond the plan?"
+    expect:
+      includes: ["bug", "3"]
+      excludes: ["billing", "rate limiting"]
+      ranking: ["3", "critical", "bugs"]

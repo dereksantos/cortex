@@ -17,12 +17,13 @@ tree:
       expect:
         includes: ["safecache", "SafeCache"]
         excludes: ["sync.Map"]
+        ranking: ["safecache", "SafeCache", "type safety"]
 
     - id: why-not-syncmap
       query: "Can I use sync.Map for the cache?"
       expect:
         includes: ["deprecated", "safecache"]
-        excludes: []
+        ranking: ["deprecated", "safecache", "SafeCache"]
 
   children:
     # Session 2: Implementation details
@@ -35,3 +36,4 @@ tree:
           query: "Where do I import SafeCache from?"
           expect:
             includes: ["safecache", "pkg"]
+            ranking: ["internal/pkg/safecache", "NewSafeCache"]

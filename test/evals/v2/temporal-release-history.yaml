@@ -1,0 +1,51 @@
+# Temporal Reasoning: Release history
+# Tests understanding of release sequence and timing
+
+id: temporal-release-history
+name: "Temporal: Release history"
+
+difficulty:
+  depth: 1
+  breadth: 5
+  category: temporal-reasoning
+
+context:
+  - type: decision
+    content: "v1.0.0 (Jan 2024): Initial release. Core CRUD functionality."
+  - type: decision
+    content: "v1.1.0 (Feb 2024): Added search functionality. Elasticsearch integration."
+  - type: decision
+    content: "v1.2.0 (Apr 2024): Added export to CSV. Batch operations."
+  - type: decision
+    content: "v2.0.0 (Jul 2024): Major rewrite. New React frontend. Breaking API changes."
+  - type: decision
+    content: "v2.1.0 (Sep 2024): Added real-time notifications. WebSocket support."
+
+tests:
+  - id: when-search-added
+    query: "When was search functionality added?"
+    expect:
+      includes: ["Feb", "v1.1"]
+      excludes: ["Jan", "Apr"]
+      ranking: ["Feb 2024", "v1.1.0", "search"]
+
+  - id: major-version-timing
+    query: "When was v2.0.0 released?"
+    expect:
+      includes: ["Jul", "2024"]
+      excludes: ["Jan", "Feb", "Sep"]
+      ranking: ["Jul 2024", "v2.0.0"]
+
+  - id: what-before-export
+    query: "What feature was added before export to CSV?"
+    expect:
+      includes: ["search", "Elasticsearch"]
+      excludes: ["notifications", "React"]
+      ranking: ["search", "v1.1.0"]
+
+  - id: latest-feature
+    query: "What's the most recent feature added?"
+    expect:
+      includes: ["notification", "WebSocket"]
+      excludes: ["search", "CSV", "React"]
+      ranking: ["notification", "WebSocket", "v2.1.0"]

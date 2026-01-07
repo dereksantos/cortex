@@ -1915,9 +1915,20 @@ Examples:
 		}
 	}
 
+	// Determine actual model name
+	var modelName string
+	if modelOverride != "" {
+		modelName = modelOverride
+	} else if providerName == "anthropic" {
+		modelName = cfg.AnthropicModel
+	} else {
+		modelName = cfg.OllamaModel
+	}
+
 	// Create evaluator
 	evaluator := evalv2.New(provider)
 	evaluator.SetVerbose(verbose)
+	evaluator.SetModel(modelName)
 
 	// Track start time for duration measurement
 	startTime := time.Now()
@@ -1935,7 +1946,7 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Failed to run scenario: %v\n", err)
 			os.Exit(1)
 		}
-		results = evalv2.CalculateResults([]evalv2.ScenarioResult{*scenarioResult}, provider.Name(), "")
+		results = evalv2.CalculateResults([]evalv2.ScenarioResult{*scenarioResult}, provider.Name(), modelName)
 	} else {
 		results, err = evaluator.Run(scenarioDir)
 		if err != nil {

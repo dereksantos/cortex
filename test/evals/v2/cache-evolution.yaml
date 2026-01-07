@@ -17,6 +17,7 @@ tree:
       expect:
         includes: ["Redis"]
         excludes: ["sync.Map", "in-memory"]
+        ranking: ["Redis", "dependency injection", "main.go"]
 
   children:
     # Session 2: Add cache configuration details
@@ -31,11 +32,13 @@ tree:
           query: "How should I format cache keys?"
           expect:
             includes: ["service", "entity", "id"]
+            ranking: ["service", "entity", "id", "users:profile:123"]
 
         - id: pool-config
           query: "What's the Redis connection pool configuration?"
           expect:
             includes: ["10", "connection"]
+            ranking: ["10 connections", "idle timeout", "5 minutes"]
 
       children:
         # Session 3: Add TTL patterns
@@ -48,8 +51,10 @@ tree:
               query: "What TTL should I use for caching API responses?"
               expect:
                 includes: ["1 hour", "TTL"]
+                ranking: ["1 hour", "TTL", "default"]
 
             - id: session-ttl
               query: "How long should user sessions be cached?"
               expect:
                 includes: ["24"]
+                ranking: ["24 hours", "session", "TTL"]

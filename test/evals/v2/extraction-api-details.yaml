@@ -1,0 +1,49 @@
+# Information Extraction: API implementation details
+# Tests precise recall of specific technical details
+
+id: extraction-api-details
+name: "Extraction: API implementation details"
+
+difficulty:
+  depth: 1
+  breadth: 4
+  category: information-extraction
+
+context:
+  - type: pattern
+    content: "REST API pagination: Use cursor-based pagination with 'next_cursor' field. Default page size 25, max 100. Never use offset-based pagination."
+  - type: decision
+    content: "API rate limits: 1000 requests/hour for free tier, 10000/hour for paid. Return 429 with Retry-After header when exceeded."
+  - type: pattern
+    content: "Error response format: {\"error\": {\"code\": \"ERROR_CODE\", \"message\": \"Human readable\", \"details\": {}}}. Always include request_id."
+  - type: decision
+    content: "API versioning: Use Accept header versioning (Accept: application/vnd.api+json;version=2). No URL versioning."
+
+tests:
+  - id: pagination-details
+    query: "What's the maximum page size for API responses?"
+    expect:
+      includes: ["100"]
+      excludes: ["25", "50"]
+      ranking: ["100", "max", "page size"]
+
+  - id: rate-limit-paid
+    query: "How many API requests per hour for paid users?"
+    expect:
+      includes: ["10000"]
+      excludes: ["1000"]
+      ranking: ["10000", "paid", "hour"]
+
+  - id: error-format
+    query: "What fields must be in API error responses?"
+    expect:
+      includes: ["code", "message", "request_id"]
+      excludes: []
+      ranking: ["error", "code", "message", "request_id"]
+
+  - id: versioning-method
+    query: "How do we version our API?"
+    expect:
+      includes: ["Accept", "header"]
+      excludes: ["URL", "/v1/", "/v2/"]
+      ranking: ["Accept header", "version"]

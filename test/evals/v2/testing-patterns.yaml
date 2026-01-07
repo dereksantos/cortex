@@ -15,8 +15,10 @@ tests:
     expect:
       includes: ["standard library", "testing"]
       excludes: ["testify", "assert"]
+      ranking: ["standard library", "testing", "t.Errorf"]
 
   - id: test-structure
     query: "How should I structure my tests?"
     expect:
       includes: ["table", "t.Run"]
+      ranking: ["table-driven", "t.Run", "subtest"]

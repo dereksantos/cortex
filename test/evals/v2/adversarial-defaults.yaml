@@ -1,0 +1,61 @@
+# Adversarial eval: Tests if Cortex overrides model's default knowledge
+#
+# These scenarios test cases where:
+# 1. The model's training strongly suggests one approach (popular default)
+# 2. The project context specifies a DIFFERENT approach
+# 3. Small models especially may ignore context and follow training
+#
+# Success = Cortex context overrides model defaults
+# Failure = Model ignores context and suggests default anyway
+
+id: adversarial-defaults
+name: "Adversarial: Override model defaults"
+
+difficulty:
+  depth: 1
+  breadth: 1
+  adversarial: true  # Model's prior conflicts with context
+
+context:
+  # These contradict common defaults that models are trained on
+  - type: correction
+    content: "IMPORTANT: Do NOT use testify/assert in this project. Use standard library testing with t.Errorf and t.Fatalf only. We tried testify and removed it due to dependency bloat."
+  - type: correction
+    content: "IMPORTANT: Do NOT use fmt.Errorf for error wrapping. Use github.com/pkg/errors.Wrap() to preserve stack traces. This is a strict project requirement."
+  - type: correction
+    content: "IMPORTANT: Never use gin or echo for HTTP. This project uses standard library net/http with chi router only."
+  - type: decision
+    content: "UUID generation: Do NOT use google/uuid. Use rs/xid for shorter, sortable IDs."
+
+tests:
+  # Test 1: Model default is testify, project says stdlib
+  - id: testing-override
+    query: "What assertion library should I use for my unit tests?"
+    expect:
+      includes: ["standard library", "t.Errorf"]
+      excludes: ["testify", "assert", "require"]
+      ranking: ["standard library", "t.Errorf", "t.Fatalf"]
+
+  # Test 2: Model default is fmt.Errorf, project says pkg/errors
+  - id: errors-override
+    query: "How do I wrap an error with context in this codebase?"
+    expect:
+      includes: ["pkg/errors", "Wrap"]
+      excludes: ["fmt.Errorf", "%w"]
+      ranking: ["pkg/errors", "Wrap", "stack traces"]
+
+  # Test 3: Model default is gin/echo, project says net/http+chi
+  - id: http-override
+    query: "What HTTP framework should I use for a new endpoint?"
+    expect:
+      includes: ["net/http", "chi"]
+      excludes: ["gin", "echo", "fiber"]
+      ranking: ["net/http", "chi", "standard library"]
+
+  # Test 4: Model default is google/uuid, project says rs/xid
+  - id: uuid-override
+    query: "How should I generate unique IDs for new records?"
+    expect:
+      includes: ["xid", "rs/xid"]
+      excludes: ["uuid", "google/uuid"]
+      ranking: ["xid", "rs/xid", "sortable"]

@@ -1,0 +1,83 @@
+# Multi-Session Reasoning: Feature development across sessions
+# Tests synthesizing information from multiple development sessions
+
+id: reasoning-feature-build
+name: "Reasoning: Feature development journey"
+
+difficulty:
+  depth: 4
+  breadth: 3
+  category: multi-session-reasoning
+
+tree:
+  # Session 1: Feature planning
+  context:
+    - type: decision
+      content: "New feature: Implement team workspaces. Each workspace has members with roles (owner, admin, member)."
+
+  tests:
+    - id: initial-plan
+      query: "What roles exist in a workspace?"
+      expect:
+        includes: ["owner", "admin", "member"]
+        ranking: ["owner", "admin", "member"]
+
+  children:
+    # Session 2: Database design
+    - context:
+        - type: pattern
+          content: "Workspace tables: workspaces (id, name, created_at), workspace_members (workspace_id, user_id, role, joined_at)."
+        - type: decision
+          content: "Workspace IDs use UUID format. Member role stored as enum: 'owner', 'admin', 'member'."
+
+      tests:
+        - id: table-structure
+          query: "What tables store workspace data?"
+          expect:
+            includes: ["workspaces", "workspace_members"]
+            ranking: ["workspaces", "workspace_members"]
+
+      children:
+        # Session 3: API design
+        - context:
+            - type: pattern
+              content: "Workspace API endpoints: POST /workspaces, GET /workspaces/:id, POST /workspaces/:id/members, DELETE /workspaces/:id/members/:user_id"
+            - type: decision
+              content: "Only workspace owners can delete the workspace. Admins can manage members."
+
+          tests:
+            - id: permission-model
+              query: "Who can delete a workspace?"
+              expect:
+                includes: ["owner"]
+                excludes: ["admin", "member"]
+                ranking: ["owner", "delete"]
+
+            - id: synthesize-full-picture
+              query: "Describe the workspace feature including tables and permissions."
+              expect:
+                includes: ["owner", "workspace_members", "role"]
+                ranking: ["workspaces", "workspace_members", "owner", "admin", "member"]
+
+          children:
+            # Session 4: Edge cases
+            - context:
+                - type: decision
+                  content: "Workspace limits: Max 50 members per workspace. Max 10 workspaces per user. Free tier: 3 workspaces."
+                - type: pattern
+                  content: "When owner leaves: Must transfer ownership first. Cannot delete last owner."
+
+              tests:
+                - id: limits
+                  query: "How many members can a workspace have?"
+                  expect:
+                    includes: ["50"]
+                    excludes: ["10", "100"]
+                    ranking: ["50", "members", "max"]
+
+                - id: ownership-transfer
+                  query: "What happens if a workspace owner tries to leave?"
+                  expect:
+                    includes: ["transfer", "ownership"]
+                    excludes: ["delete", "remove"]
+                    ranking: ["transfer", "ownership", "cannot"]

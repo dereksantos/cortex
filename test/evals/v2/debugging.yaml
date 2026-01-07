@@ -12,11 +12,14 @@ tests:
     query: "How do I trace a request across multiple services?"
     expect:
       includes: ["request_id", "trace"]
+      ranking: ["request_id", "tracing", "log entries"]
   - id: log-context
     query: "What information should I include in my log messages?"
     expect:
       includes: ["user_id", "context", "structured"]
+      ranking: ["user_id", "slog", "structured", "context"]
   - id: prod-debugging
     query: "There's an issue in production. Where should I start investigating?"
     expect:
       includes: ["logs"]
+      ranking: ["logs", "metrics", "traces"]

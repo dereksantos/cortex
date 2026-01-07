@@ -1,0 +1,60 @@
+# Adversarial eval: Tests retrieval quality with noise
+#
+# These scenarios test:
+# 1. Can model find relevant info among distractors?
+# 2. Does irrelevant context confuse the model?
+# 3. Retrieval quality (ABR) matters here
+
+id: adversarial-noise
+name: "Adversarial: Signal vs noise"
+
+difficulty:
+  depth: 1
+  breadth: 5
+  adversarial: true
+  noise: true  # Contains distractor items
+
+context:
+  # RELEVANT: Auth pattern
+  - type: decision
+    content: "Authentication: Use JWT with RS256 signing. Tokens expire in 1 hour. Refresh tokens last 7 days."
+
+  # NOISE: Unrelated patterns
+  - type: pattern
+    content: "Logging: Use structured JSON logging with correlation IDs. Log level INFO in production."
+  - type: pattern
+    content: "Metrics: Export Prometheus metrics on /metrics endpoint. Include request latency histograms."
+  - type: pattern
+    content: "Health checks: Implement /health and /ready endpoints. Health checks database connectivity."
+  - type: pattern
+    content: "Rate limiting: Use token bucket algorithm. Default 100 requests per minute per user."
+  - type: decision
+    content: "Deployment: Use Kubernetes with Helm charts. Blue-green deployment strategy."
+  - type: pattern
+    content: "CI/CD: GitHub Actions for CI. ArgoCD for CD. All PRs require passing tests."
+
+  # RELEVANT: More auth details
+  - type: pattern
+    content: "JWT claims must include: sub (user ID), exp (expiry), iat (issued at), roles (array of role names)."
+
+tests:
+  - id: find-auth-in-noise
+    query: "How long do JWT tokens last before expiring?"
+    expect:
+      includes: ["1 hour", "hour"]
+      excludes: ["7 days", "minute"]
+      ranking: ["1 hour", "expire", "JWT"]
+
+  - id: find-claims-in-noise
+    query: "What claims should be included in the JWT?"
+    expect:
+      includes: ["sub", "exp", "roles"]
+      excludes: ["Prometheus", "Kubernetes"]
+      ranking: ["sub", "exp", "iat", "roles", "claims"]
+
+  - id: dont-confuse-patterns
+    query: "What signing algorithm do we use for JWTs?"
+    expect:
+      includes: ["RS256"]
+      excludes: ["token bucket", "histogram"]
+      ranking: ["RS256", "signing", "JWT"]
