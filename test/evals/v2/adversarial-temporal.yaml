@@ -1,0 +1,56 @@
+# Adversarial eval: Tests temporal reasoning
+#
+# These scenarios test:
+# 1. Model understands sequence of events
+# 2. Model recognizes "before" and "after" relationships
+# 3. Model uses most recent information when relevant
+
+id: adversarial-temporal
+name: "Adversarial: Temporal reasoning"
+
+difficulty:
+  depth: 3
+  breadth: 3
+  adversarial: true
+
+context:
+  # Chronological sequence of events
+  - type: decision
+    content: "January 2024: Initial architecture uses monolith with all services in one repo."
+  - type: decision
+    content: "March 2024: Extracted UserService into separate microservice. Communicates via gRPC."
+  - type: decision
+    content: "June 2024: Extracted PaymentService. Now have 3 services: Monolith, UserService, PaymentService."
+  - type: decision
+    content: "September 2024: Monolith renamed to CoreService. Full microservices architecture complete."
+  - type: pattern
+    content: "Service communication: All inter-service calls use gRPC. REST only for external API."
+
+tests:
+  - id: current-architecture
+    query: "What is the current architecture of the system?"
+    expect:
+      includes: ["microservice", "CoreService"]
+      excludes: ["monolith"]
+      ranking: ["microservices", "CoreService", "UserService", "PaymentService"]
+
+  - id: when-extracted
+    query: "When was the PaymentService extracted?"
+    expect:
+      includes: ["June", "2024"]
+      excludes: ["January", "March", "September"]
+      ranking: ["June 2024", "extracted"]
+
+  - id: before-after
+    query: "What was the architecture before PaymentService was extracted?"
+    expect:
+      includes: ["UserService", "monolith"]
+      excludes: ["PaymentService", "CoreService"]
+      ranking: ["monolith", "UserService", "before"]
+
+  - id: sequence
+    query: "List the services in the order they were created."
+    expect:
+      includes: ["monolith", "UserService", "PaymentService"]
+      excludes: []
+      ranking: ["monolith", "UserService", "PaymentService", "CoreService"]

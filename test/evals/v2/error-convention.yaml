@@ -17,6 +17,7 @@ tree:
       expect:
         includes: ["pkg/errors", "Wrap"]
         excludes: ["fmt.Errorf"]
+        ranking: ["pkg/errors", "Wrap", "stack traces"]
 
   children:
     # Session 2: Add more detail about message format
@@ -29,9 +30,11 @@ tree:
           query: "What should error messages include?"
           expect:
             includes: ["function", "context"]
+            ranking: ["function name", "operation", "context"]
 
         - id: implementation-check
           query: "I need to add error handling to my ReadFile function. What should I use?"
           expect:
             includes: ["pkg/errors", "Wrap"]
             excludes: ["fmt.Errorf", "%w"]
+            ranking: ["pkg/errors", "Wrap", "ReadFile"]

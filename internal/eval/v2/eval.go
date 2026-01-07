@@ -15,6 +15,7 @@ import (
 // Evaluator runs scenarios and compares Cortex vs baseline.
 type Evaluator struct {
 	provider llm.Provider
+	model    string
 	verbose  bool
 }
 
@@ -28,6 +29,11 @@ func New(provider llm.Provider) *Evaluator {
 // SetVerbose enables verbose output.
 func (e *Evaluator) SetVerbose(v bool) {
 	e.verbose = v
+}
+
+// SetModel sets the model name for result tracking.
+func (e *Evaluator) SetModel(m string) {
+	e.model = m
 }
 
 // Run executes all scenarios in a directory and returns results.
@@ -53,7 +59,7 @@ func (e *Evaluator) Run(dir string) (*Results, error) {
 		results = append(results, *result)
 	}
 
-	return CalculateResults(results, e.provider.Name(), ""), nil
+	return CalculateResults(results, e.provider.Name(), e.model), nil
 }
 
 // RunScenario executes a single scenario and returns its result.

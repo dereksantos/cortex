@@ -13,12 +13,15 @@ tests:
     expect:
       includes: ["never", "sensitive"]
       excludes: ["yes", "sure"]
+      ranking: ["never", "sensitive", "PII", "password"]
   - id: input-validation
     query: "How should I handle user input from the request body?"
     expect:
       includes: ["validate", "sanitize"]
+      ranking: ["validate", "sanitize", "middleware", "API boundaries"]
   - id: secrets-storage
     query: "Where should I store API keys and database credentials?"
     expect:
       includes: ["environment", "variable"]
       excludes: ["commit", "code", "hardcode"]
+      ranking: ["environment", "variable", "never committed"]

@@ -1,0 +1,49 @@
+# Knowledge Updates: API version changes
+# Tests recognizing deprecated API patterns and new versions
+
+id: updates-api-versions
+name: "Updates: API version changes"
+
+difficulty:
+  depth: 2
+  breadth: 3
+  category: knowledge-updates
+
+context:
+  # Old API patterns
+  - type: pattern
+    content: "API v1: User endpoint is GET /api/users/:id. Returns {id, name, email, created_at}."
+  - type: pattern
+    content: "API v1: Authentication via API key in query string: ?api_key=xxx"
+  - type: pattern
+    content: "API v1: Pagination via page number: ?page=1&per_page=25"
+
+  # New API patterns (v2)
+  - type: correction
+    content: "API v2 BREAKING CHANGE: User endpoint moved to GET /api/v2/users/:id. Returns {id, name, email, created_at, updated_at, profile: {...}}. v1 endpoint deprecated."
+  - type: correction
+    content: "API v2 SECURITY: API key in query string is deprecated. Use Authorization: Bearer header. Query string keys will stop working Dec 2024."
+  - type: correction
+    content: "API v2 CHANGE: Pagination now uses cursor: ?cursor=xxx&limit=25. Page-based pagination deprecated."
+
+tests:
+  - id: user-endpoint
+    query: "What's the endpoint to get a user's details?"
+    expect:
+      includes: ["/api/v2/users", "v2"]
+      excludes: ["/api/users/:id"]
+      ranking: ["/api/v2/users", "v2"]
+
+  - id: auth-method
+    query: "How should I authenticate API requests?"
+    expect:
+      includes: ["Authorization", "Bearer", "header"]
+      excludes: ["query string", "api_key="]
+      ranking: ["Authorization", "Bearer", "header"]
+
+  - id: pagination-style
+    query: "How does API pagination work?"
+    expect:
+      includes: ["cursor"]
+      excludes: ["page=", "page number"]
+      ranking: ["cursor", "limit"]

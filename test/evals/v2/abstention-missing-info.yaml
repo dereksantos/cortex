@@ -1,0 +1,48 @@
+# Abstention: Missing information
+# Tests model's ability to recognize when info is not in context
+
+id: abstention-missing-info
+name: "Abstention: Missing information"
+
+difficulty:
+  depth: 1
+  breadth: 2
+  category: abstention
+
+context:
+  # Only has backend info, nothing about frontend or mobile
+  - type: decision
+    content: "Backend stack: Go 1.21 with Chi router. PostgreSQL 15 for primary database."
+  - type: pattern
+    content: "Backend testing: Use standard library testing. Table-driven tests required."
+
+tests:
+  # Questions about topics NOT in context
+  - id: no-frontend-info
+    query: "What frontend framework does this project use?"
+    expect:
+      includes: ["not specified", "no information", "don't have", "not mentioned", "context doesn't"]
+      excludes: ["React", "Vue", "Angular", "Next.js"]
+      ranking: ["not specified", "no information"]
+
+  - id: no-mobile-info
+    query: "Is there a mobile app? What's it built with?"
+    expect:
+      includes: ["not specified", "no information", "don't have", "not mentioned", "context doesn't"]
+      excludes: ["React Native", "Flutter", "Swift", "iOS", "Android"]
+      ranking: ["not specified", "no information"]
+
+  - id: no-ci-info
+    query: "What CI/CD pipeline does this project use?"
+    expect:
+      includes: ["not specified", "no information", "don't have", "not mentioned", "context doesn't"]
+      excludes: ["GitHub Actions", "Jenkins", "CircleCI", "GitLab"]
+      ranking: ["not specified", "no information"]
+
+  # Question that IS in context - should answer
+  - id: has-backend-info
+    query: "What programming language is the backend written in?"
+    expect:
+      includes: ["Go"]
+      excludes: ["not specified", "don't know"]
+      ranking: ["Go", "1.21"]

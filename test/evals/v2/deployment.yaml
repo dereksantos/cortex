@@ -12,12 +12,15 @@ tests:
     query: "How should I roll out a new experimental feature?"
     expect:
       includes: ["feature flag", "gradual"]
+      ranking: ["feature flag", "gradual", "rollout"]
   - id: config-loading
     query: "How should I handle configuration for different environments?"
     expect:
       includes: ["environment"]
+      ranking: ["environment", "defaults", "fail fast"]
   - id: production-deploy
     query: "Can I deploy directly to production?"
     expect:
       includes: ["staging", "approval"]
       excludes: ["yes", "directly"]
+      ranking: ["staging", "approval", "manual"]

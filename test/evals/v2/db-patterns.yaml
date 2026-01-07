@@ -15,8 +15,10 @@ tests:
     expect:
       includes: ["SQLite"]
       excludes: ["PostgreSQL", "MySQL"]
+      ranking: ["SQLite", "connection pool"]
 
   - id: connection-pooling
     query: "How do we handle database connections?"
     expect:
       includes: ["pool", "connection"]
+      ranking: ["pool", "10 connections", "idle timeout"]

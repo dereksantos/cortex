@@ -43,16 +43,17 @@ tests:
     query: "How should I write a unit test for my OrderService.Cancel method?"
     expect:
       includes: ["t.Run"]
-      excludes: []
+      ranking: ["table-driven", "t.Run", "TestOrderService_Cancel"]
 
   - id: test-naming
     query: "What should I name my test function for the PaymentService.Process method?"
     expect:
       includes: ["TestPaymentService_Process"]
       excludes: ["TestProcess", "Test_Process"]
+      ranking: ["TestPaymentService_Process", "Test<Type>_<Method>"]
 
   - id: assertion-library
     query: "What assertion library should I use in my tests?"
     expect:
       includes: ["testify", "assert"]
-      excludes: []
+      ranking: ["testify", "assert", "go.mod"]

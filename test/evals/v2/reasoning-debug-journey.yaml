@@ -1,0 +1,79 @@
+# Multi-Session Reasoning: Debugging journey across sessions
+# Tests following a debugging narrative and synthesizing findings
+
+id: reasoning-debug-journey
+name: "Reasoning: Debugging investigation"
+
+difficulty:
+  depth: 4
+  breadth: 2
+  category: multi-session-reasoning
+
+tree:
+  # Session 1: Bug report
+  context:
+    - type: pattern
+      content: "BUG-1234: Users report slow API responses. P95 latency jumped from 200ms to 2s."
+
+  tests:
+    - id: initial-symptom
+      query: "What is the main symptom of BUG-1234?"
+      expect:
+        includes: ["slow", "latency", "2s"]
+        ranking: ["slow", "latency", "2s", "P95"]
+
+  children:
+    # Session 2: Initial investigation
+    - context:
+        - type: pattern
+          content: "Investigation: Database queries look normal. Redis cache hit rate dropped from 95% to 40%."
+        - type: decision
+          content: "Hypothesis: Cache invalidation issue causing excessive cache misses."
+
+      tests:
+        - id: root-cause-hypothesis
+          query: "What's the suspected cause of the slowdown?"
+          expect:
+            includes: ["cache", "invalidation"]
+            ranking: ["cache", "invalidation", "misses"]
+
+      children:
+        # Session 3: Found the bug
+        - context:
+            - type: pattern
+              content: "Root cause found: Deploy on Monday introduced bug in cache key generation. Keys now include timestamp, causing 100% miss rate."
+            - type: decision
+              content: "Fix: Remove timestamp from cache keys. Revert to previous key format: 'user:{user_id}:profile'."
+
+          tests:
+            - id: actual-cause
+              query: "What was the actual root cause of BUG-1234?"
+              expect:
+                includes: ["cache key", "timestamp"]
+                ranking: ["cache key", "timestamp", "Monday"]
+
+            - id: fix-approach
+              query: "How was BUG-1234 fixed?"
+              expect:
+                includes: ["remove", "timestamp"]
+                excludes: ["database", "Redis config"]
+                ranking: ["remove", "timestamp", "key format"]
+
+          children:
+            # Session 4: Post-mortem
+            - context:
+                - type: decision
+                  content: "Post-mortem action items: 1) Add cache hit rate alerts below 80%. 2) Add cache key format to code review checklist. 3) Add integration test for cache keys."
+
+              tests:
+                - id: prevention
+                  query: "What alerts were added after BUG-1234?"
+                  expect:
+                    includes: ["cache hit rate", "80%"]
+                    ranking: ["cache hit rate", "80%", "alert"]
+
+                - id: full-story
+                  query: "Summarize the BUG-1234 investigation from symptom to fix."
+                  expect:
+                    includes: ["latency", "cache", "timestamp", "remove"]
+                    ranking: ["latency", "cache", "timestamp", "key", "remove"]

@@ -33,15 +33,18 @@ tests:
     expect:
       includes: ["slog"]
       excludes: ["fmt.Println", "log.Println", "fmt.Printf"]
+      ranking: ["slog", "structured", "Info"]
 
   - id: error-logging
     query: "I have an error in my handler, how should I log it?"
     expect:
       includes: ["slog.Error"]
       excludes: ["log.Fatal", "panic", "fmt.Println"]
+      ranking: ["slog.Error", "structured", "key-value"]
 
   - id: debug-logging
     query: "I want to add some debug output for troubleshooting. What should I use?"
     expect:
       includes: ["slog.Debug"]
       excludes: ["fmt.Println", "log.Println"]
+      ranking: ["slog.Debug", "verbose", "structured"]

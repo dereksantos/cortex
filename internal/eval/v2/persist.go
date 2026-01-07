@@ -52,6 +52,8 @@ func (p *Persister) init() error {
 		timestamp TEXT NOT NULL,
 		provider TEXT,
 		model TEXT,
+		scenario_id TEXT,
+		scenario_name TEXT,
 		avg_baseline_score REAL,
 		avg_cortex_score REAL,
 		avg_lift REAL,
@@ -69,6 +71,7 @@ func (p *Persister) init() error {
 
 	CREATE INDEX IF NOT EXISTS idx_eval_runs_timestamp ON eval_runs(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_eval_runs_lift ON eval_runs(avg_lift);
+	CREATE INDEX IF NOT EXISTS idx_eval_runs_scenario ON eval_runs(scenario_id);
 
 	CREATE TABLE IF NOT EXISTS eval_scenario_results (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +107,8 @@ func (p *Persister) init() error {
 		"ALTER TABLE eval_runs ADD COLUMN git_branch TEXT",
 		"ALTER TABLE eval_runs ADD COLUMN run_duration_ms INTEGER",
 		"ALTER TABLE eval_runs ADD COLUMN cortex_version TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN scenario_id TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN scenario_name TEXT",
 	}
 	for _, m := range migrations {
 		p.db.Exec(m) // Ignore errors (column already exists)
@@ -146,11 +151,18 @@ func (p *Persister) Persist(results *Results, durationMs int64) error {
 	// Get git info
 	commitSHA, branch := getGitInfo()
 
+	// Extract scenario info for single-scenario runs
+	var scenarioID, scenarioName string
+	if len(results.Scenarios) == 1 {
+		scenarioID = results.Scenarios[0].ScenarioID
+		scenarioName = results.Scenarios[0].Name
+	}
+
 	// Insert main run record
 	_, err = p.db.Exec(`
-		INSERT INTO eval_runs (id, timestamp, provider, model, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, git_commit_sha, git_branch, run_duration_ms, cortex_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, results.Timestamp, results.Provider, results.Model,
+		INSERT INTO eval_runs (id, timestamp, provider, model, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, git_commit_sha, git_branch, run_duration_ms, cortex_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, results.Timestamp, results.Provider, results.Model, scenarioID, scenarioName,
 		results.AvgBaselineScore, results.AvgCortexScore, results.AvgLift,
 		results.TotalCortexWins, results.TotalBaselineWins, results.TotalTies,
 		results.PassRate, results.Pass, string(scenariosJSON),

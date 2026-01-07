@@ -14,9 +14,11 @@ tests:
     query: "How should I handle errors?"
     expect:
       includes: ["wrap", "context"]
+      ranking: ["fmt.Errorf", "%w", "wrap", "context"]
 
   - id: log-timing
     query: "When should I log errors?"
     expect:
       includes: ["before", "return"]
       excludes: ["after"]
+      ranking: ["before", "return", "log"]

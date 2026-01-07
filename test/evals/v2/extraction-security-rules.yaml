@@ -1,0 +1,49 @@
+# Information Extraction: Security rules and policies
+# Tests recall of security-critical configuration
+
+id: extraction-security-rules
+name: "Extraction: Security rules"
+
+difficulty:
+  depth: 1
+  breadth: 4
+  category: information-extraction
+
+context:
+  - type: decision
+    content: "Password policy: minimum 12 characters, must include uppercase, lowercase, number, and special char. No dictionary words."
+  - type: pattern
+    content: "Session timeout: 30 minutes of inactivity. Absolute timeout 8 hours. Refresh tokens valid 30 days."
+  - type: decision
+    content: "Failed login lockout: Lock account after 5 failed attempts. Unlock after 15 minutes or admin reset."
+  - type: pattern
+    content: "API key rotation: Keys expire after 90 days. Warning email at 14 days before expiry. Grace period 7 days."
+
+tests:
+  - id: password-length
+    query: "What's the minimum password length?"
+    expect:
+      includes: ["12"]
+      excludes: ["8", "10"]
+      ranking: ["12", "minimum", "password"]
+
+  - id: session-timeout
+    query: "How long before an inactive session expires?"
+    expect:
+      includes: ["30 minutes"]
+      excludes: ["8 hours", "15"]
+      ranking: ["30 minutes", "inactivity", "timeout"]
+
+  - id: lockout-attempts
+    query: "How many failed logins before account lockout?"
+    expect:
+      includes: ["5"]
+      excludes: ["3", "10"]
+      ranking: ["5", "failed", "lockout"]
+
+  - id: key-expiry
+    query: "How long are API keys valid?"
+    expect:
+      includes: ["90 days"]
+      excludes: ["30 days", "7 days"]
+      ranking: ["90 days", "expire", "key"]

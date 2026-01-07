@@ -1,0 +1,46 @@
+# Abstention: Ambiguous context
+# Tests model's ability to recognize when context is contradictory or unclear
+
+id: abstention-ambiguous-context
+name: "Abstention: Ambiguous context"
+
+difficulty:
+  depth: 1
+  breadth: 3
+  category: abstention
+
+context:
+  # Contradictory information without clear resolution
+  - type: decision
+    content: "Team A decision: Use gRPC for all inter-service communication."
+  - type: decision
+    content: "Team B decision: Use REST for all inter-service communication."
+  # No resolution provided - unclear which is correct
+
+  # Vague/unclear guidance
+  - type: pattern
+    content: "Database choice depends on the use case. Consider PostgreSQL, MongoDB, or Redis depending on requirements."
+  # No clear recommendation
+
+tests:
+  - id: contradictory-info
+    query: "Should I use gRPC or REST for inter-service communication?"
+    expect:
+      includes: ["conflict", "unclear", "both", "Team A", "Team B"]
+      excludes: []
+      ranking: ["conflicting", "Team A", "Team B", "unclear"]
+
+  - id: vague-guidance
+    query: "What database should I use for a new feature?"
+    expect:
+      includes: ["depends", "use case", "requirements"]
+      excludes: []
+      ranking: ["depends", "use case", "PostgreSQL", "MongoDB", "Redis"]
+
+  # Still should answer when unambiguous
+  - id: clear-info
+    query: "What databases are available in this project?"
+    expect:
+      includes: ["PostgreSQL", "MongoDB", "Redis"]
+      excludes: ["not specified"]
+      ranking: ["PostgreSQL", "MongoDB", "Redis"]

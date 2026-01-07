@@ -1,0 +1,104 @@
+# Multi-Session Reasoning: Architecture evolution
+# Tests understanding of how system architecture evolved over time
+
+id: reasoning-architecture-evolution
+name: "Reasoning: Architecture evolution"
+
+difficulty:
+  depth: 5
+  breadth: 3
+  category: multi-session-reasoning
+
+tree:
+  # Session 1: Monolith
+  context:
+    - type: decision
+      content: "Initial architecture: Django monolith with PostgreSQL. All features in one codebase. Deployed on single EC2 instance."
+
+  tests:
+    - id: initial-state
+      query: "What was the original tech stack?"
+      expect:
+        includes: ["Django", "PostgreSQL"]
+        ranking: ["Django", "PostgreSQL", "monolith"]
+
+  children:
+    # Session 2: First split
+    - context:
+        - type: decision
+          content: "Phase 1 migration: Extract authentication to separate service. Auth service uses Go + JWT. Communicates via REST API."
+        - type: pattern
+          content: "Auth service endpoints: POST /auth/login, POST /auth/register, GET /auth/verify, POST /auth/refresh"
+
+      tests:
+        - id: first-service
+          query: "What was the first service extracted from the monolith?"
+          expect:
+            includes: ["auth", "authentication"]
+            ranking: ["auth", "authentication", "first"]
+
+      children:
+        # Session 3: More services
+        - context:
+            - type: decision
+              content: "Phase 2: Extract notification service (Go + Kafka) and payment service (Go + Stripe SDK). Now have 4 services total."
+            - type: pattern
+              content: "Inter-service communication: REST for sync calls, Kafka for async events. Event schema registry in Confluent."
+
+          tests:
+            - id: service-count
+              query: "How many services exist after phase 2?"
+              expect:
+                includes: ["4"]
+                excludes: ["2", "3"]
+                ranking: ["4", "services"]
+
+            - id: async-comm
+              query: "How do services communicate asynchronously?"
+              expect:
+                includes: ["Kafka"]
+                excludes: ["REST", "RabbitMQ"]
+                ranking: ["Kafka", "async", "events"]
+
+          children:
+            # Session 4: Kubernetes migration
+            - context:
+                - type: decision
+                  content: "Phase 3: Migrate from EC2 to Kubernetes (EKS). Each service gets its own namespace. Istio for service mesh."
+                - type: pattern
+                  content: "Deployment: Helm charts per service. ArgoCD for GitOps. Horizontal pod autoscaler based on CPU (target 70%)."
+
+              tests:
+                - id: orchestration
+                  query: "What container orchestration do we use?"
+                  expect:
+                    includes: ["Kubernetes", "EKS"]
+                    excludes: ["EC2", "Docker Swarm"]
+                    ranking: ["Kubernetes", "EKS"]
+
+              children:
+                # Session 5: Current state
+                - context:
+                    - type: decision
+                      content: "Current state: 8 microservices on EKS. Django monolith sunset complete. Full Kubernetes deployment with Istio, ArgoCD, and Prometheus monitoring."
+
+                  tests:
+                    - id: current-count
+                      query: "How many microservices exist now?"
+                      expect:
+                        includes: ["8"]
+                        excludes: ["4", "6"]
+                        ranking: ["8", "microservices"]
+
+                    - id: evolution-summary
+                      query: "Describe the journey from initial architecture to current state."
+                      expect:
+                        includes: ["Django", "microservices", "Kubernetes"]
+                        ranking: ["Django", "monolith", "auth", "Kubernetes", "microservices"]
+
+                    - id: monolith-status
+                      query: "Is the Django monolith still running?"
+                      expect:
+                        includes: ["sunset", "complete"]
+                        excludes: ["running", "active", "yes"]
+                        ranking: ["sunset", "complete"]

@@ -1,0 +1,50 @@
+# Abstention: Partial information
+# Tests model's ability to answer what's known and acknowledge what's not
+
+id: abstention-partial-info
+name: "Abstention: Partial information"
+
+difficulty:
+  depth: 1
+  breadth: 3
+  category: abstention
+
+context:
+  # Has some info about auth, but incomplete
+  - type: decision
+    content: "Authentication uses JWT tokens. Tokens are signed with RS256."
+  # Missing: token expiry, refresh flow, storage location
+
+  # Has some info about caching, but incomplete
+  - type: decision
+    content: "Caching layer uses Redis cluster with 3 nodes."
+  # Missing: eviction policy, TTL defaults, what is cached
+
+tests:
+  - id: auth-known
+    query: "What signing algorithm is used for JWT tokens?"
+    expect:
+      includes: ["RS256"]
+      excludes: ["not specified"]
+      ranking: ["RS256", "signed"]
+
+  - id: auth-unknown
+    query: "How long do JWT tokens last before expiring?"
+    expect:
+      includes: ["not specified", "no information", "not mentioned"]
+      excludes: ["1 hour", "24 hours", "30 minutes"]
+      ranking: ["not specified", "expiry"]
+
+  - id: cache-known
+    query: "How many Redis nodes are in the cluster?"
+    expect:
+      includes: ["3"]
+      excludes: ["not specified"]
+      ranking: ["3", "nodes"]
+
+  - id: cache-unknown
+    query: "What is the default TTL for cached items?"
+    expect:
+      includes: ["not specified", "no information", "not mentioned"]
+      excludes: ["1 hour", "5 minutes", "24 hours"]
+      ranking: ["not specified", "TTL"]

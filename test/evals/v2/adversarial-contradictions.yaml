@@ -1,0 +1,49 @@
+# Adversarial eval: Tests handling of contradictory information
+#
+# These scenarios test:
+# 1. Old decision superseded by new decision
+# 2. Model must recognize recency/precedence
+# 3. Must NOT use the old/deprecated approach
+
+id: adversarial-contradictions
+name: "Adversarial: Handle contradictions"
+
+difficulty:
+  depth: 2
+  breadth: 2
+  adversarial: true
+
+context:
+  # Old decisions (should be superseded)
+  - type: decision
+    content: "Q1 2024: Use MongoDB for all data storage needs."
+  - type: decision
+    content: "Q1 2024: Authentication via session cookies stored server-side."
+
+  # New decisions (supersede the old ones)
+  - type: decision
+    content: "Q3 2024 UPDATE: Migrated from MongoDB to PostgreSQL. Do NOT use MongoDB for new features. All new tables go in PostgreSQL."
+  - type: decision
+    content: "Q3 2024 UPDATE: Migrated from session cookies to JWT tokens. Sessions are deprecated. Use JWT for all new auth flows."
+
+tests:
+  - id: db-contradiction
+    query: "What database should I use for a new feature that stores user preferences?"
+    expect:
+      includes: ["PostgreSQL"]
+      excludes: ["MongoDB", "Mongo"]
+      ranking: ["PostgreSQL", "Q3 2024", "new tables"]
+
+  - id: auth-contradiction
+    query: "How should I implement authentication for a new API endpoint?"
+    expect:
+      includes: ["JWT"]
+      excludes: ["session", "cookie"]
+      ranking: ["JWT", "Q3 2024", "deprecated"]
+
+  - id: recognize-update
+    query: "We used MongoDB before. Can I keep using it for consistency?"
+    expect:
+      includes: ["PostgreSQL", "migrated"]
+      excludes: ["yes", "continue", "MongoDB"]
+      ranking: ["migrated", "PostgreSQL", "do not"]

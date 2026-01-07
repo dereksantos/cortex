@@ -13,11 +13,14 @@ tests:
     expect:
       includes: ["GET", "/products"]
       excludes: ["getProducts", "fetch_products"]
+      ranking: ["GET", "/products", "plural", "RESTful"]
   - id: versioning
     query: "How do we handle API versioning?"
     expect:
       includes: ["v1", "URL", "prefix"]
+      ranking: ["/api/v1/", "URL prefix", "version"]
   - id: response-codes
     query: "What status code should I return when creating a resource?"
     expect:
       includes: ["201", "Created"]
+      ranking: ["201", "Created", "Location header"]
