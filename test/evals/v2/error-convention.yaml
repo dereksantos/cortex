@@ -1,0 +1,37 @@
+# Cortex-proof scenario: Tests recall of project-specific error handling
+# Key insight: stdlib default is fmt.Errorf, but project uses pkg/errors.Wrap
+id: error-convention
+name: "Error handling convention recall"
+
+tree:
+  # Session 1: Establish the convention
+  context:
+    - type: decision
+      content: "Use github.com/pkg/errors.Wrap() for all error wrapping, NOT fmt.Errorf. This preserves stack traces."
+    - type: correction
+      content: "Do NOT use fmt.Errorf with %w for error wrapping. Always use pkg/errors.Wrap instead."
+
+  tests:
+    - id: error-approach
+      query: "How should I wrap errors in this codebase?"
+      expect:
+        includes: ["pkg/errors", "Wrap"]
+        excludes: ["fmt.Errorf"]
+
+  children:
+    # Session 2: Add more detail about message format
+    - context:
+        - type: pattern
+          content: "Error messages should include the function name and operation, e.g., errors.Wrap(err, \"ReadConfig: reading config file\")"
+
+      tests:
+        - id: error-message-format
+          query: "What should error messages include?"
+          expect:
+            includes: ["function", "context"]
+
+        - id: implementation-check
+          query: "I need to add error handling to my ReadFile function. What should I use?"
+          expect:
+            includes: ["pkg/errors", "Wrap"]
+            excludes: ["fmt.Errorf", "%w"]

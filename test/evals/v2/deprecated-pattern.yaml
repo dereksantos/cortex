@@ -1,0 +1,37 @@
+# Cortex-proof scenario: Tests recall of deprecated patterns
+# Key insight: stdlib default is sync.Map, but project deprecated it for SafeCache
+id: deprecated-pattern
+name: "Deprecated pattern avoidance"
+
+tree:
+  # Session 1: Deprecation announcement
+  context:
+    - type: correction
+      content: "DEPRECATED: Do NOT use sync.Map for caching. We switched to pkg/safecache.SafeCache for better type safety."
+    - type: pattern
+      content: "For thread-safe caching, use: cache := safecache.New[string, *YourType]() then cache.Get(key) and cache.Set(key, value)"
+
+  tests:
+    - id: cache-choice
+      query: "I need a thread-safe cache for user data. What should I use?"
+      expect:
+        includes: ["safecache", "SafeCache"]
+        excludes: ["sync.Map"]
+
+    - id: why-not-syncmap
+      query: "Can I use sync.Map for the cache?"
+      expect:
+        includes: ["deprecated", "safecache"]
+        excludes: []
+
+  children:
+    # Session 2: Implementation details
+    - context:
+        - type: pattern
+          content: "Import safecache from internal/pkg/safecache. Initialize with NewSafeCache[K,V]() in constructors."
+
+      tests:
+        - id: import-path
+          query: "Where do I import SafeCache from?"
+          expect:
+            includes: ["safecache", "pkg"]
