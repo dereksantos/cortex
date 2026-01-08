@@ -1,0 +1,25 @@
+# Agentic eval: Finding error handling patterns
+# Tests whether Cortex reduces exploration when finding error conventions.
+id: agentic-find-errors
+name: "Find error handling patterns"
+
+context:
+  - type: decision
+    content: "Error handling follows Go conventions: return errors, don't panic. Wrap errors with context using fmt.Errorf and %w verb."
+  - type: pattern
+    content: "Custom errors defined in pkg/errors/errors.go. Use errors.Is and errors.As for error checking."
+  - type: constraint
+    content: "Never silently ignore errors. Log at appropriate level (debug for expected, error for unexpected)."
+
+tests:
+  - id: find-error-wrap
+    query: "How should I wrap errors in this project?"
+    expect:
+      includes: ["fmt.Errorf", "%w"]
+      excludes: ["panic", "ignore"]
+
+  - id: find-error-check
+    query: "What's the correct way to check error types?"
+    expect:
+      includes: ["errors.Is", "errors.As"]
+      excludes: ["type assertion", "string match"]

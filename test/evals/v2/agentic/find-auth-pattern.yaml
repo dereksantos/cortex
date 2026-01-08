@@ -1,0 +1,26 @@
+# Agentic eval: Finding authentication patterns
+# This scenario tests whether Cortex context reduces tool calls
+# when the developer needs to find how authentication works.
+id: agentic-find-auth
+name: "Find authentication implementation"
+
+context:
+  - type: decision
+    content: "Authentication uses JWT with HS256 signing algorithm. Tokens expire after 24 hours. Store in httpOnly cookies, not localStorage."
+  - type: pattern
+    content: "AuthMiddleware validates tokens on protected routes. Check pkg/middleware/auth.go for implementation."
+  - type: constraint
+    content: "Never expose JWT secrets in code. Always use CORTEX_JWT_SECRET environment variable."
+
+tests:
+  - id: find-auth-impl
+    query: "How does this project implement JWT authentication? Where is the token validation code?"
+    expect:
+      includes: ["HS256", "24h", "AuthMiddleware"]
+      excludes: ["session", "localStorage"]
+
+  - id: find-secret-handling
+    query: "How should I handle the JWT signing secret in this codebase?"
+    expect:
+      includes: ["environment", "CORTEX_JWT_SECRET"]
+      excludes: ["hardcode", "config file"]

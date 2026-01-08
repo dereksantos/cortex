@@ -47,6 +47,14 @@ func (m *MockProvider) generateResponse(prompt, context string) string {
 	contextLower := strings.ToLower(context)
 	combined := promptLower + " " + contextLower
 
+	// LLM-as-Judge scoring - check first before other patterns
+	// Detect by looking for "evaluating whether an ai response" or judge evaluation criteria
+	if strings.Contains(promptLower, "evaluating whether an ai response") ||
+		strings.Contains(promptLower, "response to evaluate") ||
+		(strings.Contains(promptLower, "correctness") && strings.Contains(promptLower, "understanding") && strings.Contains(promptLower, "hallucination")) {
+		return `{"correctness": 0.75, "understanding": 0.80, "hallucination": 0.15, "explanation": "Response appears to be partially correct based on mock evaluation."}`
+	}
+
 	// Auth/JWT related
 	if strings.Contains(combined, "jwt") || strings.Contains(combined, "auth") {
 		if strings.Contains(promptLower, "password reset") {

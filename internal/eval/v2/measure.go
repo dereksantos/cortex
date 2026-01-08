@@ -1,8 +1,13 @@
 package eval
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // Score evaluates a response against expected includes/excludes.
@@ -31,6 +36,94 @@ func Score(response string, expect Expect) float64 {
 	}
 
 	return float64(passed) / float64(total)
+}
+
+// JudgeResult holds the LLM judge's evaluation scores.
+type JudgeResult struct {
+	Correctness   float64 `json:"correctness"`
+	Understanding float64 `json:"understanding"`
+	Hallucination float64 `json:"hallucination"`
+	Explanation   string  `json:"explanation"`
+}
+
+// ScoreWithJudge uses an LLM to evaluate response quality semantically.
+// Returns JudgeResult with correctness, understanding, and hallucination scores.
+func ScoreWithJudge(ctx context.Context, response, query string, expect Expect, contextSummary string, judge llm.Provider) (*JudgeResult, error) {
+	if judge == nil {
+		return nil, fmt.Errorf("judge provider is nil")
+	}
+
+	// Build judge prompt
+	includesStr := strings.Join(expect.Includes, ", ")
+	excludesStr := strings.Join(expect.Excludes, ", ")
+	if includesStr == "" {
+		includesStr = "(none specified)"
+	}
+	if excludesStr == "" {
+		excludesStr = "(none specified)"
+	}
+	if contextSummary == "" {
+		contextSummary = "(no context provided)"
+	}
+
+	prompt := fmt.Sprintf(`You are evaluating whether an AI response correctly answers a question given specific project context.
+
+Question: %s
+Expected behavior: Should include concepts: %s, Should NOT include: %s
+Context provided: %s
+
+Response to evaluate:
+%s
+
+Evaluate on these criteria:
+1. CORRECTNESS: Does the response align with the provided context? (0.0-1.0)
+2. UNDERSTANDING: Does it demonstrate understanding vs just keyword matching? (0.0-1.0)
+3. HALLUCINATION: Does it make up information not in context? (0.0-1.0, higher = more hallucination)
+
+Return ONLY valid JSON with no other text: {"correctness": 0.X, "understanding": 0.X, "hallucination": 0.X, "explanation": "brief explanation"}`,
+		query, includesStr, excludesStr, contextSummary, response)
+
+	systemPrompt := "You are an AI evaluation judge. Return only valid JSON with no markdown formatting or additional text."
+
+	// Call judge LLM
+	result, err := judge.GenerateWithSystem(ctx, prompt, systemPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("judge generate: %w", err)
+	}
+
+	// Parse JSON response
+	var judgeResult JudgeResult
+	if err := json.Unmarshal([]byte(result), &judgeResult); err != nil {
+		// Try to extract JSON from response (in case of markdown wrapping)
+		jsonStart := strings.Index(result, "{")
+		jsonEnd := strings.LastIndex(result, "}")
+		if jsonStart >= 0 && jsonEnd > jsonStart {
+			jsonStr := result[jsonStart : jsonEnd+1]
+			if err := json.Unmarshal([]byte(jsonStr), &judgeResult); err != nil {
+				return nil, fmt.Errorf("parse judge response: %w (response: %s)", err, result)
+			}
+		} else {
+			return nil, fmt.Errorf("parse judge response: %w (response: %s)", err, result)
+		}
+	}
+
+	// Clamp values to 0-1 range
+	judgeResult.Correctness = clamp(judgeResult.Correctness, 0, 1)
+	judgeResult.Understanding = clamp(judgeResult.Understanding, 0, 1)
+	judgeResult.Hallucination = clamp(judgeResult.Hallucination, 0, 1)
+
+	return &judgeResult, nil
+}
+
+// clamp restricts a value to a range.
+func clamp(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // CalculateLift computes how much Cortex improves over baseline.
@@ -135,6 +228,20 @@ type TestResult struct {
 	FastNDCG   float64 `json:"fast_ndcg,omitempty"` // NDCG for Fast mode (= NDCG until Reflect wired)
 	FullNDCG   float64 `json:"full_ndcg,omitempty"` // NDCG for Full mode (1.0 until Reflect wired)
 	ABR        float64 `json:"abr,omitempty"`       // FastNDCG / FullNDCG
+
+	// LLM Judge scoring (only populated when --judge is enabled)
+	JudgeUsed bool `json:"judge_used,omitempty"`
+	// Baseline judge scores
+	BaselineJudgeCorrectness   float64 `json:"baseline_judge_correctness,omitempty"`
+	BaselineJudgeUnderstanding float64 `json:"baseline_judge_understanding,omitempty"`
+	BaselineJudgeHallucination float64 `json:"baseline_judge_hallucination,omitempty"`
+	// Cortex judge scores
+	CortexJudgeCorrectness   float64 `json:"cortex_judge_correctness,omitempty"`
+	CortexJudgeUnderstanding float64 `json:"cortex_judge_understanding,omitempty"`
+	CortexJudgeHallucination float64 `json:"cortex_judge_hallucination,omitempty"`
+	// Judge explanations
+	BaselineJudgeExplanation string `json:"baseline_judge_explanation,omitempty"`
+	CortexJudgeExplanation   string `json:"cortex_judge_explanation,omitempty"`
 }
 
 // ScenarioResult holds the result of running a scenario.
