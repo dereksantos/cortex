@@ -1,0 +1,42 @@
+id: locomo-commonsense
+name: "LoCoMo: Commonsense integration"
+
+# Tests combining project context with world knowledge.
+# Model must use general knowledge (e.g., AWS regions are in specific timezones)
+# to correctly answer questions about project-specific context.
+
+context:
+  - type: decision
+    content: "We deploy to AWS us-east-1 region for our primary infrastructure."
+  - type: decision
+    content: "Our primary customer base is located in New York City."
+  - type: decision
+    content: "Backend services are written in Go with 10-minute timeout defaults."
+  - type: decision
+    content: "We use PostgreSQL 15 as our primary database."
+
+tests:
+  - id: timezone-inference
+    query: "What timezone should our cron jobs use for end-of-business processing at 5pm local time?"
+    expect:
+      includes: ["EST", "Eastern", "America/New_York", "ET"]
+      excludes: ["UTC", "PST", "Pacific", "GMT"]
+
+  - id: latency-optimization
+    query: "Which AWS region should we use for a new cache service to minimize latency to our users?"
+    expect:
+      includes: ["us-east-1", "east"]
+      excludes: ["us-west", "eu-", "ap-"]
+
+  - id: database-version-features
+    query: "Can we use MERGE statements in our SQL queries?"
+    expect:
+      # PostgreSQL 15 introduced MERGE support
+      includes: ["yes", "MERGE", "PostgreSQL 15", "supported"]
+      excludes: ["no", "not supported", "unavailable"]
+
+  - id: go-concurrency-pattern
+    query: "What's the recommended pattern for handling our 10-minute timeout in Go?"
+    expect:
+      includes: ["context", "WithTimeout", "WithDeadline"]
+      excludes: ["sleep", "time.After"]

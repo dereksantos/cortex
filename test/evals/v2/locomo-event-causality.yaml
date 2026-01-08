@@ -1,0 +1,66 @@
+id: locomo-event-causality
+name: "LoCoMo: Event causality"
+
+# Tests understanding of causal relationships using event graphs.
+# Model must trace cause-effect chains across timestamped events.
+
+events:
+  - id: e1
+    time: "2024-01"
+    content: "Chose MongoDB for schema flexibility to support rapid prototyping"
+
+  - id: e2
+    time: "2024-06"
+    content: "Hit MongoDB scaling issues at 1M users - slow queries, connection pool exhaustion"
+    caused_by: [e1]
+
+  - id: e3
+    time: "2024-07"
+    content: "Added read replicas to MongoDB but latency still unacceptable at 500ms p99"
+    caused_by: [e2]
+
+  - id: e4
+    time: "2024-09"
+    content: "Migrated to PostgreSQL for better scaling and query performance"
+    caused_by: [e2, e3]
+
+  - id: e5
+    time: "2024-10"
+    content: "Achieved 50ms p99 latency with PostgreSQL at 2M users"
+    caused_by: [e4]
+
+tests:
+  - id: causal-chain-full
+    query: "Why did we migrate to PostgreSQL?"
+    expect:
+      includes: ["scaling", "MongoDB", "issues", "latency", "performance"]
+      excludes: ["flexibility", "schema", "prototyping"]
+    causal_chain: [e1, e2, e3, e4]
+
+  - id: root-cause
+    query: "What was the root cause of our database performance problems?"
+    expect:
+      includes: ["MongoDB", "1M users", "scaling"]
+      excludes: ["PostgreSQL", "flexibility"]
+    causal_chain: [e1, e2]
+
+  - id: intermediate-step
+    query: "What did we try before migrating to PostgreSQL?"
+    expect:
+      includes: ["read replicas", "MongoDB"]
+      excludes: ["PostgreSQL"]
+    causal_chain: [e3]
+
+  - id: outcome
+    query: "What was the result of our database migration?"
+    expect:
+      includes: ["50ms", "latency", "2M users", "PostgreSQL"]
+      excludes: ["500ms", "issues", "problems"]
+    causal_chain: [e4, e5]
+
+  - id: timeline-order
+    query: "In what order did we make database decisions?"
+    expect:
+      includes: ["MongoDB", "replicas", "PostgreSQL"]
+      excludes: []
+    causal_chain: [e1, e2, e3, e4, e5]
