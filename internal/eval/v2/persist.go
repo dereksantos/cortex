@@ -47,6 +47,31 @@ func NewPersister() (*Persister, error) {
 // init creates the schema if needed.
 func (p *Persister) init() error {
 	schema := `
+	CREATE TABLE IF NOT EXISTS agentic_eval_runs (
+		id TEXT PRIMARY KEY,
+		timestamp TEXT NOT NULL,
+		total_baseline_tool_calls INTEGER,
+		total_cortex_tool_calls INTEGER,
+		avg_tool_call_reduction REAL,
+		avg_time_reduction REAL,
+		avg_cost_reduction REAL,
+		avg_lift REAL,
+		cortex_wins INTEGER,
+		baseline_wins INTEGER,
+		ties INTEGER,
+		pass_rate REAL,
+		pass BOOLEAN,
+		scenarios_json TEXT,
+		tool_calls_by_type_json TEXT,
+		git_commit_sha TEXT,
+		git_branch TEXT,
+		run_duration_ms INTEGER,
+		cortex_version TEXT
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_agentic_runs_timestamp ON agentic_eval_runs(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_agentic_runs_reduction ON agentic_eval_runs(avg_tool_call_reduction);
+
 	CREATE TABLE IF NOT EXISTS eval_runs (
 		id TEXT PRIMARY KEY,
 		timestamp TEXT NOT NULL,
@@ -109,6 +134,13 @@ func (p *Persister) init() error {
 		"ALTER TABLE eval_runs ADD COLUMN cortex_version TEXT",
 		"ALTER TABLE eval_runs ADD COLUMN scenario_id TEXT",
 		"ALTER TABLE eval_runs ADD COLUMN scenario_name TEXT",
+		// Judge scoring columns
+		"ALTER TABLE eval_runs ADD COLUMN judge_used INTEGER DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN judge_model TEXT",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_baseline_judge_correctness REAL",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_cortex_judge_correctness REAL",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_baseline_judge_understanding REAL",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_cortex_judge_understanding REAL",
 	}
 	for _, m := range migrations {
 		p.db.Exec(m) // Ignore errors (column already exists)
@@ -252,4 +284,97 @@ func (p *Persister) GetTrend(n int) ([]float64, error) {
 // Close closes the database connection.
 func (p *Persister) Close() error {
 	return p.db.Close()
+}
+
+// PersistAgentic saves agentic eval results to the database.
+func (p *Persister) PersistAgentic(results *AgenticResults, durationMs int64) error {
+	id := fmt.Sprintf("agentic-%s", time.Now().Format("20060102-150405"))
+	results.Timestamp = Timestamp()
+
+	scenariosJSON, err := json.Marshal(results.Scenarios)
+	if err != nil {
+		return fmt.Errorf("marshal scenarios: %w", err)
+	}
+
+	// Aggregate tool calls by type across all scenarios
+	toolCallsByType := make(map[string][2]int) // [baseline, cortex]
+	for _, s := range results.Scenarios {
+		for _, t := range s.Tests {
+			for tool, count := range t.BaselineCallsByType {
+				v := toolCallsByType[tool]
+				v[0] += count
+				toolCallsByType[tool] = v
+			}
+			for tool, count := range t.CortexCallsByType {
+				v := toolCallsByType[tool]
+				v[1] += count
+				toolCallsByType[tool] = v
+			}
+		}
+	}
+	toolCallsJSON, err := json.Marshal(toolCallsByType)
+	if err != nil {
+		return fmt.Errorf("marshal tool calls: %w", err)
+	}
+
+	// Get git info
+	commitSHA, branch := getGitInfo()
+
+	_, err = p.db.Exec(`
+		INSERT INTO agentic_eval_runs (id, timestamp, total_baseline_tool_calls, total_cortex_tool_calls, avg_tool_call_reduction, avg_time_reduction, avg_cost_reduction, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, tool_calls_by_type_json, git_commit_sha, git_branch, run_duration_ms, cortex_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, results.Timestamp,
+		results.TotalBaselineToolCalls, results.TotalCortexToolCalls,
+		results.AvgToolCallReduction, results.AvgTimeReduction, results.AvgCostReduction,
+		results.AvgLift, results.TotalCortexWins, results.TotalBaselineWins, results.TotalTies,
+		results.PassRate, results.Pass, string(scenariosJSON), string(toolCallsJSON),
+		commitSHA, branch, durationMs, CortexVersion)
+
+	if err != nil {
+		return fmt.Errorf("insert agentic run: %w", err)
+	}
+
+	return nil
+}
+
+// AgenticTrendPoint represents a single data point in the agentic trend.
+type AgenticTrendPoint struct {
+	Timestamp           string  `json:"timestamp"`
+	ToolCallReduction   float64 `json:"tool_call_reduction"`
+	TimeReduction       float64 `json:"time_reduction"`
+	CostReduction       float64 `json:"cost_reduction"`
+	BaselineToolCalls   int     `json:"baseline_tool_calls"`
+	CortexToolCalls     int     `json:"cortex_tool_calls"`
+}
+
+// GetAgenticTrend returns tool call reduction over the last N runs.
+func (p *Persister) GetAgenticTrend(n int) ([]AgenticTrendPoint, error) {
+	rows, err := p.db.Query(`
+		SELECT timestamp, avg_tool_call_reduction, avg_time_reduction, avg_cost_reduction,
+		       total_baseline_tool_calls, total_cortex_tool_calls
+		FROM agentic_eval_runs
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []AgenticTrendPoint
+	for rows.Next() {
+		var pt AgenticTrendPoint
+		if err := rows.Scan(&pt.Timestamp, &pt.ToolCallReduction, &pt.TimeReduction,
+			&pt.CostReduction, &pt.BaselineToolCalls, &pt.CortexToolCalls); err != nil {
+			return nil, err
+		}
+		points = append(points, pt)
+	}
+
+	// Reverse to get chronological order
+	for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
+		points[i], points[j] = points[j], points[i]
+	}
+
+	return points, nil
 }

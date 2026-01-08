@@ -26,6 +26,9 @@ type Scenario struct {
 
 	// Tree format (new)
 	Tree *TreeNode `yaml:"tree,omitempty"`
+
+	// Event graph format (LoCoMo-style causal chains)
+	Events []Event `yaml:"events,omitempty"`
 }
 
 // TreeNode represents a node in the scenario tree.
@@ -43,11 +46,21 @@ type Context struct {
 	Supersedes string `yaml:"supersedes,omitempty"` // Content this replaces (for decision evolution)
 }
 
+// Event represents a timestamped event with causal relationships.
+// Used for LoCoMo-style causal chain reasoning scenarios.
+type Event struct {
+	ID       string   `yaml:"id"`                 // Unique event identifier
+	Time     string   `yaml:"time"`               // Timestamp or time period (e.g., "2024-01", "Q2 2024")
+	Content  string   `yaml:"content"`            // Event description
+	CausedBy []string `yaml:"caused_by,omitempty"` // IDs of events that caused this one
+}
+
 // Test defines a query and expected results.
 type Test struct {
-	ID     string `yaml:"id,omitempty"`
-	Query  string `yaml:"query"`
-	Expect Expect `yaml:"expect"`
+	ID          string   `yaml:"id,omitempty"`
+	Query       string   `yaml:"query"`
+	Expect      Expect   `yaml:"expect"`
+	CausalChain []string `yaml:"causal_chain,omitempty"` // Expected event chain for LoCoMo-style scenarios
 }
 
 // Expect defines what the response should include/exclude.
@@ -78,18 +91,26 @@ func Load(path string) (*Scenario, error) {
 		return nil, fmt.Errorf("scenario missing id")
 	}
 
-	// Determine format: tree or flat
+	// Determine format: tree or flat (events can be used with either)
 	isTree := s.Tree != nil
 	isFlat := len(s.Tests) > 0 || len(s.Context) > 0
+	hasEvents := len(s.Events) > 0
 
 	if isTree && isFlat {
 		return nil, fmt.Errorf("scenario %s: cannot mix tree and flat formats", s.ID)
 	}
-	if !isTree && !isFlat {
-		return nil, fmt.Errorf("scenario %s: must have either tree or tests", s.ID)
+	if !isTree && !isFlat && !hasEvents {
+		return nil, fmt.Errorf("scenario %s: must have either tree, tests, or events", s.ID)
 	}
 
-	if isFlat {
+	// Validate events and causal references
+	if hasEvents {
+		if err := validateEvents(&s); err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", s.ID, err)
+		}
+	}
+
+	if isFlat || hasEvents {
 		// Validate flat scenario
 		if len(s.Tests) == 0 {
 			return nil, fmt.Errorf("scenario %s has no tests", s.ID)
@@ -106,6 +127,41 @@ func Load(path string) (*Scenario, error) {
 	}
 
 	return &s, nil
+}
+
+// validateEvents checks that all event references are valid.
+func validateEvents(s *Scenario) error {
+	// Build set of valid event IDs
+	eventIDs := make(map[string]bool)
+	for _, e := range s.Events {
+		if e.ID == "" {
+			return fmt.Errorf("event missing id")
+		}
+		if eventIDs[e.ID] {
+			return fmt.Errorf("duplicate event id: %s", e.ID)
+		}
+		eventIDs[e.ID] = true
+	}
+
+	// Validate caused_by references
+	for _, e := range s.Events {
+		for _, ref := range e.CausedBy {
+			if !eventIDs[ref] {
+				return fmt.Errorf("event %s references unknown event: %s", e.ID, ref)
+			}
+		}
+	}
+
+	// Validate causal_chain references in tests
+	for _, t := range s.Tests {
+		for _, ref := range t.CausalChain {
+			if !eventIDs[ref] {
+				return fmt.Errorf("test %s references unknown event: %s", t.ID, ref)
+			}
+		}
+	}
+
+	return nil
 }
 
 // autoNumberTreeTests assigns IDs to tests in a tree that don't have them.

@@ -1797,6 +1797,11 @@ func handleEvalV2() {
 	verbose := false
 	outputFormat := "human"
 	dryRun := false
+	useJudge := false
+	judgeModel := ""
+	agenticMode := false
+	claudeBinary := ""
+	showSummary := false
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -1805,6 +1810,13 @@ func handleEvalV2() {
 			verbose = true
 		case arg == "--dry-run":
 			dryRun = true
+		case arg == "--agentic":
+			agenticMode = true
+		case arg == "--claude-binary":
+			if i+1 < len(os.Args) {
+				claudeBinary = os.Args[i+1]
+				i++
+			}
 		case arg == "-s" || arg == "--scenario":
 			if i+1 < len(os.Args) {
 				scenarioPath = os.Args[i+1]
@@ -1830,23 +1842,16 @@ func handleEvalV2() {
 				outputFormat = os.Args[i+1]
 				i++
 			}
+		case arg == "--judge":
+			useJudge = true
+		case arg == "--judge-model":
+			if i+1 < len(os.Args) {
+				judgeModel = os.Args[i+1]
+				useJudge = true // implicitly enable judge
+				i++
+			}
 		case arg == "--summary":
-			// Show ABR trend
-			persister, err := evalv2.NewPersister()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
-				os.Exit(1)
-			}
-			defer persister.Close()
-
-			abrs, err := persister.GetTrend(10)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to get trend: %v\n", err)
-				os.Exit(1)
-			}
-
-			evalv2.ReportTrend(os.Stdout, abrs)
-			return
+			showSummary = true
 		case arg == "-h" || arg == "--help":
 			fmt.Println(`Usage: cortex eval [options]
 
@@ -1860,15 +1865,52 @@ Options:
   -o, --output FORMAT    Output: human, json (default: human)
   -v, --verbose          Verbose output
   --dry-run              Use mock provider
+  --judge                Enable LLM-as-judge scoring (semantic evaluation)
+  --judge-model MODEL    Model for judge (default: same as eval model)
+  --agentic              Use Claude CLI for agentic evals (measures tool usage)
+  --claude-binary PATH   Path to claude binary (default: auto-detect)
   --summary              Show lift trend over recent runs
   -h, --help             Show this help
 
 Examples:
-  cortex eval                    # Run all scenarios
-  cortex eval -s auth.yaml       # Run single scenario
-  cortex eval --summary          # Show lift trend`)
+  cortex eval                              # Run all scenarios
+  cortex eval -s auth.yaml                 # Run single scenario
+  cortex eval --judge                      # Use LLM judge for scoring
+  cortex eval --judge --judge-model gemma2:2b  # Use specific judge model
+  cortex eval --agentic                    # Run with Claude CLI (tool tracking)
+  cortex eval --summary                    # Show lift trend
+  cortex eval --summary --agentic          # Show tool call reduction trend`)
 			return
 		}
+	}
+
+	// Handle --summary flag
+	if showSummary {
+		persister, err := evalv2.NewPersister()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to open database: %v\n", err)
+			os.Exit(1)
+		}
+		defer persister.Close()
+
+		if agenticMode {
+			// Show agentic tool call reduction trend
+			points, err := persister.GetAgenticTrend(10)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to get agentic trend: %v\n", err)
+				os.Exit(1)
+			}
+			evalv2.ReportAgenticTrend(os.Stdout, points)
+		} else {
+			// Show standard lift trend
+			abrs, err := persister.GetTrend(10)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to get trend: %v\n", err)
+				os.Exit(1)
+			}
+			evalv2.ReportTrend(os.Stdout, abrs)
+		}
+		return
 	}
 
 	// Create provider
@@ -1925,13 +1967,124 @@ Examples:
 		modelName = cfg.OllamaModel
 	}
 
+	// Create judge provider if enabled
+	var judgeProvider llm.Provider
+	var judgeModelName string
+	if useJudge {
+		// Determine judge model
+		judgeModelName = judgeModel
+		if judgeModelName == "" {
+			judgeModelName = modelName // Use same model as eval
+		}
+
+		if dryRun {
+			judgeProvider = llm.NewMockProvider(10)
+		} else {
+			// Create judge provider (can be different model, same provider type)
+			judgeCfg := *cfg
+			if providerName == "anthropic" {
+				judgeCfg.AnthropicModel = judgeModelName
+				judgeProvider = llm.NewAnthropicClient(&judgeCfg)
+			} else {
+				judgeCfg.OllamaModel = judgeModelName
+				judgeProvider = llm.NewOllamaClient(&judgeCfg)
+			}
+		}
+
+		if verbose {
+			fmt.Printf("Using LLM judge: %s\n", judgeModelName)
+		}
+	}
+
+	// Track start time for duration measurement
+	startTime := time.Now()
+
+	// AGENTIC MODE: Use Claude CLI for tool usage measurement
+	if agenticMode {
+		if dryRun {
+			fmt.Fprintf(os.Stderr, "Error: --agentic mode does not support --dry-run\n")
+			os.Exit(1)
+		}
+
+		// Build claude CLI args
+		var cliArgs []string
+		if modelOverride != "" {
+			cliArgs = append(cliArgs, "--model", modelOverride)
+		}
+
+		agenticEval, err := evalv2.NewAgenticEvaluator(claudeBinary, cliArgs...)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create agentic evaluator: %v\n", err)
+			os.Exit(1)
+		}
+		agenticEval.SetVerbose(verbose)
+
+		if verbose {
+			fmt.Println("Running in agentic mode (Claude CLI with tool tracking)")
+		}
+
+		// Run agentic eval
+		var agenticResults *evalv2.AgenticResults
+		if scenarioPath != "" {
+			scenario, err := evalv2.Load(scenarioPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to load scenario: %v\n", err)
+				os.Exit(1)
+			}
+			scenarioResult, err := agenticEval.RunScenario(scenario)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to run scenario: %v\n", err)
+				os.Exit(1)
+			}
+			agenticResults = evalv2.CalculateAgenticResults([]evalv2.AgenticScenarioResult{*scenarioResult})
+		} else {
+			agenticResults, err = agenticEval.Run(scenarioDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to run agentic evals: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		// Calculate duration
+		agenticDurationMs := time.Since(startTime).Milliseconds()
+
+		// Report agentic results
+		switch outputFormat {
+		case "json":
+			evalv2.ReportAgenticJSON(os.Stdout, agenticResults)
+		default:
+			evalv2.ReportAgentic(os.Stdout, agenticResults)
+		}
+
+		// Persist agentic results
+		persister, err := evalv2.NewPersister()
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
+			}
+		} else {
+			defer persister.Close()
+			if err := persister.PersistAgentic(agenticResults, agenticDurationMs); err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
+				}
+			}
+		}
+
+		if !agenticResults.Pass {
+			os.Exit(1)
+		}
+		return
+	}
+
+	// STANDARD MODE: Use LLM provider
 	// Create evaluator
 	evaluator := evalv2.New(provider)
 	evaluator.SetVerbose(verbose)
 	evaluator.SetModel(modelName)
-
-	// Track start time for duration measurement
-	startTime := time.Now()
+	if judgeProvider != nil {
+		evaluator.SetJudge(judgeProvider, judgeModelName)
+	}
 
 	// Run eval
 	var results *evalv2.Results

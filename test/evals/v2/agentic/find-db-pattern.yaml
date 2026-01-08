@@ -1,0 +1,25 @@
+# Agentic eval: Finding database patterns
+# Tests whether Cortex reduces exploration when finding DB conventions.
+id: agentic-find-db
+name: "Find database patterns"
+
+context:
+  - type: decision
+    content: "Use SQLite for storage. All tables use INTEGER PRIMARY KEY with AUTOINCREMENT. Timestamps stored as ISO8601 strings."
+  - type: pattern
+    content: "Database connections managed via internal/storage/storage.go. Use prepared statements for all queries."
+  - type: constraint
+    content: "No raw SQL string concatenation. Always use parameterized queries to prevent SQL injection."
+
+tests:
+  - id: find-db-connection
+    query: "How do I connect to the database in this project? Where is the connection code?"
+    expect:
+      includes: ["SQLite", "storage.go"]
+      excludes: ["PostgreSQL", "MySQL"]
+
+  - id: find-query-pattern
+    query: "What's the correct way to write database queries in this codebase?"
+    expect:
+      includes: ["prepared", "parameterized"]
+      excludes: ["string concatenation", "sprintf"]

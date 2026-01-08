@@ -14,9 +14,11 @@ import (
 
 // Evaluator runs scenarios and compares Cortex vs baseline.
 type Evaluator struct {
-	provider llm.Provider
-	model    string
-	verbose  bool
+	provider      llm.Provider
+	model         string
+	verbose       bool
+	judgeProvider llm.Provider // LLM for semantic scoring (optional)
+	judgeModel    string       // Judge model name for tracking
 }
 
 // New creates a new Evaluator.
@@ -34,6 +36,12 @@ func (e *Evaluator) SetVerbose(v bool) {
 // SetModel sets the model name for result tracking.
 func (e *Evaluator) SetModel(m string) {
 	e.model = m
+}
+
+// SetJudge sets the judge provider and model for LLM-as-judge scoring.
+func (e *Evaluator) SetJudge(provider llm.Provider, model string) {
+	e.judgeProvider = provider
+	e.judgeModel = model
 }
 
 // Run executes all scenarios in a directory and returns results.
@@ -91,6 +99,20 @@ func (e *Evaluator) runFlatScenario(s *Scenario) (*ScenarioResult, error) {
 		}
 		if e.verbose {
 			fmt.Printf("  [stored] %s: %s\n", ctx.Type, truncateVerbose(ctx.Content, 60))
+		}
+	}
+
+	// Store events as context (for LoCoMo-style scenarios)
+	for _, event := range s.Events {
+		content := event.Content
+		if event.Time != "" {
+			content = fmt.Sprintf("[%s] %s", event.Time, content)
+		}
+		if err := cortex.store("decision", content); err != nil {
+			return nil, fmt.Errorf("store event: %w", err)
+		}
+		if e.verbose {
+			fmt.Printf("  [stored] event %s: %s\n", event.ID, truncateVerbose(content, 50))
 		}
 	}
 
@@ -290,6 +312,44 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 
 		if e.verbose {
 			fmt.Printf("    [ranking] FastNDCG=%.2f, FullNDCG=%.2f, ABR=%.2f\n", fastNDCG, fullNDCG, abr)
+		}
+	}
+
+	// 6. LLM Judge scoring (if enabled)
+	if e.judgeProvider != nil {
+		result.JudgeUsed = true
+
+		// Score baseline response with judge
+		baselineJudge, err := ScoreWithJudge(ctx, baselineResponse, test.Query, test.Expect, "", e.judgeProvider)
+		if err != nil {
+			if e.verbose {
+				fmt.Printf("    [judge] baseline error: %v\n", err)
+			}
+		} else {
+			result.BaselineJudgeCorrectness = baselineJudge.Correctness
+			result.BaselineJudgeUnderstanding = baselineJudge.Understanding
+			result.BaselineJudgeHallucination = baselineJudge.Hallucination
+			result.BaselineJudgeExplanation = baselineJudge.Explanation
+		}
+
+		// Score cortex response with judge (with context)
+		cortexJudge, err := ScoreWithJudge(ctx, cortexResponse, test.Query, test.Expect, cortexContext, e.judgeProvider)
+		if err != nil {
+			if e.verbose {
+				fmt.Printf("    [judge] cortex error: %v\n", err)
+			}
+		} else {
+			result.CortexJudgeCorrectness = cortexJudge.Correctness
+			result.CortexJudgeUnderstanding = cortexJudge.Understanding
+			result.CortexJudgeHallucination = cortexJudge.Hallucination
+			result.CortexJudgeExplanation = cortexJudge.Explanation
+		}
+
+		if e.verbose && baselineJudge != nil && cortexJudge != nil {
+			fmt.Printf("    [judge] baseline: correct=%.2f understand=%.2f hallucinate=%.2f\n",
+				baselineJudge.Correctness, baselineJudge.Understanding, baselineJudge.Hallucination)
+			fmt.Printf("    [judge] cortex:   correct=%.2f understand=%.2f hallucinate=%.2f\n",
+				cortexJudge.Correctness, cortexJudge.Understanding, cortexJudge.Hallucination)
 		}
 	}
 
