@@ -1,0 +1,73 @@
+id: locomo-multihop
+name: "LoCoMo: Multi-hop reasoning"
+
+# Tests reasoning across multiple facts through transitive inference.
+# Model must chain facts together: A -> B, B -> C, therefore A -> C
+
+context:
+  # Ownership chain
+  - type: decision
+    content: "Auth service is owned by Team Alpha"
+  - type: decision
+    content: "Team Alpha uses Go exclusively for all services"
+  - type: decision
+    content: "Go services at our company use the chi router for HTTP handling"
+
+  # Technology stack chain
+  - type: decision
+    content: "Payment service uses Stripe for processing"
+  - type: decision
+    content: "Stripe integration requires PCI DSS compliance"
+  - type: decision
+    content: "PCI DSS compliance requires encrypted storage for all payment data"
+
+  # Deployment chain
+  - type: decision
+    content: "Critical services must have 99.99% uptime SLA"
+  - type: decision
+    content: "Auth service is classified as critical"
+  - type: decision
+    content: "Services with 99.99% SLA must be deployed across 3 availability zones"
+
+  # Testing chain
+  - type: decision
+    content: "All Go services must use table-driven tests"
+  - type: decision
+    content: "The billing service is written in Go"
+
+tests:
+  - id: router-inference
+    query: "What router does the auth service use?"
+    expect:
+      includes: ["chi"]
+      excludes: ["gin", "mux", "fiber", "gorilla"]
+
+  - id: language-inference
+    query: "What language is the auth service written in?"
+    expect:
+      includes: ["Go"]
+      excludes: ["Python", "Java", "Node", "TypeScript"]
+
+  - id: compliance-chain
+    query: "Does the payment service need encrypted storage?"
+    expect:
+      includes: ["yes", "encrypted", "PCI"]
+      excludes: ["no", "optional", "not required"]
+
+  - id: deployment-chain
+    query: "How many availability zones does the auth service need?"
+    expect:
+      includes: ["3", "three"]
+      excludes: ["1", "2", "one", "two"]
+
+  - id: testing-inference
+    query: "What testing pattern should the billing service use?"
+    expect:
+      includes: ["table-driven", "table"]
+      excludes: ["unit", "integration", "mock"]
+
+  - id: double-hop
+    query: "What compliance standard applies to Stripe payment data storage?"
+    expect:
+      includes: ["PCI DSS", "PCI"]
+      excludes: ["SOC", "HIPAA", "GDPR"]
