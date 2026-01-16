@@ -17,11 +17,14 @@ type Resolve struct {
 	WaitThreshold    float64 // Min avg score to wait (default 0.2)
 	MinResultsInject int     // Min results needed to inject (default 1)
 
-	// SessionContext for boost (set by Think)
+	// SessionContext for boost - this is a snapshot (copy), safe from races
 	sessionCtx *cognition.SessionContext
 
 	// Proactive queue (set by Dream)
 	proactiveQueue []cognition.Result
+
+	// Thinker provides session context snapshots (safe from races)
+	thinker *Think
 }
 
 // NewResolve creates a new Resolve instance with default thresholds.
@@ -36,8 +39,15 @@ func NewResolve() *Resolve {
 }
 
 // SetSessionContext sets the session context for topic boosting.
+// DEPRECATED: Use SetThinker instead to get race-safe snapshots.
 func (r *Resolve) SetSessionContext(ctx *cognition.SessionContext) {
 	r.sessionCtx = ctx
+}
+
+// SetThinker sets the Think instance for getting session context snapshots.
+// This is the preferred way to provide session context - it's race-safe.
+func (r *Resolve) SetThinker(thinker *Think) {
+	r.thinker = thinker
 }
 
 // AddProactiveResult adds a result from Dream to the proactive queue.
@@ -52,19 +62,29 @@ func (r *Resolve) ClearProactiveQueue() {
 
 // Resolve decides whether to inject, wait, queue, or discard results.
 func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cognition.Result) (*cognition.ResolveResult, error) {
+	// Get a race-safe snapshot of session context
+	// Prefer thinker (provides fresh snapshot) over static sessionCtx
+	var sessionCtx *cognition.SessionContext
+	if r.thinker != nil {
+		snapshot := r.thinker.SessionContextSnapshot()
+		sessionCtx = &snapshot
+	} else if r.sessionCtx != nil {
+		sessionCtx = r.sessionCtx
+	}
+
 	// Merge with proactive results from Dream
 	if len(r.proactiveQueue) > 0 {
 		results = r.mergeProactive(results)
 	}
 
 	// Apply session context boost if available
-	if r.sessionCtx != nil {
-		results = r.applySessionBoost(results)
+	if sessionCtx != nil {
+		results = r.applySessionBoostWithCtx(results, sessionCtx)
 	}
 
 	// Check for cached Reflect results
-	if r.sessionCtx != nil && q.Text != "" {
-		if cached, ok := r.sessionCtx.CachedReflect[q.Text]; ok && len(cached) > 0 {
+	if sessionCtx != nil && q.Text != "" {
+		if cached, ok := sessionCtx.CachedReflect[q.Text]; ok && len(cached) > 0 {
 			results = cached
 		}
 	}
@@ -79,7 +99,7 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 	var formatted string
 	if decision == cognition.Inject {
 		// Pass SessionContext to formatter for any enrichments (nuances, etc.)
-		formatted = r.formatter.FormatForInjection(results, r.sessionCtx)
+		formatted = r.formatter.FormatForInjection(results, sessionCtx)
 	}
 
 	return &cognition.ResolveResult{
@@ -120,8 +140,18 @@ func (r *Resolve) mergeProactive(results []cognition.Result) []cognition.Result 
 }
 
 // applySessionBoost boosts results that match session topic weights.
+// DEPRECATED: Use applySessionBoostWithCtx instead.
 func (r *Resolve) applySessionBoost(results []cognition.Result) []cognition.Result {
 	if r.sessionCtx == nil || len(r.sessionCtx.TopicWeights) == 0 {
+		return results
+	}
+	return r.applySessionBoostWithCtx(results, r.sessionCtx)
+}
+
+// applySessionBoostWithCtx boosts results that match session topic weights.
+// Takes an explicit session context to avoid race conditions.
+func (r *Resolve) applySessionBoostWithCtx(results []cognition.Result, sessionCtx *cognition.SessionContext) []cognition.Result {
+	if sessionCtx == nil || len(sessionCtx.TopicWeights) == 0 {
 		return results
 	}
 
@@ -129,13 +159,13 @@ func (r *Resolve) applySessionBoost(results []cognition.Result) []cognition.Resu
 		// Check if result tags match any topic weights
 		boost := 0.0
 		for _, tag := range results[i].Tags {
-			if weight, ok := r.sessionCtx.TopicWeights[tag]; ok {
+			if weight, ok := sessionCtx.TopicWeights[tag]; ok {
 				boost += weight * 0.1 // Up to 10% boost per matching topic
 			}
 		}
 
 		// Also check content for topic keywords
-		for topic, weight := range r.sessionCtx.TopicWeights {
+		for topic, weight := range sessionCtx.TopicWeights {
 			if containsIgnoreCase(results[i].Content, topic) {
 				boost += weight * 0.05 // 5% boost for content match
 			}

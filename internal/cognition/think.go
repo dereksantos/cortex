@@ -168,10 +168,96 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 }
 
 // SessionContext returns the current session's accumulated context.
+// DEPRECATED: Use SessionContextSnapshot() to avoid race conditions.
+// This method returns a pointer that can race with Think's updates.
 func (t *Think) SessionContext() *cognition.SessionContext {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.sessionCtx
+}
+
+// SessionContextSnapshot returns a deep copy of the session context.
+// This is safe to read concurrently while Think is updating the original.
+func (t *Think) SessionContextSnapshot() cognition.SessionContext {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.sessionCtx == nil {
+		return cognition.SessionContext{}
+	}
+
+	// Deep copy all maps and slices
+	snapshot := cognition.SessionContext{
+		LastUpdated: t.sessionCtx.LastUpdated,
+	}
+
+	// Copy TopicWeights
+	if t.sessionCtx.TopicWeights != nil {
+		snapshot.TopicWeights = make(map[string]float64, len(t.sessionCtx.TopicWeights))
+		for k, v := range t.sessionCtx.TopicWeights {
+			snapshot.TopicWeights[k] = v
+		}
+	}
+
+	// Copy RecentQueries
+	if t.sessionCtx.RecentQueries != nil {
+		snapshot.RecentQueries = make([]cognition.Query, len(t.sessionCtx.RecentQueries))
+		copy(snapshot.RecentQueries, t.sessionCtx.RecentQueries)
+	}
+
+	// Copy RecentPrompts
+	if t.sessionCtx.RecentPrompts != nil {
+		snapshot.RecentPrompts = make([]string, len(t.sessionCtx.RecentPrompts))
+		copy(snapshot.RecentPrompts, t.sessionCtx.RecentPrompts)
+	}
+
+	// Copy WarmCache (map of slices - need deep copy)
+	if t.sessionCtx.WarmCache != nil {
+		snapshot.WarmCache = make(map[string][]cognition.Result, len(t.sessionCtx.WarmCache))
+		for k, v := range t.sessionCtx.WarmCache {
+			resultsCopy := make([]cognition.Result, len(v))
+			copy(resultsCopy, v)
+			snapshot.WarmCache[k] = resultsCopy
+		}
+	}
+
+	// Copy CachedReflect (map of slices - need deep copy)
+	if t.sessionCtx.CachedReflect != nil {
+		snapshot.CachedReflect = make(map[string][]cognition.Result, len(t.sessionCtx.CachedReflect))
+		for k, v := range t.sessionCtx.CachedReflect {
+			resultsCopy := make([]cognition.Result, len(v))
+			copy(resultsCopy, v)
+			snapshot.CachedReflect[k] = resultsCopy
+		}
+	}
+
+	// Copy ResolvedContradictions
+	if t.sessionCtx.ResolvedContradictions != nil {
+		snapshot.ResolvedContradictions = make(map[string]string, len(t.sessionCtx.ResolvedContradictions))
+		for k, v := range t.sessionCtx.ResolvedContradictions {
+			snapshot.ResolvedContradictions[k] = v
+		}
+	}
+
+	// Copy ExtractedNuances (map of slices - need deep copy)
+	if t.sessionCtx.ExtractedNuances != nil {
+		snapshot.ExtractedNuances = make(map[string][]cognition.Nuance, len(t.sessionCtx.ExtractedNuances))
+		for k, v := range t.sessionCtx.ExtractedNuances {
+			nuancesCopy := make([]cognition.Nuance, len(v))
+			copy(nuancesCopy, v)
+			snapshot.ExtractedNuances[k] = nuancesCopy
+		}
+	}
+
+	// Copy ProcessedPatternIDs
+	if t.sessionCtx.ProcessedPatternIDs != nil {
+		snapshot.ProcessedPatternIDs = make(map[string]bool, len(t.sessionCtx.ProcessedPatternIDs))
+		for k, v := range t.sessionCtx.ProcessedPatternIDs {
+			snapshot.ProcessedPatternIDs[k] = v
+		}
+	}
+
+	return snapshot
 }
 
 // RecordQuery adds a query to the recent queries list.

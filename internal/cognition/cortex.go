@@ -3,6 +3,7 @@ package cognition
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -29,6 +30,9 @@ type Cortex struct {
 
 	// Shared state
 	activity *ActivityTracker
+
+	// Graceful shutdown
+	wg sync.WaitGroup
 }
 
 // New creates a new Cortex instance with all cognitive modes.
@@ -49,8 +53,8 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	digest := NewDigest(store)
 	resolve := NewResolve()
 
-	// Connect resolve to think for session context
-	resolve.SetSessionContext(think.SessionContext())
+	// Connect resolve to think for session context (race-safe via snapshots)
+	resolve.SetThinker(think)
 
 	// Create event router
 	router := NewRouter(reflex, think, dream)
@@ -106,8 +110,10 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 			candidates = cached
 		} else {
 			// Run Reflect async for next time
+			c.wg.Add(1)
 			go func() {
-				reflected, err := c.reflect.Reflect(context.Background(), q, candidates)
+				defer c.wg.Done()
+				reflected, err := c.reflect.Reflect(ctx, q, candidates)
 				if err == nil {
 					c.think.CacheReflectResult(q.Text, reflected)
 				}
@@ -132,16 +138,22 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 
 	// Step 4: Trigger background mode (non-blocking)
 	if c.activity.IsIdle() {
+		c.wg.Add(1)
 		go func() {
-			result, _ := c.dream.MaybeDream(context.Background())
+			defer c.wg.Done()
+			result, _ := c.dream.MaybeDream(ctx)
 			// Trigger Digest after Dream completes
 			if result != nil && result.Status == cognition.DreamRan {
 				c.digest.NotifyDreamCompleted()
-				c.digest.MaybeDigest(context.Background())
+				c.digest.MaybeDigest(ctx)
 			}
 		}()
 	} else {
-		go c.think.MaybeThink(context.Background())
+		c.wg.Add(1)
+		go func() {
+			defer c.wg.Done()
+			c.think.MaybeThink(ctx)
+		}()
 	}
 
 	return result, nil
@@ -261,4 +273,29 @@ func (c *Cortex) GetDigestedInsights(ctx context.Context, limit int) ([]cognitio
 // SessionTracker returns the session tracker for watch view.
 func (c *Cortex) SessionTracker() *SessionTracker {
 	return c.sessionTracker
+}
+
+// Wait blocks until all background goroutines complete.
+func (c *Cortex) Wait() {
+	c.wg.Wait()
+}
+
+// Shutdown gracefully stops background processing.
+// Call this before application exit. The provided context can be used
+// to set a timeout for waiting on goroutines to complete.
+func (c *Cortex) Shutdown(ctx context.Context) error {
+	// Signal goroutines to stop via context cancellation (handled by caller)
+	// Wait for completion with timeout
+	done := make(chan struct{})
+	go func() {
+		c.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
