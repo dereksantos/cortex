@@ -539,3 +539,138 @@ func TestGenerateResponse_Structure(t *testing.T) {
 		t.Errorf("expected Latency 100, got %d", resp.Latency)
 	}
 }
+
+// mockEmbedder implements Embedder for testing
+type mockEmbedder struct {
+	available bool
+	embedding []float32
+	err       error
+}
+
+func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.embedding, nil
+}
+
+func (m *mockEmbedder) IsEmbeddingAvailable() bool {
+	return m.available
+}
+
+func TestFallbackEmbedder(t *testing.T) {
+	t.Run("uses primary when available", func(t *testing.T) {
+		primary := &mockEmbedder{
+			available: true,
+			embedding: []float32{1.0, 2.0, 3.0},
+		}
+		secondary := &mockEmbedder{
+			available: true,
+			embedding: []float32{4.0, 5.0, 6.0},
+		}
+
+		fallback := NewFallbackEmbedder(primary, secondary)
+
+		vec, err := fallback.Embed(context.Background(), "test")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(vec) != 3 || vec[0] != 1.0 {
+			t.Errorf("expected primary embedding [1.0, 2.0, 3.0], got %v", vec)
+		}
+	})
+
+	t.Run("falls back to secondary when primary unavailable", func(t *testing.T) {
+		primary := &mockEmbedder{
+			available: false,
+		}
+		secondary := &mockEmbedder{
+			available: true,
+			embedding: []float32{4.0, 5.0, 6.0},
+		}
+
+		fallback := NewFallbackEmbedder(primary, secondary)
+
+		vec, err := fallback.Embed(context.Background(), "test")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(vec) != 3 || vec[0] != 4.0 {
+			t.Errorf("expected secondary embedding [4.0, 5.0, 6.0], got %v", vec)
+		}
+	})
+
+	t.Run("IsEmbeddingAvailable returns true when either available", func(t *testing.T) {
+		tests := []struct {
+			name            string
+			primaryAvail    bool
+			secondaryAvail  bool
+			expectedAvail   bool
+		}{
+			{"both available", true, true, true},
+			{"only primary", true, false, true},
+			{"only secondary", false, true, true},
+			{"neither available", false, false, false},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				primary := &mockEmbedder{available: tt.primaryAvail}
+				secondary := &mockEmbedder{available: tt.secondaryAvail}
+				fallback := NewFallbackEmbedder(primary, secondary)
+
+				if got := fallback.IsEmbeddingAvailable(); got != tt.expectedAvail {
+					t.Errorf("IsEmbeddingAvailable() = %v, want %v", got, tt.expectedAvail)
+				}
+			})
+		}
+	})
+
+	t.Run("handles nil embedders gracefully", func(t *testing.T) {
+		fallback := NewFallbackEmbedder(nil, nil)
+		if fallback.IsEmbeddingAvailable() {
+			t.Error("expected IsEmbeddingAvailable to return false with nil embedders")
+		}
+
+		_, err := fallback.Embed(context.Background(), "test")
+		if err == nil {
+			t.Error("expected error with nil embedders")
+		}
+	})
+}
+
+func TestHugotEmbedder_LazyInit(t *testing.T) {
+	// Test that HugotEmbedder is created without immediately loading the model
+	embedder := NewHugotEmbedder()
+	if embedder == nil {
+		t.Fatal("NewHugotEmbedder returned nil")
+	}
+
+	// The model should not be loaded yet
+	if embedder.pipeline != nil {
+		t.Error("pipeline should not be loaded until first use")
+	}
+
+	// Model name should be set to default
+	if embedder.ModelName() != DefaultHugotModel {
+		t.Errorf("expected model name %q, got %q", DefaultHugotModel, embedder.ModelName())
+	}
+}
+
+func TestHugotEmbedder_WithCustomModel(t *testing.T) {
+	customModel := "sentence-transformers/paraphrase-MiniLM-L6-v2"
+	embedder := NewHugotEmbedderWithModel(customModel)
+
+	if embedder.ModelName() != customModel {
+		t.Errorf("expected model name %q, got %q", customModel, embedder.ModelName())
+	}
+}
+
+func TestHugotEmbedder_WithPath(t *testing.T) {
+	path := "/some/model/path"
+	embedder := NewHugotEmbedderWithPath(path)
+
+	if embedder.modelPath != path {
+		t.Errorf("expected model path %q, got %q", path, embedder.modelPath)
+	}
+}

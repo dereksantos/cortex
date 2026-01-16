@@ -81,12 +81,10 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	// Initialize embedder for semantic search (always try, falls back gracefully)
-	var embedder llm.Embedder
+	// Initialize embedder with fallback: Ollama -> Hugot
 	ollamaClient := llm.NewOllamaClient(cfg)
-	if ollamaClient.IsEmbeddingAvailable() {
-		embedder = ollamaClient
-	}
+	hugotEmbedder := llm.NewHugotEmbedder()
+	embedder := llm.NewFallbackEmbedder(ollamaClient, hugotEmbedder)
 
 	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
