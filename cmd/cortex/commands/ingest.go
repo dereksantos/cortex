@@ -185,13 +185,15 @@ func (c *IngestCommand) Execute(ctx *Context) error {
 	// Generate embeddings if vector search is enabled
 	if cfg.EnableVector && processed > 0 {
 		ollamaClient := llm.NewOllamaClient(cfg)
-		if ollamaClient.IsAvailable() && ollamaClient.IsEmbeddingModelAvailable() {
+		hugotEmbedder := llm.NewHugotEmbedder()
+		embedder := llm.NewFallbackEmbedder(ollamaClient, hugotEmbedder)
+		if embedder.IsEmbeddingAvailable() {
 			bgCtx := context.Background()
 			events, _ := store.GetRecentEvents(processed)
 			embedded := 0
 			for _, event := range events {
 				if event.ToolResult != "" {
-					vec, err := ollamaClient.Embed(bgCtx, event.ToolResult)
+					vec, err := embedder.Embed(bgCtx, event.ToolResult)
 					if err == nil {
 						store.StoreEmbedding(event.ID, "event", vec)
 						embedded++

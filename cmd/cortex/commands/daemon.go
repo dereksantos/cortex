@@ -50,19 +50,19 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 
 	// Initialize LLM provider for cognitive modes
 	var llmProvider llm.Provider
-	var embedder llm.Embedder
 	anthropic := llm.NewAnthropicClient(cfg)
+	ollama := llm.NewOllamaClient(cfg)
 	if anthropic.IsAvailable() {
 		llmProvider = anthropic
-	} else {
-		ollama := llm.NewOllamaClient(cfg)
-		if ollama.IsAvailable() {
-			llmProvider = ollama
-		}
-		if ollama.IsEmbeddingAvailable() {
-			embedder = ollama
-		}
+	} else if ollama.IsAvailable() {
+		llmProvider = ollama
 	}
+
+	// Initialize embedder with fallback: Ollama (768-dim) -> Hugot (384-dim)
+	// Note: Different dimensions are handled by storage, but using a single
+	// embedder consistently per database is recommended for best results.
+	hugotEmbedder := llm.NewHugotEmbedder()
+	embedder := llm.NewFallbackEmbedder(ollama, hugotEmbedder)
 
 	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)

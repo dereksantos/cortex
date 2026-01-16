@@ -120,16 +120,15 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 
 	// Initialize LLM provider (optional - Reflect will degrade gracefully if nil)
 	var llmProvider llm.Provider
-	var embedder llm.Embedder
 	anthropic := llm.NewAnthropicClient(cfg)
+	ollama := llm.NewOllamaClient(cfg)
 	if anthropic.IsAvailable() {
 		llmProvider = anthropic
 	}
-	// Try Ollama for embeddings
-	ollama := llm.NewOllamaClient(cfg)
-	if ollama.IsEmbeddingAvailable() {
-		embedder = ollama
-	}
+
+	// Initialize embedder with fallback: Ollama -> Hugot
+	hugotEmbedder := llm.NewHugotEmbedder()
+	embedder := llm.NewFallbackEmbedder(ollama, hugotEmbedder)
 
 	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
