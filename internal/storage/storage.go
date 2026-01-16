@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"math"
 	"time"
-	"unsafe"
 
 	"github.com/viterin/vek"
 	_ "modernc.org/sqlite"
@@ -983,7 +983,7 @@ func (s *Storage) SearchByVector(queryVector []float32, limit int, threshold flo
 func vectorToBytes(v []float32) []byte {
 	buf := make([]byte, len(v)*4)
 	for i, f := range v {
-		bits := *(*uint32)(unsafe.Pointer(&f))
+		bits := math.Float32bits(f)
 		buf[i*4] = byte(bits)
 		buf[i*4+1] = byte(bits >> 8)
 		buf[i*4+2] = byte(bits >> 16)
@@ -997,7 +997,7 @@ func bytesToVector(b []byte) []float32 {
 	v := make([]float32, len(b)/4)
 	for i := range v {
 		bits := uint32(b[i*4]) | uint32(b[i*4+1])<<8 | uint32(b[i*4+2])<<16 | uint32(b[i*4+3])<<24
-		v[i] = *(*float32)(unsafe.Pointer(&bits))
+		v[i] = math.Float32frombits(bits)
 	}
 	return v
 }
