@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/dereksantos/cortex/integrations/claude"
 	"github.com/dereksantos/cortex/integrations/cursor"
 	"github.com/dereksantos/cortex/internal/capture"
@@ -3836,30 +3838,47 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 	logger.Log(resolveEntry)
 }
 
+// watchState holds the interactive watch UI state
+type watchState struct {
+	selectedSession int  // Index of selected session (0-based)
+	expandedSession int  // Index of expanded session (-1 = none)
+	sessions        []*storage.SessionMetadata
+}
+
 func handleWatch() {
 	// Parse flags
 	jsonOutput := false
 	noAnimate := false
 	retrievalOnly := false
 	backgroundOnly := false
+	interactive := true // Default to interactive if TTY
 
 	for _, arg := range os.Args[2:] {
 		switch arg {
 		case "--json":
 			jsonOutput = true
+			interactive = false
 		case "--no-animate":
 			noAnimate = true
+			interactive = false
 		case "--retrieval-only":
 			retrievalOnly = true
 		case "--background-only":
 			backgroundOnly = true
+		case "--no-interactive":
+			interactive = false
 		case "-h", "--help":
 			fmt.Println("Usage: cortex watch [flags]")
 			fmt.Println("\nFlags:")
 			fmt.Println("  --json             Machine-readable JSON output")
 			fmt.Println("  --no-animate       Static output (single snapshot)")
+			fmt.Println("  --no-interactive   Disable keyboard interaction")
 			fmt.Println("  --retrieval-only   Show only retrieval stats")
 			fmt.Println("  --background-only  Show only background (daemon) stats")
+			fmt.Println("\nInteractive controls:")
+			fmt.Println("  Up/Down arrows     Navigate sessions")
+			fmt.Println("  Enter              Expand/collapse session details")
+			fmt.Println("  q or Ctrl+C        Quit")
 			os.Exit(0)
 		}
 	}
@@ -3891,6 +3910,20 @@ func handleWatch() {
 		return
 	}
 
+	// Check if we're in a TTY for interactive mode
+	if interactive && !term.IsTerminal(int(os.Stdin.Fd())) {
+		interactive = false
+	}
+
+	if interactive {
+		runInteractiveWatch(cfg, store, retrievalOnly, backgroundOnly)
+	} else {
+		runAnimatedWatch(cfg, store, retrievalOnly, backgroundOnly)
+	}
+}
+
+// runAnimatedWatch runs the non-interactive animated watch
+func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -3919,6 +3952,125 @@ func handleWatch() {
 		case <-sigChan:
 			fmt.Print("\033[?25h") // Show cursor
 			fmt.Println("\n\nStopped watching.")
+			return
+		}
+	}
+}
+
+// runInteractiveWatch runs the interactive watch with keyboard input
+func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Put terminal in raw mode for keyboard input
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		// Fall back to non-interactive mode
+		runAnimatedWatch(cfg, store, retrievalOnly, backgroundOnly)
+		return
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	// Animation ticker (refresh every 300ms)
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Keyboard input channel
+	keyChan := make(chan byte, 10)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				return
+			}
+			keyChan <- buf[0]
+		}
+	}()
+
+	// Watch state
+	state := &watchState{
+		selectedSession: 0,
+		expandedSession: -1,
+	}
+
+	// Animation state
+	animFrame := 0
+
+	// Clear screen and hide cursor
+	fmt.Print("\033[2J\033[H\033[?25l")
+	defer fmt.Print("\033[?25h\033[2J\033[H") // Show cursor and clear on exit
+
+	// Initial data load
+	state.sessions, _ = store.GetRecentSessions(3)
+
+	// Initial render
+	printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+
+	// Escape sequence state
+	escapeSeq := make([]byte, 0, 3)
+
+	for {
+		select {
+		case <-ticker.C:
+			animFrame++
+			// Refresh session data periodically
+			if animFrame%10 == 0 { // Every ~3 seconds
+				state.sessions, _ = store.GetRecentSessions(3)
+			}
+			// Move cursor to top and redraw
+			fmt.Print("\033[H")
+			printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+
+		case key := <-keyChan:
+			// Handle escape sequences (arrow keys)
+			if len(escapeSeq) > 0 {
+				escapeSeq = append(escapeSeq, key)
+				if len(escapeSeq) == 3 {
+					// Process escape sequence
+					if escapeSeq[0] == 27 && escapeSeq[1] == 91 {
+						switch escapeSeq[2] {
+						case 65: // Up arrow
+							if state.expandedSession == -1 && state.selectedSession > 0 {
+								state.selectedSession--
+							}
+						case 66: // Down arrow
+							if state.expandedSession == -1 && state.selectedSession < len(state.sessions)-1 {
+								state.selectedSession++
+							}
+						}
+					}
+					escapeSeq = escapeSeq[:0]
+					// Redraw after key
+					fmt.Print("\033[H")
+					printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+				}
+				continue
+			}
+
+			switch key {
+			case 27: // Escape - start escape sequence or collapse
+				if state.expandedSession != -1 {
+					state.expandedSession = -1
+					fmt.Print("\033[H")
+					printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+				} else {
+					escapeSeq = append(escapeSeq, key)
+				}
+			case 13: // Enter - toggle expand
+				if state.expandedSession == state.selectedSession {
+					state.expandedSession = -1
+				} else if len(state.sessions) > 0 && state.selectedSession < len(state.sessions) {
+					state.expandedSession = state.selectedSession
+				}
+				fmt.Print("\033[2J\033[H") // Clear and redraw for expansion
+				printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+			case 'q', 3: // q or Ctrl+C
+				return
+			}
+
+		case <-sigChan:
 			return
 		}
 	}
@@ -4291,6 +4443,179 @@ func getAnimatedModeSpinner(mode string, frame int) string {
 	default:
 		return "●"
 	}
+}
+
+// printInteractiveWatch renders the interactive watch view with sessions panel
+func printInteractiveWatch(cfg *config.Config, store *storage.Storage, state *watchState, retrievalOnly, backgroundOnly bool, frame int) {
+	// Get all state
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	daemonState, _ := intcognition.ReadDaemonState(statePath)
+	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
+	stats, _ := store.GetStats()
+
+	// Column width
+	totalWidth := 61
+
+	// Helper to pad cell content
+	padCell := func(content string, width int) string {
+		if len(content) > width {
+			return content[:width]
+		}
+		return content + strings.Repeat(" ", width-len(content))
+	}
+
+	// Get stats
+	events := 0
+	insights := 0
+	if daemonState != nil {
+		events = daemonState.Stats.Events
+		insights = daemonState.Stats.Insights
+	}
+	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
+		events = statsEvents
+	}
+	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
+		insights = statsInsights
+	}
+
+	// Mode status
+	modeIcon := "○"
+	modeName := "IDLE"
+	modeDesc := ""
+	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
+		modeIcon = getAnimatedModeSpinner(daemonState.Mode, frame)
+		modeName = strings.ToUpper(daemonState.Mode) + "ING"
+		if daemonState.Mode == "dream" {
+			modeName = "DREAMING"
+		} else if daemonState.Mode == "think" {
+			modeName = "THINKING"
+		}
+		modeDesc = daemonState.Description
+		if modeDesc == "" {
+			modeDesc = getDefaultModeDescription(daemonState.Mode)
+		}
+	}
+
+	// Print mode header
+	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
+	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
+	if modeDesc != "" {
+		modeStr += "  " + truncateString(modeDesc, totalWidth-len(modeStr)-3)
+	}
+	fmt.Printf("│%s│\n", padCell(modeStr, totalWidth))
+
+	// Quick stats line
+	statsLine := fmt.Sprintf(" Events: %d  Insights: %d", events, insights)
+	if retrievalStats != nil && retrievalStats.TotalRetrievals > 0 {
+		statsLine += fmt.Sprintf("  Queries: %d", retrievalStats.TotalRetrievals)
+	}
+	fmt.Printf("│%s│\n", padCell(statsLine, totalWidth))
+
+	// Sessions panel
+	fmt.Printf("├%s┤\n", strings.Repeat("─", totalWidth))
+	fmt.Printf("│%s│\n", padCell(" Sessions", totalWidth))
+	fmt.Printf("├%s┤\n", strings.Repeat("─", totalWidth))
+
+	if len(state.sessions) == 0 {
+		fmt.Printf("│%s│\n", padCell(" No sessions yet. Use Claude Code to start.", totalWidth))
+	} else {
+		for i, sess := range state.sessions {
+			// Format: [▸/  ] HH:MM  "prompt..."  Last: action   N evts
+			selector := "  "
+			if i == state.selectedSession {
+				selector = "▸ "
+			}
+
+			timeStr := sess.StartedAt.Format("15:04")
+			promptSnippet := truncateString(sess.InitialPrompt, 15)
+			if promptSnippet == "" {
+				promptSnippet = "(no prompt)"
+			}
+			lastAction := truncateString(sess.LastAction, 18)
+			if lastAction == "" {
+				lastAction = "-"
+			}
+
+			line := fmt.Sprintf("%s%s  \"%s\"  Last: %s  %d evts",
+				selector, timeStr, promptSnippet, lastAction, sess.EventCount)
+			fmt.Printf("│%s│\n", padCell(line, totalWidth))
+
+			// If this session is expanded, show details
+			if i == state.expandedSession {
+				renderExpandedSession(cfg, store, sess, totalWidth)
+			}
+		}
+	}
+
+	fmt.Printf("└%s┘\n", strings.Repeat("─", totalWidth))
+
+	// Controls hint
+	if state.expandedSession == -1 {
+		fmt.Printf("\n↑/↓: Navigate  Enter: Expand  q: Quit\n")
+	} else {
+		fmt.Printf("\nEsc: Collapse  q: Quit\n")
+	}
+}
+
+// renderExpandedSession shows detailed session info
+func renderExpandedSession(cfg *config.Config, store *storage.Storage, sess *storage.SessionMetadata, totalWidth int) {
+	padCell := func(content string, width int) string {
+		if len(content) > width {
+			return content[:width]
+		}
+		return content + strings.Repeat(" ", width-len(content))
+	}
+
+	// Session details box
+	fmt.Printf("│%s│\n", padCell("", totalWidth))
+
+	// Full initial prompt
+	if sess.InitialPrompt != "" {
+		promptLine := "   Initial: \"" + truncateString(sess.InitialPrompt, totalWidth-16) + "\""
+		fmt.Printf("│%s│\n", padCell(promptLine, totalWidth))
+	}
+
+	// Duration
+	duration := time.Since(sess.StartedAt).Round(time.Minute)
+	durationStr := fmt.Sprintf("   Duration: %v", duration)
+	fmt.Printf("│%s│\n", padCell(durationStr, totalWidth))
+
+	// Recent activity for this session
+	sessionEvents, err := store.GetSessionEvents(sess.SessionID, 5)
+	if err == nil && len(sessionEvents) > 0 {
+		fmt.Printf("│%s│\n", padCell("   Recent Activity:", totalWidth))
+		for _, evt := range sessionEvents {
+			timeStr := evt.Timestamp.Format("15:04:05")
+			action := evt.ToolName
+			if action == "" {
+				action = string(evt.EventType)
+			}
+			line := fmt.Sprintf("     %s  %s", timeStr, truncateString(action, totalWidth-18))
+			fmt.Printf("│%s│\n", padCell(line, totalWidth))
+		}
+	}
+
+	// Topic weights if available
+	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
+	if sessionData, err := os.ReadFile(sessionPath); err == nil {
+		var session struct {
+			TopicWeights map[string]float64 `json:"topic_weights"`
+		}
+		if json.Unmarshal(sessionData, &session) == nil && len(session.TopicWeights) > 0 {
+			topicList := make([]string, 0)
+			for topic, weight := range session.TopicWeights {
+				if weight > 0.3 {
+					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
+				}
+			}
+			if len(topicList) > 0 {
+				topicsStr := "   Topics: " + strings.Join(topicList[:min(3, len(topicList))], " ")
+				fmt.Printf("│%s│\n", padCell(topicsStr, totalWidth))
+			}
+		}
+	}
+
+	fmt.Printf("│%s│\n", padCell("", totalWidth))
 }
 
 func printUsage() {

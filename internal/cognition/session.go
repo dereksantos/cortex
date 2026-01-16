@@ -214,3 +214,103 @@ func (s *SessionSaver) ForceSave(ctx *cognition.SessionContext) error {
 	s.dirty = false
 	return nil
 }
+
+// SessionIndexEntry represents a session in the fast-access index
+type SessionIndexEntry struct {
+	SessionID     string    `json:"session_id"`
+	StartedAt     time.Time `json:"started_at"`
+	InitialPrompt string    `json:"initial_prompt"`
+	LastAction    string    `json:"last_action"`
+	LastActionAt  time.Time `json:"last_action_at"`
+	EventCount    int       `json:"event_count"`
+	ProjectPath   string    `json:"project_path,omitempty"`
+}
+
+// SessionIndex is the cached list of recent sessions for fast watch refresh
+type SessionIndex struct {
+	Sessions  []SessionIndexEntry `json:"sessions"`
+	UpdatedAt time.Time           `json:"updated_at"`
+}
+
+// SessionIndexWriter writes the session index to a JSON file for fast access
+type SessionIndexWriter struct {
+	path         string
+	lastWrite    time.Time
+	minInterval  time.Duration
+}
+
+// NewSessionIndexWriter creates a new session index writer
+func NewSessionIndexWriter(contextDir string) *SessionIndexWriter {
+	return &SessionIndexWriter{
+		path:        filepath.Join(contextDir, "sessions_index.json"),
+		minInterval: time.Second, // Debounce writes to max 1/second
+	}
+}
+
+// Path returns the path to the session index file
+func (w *SessionIndexWriter) Path() string {
+	return w.path
+}
+
+// Write writes the session index to disk (debounced)
+func (w *SessionIndexWriter) Write(sessions []SessionIndexEntry) error {
+	if time.Since(w.lastWrite) < w.minInterval {
+		return nil // Skip if too recent
+	}
+
+	index := SessionIndex{
+		Sessions:  sessions,
+		UpdatedAt: time.Now(),
+	}
+
+	data, err := json.MarshalIndent(index, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session index: %w", err)
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(w.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Atomic write
+	tempPath := w.path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempPath, w.path); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	w.lastWrite = time.Now()
+	return nil
+}
+
+// ForceWrite writes immediately, bypassing debounce
+func (w *SessionIndexWriter) ForceWrite(sessions []SessionIndexEntry) error {
+	w.lastWrite = time.Time{} // Reset to allow write
+	return w.Write(sessions)
+}
+
+// ReadSessionIndex reads the session index from disk
+func ReadSessionIndex(contextDir string) (*SessionIndex, error) {
+	path := filepath.Join(contextDir, "sessions_index.json")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &SessionIndex{Sessions: []SessionIndexEntry{}}, nil
+		}
+		return nil, fmt.Errorf("failed to read session index: %w", err)
+	}
+
+	var index SessionIndex
+	if err := json.Unmarshal(data, &index); err != nil {
+		return &SessionIndex{Sessions: []SessionIndexEntry{}}, nil
+	}
+
+	return &index, nil
+}

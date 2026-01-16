@@ -129,6 +129,18 @@ func (s *Storage) initSchema() error {
 		content_rowid='rowid'
 	);
 
+	-- Session metadata for watch tracking
+	CREATE TABLE IF NOT EXISTS sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT UNIQUE NOT NULL,
+		started_at DATETIME NOT NULL,
+		initial_prompt TEXT,
+		event_count INTEGER DEFAULT 0,
+		last_action TEXT,
+		last_action_at DATETIME,
+		project_path TEXT
+	);
+
 	-- Indexes for performance
 	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
@@ -139,6 +151,7 @@ func (s *Storage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
 	CREATE INDEX IF NOT EXISTS idx_insights_event ON insights(event_id);
 	CREATE INDEX IF NOT EXISTS idx_embeddings_content ON embeddings(content_id, content_type);
+	CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -1013,4 +1026,193 @@ func sortBySimilarity(results []VectorSearchResult) {
 			}
 		}
 	}
+}
+
+// SessionMetadata represents session tracking info for the watch view
+type SessionMetadata struct {
+	ID           int64
+	SessionID    string
+	StartedAt    time.Time
+	InitialPrompt string
+	EventCount   int
+	LastAction   string
+	LastActionAt time.Time
+	ProjectPath  string
+}
+
+// CreateOrUpdateSession creates a new session or updates an existing one.
+// On first call (new session), it sets started_at and initial_prompt.
+// On subsequent calls, it increments event_count and updates last_action.
+func (s *Storage) CreateOrUpdateSession(sessionID, initialPrompt, lastAction, projectPath string) error {
+	now := time.Now()
+
+	// Try to insert first (new session)
+	result, err := s.db.Exec(`
+		INSERT INTO sessions (session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path)
+		VALUES (?, ?, ?, 1, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			event_count = event_count + 1,
+			last_action = ?,
+			last_action_at = ?
+	`, sessionID, now, initialPrompt, lastAction, now, projectPath, lastAction, now)
+
+	if err != nil {
+		return fmt.Errorf("failed to create/update session: %w", err)
+	}
+
+	_ = result
+	return nil
+}
+
+// UpdateSessionLastAction updates only the last action for a session
+func (s *Storage) UpdateSessionLastAction(sessionID, lastAction string) error {
+	_, err := s.db.Exec(`
+		UPDATE sessions SET last_action = ?, last_action_at = ?, event_count = event_count + 1
+		WHERE session_id = ?
+	`, lastAction, time.Now(), sessionID)
+
+	if err != nil {
+		return fmt.Errorf("failed to update session last action: %w", err)
+	}
+	return nil
+}
+
+// GetRecentSessions retrieves the most recent sessions
+func (s *Storage) GetRecentSessions(limit int) ([]*SessionMetadata, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path
+		FROM sessions
+		ORDER BY started_at DESC
+		LIMIT ?
+	`, limit)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get recent sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var sessions []*SessionMetadata
+	for rows.Next() {
+		var sess SessionMetadata
+		var initialPrompt, lastAction, projectPath sql.NullString
+		var lastActionAt sql.NullTime
+
+		err := rows.Scan(
+			&sess.ID,
+			&sess.SessionID,
+			&sess.StartedAt,
+			&initialPrompt,
+			&sess.EventCount,
+			&lastAction,
+			&lastActionAt,
+			&projectPath,
+		)
+		if err != nil {
+			continue
+		}
+
+		if initialPrompt.Valid {
+			sess.InitialPrompt = initialPrompt.String
+		}
+		if lastAction.Valid {
+			sess.LastAction = lastAction.String
+		}
+		if lastActionAt.Valid {
+			sess.LastActionAt = lastActionAt.Time
+		}
+		if projectPath.Valid {
+			sess.ProjectPath = projectPath.String
+		}
+
+		sessions = append(sessions, &sess)
+	}
+
+	return sessions, nil
+}
+
+// GetSessionByID retrieves a specific session by session_id
+func (s *Storage) GetSessionByID(sessionID string) (*SessionMetadata, error) {
+	var sess SessionMetadata
+	var initialPrompt, lastAction, projectPath sql.NullString
+	var lastActionAt sql.NullTime
+
+	err := s.db.QueryRow(`
+		SELECT id, session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path
+		FROM sessions
+		WHERE session_id = ?
+	`, sessionID).Scan(
+		&sess.ID,
+		&sess.SessionID,
+		&sess.StartedAt,
+		&initialPrompt,
+		&sess.EventCount,
+		&lastAction,
+		&lastActionAt,
+		&projectPath,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if initialPrompt.Valid {
+		sess.InitialPrompt = initialPrompt.String
+	}
+	if lastAction.Valid {
+		sess.LastAction = lastAction.String
+	}
+	if lastActionAt.Valid {
+		sess.LastActionAt = lastActionAt.Time
+	}
+	if projectPath.Valid {
+		sess.ProjectPath = projectPath.String
+	}
+
+	return &sess, nil
+}
+
+// GetSessionEvents retrieves events for a specific session (for expanded view)
+func (s *Storage) GetSessionEvents(sessionID string, limit int) ([]*events.Event, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
+		FROM events
+		WHERE json_extract(context, '$.session_id') = ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, sessionID, limit)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session events: %w", err)
+	}
+	defer rows.Close()
+
+	var eventList []*events.Event
+	for rows.Next() {
+		var event events.Event
+		var toolInputJSON, contextJSON, metadataJSON string
+
+		err := rows.Scan(
+			&event.ID,
+			&event.Source,
+			&event.EventType,
+			&event.Timestamp,
+			&event.ToolName,
+			&toolInputJSON,
+			&event.ToolResult,
+			&contextJSON,
+			&metadataJSON,
+		)
+
+		if err != nil {
+			continue
+		}
+
+		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
+		json.Unmarshal([]byte(contextJSON), &event.Context)
+		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
+
+		eventList = append(eventList, &event)
+	}
+
+	return eventList, nil
 }
