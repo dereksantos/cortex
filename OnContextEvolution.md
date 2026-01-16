@@ -41,6 +41,8 @@ Context evolution rests on a fundamental separation:
 | **Mechanical** | <20ms | None | Keyword matching, recency weighting |
 | **Agentic** | 200ms+ | LLM-based | Reranking, contradiction detection |
 
+This separation mirrors dual-process theory in cognitive science [2]: System 1 (fast, automatic, intuitive) corresponds to mechanical processing; System 2 (slow, deliberate, analytical) corresponds to agentic processing. The terminology is deliberate—developers interact with AI as if it were a human-like collaborator, and matching the cognitive metaphor improves intuition about system behavior.
+
 **Why 20ms?** Latency under 50ms is imperceptible to humans. Targeting 20ms provides headroom—multiple hooks can run without crossing the perceptual threshold. The goal is "feels instant," not a specific number.
 
 As other agentic processes may also depend on LLMs, so reducing response time is crucial for agentic processes.
@@ -184,9 +186,13 @@ This "agentic random reflection" could improve project outcomes by exploring wha
 
 Context evolution builds on several threads:
 
-**Agentic Context Engineering (ACE)** treats contexts as "evolving playbooks" with Generation, Reflection, and Curation operations. Context evolution adds explicit *latency constraints* and *activity-based budgets*.
+**Agentic Context Engineering (ACE)** [1] treats contexts as "evolving playbooks" with Generation, Reflection, and Curation operations. Context evolution adds explicit *latency constraints* and *activity-based budgets*.
 
-**Retrieval-Augmented Generation (RAG)** retrieves context to augment generation. Context evolution extends RAG with *temporal learning*—retrieval quality improves over time.
+**Time-Scaling** [3] proposes extending an agent's reasoning over time as essential for problem-solving without increasing model parameters. Context evolution implements Time-Scaling through activity-based budgets: Think processes during active periods, Dream explores during idle periods, and session context accumulates over interactions. Where Time-Scaling describes the conceptual framework, Cortex provides a concrete implementation with measurable ABR metrics.
+
+**Retrieval-Augmented Generation (RAG)** [4] retrieves context to augment generation. Context evolution extends RAG with *temporal learning*—retrieval quality improves over time through background processing, not just static retrieval.
+
+**Explicit Reasoning Trajectories.** Recent models like DeepSeek-R1 [5] use reinforcement learning to develop explicit reasoning traces. Context evolution complements this: where R1 improves *within-turn* reasoning, Cortex improves *across-turn* context accumulation. The Reflect mode could leverage such reasoning-capable models for higher-quality reranking.
 
 **Memory-Augmented Language Models** persist state across interactions. Context evolution adds *cognitive load modeling*—background processing yields to foreground work.
 
@@ -231,15 +237,15 @@ What remains is to build, evaluate, and iterate.
 
 ## References
 
-**References need more revision**
-
 [1] Agentic Context Engineering. arXiv:2510.04618, 2024.
 
-[2] Martin, Robert C. Clean Code: A Handbook of Agile Software Craftsmanship. Prentice Hall, 2008.
+[2] Kahneman, Daniel. Thinking, Fast and Slow. Farrar, Straus and Giroux, 2011.
 
-[3] Fowler, Martin. Refactoring: Improving the Design of Existing Code. Addison-Wesley, 2018.
+[3] Liu, Zhi and Guangzhi Wang. "Time-Scaling Is What Agents Need Now." arXiv:2601.02714, January 2026.
 
-[4] Evans, Eric. Domain-Driven Design: Tackling Complexity in the Heart of Software. Addison-Wesley, 2003.
+[4] Lewis, Patrick et al. "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks." NeurIPS 2020.
+
+[5] DeepSeek AI. "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning." Technical Report, January 2025.
 
 [A] Cortex: Latency-Constrained Cognitive Architecture for Developer Context Memory. Reference implementation. github.com/[repo], 2024.
 
