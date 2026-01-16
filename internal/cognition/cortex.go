@@ -24,6 +24,9 @@ type Cortex struct {
 	// Event routing
 	router *Router
 
+	// Session tracking for watch view
+	sessionTracker *SessionTracker
+
 	// Shared state
 	activity *ActivityTracker
 }
@@ -52,15 +55,23 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	// Create event router
 	router := NewRouter(reflex, think, dream)
 
+	// Create session tracker for watch view (if config provided)
+	var sessionTracker *SessionTracker
+	if cfg != nil {
+		sessionTracker = NewSessionTracker(store, cfg.ContextDir)
+		router.SetSessionTracker(sessionTracker)
+	}
+
 	return &Cortex{
-		reflex:   reflex,
-		reflect:  reflect,
-		resolve:  resolve,
-		think:    think,
-		dream:    dream,
-		digest:   digest,
-		router:   router,
-		activity: activity,
+		reflex:         reflex,
+		reflect:        reflect,
+		resolve:        resolve,
+		think:          think,
+		dream:          dream,
+		digest:         digest,
+		router:         router,
+		sessionTracker: sessionTracker,
+		activity:       activity,
 	}, nil
 }
 
@@ -245,4 +256,9 @@ func (c *Cortex) DigestInsights(ctx context.Context, insights []cognition.Result
 // GetDigestedInsights returns all active insights in deduplicated form.
 func (c *Cortex) GetDigestedInsights(ctx context.Context, limit int) ([]cognition.DigestedInsight, error) {
 	return c.digest.GetDigestedInsights(ctx, limit)
+}
+
+// SessionTracker returns the session tracker for watch view.
+func (c *Cortex) SessionTracker() *SessionTracker {
+	return c.sessionTracker
 }

@@ -14,9 +14,10 @@ import (
 //   - tool_use → Reflex.Index() for fast storage
 //   - stop → Dream.Queue() for deeper transcript analysis
 type Router struct {
-	reflex *Reflex
-	think  *Think
-	dream  *Dream
+	reflex         *Reflex
+	think          *Think
+	dream          *Dream
+	sessionTracker *SessionTracker
 }
 
 // NewRouter creates a new event router.
@@ -26,6 +27,12 @@ func NewRouter(reflex *Reflex, think *Think, dream *Dream) *Router {
 		think:  think,
 		dream:  dream,
 	}
+}
+
+// SetSessionTracker sets the session tracker for the router.
+// This is called after router creation since SessionTracker needs storage.
+func (r *Router) SetSessionTracker(tracker *SessionTracker) {
+	r.sessionTracker = tracker
 }
 
 // RouteResult describes what happened when routing an event.
@@ -40,6 +47,11 @@ type RouteResult struct {
 func (r *Router) Route(ctx context.Context, event *events.Event) *RouteResult {
 	if event == nil {
 		return &RouteResult{Routed: false}
+	}
+
+	// Track session lifecycle for watch view
+	if r.sessionTracker != nil {
+		r.sessionTracker.OnEvent(event)
 	}
 
 	switch event.EventType {
