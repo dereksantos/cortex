@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -100,11 +99,11 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// watchState holds the interactive watch UI state.
-type watchState struct {
+// watchUIState holds the interactive watch UI state.
+type watchUIState struct {
 	selectedSession int // Index of selected session (0-based)
 	expandedSession int // Index of expanded session (-1 = none)
-	sessions        []*storage.SessionMetadata
+	data            *WatchData
 }
 
 // runAnimatedWatch runs the non-interactive animated watch.
@@ -120,20 +119,26 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly,
 	// Animation state
 	animFrame := 0
 
-	// Clear screen and hide cursor
-	fmt.Print(tui.ClearAndHome() + tui.CursorHide)
-	defer fmt.Print(tui.CursorShow) // Show cursor on exit
+	// Initialize watch data
+	data := NewWatchData(cfg, store)
+
+	// Enter alternate screen buffer and hide cursor
+	fmt.Print(tui.AltScreenEnter + tui.CursorHide)
+	defer fmt.Print(tui.CursorShow + tui.AltScreenLeave) // Restore on exit
 
 	// Initial render
-	printWatchAnimated(cfg, store, retrievalOnly, backgroundOnly, animFrame)
+	fmt.Print(tui.ClearAndHome())
+	renderDashboard(data, animFrame, retrievalOnly, backgroundOnly)
 
 	for {
 		select {
 		case <-ticker.C:
 			animFrame++
-			// Move cursor to top and redraw
-			fmt.Print(tui.CursorHome)
-			printWatchAnimated(cfg, store, retrievalOnly, backgroundOnly, animFrame)
+			// Refresh data every frame (file reads are fast)
+			data.Refresh(cfg, store)
+			// Clear and redraw (prevents ghost content)
+			fmt.Print(tui.ClearAndHome())
+			renderDashboard(data, animFrame, retrievalOnly, backgroundOnly)
 		case <-sigChan:
 			fmt.Print(tui.CursorShow) // Show cursor
 			fmt.Println("\n\nStopped watching.")
@@ -174,24 +179,24 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 		}
 	}()
 
-	// Watch state
-	state := &watchState{
+	// Initialize watch data and UI state
+	data := NewWatchData(cfg, store)
+	state := &watchUIState{
 		selectedSession: 0,
 		expandedSession: -1,
+		data:            data,
 	}
 
 	// Animation state
 	animFrame := 0
 
-	// Clear screen and hide cursor
-	fmt.Print(tui.ClearAndHome() + tui.CursorHide)
-	defer fmt.Print(tui.CursorShow + tui.ClearAndHome()) // Show cursor and clear on exit
-
-	// Initial data load
-	state.sessions, _ = store.GetRecentSessions(3)
+	// Enter alternate screen buffer and hide cursor
+	fmt.Print(tui.AltScreenEnter + tui.CursorHide)
+	defer fmt.Print(tui.CursorShow + tui.AltScreenLeave) // Restore on exit
 
 	// Initial render
-	printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+	fmt.Print(tui.ClearAndHome())
+	renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
 
 	// Escape sequence state
 	escapeSeq := make([]byte, 0, 3)
@@ -200,13 +205,11 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 		select {
 		case <-ticker.C:
 			animFrame++
-			// Refresh session data periodically
-			if animFrame%10 == 0 { // Every ~3 seconds
-				state.sessions, _ = store.GetRecentSessions(3)
-			}
-			// Move cursor to top and redraw
-			fmt.Print(tui.CursorHome)
-			printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+			// Refresh all data every frame
+			state.data.Refresh(cfg, store)
+			// Clear screen and redraw (prevents ghost content)
+			fmt.Print(tui.ClearAndHome())
+			renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
 
 		case key := <-keyChan:
 			// Handle escape sequences (arrow keys)
@@ -221,15 +224,15 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 								state.selectedSession--
 							}
 						case 66: // Down arrow
-							if state.expandedSession == -1 && state.selectedSession < len(state.sessions)-1 {
+							if state.expandedSession == -1 && state.selectedSession < len(state.data.Sessions)-1 {
 								state.selectedSession++
 							}
 						}
 					}
 					escapeSeq = escapeSeq[:0]
 					// Redraw after key
-					fmt.Print(tui.CursorHome)
-					printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+					fmt.Print(tui.ClearAndHome())
+					renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
 				}
 				continue
 			}
@@ -238,19 +241,19 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 			case 27: // Escape - start escape sequence or collapse
 				if state.expandedSession != -1 {
 					state.expandedSession = -1
-					fmt.Print(tui.CursorHome)
-					printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+					fmt.Print(tui.ClearAndHome())
+					renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
 				} else {
 					escapeSeq = append(escapeSeq, key)
 				}
 			case 13: // Enter - toggle expand
 				if state.expandedSession == state.selectedSession {
 					state.expandedSession = -1
-				} else if len(state.sessions) > 0 && state.selectedSession < len(state.sessions) {
+				} else if len(state.data.Sessions) > 0 && state.selectedSession < len(state.data.Sessions) {
 					state.expandedSession = state.selectedSession
 				}
 				fmt.Print(tui.ClearAndHome()) // Clear and redraw for expansion
-				printInteractiveWatch(cfg, store, state, retrievalOnly, backgroundOnly, animFrame)
+				renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
 			case 'q', 3: // q or Ctrl+C
 				return
 			}
@@ -264,10 +267,11 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 // printWatchJSON outputs all watch data as JSON.
 func printWatchJSON(cfg *config.Config, store *storage.Storage) {
 	type WatchOutput struct {
-		DaemonState    *intcognition.DaemonState      `json:"daemon_state,omitempty"`
-		RetrievalStats *intcognition.RetrievalStats   `json:"retrieval_stats,omitempty"`
-		RecentActivity []intcognition.ActivityLogEntry `json:"recent_activity,omitempty"`
-		Stats          map[string]interface{}         `json:"stats,omitempty"`
+		DaemonState       *intcognition.DaemonState       `json:"daemon_state,omitempty"`
+		RetrievalStats    *intcognition.RetrievalStats    `json:"retrieval_stats,omitempty"`
+		BackgroundMetrics *intcognition.BackgroundMetrics `json:"background_metrics,omitempty"`
+		RecentActivity    []intcognition.ActivityLogEntry `json:"recent_activity,omitempty"`
+		Stats             map[string]interface{}          `json:"stats,omitempty"`
 	}
 
 	output := WatchOutput{}
@@ -278,6 +282,9 @@ func printWatchJSON(cfg *config.Config, store *storage.Storage) {
 
 	// Get retrieval stats
 	output.RetrievalStats, _ = intcognition.ReadRetrievalStats(cfg.ContextDir)
+
+	// Get background metrics
+	output.BackgroundMetrics, _ = intcognition.ReadBackgroundMetrics(cfg.ContextDir)
 
 	// Get recent activity
 	output.RecentActivity, _ = intcognition.ReadRecentActivity(cfg.ContextDir, 10)
@@ -291,295 +298,146 @@ func printWatchJSON(cfg *config.Config, store *storage.Storage) {
 
 // printWatchStatic outputs a single snapshot without animation.
 func printWatchStatic(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
-	// Get all state
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	daemonState, _ := intcognition.ReadDaemonState(statePath)
-	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
-	recentActivity, _ := intcognition.ReadRecentActivity(cfg.ContextDir, 5)
-	stats, _ := store.GetStats()
-
-	// Session data
-	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
-	var topicWeights map[string]float64
-	if sessionData, err := os.ReadFile(sessionPath); err == nil {
-		var session struct {
-			TopicWeights map[string]float64 `json:"topic_weights"`
-		}
-		if json.Unmarshal(sessionData, &session) == nil {
-			topicWeights = session.TopicWeights
-		}
-	}
-
-	// Column widths for pipe-style table
-	col1Width := 28 // Background column
-	col2Width := 28 // Retrieval column
-
-	// Get stats
-	events := 0
-	insights := 0
-	if daemonState != nil {
-		events = daemonState.Stats.Events
-		insights = daemonState.Stats.Insights
-	}
-	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
-		events = statsEvents
-	}
-	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
-		insights = statsInsights
-	}
-
-	// Mode status
-	modeIcon := "○"
-	modeName := "IDLE"
-	modeDesc := ""
-	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
-		modeIcon = getModeSpinner(daemonState.Mode)
-		modeName = strings.ToUpper(daemonState.Mode)
-		modeDesc = daemonState.Description
-		if modeDesc == "" {
-			modeDesc = getDefaultModeDescription(daemonState.Mode)
-		}
-	}
-
-	// Print mode header
-	fmt.Printf("┌%s┐\n", strings.Repeat("─", col1Width+col2Width+3))
-	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
-	fmt.Printf("│%s│\n", tui.Pad(modeStr, col1Width+col2Width+3))
-	if modeDesc != "" {
-		descStr := fmt.Sprintf(" %s", tui.Truncate(modeDesc, col1Width+col2Width+1))
-		fmt.Printf("│%s│\n", tui.Pad(descStr, col1Width+col2Width+3))
-	}
-
-	// Two-column table
-	if !retrievalOnly && !backgroundOnly {
-		fmt.Printf("├%s┬%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
-		fmt.Printf("│ %s │ %s │\n", tui.Pad("Background", col1Width-1), tui.Pad("Retrieval", col2Width-1))
-		fmt.Printf("├%s┼%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
-
-		bgEvents := fmt.Sprintf("Events: %d", events)
-		retQueries := ""
-		if retrievalStats != nil {
-			retQueries = fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals)
-		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(bgEvents, col1Width-1), tui.Pad(retQueries, col2Width-1))
-
-		bgInsights := fmt.Sprintf("Insights: %d", insights)
-		retLatency := ""
-		if retrievalStats != nil && retrievalStats.LastMode != "" {
-			modeTitle := strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
-			retLatency = fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle)
-		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(bgInsights, col1Width-1), tui.Pad(retLatency, col2Width-1))
-
-		topicsStr := ""
-		if len(topicWeights) > 0 {
-			topicList := make([]string, 0)
-			for topic, weight := range topicWeights {
-				if weight > 0.3 {
-					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
-				}
-			}
-			if len(topicList) > 0 {
-				topicsStr = strings.Join(topicList[:min(2, len(topicList))], ", ")
-			}
-		}
-		retResults := ""
-		if retrievalStats != nil {
-			retResults = fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision)
-		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(topicsStr, col1Width-1), tui.Pad(retResults, col2Width-1))
-
-		fmt.Printf("└%s┴%s┘\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
-	} else if backgroundOnly {
-		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Events: %d  Insights: %d", events, insights), col1Width+col2Width+1))
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
-	} else if retrievalOnly && retrievalStats != nil {
-		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals), col1Width+col2Width+1))
-		modeTitle := "N/A"
-		if retrievalStats.LastMode != "" {
-			modeTitle = strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
-		}
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle), col1Width+col2Width+1))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision), col1Width+col2Width+1))
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
-	} else {
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
-	}
-
-	// Recent activity table
-	totalWidth := col1Width + col2Width + 3
-	fmt.Println()
-	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
-	fmt.Printf("│ %s │\n", tui.Pad("Recent Activity", totalWidth-2))
-	fmt.Printf("├%s┬%s┬%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
-	fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad("Time", 8), tui.Pad("Mode", 6), tui.Pad("Description", totalWidth-23))
-	fmt.Printf("├%s┼%s┼%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
-
-	if len(recentActivity) > 0 {
-		for _, entry := range recentActivity {
-			timeStr := entry.Timestamp.Format("15:04:05")
-			entryModeIcon := getModeSpinner(entry.Mode)
-			desc := tui.Truncate(entry.Description, totalWidth-25)
-			fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad(timeStr, 8), tui.Pad(entryModeIcon, 6), tui.Pad(desc, totalWidth-23))
-		}
-	} else {
-		fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad("--:--:--", 8), tui.Pad("○", 6), tui.Pad("No activity yet", totalWidth-23))
-	}
-
-	fmt.Printf("└%s┴%s┴%s┘\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+	data := NewWatchData(cfg, store)
+	renderDashboard(data, 0, retrievalOnly, backgroundOnly)
 }
 
-// printWatchAnimated outputs the animated watch display.
-func printWatchAnimated(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool, frame int) {
-	// Get all state
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	daemonState, _ := intcognition.ReadDaemonState(statePath)
-	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
-	recentActivity, _ := intcognition.ReadRecentActivity(cfg.ContextDir, 5)
-	stats, _ := store.GetStats()
+// Dashboard layout constants
+const (
+	dashboardWidth = 61
+	col1Width      = 28
+	col2Width      = 28
+)
 
-	// Session data
-	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
-	var topicWeights map[string]float64
-	if sessionData, err := os.ReadFile(sessionPath); err == nil {
-		var session struct {
-			TopicWeights map[string]float64 `json:"topic_weights"`
-		}
-		if json.Unmarshal(sessionData, &session) == nil {
-			topicWeights = session.TopicWeights
-		}
+// rawPrint prints a line with \r\n for raw terminal mode.
+// In raw mode, \n alone doesn't return to column 1.
+func rawPrint(format string, args ...interface{}) {
+	fmt.Printf(format+"\r\n", args...)
+}
+
+// rawPrintln prints a string with \r\n for raw terminal mode.
+func rawPrintln(s string) {
+	fmt.Print(s + "\r\n")
+}
+
+// renderDashboard renders the main dashboard view (used by both animated and static modes).
+func renderDashboard(data *WatchData, frame int, retrievalOnly, backgroundOnly bool) {
+	// Mode header
+	icon, name, desc := data.ModeStatus(frame, true)
+	for _, line := range tui.HeaderPanel(icon, name, desc, dashboardWidth) {
+		fmt.Println(line)
 	}
 
-	// Column widths for pipe-style table
-	col1Width := 28 // Background column
-	col2Width := 28 // Retrieval column
-
-	// Get stats
-	events := 0
-	insights := 0
-	if daemonState != nil {
-		events = daemonState.Stats.Events
-		insights = daemonState.Stats.Insights
-	}
-	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
-		events = statsEvents
-	}
-	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
-		insights = statsInsights
-	}
-
-	// Mode status
-	modeIcon := "○"
-	modeName := "IDLE"
-	modeDesc := ""
-	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
-		modeIcon = getAnimatedModeSpinner(daemonState.Mode, frame)
-		modeName = strings.ToUpper(daemonState.Mode) + "ING"
-		if daemonState.Mode == "dream" {
-			modeName = "DREAMING"
-		} else if daemonState.Mode == "think" {
-			modeName = "THINKING"
-		}
-		modeDesc = daemonState.Description
-		if modeDesc == "" {
-			modeDesc = getDefaultModeDescription(daemonState.Mode)
-		}
-	}
-
-	// Print mode header
-	fmt.Printf("┌%s┐\n", strings.Repeat("─", col1Width+col2Width+3))
-	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
-	fmt.Printf("│%s│\n", tui.Pad(modeStr, col1Width+col2Width+3))
-	if modeDesc != "" {
-		descStr := fmt.Sprintf(" %s", tui.Truncate(modeDesc, col1Width+col2Width+1))
-		fmt.Printf("│%s│\n", tui.Pad(descStr, col1Width+col2Width+3))
-	}
-
-	// Two-column table header
+	// Main content panels
 	if !retrievalOnly && !backgroundOnly {
-		fmt.Printf("├%s┬%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
-		fmt.Printf("│ %s │ %s │\n", tui.Pad("Background", col1Width-1), tui.Pad("Retrieval", col2Width-1))
-		fmt.Printf("├%s┼%s┤\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
-
-		// Stats rows
-		bgEvents := fmt.Sprintf("Events: %d", events)
-		retQueries := ""
-		if retrievalStats != nil {
-			retQueries = fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals)
+		// Two-column split: Retrieval | Background
+		leftLines := renderRetrievalColumn(data)
+		rightLines := renderBackgroundColumn(data)
+		for _, line := range tui.SplitPanel("Retrieval", "Background", leftLines, rightLines, col1Width, col2Width) {
+			fmt.Println(line)
 		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(bgEvents, col1Width-1), tui.Pad(retQueries, col2Width-1))
-
-		bgInsights := fmt.Sprintf("Insights: %d", insights)
-		retLatency := ""
-		if retrievalStats != nil && retrievalStats.LastMode != "" {
-			modeTitle := strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
-			retLatency = fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle)
-		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(bgInsights, col1Width-1), tui.Pad(retLatency, col2Width-1))
-
-		// Topics
-		topicsStr := ""
-		if len(topicWeights) > 0 {
-			topicList := make([]string, 0)
-			for topic, weight := range topicWeights {
-				if weight > 0.3 {
-					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
-				}
-			}
-			if len(topicList) > 0 {
-				topicsStr = strings.Join(topicList[:min(2, len(topicList))], ", ")
-			}
-		}
-		retResults := ""
-		if retrievalStats != nil {
-			retResults = fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision)
-		}
-		fmt.Printf("│ %s │ %s │\n", tui.Pad(topicsStr, col1Width-1), tui.Pad(retResults, col2Width-1))
-
-		fmt.Printf("└%s┴%s┘\n", strings.Repeat("─", col1Width+1), strings.Repeat("─", col2Width+1))
 	} else if backgroundOnly {
-		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Events: %d  Insights: %d", events, insights), col1Width+col2Width+1))
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
-	} else if retrievalOnly && retrievalStats != nil {
-		fmt.Printf("├%s┤\n", strings.Repeat("─", col1Width+col2Width+3))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Queries: %d", retrievalStats.TotalRetrievals), col1Width+col2Width+1))
-		modeTitle := "N/A"
-		if retrievalStats.LastMode != "" {
-			modeTitle = strings.ToUpper(retrievalStats.LastMode[:1]) + retrievalStats.LastMode[1:]
+		// Background only
+		lines := []string{
+			fmt.Sprintf("Events: %d  Insights: %d", data.TotalEvents, data.TotalInsights),
 		}
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Last: %dms (%s)", retrievalStats.LastReflexMs, modeTitle), col1Width+col2Width+1))
-		fmt.Printf("│ %s │\n", tui.Pad(fmt.Sprintf("Results: %d → %s", retrievalStats.LastResults, retrievalStats.LastDecision), col1Width+col2Width+1))
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
-	} else {
-		fmt.Printf("└%s┘\n", strings.Repeat("─", col1Width+col2Width+3))
+		if data.Background != nil {
+			lines = append(lines, fmt.Sprintf("Think: budget %d/%d  Dream: queue %d",
+				data.Background.ThinkBudget, data.Background.ThinkMaxBudget, data.Background.DreamQueueDepth))
+		}
+		for _, line := range tui.Panel("Background", lines, dashboardWidth) {
+			fmt.Println(line)
+		}
+	} else if retrievalOnly {
+		// Retrieval only
+		lines := renderRetrievalColumn(data)
+		for _, line := range tui.Panel("Retrieval", lines, dashboardWidth) {
+			fmt.Println(line)
+		}
 	}
 
-	// Recent activity table
-	totalWidth := col1Width + col2Width + 3
+	// Activity feed
 	fmt.Println()
-	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
-	fmt.Printf("│ %s │\n", tui.Pad("Recent Activity", totalWidth-2))
-	fmt.Printf("├%s┬%s┬%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
-	fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad("Time", 8), tui.Pad("Mode", 6), tui.Pad("Description", totalWidth-23))
-	fmt.Printf("├%s┼%s┼%s┤\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+	renderActivityFeed(data, frame, dashboardWidth)
 
-	if len(recentActivity) > 0 {
-		for _, entry := range recentActivity {
-			timeStr := entry.Timestamp.Format("15:04:05")
-			entryModeIcon := getAnimatedModeSpinner(entry.Mode, frame)
-			desc := tui.Truncate(entry.Description, totalWidth-25)
-			fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad(timeStr, 8), tui.Pad(entryModeIcon, 6), tui.Pad(desc, totalWidth-23))
+	// Footer
+	fmt.Printf("\nPress Ctrl+C to stop. Refreshing every 300ms...\n")
+}
+
+// renderRetrievalColumn builds the retrieval stats column content.
+func renderRetrievalColumn(data *WatchData) []string {
+	lines := make([]string, 0, 4)
+
+	if data.Retrieval != nil {
+		lines = append(lines, fmt.Sprintf("Queries: %d", data.Retrieval.TotalRetrievals))
+
+		if data.Retrieval.LastMode != "" {
+			mode := strings.ToUpper(data.Retrieval.LastMode[:1]) + data.Retrieval.LastMode[1:]
+			lines = append(lines, fmt.Sprintf("Last: %dms (%s)", data.Retrieval.LastReflexMs, mode))
+		}
+
+		lines = append(lines, fmt.Sprintf("Results: %d -> %s", data.Retrieval.LastResults, data.Retrieval.LastDecision))
+
+		// ABR metric
+		abr := data.ABR()
+		if abr > 0 {
+			lines = append(lines, fmt.Sprintf("ABR: %.0f%%", abr*100))
 		}
 	} else {
-		fmt.Printf("│ %s │ %s │ %s │\n", tui.Pad("--:--:--", 8), tui.Pad("○", 6), tui.Pad("No activity yet. Start daemon or use Cortex.", totalWidth-23))
+		lines = append(lines, "No retrievals yet")
 	}
 
-	fmt.Printf("└%s┴%s┴%s┘\n", strings.Repeat("─", 10), strings.Repeat("─", 8), strings.Repeat("─", totalWidth-21))
+	return lines
+}
 
-	fmt.Printf("\nPress Ctrl+C to stop. Refreshing every 300ms...\n")
+// renderBackgroundColumn builds the background stats column content.
+func renderBackgroundColumn(data *WatchData) []string {
+	lines := make([]string, 0, 4)
+
+	lines = append(lines, fmt.Sprintf("Events: %d", data.TotalEvents))
+	lines = append(lines, fmt.Sprintf("Insights: %d", data.TotalInsights))
+
+	if data.Background != nil {
+		lines = append(lines, fmt.Sprintf("Think: %s (budget %d)", data.ThinkStatus(), data.Background.ThinkBudget))
+		lines = append(lines, fmt.Sprintf("Dream: %s (queue %d)", data.DreamStatus(), data.Background.DreamQueueDepth))
+	}
+
+	// Topic weights
+	topics := data.TopTopics(3, 0.3)
+	if len(topics) > 0 {
+		parts := make([]string, len(topics))
+		for i, t := range topics {
+			parts[i] = fmt.Sprintf("%s(%.1f)", t.Topic, t.Weight)
+		}
+		lines = append(lines, "Topics: "+strings.Join(parts, ", "))
+	}
+
+	return lines
+}
+
+// renderActivityFeed renders the activity log panel.
+func renderActivityFeed(data *WatchData, frame int, width int) {
+	chars := tui.BoxChars(tui.StyleSingle)
+
+	// Header
+	fmt.Println(chars.TopLeft + tui.HLine(width-2, tui.StyleSingle) + chars.TopRight)
+	fmt.Printf("%s %s %s\n", chars.Vertical, tui.Pad("Activity Feed", width-4), chars.Vertical)
+	fmt.Println(chars.VerticalRight + tui.HLine(width-2, tui.StyleSingle) + chars.VerticalLeft)
+
+	if len(data.Activity) > 0 {
+		for _, entry := range data.Activity {
+			timeStr := entry.Timestamp.Format("15:04:05")
+			modeIcon := getAnimatedModeSpinner(entry.Mode, frame)
+			desc := tui.Truncate(entry.Description, width-20)
+			line := fmt.Sprintf(" %s %s %s", timeStr, tui.Pad(modeIcon, 2), desc)
+			fmt.Printf("%s%s%s\n", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
+		}
+	} else {
+		line := " No activity yet. Start daemon with: cortex daemon &"
+		fmt.Printf("%s%s%s\n", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
+	}
+
+	fmt.Println(chars.BottomLeft + tui.HLine(width-2, tui.StyleSingle) + chars.BottomRight)
 }
 
 // getAnimatedModeSpinner returns an animated spinner for a cognitive mode.
@@ -614,160 +472,118 @@ func getAnimatedModeSpinner(mode string, frame int) string {
 	}
 }
 
-// printInteractiveWatch renders the interactive watch view with sessions panel.
-func printInteractiveWatch(cfg *config.Config, store *storage.Storage, state *watchState, retrievalOnly, backgroundOnly bool, frame int) {
-	// Get all state
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	daemonState, _ := intcognition.ReadDaemonState(statePath)
-	retrievalStats, _ := intcognition.ReadRetrievalStats(cfg.ContextDir)
-	stats, _ := store.GetStats()
+// renderInteractiveDashboard renders the interactive watch view with sessions panel.
+func renderInteractiveDashboard(cfg *config.Config, store *storage.Storage, state *watchUIState, frame int, retrievalOnly, backgroundOnly bool) {
+	data := state.data
+	chars := tui.BoxChars(tui.StyleSingle)
 
-	// Column width
-	totalWidth := 61
-
-	// Get stats
-	events := 0
-	insights := 0
-	if daemonState != nil {
-		events = daemonState.Stats.Events
-		insights = daemonState.Stats.Insights
-	}
-	if statsEvents, ok := stats["total_events"].(int); ok && statsEvents > events {
-		events = statsEvents
-	}
-	if statsInsights, ok := stats["total_insights"].(int); ok && statsInsights > insights {
-		insights = statsInsights
+	// Mode header
+	icon, name, desc := data.ModeStatus(frame, true)
+	modeStr := fmt.Sprintf(" %s %s", icon, name)
+	if desc != "" {
+		modeStr += "  " + tui.Truncate(desc, dashboardWidth-tui.VisibleWidth(modeStr)-3)
 	}
 
-	// Mode status
-	modeIcon := "○"
-	modeName := "IDLE"
-	modeDesc := ""
-	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
-		modeIcon = getAnimatedModeSpinner(daemonState.Mode, frame)
-		modeName = strings.ToUpper(daemonState.Mode) + "ING"
-		if daemonState.Mode == "dream" {
-			modeName = "DREAMING"
-		} else if daemonState.Mode == "think" {
-			modeName = "THINKING"
-		}
-		modeDesc = daemonState.Description
-		if modeDesc == "" {
-			modeDesc = getDefaultModeDescription(daemonState.Mode)
-		}
-	}
-
-	// Print mode header
-	fmt.Printf("┌%s┐\n", strings.Repeat("─", totalWidth))
-	modeStr := fmt.Sprintf(" %s %s", modeIcon, modeName)
-	if modeDesc != "" {
-		modeStr += "  " + tui.Truncate(modeDesc, totalWidth-len(modeStr)-3)
-	}
-	fmt.Printf("│%s│\n", tui.Pad(modeStr, totalWidth))
+	rawPrintln(chars.TopLeft + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.TopRight)
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad(modeStr, dashboardWidth-2), chars.Vertical)
 
 	// Quick stats line
-	statsLine := fmt.Sprintf(" Events: %d  Insights: %d", events, insights)
-	if retrievalStats != nil && retrievalStats.TotalRetrievals > 0 {
-		statsLine += fmt.Sprintf("  Queries: %d", retrievalStats.TotalRetrievals)
+	statsLine := fmt.Sprintf(" Events: %d  Insights: %d", data.TotalEvents, data.TotalInsights)
+	if data.Retrieval != nil && data.Retrieval.TotalRetrievals > 0 {
+		statsLine += fmt.Sprintf("  Queries: %d", data.Retrieval.TotalRetrievals)
 	}
-	fmt.Printf("│%s│\n", tui.Pad(statsLine, totalWidth))
+	if data.Background != nil {
+		statsLine += fmt.Sprintf("  ABR: %.0f%%", data.ABR()*100)
+	}
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad(statsLine, dashboardWidth-2), chars.Vertical)
 
-	// Sessions panel
-	fmt.Printf("├%s┤\n", strings.Repeat("─", totalWidth))
-	fmt.Printf("│%s│\n", tui.Pad(" Sessions", totalWidth))
-	fmt.Printf("├%s┤\n", strings.Repeat("─", totalWidth))
+	// Sessions panel header
+	sessionCount := len(data.Sessions)
+	sessionTitle := fmt.Sprintf(" Sessions (%d)", sessionCount)
+	rawPrintln(chars.VerticalRight + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.VerticalLeft)
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad(sessionTitle, dashboardWidth-2), chars.Vertical)
+	rawPrintln(chars.VerticalRight + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.VerticalLeft)
 
-	if len(state.sessions) == 0 {
-		fmt.Printf("│%s│\n", tui.Pad(" No sessions yet. Use Claude Code to start.", totalWidth))
+	if sessionCount == 0 {
+		rawPrint("%s%s%s", chars.Vertical, tui.Pad(" No sessions yet. Use Claude Code to start.", dashboardWidth-2), chars.Vertical)
 	} else {
-		for i, sess := range state.sessions {
-			// Format: [>/  ] HH:MM  "prompt..."  Last: action   N evts
+		for i, sess := range data.Sessions {
+			// Format: [>/  ] HH:MM  "prompt..."  [N evts]
 			selector := "  "
 			if i == state.selectedSession {
 				selector = "> "
 			}
 
 			timeStr := sess.StartedAt.Format("15:04")
-			promptSnippet := tui.Truncate(sess.InitialPrompt, 15)
+			promptSnippet := tui.Truncate(sess.InitialPrompt, 20)
 			if promptSnippet == "" {
 				promptSnippet = "(no prompt)"
 			}
-			lastAction := tui.Truncate(sess.LastAction, 18)
-			if lastAction == "" {
-				lastAction = "-"
-			}
 
-			line := fmt.Sprintf("%s%s  \"%s\"  Last: %s  %d evts",
-				selector, timeStr, promptSnippet, lastAction, sess.EventCount)
-			fmt.Printf("│%s│\n", tui.Pad(line, totalWidth))
+			line := fmt.Sprintf("%s%s  \"%s\"  [%d evts]", selector, timeStr, promptSnippet, sess.EventCount)
+			rawPrint("%s%s%s", chars.Vertical, tui.Pad(line, dashboardWidth-2), chars.Vertical)
 
 			// If this session is expanded, show details
 			if i == state.expandedSession {
-				renderExpandedSession(cfg, store, sess, totalWidth)
+				renderSessionDetails(store, data, sess, dashboardWidth, chars)
 			}
 		}
 	}
 
-	fmt.Printf("└%s┘\n", strings.Repeat("─", totalWidth))
+	rawPrintln(chars.BottomLeft + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.BottomRight)
 
 	// Controls hint
 	if state.expandedSession == -1 {
-		fmt.Printf("\nUp/Down: Navigate  Enter: Expand  q: Quit\n")
+		rawPrint("")
+		rawPrintln("Up/Down: Navigate  Enter: Expand  q: Quit")
 	} else {
-		fmt.Printf("\nEsc: Collapse  q: Quit\n")
+		rawPrint("")
+		rawPrintln("Esc: Collapse  q: Quit")
 	}
 }
 
-// renderExpandedSession shows detailed session info.
-func renderExpandedSession(cfg *config.Config, store *storage.Storage, sess *storage.SessionMetadata, totalWidth int) {
-	// Session details box
-	fmt.Printf("│%s│\n", tui.Pad("", totalWidth))
+// renderSessionDetails shows detailed session info when expanded.
+func renderSessionDetails(store *storage.Storage, data *WatchData, sess *storage.SessionMetadata, width int, chars tui.BoxCharSet) {
+	// Blank line
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad("", width-2), chars.Vertical)
 
 	// Full initial prompt
 	if sess.InitialPrompt != "" {
-		promptLine := "   Initial: \"" + tui.Truncate(sess.InitialPrompt, totalWidth-16) + "\""
-		fmt.Printf("│%s│\n", tui.Pad(promptLine, totalWidth))
+		promptLine := "   Initial: \"" + tui.Truncate(sess.InitialPrompt, width-18) + "\""
+		rawPrint("%s%s%s", chars.Vertical, tui.Pad(promptLine, width-2), chars.Vertical)
 	}
 
 	// Duration
 	duration := time.Since(sess.StartedAt).Round(time.Minute)
 	durationStr := fmt.Sprintf("   Duration: %v", duration)
-	fmt.Printf("│%s│\n", tui.Pad(durationStr, totalWidth))
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad(durationStr, width-2), chars.Vertical)
 
 	// Recent activity for this session
 	sessionEvents, err := store.GetSessionEvents(sess.SessionID, 5)
 	if err == nil && len(sessionEvents) > 0 {
-		fmt.Printf("│%s│\n", tui.Pad("   Recent Activity:", totalWidth))
+		rawPrint("%s%s%s", chars.Vertical, tui.Pad("   Recent Activity:", width-2), chars.Vertical)
 		for _, evt := range sessionEvents {
 			timeStr := evt.Timestamp.Format("15:04:05")
 			action := evt.ToolName
 			if action == "" {
 				action = string(evt.EventType)
 			}
-			line := fmt.Sprintf("     %s  %s", timeStr, tui.Truncate(action, totalWidth-18))
-			fmt.Printf("│%s│\n", tui.Pad(line, totalWidth))
+			line := fmt.Sprintf("     %s  %s", timeStr, tui.Truncate(action, width-20))
+			rawPrint("%s%s%s", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
 		}
 	}
 
-	// Topic weights if available
-	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
-	if sessionData, err := os.ReadFile(sessionPath); err == nil {
-		var session struct {
-			TopicWeights map[string]float64 `json:"topic_weights"`
+	// Topic weights
+	topics := data.TopTopics(3, 0.3)
+	if len(topics) > 0 {
+		parts := make([]string, len(topics))
+		for i, t := range topics {
+			parts[i] = fmt.Sprintf("%s(%.1f)", t.Topic, t.Weight)
 		}
-		if json.Unmarshal(sessionData, &session) == nil && len(session.TopicWeights) > 0 {
-			topicList := make([]string, 0)
-			for topic, weight := range session.TopicWeights {
-				if weight > 0.3 {
-					topicList = append(topicList, fmt.Sprintf("%s(%.1f)", topic, weight))
-				}
-			}
-			if len(topicList) > 0 {
-				topicsStr := "   Topics: " + strings.Join(topicList[:min(3, len(topicList))], " ")
-				fmt.Printf("│%s│\n", tui.Pad(topicsStr, totalWidth))
-			}
-		}
+		topicsStr := "   Topics: " + strings.Join(parts, ", ")
+		rawPrint("%s%s%s", chars.Vertical, tui.Pad(topicsStr, width-2), chars.Vertical)
 	}
 
-	fmt.Printf("│%s│\n", tui.Pad("", totalWidth))
+	// Blank line
+	rawPrint("%s%s%s", chars.Vertical, tui.Pad("", width-2), chars.Vertical)
 }
