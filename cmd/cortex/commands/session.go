@@ -27,6 +27,16 @@ func init() {
 	Register(&CLICommand{})
 }
 
+// tryLogError attempts to log an error to activity.log for watch visibility.
+// It fails silently if the context directory is not available.
+func tryLogError(contextDir, command string, err error) {
+	if contextDir == "" {
+		return
+	}
+	logger := intcognition.NewActivityLogger(contextDir)
+	_ = logger.LogError(command, err)
+}
+
 // SessionStartCommand prints session start instructions.
 type SessionStartCommand struct{}
 
@@ -91,7 +101,8 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 	// Load config
 	cfg := ctx.Config
 	if cfg == nil {
-		// Silent failure - don't block user if Cortex not initialized
+		// Log error if we can find context dir
+		tryLogError(".cortex", "inject-context", fmt.Errorf("config not loaded"))
 		fmt.Println(prompt)
 		return nil
 	}
@@ -104,7 +115,7 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 	// Get storage
 	store := ctx.Storage
 	if store == nil {
-		// Silent failure
+		tryLogError(cfg.ContextDir, "inject-context", fmt.Errorf("storage not available"))
 		fmt.Println(prompt)
 		return nil
 	}
@@ -133,7 +144,7 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {
-		// Fallback to just printing the prompt
+		tryLogError(cfg.ContextDir, "inject-context", fmt.Errorf("cortex init: %w", err))
 		fmt.Println(prompt)
 		return nil
 	}
@@ -223,6 +234,7 @@ func (c *StopCommand) Execute(ctx *Context) error {
 	// Get config and storage
 	cfg := ctx.Config
 	if cfg == nil {
+		tryLogError(".cortex", "stop", fmt.Errorf("config not loaded"))
 		return nil
 	}
 
@@ -233,6 +245,7 @@ func (c *StopCommand) Execute(ctx *Context) error {
 
 	store := ctx.Storage
 	if store == nil {
+		tryLogError(cfg.ContextDir, "stop", fmt.Errorf("storage not available"))
 		return nil
 	}
 
