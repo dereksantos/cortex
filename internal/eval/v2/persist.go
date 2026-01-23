@@ -22,9 +22,9 @@ type Persister struct {
 }
 
 // NewPersister creates a new SQLite persister.
-// The database is stored in .context/db/evals.db relative to the current directory.
+// The database is stored in .cortex/db/evals.db relative to the current directory.
 func NewPersister() (*Persister, error) {
-	dbDir := filepath.Join(".context", "db")
+	dbDir := filepath.Join(".cortex", "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}

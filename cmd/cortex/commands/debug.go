@@ -242,7 +242,7 @@ func (c *TestCommand) Execute(ctx *Context) error {
 
 	cfg := config.Default()
 	cfg.ProjectRoot = tmpDir
-	cfg.ContextDir = tmpDir + "/.context"
+	cfg.ContextDir = tmpDir + "/.cortex"
 	if err := cfg.EnsureDirectories(); err != nil {
 		return fmt.Errorf("failed to create directories: %w", err)
 	}

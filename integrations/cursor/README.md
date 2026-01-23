@@ -193,7 +193,7 @@ This will:
 ### Events not appearing
 - Check Cortex daemon is running: `cortex daemon`
 - View queue status: `cortex stats`
-- Check logs in `.context/logs/`
+- Check logs in `.cortex/logs/`
 
 ### Performance issues
 - Cortex capture is <10ms, shouldn't impact editor
@@ -202,7 +202,7 @@ This will:
 
 ## Configuration
 
-Configure Cursor-specific settings in `.context/config.json`:
+Configure Cursor-specific settings in `.cortex/config.json`:
 
 ```json
 {

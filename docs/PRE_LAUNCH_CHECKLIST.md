@@ -26,7 +26,7 @@
 - [ ] **Test auto-setup**
   - [ ] `cd` into test project
   - [ ] Run `cortex init --auto`
-  - [ ] Verify `.context/` created
+  - [ ] Verify `.cortex/` created
   - [ ] Check `.claude/settings.local.json` updated
   - [ ] Verify all hooks added (PostToolUse, SessionStart, UserPromptSubmit)
 
@@ -47,7 +47,7 @@
 
 - [ ] **Test event capture**
   - [ ] Make code changes with Claude Code
-  - [ ] Verify events captured (check `.context/queue/pending/`)
+  - [ ] Verify events captured (check `.cortex/queue/pending/`)
   - [ ] Confirm daemon processes events
   - [ ] Check events in database (`cortex stats`)
 

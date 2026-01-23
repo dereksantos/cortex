@@ -23,7 +23,7 @@ type TranscriptQueueSource struct {
 }
 
 // NewTranscriptQueueSource creates a new TranscriptQueueSource.
-// queueDir is typically <project>/.context/transcript_queue/
+// queueDir is typically <project>/.cortex/transcript_queue/
 func NewTranscriptQueueSource(queueDir string) *TranscriptQueueSource {
 	return &TranscriptQueueSource{
 		queueDir: queueDir,

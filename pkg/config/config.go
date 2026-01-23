@@ -34,13 +34,13 @@ func Default() *Config {
 	projectRoot, _ := os.Getwd()
 
 	return &Config{
-		ContextDir:  filepath.Join(projectRoot, ".context"),
+		ContextDir:  filepath.Join(projectRoot, ".cortex"),
 		ProjectRoot: projectRoot,
 		SkipPatterns: []string{
 			".git",
 			"node_modules",
 			"venv",
-			".context",
+			".cortex",
 			"__pycache__",
 		},
 		OllamaURL:            "http://localhost:11434",

@@ -161,7 +161,7 @@ The daemon:
 - Polls queue every 5 seconds
 - Runs LLM analysis on captured events
 - Executes cognitive modes (Think, Dream) opportunistically
-- Writes state to `.context/daemon_state.json` for status line
+- Writes state to `.cortex/daemon_state.json` for status line
 
 #### `cortex watch`
 
@@ -225,11 +225,11 @@ After running `cortex install`, these slash commands are available in Claude Cod
 
 ## Configuration
 
-Cortex stores configuration in `.context/config.json`:
+Cortex stores configuration in `.cortex/config.json`:
 
 ```json
 {
-  "context_dir": "/path/to/project/.context",
+  "context_dir": "/path/to/project/.cortex",
   "project_root": "/path/to/project",
   "skip_patterns": [".git", "node_modules", "venv", "*.lock"],
   "ollama_url": "http://localhost:11434",
@@ -244,7 +244,7 @@ Cortex stores configuration in `.context/config.json`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `context_dir` | `./.context` | Where Cortex stores data |
+| `context_dir` | `./.cortex` | Where Cortex stores data |
 | `project_root` | Current directory | Project root for relative paths |
 | `skip_patterns` | Common ignores | Patterns to skip during capture |
 | `ollama_url` | `http://localhost:11434` | Ollama API endpoint |
@@ -270,10 +270,10 @@ Cortex checks LLMs in this order:
 
 ## Data Storage
 
-All data is stored in `.context/` within your project:
+All data is stored in `.cortex/` within your project:
 
 ```
-.context/
+.cortex/
 ├── config.json         # Configuration
 ├── db/
 │   └── events.db       # SQLite database (events, insights, entities)
@@ -300,11 +300,11 @@ The SQLite database contains:
 
 ```bash
 # Backup
-cp -r .context .context.backup
+cp -r .cortex .cortex.backup
 
 # Restore
-rm -rf .context
-cp -r .context.backup .context
+rm -rf .cortex
+cp -r .cortex.backup .cortex
 ```
 
 ---
@@ -386,7 +386,7 @@ AI Tool (Claude Code)
 cortex capture (<20ms)
         │
         ↓ Atomic file write
-File Queue (.context/queue/pending/)
+File Queue (.cortex/queue/pending/)
         │
         ↓ Daemon polls every 5s
 cortex daemon
@@ -468,7 +468,7 @@ cat .claude/settings.local.json
 echo '{"tool_name":"Test"}' | ./cortex capture
 
 # Check queue
-ls .context/queue/pending/
+ls .cortex/queue/pending/
 ```
 
 #### "Daemon not running"
@@ -504,7 +504,7 @@ killall cortex
 ./cortex stats
 
 # Check daemon state
-cat .context/daemon_state.json
+cat .cortex/daemon_state.json
 
 # Watch cognitive modes live
 ./cortex watch
@@ -514,7 +514,7 @@ cat .context/daemon_state.json
 
 ```bash
 # Backup first
-cp -r .context .context.backup
+cp -r .cortex .cortex.backup
 
 # Remove all data
 ./cortex uninstall --purge

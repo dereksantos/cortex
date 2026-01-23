@@ -203,7 +203,7 @@ func loadConfig() (*config.Config, error) {
 		return nil, err
 	}
 
-	configPath := fmt.Sprintf("%s/.context/config.json", projectRoot)
+	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
 	return config.Load(configPath)
 }
 
@@ -283,7 +283,7 @@ Usage:
 Commands:
   init           Initialize Cortex in current directory
   install        Install Cortex hooks for Claude Code
-  uninstall      Remove Cortex hooks (--purge to also delete .context/)
+  uninstall      Remove Cortex hooks (--purge to also delete .cortex/)
   info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 

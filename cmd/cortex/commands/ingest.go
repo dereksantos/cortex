@@ -376,6 +376,6 @@ func loadCaptureConfig() (*config.Config, error) {
 		return nil, err
 	}
 
-	configPath := fmt.Sprintf("%s/.context/config.json", projectRoot)
+	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
 	return config.Load(configPath)
 }
