@@ -190,7 +190,8 @@ tramp
 ehthumbs.db
 Thumbs.db
 
-# Context capture specific
+# Cortex runtime data
+.cortex/
 .context/
 *.log
 *.tmp
