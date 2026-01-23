@@ -183,6 +183,7 @@ type ResolveResult struct {
 	Formatted  string   // Pre-formatted for LLM consumption
 	Confidence float64  // Confidence in this decision (0-1)
 	Reason     string   // Why this decision was made
+	ResolveMs  int64    // Time taken by Resolve operation in milliseconds
 }
 
 // RetrieveMode controls the retrieval path.

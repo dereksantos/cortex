@@ -33,6 +33,10 @@ type Think struct {
 	// State
 	running bool
 
+	// Cache hit/miss tracking
+	cacheHits   int
+	cacheMisses int
+
 	// State writer for daemon status updates
 	stateWriter *StateWriter
 }
@@ -279,6 +283,48 @@ func (t *Think) CacheReflectResult(queryText string, results []cognition.Result)
 	defer t.mu.Unlock()
 
 	t.sessionCtx.CachedReflect[queryText] = results
+}
+
+// RecordCacheHit records that a cache lookup succeeded.
+// Called when CachedReflect or WarmCache returns results for a query.
+func (t *Think) RecordCacheHit() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cacheHits++
+}
+
+// RecordCacheMiss records that a cache lookup failed.
+// Called when neither CachedReflect nor WarmCache has results for a query.
+func (t *Think) RecordCacheMiss() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cacheMisses++
+}
+
+// CacheHits returns the total number of cache hits this session.
+func (t *Think) CacheHits() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cacheHits
+}
+
+// CacheMisses returns the total number of cache misses this session.
+func (t *Think) CacheMisses() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cacheMisses
+}
+
+// CacheHitRate returns the cache hit rate as a value between 0 and 1.
+// Returns 0 if no cache lookups have been performed.
+func (t *Think) CacheHitRate() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	total := t.cacheHits + t.cacheMisses
+	if total == 0 {
+		return 0
+	}
+	return float64(t.cacheHits) / float64(total)
 }
 
 // IngestPrompt processes a user prompt for pattern learning.

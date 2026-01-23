@@ -25,6 +25,9 @@ type Resolve struct {
 
 	// Thinker provides session context snapshots (safe from races)
 	thinker *Think
+
+	// ActivityLogger for logging decisions to activity.log
+	activityLogger *ActivityLogger
 }
 
 // NewResolve creates a new Resolve instance with default thresholds.
@@ -48,6 +51,11 @@ func (r *Resolve) SetSessionContext(ctx *cognition.SessionContext) {
 // This is the preferred way to provide session context - it's race-safe.
 func (r *Resolve) SetThinker(thinker *Think) {
 	r.thinker = thinker
+}
+
+// SetActivityLogger sets the activity logger for decision logging.
+func (r *Resolve) SetActivityLogger(logger *ActivityLogger) {
+	r.activityLogger = logger
 }
 
 // AddProactiveResult adds a result from Dream to the proactive queue.
@@ -100,6 +108,12 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 	if decision == cognition.Inject {
 		// Pass SessionContext to formatter for any enrichments (nuances, etc.)
 		formatted = r.formatter.FormatForInjection(results, sessionCtx)
+	}
+
+	// Log decision to activity.log for eval analysis
+	if r.activityLogger != nil {
+		// Ignoring error - logging should not block decisions
+		_ = r.activityLogger.LogDecision(decision.String(), confidence, q.Text, count)
 	}
 
 	return &cognition.ResolveResult{

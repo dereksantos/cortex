@@ -12,19 +12,21 @@ import (
 // It detects session starts, updates last actions, and maintains
 // the session index cache for fast watch refresh.
 type SessionTracker struct {
-	storage     *storage.Storage
-	indexWriter *SessionIndexWriter
+	storage        *storage.Storage
+	indexWriter    *SessionIndexWriter
+	activityLogger *ActivityLogger
 
-	mu           sync.Mutex
-	knownSessions map[string]bool // Track sessions we've seen this daemon run
+	mu             sync.Mutex
+	knownSessions  map[string]bool // Track sessions we've seen this daemon run
 }
 
 // NewSessionTracker creates a new session tracker.
 func NewSessionTracker(store *storage.Storage, contextDir string) *SessionTracker {
 	return &SessionTracker{
-		storage:       store,
-		indexWriter:   NewSessionIndexWriter(contextDir),
-		knownSessions: make(map[string]bool),
+		storage:        store,
+		indexWriter:    NewSessionIndexWriter(contextDir),
+		activityLogger: NewActivityLogger(contextDir),
+		knownSessions:  make(map[string]bool),
 	}
 }
 
@@ -57,13 +59,47 @@ func (t *SessionTracker) OnEvent(event *events.Event) {
 	if isNew {
 		// New session - create with initial prompt
 		t.storage.CreateOrUpdateSession(sessionID, initialPrompt, lastAction, projectPath)
+
+		// Log session start to activity log
+		if t.activityLogger != nil {
+			t.activityLogger.LogSessionStart(sessionID, initialPrompt)
+		}
 	} else {
 		// Existing session - just update last action
 		t.storage.UpdateSessionLastAction(sessionID, lastAction)
 	}
 
+	// Handle session end (EventStop)
+	if event.EventType == events.EventStop {
+		t.onSessionEnd(sessionID)
+	}
+
 	// Update the session index cache
 	t.updateIndex()
+}
+
+// onSessionEnd handles logging when a session ends.
+func (t *SessionTracker) onSessionEnd(sessionID string) {
+	if t.activityLogger == nil {
+		return
+	}
+
+	// Get session metadata to retrieve event count
+	sess, err := t.storage.GetSessionByID(sessionID)
+	if err != nil {
+		// Log with zero counts if we can't get session data
+		t.activityLogger.LogSessionEnd(sessionID, 0, 0)
+		return
+	}
+
+	eventCount := 0
+	if sess != nil {
+		eventCount = sess.EventCount
+	}
+
+	// Note: insightCount is not tracked per-session currently, so we pass 0
+	// In the future, this could be enhanced to track insights per session
+	t.activityLogger.LogSessionEnd(sessionID, eventCount, 0)
 }
 
 // describeAction creates a human-readable description of the event action

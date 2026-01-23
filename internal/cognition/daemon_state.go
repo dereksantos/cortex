@@ -186,6 +186,7 @@ type RetrievalStats struct {
 	LastMode        string    `json:"last_mode"`    // "fast" or "full"
 	LastReflexMs    int64     `json:"last_reflex_ms"`
 	LastReflectMs   int64     `json:"last_reflect_ms"`
+	LastResolveMs   int64     `json:"last_resolve_ms"`
 	LastResults     int       `json:"last_results"`
 	LastDecision    string    `json:"last_decision"` // "inject", "skip", "wait"
 	TotalRetrievals int       `json:"total_retrievals"`
@@ -234,6 +235,121 @@ func (w *RetrievalStatsWriter) WriteStats(stats *RetrievalStats) error {
 	}
 
 	return nil
+}
+
+// RetrievalStatsHistoryEntry represents a single entry in the retrieval stats history.
+// This is the JSONL format for historical retrieval analysis.
+type RetrievalStatsHistoryEntry struct {
+	Timestamp time.Time `json:"ts"`
+	Query     string    `json:"query"`
+	Mode      string    `json:"mode"` // "fast" or "full"
+	ReflexMs  int64     `json:"reflex_ms"`
+	ReflectMs int64     `json:"reflect_ms"`
+	ResolveMs int64     `json:"resolve_ms"`
+	Results   int       `json:"results"`
+	Decision  string    `json:"decision"` // "inject", "skip", "queue"
+}
+
+// RetrievalStatsHistoryWriter provides thread-safe appending of retrieval stats history.
+// Implements automatic rotation when file exceeds MaxHistorySize.
+type RetrievalStatsHistoryWriter struct {
+	mu   sync.Mutex
+	path string
+}
+
+// MaxHistorySize is the maximum size of the history file before rotation (10MB).
+const MaxHistorySize = 10 * 1024 * 1024
+
+// NewRetrievalStatsHistoryWriter creates a history writer for the given context directory.
+func NewRetrievalStatsHistoryWriter(contextDir string) *RetrievalStatsHistoryWriter {
+	return &RetrievalStatsHistoryWriter{
+		path: filepath.Join(contextDir, "retrieval_stats_history.jsonl"),
+	}
+}
+
+// Path returns the history file path.
+func (w *RetrievalStatsHistoryWriter) Path() string {
+	return w.path
+}
+
+// AppendEntry appends a retrieval stats entry to the history file.
+// Performs automatic rotation when file exceeds MaxHistorySize.
+func (w *RetrievalStatsHistoryWriter) AppendEntry(entry *RetrievalStatsHistoryEntry) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+
+	// Check file size and rotate if needed
+	if err := w.maybeRotate(); err != nil {
+		// Log but don't fail - rotation failure shouldn't block append
+		// Continue with append attempt
+	}
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal history entry: %w", err)
+	}
+
+	// Open with O_APPEND for atomic append
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open history file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(string(data) + "\n"); err != nil {
+		return fmt.Errorf("failed to write history entry: %w", err)
+	}
+
+	return nil
+}
+
+// maybeRotate checks if the history file exceeds MaxHistorySize and rotates if needed.
+// Rotation renames current file to .old (overwriting any existing .old file).
+func (w *RetrievalStatsHistoryWriter) maybeRotate() error {
+	info, err := os.Stat(w.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, no rotation needed
+		}
+		return fmt.Errorf("failed to stat history file: %w", err)
+	}
+
+	if info.Size() < MaxHistorySize {
+		return nil // File is within size limit
+	}
+
+	// Rotate: rename to .old
+	oldPath := w.path + ".old"
+	if err := os.Rename(w.path, oldPath); err != nil {
+		return fmt.Errorf("failed to rotate history file: %w", err)
+	}
+
+	return nil
+}
+
+// AppendFromStats creates a history entry from RetrievalStats and appends it.
+// This is a convenience method to convert from the main stats format.
+func (w *RetrievalStatsHistoryWriter) AppendFromStats(stats *RetrievalStats) error {
+	entry := &RetrievalStatsHistoryEntry{
+		Timestamp: stats.UpdatedAt,
+		Query:     stats.LastQuery,
+		Mode:      stats.LastMode,
+		ReflexMs:  stats.LastReflexMs,
+		ReflectMs: stats.LastReflectMs,
+		ResolveMs: stats.LastResolveMs,
+		Results:   stats.LastResults,
+		Decision:  stats.LastDecision,
+	}
+	return w.AppendEntry(entry)
+}
+
+// GetRetrievalStatsHistoryPath returns the standard retrieval stats history file path.
+func GetRetrievalStatsHistoryPath(contextDir string) string {
+	return filepath.Join(contextDir, "retrieval_stats_history.jsonl")
 }
 
 // ReadRetrievalStats reads retrieval stats from the stats file.
@@ -361,6 +477,46 @@ func (l *ActivityLogger) LogCache(operation string) error {
 	return l.Log(&ActivityLogEntry{
 		Mode:        "think",
 		Description: operation,
+	})
+}
+
+// LogDecision logs a Resolve decision with confidence and query context.
+func (l *ActivityLogger) LogDecision(decision string, confidence float64, query string, resultCount int) error {
+	desc := fmt.Sprintf("decision=%s confidence=%.2f results=%d", decision, confidence, resultCount)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "resolve",
+		Description: desc,
+		Query:       query,
+		Results:     resultCount,
+	})
+}
+
+// LogContradiction logs a detected contradiction between insights.
+// Used by Reflect mode for noise ratio analysis in evals.
+func (l *ActivityLogger) LogContradiction(insight1Summary, insight2Summary, resolution string) error {
+	desc := fmt.Sprintf("contradiction: %q vs %q resolved=%q", insight1Summary, insight2Summary, resolution)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "reflect",
+		Description: desc,
+	})
+}
+
+// LogSessionStart logs the start of a new session with its initial prompt.
+func (l *ActivityLogger) LogSessionStart(sessionID string, initialPrompt string) error {
+	desc := fmt.Sprintf("started session_id=%s", sessionID)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "session",
+		Description: desc,
+		Query:       initialPrompt,
+	})
+}
+
+// LogSessionEnd logs the end of a session with summary statistics.
+func (l *ActivityLogger) LogSessionEnd(sessionID string, eventCount int, insightCount int) error {
+	desc := fmt.Sprintf("ended session_id=%s events=%d insights=%d", sessionID, eventCount, insightCount)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "session",
+		Description: desc,
 	})
 }
 

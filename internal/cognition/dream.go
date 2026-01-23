@@ -60,10 +60,11 @@ type Dream struct {
 	config cognition.DreamConfig
 
 	// State
-	running        bool
-	lastDream      time.Time
-	insightsChan   chan cognition.Result
-	proactiveQueue []cognition.Result
+	running         bool
+	lastDream       time.Time
+	insightsChan    chan cognition.Result
+	proactiveQueue  []cognition.Result
+	sessionInsights int // Count of insights discovered this session
 
 	// Queued transcripts from Stop hooks
 	queuedTranscripts []QueuedTranscript
@@ -195,15 +196,22 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 				continue
 			}
 
-			// Store insight
+			// Store insight with session and source tracking
 			if d.storage != nil {
-				d.storage.StoreInsight(
+				// Extract session_id from item metadata if available
+				var sessionID string
+				if sid, ok := item.Metadata["session_id"].(string); ok {
+					sessionID = sid
+				}
+				d.storage.StoreInsightWithSession(
 					item.ID,
 					insight.Category,
 					insight.Content,
 					int(insight.Score*10),
 					insight.Tags,
 					"",
+					sessionID,
+					item.Source, // source_type from DreamSource name
 				)
 			}
 
@@ -240,13 +248,20 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 							TruncateInsight(insight.Content, 50), nuance.Detail, nuance.Why)
 
 						if d.storage != nil {
-							d.storage.StoreInsight(
+							// Extract session_id from item metadata if available
+							var sessionID string
+							if sid, ok := item.Metadata["session_id"].(string); ok {
+								sessionID = sid
+							}
+							d.storage.StoreInsightWithSession(
 								supplementalID,
 								"nuance",
 								nuanceContent,
 								int(insight.Score*10),
 								append(insight.Tags, "nuance", "implementation-detail"),
 								"",
+								sessionID,
+								item.Source, // source_type from DreamSource name
 							)
 						}
 
@@ -275,6 +290,11 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 
 			insights++
 			ops++
+
+			// Track session insights
+			d.mu.Lock()
+			d.sessionInsights++
+			d.mu.Unlock()
 		}
 	}
 
@@ -438,4 +458,11 @@ func (d *Dream) ClearQueuedTranscripts() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.queuedTranscripts = nil
+}
+
+// SessionInsights returns the count of insights discovered this session.
+func (d *Dream) SessionInsights() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.sessionInsights
 }

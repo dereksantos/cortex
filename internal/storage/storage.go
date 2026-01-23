@@ -106,6 +106,9 @@ func (s *Storage) initSchema() error {
 		importance INTEGER DEFAULT 0,
 		tags TEXT,
 		reasoning TEXT,
+		session_id TEXT,           -- Links to session for session-over-session analysis
+		source_type TEXT,          -- project, cortex, claude_history, git
+		was_retrieved INTEGER DEFAULT 0, -- Boolean: 1 if ever returned in search
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(event_id) REFERENCES events(id)
 	);
@@ -150,12 +153,67 @@ func (s *Storage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entity_id);
 	CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
 	CREATE INDEX IF NOT EXISTS idx_insights_event ON insights(event_id);
+	CREATE INDEX IF NOT EXISTS idx_insights_session ON insights(session_id);
+	CREATE INDEX IF NOT EXISTS idx_insights_source_type ON insights(source_type);
 	CREATE INDEX IF NOT EXISTS idx_embeddings_content ON embeddings(content_id, content_type);
 	CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 	`
 
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Run migrations for existing databases
+	return s.runMigrations()
+}
+
+// runMigrations adds new columns to existing tables for backwards compatibility.
+// SQLite supports ALTER TABLE ADD COLUMN, but not all DDL in a single statement.
+func (s *Storage) runMigrations() error {
+	// Migration: Add session_id, source_type, was_retrieved to insights table
+	insightMigrations := []struct {
+		column string
+		ddl    string
+	}{
+		{"session_id", "ALTER TABLE insights ADD COLUMN session_id TEXT"},
+		{"source_type", "ALTER TABLE insights ADD COLUMN source_type TEXT"},
+		{"was_retrieved", "ALTER TABLE insights ADD COLUMN was_retrieved INTEGER DEFAULT 0"},
+	}
+
+	for _, m := range insightMigrations {
+		if !s.columnExists("insights", m.column) {
+			if _, err := s.db.Exec(m.ddl); err != nil {
+				return fmt.Errorf("failed to add %s column to insights: %w", m.column, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// columnExists checks if a column exists in a table.
+func (s *Storage) columnExists(table, column string) bool {
+	// Use PRAGMA table_info to check columns
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			continue
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // StoreEvent stores an event (append-only)
@@ -653,40 +711,65 @@ func (s *Storage) GetRelationships(entityID int64) ([]*Relationship, error) {
 
 // Insight represents an LLM-extracted insight
 type Insight struct {
-	ID         int64
-	EventID    string
-	Category   string
-	Summary    string
-	Importance int
-	Tags       []string
-	Reasoning  string
-	CreatedAt  time.Time
+	ID           int64
+	EventID      string
+	Category     string
+	Summary      string
+	Importance   int
+	Tags         []string
+	Reasoning    string
+	SessionID    string // Links to session for session-over-session analysis
+	SourceType   string // project, cortex, claude_history, git
+	WasRetrieved bool   // True if ever returned in a search
+	CreatedAt    time.Time
 }
 
 // StoreInsight stores an insight from LLM analysis
 func (s *Storage) StoreInsight(eventID, category, summary string, importance int, tags []string, reasoning string) error {
-	return s.StoreInsightWithTimestamp(eventID, category, summary, importance, tags, reasoning, time.Time{})
+	return s.StoreInsightFull(eventID, category, summary, importance, tags, reasoning, "", "", time.Time{})
 }
 
 // StoreInsightWithTimestamp stores an insight with a specific timestamp
 func (s *Storage) StoreInsightWithTimestamp(eventID, category, summary string, importance int, tags []string, reasoning string, timestamp time.Time) error {
+	return s.StoreInsightFull(eventID, category, summary, importance, tags, reasoning, "", "", timestamp)
+}
+
+// StoreInsightWithSession stores an insight with session and source tracking.
+// sessionID links the insight to a specific session for session-over-session analysis.
+// sourceType indicates where the insight came from (project, cortex, claude_history, git).
+func (s *Storage) StoreInsightWithSession(eventID, category, summary string, importance int, tags []string, reasoning, sessionID, sourceType string) error {
+	return s.StoreInsightFull(eventID, category, summary, importance, tags, reasoning, sessionID, sourceType, time.Time{})
+}
+
+// StoreInsightFull stores an insight with all optional fields.
+// This is the underlying implementation used by all other StoreInsight variants.
+func (s *Storage) StoreInsightFull(eventID, category, summary string, importance int, tags []string, reasoning, sessionID, sourceType string, timestamp time.Time) error {
 	tagsJSON, _ := json.Marshal(tags)
+
+	// Convert empty strings to nil for nullable columns
+	var sessID, srcType interface{}
+	if sessionID != "" {
+		sessID = sessionID
+	}
+	if sourceType != "" {
+		srcType = sourceType
+	}
 
 	if timestamp.IsZero() {
 		// Use default (current time via SQLite)
 		_, err := s.db.Exec(`
-			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, eventID, category, summary, importance, string(tagsJSON), reasoning)
+			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, session_id, source_type)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, eventID, category, summary, importance, string(tagsJSON), reasoning, sessID, srcType)
 		if err != nil {
 			return fmt.Errorf("failed to store insight: %w", err)
 		}
 	} else {
 		// Use provided timestamp
 		_, err := s.db.Exec(`
-			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, eventID, category, summary, importance, string(tagsJSON), reasoning, timestamp)
+			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, session_id, source_type, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, eventID, category, summary, importance, string(tagsJSON), reasoning, sessID, srcType, timestamp)
 		if err != nil {
 			return fmt.Errorf("failed to store insight with timestamp: %w", err)
 		}
@@ -698,7 +781,7 @@ func (s *Storage) StoreInsightWithTimestamp(eventID, category, summary string, i
 // GetInsightsByCategory retrieves insights by category
 func (s *Storage) GetInsightsByCategory(category string, limit int) ([]*Insight, error) {
 	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
 		FROM insights
 		WHERE category = ?
 		ORDER BY importance DESC, created_at DESC
@@ -716,7 +799,7 @@ func (s *Storage) GetInsightsByCategory(category string, limit int) ([]*Insight,
 // GetRecentInsights retrieves recent insights
 func (s *Storage) GetRecentInsights(limit int) ([]*Insight, error) {
 	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
 		FROM insights
 		ORDER BY created_at DESC
 		LIMIT ?
@@ -733,7 +816,7 @@ func (s *Storage) GetRecentInsights(limit int) ([]*Insight, error) {
 // GetImportantInsights retrieves high-importance insights
 func (s *Storage) GetImportantInsights(minImportance, limit int) ([]*Insight, error) {
 	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
 		FROM insights
 		WHERE importance >= ?
 		ORDER BY importance DESC, created_at DESC
@@ -754,6 +837,8 @@ func (s *Storage) scanInsights(rows *sql.Rows) ([]*Insight, error) {
 	for rows.Next() {
 		var insight Insight
 		var tagsJSON string
+		var sessionID, sourceType sql.NullString
+		var wasRetrieved sql.NullInt64
 
 		if err := rows.Scan(
 			&insight.ID,
@@ -763,12 +848,24 @@ func (s *Storage) scanInsights(rows *sql.Rows) ([]*Insight, error) {
 			&insight.Importance,
 			&tagsJSON,
 			&insight.Reasoning,
+			&sessionID,
+			&sourceType,
+			&wasRetrieved,
 			&insight.CreatedAt,
 		); err != nil {
 			continue
 		}
 
 		json.Unmarshal([]byte(tagsJSON), &insight.Tags)
+		if sessionID.Valid {
+			insight.SessionID = sessionID.String
+		}
+		if sourceType.Valid {
+			insight.SourceType = sourceType.String
+		}
+		if wasRetrieved.Valid {
+			insight.WasRetrieved = wasRetrieved.Int64 != 0
+		}
 		insights = append(insights, &insight)
 	}
 
@@ -806,7 +903,7 @@ func (s *Storage) ForgetInsightsByKeyword(keyword string) (int, error) {
 func (s *Storage) SearchInsights(keyword string, limit int) ([]*Insight, error) {
 	pattern := "%" + keyword + "%"
 	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
 		FROM insights
 		WHERE summary LIKE ? OR tags LIKE ? OR category LIKE ?
 		ORDER BY importance DESC, created_at DESC
@@ -898,9 +995,11 @@ func (s *Storage) MergeInsights(keepID int64, deleteIDs []int64) (int, error) {
 func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
 	var insight Insight
 	var tagsJSON string
+	var sessionID, sourceType sql.NullString
+	var wasRetrieved sql.NullInt64
 
 	err := s.db.QueryRow(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, created_at
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
 		FROM insights
 		WHERE id = ?
 	`, id).Scan(
@@ -911,6 +1010,9 @@ func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
 		&insight.Importance,
 		&tagsJSON,
 		&insight.Reasoning,
+		&sessionID,
+		&sourceType,
+		&wasRetrieved,
 		&insight.CreatedAt,
 	)
 
@@ -919,7 +1021,112 @@ func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
 	}
 
 	json.Unmarshal([]byte(tagsJSON), &insight.Tags)
+	if sessionID.Valid {
+		insight.SessionID = sessionID.String
+	}
+	if sourceType.Valid {
+		insight.SourceType = sourceType.String
+	}
+	if wasRetrieved.Valid {
+		insight.WasRetrieved = wasRetrieved.Int64 != 0
+	}
 	return &insight, nil
+}
+
+// GetInsightsBySession retrieves insights linked to a specific session.
+// Enables session-over-session analysis of what was learned.
+func (s *Storage) GetInsightsBySession(sessionID string, limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
+		FROM insights
+		WHERE session_id = ?
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, sessionID, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// GetInsightsBySourceType retrieves insights from a specific source type.
+// sourceType should be one of: project, cortex, claude_history, git
+func (s *Storage) GetInsightsBySourceType(sourceType string, limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
+		FROM insights
+		WHERE source_type = ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, sourceType, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// MarkInsightRetrieved marks an insight as having been returned in a search.
+// This helps track which insights are actually being used.
+func (s *Storage) MarkInsightRetrieved(id int64) error {
+	_, err := s.db.Exec(`
+		UPDATE insights SET was_retrieved = 1 WHERE id = ?
+	`, id)
+	if err != nil {
+		return fmt.Errorf("failed to mark insight as retrieved: %w", err)
+	}
+	return nil
+}
+
+// MarkInsightsRetrieved marks multiple insights as retrieved in a single operation.
+func (s *Storage) MarkInsightsRetrieved(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("UPDATE insights SET was_retrieved = 1 WHERE id = ?")
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, id := range ids {
+		if _, err := stmt.Exec(id); err != nil {
+			return fmt.Errorf("failed to mark insight %d as retrieved: %w", id, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetUnretrievedInsights returns insights that have never been returned in a search.
+// Useful for identifying potentially forgotten or underutilized insights.
+func (s *Storage) GetUnretrievedInsights(limit int) ([]*Insight, error) {
+	rows, err := s.db.Query(`
+		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
+		FROM insights
+		WHERE was_retrieved = 0 OR was_retrieved IS NULL
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, limit)
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
 }
 
 // VectorSearchResult represents a result from vector similarity search

@@ -597,3 +597,233 @@ func TestMergeInsights(t *testing.T) {
 		}
 	})
 }
+
+func TestStoreInsightWithSession(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("session-insight-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	t.Run("stores insight with session_id and source_type", func(t *testing.T) {
+		err := store.StoreInsightWithSession(
+			"session-insight-event",
+			"decision",
+			"Use Zustand for state management",
+			8,
+			[]string{"state", "react"},
+			"reasoning",
+			"sess-123-abc",
+			"project",
+		)
+		if err != nil {
+			t.Fatalf("failed to store insight with session: %v", err)
+		}
+
+		// Retrieve and verify
+		insights, err := store.GetInsightsBySession("sess-123-abc", 10)
+		if err != nil {
+			t.Fatalf("failed to get insights by session: %v", err)
+		}
+
+		if len(insights) != 1 {
+			t.Fatalf("expected 1 insight, got %d", len(insights))
+		}
+
+		insight := insights[0]
+		if insight.SessionID != "sess-123-abc" {
+			t.Errorf("expected session_id 'sess-123-abc', got '%s'", insight.SessionID)
+		}
+		if insight.SourceType != "project" {
+			t.Errorf("expected source_type 'project', got '%s'", insight.SourceType)
+		}
+		if insight.Summary != "Use Zustand for state management" {
+			t.Errorf("unexpected summary: %s", insight.Summary)
+		}
+	})
+
+	t.Run("handles nil session_id gracefully", func(t *testing.T) {
+		err := store.StoreInsightWithSession(
+			"session-insight-event",
+			"pattern",
+			"Another pattern",
+			5,
+			[]string{"test"},
+			"",
+			"", // empty session_id
+			"git",
+		)
+		if err != nil {
+			t.Fatalf("failed to store insight without session: %v", err)
+		}
+
+		// Verify it was stored
+		insights, err := store.GetInsightsBySourceType("git", 10)
+		if err != nil {
+			t.Fatalf("failed to get insights by source_type: %v", err)
+		}
+
+		if len(insights) != 1 {
+			t.Fatalf("expected 1 insight, got %d", len(insights))
+		}
+
+		if insights[0].SessionID != "" {
+			t.Errorf("expected empty session_id, got '%s'", insights[0].SessionID)
+		}
+	})
+}
+
+func TestGetInsightsBySession(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("session-test-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	// Store insights for different sessions
+	store.StoreInsightWithSession("session-test-event", "decision", "Decision A", 7, []string{"a"}, "", "session-1", "project")
+	store.StoreInsightWithSession("session-test-event", "decision", "Decision B", 8, []string{"b"}, "", "session-1", "project")
+	store.StoreInsightWithSession("session-test-event", "decision", "Decision C", 9, []string{"c"}, "", "session-2", "cortex")
+
+	t.Run("retrieves only insights from specified session", func(t *testing.T) {
+		insights, err := store.GetInsightsBySession("session-1", 10)
+		if err != nil {
+			t.Fatalf("failed to get insights by session: %v", err)
+		}
+
+		if len(insights) != 2 {
+			t.Errorf("expected 2 insights for session-1, got %d", len(insights))
+		}
+
+		for _, insight := range insights {
+			if insight.SessionID != "session-1" {
+				t.Errorf("got insight from wrong session: %s", insight.SessionID)
+			}
+		}
+	})
+
+	t.Run("returns empty for non-existent session", func(t *testing.T) {
+		insights, err := store.GetInsightsBySession("non-existent", 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if len(insights) != 0 {
+			t.Errorf("expected 0 insights for non-existent session, got %d", len(insights))
+		}
+	})
+}
+
+func TestMarkInsightRetrieved(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("retrieved-test-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	// Store an insight
+	store.StoreInsight("retrieved-test-event", "decision", "Test decision", 7, []string{"test"}, "")
+
+	insights, _ := store.GetRecentInsights(1)
+	if len(insights) == 0 {
+		t.Fatal("expected at least 1 insight")
+	}
+	insightID := insights[0].ID
+
+	t.Run("marks insight as retrieved", func(t *testing.T) {
+		// Verify initially not retrieved
+		insight, _ := store.GetInsightByID(insightID)
+		if insight.WasRetrieved {
+			t.Error("expected was_retrieved to be false initially")
+		}
+
+		// Mark as retrieved
+		err := store.MarkInsightRetrieved(insightID)
+		if err != nil {
+			t.Fatalf("failed to mark insight as retrieved: %v", err)
+		}
+
+		// Verify it's now retrieved
+		insight, _ = store.GetInsightByID(insightID)
+		if !insight.WasRetrieved {
+			t.Error("expected was_retrieved to be true after marking")
+		}
+	})
+}
+
+func TestGetUnretrievedInsights(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("unretrieved-test-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	// Store some insights
+	store.StoreInsight("unretrieved-test-event", "decision", "Decision 1", 7, []string{"a"}, "")
+	store.StoreInsight("unretrieved-test-event", "decision", "Decision 2", 8, []string{"b"}, "")
+	store.StoreInsight("unretrieved-test-event", "decision", "Decision 3", 9, []string{"c"}, "")
+
+	// Mark one as retrieved
+	insights, _ := store.GetRecentInsights(10)
+	if len(insights) < 3 {
+		t.Fatalf("expected at least 3 insights, got %d", len(insights))
+	}
+	store.MarkInsightRetrieved(insights[0].ID)
+
+	t.Run("returns only unretrieved insights", func(t *testing.T) {
+		unretrieved, err := store.GetUnretrievedInsights(10)
+		if err != nil {
+			t.Fatalf("failed to get unretrieved insights: %v", err)
+		}
+
+		if len(unretrieved) != 2 {
+			t.Errorf("expected 2 unretrieved insights, got %d", len(unretrieved))
+		}
+
+		for _, insight := range unretrieved {
+			if insight.WasRetrieved {
+				t.Error("got a retrieved insight when requesting unretrieved")
+			}
+		}
+	})
+}
+
+func TestMarkInsightsRetrieved(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	event := createTestEvent("batch-retrieved-event", "Edit", "test")
+	store.StoreEvent(event)
+
+	// Store several insights
+	for i := 0; i < 5; i++ {
+		store.StoreInsight("batch-retrieved-event", "pattern", "Pattern", i+1, []string{}, "")
+	}
+
+	insights, _ := store.GetRecentInsights(10)
+	ids := make([]int64, len(insights))
+	for i, insight := range insights {
+		ids[i] = insight.ID
+	}
+
+	t.Run("marks multiple insights as retrieved", func(t *testing.T) {
+		// Mark first 3
+		err := store.MarkInsightsRetrieved(ids[:3])
+		if err != nil {
+			t.Fatalf("failed to mark insights as retrieved: %v", err)
+		}
+
+		// Verify
+		unretrieved, _ := store.GetUnretrievedInsights(10)
+		if len(unretrieved) != 2 {
+			t.Errorf("expected 2 unretrieved after marking 3, got %d", len(unretrieved))
+		}
+	})
+
+	t.Run("handles empty list gracefully", func(t *testing.T) {
+		err := store.MarkInsightsRetrieved([]int64{})
+		if err != nil {
+			t.Fatalf("unexpected error for empty list: %v", err)
+		}
+	})
+}
