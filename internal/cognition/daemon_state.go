@@ -520,6 +520,15 @@ func (l *ActivityLogger) LogSessionEnd(sessionID string, eventCount int, insight
 	})
 }
 
+// LogError logs a hook or command error for debugging visibility.
+func (l *ActivityLogger) LogError(command string, err error) error {
+	desc := fmt.Sprintf("%s failed: %v", command, err)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "error",
+		Description: desc,
+	})
+}
+
 // ReadRecentActivity reads the most recent N activity log entries.
 func ReadRecentActivity(contextDir string, limit int) ([]ActivityLogEntry, error) {
 	path := filepath.Join(contextDir, "activity.log")
