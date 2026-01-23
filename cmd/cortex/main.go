@@ -133,7 +133,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-	case "search", "recent", "insights", "entities", "graph":
+	case "search", "recent", "insights", "entities", "graph", "prune":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -301,6 +301,7 @@ Commands:
   stats          Show statistics
   status         Show status (for status line)
   watch          Live dashboard of cognitive modes
+  prune          Manage context size relative to project
 
   session-start  Print session start instructions (for hooks)
   inject-context Inject relevant context into prompt (for hooks)
