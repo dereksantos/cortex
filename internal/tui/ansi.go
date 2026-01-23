@@ -10,6 +10,10 @@ const (
 	ClearLine   = "\033[2K"  // Clear entire line
 	ClearToEnd  = "\033[K"   // Clear from cursor to end of line
 
+	// Alternate screen buffer (for full-screen TUI apps)
+	AltScreenEnter = "\033[?1049h" // Enter alternate screen buffer
+	AltScreenLeave = "\033[?1049l" // Leave alternate screen buffer
+
 	// Cursor visibility
 	CursorHide = "\033[?25l" // Hide cursor
 	CursorShow = "\033[?25h" // Show cursor
