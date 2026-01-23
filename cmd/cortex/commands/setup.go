@@ -182,7 +182,7 @@ func (c *InstallCommand) Execute(ctx *Context) error {
 			content: `---
 description: Recall what Cortex knows about a topic
 argument-hint: "<topic>"
-allowed-tools: Bash(./cortex:*)
+allowed-tools: Bash(cortex:*)
 ---
 
 Search Cortex for context related to: $ARGUMENTS
@@ -197,7 +197,7 @@ Summarize the relevant insights, decisions, and patterns found.
 			content: `---
 description: Record an architectural decision
 argument-hint: "<decision>"
-allowed-tools: Bash(./cortex:*)
+allowed-tools: Bash(cortex:*)
 ---
 
 Record this architectural decision in Cortex:
@@ -214,7 +214,7 @@ Confirm the decision was recorded.
 			content: `---
 description: Record a correction (e.g., "we use X not Y")
 argument-hint: "<correction>"
-allowed-tools: Bash(./cortex:*)
+allowed-tools: Bash(cortex:*)
 ---
 
 Record this correction in Cortex:
@@ -231,7 +231,7 @@ Run: ./cortex capture --type=correction --content="$ARGUMENTS"
 			content: `---
 description: Mark context as outdated
 argument-hint: "<insight-id or description>"
-allowed-tools: Bash(./cortex:*)
+allowed-tools: Bash(cortex:*)
 ---
 
 Mark this context as outdated/deprecated:
@@ -682,7 +682,7 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "./cortex session-start",
+						"command": "cortex session-start",
 					},
 				},
 			},
@@ -692,7 +692,7 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "./cortex inject-context",
+						"command": "cortex inject-context",
 					},
 				},
 			},
@@ -703,7 +703,7 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "./cortex capture",
+						"command": "cortex capture",
 					},
 				},
 			},
@@ -713,7 +713,7 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "./cortex stop",
+						"command": "cortex stop",
 					},
 				},
 			},
@@ -723,7 +723,7 @@ func createClaudeSettings(settingsPath string) error {
 	// Configure status line
 	statusLine := map[string]interface{}{
 		"type":    "command",
-		"command": "./cortex status --format=claude",
+		"command": "cortex status --format=claude",
 	}
 
 	settings["hooks"] = hooks
@@ -746,7 +746,7 @@ func createCortexCommand(commandFile string) error {
 	content := `---
 description: Query Cortex context memory
 argument-hint: "<query>"
-allowed-tools: Bash(./cortex:*)
+allowed-tools: Bash(cortex:*)
 ---
 
 Search Cortex for relevant context:
@@ -782,7 +782,7 @@ func removeCortexFromSettings(settingsPath string) (bool, error) {
 
 	modified := false
 
-	// Remove hooks that contain "./cortex" commands
+	// Remove hooks that contain "cortex" commands
 	if hooks, ok := settings["hooks"].(map[string]interface{}); ok {
 		cleanedHooks := cleanCortexHooks(hooks)
 		if len(cleanedHooks) == 0 {
@@ -829,7 +829,7 @@ func removeCortexFromSettings(settingsPath string) (bool, error) {
 	return true, nil
 }
 
-// cleanCortexHooks removes hook entries that contain "./cortex" or "cortex" commands
+// cleanCortexHooks removes hook entries that contain "cortex" or "cortex" commands
 func cleanCortexHooks(hooks map[string]interface{}) map[string]interface{} {
 	cleaned := make(map[string]interface{})
 
