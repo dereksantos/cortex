@@ -160,8 +160,9 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
-				// For session commands, fail silently and just pass through
+				// For session commands, log error but don't block user
 				if command == "inject-context" || command == "stop" {
+					fmt.Fprintf(os.Stderr, "cortex %s: config error: %v\n", command, err)
 					os.Exit(0)
 				}
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
@@ -170,6 +171,7 @@ func main() {
 			store, err := storage.New(cfg)
 			if err != nil {
 				if command == "inject-context" || command == "stop" {
+					fmt.Fprintf(os.Stderr, "cortex %s: storage error: %v\n", command, err)
 					os.Exit(0)
 				}
 				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
