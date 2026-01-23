@@ -107,6 +107,14 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
+	// Log the query to activity log
+	activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+	resultCount := 0
+	if result != nil {
+		resultCount = len(result.Results)
+	}
+	activityLogger.LogQuery(query, resultCount, elapsed.Milliseconds())
+
 	// Determine mode string for output
 	modeStr := "Fast (Reflex)"
 	if mode == cognition.Full {

@@ -4,9 +4,13 @@ package commands
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,6 +42,12 @@ func (c *DaemonCommand) Description() string { return "Run background context pr
 func (c *DaemonCommand) Execute(ctx *Context) error {
 	cfg := ctx.Config
 	store := ctx.Storage
+
+	// Write PID file for process tracking
+	if err := WriteDaemonPID(cfg.ContextDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Could not write PID file: %v\n", err)
+	}
+	defer RemoveDaemonPID(cfg.ContextDir)
 
 	// Create queue manager
 	queueMgr := queue.New(cfg, store)
@@ -120,11 +130,16 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	// Create session saver for periodic saves
 	sessionSaver := intcognition.NewSessionSaver(sessionPersister, 30*time.Second)
 
+	// Create pruner for context size management
+	pruner := intcognition.NewPruner(store, cfg)
+	pruner.SetStateWriter(stateWriter)
+
 	fmt.Println("Cortex daemon started")
 	fmt.Println("   Processing events every 5 seconds...")
 	fmt.Println("   Session persisted every 30 seconds...")
 	fmt.Println("   Status updates every 2 seconds...")
 	fmt.Println("   Cognitive modes check every 10 seconds...")
+	fmt.Println("   Context size check every 5 minutes...")
 	fmt.Println("   Press Ctrl+C to stop")
 
 	// Set up signal handling for graceful shutdown
@@ -143,11 +158,29 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	cognitiveTicker := time.NewTicker(10 * time.Second)
 	defer cognitiveTicker.Stop()
 
+	// Periodic prune ticker (check context size vs project size)
+	pruneTicker := time.NewTicker(5 * time.Minute)
+	defer pruneTicker.Stop()
+
 	// Idle threshold for Dream triggering (30 seconds without events)
 	idleThreshold := 30 * time.Second
 
 	// Write initial state
 	updateDaemonStats(store, stateWriter)
+
+	// Listen for insights and log them as they arrive
+	if cortex != nil {
+		activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+		go func() {
+			for insight := range cortex.Insights() {
+				// Log each insight as it's discovered (full content, no truncation)
+				activityLogger.Log(&intcognition.ActivityLogEntry{
+					Mode:        "dream",
+					Description: fmt.Sprintf("insight: %s", insight.Content),
+				})
+			}
+		}()
+	}
 
 	// Main daemon loop
 	done := false
@@ -194,6 +227,23 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 					}()
 				}
 			}
+		case <-pruneTicker.C:
+			// Check if context exceeds project size limit
+			go func() {
+				result, err := pruner.MaybePrune(context.Background())
+				if err != nil {
+					log.Printf("Prune error: %v", err)
+					return
+				}
+				if result != nil && !result.Skipped && result.Pruned > 0 {
+					activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+					activityLogger.Log(&intcognition.ActivityLogEntry{
+						Mode:        "prune",
+						Description: fmt.Sprintf("removed %d items (%.1fx -> %.1fx project)", result.Pruned, float64(result.CortexSize)/float64(result.ProjectSize), result.Ratio),
+						LatencyMs:   result.Duration.Milliseconds(),
+					})
+				}
+			}()
 		case <-sigChan:
 			done = true
 		}
@@ -291,4 +341,99 @@ func RunDaemon(cfg *config.Config, store *storage.Storage) error {
 		Storage: store,
 		Args:    []string{},
 	})
+}
+
+// PID file management for daemon process tracking
+
+// GetDaemonPIDPath returns the path to the daemon PID file.
+func GetDaemonPIDPath(contextDir string) string {
+	return filepath.Join(contextDir, "daemon.pid")
+}
+
+// WriteDaemonPID writes the current process PID to the PID file.
+func WriteDaemonPID(contextDir string) error {
+	pidPath := GetDaemonPIDPath(contextDir)
+	return os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0644)
+}
+
+// RemoveDaemonPID removes the PID file.
+func RemoveDaemonPID(contextDir string) {
+	os.Remove(GetDaemonPIDPath(contextDir))
+}
+
+// ReadDaemonPID reads the daemon PID from the PID file.
+// Returns 0 if the file doesn't exist or is invalid.
+func ReadDaemonPID(contextDir string) int {
+	data, err := os.ReadFile(GetDaemonPIDPath(contextDir))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// IsDaemonRunning checks if the daemon process is running.
+func IsDaemonRunning(contextDir string) bool {
+	pid := ReadDaemonPID(contextDir)
+	if pid == 0 {
+		return false
+	}
+	// Check if process exists
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix, FindProcess always succeeds. Send signal 0 to check if process exists.
+	err = process.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+// StopDaemon stops a running daemon process.
+func StopDaemon(contextDir string) error {
+	pid := ReadDaemonPID(contextDir)
+	if pid == 0 {
+		return fmt.Errorf("daemon not running")
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("cannot find daemon process: %w", err)
+	}
+	// Send SIGTERM for graceful shutdown
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("cannot stop daemon: %w", err)
+	}
+	return nil
+}
+
+// StartDaemonBackground starts the daemon as a background process.
+// Returns the PID of the started process.
+func StartDaemonBackground(contextDir string) (int, error) {
+	if IsDaemonRunning(contextDir) {
+		return ReadDaemonPID(contextDir), fmt.Errorf("daemon already running")
+	}
+
+	// Find the cortex executable
+	executable, err := os.Executable()
+	if err != nil {
+		return 0, fmt.Errorf("cannot find executable: %w", err)
+	}
+
+	// Start daemon in background
+	cmd := exec.Command(executable, "daemon")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Stdin = nil
+	// Detach from parent process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("cannot start daemon: %w", err)
+	}
+
+	return cmd.Process.Pid, nil
 }
