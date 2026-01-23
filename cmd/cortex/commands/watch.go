@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,8 +35,6 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 	// Parse flags from ctx.Args
 	jsonOutput := false
 	noAnimate := false
-	retrievalOnly := false
-	backgroundOnly := false
 	interactive := true // Default to interactive if TTY
 
 	for _, arg := range ctx.Args {
@@ -48,10 +45,6 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 		case "--no-animate":
 			noAnimate = true
 			interactive = false
-		case "--retrieval-only":
-			retrievalOnly = true
-		case "--background-only":
-			backgroundOnly = true
 		case "--no-interactive":
 			interactive = false
 		case "-h", "--help":
@@ -60,11 +53,9 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 			fmt.Println("  --json             Machine-readable JSON output")
 			fmt.Println("  --no-animate       Static output (single snapshot)")
 			fmt.Println("  --no-interactive   Disable keyboard interaction")
-			fmt.Println("  --retrieval-only   Show only retrieval stats")
-			fmt.Println("  --background-only  Show only background (daemon) stats")
 			fmt.Println("\nInteractive controls:")
-			fmt.Println("  Up/Down arrows     Navigate sessions")
-			fmt.Println("  Enter              Expand/collapse session details")
+			fmt.Println("  ↑/↓                Scroll activity log")
+			fmt.Println("  d                  Start/stop daemon")
 			fmt.Println("  q or Ctrl+C        Quit")
 			return nil
 		}
@@ -81,7 +72,7 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 
 	// If no-animate, print once and exit
 	if noAnimate {
-		printWatchStatic(cfg, store, retrievalOnly, backgroundOnly)
+		printWatchStatic(cfg, store)
 		return nil
 	}
 
@@ -91,9 +82,9 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 	}
 
 	if interactive {
-		runInteractiveWatch(cfg, store, retrievalOnly, backgroundOnly)
+		runInteractiveWatch(cfg, store)
 	} else {
-		runAnimatedWatch(cfg, store, retrievalOnly, backgroundOnly)
+		runAnimatedWatch(cfg, store)
 	}
 
 	return nil
@@ -101,13 +92,12 @@ func (c *WatchCommand) Execute(ctx *Context) error {
 
 // watchUIState holds the interactive watch UI state.
 type watchUIState struct {
-	selectedSession int // Index of selected session (0-based)
-	expandedSession int // Index of expanded session (-1 = none)
-	data            *WatchData
+	scrollOffset int // Scroll offset for log feed (0 = bottom/newest)
+	data         *WatchData
 }
 
 // runAnimatedWatch runs the non-interactive animated watch.
-func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
+func runAnimatedWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -128,7 +118,7 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly,
 
 	// Initial render
 	fmt.Print(tui.ClearAndHome())
-	renderDashboard(data, animFrame, retrievalOnly, backgroundOnly)
+	renderDashboard(data, animFrame)
 
 	for {
 		select {
@@ -138,7 +128,7 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly,
 			data.Refresh(cfg, store)
 			// Clear and redraw (prevents ghost content)
 			fmt.Print(tui.ClearAndHome())
-			renderDashboard(data, animFrame, retrievalOnly, backgroundOnly)
+			renderDashboard(data, animFrame)
 		case <-sigChan:
 			fmt.Print(tui.CursorShow) // Show cursor
 			fmt.Println("\n\nStopped watching.")
@@ -148,7 +138,7 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage, retrievalOnly,
 }
 
 // runInteractiveWatch runs the interactive watch with keyboard input.
-func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
+func runInteractiveWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -157,7 +147,7 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		// Fall back to non-interactive mode
-		runAnimatedWatch(cfg, store, retrievalOnly, backgroundOnly)
+		runAnimatedWatch(cfg, store)
 		return
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
@@ -182,9 +172,7 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 	// Initialize watch data and UI state
 	data := NewWatchData(cfg, store)
 	state := &watchUIState{
-		selectedSession: 0,
-		expandedSession: -1,
-		data:            data,
+		data: data,
 	}
 
 	// Animation state
@@ -196,7 +184,7 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 
 	// Initial render
 	fmt.Print(tui.ClearAndHome())
-	renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
+	renderInteractiveDashboard(cfg, state, animFrame)
 
 	// Escape sequence state
 	escapeSeq := make([]byte, 0, 3)
@@ -209,7 +197,7 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 			state.data.Refresh(cfg, store)
 			// Clear screen and redraw (prevents ghost content)
 			fmt.Print(tui.ClearAndHome())
-			renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
+			renderInteractiveDashboard(cfg, state, animFrame)
 
 		case key := <-keyChan:
 			// Handle escape sequences (arrow keys)
@@ -219,48 +207,54 @@ func runInteractiveWatch(cfg *config.Config, store *storage.Storage, retrievalOn
 					// Process escape sequence
 					if escapeSeq[0] == 27 && escapeSeq[1] == 91 {
 						switch escapeSeq[2] {
-						case 65: // Up arrow
-							if state.expandedSession == -1 && state.selectedSession > 0 {
-								state.selectedSession--
+						case 65: // Up arrow - scroll up (older entries)
+							maxScroll := len(state.data.Activity) - 1
+							if maxScroll < 0 {
+								maxScroll = 0
 							}
-						case 66: // Down arrow
-							if state.expandedSession == -1 && state.selectedSession < len(state.data.Sessions)-1 {
-								state.selectedSession++
+							if state.scrollOffset < maxScroll {
+								state.scrollOffset++
+							}
+						case 66: // Down arrow - scroll down (newer entries)
+							if state.scrollOffset > 0 {
+								state.scrollOffset--
 							}
 						}
 					}
 					escapeSeq = escapeSeq[:0]
 					// Redraw after key
 					fmt.Print(tui.ClearAndHome())
-					renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
+					renderInteractiveDashboard(cfg, state, animFrame)
 				}
 				continue
 			}
 
 			switch key {
-			case 27: // Escape - start escape sequence or collapse
-				if state.expandedSession != -1 {
-					state.expandedSession = -1
-					fmt.Print(tui.ClearAndHome())
-					renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
-				} else {
-					escapeSeq = append(escapeSeq, key)
-				}
-			case 13: // Enter - toggle expand
-				if state.expandedSession == state.selectedSession {
-					state.expandedSession = -1
-				} else if len(state.data.Sessions) > 0 && state.selectedSession < len(state.data.Sessions) {
-					state.expandedSession = state.selectedSession
-				}
-				fmt.Print(tui.ClearAndHome()) // Clear and redraw for expansion
-				renderInteractiveDashboard(cfg, store, state, animFrame, retrievalOnly, backgroundOnly)
+			case 27: // Escape - start escape sequence
+				escapeSeq = append(escapeSeq, key)
 			case 'q', 3: // q or Ctrl+C
 				return
+			case 'd': // d - toggle daemon
+				toggleDaemon(cfg)
+				// Give daemon time to start/stop, then refresh
+				time.Sleep(500 * time.Millisecond)
+				state.data.Refresh(cfg, store)
+				fmt.Print(tui.ClearAndHome())
+				renderInteractiveDashboard(cfg, state, animFrame)
 			}
 
 		case <-sigChan:
 			return
 		}
+	}
+}
+
+// toggleDaemon starts or stops the daemon based on current state.
+func toggleDaemon(cfg *config.Config) {
+	if IsDaemonRunning(cfg.ContextDir) {
+		StopDaemon(cfg.ContextDir)
+	} else {
+		StartDaemonBackground(cfg.ContextDir)
 	}
 }
 
@@ -297,17 +291,11 @@ func printWatchJSON(cfg *config.Config, store *storage.Storage) {
 }
 
 // printWatchStatic outputs a single snapshot without animation.
-func printWatchStatic(cfg *config.Config, store *storage.Storage, retrievalOnly, backgroundOnly bool) {
+func printWatchStatic(cfg *config.Config, store *storage.Storage) {
 	data := NewWatchData(cfg, store)
-	renderDashboard(data, 0, retrievalOnly, backgroundOnly)
+	renderDashboard(data, 0)
 }
 
-// Dashboard layout constants
-const (
-	dashboardWidth = 61
-	col1Width      = 28
-	col2Width      = 28
-)
 
 // rawPrint prints a line with \r\n for raw terminal mode.
 // In raw mode, \n alone doesn't return to column 1.
@@ -320,125 +308,35 @@ func rawPrintln(s string) {
 	fmt.Print(s + "\r\n")
 }
 
-// renderDashboard renders the main dashboard view (used by both animated and static modes).
-func renderDashboard(data *WatchData, frame int, retrievalOnly, backgroundOnly bool) {
-	// Mode header
-	icon, name, desc := data.ModeStatus(frame, true)
-	for _, line := range tui.HeaderPanel(icon, name, desc, dashboardWidth) {
-		fmt.Println(line)
+// renderDashboard renders the simplified dashboard view (used by both animated and static modes).
+// Layout: Stats header, Log feed, Commands footer - no boxes.
+func renderDashboard(data *WatchData, frame int) {
+	// Stats header
+	icon, modeName, _ := data.ModeStatus(frame, true)
+	abr := data.ABR()
+	abrStr := "-"
+	if abr > 0 {
+		abrStr = fmt.Sprintf("%.0f%%", abr*100)
 	}
-
-	// Main content panels
-	if !retrievalOnly && !backgroundOnly {
-		// Two-column split: Retrieval | Background
-		leftLines := renderRetrievalColumn(data)
-		rightLines := renderBackgroundColumn(data)
-		for _, line := range tui.SplitPanel("Retrieval", "Background", leftLines, rightLines, col1Width, col2Width) {
-			fmt.Println(line)
-		}
-	} else if backgroundOnly {
-		// Background only
-		lines := []string{
-			fmt.Sprintf("Events: %d  Insights: %d", data.TotalEvents, data.TotalInsights),
-		}
-		if data.Background != nil {
-			lines = append(lines, fmt.Sprintf("Think: budget %d/%d  Dream: queue %d",
-				data.Background.ThinkBudget, data.Background.ThinkMaxBudget, data.Background.DreamQueueDepth))
-		}
-		for _, line := range tui.Panel("Background", lines, dashboardWidth) {
-			fmt.Println(line)
-		}
-	} else if retrievalOnly {
-		// Retrieval only
-		lines := renderRetrievalColumn(data)
-		for _, line := range tui.Panel("Retrieval", lines, dashboardWidth) {
-			fmt.Println(line)
-		}
-	}
-
-	// Activity feed
+	fmt.Printf("%s %s  Events: %d  Insights: %d  ABR: %s\n",
+		icon, modeName, data.TotalEvents, data.TotalInsights, abrStr)
 	fmt.Println()
-	renderActivityFeed(data, frame, dashboardWidth)
 
-	// Footer
-	fmt.Printf("\nPress Ctrl+C to stop. Refreshing every 300ms...\n")
-}
-
-// renderRetrievalColumn builds the retrieval stats column content.
-func renderRetrievalColumn(data *WatchData) []string {
-	lines := make([]string, 0, 4)
-
-	if data.Retrieval != nil {
-		lines = append(lines, fmt.Sprintf("Queries: %d", data.Retrieval.TotalRetrievals))
-
-		if data.Retrieval.LastMode != "" {
-			mode := strings.ToUpper(data.Retrieval.LastMode[:1]) + data.Retrieval.LastMode[1:]
-			lines = append(lines, fmt.Sprintf("Last: %dms (%s)", data.Retrieval.LastReflexMs, mode))
-		}
-
-		lines = append(lines, fmt.Sprintf("Results: %d -> %s", data.Retrieval.LastResults, data.Retrieval.LastDecision))
-
-		// ABR metric
-		abr := data.ABR()
-		if abr > 0 {
-			lines = append(lines, fmt.Sprintf("ABR: %.0f%%", abr*100))
-		}
-	} else {
-		lines = append(lines, "No retrievals yet")
-	}
-
-	return lines
-}
-
-// renderBackgroundColumn builds the background stats column content.
-func renderBackgroundColumn(data *WatchData) []string {
-	lines := make([]string, 0, 4)
-
-	lines = append(lines, fmt.Sprintf("Events: %d", data.TotalEvents))
-	lines = append(lines, fmt.Sprintf("Insights: %d", data.TotalInsights))
-
-	if data.Background != nil {
-		lines = append(lines, fmt.Sprintf("Think: %s (budget %d)", data.ThinkStatus(), data.Background.ThinkBudget))
-		lines = append(lines, fmt.Sprintf("Dream: %s (queue %d)", data.DreamStatus(), data.Background.DreamQueueDepth))
-	}
-
-	// Topic weights
-	topics := data.TopTopics(3, 0.3)
-	if len(topics) > 0 {
-		parts := make([]string, len(topics))
-		for i, t := range topics {
-			parts[i] = fmt.Sprintf("%s(%.1f)", t.Topic, t.Weight)
-		}
-		lines = append(lines, "Topics: "+strings.Join(parts, ", "))
-	}
-
-	return lines
-}
-
-// renderActivityFeed renders the activity log panel.
-func renderActivityFeed(data *WatchData, frame int, width int) {
-	chars := tui.BoxChars(tui.StyleSingle)
-
-	// Header
-	fmt.Println(chars.TopLeft + tui.HLine(width-2, tui.StyleSingle) + chars.TopRight)
-	fmt.Printf("%s %s %s\n", chars.Vertical, tui.Pad("Activity Feed", width-4), chars.Vertical)
-	fmt.Println(chars.VerticalRight + tui.HLine(width-2, tui.StyleSingle) + chars.VerticalLeft)
-
+	// Log feed
 	if len(data.Activity) > 0 {
 		for _, entry := range data.Activity {
 			timeStr := entry.Timestamp.Format("15:04:05")
-			modeIcon := getAnimatedModeSpinner(entry.Mode, frame)
-			desc := tui.Truncate(entry.Description, width-20)
-			line := fmt.Sprintf(" %s %s %s", timeStr, tui.Pad(modeIcon, 2), desc)
-			fmt.Printf("%s%s%s\n", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
+			fmt.Printf("%s [%s] %s\n", timeStr, entry.Mode, entry.Description)
 		}
 	} else {
-		line := " No activity yet. Start daemon with: cortex daemon &"
-		fmt.Printf("%s%s%s\n", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
+		fmt.Println("No activity yet. Start daemon with: cortex daemon &")
 	}
+	fmt.Println()
 
-	fmt.Println(chars.BottomLeft + tui.HLine(width-2, tui.StyleSingle) + chars.BottomRight)
+	// Commands footer
+	fmt.Println("d:daemon  q:quit")
 }
+
 
 // getAnimatedModeSpinner returns an animated spinner for a cognitive mode.
 func getAnimatedModeSpinner(mode string, frame int) string {
@@ -472,118 +370,60 @@ func getAnimatedModeSpinner(mode string, frame int) string {
 	}
 }
 
-// renderInteractiveDashboard renders the interactive watch view with sessions panel.
-func renderInteractiveDashboard(cfg *config.Config, store *storage.Storage, state *watchUIState, frame int, retrievalOnly, backgroundOnly bool) {
+// renderInteractiveDashboard renders the simplified interactive watch view.
+// Layout: Stats header, scrollable Log feed, Commands footer - no boxes.
+func renderInteractiveDashboard(cfg *config.Config, state *watchUIState, frame int) {
 	data := state.data
-	chars := tui.BoxChars(tui.StyleSingle)
 
-	// Mode header
-	icon, name, desc := data.ModeStatus(frame, true)
-	modeStr := fmt.Sprintf(" %s %s", icon, name)
-	if desc != "" {
-		modeStr += "  " + tui.Truncate(desc, dashboardWidth-tui.VisibleWidth(modeStr)-3)
+	// Stats header
+	icon, modeName, _ := data.ModeStatus(frame, true)
+	abr := data.ABR()
+	abrStr := "-"
+	if abr > 0 {
+		abrStr = fmt.Sprintf("%.0f%%", abr*100)
 	}
+	rawPrint("%s %s  Events: %d  Insights: %d  ABR: %s",
+		icon, modeName, data.TotalEvents, data.TotalInsights, abrStr)
+	rawPrint("")
 
-	rawPrintln(chars.TopLeft + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.TopRight)
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad(modeStr, dashboardWidth-2), chars.Vertical)
-
-	// Quick stats line
-	statsLine := fmt.Sprintf(" Events: %d  Insights: %d", data.TotalEvents, data.TotalInsights)
-	if data.Retrieval != nil && data.Retrieval.TotalRetrievals > 0 {
-		statsLine += fmt.Sprintf("  Queries: %d", data.Retrieval.TotalRetrievals)
-	}
-	if data.Background != nil {
-		statsLine += fmt.Sprintf("  ABR: %.0f%%", data.ABR()*100)
-	}
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad(statsLine, dashboardWidth-2), chars.Vertical)
-
-	// Sessions panel header
-	sessionCount := len(data.Sessions)
-	sessionTitle := fmt.Sprintf(" Sessions (%d)", sessionCount)
-	rawPrintln(chars.VerticalRight + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.VerticalLeft)
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad(sessionTitle, dashboardWidth-2), chars.Vertical)
-	rawPrintln(chars.VerticalRight + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.VerticalLeft)
-
-	if sessionCount == 0 {
-		rawPrint("%s%s%s", chars.Vertical, tui.Pad(" No sessions yet. Use Claude Code to start.", dashboardWidth-2), chars.Vertical)
-	} else {
-		for i, sess := range data.Sessions {
-			// Format: [>/  ] HH:MM  "prompt..."  [N evts]
-			selector := "  "
-			if i == state.selectedSession {
-				selector = "> "
-			}
-
-			timeStr := sess.StartedAt.Format("15:04")
-			promptSnippet := tui.Truncate(sess.InitialPrompt, 20)
-			if promptSnippet == "" {
-				promptSnippet = "(no prompt)"
-			}
-
-			line := fmt.Sprintf("%s%s  \"%s\"  [%d evts]", selector, timeStr, promptSnippet, sess.EventCount)
-			rawPrint("%s%s%s", chars.Vertical, tui.Pad(line, dashboardWidth-2), chars.Vertical)
-
-			// If this session is expanded, show details
-			if i == state.expandedSession {
-				renderSessionDetails(store, data, sess, dashboardWidth, chars)
+	// Log feed (with scroll support)
+	maxLogLines := 15
+	if len(data.Activity) > 0 {
+		totalEntries := len(data.Activity)
+		startIdx := state.scrollOffset
+		endIdx := startIdx + maxLogLines
+		if endIdx > totalEntries {
+			endIdx = totalEntries
+		}
+		if startIdx >= totalEntries {
+			startIdx = totalEntries - 1
+			if startIdx < 0 {
+				startIdx = 0
 			}
 		}
-	}
 
-	rawPrintln(chars.BottomLeft + tui.HLine(dashboardWidth-2, tui.StyleSingle) + chars.BottomRight)
+		// Show scroll indicator if there are more entries above
+		if state.scrollOffset > 0 {
+			rawPrint("  ↑ %d more", state.scrollOffset)
+		}
 
-	// Controls hint
-	if state.expandedSession == -1 {
-		rawPrint("")
-		rawPrintln("Up/Down: Navigate  Enter: Expand  q: Quit")
+		// Activity is stored newest-first, so reverse for display
+		visibleEntries := data.Activity[startIdx:endIdx]
+		for i := len(visibleEntries) - 1; i >= 0; i-- {
+			entry := visibleEntries[i]
+			timeStr := entry.Timestamp.Format("15:04:05")
+			rawPrint("%s [%s] %s", timeStr, entry.Mode, entry.Description)
+		}
 	} else {
-		rawPrint("")
-		rawPrintln("Esc: Collapse  q: Quit")
+		rawPrint("No activity yet. Start daemon with: cortex daemon &")
 	}
+	rawPrint("")
+
+	// Commands footer with daemon status
+	daemonStatus := "off"
+	if IsDaemonRunning(cfg.ContextDir) {
+		daemonStatus = "on"
+	}
+	rawPrint("d:daemon(%s)  ↑↓:scroll  q:quit", daemonStatus)
 }
 
-// renderSessionDetails shows detailed session info when expanded.
-func renderSessionDetails(store *storage.Storage, data *WatchData, sess *storage.SessionMetadata, width int, chars tui.BoxCharSet) {
-	// Blank line
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad("", width-2), chars.Vertical)
-
-	// Full initial prompt
-	if sess.InitialPrompt != "" {
-		promptLine := "   Initial: \"" + tui.Truncate(sess.InitialPrompt, width-18) + "\""
-		rawPrint("%s%s%s", chars.Vertical, tui.Pad(promptLine, width-2), chars.Vertical)
-	}
-
-	// Duration
-	duration := time.Since(sess.StartedAt).Round(time.Minute)
-	durationStr := fmt.Sprintf("   Duration: %v", duration)
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad(durationStr, width-2), chars.Vertical)
-
-	// Recent activity for this session
-	sessionEvents, err := store.GetSessionEvents(sess.SessionID, 5)
-	if err == nil && len(sessionEvents) > 0 {
-		rawPrint("%s%s%s", chars.Vertical, tui.Pad("   Recent Activity:", width-2), chars.Vertical)
-		for _, evt := range sessionEvents {
-			timeStr := evt.Timestamp.Format("15:04:05")
-			action := evt.ToolName
-			if action == "" {
-				action = string(evt.EventType)
-			}
-			line := fmt.Sprintf("     %s  %s", timeStr, tui.Truncate(action, width-20))
-			rawPrint("%s%s%s", chars.Vertical, tui.Pad(line, width-2), chars.Vertical)
-		}
-	}
-
-	// Topic weights
-	topics := data.TopTopics(3, 0.3)
-	if len(topics) > 0 {
-		parts := make([]string, len(topics))
-		for i, t := range topics {
-			parts[i] = fmt.Sprintf("%s(%.1f)", t.Topic, t.Weight)
-		}
-		topicsStr := "   Topics: " + strings.Join(parts, ", ")
-		rawPrint("%s%s%s", chars.Vertical, tui.Pad(topicsStr, width-2), chars.Vertical)
-	}
-
-	// Blank line
-	rawPrint("%s%s%s", chars.Vertical, tui.Pad("", width-2), chars.Vertical)
-}

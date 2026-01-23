@@ -316,6 +316,54 @@ func (l *ActivityLogger) Log(entry *ActivityLogEntry) error {
 	return nil
 }
 
+// LogMetric logs a metric value for a cognitive mode.
+// Format: "[mode] metric: value" (e.g., "[reflect] ABR: 0.87")
+func (l *ActivityLogger) LogMetric(mode string, metric string, value interface{}) error {
+	desc := fmt.Sprintf("%s: %v", metric, value)
+	return l.Log(&ActivityLogEntry{
+		Mode:        mode,
+		Description: desc,
+	})
+}
+
+// LogQuery logs a reflex query with results and latency.
+func (l *ActivityLogger) LogQuery(query string, results int, latencyMs int64) error {
+	desc := fmt.Sprintf("query %q → %d results (%dms)", query, results, latencyMs)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "reflex",
+		Description: desc,
+		Query:       query,
+		Results:     results,
+		LatencyMs:   latencyMs,
+	})
+}
+
+// LogInsight logs an insight extraction.
+func (l *ActivityLogger) LogInsight(insight string) error {
+	desc := fmt.Sprintf("extracted insight: %q", insight)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "dream",
+		Description: desc,
+	})
+}
+
+// LogRerank logs a reflect reranking operation with ABR.
+func (l *ActivityLogger) LogRerank(abr float64) error {
+	desc := fmt.Sprintf("reranked → ABR %.2f", abr)
+	return l.Log(&ActivityLogEntry{
+		Mode:        "reflect",
+		Description: desc,
+	})
+}
+
+// LogCache logs a think cache operation.
+func (l *ActivityLogger) LogCache(operation string) error {
+	return l.Log(&ActivityLogEntry{
+		Mode:        "think",
+		Description: operation,
+	})
+}
+
 // ReadRecentActivity reads the most recent N activity log entries.
 func ReadRecentActivity(contextDir string, limit int) ([]ActivityLogEntry, error) {
 	path := filepath.Join(contextDir, "activity.log")
@@ -347,4 +395,95 @@ func ReadRecentActivity(contextDir string, limit int) ([]ActivityLogEntry, error
 	}
 
 	return entries, nil
+}
+
+// BackgroundMetrics tracks background processing state for the watch command.
+// Written periodically by the daemon, read by the watch command.
+type BackgroundMetrics struct {
+	ThinkBudget     int       `json:"think_budget"`      // Current Think budget
+	ThinkMaxBudget  int       `json:"think_max_budget"`  // Max Think budget for reference
+	DreamQueueDepth int       `json:"dream_queue_depth"` // ProactiveQueue length
+	DreamBudget     int       `json:"dream_budget"`      // Current Dream budget
+	DreamMaxBudget  int       `json:"dream_max_budget"`  // Max Dream budget for reference
+	ActivityLevel   float64   `json:"activity_level"`    // 0.0 (idle) to 1.0 (very active)
+	IdleSeconds     int       `json:"idle_seconds"`      // Time since last retrieve
+	CacheHitRate    float64   `json:"cache_hit_rate"`    // Think cache hit rate (0-1)
+	CacheHits       int       `json:"cache_hits"`        // Total cache hits
+	CacheMisses     int       `json:"cache_misses"`      // Total cache misses
+	InsightsSession int       `json:"insights_session"`  // Insights discovered this session
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// BackgroundMetricsWriter provides thread-safe writing of background metrics.
+type BackgroundMetricsWriter struct {
+	mu   sync.Mutex
+	path string
+}
+
+// NewBackgroundMetricsWriter creates a writer for the given context directory.
+func NewBackgroundMetricsWriter(contextDir string) *BackgroundMetricsWriter {
+	return &BackgroundMetricsWriter{
+		path: filepath.Join(contextDir, "background_metrics.json"),
+	}
+}
+
+// Path returns the metrics file path.
+func (w *BackgroundMetricsWriter) Path() string {
+	return w.path
+}
+
+// WriteMetrics atomically writes background metrics to the metrics file.
+func (w *BackgroundMetricsWriter) WriteMetrics(metrics *BackgroundMetrics) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	metrics.UpdatedAt = time.Now()
+
+	data, err := json.MarshalIndent(metrics, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal background metrics: %w", err)
+	}
+
+	// Atomic write pattern
+	tempPath := w.path + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tempPath, w.path); err != nil {
+		os.Remove(tempPath)
+		return fmt.Errorf("failed to rename metrics file: %w", err)
+	}
+
+	return nil
+}
+
+// ReadBackgroundMetrics reads background metrics from the metrics file.
+// Returns nil if the file doesn't exist or is stale (> 10 seconds old).
+func ReadBackgroundMetrics(contextDir string) (*BackgroundMetrics, error) {
+	path := filepath.Join(contextDir, "background_metrics.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read background metrics: %w", err)
+	}
+
+	var metrics BackgroundMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return nil, fmt.Errorf("failed to parse background metrics: %w", err)
+	}
+
+	// Check if metrics are stale (> 10 seconds old)
+	if time.Since(metrics.UpdatedAt) > 10*time.Second {
+		return nil, nil // Metrics are stale
+	}
+
+	return &metrics, nil
+}
+
+// GetBackgroundMetricsPath returns the standard background metrics file path.
+func GetBackgroundMetricsPath(contextDir string) string {
+	return filepath.Join(contextDir, "background_metrics.json")
 }
