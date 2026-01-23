@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/viterin/vek"
@@ -31,8 +32,12 @@ type Storage struct {
 
 // New creates a new Storage instance
 func New(cfg *config.Config) (*Storage, error) {
-	dbPath := filepath.Join(cfg.ContextDir, "db", "events.db")
+	dbDir := filepath.Join(cfg.ContextDir, "db")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	}
 
+	dbPath := filepath.Join(dbDir, "events.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
