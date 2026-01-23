@@ -359,6 +359,7 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 		LastMode:        modeStr,
 		LastReflexMs:    elapsed.Milliseconds(), // Total time as estimate
 		LastReflectMs:   0,
+		LastResolveMs:   0,
 		LastResults:     0,
 		LastDecision:    "skip",
 		TotalRetrievals: totalRetrievals,
@@ -367,17 +368,27 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 	if result != nil {
 		stats.LastResults = len(result.Results)
 		stats.LastDecision = result.Decision.String()
+		stats.LastResolveMs = result.ResolveMs
 	}
 
 	// For Full mode, estimate reflect took majority of time
-	if mode == cognition.Full && elapsed.Milliseconds() > 50 {
+	// Subtract resolve time from elapsed before estimating reflex/reflect split
+	elapsedMinusResolve := elapsed.Milliseconds() - stats.LastResolveMs
+	if mode == cognition.Full && elapsedMinusResolve > 50 {
 		stats.LastReflexMs = 10 // Estimate ~10ms for reflex
-		stats.LastReflectMs = elapsed.Milliseconds() - 10
+		stats.LastReflectMs = elapsedMinusResolve - 10
+	} else {
+		// Fast mode or short elapsed: most time is reflex
+		stats.LastReflexMs = elapsedMinusResolve
 	}
 
 	// Write stats
 	statsWriter := intcognition.NewRetrievalStatsWriter(contextDir)
 	statsWriter.WriteStats(stats)
+
+	// Append to history for latency trend analysis
+	historyWriter := intcognition.NewRetrievalStatsHistoryWriter(contextDir)
+	historyWriter.AppendFromStats(stats)
 
 	// Log the activity
 	logger := intcognition.NewActivityLogger(contextDir)

@@ -70,6 +70,11 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		sessionTracker = NewSessionTracker(store, cfg.ContextDir)
 		router.SetSessionTracker(sessionTracker)
 		metricsWriter = NewBackgroundMetricsWriter(cfg.ContextDir)
+
+		// Wire activity logger for decision and contradiction logging
+		activityLogger := NewActivityLogger(cfg.ContextDir)
+		resolve.SetActivityLogger(activityLogger)
+		reflect.SetActivityLogger(activityLogger)
 	}
 
 	return &Cortex{
@@ -115,7 +120,9 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 		sessionCtx := c.think.SessionContext()
 		if cached, ok := sessionCtx.CachedReflect[q.Text]; ok && len(cached) > 0 {
 			candidates = cached
+			c.think.RecordCacheHit()
 		} else {
+			c.think.RecordCacheMiss()
 			// Run Reflect async for next time
 			c.wg.Add(1)
 			go func() {
@@ -137,11 +144,13 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 		c.dream.ClearProactiveQueue()
 	}
 
-	// Step 3: Resolve
+	// Step 3: Resolve (with timing)
+	resolveStart := time.Now()
 	result, err := c.resolve.Resolve(ctx, q, candidates)
 	if err != nil {
 		return nil, fmt.Errorf("resolve failed: %w", err)
 	}
+	result.ResolveMs = time.Since(resolveStart).Milliseconds()
 
 	// Step 4: Trigger background mode (non-blocking)
 	if c.activity.IsIdle() {
@@ -292,25 +301,10 @@ func (c *Cortex) updateBackgroundMetrics() {
 		return
 	}
 
-	// Get Think session context for cache stats
-	ctx := c.think.SessionContext()
-	cacheHits := 0
-	cacheMisses := 0
-	if ctx != nil {
-		cacheHits = len(ctx.CachedReflect)
-		// Estimate misses as queries without cached results
-		cacheMisses = len(ctx.RecentQueries) - cacheHits
-		if cacheMisses < 0 {
-			cacheMisses = 0
-		}
-	}
-
-	// Calculate cache hit rate
-	var cacheHitRate float64
-	total := cacheHits + cacheMisses
-	if total > 0 {
-		cacheHitRate = float64(cacheHits) / float64(total)
-	}
+	// Get Think cache stats from actual hit/miss tracking
+	cacheHits := c.think.CacheHits()
+	cacheMisses := c.think.CacheMisses()
+	cacheHitRate := c.think.CacheHitRate()
 
 	// Get activity state
 	activityLevel := c.activity.ActivityLevel()
@@ -325,9 +319,8 @@ func (c *Cortex) updateBackgroundMetrics() {
 	thinkBudget := c.activity.ThinkBudget(1, 5)
 	dreamBudget := c.activity.DreamBudget(2, 20, 10*time.Minute)
 
-	// Get session insight count (approximation from Dream)
-	insightsSession := 0
-	// Could track this more precisely if needed
+	// Get session insight count from Dream
+	insightsSession := c.dream.SessionInsights()
 
 	metrics := &BackgroundMetrics{
 		ThinkBudget:     thinkBudget,

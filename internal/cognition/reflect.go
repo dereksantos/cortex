@@ -36,6 +36,9 @@ Guidelines:
 // Takes ~200ms+ due to LLM call.
 type Reflect struct {
 	llm llm.Provider
+
+	// ActivityLogger for logging contradictions to activity.log
+	activityLogger *ActivityLogger
 }
 
 // NewReflect creates a new Reflect instance.
@@ -44,6 +47,11 @@ func NewReflect(provider llm.Provider) *Reflect {
 	return &Reflect{
 		llm: provider,
 	}
+}
+
+// SetActivityLogger sets the activity logger for contradiction logging.
+func (r *Reflect) SetActivityLogger(logger *ActivityLogger) {
+	r.activityLogger = logger
 }
 
 // Reflect reranks candidates using LLM-based relevance evaluation.
@@ -135,6 +143,19 @@ func (r *Reflect) parseRerankResponse(response string, candidates []cognition.Re
 		candidateMap[c.ID] = c
 	}
 
+	// Log detected contradictions for noise ratio analysis
+	if r.activityLogger != nil && len(rr.Contradictions) > 0 {
+		for _, cont := range rr.Contradictions {
+			if len(cont.IDs) >= 2 {
+				// Get summaries from the candidate contents
+				insight1 := r.getSummary(candidateMap, cont.IDs[0])
+				insight2 := r.getSummary(candidateMap, cont.IDs[1])
+				// Ignoring error - logging should not block reranking
+				_ = r.activityLogger.LogContradiction(insight1, insight2, cont.Reason)
+			}
+		}
+	}
+
 	// Reorder based on ranking
 	var reranked []cognition.Result
 	seenIDs := make(map[string]bool)
@@ -190,4 +211,17 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// getSummary extracts a brief summary from a candidate for logging.
+// Returns the truncated content or the ID if content is not available.
+func (r *Reflect) getSummary(candidateMap map[string]cognition.Result, id string) string {
+	if c, ok := candidateMap[id]; ok {
+		summary := c.Content
+		if summary == "" {
+			summary = id
+		}
+		return truncate(summary, 50)
+	}
+	return id
 }
