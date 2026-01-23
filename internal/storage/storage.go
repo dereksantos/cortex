@@ -423,11 +423,22 @@ func (s *Storage) GetStats() (map[string]interface{}, error) {
 	s.db.QueryRow("SELECT COUNT(*) FROM insights").Scan(&totalInsights)
 	stats["total_insights"] = totalInsights
 
+	// Total embeddings
+	var totalEmbeddings int
+	s.db.QueryRow("SELECT COUNT(*) FROM embeddings").Scan(&totalEmbeddings)
+	stats["total_embeddings"] = totalEmbeddings
+
 	// Date range
 	var oldest, newest time.Time
 	s.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM events").Scan(&oldest, &newest)
 	stats["oldest_event"] = oldest
 	stats["newest_event"] = newest
+
+	// Database size (SQLite page_count * page_size)
+	var pageCount, pageSize int64
+	s.db.QueryRow("PRAGMA page_count").Scan(&pageCount)
+	s.db.QueryRow("PRAGMA page_size").Scan(&pageSize)
+	stats["db_size_bytes"] = pageCount * pageSize
 
 	return stats, nil
 }

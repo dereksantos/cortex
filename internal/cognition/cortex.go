@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -30,6 +31,9 @@ type Cortex struct {
 
 	// Shared state
 	activity *ActivityTracker
+
+	// Metrics
+	metricsWriter *BackgroundMetricsWriter
 
 	// Graceful shutdown
 	wg sync.WaitGroup
@@ -61,9 +65,11 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 
 	// Create session tracker for watch view (if config provided)
 	var sessionTracker *SessionTracker
+	var metricsWriter *BackgroundMetricsWriter
 	if cfg != nil {
 		sessionTracker = NewSessionTracker(store, cfg.ContextDir)
 		router.SetSessionTracker(sessionTracker)
+		metricsWriter = NewBackgroundMetricsWriter(cfg.ContextDir)
 	}
 
 	return &Cortex{
@@ -75,6 +81,7 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		digest:         digest,
 		router:         router,
 		sessionTracker: sessionTracker,
+		metricsWriter:  metricsWriter,
 		activity:       activity,
 	}, nil
 }
@@ -147,12 +154,16 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 				c.digest.NotifyDreamCompleted()
 				c.digest.MaybeDigest(ctx)
 			}
+			// Update metrics for watch command
+			c.updateBackgroundMetrics()
 		}()
 	} else {
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
 			c.think.MaybeThink(ctx)
+			// Update metrics for watch command
+			c.updateBackgroundMetrics()
 		}()
 	}
 
@@ -273,6 +284,66 @@ func (c *Cortex) GetDigestedInsights(ctx context.Context, limit int) ([]cognitio
 // SessionTracker returns the session tracker for watch view.
 func (c *Cortex) SessionTracker() *SessionTracker {
 	return c.sessionTracker
+}
+
+// updateBackgroundMetrics writes current background processing state for the watch command.
+func (c *Cortex) updateBackgroundMetrics() {
+	if c.metricsWriter == nil {
+		return
+	}
+
+	// Get Think session context for cache stats
+	ctx := c.think.SessionContext()
+	cacheHits := 0
+	cacheMisses := 0
+	if ctx != nil {
+		cacheHits = len(ctx.CachedReflect)
+		// Estimate misses as queries without cached results
+		cacheMisses = len(ctx.RecentQueries) - cacheHits
+		if cacheMisses < 0 {
+			cacheMisses = 0
+		}
+	}
+
+	// Calculate cache hit rate
+	var cacheHitRate float64
+	total := cacheHits + cacheMisses
+	if total > 0 {
+		cacheHitRate = float64(cacheHits) / float64(total)
+	}
+
+	// Get activity state
+	activityLevel := c.activity.ActivityLevel()
+	idleSeconds := int(c.activity.TimeSinceLastRetrieve().Seconds())
+
+	// Get Dream queue depth
+	dreamQueueDepth := len(c.dream.ProactiveQueue())
+
+	// Get budgets using default config values
+	// Think: MaxBudget=5, MinBudget=1
+	// Dream: MaxBudget=20, MinBudget=2, GrowthDuration=10min
+	thinkBudget := c.activity.ThinkBudget(1, 5)
+	dreamBudget := c.activity.DreamBudget(2, 20, 10*time.Minute)
+
+	// Get session insight count (approximation from Dream)
+	insightsSession := 0
+	// Could track this more precisely if needed
+
+	metrics := &BackgroundMetrics{
+		ThinkBudget:     thinkBudget,
+		ThinkMaxBudget:  5, // Default max budget
+		DreamQueueDepth: dreamQueueDepth,
+		DreamBudget:     dreamBudget,
+		DreamMaxBudget:  20, // Default max budget
+		ActivityLevel:   activityLevel,
+		IdleSeconds:     idleSeconds,
+		CacheHitRate:    cacheHitRate,
+		CacheHits:       cacheHits,
+		CacheMisses:     cacheMisses,
+		InsightsSession: insightsSession,
+	}
+
+	c.metricsWriter.WriteMetrics(metrics)
 }
 
 // Wait blocks until all background goroutines complete.
