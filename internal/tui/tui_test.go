@@ -630,3 +630,206 @@ func TestTextWithANSIIntegration(t *testing.T) {
 		t.Error("Styled text should end with reset")
 	}
 }
+
+// ============================================================================
+// Panel Tests
+// ============================================================================
+
+func TestPanelWidthConsistency(t *testing.T) {
+	width := 40
+	lines := Panel("Test Title", []string{"Line 1", "Line 2", "Long line that needs truncation here"}, width)
+
+	for i, line := range lines {
+		got := VisibleWidth(line)
+		if got != width {
+			t.Errorf("Panel line %d: width=%d, want %d\nline: %q", i, got, width, line)
+		}
+	}
+}
+
+func TestPanelCleanInputProducesCleanOutput(t *testing.T) {
+	// Panel expects clean input (no embedded newlines in content)
+	// Caller is responsible for sanitizing input
+	lines := Panel("Title", []string{"Clean line 1", "Clean line 2"}, 30)
+
+	for i, line := range lines {
+		if strings.Contains(line, "\n") {
+			t.Errorf("Panel line %d contains embedded newline: %q", i, line)
+		}
+		if strings.Contains(line, "\r") {
+			t.Errorf("Panel line %d contains embedded carriage return: %q", i, line)
+		}
+	}
+}
+
+func TestSplitPanelWidthConsistency(t *testing.T) {
+	leftWidth := 20
+	rightWidth := 20
+	expectedWidth := leftWidth + rightWidth + 5 // borders + divider + padding
+
+	left := []string{"Left 1", "Left 2"}
+	right := []string{"Right 1", "Right 2", "Right 3"}
+
+	lines := SplitPanel("Left", "Right", left, right, leftWidth, rightWidth)
+
+	for i, line := range lines {
+		got := VisibleWidth(line)
+		if got != expectedWidth {
+			t.Errorf("SplitPanel line %d: width=%d, want %d\nline: %q", i, got, expectedWidth, line)
+		}
+	}
+}
+
+func TestSplitPanelStructure(t *testing.T) {
+	lines := SplitPanel("L", "R", []string{"a"}, []string{"b"}, 15, 15)
+
+	// Should have: top, header, divider, content, bottom = 5 lines
+	if len(lines) != 5 {
+		t.Errorf("SplitPanel should have 5 lines, got %d", len(lines))
+	}
+
+	// Top: ┌───┬───┐
+	if !strings.HasPrefix(lines[0], "┌") || !strings.HasSuffix(lines[0], "┐") {
+		t.Errorf("Invalid top border: %q", lines[0])
+	}
+	if strings.Count(lines[0], "┬") != 1 {
+		t.Errorf("Top should have one ┬: %q", lines[0])
+	}
+
+	// Header row: │ L │ R │
+	if strings.Count(lines[1], "│") != 3 {
+		t.Errorf("Header should have 3 │: %q", lines[1])
+	}
+
+	// Divider: ├───┼───┤
+	if !strings.HasPrefix(lines[2], "├") || !strings.HasSuffix(lines[2], "┤") {
+		t.Errorf("Invalid divider: %q", lines[2])
+	}
+	if strings.Count(lines[2], "┼") != 1 {
+		t.Errorf("Divider should have one ┼: %q", lines[2])
+	}
+
+	// Content row: │ a │ b │
+	if strings.Count(lines[3], "│") != 3 {
+		t.Errorf("Content should have 3 │: %q", lines[3])
+	}
+
+	// Bottom: └───┴───┘
+	if !strings.HasPrefix(lines[4], "└") || !strings.HasSuffix(lines[4], "┘") {
+		t.Errorf("Invalid bottom border: %q", lines[4])
+	}
+	if strings.Count(lines[4], "┴") != 1 {
+		t.Errorf("Bottom should have one ┴: %q", lines[4])
+	}
+}
+
+func TestHeaderPanelWidthConsistency(t *testing.T) {
+	width := 50
+
+	tests := []struct {
+		name string
+		icon string
+		title string
+		desc string
+	}{
+		{"short", "●", "IDLE", ""},
+		{"with desc", "●", "THINKING", "processing patterns"},
+		{"long desc", "●", "DREAMING", "a very long description that should be truncated"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := HeaderPanel(tt.icon, tt.title, tt.desc, width)
+			for i, line := range lines {
+				got := VisibleWidth(line)
+				if got != width {
+					t.Errorf("HeaderPanel line %d: width=%d, want %d\nline: %q", i, got, width, line)
+				}
+			}
+		})
+	}
+}
+
+func TestMetricRow(t *testing.T) {
+	row := MetricRow("Events", "1234", 20)
+	if !strings.Contains(row, "Events") || !strings.Contains(row, "1234") {
+		t.Errorf("MetricRow should contain label and value: %q", row)
+	}
+	if VisibleWidth(row) > 20 {
+		t.Errorf("MetricRow width=%d, should be <= 20", VisibleWidth(row))
+	}
+}
+
+func TestActivityRow(t *testing.T) {
+	width := 50
+	row := ActivityRow("15:04:05", "dream", "Processing insights", width)
+
+	got := VisibleWidth(row)
+	if got != width {
+		t.Errorf("ActivityRow width=%d, want %d\nrow: %q", got, width, row)
+	}
+
+	if !strings.Contains(row, "15:04:05") {
+		t.Errorf("ActivityRow should contain time: %q", row)
+	}
+	if !strings.Contains(row, "dream") {
+		t.Errorf("ActivityRow should contain mode: %q", row)
+	}
+}
+
+func TestSessionRow(t *testing.T) {
+	width := 50
+	row := SessionRow("> ", "15:04", "implement feature", 25, width)
+
+	got := VisibleWidth(row)
+	if got != width {
+		t.Errorf("SessionRow width=%d, want %d\nrow: %q", got, width, row)
+	}
+
+	if !strings.HasPrefix(row, "> ") {
+		t.Errorf("SessionRow should start with selector: %q", row)
+	}
+}
+
+func TestProgressBar(t *testing.T) {
+	tests := []struct {
+		progress float64
+		width    int
+	}{
+		{0.0, 20},
+		{0.5, 20},
+		{1.0, 20},
+		{0.75, 30},
+	}
+
+	for _, tt := range tests {
+		bar := ProgressBar(tt.progress, tt.width)
+		got := VisibleWidth(bar)
+		if got > tt.width {
+			t.Errorf("ProgressBar(%.1f, %d) width=%d, should be <= %d\nbar: %q",
+				tt.progress, tt.width, got, tt.width, bar)
+		}
+		if !strings.HasPrefix(bar, "[") {
+			t.Errorf("ProgressBar should start with [: %q", bar)
+		}
+	}
+}
+
+func TestDividerWithLabel(t *testing.T) {
+	width := 30
+
+	// With label
+	div := DividerWithLabel("Section", width)
+	if VisibleWidth(div) != width {
+		t.Errorf("DividerWithLabel width=%d, want %d", VisibleWidth(div), width)
+	}
+	if !strings.Contains(div, "Section") {
+		t.Errorf("DividerWithLabel should contain label: %q", div)
+	}
+
+	// Without label (should be same as BoxDivider)
+	divNoLabel := DividerWithLabel("", width)
+	if VisibleWidth(divNoLabel) != width {
+		t.Errorf("DividerWithLabel (no label) width=%d, want %d", VisibleWidth(divNoLabel), width)
+	}
+}
