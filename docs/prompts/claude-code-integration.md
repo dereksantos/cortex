@@ -106,7 +106,7 @@ cortex install
    }
    ```
 2. Copy slash command to `.claude/commands/cortex.md`
-3. Ensure `.context/` directory exists
+3. Ensure `.cortex/` directory exists
 4. Print success message with next steps
 
 **Edge cases**:
@@ -450,7 +450,7 @@ dream.RegisterSource(sources.NewClaudeHistorySource(
 
 **Current**: SessionContext lost on daemon restart
 
-**Solution**: Persist to `.context/session.json`
+**Solution**: Persist to `.cortex/session.json`
 
 ```go
 type PersistedSession struct {
@@ -525,9 +525,9 @@ Update `cortex install` to:
 |------|---------|------|
 | `.claude/settings.local.json` | Hooks config | No |
 | `.claude/commands/*.md` | Slash commands | Yes |
-| `.context/db/events.db` | Event storage | No |
-| `.context/queue/` | Capture queue | No |
-| `.context/session.json` | Session state | No |
+| `.cortex/db/events.db` | Event storage | No |
+| `.cortex/queue/` | Capture queue | No |
+| `.cortex/session.json` | Session state | No |
 
 ## Testing Checklist
 

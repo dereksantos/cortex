@@ -68,12 +68,12 @@ func (c *InitCommand) Execute(ctx *Context) error {
 	}
 
 	// Save config
-	configPath := fmt.Sprintf("%s/.context/config.json", projectRoot)
+	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
 	if err := cfg.Save(configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// Add .context/ to .gitignore if it exists
+	// Add .cortex/ to .gitignore if it exists
 	ensureGitignore(projectRoot)
 
 	fmt.Println("Cortex initialized successfully!")
@@ -137,10 +137,10 @@ func (c *InstallCommand) Execute(ctx *Context) error {
 
 	fmt.Printf("Detected Claude Code at %s\n", claudeHomeDir)
 
-	// 2. Ensure .context/ directory exists
-	contextDir := filepath.Join(projectRoot, ".context")
+	// 2. Ensure .cortex/ directory exists
+	contextDir := filepath.Join(projectRoot, ".cortex")
 	if err := os.MkdirAll(contextDir, 0755); err != nil {
-		return fmt.Errorf("failed to create .context directory: %w", err)
+		return fmt.Errorf("failed to create .cortex directory: %w", err)
 	}
 
 	// 3. Ensure .claude/ directory exists in project
@@ -332,7 +332,7 @@ func (c *UninstallCommand) Execute(ctx *Context) error {
 		if arg == "-h" || arg == "--help" {
 			fmt.Println("Usage: cortex uninstall [flags]")
 			fmt.Println("\nFlags:")
-			fmt.Println("  --purge       Remove .context/ directory and all captured data")
+			fmt.Println("  --purge       Remove .cortex/ directory and all captured data")
 			fmt.Println("  -h, --help    Show this help message")
 			return nil
 		}
@@ -393,25 +393,25 @@ func (c *UninstallCommand) Execute(ctx *Context) error {
 		os.Remove(claudeProjectDir)
 	}
 
-	// 3. Handle .context/ directory
-	contextDir := filepath.Join(projectRoot, ".context")
+	// 3. Handle .cortex/ directory
+	contextDir := filepath.Join(projectRoot, ".cortex")
 	if _, err := os.Stat(contextDir); err == nil {
 		if purge {
 			// Count events and insights before removal
 			eventCount, insightCount := countContextData(contextDir)
 
 			if err := os.RemoveAll(contextDir); err != nil {
-				fmt.Printf("Warning: Could not remove .context/: %v\n", err)
+				fmt.Printf("Warning: Could not remove .cortex/: %v\n", err)
 			} else {
 				if eventCount > 0 || insightCount > 0 {
-					fmt.Printf("Removed .context/ directory (%d events, %d insights deleted)\n", eventCount, insightCount)
+					fmt.Printf("Removed .cortex/ directory (%d events, %d insights deleted)\n", eventCount, insightCount)
 				} else {
-					fmt.Println("Removed .context/ directory")
+					fmt.Println("Removed .cortex/ directory")
 				}
 				removedSomething = true
 			}
 		} else {
-			fmt.Println("Kept .context/ data (use --purge to remove)")
+			fmt.Println("Kept .cortex/ data (use --purge to remove)")
 		}
 	}
 
@@ -489,13 +489,13 @@ func ensureGitignore(projectRoot string) {
 
 	gitignoreContent := string(content)
 
-	// Check if .context/ is already ignored
-	if strings.Contains(gitignoreContent, ".context/") || strings.Contains(gitignoreContent, ".context") {
+	// Check if .cortex/ is already ignored
+	if strings.Contains(gitignoreContent, ".cortex/") || strings.Contains(gitignoreContent, ".cortex") {
 		// Already in gitignore
 		return
 	}
 
-	// Append .context/ to gitignore
+	// Append .cortex/ to gitignore
 	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		// Silent failure - not critical
@@ -508,10 +508,10 @@ func ensureGitignore(projectRoot string) {
 		f.WriteString("\n")
 	}
 
-	// Add .context/ with comment
-	f.WriteString("\n# Cortex context memory (local development context)\n.context/\n")
+	// Add .cortex/ with comment
+	f.WriteString("\n# Cortex context memory (local development context)\n.cortex/\n")
 
-	fmt.Println("   Added .context/ to .gitignore")
+	fmt.Println("   Added .cortex/ to .gitignore")
 }
 
 func setupClaudeCode(claudeDir, cortexPath string) error {

@@ -95,7 +95,7 @@ type Event struct {
 
 ```go
 type Config struct {
-    ContextDir    string      // .context/
+    ContextDir    string      // .cortex/
     ProjectRoot   string
     SkipPatterns  []string    // Filtering patterns
     OllamaURL     string      // http://localhost:11434
@@ -555,8 +555,8 @@ FTS5 provides:
 
 #### A. One Project Per Cortex Instance
 ```
-~/project-a/.context/  (separate database)
-~/project-b/.context/  (separate database)
+~/project-a/.cortex/  (separate database)
+~/project-b/.cortex/  (separate database)
 ```
 
 No unified view across projects.
@@ -568,7 +568,7 @@ No unified view across projects.
   ├── service-b/
   └── shared-lib/
 
-Where does .context/ go?
+Where does .cortex/ go?
 - At root? (captures everything)
 - Per service? (can't track cross-service decisions)
 ```
@@ -582,7 +582,7 @@ Where does .context/ go?
 Working on multiple projects in parallel:
 - Switch git branches
 - Switch directories
-- **But all events go to single .context/**
+- **But all events go to single .cortex/**
 
 No per-branch or per-workspace isolation.
 
@@ -599,7 +599,7 @@ Events have ProjectRoot field → filter by project
 
 **Option 2: Workspace Support**
 ```
-.context/
+.cortex/
   ├── workspaces/
   │   ├── feature-auth/
   │   ├── feature-payments/
@@ -608,9 +608,9 @@ Events have ProjectRoot field → filter by project
 
 **Option 3: Project Linking**
 ```
-project-a/.context/
-project-b/.context/
-shared-knowledge/.context/  (linked from both)
+project-a/.cortex/
+project-b/.cortex/
+shared-knowledge/.cortex/  (linked from both)
 ```
 
 **Questions**:
@@ -1140,12 +1140,12 @@ LIMIT 5;
 **Impact**: Solves Issue #5 (Context Injection Limitations)
 
 #### ✅ Enables Multi-Device Sync (Optional)
-**Current Problem**: Each machine has separate .context/
+**Current Problem**: Each machine has separate .cortex/
 
 **With Turso**:
 ```
-Work Mac: .context/ (Turso embedded)
-Personal Mac: .context/ (Turso embedded)
+Work Mac: .cortex/ (Turso embedded)
+Personal Mac: .cortex/ (Turso embedded)
 Turso Cloud: Sync layer (optional)
 
 Sync: Bidirectional, automatic

@@ -21,7 +21,7 @@ brew services start grafana
 2. Search for "SQLite" (install plugin if needed: `grafana-cli plugins install frser-sqlite-datasource`)
 3. Configure:
    - Name: `cortex-evals`
-   - Path: `/Users/dereksantos/eng/projects/cortex/.context/db/evals.db`
+   - Path: `/Users/dereksantos/eng/projects/cortex/.cortex/db/evals.db`
 4. Save & Test
 
 ## Models to Test
@@ -77,7 +77,7 @@ Cognition:
 
 ### 1. Verify Data Collection
 ```bash
-sqlite3 -header -column .context/db/evals.db "
+sqlite3 -header -column .cortex/db/evals.db "
 SELECT model, run_type, COUNT(*) as runs,
        ROUND(AVG(pass_rate)*100,1) as pass_pct
 FROM eval_runs
@@ -169,11 +169,11 @@ Create a summary comparing models across:
 
 ## Notes
 
-- Results auto-persist to SQLite (`.context/db/evals.db`) and JSONL (`.context/evals/`)
+- Results auto-persist to SQLite (`.cortex/db/evals.db`) and JSONL (`.cortex/evals/`)
 - Grafana dashboard updates automatically as new eval runs complete
 - Ollama agents run sequentially to avoid CPU contention
 - Anthropic agents can run in parallel (uses API, not local resources)
 - For quick data exploration, Datasette is also available:
   ```bash
-  datasette serve .context/db/evals.db -m .context/datasette.yaml --open
+  datasette serve .cortex/db/evals.db -m .cortex/datasette.yaml --open
   ```

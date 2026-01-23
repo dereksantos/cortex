@@ -45,7 +45,7 @@ Eval System Redesign: Unify Around ABR
   - internal/eval/*.go - current implementation
   - test/evals/scenarios/ and test/evals/journeys/ - scenario formats
   - CLAUDE.md - ABR definition and cognitive mode descriptions
-  - .context/db/evals.db - current schema (only has E2E data)
+  - .cortex/db/evals.db - current schema (only has E2E data)
 
   Constraints
 

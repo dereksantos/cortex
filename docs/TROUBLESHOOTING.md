@@ -80,7 +80,7 @@ ollama list
 ollama pull mistral:7b
 
 # Or change config to use available model
-# Edit .context/config.json
+# Edit .cortex/config.json
 {
   "ollama_model": "mistral:7b"
 }
@@ -92,7 +92,7 @@ ollama pull mistral:7b
 
 ### Events not being captured
 
-**Problem**: No events appear in `.context/queue/pending/`
+**Problem**: No events appear in `.cortex/queue/pending/`
 
 **Debug**:
 ```bash
@@ -106,7 +106,7 @@ cat .claude/settings.local.json
 echo '{"tool_name":"Edit","tool_input":{},"tool_result":"test"}' | ./cortex capture
 
 # Check queue
-ls .context/queue/pending/
+ls .cortex/queue/pending/
 ```
 
 **Solution**:
@@ -124,14 +124,14 @@ ls .context/queue/pending/
 
 **Check logs**:
 ```bash
-cat .context/logs/capture.log
+cat .cortex/logs/capture.log
 ```
 
 **Solutions**:
 1. **Disk is full**: Free up space
-2. **Slow disk**: Move `.context/` to faster drive (SSD)
+2. **Slow disk**: Move `.cortex/` to faster drive (SSD)
 3. **Too many skip patterns**: Reduce patterns in config
-4. **Antivirus scanning**: Exclude `.context/` directory
+4. **Antivirus scanning**: Exclude `.cortex/` directory
 
 ---
 
@@ -147,7 +147,7 @@ cat .context/logs/capture.log
 ps aux | grep "cortex daemon"
 
 # Check daemon logs (if you started with logging)
-# cortex daemon > .context/logs/daemon.log 2>&1
+# cortex daemon > .cortex/logs/daemon.log 2>&1
 ```
 
 **Solution**:
@@ -166,7 +166,7 @@ ps aux | grep "cortex daemon"
 **Debug**:
 ```bash
 # Run with verbose logging
-./cortex daemon 2>&1 | tee .context/logs/daemon.log
+./cortex daemon 2>&1 | tee .cortex/logs/daemon.log
 
 # Check for:
 # - Database errors
@@ -236,7 +236,7 @@ curl http://localhost:11434/api/generate -d '{
 
 **Solutions**:
 - **Large database**: This is expected with 10k+ events
-- **Slow disk**: Move `.context/` to SSD
+- **Slow disk**: Move `.cortex/` to SSD
 - **Future**: Vector search will be faster (planned feature)
 
 ---
@@ -301,7 +301,7 @@ echo "How should I implement auth?" | ./cortex inject-context
 # workersCh: make(chan struct{}, 2), // Reduce from 5 to 2
 
 # Use smaller model
-# Edit .context/config.json:
+# Edit .cortex/config.json:
 {
   "ollama_model": "phi3:mini"  // Faster, smaller
 }
@@ -309,22 +309,22 @@ echo "How should I implement auth?" | ./cortex inject-context
 
 ### High disk usage
 
-**Problem**: `.context/` directory growing too large
+**Problem**: `.cortex/` directory growing too large
 
 **Check**:
 ```bash
-du -sh .context/
-du -sh .context/db/
-du -sh .context/queue/
+du -sh .cortex/
+du -sh .cortex/db/
+du -sh .cortex/queue/
 ```
 
 **Solutions**:
 ```bash
 # Clean processed queue
-rm -rf .context/queue/processed/*
+rm -rf .cortex/queue/processed/*
 
 # Compact database (careful!)
-sqlite3 .context/db/events.db "VACUUM;"
+sqlite3 .cortex/db/events.db "VACUUM;"
 
 # Reduce retention (future feature)
 ```
@@ -355,13 +355,13 @@ killall cortex
 **Recovery**:
 ```bash
 # Backup first!
-cp .context/db/events.db .context/db/events.db.backup
+cp .cortex/db/events.db .cortex/db/events.db.backup
 
 # Try to recover
-sqlite3 .context/db/events.db ".recover" | sqlite3 .context/db/events_recovered.db
+sqlite3 .cortex/db/events.db ".recover" | sqlite3 .cortex/db/events_recovered.db
 
 # If that fails, start fresh (you'll lose history)
-rm .context/db/events.db
+rm .cortex/db/events.db
 ./cortex init
 ```
 
@@ -415,10 +415,10 @@ cp .claude/settings.local.json .claude/settings.local.json.backup
 
 ```bash
 # Run daemon with logging
-./cortex daemon 2>&1 | tee .context/logs/debug.log
+./cortex daemon 2>&1 | tee .cortex/logs/debug.log
 
 # Check logs
-tail -f .context/logs/debug.log
+tail -f .cortex/logs/debug.log
 ```
 
 ### Collect Diagnostic Info
@@ -434,7 +434,7 @@ tail -f .context/logs/debug.log
 ./cortex recent 5
 
 # Check configuration
-cat .context/config.json
+cat .cortex/config.json
 ```
 
 ### Report an Issue
@@ -444,7 +444,7 @@ When reporting bugs, include:
 2. OS and architecture
 3. Ollama version and model
 4. Error messages
-5. Relevant logs from `.context/logs/`
+5. Relevant logs from `.cortex/logs/`
 
 **GitHub Issues**: https://github.com/dereksantos/cortex/issues
 
@@ -456,7 +456,7 @@ When reporting bugs, include:
 
 ```bash
 # Open database
-sqlite3 .context/db/events.db
+sqlite3 .cortex/db/events.db
 
 # Useful queries:
 .schema                           # Show structure
@@ -474,10 +474,10 @@ SELECT * FROM insights ORDER BY created_at DESC LIMIT 5;
 
 ```bash
 # Backup first (optional)
-cp -r .context .context.backup
+cp -r .cortex .cortex.backup
 
 # Delete context directory
-rm -rf .context
+rm -rf .cortex
 
 # Reinitialize
 ./cortex init --auto
@@ -489,7 +489,7 @@ rm -rf .context
 
 | Error | Meaning | Solution |
 |-------|---------|----------|
-| `failed to load config` | No `.context/config.json` | Run `cortex init` |
+| `failed to load config` | No `.cortex/config.json` | Run `cortex init` |
 | `Ollama not available` | Can't connect to Ollama | Start Ollama |
 | `model not found` | Model not pulled | `ollama pull model-name` |
 | `database is locked` | Multiple processes | Kill other cortex processes |
