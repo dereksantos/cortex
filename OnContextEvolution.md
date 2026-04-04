@@ -12,17 +12,13 @@ Large language models operate statelessly—each interaction begins fresh, forge
 
 ---
 
-## 1. The Problem of Stateless Intelligence
+## 1. Evolving Temporal Performance of LLMs
 
-REWORD TO-->**Local Temporal Learning** ?? I want to make this more about 
-OR-->**Evolving Temporal Perfomance of LLMs**
+AI coding assistants have made significant progress on session persistence—Claude Code's Auto-Memory captures preferences and corrections natively, and "context engineering" has emerged as a recognized discipline. Yet these approaches share a limitation: they treat context as flat text to be stuffed into prompts, without principled resource management or quality measurement.
 
-AI coding assistants are remarkably capable in isolation, yet remarkably forgetful in practice. A developer explains an architectural decision; the assistant forgets by the next session. A correction is made; it must be repeated tomorrow. Constraints are established; they are violated next week.
-**There's nothing really new or innovative in this paragrah.**
+The gap is not *whether* to persist context, but *how* to manage it at scale. As projects grow, flat-file memory becomes noise. Background processing runs unbounded. There is no metric for whether injected context actually improves output quality. Software development is inherently temporal—decisions compound, patterns emerge, and context evolves—and effective memory systems must model this temporality with bounded, measurable processing.
 
-This is not a failure of intelligence but of *memory architecture*. Current approaches optimize for single-turn performance, treating each interaction as independent. But software development is inherently temporal—decisions compound, patterns emerge, and context evolves.
-
-REVISE-->Current approaches optimize for single-turn performance, treating each interaction as independent. **this isnt necessarily true, ACE looks at the entire session. This paper ought to word as we are building on these ideas.**
+Building on prior work in agentic context engineering [1] and time-scaling [3], context evolution proposes principled separation of mechanical and agentic processing, activity-based budgets, and measurable quality via ABR.
 
 ### 1.1 What Context Evolution Means
 
@@ -161,9 +157,7 @@ Context evolution is not one-size-fits-all. Key parameters:
 | **Decay** | How quickly Think/Dream budgets decay | Fast decay → more responsive; slow decay → deeper processing |
 | **Depth** | Budgets for Reflect, Think, Dream | Higher → better quality; lower → faster, cheaper |
 
-These parameters define the *behavior* of context evolution, separate from any specific implementation.
-
-**Do we need more options here?**
+These parameters define the *behavior* of context evolution, separate from any specific implementation. Additional parameters may emerge from practice—embedding model selection, similarity thresholds, and proactive injection confidence levels are implementation-specific tuning knobs that affect the above trade-offs.
 
 ---
 
@@ -176,9 +170,7 @@ The idea:
 2. **Agentic analysis** — Prompt for idea generation, suggest improvements
 3. **Pattern discovery** — Surface insights not yet queried
 
-This "agentic random reflection" could improve project outcomes by exploring what the developer hasn't thought to ask about—yet.
-
-**I intend to build this in**
+This "agentic random reflection" could improve project outcomes by exploring what the developer hasn't thought to ask about—yet. This is implemented in Cortex as the Dream mode with pluggable DreamSource interfaces (Project, Cortex, Claude History, Git sources).
 
 ---
 
@@ -189,6 +181,14 @@ Context evolution builds on several threads:
 **Agentic Context Engineering (ACE)** [1] treats contexts as "evolving playbooks" with Generation, Reflection, and Curation operations. Context evolution adds explicit *latency constraints* and *activity-based budgets*.
 
 **Time-Scaling** [3] proposes extending an agent's reasoning over time as essential for problem-solving without increasing model parameters. Context evolution implements Time-Scaling through activity-based budgets: Think processes during active periods, Dream explores during idle periods, and session context accumulates over interactions. Where Time-Scaling describes the conceptual framework, Cortex provides a concrete implementation with measurable ABR metrics.
+
+**Native AI Memory.** Claude Code (since v2.1.59) ships Auto-Memory and Auto-Dream—automatic preference capture and between-session consolidation modeled after REM sleep. These handle ~70-80% of basic recall for solo developers but lack semantic retrieval, cross-tool portability, budget-bounded processing, and quality measurement. Context evolution provides the principled architecture that native memory approximates.
+
+**Observational Memory.** Mastra's observational memory framework captures context from tool interactions and surfaces it proactively. Context evolution adds cognitive mode separation and activity-based budgets to this observational approach.
+
+**Context Engineering as Discipline.** The term "context engineering" emerged in 2025-2026, recognizing that the bottleneck has shifted from model intelligence to context quality. Context evolution is a specific proposal within this discipline, contributing budget-bounded processing and ABR as a quality metric.
+
+**LLM Functional Anatomies.** Research on layer duplication in LLMs [6] demonstrates distinct cognitive circuits for different reasoning tasks—different layer ranges activate for math vs. emotional processing. This validates the cognitive metaphor underlying context evolution: different modes (Reflex, Reflect, Dream) for fundamentally different processing needs.
 
 **Retrieval-Augmented Generation (RAG)** [4] retrieves context to augment generation. Context evolution extends RAG with *temporal learning*—retrieval quality improves over time through background processing, not just static retrieval.
 
@@ -246,6 +246,8 @@ What remains is to build, evaluate, and iterate.
 [4] Lewis, Patrick et al. "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks." NeurIPS 2020.
 
 [5] DeepSeek AI. "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning." Technical Report, January 2025.
+
+[6] Heekerens, Daniel. "Layer Duplication in LLMs: Functional Anatomies of Large Language Models." dnhkng.github.io/posts/rys/, 2025.
 
 [A] Cortex: Latency-Constrained Cognitive Architecture for Developer Context Memory. Reference implementation. github.com/[repo], 2024.
 

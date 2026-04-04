@@ -63,6 +63,7 @@ Over time a project's artifacts grow beyond the limits that an LLM model can und
 - More complete (mentioning relevant facts)
 - Less likely to hallucinate
 - More valuable to the developer
+- **Lower in token cost** (fewer tokens spent re-discovering context)
 
 ### Experimental Design
 
@@ -70,7 +71,13 @@ Over time a project's artifacts grow beyond the limits that an LLM model can und
 - **Condition A (With Cortex)**: AI responds to `p` with Cortex-injected context from `c`
 - **Condition B (Without Cortex)**: AI responds to `p` with no additional context (baseline)
 
-**Measure**: Quality delta (A - B) across multiple dimensions
+**Measure**: Quality delta (A - B) across multiple dimensions, with token cost as a primary metric
+
+### Primary Metrics
+
+1. **Token Cost Reduction**: Total tokens consumed (input + output) in Condition A vs Condition B. Cortex should reduce tokens spent re-discovering decisions, re-reading files, and re-establishing context. Measured per-session and as a trend across sessions.
+2. **ABR Trend**: Agentic Benefit Ratio tracked over a session. ABR should trend toward 1.0 as Think accumulates context, meaning Fast mode (cheap) approaches Full mode (expensive) quality. Measured as ABR at query 1, query N, and the slope between them.
+3. **Quality Delta**: Response quality (A - B) across consistency, correctness, completeness, and hallucination dimensions.
 
 ### Evaluation Types
 
@@ -2190,6 +2197,26 @@ Tasks:
   ⬜ Optimize real-world score composite weights
 
 Deliverable: Optimized Cortex based on eval insights
+```
+
+### Phase 7: Industry Benchmark Alignment
+
+**Goal**: Align Cortex evals with established industry benchmarks
+
+```
+Tasks:
+  ⬜ Map Cortex eval metrics to SWE-bench dimensions
+  ⬜ Establish baseline on SWE-bench Verified subset (with/without Cortex context)
+  ⬜ Measure Cortex impact on task completion rate in standardized settings
+  ⬜ Compare ABR progression against multi-turn benchmarks (ColBench, MINT)
+  ⬜ Publish reproducible benchmark results
+
+Metrics:
+  - SWE-bench completion lift with Cortex context injection
+  - ABR correlation with task completion rate
+  - Cross-benchmark consistency of quality improvements
+
+Deliverable: Industry-comparable evidence that context evolution improves outcomes
 ```
 
 ---

@@ -14,8 +14,8 @@ import (
 )
 
 // DefaultHugotModel is the default model for local embeddings.
-// all-MiniLM-L6-v2 is a small, fast model that produces 384-dimensional embeddings.
-const DefaultHugotModel = "sentence-transformers/all-MiniLM-L6-v2"
+// all-MiniLM-L12-v2 is a higher-quality model that produces 384-dimensional embeddings.
+const DefaultHugotModel = "sentence-transformers/all-MiniLM-L12-v2"
 
 // HugotEmbedder implements the Embedder interface using Hugot's pure Go backend.
 // It provides local embeddings without requiring Ollama or external services.
@@ -194,7 +194,7 @@ func (h *HugotEmbedder) Dimensions() int {
 	if h.pipeline == nil {
 		return 0
 	}
-	// all-MiniLM-L6-v2 produces 384-dimensional embeddings
+	// all-MiniLM-L12-v2 produces 384-dimensional embeddings
 	return 384
 }
 

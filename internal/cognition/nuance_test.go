@@ -135,6 +135,10 @@ func (m *nuanceMockProvider) GenerateWithSystem(ctx context.Context, prompt, sys
 	m.receivedPrompt = prompt
 	return m.response, nil
 }
+func (m *nuanceMockProvider) GenerateWithStats(ctx context.Context, prompt string) (string, llm.GenerationStats, error) {
+	m.receivedPrompt = prompt
+	return m.response, llm.GenerationStats{InputTokens: len(prompt) / 4, OutputTokens: len(m.response) / 4}, nil
+}
 
 // TestExtractNuances_RealLLM tests with a real LLM to verify the prompt works.
 // Skip if no LLM is available.

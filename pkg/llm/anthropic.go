@@ -35,7 +35,7 @@ func NewAnthropicClient(cfg *config.Config) *AnthropicClient {
 
 	model := cfg.AnthropicModel
 	if model == "" {
-		model = "claude-3-5-haiku-20241022"
+		model = "claude-haiku-4-5-20251001"
 	}
 
 	return &AnthropicClient{
@@ -109,18 +109,25 @@ func (c *AnthropicClient) IsAvailable() bool {
 
 // Generate produces a response for the given prompt
 func (c *AnthropicClient) Generate(ctx context.Context, prompt string) (string, error) {
-	return c.generate(ctx, prompt, "")
+	result, _, err := c.generate(ctx, prompt, "")
+	return result, err
 }
 
 // GenerateWithSystem includes system context (for context injection)
 func (c *AnthropicClient) GenerateWithSystem(ctx context.Context, prompt, system string) (string, error) {
-	return c.generate(ctx, prompt, system)
+	result, _, err := c.generate(ctx, prompt, system)
+	return result, err
+}
+
+// GenerateWithStats produces a response and returns token usage statistics.
+func (c *AnthropicClient) GenerateWithStats(ctx context.Context, prompt string) (string, GenerationStats, error) {
+	return c.generate(ctx, prompt, "")
 }
 
 // generate calls the Anthropic Messages API
-func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (string, error) {
+func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (string, GenerationStats, error) {
 	if c.apiKey == "" {
-		return "", fmt.Errorf("anthropic API key not configured")
+		return "", GenerationStats{}, fmt.Errorf("anthropic API key not configured")
 	}
 
 	reqBody := anthropicRequest{
@@ -134,12 +141,12 @@ func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", anthropicAPIURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -148,26 +155,26 @@ func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to call Anthropic API: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to call Anthropic API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp anthropicErrorResponse
 		if err := json.Unmarshal(body, &errResp); err == nil {
-			return "", fmt.Errorf("anthropic API error (%d): %s", resp.StatusCode, errResp.Error.Message)
+			return "", GenerationStats{}, fmt.Errorf("anthropic API error (%d): %s", resp.StatusCode, errResp.Error.Message)
 		}
-		return "", fmt.Errorf("anthropic API returned status %d: %s", resp.StatusCode, string(body))
+		return "", GenerationStats{}, fmt.Errorf("anthropic API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var apiResp anthropicResponse
 	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	// Extract text from content blocks
@@ -178,7 +185,12 @@ func (c *AnthropicClient) generate(ctx context.Context, prompt, system string) (
 		}
 	}
 
-	return result, nil
+	stats := GenerationStats{
+		InputTokens:  apiResp.Usage.InputTokens,
+		OutputTokens: apiResp.Usage.OutputTokens,
+	}
+
+	return result, stats, nil
 }
 
 // SetMaxTokens allows configuring the max tokens for responses
@@ -196,7 +208,7 @@ func (c *AnthropicClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
 	filePath, _ := event.ToolInput["file_path"].(string)
 	prompt := BuildAnalysisPrompt(event.ToolName, filePath, event.ToolResult)
 
-	response, err := c.generate(context.Background(), prompt, AnalysisSystemPrompt)
+	response, _, err := c.generate(context.Background(), prompt, AnalysisSystemPrompt)
 	if err != nil {
 		return nil, err
 	}

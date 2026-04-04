@@ -226,6 +226,23 @@ methodMap := map[string]string{
 }
 ```
 
+## MCP Integration (Recommended for New Setups)
+
+Cursor supports MCP (Model Context Protocol) servers natively. Once the Cortex MCP server is available (see [ROADMAP.md](../../ROADMAP.md)), this will be the preferred integration method:
+
+```json
+{
+  "mcpServers": {
+    "cortex": {
+      "command": "cortex",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+This provides `cortex_search`, `cortex_recall`, and `cortex_record` tools directly in Cursor's AI context, without requiring a custom extension.
+
 ## See Also
 
 - [LSP Specification](https://microsoft.github.io/language-server-protocol/)

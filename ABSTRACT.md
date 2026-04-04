@@ -4,7 +4,7 @@
 
 ## Abstract
 
-We present Cortex, a reference implementation of context evolution [0] for AI coding assistants. Cortex implements the mechanical-agentic separation as a single-binary CLI daemon with five cognitive modes: Reflex (<20ms mechanical retrieval), Reflect (LLM reranking), Resolve (injection decisions), Think (active-period learning), and Dream (idle-period exploration). We contribute a comprehensive evaluation framework including the Agentic Benefit Ratio (ABR) metric, session accumulation tests, and conflict detection scenarios. Initial evaluations show 87% pass rate across cognitive mode tests, sub-millisecond Reflex latency in controlled settings, and average ABR of 0.77. Session evaluations demonstrate Fast mode converging to Full mode quality by the second query. Cortex is open source and integrates with Claude Code via lifecycle hooks.
+We present Cortex, a reference implementation of context evolution [0] for AI coding assistants that reduces token costs over time through a shared context cognition pipeline. Cortex implements the mechanical-agentic separation as a single-binary CLI daemon with five cognitive modes: Reflex (<20ms mechanical retrieval), Reflect (LLM reranking), Resolve (injection decisions), Think (active-period learning), and Dream (idle-period exploration). By shifting compute to cheap background processing with local models and injecting pre-computed context at query time, Cortex reduces the tokens frontier models need to re-discover decisions, re-read files, and re-establish context across sessions. We contribute a comprehensive evaluation framework including the Agentic Benefit Ratio (ABR) metric, session accumulation tests, and conflict detection scenarios. Initial evaluations show 87% pass rate across cognitive mode tests, sub-millisecond Reflex latency in controlled settings, and average ABR of 0.77. Session evaluations demonstrate Fast mode converging to Full mode quality by the second query. Cortex is open source and integrates with Claude Code via lifecycle hooks.
 
 ## 1. Introduction
 
@@ -23,9 +23,10 @@ Here we focus on:
 ### 1.2 Contributions
 
 1. **Reference implementation** of context evolution with five cognitive modes
-2. **Evaluation framework** with ABR, session, and conflict scenarios
-3. **Integration model** for Claude Code via lifecycle hooks
-4. **Initial results** establishing baseline metrics for future improvement
+2. **Token efficiency model**: cheap background processing with local models produces pre-computed context, reducing frontier model token consumption over time
+3. **Evaluation framework** with ABR, session, and conflict scenarios
+4. **Integration model** for Claude Code via lifecycle hooks
+5. **Initial results** establishing baseline metrics for future improvement
 
 ### 1.3 Bounded Intelligence Model
 
@@ -381,6 +382,12 @@ These results establish an honest baseline. The architecture works as designed: 
 ### 9.3 Developer Memory Systems
 
 **Session Persistence.** Claude-Mem [3] provides persistent memory for Claude Code through lifecycle hooks, SQLite storage, and progressive disclosure to optimize token usage. Cortex shares the goal of session persistence but adds cognitive mode separation (mechanical vs agentic), latency constraints, and quality metrics (ABR, NDCG).
+
+**Native AI Memory.** Claude Code (since v2.1.59) ships Auto-Memory (automatic preference/pattern capture to MEMORY.md files) and Auto-Dream (background consolidation between sessions modeled after REM sleep). These cover ~70-80% of basic recall for solo developers on small-to-medium projects. Cortex remains differentiated on semantic retrieval at scale, cross-tool portability, measurability via ABR, and budget-bounded processing.
+
+**Observational Memory.** Mastra's observational memory framework captures context from tool interactions and surfaces it proactively. Similar to Cortex's capture-filter-store pipeline but without cognitive mode separation or activity-based budgets.
+
+**Context Engineering.** The term "context engineering" emerged as a discipline in 2025-2026, recognizing that the bottleneck has shifted from model intelligence to context quality. Cortex's cognitive architecture represents a principled approach to context engineering with measurable outcomes.
 
 **Retrieval-Augmented Generation.** RAG systems retrieve relevant context to augment LLM generation. Cortex extends RAG with (1) hard latency budgets on retrieval, (2) background processing to improve retrieval quality over time, and (3) proactive injection via Resolve mode.
 

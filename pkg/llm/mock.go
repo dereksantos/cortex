@@ -41,6 +41,17 @@ func (m *MockProvider) GenerateWithSystem(ctx context.Context, prompt, system st
 	return m.generateResponse(prompt, system), nil
 }
 
+// GenerateWithStats produces a mock response with synthetic token counts.
+func (m *MockProvider) GenerateWithStats(ctx context.Context, prompt string) (string, GenerationStats, error) {
+	time.Sleep(m.latency)
+	response := m.generateResponse(prompt, "")
+	stats := GenerationStats{
+		InputTokens:  len(prompt) / 4,
+		OutputTokens: len(response) / 4,
+	}
+	return response, stats, nil
+}
+
 // generateResponse creates a mock response based on keywords in prompt and context
 func (m *MockProvider) generateResponse(prompt, context string) string {
 	promptLower := strings.ToLower(prompt)

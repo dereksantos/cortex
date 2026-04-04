@@ -1,20 +1,22 @@
 # Cortex Product Documentation
 
-**Context memory for AI coding assistants**
+**A shared context pipeline that reduces token costs over time**
 
-Cortex captures development decisions, patterns, and corrections from your AI coding sessions and injects them back when relevant. Your AI assistant remembers what you decided yesterday.
+Cortex captures development decisions, patterns, and corrections from your AI coding sessions and injects them back when relevant. Instead of re-discovering context every session, your AI assistant starts with what it already knows.
 
 ---
 
 ## What is Cortex?
 
-AI coding assistants forget everything between sessions. Every day you repeat:
+AI coding assistants waste tokens re-discovering decisions, re-reading files, and re-establishing context that existed in previous sessions. This token waste compounds over time: longer projects mean more redundant context, higher costs, and slower responses.
 
-- "No, we use Zustand not Redux"
-- "JWT tokens, not sessions"
-- "Handlers are named `Handle*`, not `*Handler`"
+Cortex is a shared context pipeline that captures development insights and injects them via semantic retrieval, so the expensive frontier model receives pre-computed context instead of rebuilding it from scratch. It works across AI tools (Claude Code, Cursor, any MCP client), uses budget-bounded cognitive modes for background processing, and measures quality through the ABR metric.
 
-Cortex fixes this. It runs invisibly in the background, capturing insights from your AI sessions and surfacing them when relevant.
+## How It Reduces Costs
+
+1. **Cheap background processing**: Think and Dream modes run on small local models (Ollama) during spare cycles and idle periods, extracting durable insights at minimal cost
+2. **Pre-computed context**: Background processing populates caches (topic weights, reranking, entity relationships) so the frontier model doesn't have to compute them at query time
+3. **Fewer tokens at query time**: Instead of re-reading files and re-discovering decisions, the LLM receives a compact, pre-ranked context injection -- the right information in fewer tokens
 
 ```
 You: "How should I handle authentication?"
@@ -141,7 +143,7 @@ Configures Claude Code integration:
 ```
 
 Creates:
-- `.claude/settings.local.json` - Lifecycle hooks (SessionStart, PostToolUse, UserPromptSubmit)
+- `.claude/settings.local.json` - Lifecycle hooks (SessionStart, PreToolUse, UserPromptSubmit, PostToolUse, Stop, Notification, SubagentComplete)
 - `.claude/commands/cortex.md` - `/cortex` slash command
 - `.claude/commands/cortex-recall.md` - `/cortex-recall` slash command
 - `.claude/commands/cortex-decide.md` - `/cortex-decide` slash command
@@ -234,9 +236,9 @@ Cortex stores configuration in `.cortex/config.json`:
   "skip_patterns": [".git", "node_modules", "venv", "*.lock"],
   "ollama_url": "http://localhost:11434",
   "ollama_model": "qwen2.5:3b",
-  "anthropic_model": "claude-3-5-haiku-20241022",
+  "anthropic_model": "claude-haiku-4-5-20251001",
   "enable_graph": true,
-  "enable_vector": false
+  "enable_vector": true
 }
 ```
 
@@ -249,9 +251,9 @@ Cortex stores configuration in `.cortex/config.json`:
 | `skip_patterns` | Common ignores | Patterns to skip during capture |
 | `ollama_url` | `http://localhost:11434` | Ollama API endpoint |
 | `ollama_model` | `qwen2.5:3b` | Model for local LLM analysis |
-| `anthropic_model` | `claude-3-5-haiku-20241022` | Model for Anthropic API |
+| `anthropic_model` | `claude-haiku-4-5-20251001` | Model for Anthropic API |
 | `enable_graph` | `true` | Enable knowledge graph extraction |
-| `enable_vector` | `false` | Enable vector embeddings (experimental) |
+| `enable_vector` | `true` | Enable vector embeddings for semantic search |
 
 ### Environment Variables
 
@@ -316,10 +318,13 @@ cp -r .cortex.backup .cortex
 Cortex integrates via Claude Code lifecycle hooks:
 
 ```
-SessionStart     → cortex session-start    (initialize session)
-UserPromptSubmit → cortex inject-context   (inject relevant context)
-PostToolUse      → cortex capture          (capture events)
-Stop             → cortex stop             (cleanup)
+SessionStart     → cortex session-start         (initialize session)
+PreToolUse       → cortex inject-context --pre-tool  (proactive injection before writes)
+UserPromptSubmit → cortex inject-context         (inject relevant context)
+PostToolUse      → cortex capture                (capture events)
+Stop             → cortex stop                   (cleanup)
+Notification     → cortex capture --notification (capture notifications)
+SubagentComplete → cortex capture --subagent     (capture subagent results)
 ```
 
 Plus a status line that shows current state:
@@ -338,15 +343,25 @@ The `cortex install` command creates `.claude/settings.local.json`:
     "SessionStart": [{
       "hooks": [{"type": "command", "command": "./cortex session-start"}]
     }],
+    "PreToolUse": [{
+      "matcher": "Write|Edit",
+      "hooks": [{"type": "command", "command": "./cortex inject-context --pre-tool"}]
+    }],
     "UserPromptSubmit": [{
       "hooks": [{"type": "command", "command": "./cortex inject-context"}]
     }],
     "PostToolUse": [{
-      "matcher": "Write|Edit|Bash",
+      "matcher": "Write|Edit|Bash|Read|Grep|Glob",
       "hooks": [{"type": "command", "command": "./cortex capture"}]
     }],
     "Stop": [{
       "hooks": [{"type": "command", "command": "./cortex stop"}]
+    }],
+    "Notification": [{
+      "hooks": [{"type": "command", "command": "./cortex capture --notification"}]
+    }],
+    "SubagentComplete": [{
+      "hooks": [{"type": "command", "command": "./cortex capture --subagent"}]
     }]
   },
   "statusLine": {
@@ -540,20 +555,21 @@ cp -r .cortex .cortex.backup
 
 ### Near Term
 
-- [ ] Vector embeddings for semantic search
-- [ ] FTS5 search (table exists, needs integration)
-- [ ] Improved entity resolution and deduplication
-- [ ] Session persistence across daemon restarts
-- [ ] Better onboarding experience
+- [x] Vector embeddings for semantic search
+- [ ] Embedding model upgrade (all-MiniLM-L12-v2) + re-embedding migration
+- [ ] sqlite-vec for indexed vector search
+- [ ] MCP server for cross-tool access
+- [ ] Expanded hook coverage (PreToolUse, Notification, SubagentComplete)
+- [ ] MEMORY.md as DreamSource (complement Claude Code Auto-Memory)
 
 ### Future
 
 - [ ] Multi-project support
-- [ ] Cross-project context sharing
-- [ ] Web UI dashboard
+- [ ] Team-shared context database
+- [ ] Web UI / context quality analytics dashboard
 - [ ] VS Code extension
-- [ ] Team collaboration (optional cloud sync)
-- [ ] Graph visualization
+- [ ] HTTP hook handler for direct daemon delivery
+- [ ] AST-based DreamSource (inspired by Aider's repo map)
 
 ---
 

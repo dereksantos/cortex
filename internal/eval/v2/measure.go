@@ -183,6 +183,23 @@ func ScoreRanking(expectedRanking []string, actualResults []string) float64 {
 	return dcg / idcg
 }
 
+// CalculateMPR computes Model Parity Ratio.
+// MPR = score(small + Cortex) / score(frontier, no context)
+// Goal: MPR → 1.0 means cheap model + Cortex matches frontier.
+func CalculateMPR(cortexScore, compareScore float64) float64 {
+	if compareScore == 0 {
+		if cortexScore == 0 {
+			return 1.0 // Both zero = equivalent
+		}
+		return 1.0 // Cortex better than frontier (avoid division by zero)
+	}
+	mpr := cortexScore / compareScore
+	if mpr > 2.0 {
+		return 2.0 // Cap at 2.0 (reasonable upper bound)
+	}
+	return mpr
+}
+
 // CalculateABR computes Agentic Benefit Ratio.
 // ABR = NDCG(Fast) / NDCG(Full)
 // Goal: ABR → 1.0 as Think improves Fast mode.
@@ -221,6 +238,16 @@ type TestResult struct {
 
 	// Pass: Cortex score >= baseline (Cortex doesn't hurt)
 	Pass bool `json:"pass"`
+
+	// Token usage
+	BaselineTokens int `json:"baseline_tokens,omitempty"` // Total tokens (input+output) for baseline
+	CortexTokens   int `json:"cortex_tokens,omitempty"`   // Total tokens (input+output) for cortex
+
+	// Compare: Frontier model response WITHOUT context (for MPR)
+	HasCompare    bool    `json:"has_compare,omitempty"`
+	CompareScore  float64 `json:"compare_score,omitempty"`
+	CompareTokens int     `json:"compare_tokens,omitempty"`
+	MPR           float64 `json:"mpr,omitempty"` // CortexScore / CompareScore
 
 	// Retrieval quality metrics (only populated when expect.ranking is specified)
 	HasRanking bool    `json:"has_ranking,omitempty"`
@@ -268,6 +295,16 @@ type ScenarioResult struct {
 	AvgFullNDCG  float64         `json:"avg_full_ndcg,omitempty"` // For ABR (1.0 until Reflect)
 	AvgABR       float64         `json:"avg_abr,omitempty"`       // FastNDCG / FullNDCG
 
+	// Model Parity Ratio (averaged across tests with comparison)
+	HasCompare      bool    `json:"has_compare,omitempty"`
+	AvgCompareScore float64 `json:"avg_compare_score,omitempty"`
+	AvgMPR          float64 `json:"avg_mpr,omitempty"`
+
+	// Token usage (averaged across tests)
+	AvgBaselineTokens int     `json:"avg_baseline_tokens,omitempty"`
+	AvgCortexTokens   int     `json:"avg_cortex_tokens,omitempty"`
+	TokenReduction    float64 `json:"token_reduction,omitempty"` // (baseline - cortex) / baseline
+
 	// Pass: Cortex doesn't cause regressions (lift >= 0)
 	Pass bool `json:"pass"`
 }
@@ -283,11 +320,24 @@ type Results struct {
 	AvgBaselineScore float64 `json:"avg_baseline_score"`
 	AvgCortexScore   float64 `json:"avg_cortex_score"`
 	AvgLift          float64 `json:"avg_lift"` // Average lift across all tests
+	AvgABR           float64 `json:"avg_abr,omitempty"`
 
 	// Win/loss totals
 	TotalCortexWins   int `json:"total_cortex_wins"`
 	TotalBaselineWins int `json:"total_baseline_wins"`
 	TotalTies         int `json:"total_ties"`
+
+	// Model Parity Ratio (compare provider)
+	CompareProvider    string  `json:"compare_provider,omitempty"`
+	CompareModel       string  `json:"compare_model,omitempty"`
+	AvgCompareScore    float64 `json:"avg_compare_score,omitempty"`
+	AvgMPR             float64 `json:"avg_mpr,omitempty"`
+	TotalCompareTokens int     `json:"total_compare_tokens,omitempty"`
+
+	// Token usage totals
+	TotalBaselineTokens int     `json:"total_baseline_tokens,omitempty"`
+	TotalCortexTokens   int     `json:"total_cortex_tokens,omitempty"`
+	AvgTokenReduction   float64 `json:"avg_token_reduction,omitempty"`
 
 	// Pass rate: % of scenarios where Cortex doesn't regress
 	PassRate float64 `json:"pass_rate"`
@@ -325,16 +375,23 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 
 	var totalBaseline, totalCortex, totalLift float64
 	cortexWins, baselineWins, ties := 0, 0, 0
+	totalBaselineTokens, totalCortexTokens := 0, 0
 
 	// Retrieval quality aggregation
 	var totalNDCG, totalFastNDCG, totalFullNDCG, totalABR float64
 	rankingCount := 0
 	ndcgByDepth := make(map[int][]float64)
 
+	// MPR aggregation
+	var totalCompareScore, totalMPR float64
+	compareCount := 0
+
 	for _, t := range tests {
 		totalBaseline += t.BaselineScore
 		totalCortex += t.CortexScore
 		totalLift += t.Lift
+		totalBaselineTokens += t.BaselineTokens
+		totalCortexTokens += t.CortexTokens
 
 		switch t.Winner {
 		case "cortex":
@@ -354,22 +411,39 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 			rankingCount++
 			ndcgByDepth[t.Depth] = append(ndcgByDepth[t.Depth], t.NDCG)
 		}
+
+		// Aggregate MPR metrics
+		if t.HasCompare {
+			totalCompareScore += t.CompareScore
+			totalMPR += t.MPR
+			compareCount++
+		}
 	}
 
 	n := float64(len(tests))
+	nInt := len(tests)
 	avgLift := totalLift / n
 
+	// Token reduction
+	var tokenReduction float64
+	if totalBaselineTokens > 0 {
+		tokenReduction = float64(totalBaselineTokens-totalCortexTokens) / float64(totalBaselineTokens)
+	}
+
 	result := &ScenarioResult{
-		ScenarioID:       scenarioID,
-		Name:             name,
-		Tests:            tests,
-		AvgBaselineScore: totalBaseline / n,
-		AvgCortexScore:   totalCortex / n,
-		AvgLift:          avgLift,
-		CortexWins:       cortexWins,
-		BaselineWins:     baselineWins,
-		Ties:             ties,
-		Pass:             avgLift >= LiftThreshold, // Cortex doesn't hurt
+		ScenarioID:        scenarioID,
+		Name:              name,
+		Tests:             tests,
+		AvgBaselineScore:  totalBaseline / n,
+		AvgCortexScore:    totalCortex / n,
+		AvgLift:           avgLift,
+		CortexWins:        cortexWins,
+		BaselineWins:      baselineWins,
+		Ties:              ties,
+		AvgBaselineTokens: totalBaselineTokens / nInt,
+		AvgCortexTokens:   totalCortexTokens / nInt,
+		TokenReduction:    tokenReduction,
+		Pass:              avgLift >= LiftThreshold, // Cortex doesn't hurt
 	}
 
 	// Add retrieval quality metrics if any tests had ranking
@@ -391,6 +465,13 @@ func CalculateScenarioResult(scenarioID, name string, tests []TestResult) *Scena
 		}
 	}
 
+	// Add MPR metrics if any tests had comparison
+	if compareCount > 0 {
+		result.HasCompare = true
+		result.AvgCompareScore = totalCompareScore / float64(compareCount)
+		result.AvgMPR = totalMPR / float64(compareCount)
+	}
+
 	return result
 }
 
@@ -405,8 +486,16 @@ func CalculateResults(scenarios []ScenarioResult, provider, model string) *Resul
 	}
 
 	var totalBaseline, totalCortex, totalLift float64
+	var totalABR float64
 	totalCortexWins, totalBaselineWins, totalTies := 0, 0, 0
+	totalBaselineTokens, totalCortexTokens := 0, 0
 	passCount := 0
+	abrCount := 0
+
+	// MPR aggregation
+	var totalCompareScore, totalMPR float64
+	totalCompareTokens := 0
+	mprCount := 0
 
 	for _, s := range scenarios {
 		totalBaseline += s.AvgBaselineScore
@@ -415,6 +504,23 @@ func CalculateResults(scenarios []ScenarioResult, provider, model string) *Resul
 		totalCortexWins += s.CortexWins
 		totalBaselineWins += s.BaselineWins
 		totalTies += s.Ties
+		totalBaselineTokens += s.AvgBaselineTokens * len(s.Tests)
+		totalCortexTokens += s.AvgCortexTokens * len(s.Tests)
+
+		if s.HasRanking && s.AvgABR > 0 {
+			totalABR += s.AvgABR
+			abrCount++
+		}
+
+		if s.HasCompare {
+			totalCompareScore += s.AvgCompareScore
+			totalMPR += s.AvgMPR
+			// Sum compare tokens from individual tests
+			for _, t := range s.Tests {
+				totalCompareTokens += t.CompareTokens
+			}
+			mprCount++
+		}
 
 		if s.Pass {
 			passCount++
@@ -423,17 +529,43 @@ func CalculateResults(scenarios []ScenarioResult, provider, model string) *Resul
 
 	n := float64(len(scenarios))
 
+	// Token reduction
+	var avgTokenReduction float64
+	if totalBaselineTokens > 0 {
+		avgTokenReduction = float64(totalBaselineTokens-totalCortexTokens) / float64(totalBaselineTokens)
+	}
+
+	// Average ABR
+	var avgABR float64
+	if abrCount > 0 {
+		avgABR = totalABR / float64(abrCount)
+	}
+
+	// Average MPR
+	var avgCompareScore, avgMPR float64
+	if mprCount > 0 {
+		avgCompareScore = totalCompareScore / float64(mprCount)
+		avgMPR = totalMPR / float64(mprCount)
+	}
+
 	return &Results{
-		Provider:          provider,
-		Model:             model,
-		Scenarios:         scenarios,
-		AvgBaselineScore:  totalBaseline / n,
-		AvgCortexScore:    totalCortex / n,
-		AvgLift:           totalLift / n,
-		TotalCortexWins:   totalCortexWins,
-		TotalBaselineWins: totalBaselineWins,
-		TotalTies:         totalTies,
-		PassRate:          float64(passCount) / n,
-		Pass:              totalLift/n >= LiftThreshold,
+		Provider:            provider,
+		Model:               model,
+		Scenarios:           scenarios,
+		AvgBaselineScore:    totalBaseline / n,
+		AvgCortexScore:      totalCortex / n,
+		AvgLift:             totalLift / n,
+		AvgABR:              avgABR,
+		AvgCompareScore:     avgCompareScore,
+		AvgMPR:              avgMPR,
+		TotalCompareTokens:  totalCompareTokens,
+		TotalCortexWins:     totalCortexWins,
+		TotalBaselineWins:   totalBaselineWins,
+		TotalTies:           totalTies,
+		TotalBaselineTokens: totalBaselineTokens,
+		TotalCortexTokens:   totalCortexTokens,
+		AvgTokenReduction:   avgTokenReduction,
+		PassRate:            float64(passCount) / n,
+		Pass:                totalLift/n >= LiftThreshold,
 	}
 }

@@ -36,6 +36,17 @@ For example: "CONSTRAINT: No Redis - use PostgreSQL for all data storage"
 
 Respond concisely. Future AI assistants will use your extracted context to give better, project-aware suggestions.`
 
+// GenerationStats holds token usage statistics from an LLM call.
+type GenerationStats struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// TotalTokens returns the sum of input and output tokens.
+func (s GenerationStats) TotalTokens() int {
+	return s.InputTokens + s.OutputTokens
+}
+
 // Provider defines the interface for LLM backends
 type Provider interface {
 	// Generate produces a response for the given prompt
@@ -43,6 +54,9 @@ type Provider interface {
 
 	// GenerateWithSystem includes system context (for context injection)
 	GenerateWithSystem(ctx context.Context, prompt, system string) (string, error)
+
+	// GenerateWithStats produces a response and returns token usage statistics
+	GenerateWithStats(ctx context.Context, prompt string) (string, GenerationStats, error)
 
 	// IsAvailable checks if the provider is ready
 	IsAvailable() bool

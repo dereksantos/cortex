@@ -308,6 +308,52 @@ func TestMockProviderResponses(t *testing.T) {
 	}
 }
 
+func TestMockProvider_GenerateWithStats(t *testing.T) {
+	provider := NewMockProvider(0)
+	ctx := context.Background()
+
+	t.Run("returns stats with response", func(t *testing.T) {
+		prompt := "How do I handle JWT auth?"
+		response, stats, err := provider.GenerateWithStats(ctx, prompt)
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if response == "" {
+			t.Error("expected non-empty response")
+		}
+		if stats.InputTokens <= 0 {
+			t.Errorf("expected positive input tokens, got %d", stats.InputTokens)
+		}
+		if stats.OutputTokens <= 0 {
+			t.Errorf("expected positive output tokens, got %d", stats.OutputTokens)
+		}
+		if stats.TotalTokens() != stats.InputTokens+stats.OutputTokens {
+			t.Errorf("TotalTokens() = %d, expected %d", stats.TotalTokens(), stats.InputTokens+stats.OutputTokens)
+		}
+	})
+
+	t.Run("input tokens proportional to prompt length", func(t *testing.T) {
+		shortPrompt := "test"
+		longPrompt := "this is a much longer prompt that should produce more input tokens"
+
+		_, shortStats, _ := provider.GenerateWithStats(ctx, shortPrompt)
+		_, longStats, _ := provider.GenerateWithStats(ctx, longPrompt)
+
+		if longStats.InputTokens <= shortStats.InputTokens {
+			t.Errorf("expected long prompt (%d) > short prompt (%d) input tokens",
+				longStats.InputTokens, shortStats.InputTokens)
+		}
+	})
+}
+
+func TestGenerationStats_TotalTokens(t *testing.T) {
+	stats := GenerationStats{InputTokens: 100, OutputTokens: 50}
+	if stats.TotalTokens() != 150 {
+		t.Errorf("TotalTokens() = %d, expected 150", stats.TotalTokens())
+	}
+}
+
 func TestAnalysisSystemPrompt(t *testing.T) {
 	t.Run("contains key guidance", func(t *testing.T) {
 		expectedParts := []string{

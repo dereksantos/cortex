@@ -46,7 +46,7 @@ func Default() *Config {
 		OllamaURL:            "http://localhost:11434",
 		OllamaModel:          "qwen2.5-coder:1.5b",
 		OllamaEmbeddingModel: "nomic-embed-text",
-		AnthropicModel:       "claude-3-5-haiku-20241022",
+		AnthropicModel:       "claude-haiku-4-5-20251001",
 		EnableGraph:  true,
 		EnableVector: true,
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"path/filepath"
 	"time"
 
@@ -191,6 +192,13 @@ func (s *Storage) runMigrations() error {
 			if _, err := s.db.Exec(m.ddl); err != nil {
 				return fmt.Errorf("failed to add %s column to insights: %w", m.column, err)
 			}
+		}
+	}
+
+	// Migration: Add model_name to embeddings table
+	if !s.columnExists("embeddings", "model_name") {
+		if _, err := s.db.Exec("ALTER TABLE embeddings ADD COLUMN model_name TEXT"); err != nil {
+			return fmt.Errorf("failed to add model_name column to embeddings: %w", err)
 		}
 	}
 
@@ -1155,6 +1163,53 @@ func (s *Storage) StoreEmbedding(contentID, contentType string, vector []float32
 	return err
 }
 
+// StoreEmbeddingWithModel stores a vector embedding with model name tracking.
+func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector []float32, modelName string) error {
+	vectorBytes := vectorToBytes(vector)
+
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO embeddings (content_id, content_type, vector, model_name, created_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, contentID, contentType, vectorBytes, modelName)
+
+	return err
+}
+
+// EmbeddingContent represents a content ID and type from the embeddings table.
+type EmbeddingContent struct {
+	ContentID   string
+	ContentType string
+}
+
+// GetAllEmbeddingContentIDs returns all content IDs and types from the embeddings table.
+func (s *Storage) GetAllEmbeddingContentIDs() ([]EmbeddingContent, error) {
+	rows, err := s.db.Query("SELECT content_id, content_type FROM embeddings")
+	if err != nil {
+		return nil, fmt.Errorf("failed to query embedding content IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var results []EmbeddingContent
+	for rows.Next() {
+		var ec EmbeddingContent
+		if err := rows.Scan(&ec.ContentID, &ec.ContentType); err != nil {
+			continue
+		}
+		results = append(results, ec)
+	}
+	return results, nil
+}
+
+// GetEmbeddingCount returns the total number of embeddings.
+func (s *Storage) GetEmbeddingCount() (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM embeddings").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count embeddings: %w", err)
+	}
+	return count, nil
+}
+
 // SearchByVector finds content similar to the query vector
 func (s *Storage) SearchByVector(queryVector []float32, limit int, threshold float64) ([]VectorSearchResult, error) {
 	// Get all embeddings
@@ -1242,13 +1297,9 @@ func cosineSimilarity(a, b []float32) float64 {
 
 // sortBySimilarity sorts results by similarity descending
 func sortBySimilarity(results []VectorSearchResult) {
-	for i := 0; i < len(results); i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[j].Similarity > results[i].Similarity {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Similarity > results[j].Similarity
+	})
 }
 
 // SessionMetadata represents session tracking info for the watch view
