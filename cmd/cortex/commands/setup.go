@@ -532,16 +532,6 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 
 	// Configure hooks (preserve existing ones if needed)
 	hooks := map[string]interface{}{
-		"PostToolUse": []interface{}{
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": fmt.Sprintf("%s capture", cortexPath),
-					},
-				},
-			},
-		},
 		"SessionStart": []interface{}{
 			map[string]interface{}{
 				"hooks": []interface{}{
@@ -562,6 +552,58 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 				},
 			},
 		},
+		"PostToolUse": []interface{}{
+			map[string]interface{}{
+				"matcher": "Write|Edit|Bash|Read|Grep|Glob",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s capture", cortexPath),
+					},
+				},
+			},
+		},
+		"PreToolUse": []interface{}{
+			map[string]interface{}{
+				"matcher": "Write|Edit",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s inject-context --pre-tool", cortexPath),
+					},
+				},
+			},
+		},
+		"Stop": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s stop", cortexPath),
+					},
+				},
+			},
+		},
+		"Notification": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s capture --notification", cortexPath),
+					},
+				},
+			},
+		},
+		"SubagentComplete": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": fmt.Sprintf("%s capture --subagent", cortexPath),
+					},
+				},
+			},
+		},
 	}
 
 	// Configure status line
@@ -572,6 +614,15 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 
 	settings["hooks"] = hooks
 	settings["statusLine"] = statusLine
+
+	// Configure MCP server
+	settings["mcpServers"] = map[string]interface{}{
+		"cortex": map[string]interface{}{
+			"command": cortexPath,
+			"args":    []string{"mcp"},
+		},
+	}
+
 	// Note: Preserves existing permissions and other settings
 
 	// Write settings
@@ -643,13 +694,35 @@ Interact with your captured development context.
 func createPluginJSON(pluginDir string) error {
 	pluginJSON := `{
   "name": "cortex",
-  "description": "Persistent context memory for AI coding assistants",
-  "version": "0.1.0",
+  "description": "Reactive context engine with budget-bounded cognitive modes for AI coding assistants",
+  "version": "0.2.0",
   "author": {
     "name": "Cortex"
   },
   "repository": "https://github.com/dereksantos/cortex",
-  "license": "MIT"
+  "license": "MIT",
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "cortex session-start"}]}],
+    "PreToolUse": [{"matcher": "Write|Edit", "hooks": [{"type": "command", "command": "cortex inject-context --pre-tool"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "cortex inject-context"}]}],
+    "PostToolUse": [{"matcher": "Write|Edit|Bash|Read|Grep|Glob", "hooks": [{"type": "command", "command": "cortex capture"}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "cortex stop"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "cortex capture --notification"}]}],
+    "SubagentComplete": [{"hooks": [{"type": "command", "command": "cortex capture --subagent"}]}]
+  },
+  "commands": [
+    {"name": "cortex", "description": "Query Cortex context memory"},
+    {"name": "cortex-recall", "description": "Recall what Cortex knows about a topic"},
+    {"name": "cortex-decide", "description": "Record an architectural decision"},
+    {"name": "cortex-correct", "description": "Record a correction"},
+    {"name": "cortex-forget", "description": "Mark context as outdated"}
+  ],
+  "mcpServers": {
+    "cortex": {
+      "command": "cortex",
+      "args": ["mcp"]
+    }
+  }
 }`
 
 	pluginPath := filepath.Join(pluginDir, "plugin.json")
@@ -659,6 +732,18 @@ func createPluginJSON(pluginDir string) error {
 	}
 
 	return os.WriteFile(pluginPath, []byte(pluginJSON), 0644)
+}
+
+// cortexBinPath returns the absolute path to the current cortex binary.
+func cortexBinPath() string {
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+		if err == nil {
+			return exe
+		}
+	}
+	return "cortex"
 }
 
 func createClaudeSettings(settingsPath string) error {
@@ -675,6 +760,9 @@ func createClaudeSettings(settingsPath string) error {
 		}
 	}
 
+	// Resolve cortex binary path for hooks
+	cortexPath := cortexBinPath()
+
 	// Configure hooks (preserve existing ones if needed)
 	hooks := map[string]interface{}{
 		"SessionStart": []interface{}{
@@ -682,7 +770,7 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "cortex session-start",
+						"command": cortexPath + " session-start",
 					},
 				},
 			},
@@ -692,18 +780,29 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "cortex inject-context",
+						"command": cortexPath + " inject-context",
 					},
 				},
 			},
 		},
 		"PostToolUse": []interface{}{
 			map[string]interface{}{
-				"matcher": "Write|Edit|Bash",
+				"matcher": "Write|Edit|Bash|Read|Grep|Glob",
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "cortex capture",
+						"command": cortexPath + " capture",
+					},
+				},
+			},
+		},
+		"PreToolUse": []interface{}{
+			map[string]interface{}{
+				"matcher": "Write|Edit",
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": cortexPath + " inject-context --pre-tool",
 					},
 				},
 			},
@@ -713,7 +812,27 @@ func createClaudeSettings(settingsPath string) error {
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": "cortex stop",
+						"command": cortexPath + " stop",
+					},
+				},
+			},
+		},
+		"Notification": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": cortexPath + " capture --notification",
+					},
+				},
+			},
+		},
+		"SubagentComplete": []interface{}{
+			map[string]interface{}{
+				"hooks": []interface{}{
+					map[string]interface{}{
+						"type":    "command",
+						"command": cortexPath + " capture --subagent",
 					},
 				},
 			},
@@ -723,11 +842,19 @@ func createClaudeSettings(settingsPath string) error {
 	// Configure status line
 	statusLine := map[string]interface{}{
 		"type":    "command",
-		"command": "cortex status --format=claude",
+		"command": cortexPath + " status --format=claude",
 	}
 
 	settings["hooks"] = hooks
 	settings["statusLine"] = statusLine
+
+	// Configure MCP server
+	settings["mcpServers"] = map[string]interface{}{
+		"cortex": map[string]interface{}{
+			"command": cortexPath,
+			"args":    []string{"mcp"},
+		},
+	}
 
 	// Write settings
 	newData, err := json.MarshalIndent(settings, "", "  ")
@@ -800,6 +927,19 @@ func removeCortexFromSettings(settingsPath string) (bool, error) {
 			if strings.Contains(cmd, "cortex") {
 				delete(settings, "statusLine")
 				modified = true
+			}
+		}
+	}
+
+	// Remove mcpServers.cortex
+	if mcpServers, ok := settings["mcpServers"].(map[string]interface{}); ok {
+		if _, ok := mcpServers["cortex"]; ok {
+			delete(mcpServers, "cortex")
+			modified = true
+			if len(mcpServers) == 0 {
+				delete(settings, "mcpServers")
+			} else {
+				settings["mcpServers"] = mcpServers
 			}
 		}
 	}

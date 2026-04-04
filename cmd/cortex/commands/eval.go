@@ -39,6 +39,9 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	agenticMode := false
 	claudeBinary := ""
 	showSummary := false
+	showABRTrend := false
+	compareProviderName := ""
+	compareModelOverride := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -89,6 +92,18 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			}
 		case arg == "--summary":
 			showSummary = true
+		case arg == "--abr-trend":
+			showABRTrend = true
+		case arg == "--compare-provider":
+			if i+1 < len(ctx.Args) {
+				compareProviderName = ctx.Args[i+1]
+				i++
+			}
+		case arg == "--compare-model":
+			if i+1 < len(ctx.Args) {
+				compareModelOverride = ctx.Args[i+1]
+				i++
+			}
 		case arg == "-h" || arg == "--help":
 			fmt.Println(`Usage: cortex eval [options]
 
@@ -106,7 +121,10 @@ Options:
   --judge-model MODEL    Model for judge (default: same as eval model)
   --agentic              Use Claude CLI for agentic evals (measures tool usage)
   --claude-binary PATH   Path to claude binary (default: auto-detect)
+  --compare-provider NAME  Frontier provider for MPR comparison (e.g., anthropic)
+  --compare-model MODEL    Frontier model override (default: provider default)
   --summary              Show lift trend over recent runs
+  --abr-trend            Show ABR progression across runs
   -h, --help             Show this help
 
 Examples:
@@ -115,10 +133,28 @@ Examples:
   cortex eval --judge                      # Use LLM judge for scoring
   cortex eval --judge --judge-model gemma2:2b  # Use specific judge model
   cortex eval --agentic                    # Run with Claude CLI (tool tracking)
+  cortex eval --compare-provider anthropic --compare-model claude-haiku-4-5-20251001
   cortex eval --summary                    # Show lift trend
-  cortex eval --summary --agentic          # Show tool call reduction trend`)
+  cortex eval --summary --agentic          # Show tool call reduction trend
+  cortex eval --abr-trend                  # Show ABR progression`)
 			return nil
 		}
+	}
+
+	// Handle --abr-trend flag
+	if showABRTrend {
+		persister, err := evalv2.NewPersister()
+		if err != nil {
+			return fmt.Errorf("failed to open database: %w", err)
+		}
+		defer persister.Close()
+
+		points, err := persister.GetABRTrend(10)
+		if err != nil {
+			return fmt.Errorf("failed to get ABR trend: %w", err)
+		}
+		evalv2.ReportABRTrend(os.Stdout, points)
+		return nil
 	}
 
 	// Handle --summary flag
@@ -226,6 +262,43 @@ Examples:
 		}
 	}
 
+	// Create compare provider for MPR if requested
+	var compareProvider llm.Provider
+	var compareModelName string
+	if compareProviderName != "" {
+		compareModelName = compareModelOverride
+
+		if dryRun {
+			compareProvider = llm.NewMockProvider(10)
+		} else {
+			compareCfg := *cfg
+			switch compareProviderName {
+			case "anthropic":
+				if compareModelName != "" {
+					compareCfg.AnthropicModel = compareModelName
+				}
+				if compareModelName == "" {
+					compareModelName = compareCfg.AnthropicModel
+				}
+				compareProvider = llm.NewAnthropicClient(&compareCfg)
+			case "ollama":
+				if compareModelName != "" {
+					compareCfg.OllamaModel = compareModelName
+				}
+				if compareModelName == "" {
+					compareModelName = compareCfg.OllamaModel
+				}
+				compareProvider = llm.NewOllamaClient(&compareCfg)
+			default:
+				return fmt.Errorf("unknown compare provider: %s", compareProviderName)
+			}
+		}
+
+		if verbose {
+			fmt.Printf("Using compare provider: %s/%s (for MPR)\n", compareProviderName, compareModelName)
+		}
+	}
+
 	// Track start time for duration measurement
 	startTime := time.Now()
 
@@ -309,6 +382,9 @@ Examples:
 	evaluator.SetModel(modelName)
 	if judgeProvider != nil {
 		evaluator.SetJudge(judgeProvider, judgeModelName)
+	}
+	if compareProvider != nil {
+		evaluator.SetCompareProvider(compareProvider, compareModelName)
 	}
 
 	// Run eval

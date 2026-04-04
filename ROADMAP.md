@@ -2,7 +2,7 @@
 
 **Last Updated:** January 2026
 **Current Status:** Semantic Search Working, ABR Optimization
-**North Star:** ABR ≥ 0.9
+**North Stars:** ABR ≥ 0.9 | Token Cost Reduction over time
 
 ---
 
@@ -36,7 +36,7 @@ Goal: ABR → 1.0 as session progresses
 
 **Current: 0.77 (Needs work)**
 
-ABR is the single metric that validates Cortex's core innovation: bounded intelligence through background processing.
+ABR validates Cortex's core innovation: bounded intelligence through background processing. Alongside ABR, **token cost reduction** measures the practical payoff -- fewer tokens spent re-discovering context across sessions.
 
 ---
 
@@ -108,11 +108,28 @@ tests:
 
 **Goal:** Improve ABR from 0.77 → 0.9
 
-Potential improvements:
-- [ ] Better embedding model selection
+Landscape-informed priorities (Mar 2026 review):
+- [ ] Upgrade embedding model: all-MiniLM-L6-v2 → all-MiniLM-L12-v2 (biggest ABR lever)
+- [ ] Replace brute-force vector search with sqlite-vec (indexed search)
 - [ ] Retrieval tuning (top-k, similarity threshold)
 - [ ] Context formatting for LLM consumption
-- [ ] Larger/better LLM for eval (Claude Haiku vs qwen2:0.5b)
+- [ ] Larger/better LLM for eval (Claude Haiku 4.5 vs qwen2:0.5b)
+- [ ] Re-embedding migration after model upgrade
+- [ ] Local model optimization: prefer small models (Ollama) for Think/Dream background tasks
+
+---
+
+### Phase 5: Cross-Tool & Ecosystem 📋 FUTURE
+
+**Goal:** Make Cortex tool-agnostic and ecosystem-ready
+
+- [ ] MCP server (`cortex_search`, `cortex_recall`, `cortex_record` tools)
+- [ ] MEMORY.md as DreamSource (complement Claude Code Auto-Memory)
+- [ ] Expanded hook coverage (PreToolUse, Notification, SubagentComplete)
+- [ ] HTTP hook handler for direct daemon delivery
+- [ ] Plugin manifest conforming to current Claude Code spec
+- [ ] Multi-agent / factory pattern support: shared context pool via MCP for parallel agents
+- [ ] Token cost analytics: track and report token savings over time
 
 ---
 
@@ -123,7 +140,8 @@ Potential improvements:
 | Git Dream source | Core evals must pass first |
 | Entity relationships | Polish feature, not priority |
 | Cross-session learning | Need single-session working first |
-| New cognitive modes | No expansion until stability |
+| MCP server | Need retrieval quality validated first |
+| Team-shared context | Requires stable single-user first |
 
 ---
 
@@ -164,4 +182,4 @@ Potential improvements:
 
 ---
 
-*This roadmap is a living document. North star: ABR ≥ 0.9.*
+*This roadmap is a living document. North stars: ABR ≥ 0.9, token cost reduction over time.*

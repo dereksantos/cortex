@@ -141,6 +141,22 @@ func (p *Persister) init() error {
 		"ALTER TABLE eval_scenario_results ADD COLUMN avg_cortex_judge_correctness REAL",
 		"ALTER TABLE eval_scenario_results ADD COLUMN avg_baseline_judge_understanding REAL",
 		"ALTER TABLE eval_scenario_results ADD COLUMN avg_cortex_judge_understanding REAL",
+		// Token usage columns
+		"ALTER TABLE eval_runs ADD COLUMN total_baseline_tokens INTEGER DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN total_cortex_tokens INTEGER DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN avg_token_reduction REAL DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN avg_abr REAL DEFAULT 0",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_baseline_tokens INTEGER DEFAULT 0",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_cortex_tokens INTEGER DEFAULT 0",
+		"ALTER TABLE eval_scenario_results ADD COLUMN token_reduction REAL DEFAULT 0",
+		// MPR columns
+		"ALTER TABLE eval_runs ADD COLUMN compare_provider TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN compare_model TEXT",
+		"ALTER TABLE eval_runs ADD COLUMN avg_compare_score REAL DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN avg_mpr REAL DEFAULT 0",
+		"ALTER TABLE eval_runs ADD COLUMN total_compare_tokens INTEGER DEFAULT 0",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_compare_score REAL DEFAULT 0",
+		"ALTER TABLE eval_scenario_results ADD COLUMN avg_mpr REAL DEFAULT 0",
 	}
 	for _, m := range migrations {
 		p.db.Exec(m) // Ignore errors (column already exists)
@@ -192,13 +208,15 @@ func (p *Persister) Persist(results *Results, durationMs int64) error {
 
 	// Insert main run record
 	_, err = p.db.Exec(`
-		INSERT INTO eval_runs (id, timestamp, provider, model, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, git_commit_sha, git_branch, run_duration_ms, cortex_version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO eval_runs (id, timestamp, provider, model, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, pass_rate, pass, scenarios_json, git_commit_sha, git_branch, run_duration_ms, cortex_version, total_baseline_tokens, total_cortex_tokens, avg_token_reduction, avg_abr, compare_provider, compare_model, avg_compare_score, avg_mpr, total_compare_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, results.Timestamp, results.Provider, results.Model, scenarioID, scenarioName,
 		results.AvgBaselineScore, results.AvgCortexScore, results.AvgLift,
 		results.TotalCortexWins, results.TotalBaselineWins, results.TotalTies,
 		results.PassRate, results.Pass, string(scenariosJSON),
-		commitSHA, branch, durationMs, CortexVersion)
+		commitSHA, branch, durationMs, CortexVersion,
+		results.TotalBaselineTokens, results.TotalCortexTokens, results.AvgTokenReduction, results.AvgABR,
+		results.CompareProvider, results.CompareModel, results.AvgCompareScore, results.AvgMPR, results.TotalCompareTokens)
 
 	if err != nil {
 		return fmt.Errorf("insert run: %w", err)
@@ -207,13 +225,14 @@ func (p *Persister) Persist(results *Results, durationMs int64) error {
 	// Insert scenario results for easy querying
 	for _, scenario := range results.Scenarios {
 		_, err = p.db.Exec(`
-			INSERT INTO eval_scenario_results (run_id, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, has_ranking, avg_ndcg, avg_fast_ndcg, avg_full_ndcg, avg_abr, pass)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO eval_scenario_results (run_id, scenario_id, scenario_name, avg_baseline_score, avg_cortex_score, avg_lift, cortex_wins, baseline_wins, ties, has_ranking, avg_ndcg, avg_fast_ndcg, avg_full_ndcg, avg_abr, pass, avg_baseline_tokens, avg_cortex_tokens, token_reduction, avg_compare_score, avg_mpr)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, id, scenario.ScenarioID, scenario.Name,
 			scenario.AvgBaselineScore, scenario.AvgCortexScore, scenario.AvgLift,
 			scenario.CortexWins, scenario.BaselineWins, scenario.Ties,
 			scenario.HasRanking, scenario.AvgNDCG, scenario.AvgFastNDCG, scenario.AvgFullNDCG, scenario.AvgABR,
-			scenario.Pass)
+			scenario.Pass, scenario.AvgBaselineTokens, scenario.AvgCortexTokens, scenario.TokenReduction,
+			scenario.AvgCompareScore, scenario.AvgMPR)
 		if err != nil {
 			return fmt.Errorf("insert scenario result %s: %w", scenario.ScenarioID, err)
 		}
@@ -279,6 +298,47 @@ func (p *Persister) GetTrend(n int) ([]float64, error) {
 	}
 
 	return lifts, nil
+}
+
+// ABRTrendPoint represents a single data point in the ABR trend.
+type ABRTrendPoint struct {
+	Timestamp    string  `json:"timestamp"`
+	AvgABR       float64 `json:"avg_abr"`
+	RunID        string  `json:"run_id"`
+	GitCommitSHA string  `json:"git_commit_sha"`
+}
+
+// GetABRTrend returns ABR values over the last N runs.
+func (p *Persister) GetABRTrend(n int) ([]ABRTrendPoint, error) {
+	rows, err := p.db.Query(`
+		SELECT r.id, r.timestamp, COALESCE(r.git_commit_sha, ''), AVG(s.avg_abr)
+		FROM eval_runs r
+		JOIN eval_scenario_results s ON s.run_id = r.id
+		WHERE s.has_ranking = 1 AND s.avg_abr > 0
+		GROUP BY r.id
+		ORDER BY r.timestamp DESC
+		LIMIT ?
+	`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []ABRTrendPoint
+	for rows.Next() {
+		var pt ABRTrendPoint
+		if err := rows.Scan(&pt.RunID, &pt.Timestamp, &pt.GitCommitSHA, &pt.AvgABR); err != nil {
+			return nil, err
+		}
+		points = append(points, pt)
+	}
+
+	// Reverse to get chronological order
+	for i, j := 0, len(points)-1; i < j; i, j = i+1, j-1 {
+		points[i], points[j] = points[j], points[i]
+	}
+
+	return points, nil
 }
 
 // Close closes the database connection.

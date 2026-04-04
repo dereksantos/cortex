@@ -4,13 +4,17 @@ A context broker that captures development insights and injects them into AI cod
 
 ## Problem
 
-AI coding assistants forget. Every session starts fresh:
-- Decisions made yesterday are unknown today
-- Corrections must be repeated ("No, we use Zustand not Redux")
-- Architectural constraints get violated
-- Patterns aren't consistently applied
+AI coding assistants waste tokens. Every session re-discovers past decisions, re-reads files already understood, and re-establishes context that existed yesterday. This token waste compounds: longer projects mean more redundant context, higher costs, and slower responses.
 
-## Solution: The Context Pipeline
+- **Re-discovered decisions**: "We use JWT" gets explained to the LLM session after session
+- **Redundant file reads**: The same architecture files get read and re-read across sessions
+- **Repeated context**: Corrections, patterns, and constraints are re-stated manually
+- **Cross-tool fragmentation**: Context built in Claude Code is invisible to Cursor and vice versa
+- **No measurement**: No way to know if injected context actually reduces downstream token use
+
+Cortex addresses this with a shared context pipeline that reduces token costs over time through semantic retrieval, cross-tool portability via MCP, budget-bounded cognitive modes, and the ABR metric for measurable context quality.
+
+## Solution: A Context Pipeline That Reduces Token Costs Over Time
 
 ```
 Capture → Filter → Store → Retrieve → Inject
@@ -55,6 +59,14 @@ cortex insights                  # View extracted insights
 cortex recent                    # Show recent events
 cortex status                    # Check daemon status
 ```
+
+## Why This Matters
+
+**Local models for background processing.** Think and Dream modes use small, cheap models (Ollama, local inference) for background work. The expensive frontier model is only needed at query time, and even then it receives pre-computed context that reduces the tokens it needs to process.
+
+**Compounding returns over sessions.** Each session captures decisions, corrections, and patterns. The next session starts with that context already available. Over weeks and months, the token savings compound as less and less needs to be re-established.
+
+**Multi-agent amortization.** In multi-agent and factory workflows, context computed once by Cortex is shared across all agents via MCP. Instead of each agent independently building context (multiplying token costs), they share a single pre-computed context pool.
 
 ## Cognitive Architecture
 
@@ -158,6 +170,18 @@ Key metrics from initial evaluation:
 - 87% pass rate across cognitive mode tests
 - <20ms Reflex latency (target met)
 - ABR 0.77 (Fast mode achieves 77% of Full mode quality)
+
+### Differentiation from Native AI Memory
+
+| Capability | Claude Code Auto-Memory | Cortex |
+|---|---|---|
+| Basic recall | Yes | Yes |
+| Semantic retrieval | No (flat text) | Yes (embeddings + multi-signal) |
+| Cross-tool | No (Claude Code only) | Yes (MCP server) |
+| Measurable quality | No | Yes (ABR metric + eval framework) |
+| Budget-bounded processing | No | Yes (Think/Dream inverse models) |
+| Token cost reduction | No (context grows linearly) | Yes (pre-computed, compounding) |
+| Entity graph | No | Yes (structured relationships) |
 
 ## Documentation
 

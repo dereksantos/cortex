@@ -48,10 +48,12 @@ type OllamaRequest struct {
 
 // OllamaResponse represents a response from Ollama
 type OllamaResponse struct {
-	Model     string    `json:"model"`
-	CreatedAt time.Time `json:"created_at"`
-	Response  string    `json:"response"`
-	Done      bool      `json:"done"`
+	Model           string    `json:"model"`
+	CreatedAt       time.Time `json:"created_at"`
+	Response        string    `json:"response"`
+	Done            bool      `json:"done"`
+	PromptEvalCount int       `json:"prompt_eval_count"`
+	EvalCount       int       `json:"eval_count"`
 }
 
 // IsAvailable checks if Ollama is running
@@ -80,7 +82,13 @@ func (c *OllamaClient) GenerateWithSystem(ctx context.Context, prompt, system st
 	if system != "" {
 		fullPrompt = fmt.Sprintf("Context:\n%s\n\n---\n\nQuestion: %s", system, prompt)
 	}
-	return c.generate(fullPrompt)
+	result, _, err := c.generateWithStats(fullPrompt)
+	return result, err
+}
+
+// GenerateWithStats produces a response and returns token usage statistics.
+func (c *OllamaClient) GenerateWithStats(ctx context.Context, prompt string) (string, GenerationStats, error) {
+	return c.generateWithStats(prompt)
 }
 
 // ModelsResponse represents the response from /api/tags
@@ -125,7 +133,7 @@ func (c *OllamaClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
 	filePath, _ := event.ToolInput["file_path"].(string)
 	prompt := BuildAnalysisPrompt(event.ToolName, filePath, event.ToolResult)
 
-	response, err := c.generateInternal(prompt, AnalysisSystemPrompt)
+	response, _, err := c.generateInternal(prompt, AnalysisSystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +143,17 @@ func (c *OllamaClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
 
 // generate calls Ollama to generate text (no system prompt)
 func (c *OllamaClient) generate(prompt string) (string, error) {
+	result, _, err := c.generateWithStats(prompt)
+	return result, err
+}
+
+// generateWithStats calls Ollama and returns response with token stats.
+func (c *OllamaClient) generateWithStats(prompt string) (string, GenerationStats, error) {
 	return c.generateInternal(prompt, "")
 }
 
 // generateInternal calls Ollama with optional system prompt
-func (c *OllamaClient) generateInternal(prompt, system string) (string, error) {
+func (c *OllamaClient) generateInternal(prompt, system string) (string, GenerationStats, error) {
 	reqBody := OllamaRequest{
 		Model:  c.model,
 		Prompt: prompt,
@@ -149,7 +163,7 @@ func (c *OllamaClient) generateInternal(prompt, system string) (string, error) {
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", err
+		return "", GenerationStats{}, err
 	}
 
 	resp, err := c.httpClient.Post(
@@ -158,21 +172,26 @@ func (c *OllamaClient) generateInternal(prompt, system string) (string, error) {
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to call Ollama: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to call Ollama: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
+		return "", GenerationStats{}, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var ollamaResp OllamaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return "", GenerationStats{}, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return ollamaResp.Response, nil
+	stats := GenerationStats{
+		InputTokens:  ollamaResp.PromptEvalCount,
+		OutputTokens: ollamaResp.EvalCount,
+	}
+
+	return ollamaResp.Response, stats, nil
 }
 
 // EmbedRequest represents a request to Ollama's embedding endpoint

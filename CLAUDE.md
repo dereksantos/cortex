@@ -4,11 +4,13 @@ A context broker that captures development insights and injects them into AI cod
 
 ## Problem
 
-AI coding assistants forget. Every session starts fresh:
-- Decisions made yesterday are unknown today
-- Corrections must be repeated ("No, we use Zustand not Redux")
-- Architectural constraints get violated
-- Patterns aren't consistently applied
+Native AI memory (e.g., Claude Code Auto-Memory) handles basic single-tool recall. Cortex addresses what native memory cannot:
+
+- **Token waste**: Sessions re-discover decisions, re-read files, and re-establish context -- compounding costs over time
+- **Scale**: Semantic retrieval via embeddings when insights grow to hundreds (vs flat-file context stuffing)
+- **Cross-tool**: Portable context across Claude Code, Cursor, Copilot via MCP server
+- **Measurability**: ABR metric + eval framework to quantify context quality
+- **Budget-bounded intelligence**: Activity-aware Think/Dream modes with inverse budget models; local models preferred for background tasks
 
 ## Solution: The Context Pipeline
 

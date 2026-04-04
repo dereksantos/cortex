@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Report writes human-readable results to the given writer.
@@ -25,14 +26,32 @@ func Report(w io.Writer, results *Results) {
 	fmt.Fprintf(w, "Avg Cortex Score:   %.2f\n", results.AvgCortexScore)
 	fmt.Fprintf(w, "Avg Lift:           %+.0f%%\n", results.AvgLift*100)
 
-	// Show ABR if any scenario has ranking
-	for _, s := range results.Scenarios {
-		if s.HasRanking && s.AvgABR > 0 {
-			fmt.Fprintf(w, "Avg ABR:            %.2f\n", s.AvgABR)
-			break
-		}
+	if results.AvgABR > 0 {
+		fmt.Fprintf(w, "Avg ABR:            %.2f\n", results.AvgABR)
 	}
 	fmt.Fprintf(w, "\n")
+
+	// Token usage
+	if results.TotalBaselineTokens > 0 || results.TotalCortexTokens > 0 {
+		fmt.Fprintf(w, "Tokens\n")
+		fmt.Fprintf(w, "------\n")
+		fmt.Fprintf(w, "Baseline: %d → Cortex: %d (%.0f%% reduction)\n",
+			results.TotalBaselineTokens, results.TotalCortexTokens, results.AvgTokenReduction*100)
+		fmt.Fprintf(w, "\n")
+	}
+
+	// Model Parity (only when compare provider is set)
+	if results.CompareModel != "" {
+		fmt.Fprintf(w, "Model Parity (%s + Cortex vs %s)\n", results.Model, results.CompareModel)
+		fmt.Fprintf(w, "%s\n", strings.Repeat("-", 50))
+		fmt.Fprintf(w, "Small + Cortex:    %.2f\n", results.AvgCortexScore)
+		fmt.Fprintf(w, "Frontier (no ctx): %.2f\n", results.AvgCompareScore)
+		fmt.Fprintf(w, "MPR:               %.2f\n", results.AvgMPR)
+		if results.TotalCompareTokens > 0 {
+			fmt.Fprintf(w, "Compare tokens:    %d\n", results.TotalCompareTokens)
+		}
+		fmt.Fprintf(w, "\n")
+	}
 
 	// Win/Loss
 	fmt.Fprintf(w, "Win/Loss\n")
@@ -126,13 +145,88 @@ func ReportJSON(w io.Writer, results *Results) error {
 func ReportSummary(w io.Writer, results *Results) {
 	status := "PASS"
 	if !results.Pass {
-		status := "FAIL"
-		fmt.Fprintf(w, "Lift: %+.0f%% [%s] - Cortex: %d wins, Baseline: %d wins\n",
-			results.AvgLift*100, status, results.TotalCortexWins, results.TotalBaselineWins)
+		status = "FAIL"
+	}
+	line := fmt.Sprintf("Lift: %+.0f%% [%s] - Cortex: %d wins, Baseline: %d wins",
+		results.AvgLift*100, status, results.TotalCortexWins, results.TotalBaselineWins)
+	if results.AvgABR > 0 {
+		line += fmt.Sprintf(" - ABR: %.2f", results.AvgABR)
+	}
+	if results.AvgMPR > 0 {
+		line += fmt.Sprintf(" - MPR: %.2f", results.AvgMPR)
+	}
+	fmt.Fprintf(w, "%s\n", line)
+}
+
+// ReportABRTrend writes ABR trend over recent runs.
+func ReportABRTrend(w io.Writer, points []ABRTrendPoint) {
+	if len(points) == 0 {
+		fmt.Fprintf(w, "No ABR data from previous runs.\n")
 		return
 	}
-	fmt.Fprintf(w, "Lift: %+.0f%% [%s] - Cortex: %d wins, Baseline: %d wins\n",
-		results.AvgLift*100, status, results.TotalCortexWins, results.TotalBaselineWins)
+
+	fmt.Fprintf(w, "ABR Trend (last %d runs)\n", len(points))
+	fmt.Fprintf(w, "========================\n")
+
+	// ASCII chart - show ABR as bar from 0.0 to 1.0, with target line at 0.9
+	for i, pt := range points {
+		bar := abrBar(pt.AvgABR)
+		sha := ""
+		if len(pt.GitCommitSHA) >= 7 {
+			sha = " " + pt.GitCommitSHA[:7]
+		}
+		fmt.Fprintf(w, "%2d: %s %.2f%s\n", i+1, bar, pt.AvgABR, sha)
+	}
+
+	// Trend direction
+	if len(points) >= 2 {
+		first := points[0].AvgABR
+		last := points[len(points)-1].AvgABR
+		diff := last - first
+		if diff > 0.05 {
+			fmt.Fprintf(w, "\nTrend: IMPROVING\n")
+		} else if diff < -0.05 {
+			fmt.Fprintf(w, "\nTrend: DECLINING\n")
+		} else {
+			fmt.Fprintf(w, "\nTrend: STABLE\n")
+		}
+	}
+
+	// Target comparison
+	latest := points[len(points)-1].AvgABR
+	if latest >= 0.9 {
+		fmt.Fprintf(w, "Status: TARGET MET (ABR >= 0.9)\n")
+	} else {
+		fmt.Fprintf(w, "Status: %.0f%% to target (0.9)\n", (0.9-latest)*100)
+	}
+}
+
+// abrBar creates an ASCII bar for ABR visualization (0.0 to 1.0)
+// with a target marker at 0.9
+func abrBar(abr float64) string {
+	width := 20
+	if abr < 0 {
+		abr = 0
+	}
+	if abr > 1 {
+		abr = 1
+	}
+
+	chars := int(abr * float64(width))
+	targetPos := int(0.9 * float64(width)) // target at 0.9
+
+	bar := make([]byte, width)
+	for i := range bar {
+		if i < chars {
+			bar[i] = '#'
+		} else if i == targetPos {
+			bar[i] = '|'
+		} else {
+			bar[i] = '.'
+		}
+	}
+
+	return "[" + string(bar) + "]"
 }
 
 // ReportTrend writes lift trend over recent runs.

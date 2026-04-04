@@ -14,11 +14,13 @@ import (
 
 // Evaluator runs scenarios and compares Cortex vs baseline.
 type Evaluator struct {
-	provider      llm.Provider
-	model         string
-	verbose       bool
-	judgeProvider llm.Provider // LLM for semantic scoring (optional)
-	judgeModel    string       // Judge model name for tracking
+	provider        llm.Provider
+	model           string
+	verbose         bool
+	judgeProvider   llm.Provider // LLM for semantic scoring (optional)
+	judgeModel      string       // Judge model name for tracking
+	compareProvider llm.Provider // Frontier model for MPR comparison (optional)
+	compareModel    string       // Compare model name for tracking
 }
 
 // New creates a new Evaluator.
@@ -44,6 +46,12 @@ func (e *Evaluator) SetJudge(provider llm.Provider, model string) {
 	e.judgeModel = model
 }
 
+// SetCompareProvider sets the frontier model used for Model Parity Ratio (MPR).
+func (e *Evaluator) SetCompareProvider(provider llm.Provider, model string) {
+	e.compareProvider = provider
+	e.compareModel = model
+}
+
 // Run executes all scenarios in a directory and returns results.
 func (e *Evaluator) Run(dir string) (*Results, error) {
 	scenarios, err := LoadAll(dir)
@@ -67,7 +75,12 @@ func (e *Evaluator) Run(dir string) (*Results, error) {
 		results = append(results, *result)
 	}
 
-	return CalculateResults(results, e.provider.Name(), e.model), nil
+	r := CalculateResults(results, e.provider.Name(), e.model)
+	if e.compareProvider != nil {
+		r.CompareProvider = e.compareProvider.Name()
+		r.CompareModel = e.compareModel
+	}
+	return r, nil
 }
 
 // RunScenario executes a single scenario and returns its result.
@@ -226,7 +239,7 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 	ctx := context.Background()
 
 	// 1. BASELINE: Generate response WITHOUT any context
-	baselineResponse, err := e.provider.Generate(ctx, test.Query)
+	baselineResponse, baselineStats, err := e.provider.GenerateWithStats(ctx, test.Query)
 	if err != nil {
 		return nil, fmt.Errorf("baseline generate: %w", err)
 	}
@@ -257,7 +270,7 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 
 	// 3. CORTEX: Generate response WITH context
 	cortexPrompt := buildPrompt(test.Query, cortexContext)
-	cortexResponse, err := e.provider.Generate(ctx, cortexPrompt)
+	cortexResponse, cortexStats, err := e.provider.GenerateWithStats(ctx, cortexPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("cortex generate: %w", err)
 	}
@@ -275,14 +288,37 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 	}
 
 	result := &TestResult{
-		TestID:        test.ID,
-		Query:         test.Query,
-		Depth:         depth,
-		BaselineScore: baselineScore,
-		CortexScore:   cortexScore,
-		Lift:          lift,
-		Winner:        winner,
-		Pass:          cortexScore >= baselineScore, // Cortex doesn't hurt
+		TestID:         test.ID,
+		Query:          test.Query,
+		Depth:          depth,
+		BaselineScore:  baselineScore,
+		CortexScore:    cortexScore,
+		Lift:           lift,
+		Winner:         winner,
+		Pass:           cortexScore >= baselineScore, // Cortex doesn't hurt
+		BaselineTokens: baselineStats.TotalTokens(),
+		CortexTokens:   cortexStats.TotalTokens(),
+	}
+
+	// 4b. COMPARE: Generate response with frontier model (no context) for MPR
+	if e.compareProvider != nil {
+		compareResponse, compareStats, err := e.compareProvider.GenerateWithStats(ctx, test.Query)
+		if err != nil {
+			if e.verbose {
+				fmt.Printf("    [compare] error: %v\n", err)
+			}
+		} else {
+			compareScore := Score(compareResponse, test.Expect)
+			result.CompareScore = compareScore
+			result.CompareTokens = compareStats.TotalTokens()
+			result.HasCompare = true
+			result.MPR = CalculateMPR(cortexScore, compareScore)
+
+			if e.verbose {
+				fmt.Printf("    [compare] %.2f - %s\n", compareScore, truncateVerbose(compareResponse, 80))
+				fmt.Printf("    MPR: %.2f\n", result.MPR)
+			}
+		}
 	}
 
 	// 5. Calculate retrieval quality metrics if ranking is specified
