@@ -55,6 +55,37 @@ cortex recent                    # Show recent events
 cortex status                    # Check daemon status
 ```
 
+## Multi-Agent / CI Setup
+
+For projects with multiple AI agents (e.g., sprite.dev, parallel Claude Code sessions), use Cortex as a shared context layer without hooks or daemon:
+
+1. Build: `go build -o bin/cortex ./cmd/cortex`
+2. Init: `./bin/cortex init`
+3. Add `.cortex/` to `.gitignore`
+
+All agents share the same `.cortex/` directory — one agent's captured decisions are searchable by all others.
+
+### Capture and search only (no hooks, no daemon)
+
+```bash
+# Record a decision or insight
+./bin/cortex capture --type=decision --content="Use PostgreSQL for all storage"
+
+# Search for relevant context
+./bin/cortex search "database"
+
+# Record a correction
+./bin/cortex capture --type=correction --content="Use pgx not database/sql"
+```
+
+### Notes for automated environments
+
+- **Binary path**: Check the binary into the repo (e.g., `bin/cortex`) or install to a fixed path so all agents find it
+- **Shared `.cortex/`**: SQLite WAL mode handles concurrent readers. Concurrent writers may hit brief locks under heavy parallel writes — this is fine for typical agent workloads
+- **No daemon needed**: Capture and search work standalone. The daemon adds background processing (Dream/Think) and the web dashboard, but is optional
+- **No `~/.claude/` required**: `cortex init` and CLI commands work without Claude Code installed. Only `cortex install` requires it (sets up hooks)
+- **Ingest after capture**: Run `./bin/cortex ingest` to move queued events into the database. Without the daemon, events stay in the queue until ingest runs
+
 ## Cognitive Architecture
 
 Cortex uses five cognitive modes, inspired by how humans process information:

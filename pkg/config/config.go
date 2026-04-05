@@ -24,6 +24,9 @@ type Config struct {
 	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
 	AnthropicModel string `json:"anthropic_model,omitempty"`
 
+	// Web dashboard
+	WebPort int `json:"web_port,omitempty"`
+
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
 	EnableVector bool `json:"enable_vector"`
@@ -47,6 +50,7 @@ func Default() *Config {
 		OllamaModel:          "qwen2.5-coder:1.5b",
 		OllamaEmbeddingModel: "nomic-embed-text",
 		AnthropicModel:       "claude-haiku-4-5-20251001",
+		WebPort:              9090,
 		EnableGraph:  true,
 		EnableVector: true,
 	}

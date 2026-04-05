@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+  }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .logo {
+    font-size: 16px;
+    font-weight: 700;
+    color: #58a6ff;
+    letter-spacing: 2px;
+  }
+  .mode-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: #21262d;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .mode-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #484f58;
+  }
+  .mode-dot.active { background: #3fb950; animation: pulse 2s ease-in-out infinite; }
+  .mode-dot.dream { background: #a371f7; }
+  .mode-dot.think { background: #58a6ff; }
+  .mode-dot.reflect { background: #d29922; }
+  .mode-dot.reflex { background: #3fb950; }
+  .mode-dot.resolve { background: #f0883e; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .stats-bar {
+    display: flex;
+    gap: 20px;
+    font-size: 12px;
+    color: #8b949e;
+  }
+  .stat-value { color: #c9d1d9; font-weight: 600; }
+  .connection-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 4px;
+  }
+  .connection-dot.connected { background: #3fb950; }
+  .connection-dot.disconnected { background: #f85149; animation: pulse 1s ease-in-out infinite; }
+
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 0;
+    height: calc(100vh - 49px);
+  }
+  .panel {
+    padding: 16px 20px;
+    overflow-y: auto;
+  }
+  .panel-right {
+    border-left: 1px solid #30363d;
+    background: #0d1117;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #8b949e;
+    margin-bottom: 8px;
+    margin-top: 16px;
+  }
+  .section-title:first-child { margin-top: 0; }
+
+  /* Activity log */
+  .activity-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .activity-item {
+    display: flex;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .activity-item:hover { background: #161b22; }
+  .activity-time { color: #484f58; min-width: 60px; }
+  .activity-mode {
+    min-width: 56px;
+    font-weight: 600;
+    font-size: 11px;
+  }
+  .activity-mode.dream { color: #a371f7; }
+  .activity-mode.think { color: #58a6ff; }
+  .activity-mode.reflect { color: #d29922; }
+  .activity-mode.reflex { color: #3fb950; }
+  .activity-mode.resolve { color: #f0883e; }
+  .activity-mode.prune { color: #f85149; }
+  .activity-mode.digest { color: #79c0ff; }
+  .activity-desc { color: #c9d1d9; word-break: break-word; }
+
+  /* Stats panel */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .stat-label { color: #8b949e; }
+  .stat-val { color: #c9d1d9; font-weight: 600; }
+
+  /* Topic bars */
+  .topic-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 12px;
+  }
+  .topic-name { min-width: 80px; color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topic-bar-bg {
+    flex: 1;
+    height: 6px;
+    background: #21262d;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .topic-bar-fill {
+    height: 100%;
+    background: #58a6ff;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .topic-val { min-width: 32px; text-align: right; color: #8b949e; font-size: 11px; }
+
+  /* Sessions */
+  .session-item {
+    padding: 6px 0;
+    border-bottom: 1px solid #21262d;
+    font-size: 12px;
+  }
+  .session-item:last-child { border-bottom: none; }
+  .session-id { color: #58a6ff; font-weight: 600; }
+  .session-meta { color: #484f58; font-size: 11px; }
+
+  /* Mode description */
+  .mode-desc {
+    color: #8b949e;
+    font-size: 12px;
+    font-style: italic;
+    padding: 8px 0;
+    min-height: 24px;
+  }
+
+  /* Empty state */
+  .empty { color: #484f58; font-style: italic; font-size: 12px; padding: 8px 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <span class="logo">CORTEX</span>
+    <div class="mode-badge" id="mode-badge">
+      <span class="mode-dot" id="mode-dot"></span>
+      <span id="mode-name">IDLE</span>
+    </div>
+  </div>
+  <div class="stats-bar">
+    <span>Events: <span class="stat-value" id="stat-events">0</span></span>
+    <span>Insights: <span class="stat-value" id="stat-insights">0</span></span>
+    <span><span class="connection-dot disconnected" id="conn-dot"></span><span id="conn-text">connecting</span></span>
+  </div>
+</div>
+
+<div class="main">
+  <div class="panel">
+    <div class="section-title">Activity</div>
+    <div class="mode-desc" id="mode-desc"></div>
+    <ul class="activity-list" id="activity-list">
+      <li class="empty">Waiting for data...</li>
+    </ul>
+  </div>
+
+  <div class="panel panel-right">
+    <div class="section-title">Stats</div>
+    <div class="stat-row"><span class="stat-label">Cache Hit Rate</span><span class="stat-val" id="stat-cache">-</span></div>
+    <div class="stat-row"><span class="stat-label">Activity Level</span><span class="stat-val" id="stat-activity">-</span></div>
+    <div class="stat-row"><span class="stat-label">Idle</span><span class="stat-val" id="stat-idle">-</span></div>
+
+    <div class="section-title">Topics</div>
+    <div id="topics-container"><span class="empty">No topics yet</span></div>
+
+    <div class="section-title">Sessions</div>
+    <div id="sessions-container"><span class="empty">No sessions</span></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const $ = id => document.getElementById(id);
+
+  let connected = false;
+
+  function setConnected(v) {
+    connected = v;
+    const dot = $('conn-dot');
+    const text = $('conn-text');
+    if (v) {
+      dot.className = 'connection-dot connected';
+      text.textContent = 'live';
+    } else {
+      dot.className = 'connection-dot disconnected';
+      text.textContent = 'disconnected';
+    }
+  }
+
+  function modeClass(mode) {
+    return ['dream','think','reflect','reflex','resolve','prune','digest'].includes(mode) ? mode : '';
+  }
+
+  function update(d) {
+    // Mode
+    const mode = d.mode || 'idle';
+    const modeNames = {dream:'DREAMING',think:'THINKING',reflect:'REFLECTING',reflex:'REFLEX',resolve:'RESOLVING'};
+    $('mode-name').textContent = modeNames[mode] || mode.toUpperCase();
+    const dot = $('mode-dot');
+    dot.className = 'mode-dot' + (mode !== 'idle' ? ' active ' + modeClass(mode) : '');
+    $('mode-desc').textContent = d.mode_description || '';
+
+    // Stats
+    $('stat-events').textContent = d.events || 0;
+    $('stat-insights').textContent = d.insights || 0;
+    $('stat-cache').textContent = d.cache_hit_rate || '-';
+    $('stat-activity').textContent = d.activity_level != null ? d.activity_level.toFixed(2) : '-';
+    $('stat-idle').textContent = d.idle_seconds != null ? d.idle_seconds + 's' : '-';
+
+    // Activity
+    const list = $('activity-list');
+    if (d.activity && d.activity.length > 0) {
+      list.innerHTML = d.activity.map(a =>
+        '<li class="activity-item">' +
+          '<span class="activity-time">' + esc(a.time) + '</span>' +
+          '<span class="activity-mode ' + modeClass(a.mode) + '">[' + esc(a.mode) + ']</span>' +
+          '<span class="activity-desc">' + esc(a.description) + '</span>' +
+        '</li>'
+      ).join('');
+      list.scrollTop = list.scrollHeight;
+    } else {
+      list.innerHTML = '<li class="empty">No activity yet</li>';
+    }
+
+    // Topics
+    const tc = $('topics-container');
+    if (d.topics && Object.keys(d.topics).length > 0) {
+      const sorted = Object.entries(d.topics).sort((a,b) => b[1]-a[1]).slice(0, 8);
+      tc.innerHTML = sorted.map(([name, weight]) =>
+        '<div class="topic-row">' +
+          '<span class="topic-name">' + esc(name) + '</span>' +
+          '<div class="topic-bar-bg"><div class="topic-bar-fill" style="width:' + (weight*100) + '%"></div></div>' +
+          '<span class="topic-val">' + weight.toFixed(2) + '</span>' +
+        '</div>'
+      ).join('');
+    } else {
+      tc.innerHTML = '<span class="empty">No topics yet</span>';
+    }
+
+    // Sessions
+    const sc = $('sessions-container');
+    if (d.sessions && d.sessions.length > 0) {
+      sc.innerHTML = d.sessions.map(s =>
+        '<div class="session-item">' +
+          '<span class="session-id">' + esc(s.session_id || 'unknown').slice(0, 12) + '</span> ' +
+          '<span class="session-meta">' + s.event_count + ' events, started ' + esc(s.started_at) + '</span>' +
+        '</div>'
+      ).join('');
+    } else {
+      sc.innerHTML = '<span class="empty">No sessions</span>';
+    }
+  }
+
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function connect() {
+    const es = new EventSource('/api/events');
+    es.addEventListener('state', function(e) {
+      setConnected(true);
+      try {
+        update(JSON.parse(e.data));
+      } catch(err) {
+        console.error('parse error:', err);
+      }
+    });
+    es.onerror = function() {
+      setConnected(false);
+    };
+    es.onopen = function() {
+      setConnected(true);
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
