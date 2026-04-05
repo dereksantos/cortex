@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/internal/web"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -42,6 +44,23 @@ func (c *DaemonCommand) Description() string { return "Run background context pr
 func (c *DaemonCommand) Execute(ctx *Context) error {
 	cfg := ctx.Config
 	store := ctx.Storage
+
+	// Parse daemon flags
+	webPort := cfg.WebPort
+	if webPort == 0 {
+		webPort = 9090
+	}
+	for i := 0; i < len(ctx.Args); i++ {
+		switch ctx.Args[i] {
+		case "--port":
+			if i+1 < len(ctx.Args) {
+				if p, err := strconv.Atoi(ctx.Args[i+1]); err == nil {
+					webPort = p
+				}
+				i++
+			}
+		}
+	}
 
 	// Write PID file for process tracking
 	if err := WriteDaemonPID(cfg.ContextDir); err != nil {
@@ -134,7 +153,17 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	pruner := intcognition.NewPruner(store, cfg)
 	pruner.SetStateWriter(stateWriter)
 
+	// Start web dashboard
+	webServer := web.New(cfg, store, webPort)
+	go func() {
+		if err := webServer.Start(); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "Warning: Web dashboard failed to start: %v\n", err)
+		}
+	}()
+	defer webServer.Shutdown(context.Background())
+
 	fmt.Println("Cortex daemon started")
+	fmt.Printf("   Dashboard: http://localhost:%d\n", webPort)
 	fmt.Println("   Processing events every 5 seconds...")
 	fmt.Println("   Session persisted every 30 seconds...")
 	fmt.Println("   Status updates every 2 seconds...")

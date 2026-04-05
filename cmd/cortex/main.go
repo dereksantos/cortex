@@ -316,7 +316,7 @@ Commands:
   ingest         Move queued events to database
   analyze        Run LLM analysis on recent events [limit]
   process        Process queue + analyze (backward compat)
-  daemon         Start background processor
+  daemon         Start background processor (dashboard at :9090)
 
   search         Search captured context
   recent         Show recent events
