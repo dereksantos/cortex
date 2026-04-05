@@ -163,6 +163,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
 			}
+			// Auto-start daemon on search/insights (covers CLI-only multi-agent usage)
+			if command == "search" || command == "insights" {
+				maybeStartDaemon(cfg)
+			}
 			store, err := storage.New(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
@@ -190,6 +194,10 @@ func main() {
 				}
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
+			}
+			// Auto-start daemon on session-start (beginning of every session)
+			if command == "session-start" {
+				maybeStartDaemon(cfg)
 			}
 			store, err := storage.New(cfg)
 			if err != nil {
@@ -230,6 +238,24 @@ func loadConfig() (*config.Config, error) {
 
 	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
 	return config.Load(configPath)
+}
+
+// maybeStartDaemon auto-starts the daemon if it's not running.
+// Fire-and-forget: never blocks the caller, never fails the caller.
+// Writes to stderr only so it doesn't pollute hook stdout.
+func maybeStartDaemon(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if commands.IsDaemonRunning(cfg.ContextDir) {
+		return
+	}
+	pid, err := commands.StartDaemonBackground(cfg.ContextDir)
+	if err != nil {
+		// Already running or can't start — either way, not our problem
+		return
+	}
+	fmt.Fprintf(os.Stderr, "cortex: auto-started daemon (pid %d)\n", pid)
 }
 
 // ensureDaemonRunning checks if the daemon appears to be running.
