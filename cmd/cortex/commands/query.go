@@ -198,9 +198,22 @@ func (c *RecentCommand) Execute(ctx *Context) error {
 
 	fmt.Printf("Recent %d events:\n\n", len(recentEvents))
 	for i, event := range recentEvents {
-		fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, event.ToolName, event.Timestamp.Format("2006-01-02 15:04"))
+		label := event.ToolName
+		if label == "" {
+			label = string(event.EventType)
+		}
+		if label == "" {
+			label = "(unknown)"
+		}
+		fmt.Printf("%d. [%s] %s - %s\n", i+1, event.Source, label, event.Timestamp.Format("2006-01-02 15:04"))
 		if filePath, ok := event.ToolInput["file_path"].(string); ok {
 			fmt.Printf("   File: %s\n", filePath)
+		} else if event.ToolName == "" && event.Prompt != "" {
+			preview := event.Prompt
+			if len(preview) > 80 {
+				preview = preview[:80] + "..."
+			}
+			fmt.Printf("   %s\n", preview)
 		}
 		fmt.Println()
 	}

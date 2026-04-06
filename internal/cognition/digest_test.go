@@ -131,7 +131,7 @@ func TestTokenize(t *testing.T) {
 }
 
 func TestDigest_DigestInsights(t *testing.T) {
-	digest := NewDigest(nil) // No storage needed for this test
+	digest := NewDigest(nil, "") // No storage needed for this test
 
 	tests := []struct {
 		name           string
@@ -206,7 +206,7 @@ func TestDigest_DigestInsights(t *testing.T) {
 }
 
 func TestDigest_RecencyBias(t *testing.T) {
-	digest := NewDigest(nil)
+	digest := NewDigest(nil, "")
 	digest.config.SimilarityThreshold = 0.5
 	digest.config.RecencyBias = true
 
@@ -236,7 +236,7 @@ func TestDigest_RecencyBias(t *testing.T) {
 }
 
 func TestDigest_MaybeDigest_Preconditions(t *testing.T) {
-	digest := NewDigest(nil)
+	digest := NewDigest(nil, "")
 
 	// Should skip because no Dream has run
 	result, err := digest.MaybeDigest(context.Background())
@@ -289,8 +289,8 @@ func TestDefaultDigestConfig(t *testing.T) {
 	if cfg.MaxMerges != 10 {
 		t.Errorf("MaxMerges = %d, want 10", cfg.MaxMerges)
 	}
-	if cfg.SimilarityThreshold != 0.7 {
-		t.Errorf("SimilarityThreshold = %v, want 0.7", cfg.SimilarityThreshold)
+	if cfg.SimilarityThreshold != 0.5 {
+		t.Errorf("SimilarityThreshold = %v, want 0.5", cfg.SimilarityThreshold)
 	}
 	if !cfg.RecencyBias {
 		t.Error("RecencyBias should be true by default")

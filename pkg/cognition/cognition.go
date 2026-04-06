@@ -657,7 +657,7 @@ type DigestConfig struct {
 func DefaultDigestConfig() DigestConfig {
 	return DigestConfig{
 		MaxMerges:           10,
-		SimilarityThreshold: 0.7,
+		SimilarityThreshold: 0.5,
 		RecencyBias:         true,
 		MinDisplayDuration:  2 * time.Second,
 	}

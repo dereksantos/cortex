@@ -221,6 +221,11 @@ func (g *GitSource) sampleDiffs(ctx context.Context, n int) ([]cognition.DreamIt
 			break
 		}
 
+		// Skip sensitive file paths in diffs
+		if isSensitivePath(change.file) {
+			continue
+		}
+
 		diff, err := g.getDiff(ctx, change.commit, change.file)
 		if err != nil || diff == "" {
 			continue
@@ -267,6 +272,47 @@ func isHex(s string) bool {
 		}
 	}
 	return true
+}
+
+// isSensitivePath returns true for file paths that should never be analyzed.
+// Used by both ProjectSource and GitSource to filter out secrets and noise.
+func isSensitivePath(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	ext := strings.ToLower(filepath.Ext(path))
+
+	// .env files (not .env.example/.env.sample/.env.template)
+	if strings.HasPrefix(base, ".env") {
+		return base != ".env.example" && base != ".env.sample" && base != ".env.template"
+	}
+
+	// Key/cert files
+	sensitiveExts := map[string]bool{
+		".key": true, ".pem": true, ".p12": true, ".pfx": true,
+		".keystore": true, ".jks": true, ".p8": true,
+	}
+	if sensitiveExts[ext] {
+		return true
+	}
+
+	// Named secret files
+	sensitiveFiles := map[string]bool{
+		"id_rsa": true, "id_ed25519": true, "id_ecdsa": true,
+		"credentials.json": true, "service-account.json": true,
+		"secrets.yaml": true, "secrets.yml": true, "secrets.json": true,
+		".npmrc": true, ".pypirc": true, ".netrc": true, "htpasswd": true,
+	}
+	if sensitiveFiles[base] {
+		return true
+	}
+
+	// Cortex queue/state files
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, ".cortex/queue/") || strings.Contains(lower, ".cortex/db/") ||
+		strings.Contains(lower, ".cortex/logs/") {
+		return true
+	}
+
+	return false
 }
 
 // classifyCommit determines the type of commit from its subject.

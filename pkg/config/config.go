@@ -24,6 +24,9 @@ type Config struct {
 	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
 	AnthropicModel string `json:"anthropic_model,omitempty"`
 
+	// Storage
+	DatabaseURL string `json:"database_url,omitempty"` // SQLite path override (default: .cortex/db/events.db)
+
 	// Web dashboard
 	WebPort int `json:"web_port,omitempty"`
 
@@ -113,4 +116,9 @@ func (c *Config) EnsureDirectories() error {
 	}
 
 	return nil
+}
+
+// KnowledgePath returns the path to a knowledge category directory.
+func (c *Config) KnowledgePath(category string) string {
+	return filepath.Join(c.ContextDir, "knowledge", category)
 }

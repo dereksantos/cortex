@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sort"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/viterin/vek"
@@ -31,14 +32,26 @@ type Storage struct {
 	cfg *config.Config
 }
 
-// New creates a new Storage instance
+// New creates a new Storage instance.
+// If cfg.DatabaseURL is set, it is used as the SQLite path (e.g., a shared volume).
+// Otherwise, defaults to .cortex/db/events.db.
 func New(cfg *config.Config) (*Storage, error) {
-	dbDir := filepath.Join(cfg.ContextDir, "db")
-	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	dbPath := cfg.DatabaseURL
+	if dbPath == "" {
+		dbDir := filepath.Join(cfg.ContextDir, "db")
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create db directory: %w", err)
+		}
+		dbPath = filepath.Join(dbDir, "events.db")
+	} else {
+		// Ensure parent directory exists for custom paths
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create database directory: %w", err)
+			}
+		}
 	}
 
-	dbPath := filepath.Join(dbDir, "events.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -929,6 +942,65 @@ func (s *Storage) SearchInsights(keyword string, limit int) ([]*Insight, error) 
 	defer rows.Close()
 
 	return s.scanInsights(rows)
+}
+
+// SearchKnowledgeFiles searches .cortex/knowledge/ markdown files by keyword.
+// This enables search over committed knowledge that may not be in the database.
+func (s *Storage) SearchKnowledgeFiles(keyword string, limit int) ([]*Insight, error) {
+	if s.cfg == nil || s.cfg.ContextDir == "" {
+		return nil, nil
+	}
+
+	knowledgeDir := filepath.Join(s.cfg.ContextDir, "knowledge")
+	if _, err := os.Stat(knowledgeDir); err != nil {
+		return nil, nil
+	}
+
+	keyword = strings.ToLower(keyword)
+	var results []*Insight
+
+	err := filepath.Walk(knowledgeDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		if len(results) >= limit {
+			return filepath.SkipAll
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		if !strings.Contains(strings.ToLower(string(content)), keyword) {
+			return nil
+		}
+
+		// Parse frontmatter for category and importance
+		category := filepath.Base(filepath.Dir(path))
+		importance := 5
+		summary := string(content)
+
+		// Extract body after frontmatter
+		if parts := strings.SplitN(summary, "---", 3); len(parts) == 3 {
+			summary = strings.TrimSpace(parts[2])
+		}
+
+		results = append(results, &Insight{
+			Category:   category,
+			Summary:    summary,
+			Importance: importance,
+			SourceType: "knowledge_file",
+			CreatedAt:  info.ModTime(),
+		})
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to search knowledge files: %w", err)
+	}
+
+	return results, nil
 }
 
 // MergeInsights keeps one insight and deletes duplicates, merging their tags.
