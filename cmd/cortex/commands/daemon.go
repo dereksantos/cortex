@@ -100,6 +100,22 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 		// Continue without cognitive features
 	}
 
+	// Apply mode configuration (tuning knobs for Think/Dream/Digest)
+	if cortex != nil && cfg.Modes != nil {
+		cortex.ApplyModeConfig(cfg.Modes)
+		fmt.Printf("   Applied mode config")
+		if cfg.Modes.Dream != nil && cfg.Modes.Dream.Enabled != nil && !*cfg.Modes.Dream.Enabled {
+			fmt.Printf(" (dream: off)")
+		}
+		if cfg.Modes.Think != nil && cfg.Modes.Think.Enabled != nil && !*cfg.Modes.Think.Enabled {
+			fmt.Printf(" (think: off)")
+		}
+		if cfg.Modes.Digest != nil && cfg.Modes.Digest.Enabled != nil && !*cfg.Modes.Digest.Enabled {
+			fmt.Printf(" (digest: off)")
+		}
+		fmt.Println()
+	}
+
 	// Create state writer for real-time cognitive mode status
 	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
 	if cortex != nil {
@@ -227,10 +243,10 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 				}
 			}
 		case <-cognitiveTicker.C:
-			// Trigger cognitive modes based on activity
+			// Trigger cognitive modes based on activity and config
 			if cortex != nil {
 				activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
-				if isUserIdle(store, idleThreshold) {
+				if cortex.IsModeEnabled("dream") && isUserIdle(store, idleThreshold) {
 					// Idle - run Dream for background exploration
 					go func() {
 						result, err := cortex.MaybeDream(context.Background())
@@ -242,7 +258,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 							})
 						}
 					}()
-				} else {
+				} else if cortex.IsModeEnabled("think") {
 					// Active - run Think for session pattern learning
 					go func() {
 						result, err := cortex.MaybeThink(context.Background())

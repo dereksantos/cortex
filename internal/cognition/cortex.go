@@ -35,6 +35,11 @@ type Cortex struct {
 	// Metrics
 	metricsWriter *BackgroundMetricsWriter
 
+	// Mode enabled flags (all true by default)
+	thinkEnabled  bool
+	dreamEnabled  bool
+	digestEnabled bool
+
 	// Graceful shutdown
 	wg sync.WaitGroup
 }
@@ -88,7 +93,92 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		sessionTracker: sessionTracker,
 		metricsWriter:  metricsWriter,
 		activity:       activity,
+		thinkEnabled:   true,
+		dreamEnabled:   true,
+		digestEnabled:  true,
 	}, nil
+}
+
+// ApplyModeConfig applies per-mode tuning from the user's config.
+// Nil fields in the config fall back to defaults.
+func (c *Cortex) ApplyModeConfig(modes *config.ModeConfig) {
+	if modes == nil {
+		return
+	}
+
+	// Think
+	if modes.Think != nil {
+		if modes.Think.Enabled != nil {
+			c.thinkEnabled = *modes.Think.Enabled
+		}
+		if c.thinkEnabled {
+			cfg := cognition.DefaultThinkConfig()
+			if modes.Think.MaxBudget != nil {
+				cfg.MaxBudget = *modes.Think.MaxBudget
+			}
+			if modes.Think.MinBudget != nil {
+				cfg.MinBudget = *modes.Think.MinBudget
+			}
+			if modes.Think.OperationTimeoutMs != nil {
+				cfg.OperationTimeout = time.Duration(*modes.Think.OperationTimeoutMs) * time.Millisecond
+			}
+			c.think.SetConfig(cfg)
+		}
+	}
+
+	// Dream
+	if modes.Dream != nil {
+		if modes.Dream.Enabled != nil {
+			c.dreamEnabled = *modes.Dream.Enabled
+		}
+		if c.dreamEnabled {
+			cfg := cognition.DefaultDreamConfig()
+			if modes.Dream.MaxBudget != nil {
+				cfg.MaxBudget = *modes.Dream.MaxBudget
+			}
+			if modes.Dream.MinBudget != nil {
+				cfg.MinBudget = *modes.Dream.MinBudget
+			}
+			if modes.Dream.IdleThresholdS != nil {
+				cfg.IdleThreshold = time.Duration(*modes.Dream.IdleThresholdS) * time.Second
+			}
+			if modes.Dream.GrowthDurationM != nil {
+				cfg.GrowthDuration = time.Duration(*modes.Dream.GrowthDurationM) * time.Minute
+			}
+			c.dream.SetConfig(cfg)
+		}
+	}
+
+	// Digest
+	if modes.Digest != nil {
+		if modes.Digest.Enabled != nil {
+			c.digestEnabled = *modes.Digest.Enabled
+		}
+		if c.digestEnabled {
+			cfg := cognition.DefaultDigestConfig()
+			if modes.Digest.MaxMerges != nil {
+				cfg.MaxMerges = *modes.Digest.MaxMerges
+			}
+			if modes.Digest.SimilarityThreshold != nil {
+				cfg.SimilarityThreshold = *modes.Digest.SimilarityThreshold
+			}
+			c.digest.SetConfig(cfg)
+		}
+	}
+}
+
+// IsModeEnabled returns whether a cognitive mode is enabled.
+func (c *Cortex) IsModeEnabled(mode string) bool {
+	switch mode {
+	case "think":
+		return c.thinkEnabled
+	case "dream":
+		return c.dreamEnabled
+	case "digest":
+		return c.digestEnabled
+	default:
+		return true // reflex, reflect, resolve always enabled
+	}
 }
 
 // Retrieve performs context retrieval using the specified mode.
