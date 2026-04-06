@@ -241,6 +241,11 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 				}
 				nuances, err := ExtractNuances(ctx, d.llm, insight.Content)
 				if err == nil && len(nuances) > 0 {
+					// Cap nuances per parent insight to avoid noise
+					maxNuances := 3
+					if len(nuances) > maxNuances {
+						nuances = nuances[:maxNuances]
+					}
 					// Store nuances as supplemental insights
 					for _, nuance := range nuances {
 						supplementalID := insight.ID + ":nuance"

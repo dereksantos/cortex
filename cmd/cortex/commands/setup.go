@@ -76,6 +76,9 @@ func (c *InitCommand) Execute(ctx *Context) error {
 	// Add .cortex/ to .gitignore if it exists
 	ensureGitignore(projectRoot)
 
+	// Create .cortex/.gitignore for committed/local split
+	ensureCortexGitignore(cfg.ContextDir)
+
 	fmt.Println("Cortex initialized successfully!")
 	fmt.Printf("   Config: %s\n", configPath)
 	fmt.Printf("   Context directory: %s\n", cfg.ContextDir)
@@ -154,6 +157,12 @@ func (c *InstallCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("failed to create settings: %w", err)
 	}
 	fmt.Printf("Created %s with hooks\n", settingsPath)
+
+	// 4b. Ensure .cortex/ is in .gitignore
+	ensureGitignore(projectRoot)
+
+	// 4c. Create .cortex/.gitignore for committed/local split
+	ensureCortexGitignore(contextDir)
 
 	// 5. Create slash command
 	commandsDir := filepath.Join(claudeProjectDir, "commands")
@@ -514,6 +523,28 @@ func ensureGitignore(projectRoot string) {
 	fmt.Println("   Added .cortex/ to .gitignore")
 }
 
+func ensureCortexGitignore(contextDir string) {
+	gitignorePath := filepath.Join(contextDir, ".gitignore")
+
+	// Don't overwrite if it already exists
+	if _, err := os.Stat(gitignorePath); err == nil {
+		return
+	}
+
+	content := `# Ignore everything except team-shared knowledge
+*
+!.gitignore
+!knowledge/
+!knowledge/**
+`
+	if err := os.WriteFile(gitignorePath, []byte(content), 0644); err != nil {
+		// Silent failure - not critical
+		return
+	}
+
+	fmt.Println("   Created .cortex/.gitignore (knowledge/ will be committed, everything else ignored)")
+}
+
 func setupClaudeCode(claudeDir, cortexPath string) error {
 	settingsPath := fmt.Sprintf("%s/settings.local.json", claudeDir)
 
@@ -708,7 +739,6 @@ func createPluginJSON(pluginDir string) error {
     "PostToolUse": [{"matcher": "Write|Edit|Bash|Read|Grep|Glob", "hooks": [{"type": "command", "command": "cortex capture"}]}],
     "Stop": [{"hooks": [{"type": "command", "command": "cortex stop"}]}],
     "Notification": [{"hooks": [{"type": "command", "command": "cortex capture --notification"}]}],
-    "SubagentComplete": [{"hooks": [{"type": "command", "command": "cortex capture --subagent"}]}]
   },
   "commands": [
     {"name": "cortex", "description": "Query Cortex context memory"},
@@ -823,16 +853,6 @@ func createClaudeSettings(settingsPath string) error {
 					map[string]interface{}{
 						"type":    "command",
 						"command": cortexPath + " capture --notification",
-					},
-				},
-			},
-		},
-		"SubagentComplete": []interface{}{
-			map[string]interface{}{
-				"hooks": []interface{}{
-					map[string]interface{}{
-						"type":    "command",
-						"command": cortexPath + " capture --subagent",
 					},
 				},
 			},

@@ -54,7 +54,7 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	reflect := NewReflect(provider)      // provider can be nil, Reflect will degrade gracefully
 	think := NewThink(reflex, reflect, activity)
 	dream := NewDream(store, provider, activity)
-	digest := NewDigest(store)
+	digest := NewDigest(store, cfg.ContextDir)
 	resolve := NewResolve()
 
 	// Connect resolve to think for session context (race-safe via snapshots)

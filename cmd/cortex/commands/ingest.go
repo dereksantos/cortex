@@ -3,9 +3,12 @@ package commands
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,11 +34,15 @@ type AnalyzeCommand struct{}
 // ProcessCommand implements combined ingest + analyze (backward compat).
 type ProcessCommand struct{}
 
+// FeedCommand implements manual knowledge seeding from files.
+type FeedCommand struct{}
+
 func init() {
 	Register(&CaptureCommand{})
 	Register(&IngestCommand{})
 	Register(&AnalyzeCommand{})
 	Register(&ProcessCommand{})
+	Register(&FeedCommand{})
 }
 
 // Name returns the command name.
@@ -365,6 +372,311 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 	}
 
 	return nil
+}
+
+// Name returns the command name.
+func (c *FeedCommand) Name() string { return "feed" }
+
+// Description returns the command description.
+func (c *FeedCommand) Description() string { return "Seed knowledge from files or directories" }
+
+// Execute runs the feed command.
+func (c *FeedCommand) Execute(ctx *Context) error {
+	cfg := ctx.Config
+	store := ctx.Storage
+
+	if cfg == nil || store == nil {
+		var err error
+		cfg, err = loadCaptureConfig()
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		store, err = storage.New(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to open storage: %w", err)
+		}
+		defer store.Close()
+	}
+
+	// Parse args
+	raw := false
+	var paths []string
+	dir := ""
+	for i := 0; i < len(ctx.Args); i++ {
+		arg := ctx.Args[i]
+		switch {
+		case arg == "--raw":
+			raw = true
+		case arg == "--dir" && i+1 < len(ctx.Args):
+			dir = ctx.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--dir="):
+			dir = strings.TrimPrefix(arg, "--dir=")
+		default:
+			paths = append(paths, arg)
+		}
+	}
+
+	// Collect files from --dir
+	if dir != "" {
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return nil
+			}
+			if isFeedableFile(path) {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to walk directory %s: %w", dir, err)
+		}
+	}
+
+	if len(paths) == 0 {
+		fmt.Println("Usage: cortex feed <file> [<file>...] [--dir <dir>] [--raw]")
+		fmt.Println()
+		fmt.Println("Options:")
+		fmt.Println("  --raw       Store file content directly without LLM analysis")
+		fmt.Println("  --dir DIR   Recursively process files in directory")
+		return nil
+	}
+
+	// Get LLM provider (only needed for non-raw mode)
+	var llmProvider llm.Provider
+	if !raw {
+		anthropic := llm.NewAnthropicClient(cfg)
+		if anthropic.IsAvailable() {
+			llmProvider = anthropic
+		} else {
+			ollama := llm.NewOllamaClient(cfg)
+			if ollama.IsAvailable() {
+				llmProvider = ollama
+			}
+		}
+		if llmProvider == nil {
+			fmt.Println("No LLM available. Use --raw to store without analysis, or set ANTHROPIC_API_KEY / start Ollama.")
+			return nil
+		}
+	}
+
+	fmt.Printf("Feeding %d file(s)...\n", len(paths))
+
+	fed := 0
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Skip %s: %v\n", path, err)
+			continue
+		}
+
+		if len(content) == 0 {
+			continue
+		}
+
+		if raw {
+			if err := feedRaw(cfg, path, string(content)); err != nil {
+				fmt.Fprintf(os.Stderr, "  Error %s: %v\n", path, err)
+				continue
+			}
+		} else {
+			if err := feedWithLLM(cfg, store, llmProvider, path, string(content)); err != nil {
+				fmt.Fprintf(os.Stderr, "  Error %s: %v\n", path, err)
+				continue
+			}
+		}
+		fed++
+		fmt.Printf("  Fed: %s\n", path)
+	}
+
+	fmt.Printf("Done. %d/%d files processed.\n", fed, len(paths))
+	return nil
+}
+
+// feedRaw stores file content directly as a knowledge file without LLM processing.
+func feedRaw(cfg *config.Config, filePath, content string) error {
+	category := "insights"
+	knowledgeDir := cfg.KnowledgePath(category)
+	if err := os.MkdirAll(knowledgeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create knowledge dir: %w", err)
+	}
+
+	slug := feedSlugify(filepath.Base(filePath))
+	outPath := filepath.Join(knowledgeDir, slug+".md")
+
+	fileContent := fmt.Sprintf("---\ncategory: %s\nsource: %s\ncreated: %s\n---\n\n%s\n",
+		category,
+		filePath,
+		time.Now().Format(time.RFC3339),
+		content,
+	)
+
+	return os.WriteFile(outPath, []byte(fileContent), 0644)
+}
+
+// feedWithLLM processes file content through LLM to extract insights.
+func feedWithLLM(cfg *config.Config, store *storage.Storage, provider llm.Provider, filePath, content string) error {
+	// Truncate large files
+	if len(content) > 8000 {
+		content = content[:8000] + "\n... (truncated)"
+	}
+
+	prompt := fmt.Sprintf(`Analyze this document for durable knowledge — decisions, patterns, constraints, and domain context.
+
+File: %s
+
+Content:
+%s
+
+Extract insights as a JSON array. Each insight should be:
+{
+  "category": "decision|pattern|constraint|insight|strategy",
+  "summary": "1-3 sentence insight",
+  "importance": 1-10,
+  "tags": ["tag1", "tag2"]
+}
+
+If nothing significant, respond: NO_INSIGHT`, filePath, content)
+
+	response, err := provider.GenerateWithSystem(context.Background(), prompt, llm.AnalysisSystemPrompt)
+	if err != nil {
+		return err
+	}
+
+	if strings.Contains(strings.ToUpper(response), "NO_INSIGHT") {
+		return nil
+	}
+
+	// Parse response as JSON array of insights
+	var insights []struct {
+		Category   string   `json:"category"`
+		Summary    string   `json:"summary"`
+		Importance int      `json:"importance"`
+		Tags       []string `json:"tags"`
+	}
+
+	// Try to extract JSON from response
+	cleaned := extractJSON(response)
+	if err := json.Unmarshal([]byte(cleaned), &insights); err != nil {
+		// Try single object
+		var single struct {
+			Category   string   `json:"category"`
+			Summary    string   `json:"summary"`
+			Importance int      `json:"importance"`
+			Tags       []string `json:"tags"`
+		}
+		if err := json.Unmarshal([]byte(cleaned), &single); err != nil {
+			return fmt.Errorf("failed to parse LLM response: %w", err)
+		}
+		insights = append(insights, single)
+	}
+
+	// Store insights in DB and write to knowledge files
+	for _, ins := range insights {
+		if ins.Summary == "" {
+			continue
+		}
+
+		store.StoreInsight("", ins.Category, ins.Summary, ins.Importance, ins.Tags, "")
+
+		// Write to knowledge file
+		category := ins.Category
+		if category == "" {
+			category = "insights"
+		}
+		knowledgeDir := cfg.KnowledgePath(category)
+		os.MkdirAll(knowledgeDir, 0755)
+
+		slug := feedSlugify(ins.Summary)
+		outPath := filepath.Join(knowledgeDir, slug+".md")
+
+		tagsStr := ""
+		if len(ins.Tags) > 0 {
+			tagsStr = fmt.Sprintf("tags: [%s]\n", strings.Join(ins.Tags, ", "))
+		}
+
+		fileContent := fmt.Sprintf("---\ncategory: %s\nimportance: %d\n%ssource: %s\ncreated: %s\n---\n\n%s\n",
+			category,
+			ins.Importance,
+			tagsStr,
+			filePath,
+			time.Now().Format(time.RFC3339),
+			ins.Summary,
+		)
+
+		os.WriteFile(outPath, []byte(fileContent), 0644)
+	}
+
+	return nil
+}
+
+// extractJSON tries to extract a JSON array or object from LLM response text.
+func extractJSON(s string) string {
+	// Find first [ or {
+	start := strings.IndexAny(s, "[{")
+	if start < 0 {
+		return s
+	}
+
+	opener := s[start]
+	var closer byte = '}'
+	if opener == '[' {
+		closer = ']'
+	}
+
+	// Find matching closer
+	depth := 0
+	for i := start; i < len(s); i++ {
+		if s[i] == opener {
+			depth++
+		} else if s[i] == closer {
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+
+	return s[start:]
+}
+
+// isFeedableFile returns true if the file extension is suitable for feeding.
+func isFeedableFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	feedable := map[string]bool{
+		".md": true, ".txt": true, ".rst": true,
+		".go": true, ".py": true, ".js": true, ".ts": true,
+		".yaml": true, ".yml": true, ".json": true, ".toml": true,
+		".sh": true, ".bash": true,
+		".sql": true, ".graphql": true,
+		".html": true, ".css": true,
+		".java": true, ".rs": true, ".rb": true, ".php": true,
+		".c": true, ".cpp": true, ".h": true,
+		".tf": true, ".dockerfile": true,
+	}
+	if feedable[ext] {
+		return true
+	}
+	// Also check for extensionless files like Makefile, Dockerfile
+	base := strings.ToLower(filepath.Base(path))
+	return base == "makefile" || base == "dockerfile" || base == "readme"
+}
+
+// feedSlugify converts text to a filesystem-safe slug for feed output.
+func feedSlugify(text string) string {
+	s := strings.ToLower(text)
+	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 60 {
+		s = s[:60]
+		if idx := strings.LastIndex(s, "-"); idx > 30 {
+			s = s[:idx]
+		}
+	}
+	if s == "" {
+		s = "feed"
+	}
+	return s
 }
 
 // --- Helper functions ---

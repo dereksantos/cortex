@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +24,8 @@ type Digest struct {
 	storage *storage.Storage
 
 	// Config
-	config cognition.DigestConfig
+	config     cognition.DigestConfig
+	contextDir string // Root .cortex/ directory for writing knowledge files
 
 	// State
 	running       bool
@@ -33,10 +37,11 @@ type Digest struct {
 }
 
 // NewDigest creates a new Digest instance.
-func NewDigest(store *storage.Storage) *Digest {
+func NewDigest(store *storage.Storage, contextDir string) *Digest {
 	return &Digest{
-		storage: store,
-		config:  cognition.DefaultDigestConfig(),
+		storage:    store,
+		config:     cognition.DefaultDigestConfig(),
+		contextDir: contextDir,
 	}
 }
 
@@ -145,12 +150,15 @@ func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, erro
 		}
 	}
 
+	// Write high-quality insights to knowledge/ as committable files
+	knowledgeWritten := d.writeKnowledgeFiles(digested)
+
 	if stateWriter != nil && groups > 0 {
 		stateWriter.WriteMode("digest", fmt.Sprintf("Compacted %d duplicates from %d groups", merged, groups))
 	}
 
-	log.Printf("Digest: completed (%d insights -> %d unique, %d groups, %d merged, %v)",
-		len(insights), len(digested), groups, merged, time.Since(start))
+	log.Printf("Digest: completed (%d insights -> %d unique, %d groups, %d merged, %d knowledge files, %v)",
+		len(insights), len(digested), groups, merged, knowledgeWritten, time.Since(start))
 
 	return &cognition.DigestResult{
 		Status:   cognition.DigestRan,
@@ -206,7 +214,13 @@ func (d *Digest) digestCategory(insights []cognition.Result) []cognition.Digeste
 			}
 
 			sim := textSimilarity(ins.Content, insights[j].Content)
-			if sim >= d.config.SimilarityThreshold {
+			ngramSim := ngramSimilarity(ins.Content, insights[j].Content, 3)
+			// Use max of Jaccard and n-gram similarity to catch paraphrases
+			bestSim := sim
+			if ngramSim > bestSim {
+				bestSim = ngramSim
+			}
+			if bestSim >= d.config.SimilarityThreshold {
 				duplicates = append(duplicates, insights[j])
 				merged[j] = true
 			}
@@ -335,6 +349,50 @@ func textSimilarity(a, b string) float64 {
 	return float64(intersection) / float64(union)
 }
 
+// ngramSimilarity computes Jaccard similarity using character n-grams.
+// This catches paraphrases that word-level Jaccard misses.
+func ngramSimilarity(a, b string, n int) float64 {
+	a = strings.ToLower(a)
+	b = strings.ToLower(b)
+
+	ngramsA := ngrams(a, n)
+	ngramsB := ngrams(b, n)
+
+	if len(ngramsA) == 0 || len(ngramsB) == 0 {
+		return 0
+	}
+
+	intersection := 0
+	for ng := range ngramsA {
+		if ngramsB[ng] {
+			intersection++
+		}
+	}
+
+	union := len(ngramsA)
+	for ng := range ngramsB {
+		if !ngramsA[ng] {
+			union++
+		}
+	}
+
+	if union == 0 {
+		return 0
+	}
+
+	return float64(intersection) / float64(union)
+}
+
+// ngrams extracts character n-grams from text.
+func ngrams(text string, n int) map[string]bool {
+	result := make(map[string]bool)
+	runes := []rune(text)
+	for i := 0; i <= len(runes)-n; i++ {
+		result[string(runes[i:i+n])] = true
+	}
+	return result
+}
+
 // tokenize splits text into lowercase word tokens.
 func tokenize(text string) []string {
 	// Lowercase and split on non-alphanumeric
@@ -391,4 +449,78 @@ func parseInsightID(id string) int64 {
 		return 0
 	}
 	return num
+}
+
+// writeKnowledgeFiles writes high-quality digested insights to .cortex/knowledge/ as markdown files.
+func (d *Digest) writeKnowledgeFiles(digested []cognition.DigestedInsight) int {
+	if d.contextDir == "" {
+		return 0
+	}
+
+	written := 0
+	for _, di := range digested {
+		rep := di.Representative
+		if rep.Score < 0.7 {
+			continue
+		}
+
+		category := rep.Category
+		if category == "" {
+			category = "insights"
+		}
+
+		dir := filepath.Join(d.contextDir, "knowledge", category)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("Digest: failed to create knowledge dir %s: %v", dir, err)
+			continue
+		}
+
+		slug := slugify(rep.Content)
+		filePath := filepath.Join(dir, slug+".md")
+
+		// Don't overwrite existing files
+		if _, err := os.Stat(filePath); err == nil {
+			continue
+		}
+
+		tagsStr := ""
+		if len(rep.Tags) > 0 {
+			tagsStr = fmt.Sprintf("tags: [%s]\n", strings.Join(rep.Tags, ", "))
+		}
+
+		content := fmt.Sprintf("---\nid: %s\ncategory: %s\nimportance: %.2f\n%screated: %s\n---\n\n%s\n",
+			rep.ID,
+			category,
+			rep.Score,
+			tagsStr,
+			time.Now().Format(time.RFC3339),
+			rep.Content,
+		)
+
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			log.Printf("Digest: failed to write knowledge file %s: %v", filePath, err)
+			continue
+		}
+		written++
+	}
+
+	return written
+}
+
+// slugify converts text to a filesystem-safe slug.
+func slugify(text string) string {
+	s := strings.ToLower(text)
+	s = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > 60 {
+		s = s[:60]
+		// Don't end on a partial word
+		if idx := strings.LastIndex(s, "-"); idx > 30 {
+			s = s[:idx]
+		}
+	}
+	if s == "" {
+		s = "insight"
+	}
+	return s
 }
