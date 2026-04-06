@@ -61,6 +61,13 @@ func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Thin
 	}
 }
 
+// SetConfig updates the Think configuration.
+func (t *Think) SetConfig(cfg cognition.ThinkConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.config = cfg
+}
+
 // SetProvider sets the LLM provider for nuance extraction.
 func (t *Think) SetProvider(provider llm.Provider) {
 	t.mu.Lock()

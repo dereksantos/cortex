@@ -84,6 +84,13 @@ func NewDream(store *storage.Storage, provider llm.Provider, activity *ActivityT
 	}
 }
 
+// SetConfig updates the Dream configuration.
+func (d *Dream) SetConfig(cfg cognition.DreamConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.config = cfg
+}
+
 // RegisterSource adds a source for Dream to explore.
 func (d *Dream) RegisterSource(source cognition.DreamSource) {
 	d.mu.Lock()

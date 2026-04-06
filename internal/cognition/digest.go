@@ -45,6 +45,13 @@ func NewDigest(store *storage.Storage, contextDir string) *Digest {
 	}
 }
 
+// SetConfig updates the Digest configuration.
+func (d *Digest) SetConfig(cfg cognition.DigestConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.config = cfg
+}
+
 // SetStateWriter sets the state writer for daemon status updates.
 func (d *Digest) SetStateWriter(sw *StateWriter) {
 	d.mu.Lock()

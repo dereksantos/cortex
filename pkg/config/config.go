@@ -30,10 +30,66 @@ type Config struct {
 	// Web dashboard
 	WebPort int `json:"web_port,omitempty"`
 
+	// Cognitive mode tuning
+	Modes *ModeConfig `json:"modes,omitempty"`
+
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
 	EnableVector bool `json:"enable_vector"`
 }
+
+// ModeConfig provides per-mode tuning knobs.
+// All fields are optional — nil means use defaults.
+type ModeConfig struct {
+	Think   *ThinkModeConfig   `json:"think,omitempty"`
+	Dream   *DreamModeConfig   `json:"dream,omitempty"`
+	Digest  *DigestModeConfig  `json:"digest,omitempty"`
+	Capture *CaptureModeConfig `json:"capture,omitempty"`
+	Search  *SearchModeConfig  `json:"search,omitempty"`
+}
+
+// ThinkModeConfig controls Think mode behavior.
+type ThinkModeConfig struct {
+	Enabled            *bool  `json:"enabled,omitempty"`
+	MaxBudget          *int   `json:"max_budget,omitempty"`
+	MinBudget          *int   `json:"min_budget,omitempty"`
+	Mode               string `json:"mode,omitempty"`                // "fast" or "full"
+	OperationTimeoutMs *int   `json:"operation_timeout_ms,omitempty"`
+}
+
+// DreamModeConfig controls Dream mode behavior.
+type DreamModeConfig struct {
+	Enabled         *bool `json:"enabled,omitempty"`
+	MaxBudget       *int  `json:"max_budget,omitempty"`
+	MinBudget       *int  `json:"min_budget,omitempty"`
+	IdleThresholdS  *int  `json:"idle_threshold_s,omitempty"`
+	GrowthDurationM *int  `json:"growth_duration_m,omitempty"`
+}
+
+// DigestModeConfig controls Digest mode behavior.
+type DigestModeConfig struct {
+	Enabled             *bool    `json:"enabled,omitempty"`
+	MaxMerges           *int     `json:"max_merges,omitempty"`
+	SimilarityThreshold *float64 `json:"similarity_threshold,omitempty"`
+}
+
+// CaptureModeConfig controls event capture behavior.
+type CaptureModeConfig struct {
+	Enabled *bool  `json:"enabled,omitempty"`
+	Queue   string `json:"queue,omitempty"` // "file" or "direct"
+}
+
+// SearchModeConfig controls search/retrieval behavior.
+type SearchModeConfig struct {
+	Enabled *bool  `json:"enabled,omitempty"`
+	Mode    string `json:"mode,omitempty"` // "fast" or "full"
+}
+
+// boolPtr is a helper for creating *bool values in config.
+func boolPtr(b bool) *bool { return &b }
+
+// intPtr is a helper for creating *int values in config.
+func intPtr(i int) *int { return &i }
 
 // Default returns a default configuration
 func Default() *Config {
