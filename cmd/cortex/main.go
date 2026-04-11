@@ -102,6 +102,16 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	case "measure":
+		if cmd := commands.Get("measure"); cmd != nil {
+			ctx := &commands.Context{
+				Args: os.Args[2:],
+			}
+			if err := cmd.Execute(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	case "watch":
 		if cmd := commands.Get("watch"); cmd != nil {
 			cfg, err := loadConfig()
@@ -298,6 +308,7 @@ Commands:
   watch          Live dashboard of cognitive modes
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
+  measure        Measure prompt quality for small context windows
   mcp            Start MCP server (for cross-tool access)
 
   session-start  Print session start instructions (for hooks)
