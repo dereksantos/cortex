@@ -82,9 +82,9 @@ type CalibrationPoint struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Weights: &Weights{
-			Decomposition: 0.40,
-			Clarity:       0.35,
-			InverseScope:  0.25,
+			Decomposition: 0.35,
+			Clarity:       0.50,
+			InverseScope:  0.15,
 		},
 		Scope: &ScopeParams{
 			VerbWeight:        1.0,

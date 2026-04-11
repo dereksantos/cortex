@@ -33,8 +33,8 @@ func TestLoadConfigMissing(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("LoadConfig should return defaults for missing file")
 	}
-	if cfg.Weights.Decomposition != 0.40 {
-		t.Errorf("Expected default decomposition weight 0.40, got %.2f", cfg.Weights.Decomposition)
+	if cfg.Weights.Decomposition != 0.35 {
+		t.Errorf("Expected default decomposition weight 0.35, got %.2f", cfg.Weights.Decomposition)
 	}
 }
 

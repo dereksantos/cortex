@@ -202,14 +202,16 @@ func countConcerns(prompt string, seps []string) int {
 		concerns += strings.Count(lower, sep)
 	}
 
+	// List items are weighted at 0.5 each — they're often sub-requirements
+	// of a single concern, not separate concerns.
 	numberedItems := numberedListRe.FindAllString(prompt, -1)
 	if len(numberedItems) > 1 {
-		concerns += len(numberedItems) - 1
+		concerns += (len(numberedItems) - 1) / 2
 	}
 
 	bulletItems := bulletListRe.FindAllString(prompt, -1)
 	if len(bulletItems) > 1 {
-		concerns += len(bulletItems) - 1
+		concerns += (len(bulletItems) - 1) / 2
 	}
 
 	return concerns

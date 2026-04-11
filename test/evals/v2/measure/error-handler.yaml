@@ -1,0 +1,31 @@
+id: measure-error-handler
+name: "Promptability vs quality: error handling middleware"
+measure:
+  task: "Implement HTTP error handling middleware in Go"
+  judge_criteria: |
+    Evaluate this Go HTTP error handling middleware:
+    1. Does it recover from panics and convert them to 500 responses?
+    2. Does it log errors with useful context (request method, path, stack trace)?
+    3. Does it set appropriate Content-Type headers on error responses?
+    4. Does it follow the http.Handler/middleware pattern correctly?
+    5. Is the code compilable and idiomatic Go?
+  variants:
+    - id: low
+      prompt: "Write error handling for a Go web server"
+    - id: mid
+      prompt: "Implement Go HTTP middleware that catches panics and returns proper error responses with logging"
+    - id: high
+      prompt: |
+        Implement an HTTP error handling middleware in Go.
+
+        Requirements:
+        - func ErrorHandler(next http.Handler) http.Handler signature
+        - Recover from panics, log the error with request method and path
+        - Return 500 with JSON body {"error": "Internal Server Error"}
+        - Set Content-Type: application/json header
+        - Include stack trace in log output using runtime.Stack
+        - Must not expose internal details to the client
+    - id: decomposed
+      sub_prompts:
+        - "Write a Go function ErrorHandler(next http.Handler) http.Handler that wraps the handler in a defer/recover. On panic, call a handleError helper."
+        - "Write a handleError(w http.ResponseWriter, r *http.Request, err interface{}) function that: logs the error with r.Method, r.URL.Path, and runtime.Stack; sets Content-Type to application/json; writes 500 status; writes JSON {\"error\": \"Internal Server Error\"}."

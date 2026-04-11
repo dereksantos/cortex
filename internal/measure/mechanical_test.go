@@ -84,8 +84,8 @@ func TestCountConcerns(t *testing.T) {
 		{"single concern", "Add JWT validation to the auth endpoint", 1},
 		{"two concerns with and", "Add validation and update the tests", 2},
 		{"three concerns", "Add validation and update tests and fix the docs", 3},
-		{"numbered list", "1. Add auth\n2. Update tests\n3. Fix docs", 3},
-		{"bullet list", "- Add auth\n- Update tests\n- Fix docs", 3},
+		{"numbered list", "1. Add auth\n2. Update tests\n3. Fix docs", 2},
+		{"bullet list", "- Add auth\n- Update tests\n- Fix docs", 2},
 		{"also separator", "Add auth, also update the tests", 2},
 		{"empty", "", 1}, // base concern
 	}
@@ -292,7 +292,7 @@ func TestPromptability(t *testing.T) {
 		{
 			"well decomposed",
 			"Add JWT validation to handleLogin() in pkg/auth/handler.go. Must return 401 on invalid token.",
-			0.6, 1.0,
+			0.5, 1.0,
 		},
 		{
 			"vague and broad",

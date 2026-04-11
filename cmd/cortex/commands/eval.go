@@ -37,6 +37,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	useJudge := false
 	judgeModel := ""
 	agenticMode := false
+	measureMode := false
 	claudeBinary := ""
 	showSummary := false
 	showABRTrend := false
@@ -52,6 +53,8 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			dryRun = true
 		case "--agentic":
 			agenticMode = true
+		case "--measure":
+			measureMode = true
 		case "--claude-binary":
 			if i+1 < len(ctx.Args) {
 				claudeBinary = ctx.Args[i+1]
@@ -120,6 +123,7 @@ Options:
   --judge                Enable LLM-as-judge scoring (semantic evaluation)
   --judge-model MODEL    Model for judge (default: same as eval model)
   --agentic              Use Claude CLI for agentic evals (measures tool usage)
+  --measure              Run Promptability vs quality correlation evals
   --claude-binary PATH   Path to claude binary (default: auto-detect)
   --compare-provider NAME  Frontier provider for MPR comparison (e.g., anthropic)
   --compare-model MODEL    Frontier model override (default: provider default)
@@ -371,6 +375,65 @@ Examples:
 
 		if !agenticResults.Pass {
 			return fmt.Errorf("agentic eval failed")
+		}
+		return nil
+	}
+
+	// MEASURE MODE: Test Promptability vs response quality correlation
+	if measureMode {
+		// Measure evals require a judge
+		measureJudge := judgeProvider
+		if measureJudge == nil {
+			measureJudge = provider // Use same provider as judge if not specified
+		}
+
+		measureEval := evalv2.NewMeasureEvaluator(provider, measureJudge)
+		measureEval.SetVerbose(verbose)
+		measureEval.SetModel(modelName)
+
+		measureDir := scenarioDir + "/measure"
+		if scenarioPath != "" {
+			// Single scenario
+			s, err := evalv2.LoadMeasureScenario(scenarioPath)
+			if err != nil {
+				return fmt.Errorf("failed to load measure scenario: %w", err)
+			}
+			result, err := measureEval.RunScenario(s)
+			if err != nil {
+				return fmt.Errorf("measure eval failed: %w", err)
+			}
+			// Wrap in aggregate results for reporting
+			aggregate := &evalv2.MeasureResults{
+				Provider:           provider.Name(),
+				Model:              modelName,
+				Scenarios:          []evalv2.MeasureScenarioResult{*result},
+				OverallCorrelation: result.Correlation,
+				Pass:               result.Correlation >= 0.7,
+			}
+			switch outputFormat {
+			case "json":
+				return evalv2.ReportMeasureJSON(os.Stdout, aggregate)
+			default:
+				evalv2.ReportMeasure(os.Stdout, aggregate)
+			}
+			return nil
+		}
+
+		// Run all measure scenarios
+		results, err := measureEval.Run(measureDir)
+		if err != nil {
+			return fmt.Errorf("measure eval failed: %w", err)
+		}
+
+		switch outputFormat {
+		case "json":
+			return evalv2.ReportMeasureJSON(os.Stdout, results)
+		default:
+			evalv2.ReportMeasure(os.Stdout, results)
+		}
+
+		if !results.Pass {
+			return fmt.Errorf("measure eval failed: correlation %.2f < 0.7", results.OverallCorrelation)
 		}
 		return nil
 	}

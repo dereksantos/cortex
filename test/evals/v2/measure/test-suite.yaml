@@ -1,0 +1,27 @@
+id: measure-test-suite
+name: "Promptability vs quality: writing tests"
+measure:
+  task: "Write table-driven tests for a string utility function in Go"
+  judge_criteria: |
+    Evaluate these Go tests:
+    1. Are they table-driven using t.Run subtests?
+    2. Do they cover edge cases (empty string, special characters, unicode)?
+    3. Do they cover the happy path with representative inputs?
+    4. Do they use clear test names that describe the scenario?
+    5. Is the test code compilable and follows Go testing conventions?
+    6. Do they avoid external test libraries (testify, assert)?
+  variants:
+    - id: low
+      prompt: "Write tests for a reverse string function"
+    - id: mid
+      prompt: "Write table-driven Go tests for func Reverse(s string) string that reverses a string, including edge cases"
+    - id: high
+      prompt: |
+        Write table-driven tests for func Reverse(s string) string in Go.
+
+        Requirements:
+        - Use testing package only, no external libraries
+        - Table-driven with t.Run subtests
+        - Test cases: empty string, single char, palindrome, multi-byte unicode, spaces, normal string
+        - Each test case has a descriptive name
+        - Use t.Errorf for assertion messages that show got vs want
