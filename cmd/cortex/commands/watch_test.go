@@ -9,6 +9,12 @@ import (
 	"github.com/dereksantos/cortex/internal/tui"
 )
 
+const (
+	dashboardWidth = 61
+	col1Width      = 28
+	col2Width      = 28
+)
+
 // TestWatchOutputFormat verifies the watch dashboard output has correct formatting.
 func TestWatchOutputFormat(t *testing.T) {
 	// Create test data
