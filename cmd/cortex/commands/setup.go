@@ -637,10 +637,22 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 		},
 	}
 
-	// Configure status line
+	// Configure status line, composing with any existing non-cortex statusLine
 	statusLine := map[string]interface{}{
 		"type":    "command",
-		"command": fmt.Sprintf("%s status", cortexPath),
+		"command": fmt.Sprintf("%s status --format=claude", cortexPath),
+	}
+
+	if existing, ok := settings["statusLine"].(map[string]interface{}); ok {
+		if cmd, ok := existing["command"].(string); ok {
+			if !strings.Contains(cmd, "cortex") {
+				composed := fmt.Sprintf(
+					`bash -c 'input=$(cat); existing=$(echo "$input" | %s); cortex=$(%s status --format=claude < /dev/null); echo "${existing} | ${cortex}"'`,
+					cmd, cortexPath,
+				)
+				statusLine["command"] = composed
+			}
+		}
 	}
 
 	settings["hooks"] = hooks
@@ -859,10 +871,22 @@ func createClaudeSettings(settingsPath string) error {
 		},
 	}
 
-	// Configure status line
+	// Configure status line, composing with any existing non-cortex statusLine
 	statusLine := map[string]interface{}{
 		"type":    "command",
 		"command": cortexPath + " status --format=claude",
+	}
+
+	if existing, ok := settings["statusLine"].(map[string]interface{}); ok {
+		if cmd, ok := existing["command"].(string); ok {
+			if !strings.Contains(cmd, "cortex") {
+				composed := fmt.Sprintf(
+					`bash -c 'input=$(cat); existing=$(echo "$input" | %s); cortex=$(%s status --format=claude < /dev/null); echo "${existing} | ${cortex}"'`,
+					cmd, cortexPath,
+				)
+				statusLine["command"] = composed
+			}
+		}
 	}
 
 	settings["hooks"] = hooks
@@ -941,12 +965,29 @@ func removeCortexFromSettings(settingsPath string) (bool, error) {
 		}
 	}
 
-	// Remove statusLine if it's a Cortex command
+	// Remove statusLine if it's a Cortex command, or unwrap if composed
 	if statusLine, ok := settings["statusLine"].(map[string]interface{}); ok {
 		if cmd, ok := statusLine["command"].(string); ok {
 			if strings.Contains(cmd, "cortex") {
-				delete(settings, "statusLine")
-				modified = true
+				// Check if this is a composed wrapper with an original command
+				if strings.HasPrefix(cmd, "bash -c") && strings.Contains(cmd, `echo "$input" |`) {
+					// Extract original command: between 'echo "$input" | ' and '); cortex=$('
+					start := strings.Index(cmd, `echo "$input" | `)
+					end := strings.Index(cmd, `); cortex=$(`)
+					if start != -1 && end != -1 {
+						start += len(`echo "$input" | `)
+						original := cmd[start:end]
+						statusLine["command"] = original
+						settings["statusLine"] = statusLine
+						modified = true
+					} else {
+						delete(settings, "statusLine")
+						modified = true
+					}
+				} else {
+					delete(settings, "statusLine")
+					modified = true
+				}
 			}
 		}
 	}
