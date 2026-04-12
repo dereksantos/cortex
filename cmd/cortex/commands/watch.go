@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
+
+
 	"time"
 
 	"golang.org/x/term"
@@ -100,7 +100,7 @@ type watchUIState struct {
 func runAnimatedWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	notifyTermSignals(sigChan)
 
 	// Animation ticker (refresh every 300ms)
 	ticker := time.NewTicker(300 * time.Millisecond)
@@ -141,7 +141,7 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage) {
 func runInteractiveWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	notifyTermSignals(sigChan)
 
 	// Put terminal in raw mode for keyboard input
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
