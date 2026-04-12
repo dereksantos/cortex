@@ -270,10 +270,11 @@ Run: ./cortex forget "$ARGUMENTS"
 	llmStatus := intllm.DetectLLM()
 
 	if llmStatus.Available {
-		if llmStatus.Provider == "ollama" {
+		switch llmStatus.Provider {
+		case "ollama":
 			fmt.Printf("Ollama installed at %s\n", llmStatus.OllamaPath)
 			fmt.Printf("Model %s available (recommended for Cortex)\n", llmStatus.Model)
-		} else if llmStatus.Provider == "anthropic" {
+		case "anthropic":
 			fmt.Println("Anthropic API key configured")
 			if llmStatus.OllamaInstalled {
 				fmt.Printf("Ollama also installed at %s\n", llmStatus.OllamaPath)

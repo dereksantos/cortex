@@ -44,7 +44,9 @@ type SessionStartCommand struct{}
 func (c *SessionStartCommand) Name() string { return "session-start" }
 
 // Description returns the command description.
-func (c *SessionStartCommand) Description() string { return "Print session start instructions for hooks" }
+func (c *SessionStartCommand) Description() string {
+	return "Print session start instructions for hooks"
+}
 
 // Execute runs the session-start command.
 func (c *SessionStartCommand) Execute(ctx *Context) error {
@@ -71,7 +73,9 @@ type InjectContextCommand struct{}
 func (c *InjectContextCommand) Name() string { return "inject-context" }
 
 // Description returns the command description.
-func (c *InjectContextCommand) Description() string { return "Inject relevant context into prompt for hooks" }
+func (c *InjectContextCommand) Description() string {
+	return "Inject relevant context into prompt for hooks"
+}
 
 // Execute runs the inject-context command.
 func (c *InjectContextCommand) Execute(ctx *Context) error {
@@ -213,7 +217,9 @@ type StopCommand struct{}
 func (c *StopCommand) Name() string { return "stop" }
 
 // Description returns the command description.
-func (c *StopCommand) Description() string { return "Handle session stop and capture transcript for hooks" }
+func (c *StopCommand) Description() string {
+	return "Handle session stop and capture transcript for hooks"
+}
 
 // Execute runs the stop command.
 func (c *StopCommand) Execute(ctx *Context) error {

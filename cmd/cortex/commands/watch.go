@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 
-
 	"time"
 
 	"golang.org/x/term"
@@ -296,7 +295,6 @@ func printWatchStatic(cfg *config.Config, store *storage.Storage) {
 	renderDashboard(data, 0)
 }
 
-
 // rawPrint prints a line with \r\n for raw terminal mode.
 // In raw mode, \n alone doesn't return to column 1.
 func rawPrint(format string, args ...interface{}) {
@@ -336,7 +334,6 @@ func renderDashboard(data *WatchData, frame int) {
 	// Commands footer
 	fmt.Println("d:daemon  q:quit")
 }
-
 
 // getAnimatedModeSpinner returns an animated spinner for a cognitive mode.
 func getAnimatedModeSpinner(mode string, frame int) string {
@@ -426,4 +423,3 @@ func renderInteractiveDashboard(cfg *config.Config, state *watchUIState, frame i
 	}
 	rawPrint("d:daemon(%s)  ↑↓:scroll  q:quit", daemonStatus)
 }
-

@@ -282,11 +282,8 @@ func (w *RetrievalStatsHistoryWriter) AppendEntry(entry *RetrievalStatsHistoryEn
 		entry.Timestamp = time.Now()
 	}
 
-	// Check file size and rotate if needed
-	if err := w.maybeRotate(); err != nil {
-		// Log but don't fail - rotation failure shouldn't block append
-		// Continue with append attempt
-	}
+	// Check file size and rotate if needed (failure shouldn't block append)
+	_ = w.maybeRotate()
 
 	data, err := json.Marshal(entry)
 	if err != nil {
