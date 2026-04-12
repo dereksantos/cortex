@@ -301,11 +301,6 @@ func rawPrint(format string, args ...interface{}) {
 	fmt.Printf(format+"\r\n", args...)
 }
 
-// rawPrintln prints a string with \r\n for raw terminal mode.
-func rawPrintln(s string) {
-	fmt.Print(s + "\r\n")
-}
-
 // renderDashboard renders the simplified dashboard view (used by both animated and static modes).
 // Layout: Stats header, Log feed, Commands footer - no boxes.
 func renderDashboard(data *WatchData, frame int) {

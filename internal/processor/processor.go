@@ -72,10 +72,8 @@ func (p *Processor) processLoop() {
 	defer ticker.Stop()
 
 	for p.running.Load() {
-		select {
-		case <-ticker.C:
-			p.processBatch()
-		}
+		<-ticker.C
+		p.processBatch()
 	}
 }
 

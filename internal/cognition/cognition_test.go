@@ -164,11 +164,11 @@ func TestExtractTerms(t *testing.T) {
 		minTerms int
 		maxTerms int
 	}{
-		{"The quick brown fox", 2, 3},                            // "quick", "brown", "fox"
-		{"How do I authenticate with JWT?", 2, 3},                // "authenticate", "jwt"
-		{"a an the is are", 0, 0},                                // All stopwords
-		{"authentication authorization security", 3, 3},          // Technical terms
-		{"I want to help me please", 0, 5},                       // Some words may not be stopwords
+		{"The quick brown fox", 2, 3},                   // "quick", "brown", "fox"
+		{"How do I authenticate with JWT?", 2, 3},       // "authenticate", "jwt"
+		{"a an the is are", 0, 0},                       // All stopwords
+		{"authentication authorization security", 3, 3}, // Technical terms
+		{"I want to help me please", 0, 5},              // Some words may not be stopwords
 	}
 
 	for _, tt := range tests {

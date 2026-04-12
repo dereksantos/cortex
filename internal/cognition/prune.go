@@ -233,14 +233,14 @@ func (p *Pruner) ShouldPrune() (bool, float64, error) {
 
 // PruneResult contains the results of a prune operation.
 type PruneResult struct {
-	Pruned       int           // Number of items pruned
-	ProjectSize  int64         // Project size in bytes
-	CortexSize   int64         // Cortex size before pruning
-	NewSize      int64         // Cortex size after pruning
-	Ratio        float64       // Size ratio (cortex/project)
-	Duration     time.Duration // How long pruning took
-	Skipped      bool          // True if pruning was skipped
-	SkipReason   string        // Why pruning was skipped
+	Pruned      int           // Number of items pruned
+	ProjectSize int64         // Project size in bytes
+	CortexSize  int64         // Cortex size before pruning
+	NewSize     int64         // Cortex size after pruning
+	Ratio       float64       // Size ratio (cortex/project)
+	Duration    time.Duration // How long pruning took
+	Skipped     bool          // True if pruning was skipped
+	SkipReason  string        // Why pruning was skipped
 }
 
 // MaybePrune checks if pruning is needed and performs it if so.

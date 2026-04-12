@@ -399,12 +399,12 @@ func (p *Persister) PersistAgentic(results *AgenticResults, durationMs int64) er
 
 // AgenticTrendPoint represents a single data point in the agentic trend.
 type AgenticTrendPoint struct {
-	Timestamp           string  `json:"timestamp"`
-	ToolCallReduction   float64 `json:"tool_call_reduction"`
-	TimeReduction       float64 `json:"time_reduction"`
-	CostReduction       float64 `json:"cost_reduction"`
-	BaselineToolCalls   int     `json:"baseline_tool_calls"`
-	CortexToolCalls     int     `json:"cortex_tool_calls"`
+	Timestamp         string  `json:"timestamp"`
+	ToolCallReduction float64 `json:"tool_call_reduction"`
+	TimeReduction     float64 `json:"time_reduction"`
+	CostReduction     float64 `json:"cost_reduction"`
+	BaselineToolCalls int     `json:"baseline_tool_calls"`
+	CortexToolCalls   int     `json:"cortex_tool_calls"`
 }
 
 // GetAgenticTrend returns tool call reduction over the last N runs.

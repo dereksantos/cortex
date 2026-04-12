@@ -6,10 +6,10 @@ import (
 
 func TestTokenReduction(t *testing.T) {
 	tests := []struct {
-		name             string
-		baselineTokens   int
-		cortexTokens     int
-		wantReduction    float64
+		name           string
+		baselineTokens int
+		cortexTokens   int
+		wantReduction  float64
 	}{
 		{
 			name:           "20% reduction",
@@ -77,9 +77,9 @@ func TestTokenReduction(t *testing.T) {
 
 func TestAvgABR(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		scenarios []ScenarioResult
-		wantABR  float64
+		wantABR   float64
 	}{
 		{
 			name: "single scenario with ABR",
@@ -444,7 +444,7 @@ func TestMPRAggregation(t *testing.T) {
 func TestScenarioMPRAggregation(t *testing.T) {
 	tests := []TestResult{
 		{
-			TestID:       "t1",
+			TestID:        "t1",
 			BaselineScore: 0.4,
 			CortexScore:   0.7,
 			Lift:          0.75,
@@ -455,7 +455,7 @@ func TestScenarioMPRAggregation(t *testing.T) {
 			MPR:           0.875,
 		},
 		{
-			TestID:       "t2",
+			TestID:        "t2",
 			BaselineScore: 0.5,
 			CortexScore:   0.9,
 			Lift:          0.8,
@@ -466,7 +466,7 @@ func TestScenarioMPRAggregation(t *testing.T) {
 			MPR:           1.059,
 		},
 		{
-			TestID:       "t3",
+			TestID:        "t3",
 			BaselineScore: 0.6,
 			CortexScore:   0.6,
 			Lift:          0.0,

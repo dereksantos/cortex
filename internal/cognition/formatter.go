@@ -210,4 +210,3 @@ func (f *Formatter) EstimateTokens(results []cognition.Result) int {
 	formatted := f.FormatForInjection(results)
 	return len(formatted) / 4
 }
-

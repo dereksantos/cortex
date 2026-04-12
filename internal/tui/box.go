@@ -14,45 +14,45 @@ const (
 
 // BoxCharSet contains the box drawing characters for a style.
 type BoxCharSet struct {
-	Horizontal   string // ─ or ═
-	Vertical     string // │ or ║
-	TopLeft      string // ┌ or ╔
-	TopRight     string // ┐ or ╗
-	BottomLeft   string // └ or ╚
-	BottomRight  string // ┘ or ╝
-	VerticalLeft string // ┤ or ╣ (T from right)
-	VerticalRight string // ├ or ╠ (T from left)
-	HorizontalUp string // ┴ or ╩ (T from bottom)
+	Horizontal     string // ─ or ═
+	Vertical       string // │ or ║
+	TopLeft        string // ┌ or ╔
+	TopRight       string // ┐ or ╗
+	BottomLeft     string // └ or ╚
+	BottomRight    string // ┘ or ╝
+	VerticalLeft   string // ┤ or ╣ (T from right)
+	VerticalRight  string // ├ or ╠ (T from left)
+	HorizontalUp   string // ┴ or ╩ (T from bottom)
 	HorizontalDown string // ┬ or ╦ (T from top)
-	Cross        string // ┼ or ╬
+	Cross          string // ┼ or ╬
 }
 
 var singleBox = BoxCharSet{
-	Horizontal:    "─",
-	Vertical:      "│",
-	TopLeft:       "┌",
-	TopRight:      "┐",
-	BottomLeft:    "└",
-	BottomRight:   "┘",
-	VerticalLeft:  "┤",
-	VerticalRight: "├",
-	HorizontalUp:  "┴",
+	Horizontal:     "─",
+	Vertical:       "│",
+	TopLeft:        "┌",
+	TopRight:       "┐",
+	BottomLeft:     "└",
+	BottomRight:    "┘",
+	VerticalLeft:   "┤",
+	VerticalRight:  "├",
+	HorizontalUp:   "┴",
 	HorizontalDown: "┬",
-	Cross:         "┼",
+	Cross:          "┼",
 }
 
 var doubleBox = BoxCharSet{
-	Horizontal:    "═",
-	Vertical:      "║",
-	TopLeft:       "╔",
-	TopRight:      "╗",
-	BottomLeft:    "╚",
-	BottomRight:   "╝",
-	VerticalLeft:  "╣",
-	VerticalRight: "╠",
-	HorizontalUp:  "╩",
+	Horizontal:     "═",
+	Vertical:       "║",
+	TopLeft:        "╔",
+	TopRight:       "╗",
+	BottomLeft:     "╚",
+	BottomRight:    "╝",
+	VerticalLeft:   "╣",
+	VerticalRight:  "╠",
+	HorizontalUp:   "╩",
 	HorizontalDown: "╦",
-	Cross:         "╬",
+	Cross:          "╬",
 }
 
 // BoxChars returns the character set for the given box style.

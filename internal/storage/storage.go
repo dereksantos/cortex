@@ -1,19 +1,17 @@
-// Package storage provides event sourcing storage with SQLite
+// Package storage provides event sourcing storage with JSONL files and in-memory indexes
 package storage
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/viterin/vek"
-	_ "modernc.org/sqlite"
 
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -26,520 +24,657 @@ type Event struct {
 	ToolResult string
 }
 
-// Storage handles event storage with event sourcing pattern
+// Storage handles event storage with JSONL files and in-memory indexes
 type Storage struct {
-	db  *sql.DB
-	cfg *config.Config
+	cfg     *config.Config
+	dataDir string
+	mu      sync.RWMutex
+
+	// Event indexes
+	events        map[string]*events.Event // id -> Event
+	eventsByTime  []*events.Event          // sorted by timestamp DESC
+	sessionEvents map[string][]string      // session_id -> []event_id
+
+	// Entity indexes
+	entities     map[int64]*Entity // id -> Entity
+	entityByKey  map[string]int64  // "type:name" -> id
+	nextEntityID int64
+
+	// Relationship indexes
+	relationships map[int64]*Relationship // id -> Relationship
+	relsByEntity  map[int64][]int64       // entity_id -> []relationship_id (from or to)
+	nextRelID     int64
+
+	// Insight indexes
+	insights          map[int64]*Insight    // id -> Insight
+	insightsByTime    []*Insight            // sorted by created_at DESC
+	insightsByCat     map[string][]*Insight // category -> sorted by importance DESC, created_at DESC
+	insightsBySession map[string][]*Insight // session_id -> insights
+	insightsBySource  map[string][]*Insight // source_type -> insights
+	nextInsightID     int64
+
+	// Embedding data
+	embeddings map[string]*embeddingEntry // "contentID:contentType" -> entry
+
+	// Session indexes
+	sessions       map[string]*SessionMetadata // session_id -> metadata
+	sessionsByTime []*SessionMetadata          // sorted by started_at DESC
+	nextSessionID  int64
+
+	// Open file handles for append
+	eventFile   *os.File
+	insightFile *os.File
+	entityFile  *os.File
+	relFile     *os.File
+	sessionFile *os.File
+	embFile     *os.File
 }
 
-// New creates a new Storage instance.
-// If cfg.DatabaseURL is set, it is used as the SQLite path (e.g., a shared volume).
-// Otherwise, defaults to .cortex/db/events.db.
+type embeddingEntry struct {
+	ContentID   string    `json:"content_id"`
+	ContentType string    `json:"content_type"`
+	Vector      []float32 `json:"vector"`
+	ModelName   string    `json:"model_name,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// --- JSONL record types ---
+
+type eventRecord struct {
+	ID             string                 `json:"id"`
+	Source         events.Source          `json:"source"`
+	EventType      events.EventType       `json:"event_type"`
+	Timestamp      time.Time              `json:"timestamp"`
+	ToolName       string                 `json:"tool_name,omitempty"`
+	ToolInput      map[string]interface{} `json:"tool_input,omitempty"`
+	ToolResult     string                 `json:"tool_result,omitempty"`
+	Prompt         string                 `json:"prompt,omitempty"`
+	TranscriptPath string                 `json:"transcript_path,omitempty"`
+	Context        events.EventContext    `json:"context"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+}
+
+type entityRecord struct {
+	Op        string    `json:"op,omitempty"` // "" = insert/upsert, "delete" = soft delete
+	ID        int64     `json:"id"`
+	Type      string    `json:"type"`
+	Name      string    `json:"name"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+type relationshipRecord struct {
+	Op           string    `json:"op,omitempty"`
+	ID           int64     `json:"id"`
+	FromEntityID int64     `json:"from_entity_id"`
+	ToEntityID   int64     `json:"to_entity_id"`
+	RelationType string    `json:"relation_type"`
+	EventID      string    `json:"event_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type insightRecord struct {
+	Op           string    `json:"op,omitempty"` // "" = insert, "delete" = soft delete, "update" = replace
+	ID           int64     `json:"id"`
+	EventID      string    `json:"event_id"`
+	Category     string    `json:"category"`
+	Summary      string    `json:"summary"`
+	Importance   int       `json:"importance"`
+	Tags         []string  `json:"tags"`
+	Reasoning    string    `json:"reasoning,omitempty"`
+	SessionID    string    `json:"session_id,omitempty"`
+	SourceType   string    `json:"source_type,omitempty"`
+	WasRetrieved bool      `json:"was_retrieved,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type sessionRecord struct {
+	Op            string    `json:"op,omitempty"` // "" = insert, "update" = replace
+	ID            int64     `json:"id"`
+	SessionID     string    `json:"session_id"`
+	StartedAt     time.Time `json:"started_at"`
+	InitialPrompt string    `json:"initial_prompt,omitempty"`
+	EventCount    int       `json:"event_count"`
+	LastAction    string    `json:"last_action,omitempty"`
+	LastActionAt  time.Time `json:"last_action_at,omitempty"`
+	ProjectPath   string    `json:"project_path,omitempty"`
+}
+
+// New creates a new Storage instance backed by JSONL files.
 func New(cfg *config.Config) (*Storage, error) {
-	dbPath := cfg.DatabaseURL
-	if dbPath == "" {
-		dbDir := filepath.Join(cfg.ContextDir, "db")
-		if err := os.MkdirAll(dbDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create db directory: %w", err)
-		}
-		dbPath = filepath.Join(dbDir, "events.db")
-	} else {
-		// Ensure parent directory exists for custom paths
-		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return nil, fmt.Errorf("failed to create database directory: %w", err)
+	dataDir := filepath.Join(cfg.ContextDir, "data")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	s := &Storage{
+		cfg:               cfg,
+		dataDir:           dataDir,
+		events:            make(map[string]*events.Event),
+		sessionEvents:     make(map[string][]string),
+		entities:          make(map[int64]*Entity),
+		entityByKey:       make(map[string]int64),
+		nextEntityID:      1, // Start at 1 to match SQLite AUTOINCREMENT behavior
+		relationships:     make(map[int64]*Relationship),
+		relsByEntity:      make(map[int64][]int64),
+		nextRelID:         1,
+		insights:          make(map[int64]*Insight),
+		insightsByCat:     make(map[string][]*Insight),
+		insightsBySession: make(map[string][]*Insight),
+		insightsBySource:  make(map[string][]*Insight),
+		nextInsightID:     1,
+		embeddings:        make(map[string]*embeddingEntry),
+		sessions:          make(map[string]*SessionMetadata),
+		nextSessionID:     1,
+	}
+
+	// Rebuild in-memory indexes from JSONL files
+	if err := s.rebuildIndexes(); err != nil {
+		return nil, fmt.Errorf("failed to rebuild indexes: %w", err)
+	}
+
+	// Open files for append
+	var err error
+	s.eventFile, err = openAppend(filepath.Join(dataDir, "events.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open events file: %w", err)
+	}
+	s.insightFile, err = openAppend(filepath.Join(dataDir, "insights.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		return nil, fmt.Errorf("failed to open insights file: %w", err)
+	}
+	s.entityFile, err = openAppend(filepath.Join(dataDir, "entities.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		return nil, fmt.Errorf("failed to open entities file: %w", err)
+	}
+	s.relFile, err = openAppend(filepath.Join(dataDir, "relationships.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		return nil, fmt.Errorf("failed to open relationships file: %w", err)
+	}
+	s.sessionFile, err = openAppend(filepath.Join(dataDir, "sessions.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		return nil, fmt.Errorf("failed to open sessions file: %w", err)
+	}
+	s.embFile, err = openAppend(filepath.Join(dataDir, "embeddings.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		return nil, fmt.Errorf("failed to open embeddings file: %w", err)
+	}
+
+	return s, nil
+}
+
+// Close closes all open file handles
+func (s *Storage) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var firstErr error
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile} {
+		if f != nil {
+			if err := f.Close(); err != nil && firstErr == nil {
+				firstErr = err
 			}
 		}
 	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	storage := &Storage{
-		db:  db,
-		cfg: cfg,
-	}
-
-	// Initialize schema
-	if err := storage.initSchema(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
-	}
-
-	return storage, nil
+	return firstErr
 }
 
-// Close closes the database connection
-func (s *Storage) Close() error {
-	return s.db.Close()
-}
+// --- Index rebuild ---
 
-// initSchema creates the database schema
-func (s *Storage) initSchema() error {
-	schema := `
-	-- Event store (immutable, append-only)
-	CREATE TABLE IF NOT EXISTS events (
-		id TEXT PRIMARY KEY,
-		source TEXT NOT NULL,
-		event_type TEXT NOT NULL,
-		timestamp DATETIME NOT NULL,
-		tool_name TEXT,
-		tool_input TEXT,
-		tool_result TEXT,
-		context TEXT,
-		metadata TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	);
-
-	-- Entities extracted from events
-	CREATE TABLE IF NOT EXISTS entities (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		type TEXT NOT NULL, -- file, concept, decision, pattern
-		name TEXT NOT NULL,
-		first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-		last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(type, name)
-	);
-
-	-- Relationships between entities
-	CREATE TABLE IF NOT EXISTS relationships (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		from_entity_id INTEGER NOT NULL,
-		to_entity_id INTEGER NOT NULL,
-		relation_type TEXT NOT NULL, -- affects, implements, relates_to, etc.
-		event_id TEXT,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY(from_entity_id) REFERENCES entities(id),
-		FOREIGN KEY(to_entity_id) REFERENCES entities(id),
-		FOREIGN KEY(event_id) REFERENCES events(id)
-	);
-
-	-- Insights derived from events
-	CREATE TABLE IF NOT EXISTS insights (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		event_id TEXT NOT NULL,
-		category TEXT NOT NULL, -- decision, pattern, insight, strategy
-		summary TEXT NOT NULL,
-		importance INTEGER DEFAULT 0,
-		tags TEXT,
-		reasoning TEXT,
-		session_id TEXT,           -- Links to session for session-over-session analysis
-		source_type TEXT,          -- project, cortex, claude_history, git
-		was_retrieved INTEGER DEFAULT 0, -- Boolean: 1 if ever returned in search
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY(event_id) REFERENCES events(id)
-	);
-
-	-- Vector embeddings for semantic search
-	CREATE TABLE IF NOT EXISTS embeddings (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		content_id TEXT NOT NULL,
-		content_type TEXT NOT NULL, -- event, insight
-		vector BLOB NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(content_id, content_type)
-	);
-
-	-- Full-text search index
-	CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-		event_id,
-		tool_name,
-		tool_result,
-		content='events',
-		content_rowid='rowid'
-	);
-
-	-- Session metadata for watch tracking
-	CREATE TABLE IF NOT EXISTS sessions (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		session_id TEXT UNIQUE NOT NULL,
-		started_at DATETIME NOT NULL,
-		initial_prompt TEXT,
-		event_count INTEGER DEFAULT 0,
-		last_action TEXT,
-		last_action_at DATETIME,
-		project_path TEXT
-	);
-
-	-- Indexes for performance
-	CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-	CREATE INDEX IF NOT EXISTS idx_events_source ON events(source);
-	CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-	CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
-	CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships(from_entity_id);
-	CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entity_id);
-	CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
-	CREATE INDEX IF NOT EXISTS idx_insights_event ON insights(event_id);
-	CREATE INDEX IF NOT EXISTS idx_insights_session ON insights(session_id);
-	CREATE INDEX IF NOT EXISTS idx_insights_source_type ON insights(source_type);
-	CREATE INDEX IF NOT EXISTS idx_embeddings_content ON embeddings(content_id, content_type);
-	CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-	`
-
-	_, err := s.db.Exec(schema)
-	if err != nil {
+func (s *Storage) rebuildIndexes() error {
+	if err := s.rebuildEventIndexes(); err != nil {
 		return err
 	}
-
-	// Run migrations for existing databases
-	return s.runMigrations()
-}
-
-// runMigrations adds new columns to existing tables for backwards compatibility.
-// SQLite supports ALTER TABLE ADD COLUMN, but not all DDL in a single statement.
-func (s *Storage) runMigrations() error {
-	// Migration: Add session_id, source_type, was_retrieved to insights table
-	insightMigrations := []struct {
-		column string
-		ddl    string
-	}{
-		{"session_id", "ALTER TABLE insights ADD COLUMN session_id TEXT"},
-		{"source_type", "ALTER TABLE insights ADD COLUMN source_type TEXT"},
-		{"was_retrieved", "ALTER TABLE insights ADD COLUMN was_retrieved INTEGER DEFAULT 0"},
+	if err := s.rebuildEntityIndexes(); err != nil {
+		return err
 	}
-
-	for _, m := range insightMigrations {
-		if !s.columnExists("insights", m.column) {
-			if _, err := s.db.Exec(m.ddl); err != nil {
-				return fmt.Errorf("failed to add %s column to insights: %w", m.column, err)
-			}
-		}
+	if err := s.rebuildRelationshipIndexes(); err != nil {
+		return err
 	}
-
-	// Migration: Add model_name to embeddings table
-	if !s.columnExists("embeddings", "model_name") {
-		if _, err := s.db.Exec("ALTER TABLE embeddings ADD COLUMN model_name TEXT"); err != nil {
-			return fmt.Errorf("failed to add model_name column to embeddings: %w", err)
-		}
+	if err := s.rebuildInsightIndexes(); err != nil {
+		return err
 	}
-
+	if err := s.rebuildEmbeddingIndexes(); err != nil {
+		return err
+	}
+	if err := s.rebuildSessionIndexes(); err != nil {
+		return err
+	}
 	return nil
 }
 
-// columnExists checks if a column exists in a table.
-func (s *Storage) columnExists(table, column string) bool {
-	// Use PRAGMA table_info to check columns
-	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+func (s *Storage) rebuildEventIndexes() error {
+	records, err := readLines[eventRecord](filepath.Join(s.dataDir, "events.jsonl"))
 	if err != nil {
-		return false
+		return err
 	}
-	defer rows.Close()
+	for _, r := range records {
+		ev := &events.Event{
+			ID:             r.ID,
+			Source:         r.Source,
+			EventType:      r.EventType,
+			Timestamp:      r.Timestamp,
+			ToolName:       r.ToolName,
+			ToolInput:      r.ToolInput,
+			ToolResult:     r.ToolResult,
+			Prompt:         r.Prompt,
+			TranscriptPath: r.TranscriptPath,
+			Context:        r.Context,
+			Metadata:       r.Metadata,
+		}
+		s.events[ev.ID] = ev
+		s.eventsByTime = append(s.eventsByTime, ev)
+		if ev.Context.SessionID != "" {
+			s.sessionEvents[ev.Context.SessionID] = append(s.sessionEvents[ev.Context.SessionID], ev.ID)
+		}
+	}
+	sort.Slice(s.eventsByTime, func(i, j int) bool {
+		return s.eventsByTime[i].Timestamp.After(s.eventsByTime[j].Timestamp)
+	})
+	return nil
+}
 
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dfltValue sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+func (s *Storage) rebuildEntityIndexes() error {
+	records, err := readLines[entityRecord](filepath.Join(s.dataDir, "entities.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		if r.Op == "delete" {
+			delete(s.entities, r.ID)
+			// find and remove from entityByKey
+			for k, v := range s.entityByKey {
+				if v == r.ID {
+					delete(s.entityByKey, k)
+					break
+				}
+			}
 			continue
 		}
-		if name == column {
-			return true
+		e := &Entity{
+			ID:        r.ID,
+			Type:      r.Type,
+			Name:      r.Name,
+			FirstSeen: r.FirstSeen,
+			LastSeen:  r.LastSeen,
+		}
+		// If entity already exists (upsert), update it
+		key := r.Type + ":" + r.Name
+		if existingID, ok := s.entityByKey[key]; ok {
+			existing := s.entities[existingID]
+			if existing != nil {
+				existing.LastSeen = r.LastSeen
+				continue
+			}
+		}
+		s.entities[r.ID] = e
+		s.entityByKey[key] = r.ID
+		if r.ID >= s.nextEntityID {
+			s.nextEntityID = r.ID + 1
 		}
 	}
-	return false
+	return nil
 }
+
+func (s *Storage) rebuildRelationshipIndexes() error {
+	records, err := readLines[relationshipRecord](filepath.Join(s.dataDir, "relationships.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		if r.Op == "delete" {
+			delete(s.relationships, r.ID)
+			continue
+		}
+		rel := &Relationship{
+			ID:           r.ID,
+			FromEntity:   s.entities[r.FromEntityID],
+			ToEntity:     s.entities[r.ToEntityID],
+			RelationType: r.RelationType,
+			EventID:      r.EventID,
+			CreatedAt:    r.CreatedAt,
+		}
+		s.relationships[r.ID] = rel
+		s.relsByEntity[r.FromEntityID] = append(s.relsByEntity[r.FromEntityID], r.ID)
+		s.relsByEntity[r.ToEntityID] = append(s.relsByEntity[r.ToEntityID], r.ID)
+		if r.ID >= s.nextRelID {
+			s.nextRelID = r.ID + 1
+		}
+	}
+	return nil
+}
+
+func (s *Storage) rebuildInsightIndexes() error {
+	records, err := readLines[insightRecord](filepath.Join(s.dataDir, "insights.jsonl"))
+	if err != nil {
+		return err
+	}
+	// Process in order — last write wins for updates, deletes remove
+	for _, r := range records {
+		switch r.Op {
+		case "delete":
+			s.removeInsightFromIndexes(r.ID)
+			delete(s.insights, r.ID)
+		case "update":
+			// Remove old version from secondary indexes, then re-add
+			s.removeInsightFromIndexes(r.ID)
+			insight := recordToInsight(r)
+			s.insights[r.ID] = insight
+			s.addInsightToSecondaryIndexes(insight)
+		default:
+			// Insert
+			insight := recordToInsight(r)
+			s.insights[r.ID] = insight
+			s.addInsightToSecondaryIndexes(insight)
+			if r.ID >= s.nextInsightID {
+				s.nextInsightID = r.ID + 1
+			}
+		}
+	}
+	// Sort secondary indexes
+	sort.Slice(s.insightsByTime, func(i, j int) bool {
+		return s.insightsByTime[i].CreatedAt.After(s.insightsByTime[j].CreatedAt)
+	})
+	for cat := range s.insightsByCat {
+		sortInsightsByImportance(s.insightsByCat[cat])
+	}
+	for src := range s.insightsBySource {
+		sortInsightsByImportance(s.insightsBySource[src])
+	}
+	return nil
+}
+
+func (s *Storage) rebuildEmbeddingIndexes() error {
+	records, err := readLines[embeddingEntry](filepath.Join(s.dataDir, "embeddings.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		key := r.ContentID + ":" + r.ContentType
+		entry := r // copy
+		s.embeddings[key] = &entry
+	}
+	return nil
+}
+
+func (s *Storage) rebuildSessionIndexes() error {
+	records, err := readLines[sessionRecord](filepath.Join(s.dataDir, "sessions.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		sess := &SessionMetadata{
+			ID:            r.ID,
+			SessionID:     r.SessionID,
+			StartedAt:     r.StartedAt,
+			InitialPrompt: r.InitialPrompt,
+			EventCount:    r.EventCount,
+			LastAction:    r.LastAction,
+			LastActionAt:  r.LastActionAt,
+			ProjectPath:   r.ProjectPath,
+		}
+		s.sessions[r.SessionID] = sess
+		if r.ID >= s.nextSessionID {
+			s.nextSessionID = r.ID + 1
+		}
+	}
+	// Build sessionsByTime from map
+	s.sessionsByTime = nil
+	for _, sess := range s.sessions {
+		s.sessionsByTime = append(s.sessionsByTime, sess)
+	}
+	sort.Slice(s.sessionsByTime, func(i, j int) bool {
+		return s.sessionsByTime[i].StartedAt.After(s.sessionsByTime[j].StartedAt)
+	})
+	return nil
+}
+
+// --- Index helpers ---
+
+func recordToInsight(r insightRecord) *Insight {
+	return &Insight{
+		ID:           r.ID,
+		EventID:      r.EventID,
+		Category:     r.Category,
+		Summary:      r.Summary,
+		Importance:   r.Importance,
+		Tags:         r.Tags,
+		Reasoning:    r.Reasoning,
+		SessionID:    r.SessionID,
+		SourceType:   r.SourceType,
+		WasRetrieved: r.WasRetrieved,
+		CreatedAt:    r.CreatedAt,
+	}
+}
+
+func insightToRecord(ins *Insight, op string) insightRecord {
+	return insightRecord{
+		Op:           op,
+		ID:           ins.ID,
+		EventID:      ins.EventID,
+		Category:     ins.Category,
+		Summary:      ins.Summary,
+		Importance:   ins.Importance,
+		Tags:         ins.Tags,
+		Reasoning:    ins.Reasoning,
+		SessionID:    ins.SessionID,
+		SourceType:   ins.SourceType,
+		WasRetrieved: ins.WasRetrieved,
+		CreatedAt:    ins.CreatedAt,
+	}
+}
+
+func (s *Storage) addInsightToSecondaryIndexes(insight *Insight) {
+	s.insightsByTime = append(s.insightsByTime, insight)
+	if insight.Category != "" {
+		s.insightsByCat[insight.Category] = append(s.insightsByCat[insight.Category], insight)
+	}
+	if insight.SessionID != "" {
+		s.insightsBySession[insight.SessionID] = append(s.insightsBySession[insight.SessionID], insight)
+	}
+	if insight.SourceType != "" {
+		s.insightsBySource[insight.SourceType] = append(s.insightsBySource[insight.SourceType], insight)
+	}
+}
+
+func (s *Storage) removeInsightFromIndexes(id int64) {
+	insight := s.insights[id]
+	if insight == nil {
+		return
+	}
+	s.insightsByTime = removeInsightFromSlice(s.insightsByTime, id)
+	if insight.Category != "" {
+		s.insightsByCat[insight.Category] = removeInsightFromSlice(s.insightsByCat[insight.Category], id)
+	}
+	if insight.SessionID != "" {
+		s.insightsBySession[insight.SessionID] = removeInsightFromSlice(s.insightsBySession[insight.SessionID], id)
+	}
+	if insight.SourceType != "" {
+		s.insightsBySource[insight.SourceType] = removeInsightFromSlice(s.insightsBySource[insight.SourceType], id)
+	}
+}
+
+func removeInsightFromSlice(slice []*Insight, id int64) []*Insight {
+	for i, ins := range slice {
+		if ins.ID == id {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
+}
+
+func sortInsightsByImportance(slice []*Insight) {
+	sort.Slice(slice, func(i, j int) bool {
+		if slice[i].Importance != slice[j].Importance {
+			return slice[i].Importance > slice[j].Importance
+		}
+		return slice[i].CreatedAt.After(slice[j].CreatedAt)
+	})
+}
+
+// --- Event methods ---
 
 // StoreEvent stores an event (append-only)
 func (s *Storage) StoreEvent(event *events.Event) error {
-	toolInputJSON, _ := json.Marshal(event.ToolInput)
-	contextJSON, _ := json.Marshal(event.Context)
-	metadataJSON, _ := json.Marshal(event.Metadata)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`
-		INSERT INTO events (id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		event.ID,
-		event.Source,
-		event.EventType,
-		event.Timestamp,
-		event.ToolName,
-		string(toolInputJSON),
-		event.ToolResult,
-		string(contextJSON),
-		string(metadataJSON),
-	)
+	// Check for duplicate
+	if _, exists := s.events[event.ID]; exists {
+		return fmt.Errorf("failed to store event: UNIQUE constraint failed: events.id")
+	}
 
-	if err != nil {
+	rec := eventRecord{
+		ID:             event.ID,
+		Source:         event.Source,
+		EventType:      event.EventType,
+		Timestamp:      event.Timestamp,
+		ToolName:       event.ToolName,
+		ToolInput:      event.ToolInput,
+		ToolResult:     event.ToolResult,
+		Prompt:         event.Prompt,
+		TranscriptPath: event.TranscriptPath,
+		Context:        event.Context,
+		Metadata:       event.Metadata,
+	}
+
+	if err := appendLine(s.eventFile, rec); err != nil {
 		return fmt.Errorf("failed to store event: %w", err)
 	}
 
-	// Update FTS index
-	_, _ = s.db.Exec(`
-		INSERT INTO events_fts (event_id, tool_name, tool_result)
-		VALUES (?, ?, ?)
-	`, event.ID, event.ToolName, event.ToolResult)
+	// Update in-memory indexes
+	s.events[event.ID] = event
+	// Insert into sorted slice maintaining DESC order
+	idx := sort.Search(len(s.eventsByTime), func(i int) bool {
+		return s.eventsByTime[i].Timestamp.Before(event.Timestamp)
+	})
+	s.eventsByTime = append(s.eventsByTime, nil)
+	copy(s.eventsByTime[idx+1:], s.eventsByTime[idx:])
+	s.eventsByTime[idx] = event
+
+	if event.Context.SessionID != "" {
+		s.sessionEvents[event.Context.SessionID] = append(s.sessionEvents[event.Context.SessionID], event.ID)
+	}
 
 	return nil
 }
 
 // GetEvent retrieves an event by ID
 func (s *Storage) GetEvent(id string) (*events.Event, error) {
-	var event events.Event
-	var toolInputJSON, contextJSON, metadataJSON string
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	err := s.db.QueryRow(`
-		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
-		FROM events WHERE id = ?
-	`, id).Scan(
-		&event.ID,
-		&event.Source,
-		&event.EventType,
-		&event.Timestamp,
-		&event.ToolName,
-		&toolInputJSON,
-		&event.ToolResult,
-		&contextJSON,
-		&metadataJSON,
-	)
-
-	if err != nil {
-		return nil, err
+	ev, ok := s.events[id]
+	if !ok {
+		return nil, fmt.Errorf("event not found: %s", id)
 	}
-
-	json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
-	json.Unmarshal([]byte(contextJSON), &event.Context)
-	json.Unmarshal([]byte(metadataJSON), &event.Metadata)
-
-	return &event, nil
+	return ev, nil
 }
 
 // GetRecentEvents retrieves recent events
 func (s *Storage) GetRecentEvents(limit int) ([]*events.Event, error) {
-	rows, err := s.db.Query(`
-		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
-		FROM events
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	if limit > len(s.eventsByTime) {
+		limit = len(s.eventsByTime)
 	}
-	defer rows.Close()
-
-	var eventList []*events.Event
-	for rows.Next() {
-		var event events.Event
-		var toolInputJSON, contextJSON, metadataJSON string
-
-		err := rows.Scan(
-			&event.ID,
-			&event.Source,
-			&event.EventType,
-			&event.Timestamp,
-			&event.ToolName,
-			&toolInputJSON,
-			&event.ToolResult,
-			&contextJSON,
-			&metadataJSON,
-		)
-
-		if err != nil {
-			continue
-		}
-
-		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
-		json.Unmarshal([]byte(contextJSON), &event.Context)
-		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
-
-		eventList = append(eventList, &event)
-	}
-
-	return eventList, nil
+	result := make([]*events.Event, limit)
+	copy(result, s.eventsByTime[:limit])
+	return result, nil
 }
 
 // SearchEvents performs text search on events (fallback when vectors unavailable).
 func (s *Storage) SearchEvents(query string, limit int) ([]*events.Event, error) {
-	searchPattern := "%" + query + "%"
-	rows, err := s.db.Query(`
-		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
-		FROM events
-		WHERE tool_result LIKE ? OR tool_name LIKE ? OR tool_input LIKE ?
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, searchPattern, searchPattern, searchPattern, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	queryLower := strings.ToLower(query)
+	var results []*events.Event
 
-	var eventList []*events.Event
-	for rows.Next() {
-		var event events.Event
-		var toolInputJSON, contextJSON, metadataJSON string
-
-		err := rows.Scan(
-			&event.ID,
-			&event.Source,
-			&event.EventType,
-			&event.Timestamp,
-			&event.ToolName,
-			&toolInputJSON,
-			&event.ToolResult,
-			&contextJSON,
-			&metadataJSON,
-		)
-
-		if err != nil {
-			continue
+	for _, ev := range s.eventsByTime {
+		if len(results) >= limit {
+			break
 		}
-
-		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
-		json.Unmarshal([]byte(contextJSON), &event.Context)
-		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
-
-		eventList = append(eventList, &event)
+		if matchesEvent(ev, queryLower) {
+			results = append(results, ev)
+		}
 	}
 
-	return eventList, nil
+	return results, nil
 }
 
 // SearchEventsMultiTerm searches events matching ANY of the provided terms (OR logic).
-// This enables natural language queries like "how to implement caching" to match
-// content containing any of the extracted keywords.
 func (s *Storage) SearchEventsMultiTerm(terms []string, limit int) ([]*events.Event, error) {
 	if len(terms) == 0 {
 		return nil, nil
 	}
 
-	// Build dynamic WHERE clause with OR for each term
-	var conditions []string
-	var args []any
-	for _, term := range terms {
-		pattern := "%" + term + "%"
-		conditions = append(conditions, "(tool_result LIKE ? OR tool_name LIKE ? OR tool_input LIKE ?)")
-		args = append(args, pattern, pattern, pattern)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	lowerTerms := make([]string, len(terms))
+	for i, t := range terms {
+		lowerTerms[i] = strings.ToLower(t)
 	}
-	args = append(args, limit)
 
-	query := `
-		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
-		FROM events
-		WHERE ` + joinConditions(conditions, " OR ") + `
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var eventList []*events.Event
-	for rows.Next() {
-		var event events.Event
-		var toolInputJSON, contextJSON, metadataJSON string
-
-		err := rows.Scan(
-			&event.ID,
-			&event.Source,
-			&event.EventType,
-			&event.Timestamp,
-			&event.ToolName,
-			&toolInputJSON,
-			&event.ToolResult,
-			&contextJSON,
-			&metadataJSON,
-		)
-
-		if err != nil {
-			continue
+	var results []*events.Event
+	for _, ev := range s.eventsByTime {
+		if len(results) >= limit {
+			break
 		}
-
-		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
-		json.Unmarshal([]byte(contextJSON), &event.Context)
-		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
-
-		eventList = append(eventList, &event)
+		for _, term := range lowerTerms {
+			if matchesEvent(ev, term) {
+				results = append(results, ev)
+				break
+			}
+		}
 	}
 
-	return eventList, nil
+	return results, nil
 }
 
-// joinConditions joins SQL conditions with a separator.
-func joinConditions(conditions []string, sep string) string {
-	if len(conditions) == 0 {
-		return ""
+func matchesEvent(ev *events.Event, queryLower string) bool {
+	if strings.Contains(strings.ToLower(ev.ToolResult), queryLower) {
+		return true
 	}
-	result := conditions[0]
-	for i := 1; i < len(conditions); i++ {
-		result += sep + conditions[i]
+	if strings.Contains(strings.ToLower(ev.ToolName), queryLower) {
+		return true
 	}
-	return result
-}
-
-// GetStats returns storage statistics
-func (s *Storage) GetStats() (map[string]interface{}, error) {
-	stats := make(map[string]interface{})
-
-	// Total events
-	var totalEvents int
-	s.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&totalEvents)
-	stats["total_events"] = totalEvents
-
-	// Events by source
-	rows, err := s.db.Query("SELECT source, COUNT(*) FROM events GROUP BY source")
-	if err == nil {
-		defer rows.Close()
-		bySource := make(map[string]int)
-		for rows.Next() {
-			var source string
-			var count int
-			rows.Scan(&source, &count)
-			bySource[source] = count
+	// Check tool_input as JSON string (matches SQLite LIKE on the JSON text)
+	if ev.ToolInput != nil {
+		inputJSON, _ := json.Marshal(ev.ToolInput)
+		if strings.Contains(strings.ToLower(string(inputJSON)), queryLower) {
+			return true
 		}
-		stats["by_source"] = bySource
 	}
-
-	// Total entities
-	var totalEntities int
-	s.db.QueryRow("SELECT COUNT(*) FROM entities").Scan(&totalEntities)
-	stats["total_entities"] = totalEntities
-
-	// Total insights
-	var totalInsights int
-	s.db.QueryRow("SELECT COUNT(*) FROM insights").Scan(&totalInsights)
-	stats["total_insights"] = totalInsights
-
-	// Total embeddings
-	var totalEmbeddings int
-	s.db.QueryRow("SELECT COUNT(*) FROM embeddings").Scan(&totalEmbeddings)
-	stats["total_embeddings"] = totalEmbeddings
-
-	// Date range
-	var oldest, newest time.Time
-	s.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM events").Scan(&oldest, &newest)
-	stats["oldest_event"] = oldest
-	stats["newest_event"] = newest
-
-	// Database size (SQLite page_count * page_size)
-	var pageCount, pageSize int64
-	s.db.QueryRow("PRAGMA page_count").Scan(&pageCount)
-	s.db.QueryRow("PRAGMA page_size").Scan(&pageSize)
-	stats["db_size_bytes"] = pageCount * pageSize
-
-	return stats, nil
+	return false
 }
 
 // CountEventsBySession counts events for a specific session
 func (s *Storage) CountEventsBySession(sessionID string) (int, error) {
-	var count int
-	// Session ID is stored in the context JSON field
-	err := s.db.QueryRow(`
-		SELECT COUNT(*) FROM events
-		WHERE json_extract(context, '$.session_id') = ?
-	`, sessionID).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to count events by session: %w", err)
-	}
-	return count, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return len(s.sessionEvents[sessionID]), nil
 }
+
+// --- Entity types and methods ---
 
 // Entity represents a knowledge graph entity
 type Entity struct {
@@ -562,178 +697,197 @@ type Relationship struct {
 
 // StoreEntity stores or updates an entity
 func (s *Storage) StoreEntity(entityType, name string) (int64, error) {
-	// Try insert first
-	result, err := s.db.Exec(`
-		INSERT INTO entities (type, name, first_seen, last_seen)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(type, name) DO UPDATE SET last_seen = ?
-	`, entityType, name, time.Now(), time.Now(), time.Now())
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if err != nil {
+	now := time.Now()
+	key := entityType + ":" + name
+
+	if existingID, ok := s.entityByKey[key]; ok {
+		// Upsert: update last_seen
+		existing := s.entities[existingID]
+		existing.LastSeen = now
+
+		rec := entityRecord{
+			ID:        existingID,
+			Type:      entityType,
+			Name:      name,
+			FirstSeen: existing.FirstSeen,
+			LastSeen:  now,
+		}
+		if err := appendLine(s.entityFile, rec); err != nil {
+			return 0, fmt.Errorf("failed to store entity: %w", err)
+		}
+		return existingID, nil
+	}
+
+	// New entity
+	id := s.nextEntityID
+	s.nextEntityID++
+
+	entity := &Entity{
+		ID:        id,
+		Type:      entityType,
+		Name:      name,
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+
+	rec := entityRecord{
+		ID:        id,
+		Type:      entityType,
+		Name:      name,
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+	if err := appendLine(s.entityFile, rec); err != nil {
 		return 0, fmt.Errorf("failed to store entity: %w", err)
 	}
 
-	// Get the entity ID
-	var id int64
-	err = s.db.QueryRow(`
-		SELECT id FROM entities WHERE type = ? AND name = ?
-	`, entityType, name).Scan(&id)
-
-	if err != nil {
-		id, _ = result.LastInsertId()
-	}
-
+	s.entities[id] = entity
+	s.entityByKey[key] = id
 	return id, nil
 }
 
 // StoreRelationship stores a relationship between entities
 func (s *Storage) StoreRelationship(fromID, toID int64, relationType, eventID string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO relationships (from_entity_id, to_entity_id, relation_type, event_id)
-		VALUES (?, ?, ?, ?)
-	`, fromID, toID, relationType, eventID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if err != nil {
+	id := s.nextRelID
+	s.nextRelID++
+	now := time.Now()
+
+	rec := relationshipRecord{
+		ID:           id,
+		FromEntityID: fromID,
+		ToEntityID:   toID,
+		RelationType: relationType,
+		EventID:      eventID,
+		CreatedAt:    now,
+	}
+	if err := appendLine(s.relFile, rec); err != nil {
 		return fmt.Errorf("failed to store relationship: %w", err)
 	}
+
+	rel := &Relationship{
+		ID:           id,
+		FromEntity:   s.entities[fromID],
+		ToEntity:     s.entities[toID],
+		RelationType: relationType,
+		EventID:      eventID,
+		CreatedAt:    now,
+	}
+	s.relationships[id] = rel
+	s.relsByEntity[fromID] = append(s.relsByEntity[fromID], id)
+	s.relsByEntity[toID] = append(s.relsByEntity[toID], id)
 
 	return nil
 }
 
 // GetEntity retrieves an entity by type and name
 func (s *Storage) GetEntity(entityType, name string) (*Entity, error) {
-	var entity Entity
-	err := s.db.QueryRow(`
-		SELECT id, type, name, first_seen, last_seen
-		FROM entities
-		WHERE type = ? AND name = ?
-	`, entityType, name).Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	key := entityType + ":" + name
+	id, ok := s.entityByKey[key]
+	if !ok {
+		return nil, fmt.Errorf("entity not found: %s/%s", entityType, name)
 	}
-
-	return &entity, nil
+	return s.entities[id], nil
 }
 
 // GetEntityByID retrieves an entity by ID
 func (s *Storage) GetEntityByID(id int64) (*Entity, error) {
-	var entity Entity
-	err := s.db.QueryRow(`
-		SELECT id, type, name, first_seen, last_seen
-		FROM entities
-		WHERE id = ?
-	`, id).Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	e, ok := s.entities[id]
+	if !ok {
+		return nil, fmt.Errorf("entity not found: %d", id)
 	}
-
-	return &entity, nil
+	return e, nil
 }
 
 // GetEntitiesByType retrieves all entities of a specific type
 func (s *Storage) GetEntitiesByType(entityType string) ([]*Entity, error) {
-	rows, err := s.db.Query(`
-		SELECT id, type, name, first_seen, last_seen
-		FROM entities
-		WHERE type = ?
-		ORDER BY last_seen DESC
-	`, entityType)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entities []*Entity
-	for rows.Next() {
-		var entity Entity
-		if err := rows.Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen); err != nil {
-			continue
+	var result []*Entity
+	for _, e := range s.entities {
+		if e.Type == entityType {
+			result = append(result, e)
 		}
-		entities = append(entities, &entity)
 	}
-
-	return entities, nil
+	// Sort by last_seen DESC
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].LastSeen.After(result[j].LastSeen)
+	})
+	return result, nil
 }
 
 // GetRelatedEntities finds entities related to the given entity
 func (s *Storage) GetRelatedEntities(entityID int64, relationType string) ([]*Entity, error) {
-	query := `
-		SELECT e.id, e.type, e.name, e.first_seen, e.last_seen
-		FROM entities e
-		INNER JOIN relationships r ON (r.to_entity_id = e.id OR r.from_entity_id = e.id)
-		WHERE (r.from_entity_id = ? OR r.to_entity_id = ?)
-		AND e.id != ?
-	`
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	args := []interface{}{entityID, entityID, entityID}
-
-	if relationType != "" {
-		query += " AND r.relation_type = ?"
-		args = append(args, relationType)
-	}
-
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entities []*Entity
 	seen := make(map[int64]bool)
+	var result []*Entity
 
-	for rows.Next() {
-		var entity Entity
-		if err := rows.Scan(&entity.ID, &entity.Type, &entity.Name, &entity.FirstSeen, &entity.LastSeen); err != nil {
+	for _, relID := range s.relsByEntity[entityID] {
+		rel := s.relationships[relID]
+		if rel == nil {
 			continue
 		}
-		if !seen[entity.ID] {
-			entities = append(entities, &entity)
-			seen[entity.ID] = true
+		if relationType != "" && rel.RelationType != relationType {
+			continue
+		}
+
+		// Find the other entity
+		var otherID int64
+		if rel.FromEntity != nil && rel.FromEntity.ID == entityID {
+			if rel.ToEntity != nil {
+				otherID = rel.ToEntity.ID
+			}
+		} else if rel.ToEntity != nil && rel.ToEntity.ID == entityID {
+			if rel.FromEntity != nil {
+				otherID = rel.FromEntity.ID
+			}
+		}
+
+		if otherID != 0 && !seen[otherID] {
+			if e := s.entities[otherID]; e != nil {
+				result = append(result, e)
+				seen[otherID] = true
+			}
 		}
 	}
 
-	return entities, nil
+	return result, nil
 }
 
 // GetRelationships retrieves relationships for an entity
 func (s *Storage) GetRelationships(entityID int64) ([]*Relationship, error) {
-	rows, err := s.db.Query(`
-		SELECT id, from_entity_id, to_entity_id, relation_type, event_id, created_at
-		FROM relationships
-		WHERE from_entity_id = ? OR to_entity_id = ?
-		ORDER BY created_at DESC
-	`, entityID, entityID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var relationships []*Relationship
-	for rows.Next() {
-		var rel Relationship
-		var fromID, toID int64
-		var eventID sql.NullString
-
-		if err := rows.Scan(&rel.ID, &fromID, &toID, &rel.RelationType, &eventID, &rel.CreatedAt); err != nil {
-			continue
+	var result []*Relationship
+	for _, relID := range s.relsByEntity[entityID] {
+		rel := s.relationships[relID]
+		if rel != nil {
+			result = append(result, rel)
 		}
-
-		// Load from and to entities
-		rel.FromEntity, _ = s.GetEntityByID(fromID)
-		rel.ToEntity, _ = s.GetEntityByID(toID)
-		if eventID.Valid {
-			rel.EventID = eventID.String
-		}
-
-		relationships = append(relationships, &rel)
 	}
-
-	return relationships, nil
+	// Sort by created_at DESC
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	return result, nil
 }
+
+// --- Insight types and methods ---
 
 // Insight represents an LLM-extracted insight
 type Insight struct {
@@ -761,191 +915,223 @@ func (s *Storage) StoreInsightWithTimestamp(eventID, category, summary string, i
 }
 
 // StoreInsightWithSession stores an insight with session and source tracking.
-// sessionID links the insight to a specific session for session-over-session analysis.
-// sourceType indicates where the insight came from (project, cortex, claude_history, git).
 func (s *Storage) StoreInsightWithSession(eventID, category, summary string, importance int, tags []string, reasoning, sessionID, sourceType string) error {
 	return s.StoreInsightFull(eventID, category, summary, importance, tags, reasoning, sessionID, sourceType, time.Time{})
 }
 
 // StoreInsightFull stores an insight with all optional fields.
-// This is the underlying implementation used by all other StoreInsight variants.
 func (s *Storage) StoreInsightFull(eventID, category, summary string, importance int, tags []string, reasoning, sessionID, sourceType string, timestamp time.Time) error {
-	tagsJSON, _ := json.Marshal(tags)
-
-	// Convert empty strings to nil for nullable columns
-	var sessID, srcType interface{}
-	if sessionID != "" {
-		sessID = sessionID
-	}
-	if sourceType != "" {
-		srcType = sourceType
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if timestamp.IsZero() {
-		// Use default (current time via SQLite)
-		_, err := s.db.Exec(`
-			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, session_id, source_type)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, eventID, category, summary, importance, string(tagsJSON), reasoning, sessID, srcType)
-		if err != nil {
-			return fmt.Errorf("failed to store insight: %w", err)
-		}
-	} else {
-		// Use provided timestamp
-		_, err := s.db.Exec(`
-			INSERT INTO insights (event_id, category, summary, importance, tags, reasoning, session_id, source_type, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, eventID, category, summary, importance, string(tagsJSON), reasoning, sessID, srcType, timestamp)
-		if err != nil {
-			return fmt.Errorf("failed to store insight with timestamp: %w", err)
-		}
+		timestamp = time.Now()
+	}
+
+	id := s.nextInsightID
+	s.nextInsightID++
+
+	insight := &Insight{
+		ID:         id,
+		EventID:    eventID,
+		Category:   category,
+		Summary:    summary,
+		Importance: importance,
+		Tags:       tags,
+		Reasoning:  reasoning,
+		SessionID:  sessionID,
+		SourceType: sourceType,
+		CreatedAt:  timestamp,
+	}
+
+	rec := insightToRecord(insight, "")
+	if err := appendLine(s.insightFile, rec); err != nil {
+		return fmt.Errorf("failed to store insight: %w", err)
+	}
+
+	s.insights[id] = insight
+
+	// Insert into sorted slices maintaining order
+	s.insightsByTime = insertInsightSorted(s.insightsByTime, insight, func(a, b *Insight) bool {
+		return a.CreatedAt.After(b.CreatedAt)
+	})
+	if category != "" {
+		s.insightsByCat[category] = insertInsightSorted(s.insightsByCat[category], insight, func(a, b *Insight) bool {
+			if a.Importance != b.Importance {
+				return a.Importance > b.Importance
+			}
+			return a.CreatedAt.After(b.CreatedAt)
+		})
+	}
+	if sessionID != "" {
+		s.insightsBySession[sessionID] = append(s.insightsBySession[sessionID], insight)
+	}
+	if sourceType != "" {
+		s.insightsBySource[sourceType] = insertInsightSorted(s.insightsBySource[sourceType], insight, func(a, b *Insight) bool {
+			if a.Importance != b.Importance {
+				return a.Importance > b.Importance
+			}
+			return a.CreatedAt.After(b.CreatedAt)
+		})
 	}
 
 	return nil
+}
+
+func insertInsightSorted(slice []*Insight, ins *Insight, less func(a, b *Insight) bool) []*Insight {
+	idx := sort.Search(len(slice), func(i int) bool {
+		return !less(slice[i], ins)
+	})
+	slice = append(slice, nil)
+	copy(slice[idx+1:], slice[idx:])
+	slice[idx] = ins
+	return slice
 }
 
 // GetInsightsByCategory retrieves insights by category
 func (s *Storage) GetInsightsByCategory(category string, limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE category = ?
-		ORDER BY importance DESC, created_at DESC
-		LIMIT ?
-	`, category, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	catInsights := s.insightsByCat[category]
+	if limit > len(catInsights) {
+		limit = len(catInsights)
 	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
+	result := make([]*Insight, limit)
+	copy(result, catInsights[:limit])
+	return result, nil
 }
 
 // GetRecentInsights retrieves recent insights
 func (s *Storage) GetRecentInsights(limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		ORDER BY created_at DESC
-		LIMIT ?
-	`, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	if limit > len(s.insightsByTime) {
+		limit = len(s.insightsByTime)
 	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
+	result := make([]*Insight, limit)
+	copy(result, s.insightsByTime[:limit])
+	return result, nil
 }
 
 // GetImportantInsights retrieves high-importance insights
 func (s *Storage) GetImportantInsights(minImportance, limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE importance >= ?
-		ORDER BY importance DESC, created_at DESC
-		LIMIT ?
-	`, minImportance, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	var result []*Insight
+	// Walk insightsByTime but we need importance-sorted output.
+	// Collect all matching, then sort.
+	for _, ins := range s.insights {
+		if ins.Importance >= minImportance {
+			result = append(result, ins)
+		}
 	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
+	sortInsightsByImportance(result)
+	if limit < len(result) {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
-// scanInsights helper function to scan insight rows
-func (s *Storage) scanInsights(rows *sql.Rows) ([]*Insight, error) {
-	var insights []*Insight
-	for rows.Next() {
-		var insight Insight
-		var tagsJSON string
-		var sessionID, sourceType sql.NullString
-		var wasRetrieved sql.NullInt64
+// GetInsightByID retrieves a single insight by ID
+func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-		if err := rows.Scan(
-			&insight.ID,
-			&insight.EventID,
-			&insight.Category,
-			&insight.Summary,
-			&insight.Importance,
-			&tagsJSON,
-			&insight.Reasoning,
-			&sessionID,
-			&sourceType,
-			&wasRetrieved,
-			&insight.CreatedAt,
-		); err != nil {
-			continue
-		}
-
-		json.Unmarshal([]byte(tagsJSON), &insight.Tags)
-		if sessionID.Valid {
-			insight.SessionID = sessionID.String
-		}
-		if sourceType.Valid {
-			insight.SourceType = sourceType.String
-		}
-		if wasRetrieved.Valid {
-			insight.WasRetrieved = wasRetrieved.Int64 != 0
-		}
-		insights = append(insights, &insight)
+	ins, ok := s.insights[id]
+	if !ok {
+		return nil, fmt.Errorf("insight not found: %d", id)
 	}
-
-	return insights, nil
+	return ins, nil
 }
 
-// ForgetInsight deletes an insight by ID
-func (s *Storage) ForgetInsight(id int64) error {
-	result, err := s.db.Exec("DELETE FROM insights WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("failed to delete insight: %w", err)
-	}
+// GetInsightsBySession retrieves insights linked to a specific session.
+func (s *Storage) GetInsightsBySession(sessionID string, limit int) ([]*Insight, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	affected, _ := result.RowsAffected()
-	if affected == 0 {
-		return fmt.Errorf("insight not found")
+	sessInsights := s.insightsBySession[sessionID]
+	if limit > len(sessInsights) {
+		limit = len(sessInsights)
 	}
-
-	return nil
+	if limit == 0 {
+		return nil, nil
+	}
+	result := make([]*Insight, limit)
+	copy(result, sessInsights[:limit])
+	return result, nil
 }
 
-// ForgetInsightsByKeyword deletes insights matching a keyword in summary
-func (s *Storage) ForgetInsightsByKeyword(keyword string) (int, error) {
-	pattern := "%" + keyword + "%"
-	result, err := s.db.Exec("DELETE FROM insights WHERE summary LIKE ?", pattern)
-	if err != nil {
-		return 0, fmt.Errorf("failed to delete insights: %w", err)
-	}
+// GetInsightsBySourceType retrieves insights from a specific source type.
+func (s *Storage) GetInsightsBySourceType(sourceType string, limit int) ([]*Insight, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	affected, _ := result.RowsAffected()
-	return int(affected), nil
+	srcInsights := s.insightsBySource[sourceType]
+	if limit > len(srcInsights) {
+		limit = len(srcInsights)
+	}
+	if limit == 0 {
+		return nil, nil
+	}
+	result := make([]*Insight, limit)
+	copy(result, srcInsights[:limit])
+	return result, nil
+}
+
+// GetUnretrievedInsights returns insights that have never been returned in a search.
+func (s *Storage) GetUnretrievedInsights(limit int) ([]*Insight, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*Insight
+	for _, ins := range s.insights {
+		if !ins.WasRetrieved {
+			result = append(result, ins)
+		}
+	}
+	sortInsightsByImportance(result)
+	if limit < len(result) {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 // SearchInsights searches insights by keyword
 func (s *Storage) SearchInsights(keyword string, limit int) ([]*Insight, error) {
-	pattern := "%" + keyword + "%"
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE summary LIKE ? OR tags LIKE ? OR category LIKE ?
-		ORDER BY importance DESC, created_at DESC
-		LIMIT ?
-	`, pattern, pattern, pattern, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, err
+	keywordLower := strings.ToLower(keyword)
+	var result []*Insight
+
+	for _, ins := range s.insights {
+		if strings.Contains(strings.ToLower(ins.Summary), keywordLower) ||
+			strings.Contains(strings.ToLower(ins.Category), keywordLower) ||
+			tagsContain(ins.Tags, keywordLower) {
+			result = append(result, ins)
+		}
 	}
-	defer rows.Close()
 
-	return s.scanInsights(rows)
+	sortInsightsByImportance(result)
+	if limit < len(result) {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func tagsContain(tags []string, keyword string) bool {
+	for _, t := range tags {
+		if strings.Contains(strings.ToLower(t), keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 // SearchKnowledgeFiles searches .cortex/knowledge/ markdown files by keyword.
-// This enables search over committed knowledge that may not be in the database.
 func (s *Storage) SearchKnowledgeFiles(keyword string, limit int) ([]*Insight, error) {
 	if s.cfg == nil || s.cfg.ContextDir == "" {
 		return nil, nil
@@ -976,12 +1162,10 @@ func (s *Storage) SearchKnowledgeFiles(keyword string, limit int) ([]*Insight, e
 			return nil
 		}
 
-		// Parse frontmatter for category and importance
 		category := filepath.Base(filepath.Dir(path))
 		importance := 5
 		summary := string(content)
 
-		// Extract body after frontmatter
 		if parts := strings.SplitN(summary, "---", 3); len(parts) == 3 {
 			summary = strings.TrimSpace(parts[2])
 		}
@@ -1003,168 +1187,123 @@ func (s *Storage) SearchKnowledgeFiles(keyword string, limit int) ([]*Insight, e
 	return results, nil
 }
 
+// ForgetInsight deletes an insight by ID
+func (s *Storage) ForgetInsight(id int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.insights[id]; !ok {
+		return fmt.Errorf("insight not found")
+	}
+
+	rec := insightRecord{Op: "delete", ID: id}
+	if err := appendLine(s.insightFile, rec); err != nil {
+		return fmt.Errorf("failed to delete insight: %w", err)
+	}
+
+	s.removeInsightFromIndexes(id)
+	delete(s.insights, id)
+	return nil
+}
+
+// ForgetInsightsByKeyword deletes insights matching a keyword in summary
+func (s *Storage) ForgetInsightsByKeyword(keyword string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	keywordLower := strings.ToLower(keyword)
+	var toDelete []int64
+
+	for _, ins := range s.insights {
+		if strings.Contains(strings.ToLower(ins.Summary), keywordLower) {
+			toDelete = append(toDelete, ins.ID)
+		}
+	}
+
+	for _, id := range toDelete {
+		rec := insightRecord{Op: "delete", ID: id}
+		if err := appendLine(s.insightFile, rec); err != nil {
+			return 0, fmt.Errorf("failed to delete insights: %w", err)
+		}
+		s.removeInsightFromIndexes(id)
+		delete(s.insights, id)
+	}
+
+	return len(toDelete), nil
+}
+
 // MergeInsights keeps one insight and deletes duplicates, merging their tags.
-// This is the compaction operation called by Digest during idle time.
 func (s *Storage) MergeInsights(keepID int64, deleteIDs []int64) (int, error) {
 	if len(deleteIDs) == 0 {
 		return 0, nil
 	}
 
-	// Start transaction for atomicity
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Get tags from all duplicates to merge into representative
-	var allTags []string
-
-	// First get the representative's current tags
-	var keepTagsJSON string
-	err = tx.QueryRow("SELECT tags FROM insights WHERE id = ?", keepID).Scan(&keepTagsJSON)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get representative tags: %w", err)
-	}
-	json.Unmarshal([]byte(keepTagsJSON), &allTags)
-
-	// Collect tags from duplicates
-	for _, dupID := range deleteIDs {
-		var tagsJSON string
-		err := tx.QueryRow("SELECT tags FROM insights WHERE id = ?", dupID).Scan(&tagsJSON)
-		if err != nil {
-			continue // Skip if not found
-		}
-		var dupTags []string
-		json.Unmarshal([]byte(tagsJSON), &dupTags)
-		allTags = append(allTags, dupTags...)
+	keeper := s.insights[keepID]
+	if keeper == nil {
+		return 0, fmt.Errorf("failed to get representative tags: insight not found")
 	}
 
-	// Dedupe tags
+	// Collect all tags
 	tagSet := make(map[string]bool)
-	var uniqueTags []string
-	for _, t := range allTags {
-		if !tagSet[t] {
-			tagSet[t] = true
-			uniqueTags = append(uniqueTags, t)
-		}
+	for _, t := range keeper.Tags {
+		tagSet[t] = true
 	}
 
-	// Update representative with merged tags
-	mergedTagsJSON, _ := json.Marshal(uniqueTags)
-	_, err = tx.Exec("UPDATE insights SET tags = ? WHERE id = ?", string(mergedTagsJSON), keepID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to update representative tags: %w", err)
-	}
-
-	// Delete duplicates
 	deleted := 0
 	for _, dupID := range deleteIDs {
-		result, err := tx.Exec("DELETE FROM insights WHERE id = ?", dupID)
-		if err != nil {
+		dup := s.insights[dupID]
+		if dup == nil {
 			continue
 		}
-		affected, _ := result.RowsAffected()
-		deleted += int(affected)
+		for _, t := range dup.Tags {
+			tagSet[t] = true
+		}
+		// Append delete op
+		rec := insightRecord{Op: "delete", ID: dupID}
+		if err := appendLine(s.insightFile, rec); err != nil {
+			return deleted, fmt.Errorf("failed to delete duplicate: %w", err)
+		}
+		s.removeInsightFromIndexes(dupID)
+		delete(s.insights, dupID)
+		deleted++
 	}
 
-	// Commit transaction
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit merge: %w", err)
+	// Update keeper tags
+	var uniqueTags []string
+	for t := range tagSet {
+		uniqueTags = append(uniqueTags, t)
+	}
+	keeper.Tags = uniqueTags
+
+	// Append update op
+	rec := insightToRecord(keeper, "update")
+	if err := appendLine(s.insightFile, rec); err != nil {
+		return deleted, fmt.Errorf("failed to update representative tags: %w", err)
 	}
 
 	return deleted, nil
 }
 
-// GetInsightByID retrieves a single insight by ID
-func (s *Storage) GetInsightByID(id int64) (*Insight, error) {
-	var insight Insight
-	var tagsJSON string
-	var sessionID, sourceType sql.NullString
-	var wasRetrieved sql.NullInt64
-
-	err := s.db.QueryRow(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE id = ?
-	`, id).Scan(
-		&insight.ID,
-		&insight.EventID,
-		&insight.Category,
-		&insight.Summary,
-		&insight.Importance,
-		&tagsJSON,
-		&insight.Reasoning,
-		&sessionID,
-		&sourceType,
-		&wasRetrieved,
-		&insight.CreatedAt,
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
-	json.Unmarshal([]byte(tagsJSON), &insight.Tags)
-	if sessionID.Valid {
-		insight.SessionID = sessionID.String
-	}
-	if sourceType.Valid {
-		insight.SourceType = sourceType.String
-	}
-	if wasRetrieved.Valid {
-		insight.WasRetrieved = wasRetrieved.Int64 != 0
-	}
-	return &insight, nil
-}
-
-// GetInsightsBySession retrieves insights linked to a specific session.
-// Enables session-over-session analysis of what was learned.
-func (s *Storage) GetInsightsBySession(sessionID string, limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE session_id = ?
-		ORDER BY created_at DESC
-		LIMIT ?
-	`, sessionID, limit)
-
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
-}
-
-// GetInsightsBySourceType retrieves insights from a specific source type.
-// sourceType should be one of: project, cortex, claude_history, git
-func (s *Storage) GetInsightsBySourceType(sourceType string, limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE source_type = ?
-		ORDER BY importance DESC, created_at DESC
-		LIMIT ?
-	`, sourceType, limit)
-
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
-}
-
 // MarkInsightRetrieved marks an insight as having been returned in a search.
-// This helps track which insights are actually being used.
 func (s *Storage) MarkInsightRetrieved(id int64) error {
-	_, err := s.db.Exec(`
-		UPDATE insights SET was_retrieved = 1 WHERE id = ?
-	`, id)
-	if err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ins, ok := s.insights[id]
+	if !ok {
+		return fmt.Errorf("failed to mark insight as retrieved: not found")
+	}
+
+	ins.WasRetrieved = true
+
+	rec := insightToRecord(ins, "update")
+	if err := appendLine(s.insightFile, rec); err != nil {
 		return fmt.Errorf("failed to mark insight as retrieved: %w", err)
 	}
+
 	return nil
 }
 
@@ -1174,45 +1313,26 @@ func (s *Storage) MarkInsightsRetrieved(ids []int64) error {
 		return nil
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare("UPDATE insights SET was_retrieved = 1 WHERE id = ?")
-	if err != nil {
-		return fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer stmt.Close()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	for _, id := range ids {
-		if _, err := stmt.Exec(id); err != nil {
+		ins, ok := s.insights[id]
+		if !ok {
+			return fmt.Errorf("failed to mark insight %d as retrieved: not found", id)
+		}
+		ins.WasRetrieved = true
+
+		rec := insightToRecord(ins, "update")
+		if err := appendLine(s.insightFile, rec); err != nil {
 			return fmt.Errorf("failed to mark insight %d as retrieved: %w", id, err)
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
-// GetUnretrievedInsights returns insights that have never been returned in a search.
-// Useful for identifying potentially forgotten or underutilized insights.
-func (s *Storage) GetUnretrievedInsights(limit int) ([]*Insight, error) {
-	rows, err := s.db.Query(`
-		SELECT id, event_id, category, summary, importance, tags, reasoning, session_id, source_type, was_retrieved, created_at
-		FROM insights
-		WHERE was_retrieved = 0 OR was_retrieved IS NULL
-		ORDER BY importance DESC, created_at DESC
-		LIMIT ?
-	`, limit)
-
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return s.scanInsights(rows)
-}
+// --- Embedding types and methods ---
 
 // VectorSearchResult represents a result from vector similarity search
 type VectorSearchResult struct {
@@ -1222,134 +1342,92 @@ type VectorSearchResult struct {
 	Similarity  float64
 }
 
-// StoreEmbedding stores a vector embedding for content
-func (s *Storage) StoreEmbedding(contentID, contentType string, vector []float32) error {
-	// Serialize vector to bytes
-	vectorBytes := vectorToBytes(vector)
-
-	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO embeddings (content_id, content_type, vector, created_at)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-	`, contentID, contentType, vectorBytes)
-
-	return err
-}
-
-// StoreEmbeddingWithModel stores a vector embedding with model name tracking.
-func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector []float32, modelName string) error {
-	vectorBytes := vectorToBytes(vector)
-
-	_, err := s.db.Exec(`
-		INSERT OR REPLACE INTO embeddings (content_id, content_type, vector, model_name, created_at)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-	`, contentID, contentType, vectorBytes, modelName)
-
-	return err
-}
-
 // EmbeddingContent represents a content ID and type from the embeddings table.
 type EmbeddingContent struct {
 	ContentID   string
 	ContentType string
 }
 
-// GetAllEmbeddingContentIDs returns all content IDs and types from the embeddings table.
-func (s *Storage) GetAllEmbeddingContentIDs() ([]EmbeddingContent, error) {
-	rows, err := s.db.Query("SELECT content_id, content_type FROM embeddings")
-	if err != nil {
-		return nil, fmt.Errorf("failed to query embedding content IDs: %w", err)
+// StoreEmbedding stores a vector embedding for content
+func (s *Storage) StoreEmbedding(contentID, contentType string, vector []float32) error {
+	return s.StoreEmbeddingWithModel(contentID, contentType, vector, "")
+}
+
+// StoreEmbeddingWithModel stores a vector embedding with model name tracking.
+func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector []float32, modelName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry := &embeddingEntry{
+		ContentID:   contentID,
+		ContentType: contentType,
+		Vector:      vector,
+		ModelName:   modelName,
+		CreatedAt:   time.Now(),
 	}
-	defer rows.Close()
+
+	if err := appendLine(s.embFile, entry); err != nil {
+		return fmt.Errorf("failed to store embedding: %w", err)
+	}
+
+	key := contentID + ":" + contentType
+	s.embeddings[key] = entry
+	return nil
+}
+
+// GetAllEmbeddingContentIDs returns all content IDs and types from the embeddings.
+func (s *Storage) GetAllEmbeddingContentIDs() ([]EmbeddingContent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	var results []EmbeddingContent
-	for rows.Next() {
-		var ec EmbeddingContent
-		if err := rows.Scan(&ec.ContentID, &ec.ContentType); err != nil {
-			continue
-		}
-		results = append(results, ec)
+	for _, entry := range s.embeddings {
+		results = append(results, EmbeddingContent{
+			ContentID:   entry.ContentID,
+			ContentType: entry.ContentType,
+		})
 	}
 	return results, nil
 }
 
 // GetEmbeddingCount returns the total number of embeddings.
 func (s *Storage) GetEmbeddingCount() (int, error) {
-	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM embeddings").Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to count embeddings: %w", err)
-	}
-	return count, nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return len(s.embeddings), nil
 }
 
 // SearchByVector finds content similar to the query vector
 func (s *Storage) SearchByVector(queryVector []float32, limit int, threshold float64) ([]VectorSearchResult, error) {
-	// Get all embeddings
-	rows, err := s.db.Query(`
-		SELECT e.content_id, e.content_type, e.vector, ev.tool_result
-		FROM embeddings e
-		LEFT JOIN events ev ON e.content_id = ev.id AND e.content_type = 'event'
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	var results []VectorSearchResult
-	for rows.Next() {
-		var contentID, contentType string
-		var vectorBytes []byte
-		var content sql.NullString
-
-		if err := rows.Scan(&contentID, &contentType, &vectorBytes, &content); err != nil {
-			continue
-		}
-
-		storedVector := bytesToVector(vectorBytes)
-		similarity := cosineSimilarity(queryVector, storedVector)
-
+	for _, entry := range s.embeddings {
+		similarity := cosineSimilarity(queryVector, entry.Vector)
 		if similarity >= threshold {
+			// Try to get content from events
+			var content string
+			if entry.ContentType == "event" {
+				if ev, ok := s.events[entry.ContentID]; ok {
+					content = ev.ToolResult
+				}
+			}
 			results = append(results, VectorSearchResult{
-				ContentID:   contentID,
-				ContentType: contentType,
-				Content:     content.String,
+				ContentID:   entry.ContentID,
+				ContentType: entry.ContentType,
+				Content:     content,
 				Similarity:  similarity,
 			})
 		}
 	}
 
-	// Sort by similarity descending
 	sortBySimilarity(results)
-
-	// Limit results
 	if len(results) > limit {
 		results = results[:limit]
 	}
-
 	return results, nil
-}
-
-// vectorToBytes serializes a float32 vector to bytes
-func vectorToBytes(v []float32) []byte {
-	buf := make([]byte, len(v)*4)
-	for i, f := range v {
-		bits := math.Float32bits(f)
-		buf[i*4] = byte(bits)
-		buf[i*4+1] = byte(bits >> 8)
-		buf[i*4+2] = byte(bits >> 16)
-		buf[i*4+3] = byte(bits >> 24)
-	}
-	return buf
-}
-
-// bytesToVector deserializes bytes to a float32 vector
-func bytesToVector(b []byte) []float32 {
-	v := make([]float32, len(b)/4)
-	for i := range v {
-		bits := uint32(b[i*4]) | uint32(b[i*4+1])<<8 | uint32(b[i*4+2])<<16 | uint32(b[i*4+3])<<24
-		v[i] = math.Float32frombits(bits)
-	}
-	return v
 }
 
 // cosineSimilarity computes cosine similarity between two vectors using SIMD
@@ -1357,7 +1435,6 @@ func cosineSimilarity(a, b []float32) float64 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0
 	}
-	// Convert float32 to float64 for vek
 	a64 := make([]float64, len(a))
 	b64 := make([]float64, len(b))
 	for i := range a {
@@ -1374,191 +1451,281 @@ func sortBySimilarity(results []VectorSearchResult) {
 	})
 }
 
+// --- Session types and methods ---
+
 // SessionMetadata represents session tracking info for the watch view
 type SessionMetadata struct {
-	ID           int64
-	SessionID    string
-	StartedAt    time.Time
+	ID            int64
+	SessionID     string
+	StartedAt     time.Time
 	InitialPrompt string
-	EventCount   int
-	LastAction   string
-	LastActionAt time.Time
-	ProjectPath  string
+	EventCount    int
+	LastAction    string
+	LastActionAt  time.Time
+	ProjectPath   string
 }
 
 // CreateOrUpdateSession creates a new session or updates an existing one.
-// On first call (new session), it sets started_at and initial_prompt.
-// On subsequent calls, it increments event_count and updates last_action.
 func (s *Storage) CreateOrUpdateSession(sessionID, initialPrompt, lastAction, projectPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	now := time.Now()
 
-	// Try to insert first (new session)
-	result, err := s.db.Exec(`
-		INSERT INTO sessions (session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path)
-		VALUES (?, ?, ?, 1, ?, ?, ?)
-		ON CONFLICT(session_id) DO UPDATE SET
-			event_count = event_count + 1,
-			last_action = ?,
-			last_action_at = ?
-	`, sessionID, now, initialPrompt, lastAction, now, projectPath, lastAction, now)
+	if existing, ok := s.sessions[sessionID]; ok {
+		// Update existing
+		existing.EventCount++
+		existing.LastAction = lastAction
+		existing.LastActionAt = now
 
-	if err != nil {
+		rec := sessionRecord{
+			Op:            "update",
+			ID:            existing.ID,
+			SessionID:     sessionID,
+			StartedAt:     existing.StartedAt,
+			InitialPrompt: existing.InitialPrompt,
+			EventCount:    existing.EventCount,
+			LastAction:    lastAction,
+			LastActionAt:  now,
+			ProjectPath:   existing.ProjectPath,
+		}
+		return appendLine(s.sessionFile, rec)
+	}
+
+	// New session
+	id := s.nextSessionID
+	s.nextSessionID++
+
+	sess := &SessionMetadata{
+		ID:            id,
+		SessionID:     sessionID,
+		StartedAt:     now,
+		InitialPrompt: initialPrompt,
+		EventCount:    1,
+		LastAction:    lastAction,
+		LastActionAt:  now,
+		ProjectPath:   projectPath,
+	}
+
+	rec := sessionRecord{
+		ID:            id,
+		SessionID:     sessionID,
+		StartedAt:     now,
+		InitialPrompt: initialPrompt,
+		EventCount:    1,
+		LastAction:    lastAction,
+		LastActionAt:  now,
+		ProjectPath:   projectPath,
+	}
+	if err := appendLine(s.sessionFile, rec); err != nil {
 		return fmt.Errorf("failed to create/update session: %w", err)
 	}
 
-	_ = result
+	s.sessions[sessionID] = sess
+	// Insert into sorted slice
+	idx := sort.Search(len(s.sessionsByTime), func(i int) bool {
+		return s.sessionsByTime[i].StartedAt.Before(now)
+	})
+	s.sessionsByTime = append(s.sessionsByTime, nil)
+	copy(s.sessionsByTime[idx+1:], s.sessionsByTime[idx:])
+	s.sessionsByTime[idx] = sess
+
 	return nil
 }
 
 // UpdateSessionLastAction updates only the last action for a session
 func (s *Storage) UpdateSessionLastAction(sessionID, lastAction string) error {
-	_, err := s.db.Exec(`
-		UPDATE sessions SET last_action = ?, last_action_at = ?, event_count = event_count + 1
-		WHERE session_id = ?
-	`, lastAction, time.Now(), sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if err != nil {
-		return fmt.Errorf("failed to update session last action: %w", err)
+	existing, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("failed to update session last action: session not found")
 	}
-	return nil
+
+	existing.EventCount++
+	existing.LastAction = lastAction
+	existing.LastActionAt = time.Now()
+
+	rec := sessionRecord{
+		Op:            "update",
+		ID:            existing.ID,
+		SessionID:     sessionID,
+		StartedAt:     existing.StartedAt,
+		InitialPrompt: existing.InitialPrompt,
+		EventCount:    existing.EventCount,
+		LastAction:    lastAction,
+		LastActionAt:  existing.LastActionAt,
+		ProjectPath:   existing.ProjectPath,
+	}
+	return appendLine(s.sessionFile, rec)
 }
 
 // GetRecentSessions retrieves the most recent sessions
 func (s *Storage) GetRecentSessions(limit int) ([]*SessionMetadata, error) {
-	rows, err := s.db.Query(`
-		SELECT id, session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path
-		FROM sessions
-		ORDER BY started_at DESC
-		LIMIT ?
-	`, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to get recent sessions: %w", err)
+	if limit > len(s.sessionsByTime) {
+		limit = len(s.sessionsByTime)
 	}
-	defer rows.Close()
-
-	var sessions []*SessionMetadata
-	for rows.Next() {
-		var sess SessionMetadata
-		var initialPrompt, lastAction, projectPath sql.NullString
-		var lastActionAt sql.NullTime
-
-		err := rows.Scan(
-			&sess.ID,
-			&sess.SessionID,
-			&sess.StartedAt,
-			&initialPrompt,
-			&sess.EventCount,
-			&lastAction,
-			&lastActionAt,
-			&projectPath,
-		)
-		if err != nil {
-			continue
-		}
-
-		if initialPrompt.Valid {
-			sess.InitialPrompt = initialPrompt.String
-		}
-		if lastAction.Valid {
-			sess.LastAction = lastAction.String
-		}
-		if lastActionAt.Valid {
-			sess.LastActionAt = lastActionAt.Time
-		}
-		if projectPath.Valid {
-			sess.ProjectPath = projectPath.String
-		}
-
-		sessions = append(sessions, &sess)
-	}
-
-	return sessions, nil
+	result := make([]*SessionMetadata, limit)
+	copy(result, s.sessionsByTime[:limit])
+	return result, nil
 }
 
 // GetSessionByID retrieves a specific session by session_id
 func (s *Storage) GetSessionByID(sessionID string) (*SessionMetadata, error) {
-	var sess SessionMetadata
-	var initialPrompt, lastAction, projectPath sql.NullString
-	var lastActionAt sql.NullTime
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	err := s.db.QueryRow(`
-		SELECT id, session_id, started_at, initial_prompt, event_count, last_action, last_action_at, project_path
-		FROM sessions
-		WHERE session_id = ?
-	`, sessionID).Scan(
-		&sess.ID,
-		&sess.SessionID,
-		&sess.StartedAt,
-		&initialPrompt,
-		&sess.EventCount,
-		&lastAction,
-		&lastActionAt,
-		&projectPath,
-	)
-
-	if err != nil {
-		return nil, err
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
-
-	if initialPrompt.Valid {
-		sess.InitialPrompt = initialPrompt.String
-	}
-	if lastAction.Valid {
-		sess.LastAction = lastAction.String
-	}
-	if lastActionAt.Valid {
-		sess.LastActionAt = lastActionAt.Time
-	}
-	if projectPath.Valid {
-		sess.ProjectPath = projectPath.String
-	}
-
-	return &sess, nil
+	return sess, nil
 }
 
 // GetSessionEvents retrieves events for a specific session (for expanded view)
 func (s *Storage) GetSessionEvents(sessionID string, limit int) ([]*events.Event, error) {
-	rows, err := s.db.Query(`
-		SELECT id, source, event_type, timestamp, tool_name, tool_input, tool_result, context, metadata
-		FROM events
-		WHERE json_extract(context, '$.session_id') = ?
-		ORDER BY timestamp DESC
-		LIMIT ?
-	`, sessionID, limit)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session events: %w", err)
-	}
-	defer rows.Close()
+	eventIDs := s.sessionEvents[sessionID]
+	var result []*events.Event
 
-	var eventList []*events.Event
-	for rows.Next() {
-		var event events.Event
-		var toolInputJSON, contextJSON, metadataJSON string
-
-		err := rows.Scan(
-			&event.ID,
-			&event.Source,
-			&event.EventType,
-			&event.Timestamp,
-			&event.ToolName,
-			&toolInputJSON,
-			&event.ToolResult,
-			&contextJSON,
-			&metadataJSON,
-		)
-
-		if err != nil {
-			continue
+	// Walk in reverse to get most recent first
+	for i := len(eventIDs) - 1; i >= 0 && len(result) < limit; i-- {
+		if ev, ok := s.events[eventIDs[i]]; ok {
+			result = append(result, ev)
 		}
-
-		json.Unmarshal([]byte(toolInputJSON), &event.ToolInput)
-		json.Unmarshal([]byte(contextJSON), &event.Context)
-		json.Unmarshal([]byte(metadataJSON), &event.Metadata)
-
-		eventList = append(eventList, &event)
 	}
 
-	return eventList, nil
+	return result, nil
+}
+
+// --- Utility methods ---
+
+// GetStats returns storage statistics
+func (s *Storage) GetStats() (map[string]interface{}, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := make(map[string]interface{})
+
+	stats["total_events"] = len(s.events)
+
+	// Events by source
+	bySource := make(map[string]int)
+	for _, ev := range s.events {
+		bySource[string(ev.Source)]++
+	}
+	stats["by_source"] = bySource
+
+	stats["total_entities"] = len(s.entities)
+	stats["total_insights"] = len(s.insights)
+	stats["total_embeddings"] = len(s.embeddings)
+
+	// Date range
+	var oldest, newest time.Time
+	for _, ev := range s.eventsByTime {
+		if oldest.IsZero() || ev.Timestamp.Before(oldest) {
+			oldest = ev.Timestamp
+		}
+		if newest.IsZero() || ev.Timestamp.After(newest) {
+			newest = ev.Timestamp
+		}
+	}
+	stats["oldest_event"] = oldest
+	stats["newest_event"] = newest
+
+	// Data size (sum of JSONL file sizes)
+	var totalSize int64
+	files := []string{"events.jsonl", "insights.jsonl", "entities.jsonl", "relationships.jsonl", "sessions.jsonl", "embeddings.jsonl"}
+	for _, name := range files {
+		if info, err := os.Stat(filepath.Join(s.dataDir, name)); err == nil {
+			totalSize += info.Size()
+		}
+	}
+	stats["db_size_bytes"] = totalSize
+
+	return stats, nil
+}
+
+// Compact rewrites JSONL files removing deleted/superseded records.
+func (s *Storage) Compact() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Compact insights (most likely to have deletes/updates)
+	var liveInsights []insightRecord
+	for _, ins := range s.insights {
+		liveInsights = append(liveInsights, insightToRecord(ins, ""))
+	}
+	insightsPath := filepath.Join(s.dataDir, "insights.jsonl")
+	if err := atomicRewrite(insightsPath, liveInsights); err != nil {
+		return fmt.Errorf("failed to compact insights: %w", err)
+	}
+	// Reopen file handle
+	s.insightFile.Close()
+	var err error
+	s.insightFile, err = openAppend(insightsPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen insights file: %w", err)
+	}
+
+	// Compact entities
+	var liveEntities []entityRecord
+	for _, e := range s.entities {
+		liveEntities = append(liveEntities, entityRecord{
+			ID: e.ID, Type: e.Type, Name: e.Name,
+			FirstSeen: e.FirstSeen, LastSeen: e.LastSeen,
+		})
+	}
+	entitiesPath := filepath.Join(s.dataDir, "entities.jsonl")
+	if err := atomicRewrite(entitiesPath, liveEntities); err != nil {
+		return fmt.Errorf("failed to compact entities: %w", err)
+	}
+	s.entityFile.Close()
+	s.entityFile, err = openAppend(entitiesPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen entities file: %w", err)
+	}
+
+	// Compact sessions
+	var liveSessions []sessionRecord
+	for _, sess := range s.sessions {
+		liveSessions = append(liveSessions, sessionRecord{
+			ID: sess.ID, SessionID: sess.SessionID, StartedAt: sess.StartedAt,
+			InitialPrompt: sess.InitialPrompt, EventCount: sess.EventCount,
+			LastAction: sess.LastAction, LastActionAt: sess.LastActionAt,
+			ProjectPath: sess.ProjectPath,
+		})
+	}
+	sessionsPath := filepath.Join(s.dataDir, "sessions.jsonl")
+	if err := atomicRewrite(sessionsPath, liveSessions); err != nil {
+		return fmt.Errorf("failed to compact sessions: %w", err)
+	}
+	s.sessionFile.Close()
+	s.sessionFile, err = openAppend(sessionsPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen sessions file: %w", err)
+	}
+
+	// Compact embeddings (deduped by key)
+	var liveEmbeddings []embeddingEntry
+	for _, entry := range s.embeddings {
+		liveEmbeddings = append(liveEmbeddings, *entry)
+	}
+	embPath := filepath.Join(s.dataDir, "embeddings.jsonl")
+	if err := atomicRewrite(embPath, liveEmbeddings); err != nil {
+		return fmt.Errorf("failed to compact embeddings: %w", err)
+	}
+	s.embFile.Close()
+	s.embFile, err = openAppend(embPath)
+	if err != nil {
+		return fmt.Errorf("failed to reopen embeddings file: %w", err)
+	}
+
+	return nil
 }

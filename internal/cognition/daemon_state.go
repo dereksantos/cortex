@@ -183,7 +183,7 @@ func TruncateInsight(insight string, maxLen int) string {
 // Written by inject-context hook, read by watch command.
 type RetrievalStats struct {
 	LastQuery       string    `json:"last_query"`
-	LastMode        string    `json:"last_mode"`    // "fast" or "full"
+	LastMode        string    `json:"last_mode"` // "fast" or "full"
 	LastReflexMs    int64     `json:"last_reflex_ms"`
 	LastReflectMs   int64     `json:"last_reflect_ms"`
 	LastResolveMs   int64     `json:"last_resolve_ms"`
@@ -377,7 +377,7 @@ func GetRetrievalStatsPath(contextDir string) string {
 // ActivityLogEntry represents a single log entry for the watch command.
 type ActivityLogEntry struct {
 	Timestamp   time.Time `json:"timestamp"`
-	Mode        string    `json:"mode"`        // "dream", "think", "reflex", "reflect", "resolve"
+	Mode        string    `json:"mode"` // "dream", "think", "reflex", "reflect", "resolve"
 	Description string    `json:"description"`
 	Query       string    `json:"query,omitempty"`
 	Results     int       `json:"results,omitempty"`

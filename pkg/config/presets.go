@@ -18,8 +18,8 @@ func WorkerPreset() *ModeConfig {
 // This is the default behavior when no modes config is specified.
 func FullPreset() *ModeConfig {
 	return &ModeConfig{
-		Think: &ThinkModeConfig{Enabled: boolPtr(true)},
-		Dream: &DreamModeConfig{Enabled: boolPtr(true)},
+		Think:  &ThinkModeConfig{Enabled: boolPtr(true)},
+		Dream:  &DreamModeConfig{Enabled: boolPtr(true)},
 		Digest: &DigestModeConfig{Enabled: boolPtr(true)},
 	}
 }

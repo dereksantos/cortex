@@ -5,10 +5,10 @@ import "fmt"
 // ANSI escape code constants for terminal control.
 const (
 	// Screen control
-	ClearScreen = "\033[2J"  // Clear entire screen
-	CursorHome  = "\033[H"   // Move cursor to home position (1,1)
-	ClearLine   = "\033[2K"  // Clear entire line
-	ClearToEnd  = "\033[K"   // Clear from cursor to end of line
+	ClearScreen = "\033[2J" // Clear entire screen
+	CursorHome  = "\033[H"  // Move cursor to home position (1,1)
+	ClearLine   = "\033[2K" // Clear entire line
+	ClearToEnd  = "\033[K"  // Clear from cursor to end of line
 
 	// Alternate screen buffer (for full-screen TUI apps)
 	AltScreenEnter = "\033[?1049h" // Enter alternate screen buffer
@@ -19,14 +19,14 @@ const (
 	CursorShow = "\033[?25h" // Show cursor
 
 	// Text styles
-	Bold       = "\033[1m"
-	Dim        = "\033[2m"
-	Italic     = "\033[3m"
-	Underline  = "\033[4m"
-	Blink      = "\033[5m"
-	Reverse    = "\033[7m"
-	Hidden     = "\033[8m"
-	Strike     = "\033[9m"
+	Bold      = "\033[1m"
+	Dim       = "\033[2m"
+	Italic    = "\033[3m"
+	Underline = "\033[4m"
+	Blink     = "\033[5m"
+	Reverse   = "\033[7m"
+	Hidden    = "\033[8m"
+	Strike    = "\033[9m"
 
 	// Reset
 	Reset     = "\033[0m"

@@ -73,9 +73,9 @@ type AgenticTestResult struct {
 
 // AgenticScenarioResult holds results for a scenario.
 type AgenticScenarioResult struct {
-	ScenarioID string               `json:"scenario_id"`
-	Name       string               `json:"name"`
-	Tests      []AgenticTestResult  `json:"tests"`
+	ScenarioID string              `json:"scenario_id"`
+	Name       string              `json:"name"`
+	Tests      []AgenticTestResult `json:"tests"`
 
 	// Average metrics
 	AvgBaselineToolCalls float64 `json:"avg_baseline_tool_calls"`
