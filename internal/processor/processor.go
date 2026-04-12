@@ -4,6 +4,7 @@ package processor
 import (
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/queue"
@@ -23,7 +24,7 @@ type Processor struct {
 	cfg     *config.Config
 	storage *storage.Storage
 	queue   *queue.Manager
-	running bool
+	running atomic.Bool
 
 	// Callback for routing events through cognition pipeline
 	eventCallback EventCallback
@@ -35,17 +36,16 @@ func New(cfg *config.Config, store *storage.Storage, queueMgr *queue.Manager) *P
 		cfg:     cfg,
 		storage: store,
 		queue:   queueMgr,
-		running: false,
+		// running zero-value is false
 	}
 }
 
 // Start starts the processor
 func (p *Processor) Start() error {
-	if p.running {
+	if !p.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("processor already running")
 	}
 
-	p.running = true
 	log.Println("Processor started")
 
 	// Start main processing loop
@@ -56,7 +56,7 @@ func (p *Processor) Start() error {
 
 // Stop stops the processor
 func (p *Processor) Stop() {
-	p.running = false
+	p.running.Store(false)
 	log.Println("Processor stopped")
 }
 
@@ -71,7 +71,7 @@ func (p *Processor) processLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	for p.running {
+	for p.running.Load() {
 		select {
 		case <-ticker.C:
 			p.processBatch()
