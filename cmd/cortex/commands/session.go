@@ -422,7 +422,7 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 		reflectEntry := &intcognition.ActivityLogEntry{
 			Timestamp:   time.Now(),
 			Mode:        "reflect",
-			Description: fmt.Sprintf("reranked results (Full mode)"),
+			Description: "reranked results (Full mode)",
 			LatencyMs:   stats.LastReflectMs,
 		}
 		logger.Log(reflectEntry)

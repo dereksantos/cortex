@@ -39,11 +39,11 @@ type ActivityEntry struct {
 
 // SessionEntry is a session summary for the dashboard.
 type SessionEntry struct {
-	SessionID    string `json:"session_id"`
-	StartedAt    string `json:"started_at"`
-	EventCount   int    `json:"event_count"`
-	LastAction   string `json:"last_action"`
-	ProjectPath  string `json:"project_path"`
+	SessionID   string `json:"session_id"`
+	StartedAt   string `json:"started_at"`
+	EventCount  int    `json:"event_count"`
+	LastAction  string `json:"last_action"`
+	ProjectPath string `json:"project_path"`
 }
 
 // BuildDashboardData reads state files and storage to produce the dashboard payload.

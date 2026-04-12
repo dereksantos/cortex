@@ -135,7 +135,7 @@ func (c *InstallCommand) Execute(ctx *Context) error {
 	if _, err := os.Stat(claudeHomeDir); err != nil {
 		fmt.Println("Claude Code not detected at ~/.claude/")
 		fmt.Println("Install Claude Code first: https://claude.ai/claude-code")
-		return fmt.Errorf("Claude Code not installed")
+		return fmt.Errorf("claude code not installed")
 	}
 
 	fmt.Printf("Detected Claude Code at %s\n", claudeHomeDir)

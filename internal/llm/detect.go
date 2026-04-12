@@ -14,8 +14,8 @@ import (
 // LLMStatus represents the detected LLM configuration
 type LLMStatus struct {
 	Available        bool
-	Provider         string   // "ollama" | "anthropic" | ""
-	Model            string   // e.g., "qwen2.5:3b"
+	Provider         string // "ollama" | "anthropic" | ""
+	Model            string // e.g., "qwen2.5:3b"
 	OllamaInstalled  bool
 	OllamaPath       string
 	OllamaModels     []string // all installed models

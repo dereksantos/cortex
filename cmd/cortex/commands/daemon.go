@@ -238,9 +238,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 			// Periodic session save
 			if cortex != nil {
 				sessionSaver.MarkDirty()
-				if sessionSaver.MaybeSave(cortex.SessionContext()) {
-					// Silent save - no output needed
-				}
+				_ = sessionSaver.MaybeSave(cortex.SessionContext())
 			}
 		case <-cognitiveTicker.C:
 			// Trigger cognitive modes based on activity and config

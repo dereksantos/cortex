@@ -7,7 +7,6 @@ import (
 
 	"strconv"
 
-
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
