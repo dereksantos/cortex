@@ -34,7 +34,12 @@ jobs:
       run: go vet ./...
 
     - name: Run tests
+      run: go test -v -race -covermode=atomic ./...
+      if: matrix.os == 'windows-latest'
+
+    - name: Run tests with coverage
       run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      if: matrix.os != 'windows-latest'
 
     - name: Build
       run: go build -v ./cmd/cortex
