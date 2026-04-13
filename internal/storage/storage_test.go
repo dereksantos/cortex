@@ -66,7 +66,7 @@ func TestNew(t *testing.T) {
 
 	t.Run("fails with invalid path", func(t *testing.T) {
 		cfg := &config.Config{
-			ContextDir: "/nonexistent/path/that/cannot/exist",
+			ContextDir: "/nonexistent/\x00invalid/path",
 		}
 
 		_, err := New(cfg)

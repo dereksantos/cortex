@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -123,18 +124,21 @@ func GetDaemonStatePath(contextDir string) string {
 // TruncatePath shortens a file path for status bar display.
 // Shows just the filename, or parent/filename if short enough.
 // Keeps result under maxLen characters.
-func TruncatePath(path string, maxLen int) string {
-	if path == "" {
+func TruncatePath(p string, maxLen int) string {
+	if p == "" {
 		return ""
 	}
 
+	// Normalize to forward slashes for consistent cross-platform output
+	p = filepath.ToSlash(p)
+
 	// Get just the filename
-	filename := filepath.Base(path)
+	filename := path.Base(p)
 	if len(filename) <= maxLen {
 		// Try to include parent directory if it fits
-		dir := filepath.Dir(path)
+		dir := path.Dir(p)
 		if dir != "." && dir != "/" {
-			parent := filepath.Base(dir)
+			parent := path.Base(dir)
 			withParent := parent + "/" + filename
 			if len(withParent) <= maxLen {
 				return withParent
