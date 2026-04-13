@@ -648,10 +648,10 @@ func TestFallbackEmbedder(t *testing.T) {
 
 	t.Run("IsEmbeddingAvailable returns true when either available", func(t *testing.T) {
 		tests := []struct {
-			name            string
-			primaryAvail    bool
-			secondaryAvail  bool
-			expectedAvail   bool
+			name           string
+			primaryAvail   bool
+			secondaryAvail bool
+			expectedAvail  bool
 		}{
 			{"both available", true, true, true},
 			{"only primary", true, false, true},

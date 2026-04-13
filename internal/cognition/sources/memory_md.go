@@ -128,7 +128,7 @@ func (m *MemoryMDSource) parseMemoryFile(path string) ([]cognition.DreamItem, er
 	if strings.HasPrefix(text, "---") {
 		return []cognition.DreamItem{
 			{
-				ID:      "memory:" + filepath.Base(path),
+				ID:       "memory:" + filepath.Base(path),
 				Source:   "memory-md",
 				Content:  text,
 				Path:     path,
@@ -150,7 +150,7 @@ func (m *MemoryMDSource) parseMemoryFile(path string) ([]cognition.DreamItem, er
 		}
 
 		items = append(items, cognition.DreamItem{
-			ID:      "memory:" + filepath.Base(path) + ":" + strings.Fields(section)[0],
+			ID:       "memory:" + filepath.Base(path) + ":" + strings.Fields(section)[0],
 			Source:   "memory-md",
 			Content:  section,
 			Path:     path,

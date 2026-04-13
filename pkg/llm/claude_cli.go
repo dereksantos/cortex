@@ -30,14 +30,14 @@ type ToolStats struct {
 
 // AgenticResult holds the result of an agentic Claude session.
 type AgenticResult struct {
-	Response     string     `json:"response"`
-	ToolStats    ToolStats  `json:"tool_stats"`
-	DurationMs   int64      `json:"duration_ms"`
-	NumTurns     int        `json:"num_turns"`
-	TotalCostUSD float64    `json:"total_cost_usd"`
-	SessionID    string     `json:"session_id"`
-	Success      bool       `json:"success"`
-	Error        string     `json:"error,omitempty"`
+	Response     string    `json:"response"`
+	ToolStats    ToolStats `json:"tool_stats"`
+	DurationMs   int64     `json:"duration_ms"`
+	NumTurns     int       `json:"num_turns"`
+	TotalCostUSD float64   `json:"total_cost_usd"`
+	SessionID    string    `json:"session_id"`
+	Success      bool      `json:"success"`
+	Error        string    `json:"error,omitempty"`
 }
 
 // NewClaudeCLI creates a new ClaudeCLI provider.

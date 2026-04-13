@@ -153,15 +153,6 @@ func (r *Resolve) mergeProactive(results []cognition.Result) []cognition.Result 
 	return results
 }
 
-// applySessionBoost boosts results that match session topic weights.
-// DEPRECATED: Use applySessionBoostWithCtx instead.
-func (r *Resolve) applySessionBoost(results []cognition.Result) []cognition.Result {
-	if r.sessionCtx == nil || len(r.sessionCtx.TopicWeights) == 0 {
-		return results
-	}
-	return r.applySessionBoostWithCtx(results, r.sessionCtx)
-}
-
 // applySessionBoostWithCtx boosts results that match session topic weights.
 // Takes an explicit session context to avoid race conditions.
 func (r *Resolve) applySessionBoostWithCtx(results []cognition.Result, sessionCtx *cognition.SessionContext) []cognition.Result {

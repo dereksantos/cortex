@@ -625,6 +625,12 @@ func (c *StatusCommand) Description() string { return "Show status (for status l
 
 // Execute runs the status command.
 func (c *StatusCommand) Execute(ctx *Context) error {
+	for _, arg := range ctx.Args {
+		if arg == "--format=claude" {
+			displayStatusClaude(ctx)
+			return nil
+		}
+	}
 	displayStatus(ctx)
 	return nil
 }
@@ -738,6 +744,107 @@ func displayStatus(ctx *Context) {
 		fmt.Printf("%s Waiting for first activity...", spinner)
 	} else {
 		fmt.Printf("%s Watching for activity...", spinner)
+	}
+}
+
+func displayStatusClaude(ctx *Context) {
+	// Drain stdin to avoid broken pipe errors
+	_, _ = io.ReadAll(os.Stdin)
+
+	cfg := ctx.Config
+	if cfg == nil {
+		fmt.Print("◌ Init")
+		return
+	}
+
+	// Check for daemon state file (real-time cognitive mode status)
+	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+	daemonState, _ := intcognition.ReadDaemonState(statePath)
+
+	// If we have fresh daemon state with an active mode, show it
+	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
+		fmt.Print(getClaudeModeOutput(daemonState.Mode))
+		return
+	}
+
+	// Check if daemon is offline (state file exists but stale)
+	daemonOffline := false
+	if _, err := os.Stat(statePath); err == nil {
+		if daemonState == nil {
+			daemonOffline = true
+		}
+	}
+
+	if daemonOffline {
+		fmt.Print("⏸ Stopped")
+		return
+	}
+
+	store := ctx.Storage
+	if store == nil {
+		fmt.Print("◌ Empty")
+		return
+	}
+
+	// Get stats
+	stats, err := store.GetStats()
+	if err != nil {
+		fmt.Print("✓ Ready")
+		return
+	}
+
+	totalEvents := 0
+	if val, ok := stats["total_events"].(int); ok {
+		totalEvents = val
+	}
+
+	totalInsights := 0
+	if val, ok := stats["total_insights"].(int); ok {
+		totalInsights = val
+	}
+
+	if daemonState != nil && (daemonState.Stats.Events > 0 || daemonState.Stats.Insights > 0) {
+		totalEvents = daemonState.Stats.Events
+		totalInsights = daemonState.Stats.Insights
+	}
+
+	if totalEvents == 0 && totalInsights == 0 {
+		fmt.Print("◌ Waiting")
+		return
+	}
+
+	// Check for recent activity
+	recentEvents, _ := store.GetRecentEvents(5)
+	if len(recentEvents) > 0 {
+		lastEvent := recentEvents[0]
+		if time.Since(lastEvent.Timestamp) < 5*time.Minute {
+			fmt.Print("✓ Active")
+			return
+		}
+	}
+
+	fmt.Print("✓ Ready")
+}
+
+// getClaudeModeOutput returns the compact symbol + word for a cognitive mode.
+func getClaudeModeOutput(mode string) string {
+	switch mode {
+	case "think":
+		return "◐ Think"
+	case "dream":
+		return "☁ Dream"
+	case "reflex":
+		return "⚡ Reflex"
+	case "reflect":
+		return "◑ Reflect"
+	case "resolve":
+		return "▸ Resolve"
+	case "insight":
+		return "✦ Insight"
+	case "digest":
+		return "~ Digest"
+	default:
+		return "✓ Ready"
 	}
 }
 

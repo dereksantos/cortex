@@ -16,8 +16,8 @@ type SessionTracker struct {
 	indexWriter    *SessionIndexWriter
 	activityLogger *ActivityLogger
 
-	mu             sync.Mutex
-	knownSessions  map[string]bool // Track sessions we've seen this daemon run
+	mu            sync.Mutex
+	knownSessions map[string]bool // Track sessions we've seen this daemon run
 }
 
 // NewSessionTracker creates a new session tracker.

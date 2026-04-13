@@ -49,9 +49,9 @@ type Context struct {
 // Event represents a timestamped event with causal relationships.
 // Used for LoCoMo-style causal chain reasoning scenarios.
 type Event struct {
-	ID       string   `yaml:"id"`                 // Unique event identifier
-	Time     string   `yaml:"time"`               // Timestamp or time period (e.g., "2024-01", "Q2 2024")
-	Content  string   `yaml:"content"`            // Event description
+	ID       string   `yaml:"id"`                  // Unique event identifier
+	Time     string   `yaml:"time"`                // Timestamp or time period (e.g., "2024-01", "Q2 2024")
+	Content  string   `yaml:"content"`             // Event description
 	CausedBy []string `yaml:"caused_by,omitempty"` // IDs of events that caused this one
 }
 

@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
+
 	"time"
 
 	"golang.org/x/term"
@@ -100,7 +99,7 @@ type watchUIState struct {
 func runAnimatedWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	notifyTermSignals(sigChan)
 
 	// Animation ticker (refresh every 300ms)
 	ticker := time.NewTicker(300 * time.Millisecond)
@@ -141,7 +140,7 @@ func runAnimatedWatch(cfg *config.Config, store *storage.Storage) {
 func runInteractiveWatch(cfg *config.Config, store *storage.Storage) {
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	notifyTermSignals(sigChan)
 
 	// Put terminal in raw mode for keyboard input
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
@@ -296,16 +295,10 @@ func printWatchStatic(cfg *config.Config, store *storage.Storage) {
 	renderDashboard(data, 0)
 }
 
-
 // rawPrint prints a line with \r\n for raw terminal mode.
 // In raw mode, \n alone doesn't return to column 1.
 func rawPrint(format string, args ...interface{}) {
 	fmt.Printf(format+"\r\n", args...)
-}
-
-// rawPrintln prints a string with \r\n for raw terminal mode.
-func rawPrintln(s string) {
-	fmt.Print(s + "\r\n")
 }
 
 // renderDashboard renders the simplified dashboard view (used by both animated and static modes).
@@ -336,7 +329,6 @@ func renderDashboard(data *WatchData, frame int) {
 	// Commands footer
 	fmt.Println("d:daemon  q:quit")
 }
-
 
 // getAnimatedModeSpinner returns an animated spinner for a cognitive mode.
 func getAnimatedModeSpinner(mode string, frame int) string {
@@ -426,4 +418,3 @@ func renderInteractiveDashboard(cfg *config.Config, state *watchUIState, frame i
 	}
 	rawPrint("d:daemon(%s)  ↑↓:scroll  q:quit", daemonStatus)
 }
-

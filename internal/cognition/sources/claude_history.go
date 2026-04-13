@@ -319,14 +319,14 @@ func (s *ClaudeHistorySource) isDecision(content string) bool {
 // isSignificantTool checks if a tool use is worth capturing.
 func (s *ClaudeHistorySource) isSignificantTool(name string) bool {
 	significantTools := map[string]bool{
-		"Write":       true,
-		"Edit":        true,
-		"Bash":        true,
-		"Read":        false, // Too common, skip
-		"Grep":        false,
-		"Glob":        false,
-		"WebFetch":    true,
-		"TodoWrite":   true,
+		"Write":        true,
+		"Edit":         true,
+		"Bash":         true,
+		"Read":         false, // Too common, skip
+		"Grep":         false,
+		"Glob":         false,
+		"WebFetch":     true,
+		"TodoWrite":    true,
 		"NotebookEdit": true,
 	}
 

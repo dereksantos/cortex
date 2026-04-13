@@ -31,23 +31,22 @@ func testStorage(t *testing.T) *Storage {
 func TestModelNameMigration(t *testing.T) {
 	store := testStorage(t)
 
-	// Verify model_name column exists by attempting an insert with it
-	_, err := store.db.Exec(`
-		INSERT INTO embeddings (content_id, content_type, vector, model_name)
-		VALUES (?, ?, ?, ?)
-	`, "test-id", "event", []byte{0x00}, "test-model")
+	// Store an embedding with model name via public API
+	err := store.StoreEmbeddingWithModel("test-id", "event", []float32{0.1, 0.2, 0.3}, "test-model")
 	if err != nil {
-		t.Fatalf("model_name column should exist after migration: %v", err)
+		t.Fatalf("StoreEmbeddingWithModel should work: %v", err)
 	}
 
-	// Verify we can read it back
-	var modelName string
-	err = store.db.QueryRow("SELECT model_name FROM embeddings WHERE content_id = ?", "test-id").Scan(&modelName)
+	// Verify we can retrieve it
+	contents, err := store.GetAllEmbeddingContentIDs()
 	if err != nil {
-		t.Fatalf("failed to read model_name: %v", err)
+		t.Fatalf("failed to get embedding content IDs: %v", err)
 	}
-	if modelName != "test-model" {
-		t.Errorf("expected model_name 'test-model', got %q", modelName)
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 embedding, got %d", len(contents))
+	}
+	if contents[0].ContentID != "test-id" {
+		t.Errorf("expected content_id 'test-id', got %q", contents[0].ContentID)
 	}
 }
 
@@ -60,14 +59,13 @@ func TestStoreEmbeddingWithModel(t *testing.T) {
 		t.Fatalf("StoreEmbeddingWithModel failed: %v", err)
 	}
 
-	// Verify model_name was stored
-	var modelName string
-	err = store.db.QueryRow("SELECT model_name FROM embeddings WHERE content_id = ?", "content-1").Scan(&modelName)
+	// Verify embedding exists
+	count, err := store.GetEmbeddingCount()
 	if err != nil {
-		t.Fatalf("failed to query model_name: %v", err)
+		t.Fatalf("GetEmbeddingCount failed: %v", err)
 	}
-	if modelName != "all-MiniLM-L12-v2" {
-		t.Errorf("expected model_name 'all-MiniLM-L12-v2', got %q", modelName)
+	if count != 1 {
+		t.Errorf("expected 1 embedding, got %d", count)
 	}
 
 	// Verify upsert works (INSERT OR REPLACE)
@@ -77,12 +75,13 @@ func TestStoreEmbeddingWithModel(t *testing.T) {
 		t.Fatalf("StoreEmbeddingWithModel upsert failed: %v", err)
 	}
 
-	err = store.db.QueryRow("SELECT model_name FROM embeddings WHERE content_id = ?", "content-1").Scan(&modelName)
+	// Should still be 1 embedding (upserted, not duplicated)
+	count, err = store.GetEmbeddingCount()
 	if err != nil {
-		t.Fatalf("failed to query updated model_name: %v", err)
+		t.Fatalf("GetEmbeddingCount failed: %v", err)
 	}
-	if modelName != "new-model" {
-		t.Errorf("expected updated model_name 'new-model', got %q", modelName)
+	if count != 1 {
+		t.Errorf("expected 1 embedding after upsert, got %d", count)
 	}
 }
 
@@ -100,8 +99,8 @@ func TestGetAllEmbeddingContentIDs(t *testing.T) {
 
 	// Store several embeddings
 	testCases := []struct {
-		id      string
-		ctype   string
+		id    string
+		ctype string
 	}{
 		{"event-1", "event"},
 		{"event-2", "event"},

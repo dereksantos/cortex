@@ -146,9 +146,7 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 
 	// Capture the converted event
 	cap := capture.New(cfg)
-	if err := cap.CaptureEvent(event); err != nil {
-		// Silent failure
-	}
+	_ = cap.CaptureEvent(event)
 
 	os.Exit(0)
 	return nil
@@ -627,9 +625,10 @@ func extractJSON(s string) string {
 	// Find matching closer
 	depth := 0
 	for i := start; i < len(s); i++ {
-		if s[i] == opener {
+		switch s[i] {
+		case opener:
 			depth++
-		} else if s[i] == closer {
+		case closer:
 			depth--
 			if depth == 0 {
 				return s[start : i+1]

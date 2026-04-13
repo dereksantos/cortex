@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go-version: ['1.21', '1.22']
+        go-version: ['1.25']
 
     steps:
     - name: Checkout code
@@ -34,14 +34,19 @@ jobs:
       run: go vet ./...
 
     - name: Run tests
+      run: go test -v -race -covermode=atomic ./...
+      if: matrix.os == 'windows-latest'
+
+    - name: Run tests with coverage
       run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      if: matrix.os != 'windows-latest'
 
     - name: Build
       run: go build -v ./cmd/cortex
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
-      if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.22'
+      if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
       with:
         file: ./coverage.txt
         flags: unittests
@@ -58,13 +63,13 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version: '1.25'
+
+    - name: Install golangci-lint from source
+      run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
 
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v4
-      with:
-        version: latest
-        args: --timeout=5m
+      run: golangci-lint run --timeout=5m
 
   build:
     name: Build binaries
@@ -78,7 +83,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version: '1.25'
 
     - name: Build for Linux
       run: GOOS=linux GOARCH=amd64 go build -o cortex-linux-amd64 ./cmd/cortex

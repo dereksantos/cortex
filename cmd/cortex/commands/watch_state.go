@@ -194,7 +194,7 @@ func (w *WatchData) CacheHitRate() string {
 	pct := float64(w.Background.CacheHits) / float64(total) * 100
 	return strings.TrimSuffix(strings.TrimSuffix(
 		strings.TrimRight(strings.TrimRight(
-			formatFloat(pct, 1), "0"), "."), "%") + "%", "")
+			formatFloat(pct, 1), "0"), "."), "%")+"%", "")
 }
 
 // formatFloat formats a float with the specified precision.

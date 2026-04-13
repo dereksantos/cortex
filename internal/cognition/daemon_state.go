@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -123,18 +124,21 @@ func GetDaemonStatePath(contextDir string) string {
 // TruncatePath shortens a file path for status bar display.
 // Shows just the filename, or parent/filename if short enough.
 // Keeps result under maxLen characters.
-func TruncatePath(path string, maxLen int) string {
-	if path == "" {
+func TruncatePath(p string, maxLen int) string {
+	if p == "" {
 		return ""
 	}
 
+	// Normalize to forward slashes for consistent cross-platform output
+	p = filepath.ToSlash(p)
+
 	// Get just the filename
-	filename := filepath.Base(path)
+	filename := path.Base(p)
 	if len(filename) <= maxLen {
 		// Try to include parent directory if it fits
-		dir := filepath.Dir(path)
+		dir := path.Dir(p)
 		if dir != "." && dir != "/" {
-			parent := filepath.Base(dir)
+			parent := path.Base(dir)
 			withParent := parent + "/" + filename
 			if len(withParent) <= maxLen {
 				return withParent
@@ -183,7 +187,7 @@ func TruncateInsight(insight string, maxLen int) string {
 // Written by inject-context hook, read by watch command.
 type RetrievalStats struct {
 	LastQuery       string    `json:"last_query"`
-	LastMode        string    `json:"last_mode"`    // "fast" or "full"
+	LastMode        string    `json:"last_mode"` // "fast" or "full"
 	LastReflexMs    int64     `json:"last_reflex_ms"`
 	LastReflectMs   int64     `json:"last_reflect_ms"`
 	LastResolveMs   int64     `json:"last_resolve_ms"`
@@ -282,11 +286,8 @@ func (w *RetrievalStatsHistoryWriter) AppendEntry(entry *RetrievalStatsHistoryEn
 		entry.Timestamp = time.Now()
 	}
 
-	// Check file size and rotate if needed
-	if err := w.maybeRotate(); err != nil {
-		// Log but don't fail - rotation failure shouldn't block append
-		// Continue with append attempt
-	}
+	// Check file size and rotate if needed (failure shouldn't block append)
+	_ = w.maybeRotate()
 
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -380,7 +381,7 @@ func GetRetrievalStatsPath(contextDir string) string {
 // ActivityLogEntry represents a single log entry for the watch command.
 type ActivityLogEntry struct {
 	Timestamp   time.Time `json:"timestamp"`
-	Mode        string    `json:"mode"`        // "dream", "think", "reflex", "reflect", "resolve"
+	Mode        string    `json:"mode"` // "dream", "think", "reflex", "reflect", "resolve"
 	Description string    `json:"description"`
 	Query       string    `json:"query,omitempty"`
 	Results     int       `json:"results,omitempty"`

@@ -3,18 +3,18 @@ package system
 
 import (
 	"fmt"
-	"runtime"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 )
 
 // Info holds system information
 type Info struct {
-	OS           string
-	Arch         string
-	CPUCores     int
-	TotalRAMGB   float64
+	OS             string
+	Arch           string
+	CPUCores       int
+	TotalRAMGB     float64
 	AvailableRAMGB float64
 }
 

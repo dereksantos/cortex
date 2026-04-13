@@ -13,11 +13,11 @@ import (
 // PersistedSession represents the serializable form of SessionContext.
 // Used for saving/loading session state across daemon restarts.
 type PersistedSession struct {
-	SessionID              string                 `json:"session_id"`
-	TopicWeights           map[string]float64     `json:"topic_weights"`
-	WarmCache              map[string][]byte      `json:"warm_cache"` // serialized results
-	ResolvedContradictions map[string]string      `json:"resolved_contradictions"`
-	LastUpdated            time.Time              `json:"last_updated"`
+	SessionID              string             `json:"session_id"`
+	TopicWeights           map[string]float64 `json:"topic_weights"`
+	WarmCache              map[string][]byte  `json:"warm_cache"` // serialized results
+	ResolvedContradictions map[string]string  `json:"resolved_contradictions"`
+	LastUpdated            time.Time          `json:"last_updated"`
 }
 
 // SessionPersister handles saving and loading of session state.
@@ -234,9 +234,9 @@ type SessionIndex struct {
 
 // SessionIndexWriter writes the session index to a JSON file for fast access
 type SessionIndexWriter struct {
-	path         string
-	lastWrite    time.Time
-	minInterval  time.Duration
+	path        string
+	lastWrite   time.Time
+	minInterval time.Duration
 }
 
 // NewSessionIndexWriter creates a new session index writer

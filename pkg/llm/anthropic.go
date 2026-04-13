@@ -50,10 +50,10 @@ func NewAnthropicClient(cfg *config.Config) *AnthropicClient {
 
 // anthropicRequest represents a request to the Anthropic Messages API
 type anthropicRequest struct {
-	Model     string              `json:"model"`
-	MaxTokens int                 `json:"max_tokens"`
-	System    string              `json:"system,omitempty"`
-	Messages  []anthropicMessage  `json:"messages"`
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    string             `json:"system,omitempty"`
+	Messages  []anthropicMessage `json:"messages"`
 }
 
 // anthropicMessage represents a message in the conversation
@@ -64,13 +64,13 @@ type anthropicMessage struct {
 
 // anthropicResponse represents a response from the Anthropic API
 type anthropicResponse struct {
-	ID           string                   `json:"id"`
-	Type         string                   `json:"type"`
-	Role         string                   `json:"role"`
-	Content      []anthropicContentBlock  `json:"content"`
-	Model        string                   `json:"model"`
-	StopReason   string                   `json:"stop_reason"`
-	Usage        anthropicUsage           `json:"usage"`
+	ID         string                  `json:"id"`
+	Type       string                  `json:"type"`
+	Role       string                  `json:"role"`
+	Content    []anthropicContentBlock `json:"content"`
+	Model      string                  `json:"model"`
+	StopReason string                  `json:"stop_reason"`
+	Usage      anthropicUsage          `json:"usage"`
 }
 
 // anthropicContentBlock represents a content block in the response

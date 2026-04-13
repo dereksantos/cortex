@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
+
 	"strconv"
-	"syscall"
 
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -76,7 +75,7 @@ func (c *ReembedCommand) Execute(ctx *Context) error {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	notifyTermSignals(sigCh)
 	go func() {
 		<-sigCh
 		fmt.Fprintf(os.Stderr, "\nInterrupted, finishing current embedding...\n")

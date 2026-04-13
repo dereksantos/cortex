@@ -127,8 +127,8 @@ func ActivityRow(timeStr, mode, description string, width int) string {
 // Format: "[selector] HH:MM  "prompt..."  [N events]"
 func SessionRow(selector, timeStr, prompt string, eventCount int, width int) string {
 	// Fixed parts
-	selectorPart := selector + " "    // 2 chars
-	timePart := timeStr + "  "        // 7 chars (HH:MM + 2 spaces)
+	selectorPart := selector + " " // 2 chars
+	timePart := timeStr + "  "     // 7 chars (HH:MM + 2 spaces)
 	eventsPart := fmt.Sprintf("  [%d]", eventCount)
 
 	// Calculate prompt width
@@ -178,7 +178,10 @@ func ProgressBar(progress float64, width int) string {
 
 // TopicsList formats a list of topics with weights.
 // Format: "topic1 (0.8), topic2 (0.6), ..."
-func TopicsList(topics []struct{ Name string; Weight float64 }, maxTopics int, width int) string {
+func TopicsList(topics []struct {
+	Name   string
+	Weight float64
+}, maxTopics int, width int) string {
 	if len(topics) == 0 {
 		return ""
 	}

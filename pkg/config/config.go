@@ -53,7 +53,7 @@ type ThinkModeConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty"`
 	MaxBudget          *int   `json:"max_budget,omitempty"`
 	MinBudget          *int   `json:"min_budget,omitempty"`
-	Mode               string `json:"mode,omitempty"`                // "fast" or "full"
+	Mode               string `json:"mode,omitempty"` // "fast" or "full"
 	OperationTimeoutMs *int   `json:"operation_timeout_ms,omitempty"`
 }
 
@@ -110,8 +110,8 @@ func Default() *Config {
 		OllamaEmbeddingModel: "nomic-embed-text",
 		AnthropicModel:       "claude-haiku-4-5-20251001",
 		WebPort:              9090,
-		EnableGraph:  true,
-		EnableVector: true,
+		EnableGraph:          true,
+		EnableVector:         true,
 	}
 }
 
