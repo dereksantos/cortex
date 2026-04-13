@@ -45,66 +45,66 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
-		switch {
-		case arg == "-v" || arg == "--verbose":
+		switch arg {
+		case "-v", "--verbose":
 			verbose = true
-		case arg == "--dry-run":
+		case "--dry-run":
 			dryRun = true
-		case arg == "--agentic":
+		case "--agentic":
 			agenticMode = true
-		case arg == "--claude-binary":
+		case "--claude-binary":
 			if i+1 < len(ctx.Args) {
 				claudeBinary = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-s" || arg == "--scenario":
+		case "-s", "--scenario":
 			if i+1 < len(ctx.Args) {
 				scenarioPath = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-d" || arg == "--dir":
+		case "-d", "--dir":
 			if i+1 < len(ctx.Args) {
 				scenarioDir = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-p" || arg == "--provider":
+		case "-p", "--provider":
 			if i+1 < len(ctx.Args) {
 				providerName = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-m" || arg == "--model":
+		case "-m", "--model":
 			if i+1 < len(ctx.Args) {
 				modelOverride = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-o" || arg == "--output":
+		case "-o", "--output":
 			if i+1 < len(ctx.Args) {
 				outputFormat = ctx.Args[i+1]
 				i++
 			}
-		case arg == "--judge":
+		case "--judge":
 			useJudge = true
-		case arg == "--judge-model":
+		case "--judge-model":
 			if i+1 < len(ctx.Args) {
 				judgeModel = ctx.Args[i+1]
 				useJudge = true // implicitly enable judge
 				i++
 			}
-		case arg == "--summary":
+		case "--summary":
 			showSummary = true
-		case arg == "--abr-trend":
+		case "--abr-trend":
 			showABRTrend = true
-		case arg == "--compare-provider":
+		case "--compare-provider":
 			if i+1 < len(ctx.Args) {
 				compareProviderName = ctx.Args[i+1]
 				i++
 			}
-		case arg == "--compare-model":
+		case "--compare-model":
 			if i+1 < len(ctx.Args) {
 				compareModelOverride = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-h" || arg == "--help":
+		case "-h", "--help":
 			fmt.Println(`Usage: cortex eval [options]
 
 Unified eval system comparing baseline vs Cortex-augmented responses.
@@ -209,7 +209,7 @@ Examples:
 		case "ollama":
 			ollamaClient := llm.NewOllamaClient(cfg)
 			if !ollamaClient.IsAvailable() {
-				return fmt.Errorf("Ollama is not running. Start with: ollama serve")
+				return fmt.Errorf("ollama is not running, start with: ollama serve")
 			}
 			provider = ollamaClient
 		case "anthropic":

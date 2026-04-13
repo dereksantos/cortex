@@ -4,8 +4,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
 
 	"github.com/dereksantos/cortex/cmd/cortex/commands"
 	"github.com/dereksantos/cortex/internal/storage"
@@ -256,73 +254,6 @@ func maybeStartDaemon(cfg *config.Config) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "cortex: auto-started daemon (pid %d)\n", pid)
-}
-
-// ensureDaemonRunning checks if the daemon appears to be running.
-// Returns true if running, false otherwise.
-// Prints helpful message if not running.
-func ensureDaemonRunning() bool {
-	// Load config to check for context directory
-	cfg, err := loadConfig()
-	if err != nil {
-		// Config not found means cortex isn't initialized
-		fmt.Fprintln(os.Stderr, "Cortex is not initialized in this project.")
-		fmt.Fprintln(os.Stderr, "Run 'cortex init' or 'cortex install' first.")
-		return false
-	}
-
-	// Check for recent activity by looking at session file
-	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
-	info, err := os.Stat(sessionPath)
-	if err != nil {
-		// Session file doesn't exist - daemon may not be running
-		// But this could also be a fresh install, so just warn
-		fmt.Fprintln(os.Stderr, "Warning: Daemon may not be running.")
-		fmt.Fprintln(os.Stderr, "Start it with: cortex daemon &")
-		return false
-	}
-
-	// Check if session was updated recently (within last 2 minutes)
-	if time.Since(info.ModTime()) > 2*time.Minute {
-		fmt.Fprintln(os.Stderr, "Warning: Daemon may not be running (session stale).")
-		fmt.Fprintln(os.Stderr, "Start it with: cortex daemon &")
-		return false
-	}
-
-	return true
-}
-
-// warnDaemonNotRunning prints a warning if daemon isn't running, but doesn't fail.
-// Use this for commands that work without daemon but work better with it.
-func warnDaemonNotRunning() {
-	cfg, err := loadConfig()
-	if err != nil {
-		return // Silently skip if config not found
-	}
-
-	sessionPath := filepath.Join(cfg.ContextDir, "session.json")
-	info, err := os.Stat(sessionPath)
-	if err != nil || time.Since(info.ModTime()) > 2*time.Minute {
-		fmt.Fprintln(os.Stderr, "Tip: Start 'cortex daemon &' for automatic context capture.")
-	}
-}
-
-// loadConfigWithFallback loads config or creates a default for recovery.
-func loadConfigWithFallback() *config.Config {
-	cfg, err := loadConfig()
-	if err != nil {
-		// Return default config for basic operations
-		return config.Default()
-	}
-	return cfg
-}
-
-// truncateString truncates a string to max length with ellipsis.
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }
 
 func printUsage() {

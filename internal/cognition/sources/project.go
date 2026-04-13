@@ -161,12 +161,12 @@ func (p *ProjectSource) isHardExcludedDir(name string) bool {
 
 	// Dependencies
 	hardExcludedDirs := map[string]bool{
-		"node_modules": true,
-		"vendor":       true,
-		".venv":        true,
-		"venv":         true,
-		"__pycache__":  true,
-		".mypy_cache":  true,
+		"node_modules":  true,
+		"vendor":        true,
+		".venv":         true,
+		"venv":          true,
+		"__pycache__":   true,
+		".mypy_cache":   true,
 		".pytest_cache": true,
 
 		// Build artifacts
@@ -219,7 +219,7 @@ func (p *ProjectSource) isHardExcludedFile(path string) bool {
 		"secrets.yaml": true, "secrets.yml": true, "secrets.json": true,
 		".npmrc": true, ".pypirc": true, ".netrc": true,
 		".docker/config.json": true,
-		"htpasswd": true, ".htpasswd": true,
+		"htpasswd":            true, ".htpasswd": true,
 	}
 	if secretFiles[lower] || secretFiles[rel] {
 		return true
@@ -239,11 +239,7 @@ func (p *ProjectSource) isHardExcludedFile(path string) bool {
 	osJunk := map[string]bool{
 		".ds_store": true, "thumbs.db": true, "desktop.ini": true,
 	}
-	if osJunk[lower] {
-		return true
-	}
-
-	return false
+	return osJunk[lower]
 }
 
 // shouldSkipByExtension returns true for binary, generated, and low-signal files.
@@ -300,11 +296,7 @@ func (p *ProjectSource) shouldSkipByExtension(path string) bool {
 		"go.sum": true, "gemfile.lock": true, "poetry.lock": true,
 		"composer.lock": true, "cargo.lock": true, "flake.lock": true,
 	}
-	if lockFiles[strings.ToLower(base)] {
-		return true
-	}
-
-	return false
+	return lockFiles[strings.ToLower(base)]
 }
 
 // loadGitignore parses .gitignore from the project root.

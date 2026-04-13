@@ -8,11 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/signal"
+
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+
 	"time"
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
@@ -189,7 +189,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	notifyTermSignals(sigChan)
 
 	// Periodic session save ticker
 	saveTicker := time.NewTicker(30 * time.Second)
@@ -238,9 +238,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 			// Periodic session save
 			if cortex != nil {
 				sessionSaver.MarkDirty()
-				if sessionSaver.MaybeSave(cortex.SessionContext()) {
-					// Silent save - no output needed
-				}
+				_ = sessionSaver.MaybeSave(cortex.SessionContext())
 			}
 		case <-cognitiveTicker.C:
 			// Trigger cognitive modes based on activity and config
@@ -432,8 +430,7 @@ func IsDaemonRunning(contextDir string) bool {
 		return false
 	}
 	// On Unix, FindProcess always succeeds. Send signal 0 to check if process exists.
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
+	return isProcessAlive(process)
 }
 
 // StopDaemon stops a running daemon process.
@@ -446,8 +443,8 @@ func StopDaemon(contextDir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot find daemon process: %w", err)
 	}
-	// Send SIGTERM for graceful shutdown
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	// Send termination signal for graceful shutdown
+	if err := sendTermSignal(process); err != nil {
 		return fmt.Errorf("cannot stop daemon: %w", err)
 	}
 	return nil
@@ -471,10 +468,8 @@ func StartDaemonBackground(contextDir string) (int, error) {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil
-	// Detach from parent process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
+	// Detach from parent process group (platform-specific)
+	detachProcess(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("cannot start daemon: %w", err)

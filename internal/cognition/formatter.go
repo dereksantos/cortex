@@ -56,7 +56,7 @@ func (f *Formatter) FormatForInjection(results []cognition.Result, sessionCtx ..
 		if len(contradictions) > 0 {
 			sb.WriteString("**Note:** Some context may conflict:\n")
 			for _, c := range contradictions {
-				sb.WriteString(fmt.Sprintf("- %s\n", c))
+				fmt.Fprintf(&sb, "- %s\n", c)
 			}
 			sb.WriteString("\n")
 		}
@@ -68,7 +68,7 @@ func (f *Formatter) FormatForInjection(results []cognition.Result, sessionCtx ..
 
 		// Category header
 		categoryLabel := f.categoryLabel(r.Category)
-		sb.WriteString(fmt.Sprintf("### %s\n", categoryLabel))
+		fmt.Fprintf(&sb, "### %s\n", categoryLabel)
 
 		// Content
 		content := r.Content
@@ -80,7 +80,7 @@ func (f *Formatter) FormatForInjection(results []cognition.Result, sessionCtx ..
 
 		// Tags
 		if f.IncludeTags && len(r.Tags) > 0 {
-			sb.WriteString(fmt.Sprintf("*Tags: %s*\n", strings.Join(r.Tags, ", ")))
+			fmt.Fprintf(&sb, "*Tags: %s*\n", strings.Join(r.Tags, ", "))
 		}
 
 		sb.WriteString("\n")
@@ -118,7 +118,7 @@ func (f *Formatter) formatEnrichments(ctx *cognition.SessionContext) string {
 			sb.WriteString("### Implementation Notes\n")
 			sb.WriteString("*Gotchas to remember:*\n")
 			for _, n := range allNuances {
-				sb.WriteString(fmt.Sprintf("- **%s** — %s\n", n.Detail, n.Why))
+				fmt.Fprintf(&sb, "- **%s** — %s\n", n.Detail, n.Why)
 			}
 			sb.WriteString("\n")
 		}
@@ -155,7 +155,7 @@ func (f *Formatter) FormatCompact(results []cognition.Result) string {
 			content = content[:200] + "..."
 		}
 
-		sb.WriteString(fmt.Sprintf("- [%s] %s\n", r.Category, content))
+		fmt.Fprintf(&sb, "- [%s] %s\n", r.Category, content)
 	}
 
 	sb.WriteString("</cortex-context>\n\n")
@@ -210,4 +210,3 @@ func (f *Formatter) EstimateTokens(results []cognition.Result) int {
 	formatted := f.FormatForInjection(results)
 	return len(formatted) / 4
 }
-

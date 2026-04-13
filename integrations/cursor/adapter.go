@@ -64,16 +64,16 @@ func ConvertLSPToEvent(data []byte, projectPath string) (*events.Event, error) {
 // mapLSPMethodToToolName maps LSP notification methods to our tool names
 func mapLSPMethodToToolName(method string) string {
 	methodMap := map[string]string{
-		"textDocument/didChange":    "Edit",
-		"textDocument/didSave":      "Write",
-		"textDocument/didOpen":      "Read",
-		"textDocument/didClose":     "Close",
-		"workspace/executeCommand":  "Command",
-		"$/ai/completion":           "AICompletion",
-		"$/ai/chat":                 "AIChat",
-		"$/cursor/applyEdit":        "CursorEdit",
-		"$/cursor/accept":           "CursorAccept",
-		"$/cursor/reject":           "CursorReject",
+		"textDocument/didChange":   "Edit",
+		"textDocument/didSave":     "Write",
+		"textDocument/didOpen":     "Read",
+		"textDocument/didClose":    "Close",
+		"workspace/executeCommand": "Command",
+		"$/ai/completion":          "AICompletion",
+		"$/ai/chat":                "AIChat",
+		"$/cursor/applyEdit":       "CursorEdit",
+		"$/cursor/accept":          "CursorAccept",
+		"$/cursor/reject":          "CursorReject",
 	}
 
 	if toolName, ok := methodMap[method]; ok {

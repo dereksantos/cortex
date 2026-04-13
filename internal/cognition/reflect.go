@@ -93,11 +93,11 @@ func (r *Reflect) buildRerankPrompt(q cognition.Query, candidates []cognition.Re
 	sb.WriteString("Candidates:\n\n")
 
 	for i, c := range candidates {
-		sb.WriteString(fmt.Sprintf("%d. [ID: %s]\n", i+1, c.ID))
-		sb.WriteString(fmt.Sprintf("   Category: %s\n", c.Category))
-		sb.WriteString(fmt.Sprintf("   Content: %s\n", truncate(c.Content, 300)))
+		fmt.Fprintf(&sb, "%d. [ID: %s]\n", i+1, c.ID)
+		fmt.Fprintf(&sb, "   Category: %s\n", c.Category)
+		fmt.Fprintf(&sb, "   Content: %s\n", truncate(c.Content, 300))
 		if len(c.Tags) > 0 {
-			sb.WriteString(fmt.Sprintf("   Tags: %s\n", strings.Join(c.Tags, ", ")))
+			fmt.Fprintf(&sb, "   Tags: %s\n", strings.Join(c.Tags, ", "))
 		}
 		sb.WriteString("\n")
 	}
@@ -109,9 +109,9 @@ func (r *Reflect) buildRerankPrompt(q cognition.Query, candidates []cognition.Re
 
 // rerankResponse represents the LLM's reranking output.
 type rerankResponse struct {
-	Ranking        []string       `json:"ranking"`
+	Ranking        []string        `json:"ranking"`
 	Contradictions []contradiction `json:"contradictions"`
-	Reasoning      string         `json:"reasoning"`
+	Reasoning      string          `json:"reasoning"`
 }
 
 // contradiction represents a detected conflict between candidates.

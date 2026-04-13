@@ -307,8 +307,8 @@ func TestCapture_MultipleSkipPatterns(t *testing.T) {
 	cap := New(cfg)
 
 	tests := []struct {
-		name     string
-		filePath string
+		name       string
+		filePath   string
 		shouldSkip bool
 	}{
 		{"skips .git files", ".git/config", true},

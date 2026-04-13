@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/dereksantos/cortex/internal/mcp"
 )
@@ -42,7 +40,7 @@ func (c *MCPCommand) Execute(ctx *Context) error {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	notifyTermSignals(sigCh)
 	go func() {
 		<-sigCh
 		fmt.Fprintln(os.Stderr, "MCP server shutting down...")

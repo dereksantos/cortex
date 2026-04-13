@@ -84,7 +84,7 @@ func TestProcessor_StartStop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to start processor: %v", err)
 		}
-		if !processor.running {
+		if !processor.running.Load() {
 			t.Error("processor should be running after Start")
 		}
 	})
@@ -98,7 +98,7 @@ func TestProcessor_StartStop(t *testing.T) {
 
 	t.Run("stops successfully", func(t *testing.T) {
 		processor.Stop()
-		if processor.running {
+		if processor.running.Load() {
 			t.Error("processor should not be running after Stop")
 		}
 	})

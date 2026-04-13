@@ -11,9 +11,9 @@ import (
 
 func TestNewBuffer(t *testing.T) {
 	tests := []struct {
-		name     string
-		width    int
-		wantW    int
+		name  string
+		width int
+		wantW int
 	}{
 		{"positive width", 80, 80},
 		{"zero width defaults to 80", 0, 80},
@@ -492,7 +492,7 @@ func TestSpinnerFrame(t *testing.T) {
 		{0, "a"},
 		{1, "b"},
 		{2, "c"},
-		{3, "a"}, // wrap
+		{3, "a"},  // wrap
 		{-1, "c"}, // negative wrap
 	}
 
@@ -727,10 +727,10 @@ func TestHeaderPanelWidthConsistency(t *testing.T) {
 	width := 50
 
 	tests := []struct {
-		name string
-		icon string
+		name  string
+		icon  string
 		title string
-		desc string
+		desc  string
 	}{
 		{"short", "●", "IDLE", ""},
 		{"with desc", "●", "THINKING", "processing patterns"},

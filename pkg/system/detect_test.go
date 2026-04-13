@@ -95,9 +95,9 @@ func TestInfo_String(t *testing.T) {
 		{
 			name: "macOS info",
 			info: Info{
-				OS:       "darwin",
-				Arch:     "arm64",
-				CPUCores: 8,
+				OS:         "darwin",
+				Arch:       "arm64",
+				CPUCores:   8,
 				TotalRAMGB: 16.0,
 			},
 			contains: []string{"macOS", "arm64", "8 cores", "16.0 GB RAM"},
@@ -105,9 +105,9 @@ func TestInfo_String(t *testing.T) {
 		{
 			name: "Linux info",
 			info: Info{
-				OS:       "linux",
-				Arch:     "amd64",
-				CPUCores: 4,
+				OS:         "linux",
+				Arch:       "amd64",
+				CPUCores:   4,
 				TotalRAMGB: 32.5,
 			},
 			contains: []string{"Linux", "amd64", "4 cores", "32.5 GB RAM"},
@@ -115,9 +115,9 @@ func TestInfo_String(t *testing.T) {
 		{
 			name: "Windows info",
 			info: Info{
-				OS:       "windows",
-				Arch:     "amd64",
-				CPUCores: 16,
+				OS:         "windows",
+				Arch:       "amd64",
+				CPUCores:   16,
 				TotalRAMGB: 64.0,
 			},
 			contains: []string{"Windows", "amd64", "16 cores", "64.0 GB RAM"},
@@ -125,9 +125,9 @@ func TestInfo_String(t *testing.T) {
 		{
 			name: "single core",
 			info: Info{
-				OS:       "linux",
-				Arch:     "386",
-				CPUCores: 1,
+				OS:         "linux",
+				Arch:       "386",
+				CPUCores:   1,
 				TotalRAMGB: 1.0,
 			},
 			contains: []string{"1 cores", "1.0 GB RAM"},
@@ -148,9 +148,9 @@ func TestInfo_String(t *testing.T) {
 
 func TestInfo_String_Format(t *testing.T) {
 	info := Info{
-		OS:       "darwin",
-		Arch:     "arm64",
-		CPUCores: 10,
+		OS:         "darwin",
+		Arch:       "arm64",
+		CPUCores:   10,
 		TotalRAMGB: 32.0,
 	}
 

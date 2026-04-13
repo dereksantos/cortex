@@ -277,4 +277,3 @@ func (c *OllamaClient) IsEmbeddingModelAvailable() bool {
 func (c *OllamaClient) IsEmbeddingAvailable() bool {
 	return c.IsAvailable() && c.IsEmbeddingModelAvailable()
 }
-

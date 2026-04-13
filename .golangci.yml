@@ -1,0 +1,10 @@
+version: "2"
+
+linters:
+  default: standard
+  disable:
+    - errcheck  # Too many false positives on intentional ignores (cleanup, deferred close)
+
+formatters:
+  enable:
+    - gofmt

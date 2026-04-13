@@ -373,20 +373,25 @@ The `cortex install` command creates `.claude/settings.local.json`:
 
 ### Status Line Icons
 
-The status line shows current cognitive mode:
+The `--format=claude` flag outputs a compact symbol + one word. This is what appears in the Claude Code status line:
 
-| Icon | Mode | Meaning |
-|------|------|---------|
-| `◌` | Cold start | No data yet |
-| `✓` | Ready | Normal operation |
-| `⏸` | Stopped | Daemon not running |
-| `◐` | Think | Learning session patterns |
-| `☁` | Dream | Exploring codebase |
-| `⚡` | Reflex | Fast mechanical search |
-| `◑` | Reflect | Evaluating relevance |
-| `▸` | Resolve | Deciding what to inject |
-| `✦` | Insight | Discovered something new |
-| `~` | Digest | Consolidating insights |
+| Output | State |
+|--------|-------|
+| `◌ Init` | Not initialized |
+| `◌ Empty` | No data stored |
+| `◌ Waiting` | Cold start, no activity yet |
+| `✓ Ready` | Normal operation with data |
+| `✓ Active` | Recent activity detected |
+| `⏸ Stopped` | Daemon offline |
+| `◐ Think` | Learning session patterns |
+| `☁ Dream` | Exploring codebase |
+| `⚡ Reflex` | Fast mechanical search |
+| `◑ Reflect` | Evaluating relevance |
+| `▸ Resolve` | Deciding what to inject |
+| `✦ Insight` | Discovered something new |
+| `~ Digest` | Consolidating insights |
+
+If an existing non-cortex statusLine is configured, Cortex composes with it (appending ` | <cortex status>`) rather than replacing it. Uninstall restores the original.
 
 ---
 

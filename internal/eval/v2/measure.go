@@ -288,12 +288,12 @@ type ScenarioResult struct {
 	Ties         int `json:"ties"`
 
 	// Retrieval quality metrics (averaged across tests with ranking)
-	HasRanking   bool            `json:"has_ranking,omitempty"`
-	AvgNDCG      float64         `json:"avg_ndcg,omitempty"`      // Retrieval quality
-	NDCGByDepth  map[int]float64 `json:"ndcg_by_depth,omitempty"` // NDCG at each tree depth
-	AvgFastNDCG  float64         `json:"avg_fast_ndcg,omitempty"` // For ABR (= AvgNDCG until Reflect)
-	AvgFullNDCG  float64         `json:"avg_full_ndcg,omitempty"` // For ABR (1.0 until Reflect)
-	AvgABR       float64         `json:"avg_abr,omitempty"`       // FastNDCG / FullNDCG
+	HasRanking  bool            `json:"has_ranking,omitempty"`
+	AvgNDCG     float64         `json:"avg_ndcg,omitempty"`      // Retrieval quality
+	NDCGByDepth map[int]float64 `json:"ndcg_by_depth,omitempty"` // NDCG at each tree depth
+	AvgFastNDCG float64         `json:"avg_fast_ndcg,omitempty"` // For ABR (= AvgNDCG until Reflect)
+	AvgFullNDCG float64         `json:"avg_full_ndcg,omitempty"` // For ABR (1.0 until Reflect)
+	AvgABR      float64         `json:"avg_abr,omitempty"`       // FastNDCG / FullNDCG
 
 	// Model Parity Ratio (averaged across tests with comparison)
 	HasCompare      bool    `json:"has_compare,omitempty"`

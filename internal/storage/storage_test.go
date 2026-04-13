@@ -2,7 +2,6 @@ package storage
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,12 +15,6 @@ func setupTestStorage(t *testing.T) (*Storage, func()) {
 	tempDir, err := os.MkdirTemp("", "cortex-storage-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
-	}
-
-	// Create db directory
-	if err := os.MkdirAll(filepath.Join(tempDir, "db"), 0755); err != nil {
-		os.RemoveAll(tempDir)
-		t.Fatalf("failed to create db dir: %v", err)
 	}
 
 	cfg := &config.Config{
@@ -66,14 +59,14 @@ func TestNew(t *testing.T) {
 		if store == nil {
 			t.Fatal("expected non-nil storage")
 		}
-		if store.db == nil {
-			t.Fatal("expected non-nil database connection")
+		if store.dataDir == "" {
+			t.Fatal("expected non-empty data directory")
 		}
 	})
 
 	t.Run("fails with invalid path", func(t *testing.T) {
 		cfg := &config.Config{
-			ContextDir: "/nonexistent/path/that/cannot/exist",
+			ContextDir: "/nonexistent/\x00invalid/path",
 		}
 
 		_, err := New(cfg)

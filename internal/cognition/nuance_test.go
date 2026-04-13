@@ -125,8 +125,8 @@ type nuanceMockProvider struct {
 	receivedPrompt string
 }
 
-func (m *nuanceMockProvider) Name() string       { return "nuance-mock" }
-func (m *nuanceMockProvider) IsAvailable() bool  { return true }
+func (m *nuanceMockProvider) Name() string      { return "nuance-mock" }
+func (m *nuanceMockProvider) IsAvailable() bool { return true }
 func (m *nuanceMockProvider) Generate(ctx context.Context, prompt string) (string, error) {
 	m.receivedPrompt = prompt
 	return m.response, nil
