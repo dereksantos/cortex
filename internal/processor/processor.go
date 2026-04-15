@@ -26,6 +26,9 @@ type Processor struct {
 	queue   *queue.Manager
 	running atomic.Bool
 
+	// Additional queue directories to process (for multi-project support)
+	extraQueueDirs []string
+
 	// Callback for routing events through cognition pipeline
 	eventCallback EventCallback
 }
@@ -38,6 +41,12 @@ func New(cfg *config.Config, store *storage.Storage, queueMgr *queue.Manager) *P
 		queue:   queueMgr,
 		// running zero-value is false
 	}
+}
+
+// AddQueueDir adds an additional queue directory to process each tick.
+// The directory should contain pending/, processing/, and processed/ subdirectories.
+func (p *Processor) AddQueueDir(dir string) {
+	p.extraQueueDirs = append(p.extraQueueDirs, dir)
 }
 
 // Start starts the processor
@@ -77,21 +86,34 @@ func (p *Processor) processLoop() {
 	}
 }
 
-// processBatch processes a batch of events from queue to storage
+// processBatch processes a batch of events from all queue directories
 // and routes them through the cognition pipeline.
 func (p *Processor) processBatch() {
-	// Move events from queue to storage
+	totalProcessed := 0
+
+	// Process default queue
 	processed, err := p.queue.ProcessPending()
 	if err != nil {
-		log.Printf("Error processing queue: %v", err)
-		return
+		log.Printf("Error processing default queue: %v", err)
+	} else {
+		totalProcessed += processed
 	}
 
-	if processed > 0 {
-		log.Printf("Processed %d events from queue", processed)
+	// Process additional project queues
+	for _, dir := range p.extraQueueDirs {
+		n, err := p.queue.ProcessPendingAt(dir)
+		if err != nil {
+			log.Printf("Error processing queue at %s: %v", dir, err)
+			continue
+		}
+		totalProcessed += n
+	}
+
+	if totalProcessed > 0 {
+		log.Printf("Processed %d events from queue(s)", totalProcessed)
 
 		// Get recent events for routing through cognition
-		events, err := p.storage.GetRecentEvents(processed)
+		events, err := p.storage.GetRecentEvents(totalProcessed)
 		if err != nil {
 			log.Printf("Error getting recent events: %v", err)
 			return

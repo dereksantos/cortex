@@ -25,11 +25,17 @@ func New(cfg *config.Config, store *storage.Storage) *Manager {
 	}
 }
 
-// ProcessPending processes all pending events in the queue
+// ProcessPending processes all pending events in the default queue
 func (m *Manager) ProcessPending() (int, error) {
-	pendingDir := filepath.Join(m.cfg.ContextDir, "queue", "pending")
-	processingDir := filepath.Join(m.cfg.ContextDir, "queue", "processing")
-	processedDir := filepath.Join(m.cfg.ContextDir, "queue", "processed")
+	return m.ProcessPendingAt(filepath.Join(m.cfg.ContextDir, "queue"))
+}
+
+// ProcessPendingAt processes all pending events from a queue at the given base directory.
+// The baseDir should contain pending/, processing/, and processed/ subdirectories.
+func (m *Manager) ProcessPendingAt(baseDir string) (int, error) {
+	pendingDir := filepath.Join(baseDir, "pending")
+	processingDir := filepath.Join(baseDir, "processing")
+	processedDir := filepath.Join(baseDir, "processed")
 
 	// Get all pending files
 	files, err := filepath.Glob(filepath.Join(pendingDir, "*.json"))

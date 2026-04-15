@@ -25,6 +25,7 @@ import (
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
+	projreg "github.com/dereksantos/cortex/pkg/registry"
 )
 
 // DaemonCommand implements the daemon background processor.
@@ -43,7 +44,6 @@ func (c *DaemonCommand) Description() string { return "Run background context pr
 // Execute runs the daemon command.
 func (c *DaemonCommand) Execute(ctx *Context) error {
 	cfg := ctx.Config
-	store := ctx.Storage
 
 	// Parse daemon flags
 	webPort := cfg.WebPort
@@ -62,17 +62,48 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	// Write PID file for process tracking
-	if err := WriteDaemonPID(cfg.ContextDir); err != nil {
+	// Ensure global directory exists and use it for daemon state
+	globalDir, err := projreg.EnsureGlobalDir()
+	if err != nil {
+		return fmt.Errorf("failed to create global dir: %w", err)
+	}
+	cfg.GlobalDir = globalDir
+
+	// Point storage at the global data directory
+	cfg.ContextDir = globalDir
+
+	// Open storage at ~/.cortex/data/
+	store, err := storage.New(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to open global storage: %w", err)
+	}
+	defer store.Close()
+
+	// Write PID file to global dir
+	if err := WriteDaemonPID(globalDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not write PID file: %v\n", err)
 	}
-	defer RemoveDaemonPID(cfg.ContextDir)
+	defer RemoveDaemonPID(globalDir)
 
-	// Create queue manager
+	// Create queue manager (default queue at global dir)
 	queueMgr := queue.New(cfg, store)
 
 	// Create and start processor
 	proc := processor.New(cfg, store, queueMgr)
+
+	// Register all project queues from the registry
+	reg, regErr := projreg.Open()
+	if regErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open project registry: %v\n", regErr)
+	} else {
+		for _, project := range reg.List() {
+			queueDir := filepath.Join(project.Path, ".cortex", "queue")
+			if _, err := os.Stat(filepath.Join(queueDir, "pending")); err == nil {
+				proc.AddQueueDir(queueDir)
+				fmt.Printf("   Watching queue: %s\n", project.ID)
+			}
+		}
+	}
 	if err := proc.Start(); err != nil {
 		return fmt.Errorf("failed to start processor: %w", err)
 	}
@@ -117,7 +148,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	}
 
 	// Create state writer for real-time cognitive mode status
-	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
+	stateWriter := intcognition.NewStateWriter(globalDir)
 	if cortex != nil {
 		cortex.SetStateWriter(stateWriter)
 
@@ -126,8 +157,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 			cortex.IngestBatch(context.Background(), evts)
 		})
 
-		// Register dream sources for background exploration
-		cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+		// Register dream sources for all registered projects
 		cortex.RegisterSource(sources.NewCortexSource(store))
 
 		// Register Claude history source
@@ -137,16 +167,25 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 			cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
 		}
 
-		// Register transcript queue source (from Stop hooks)
-		transcriptQueueDir := filepath.Join(cfg.ContextDir, "transcript_queue")
-		cortex.RegisterSource(sources.NewTranscriptQueueSource(transcriptQueueDir))
-
-		// Register git source for commit history exploration
-		cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+		// Register per-project dream sources
+		if reg != nil {
+			for _, project := range reg.List() {
+				cortex.RegisterSource(sources.NewProjectSource(project.Path))
+				cortex.RegisterSource(sources.NewGitSource(project.Path))
+				transcriptDir := filepath.Join(project.Path, ".cortex", "transcript_queue")
+				if _, err := os.Stat(transcriptDir); err == nil {
+					cortex.RegisterSource(sources.NewTranscriptQueueSource(transcriptDir))
+				}
+			}
+		} else {
+			// Fallback: use current project root if registry unavailable
+			cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+			cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+		}
 	}
 
 	// Load persisted session
-	sessionPersister := intcognition.NewSessionPersister(cfg.ContextDir)
+	sessionPersister := intcognition.NewSessionPersister(globalDir)
 	persistedSession, err := sessionPersister.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not load session: %v\n", err)
@@ -215,7 +254,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 
 	// Listen for insights and log them as they arrive
 	if cortex != nil {
-		activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+		activityLogger := intcognition.NewActivityLogger(globalDir)
 		go func() {
 			for insight := range cortex.Insights() {
 				// Log each insight as it's discovered (full content, no truncation)
@@ -243,7 +282,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 		case <-cognitiveTicker.C:
 			// Trigger cognitive modes based on activity and config
 			if cortex != nil {
-				activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+				activityLogger := intcognition.NewActivityLogger(globalDir)
 				if cortex.IsModeEnabled("dream") && isUserIdle(store, idleThreshold) {
 					// Idle - run Dream for background exploration
 					go func() {
@@ -279,7 +318,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 					return
 				}
 				if result != nil && !result.Skipped && result.Pruned > 0 {
-					activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
+					activityLogger := intcognition.NewActivityLogger(globalDir)
 					activityLogger.Log(&intcognition.ActivityLogEntry{
 						Mode:        "prune",
 						Description: fmt.Sprintf("removed %d items (%.1fx -> %.1fx project)", result.Pruned, float64(result.CortexSize)/float64(result.ProjectSize), result.Ratio),

@@ -20,6 +20,7 @@ import (
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
+	projreg "github.com/dereksantos/cortex/pkg/registry"
 )
 
 // CaptureCommand implements event capture from stdin.
@@ -166,9 +167,15 @@ func (c *IngestCommand) Execute(ctx *Context) error {
 	// Load config and storage if not provided
 	if cfg == nil || store == nil {
 		var err error
-		cfg, err = loadCaptureConfig()
+		// Use capture config for queue path (project-local)
+		captureCfg, captureErr := loadCaptureConfig()
+		if captureErr != nil {
+			return fmt.Errorf("failed to load config: %w", captureErr)
+		}
+		// Use storage config for storage (global)
+		cfg, err = loadStorageConfig()
 		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
+			return fmt.Errorf("failed to load storage config: %w", err)
 		}
 
 		store, err = storage.New(cfg)
@@ -176,6 +183,9 @@ func (c *IngestCommand) Execute(ctx *Context) error {
 			return fmt.Errorf("failed to open storage: %w", err)
 		}
 		defer store.Close()
+
+		// Use project-local queue, not global
+		cfg.ContextDir = captureCfg.ContextDir
 	}
 
 	// Process queue (move to DB only)
@@ -228,7 +238,7 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 	// Load config and storage if not provided
 	if cfg == nil || store == nil {
 		var err error
-		cfg, err = loadCaptureConfig()
+		cfg, err = loadStorageConfig()
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -307,9 +317,13 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 	// Load config and storage if not provided
 	if cfg == nil || store == nil {
 		var err error
-		cfg, err = loadCaptureConfig()
+		captureCfg, captureErr := loadCaptureConfig()
+		if captureErr != nil {
+			return fmt.Errorf("failed to load config: %w", captureErr)
+		}
+		cfg, err = loadStorageConfig()
 		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
+			return fmt.Errorf("failed to load storage config: %w", err)
 		}
 
 		store, err = storage.New(cfg)
@@ -317,6 +331,8 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 			return fmt.Errorf("failed to open storage: %w", err)
 		}
 		defer store.Close()
+
+		cfg.ContextDir = captureCfg.ContextDir
 	}
 
 	// Process queue
@@ -385,7 +401,7 @@ func (c *FeedCommand) Execute(ctx *Context) error {
 
 	if cfg == nil || store == nil {
 		var err error
-		cfg, err = loadCaptureConfig()
+		cfg, err = loadStorageConfig()
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
@@ -680,13 +696,57 @@ func feedSlugify(text string) string {
 
 // --- Helper functions ---
 
-// loadCaptureConfig loads config from the current working directory.
+// loadCaptureConfig loads config for capture, finding the project root by
+// walking up from cwd. The ContextDir stays project-local (for queue writes),
+// while GlobalDir points to ~/.cortex/ (for storage reads).
 func loadCaptureConfig() (*config.Config, error) {
-	projectRoot, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
 
-	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
-	return config.Load(configPath)
+	// Walk up from cwd looking for .cortex/config.json
+	projectRoot := findProjectRoot(cwd)
+	if projectRoot == "" {
+		return nil, fmt.Errorf("no .cortex/ found in %s or parents", cwd)
+	}
+
+	configPath := filepath.Join(projectRoot, ".cortex", "config.json")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure ContextDir points to project-local .cortex/ (for queue writes)
+	cfg.ContextDir = filepath.Join(projectRoot, ".cortex")
+	cfg.ProjectRoot = projectRoot
+
+	return cfg, nil
+}
+
+// loadStorageConfig returns a config suitable for opening global storage.
+// Uses loadCaptureConfig for project context, then overrides ContextDir to ~/.cortex/.
+func loadStorageConfig() (*config.Config, error) {
+	cfg, err := loadCaptureConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg.ContextDir = projreg.GlobalDir()
+	cfg.GlobalDir = projreg.GlobalDir()
+	return cfg, nil
+}
+
+// findProjectRoot walks up from dir looking for a .cortex/ directory.
+// Returns the project root path, or empty string if not found.
+func findProjectRoot(dir string) string {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".cortex")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "" // reached filesystem root
+		}
+		dir = parent
+	}
 }

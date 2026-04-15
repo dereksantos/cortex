@@ -8,6 +8,7 @@ import (
 	"github.com/dereksantos/cortex/cmd/cortex/commands"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/registry"
 )
 
 const version = "0.1.0"
@@ -31,7 +32,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-	case "init", "install", "uninstall":
+	case "init", "install", "uninstall", "projects":
 		if cmd := commands.Get(command); cmd != nil {
 			ctx := &commands.Context{
 				Args: os.Args[2:],
@@ -45,19 +46,12 @@ func main() {
 		if cmd := commands.Get("daemon"); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
+				// Daemon can run without a per-project config
+				cfg = config.Default()
 			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
 			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
+				Config: cfg,
+				Args:   os.Args[2:],
 			}
 			if err := cmd.Execute(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -235,20 +229,37 @@ func loadConfig() (*config.Config, error) {
 	}
 
 	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
-	return config.Load(configPath)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Point storage at global data directory (~/.cortex/)
+	globalDir := registry.GlobalDir()
+	cfg.GlobalDir = globalDir
+	cfg.ContextDir = globalDir
+
+	// Try to find project ID from registry
+	if cfg.ProjectID == "" {
+		if reg, regErr := registry.Open(); regErr == nil {
+			if entry := reg.FindByPath(projectRoot); entry != nil {
+				cfg.ProjectID = entry.ID
+			}
+		}
+	}
+
+	return cfg, nil
 }
 
-// maybeStartDaemon auto-starts the daemon if it's not running.
+// maybeStartDaemon auto-starts the global daemon if it's not running.
 // Fire-and-forget: never blocks the caller, never fails the caller.
 // Writes to stderr only so it doesn't pollute hook stdout.
-func maybeStartDaemon(cfg *config.Config) {
-	if cfg == nil {
+func maybeStartDaemon(_ *config.Config) {
+	globalDir := registry.GlobalDir()
+	if commands.IsDaemonRunning(globalDir) {
 		return
 	}
-	if commands.IsDaemonRunning(cfg.ContextDir) {
-		return
-	}
-	pid, err := commands.StartDaemonBackground(cfg.ContextDir)
+	pid, err := commands.StartDaemonBackground(globalDir)
 	if err != nil {
 		// Already running or can't start — either way, not our problem
 		return
@@ -266,6 +277,7 @@ Commands:
   init           Initialize Cortex in current directory
   install        Install Cortex hooks for Claude Code
   uninstall      Remove Cortex hooks (--purge to also delete .cortex/)
+  projects       List registered projects
   info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 
