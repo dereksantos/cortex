@@ -12,6 +12,8 @@ type Config struct {
 	// Paths
 	ContextDir  string `json:"context_dir"`
 	ProjectRoot string `json:"project_root"`
+	GlobalDir   string `json:"global_dir,omitempty"`  // ~/.cortex/ — central storage and daemon home
+	ProjectID   string `json:"project_id,omitempty"`   // Slug identifying this project in the global registry
 
 	// Capture settings
 	SkipPatterns []string `json:"skip_patterns"`
@@ -94,10 +96,17 @@ func intPtr(i int) *int { return &i }
 // Default returns a default configuration
 func Default() *Config {
 	projectRoot, _ := os.Getwd()
+	homeDir, _ := os.UserHomeDir()
+
+	globalDir := ""
+	if homeDir != "" {
+		globalDir = filepath.Join(homeDir, ".cortex")
+	}
 
 	return &Config{
 		ContextDir:  filepath.Join(projectRoot, ".cortex"),
 		ProjectRoot: projectRoot,
+		GlobalDir:   globalDir,
 		SkipPatterns: []string{
 			".git",
 			"node_modules",
@@ -172,6 +181,92 @@ func (c *Config) EnsureDirectories() error {
 	}
 
 	return nil
+}
+
+// LoadGlobal loads global config from ~/.cortex/config.json, then overlays
+// per-project config on top. Global settings provide defaults; project
+// settings override them.
+func LoadGlobal(projectConfigPath string) (*Config, error) {
+	// Start with defaults
+	cfg := Default()
+
+	// Load global config if it exists
+	if cfg.GlobalDir != "" {
+		globalPath := filepath.Join(cfg.GlobalDir, "config.json")
+		if data, err := os.ReadFile(globalPath); err == nil {
+			var global Config
+			if err := json.Unmarshal(data, &global); err == nil {
+				mergeConfig(cfg, &global)
+			}
+		}
+	}
+
+	// Overlay project config
+	if projectConfigPath != "" {
+		if data, err := os.ReadFile(projectConfigPath); err == nil {
+			var project Config
+			if err := json.Unmarshal(data, &project); err == nil {
+				mergeConfig(cfg, &project)
+			}
+		}
+	}
+
+	return cfg, nil
+}
+
+// mergeConfig overlays non-zero values from src onto dst.
+func mergeConfig(dst, src *Config) {
+	if src.ContextDir != "" {
+		dst.ContextDir = src.ContextDir
+	}
+	if src.ProjectRoot != "" {
+		dst.ProjectRoot = src.ProjectRoot
+	}
+	if src.GlobalDir != "" {
+		dst.GlobalDir = src.GlobalDir
+	}
+	if src.ProjectID != "" {
+		dst.ProjectID = src.ProjectID
+	}
+	if src.OllamaURL != "" {
+		dst.OllamaURL = src.OllamaURL
+	}
+	if src.OllamaModel != "" {
+		dst.OllamaModel = src.OllamaModel
+	}
+	if src.OllamaEmbeddingModel != "" {
+		dst.OllamaEmbeddingModel = src.OllamaEmbeddingModel
+	}
+	if src.AnthropicModel != "" {
+		dst.AnthropicModel = src.AnthropicModel
+	}
+	if src.DatabaseURL != "" {
+		dst.DatabaseURL = src.DatabaseURL
+	}
+	if src.WebPort != 0 {
+		dst.WebPort = src.WebPort
+	}
+	if src.Modes != nil {
+		dst.Modes = src.Modes
+	}
+	if src.EnableGraph {
+		dst.EnableGraph = true
+	}
+	if src.EnableVector {
+		dst.EnableVector = true
+	}
+	if len(src.SkipPatterns) > 0 {
+		dst.SkipPatterns = src.SkipPatterns
+	}
+}
+
+// GlobalDataDir returns the path to the global data directory.
+// This is where the central JSONL files live.
+func (c *Config) GlobalDataDir() string {
+	if c.GlobalDir != "" {
+		return filepath.Join(c.GlobalDir, "data")
+	}
+	return filepath.Join(c.ContextDir, "data")
 }
 
 // KnowledgePath returns the path to a knowledge category directory.

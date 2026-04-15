@@ -166,6 +166,25 @@
   }
   .topic-val { min-width: 32px; text-align: right; color: #8b949e; font-size: 11px; }
 
+  /* Projects */
+  .project-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .project-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #484f58;
+    flex-shrink: 0;
+  }
+  .project-dot.active { background: #3fb950; }
+  .project-name { color: #58a6ff; font-weight: 600; }
+  .project-path { color: #484f58; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   /* Sessions */
   .session-item {
     padding: 6px 0;
@@ -216,6 +235,9 @@
   </div>
 
   <div class="panel panel-right">
+    <div class="section-title">Projects</div>
+    <div id="projects-container"><span class="empty">No projects</span></div>
+
     <div class="section-title">Stats</div>
     <div class="stat-row"><span class="stat-label">Cache Hit Rate</span><span class="stat-val" id="stat-cache">-</span></div>
     <div class="stat-row"><span class="stat-label">Activity Level</span><span class="stat-val" id="stat-activity">-</span></div>
@@ -281,6 +303,19 @@
       list.scrollTop = list.scrollHeight;
     } else {
       list.innerHTML = '<li class="empty">No activity yet</li>';
+    }
+
+    // Projects
+    const pc = $('projects-container');
+    if (d.projects && d.projects.length > 0) {
+      pc.innerHTML = d.projects.map(p =>
+        '<div class="project-item">' +
+          '<span class="project-dot"></span>' +
+          '<span class="project-name">' + esc(p.name) + '</span>' +
+        '</div>'
+      ).join('');
+    } else {
+      pc.innerHTML = '<span class="empty">No projects registered</span>';
     }
 
     // Topics

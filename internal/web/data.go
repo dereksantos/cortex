@@ -11,6 +11,7 @@ import (
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/registry"
 )
 
 // DashboardData is the JSON payload sent to the web dashboard.
@@ -26,7 +27,16 @@ type DashboardData struct {
 	Activity      []ActivityEntry    `json:"activity"`
 	Topics        map[string]float64 `json:"topics"`
 	Sessions      []SessionEntry     `json:"sessions"`
+	Projects      []ProjectEntry     `json:"projects"`
 	Timestamp     string             `json:"timestamp"`
+}
+
+// ProjectEntry is a registered project for the dashboard.
+type ProjectEntry struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	LastActive string `json:"last_active"`
 }
 
 // ActivityEntry is a single activity log line for the dashboard.
@@ -112,6 +122,18 @@ func BuildDashboardData(cfg *config.Config, store *storage.Storage) *DashboardDa
 			if i, ok := stats["total_insights"].(int); ok && i > d.Insights {
 				d.Insights = i
 			}
+		}
+	}
+
+	// Registered projects
+	if reg, err := registry.Open(); err == nil {
+		for _, p := range reg.List() {
+			d.Projects = append(d.Projects, ProjectEntry{
+				ID:         p.ID,
+				Name:       p.Name,
+				Path:       p.Path,
+				LastActive: p.LastActive.Format(time.RFC3339),
+			})
 		}
 	}
 

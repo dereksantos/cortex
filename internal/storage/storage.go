@@ -26,9 +26,10 @@ type Event struct {
 
 // Storage handles event storage with JSONL files and in-memory indexes
 type Storage struct {
-	cfg     *config.Config
-	dataDir string
-	mu      sync.RWMutex
+	cfg       *config.Config
+	dataDir   string
+	projectID string // Tags all written records; empty string matches all on read
+	mu        sync.RWMutex
 
 	// Event indexes
 	events        map[string]*events.Event // id -> Event
@@ -71,6 +72,7 @@ type Storage struct {
 }
 
 type embeddingEntry struct {
+	ProjectID   string    `json:"project_id,omitempty"`
 	ContentID   string    `json:"content_id"`
 	ContentType string    `json:"content_type"`
 	Vector      []float32 `json:"vector"`
@@ -81,6 +83,7 @@ type embeddingEntry struct {
 // --- JSONL record types ---
 
 type eventRecord struct {
+	ProjectID      string                 `json:"project_id,omitempty"`
 	ID             string                 `json:"id"`
 	Source         events.Source          `json:"source"`
 	EventType      events.EventType       `json:"event_type"`
@@ -95,6 +98,7 @@ type eventRecord struct {
 }
 
 type entityRecord struct {
+	ProjectID string    `json:"project_id,omitempty"`
 	Op        string    `json:"op,omitempty"` // "" = insert/upsert, "delete" = soft delete
 	ID        int64     `json:"id"`
 	Type      string    `json:"type"`
@@ -104,6 +108,7 @@ type entityRecord struct {
 }
 
 type relationshipRecord struct {
+	ProjectID    string    `json:"project_id,omitempty"`
 	Op           string    `json:"op,omitempty"`
 	ID           int64     `json:"id"`
 	FromEntityID int64     `json:"from_entity_id"`
@@ -114,6 +119,7 @@ type relationshipRecord struct {
 }
 
 type insightRecord struct {
+	ProjectID    string    `json:"project_id,omitempty"`
 	Op           string    `json:"op,omitempty"` // "" = insert, "delete" = soft delete, "update" = replace
 	ID           int64     `json:"id"`
 	EventID      string    `json:"event_id"`
@@ -129,6 +135,7 @@ type insightRecord struct {
 }
 
 type sessionRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
 	Op            string    `json:"op,omitempty"` // "" = insert, "update" = replace
 	ID            int64     `json:"id"`
 	SessionID     string    `json:"session_id"`
@@ -150,6 +157,7 @@ func New(cfg *config.Config) (*Storage, error) {
 	s := &Storage{
 		cfg:               cfg,
 		dataDir:           dataDir,
+		projectID:         cfg.ProjectID,
 		events:            make(map[string]*events.Event),
 		sessionEvents:     make(map[string][]string),
 		entities:          make(map[int64]*Entity),
@@ -462,8 +470,9 @@ func recordToInsight(r insightRecord) *Insight {
 	}
 }
 
-func insightToRecord(ins *Insight, op string) insightRecord {
+func insightToRecord(ins *Insight, op, projectID string) insightRecord {
 	return insightRecord{
+		ProjectID:    projectID,
 		Op:           op,
 		ID:           ins.ID,
 		EventID:      ins.EventID,
@@ -540,6 +549,7 @@ func (s *Storage) StoreEvent(event *events.Event) error {
 	}
 
 	rec := eventRecord{
+		ProjectID:      s.projectID,
 		ID:             event.ID,
 		Source:         event.Source,
 		EventType:      event.EventType,
@@ -709,6 +719,7 @@ func (s *Storage) StoreEntity(entityType, name string) (int64, error) {
 		existing.LastSeen = now
 
 		rec := entityRecord{
+			ProjectID: s.projectID,
 			ID:        existingID,
 			Type:      entityType,
 			Name:      name,
@@ -734,6 +745,7 @@ func (s *Storage) StoreEntity(entityType, name string) (int64, error) {
 	}
 
 	rec := entityRecord{
+		ProjectID: s.projectID,
 		ID:        id,
 		Type:      entityType,
 		Name:      name,
@@ -759,6 +771,7 @@ func (s *Storage) StoreRelationship(fromID, toID int64, relationType, eventID st
 	now := time.Now()
 
 	rec := relationshipRecord{
+		ProjectID:    s.projectID,
 		ID:           id,
 		FromEntityID: fromID,
 		ToEntityID:   toID,
@@ -944,7 +957,7 @@ func (s *Storage) StoreInsightFull(eventID, category, summary string, importance
 		CreatedAt:  timestamp,
 	}
 
-	rec := insightToRecord(insight, "")
+	rec := insightToRecord(insight, "", s.projectID)
 	if err := appendLine(s.insightFile, rec); err != nil {
 		return fmt.Errorf("failed to store insight: %w", err)
 	}
@@ -1196,7 +1209,7 @@ func (s *Storage) ForgetInsight(id int64) error {
 		return fmt.Errorf("insight not found")
 	}
 
-	rec := insightRecord{Op: "delete", ID: id}
+	rec := insightRecord{ProjectID: s.projectID, Op: "delete", ID: id}
 	if err := appendLine(s.insightFile, rec); err != nil {
 		return fmt.Errorf("failed to delete insight: %w", err)
 	}
@@ -1221,7 +1234,7 @@ func (s *Storage) ForgetInsightsByKeyword(keyword string) (int, error) {
 	}
 
 	for _, id := range toDelete {
-		rec := insightRecord{Op: "delete", ID: id}
+		rec := insightRecord{ProjectID: s.projectID, Op: "delete", ID: id}
 		if err := appendLine(s.insightFile, rec); err != nil {
 			return 0, fmt.Errorf("failed to delete insights: %w", err)
 		}
@@ -1262,7 +1275,7 @@ func (s *Storage) MergeInsights(keepID int64, deleteIDs []int64) (int, error) {
 			tagSet[t] = true
 		}
 		// Append delete op
-		rec := insightRecord{Op: "delete", ID: dupID}
+		rec := insightRecord{ProjectID: s.projectID, Op: "delete", ID: dupID}
 		if err := appendLine(s.insightFile, rec); err != nil {
 			return deleted, fmt.Errorf("failed to delete duplicate: %w", err)
 		}
@@ -1279,7 +1292,7 @@ func (s *Storage) MergeInsights(keepID int64, deleteIDs []int64) (int, error) {
 	keeper.Tags = uniqueTags
 
 	// Append update op
-	rec := insightToRecord(keeper, "update")
+	rec := insightToRecord(keeper, "update", s.projectID)
 	if err := appendLine(s.insightFile, rec); err != nil {
 		return deleted, fmt.Errorf("failed to update representative tags: %w", err)
 	}
@@ -1299,7 +1312,7 @@ func (s *Storage) MarkInsightRetrieved(id int64) error {
 
 	ins.WasRetrieved = true
 
-	rec := insightToRecord(ins, "update")
+	rec := insightToRecord(ins, "update", s.projectID)
 	if err := appendLine(s.insightFile, rec); err != nil {
 		return fmt.Errorf("failed to mark insight as retrieved: %w", err)
 	}
@@ -1323,7 +1336,7 @@ func (s *Storage) MarkInsightsRetrieved(ids []int64) error {
 		}
 		ins.WasRetrieved = true
 
-		rec := insightToRecord(ins, "update")
+		rec := insightToRecord(ins, "update", s.projectID)
 		if err := appendLine(s.insightFile, rec); err != nil {
 			return fmt.Errorf("failed to mark insight %d as retrieved: %w", id, err)
 		}
@@ -1359,6 +1372,7 @@ func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector 
 	defer s.mu.Unlock()
 
 	entry := &embeddingEntry{
+		ProjectID:   s.projectID,
 		ContentID:   contentID,
 		ContentType: contentType,
 		Vector:      vector,
@@ -1479,6 +1493,7 @@ func (s *Storage) CreateOrUpdateSession(sessionID, initialPrompt, lastAction, pr
 		existing.LastActionAt = now
 
 		rec := sessionRecord{
+			ProjectID:     s.projectID,
 			Op:            "update",
 			ID:            existing.ID,
 			SessionID:     sessionID,
@@ -1508,6 +1523,7 @@ func (s *Storage) CreateOrUpdateSession(sessionID, initialPrompt, lastAction, pr
 	}
 
 	rec := sessionRecord{
+		ProjectID:     s.projectID,
 		ID:            id,
 		SessionID:     sessionID,
 		StartedAt:     now,
@@ -1548,6 +1564,7 @@ func (s *Storage) UpdateSessionLastAction(sessionID, lastAction string) error {
 	existing.LastActionAt = time.Now()
 
 	rec := sessionRecord{
+		ProjectID:     s.projectID,
 		Op:            "update",
 		ID:            existing.ID,
 		SessionID:     sessionID,
@@ -1660,7 +1677,7 @@ func (s *Storage) Compact() error {
 	// Compact insights (most likely to have deletes/updates)
 	var liveInsights []insightRecord
 	for _, ins := range s.insights {
-		liveInsights = append(liveInsights, insightToRecord(ins, ""))
+		liveInsights = append(liveInsights, insightToRecord(ins, "", s.projectID))
 	}
 	insightsPath := filepath.Join(s.dataDir, "insights.jsonl")
 	if err := atomicRewrite(insightsPath, liveInsights); err != nil {
@@ -1678,6 +1695,7 @@ func (s *Storage) Compact() error {
 	var liveEntities []entityRecord
 	for _, e := range s.entities {
 		liveEntities = append(liveEntities, entityRecord{
+			ProjectID: s.projectID,
 			ID: e.ID, Type: e.Type, Name: e.Name,
 			FirstSeen: e.FirstSeen, LastSeen: e.LastSeen,
 		})
@@ -1696,6 +1714,7 @@ func (s *Storage) Compact() error {
 	var liveSessions []sessionRecord
 	for _, sess := range s.sessions {
 		liveSessions = append(liveSessions, sessionRecord{
+			ProjectID: s.projectID,
 			ID: sess.ID, SessionID: sess.SessionID, StartedAt: sess.StartedAt,
 			InitialPrompt: sess.InitialPrompt, EventCount: sess.EventCount,
 			LastAction: sess.LastAction, LastActionAt: sess.LastActionAt,

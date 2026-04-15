@@ -12,6 +12,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
+	projreg "github.com/dereksantos/cortex/pkg/registry"
 )
 
 // InitCommand implements the init functionality.
@@ -23,10 +24,14 @@ type InstallCommand struct{}
 // UninstallCommand implements the uninstall functionality.
 type UninstallCommand struct{}
 
+// ProjectsCommand lists registered projects.
+type ProjectsCommand struct{}
+
 func init() {
 	Register(&InitCommand{})
 	Register(&InstallCommand{})
 	Register(&UninstallCommand{})
+	Register(&ProjectsCommand{})
 }
 
 // Name returns the command name.
@@ -71,6 +76,22 @@ func (c *InitCommand) Execute(ctx *Context) error {
 	configPath := fmt.Sprintf("%s/.cortex/config.json", projectRoot)
 	if err := cfg.Save(configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	// Register project in global registry (~/.cortex/projects.json)
+	reg, err := projreg.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open global registry: %v\n", err)
+	} else {
+		entry, err := reg.Register(projectRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not register project: %v\n", err)
+		} else {
+			cfg.ProjectID = entry.ID
+			// Re-save config with project ID
+			_ = cfg.Save(configPath)
+			fmt.Printf("   Registered as project %q in ~/.cortex/\n", entry.ID)
+		}
 	}
 
 	// Add .cortex/ to .gitignore if it exists
@@ -144,6 +165,19 @@ func (c *InstallCommand) Execute(ctx *Context) error {
 	contextDir := filepath.Join(projectRoot, ".cortex")
 	if err := os.MkdirAll(contextDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .cortex directory: %w", err)
+	}
+
+	// 2b. Register project in global registry
+	reg, err := projreg.Open()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open global registry: %v\n", err)
+	} else {
+		entry, regErr := reg.Register(projectRoot)
+		if regErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not register project: %v\n", regErr)
+		} else {
+			fmt.Printf("Registered project %q in ~/.cortex/\n", entry.ID)
+		}
 	}
 
 	// 3. Ensure .claude/ directory exists in project
@@ -436,6 +470,52 @@ func (c *UninstallCommand) Execute(ctx *Context) error {
 	} else {
 		fmt.Println("Nothing to uninstall.")
 	}
+
+	return nil
+}
+
+// Name returns the command name.
+func (c *ProjectsCommand) Name() string { return "projects" }
+
+// Description returns the command description.
+func (c *ProjectsCommand) Description() string { return "List registered projects" }
+
+// Execute runs the projects command.
+func (c *ProjectsCommand) Execute(ctx *Context) error {
+	for _, arg := range ctx.Args {
+		if arg == "-h" || arg == "--help" {
+			fmt.Println("Usage: cortex projects")
+			fmt.Println("\nList all projects registered in ~/.cortex/projects.json")
+			return nil
+		}
+	}
+
+	reg, err := projreg.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open registry: %w", err)
+	}
+
+	projects := reg.List()
+	if len(projects) == 0 {
+		fmt.Println("No projects registered.")
+		fmt.Println("Run 'cortex init' in a project directory to register it.")
+		return nil
+	}
+
+	fmt.Printf("Registered projects (%d):\n\n", len(projects))
+	for _, p := range projects {
+		status := "  "
+		// Check if project has a local queue with pending events
+		queueDir := filepath.Join(p.Path, ".cortex", "queue", "pending")
+		if entries, err := os.ReadDir(queueDir); err == nil && len(entries) > 0 {
+			status = "● "
+		}
+		fmt.Printf("  %s%-16s  %s\n", status, p.ID, p.Path)
+		if p.GitRemote != "" {
+			fmt.Printf("    %-16s  %s\n", "", p.GitRemote)
+		}
+	}
+	fmt.Println()
 
 	return nil
 }

@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/registry"
 )
 
 //go:embed dashboard.html
@@ -40,6 +43,7 @@ func New(cfg *config.Config, store *storage.Storage, port int) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/events", s.handleSSE)
 
 	s.httpServer = &http.Server{
@@ -82,6 +86,38 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	data := BuildDashboardData(s.cfg, s.store)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// handleProjects returns the list of registered projects.
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	type projectInfo struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Path         string `json:"path"`
+		LastActive   string `json:"last_active"`
+		HasPending   bool   `json:"has_pending"`
+	}
+
+	var projects []projectInfo
+	if reg, err := registry.Open(); err == nil {
+		for _, p := range reg.List() {
+			info := projectInfo{
+				ID:         p.ID,
+				Name:       p.Name,
+				Path:       p.Path,
+				LastActive: p.LastActive.Format(time.RFC3339),
+			}
+			// Check for pending events
+			pendingDir := filepath.Join(p.Path, ".cortex", "queue", "pending")
+			if entries, err := os.ReadDir(pendingDir); err == nil && len(entries) > 0 {
+				info.HasPending = true
+			}
+			projects = append(projects, info)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(projects)
 }
 
 // handleSSE streams dashboard state to the client via Server-Sent Events.
