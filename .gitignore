@@ -198,6 +198,14 @@ Thumbs.db
 temp/
 tmp/
 
+# Cortex runtime artifacts at repo root
+/cortex
+/cortex-*
+daemon_state.json
+session.json
+/db/
+/logs/
+
 # User-specific config (keep templates)
 config.local.yaml
 settings.local.json

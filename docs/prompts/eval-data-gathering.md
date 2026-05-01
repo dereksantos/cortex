@@ -21,7 +21,7 @@ brew services start grafana
 2. Search for "SQLite" (install plugin if needed: `grafana-cli plugins install frser-sqlite-datasource`)
 3. Configure:
    - Name: `cortex-evals`
-   - Path: `/Users/dereksantos/eng/projects/cortex/.cortex/db/evals.db`
+   - Path: `~/.cortex/db/evals.db` (or `$PROJECT_ROOT/.cortex/db/evals.db` if using a per-project store)
 4. Save & Test
 
 ## Models to Test
