@@ -1,6 +1,12 @@
 # Cortex
 
+[![CI](https://github.com/dereksantos/cortex/actions/workflows/test.yml/badge.svg)](https://github.com/dereksantos/cortex/actions/workflows/test.yml)
+[![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A context broker that captures development insights and injects them into AI coding assistants.
+
+> **Status: Public alpha.** The core capture → store → retrieve → inject pipeline works and is in daily use. The cognitive eval framework currently reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Expect rough edges. Issues and PRs welcome.
 
 ## Problem
 
@@ -34,6 +40,8 @@ Capture → Filter → Store → Retrieve → Inject
 **Inject**: Format context for consumption by AI tools
 
 ## Quick Start with Claude Code
+
+**Prerequisites:** Go 1.25+. Either Ollama (local, free) running at `http://localhost:11434`, or `ANTHROPIC_API_KEY` set. Capture and search work without any LLM, but Reflect/Dream modes need one.
 
 ```bash
 go build ./cmd/cortex
@@ -158,9 +166,10 @@ cortex/
 
 Cortex stores data in `~/.cortex/` (global) and `.context/` (per-project).
 
-LLM providers:
-- **Anthropic**: Set `ANTHROPIC_API_KEY`
-- **Ollama**: Local inference at `http://localhost:11434`
+LLM providers (either, or none):
+- **Ollama** (recommended for first-time users): local inference at `http://localhost:11434`. Free, runs on your machine.
+- **Anthropic**: set `ANTHROPIC_API_KEY`. Higher quality, paid.
+- **No LLM**: capture and search still work; only Reflect/Dream and LLM-driven insight extraction are skipped.
 
 ## Current Status
 
@@ -186,9 +195,11 @@ Key metrics from initial evaluation:
 ## Documentation
 
 - [CLAUDE.md](CLAUDE.md) - Developer guide for AI assistants
-- [ABSTRACT.md](ABSTRACT.md) - Implementation paper with evaluation results
-- [OnContextEvolution.md](OnContextEvolution.md) - Theoretical foundations
 - [ROADMAP.md](ROADMAP.md) - Development status and gaps
+- [docs/abstract.md](docs/abstract.md) - Implementation paper with evaluation results
+- [docs/context-evolution.md](docs/context-evolution.md) - Theoretical foundations
+- [docs/product.md](docs/product.md) - Detailed product documentation
+- [docs/eval.md](docs/eval.md) - Evaluation methodology
 
 ## Development
 

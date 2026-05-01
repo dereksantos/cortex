@@ -440,4 +440,4 @@ Existing benchmarks ask "did the agent complete the task?" Cortex asks "did the 
 
 ---
 
-*This is a systems paper describing the Cortex implementation. For theoretical foundations, see "On Context Evolution" [0]. For product documentation, see CORTEX.md.*
+*This is a systems paper describing the Cortex implementation. For theoretical foundations, see [context-evolution.md](context-evolution.md) [0]. For product documentation, see [product.md](product.md).*

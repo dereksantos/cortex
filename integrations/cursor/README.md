@@ -1,8 +1,8 @@
 # Cursor Integration for Cortex
 
-This integration allows Cortex to capture development context from Cursor IDE via LSP (Language Server Protocol) notifications.
+> **Status: Planned, not yet functional.** This document describes the intended integration approach. The Go adapter (`adapter.go`) exists, but no shipping Cursor extension or LSP bridge has been built or tested end-to-end. The MCP-server path (see bottom) is the most likely route once the MCP server is validated. Treat the setup methods below as design notes, not working instructions.
 
-## Setup Methods
+## Setup Methods (planned)
 
 ### Method 1: Direct LSP Integration (Recommended)
 

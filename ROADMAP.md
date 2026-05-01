@@ -1,10 +1,27 @@
 # Cortex Roadmap
 
-**Last Updated:** January 2026
-**Current Status:** Semantic Search Working, ABR Optimization
+**Last Updated:** April 2026
+**Status:** Public alpha. Core pipeline working; ABR optimization ongoing.
 **North Stars:** ABR ≥ 0.9 | Token Cost Reduction over time
 
 ---
+
+## What's Working
+
+- Capture → store → retrieve → inject pipeline (used daily in development of Cortex itself)
+- All five cognitive modes implemented (Reflex, Reflect, Resolve, Think, Dream)
+- Multi-project support via global daemon and shared `~/.cortex/`
+- Eval framework with SQLite persistence and 7 active scenarios
+- Claude Code integration (hooks, slash commands, status line)
+- MCP server skeleton (untested at scale)
+
+## What's Early or Aspirational
+
+- **Cursor integration:** design-only; no shipping extension yet
+- **MCP server:** wired up but not validated against real external clients
+- **Slash-command UX:** functional but rough; some output is stubby
+- **Embedding model:** still all-MiniLM-L6-v2 (upgrade is the largest known ABR lever)
+- **ABR:** 0.77 against a target of 0.9
 
 ## Current Eval Results
 

@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] / [0.2.0-alpha]
+
+### Added
+- **Multi-project support** via single global daemon at `~/.cortex/`
+- New `pkg/registry` package: project registry stored at `~/.cortex/projects.json` with slug generation and git-remote detection
+- Layered config loading via `config.LoadGlobal()` — global `~/.cortex/config.json` provides defaults, per-project config overlays
+- Cross-project Dream sources for discovery across all registered projects
+- Dashboard `/api/projects` endpoint and project list in sidebar
+- `SECURITY.md` with vulnerability disclosure policy
+- GitHub issue and pull-request templates under `.github/`
+- README status badges (CI, Go version, license)
+
+### Changed
+- **BREAKING:** Daemon is now global (single PID) instead of per-project. Existing users should remove old per-project daemon state and re-init.
+- JSONL records are now tagged with `project_id` for cross-project coexistence
+- Capture command walks up directories to find the project root and routes to that project's queue
+- README reframed as **public alpha** with honest scope ("what works" / "what's early")
+- ROADMAP updated to April 2026 with current status
+- Long-form docs (`ABSTRACT.md`, `OnContextEvolution.md`, `CORTEX.md`, `eval.md`) moved into `docs/` as lowercase filenames
+- Cursor integration README clearly marked "Planned, not yet functional"
+
+### Fixed
+- Removed a hardcoded personal path from `docs/prompts/eval-data-gathering.md`
+- `.gitignore` now covers root-level runtime artifacts (`/cortex` binary, `daemon_state.json`, `session.json`, `/db/`, `/logs/`)
+
+### Internal
+- Stale internal working docs moved to `docs/archive/` (architecture review, pre-launch checklist, paper-references TODO)
+
+---
+
 ## [0.1.0] - 2025-01-15
 
 ### Added
