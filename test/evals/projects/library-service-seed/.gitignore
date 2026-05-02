@@ -1,0 +1,5 @@
+# Build artifacts — the eval harness copies this seed elsewhere; never build in place.
+/server
+*.exe
+*.db
+*.db-journal
