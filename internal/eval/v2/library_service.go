@@ -2,12 +2,17 @@
 //
 // See test/evals/library-service/SPEC.md for the design.
 //
-// This file is a stub. Implementation TODOs are noted inline.
+// The Run pipeline is still a stub (Plans 02–04). Score is implemented per
+// Plan 01 — handler/test files are discovered in the workdir and scored
+// against the rubric in test/evals/library-service/rubric.md.
 package eval
 
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"path/filepath"
+	"strings"
 )
 
 // LibraryServiceCondition identifies a comparison condition (baseline, cortex, etc.).
@@ -39,19 +44,19 @@ type SessionResult struct {
 
 // LibraryServiceScore aggregates the rubric metrics defined in rubric.md.
 type LibraryServiceScore struct {
-	ShapeSimilarity   float64 // 0..1, higher is better. Headline metric.
-	NamingAdherence   float64 // 0..1, S2-S5 vs S1
-	SmellDensity      float64 // smells per 100 LOC, lower is better
-	TestParity        float64 // 0..1
-	EndToEndPassRate  float64 // 0..1, fraction of 25 endpoints returning expected status
-	RefactorDeltaPct  float64 // optional; -1 if not measured
+	ShapeSimilarity  float64 // 0..1, higher is better. Headline metric.
+	NamingAdherence  float64 // 0..1, S2-S5 vs S1
+	SmellDensity     float64 // weighted smells per 100 LOC, lower is better
+	TestParity       float64 // 0..1
+	EndToEndPassRate float64 // 0..1, fraction of 25 endpoints returning expected status
+	RefactorDeltaPct float64 // optional; -1 if not measured
 }
 
 // LibraryServiceEvaluator drives the full eval across conditions.
 type LibraryServiceEvaluator struct {
-	specDir       string // test/evals/library-service
-	seedProject   string // test/evals/projects/library-service-seed
-	verbose       bool
+	specDir     string // test/evals/library-service
+	seedProject string // test/evals/projects/library-service-seed
+	verbose     bool
 }
 
 // NewLibraryServiceEvaluator constructs an evaluator pointing at the eval files on disk.
@@ -74,29 +79,101 @@ func NewLibraryServiceEvaluator(specDir, seedProject string) *LibraryServiceEval
 //     d. Run go build ./... and go test ./... in the workdir
 //     e. Capture SessionResult
 //  3. After S5 completes, score the final repo per rubric.md (see Score below)
+//
+// See test/evals/library-service/plans/02-session-runner.md for design.
 func (e *LibraryServiceEvaluator) Run(ctx context.Context, cond LibraryServiceCondition, model string) (*LibraryServiceRun, error) {
-	return nil, fmt.Errorf("not implemented: see SPEC.md and rubric.md for design")
+	return nil, fmt.Errorf("not implemented: see plans/02-session-runner.md")
 }
 
-// Score computes LibraryServiceScore for a completed workdir.
+// Score computes LibraryServiceScore for a completed workdir per rubric.md.
 //
-// TODO(impl):
-//   - ShapeSimilarity: pairwise cosine over AST-derived feature vectors of the 5
-//     handler files. Use go/ast + go/parser; build feature vector per file
-//     (function shapes, error-call sites, response patterns, etc.).
-//   - NamingAdherence: extract identifier patterns from the books resource files;
-//     scan S2-S5 files for adherence percentage.
-//   - SmellDensity: traverse all generated .go files, count cyclomatic complexity
-//     per function, function length, nesting depth, magic numbers; normalize per
-//     100 LOC.
-//   - TestParity: detect test files per resource, compare setup/assertion shape
-//     to books test file.
-//   - EndToEndPassRate: spin up the built binary, hit all 25 endpoints, count
-//     pass rate. Reuse internal/web or just net/http.
-//   - RefactorDeltaPct: optional; uses a frontier model to rewrite for cohesion
-//     and diffs against actual.
+// Implements the 4 MVP rubric metrics defined in plans/01-scorer.md:
+//   - ShapeSimilarity (headline) — pairwise cosine over AST-derived feature vectors
+//   - NamingAdherence — S1's identifier templates vs S2–S5
+//   - SmellDensity   — weighted cyclomatic / length / nesting / magic-literal smells
+//   - TestParity     — setup/table-driven/assertion-idiom match against S1's tests
+//
+// EndToEndPassRate stays at 0 until plans/04-integration-test.md lands.
+// RefactorDeltaPct stays at -1 (optional rubric metric).
 func (e *LibraryServiceEvaluator) Score(ctx context.Context, workDir string) (LibraryServiceScore, error) {
-	return LibraryServiceScore{RefactorDeltaPct: -1}, fmt.Errorf("not implemented: see rubric.md")
+	score := LibraryServiceScore{RefactorDeltaPct: -1}
+
+	discovered, err := discoverResourceFiles(workDir)
+	if err != nil {
+		return score, fmt.Errorf("discover files: %w", err)
+	}
+
+	// S1 by convention is the first resource (books) — it establishes the patterns
+	// that subsequent sessions are expected to follow.
+	s1Resource := LibraryResources[0]
+
+	var (
+		handlers       []string // one handler file per resource, in LibraryResources order
+		allGoFiles     []string // every handler + test file we found, for smell density
+		s1Handler      string
+		s1TestFile     string
+		otherHandlers  []string
+		otherTestFiles []string
+	)
+
+	for _, r := range LibraryResources {
+		rf := discovered[r]
+		if rf == nil {
+			continue
+		}
+		allGoFiles = append(allGoFiles, rf.Handlers...)
+		allGoFiles = append(allGoFiles, rf.Tests...)
+		if len(rf.Handlers) == 0 {
+			continue
+		}
+		// Pick the first handler/test file. With multiple matches per resource
+		// (e.g., a storage layer file also containing the resource name), this
+		// is a best-effort heuristic. Refine once real session output exists.
+		picked := rf.Handlers[0]
+		handlers = append(handlers, picked)
+		if r == s1Resource {
+			s1Handler = picked
+			if len(rf.Tests) > 0 {
+				s1TestFile = rf.Tests[0]
+			}
+			continue
+		}
+		otherHandlers = append(otherHandlers, picked)
+		if len(rf.Tests) > 0 {
+			otherTestFiles = append(otherTestFiles, rf.Tests[0])
+		}
+	}
+
+	if len(handlers) >= 2 {
+		s, err := shapeSimilarity(handlers)
+		if err != nil {
+			return score, fmt.Errorf("shape similarity: %w", err)
+		}
+		score.ShapeSimilarity = s
+	}
+	if s1Handler != "" && len(otherHandlers) > 0 {
+		s, err := namingAdherence(s1Handler, otherHandlers)
+		if err != nil {
+			return score, fmt.Errorf("naming adherence: %w", err)
+		}
+		score.NamingAdherence = s
+	}
+	if len(allGoFiles) > 0 {
+		s, err := smellDensity(allGoFiles)
+		if err != nil {
+			return score, fmt.Errorf("smell density: %w", err)
+		}
+		score.SmellDensity = s
+	}
+	if s1TestFile != "" && len(otherTestFiles) > 0 {
+		s, err := testParity(s1TestFile, otherTestFiles)
+		if err != nil {
+			return score, fmt.Errorf("test parity: %w", err)
+		}
+		score.TestParity = s
+	}
+
+	return score, nil
 }
 
 // CompareRuns produces the headline comparison: did Cortex move shape similarity
@@ -108,4 +185,71 @@ func CompareRuns(baseline, cortex *LibraryServiceRun, frontier *LibraryServiceRu
 	_ = cortex
 	_ = frontier
 	return "not implemented"
+}
+
+// resourceFiles groups the handler and test files associated with one resource.
+type resourceFiles struct {
+	Handlers []string
+	Tests    []string
+}
+
+// discoverResourceFiles walks workDir and groups .go files by which library
+// resource they belong to. Membership is determined by basename or parent
+// directory name containing the resource word (singular or plural).
+//
+// Heuristic, not authoritative. Real session output may locate files in
+// unexpected layouts (e.g., a storage file named books.go in addition to a
+// handler books.go). The first file matched per resource wins downstream.
+func discoverResourceFiles(workDir string) (map[string]*resourceFiles, error) {
+	out := make(map[string]*resourceFiles, len(LibraryResources))
+	for _, r := range LibraryResources {
+		out[r] = &resourceFiles{}
+	}
+
+	skipDirs := map[string]bool{
+		"vendor": true, "node_modules": true, ".git": true,
+		"testdata": true, ".cortex": true, ".claude": true,
+	}
+
+	err := filepath.WalkDir(workDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		base := strings.ToLower(filepath.Base(path))
+		dir := strings.ToLower(filepath.Base(filepath.Dir(path)))
+		isTest := strings.HasSuffix(base, "_test.go")
+		for _, r := range LibraryResources {
+			singular := singularize(r)
+			if !containsWord(base, r) && !containsWord(base, singular) &&
+				!containsWord(dir, r) && !containsWord(dir, singular) {
+				continue
+			}
+			if isTest {
+				out[r].Tests = append(out[r].Tests, path)
+			} else {
+				out[r].Handlers = append(out[r].Handlers, path)
+			}
+			return nil
+		}
+		return nil
+	})
+	return out, err
+}
+
+// containsWord is a small wrapper so the discovery heuristic can be tightened
+// later without touching every call site (e.g., to require word boundaries).
+func containsWord(haystack, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	return strings.Contains(haystack, needle)
 }
