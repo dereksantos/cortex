@@ -105,3 +105,7 @@ internal/eval/v2/library_service.go
 ## Status
 
 Scaffolded. Harness implementation is stub-only — runner, scorer, and reporter are all TODO.
+
+## Implementation plans
+
+The remaining work is broken into four self-contained plans in [`plans/`](plans/README.md). Each plan can be picked up by a fresh session with no prior context. Plans 01 and 04 are fully independent and can be implemented in parallel.
