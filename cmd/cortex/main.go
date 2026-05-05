@@ -58,7 +58,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-	case "info", "test", "stats", "status", "forget", "overview":
+	case "info", "test", "stats", "status", "forget", "overview", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {

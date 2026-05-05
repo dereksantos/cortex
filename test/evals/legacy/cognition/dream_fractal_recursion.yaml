@@ -1,0 +1,25 @@
+id: dream-fractal-recursion
+type: dream
+name: "Dream zooms in on regions that yield insight"
+description: |
+  Verify that an item which produces a high-signal insight in cycle N
+  causes neighbor regions of the same file to be sampled in cycle N+1
+  via the FollowUpQueue. The presence of any item with
+  `parent_item_id != ""` in the cycle-N+1 sample is the signal.
+
+dream_sources:
+  - project
+
+# Two cycles, second cycle must contain at least one follow-up item.
+cycles: 2
+
+# Soft floor — at least one follow-up should fire when at least one
+# insight landed in cycle 1.
+expected_followups_min: 1
+
+# Insight floor across both cycles combined.
+expected_insights: 2
+
+# Budget must be respected across both cycles (follow-up sub-budget
+# included).
+budget_must_respect: true
