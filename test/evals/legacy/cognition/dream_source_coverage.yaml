@@ -10,12 +10,12 @@ dream_sources:
   - claude-history
   - git
 
-# At least 2 insights should be generated per dream session
-expected_insights: 2
+# At least 3 insights per session — region sampling lifts the floor.
+expected_insights: 3
 
-# At least 50% of sources should be sampled
-# (some sources may be empty, e.g., no claude history or not a git repo)
-expected_coverage: 0.5
+# Yield-weighted budget redistribution + ε-greedy bonus keeps coverage
+# wide across cycles, so 60% of registered sources should appear.
+expected_coverage: 0.6
 
 # Dream should respect budget constraints
 budget_must_respect: true

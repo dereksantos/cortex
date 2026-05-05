@@ -8,11 +8,14 @@ dream_sources:
   - project
   - cortex
 
-# Lower threshold - focus is on budget not quantity
-expected_insights: 1
+# Region-based sampling surfaces more items per cycle, so this floor
+# was raised when Dream became fractal. Budget remains the load-bearing
+# assertion; insight count is a soft floor.
+expected_insights: 2
 
 # Minimal coverage expected
-expected_coverage: 0.25
+expected_coverage: 0.3
 
-# Critical: budget must be respected
+# Critical: budget must be respected (follow-up + source allocation
+# combined must not exceed DreamBudget).
 budget_must_respect: true

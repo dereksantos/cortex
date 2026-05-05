@@ -58,11 +58,15 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	reflex := NewReflex(store, embedder) // embedder can be nil, falls back to text search
 	reflect := NewReflect(provider)      // provider can be nil, Reflect will degrade gracefully
 	think := NewThink(reflex, reflect, activity)
-	dream := NewDream(store, provider, activity)
 	contextDir := ""
 	if cfg != nil {
 		contextDir = cfg.ContextDir
 	}
+	dreamStatePath := ""
+	if contextDir != "" {
+		dreamStatePath = contextDir + "/dream_state.json"
+	}
+	dream := NewDream(store, provider, activity, dreamStatePath)
 	digest := NewDigest(store, contextDir)
 	resolve := NewResolve()
 

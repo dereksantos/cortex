@@ -9,11 +9,13 @@ dream_sources:
   - cortex
   - git
 
-# Expect more insights when we have good content to analyze
-expected_insights: 3
+# With region sampling and novelty dedupe, expect more discoveries per
+# cycle (windows of large files surface signal that was previously
+# truncated away).
+expected_insights: 5
 
 # Full coverage not required - focus is on insight quality
-expected_coverage: 0.3
+expected_coverage: 0.4
 
 # Budget must be respected
 budget_must_respect: true
