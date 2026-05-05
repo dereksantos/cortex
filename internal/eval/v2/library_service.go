@@ -87,14 +87,17 @@ func (e *LibraryServiceEvaluator) Run(ctx context.Context, cond LibraryServiceCo
 
 // Score computes LibraryServiceScore for a completed workdir per rubric.md.
 //
-// Implements the 4 MVP rubric metrics defined in plans/01-scorer.md:
-//   - ShapeSimilarity (headline) — pairwise cosine over AST-derived feature vectors
-//   - NamingAdherence — S1's identifier templates vs S2–S5
-//   - SmellDensity   — weighted cyclomatic / length / nesting / magic-literal smells
-//   - TestParity     — setup/table-driven/assertion-idiom match against S1's tests
+// Implements the 5 MVP rubric metrics defined in plans/01-scorer.md and
+// plans/04-integration-test.md:
+//   - ShapeSimilarity  (headline) — pairwise cosine over AST-derived feature vectors
+//   - NamingAdherence  — S1's identifier templates vs S2–S5
+//   - SmellDensity     — weighted cyclomatic / length / nesting / magic-literal smells
+//   - TestParity       — setup/table-driven/assertion-idiom match against S1's tests
+//   - EndToEndPassRate — fraction of 25 endpoints returning expected status class
+//     against the built cmd/server. An e2e error never aborts the rubric;
+//     the metric records 0 and other metrics remain valid.
 //
-// EndToEndPassRate stays at 0 until plans/04-integration-test.md lands.
-// RefactorDeltaPct stays at -1 (optional rubric metric).
+// RefactorDeltaPct stays at -1 (optional rubric metric, deferred).
 func (e *LibraryServiceEvaluator) Score(ctx context.Context, workDir string) (LibraryServiceScore, error) {
 	score := LibraryServiceScore{RefactorDeltaPct: -1}
 
@@ -171,6 +174,13 @@ func (e *LibraryServiceEvaluator) Score(ctx context.Context, workDir string) (Li
 			return score, fmt.Errorf("test parity: %w", err)
 		}
 		score.TestParity = s
+	}
+
+	// e2e is best-effort: a build/start failure must not poison the rubric.
+	// Other metrics already reflect cohesion regardless of whether the binary
+	// happens to run.
+	if rate, err := endToEndPassRate(workDir); err == nil {
+		score.EndToEndPassRate = rate
 	}
 
 	return score, nil

@@ -73,8 +73,14 @@ func TestLibraryServiceScore_FixtureThresholds(t *testing.T) {
 	if cohesive.RefactorDeltaPct != -1 {
 		t.Errorf("RefactorDeltaPct = %.3f, want -1 (deferred)", cohesive.RefactorDeltaPct)
 	}
-	if cohesive.EndToEndPassRate != 0 {
-		t.Errorf("EndToEndPassRate = %.3f, want 0 (deferred to Plan 04)", cohesive.EndToEndPassRate)
+	// Plan 04 is wired into Score now: cohesive fixture has a runnable
+	// cmd/server; diverged is parse-only (no go.mod, no cmd/server) so e2e
+	// is skipped and stays at 0.
+	if cohesive.EndToEndPassRate != 1.0 {
+		t.Errorf("cohesive EndToEndPassRate = %.3f, want 1.0", cohesive.EndToEndPassRate)
+	}
+	if diverged.EndToEndPassRate != 0 {
+		t.Errorf("diverged EndToEndPassRate = %.3f, want 0 (no cmd/server)", diverged.EndToEndPassRate)
 	}
 }
 
