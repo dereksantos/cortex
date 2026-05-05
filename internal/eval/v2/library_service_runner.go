@@ -394,6 +394,13 @@ func NewClaudeCLIHarness(binary, model string) (*ClaudeCLIHarness, error) {
 // cancellation but do not impose our own timeout. On cancel, the subprocess
 // group gets SIGTERM with a 2s grace period before SIGKILL.
 func (h *ClaudeCLIHarness) RunSession(ctx context.Context, prompt, workdir string) error {
+	// --bare strips hooks, auto-memory, plugin sync, CLAUDE.md auto-discovery,
+	// and other per-machine state. Critical for eval validity: without it the
+	// user's installed Cortex hooks fire on every session, contaminating both
+	// conditions with passive Cortex capture and making "baseline" not really
+	// a baseline. With --bare, the cortex condition's lift over baseline is
+	// strictly attributable to the explicit preamble injected by CortexInjector.
+	//
 	// --permission-mode=bypassPermissions is required: in -p (print) mode
 	// without it, Edit/Write/Bash tool calls get auto-denied because there's
 	// no human to confirm them. The eval workdir is a fresh tempdir copy of
@@ -401,6 +408,7 @@ func (h *ClaudeCLIHarness) RunSession(ctx context.Context, prompt, workdir strin
 	// affect the workdir.
 	args := []string{
 		"-p", prompt,
+		"--bare",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",
