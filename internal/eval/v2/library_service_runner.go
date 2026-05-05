@@ -16,12 +16,21 @@ import (
 	"time"
 )
 
-// runSessions copies the seed into a fresh workdir, drives all session prompts
-// via h sequentially, and Scores the final state. Plan 02 contract — see
-// library_service.go for the public entrypoints.
-func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryServiceCondition, model string, h Harness) (*LibraryServiceRun, error) {
+// runSessions copies the seed into a fresh workdir, drives all session
+// prompts via h sequentially (consulting inj before/after each), and
+// Scores the final state. See library_service.go for the public
+// entrypoints.
+//
+// Plan 03 added the injector seam: before each session, inj.Preamble is
+// prepended to the session prompt; after each session, inj.Record is
+// invoked with the SessionResult so Cortex (or whatever inj wraps) can
+// learn from what was just produced.
+func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryServiceCondition, model string, h Harness, inj Injector) (*LibraryServiceRun, error) {
 	if h == nil {
 		return nil, errors.New("harness is nil")
+	}
+	if inj == nil {
+		inj = NoOpInjector{}
 	}
 	if e.seedProject == "" {
 		return nil, errors.New("evaluator missing seedProject")
@@ -49,18 +58,36 @@ func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryS
 		WorkDir:   workdir,
 	}
 
-	for _, p := range prompts {
+	for idx, p := range prompts {
 		if err := ctx.Err(); err != nil {
 			return run, err
 		}
-		sr, err := e.runOneSession(ctx, h, workdir, p)
+
+		preamble, perr := inj.Preamble(ctx, idx, workdir)
+		if perr != nil {
+			return run, fmt.Errorf("session %s: preamble: %w", p.id, perr)
+		}
+		wrapped := p
+		if preamble != "" {
+			wrapped.body = preamble + "\n" + p.body
+			if e.verbose {
+				fmt.Printf("S%s: prepended preamble (%d bytes)\n--- preamble ---\n%s--- /preamble ---\n",
+					p.id, len(preamble), preamble)
+			}
+		}
+
+		sr, runErr := e.runOneSession(ctx, h, workdir, wrapped)
 		// Always record what we managed to capture before the error so
 		// callers can see how far the run got.
 		if sr.SessionID != "" {
 			run.SessionLog = append(run.SessionLog, sr)
 		}
-		if err != nil {
-			return run, fmt.Errorf("session %s: %w", p.id, err)
+		if runErr != nil {
+			return run, fmt.Errorf("session %s: %w", p.id, runErr)
+		}
+
+		if rerr := inj.Record(ctx, idx, workdir, sr); rerr != nil {
+			return run, fmt.Errorf("session %s: record: %w", p.id, rerr)
 		}
 	}
 
