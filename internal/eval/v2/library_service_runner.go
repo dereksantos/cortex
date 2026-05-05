@@ -394,11 +394,17 @@ func NewClaudeCLIHarness(binary, model string) (*ClaudeCLIHarness, error) {
 // cancellation but do not impose our own timeout. On cancel, the subprocess
 // group gets SIGTERM with a 2s grace period before SIGKILL.
 func (h *ClaudeCLIHarness) RunSession(ctx context.Context, prompt, workdir string) error {
+	// --permission-mode=bypassPermissions is required: in -p (print) mode
+	// without it, Edit/Write/Bash tool calls get auto-denied because there's
+	// no human to confirm them. The eval workdir is a fresh tempdir copy of
+	// the seed, so bypassing permissions is safe — the model can only
+	// affect the workdir.
 	args := []string{
 		"-p", prompt,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",
+		"--permission-mode", "bypassPermissions",
 	}
 	if h.model != "" {
 		args = append(args, "--model", h.model)
