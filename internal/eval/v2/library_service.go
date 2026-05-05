@@ -181,6 +181,41 @@ func (e *LibraryServiceEvaluator) RunWithHarness(ctx context.Context, cond Libra
 	return e.RunWithInjector(ctx, cond, model, h, NoOpInjector{})
 }
 
+// RunCortexWithHarness drives the cortex condition (isolated cortex state
+// dir + CortexInjector) but lets the caller supply the harness. The
+// existing Run() method is hardcoded to ClaudeCLIHarness; this method
+// exists so Plan 05's AiderHarness (and any future harness) can run the
+// cortex condition without duplicating the injector-setup boilerplate.
+//
+// Mirrors the ConditionCortex branch of Run() exactly — same binary
+// resolution, same isolated state dir, same CortexStateDir bookkeeping.
+func (e *LibraryServiceEvaluator) RunCortexWithHarness(ctx context.Context, model string, h Harness) (*LibraryServiceRun, error) {
+	binary, err := resolveCortexBinary()
+	if err != nil {
+		return nil, fmt.Errorf("resolve cortex binary: %w", err)
+	}
+	stateDir, err := newCortexStateDir()
+	if err != nil {
+		return nil, fmt.Errorf("create cortex state dir: %w", err)
+	}
+	var opts []CortexInjectorOption
+	if e.verbose {
+		opts = append(opts, WithVerbose(nil))
+	}
+	injector, err := NewCortexInjector(binary, stateDir, opts...)
+	if err != nil {
+		_ = os.RemoveAll(stateDir)
+		return nil, fmt.Errorf("init cortex injector: %w", err)
+	}
+	run, runErr := e.RunWithInjector(ctx, ConditionCortex, model, h, injector)
+	if run != nil {
+		run.CortexStateDir = stateDir
+	} else {
+		_ = os.RemoveAll(stateDir)
+	}
+	return run, runErr
+}
+
 // RunWithInjector is the Plan 03 seam: wraps the harness in an injector
 // that prepends a Cortex-mined preamble to each session's prompt and
 // captures the session's output back into Cortex when it finishes.
