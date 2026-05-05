@@ -401,6 +401,13 @@ func (h *ClaudeCLIHarness) RunSession(ctx context.Context, prompt, workdir strin
 	// a baseline. With --bare, the cortex condition's lift over baseline is
 	// strictly attributable to the explicit preamble injected by CortexInjector.
 	//
+	// HOWEVER: --bare disables OAuth/keychain auth — it requires
+	// ANTHROPIC_API_KEY (or apiKeyHelper via --settings) to authenticate.
+	// On Max-subscription auth (no API key), --bare causes immediate exit 1.
+	// We auto-detect: --bare is included only when ANTHROPIC_API_KEY is in
+	// the env. Operators who want the cleanest comparison should provision
+	// API credits; operators on Max accept the hook-active methodology.
+	//
 	// --permission-mode=bypassPermissions is required: in -p (print) mode
 	// without it, Edit/Write/Bash tool calls get auto-denied because there's
 	// no human to confirm them. The eval workdir is a fresh tempdir copy of
@@ -408,11 +415,13 @@ func (h *ClaudeCLIHarness) RunSession(ctx context.Context, prompt, workdir strin
 	// affect the workdir.
 	args := []string{
 		"-p", prompt,
-		"--bare",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--no-session-persistence",
 		"--permission-mode", "bypassPermissions",
+	}
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		args = append(args, "--bare")
 	}
 	if h.model != "" {
 		args = append(args, "--model", h.model)
