@@ -3,6 +3,22 @@
 **First end-to-end run of the library-service eval.** Snapshot of "the
 pipeline works" rather than a definitive thesis result.
 
+> **Update 2026-05-04 (post-investigation):** The "hooks-active" caveat
+> below was overstated. Cortex's hooks live in
+> `.claude/settings.local.json` (project-local), and Claude CLI loads
+> them via cwd-based discovery. The eval's `claude` subprocesses run
+> with `cwd=tempdir`, which is outside any project tree — so this
+> project's Cortex hooks did NOT actually fire during the run. Verified
+> by inspecting `~/.cortex/queue/pending/` for events from the 22:08-
+> 22:26 window: every event came from the operator's interactive
+> Claude Code session, none from the eval's subprocesses. Treat this
+> run as effectively clean (modulo any global hooks the operator may
+> have installed — none in this case).
+>
+> The `--bare` patch (commit 850e649) and its conditional successor
+> (commit 3cba829) remain valuable as defensive hardening for setups
+> with global hooks, plugins, or different cwd structures.
+
 ## Setup
 
 - **Model**: `claude-haiku-4-5-20251001` (Anthropic-hosted via Claude CLI)
