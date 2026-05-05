@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -31,6 +32,31 @@ type LibraryServiceRun struct {
 	WorkDir    string // path to a fresh copy of library-service-seed
 	SessionLog []SessionResult
 	Score      LibraryServiceScore
+}
+
+// Cleanup removes the run's workdir. The runner deliberately leaves the
+// workdir intact on success so callers can re-Score it; this is the helper
+// they call once they're done.
+func (r *LibraryServiceRun) Cleanup() error {
+	if r == nil || r.WorkDir == "" {
+		return nil
+	}
+	return os.RemoveAll(r.WorkDir)
+}
+
+// Harness drives a single session: invoke the model with prompt against
+// workdir, expecting the model to edit files in workdir directly.
+//
+// Implementations:
+//   - ClaudeCLIHarness        — Plan 02 (this file's runner)
+//   - CortexInjectingHarness  — Plan 03 will wrap a base harness to prepend
+//     Cortex-mined patterns before calling through.
+//
+// Hard errors (binary missing, model unreachable, ctx cancellation) MUST
+// be returned. Soft outcomes (build/test broken after the session) are the
+// runner's concern and are recorded in SessionResult, not returned here.
+type Harness interface {
+	RunSession(ctx context.Context, prompt string, workdir string) error
 }
 
 // SessionResult captures what happened in one session.
@@ -67,22 +93,40 @@ func NewLibraryServiceEvaluator(specDir, seedProject string) *LibraryServiceEval
 	}
 }
 
+// SetVerbose toggles per-session start/end log lines.
+func (e *LibraryServiceEvaluator) SetVerbose(v bool) {
+	e.verbose = v
+}
+
 // Run executes all sessions for the given condition and returns the run with score.
 //
-// TODO(impl):
-//  1. Copy seedProject to a fresh tempdir
-//  2. For each session 01..05:
-//     a. Read sessions/NN-*.md
-//     b. Invoke the configured model (with or without Cortex injection per condition)
-//     c. Apply the model's edits to the workdir (relies on the harness driving an
-//        Edit/Write-tool-capable agent — likely Claude CLI for now)
-//     d. Run go build ./... and go test ./... in the workdir
-//     e. Capture SessionResult
-//  3. After S5 completes, score the final repo per rubric.md (see Score below)
+// Plan 02 (this implementation): only ConditionBaseline is wired. The default
+// Claude CLI harness is constructed from PATH; the runner copies the seed,
+// `git init`s the workdir, drives sessions 01–05 sequentially via the harness,
+// records files-changed / build / test outcomes per session, and finally
+// calls Score against the workdir.
 //
-// See test/evals/library-service/plans/02-session-runner.md for design.
+// Plan 03 territory (NOT handled here): ConditionCortex / ConditionFrontier
+// — those plug a different Harness in (e.g. CortexInjectingHarness wrapping
+// the baseline). Callers writing tests or experimenting with custom harnesses
+// should use RunWithHarness directly. See plans/02-session-runner.md and
+// plans/03-cortex-injection.md for the split.
 func (e *LibraryServiceEvaluator) Run(ctx context.Context, cond LibraryServiceCondition, model string) (*LibraryServiceRun, error) {
-	return nil, fmt.Errorf("not implemented: see plans/02-session-runner.md")
+	if cond != ConditionBaseline {
+		return nil, fmt.Errorf("condition %q not implemented yet (Plan 03 will add Cortex/Frontier harnesses)", cond)
+	}
+	h, err := NewClaudeCLIHarness("", model)
+	if err != nil {
+		return nil, fmt.Errorf("init claude harness: %w", err)
+	}
+	return e.RunWithHarness(ctx, cond, model, h)
+}
+
+// RunWithHarness drives the session loop using the provided harness. It is
+// the seam Plan 03 hooks into to swap in a Cortex-injecting harness without
+// touching the runner.
+func (e *LibraryServiceEvaluator) RunWithHarness(ctx context.Context, cond LibraryServiceCondition, model string, h Harness) (*LibraryServiceRun, error) {
+	return e.runSessions(ctx, cond, model, h)
 }
 
 // Score computes LibraryServiceScore for a completed workdir per rubric.md.
