@@ -125,9 +125,37 @@ func main() {
 		log.Printf("wrote %s", reportFile)
 		fmt.Println()
 		fmt.Println(report)
+	case "3way":
+		// No model invocations; reads existing baseline.json / cortex.json /
+		// frontier.json from --out and emits a 3-way comparison report.
+		baseline := loadRun(filepath.Join(*outDir, "baseline.json"))
+		cortex := loadRun(filepath.Join(*outDir, "cortex.json"))
+		frontier := loadRun(filepath.Join(*outDir, "frontier.json"))
+		report := eval.CompareRuns(baseline, cortex, frontier)
+		reportFile := filepath.Join(*outDir, "compare-3way.md")
+		if err := os.WriteFile(reportFile, []byte(report), 0o644); err != nil {
+			log.Fatalf("write compare: %v", err)
+		}
+		log.Printf("wrote %s", reportFile)
+		fmt.Println()
+		fmt.Println(report)
 	default:
-		log.Fatalf("unknown --cond=%s (want baseline | cortex | frontier | both)", *cond)
+		log.Fatalf("unknown --cond=%s (want baseline | cortex | frontier | both | 3way)", *cond)
 	}
+}
+
+// loadRun reads a previously-written run JSON for the --cond=3way path.
+func loadRun(path string) *eval.LibraryServiceRun {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	var r eval.LibraryServiceRun
+	if err := json.NewDecoder(f).Decode(&r); err != nil {
+		log.Fatalf("decode %s: %v", path, err)
+	}
+	return &r
 }
 
 // runCondition wires the right harness for --harness, then dispatches to
