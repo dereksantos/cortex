@@ -32,16 +32,32 @@ type LibraryServiceRun struct {
 	WorkDir    string // path to a fresh copy of library-service-seed
 	SessionLog []SessionResult
 	Score      LibraryServiceScore
+
+	// CortexStateDir is the isolated cortex global dir used when
+	// Condition == ConditionCortex. Empty for baseline/frontier. Removed
+	// on Cleanup alongside WorkDir.
+	CortexStateDir string
 }
 
-// Cleanup removes the run's workdir. The runner deliberately leaves the
-// workdir intact on success so callers can re-Score it; this is the helper
-// they call once they're done.
+// Cleanup removes the run's workdir (and the cortex state dir, if any).
+// The runner deliberately leaves the workdir intact on success so callers
+// can re-Score it; this is the helper they call once they're done.
 func (r *LibraryServiceRun) Cleanup() error {
-	if r == nil || r.WorkDir == "" {
+	if r == nil {
 		return nil
 	}
-	return os.RemoveAll(r.WorkDir)
+	var firstErr error
+	if r.WorkDir != "" {
+		if err := os.RemoveAll(r.WorkDir); err != nil {
+			firstErr = err
+		}
+	}
+	if r.CortexStateDir != "" {
+		if err := os.RemoveAll(r.CortexStateDir); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Harness drives a single session: invoke the model with prompt against
@@ -100,33 +116,82 @@ func (e *LibraryServiceEvaluator) SetVerbose(v bool) {
 
 // Run executes all sessions for the given condition and returns the run with score.
 //
-// Plan 02 (this implementation): only ConditionBaseline is wired. The default
-// Claude CLI harness is constructed from PATH; the runner copies the seed,
-// `git init`s the workdir, drives sessions 01–05 sequentially via the harness,
-// records files-changed / build / test outcomes per session, and finally
-// calls Score against the workdir.
+// Conditions:
+//   - ConditionBaseline / ConditionFrontier: run sessions with no Cortex
+//     interaction (NoOpInjector). Frontier is "baseline with a bigger
+//     model"; the model dimension is on the caller.
+//   - ConditionCortex: per-run isolated Cortex state dir + CortexInjector
+//     so prompts after S1 carry a "previously-established conventions"
+//     preamble mined from earlier sessions.
 //
-// Plan 03 territory (NOT handled here): ConditionCortex / ConditionFrontier
-// — those plug a different Harness in (e.g. CortexInjectingHarness wrapping
-// the baseline). Callers writing tests or experimenting with custom harnesses
-// should use RunWithHarness directly. See plans/02-session-runner.md and
-// plans/03-cortex-injection.md for the split.
+// The cortex condition needs a `cortex` binary. Resolution order:
+//  1. $CORTEX_BINARY env var (absolute path)
+//  2. PATH lookup for `cortex`
+//
+// If neither resolves, Run returns an error before touching the harness.
 func (e *LibraryServiceEvaluator) Run(ctx context.Context, cond LibraryServiceCondition, model string) (*LibraryServiceRun, error) {
-	if cond != ConditionBaseline {
-		return nil, fmt.Errorf("condition %q not implemented yet (Plan 03 will add Cortex/Frontier harnesses)", cond)
+	switch cond {
+	case ConditionBaseline, ConditionFrontier:
+		h, err := NewClaudeCLIHarness("", model)
+		if err != nil {
+			return nil, fmt.Errorf("init claude harness: %w", err)
+		}
+		return e.RunWithInjector(ctx, cond, model, h, NoOpInjector{})
+	case ConditionCortex:
+		h, err := NewClaudeCLIHarness("", model)
+		if err != nil {
+			return nil, fmt.Errorf("init claude harness: %w", err)
+		}
+		binary, err := resolveCortexBinary()
+		if err != nil {
+			return nil, fmt.Errorf("resolve cortex binary: %w", err)
+		}
+		stateDir, err := newCortexStateDir()
+		if err != nil {
+			return nil, fmt.Errorf("create cortex state dir: %w", err)
+		}
+		var opts []CortexInjectorOption
+		if e.verbose {
+			opts = append(opts, WithVerbose(nil))
+		}
+		injector, err := NewCortexInjector(binary, stateDir, opts...)
+		if err != nil {
+			_ = os.RemoveAll(stateDir)
+			return nil, fmt.Errorf("init cortex injector: %w", err)
+		}
+		run, runErr := e.RunWithInjector(ctx, cond, model, h, injector)
+		if run != nil {
+			run.CortexStateDir = stateDir
+		} else {
+			// On failure with no run returned, callers cannot trigger
+			// Cleanup, so reclaim the state dir here.
+			_ = os.RemoveAll(stateDir)
+		}
+		return run, runErr
+	default:
+		return nil, fmt.Errorf("unknown condition %q", cond)
 	}
-	h, err := NewClaudeCLIHarness("", model)
-	if err != nil {
-		return nil, fmt.Errorf("init claude harness: %w", err)
-	}
-	return e.RunWithHarness(ctx, cond, model, h)
 }
 
-// RunWithHarness drives the session loop using the provided harness. It is
-// the seam Plan 03 hooks into to swap in a Cortex-injecting harness without
-// touching the runner.
+// RunWithHarness drives the session loop using the provided harness with
+// no Cortex interaction (NoOpInjector). Kept as a thin wrapper around
+// RunWithInjector so Plan 02's tests and any caller that doesn't care
+// about the injector dimension stays unchanged.
 func (e *LibraryServiceEvaluator) RunWithHarness(ctx context.Context, cond LibraryServiceCondition, model string, h Harness) (*LibraryServiceRun, error) {
-	return e.runSessions(ctx, cond, model, h)
+	return e.RunWithInjector(ctx, cond, model, h, NoOpInjector{})
+}
+
+// RunWithInjector is the Plan 03 seam: wraps the harness in an injector
+// that prepends a Cortex-mined preamble to each session's prompt and
+// captures the session's output back into Cortex when it finishes.
+//
+// The harness stays Cortex-ignorant — wrapping happens at the runner
+// level, not the harness level.
+func (e *LibraryServiceEvaluator) RunWithInjector(ctx context.Context, cond LibraryServiceCondition, model string, h Harness, inj Injector) (*LibraryServiceRun, error) {
+	if inj == nil {
+		inj = NoOpInjector{}
+	}
+	return e.runSessions(ctx, cond, model, h, inj)
 }
 
 // Score computes LibraryServiceScore for a completed workdir per rubric.md.
@@ -230,15 +295,100 @@ func (e *LibraryServiceEvaluator) Score(ctx context.Context, workDir string) (Li
 	return score, nil
 }
 
-// CompareRuns produces the headline comparison: did Cortex move shape similarity
-// from baseline toward the frontier ceiling?
+// CompareRuns produces the headline comparison: did Cortex move shape
+// similarity from baseline toward the frontier ceiling?
 //
-// TODO(impl): emit a markdown report per SPEC.md "Pass criteria".
+// Output is markdown — a side-by-side table of the five MVP score fields
+// with a delta column (cortex − baseline) plus a one-line headline lift
+// callout. SmellDensity is "lower is better" so its delta is negated for
+// readability ("Δ better"); every other metric is "higher is better".
+//
+// frontier may be nil; it's an optional ceiling. baseline and cortex are
+// required.
 func CompareRuns(baseline, cortex *LibraryServiceRun, frontier *LibraryServiceRun) string {
-	_ = baseline
-	_ = cortex
-	_ = frontier
-	return "not implemented"
+	if baseline == nil || cortex == nil {
+		return "compare-runs: baseline and cortex are required, got nil"
+	}
+
+	type metric struct {
+		name        string
+		base, cor   float64
+		front       float64
+		hasFrontier bool
+		// betterDelta returns the user-facing "improvement" delta given
+		// raw cortex/baseline values (handles "lower is better" inversion).
+		betterDelta func(base, cor float64) float64
+	}
+	higherBetter := func(base, cor float64) float64 { return cor - base }
+	lowerBetter := func(base, cor float64) float64 { return base - cor }
+
+	mk := func(name string, b, c, f LibraryServiceScore, get func(LibraryServiceScore) float64, delta func(float64, float64) float64) metric {
+		m := metric{name: name, base: get(b), cor: get(c), betterDelta: delta}
+		if frontier != nil {
+			m.hasFrontier = true
+			m.front = get(f)
+		}
+		return m
+	}
+
+	var fScore LibraryServiceScore
+	if frontier != nil {
+		fScore = frontier.Score
+	}
+	metrics := []metric{
+		mk("Shape similarity (headline)", baseline.Score, cortex.Score, fScore,
+			func(s LibraryServiceScore) float64 { return s.ShapeSimilarity }, higherBetter),
+		mk("Naming adherence", baseline.Score, cortex.Score, fScore,
+			func(s LibraryServiceScore) float64 { return s.NamingAdherence }, higherBetter),
+		mk("Smell density (lower better)", baseline.Score, cortex.Score, fScore,
+			func(s LibraryServiceScore) float64 { return s.SmellDensity }, lowerBetter),
+		mk("Test parity", baseline.Score, cortex.Score, fScore,
+			func(s LibraryServiceScore) float64 { return s.TestParity }, higherBetter),
+		mk("End-to-end pass rate", baseline.Score, cortex.Score, fScore,
+			func(s LibraryServiceScore) float64 { return s.EndToEndPassRate }, higherBetter),
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Library-service eval comparison\n\n")
+	fmt.Fprintf(&b, "- baseline: condition=%s model=%s\n", baseline.Condition, baseline.Model)
+	fmt.Fprintf(&b, "- cortex:   condition=%s model=%s\n", cortex.Condition, cortex.Model)
+	if frontier != nil {
+		fmt.Fprintf(&b, "- frontier: condition=%s model=%s\n", frontier.Condition, frontier.Model)
+	}
+	b.WriteString("\n")
+
+	if frontier != nil {
+		b.WriteString("| Metric | Baseline | Cortex | Frontier | Δ (cortex − baseline) |\n")
+		b.WriteString("|---|---:|---:|---:|---:|\n")
+		for _, m := range metrics {
+			fmt.Fprintf(&b, "| %s | %.3f | %.3f | %.3f | %+.3f |\n",
+				m.name, m.base, m.cor, m.front, m.betterDelta(m.base, m.cor))
+		}
+	} else {
+		b.WriteString("| Metric | Baseline | Cortex | Δ (cortex − baseline) |\n")
+		b.WriteString("|---|---:|---:|---:|\n")
+		for _, m := range metrics {
+			fmt.Fprintf(&b, "| %s | %.3f | %.3f | %+.3f |\n",
+				m.name, m.base, m.cor, m.betterDelta(m.base, m.cor))
+		}
+	}
+
+	// Headline lift: shape similarity (cortex − baseline). The eval is
+	// "good" when this is positive and large; per SPEC.md, the goal is
+	// to move from <0.6 baseline toward ≥0.85 cortex.
+	headline := cortex.Score.ShapeSimilarity - baseline.Score.ShapeSimilarity
+	verdict := "no movement"
+	switch {
+	case headline >= 0.10:
+		verdict = "lift"
+	case headline > 0.0:
+		verdict = "marginal lift"
+	case headline < 0.0:
+		verdict = "regression"
+	}
+	fmt.Fprintf(&b, "\n**Headline shape-similarity lift:** %+.3f (%s)\n", headline, verdict)
+
+	return b.String()
 }
 
 // resourceFiles groups the handler and test files associated with one resource.

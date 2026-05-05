@@ -254,22 +254,6 @@ func TestRunWithHarness_ContextCancel(t *testing.T) {
 	}
 }
 
-// TestRun_NonBaselineNotImplemented locks in the Plan 02 contract that
-// ConditionCortex / ConditionFrontier are deferred to Plan 03.
-func TestRun_NonBaselineNotImplemented(t *testing.T) {
-	ev := newRunnerEvaluator(t)
-	for _, cond := range []LibraryServiceCondition{ConditionCortex, ConditionFrontier} {
-		_, err := ev.Run(context.Background(), cond, "")
-		if err == nil {
-			t.Errorf("Run(%q) returned nil error, want not-implemented", cond)
-			continue
-		}
-		if !strings.Contains(err.Error(), "not implemented") {
-			t.Errorf("Run(%q) err = %v, want 'not implemented' message", cond, err)
-		}
-	}
-}
-
 func TestNewClaudeCLIHarness_BinaryMissing(t *testing.T) {
 	_, err := NewClaudeCLIHarness("/nonexistent/claude-cli-binary-for-test", "")
 	if err == nil {
