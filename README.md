@@ -6,7 +6,7 @@
 
 A context broker that captures development insights and injects them into AI coding assistants.
 
-> **Status: Public alpha.** The core capture → store → retrieve → inject pipeline works and is in daily use. The cognitive eval framework currently reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Expect rough edges. Issues and PRs welcome.
+> **Status: Experimental.** The core capture → store → retrieve → inject pipeline works and is in daily use on the author's machine, but Cortex is a research-grade tool, not a polished product. Cognitive eval reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Small Ollama models (≤3B params) have measured below the floor for insight extraction — `llama3.1:8b` or larger, or `ANTHROPIC_API_KEY`, is recommended. Expect rough edges, breaking changes, and bugs that may require reading code to diagnose. Issues and PRs welcome.
 
 ## Problem
 
@@ -41,12 +41,15 @@ Capture → Filter → Store → Retrieve → Inject
 
 ## Quick Start with Claude Code
 
-**Prerequisites:** Go 1.25+. Either Ollama (local, free) running at `http://localhost:11434`, or `ANTHROPIC_API_KEY` set. Capture and search work without any LLM, but Reflect/Dream modes need one.
+**Prerequisites:**
+- Go 1.25+
+- Either Ollama at `http://localhost:11434` with `llama3.1:8b` (or larger) and `nomic-embed-text` pulled, **or** `ANTHROPIC_API_KEY` exported. Capture and search work without an LLM; Reflect/Dream and insight extraction need one. Models smaller than ~3B have measured below the task floor — see [docs/eval.md](docs/eval.md).
+- Claude Code CLI installed at `~/.claude/` (required for `cortex install`)
 
 ```bash
-go build ./cmd/cortex
-./cortex install
-./cortex daemon &
+go build -o bin/cortex ./cmd/cortex
+./bin/cortex install        # writes hooks to .claude/settings.local.json
+./bin/cortex daemon &       # background processor; dashboard at :9090
 ```
 
 Use Claude Code normally—context is captured automatically.
@@ -67,6 +70,20 @@ cortex insights                  # View extracted insights
 cortex recent                    # Show recent events
 cortex status                    # Check daemon status
 ```
+
+## Multi-Agent / CI Setup
+
+For projects with multiple AI agents or shared CI workflows, Cortex can run without hooks or a daemon — capture and search work standalone via the CLI:
+
+```bash
+go build -o bin/cortex ./cmd/cortex
+./bin/cortex init                                                 # one-time per project
+./bin/cortex capture --type=decision --content="Use PostgreSQL"   # called by agents
+./bin/cortex ingest                                               # flush queue → DB
+./bin/cortex search "database"
+```
+
+All agents pointed at the same `.cortex/` directory share context. SQLite WAL handles concurrent readers; concurrent writers may hit brief locks under heavy parallel writes. `cortex init` does not require Claude Code to be installed; only `cortex install` does.
 
 ## Why This Matters
 
@@ -164,21 +181,30 @@ cortex/
 
 ## Configuration
 
-Cortex stores data in `~/.cortex/` (global) and `.context/` (per-project).
+Cortex stores data in `~/.cortex/` (global, project registry) and `.cortex/` (per-project, captured events + embeddings + queue).
 
-LLM providers (either, or none):
-- **Ollama** (recommended for first-time users): local inference at `http://localhost:11434`. Free, runs on your machine.
-- **Anthropic**: set `ANTHROPIC_API_KEY`. Higher quality, paid.
-- **No LLM**: capture and search still work; only Reflect/Dream and LLM-driven insight extraction are skipped.
+LLM providers — selection is via the `ANTHROPIC_API_KEY` env var (set → Anthropic; unset → Ollama):
+- **Ollama**: local inference at `http://localhost:11434`. Free. Recommended models: `llama3.1:8b` for analysis and `nomic-embed-text` for embeddings. Smaller models have measured below the task floor; the configured `ollama_model` in `.cortex/config.json` must actually be pulled or the daemon will silently produce zero insights.
+- **Anthropic**: set `ANTHROPIC_API_KEY`. Uses `claude-haiku-4-5` for analysis. Embeddings still go through Ollama (`nomic-embed-text`); there is no Anthropic embedding fallback.
+- **No LLM**: capture and search still work; Reflect/Dream and insight extraction are skipped.
 
 ## Current Status
 
-~75% complete. See [ROADMAP.md](ROADMAP.md) for details.
+Active development. See [ROADMAP.md](ROADMAP.md) for the full breakdown.
 
-Key metrics from initial evaluation:
+Key metrics from cognitive evaluation:
 - 87% pass rate across cognitive mode tests
 - <20ms Reflex latency (target met)
-- ABR 0.77 (Fast mode achieves 77% of Full mode quality)
+- ABR 0.77 (Fast mode achieves 77% of Full mode quality; target 0.9)
+
+### Known Limitations
+
+- **Embedding bootstrap is brittle.** `cortex reembed` requires existing embeddings; events captured before `nomic-embed-text` is pulled don't get backfilled on daemon restart. Pull the embedding model before the first capture.
+- **Daemon fails silently on missing models.** If the configured `ollama_model` isn't pulled, the daemon processes events out of the queue but produces zero insights and zero embeddings. Check `cortex info` and `.cortex/logs/daemon.log` if insights aren't appearing.
+- **Provider selection is env-driven, not config-driven.** The daemon must inherit `ANTHROPIC_API_KEY` in its environment to use Anthropic; restart it after exporting the key.
+- **Cursor integration is design-only.** The `integrations/cursor/` adapter exists, but no IDE extension ships yet.
+- **MCP server is unvalidated.** Wired up but not exercised against external clients beyond Claude Code.
+- **Hook installation is per-project.** Sessions started in a project where `cortex install` hasn't been run silently capture nothing; no warning is surfaced at session start.
 
 ### Differentiation from Native AI Memory
 
