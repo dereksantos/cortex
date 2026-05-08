@@ -4,9 +4,21 @@
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A context broker that captures development insights and injects them into AI coding assistants.
+**The little voice in AI's head.** Small local models *think* and *dream* in the background while the frontier model works in the foreground; Cortex is what they pass between each other.
 
 > **Status: Experimental.** The core capture → store → retrieve → inject pipeline works and is in daily use on the author's machine, but Cortex is a research-grade tool, not a polished product. Cognitive eval reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Small Ollama models (≤3B params) have measured below the floor for insight extraction — `llama3.1:8b` or larger, or `ANTHROPIC_API_KEY`, is recommended. Expect rough edges, breaking changes, and bugs that may require reading code to diagnose. Issues and PRs welcome.
+
+## What Makes This Different
+
+Cortex isn't trying to be smarter than the frontier model. It's trying to be the **part of the model's mind that's always running**: a cheap, persistent inner voice that watches every session, files things away, and surfaces what's relevant when the foreground model needs it.
+
+Two ideas in the architecture that you won't find in flat-file memory tools:
+
+**Inverse activity budgets for Think and Dream.** Think runs while you're actively working and *contracts* as activity grows — it gets only the cycles your session isn't using. Dream runs while you're idle and *expands* with idle time, capped at a configurable maximum. This mirrors human cognition: we think at the edges of work, we dream when we rest. Both modes are bounded by design — no unbounded background spend.
+
+**Small models doing continuous labor for frontier models.** Background work runs on cheap local models (Ollama, Llama-3-8B, Phi). The frontier model is invoked only at query time, and it receives pre-computed context the small models have already filtered, embedded, and reranked. Small models amplifying frontier models — instead of frontier models burning tokens to re-discover yesterday's context every session.
+
+Together these implement **bounded intelligence**: mechanical retrieval first, agentic processing only with explicit budgets, the frontier model working with what it's given rather than deciding what to fetch.
 
 ## Problem
 
