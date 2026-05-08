@@ -1,7 +1,7 @@
 # Cortex Roadmap
 
-**Last Updated:** April 2026
-**Status:** Public alpha. Core pipeline working; ABR optimization ongoing.
+**Last Updated:** May 2026
+**Status:** Experimental. Core pipeline working; ABR optimization ongoing.
 **North Stars:** ABR ≥ 0.9 | Token Cost Reduction over time
 
 ---
@@ -11,7 +11,7 @@
 - Capture → store → retrieve → inject pipeline (used daily in development of Cortex itself)
 - All five cognitive modes implemented (Reflex, Reflect, Resolve, Think, Dream)
 - Multi-project support via global daemon and shared `~/.cortex/`
-- Eval framework with SQLite persistence and 7 active scenarios
+- Eval framework with SQLite persistence: 40 v2 scenarios plus the `library-service/` multi-session eval (sessions, scorer, injection, end-to-end probe)
 - Claude Code integration (hooks, slash commands, status line)
 - MCP server skeleton (untested at scale)
 
@@ -20,7 +20,7 @@
 - **Cursor integration:** design-only; no shipping extension yet
 - **MCP server:** wired up but not validated against real external clients
 - **Slash-command UX:** functional but rough; some output is stubby
-- **Embedding model:** still all-MiniLM-L6-v2 (upgrade is the largest known ABR lever)
+- **Eval LLM mix:** Haiku runs landed but the 3-way comparison (Cortex / native memory / no-context) is still settling — see `docs/archive/`
 - **ABR:** 0.77 against a target of 0.9
 
 ## Current Eval Results
@@ -31,7 +31,7 @@
 | Win Rate | 44% (8/18) | >50% |
 | ABR | 0.77 | ≥0.9 |
 
-Latest run (qwen2:0.5b): Cortex wins 8/18, baseline wins 2/18, ties 8/18.
+Most recent runs use Claude Haiku 4.5 with hooks-active; archived under `docs/archive/`. qwen 1.5B was retired (below task floor — see commit `bb309ce`).
 
 ---
 
@@ -90,9 +90,10 @@ Total: 926 lines (down from ~11,000)
 - [x] Every scenario just establishes context and runs tests
 - [x] Unified runner for all scenarios
 
-**Active scenarios:** 7 in `test/evals/v2/`
-- auth-patterns, db-patterns, error-handling
-- go-logging, go-naming, go-testing, testing-patterns
+**Active scenarios:** 40 in `test/evals/v2/`, organized as:
+- baseline patterns: auth, db, error, logging, naming, testing
+- abstention, adversarial, extraction, reasoning, temporal, updates families
+- locomo benchmark scenarios (commonsense, multihop, event-causality)
 
 **Format:**
 ```yaml
@@ -126,12 +127,11 @@ tests:
 **Goal:** Improve ABR from 0.77 → 0.9
 
 Landscape-informed priorities (Mar 2026 review):
-- [ ] Upgrade embedding model: all-MiniLM-L6-v2 → all-MiniLM-L12-v2 (biggest ABR lever)
 - [ ] Replace brute-force vector search with sqlite-vec (indexed search)
 - [ ] Retrieval tuning (top-k, similarity threshold)
 - [ ] Context formatting for LLM consumption
-- [ ] Larger/better LLM for eval (Claude Haiku 4.5 vs qwen2:0.5b)
-- [ ] Re-embedding migration after model upgrade
+- [~] Eval LLM upgrade landed (Haiku 4.5); 3-way comparison harness in flight
+- [ ] Re-embedding migration after future model upgrades
 - [ ] Local model optimization: prefer small models (Ollama) for Think/Dream background tasks
 
 ---
@@ -157,7 +157,7 @@ Landscape-informed priorities (Mar 2026 review):
 | Git Dream source | Core evals must pass first |
 | Entity relationships | Polish feature, not priority |
 | Cross-session learning | Need single-session working first |
-| MCP server | Need retrieval quality validated first |
+| MCP server expansion | Skeleton exists; broader tool surface blocked on retrieval quality |
 | Team-shared context | Requires stable single-user first |
 
 ---
@@ -171,6 +171,12 @@ Landscape-informed priorities (Mar 2026 review):
 
 ## Recently Completed
 
+- [x] **Library-service multi-session eval** — scaffold, session runner, scorer, Cortex injection, end-to-end probe (Plans 01–05)
+- [x] **First Haiku eval runs archived** with hooks-active correction; 3-way comparison harness landed
+- [x] **Multi-project support** via single global daemon and shared `~/.cortex/`
+- [x] **Composable status line** with compact format
+- [x] **Per-mode cognitive tuning** via config
+- [x] **Dream improvements**: fractal region sampling, novelty cache, follow-up queue
 - [x] **Semantic search with embeddings** - nomic-embed-text, +35% lift
 - [x] **Eval consolidation** - 23 files → 5 files (926 lines)
 - [x] **Unified scenario format** - single YAML pattern
