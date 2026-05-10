@@ -509,6 +509,109 @@ func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
 	})
 }
 
+// TestRunGrid_VerifyExits0_TaskSuccess: a scenario whose Verify
+// command exits 0 produces TaskSuccess=true even when the underlying
+// (no-op) harness wouldn't have proven anything by itself.
+func TestRunGrid_VerifyExits0_TaskSuccess(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: "true"}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%d want 1", len(results))
+	}
+	if !results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=false, want true (verify=true should pass)")
+	}
+}
+
+// TestRunGrid_VerifyExitsNonzero_TaskFails: a Verify that exits
+// non-zero overrides the harness's "no error" optimism. Confirms the
+// verifier is the source of truth when present.
+func TestRunGrid_VerifyExitsNonzero_TaskFails(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: "false"}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%d want 1", len(results))
+	}
+	if results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=true, want false (verify=false should fail)")
+	}
+	if !strings.Contains(results[0].Notes, "verify failed") {
+		t.Errorf("Notes=%q, want 'verify failed'", results[0].Notes)
+	}
+}
+
+// TestRunGrid_VerifyParsesGoTestCounts: when the Verify command emits
+// go-test-style PASS/FAIL lines, the runner counts them into
+// TestsPassed/TestsFailed.
+func TestRunGrid_VerifyParsesGoTestCounts(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	verify := `printf -- '--- PASS: TestA (0.00s)\n--- PASS: TestB (0.00s)\n--- FAIL: TestC (0.00s)\n'; exit 1`
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: verify}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results=%d want 1", len(results))
+	}
+	c := results[0]
+	if c.TestsPassed != 2 {
+		t.Errorf("TestsPassed=%d want 2", c.TestsPassed)
+	}
+	if c.TestsFailed != 1 {
+		t.Errorf("TestsFailed=%d want 1", c.TestsFailed)
+	}
+	if c.TaskSuccess {
+		t.Errorf("TaskSuccess=true (verify exited 1, should be false)")
+	}
+}
+
+// TestRunGrid_NoVerifyKeepsLegacyBehavior: a scenario without Verify
+// keeps the legacy "harness exit code is success" semantics so the
+// pre-existing retrieval scenarios stay valid.
+func TestRunGrid_NoVerifyKeepsLegacyBehavior(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}}, // no Verify
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if !results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=false; legacy no-verify should mirror harness exit 0")
+	}
+	if results[0].TestsPassed != 0 || results[0].TestsFailed != 0 {
+		t.Errorf("test counts=%d/%d, want 0/0 without verify", results[0].TestsPassed, results[0].TestsFailed)
+	}
+}
+
 func TestScenarioToPrompt(t *testing.T) {
 	tests := []struct {
 		name string

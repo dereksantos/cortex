@@ -17,6 +17,7 @@
 package eval
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/csv"
@@ -24,7 +25,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -307,8 +310,6 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		CostUSD:              hres.CostUSD,
 		LatencyMs:            hres.LatencyMs,
 		AgentTurnsTotal:      hres.AgentTurnsTotal,
-		TestsPassed:          0, // scoring is wired in a later step
-		TestsFailed:          0,
 		TaskSuccess:          runErr == nil,
 		TaskSuccessCriterion: CriterionTestsPassAll,
 	}
@@ -317,8 +318,72 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	}
 	if runErr != nil {
 		cr.Notes = fmt.Sprintf("harness error: %v", runErr)
+		// Don't run the verifier if the harness errored — there's
+		// nothing useful to verify. Pre-existing TaskSuccess=false stays.
+		return cr, nil
+	}
+
+	// Optional post-harness verifier. Only runs when the scenario
+	// declares one — empty Verify keeps the legacy "harness exit code
+	// IS the success" behavior so older retrieval scenarios stay
+	// unaffected.
+	if scn.Verify != "" {
+		passed, failed, vErr := runVerifier(ctx, scn.Verify, workdir)
+		cr.TestsPassed = passed
+		cr.TestsFailed = failed
+		cr.TaskSuccess = vErr == nil
+		if vErr != nil {
+			if cr.Notes != "" {
+				cr.Notes += "; "
+			}
+			cr.Notes += fmt.Sprintf("verify failed: %v", vErr)
+		}
 	}
 	return cr, nil
+}
+
+// goTestPassRE / goTestFailRE match the per-test summary lines emitted
+// by `go test -v` (and `go test` with verbose subtests). Subtests
+// (`PASS: TestX/sub`) are counted alongside their parents — the count
+// reflects total assertions decided, not unique test functions.
+var (
+	goTestPassRE = regexp.MustCompile(`(?m)^\s*--- PASS:`)
+	goTestFailRE = regexp.MustCompile(`(?m)^\s*--- FAIL:`)
+)
+
+// runVerifier execs `bash -c "<cmd>"` in workdir and returns the
+// derived pass/fail counts plus any execution error. Exit-0 → no
+// error; any other exit (including signals) → error wrapping the
+// captured stderr. The 5-minute timeout is a safety net — long
+// verifiers (full integration suites) should be designed to fit.
+func runVerifier(ctx context.Context, command, workdir string) (passed, failed int, err error) {
+	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(verifyCtx, "bash", "-c", command)
+	cmd.Dir = workdir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+
+	out := stdout.String()
+	passed = len(goTestPassRE.FindAllString(out, -1))
+	failed = len(goTestFailRE.FindAllString(out, -1))
+
+	if runErr != nil {
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg == "" {
+			errMsg = strings.TrimSpace(out)
+		}
+		// Truncate to keep CellResult.Notes reasonable.
+		if len(errMsg) > 200 {
+			errMsg = errMsg[:200] + "…"
+		}
+		return passed, failed, fmt.Errorf("%w (stderr: %s)", runErr, errMsg)
+	}
+	return passed, failed, nil
 }
 
 // scenarioToPrompt produces a single string prompt from a Scenario.

@@ -29,6 +29,30 @@ type Scenario struct {
 
 	// Event graph format (LoCoMo-style causal chains)
 	Events []Event `yaml:"events,omitempty"`
+
+	// --- Grid-runner extensions (eval-harness loop Phase 5) ---
+
+	// Verify is an optional shell command that the grid runner execs in
+	// the cell's workdir AFTER the harness session ends. Exit 0 → cell
+	// TaskSuccess=true; non-zero → false. When the command output
+	// contains "--- PASS:" / "--- FAIL:" lines (Go test convention),
+	// they are counted into CellResult.TestsPassed / TestsFailed.
+	// Empty Verify → keep the harness exit code as TaskSuccess (legacy
+	// behavior; no test counts).
+	Verify string `yaml:"verify,omitempty"`
+
+	// SeedDir is an optional path (relative to cwd of the eval invocation)
+	// whose contents are recursively copied into the cell's workdir
+	// before the harness runs. Lets the agent edit a known starter
+	// project rather than starting from an empty dir.
+	SeedDir string `yaml:"seed_dir,omitempty"`
+
+	// CortexContext is hand-authored context bullets that the grid runner
+	// prepends to the harness prompt when ContextStrategy == "cortex".
+	// "Static cortex" — the Reflex/Reflect-mined version comes later.
+	// Distinct YAML name from the legacy `context:` field (which is a
+	// list of typed Context items used by cortex's own retrieval evals).
+	CortexContext []string `yaml:"cortex_context,omitempty"`
 }
 
 // TreeNode represents a node in the scenario tree.
