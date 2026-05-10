@@ -296,7 +296,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 > exhausted, repeated stop-conditions). Default toward producing
 > *some* result, with a partial.csv if the full grid can't complete.
 
-- [ ] **10. Scenario `verify` field + post-harness verifier exec.**
+- [x] **10. Scenario `verify` field + post-harness verifier exec.**
   - Extend Scenario YAML with optional `verify: <shell command>`. After
     the harness session ends, the grid runner execs `bash -c "<cmd>"`
     in the workdir; exit 0 → TaskSuccess=true, non-zero → false.
