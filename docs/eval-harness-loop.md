@@ -378,7 +378,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     "temporarily rate-limited" the first attempt then succeeds asserts
     2 calls + final TaskSuccess = true.
 
-- [ ] **15. Run the $5 experiment.**
+- [x] **15. Run the $5 experiment.**
   - Grid: 5 scenarios × 5 models × 2 strategies = **50 cells**.
     - Free (3): `openai/gpt-oss-20b:free`, `google/gemma-4-26b-a4b-it:free`,
       `nvidia/nemotron-nano-9b-v2:free`. ~$0.
@@ -405,7 +405,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** ≥ 40 of 50 cells completed; SQLite + JSONL contain the
     rows; final spend reported and ≤ $5.
 
-- [ ] **16. Aggregate + report results.**
+- [x] **16. Aggregate + report results.**
   - Add `cortex eval grid --report-summary` which queries SQLite,
     groups by (model, strategy), and prints:
     - Cells: count
