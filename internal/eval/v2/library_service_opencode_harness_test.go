@@ -5,6 +5,7 @@ package eval
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -357,6 +358,68 @@ func TestParseOpencodeStream(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestOpenCodeHarness_RunSessionWithResult_OpenRouterIntegration drives
+// the real opencode binary against an OpenRouter free model. Skips when
+// the binary isn't on PATH or OPEN_ROUTER_API_KEY isn't set — including
+// CI by default.
+//
+// This is the litmus test from the Phase 7 pass criteria: a successful
+// run with `TokensIn > 0` proves the harness actually put the workdir
+// file in front of the model (the aider --file bug on 2026-05-10 was
+// caught exactly this way).
+func TestOpenCodeHarness_RunSessionWithResult_OpenRouterIntegration(t *testing.T) {
+	if os.Getenv("OPEN_ROUTER_API_KEY") == "" {
+		t.Skip("OPEN_ROUTER_API_KEY not set — skipping real-binary smoke")
+	}
+	bin, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Skip("opencode not in PATH")
+	}
+
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+
+	workdir := t.TempDir()
+	stub := `package main
+
+import "fmt"
+
+// Greet returns a greeting message. TODO: implement.
+func Greet(name string) string {
+	return "" // TODO
+}
+
+func main() {
+	fmt.Println(Greet("world"))
+}
+`
+	if err := os.WriteFile(filepath.Join(workdir, "hello.go"), []byte(stub), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	res, err := h.RunSessionWithResult(ctx, "Implement the Greet function in hello.go so it returns 'Hello, ' + name + '!'.", workdir)
+	if err != nil {
+		t.Fatalf("RunSessionWithResult: %v", err)
+	}
+
+	if res.TokensIn <= 0 {
+		t.Errorf("TokensIn=%d, want positive (model never saw the workdir?)", res.TokensIn)
+	}
+	if res.LatencyMs <= 0 {
+		t.Errorf("LatencyMs=%d, want positive", res.LatencyMs)
+	}
+	if res.ProviderEcho != "openrouter" {
+		t.Errorf("ProviderEcho=%q want openrouter", res.ProviderEcho)
+	}
+	if res.ModelEcho != "openrouter/openai/gpt-oss-20b:free" {
+		t.Errorf("ModelEcho=%q want openrouter/openai/gpt-oss-20b:free", res.ModelEcho)
 	}
 }
 
