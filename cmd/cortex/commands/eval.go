@@ -122,7 +122,7 @@ Unified eval system comparing baseline vs Cortex-augmented responses.
 Options:
   -s, --scenario FILE    Run single scenario
   -d, --dir DIR          Scenario directory (default: test/evals/v2)
-  -p, --provider NAME    LLM provider: ollama, anthropic (default: ollama)
+  -p, --provider NAME    LLM provider: ollama, anthropic, openrouter (default: ollama)
   -m, --model NAME       Model override
   -o, --output FORMAT    Output: human, json (default: human)
   -v, --verbose          Verbose output
@@ -229,19 +229,37 @@ Examples:
 				return fmt.Errorf("ANTHROPIC_API_KEY not set")
 			}
 			provider = anthropicClient
+		case "openrouter":
+			orClient := llm.NewOpenRouterClient(cfg)
+			if !orClient.IsAvailable() {
+				return fmt.Errorf("OPEN_ROUTER_API_KEY not set (note the underscore — this project uses the underscore form)")
+			}
+			if modelOverride != "" {
+				orClient.SetModel(modelOverride)
+			}
+			provider = orClient
 		default:
-			return fmt.Errorf("unknown provider: %s", providerName)
+			return fmt.Errorf("unknown provider: %s (valid: ollama, anthropic, openrouter)", providerName)
 		}
 	}
 
-	// Determine actual model name
+	// Determine actual model name (used for display + judge model
+	// fallback). For openrouter, the OpenRouterClient holds the model
+	// internally — no cfg field — so we ask it directly.
 	var modelName string
 	if modelOverride != "" {
 		modelName = modelOverride
-	} else if providerName == "anthropic" {
-		modelName = cfg.AnthropicModel
 	} else {
-		modelName = cfg.OllamaModel
+		switch providerName {
+		case "anthropic":
+			modelName = cfg.AnthropicModel
+		case "openrouter":
+			if orClient, ok := provider.(*llm.OpenRouterClient); ok {
+				modelName = orClient.Model()
+			}
+		default:
+			modelName = cfg.OllamaModel
+		}
 	}
 
 	// Create judge provider if enabled
@@ -259,10 +277,15 @@ Examples:
 		} else {
 			// Create judge provider (can be different model, same provider type)
 			judgeCfg := *cfg
-			if providerName == "anthropic" {
+			switch providerName {
+			case "anthropic":
 				judgeCfg.AnthropicModel = judgeModelName
 				judgeProvider = llm.NewAnthropicClient(&judgeCfg)
-			} else {
+			case "openrouter":
+				orJudge := llm.NewOpenRouterClient(&judgeCfg)
+				orJudge.SetModel(judgeModelName)
+				judgeProvider = orJudge
+			default:
 				judgeCfg.OllamaModel = judgeModelName
 				judgeProvider = llm.NewOllamaClient(&judgeCfg)
 			}
