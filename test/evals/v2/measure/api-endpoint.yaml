@@ -1,0 +1,31 @@
+id: measure-api-endpoint
+name: "Promptability vs quality: REST endpoint"
+measure:
+  task: "Implement a REST endpoint for creating users in Go"
+  judge_criteria: |
+    Evaluate this Go REST endpoint for creating users:
+    1. Does it parse JSON request body into a struct?
+    2. Does it validate required fields and return 400 for invalid input?
+    3. Does it return 201 with the created resource on success?
+    4. Does it set Content-Type: application/json?
+    5. Does it handle encoding/decoding errors gracefully?
+    6. Is the code compilable and idiomatic Go?
+  variants:
+    - id: low
+      prompt: "Make a user creation API endpoint"
+    - id: mid
+      prompt: "Write a Go HTTP handler that creates users from JSON POST requests with validation"
+    - id: high
+      prompt: |
+        Implement a CreateUser HTTP handler in Go.
+
+        Requirements:
+        - POST /users endpoint, accepts JSON body with name (string, required) and email (string, required)
+        - Validate both fields are non-empty, return 400 with {"error": "name is required"} if missing
+        - On success, return 201 with JSON {"id": "generated-uuid", "name": "...", "email": "..."}
+        - Set Content-Type: application/json on all responses
+        - Use encoding/json for marshal/unmarshal
+    - id: decomposed
+      sub_prompts:
+        - "Define a Go struct CreateUserRequest with Name and Email string fields (json tags). Define CreateUserResponse with ID, Name, Email. Write a function that validates CreateUserRequest returns an error string if name or email is empty."
+        - "Write a Go HTTP handler func CreateUser(w http.ResponseWriter, r *http.Request) that: decodes JSON body into CreateUserRequest, validates it (return 400 on failure), generates a UUID for the ID, returns 201 with CreateUserResponse as JSON. Set Content-Type: application/json."

@@ -197,6 +197,12 @@ func LoadAll(dir string) ([]*Scenario, error) {
 	var scenarios []*Scenario
 	for _, entry := range entries {
 		if entry.IsDir() {
+			// Skip subdirectories that hold scenarios in a different schema
+			// loaded by their own dedicated path (e.g., measure/* is loaded
+			// via LoadMeasureScenario when `cortex eval --measure` is used).
+			if entry.Name() == "measure" {
+				continue
+			}
 			// Recurse into subdirectories
 			subScenarios, err := LoadAll(filepath.Join(dir, entry.Name()))
 			if err != nil {

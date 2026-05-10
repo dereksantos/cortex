@@ -1,0 +1,30 @@
+id: measure-rate-limiter
+name: "Promptability vs quality: rate limiter"
+measure:
+  task: "Implement a token bucket rate limiter in Go"
+  judge_criteria: |
+    Evaluate this Go rate limiter implementation:
+    1. Does it implement a token bucket algorithm (not just a counter or sleep)?
+    2. Is it safe for concurrent use (mutex, atomic, or channel-based)?
+    3. Does it correctly replenish tokens based on elapsed time?
+    4. Does it expose a clean API (Allow/Take method)?
+    5. Is the code compilable, idiomatic Go?
+  variants:
+    - id: low
+      prompt: "Write a rate limiter"
+    - id: mid
+      prompt: "Implement a token bucket rate limiter in Go that allows 100 requests per second with burst capacity of 10"
+    - id: high
+      prompt: |
+        Implement a token bucket rate limiter in Go.
+
+        Requirements:
+        - TokenBucket struct with rate (float64), burst (int), tokens (float64), and last (time.Time) fields
+        - NewTokenBucket(rate float64, burst int) constructor
+        - Allow() bool method that atomically checks and consumes one token
+        - Must use sync.Mutex for thread safety
+        - Replenish tokens based on elapsed time since last call
+    - id: decomposed
+      sub_prompts:
+        - "Write a Go struct TokenBucket with fields: rate float64, burst int, tokens float64, last time.Time, mu sync.Mutex. Add a NewTokenBucket(rate float64, burst int) *TokenBucket constructor that initializes tokens to burst."
+        - "Add an Allow() bool method to TokenBucket. Lock the mutex, calculate elapsed time since tb.last, add elapsed*rate tokens (capped at burst), then if tokens >= 1 consume one and return true, else return false. Update tb.last."

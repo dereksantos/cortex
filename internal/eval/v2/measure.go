@@ -115,6 +115,69 @@ Return ONLY valid JSON with no other text: {"correctness": 0.X, "understanding":
 	return &judgeResult, nil
 }
 
+// ScoreWithJudgeCriteria evaluates response quality using free-form criteria
+// instead of keyword includes/excludes. Used by measure evals where task-specific
+// evaluation criteria produce more meaningful quality scores.
+func ScoreWithJudgeCriteria(ctx context.Context, response, task, criteria string, judge llm.Provider) (*JudgeResult, error) {
+	if judge == nil {
+		return nil, fmt.Errorf("judge provider is nil")
+	}
+
+	prompt := fmt.Sprintf(`You are evaluating an AI-generated coding response.
+
+Task: %s
+
+Evaluation criteria:
+%s
+
+Response to evaluate:
+%s
+
+Score on these dimensions:
+1. CORRECTNESS: Does the response correctly accomplish the task per the criteria? (0.0-1.0)
+2. UNDERSTANDING: Does it show genuine understanding of the requirements, not just surface-level pattern matching? (0.0-1.0)
+3. HALLUCINATION: Does it fabricate information, use non-existent APIs, or make incorrect claims? (0.0-1.0, higher = more hallucination)
+
+Return ONLY valid JSON: {"correctness": 0.X, "understanding": 0.X, "hallucination": 0.X, "explanation": "brief explanation"}`,
+		task, criteria, response)
+
+	systemPrompt := "You are an AI evaluation judge for coding tasks. Return only valid JSON with no markdown formatting or additional text."
+
+	result, err := judge.GenerateWithSystem(ctx, prompt, systemPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("judge generate: %w", err)
+	}
+
+	var judgeResult JudgeResult
+	if err := json.Unmarshal([]byte(result), &judgeResult); err != nil {
+		jsonStart := strings.Index(result, "{")
+		jsonEnd := strings.LastIndex(result, "}")
+		if jsonStart >= 0 && jsonEnd > jsonStart {
+			jsonStr := result[jsonStart : jsonEnd+1]
+			if err := json.Unmarshal([]byte(jsonStr), &judgeResult); err != nil {
+				return nil, fmt.Errorf("parse judge response: %w (response: %s)", err, result)
+			}
+		} else {
+			return nil, fmt.Errorf("parse judge response: %w (response: %s)", err, result)
+		}
+	}
+
+	judgeResult.Correctness = clamp(judgeResult.Correctness, 0, 1)
+	judgeResult.Understanding = clamp(judgeResult.Understanding, 0, 1)
+	judgeResult.Hallucination = clamp(judgeResult.Hallucination, 0, 1)
+
+	return &judgeResult, nil
+}
+
+// CompositeQuality computes a single quality score from judge results.
+// correctness*0.5 + understanding*0.3 + (1-hallucination)*0.2
+func CompositeQuality(j *JudgeResult) float64 {
+	if j == nil {
+		return 0
+	}
+	return j.Correctness*0.5 + j.Understanding*0.3 + (1-j.Hallucination)*0.2
+}
+
 // clamp restricts a value to a range.
 func clamp(v, min, max float64) float64 {
 	if v < min {

@@ -3,7 +3,10 @@ package cognition
 import (
 	"context"
 	"fmt"
+	"log"
+	"time"
 
+	"github.com/dereksantos/cortex/internal/measure"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -28,17 +31,35 @@ type Resolve struct {
 
 	// ActivityLogger for logging decisions to activity.log
 	activityLogger *ActivityLogger
+
+	// Context quality gate
+	MinInjectionQuality float64 // Min Worth score to inject (default 0.2)
+
+	// Feedback tracking
+	contextDir string // For recording injection outcomes
+	sessionID  string
 }
 
 // NewResolve creates a new Resolve instance with default thresholds.
 func NewResolve() *Resolve {
 	return &Resolve{
-		formatter:        NewFormatter(),
-		InjectThreshold:  0.5,
-		QueueThreshold:   0.3,
-		WaitThreshold:    0.2,
-		MinResultsInject: 1,
+		formatter:           NewFormatter(),
+		InjectThreshold:     0.5,
+		QueueThreshold:      0.3,
+		WaitThreshold:       0.2,
+		MinResultsInject:    1,
+		MinInjectionQuality: 0.2, // Permissive default — only filters clearly bad content
 	}
+}
+
+// SetContextDir sets the context directory for feedback recording.
+func (r *Resolve) SetContextDir(dir string) {
+	r.contextDir = dir
+}
+
+// SetSessionID sets the session ID for feedback tracking.
+func (r *Resolve) SetSessionID(id string) {
+	r.sessionID = id
 }
 
 // SetSessionContext sets the session context for topic boosting.
@@ -97,6 +118,9 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 		}
 	}
 
+	// Filter by content quality (measure gate)
+	results = r.filterByQuality(results)
+
 	// Calculate aggregate scores
 	avgScore, maxScore, count := r.calculateScores(results)
 
@@ -115,6 +139,9 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 		// Ignoring error - logging should not block decisions
 		_ = r.activityLogger.LogDecision(decision.String(), confidence, q.Text, count)
 	}
+
+	// Record injection outcomes for feedback loop
+	r.recordFeedback(q.Text, results, decision)
 
 	return &cognition.ResolveResult{
 		Decision:   decision,
@@ -238,6 +265,55 @@ func (r *Resolve) makeDecision(avgScore, maxScore float64, count int) (cognition
 
 	// Too low = discard
 	return cognition.Discard, 1.0 - avgScore
+}
+
+// filterByQuality scores each result's content and removes low-quality entries.
+// Uses mechanical measure signals (fast, no LLM) to gate injection.
+func (r *Resolve) filterByQuality(results []cognition.Result) []cognition.Result {
+	if len(results) == 0 {
+		return results
+	}
+
+	var filtered []cognition.Result
+	for _, result := range results {
+		score := measure.ScoreForInjection(result.Content)
+		if score.Worth >= r.MinInjectionQuality {
+			// Blend quality into the relevance score (up to 30% adjustment)
+			result.Score *= (0.7 + score.Worth*0.3)
+			if result.Score > 1.0 {
+				result.Score = 1.0
+			}
+			filtered = append(filtered, result)
+		}
+	}
+
+	// Don't filter everything — fallback to original if all filtered out
+	if len(filtered) == 0 {
+		return results
+	}
+	return filtered
+}
+
+// recordFeedback writes injection outcomes to the feedback file.
+func (r *Resolve) recordFeedback(query string, results []cognition.Result, decision cognition.Decision) {
+	if r.contextDir == "" {
+		return
+	}
+
+	for _, result := range results {
+		score := measure.ScoreForInjection(result.Content)
+		record := measure.InjectionRecord{
+			Timestamp: time.Now(),
+			Query:     query,
+			ContentID: result.ID,
+			Worth:     score.Worth,
+			Decision:  decision.String(),
+			SessionID: r.sessionID,
+		}
+		if err := measure.RecordInjection(r.contextDir, record); err != nil {
+			log.Printf("Resolve: failed to record feedback: %v", err)
+		}
+	}
 }
 
 // explainDecision provides a human-readable reason for the decision.
