@@ -257,8 +257,17 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	// implement SetModel(string) so the grid can re-point one instance
 	// across cells. Done via inline interface assertion to avoid widening
 	// the Harness contract.
+	//
+	// Aider/litellm expects the provider as a prefix
+	// ("openrouter/openai/gpt-oss-20b:free", "ollama/qwen2.5-coder:1.5b").
+	// CellResult.Model stays canonical (no prefix) for clean grid
+	// aggregation; only the harness call gets the prefixed form.
 	if setter, ok := hs.Harness.(interface{ SetModel(string) }); ok {
-		setter.SetModel(ms.Model)
+		harnessModel := ms.Model
+		if ms.Provider != "" && !strings.HasPrefix(harnessModel, ms.Provider+"/") {
+			harnessModel = ms.Provider + "/" + ms.Model
+		}
+		setter.SetModel(harnessModel)
 	}
 
 	var (

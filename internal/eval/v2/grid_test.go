@@ -200,10 +200,12 @@ func TestRunGrid_SetModelFiresPerCell(t *testing.T) {
 		t.Fatalf("RunGrid: %v", err)
 	}
 
-	// Last cell ran model-b (cells iterate models in order, so the last
-	// SetModel call is model-b).
-	if fake.lastModel != "model-b" {
-		t.Errorf("lastModel=%q want %q (final cell should have re-pointed)", fake.lastModel, "model-b")
+	// Last cell ran model-b. The grid prepends the provider prefix
+	// (litellm convention) before passing to SetModel, so the harness
+	// sees "openrouter/model-b". CellResult.Model keeps the canonical
+	// form for grid aggregation.
+	if fake.lastModel != "openrouter/model-b" {
+		t.Errorf("lastModel=%q want %q (final cell should have re-pointed)", fake.lastModel, "openrouter/model-b")
 	}
 }
 
@@ -441,9 +443,10 @@ func TestRunGrid_FreeTierPreferenceRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunGrid: %v", err)
 		}
-		// SetModel should have been called with the :free variant.
-		if fake.lastModel != "qwen/qwen3-coder:free" {
-			t.Errorf("lastModel=%q, want auto-swap to %q", fake.lastModel, "qwen/qwen3-coder:free")
+		// SetModel should have been called with the :free variant
+		// plus the provider prefix that litellm expects.
+		if fake.lastModel != "openrouter/qwen/qwen3-coder:free" {
+			t.Errorf("lastModel=%q, want auto-swap to %q", fake.lastModel, "openrouter/qwen/qwen3-coder:free")
 		}
 	})
 
@@ -458,8 +461,8 @@ func TestRunGrid_FreeTierPreferenceRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("RunGrid: %v", err)
 		}
-		if fake.lastModel != "qwen/qwen3-coder" {
-			t.Errorf("lastModel=%q, want %q (opt-out should leave paid form)", fake.lastModel, "qwen/qwen3-coder")
+		if fake.lastModel != "openrouter/qwen/qwen3-coder" {
+			t.Errorf("lastModel=%q, want %q (opt-out should leave paid form, with provider prefix)", fake.lastModel, "openrouter/qwen/qwen3-coder")
 		}
 	})
 }

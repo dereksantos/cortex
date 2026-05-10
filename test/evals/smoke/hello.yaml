@@ -1,0 +1,9 @@
+id: smoke-hello
+name: "Smoke: minimal aider round-trip"
+
+# Minimal scenario for the eval-harness loop's TODO 9 end-to-end smoke
+# run. The query is deliberately trivial — we are testing the wiring
+# (CLI → grid runner → AiderHarness → OpenRouter → both persistence
+# backends), not the model's coding ability.
+tests:
+  - query: "Reply with the single word 'ok' and nothing else."
