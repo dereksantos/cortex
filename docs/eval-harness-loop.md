@@ -214,7 +214,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     rows + a JSONL line-count assertion + a round-trip test (write,
     read line, `json.Unmarshal` back into CellResult, equals original).
 
-- [ ] **6. Grid runner.**
+- [x] **6. Grid runner.**
   - New file `internal/eval/v2/grid.go`. Function:
     `RunGrid(ctx, scenarios []*Scenario, harnesses []Harness, models []string,
     strategies []ContextStrategy) ([]CellResult, error)`.
