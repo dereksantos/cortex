@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**The little voice in AI's head.** Small local models *think* and *dream* in the background while the frontier model works in the foreground; Cortex is what they pass between each other.
+**A contionous learning harness.** Small local models *think* and *dream* in the background while the frontier model works in the foreground; Cortex is what they pass between each other.
 
 > **Status: Experimental.** The core capture → store → retrieve → inject pipeline works and is in daily use on the author's machine, but Cortex is a research-grade tool, not a polished product. Cognitive eval reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Small Ollama models (≤3B params) have measured below the floor for insight extraction — `llama3.1:8b` or larger, or `ANTHROPIC_API_KEY`, is recommended. Expect rough edges, breaking changes, and bugs that may require reading code to diagnose. Issues and PRs welcome.
 
