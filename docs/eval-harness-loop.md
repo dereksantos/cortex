@@ -366,7 +366,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     end-to-end without panics; pass/fail mix is fine — failure on a
     free model is real signal.
 
-- [ ] **14. Self-healing retry on transient 429s.**
+- [x] **14. Self-healing retry on transient 429s.**
   - Wrap each cell's harness call with bounded retry: up to 3 attempts
     with 15s / 30s / 60s backoff when Aider's stderr matches a 429-ish
     pattern (`temporarily rate-limited`, `retry_after`, `429`). Hard
