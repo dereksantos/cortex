@@ -99,14 +99,14 @@ var modelTier = map[string]Tier{
 	"nousresearch/hermes-3-llama-3.1-405b": TierLarge,
 
 	// Frontier (≥ $3/M prompt) — gated by EnvAllowFrontier.
-	"anthropic/claude-sonnet-4.6":     TierFrontier,
-	"anthropic/claude-sonnet-latest":  TierFrontier,
-	"anthropic/claude-3.7-sonnet":     TierFrontier,
-	"anthropic/claude-opus-4.7":       TierFrontier,
-	"anthropic/claude-opus-latest":    TierFrontier,
-	"openai/gpt-5.5":                  TierFrontier,
-	"openai/gpt-4o-2024-05-13":        TierFrontier,
-	"openai/gpt-4-turbo":              TierFrontier,
+	"anthropic/claude-sonnet-4.6":    TierFrontier,
+	"anthropic/claude-sonnet-latest": TierFrontier,
+	"anthropic/claude-3.7-sonnet":    TierFrontier,
+	"anthropic/claude-opus-4.7":      TierFrontier,
+	"anthropic/claude-opus-latest":   TierFrontier,
+	"openai/gpt-5.5":                 TierFrontier,
+	"openai/gpt-4o-2024-05-13":       TierFrontier,
+	"openai/gpt-4-turbo":             TierFrontier,
 }
 
 // ClassifyModel returns the tier for a model ID. Unknowns fall through

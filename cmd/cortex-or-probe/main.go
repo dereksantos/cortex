@@ -3,7 +3,8 @@
 // harness. Output goes to stdout (redirect to docs/openrouter-probe.json).
 //
 // Usage:
-//   go run ./cmd/cortex-or-probe > docs/openrouter-probe.json
+//
+//	go run ./cmd/cortex-or-probe > docs/openrouter-probe.json
 //
 // Requires OPEN_ROUTER_API_KEY in env. Safe to delete once
 // pkg/llm/openrouter.go (loop step 2) has internalized the response shape.

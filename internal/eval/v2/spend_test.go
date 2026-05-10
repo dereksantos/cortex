@@ -54,11 +54,11 @@ func TestFrontierGuardRequired(t *testing.T) {
 		model string
 		want  bool
 	}{
-		{"openai/gpt-oss-20b:free", false},               // free: floor=0
-		{"meta-llama/llama-3.1-8b-instruct", false},      // small: floor=0.01
-		{"qwen/qwen3-coder", false},                      // medium: floor=0.05
-		{"anthropic/claude-haiku-4.5", false},            // large: floor=0.30 ≤ 0.50
-		{"anthropic/claude-sonnet-4.6", true},            // frontier: floor=0.90 > 0.50
+		{"openai/gpt-oss-20b:free", false},          // free: floor=0
+		{"meta-llama/llama-3.1-8b-instruct", false}, // small: floor=0.01
+		{"qwen/qwen3-coder", false},                 // medium: floor=0.05
+		{"anthropic/claude-haiku-4.5", false},       // large: floor=0.30 ≤ 0.50
+		{"anthropic/claude-sonnet-4.6", true},       // frontier: floor=0.90 > 0.50
 		{"anthropic/claude-opus-4.7", true},
 		{"openai/gpt-5.5", true},
 	}
@@ -137,11 +137,11 @@ func TestSpendTracker_EstimateCost_FloorBeforeObservation(t *testing.T) {
 		provider, model string
 		want            float64
 	}{
-		{ProviderOpenRouter, "openai/gpt-oss-20b:free", 0.0},                      // free: 1.5 × 0 = 0
-		{ProviderOpenRouter, "meta-llama/llama-3.1-8b-instruct", 0.015},           // small: 1.5 × 0.01
-		{ProviderOpenRouter, "qwen/qwen3-coder", 0.075},                           // medium: 1.5 × 0.05
-		{ProviderOpenRouter, "anthropic/claude-haiku-4.5", 0.45},                  // large: 1.5 × 0.30
-		{ProviderOpenRouter, "anthropic/claude-sonnet-4.6", 1.35},                 // frontier: 1.5 × 0.90
+		{ProviderOpenRouter, "openai/gpt-oss-20b:free", 0.0},            // free: 1.5 × 0 = 0
+		{ProviderOpenRouter, "meta-llama/llama-3.1-8b-instruct", 0.015}, // small: 1.5 × 0.01
+		{ProviderOpenRouter, "qwen/qwen3-coder", 0.075},                 // medium: 1.5 × 0.05
+		{ProviderOpenRouter, "anthropic/claude-haiku-4.5", 0.45},        // large: 1.5 × 0.30
+		{ProviderOpenRouter, "anthropic/claude-sonnet-4.6", 1.35},       // frontier: 1.5 × 0.90
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

@@ -60,8 +60,8 @@ type CellResult struct {
 	SchemaVersion string `json:"schema_version"`
 
 	// Identity + audit trail.
-	RunID        string `json:"run_id"`            // unique per cell run (ULID/UUID)
-	Timestamp    string `json:"timestamp"`         // RFC3339
+	RunID        string `json:"run_id"`    // unique per cell run (ULID/UUID)
+	Timestamp    string `json:"timestamp"` // RFC3339
 	GitCommitSHA string `json:"git_commit_sha,omitempty"`
 	GitBranch    string `json:"git_branch,omitempty"`
 
@@ -70,8 +70,8 @@ type CellResult struct {
 	SessionID       string `json:"session_id,omitempty"` // for multi-session scenarios (library-service)
 	Harness         string `json:"harness"`
 	Provider        string `json:"provider"`
-	Model           string `json:"model"`              // provider-qualified, e.g. "openrouter/anthropic/claude-3-5-haiku"
-	Backend         string `json:"backend,omitempty"`  // local-only: cuda | vulkan | metal | cpu
+	Model           string `json:"model"`             // provider-qualified, e.g. "openrouter/anthropic/claude-3-5-haiku"
+	Backend         string `json:"backend,omitempty"` // local-only: cuda | vulkan | metal | cpu
 	ContextStrategy string `json:"context_strategy"`
 	CortexVersion   string `json:"cortex_version,omitempty"` // required when ContextStrategy == StrategyCortex
 

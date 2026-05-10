@@ -55,9 +55,9 @@ func TestPersistCell_HappyPath_BothBackends(t *testing.T) {
 	// SQLite: row exists, content matches schema mapping
 	var (
 		harness, model, strategy, provider string
-		tokensIn                            int
-		costUSD                             float64
-		taskSuccess                         int
+		tokensIn                           int
+		costUSD                            float64
+		taskSuccess                        int
 	)
 	err := p.db.QueryRow(`SELECT harness, model, context_strategy, provider, tokens_in, cost_usd, task_success
 		FROM cell_results WHERE run_id=?`, r.RunID).Scan(
@@ -202,7 +202,7 @@ func TestPersistCell_OptionalFieldsRoundTrip(t *testing.T) {
 		ContextStrategy:      StrategyBaseline,
 		Temperature:          0.5,
 		TokensIn:             100,
-		TokensOut:             50,
+		TokensOut:            50,
 		LatencyMs:            1000,
 		AgentTurnsTotal:      1,
 		TestsPassed:          5,

@@ -38,8 +38,10 @@ jobs:
         GOOS=darwin GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 ./cmd/cortex
         GOOS=darwin GOARCH=arm64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 ./cmd/cortex
 
-        # Windows
-        GOOS=windows GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe ./cmd/cortex
+        # Windows dropped: eval-harness relies on POSIX subprocess
+        # group semantics. Files needing the exclusion carry
+        # //go:build !windows tags so any local Windows build fails
+        # fast. Re-add when a Windows subprocess-lifecycle shim lands.
 
     - name: Create checksums
       run: |
