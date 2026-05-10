@@ -225,7 +225,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** unit test using a fake harness that returns canned
     HarnessResults for 2×2×2 = 8 cells.
 
-- [ ] **7. CLI surface.**
+- [x] **7. CLI surface.**
   - New subcommand `cortex eval grid --scenarios <dir> --harnesses
     aider --models <list> --strategies baseline,cortex`. (opencode +
     pi_dev are added later by TODOs 10 and 11 — those harnesses are
