@@ -156,7 +156,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 
 ### Phase 2 — Harness telemetry seam
 
-- [ ] **3. Add `HarnessResult` + `RunSessionWithResult` (additive, non-breaking).**
+- [x] **3. Add `HarnessResult` + `RunSessionWithResult` (additive, non-breaking).**
   - Define `HarnessResult` struct in `internal/eval/v2/harness.go`:
     fields = TokensIn, TokensOut, CostUSD, AgentTurnsTotal, FilesChanged,
     LatencyMs, ProviderEcho, ModelEcho. (Subset of CellResult — runner
