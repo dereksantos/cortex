@@ -331,7 +331,12 @@ continuing**. The session can't make meaningful progress without them.
     `LatencyMs > 0`, no panics. Both SQLite and JSONL contain rows.
     `cortex eval grid --report` shows all 3.
 
-- [ ] **11. Cross-harness divergence check on the coding scenarios.**
+- [x] **11. Cross-harness divergence check on the coding scenarios.**
+  > 40 pp observed (aider 4/5, opencode 2/5, pi_dev 4/5). Investigation
+  > in `docs/phase7-divergence-finding.md`: root cause is
+  > gpt-oss-20b:free hallucinating paths + opencode's permission gate
+  > auto-rejecting them; aider/pi.dev recover. Real model-on-harness
+  > sensitivity, not a wiring bug. User decision: accept and proceed.
   - Same command shape as TODO 10 but with `--scenarios
     test/evals/coding` and `--strategies baseline`.
     15 cells total (5 scenarios × 3 harnesses).
