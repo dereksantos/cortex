@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -249,6 +250,64 @@ func TestPersistCell_OptionalFieldsRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(&got, r) {
 		t.Errorf("round-trip mismatch:\n got: %+v\nwant: %+v", got, r)
 	}
+}
+
+// TestRecentCellsFromJSONL exercises the analysis-path readback that
+// powers `cortex eval grid --report`. Order is preserved (oldest first
+// within the returned slice), and limit truncates from the head.
+func TestRecentCellsFromJSONL(t *testing.T) {
+	p := newTestPersister(t)
+
+	// Empty file → returns nil, nil (not an error).
+	got, err := p.RecentCellsFromJSONL(10)
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if got != nil {
+		t.Errorf("empty got %d rows, want nil", len(got))
+	}
+
+	// Write 5 CellResults with distinct RunIDs so we can assert order.
+	for i := 0; i < 5; i++ {
+		r := validCellResult()
+		r.RunID = fmt.Sprintf("run-%d", i)
+		if err := p.PersistCell(context.Background(), r); err != nil {
+			t.Fatalf("PersistCell %d: %v", i, err)
+		}
+	}
+
+	t.Run("limit larger than count returns all", func(t *testing.T) {
+		got, err := p.RecentCellsFromJSONL(100)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(got) != 5 {
+			t.Errorf("len=%d want 5", len(got))
+		}
+		if got[0].RunID != "run-0" || got[4].RunID != "run-4" {
+			t.Errorf("order: %s, %s want run-0, run-4", got[0].RunID, got[4].RunID)
+		}
+	})
+
+	t.Run("limit truncates to last N", func(t *testing.T) {
+		got, err := p.RecentCellsFromJSONL(2)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(got) != 2 {
+			t.Errorf("len=%d want 2", len(got))
+		}
+		if got[0].RunID != "run-3" || got[1].RunID != "run-4" {
+			t.Errorf("truncated: %s, %s want run-3, run-4", got[0].RunID, got[1].RunID)
+		}
+	})
+
+	t.Run("limit 0 returns all", func(t *testing.T) {
+		got, _ := p.RecentCellsFromJSONL(0)
+		if len(got) != 5 {
+			t.Errorf("len=%d want 5", len(got))
+		}
+	})
 }
 
 func readJSONL(t *testing.T, path string) []string {

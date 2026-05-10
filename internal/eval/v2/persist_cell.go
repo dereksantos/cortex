@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -110,6 +111,47 @@ func (p *Persister) GetLifetimeSpend() (float64, error) {
 		return 0, fmt.Errorf("lifetime_spend select: %w", err)
 	}
 	return usd, nil
+}
+
+// RecentCellsFromJSONL returns the last n CellResult rows from the
+// JSONL append log (the canonical analysis source per hard constraint
+// #8). Reads sequentially — fine for the modest row counts we expect;
+// callers wanting tens of thousands should use direct SQLite queries
+// instead. Malformed lines are silently skipped.
+//
+// Returns nil, nil when the JSONL file does not yet exist (first-run
+// state, not an error).
+func (p *Persister) RecentCellsFromJSONL(n int) ([]CellResult, error) {
+	path := p.cellResultsJSONLPath()
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("open jsonl: %w", err)
+	}
+	defer f.Close()
+
+	var all []CellResult
+	scanner := bufio.NewScanner(f)
+	// CellResult JSON ~1-2 KB per line; cap at 1 MiB to handle outliers
+	// without exposing a runaway-line foot-gun.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var c CellResult
+		if err := json.Unmarshal(scanner.Bytes(), &c); err != nil {
+			continue
+		}
+		all = append(all, c)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan jsonl: %w", err)
+	}
+
+	if n <= 0 || len(all) <= n {
+		return all, nil
+	}
+	return all[len(all)-n:], nil
 }
 
 // PersistCell writes one CellResult to BOTH backends required by hard

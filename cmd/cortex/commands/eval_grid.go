@@ -4,10 +4,64 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 )
+
+// runGridReport prints the most recent N CellResult rows from the
+// JSONL append log. The JSONL log is the canonical analysis source
+// (hard constraint #8); SQLite is a parallel store for ad-hoc queries.
+//
+// Output is a fixed-width table on stdout — analysts can pipe to
+// `column -t` or pull richer queries from sqlite3 directly.
+func runGridReport(limit int) error {
+	p, err := evalv2.NewPersister()
+	if err != nil {
+		return fmt.Errorf("init persister: %w", err)
+	}
+	defer p.Close()
+
+	cells, err := p.RecentCellsFromJSONL(limit)
+	if err != nil {
+		return fmt.Errorf("read cell_results.jsonl: %w", err)
+	}
+	if len(cells) == 0 {
+		fmt.Println("no cell_results yet — run `cortex eval grid --models <id>` first")
+		return nil
+	}
+
+	fmt.Printf("%-30s %-20s %-10s %-35s %-10s %5s %5s %9s %7s %3s\n",
+		"run_id", "scenario", "harness", "model", "strategy",
+		"in", "out", "cost_usd", "lat_ms", "ok")
+	fmt.Println(strings.Repeat("-", 140))
+	for _, c := range cells {
+		ok := "no"
+		if c.TaskSuccess {
+			ok = "yes"
+		}
+		fmt.Printf("%-30s %-20s %-10s %-35s %-10s %5d %5d $%.6f %7d %3s\n",
+			truncate(c.RunID, 30),
+			truncate(c.ScenarioID, 20),
+			c.Harness,
+			truncate(c.Model, 35),
+			c.ContextStrategy,
+			c.TokensIn, c.TokensOut,
+			c.CostUSD, c.LatencyMs, ok)
+	}
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if n <= 1 {
+		return s[:n]
+	}
+	return s[:n-1] + "…"
+}
 
 // executeGrid handles `cortex eval grid <flags>`. Builds the grid
 // dimensions, validates that every requested harness binary is present,
@@ -22,11 +76,22 @@ func executeGrid(args []string) error {
 	modelsCSV := ""
 	strategiesCSV := evalv2.StrategyBaseline + "," + evalv2.StrategyCortex
 	showHelp := false
+	reportOnly := false
+	reportLimit := 20
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "-h", "--help":
 			showHelp = true
+		case "--report":
+			reportOnly = true
+		case "--report-limit":
+			if i+1 < len(args) {
+				if v, err := strconv.Atoi(args[i+1]); err == nil && v > 0 {
+					reportLimit = v
+				}
+				i++
+			}
 		case "--scenarios":
 			if i+1 < len(args) {
 				scenarioDir = args[i+1]
@@ -60,6 +125,10 @@ func executeGrid(args []string) error {
 	if showHelp {
 		printGridHelp()
 		return nil
+	}
+
+	if reportOnly {
+		return runGridReport(reportLimit)
 	}
 
 	if modelsCSV == "" {
@@ -228,6 +297,9 @@ Options:
   --strategies LIST        CSV of context strategies
                            (default: baseline,cortex)
                            Valid: baseline, cortex, frontier
+  --report                 Print the last N CellResult rows from the
+                           JSONL log; do not run any cells.
+  --report-limit N         How many rows --report shows (default: 20)
   -h, --help               Show this help
 
 Environment:
