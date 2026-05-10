@@ -291,7 +291,7 @@ continuing**. The session can't make meaningful progress without them.
   - Parallel to TODO 3.
   - **Done:** new test file with the same case coverage.
 
-- [ ] **8. Real-binary smoke for PiDevHarness against OpenRouter.**
+- [x] **8. Real-binary smoke for PiDevHarness against OpenRouter.**
   - Parallel to TODO 4.
   - **Done:** test green when prerequisites present, t.Skip
     otherwise.
