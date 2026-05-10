@@ -4,7 +4,7 @@
 
 ## Abstract
 
-This paper describes Cortex, a system for **continuous context integration** in service of agents executing tasks. We use *learning harness* as descriptive language for the role this layer plays alongside coding harnesses (Claude Code, Cursor, Aider, Claude Agent SDK [1]) and agent memory systems (Mem0 [2], Letta [3], A-Mem [4], Claude Code Auto-Memory, AWS AgentCore [5]). The framework is grounded in CoALA [6], which formalized cognitive architectures for language agents in 2023; Cortex is one specific instantiation. We engage directly with the cluster of recent work that overlaps most closely — sleep-time compute [7], BudgetMem [8], the reflection loop in Generative Agents [9], skill accumulation in Voyager [10], and memory evolution in A-Mem [4] — and describe two specific architectural commitments in Cortex: (a) an *inverse activity gradient* on background processing, where Think runs at reduced budget during active periods and Dream grows during idle, refining the binary active/idle split common in sleep-time approaches; and (b) a *latency-bounded mechanical foreground*, where retrieval on the critical path is bounded at <20ms with agentic processing happening off-path. We position the small-model salience layer as the application being built to test whether continuous integration measurably helps small local models produce well-architected code at a fraction of the cost.
+This paper describes Cortex, a system for **continuous context integration** in service of agents executing tasks. We use *learning harness* as descriptive language for the role this layer plays alongside coding harnesses (Claude Code, Cursor, Aider, Claude Agent SDK [1]) and agent memory systems (Mem0 [2], Letta [3], A-Mem [4], Claude Code Auto-Memory, AWS AgentCore [5]). The framework is grounded in CoALA [6], which formalized cognitive architectures for language agents in 2023; Cortex is one specific instantiation. We engage directly with the cluster of recent work that overlaps most closely — sleep-time compute [7], BudgetMem [8], the reflection loop in Generative Agents [9], skill accumulation in Voyager [10], and memory evolution in A-Mem [4] — and describe two specific architectural commitments in Cortex: (a) an *inverse activity gradient* on background processing, where Think runs at reduced budget during active periods and Dream grows during idle, refining the binary active/idle split common in sleep-time approaches; and (b) a *mechanical foreground with a latency target*, where retrieval on the critical path targets <20ms with agentic processing happening off-path. We position the small-model salience layer as the application being built to test whether continuous integration measurably helps small local models produce well-architected code at a fraction of the cost.
 
 ## 1. What is a learning harness
 
@@ -55,7 +55,7 @@ Cortex is a single-binary daemon in Go. It captures events from coding harnesses
 
 | Mode | Type | Purpose |
 |------|------|---------|
-| Reflex | Mechanical | <20ms retrieval on the critical path |
+| Reflex | Mechanical | Retrieval on the critical path, <20ms target |
 | Reflect | Agentic | Reranking and contradiction detection |
 | Resolve | Agentic | Decide whether to inject, wait, or queue |
 | Think | Agentic, background | Active-period consolidation |
@@ -76,9 +76,9 @@ DreamBudget  = min(IdleTime × GrowthRate, MaxBudget)  # idle periods
 
 Think runs during active periods at reduced budget, doing only what spare cycles allow; Dream runs during idle periods with budget that grows with idle duration up to a cap. The motivation is human: thinking while working depletes capacity; dreaming happens during rest. This is a refinement of the binary active/idle split, not a new paradigm — but it gives the harness a smooth response to host activity rather than a step function.
 
-### 3.2 Latency-bounded mechanical foreground
+### 3.2 Mechanical foreground with a latency target
 
-Most agent memory systems are LLM-mediated end-to-end. Cortex commits to a hard latency budget on the foreground retrieval path: Reflex performs embedding similarity, tag matching, and recency weighting in <20ms, with no LLM call on the critical path. Agentic processing (Reflect, Resolve, Think, Dream) runs off-path and feeds Reflex via cached artifacts. The architectural bet: foreground latency stays bounded and predictable; quality compounds off-path. This is similar in spirit to RAG-with-rerank patterns but commits explicitly to keeping LLM calls out of the critical path.
+Most agent memory systems are LLM-mediated end-to-end. Cortex's design splits the foreground retrieval path away from any LLM call: Reflex performs embedding similarity, tag matching, and recency weighting, with the agentic modes (Reflect, Resolve, Think, Dream) running off-path and feeding Reflex via cached artifacts. The architectural goal is a foreground path with low and predictable latency — <20ms is the target — so quality can compound in the background. This is similar in spirit to RAG-with-rerank patterns and commits explicitly to keeping LLM calls out of the critical path. The latency target is an active engineering goal, not a number Cortex has reliably pinned in real-world use yet; current sessions still see 80–100ms hot-path warnings.
 
 ### 3.3 What Think and Dream produce
 

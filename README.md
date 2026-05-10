@@ -8,17 +8,17 @@
 
 > **Status: Experimental.** The core capture → store → retrieve → inject pipeline works and is in daily use on the author's machine, but Cortex is a research-grade tool, not a polished product. Cognitive eval reports ABR 0.77 (target 0.9). Slash-command UX, MCP cross-tool support, and Cursor integration are early. Small Ollama models (≤3B params) have measured below the floor for insight extraction — `llama3.1:8b` or larger, or `ANTHROPIC_API_KEY`, is recommended. Expect rough edges, breaking changes, and bugs that may require reading code to diagnose. Issues and PRs welcome.
 
-## What Makes This Different
+## What Cortex Does
 
-Cortex isn't trying to be smarter than the frontier model. It's trying to be the **part of the model's mind that's always running**: a cheap, persistent inner voice that watches every session, files things away, and surfaces what's relevant when the foreground model needs it.
+Cortex performs **continuous context integration** alongside your AI coding harness — observing events as they happen, reconciling new information against existing knowledge, and surfacing relevant context proactively. It runs as a single-binary daemon next to Claude Code, Cursor, or Aider, capturing decisions, patterns, and corrections via lightweight hooks and feeding them back through fast mechanical retrieval.
 
-Two ideas in the architecture that you won't find in flat-file memory tools:
+The role sits within the framework of cognitive architectures for language agents (CoALA) and is closely related to sleep-time / background-agent patterns (Letta) and memory-evolution approaches (A-Mem). Two architectural commitments shape Cortex's particular implementation:
 
-**Inverse activity budgets for Think and Dream.** Think runs while you're actively working and *contracts* as activity grows — it gets only the cycles your session isn't using. Dream runs while you're idle and *expands* with idle time, capped at a configurable maximum. This mirrors human cognition: we think at the edges of work, we dream when we rest. Both modes are bounded by design — no unbounded background spend.
+**Inverse activity gradient on background processing.** Think runs while you're actively working at *reduced* budget, doing only what spare cycles allow. Dream runs while you're idle and *grows* with idle time, capped at a configurable maximum. This refines the binary active/idle split common in sleep-time approaches with a smooth response to host activity. Both modes are bounded by design.
 
-**Small models doing continuous labor for frontier models.** Background work runs on cheap local models (Ollama, Llama-3-8B, Phi). The frontier model is invoked only at query time, and it receives pre-computed context the small models have already filtered, embedded, and reranked. Small models amplifying frontier models — instead of frontier models burning tokens to re-discover yesterday's context every session.
+**Mechanical foreground with a latency target.** Reflex aims to keep retrieval on the critical path fast — <20ms is the design target, with no LLM call on the foreground path. Agentic processing (Reflect, Resolve, Think, Dream) runs off-path and feeds Reflex via cached artifacts. The goal is to keep foreground latency low and predictable so quality can compound in the background; this is an active engineering target, not a number that's been pinned.
 
-Together these implement **bounded intelligence**: mechanical retrieval first, agentic processing only with explicit budgets, the frontier model working with what it's given rather than deciding what to fetch.
+Small local models do the continuous integration work; the frontier model receives pre-computed context at query time. The full positioning — lineage, concurrent work, falsification — is in [docs/learning-harness.md](docs/learning-harness.md).
 
 ## Problem
 
@@ -27,7 +27,7 @@ AI coding assistants waste tokens. Every session re-discovers past decisions, re
 - **Re-discovered decisions**: "We use JWT" gets explained to the LLM session after session
 - **Redundant file reads**: The same architecture files get read and re-read across sessions
 - **Repeated context**: Corrections, patterns, and constraints are re-stated manually
-- **Cross-tool fragmentation**: Context built in Claude Code is invisible to Cursor and vice versa
+- **Cross-tool fragmentation**: Context built in one harness doesn't carry into another
 - **No measurement**: No way to know if injected context actually reduces downstream token use
 
 Cortex addresses this with a shared context pipeline that reduces token costs over time through semantic retrieval, cross-tool portability via MCP, budget-bounded cognitive modes, and the ABR metric for measurable context quality.
@@ -99,11 +99,11 @@ All agents pointed at the same `.cortex/` directory share context. SQLite WAL ha
 
 ## Why This Matters
 
-**Local models for background processing.** Think and Dream modes use small, cheap models (Ollama, local inference) for background work. The expensive frontier model is only needed at query time, and even then it receives pre-computed context that reduces the tokens it needs to process.
+**Local models for background processing.** Think and Dream modes use small local models (Ollama) for background work. The frontier model is invoked at query time and receives pre-computed context, so it can spend its tokens reasoning about the task rather than rebuilding context from scratch.
 
 **Compounding returns over sessions.** Each session captures decisions, corrections, and patterns. The next session starts with that context already available. Over weeks and months, the token savings compound as less and less needs to be re-established.
 
-**Multi-agent amortization.** In multi-agent and factory workflows, context computed once by Cortex is shared across all agents via MCP. Instead of each agent independently building context (multiplying token costs), they share a single pre-computed context pool.
+**Multi-agent amortization.** In multi-agent and factory workflows, context computed once by Cortex is shared across all agents via MCP. The same pre-computed context pool serves every agent, so the cost of building it is paid once rather than per agent.
 
 ## Cognitive Architecture
 
@@ -111,7 +111,7 @@ Cortex uses five cognitive modes, inspired by how humans process information:
 
 | Mode | Type | Speed | Purpose |
 |------|------|-------|---------|
-| Reflex | Mechanical | <20ms | "What feels related?" - embeddings, tags, recency |
+| Reflex | Mechanical | <20ms target | "What feels related?" - embeddings, tags, recency |
 | Reflect | Agentic | 200ms+ | "Is this actually relevant?" - LLM reranking |
 | Resolve | Agentic | 50-100ms | "Should I act now or wait?" - injection decisions |
 | Think | Background | Bounded | Active-period learning using spare cycles |
@@ -177,7 +177,7 @@ cortex test [type]       # Test LLM analysis
 cortex/
 ├── cmd/cortex/          # CLI entry point
 ├── internal/            # Private implementation
-│   ├── capture/         # Fast event capture (<20ms)
+│   ├── capture/         # Fast event capture (<20ms target)
 │   ├── cognition/       # Five cognitive modes
 │   ├── storage/         # SQLite + search
 │   └── processor/       # Async event processing
@@ -206,7 +206,7 @@ Active development. See [ROADMAP.md](ROADMAP.md) for the full breakdown.
 
 Key metrics from cognitive evaluation:
 - 87% pass rate across cognitive mode tests
-- <20ms Reflex latency (target met)
+- Reflex latency <20ms target — met on the eval corpus, not yet pinned in real-world sessions where 80–100ms hot-path warnings still appear
 - ABR 0.77 (Fast mode achieves 77% of Full mode quality; target 0.9)
 
 ### Known Limitations
@@ -218,17 +218,17 @@ Key metrics from cognitive evaluation:
 - **MCP server is unvalidated.** Wired up but not exercised against external clients beyond Claude Code.
 - **Hook installation is per-project.** Sessions started in a project where `cortex install` hasn't been run silently capture nothing; no warning is surfaced at session start.
 
-### Differentiation from Native AI Memory
+### Cortex alongside Claude Code Auto-Memory
 
-| Capability | Claude Code Auto-Memory | Cortex |
-|---|---|---|
-| Basic recall | Yes | Yes |
-| Semantic retrieval | No (flat text) | Yes (embeddings + multi-signal) |
-| Cross-tool | No (Claude Code only) | Yes (MCP server) |
-| Measurable quality | No | Yes (ABR metric + eval framework) |
-| Budget-bounded processing | No | Yes (Think/Dream inverse models) |
-| Token cost reduction | No (context grows linearly) | Yes (pre-computed, compounding) |
-| Entity graph | No | Yes (structured relationships) |
+Claude Code Auto-Memory provides flat-file recall scoped to Claude Code, covering basic decision and pattern persistence. Cortex extends the surface in a few directions:
+
+- **Semantic retrieval** via embeddings and multi-signal scoring, in addition to flat-text matching
+- **Cross-tool reach** via MCP, so context captured in one harness can serve another
+- **Evaluation framework** with the ABR metric for measuring retrieval quality
+- **Budget-bounded background processing** (Think/Dream inverse-gradient modes)
+- **Entity graph** with structured relationships across captured events
+
+Both can run together — Cortex reads `MEMORY.md` as one of its sources.
 
 ## Documentation
 
