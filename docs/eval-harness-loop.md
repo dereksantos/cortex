@@ -311,7 +311,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     `verify: echo '--- PASS: TestFoo'; echo '--- PASS: TestBar'` shows
     TestsPassed=2.
 
-- [ ] **11. Scenario `seed_dir` field + copy-into-workdir.**
+- [x] **11. Scenario `seed_dir` field + copy-into-workdir.**
   - Optional `seed_dir: <relative path>` on Scenario. Before invoking
     the harness, the runner recursively copies `seed_dir` contents into
     the cell's temp workdir. Scenarios without `seed_dir` get an empty
