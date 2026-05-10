@@ -119,15 +119,10 @@ func TestReflex_CircuitBreaker_RecoversOnSuccess(t *testing.T) {
 	store := newReflexTestStorage(t)
 	r := NewReflex(store, nil)
 
-	// Manually drive failures up to one below threshold.
+	// Manually drive failures up to one below threshold, then a success.
 	for i := 0; i < embedFailureThreshold-1; i++ {
 		r.recordEmbedFailure()
 	}
-	if !r.shouldTryEmbedder() {
-		// embedder is nil, so shouldTryEmbedder is false regardless; that's
-		// fine — what we're checking is the counter reset behavior below.
-	}
-
 	r.recordEmbedSuccess()
 	if got := r.embedFailures.Load(); got != 0 {
 		t.Errorf("after success, expected failures=0, got %d", got)
