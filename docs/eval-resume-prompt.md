@@ -442,55 +442,117 @@ the project's eval ledger, not as a one-time document.
 
 ---
 
-## Open questions to ask the user at session start
+## Decided defaults — standing decisions, no need to re-ask
 
-These are the choices that change which experiments are worth running.
-Ask before committing to anything substantial.
+Earlier drafts of this prompt punted these as "open questions to ask
+the user at session start." They are now decided. A fresh session
+should treat these as already-resolved unless the user explicitly
+overrides at session start.
 
-1. **Audience for the numbers — publish vs. ship?**
-   - Publish path → invest in lm-eval-harness integration, standard
-     benchmarks, reproducibility.
-   - Ship path → invest in scenarios that mirror this team's actual
-     development work; standard benchmarks become less load-bearing.
+### 1. Audience: **publish AND ship, in that order**
 
-2. **Frontier comparison budget?**
-   - Sonnet/Opus/GPT-5 comparisons each cost ~$5-15 per full sweep
-     and need `CORTEX_EVAL_ALLOW_FRONTIER=1`. The cross-tier
-     amplifier claim needs them, but they're not "free" the way
-     Haiku comparisons are.
+Publishable numbers (via standard benchmarks with reproducible
+methodology) are a strict superset of shippable numbers. Anything
+credible enough to publish is credible enough to ship; the reverse
+isn't true. This drives investment in lm-eval-harness integration
+*and* in scenarios that mirror real-world dev work — they aren't
+in tension.
 
-3. **Real-corpus seeding — clean-room or this project?**
-   - This project has session logs, git history, captured events.
-     Using them as the cortex corpus tests the live system. But it
-     biases toward "cortex helps because it has memorized this
-     codebase" — fine for a product claim, questionable for a paper.
+### 2. Frontier comparison budget: **$5 per run, $15 lifetime ceiling**
 
-4. **lm-eval integration depth?**
-   - Light (export our results to lm-eval-compatible JSON) — easy,
-     limited cross-comparability.
-   - Deep (cortex as a real `lm-eval --model cortex-...` adapter) —
-     1 day, unlocks everything downstream.
+Sonnet / Opus / GPT-5 comparisons stay behind
+`CORTEX_EVAL_ALLOW_FRONTIER=1` per-run. The $15 lifetime cap covers
+~3 full library-service sweeps at frontier tier. The amplifier
+claim needs a frontier ceiling to anchor against — without it, "cortex
+makes a small model reach frontier behavior" has nothing on the
+right-hand side.
 
-5. **Target — beat a specific number, or characterize the system?**
-   - "Beat number" → pick a benchmark, optimize until cortex wins.
-   - "Characterize" → run a wider matrix to map where cortex helps
-     and where it doesn't. Different experiments.
+Practical: when running frontier comparisons, set
+`CORTEX_EVAL_LIFETIME_USD_CEILING=15` for the frontier sweep window.
+The existing multi-tier guard handles the rest.
 
-6. **CI-integrated eval?**
-   - Every PR runs a small eval subset with a budget guard. Catches
-     regressions but adds friction. Worth doing only after a stable
-     methodology.
+### 3. Real-corpus seeding: **this project's own session logs + git history**
 
-7. **Variance budget?**
-   - Single seed per cell is fast but noisy. 3 seeds × 5 scenarios
-     gives confidence intervals. Tripling cost for that confidence
-     may or may not be worth it depending on (1).
+Tests the live system on data that actually exists. The bias toward
+"cortex memorized this codebase" is acceptable for shipping the
+product. If we later want unbiased external validation, repeat the
+same experiment against a held-out project — but that's a follow-
+up, not a precondition.
 
-8. **Comparison-against-what for "lift"?**
-   - Today: cortex vs. *nothing* (no system prompt augmentation).
-   - More fair: cortex vs. *a good engineered system prompt that
-     includes project conventions*. That's the alternative cortex
-     is competing with in practice.
+Practical: a future `cortex seed-from-history` command (or one-shot
+script) walks the project's git log and `~/.claude/projects/<this>/`
+conversation files, captures durable insights via `cortex capture`.
+Document the seeding methodology so the experiment is repeatable.
+
+### 4. lm-eval integration depth: **deep — cortex as an `lm-eval --model cortex-...` adapter**
+
+One day of work, unlocks every downstream eval: HumanEval+, MBPP+,
+SWE-bench Lite, MultiPL-E, LiveCodeBench, and the 100+ other tasks
+in lm-evaluation-harness. Light "export our results to lm-eval JSON"
+is busy-work — it doesn't get cortex onto the rails of the framework
+the field actually runs.
+
+Practical: wrap the existing OpenRouter `Provider` + cortex injector
+as a Python `LM` subclass (lm-eval is Python). Per prompt: query
+cortex with the prompt → prepend retrieved context → route to
+OpenRouter via Python client → return completion. Live in a small
+`tools/lm-eval-cortex/` directory.
+
+### 5. Target: **characterize first, optimize second**
+
+Premature optimization picks the wrong target. Characterization
+across the 5-dim MECE matrix shows where cortex actually helps and
+where it doesn't, then we optimize the cell(s) it helps most.
+"Beat number X on benchmark Y" comes after we know which (shape,
+tier, config) combination is the right place to push.
+
+Practical: every experiment writes its (shape, tier, config) cell
+into the matrix above. The `driver` loop keeps the matrix current.
+After ~20 cells are filled, we have a map; before then, optimization
+is gambling.
+
+### 6. CI-integrated eval: **yes, but only after the library-service experiment lands real signal**
+
+Gating PRs on an eval methodology that's still settling freezes the
+wrong thing. Sequence: library-service produces decisive signal →
+the scenarios + thresholds that produced it become the regression
+gate → CI runs that fixed set on each PR with a small budget guard.
+
+Practical: when the gate ships, it runs ~5 scenarios on a free model
+in baseline + cortex, with a per-run ceiling of $0.05. Asserts no
+regression > 5 pp on the cortex-side pass-rate. Sized so it adds
+< 5 min to PR feedback time.
+
+### 7. Variance budget: **3 seeds per cell when sweep cost < $5; 1 seed otherwise**
+
+Cheap experiments (free-tier or small paid) get variance bars for
+free — triple the runs, still under $1. Expensive experiments
+(library-service frontier) report point estimates with a documented
+`n=1` caveat. Never claim a lift number without surfacing whether
+it's a single-seed point estimate or a multi-seed mean.
+
+Practical: the cell-result schema's `seed` field already exists. The
+grid runner needs a `--seeds N` flag (small CLI addition) that
+re-runs each cell with `seed=0..N-1`. Aggregations average across
+seeds; per-cell std-dev gets added to `--report-summary`.
+
+### 8. "Lift" against what: **report BOTH (a) no-context AND (b) good system prompt**
+
+(a) is the mechanism check: does cortex's retrieval-and-injection
+actually surface relevant context? (b) is the deployment check: does
+cortex beat the realistic alternative — a hand-engineered system
+prompt with project conventions?
+
+The gap between (a) and (b) is itself informative:
+- Large gap → cortex's lift is mostly the *content* of what it
+  retrieves; a static system prompt could capture most of it.
+- Small gap → cortex's lift is the *dynamic* part — retrieving the
+  right thing at the right time, which a static prompt can't do.
+
+Practical: every experiment table has three columns instead of two:
+`baseline-no-context`, `baseline-good-prompt`, `cortex`. The
+`good-prompt` baseline is a maintained system prompt for each
+scenario family — author it once, reuse across experiments.
 
 ---
 
