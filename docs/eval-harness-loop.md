@@ -442,7 +442,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 
 ### Phase 6 — Final
 
-- [ ] **18. Stop the loop.** All boxes checked. Print a one-page
+- [x] **18. Stop the loop.** All boxes checked. Print a one-page
   summary of what shipped, the experiment's headline numbers, and what's
   explicitly deferred (Reflex-mined cortex, multi-session scenarios,
   alternative harnesses in Phase 7).
