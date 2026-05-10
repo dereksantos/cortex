@@ -295,14 +295,32 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	}
 
 	var (
-		hres   HarnessResult
-		runErr error
-		start  = time.Now()
+		hres       HarnessResult
+		runErr     error
+		retryCount int
+		start      = time.Now()
 	)
-	if rh, ok := hs.Harness.(ResultfulHarness); ok {
-		hres, runErr = rh.RunSessionWithResult(ctx, prompt, workdir)
-	} else {
-		runErr = hs.Harness.RunSession(ctx, prompt, workdir)
+	for attempt := 0; attempt < len(retryBackoff)+1; attempt++ {
+		if rh, ok := hs.Harness.(ResultfulHarness); ok {
+			hres, runErr = rh.RunSessionWithResult(ctx, prompt, workdir)
+		} else {
+			runErr = hs.Harness.RunSession(ctx, prompt, workdir)
+		}
+		// Success or non-transient error → stop. Last attempt also stops
+		// regardless (we've exhausted retries).
+		if runErr == nil || !isTransient429(runErr) || attempt == len(retryBackoff) {
+			break
+		}
+		retryCount = attempt + 1
+		backoff := retryBackoff[attempt]
+		select {
+		case <-ctx.Done():
+			runErr = ctx.Err()
+		case <-time.After(backoff):
+		}
+		if runErr != nil && runErr == ctx.Err() {
+			break
+		}
 	}
 	if hres.LatencyMs == 0 {
 		elapsed := time.Since(start)
@@ -346,8 +364,14 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	if strat == StrategyCortex {
 		cr.CortexVersion = CortexVersion
 	}
+	if retryCount > 0 {
+		cr.Notes = fmt.Sprintf("retry_count=%d", retryCount)
+	}
 	if runErr != nil {
-		cr.Notes = fmt.Sprintf("harness error: %v", runErr)
+		if cr.Notes != "" {
+			cr.Notes += "; "
+		}
+		cr.Notes += fmt.Sprintf("harness error: %v", runErr)
 		// Don't run the verifier if the harness errored — there's
 		// nothing useful to verify. Pre-existing TaskSuccess=false stays.
 		return cr, nil
@@ -370,6 +394,47 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		}
 	}
 	return cr, nil
+}
+
+// retryBackoff is the per-attempt sleep duration before retrying a
+// transient (429-style) harness failure. Length determines the max
+// retry count: with 3 entries, a cell tries up to 4 times total
+// (initial + 3 retries). Tests override with zero durations.
+var retryBackoff = []time.Duration{
+	15 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+}
+
+// transientErrorPatterns match errors that should trigger a retry —
+// upstream provider rate limiting (Venice saturation, etc.), 429s
+// surfaced through Aider's stderr, or OpenRouter's "retry shortly"
+// hint. Hard 4xx (auth, missing model, bad request) does NOT match
+// here — those need user attention and will burn retry budget for
+// nothing.
+var transientErrorPatterns = []string{
+	"temporarily rate-limited",
+	"rate-limited upstream",
+	"retry_after",
+	"retry shortly",
+	"429",
+}
+
+// isTransient429 reports whether an error indicates a rate-limit-like
+// transient condition that's worth retrying. Substring match on the
+// error string — Aider/litellm surfaces upstream errors textually so
+// we can't rely on typed errors here.
+func isTransient429(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, pat := range transientErrorPatterns {
+		if strings.Contains(msg, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCortexPrefix renders the static-cortex injection block. Format

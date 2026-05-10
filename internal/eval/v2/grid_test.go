@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // gridFakeHarness is a deterministic, threadsafe fake that records each
@@ -670,6 +671,166 @@ func TestRunGrid_SeedDirMissing(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "seed workdir") {
 		t.Errorf("err=%v, want 'seed workdir'", err)
+	}
+}
+
+// flakyHarness fails its first N calls with a 429-style error then
+// succeeds. Used to lock the retry-on-transient path.
+type flakyHarness struct {
+	failuresBefore int
+	calls          int
+	res            HarnessResult
+	transientErr   error
+}
+
+func (h *flakyHarness) RunSession(_ context.Context, _ string, _ string) error {
+	h.calls++
+	if h.calls <= h.failuresBefore {
+		return h.transientErr
+	}
+	return nil
+}
+
+func (h *flakyHarness) RunSessionWithResult(ctx context.Context, prompt, workdir string) (HarnessResult, error) {
+	if err := h.RunSession(ctx, prompt, workdir); err != nil {
+		return HarnessResult{}, err
+	}
+	return h.res, nil
+}
+
+// withInstantRetry zeros the per-attempt backoff durations for tests
+// so the retry loop runs without sleeping. Returns a teardown the
+// caller must defer to restore production durations.
+func withInstantRetry(t *testing.T) {
+	t.Helper()
+	saved := retryBackoff
+	retryBackoff = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { retryBackoff = saved })
+}
+
+// TestRunGrid_RetryRecoversFromTransient429: a 429 on the first
+// attempt should retry; if the next attempt succeeds, the cell
+// reports TaskSuccess=true and Notes records retry_count.
+func TestRunGrid_RetryRecoversFromTransient429(t *testing.T) {
+	withInstantRetry(t)
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &flakyHarness{
+		failuresBefore: 1,
+		transientErr:   fmt.Errorf("aider exited: openrouter (429): qwen3-coder:free is temporarily rate-limited upstream"),
+		res:            HarnessResult{TokensIn: 100, TokensOut: 50, AgentTurnsTotal: 1, LatencyMs: 1},
+	}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if fake.calls != 2 {
+		t.Errorf("calls=%d want 2 (1 fail + 1 retry)", fake.calls)
+	}
+	if !results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=false; retry should have recovered. Notes: %s", results[0].Notes)
+	}
+	if !strings.Contains(results[0].Notes, "retry_count=1") {
+		t.Errorf("Notes=%q, want 'retry_count=1'", results[0].Notes)
+	}
+}
+
+// TestRunGrid_RetryGivesUpAfterMaxAttempts: with 4 transient failures
+// (more than retryBackoff length), the cell ends in error after the
+// configured retry budget — does not loop forever.
+func TestRunGrid_RetryGivesUpAfterMaxAttempts(t *testing.T) {
+	withInstantRetry(t)
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &flakyHarness{
+		failuresBefore: 999, // never succeeds
+		transientErr:   fmt.Errorf("temporarily rate-limited"),
+	}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	// 1 initial + len(retryBackoff)=3 retries = 4 calls total.
+	if fake.calls != 4 {
+		t.Errorf("calls=%d want 4 (1 initial + 3 retries)", fake.calls)
+	}
+	if results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=true; want false (all attempts failed)")
+	}
+	if !strings.Contains(results[0].Notes, "retry_count=3") {
+		t.Errorf("Notes=%q, want 'retry_count=3'", results[0].Notes)
+	}
+}
+
+// TestRunGrid_NoRetryOnHardErrors: a non-transient error (auth failure,
+// model not found) should NOT consume the retry budget — fail fast.
+func TestRunGrid_NoRetryOnHardErrors(t *testing.T) {
+	withInstantRetry(t)
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &flakyHarness{
+		failuresBefore: 999,
+		transientErr:   fmt.Errorf("aider exited: openrouter (401): No auth credentials found"),
+	}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if fake.calls != 1 {
+		t.Errorf("calls=%d want 1 (no retry on hard error)", fake.calls)
+	}
+	if results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=true; want false (auth error)")
+	}
+	if strings.Contains(results[0].Notes, "retry_count") {
+		t.Errorf("Notes=%q, should not mention retry on non-transient error", results[0].Notes)
+	}
+}
+
+// TestIsTransient429 locks the substring patterns the retry path uses.
+func TestIsTransient429(t *testing.T) {
+	tests := []struct {
+		err  string
+		want bool
+	}{
+		{"openrouter (429): qwen/qwen3-coder:free is temporarily rate-limited upstream", true},
+		{"rate-limited upstream", true},
+		{"retry_after_seconds: 22", true},
+		{"please retry shortly", true},
+		{"http 429", true},
+		{"401 unauthorized", false},
+		{"model not found", false},
+		{"connection refused", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.err, func(t *testing.T) {
+			got := isTransient429(fmt.Errorf("%s", tc.err))
+			if got != tc.want {
+				t.Errorf("isTransient429(%q)=%v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+	if got := isTransient429(nil); got {
+		t.Error("isTransient429(nil) = true, want false")
 	}
 }
 
