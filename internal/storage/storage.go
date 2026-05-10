@@ -1696,7 +1696,7 @@ func (s *Storage) Compact() error {
 	for _, e := range s.entities {
 		liveEntities = append(liveEntities, entityRecord{
 			ProjectID: s.projectID,
-			ID: e.ID, Type: e.Type, Name: e.Name,
+			ID:        e.ID, Type: e.Type, Name: e.Name,
 			FirstSeen: e.FirstSeen, LastSeen: e.LastSeen,
 		})
 	}
@@ -1715,7 +1715,7 @@ func (s *Storage) Compact() error {
 	for _, sess := range s.sessions {
 		liveSessions = append(liveSessions, sessionRecord{
 			ProjectID: s.projectID,
-			ID: sess.ID, SessionID: sess.SessionID, StartedAt: sess.StartedAt,
+			ID:        sess.ID, SessionID: sess.SessionID, StartedAt: sess.StartedAt,
 			InitialPrompt: sess.InitialPrompt, EventCount: sess.EventCount,
 			LastAction: sess.LastAction, LastActionAt: sess.LastActionAt,
 			ProjectPath: sess.ProjectPath,

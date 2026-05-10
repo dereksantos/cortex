@@ -12,8 +12,8 @@ type Config struct {
 	// Paths
 	ContextDir  string `json:"context_dir"`
 	ProjectRoot string `json:"project_root"`
-	GlobalDir   string `json:"global_dir,omitempty"`  // ~/.cortex/ — central storage and daemon home
-	ProjectID   string `json:"project_id,omitempty"`   // Slug identifying this project in the global registry
+	GlobalDir   string `json:"global_dir,omitempty"` // ~/.cortex/ — central storage and daemon home
+	ProjectID   string `json:"project_id,omitempty"` // Slug identifying this project in the global registry
 
 	// Capture settings
 	SkipPatterns []string `json:"skip_patterns"`
