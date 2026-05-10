@@ -315,7 +315,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** `cortex eval grid --harnesses aider,opencode,pi_dev
     --help` works without errors.
 
-- [ ] **10. Cross-harness smoke (gated).**
+- [x] **10. Cross-harness smoke (gated).**
   - Requires `CORTEX_EVAL_ALLOW_SPEND=1` in env (even on free models,
     per the build-loop convention).
   - Run:
