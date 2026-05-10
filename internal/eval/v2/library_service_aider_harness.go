@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -117,6 +118,17 @@ func (h *AiderHarness) runSession(ctx context.Context, prompt, workdir string) (
 		args = append(args, "--model", h.model)
 	}
 
+	// Auto-add source files in the workdir to Aider's chat context.
+	// Without this, Aider's repo map doesn't reliably include them
+	// under --message mode and the model responds with "please add
+	// these files to the chat" instead of editing — a real failure
+	// mode discovered with claude-haiku-4.5 on 2026-05-10. Globbing
+	// .go files covers the current coding-scenario library; extend
+	// the suffix list when other languages land.
+	for _, path := range discoverChatFiles(workdir) {
+		args = append(args, "--file", path)
+	}
+
 	cmd := exec.Command(h.binary, args...)
 	cmd.Dir = workdir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -171,6 +183,44 @@ func (h *AiderHarness) runSession(ctx context.Context, prompt, workdir string) (
 	res.ProviderEcho = aiderProviderFromModel(h.model)
 	res.AgentTurnsTotal = 1 // single --message invocation
 	return res, nil
+}
+
+// discoverChatFiles walks workdir for source files Aider should add to
+// its chat context via --file. Returns paths relative to workdir
+// (Aider treats them as project-relative). Limits to common source
+// extensions to avoid pulling in build artifacts; extend when adding
+// non-Go scenarios.
+//
+// Sorted for stable test assertions and so Aider's chat order is
+// deterministic across cells.
+func discoverChatFiles(workdir string) []string {
+	var paths []string
+	skipDirs := map[string]bool{
+		".git": true, "vendor": true, "node_modules": true,
+		"testdata": true, ".cortex": true, "dist": true, "build": true,
+	}
+	_ = filepath.Walk(workdir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // best-effort; skip unreadable
+		}
+		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(p) {
+		case ".go", ".py", ".ts", ".js", ".rs", ".java":
+			rel, err := filepath.Rel(workdir, p)
+			if err != nil {
+				rel = p
+			}
+			paths = append(paths, rel)
+		}
+		return nil
+	})
+	sort.Strings(paths)
+	return paths
 }
 
 // aiderProviderFromModel pulls the provider segment from Aider's
