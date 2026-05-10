@@ -209,6 +209,306 @@ constraints and decisions:
 
 ---
 
+## Second-order optimization — what investments compound
+
+The current setup measures cortex on a hand-authored scenario set we
+own. That's tractable but inherently shallow — every iteration's
+upside is bounded by how much *more* scenario-authoring we do. The
+bigger leverage is plugging into established benchmarks so cortex
+lift becomes comparable to public numbers.
+
+### Standard-benchmark integration (highest 2nd-order leverage)
+
+The biggest force-multiplier we are *not* using:
+**`lm-evaluation-harness`** (EleutherAI) — the framework the Hugging
+Face Open LLM Leaderboard sits on. Defines 100+ standard tasks
+(MMLU, GSM8K, ARC, HellaSwag, HumanEval, MBPP, TruthfulQA, ...) and
+exposes a uniform `Model` adapter interface for any backend.
+
+Why this is worth a day of effort:
+
+1. **Battle-tested scenarios.** We stop hand-authoring; the field
+   has curated thousands of tasks with care.
+2. **Comparable numbers.** "Cortex lift on MMLU" is directly
+   comparable to published RAG / fine-tuning / agent-framework
+   numbers. Hand-authored scenarios aren't.
+3. **Reproducibility.** Anyone with the cortex binary can re-run.
+4. **Leaderboard path.** A "cortex-augmented model M" entry on the
+   public leaderboard would be unambiguous social proof.
+
+**Integration shape (~1 day):**
+
+- `lm-eval` calls `LM.generate(prompt)` for each task item.
+- Wrap our OpenRouter client + cortex injector as an `LM` subclass:
+  for each prompt → `cortex search <prompt>` → prepend → route to
+  OpenRouter → return completion.
+- Run `lm-eval --model cortex-openrouter:haiku-4.5 --tasks humaneval`
+  and `lm-eval --model openrouter:haiku-4.5 --tasks humaneval` (no
+  cortex). Compare pass@1.
+
+**On-point coding benchmarks to target first** (replacement for our
+`test/evals/coding/` set, which saturated):
+
+| benchmark | size | what it tests | why |
+|---|---:|---|---|
+| **HumanEval+** (EvalPlus) | 164 | Python function impl, pass@1 | The de-facto coding benchmark |
+| **MBPP+** | 974 | Python basic programming | Larger sample, similar shape |
+| **SWE-bench Lite** | 300 | Real GitHub bug fixes, resolution rate | Most realistic "agent does dev work" benchmark; aligns with the small-model amplifier claim |
+| **MultiPL-E** | 164 × 18 lang | HumanEval translated (incl. Go) | Lets us test on our project's language |
+| **LiveCodeBench** | rolling | Contamination-resistant | Detects "model memorized the benchmark" effect |
+
+Among these, **SWE-bench Lite is the headline target** — its score
+*is* the headline claim ("cortex makes small models resolve real
+GitHub issues at a rate closer to frontier"). Other benchmarks are
+supporting data.
+
+### Other 2nd-order investments (smaller but real)
+
+- **Variance bands on every metric.** Today we report point estimates
+  from single seeds. Two more seeds per cell triples cost but gives
+  ±σ. Without bands, every "lift" claim is ambiguous between effect
+  and noise.
+- **Pareto curve view.** Quality × cost is a curve, not a point.
+  Cortex's value is moving us along that curve. Today's `--report-
+  summary` shows the raw points but not the curve. A simple
+  matplotlib export from JSONL would do it.
+- **Statistical power calculator.** Before any expensive sweep, ask:
+  given the effect size we expect (~10 pp lift), what n gives us
+  80% power at α=0.05? Today we run n=15 with no power analysis.
+- **CI-bound eval gate.** A nightly eval against a fixed scenario
+  subset + a budget guard would catch regressions on every PR
+  affecting cortex retrieval. Same scaffolding we already built.
+
+---
+
+## MECE coverage matrix — the experiment space
+
+Three orthogonal axes define the design space. Today we've touched a
+small corner of it. The matrix below makes the gap explicit.
+
+### Eval shape × model tier (where we have evidence)
+
+| shape | small (≤10B) | medium (10-70B) | large (70-200B) | frontier (≥200B) |
+|---|---|---|---|---|
+| A. Retrieval / QA | ✅ +52% | ✅ +20% | n/a | ✅ +31% |
+| B. Single-shot coding | ✅ 0 pp (saturated) | ✅ 0 pp (saturated) | n/a | ✅ 0 pp (saturated) |
+| C. Multi-session coding | ❌ | ❌ | ❌ | ❌ |
+| D. Long-horizon agent | ❌ | ❌ | ❌ | ❌ |
+| E. Standard benchmarks (lm-eval) | ❌ | ❌ | ❌ | ❌ |
+
+C is the library-service shape. D is multi-tool-call agent work
+(plan → execute → reflect → repeat). E is the lm-eval-harness path.
+The cells most likely to show the small-model amplifier effect are
+**C × small** and **E × small** — those are the bets.
+
+### Cortex configuration (orthogonal to the above)
+
+| config | what it is | tested |
+|---|---|---|
+| α. None (baseline) | No cortex in the loop | ✅ |
+| β. Static bullets | Hand-authored `cortex_context:` per scenario | ✅ |
+| γ. Reflex-mined | Real `cortex search` over a populated store | ✅ (retrieval evals only) |
+| δ. Reflect-reranked | γ + LLM reranking of retrieved items | ❌ |
+| ε. Full pipeline | γ + δ + Think (session learning) + Dream (idle mining) | ❌ |
+
+We've only validated α and β at depth, with γ partial. δ and ε —
+which are the *interesting* parts of cortex's architecture — have
+zero eval coverage.
+
+### Context source (the corpus side)
+
+| source | description | tested |
+|---|---|---|
+| 1. Synthetic | Hand-curated `context:` items in scenario YAML | ✅ |
+| 2. Real captures | Items captured from real dev sessions | ❌ |
+| 3. Hybrid | Synthetic seed + real captures appended | ❌ |
+
+(2) is the realistic shape — and the one most likely to invalidate
+synthetic-corpus findings. Until we test on (2), every claim has the
+caveat "in a synthetic store."
+
+---
+
+## Open questions to ask the user at session start
+
+These are the choices that change which experiments are worth running.
+Ask before committing to anything substantial.
+
+1. **Audience for the numbers — publish vs. ship?**
+   - Publish path → invest in lm-eval-harness integration, standard
+     benchmarks, reproducibility.
+   - Ship path → invest in scenarios that mirror this team's actual
+     development work; standard benchmarks become less load-bearing.
+
+2. **Frontier comparison budget?**
+   - Sonnet/Opus/GPT-5 comparisons each cost ~$5-15 per full sweep
+     and need `CORTEX_EVAL_ALLOW_FRONTIER=1`. The cross-tier
+     amplifier claim needs them, but they're not "free" the way
+     Haiku comparisons are.
+
+3. **Real-corpus seeding — clean-room or this project?**
+   - This project has session logs, git history, captured events.
+     Using them as the cortex corpus tests the live system. But it
+     biases toward "cortex helps because it has memorized this
+     codebase" — fine for a product claim, questionable for a paper.
+
+4. **lm-eval integration depth?**
+   - Light (export our results to lm-eval-compatible JSON) — easy,
+     limited cross-comparability.
+   - Deep (cortex as a real `lm-eval --model cortex-...` adapter) —
+     1 day, unlocks everything downstream.
+
+5. **Target — beat a specific number, or characterize the system?**
+   - "Beat number" → pick a benchmark, optimize until cortex wins.
+   - "Characterize" → run a wider matrix to map where cortex helps
+     and where it doesn't. Different experiments.
+
+6. **CI-integrated eval?**
+   - Every PR runs a small eval subset with a budget guard. Catches
+     regressions but adds friction. Worth doing only after a stable
+     methodology.
+
+7. **Variance budget?**
+   - Single seed per cell is fast but noisy. 3 seeds × 5 scenarios
+     gives confidence intervals. Tripling cost for that confidence
+     may or may not be worth it depending on (1).
+
+8. **Comparison-against-what for "lift"?**
+   - Today: cortex vs. *nothing* (no system prompt augmentation).
+   - More fair: cortex vs. *a good engineered system prompt that
+     includes project conventions*. That's the alternative cortex
+     is competing with in practice.
+
+---
+
+## What would change the answer to "does cortex translate to real-world usage" (recap)
+
+Currently 30% there. The full check:
+
+| dimension | how to move it from ❌ to ✅ |
+|---|---|
+| Quality lift on coding | Library-service experiment OR SWE-bench Lite run |
+| Cost reduction | Add per-passing-cell cost view to `--report-summary` AND run with cost-aware scenario set |
+| Cross-tier amplifier | Run small (≤8B) cortex vs. medium (Haiku) baseline on same scenarios |
+| Real-store conditions | Seed cortex from this project's actual session logs, run any eval |
+| Reproducibility / external trust | lm-eval-harness adapter |
+
+Any single one of these moves us from "interesting plumbing" → "evidence
+worth showing someone else." The library-service experiment is the
+single highest-value next move because it could move the first three at
+once.
+
+---
+
+## Multi-loop architecture — parallel work via shared state
+
+Single-loop linear iteration was the right shape for the build phase.
+Once the harness is stable, the bottleneck shifts: how many
+independent threads of work can run in parallel without losing
+coherence? The answer is **N specialized loops, each with its own
+ScheduleWakeup cadence, communicating through shared state in
+`.cortex/db/`**.
+
+The pattern is *not* one loop juggling multiple concerns. It's N
+single-concern loops that read+write the same SQLite store, with
+atomic claims for work items and the same cost-ceiling table guarding
+all of them.
+
+### Suggested loop roster
+
+| loop | cadence | what it does | reads | writes |
+|---|---|---|---|---|
+| `experiment` | hourly | Pull from `experiment_queue`, run a sweep | queue table | `cell_results`, `daily_spend` |
+| `coverage` | weekly | Author new scenarios filling MECE matrix gaps | gap-tracker file | new scenario YAMLs |
+| `capture` | continuous (Monitor) | Tail conversation logs / git activity → durable cortex captures | session JSONL, git log | cortex store |
+| `analysis` | hourly | Recompute lift / Pareto / variance / regression alarms | `cell_results` | reports + charts |
+| `watch` | daily | Check HF Open LLM Leaderboard, OpenRouter catalog for new models worth adding to the matrix | external APIs | gap-tracker file |
+| `driver` | per-tick | Read all of the above; update the anchor status table; emit user-facing summary | everything | the resume prompt itself |
+
+Most projects don't need all six. The minimum useful set is
+`experiment` + `analysis` + (optionally) `capture`.
+
+### Shared-state mechanics
+
+- **`experiment_queue` table** (new, small migration in
+  `persist_cell.go`): rows are work items with `kind`, `params_json`,
+  `status` (`queued`/`in_progress`/`done`/`failed`), `claimed_by`,
+  `created_at`/`claimed_at`/`completed_at`. Atomic claim:
+  `UPDATE experiment_queue SET status='in_progress', claimed_by=?
+   WHERE id = (SELECT id FROM experiment_queue WHERE status='queued'
+   ORDER BY id LIMIT 1)`.
+- **`cell_results` + `cell_results.jsonl`** stay authoritative. Loops
+  filter by `timestamp` / `run_id` for their slice.
+- **`daily_spend` table** is *the* coordination point for cost — all
+  loops see the same total, so the ceiling guard is global.
+- **`gap-tracker` file** (new — markdown or YAML) tracks which MECE
+  cells are filled. `coverage` and `watch` write; `experiment`
+  reads to prioritize.
+- **Lock file** (`.cortex/db/<loop>.lock`) for any non-DB shared
+  resource (e.g., the cortex daemon when a loop wants exclusive
+  access).
+
+### Anti-patterns
+
+- **Duplicate runs.** Two loops claim the same queue row. Fix: the
+  atomic-claim SQL above.
+- **Schema drift.** One loop's `CellResult` disagrees with another's.
+  Fix: `SchemaVersion` check on read; loops refuse to process rows
+  with a different version.
+- **Cost leakage.** N parallel sweeps blow the daily ceiling. Fix:
+  the existing `CORTEX_EVAL_DAILY_USD_CEILING` enforcement already
+  reads `daily_spend` — every loop's spend counts against the same
+  pool. As long as each loop uses `PersistCell` and the spend
+  tracker, the ceiling holds globally.
+- **Drift in human-facing priorities.** Each loop iterates on its
+  slice; "what should we do next?" gets lost. Mitigation: the
+  `driver` loop is the only one that writes the resume prompt's
+  anchor status — single source of truth.
+- **Hidden serialization.** SQLite WAL handles concurrent readers
+  + one writer; multiple writers serialize. With 6 loops, sustained
+  write contention is unlikely but possible. Fix: short transactions,
+  retry on `SQLITE_BUSY`.
+
+### When a new loop is worth standing up
+
+- The work has a natural rhythm distinct from existing loops (e.g.
+  `capture` is event-driven; `experiment` is queue-driven; `watch`
+  is calendar-driven).
+- The work has independent failure modes — one stuck loop shouldn't
+  freeze others.
+- The work can be expressed as "given state X, produce state Y" —
+  not as a one-time imperative.
+
+### When *not* to spawn a loop
+
+- The work runs once and stops. Use a one-shot script.
+- The work needs human input at every step. Loops are for
+  autonomous iteration with human course-corrections, not for
+  human-in-the-loop work where every step blocks on review.
+- Two existing loops could do it with a small extension. Loops are
+  cheap but not free — each adds a coordination surface.
+
+### Wiring it up (small, additive)
+
+Concretely, what would have to land before this is real:
+
+1. New table + migration in `persist_cell.go`:
+   `experiment_queue` (~30 LOC).
+2. CLI: `cortex eval queue <add|claim|complete|list>` — operations on
+   the queue. ~50 LOC.
+3. Each loop is its own `/loop @docs/loops/<name>.md` prompt file in
+   a new `docs/loops/` directory. The prompts encode that loop's
+   single responsibility + how it reads/writes the shared state.
+4. The `driver` loop's prompt is mostly "read the others' last
+   outputs and update the anchor status table." It's the
+   meta-loop.
+
+None of this is on the critical path until the eval mechanism itself
+is shipping value. But it's the natural shape the system grows into
+once it does.
+
+---
+
 ## Anti-checklist (things to avoid in a fresh session)
 
 - **Don't re-author** `docs/eval-harness-loop.md` — it's the
