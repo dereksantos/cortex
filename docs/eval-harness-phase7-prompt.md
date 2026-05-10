@@ -250,7 +250,7 @@ continuing**. The session can't make meaningful progress without them.
       grace window.
   - **Done:** new test file with the above cases, all passing.
 
-- [ ] **4. Real-binary smoke for OpenCodeHarness against
+- [x] **4. Real-binary smoke for OpenCodeHarness against
   OpenRouter.**
   - Test that t.Skips when `opencode` not on PATH OR when
     `OPEN_ROUTER_API_KEY` not set.
