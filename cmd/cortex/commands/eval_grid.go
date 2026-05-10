@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,102 @@ func runGridReport(limit int) error {
 	return nil
 }
 
+// runGridReportSummary prints the (model, strategy) aggregate plus a
+// per-model lift table (cortex_pass_rate − baseline_pass_rate). The
+// headline numbers analysts want when interpreting a grid run.
+func runGridReportSummary(scenarioPrefix string) error {
+	p, err := evalv2.NewPersister()
+	if err != nil {
+		return fmt.Errorf("init persister: %w", err)
+	}
+	defer p.Close()
+
+	rows, err := p.SummarizeCellResults(scenarioPrefix)
+	if err != nil {
+		return fmt.Errorf("summarize: %w", err)
+	}
+	if len(rows) == 0 {
+		if scenarioPrefix != "" {
+			fmt.Printf("no cell_results match prefix %q\n", scenarioPrefix)
+		} else {
+			fmt.Println("no cell_results to summarize — run `cortex eval grid --models <id>` first")
+		}
+		return nil
+	}
+
+	// Aggregate table.
+	fmt.Printf("%-40s %-10s %5s %5s %7s %8s %8s %11s %8s %10s\n",
+		"model", "strategy", "cells", "pass", "rate", "in/cell", "out/cell", "cost/cell", "lat_ms", "tot_cost")
+	fmt.Println(strings.Repeat("-", 130))
+	for _, r := range rows {
+		fmt.Printf("%-40s %-10s %5d %5d %6.1f%% %8.0f %8.0f $%9.6f %8.0f $%9.4f\n",
+			truncate(r.Model, 40), r.Strategy, r.Cells, r.Passes, r.PassRate*100,
+			r.MeanTokensIn, r.MeanTokensOut, r.MeanCostUSD, r.MeanLatencyMs, r.TotalCostUSD)
+	}
+
+	// Per-model lift table.
+	type lift struct {
+		baselinePass, cortexPass     float64
+		baselineCells, cortexCells   int
+		baselineCost, cortexCost     float64
+		baselinePasses, cortexPasses int
+	}
+	lifts := make(map[string]*lift)
+	for _, r := range rows {
+		l, ok := lifts[r.Model]
+		if !ok {
+			l = &lift{}
+			lifts[r.Model] = l
+		}
+		switch r.Strategy {
+		case evalv2.StrategyBaseline:
+			l.baselinePass = r.PassRate
+			l.baselineCells = r.Cells
+			l.baselineCost = r.TotalCostUSD
+			l.baselinePasses = r.Passes
+		case evalv2.StrategyCortex:
+			l.cortexPass = r.PassRate
+			l.cortexCells = r.Cells
+			l.cortexCost = r.TotalCostUSD
+			l.cortexPasses = r.Passes
+		}
+	}
+
+	var modelKeys []string
+	for k, l := range lifts {
+		if l.baselineCells > 0 && l.cortexCells > 0 {
+			modelKeys = append(modelKeys, k)
+		}
+	}
+	sort.Strings(modelKeys)
+
+	if len(modelKeys) > 0 {
+		fmt.Println()
+		fmt.Printf("Lift table (cortex − baseline pass-rate; cost-per-pass = total/passes):\n\n")
+		fmt.Printf("%-40s %12s %12s %12s %14s %14s\n",
+			"model", "baseline", "cortex", "lift", "$/pass-base", "$/pass-cortex")
+		fmt.Println(strings.Repeat("-", 110))
+		for _, k := range modelKeys {
+			l := lifts[k]
+			cppB := costPerPass(l.baselineCost, l.baselinePasses)
+			cppC := costPerPass(l.cortexCost, l.cortexPasses)
+			lift := (l.cortexPass - l.baselinePass) * 100
+			fmt.Printf("%-40s %11.1f%% %11.1f%% %+11.1f%% %14s %14s\n",
+				truncate(k, 40),
+				l.baselinePass*100, l.cortexPass*100, lift,
+				cppB, cppC)
+		}
+	}
+	return nil
+}
+
+func costPerPass(cost float64, passes int) string {
+	if passes <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("$%.4f", cost/float64(passes))
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -77,7 +174,9 @@ func executeGrid(args []string) error {
 	strategiesCSV := evalv2.StrategyBaseline + "," + evalv2.StrategyCortex
 	showHelp := false
 	reportOnly := false
+	reportSummary := false
 	reportLimit := 20
+	reportScenarioPrefix := ""
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -85,11 +184,18 @@ func executeGrid(args []string) error {
 			showHelp = true
 		case "--report":
 			reportOnly = true
+		case "--report-summary":
+			reportSummary = true
 		case "--report-limit":
 			if i+1 < len(args) {
 				if v, err := strconv.Atoi(args[i+1]); err == nil && v > 0 {
 					reportLimit = v
 				}
+				i++
+			}
+		case "--report-scenario-prefix":
+			if i+1 < len(args) {
+				reportScenarioPrefix = args[i+1]
 				i++
 			}
 		case "--scenarios":
@@ -129,6 +235,10 @@ func executeGrid(args []string) error {
 
 	if reportOnly {
 		return runGridReport(reportLimit)
+	}
+
+	if reportSummary {
+		return runGridReportSummary(reportScenarioPrefix)
 	}
 
 	if modelsCSV == "" {
@@ -300,6 +410,12 @@ Options:
   --report                 Print the last N CellResult rows from the
                            JSONL log; do not run any cells.
   --report-limit N         How many rows --report shows (default: 20)
+  --report-summary         Aggregate by (model, strategy): pass-rate,
+                           tokens, cost, lift table. Read-only.
+  --report-scenario-prefix S
+                           When --report-summary is set, restrict to
+                           scenarios whose ID starts with S (e.g.
+                           "fizzbuzz" or "rename").
   -h, --help               Show this help
 
 Environment:

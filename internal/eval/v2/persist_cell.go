@@ -113,6 +113,72 @@ func (p *Persister) GetLifetimeSpend() (float64, error) {
 	return usd, nil
 }
 
+// CellSummaryRow is one row of the (model, strategy) aggregate
+// powering `cortex eval grid --report-summary`.
+type CellSummaryRow struct {
+	Model              string
+	Strategy           string
+	Cells              int
+	Passes             int
+	PassRate           float64
+	MeanTokensIn       float64
+	MeanTokensOut      float64
+	MeanCostUSD        float64
+	TotalCostUSD       float64
+	MeanLatencyMs      float64
+	MeanInjectedTokens float64
+}
+
+// SummarizeCellResults groups SQLite cell_results by (model, strategy)
+// and returns aggregate stats. scenarioPrefix is an optional LIKE
+// filter on scenario_id ("smoke" matches smoke-hello, smoke-anything;
+// empty string means no filter). Sorted by total cost ascending so
+// the cheapest (likely free-tier) configurations come first.
+func (p *Persister) SummarizeCellResults(scenarioPrefix string) ([]CellSummaryRow, error) {
+	var (
+		query = `
+            SELECT
+                model, context_strategy,
+                COUNT(*) AS cells,
+                SUM(task_success) AS passes,
+                AVG(tokens_in) AS mean_in,
+                AVG(tokens_out) AS mean_out,
+                AVG(cost_usd) AS mean_cost,
+                SUM(cost_usd) AS total_cost,
+                AVG(latency_ms) AS mean_latency,
+                AVG(injected_context_tokens) AS mean_injected
+            FROM cell_results
+        `
+		args []any
+	)
+	if scenarioPrefix != "" {
+		query += " WHERE scenario_id LIKE ? "
+		args = append(args, scenarioPrefix+"%")
+	}
+	query += " GROUP BY model, context_strategy ORDER BY total_cost ASC, model, context_strategy"
+
+	rows, err := p.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("summarize cell_results: %w", err)
+	}
+	defer rows.Close()
+
+	var out []CellSummaryRow
+	for rows.Next() {
+		var r CellSummaryRow
+		if err := rows.Scan(&r.Model, &r.Strategy, &r.Cells, &r.Passes,
+			&r.MeanTokensIn, &r.MeanTokensOut, &r.MeanCostUSD,
+			&r.TotalCostUSD, &r.MeanLatencyMs, &r.MeanInjectedTokens); err != nil {
+			return nil, fmt.Errorf("scan summary row: %w", err)
+		}
+		if r.Cells > 0 {
+			r.PassRate = float64(r.Passes) / float64(r.Cells)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // RecentCellsFromJSONL returns the last n CellResult rows from the
 // JSONL append log (the canonical analysis source per hard constraint
 // #8). Reads sequentially — fine for the modest row counts we expect;
