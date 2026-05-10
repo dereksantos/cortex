@@ -345,7 +345,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     the prefix and InjectedContextTokens > 0; strategy=baseline keeps
     the original prompt and InjectedContextTokens = 0.
 
-- [ ] **13. Author 5 minimal coding scenarios.**
+- [x] **13. Author 5 minimal coding scenarios.**
   - Under `test/evals/coding/`: 5 small Go tasks with seeds + verifiers
     + cortex context. Suggested set:
     1. **fizzbuzz** — implement function from stub, verify `go test`
