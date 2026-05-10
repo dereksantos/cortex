@@ -322,7 +322,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     marker file `MARKER.txt` confirms the marker shows up in the
     cell's workdir before the harness runs.
 
-- [ ] **12. Cortex strategy = inject scenario `context` into prompt.**
+- [x] **12. Cortex strategy = inject scenario `context` into prompt.**
   - Optional `context: [bullet, bullet, ...]` on Scenario. When
     `ContextStrategy == "cortex"`, the runner prepends the bullets to
     the harness prompt as:
