@@ -4,6 +4,8 @@ package eval
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -298,6 +300,210 @@ func TestNewRunID_UniqueAndPrefixed(t *testing.T) {
 		}
 		seen[id] = true
 	}
+}
+
+// gridFixedCostHarness is a fake that returns a configurable per-call
+// cost. Used to drive deterministic ceiling-trip tests.
+type gridFixedCostHarness struct {
+	cost float64
+}
+
+func (h *gridFixedCostHarness) RunSession(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (h *gridFixedCostHarness) RunSessionWithResult(_ context.Context, _ string, _ string) (HarnessResult, error) {
+	return HarnessResult{
+		TokensIn:        100,
+		TokensOut:       50,
+		CostUSD:         h.cost,
+		AgentTurnsTotal: 1,
+		LatencyMs:       1,
+	}, nil
+}
+
+// TestRunGrid_RunCeilingTripsAfterNCells exercises requirement (a) of
+// TODO 8's done criterion: a run-ceiling trip with a fake provider
+// returning fixed cost_usd, abort with partial CSV.
+func TestRunGrid_RunCeilingTripsAfterNCells(t *testing.T) {
+	p := newTestPersister(t)
+
+	// $1.00 ceiling. Each cell costs $0.30; estimator picks up the
+	// observed cost on subsequent cells. After 3 cells run total is
+	// $0.90; the 4th cell's estimate of $0.30 → $1.20 > $1.00 trips.
+	// Numbers chosen so float drift can't push the boundary either way.
+	t.Setenv(EnvRunUSDCeiling, "1.00")
+	t.Setenv(EnvDailyUSDCeiling, "100")
+	t.Setenv(EnvLifetimeUSDCeiling, "100")
+	t.Setenv(EnvNoFreePreference, "1") // don't auto-swap to :free for this test
+
+	fake := &gridFixedCostHarness{cost: 0.30}
+	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}
+	strategies := []ContextStrategy{StrategyBaseline}
+
+	scenarios := make([]*Scenario, 0, 6)
+	for i := 0; i < 6; i++ {
+		scenarios = append(scenarios, &Scenario{ID: fmt.Sprintf("scn-%d", i), Tests: []Test{{Query: "q"}}})
+	}
+
+	results, err := RunGrid(context.Background(), p, scenarios, harnesses, models, strategies)
+	if err == nil {
+		t.Fatalf("expected ceiling-trip error, got nil; results=%d", len(results))
+	}
+	if !strings.Contains(err.Error(), "run ceiling") {
+		t.Errorf("err=%v, want 'run ceiling'", err)
+	}
+
+	// 3 cells should have completed (3 × $0.30 = $0.90; 4th cell's
+	// estimate of $0.30 would push to $1.20 > $1.00 → abort).
+	if len(results) != 3 {
+		t.Errorf("len(results)=%d, want 3 (ceiling should trip on 4th cell)", len(results))
+	}
+
+	// Partial CSV file should exist in dbDir.
+	matches, _ := filepath.Glob(filepath.Join(p.dbDir, "*.partial.csv"))
+	if len(matches) == 0 {
+		t.Errorf("no .partial.csv emitted in %s", p.dbDir)
+	}
+}
+
+// TestRunGrid_LifetimeCeilingPersistsAcrossRuns exercises requirement
+// (b) of TODO 8: lifetime spend accumulates across two RunGrid() calls
+// via the daily_spend SQLite table.
+func TestRunGrid_LifetimeCeilingPersistsAcrossRuns(t *testing.T) {
+	p := newTestPersister(t)
+
+	// Lifetime ceiling = $0.45. Each cell costs $0.20.
+	// First RunGrid: 2 cells = $0.40 spent, third cell estimate ($0.20)
+	//   would push to $0.60 > $0.45 → abort.
+	// Each scenario × strategy + 1 model + 1 harness = N cells.
+	t.Setenv(EnvRunUSDCeiling, "100")
+	t.Setenv(EnvDailyUSDCeiling, "100")
+	t.Setenv(EnvLifetimeUSDCeiling, "0.45")
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &gridFixedCostHarness{cost: 0.20}
+	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}
+	strategies := []ContextStrategy{StrategyBaseline}
+
+	// Run 1: 3 scenarios → 3 cells but ceiling stops it at 2.
+	scenarios := []*Scenario{
+		{ID: "a", Tests: []Test{{Query: "q"}}},
+		{ID: "b", Tests: []Test{{Query: "q"}}},
+		{ID: "c", Tests: []Test{{Query: "q"}}},
+	}
+	r1, err := RunGrid(context.Background(), p, scenarios, harnesses, models, strategies)
+	if err == nil {
+		t.Fatalf("run 1: expected lifetime ceiling trip, got nil")
+	}
+	if !strings.Contains(err.Error(), "lifetime ceiling") {
+		t.Errorf("run 1 err=%v, want 'lifetime ceiling'", err)
+	}
+	if len(r1) != 2 {
+		t.Errorf("run 1 cells=%d, want 2", len(r1))
+	}
+
+	// Run 2: empty start of run-spend, but lifetime is already $0.40.
+	// Even one more $0.20 cell pushes lifetime to $0.60 > $0.45 → abort
+	// immediately (zero cells).
+	scenarios = []*Scenario{{ID: "d", Tests: []Test{{Query: "q"}}}}
+	r2, err := RunGrid(context.Background(), p, scenarios, harnesses, models, strategies)
+	if err == nil {
+		t.Fatalf("run 2: expected lifetime ceiling trip, got nil")
+	}
+	if !strings.Contains(err.Error(), "lifetime ceiling") {
+		t.Errorf("run 2 err=%v, want 'lifetime ceiling'", err)
+	}
+	if len(r2) != 0 {
+		t.Errorf("run 2 cells=%d, want 0 (lifetime already exhausted)", len(r2))
+	}
+}
+
+// TestRunGrid_FreeTierPreferenceRoutes exercises requirement (c) of
+// TODO 8: a paid model with a known `:free` variant gets auto-rewritten
+// when the user passes the paid form, unless explicitly opted out.
+func TestRunGrid_FreeTierPreferenceRoutes(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvRunUSDCeiling, "100")
+	t.Setenv(EnvDailyUSDCeiling, "100")
+	t.Setenv(EnvLifetimeUSDCeiling, "100")
+
+	t.Run("auto-swaps paid → :free", func(t *testing.T) {
+		t.Setenv(EnvNoFreePreference, "")
+		fake := &gridFakeHarness{}
+		_, err := RunGrid(context.Background(), p,
+			[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+			[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+			[]ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}, // paid input
+			[]ContextStrategy{StrategyBaseline})
+		if err != nil {
+			t.Fatalf("RunGrid: %v", err)
+		}
+		// SetModel should have been called with the :free variant.
+		if fake.lastModel != "qwen/qwen3-coder:free" {
+			t.Errorf("lastModel=%q, want auto-swap to %q", fake.lastModel, "qwen/qwen3-coder:free")
+		}
+	})
+
+	t.Run("opt-out keeps paid form", func(t *testing.T) {
+		t.Setenv(EnvNoFreePreference, "1")
+		fake := &gridFakeHarness{}
+		_, err := RunGrid(context.Background(), p,
+			[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+			[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+			[]ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}},
+			[]ContextStrategy{StrategyBaseline})
+		if err != nil {
+			t.Fatalf("RunGrid: %v", err)
+		}
+		if fake.lastModel != "qwen/qwen3-coder" {
+			t.Errorf("lastModel=%q, want %q (opt-out should leave paid form)", fake.lastModel, "qwen/qwen3-coder")
+		}
+	})
+}
+
+// TestRunGrid_FrontierGuardBlocksWithoutEnv exercises requirement (d)
+// of TODO 8: a frontier model (Sonnet) is blocked unless
+// CORTEX_EVAL_ALLOW_FRONTIER=1.
+func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvRunUSDCeiling, "100")
+	t.Setenv(EnvDailyUSDCeiling, "100")
+	t.Setenv(EnvLifetimeUSDCeiling, "100")
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &gridFakeHarness{}
+	scenarios := []*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}}
+	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "anthropic/claude-sonnet-4.6"}}
+	strategies := []ContextStrategy{StrategyBaseline}
+
+	t.Run("blocked without env", func(t *testing.T) {
+		t.Setenv(EnvAllowFrontier, "")
+		results, err := RunGrid(context.Background(), p, scenarios, harnesses, models, strategies)
+		if err == nil {
+			t.Fatal("frontier model should have been blocked, got nil err")
+		}
+		if !strings.Contains(err.Error(), "frontier model") {
+			t.Errorf("err=%v, want 'frontier model'", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("results=%d, want 0 (no cells should run)", len(results))
+		}
+	})
+
+	t.Run("allowed with env", func(t *testing.T) {
+		t.Setenv(EnvAllowFrontier, "1")
+		results, err := RunGrid(context.Background(), p, scenarios, harnesses, models, strategies)
+		if err != nil {
+			t.Fatalf("frontier should pass with env set: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("results=%d, want 1", len(results))
+		}
+	})
 }
 
 func TestScenarioToPrompt(t *testing.T) {

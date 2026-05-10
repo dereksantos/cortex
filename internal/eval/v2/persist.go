@@ -140,6 +140,13 @@ func (p *Persister) init() error {
 		return fmt.Errorf("init cell_results: %w", err)
 	}
 
+	// daily_spend — UTC-day buckets for the multi-tier USD ceiling
+	// system (TODO 8 in eval-harness loop). Lifetime spend is SUM(usd)
+	// across all rows.
+	if _, err := p.db.Exec(dailySpendSchema); err != nil {
+		return fmt.Errorf("init daily_spend: %w", err)
+	}
+
 	// Migrate: add new columns to existing eval_runs table if missing
 	migrations := []string{
 		"ALTER TABLE eval_runs ADD COLUMN git_commit_sha TEXT",

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // cellResultsSchema is the SQL DDL for the per-cell grid output table.
@@ -59,6 +60,57 @@ CREATE INDEX IF NOT EXISTS idx_cell_results_timestamp ON cell_results(timestamp)
 // Stays a constant (not a Persister field) so analysis scripts can
 // hardcode the path: <dbDir>/cell_results.jsonl.
 const cellResultsJSONLName = "cell_results.jsonl"
+
+// dailySpendSchema tracks USD-spent-per-UTC-day for the multi-tier
+// ceiling system. The grid runner reads this between cells to enforce
+// daily and lifetime ceilings; values accumulate via INSERT ... ON
+// CONFLICT to make repeated AddDailySpendUTC calls additive.
+const dailySpendSchema = `
+CREATE TABLE IF NOT EXISTS daily_spend (
+    date TEXT PRIMARY KEY,
+    usd REAL NOT NULL DEFAULT 0
+);
+`
+
+// AddDailySpendUTC adds usd to the row for t's UTC date, inserting if
+// missing. Pass cell.CostUSD after a successful call.
+func (p *Persister) AddDailySpendUTC(t time.Time, usd float64) error {
+	date := t.UTC().Format("2006-01-02")
+	_, err := p.db.Exec(`
+        INSERT INTO daily_spend (date, usd) VALUES (?, ?)
+        ON CONFLICT(date) DO UPDATE SET usd = usd + excluded.usd
+    `, date, usd)
+	if err != nil {
+		return fmt.Errorf("daily_spend upsert: %w", err)
+	}
+	return nil
+}
+
+// GetDailySpendUTC returns the recorded spend for t's UTC date, or 0
+// if the bucket doesn't exist yet (a missing row is the first call's
+// state, not an error).
+func (p *Persister) GetDailySpendUTC(t time.Time) (float64, error) {
+	date := t.UTC().Format("2006-01-02")
+	var usd float64
+	err := p.db.QueryRow(
+		`SELECT COALESCE(SUM(usd), 0) FROM daily_spend WHERE date = ?`, date,
+	).Scan(&usd)
+	if err != nil {
+		return 0, fmt.Errorf("daily_spend select: %w", err)
+	}
+	return usd, nil
+}
+
+// GetLifetimeSpend returns SUM(usd) across all daily buckets — the
+// running total against CORTEX_EVAL_LIFETIME_USD_CEILING.
+func (p *Persister) GetLifetimeSpend() (float64, error) {
+	var usd float64
+	err := p.db.QueryRow(`SELECT COALESCE(SUM(usd), 0) FROM daily_spend`).Scan(&usd)
+	if err != nil {
+		return 0, fmt.Errorf("lifetime_spend select: %w", err)
+	}
+	return usd, nil
+}
 
 // PersistCell writes one CellResult to BOTH backends required by hard
 // constraint #8:

@@ -19,9 +19,13 @@ package eval
 import (
 	"context"
 	"crypto/rand"
+	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -89,6 +93,25 @@ func RunGrid(
 
 	commitSHA, branch := getGitInfo()
 
+	// Free-tier preference: rewrite each ModelSpec to its `:free` variant
+	// when one exists in the curated pair table. Disabled via
+	// CORTEX_EVAL_NO_FREE_PREFERENCE=1 for users who want the paid form
+	// (e.g. for benchmarking).
+	if os.Getenv(EnvNoFreePreference) == "" {
+		preferred := make([]ModelSpec, len(models))
+		for i, m := range models {
+			preferred[i] = ModelSpec{Provider: m.Provider, Model: PreferFreeVariant(m.Model)}
+		}
+		models = preferred
+	}
+
+	// Spend safety. Ceilings + tracker pull from env (defaults from
+	// docs/eval-harness-loop.md TODO 8). Frontier guard is a separate
+	// boolean gate so a routine grid run can't accidentally fire Sonnet.
+	ceilings := CeilingsFromEnv()
+	tracker := NewSpendTracker(p, ceilings)
+	allowFrontier := os.Getenv(EnvAllowFrontier) == "1"
+
 	expected := len(scenarios) * len(harnesses) * len(models) * len(strategies)
 	results := make([]CellResult, 0, expected)
 
@@ -102,6 +125,35 @@ func RunGrid(
 					default:
 					}
 
+					// Frontier guard fires before any cost work — a
+					// frontier model without the env gate is a hard
+					// stop, never an estimate-and-skip.
+					if FrontierGuardRequired(ms.Model) && !allowFrontier {
+						partial := emitPartialCSV(p, results, fmt.Sprintf(
+							"frontier guard: model %q requires %s=1", ms.Model, EnvAllowFrontier))
+						return results, fmt.Errorf("frontier model %q blocked (set %s=1 to enable); partial CSV: %s",
+							ms.Model, EnvAllowFrontier, partial)
+					}
+
+					// Ceiling check uses an estimate that's the max of
+					// the last observed cost for this (provider, model)
+					// pair and 1.5× the tier floor. Trips before any
+					// network call.
+					estimate := tracker.EstimateCost(ms.Provider, ms.Model)
+					tripped, daily, lifetime, cerr := tracker.CheckBeforeCall(estimate)
+					if cerr != nil {
+						return results, fmt.Errorf("ceiling check: %w", cerr)
+					}
+					if tripped != "" {
+						partial := emitPartialCSV(p, results, fmt.Sprintf(
+							"%s ceiling: estimate $%.4f would exceed limit; run=$%.4f daily=$%.4f lifetime=$%.4f; ceilings run=$%.2f daily=$%.2f lifetime=$%.2f",
+							tripped, estimate,
+							tracker.RunSpend(), daily, lifetime,
+							ceilings.Run, ceilings.Daily, ceilings.Lifetime))
+						return results, fmt.Errorf("aborted: %s ceiling would be exceeded by next cell (estimate $%.4f); partial CSV: %s",
+							tripped, estimate, partial)
+					}
+
 					cell, err := runOneCell(ctx, scn, hs, ms, strat, commitSHA, branch)
 					if err != nil {
 						return results, fmt.Errorf("cell scenario=%s harness=%s model=%s strategy=%s: %w",
@@ -111,12 +163,80 @@ func RunGrid(
 						return results, fmt.Errorf("persist cell scenario=%s harness=%s model=%s strategy=%s: %w",
 							scn.ID, hs.Name, ms.Model, strat, err)
 					}
+					if err := tracker.RecordCell(ms.Provider, ms.Model, cell.CostUSD); err != nil {
+						return results, fmt.Errorf("track spend: %w", err)
+					}
 					results = append(results, cell)
 				}
 			}
 		}
 	}
 	return results, nil
+}
+
+// emitPartialCSV writes the completed cells (so far) to <dbDir>/<id>.partial.csv
+// + a sidecar <id>.partial.meta.json carrying the abort reason. Returns
+// the CSV path for callers to surface in error messages. CSV is the
+// analysis-friendly format mandated by hard constraint #8; the sidecar
+// keeps the abort metadata structured without breaking CSV strictness.
+func emitPartialCSV(p *Persister, completed []CellResult, reason string) string {
+	dir := p.dbDir
+	if dir == "" {
+		dir = filepath.Join(".cortex", "db")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Sprintf("<mkdir failed: %v>", err)
+	}
+
+	id := newRunID()
+	csvPath := filepath.Join(dir, id+".partial.csv")
+	metaPath := filepath.Join(dir, id+".partial.meta.json")
+
+	f, err := os.Create(csvPath)
+	if err != nil {
+		return fmt.Sprintf("<create failed: %v>", err)
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	header := []string{
+		"run_id", "scenario_id", "session_id", "harness", "provider", "model",
+		"context_strategy", "tokens_in", "tokens_out", "injected_context_tokens",
+		"cost_usd", "latency_ms", "agent_turns_total", "tests_passed", "tests_failed",
+		"task_success", "timestamp",
+	}
+	if err := w.Write(header); err != nil {
+		return fmt.Sprintf("<header write failed: %v>", err)
+	}
+	for _, c := range completed {
+		row := []string{
+			c.RunID, c.ScenarioID, c.SessionID, c.Harness, c.Provider, c.Model,
+			c.ContextStrategy,
+			strconv.Itoa(c.TokensIn), strconv.Itoa(c.TokensOut), strconv.Itoa(c.InjectedContextTokens),
+			strconv.FormatFloat(c.CostUSD, 'f', -1, 64),
+			strconv.FormatInt(c.LatencyMs, 10),
+			strconv.Itoa(c.AgentTurnsTotal),
+			strconv.Itoa(c.TestsPassed), strconv.Itoa(c.TestsFailed),
+			strconv.FormatBool(c.TaskSuccess),
+			c.Timestamp,
+		}
+		if err := w.Write(row); err != nil {
+			return fmt.Sprintf("<row write failed: %v>", err)
+		}
+	}
+	w.Flush()
+
+	meta, _ := json.MarshalIndent(map[string]any{
+		"abort_reason":    reason,
+		"completed_cells": len(completed),
+		"timestamp":       time.Now().UTC().Format(time.RFC3339),
+		"csv_path":        csvPath,
+	}, "", "  ")
+	if metaErr := os.WriteFile(metaPath, append(meta, '\n'), 0o644); metaErr != nil {
+		// Sidecar failure is non-fatal — the CSV is the durable record.
+		return csvPath
+	}
+	return csvPath
 }
 
 // runOneCell drives a single grid cell — fresh workdir, build prompt,
