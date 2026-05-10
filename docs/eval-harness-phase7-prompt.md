@@ -298,7 +298,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.C — wire into the grid runner + CLI
 
-- [ ] **9. Allow `opencode` and `pi_dev` in the grid CLI's
+- [x] **9. Allow `opencode` and `pi_dev` in the grid CLI's
   `buildGridHarnesses`.**
   - File: `cmd/cortex/commands/eval_grid.go`.
   - Current state: rejects both with "deferred to TODOs 10/11"
