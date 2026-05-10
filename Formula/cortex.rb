@@ -1,11 +1,13 @@
 # Homebrew Formula for Cortex
 # Usage: brew install --HEAD https://raw.githubusercontent.com/dereksantos/cortex/main/Formula/cortex.rb
+#
+# NOTE: A tagged release has not been cut yet. Only `--HEAD` installs are supported.
+# Once v0.1.0 is tagged, fill in the sha256 below with the tarball's sha256.
 
 class Cortex < Formula
   desc "Context memory for AI development - never lose a decision again"
   homepage "https://github.com/dereksantos/cortex"
-  url "https://github.com/dereksantos/cortex/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_ACTUAL_SHA256"
+  head "https://github.com/dereksantos/cortex.git", branch: "main"
   license "MIT"
 
   depends_on "go" => :build

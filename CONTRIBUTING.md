@@ -35,7 +35,7 @@ Thank you for your interest in contributing to Cortex! This document provides gu
 
 ### Development Environment
 
-- **Go**: 1.21+ required
+- **Go**: 1.25+ required (see `go.mod`)
 - **Code Style**: Use `gofmt` for formatting, `golint` for linting
 - **Testing**: Standard Go testing with `go test`
 - **Tools**: [Ollama](https://ollama.ai) for testing LLM features
