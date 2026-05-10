@@ -194,7 +194,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 
 ### Phase 3 — Persistence and runner
 
-- [ ] **5. Persist `CellResult` rows (SQLite + JSONL append).**
+- [x] **5. Persist `CellResult` rows (SQLite + JSONL append).**
   - Add a new SQLite table `cell_results` in `internal/eval/v2/persist.go`
     with one column per CellResult JSON tag.
   - **Also append each row to `.cortex/db/cell_results.jsonl`** — one
