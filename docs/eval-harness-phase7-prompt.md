@@ -263,7 +263,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.B — PiDevHarness
 
-- [ ] **5. Probe pi.dev CLI output shape.**
+- [x] **5. Probe pi.dev CLI output shape.**
   - Throwaway `cmd/cortex-pidev-probe/main.go`, same shape as TODO 1.
   - Invocation:
     ```
