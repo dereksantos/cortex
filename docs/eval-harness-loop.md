@@ -127,7 +127,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 
 ### Phase 1 — Foundations
 
-- [ ] **1. Probe OpenRouter free tier and lock down cost field.**
+- [x] **1. Probe OpenRouter free tier and lock down cost field.**
   - Write a small one-shot program (e.g.,
     `cmd/cortex-or-probe/main.go` — throwaway, do not wire into the main
     `cortex` binary) that POSTs one chat completion to a `:free` model
