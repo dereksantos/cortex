@@ -1,0 +1,23 @@
+id: error-wrap
+name: "Wrap os.ReadFile error with fmt.Errorf %w"
+
+seed_dir: test/evals/coding/seeds/error-wrap
+
+# Verify: the file imports fmt, the wrap pattern is present, and the
+# bare 'return nil, err' line is gone.
+verify: |
+  grep -q '"fmt"' load.go && \
+  grep -qE 'fmt\.Errorf\(.*: %w".*err\)' load.go && \
+  ! grep -qE 'return nil, err\s*$' load.go && \
+  go build ./...
+
+cortex_context:
+  - "Use fmt.Errorf with the verb %w to wrap; this preserves errors.Is/As compatibility."
+  - "Add a meaningful prefix like 'load config %q' rather than just 'error'."
+  - "Don't change the function signature; keep returning ([]byte, error)."
+
+tests:
+  - query: |
+      In load.go, replace the bare `return nil, err` with a wrapped
+      error using fmt.Errorf and the %w verb. Add fmt to the imports
+      if it's not already there. The function signature stays the same.

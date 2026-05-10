@@ -1,0 +1,21 @@
+id: add-table-test
+name: "Add table cases to TestAbs"
+
+seed_dir: test/evals/coding/seeds/add-table-test
+
+# Verify: tests still pass AND there are at least 4 entries in the
+# tests slice (count by `name:` keys, since each entry has exactly one).
+verify: |
+  go test ./... && \
+  test "$(grep -c 'name:' abs_test.go)" -ge 4
+
+cortex_context:
+  - "Match the existing table struct: {name, in, want}."
+  - "Use t.Run subtests; the loop body is already correct."
+  - "Don't add a separate test function — extend the table inside TestAbs."
+
+tests:
+  - query: |
+      The TODO in abs_test.go asks for cases covering negative input,
+      zero, and a large negative number. Add at least three more
+      entries to the tests table so the existing loop exercises them.

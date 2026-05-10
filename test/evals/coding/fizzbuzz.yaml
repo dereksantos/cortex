@@ -1,0 +1,17 @@
+id: fizzbuzz
+name: "FizzBuzz: implement function from stub"
+
+seed_dir: test/evals/coding/seeds/fizzbuzz
+verify: go test ./...
+
+cortex_context:
+  - "The function signature is fixed; do not rename FizzBuzz or change its parameters."
+  - "Match the file's existing style: package comment first, exported function with doc comment."
+  - "Run `go test ./...` to verify before considering the task complete."
+
+tests:
+  - query: |
+      Read fizzbuzz.go and implement the FizzBuzz function so all the
+      tests in fizzbuzz_test.go pass. Don't add new files; modify
+      fizzbuzz.go in place. The doc comment already specifies the
+      contract.

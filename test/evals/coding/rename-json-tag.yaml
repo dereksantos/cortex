@@ -1,0 +1,22 @@
+id: rename-json-tag
+name: "Rename JSON tag: old_name → display_name"
+
+seed_dir: test/evals/coding/seeds/rename-json-tag
+
+# Verify: the new tag is present and the old tag is gone, in types.go.
+# Also verifies the file still compiles (`go build` passes).
+verify: |
+  grep -q '"display_name"' types.go && \
+  ! grep -q '"old_name"' types.go && \
+  go build ./...
+
+cortex_context:
+  - "Only the JSON tag changes; the Go field name (DisplayName) stays the same."
+  - "Modify types.go in place — don't add new files or rename existing ones."
+  - "After editing, run `go build ./...` to confirm the file still compiles."
+
+tests:
+  - query: |
+      In types.go, change the JSON tag on the DisplayName field from
+      "old_name" to "display_name". Leave the field name and other
+      tags untouched.
