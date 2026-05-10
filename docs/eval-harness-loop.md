@@ -237,7 +237,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 
 ### Phase 4 — Spend safety + smoke
 
-- [ ] **8. Cost ceiling — multi-tier guard for the $20 budget.**
+- [x] **8. Cost ceiling — multi-tier guard for the $20 budget.**
   - Implement three independent ceilings, all read from env with defaults:
     - `CORTEX_EVAL_RUN_USD_CEILING` (default `$5.00`) — abort the current
       grid run when running spend would exceed this. One grid run = one
