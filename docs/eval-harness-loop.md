@@ -228,7 +228,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 - [x] **7. CLI surface.**
   - New subcommand `cortex eval grid --scenarios <dir> --harnesses
     aider --models <list> --strategies baseline,cortex`. (opencode +
-    pi_dev are added later by TODOs 10 and 11 — those harnesses are
+    pi_dev are added later by TODOs 19 and 20 — those harnesses are
     deferred past the smoke run, so the CLI ships aider-only first.)
   - Reads `OPEN_ROUTER_API_KEY` from env. Refuses to run if any selected
     harness binary is missing (clear error).
@@ -422,9 +422,27 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** `cortex eval grid --report-summary` prints the table;
     user sees real numbers from the experiment.
 
+- [ ] **17. Wire OpenRouter into the existing `cortex eval` CLI.**
+  - The legacy `cortex eval` CLI (Phase 1's existing v2 framework, NOT
+    `cortex eval grid`) supports retrieval-style scenarios with a real
+    scoring layer (judge LLM, NDCG, ABR, lift). It currently accepts
+    `-p ollama` and `-p anthropic` via a switch in
+    `cmd/cortex/commands/eval.go`. Add `-p openrouter` as a third arm
+    that constructs `llm.NewOpenRouterClient(cfg)` (already exists from
+    TODO 2) and treats `--model` as the verbatim OpenRouter model ID.
+  - Goal: unlock the **48 retrieval scenarios** in
+    `test/evals/v2/` + `test/evals/corpus/` against OpenRouter models
+    without touching the grid runner. Existing ABR/lift output works as-is.
+  - Don't reuse this work for the grid runner — they're complementary
+    (grid runner = coding-task pipeline; existing CLI = retrieval-task
+    pipeline). Keep them in their own lanes.
+  - **Done:** `cortex eval -p openrouter -m openai/gpt-oss-20b:free`
+    completes a small retrieval scenario sweep without panic; ABR or
+    lift numbers print; SQLite has the result rows.
+
 ### Phase 6 — Final
 
-- [ ] **17. Stop the loop.** All boxes checked. Print a one-page
+- [ ] **18. Stop the loop.** All boxes checked. Print a one-page
   summary of what shipped, the experiment's headline numbers, and what's
   explicitly deferred (Reflex-mined cortex, multi-session scenarios,
   alternative harnesses in Phase 7).
@@ -437,7 +455,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 > until Aider-via-grid has produced the lift numbers worth comparing
 > against. Pick up only after Phase 5+6 deliver real signal.
 
-- [ ] **18. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
+- [ ] **19. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
   - **Requires `opencode` on PATH** (`curl -fsSL https://opencode.ai/install | bash`).
     Re-running the loop without it will halt again at this step.
   - Mirror `AiderHarness` structure: binary resolution
@@ -449,7 +467,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     `library_service_opencode_harness_test.go` with t.Skip when
     `opencode` not on PATH.
 
-- [ ] **19. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
+- [ ] **20. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
   - **Requires `pi` on PATH** (see https://pi.dev install instructions).
     Re-running the loop without it will halt again at this step.
   - CLI invocation: `pi --mode json --provider openrouter --model <x>
@@ -458,7 +476,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - Custom-provider config (`~/.pi/agent/models.json`) is the user's job
     to set up — the harness should fail loudly with a clear error message
     pointing at the docs if pi can't reach OpenRouter.
-  - **Done:** parallel to step 18.
+  - **Done:** parallel to step 19.
 
 ---
 
