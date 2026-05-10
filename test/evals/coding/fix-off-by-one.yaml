@@ -1,0 +1,16 @@
+id: fix-off-by-one
+name: "Fix off-by-one in SumRange (inclusive bounds)"
+
+seed_dir: test/evals/coding/seeds/fix-off-by-one
+verify: go test ./...
+
+cortex_context:
+  - "The contract says inclusive bounds — both lo and hi must contribute to the total."
+  - "Don't change the function signature or rename anything; the bug is one character in the loop."
+  - "Run `go test ./...` after the fix to confirm all subtests pass."
+
+tests:
+  - query: |
+      SumRange in sum.go has an off-by-one bug. Its doc comment says
+      the range is inclusive of both lo and hi, but the loop excludes
+      hi. Fix the loop so the tests in sum_test.go pass.

@@ -12,7 +12,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows excluded: the eval-harness work relies on POSIX
+        # subprocess group semantics (syscall.Setpgid, SIGTERM/SIGKILL
+        # via PID groups) that have no clean Windows equivalent. Files
+        # needing exclusion already carry //go:build !windows tags so
+        # local builds on Windows fail fast rather than silently
+        # misbehaving. Re-adding Windows to CI would require a shim
+        # layer for subprocess lifecycle — significantly more code than
+        # the exclusion saves.
+        os: [ubuntu-latest, macos-latest]
         go-version: ['1.25']
 
     steps:
@@ -33,13 +41,8 @@ jobs:
     - name: Run go vet
       run: go vet ./...
 
-    - name: Run tests
-      run: go test -v -race -covermode=atomic ./...
-      if: matrix.os == 'windows-latest'
-
     - name: Run tests with coverage
       run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-      if: matrix.os != 'windows-latest'
 
     - name: Build
       run: go build -v ./cmd/cortex
@@ -94,8 +97,8 @@ jobs:
     - name: Build for macOS (Apple Silicon)
       run: GOOS=darwin GOARCH=arm64 go build -o cortex-darwin-arm64 ./cmd/cortex
 
-    - name: Build for Windows
-      run: GOOS=windows GOARCH=amd64 go build -o cortex-windows-amd64.exe ./cmd/cortex
+    # Windows build dropped — see matrix comment above. We're not
+    # shipping a Windows binary while the eval-harness work blocks it.
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4

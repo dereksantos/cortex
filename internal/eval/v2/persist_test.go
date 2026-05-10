@@ -25,7 +25,7 @@ func newTestPersister(t *testing.T) *Persister {
 		t.Fatal(err)
 	}
 
-	p := &Persister{db: db}
+	p := &Persister{db: db, dbDir: dbDir}
 	if err := p.init(); err != nil {
 		db.Close()
 		t.Fatal(err)

@@ -16,13 +16,19 @@ import (
 // CortexVersion is the current version of Cortex.
 const CortexVersion = "0.1.0"
 
-// Persister saves eval results to SQLite.
+// Persister saves eval results to SQLite + a JSONL append log.
+//
+// dbDir is tracked so PersistCell can locate the
+// `.cortex/db/cell_results.jsonl` companion file (the structured
+// analysis log mandated by the eval-harness contract — every CellResult
+// lands in BOTH backends so downstream tools never have to scrape).
 type Persister struct {
-	db *sql.DB
+	db    *sql.DB
+	dbDir string
 }
 
 // NewPersister creates a new SQLite persister.
-// The database is stored in .cortex/db/evals.db relative to the current directory.
+// The database is stored in .cortex/db/evals_v2.db relative to the current directory.
 func NewPersister() (*Persister, error) {
 	dbDir := filepath.Join(".cortex", "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -35,7 +41,7 @@ func NewPersister() (*Persister, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	p := &Persister{db: db}
+	p := &Persister{db: db, dbDir: dbDir}
 	if err := p.init(); err != nil {
 		db.Close()
 		return nil, err
@@ -124,6 +130,21 @@ func (p *Persister) init() error {
 	_, err := p.db.Exec(schema)
 	if err != nil {
 		return err
+	}
+
+	// cell_results — the v1 grid output table (one row per scenario ×
+	// harness × provider × model × strategy × seed cell). Schema mirrors
+	// the JSON tag names on CellResult so analysis tools see identical
+	// column names whether they query SQLite or read the JSONL log.
+	if _, err := p.db.Exec(cellResultsSchema); err != nil {
+		return fmt.Errorf("init cell_results: %w", err)
+	}
+
+	// daily_spend — UTC-day buckets for the multi-tier USD ceiling
+	// system (TODO 8 in eval-harness loop). Lifetime spend is SUM(usd)
+	// across all rows.
+	if _, err := p.db.Exec(dailySpendSchema); err != nil {
+		return fmt.Errorf("init daily_spend: %w", err)
 	}
 
 	// Migrate: add new columns to existing eval_runs table if missing
