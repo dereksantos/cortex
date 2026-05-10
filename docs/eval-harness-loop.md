@@ -34,8 +34,11 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
    signoff. Adding a new optional field with `omitempty` is allowed and keeps
    `SchemaVersion = "1"`. Anything else: stop and ask.
 
-2. **Never log `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or any other
-   secret.** Redact in error messages too.
+2. **Never log `OPEN_ROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or any other
+   secret.** Redact in error messages too. (Note: this project uses
+   `OPEN_ROUTER_API_KEY` with the underscore form — that's the user's
+   actual env-var name. Aider/litellm internally expects the canonical
+   `OPENROUTER_API_KEY`; the Aider harness must re-export from our form.)
 
 3. **No mocks of the LLM in tests that exercise a real harness.** Use the
    `MockProvider` in `pkg/llm/mock.go` only for unit-level path tests, not
@@ -78,10 +81,12 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 - **OpenRouter docs (loop should consult):** quickstart at
   `https://openrouter.ai/docs/quickstart`, OpenAI-compatible endpoint
   `POST https://openrouter.ai/api/v1/chat/completions` with
-  `Authorization: Bearer $OPENROUTER_API_KEY`
+  `Authorization: Bearer $OPEN_ROUTER_API_KEY`
 - **Aider OpenRouter:** Aider already supports `--model openrouter/<x>`
-  via litellm + `OPENROUTER_API_KEY` env var. No code change required for
-  Aider routing to OpenRouter — only model-string config.
+  via litellm + `OPENROUTER_API_KEY` env var (litellm hardcodes that
+  canonical name). The Aider harness must re-export
+  `OPENROUTER_API_KEY="$OPEN_ROUTER_API_KEY"` before invoking aider —
+  no other code change required for Aider routing to OpenRouter.
 - **opencode CLI:** `opencode run --model <provider/model> --dir <wd>
   --format json "<prompt>"` (event-stream JSON output)
 - **pi.dev CLI:** `pi -p "<prompt>"` print mode, `pi --mode json` event
@@ -126,7 +131,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - Write a small one-shot program (e.g.,
     `cmd/cortex-or-probe/main.go` — throwaway, do not wire into the main
     `cortex` binary) that POSTs one chat completion to a `:free` model
-    (e.g. `meta-llama/llama-3.1-8b-instruct:free`) using `$OPENROUTER_API_KEY`.
+    (e.g. `meta-llama/llama-3.1-8b-instruct:free`) using `$OPEN_ROUTER_API_KEY`.
   - Capture the full response JSON to `docs/openrouter-probe.json`.
   - Write `docs/openrouter-tiers.md` documenting:
     free-tier daily/per-min cap (verify experimentally if not in docs);
@@ -139,7 +144,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 - [ ] **2. Add `pkg/llm/openrouter.go` (Provider implementation).**
   - Implement `pkg/llm.Provider` interface for OpenRouter.
   - Endpoint: `https://openrouter.ai/api/v1/chat/completions`
-  - Auth: `Authorization: Bearer ${OPENROUTER_API_KEY}`
+  - Auth: `Authorization: Bearer ${OPEN_ROUTER_API_KEY}`
   - Model string format: pass through verbatim (`anthropic/claude-3-5-haiku`,
     `meta-llama/llama-3.1-70b-instruct`, etc.). No prefix translation.
   - Parse response: extract content, prompt/completion tokens, **cost_usd**
@@ -147,7 +152,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - Add `pkg/llm/openrouter_test.go`: unit tests using `httptest.Server`
     only — never hit the real endpoint in `go test`.
   - **Done:** `go test ./pkg/llm/... -count=1` green; manual smoke
-    `cortex` build with `OPENROUTER_API_KEY` unset must not panic.
+    `cortex` build with `OPEN_ROUTER_API_KEY` unset must not panic.
 
 ### Phase 2 — Harness telemetry seam
 
@@ -226,7 +231,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 - [ ] **9. CLI surface.**
   - New subcommand `cortex eval grid --scenarios <dir> --harnesses
     aider,opencode,pi_dev --models <list> --strategies baseline,cortex`.
-  - Reads `OPENROUTER_API_KEY` from env. Refuses to run if any selected
+  - Reads `OPEN_ROUTER_API_KEY` from env. Refuses to run if any selected
     harness binary is missing (clear error).
   - **Done:** `go build ./cmd/cortex/...` green; `cortex eval grid --help`
     shows the new flags.

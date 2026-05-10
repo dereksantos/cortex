@@ -1,0 +1,75 @@
+{
+  "probe": {
+    "model": "openai/gpt-oss-20b:free",
+    "timestamp": "2026-05-10T13:42:36Z"
+  },
+  "chat_status": 200,
+  "chat_latency_ms": 3462,
+  "chat_headers": {
+    "Date": "Sun, 10 May 2026 13:42:37 GMT"
+  },
+  "chat_body": {
+    "id": "gen-1778420556-m7BgrBNoZRHXSGOUvNgk",
+    "object": "chat.completion",
+    "created": 1778420556,
+    "model": "openai/gpt-oss-20b:free",
+    "provider": "OpenInference",
+    "system_fingerprint": null,
+    "choices": [
+      {
+        "index": 0,
+        "logprobs": null,
+        "finish_reason": "stop",
+        "native_finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "ok",
+          "refusal": null,
+          "reasoning": "User wants reply exactly \"ok\".",
+          "reasoning_details": [
+            {
+              "type": "reasoning.text",
+              "text": "User wants reply exactly \"ok\".",
+              "format": "unknown",
+              "index": 0
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 72,
+      "completion_tokens": 18,
+      "total_tokens": 90,
+      "cost": 0,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 64,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0,
+        "upstream_inference_prompt_cost": 0,
+        "upstream_inference_completions_cost": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 8,
+        "image_tokens": 0,
+        "audio_tokens": 0
+      }
+    }
+  },
+  "gen_status": 404,
+  "gen_latency_ms": 71,
+  "gen_headers": {
+    "Date": "Sun, 10 May 2026 13:42:42 GMT"
+  },
+  "gen_body": {
+    "error": {
+      "message": "Generation gen-1778420556-m7BgrBNoZRHXSGOUvNgk not found",
+      "code": 404
+    }
+  }
+}
