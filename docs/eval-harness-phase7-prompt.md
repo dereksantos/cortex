@@ -287,7 +287,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** compiles, implements both interfaces, compile-time
     interface guards present.
 
-- [ ] **7. Test `PiDevHarness` against a fake binary.**
+- [x] **7. Test `PiDevHarness` against a fake binary.**
   - Parallel to TODO 3.
   - **Done:** new test file with the same case coverage.
 
