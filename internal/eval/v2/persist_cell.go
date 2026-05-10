@@ -1,0 +1,190 @@
+package eval
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// cellResultsSchema is the SQL DDL for the per-cell grid output table.
+// Column names mirror CellResult's JSON tags exactly so a downstream
+// analyst who reads the JSONL append log via pandas/polars/DuckDB sees
+// the same schema as someone querying SQLite directly.
+//
+// run_id is UNIQUE so PersistCell can use INSERT OR IGNORE on retries
+// without duplicating rows in SQLite. (JSONL is append-only and may
+// contain duplicates on retry — by design, per hard constraint #8.)
+const cellResultsSchema = `
+CREATE TABLE IF NOT EXISTS cell_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version TEXT NOT NULL,
+    run_id TEXT NOT NULL UNIQUE,
+    timestamp TEXT NOT NULL,
+    git_commit_sha TEXT,
+    git_branch TEXT,
+    scenario_id TEXT NOT NULL,
+    session_id TEXT,
+    harness TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    backend TEXT,
+    context_strategy TEXT NOT NULL,
+    cortex_version TEXT,
+    seed INTEGER,
+    temperature REAL NOT NULL,
+    tokens_in INTEGER NOT NULL,
+    tokens_out INTEGER NOT NULL,
+    injected_context_tokens INTEGER NOT NULL,
+    cost_usd REAL NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    agent_turns_total INTEGER NOT NULL,
+    correction_turns INTEGER NOT NULL,
+    tests_passed INTEGER NOT NULL,
+    tests_failed INTEGER NOT NULL,
+    task_success INTEGER NOT NULL,
+    task_success_criterion TEXT NOT NULL,
+    notes TEXT,
+    inserted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cell_results_scenario ON cell_results(scenario_id);
+CREATE INDEX IF NOT EXISTS idx_cell_results_harness ON cell_results(harness);
+CREATE INDEX IF NOT EXISTS idx_cell_results_strategy ON cell_results(context_strategy);
+CREATE INDEX IF NOT EXISTS idx_cell_results_timestamp ON cell_results(timestamp);
+`
+
+// cellResultsJSONLName is the filename inside dbDir for the append log.
+// Stays a constant (not a Persister field) so analysis scripts can
+// hardcode the path: <dbDir>/cell_results.jsonl.
+const cellResultsJSONLName = "cell_results.jsonl"
+
+// PersistCell writes one CellResult to BOTH backends required by hard
+// constraint #8:
+//   - SQLite cell_results table (fast queries, uniqueness)
+//   - JSONL append log <dbDir>/cell_results.jsonl (portable analysis)
+//
+// Validation runs first; an invalid row touches neither backend.
+//
+// SQLite uses INSERT OR IGNORE on run_id so retries — including the
+// "JSONL append failed, caller retries" path — stay idempotent. JSONL
+// is append-only and may legitimately accumulate duplicates on retry;
+// downstream consumers should de-dup by run_id when that matters.
+//
+// JSONL append failure does NOT roll back the SQLite insert: a missing
+// row is worse than a duplicate.
+func (p *Persister) PersistCell(ctx context.Context, r *CellResult) error {
+	if r == nil {
+		return errors.New("PersistCell: nil CellResult")
+	}
+	if err := r.Validate(); err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+
+	if err := p.insertCellSQLite(ctx, r); err != nil {
+		return fmt.Errorf("sqlite insert: %w", err)
+	}
+
+	if err := p.appendCellJSONL(r); err != nil {
+		return fmt.Errorf("jsonl append: %w", err)
+	}
+	return nil
+}
+
+func (p *Persister) insertCellSQLite(ctx context.Context, r *CellResult) error {
+	const stmt = `
+        INSERT OR IGNORE INTO cell_results (
+            schema_version, run_id, timestamp, git_commit_sha, git_branch,
+            scenario_id, session_id, harness, provider, model, backend,
+            context_strategy, cortex_version, seed, temperature,
+            tokens_in, tokens_out, injected_context_tokens, cost_usd,
+            latency_ms, agent_turns_total, correction_turns,
+            tests_passed, tests_failed, task_success, task_success_criterion,
+            notes
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?
+        )
+    `
+	_, err := p.db.ExecContext(ctx, stmt,
+		r.SchemaVersion, r.RunID, r.Timestamp,
+		nullableString(r.GitCommitSHA), nullableString(r.GitBranch),
+		r.ScenarioID, nullableString(r.SessionID),
+		r.Harness, r.Provider, r.Model, nullableString(r.Backend),
+		r.ContextStrategy, nullableString(r.CortexVersion),
+		nullableSeed(r.Seed),
+		r.Temperature,
+		r.TokensIn, r.TokensOut, r.InjectedContextTokens, r.CostUSD,
+		r.LatencyMs, r.AgentTurnsTotal, r.CorrectionTurns,
+		r.TestsPassed, r.TestsFailed, boolToInt(r.TaskSuccess), r.TaskSuccessCriterion,
+		nullableString(r.Notes),
+	)
+	return err
+}
+
+// appendCellJSONL appends one JSON-encoded line to the jsonl log,
+// fsync'd before return. Uses O_APPEND so concurrent writers from a
+// single process serialize at the kernel level (single small writes
+// under PIPE_BUF are atomic on POSIX).
+func (p *Persister) appendCellJSONL(r *CellResult) error {
+	path := p.cellResultsJSONLPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+
+	line, err := json.Marshal(r)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	line = append(line, '\n')
+	if _, err := f.Write(line); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	return f.Sync()
+}
+
+// cellResultsJSONLPath returns the absolute (or cwd-relative) path to
+// the JSONL log. Honors p.dbDir when set (tests + NewPersister both set
+// it); otherwise falls back to the canonical .cortex/db/ location.
+func (p *Persister) cellResultsJSONLPath() string {
+	dir := p.dbDir
+	if dir == "" {
+		dir = filepath.Join(".cortex", "db")
+	}
+	return filepath.Join(dir, cellResultsJSONLName)
+}
+
+// nullableString maps Go zero-value strings to SQL NULL so optional
+// CellResult fields (git_commit_sha, session_id, backend, notes, ...)
+// store as NULL rather than empty strings — keeps analysis-side
+// COALESCE/IS NULL semantics correct.
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullableSeed maps an unset *int64 (Seed pointer) to SQL NULL. A
+// stored NULL means "seed not specified"; a stored 0 means
+// "deterministically seeded with 0".
+func nullableSeed(s *int64) any {
+	if s == nil {
+		return nil
+	}
+	return *s
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
