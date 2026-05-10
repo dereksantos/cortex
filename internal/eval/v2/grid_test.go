@@ -5,6 +5,7 @@ package eval
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -507,6 +508,64 @@ func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
 			t.Errorf("results=%d, want 1", len(results))
 		}
 	})
+}
+
+// TestRunGrid_SeedDirCopiedIntoWorkdir: scenario.SeedDir contents land
+// in the cell's workdir before the harness runs. We assert both
+// directions: a Verify that greps the seeded file passes when seed_dir
+// is set, and the marker file is observable from a fake harness's call.
+func TestRunGrid_SeedDirCopiedIntoWorkdir(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	seedRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(seedRoot, "MARKER.txt"), []byte("seed-ok"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(seedRoot, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seedRoot, "sub", "child.txt"), []byte("child"), 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{
+			ID:      "seeded",
+			Tests:   []Test{{Query: "q"}},
+			SeedDir: seedRoot,
+			// Verify checks both the top-level marker and the subdir.
+			Verify: "test -f MARKER.txt && grep -q seed-ok MARKER.txt && test -f sub/child.txt",
+		}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if !results[0].TaskSuccess {
+		t.Errorf("TaskSuccess=false; seed_dir copy failed or files missing. Notes: %s", results[0].Notes)
+	}
+}
+
+// TestRunGrid_SeedDirMissing: a scenario pointing at a non-existent
+// seed_dir fails the cell up-front (before the harness runs) with a
+// clear error wrapped in the cell's err return path.
+func TestRunGrid_SeedDirMissing(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	_, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, SeedDir: "/nonexistent/seed/dir"}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err == nil {
+		t.Fatal("want error for missing seed_dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "seed workdir") {
+		t.Errorf("err=%v, want 'seed workdir'", err)
+	}
 }
 
 // TestRunGrid_VerifyExits0_TaskSuccess: a scenario whose Verify

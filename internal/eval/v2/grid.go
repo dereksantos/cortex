@@ -254,6 +254,15 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	}
 	defer os.RemoveAll(workdir)
 
+	// Optional seed_dir → workdir copy. Lets coding scenarios ship a
+	// minimal Go project (go.mod + stubs + tests) for the agent to
+	// edit, rather than starting from an empty dir.
+	if scn.SeedDir != "" {
+		if err := copyDirIntoWorkdir(ctx, scn.SeedDir, workdir); err != nil {
+			return CellResult{}, fmt.Errorf("seed workdir from %q: %w", scn.SeedDir, err)
+		}
+	}
+
 	prompt := scenarioToPrompt(scn)
 
 	// Harnesses that bake the model at construction time (Aider) can
@@ -340,6 +349,31 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		}
 	}
 	return cr, nil
+}
+
+// copyDirIntoWorkdir recursively copies the contents of src (not src
+// itself) into dst. Uses `cp -R src/. dst/` for portable POSIX
+// semantics on macOS + Linux. Fails fast with a wrapped error if src
+// doesn't exist or cp fails.
+func copyDirIntoWorkdir(ctx context.Context, src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("stat seed_dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("seed_dir %q is not a directory", src)
+	}
+
+	// `cp -R src/. dst` copies contents of src into dst, not src itself.
+	// Trailing `/.` is the POSIX convention for "every entry inside,
+	// including dotfiles".
+	cmd := exec.CommandContext(ctx, "cp", "-R", filepath.Clean(src)+"/.", dst)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cp -R: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // goTestPassRE / goTestFailRE match the per-test summary lines emitted
