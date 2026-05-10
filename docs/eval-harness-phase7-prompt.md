@@ -237,7 +237,7 @@ continuing**. The session can't make meaningful progress without them.
     time `var _ Harness = ...` / `var _ ResultfulHarness = ...`).
   - Delete `cmd/cortex-opencode-probe/`.
 
-- [ ] **3. Test `OpenCodeHarness` against a fake binary.**
+- [x] **3. Test `OpenCodeHarness` against a fake binary.**
   - Mirror `library_service_aider_harness_test.go`'s `installFakeOpencode`
     pattern: a shell script that writes the documented event-stream
     shape to stdout.
