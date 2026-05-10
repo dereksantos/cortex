@@ -1,7 +1,69 @@
 # Resumption prompt — picks up where the 2026-05-10 session left off
 
 > Read this file end-to-end. It captures everything a fresh Claude
-> Code session needs to continue the eval-harness work without rediscovery.
+> Code session needs to continue the eval-harness work without
+> rediscovery.
+
+---
+
+## The anchor — what we are trying to prove
+
+**Thesis:** Cortex produces measurable lift on real coding tasks at
+equal-or-lower token and dollar cost, on a smaller / cheaper model
+than the baseline frontier.
+
+This is the small-model amplifier claim from `CLAUDE.md` / the
+project's product memo. Everything else (cell-result schema, grid
+runner, multi-tier ceilings, the retrieval framework) is plumbing in
+service of this question.
+
+### Pass criteria for "real lift signal that translates to real-world usage"
+
+A run lands as **decisive evidence** when *all four* of these are true
+on a coding scenario set (not retrieval-only):
+
+| dimension | pass threshold | why |
+|---|---|---|
+| **Quality** | Cortex pass-rate ≥ baseline pass-rate + **10 pp** at the same model | The amplifier must produce work that's actually better, not just different. Within-model variance on n≥15 scenarios is roughly ±5 pp, so 10 pp is the smallest interval where one seed isn't noise. |
+| **Cost** | Cortex `cost_usd` per *passing* cell ≤ baseline `cost_usd` per passing cell | The pitch is "cheaper, not just additive context." If cortex adds tokens but doesn't increase quality enough to offset, that's a regression. |
+| **Tokens** | Cortex `tokens_in + tokens_out` per cell ≤ 1.5× baseline | Static-cortex prefixes inflate the prompt; the floor is "you're not paying 3× to get 10% lift." |
+| **Cross-tier** | Small-model + cortex ≥ next-tier-up baseline on the same scenarios | The thesis is *amplifier* — small-model + cortex reaches medium-model baseline territory, or medium + cortex reaches large-baseline territory. |
+
+A run lands as **decisive falsification** when:
+- Cortex pass-rate < baseline pass-rate - 5 pp (cortex actively hurts),
+  *or*
+- Cortex pass-rate ≈ baseline pass-rate AND cortex cost > 1.3× baseline
+  (no benefit, real cost).
+
+Anything between is **inconclusive** — needs harder scenarios, larger
+sample, or different model tiers.
+
+### Current state against the anchor
+
+| dimension | status | evidence |
+|---|---|---|
+| Quality lift on coding | **❌ not yet** | 0 pp lift on 5 saturated coding scenarios (post `--file` fix) |
+| Quality lift on retrieval | ✅ partial | +31% / +52% lift on Haiku × 15 scenarios; clean and noisy |
+| Cost reduction | ❓ unmeasured | Per-passing-cell cost-per-quality comparison not yet run |
+| Cross-tier amplifier | ❌ not yet | No experiment has shown small+cortex ≥ medium baseline |
+
+We're at **mechanism-validated, outcome-unvalidated**. The retriever
+works; we haven't yet shown it delivers the headline claim on coding
+work at lower cost.
+
+### What this means for the next experiment
+
+**Every next experiment should be framed as "would this move the
+status table above?"** If the answer is "no, it just adds more
+mechanism testing," redirect.
+
+The single experiment that would move the table the most is the
+**library-service cumulative experiment** (see plan below). It tests
+all four dimensions on one coding-task corpus, accumulates state
+across sessions (the real-world shape), and has an existing scoring
+rubric (shape similarity, naming adherence, smell density, test
+parity, e2e pass rate). Bigger setup, but the only experiment likely
+to land decisive evidence one way or the other.
 
 ---
 
@@ -47,15 +109,28 @@ Two things may be in flight or recently complete — check these first:
 
 ---
 
-## Open experiments + their cost shape
+## Open experiments — ranked by anchor-table impact
 
-| Experiment | What it measures | Effort | Est cost |
-|---|---|---|---|
-| **Noisy-retrieval comparison** | Does cortex retrieval signal survive a 20× noise dilution? Validates the retriever, not just the corpus. | If `/tmp/v2-15-noisy/` still exists, run + diff against clean. Otherwise regenerate with `/tmp/inject_noise/main.go`. | ~$0.20 |
-| **Full v2 retrieval sweep on Haiku** | 40 scenarios → broader-sample lift number, not just 15. | One command, ~5-10 min. | ~$1.50 |
-| **Library-service cumulative experiment** | The user's "build up knowledge via dreaming, then build it out" thesis test. Multi-session, cumulative cortex state. Headline shape-similarity comparison. | Significant — see "library-service plan" below. | ~$3-5 per full sweep |
-| **Harder coding scenarios** | Author scenarios where the cortex bullets convey info NOT in seed files (hidden conventions, deprecated approaches, cross-file dependencies). Re-run grid. | ~2 hours scenario authoring + 1 run. | ~$0.50 |
-| **Compare-runs tool** | A script that compares two eval result sets side-by-side. Useful for "before fix vs after fix" or "clean vs noisy" deltas. | ~30 min. | $0 |
+Re-read the anchor's status table above. Each experiment is rated by
+which dimensions it could move. The bolded row is highest-leverage.
+
+| Experiment | Quality | Cost | Tokens | Cross-tier | Effort | Est cost |
+|---|:-:|:-:|:-:|:-:|---|---:|
+| **Library-service cumulative** (see plan below) | ✅ | ✅ | ✅ | ✅ | Big | $3–5 |
+| Full v2 retrieval sweep on Haiku | — | — | — | — | Tiny | $1.50 |
+| Harder coding scenarios (hidden-context shape) | ✅ | — | — | partial | Medium | $0.50 |
+| Real-store seeding (capture from session logs) | partial | — | — | — | Medium | $0.50 |
+| Noisy-retrieval comparison | — | — | — | — | Tiny | $0.20 |
+| Compare-runs tool | n/a | n/a | n/a | n/a | Small | $0 |
+
+Legend: ✅ = experiment can directly move that anchor dimension;
+partial = experiment provides side evidence but not the headline
+metric; "—" = doesn't bear on that dimension.
+
+**The library-service cumulative experiment is the only one that
+could move all four anchor dimensions in a single run.** Everything
+else either polishes mechanism evidence (retrieval sweeps) or chips at
+one dimension. If you have budget for one experiment, run that one.
 
 ---
 
