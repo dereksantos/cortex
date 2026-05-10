@@ -495,8 +495,11 @@ Examples:
 		}
 	}
 
-	// Exit with error if ABR < threshold
-	if !results.Pass {
+	// Exit with error if ABR < threshold. Skip in dry-run mode: the mock
+	// provider returns canned responses, so its ABR has no relationship to
+	// real-world Cortex quality. Dry-run is a pipeline-shape smoke test, not
+	// a quality gate.
+	if !results.Pass && !dryRun {
 		return fmt.Errorf("eval failed: ABR below threshold")
 	}
 	return nil
