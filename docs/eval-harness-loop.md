@@ -270,7 +270,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     persists across two `RunGrid()` calls, (c) free-tier preference
     routes correctly, (d) frontier guard blocks Sonnet without env var.
 
-- [ ] **9. End-to-end smoke run (gated).**
+- [x] **9. End-to-end smoke run (gated).**
   - Requires `CORTEX_EVAL_ALLOW_SPEND=1`.
   - 1 scenario × 1 harness (aider) × 1 OpenRouter free model × 1
     strategy (baseline). Real call, real CellResult written to *both*
