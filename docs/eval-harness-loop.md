@@ -174,7 +174,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** existing `library_service_*_test.go` still green; new
     interface defined but no implementation yet.
 
-- [ ] **4. Implement `RunSessionWithResult` for `AiderHarness`.**
+- [x] **4. Implement `RunSessionWithResult` for `AiderHarness`.**
   - Aider with `--no-stream` writes a final summary line. Capture stdout
     (replace `io.Discard`), parse for token/cost lines (Aider exposes
     `Tokens: 1,234 sent, 567 received. Cost: $0.0012` or similar — verify
