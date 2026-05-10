@@ -3,7 +3,8 @@
   "description": "Persistent context memory for AI coding assistants",
   "version": "0.1.0",
   "author": {
-    "name": "Cortex"
+    "name": "Derek Santos",
+    "url": "https://github.com/dereksantos"
   },
   "repository": "https://github.com/dereksantos/cortex",
   "license": "MIT",

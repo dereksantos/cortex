@@ -1,3 +1,12 @@
+# LOCAL DEVELOPMENT ONLY.
+#
+# This compose file enables anonymous Grafana access with the Admin role
+# on port 3000. That is fine on a developer laptop, but DO NOT deploy this
+# unmodified to any host that's reachable from the internet — it grants
+# anyone full Grafana admin without authentication. Bind to 127.0.0.1
+# (e.g. "127.0.0.1:3000:3000") and disable anonymous access before any
+# remote use.
+
 version: "3.8"
 
 services:
@@ -5,13 +14,13 @@ services:
     image: grafana/grafana:latest
     container_name: cortex-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_INSTALL_PLUGINS=frser-sqlite-datasource
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
-      - ./.context/db:/var/lib/grafana/db:ro
+      - ./.cortex/db:/var/lib/grafana/db:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-storage:/var/lib/grafana
 
