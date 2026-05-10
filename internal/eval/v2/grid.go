@@ -265,6 +265,18 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 
 	prompt := scenarioToPrompt(scn)
 
+	// Cortex strategy = prepend hand-authored context bullets to the
+	// prompt. "Static cortex" — the Reflex/Reflect-mined version comes
+	// later. The point at this stage is to make ContextStrategy=cortex
+	// actually *vary the prompt* so any signal we see is attributable
+	// to context, not to a no-op label.
+	var injectedTokens int
+	if strat == StrategyCortex && len(scn.CortexContext) > 0 {
+		prefix := buildCortexPrefix(scn.CortexContext)
+		injectedTokens = approxTokenCount(prefix)
+		prompt = prefix + "\n\nTASK:\n" + prompt
+	}
+
 	// Harnesses that bake the model at construction time (Aider) can
 	// implement SetModel(string) so the grid can re-point one instance
 	// across cells. Done via inline interface assertion to avoid widening
@@ -302,25 +314,34 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		}
 	}
 
+	// Cap the injected-token estimate against the harness's actual
+	// reported tokens_in. Our 4-bytes-per-token heuristic is approximate
+	// and can overshoot the real tokenizer; the schema validates
+	// injected ≤ tokens_in, and overshooting fails the persist call.
+	if injectedTokens > hres.TokensIn {
+		injectedTokens = hres.TokensIn
+	}
+
 	cr := CellResult{
-		SchemaVersion:        CellResultSchemaVersion,
-		RunID:                newRunID(),
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		GitCommitSHA:         commitSHA,
-		GitBranch:            branch,
-		ScenarioID:           scn.ID,
-		Harness:              hs.Name,
-		Provider:             ms.Provider,
-		Model:                ms.Model,
-		ContextStrategy:      strat,
-		Temperature:          0.0,
-		TokensIn:             hres.TokensIn,
-		TokensOut:            hres.TokensOut,
-		CostUSD:              hres.CostUSD,
-		LatencyMs:            hres.LatencyMs,
-		AgentTurnsTotal:      hres.AgentTurnsTotal,
-		TaskSuccess:          runErr == nil,
-		TaskSuccessCriterion: CriterionTestsPassAll,
+		SchemaVersion:         CellResultSchemaVersion,
+		RunID:                 newRunID(),
+		Timestamp:             time.Now().UTC().Format(time.RFC3339),
+		GitCommitSHA:          commitSHA,
+		GitBranch:             branch,
+		ScenarioID:            scn.ID,
+		Harness:               hs.Name,
+		Provider:              ms.Provider,
+		Model:                 ms.Model,
+		ContextStrategy:       strat,
+		Temperature:           0.0,
+		TokensIn:              hres.TokensIn,
+		TokensOut:             hres.TokensOut,
+		CostUSD:               hres.CostUSD,
+		LatencyMs:             hres.LatencyMs,
+		AgentTurnsTotal:       hres.AgentTurnsTotal,
+		InjectedContextTokens: injectedTokens,
+		TaskSuccess:           runErr == nil,
+		TaskSuccessCriterion:  CriterionTestsPassAll,
 	}
 	if strat == StrategyCortex {
 		cr.CortexVersion = CortexVersion
@@ -349,6 +370,34 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		}
 	}
 	return cr, nil
+}
+
+// buildCortexPrefix renders the static-cortex injection block. Format
+// is deliberately plain — the agent sees structured bullets without
+// any extra framing we'd later have to remove during prompt-cleanup.
+func buildCortexPrefix(bullets []string) string {
+	var b strings.Builder
+	b.WriteString("RELEVANT CONTEXT:\n")
+	for _, line := range bullets {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// approxTokenCount estimates token count from byte length using the
+// common 4-bytes-per-token heuristic. Good enough for budget tracking;
+// real per-call totals come from the harness's reported usage.
+func approxTokenCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return (len(s) + 3) / 4
 }
 
 // copyDirIntoWorkdir recursively copies the contents of src (not src

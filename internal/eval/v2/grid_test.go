@@ -510,6 +510,111 @@ func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
 	})
 }
 
+// TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy: with
+// strategy=cortex AND a non-empty CortexContext list, the harness sees
+// a prompt that starts with "RELEVANT CONTEXT:" + bullets, and
+// InjectedContextTokens is non-zero (capped by reported TokensIn).
+func TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	// Fake reports 1000 tokens_in so the InjectedContextTokens cap
+	// against TokensIn doesn't zero out our estimate.
+	fake := &gridFakeHarness{res: HarnessResult{TokensIn: 1000, TokensOut: 50, AgentTurnsTotal: 1, LatencyMs: 1}}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{
+			ID:    "x",
+			Tests: []Test{{Query: "implement the function"}},
+			CortexContext: []string{
+				"Match existing test patterns",
+				"Use t.Helper() in helpers",
+			},
+		}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyCortex})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("calls=%d want 1", len(fake.calls))
+	}
+	prompt := fake.calls[0].prompt
+	if !strings.HasPrefix(prompt, "RELEVANT CONTEXT:") {
+		t.Errorf("prompt did not start with prefix; got: %q", prompt)
+	}
+	if !strings.Contains(prompt, "Match existing test patterns") {
+		t.Errorf("prompt missing first bullet")
+	}
+	if !strings.Contains(prompt, "TASK:\nimplement the function") {
+		t.Errorf("prompt missing TASK section, got: %q", prompt)
+	}
+	if results[0].InjectedContextTokens == 0 {
+		t.Errorf("InjectedContextTokens=0 on cortex strategy with bullets, want > 0")
+	}
+}
+
+// TestRunGrid_CortexInjection_BaselineSkipsPrefix: baseline strategy
+// with the same CortexContext leaves the prompt as-is and reports
+// InjectedContextTokens=0 — strategy is the only thing varying.
+func TestRunGrid_CortexInjection_BaselineSkipsPrefix(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &gridFakeHarness{res: HarnessResult{TokensIn: 1000, TokensOut: 50, AgentTurnsTotal: 1, LatencyMs: 1}}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{
+			ID:            "x",
+			Tests:         []Test{{Query: "implement the function"}},
+			CortexContext: []string{"Match existing patterns"},
+		}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	prompt := fake.calls[0].prompt
+	if strings.Contains(prompt, "RELEVANT CONTEXT:") {
+		t.Errorf("baseline prompt should NOT have cortex prefix; got: %q", prompt)
+	}
+	if results[0].InjectedContextTokens != 0 {
+		t.Errorf("InjectedContextTokens=%d on baseline, want 0", results[0].InjectedContextTokens)
+	}
+}
+
+// TestRunGrid_CortexInjection_EmptyContextNoOp: cortex strategy with
+// no bullets behaves exactly like baseline — no prefix, no injected
+// tokens. (Catches the regression where empty bullets still produce a
+// "RELEVANT CONTEXT:\n" header.)
+func TestRunGrid_CortexInjection_EmptyContextNoOp(t *testing.T) {
+	p := newTestPersister(t)
+	t.Setenv(EnvNoFreePreference, "1")
+
+	fake := &gridFakeHarness{res: HarnessResult{TokensIn: 1000, TokensOut: 50, AgentTurnsTotal: 1, LatencyMs: 1}}
+
+	results, err := RunGrid(context.Background(), p,
+		[]*Scenario{{
+			ID:    "x",
+			Tests: []Test{{Query: "implement the function"}},
+			// no CortexContext
+		}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
+		[]ContextStrategy{StrategyCortex})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+	if strings.Contains(fake.calls[0].prompt, "RELEVANT CONTEXT:") {
+		t.Errorf("empty-context cortex prompt should be bare; got %q", fake.calls[0].prompt)
+	}
+	if results[0].InjectedContextTokens != 0 {
+		t.Errorf("InjectedContextTokens=%d, want 0 with no bullets", results[0].InjectedContextTokens)
+	}
+}
+
 // TestRunGrid_SeedDirCopiedIntoWorkdir: scenario.SeedDir contents land
 // in the cell's workdir before the harness runs. We assert both
 // directions: a Verify that greps the seeded file passes when seed_dir
