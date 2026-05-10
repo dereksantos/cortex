@@ -62,6 +62,13 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
 7. **Don't push, don't open PRs, don't run `cortex daemon`.** Local commits
    on the current branch only.
 
+8. **All eval results land as structured rows.** Every `CellResult` goes
+   to *both* the SQLite `cell_results` table and the
+   `.cortex/db/cell_results.jsonl` append log so downstream analysis
+   (pandas, polars, DuckDB, `jq`) doesn't need to scrape opaque files.
+   `CellResult`'s JSON tag names are the column-name contract for both
+   backends — see hard constraint #1 about the schema being a contract.
+
 ---
 
 ## Current state (where things live)
@@ -185,39 +192,29 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** new test that runs Aider against `ollama/qwen2.5-coder:1.5b`
     and asserts a populated `HarnessResult` (skip when Ollama unreachable).
 
-### Phase 3 — New harnesses
+### Phase 3 — Persistence and runner
 
-- [ ] **5. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
-  - Mirror `AiderHarness` structure: binary resolution
-    (`$OPENCODE_BINARY` → PATH), CLI invocation
-    `opencode run --model <model> --dir <workdir> --format json
-    "<prompt>"`, JSON event-stream parser for tokens/turns.
-  - Implements both `Harness` and `ResultfulHarness`.
-  - **Done:** `go test ./internal/eval/v2/...` green; new test file
-    `library_service_opencode_harness_test.go` with t.Skip when
-    `opencode` not on PATH.
-
-- [ ] **6. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
-  - CLI invocation: `pi --mode json --provider openrouter --model <x>
-    -p "<prompt>"` from `cmd.Dir = workdir`. Parse newline-delimited JSON
-    events for tokens, turns, file edits.
-  - Custom-provider config (`~/.pi/agent/models.json`) is the user's job
-    to set up — the harness should fail loudly with a clear error message
-    pointing at the docs if pi can't reach OpenRouter.
-  - **Done:** parallel to step 5.
-
-### Phase 4 — Persistence and runner
-
-- [ ] **7. Persist `CellResult` rows.**
+- [ ] **5. Persist `CellResult` rows (SQLite + JSONL append).**
   - Add a new SQLite table `cell_results` in `internal/eval/v2/persist.go`
     with one column per CellResult JSON tag.
-  - Add `Persister.PersistCell(ctx, *CellResult) error` (calls
-    `r.Validate()` first; never insert invalid rows).
+  - **Also append each row to `.cortex/db/cell_results.jsonl`** — one
+    valid JSON object per line (the same shape `json.Marshal(*CellResult)`
+    already produces), opened `O_APPEND|O_CREATE`, fsync'd after each
+    write. JSONL is the canonical portable format for downstream data
+    analysis (pandas / polars / DuckDB / `jq` consume it natively);
+    SQLite handles ad-hoc queries. Both backends are populated; neither
+    is optional.
+  - `Persister.PersistCell(ctx, *CellResult) error` calls `r.Validate()`
+    first (never insert invalid rows), writes to SQLite, then appends to
+    JSONL. If the JSONL append fails the function returns the error
+    *without* rolling back the SQLite insert — duplicate analysis rows
+    are tolerable; a missing row is not.
   - Migration: append-only, follow existing `ALTER TABLE` pattern.
   - **Done:** persistence test with table-driven cases for valid + invalid
-    rows.
+    rows + a JSONL line-count assertion + a round-trip test (write,
+    read line, `json.Unmarshal` back into CellResult, equals original).
 
-- [ ] **8. Grid runner.**
+- [ ] **6. Grid runner.**
   - New file `internal/eval/v2/grid.go`. Function:
     `RunGrid(ctx, scenarios []*Scenario, harnesses []Harness, models []string,
     strategies []ContextStrategy) ([]CellResult, error)`.
@@ -228,17 +225,19 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** unit test using a fake harness that returns canned
     HarnessResults for 2×2×2 = 8 cells.
 
-- [ ] **9. CLI surface.**
+- [ ] **7. CLI surface.**
   - New subcommand `cortex eval grid --scenarios <dir> --harnesses
-    aider,opencode,pi_dev --models <list> --strategies baseline,cortex`.
+    aider --models <list> --strategies baseline,cortex`. (opencode +
+    pi_dev are added later by TODOs 10 and 11 — those harnesses are
+    deferred past the smoke run, so the CLI ships aider-only first.)
   - Reads `OPEN_ROUTER_API_KEY` from env. Refuses to run if any selected
     harness binary is missing (clear error).
   - **Done:** `go build ./cmd/cortex/...` green; `cortex eval grid --help`
     shows the new flags.
 
-### Phase 5 — Spend safety + smoke
+### Phase 4 — Spend safety + smoke
 
-- [ ] **10. Cost ceiling — multi-tier guard for the $20 budget.**
+- [ ] **8. Cost ceiling — multi-tier guard for the $20 budget.**
   - Implement three independent ceilings, all read from env with defaults:
     - `CORTEX_EVAL_RUN_USD_CEILING` (default `$5.00`) — abort the current
       grid run when running spend would exceed this. One grid run = one
@@ -271,12 +270,47 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     persists across two `RunGrid()` calls, (c) free-tier preference
     routes correctly, (d) frontier guard blocks Sonnet without env var.
 
-- [ ] **11. End-to-end smoke run (gated).**
+- [ ] **9. End-to-end smoke run (gated).**
   - Requires `CORTEX_EVAL_ALLOW_SPEND=1`.
   - 1 scenario × 1 harness (aider) × 1 OpenRouter free model × 1
-    strategy (baseline). Real call, real CellResult written to SQLite.
+    strategy (baseline). Real call, real CellResult written to *both*
+    SQLite and the JSONL append log.
   - **Done:** smoke completes in < 5 min, row exists in
-    `.cortex/db/evals_v2.db`, `cortex eval grid --report` shows it.
+    `.cortex/db/evals_v2.db` AND a matching line exists in
+    `.cortex/db/cell_results.jsonl`, `cortex eval grid --report` shows it.
+
+### Phase 5 — Additional harnesses (deferred until after smoke)
+
+> Both require external CLIs not currently on PATH. The loop halted on
+> the first encounter (originally TODO 5 in the pre-reorder ordering)
+> and the user chose to defer past the smoke run rather than pause to
+> install. Pick these up after TODO 9 lands — or earlier if
+> `which opencode` / `which pi` start succeeding before then.
+
+- [ ] **10. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
+  - **Requires `opencode` on PATH** (`curl -fsSL https://opencode.ai/install | bash`).
+    Re-running the loop without it will halt again at this step.
+  - Mirror `AiderHarness` structure: binary resolution
+    (`$OPENCODE_BINARY` → PATH), CLI invocation
+    `opencode run --model <model> --dir <workdir> --format json
+    "<prompt>"`, JSON event-stream parser for tokens/turns.
+  - Implements both `Harness` and `ResultfulHarness`.
+  - **Done:** `go test ./internal/eval/v2/...` green; new test file
+    `library_service_opencode_harness_test.go` with t.Skip when
+    `opencode` not on PATH.
+
+- [ ] **11. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
+  - **Requires `pi` on PATH** (see https://pi.dev install instructions).
+    Re-running the loop without it will halt again at this step.
+  - CLI invocation: `pi --mode json --provider openrouter --model <x>
+    -p "<prompt>"` from `cmd.Dir = workdir`. Parse newline-delimited JSON
+    events for tokens, turns, file edits.
+  - Custom-provider config (`~/.pi/agent/models.json`) is the user's job
+    to set up — the harness should fail loudly with a clear error message
+    pointing at the docs if pi can't reach OpenRouter.
+  - **Done:** parallel to step 10.
+
+### Phase 6 — Final
 
 - [ ] **12. Stop the loop.** All boxes checked. Print a summary of what
   shipped and what's deferred (e.g., parallelism, hallucination detector,
