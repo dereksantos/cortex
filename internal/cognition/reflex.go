@@ -3,12 +3,24 @@ package cognition
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
+)
+
+// Embedder budget for the Reflex hot path. The HTTP client inside the
+// embedder has its own 30s timeout, but Reflex must stay well under 50ms
+// even when the LLM server is saturated (e.g. another model holding Ollama).
+// We cap each embed call here and trip a circuit breaker after repeated
+// failures so the hot path doesn't keep paying the timeout cost.
+const (
+	embedTimeout          = 100 * time.Millisecond
+	embedFailureThreshold = 2
+	embedCooldown         = 60 * time.Second
 )
 
 // Reflex implements cognition.Reflexer for fast mechanical retrieval.
@@ -18,6 +30,9 @@ type Reflex struct {
 	storage  *storage.Storage
 	embedder llm.Embedder // optional, for semantic search
 	scorer   *Scorer
+
+	embedFailures  atomic.Int32 // consecutive embed failures
+	embedSkipUntil atomic.Int64 // unix nanos; if now < this, skip embedder
 }
 
 // NewReflex creates a new Reflex instance.
@@ -28,6 +43,25 @@ func NewReflex(store *storage.Storage, embedder llm.Embedder) *Reflex {
 		embedder: embedder,
 		scorer:   NewScorer(),
 	}
+}
+
+// shouldTryEmbedder reports whether the circuit breaker permits an embed call.
+func (r *Reflex) shouldTryEmbedder() bool {
+	if r.embedder == nil {
+		return false
+	}
+	return time.Now().UnixNano() >= r.embedSkipUntil.Load()
+}
+
+func (r *Reflex) recordEmbedFailure() {
+	if r.embedFailures.Add(1) >= embedFailureThreshold {
+		r.embedSkipUntil.Store(time.Now().Add(embedCooldown).UnixNano())
+	}
+}
+
+func (r *Reflex) recordEmbedSuccess() {
+	r.embedFailures.Store(0)
+	r.embedSkipUntil.Store(0)
 }
 
 // Reflex performs fast mechanical retrieval using semantic search or text matching.
@@ -60,11 +94,21 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 		}
 	}
 
-	// 2. Semantic search via embeddings if available
+	// 2. Semantic search via embeddings if available.
+	// IsEmbeddingAvailable is intentionally NOT called here: it issues HTTP
+	// probes whose http.Client timeout (30s) is not bounded by ctx, so a
+	// hung Ollama would blow the latency budget before we even get to Embed.
+	// Instead we gate via the circuit breaker and bound Embed with a short
+	// context timeout — failures fall through to text search.
 	semanticDone := false
-	if q.Text != "" && r.embedder != nil && r.embedder.IsEmbeddingAvailable() {
-		queryVec, err := r.embedder.Embed(ctx, q.Text)
-		if err == nil && len(queryVec) > 0 {
+	if q.Text != "" && r.shouldTryEmbedder() {
+		embedCtx, cancel := context.WithTimeout(ctx, embedTimeout)
+		queryVec, err := r.embedder.Embed(embedCtx, q.Text)
+		cancel()
+		if err != nil {
+			r.recordEmbedFailure()
+		} else if len(queryVec) > 0 {
+			r.recordEmbedSuccess()
 			vectorResults, err := r.storage.SearchByVector(queryVec, limit, 0.3)
 			if err == nil && len(vectorResults) > 0 {
 				candidates = append(candidates, r.vectorResultsToResults(vectorResults)...)
