@@ -141,7 +141,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** probe runs locally and emits both files; loop now knows the
     cost-extraction code path for step 2.
 
-- [ ] **2. Add `pkg/llm/openrouter.go` (Provider implementation).**
+- [x] **2. Add `pkg/llm/openrouter.go` (Provider implementation).**
   - Implement `pkg/llm.Provider` interface for OpenRouter.
   - Endpoint: `https://openrouter.ai/api/v1/chat/completions`
   - Auth: `Authorization: Bearer ${OPEN_ROUTER_API_KEY}`
