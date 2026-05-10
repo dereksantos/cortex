@@ -422,7 +422,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - **Done:** `cortex eval grid --report-summary` prints the table;
     user sees real numbers from the experiment.
 
-- [ ] **17. Wire OpenRouter into the existing `cortex eval` CLI.**
+- [x] **17. Wire OpenRouter into the existing `cortex eval` CLI.**
   - The legacy `cortex eval` CLI (Phase 1's existing v2 framework, NOT
     `cortex eval grid`) supports retrieval-style scenarios with a real
     scoring layer (judge LLM, NDCG, ABR, lift). It currently accepts
