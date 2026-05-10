@@ -211,7 +211,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** probe runs, both files written, event schema
     summarized.
 
-- [ ] **2. Implement `OpenCodeHarness` in
+- [x] **2. Implement `OpenCodeHarness` in
   `internal/eval/v2/library_service_opencode_harness.go`.**
   - Mirror `AiderHarness` structure:
     - `OpenCodeHarness struct { binary, model string }`
