@@ -279,15 +279,165 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     `.cortex/db/evals_v2.db` AND a matching line exists in
     `.cortex/db/cell_results.jsonl`, `cortex eval grid --report` shows it.
 
-### Phase 5 — Additional harnesses (deferred until after smoke)
+### Phase 5 — Real signal on ~$5 OpenRouter budget (Aider-only)
 
-> Both require external CLIs not currently on PATH. The loop halted on
-> the first encounter (originally TODO 5 in the pre-reorder ordering)
-> and the user chose to defer past the smoke run rather than pause to
-> install. Pick these up after TODO 9 lands — or earlier if
-> `which opencode` / `which pi` start succeeding before then.
+> Loop redirected by user on 2026-05-10 after the smoke run landed.
+> Stop chasing additional harnesses — opencode/pi.dev moved to Phase 7
+> (indefinite hold). Refocus on producing real eval signal end-to-end
+> through Aider × OpenRouter on a ~$5 budget. The grid runner currently
+> lacks scoring AND context injection, so `strategy=cortex` is a label
+> not a behavior and `task_success` is just "no error". These steps fix
+> that, author a small coding-scenario library, run the experiment, and
+> report results.
+>
+> **Self-heal philosophy:** transient OpenRouter 429s, single-model
+> failures, partial-budget exhaustion → retry / drop / re-run. Halt
+> only on hard failures (test red, schema drift, budget completely
+> exhausted, repeated stop-conditions). Default toward producing
+> *some* result, with a partial.csv if the full grid can't complete.
 
-- [ ] **10. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
+- [ ] **10. Scenario `verify` field + post-harness verifier exec.**
+  - Extend Scenario YAML with optional `verify: <shell command>`. After
+    the harness session ends, the grid runner execs `bash -c "<cmd>"`
+    in the workdir; exit 0 → TaskSuccess=true, non-zero → false.
+  - When `verify` includes a `go test` invocation, parse the stdout
+    summary for `--- PASS:` / `--- FAIL:` counts and populate
+    TestsPassed/TestsFailed. For non-go-test verifiers leave both at 0
+    (TaskSuccess alone is the signal).
+  - Empty `verify` field → keep current behavior: TaskSuccess from
+    harness exit code, no test counts. Don't impose a default — opt-in.
+  - **Done:** unit test with a fake harness + scenarios whose verify is
+    `true` vs `false` shows TaskSuccess flips; a third scenario with
+    `verify: echo '--- PASS: TestFoo'; echo '--- PASS: TestBar'` shows
+    TestsPassed=2.
+
+- [ ] **11. Scenario `seed_dir` field + copy-into-workdir.**
+  - Optional `seed_dir: <relative path>` on Scenario. Before invoking
+    the harness, the runner recursively copies `seed_dir` contents into
+    the cell's temp workdir. Scenarios without `seed_dir` get an empty
+    workdir (current behavior).
+  - Use `cp -R` via exec (portable on macOS + Linux); fail the cell
+    with a clear error if seed_dir doesn't exist.
+  - **Done:** unit test with a scenario whose seed_dir contains a
+    marker file `MARKER.txt` confirms the marker shows up in the
+    cell's workdir before the harness runs.
+
+- [ ] **12. Cortex strategy = inject scenario `context` into prompt.**
+  - Optional `context: [bullet, bullet, ...]` on Scenario. When
+    `ContextStrategy == "cortex"`, the runner prepends the bullets to
+    the harness prompt as:
+    ```
+    RELEVANT CONTEXT:
+    - <bullet 1>
+    - <bullet 2>
+    ...
+
+    TASK:
+    <original query>
+    ```
+    Token estimate (`len(prefix)/4`) populates InjectedContextTokens.
+  - This is *static* cortex — hand-authored context per scenario, not
+    Reflex-mined. The point is to make the strategy dimension actually
+    *vary the prompt* so a measurable signal exists. Real mining stays
+    out of scope; if the static signal is positive, that justifies
+    investing in mining; if not, that's also signal.
+  - **Done:** unit test confirms strategy=cortex produces a prompt with
+    the prefix and InjectedContextTokens > 0; strategy=baseline keeps
+    the original prompt and InjectedContextTokens = 0.
+
+- [ ] **13. Author 5 minimal coding scenarios.**
+  - Under `test/evals/coding/`: 5 small Go tasks with seeds + verifiers
+    + cortex context. Suggested set:
+    1. **fizzbuzz** — implement function from stub, verify `go test`
+    2. **rename-json-tag** — change a struct's JSON tag from `old_name`
+       → `new_name`, verify by grep on the new tag
+    3. **fix-off-by-one** — fix a `<` that should be `<=`, verify
+       `go test`
+    4. **add-table-test** — add a test case to a table, verify the test
+       runs ≥ N cases (`grep -c '"name"' file_test.go`)
+    5. **error-wrap** — wrap a bare error with `fmt.Errorf("...: %w",
+       err)`, verify by grep on the wrap pattern
+  - Each seed_dir gets a minimal `go.mod`, the stubs, and the tests.
+    Each scenario file gets 2-3 cortex-context bullets capturing the
+    convention/decision the agent should follow (e.g. "Match the
+    existing test style: table-driven with t.Run subtests").
+  - **Done:** `cortex eval grid --scenarios test/evals/coding --models
+    openai/gpt-oss-20b:free --strategies baseline` runs all 5 cells
+    end-to-end without panics; pass/fail mix is fine — failure on a
+    free model is real signal.
+
+- [ ] **14. Self-healing retry on transient 429s.**
+  - Wrap each cell's harness call with bounded retry: up to 3 attempts
+    with 15s / 30s / 60s backoff when Aider's stderr matches a 429-ish
+    pattern (`temporarily rate-limited`, `retry_after`, `429`). Hard
+    failures (auth, missing model, invalid request) do not retry.
+  - Retry attempts are logged but each cell still emits one CellResult
+    (the final attempt's outcome). Attach `retry_count: N` to the cell's
+    `Notes` field if N > 0.
+  - **Done:** unit test with a fake harness whose stderr contains
+    "temporarily rate-limited" the first attempt then succeeds asserts
+    2 calls + final TaskSuccess = true.
+
+- [ ] **15. Run the $5 experiment.**
+  - Grid: 5 scenarios × 5 models × 2 strategies = **50 cells**.
+    - Free (3): `openai/gpt-oss-20b:free`, `google/gemma-4-26b-a4b-it:free`,
+      `nvidia/nemotron-nano-9b-v2:free`. ~$0.
+    - Paid medium (1): `qwen/qwen3-coder` (~$0.10/cell × 10 = $1).
+    - Paid large (1): `anthropic/claude-haiku-4.5` (~$0.30/cell × 10 = $3).
+    - Total expected: ~$4 of the $5 budget.
+  - Command:
+    ```
+    CORTEX_EVAL_ALLOW_SPEND=1 \
+    CORTEX_EVAL_RUN_USD_CEILING=5.00 \
+    cortex eval grid \
+      --scenarios test/evals/coding \
+      --models openai/gpt-oss-20b:free,google/gemma-4-26b-a4b-it:free,nvidia/nemotron-nano-9b-v2:free,qwen/qwen3-coder,anthropic/claude-haiku-4.5 \
+      --strategies baseline,cortex
+    ```
+  - **Self-heal protocol** if the run aborts mid-grid:
+    1. If the trip is run-ceiling: drop the most-expensive remaining
+       model (Haiku), re-run with the smaller model list.
+    2. If a model is repeatedly 429-locked: drop it, continue.
+    3. If < 20% of cells completed: stop, print partial CSV path,
+       leave TODO 15 unchecked.
+    4. If ≥ 80% of cells completed: accept the partial set, proceed
+       to TODO 16.
+  - **Done:** ≥ 40 of 50 cells completed; SQLite + JSONL contain the
+    rows; final spend reported and ≤ $5.
+
+- [ ] **16. Aggregate + report results.**
+  - Add `cortex eval grid --report-summary` which queries SQLite,
+    groups by (model, strategy), and prints:
+    - Cells: count
+    - Pass-rate: passes / cells
+    - Mean tokens (in + out)
+    - Mean cost USD
+    - Mean latency
+    - Lift = pass_rate(cortex) − pass_rate(baseline) for the same
+      (model, scenarios) — needs the strategy join.
+    - Cost-per-pass = sum(cost) / passes (or ∞ if 0 passes).
+  - Print the headline: which model+strategy pairs reach the largest
+    model's baseline pass-rate at lower cost — the small-model
+    amplifier signal, if it exists.
+  - **Done:** `cortex eval grid --report-summary` prints the table;
+    user sees real numbers from the experiment.
+
+### Phase 6 — Final
+
+- [ ] **17. Stop the loop.** All boxes checked. Print a one-page
+  summary of what shipped, the experiment's headline numbers, and what's
+  explicitly deferred (Reflex-mined cortex, multi-session scenarios,
+  alternative harnesses in Phase 7).
+
+### Phase 7 — Indefinite hold (alternative harnesses)
+
+> Held back per the 2026-05-10 user pivot. These harnesses remain
+> technically interesting (richer JSON event-streams than Aider, distinct
+> prompt-injection shapes for ablation) but are off the critical path
+> until Aider-via-grid has produced the lift numbers worth comparing
+> against. Pick up only after Phase 5+6 deliver real signal.
+
+- [ ] **18. Add `OpenCodeHarness` (`internal/eval/v2/library_service_opencode_harness.go`).**
   - **Requires `opencode` on PATH** (`curl -fsSL https://opencode.ai/install | bash`).
     Re-running the loop without it will halt again at this step.
   - Mirror `AiderHarness` structure: binary resolution
@@ -299,7 +449,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
     `library_service_opencode_harness_test.go` with t.Skip when
     `opencode` not on PATH.
 
-- [ ] **11. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
+- [ ] **19. Add `PiDevHarness` (`internal/eval/v2/library_service_pidev_harness.go`).**
   - **Requires `pi` on PATH** (see https://pi.dev install instructions).
     Re-running the loop without it will halt again at this step.
   - CLI invocation: `pi --mode json --provider openrouter --model <x>
@@ -308,13 +458,7 @@ The thesis being measured: **`(small_model + cortex)` reaches the quality of
   - Custom-provider config (`~/.pi/agent/models.json`) is the user's job
     to set up — the harness should fail loudly with a clear error message
     pointing at the docs if pi can't reach OpenRouter.
-  - **Done:** parallel to step 10.
-
-### Phase 6 — Final
-
-- [ ] **12. Stop the loop.** All boxes checked. Print a summary of what
-  shipped and what's deferred (e.g., parallelism, hallucination detector,
-  grid scheduler).
+  - **Done:** parallel to step 18.
 
 ---
 
