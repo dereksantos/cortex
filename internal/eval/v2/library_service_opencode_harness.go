@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -154,10 +155,116 @@ func (h *OpenCodeHarness) runSession(ctx context.Context, prompt, workdir string
 	}
 
 	res := parseOpencodeStream(stdout.String())
+
+	// Fallback: when the model replies without invoking any tools,
+	// opencode emits step_start + text and exits *without* a closing
+	// step_finish — so the live-stream parser sums zero tokens. The
+	// session data is still in opencode's local DB and queryable via
+	// `opencode export <sessionID>`. We backfill from there when the
+	// stream gave us nothing. Best-effort: a failure leaves zeros.
+	if res.TokensIn == 0 && res.TokensOut == 0 {
+		if sid := extractOpencodeSessionID(stdout.String()); sid != "" {
+			if fb, ferr := h.exportSessionStats(ctx, sid); ferr == nil {
+				res.TokensIn = fb.TokensIn
+				res.TokensOut = fb.TokensOut
+				res.CostUSD = fb.CostUSD
+				if res.AgentTurnsTotal == 0 {
+					res.AgentTurnsTotal = fb.AgentTurnsTotal
+				}
+			}
+		}
+	}
+
 	res.LatencyMs = elapsed
 	res.ModelEcho = h.model
 	res.ProviderEcho = opencodeProviderFromModel(h.model)
 	return res, nil
+}
+
+// opencodeSessionIDRE matches the first `"sessionID":"ses_..."` in the
+// NDJSON event stream. Every event carries this top-level field so we
+// pick whichever appears first.
+var opencodeSessionIDRE = regexp.MustCompile(`"sessionID":"(ses_[^"]+)"`)
+
+// extractOpencodeSessionID returns the first session ID emitted in the
+// event stream, or "" if none. Used by the export-fallback path when
+// the stream lacks a step_finish event to read tokens from.
+func extractOpencodeSessionID(stream string) string {
+	m := opencodeSessionIDRE.FindStringSubmatch(stream)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// exportSessionStats runs `opencode export <sessionID>` and parses the
+// JSON envelope for per-assistant-message token/cost totals. Returns
+// the summed HarnessResult (TokensIn/Out, CostUSD, AgentTurnsTotal
+// derived from the number of assistant messages).
+//
+// Output shape (opencode 1.14.46):
+//
+//	Exporting session: ses_...
+//	{
+//	  "info": { ... },
+//	  "messages": [
+//	    {"info": {"role": "user", ...}},
+//	    {"info": {"role": "assistant", "tokens": {...}, "cost": 0, ...}}
+//	  ]
+//	}
+//
+// The first stdout line is the human-readable "Exporting session: <id>"
+// banner; we strip it before json.Unmarshal.
+func (h *OpenCodeHarness) exportSessionStats(ctx context.Context, sessionID string) (HarnessResult, error) {
+	cmd := exec.CommandContext(ctx, h.binary, "export", sessionID)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return HarnessResult{}, fmt.Errorf("opencode export %s: %w (stderr: %s)",
+			sessionID, err, strings.TrimSpace(stderr.String()))
+	}
+	return parseOpencodeExport(stdout.String())
+}
+
+// parseOpencodeExport handles the export-output parsing. Split out so a
+// unit test can pin the shape without spawning a real opencode process.
+func parseOpencodeExport(raw string) (HarnessResult, error) {
+	// Drop the "Exporting session: ..." banner. Find the first '{' to
+	// be tolerant of an empty banner or a different banner format in
+	// future opencode versions.
+	i := strings.Index(raw, "{")
+	if i < 0 {
+		return HarnessResult{}, fmt.Errorf("opencode export: no JSON envelope")
+	}
+	var env struct {
+		Messages []struct {
+			Info struct {
+				Role   string `json:"role"`
+				Tokens struct {
+					Input  int `json:"input"`
+					Output int `json:"output"`
+				} `json:"tokens"`
+				Cost *float64 `json:"cost"`
+			} `json:"info"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(raw[i:]), &env); err != nil {
+		return HarnessResult{}, fmt.Errorf("opencode export: parse envelope: %w", err)
+	}
+	var r HarnessResult
+	for _, m := range env.Messages {
+		if m.Info.Role != "assistant" {
+			continue
+		}
+		r.AgentTurnsTotal++
+		r.TokensIn += m.Info.Tokens.Input
+		r.TokensOut += m.Info.Tokens.Output
+		if m.Info.Cost != nil {
+			r.CostUSD += *m.Info.Cost
+		}
+	}
+	return r, nil
 }
 
 // opencodeProviderFromModel pulls the provider segment from opencode's

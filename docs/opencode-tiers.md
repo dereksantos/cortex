@@ -145,6 +145,42 @@ message in `state.output`. These do NOT count as edits.
 | `ModelEcho`           | the `--model` value passed in                                                       |
 | `ProviderEcho`        | leading segment of `--model` before the first `/` (e.g. `openrouter`)               |
 
+## Token-recovery fallback (export)
+
+For prompts the model answers without any tool calls (e.g. the
+single-word smoke "Reply with 'ok'"), opencode emits `step_start` +
+`text` and exits **with no `step_finish`**. Live-stream parsing alone
+returns zero tokens in that case (caught by Phase 7 TODO 10's
+cross-harness smoke).
+
+When `parseOpencodeStream` reports zero in+out, the harness extracts
+the first `sessionID` from the stream and runs:
+
+```
+opencode export <sessionID>
+```
+
+The export envelope shape:
+
+```json
+{
+  "info": { ... },
+  "messages": [
+    {"info": {"role": "user",      "tokens": null, "cost": null}},
+    {"info": {"role": "assistant", "tokens": {"input": 9267, "output": 11, ...}, "cost": 0}}
+  ]
+}
+```
+
+Tokens come from `.messages[].info.tokens.input / .output` and cost
+from `.messages[].info.cost`, summed across `role == "assistant"`
+messages. The first stdout line is a `Exporting session: <id>` banner
+that must be stripped before json.Unmarshal — `parseOpencodeExport`
+finds the first `{` and parses from there.
+
+The fallback is best-effort: a failure leaves the zero from the live
+parser and is not propagated as a harness error.
+
 ## Gotchas seen in the probe
 
 1. **Stream may end mid-step**: the last event was a `text`, not a

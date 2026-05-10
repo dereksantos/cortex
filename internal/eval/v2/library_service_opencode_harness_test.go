@@ -25,7 +25,7 @@ done
 mkdir -p ./opencode-out
 printf '%s\n' "$LAST" > ./opencode-out/last-prompt.txt
 echo '{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}'
-echo '{"type":"step_finish","sessionID":"s","part":{"reason":"stop","tokens":{"input":0,"output":0},"cost":0}}'
+echo '{"type":"step_finish","sessionID":"s","part":{"reason":"stop","tokens":{"input":1,"output":1},"cost":0}}'
 `
 
 // fakeOpencodeErrorScript exits non-zero with a known stderr line so the
@@ -420,6 +420,127 @@ func main() {
 	}
 	if res.ModelEcho != "openrouter/openai/gpt-oss-20b:free" {
 		t.Errorf("ModelEcho=%q want openrouter/openai/gpt-oss-20b:free", res.ModelEcho)
+	}
+}
+
+// fakeOpencodeTextOnlyWithExportScript simulates the
+// "text-only reply" case from the real opencode binary: the `run`
+// subcommand emits step_start + text and exits without a step_finish,
+// so the live-stream parser sums zero tokens. The same fake responds
+// to `export <sessionID>` with a canned envelope so the harness's
+// fallback path can lift tokens from there.
+const fakeOpencodeTextOnlyWithExportScript = `#!/bin/sh
+set -e
+case "$1" in
+  run)
+    echo '{"type":"step_start","sessionID":"ses_abc","part":{}}'
+    echo '{"type":"text","sessionID":"ses_abc","part":{"text":"ok"}}'
+    ;;
+  export)
+    echo "Exporting session: $2"
+    cat <<'EOF'
+{"info":{"id":"ses_abc","title":"test"},"messages":[
+  {"info":{"role":"user","tokens":null,"cost":null}},
+  {"info":{"role":"assistant","tokens":{"input":9267,"output":11,"total":9365},"cost":0}}
+]}
+EOF
+    ;;
+esac
+`
+
+// TestOpenCodeHarness_RunSessionWithResult_ExportFallback exercises
+// the export-fallback path: when the stream parser returns zero
+// tokens AND a sessionID is present, the harness invokes
+// `opencode export <id>` and backfills TokensIn/Out + CostUSD from
+// the export envelope.
+//
+// This regression-tests the bug found by the Phase 7 cross-harness
+// smoke (TODO 10) — opencode emits no step_finish for tool-less
+// replies, so the live parser alone undercounts on simple prompts.
+func TestOpenCodeHarness_RunSessionWithResult_ExportFallback(t *testing.T) {
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeTextOnlyWithExportScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+
+	res, err := h.RunSessionWithResult(context.Background(), "x", t.TempDir())
+	if err != nil {
+		t.Fatalf("RunSessionWithResult: %v", err)
+	}
+	if res.TokensIn != 9267 || res.TokensOut != 11 {
+		t.Errorf("tokens via fallback: in=%d out=%d, want 9267/11", res.TokensIn, res.TokensOut)
+	}
+	if res.AgentTurnsTotal != 1 {
+		t.Errorf("AgentTurnsTotal=%d want 1 (one assistant message in export)", res.AgentTurnsTotal)
+	}
+}
+
+func TestExtractOpencodeSessionID(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{
+			name: "first sessionID wins",
+			in:   `{"type":"step_start","sessionID":"ses_first"} {"sessionID":"ses_second"}`,
+			want: "ses_first",
+		},
+		{
+			name: "no sessionID present",
+			in:   `{"type":"step_start","other":"thing"}`,
+			want: "",
+		},
+		{
+			name: "session_id without ses_ prefix is not matched",
+			in:   `{"sessionID":"other-id"}`,
+			want: "",
+		},
+		{name: "empty", in: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractOpencodeSessionID(tc.in); got != tc.want {
+				t.Errorf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseOpencodeExport(t *testing.T) {
+	const happy = `Exporting session: ses_abc
+{"info":{},"messages":[
+  {"info":{"role":"user"}},
+  {"info":{"role":"assistant","tokens":{"input":100,"output":20},"cost":0.0012}},
+  {"info":{"role":"assistant","tokens":{"input":150,"output":40},"cost":0.0018}}
+]}`
+	got, err := parseOpencodeExport(happy)
+	if err != nil {
+		t.Fatalf("parse happy: %v", err)
+	}
+	if got.TokensIn != 250 || got.TokensOut != 60 {
+		t.Errorf("tokens: in=%d out=%d, want 250/60", got.TokensIn, got.TokensOut)
+	}
+	if d := got.CostUSD - 0.003; d > 1e-9 || d < -1e-9 {
+		t.Errorf("cost=%v want 0.003", got.CostUSD)
+	}
+	if got.AgentTurnsTotal != 2 {
+		t.Errorf("AgentTurnsTotal=%d want 2", got.AgentTurnsTotal)
+	}
+
+	// Missing/null cost should not break the parser.
+	const nullCost = `Exporting session: x
+{"messages":[{"info":{"role":"assistant","tokens":{"input":42,"output":7},"cost":null}}]}`
+	got, err = parseOpencodeExport(nullCost)
+	if err != nil {
+		t.Fatalf("parse null cost: %v", err)
+	}
+	if got.TokensIn != 42 || got.CostUSD != 0 {
+		t.Errorf("null cost: in=%d cost=%v, want 42/0", got.TokensIn, got.CostUSD)
+	}
+
+	// No JSON envelope at all → error.
+	if _, err := parseOpencodeExport("banner only, no braces"); err == nil {
+		t.Error("expected error for non-JSON input")
 	}
 }
 
