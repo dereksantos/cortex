@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -41,18 +42,18 @@ func (c *MeasureCommand) Execute(ctx *Context) error {
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
-		switch {
-		case arg == "-p" || arg == "--provider":
+		switch arg {
+		case "-p", "--provider":
 			if i+1 < len(ctx.Args) {
 				providerName = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-m" || arg == "--model":
+		case "-m", "--model":
 			if i+1 < len(ctx.Args) {
 				modelOverride = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-w" || arg == "--window":
+		case "-w", "--window":
 			if i+1 < len(ctx.Args) {
 				w, err := strconv.Atoi(ctx.Args[i+1])
 				if err != nil {
@@ -61,21 +62,21 @@ func (c *MeasureCommand) Execute(ctx *Context) error {
 				contextWindow = w
 				i++
 			}
-		case arg == "-o" || arg == "--output":
+		case "-o", "--output":
 			if i+1 < len(ctx.Args) {
 				outputFormat = ctx.Args[i+1]
 				i++
 			}
-		case arg == "-f" || arg == "--file":
+		case "-f", "--file":
 			if i+1 < len(ctx.Args) {
 				fromFile = ctx.Args[i+1]
 				i++
 			}
-		case arg == "--stdin":
+		case "--stdin":
 			fromStdin = true
-		case arg == "--fast":
+		case "--fast":
 			fast = true
-		case arg == "--calibrate":
+		case "--calibrate":
 			if i+1 < len(ctx.Args) {
 				tokens, err := strconv.Atoi(ctx.Args[i+1])
 				if err != nil {
@@ -84,9 +85,9 @@ func (c *MeasureCommand) Execute(ctx *Context) error {
 				calibrateTokens = tokens
 				i++
 			}
-		case arg == "-v" || arg == "--verbose":
+		case "-v", "--verbose":
 			verbose = true
-		case arg == "-h" || arg == "--help":
+		case "-h", "--help":
 			fmt.Println(`Usage: cortex measure [options] "prompt text"
 
 Measure prompt quality for small context windows.
@@ -160,7 +161,7 @@ Examples:
 	m.SetContextWindow(contextWindow)
 	m.SetVerbose(verbose)
 
-	result, err := m.Measure(nil, prompt)
+	result, err := m.Measure(context.TODO(), prompt)
 	if err != nil {
 		return fmt.Errorf("measurement failed: %w", err)
 	}
@@ -260,13 +261,13 @@ func createMeasureProvider(providerName, modelOverride string, ctx *Context) (ll
 	case "ollama":
 		client := llm.NewOllamaClient(cfg)
 		if !client.IsAvailable() {
-			return nil, fmt.Errorf("Ollama is not running. Start with: ollama serve")
+			return nil, fmt.Errorf("ollama is not running; start with: ollama serve")
 		}
 		return client, nil
 	case "anthropic":
 		client := llm.NewAnthropicClient(cfg)
 		if !client.IsAvailable() {
-			return nil, fmt.Errorf("Anthropic API key not set. Set ANTHROPIC_API_KEY")
+			return nil, fmt.Errorf("anthropic API key not set; set ANTHROPIC_API_KEY")
 		}
 		return client, nil
 	default:

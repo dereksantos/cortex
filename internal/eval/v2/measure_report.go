@@ -23,10 +23,6 @@ func ReportMeasure(w io.Writer, results *MeasureResults) {
 		fmt.Fprintf(w, "Task: %s\n", s.Task)
 
 		for _, v := range s.Variants {
-			prompt := v.Prompt
-			if len(prompt) > 60 {
-				prompt = prompt[:57] + "..."
-			}
 			decompTag := ""
 			if v.IsDecomposed {
 				decompTag = fmt.Sprintf(" (%d subs)", v.SubCount)

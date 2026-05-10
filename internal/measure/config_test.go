@@ -1,6 +1,7 @@
 package measure
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,7 +149,7 @@ func TestConfigDrivenMeasurer(t *testing.T) {
 func TestCustomWeightsAffectScore(t *testing.T) {
 	// Default config
 	m1 := New(nil)
-	r1, _ := m1.Measure(nil, "Fix the bug in the code somewhere")
+	r1, _ := m1.Measure(context.TODO(), "Fix the bug in the code somewhere")
 
 	// Config that heavily penalizes scope
 	cfg := DefaultConfig()
@@ -158,7 +159,7 @@ func TestCustomWeightsAffectScore(t *testing.T) {
 		InverseScope:  0.80, // Heavily weight scope
 	}
 	m2 := NewWithConfig(nil, cfg)
-	r2, _ := m2.Measure(nil, "Fix the bug in the code somewhere")
+	r2, _ := m2.Measure(context.TODO(), "Fix the bug in the code somewhere")
 
 	// Scores should differ
 	if r1.Promptability == r2.Promptability {

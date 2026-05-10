@@ -1,7 +1,6 @@
 package measure
 
 import (
-	"math"
 	"testing"
 )
 
@@ -350,9 +349,4 @@ func TestEstimateTokens(t *testing.T) {
 	if got != 5 {
 		t.Errorf("EstimateTokens() = %d, want 5", got)
 	}
-}
-
-// approxEqual checks if two floats are approximately equal.
-func approxEqual(a, b, epsilon float64) bool {
-	return math.Abs(a-b) < epsilon
 }

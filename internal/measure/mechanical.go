@@ -263,9 +263,10 @@ func scoreSpecificity(prompt string, vagues []string) float64 {
 		}
 	}
 	checks++
-	if vagueCount == 0 {
+	switch vagueCount {
+	case 0:
 		score += 1.0
-	} else if vagueCount == 1 {
+	case 1:
 		score += 0.5
 	}
 

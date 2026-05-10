@@ -6,10 +6,10 @@ import (
 
 // ContextScore evaluates a piece of context for injection worthiness.
 type ContextScore struct {
-	Clarity    float64 `json:"clarity"`     // 0-1: is the content unambiguous and specific?
-	TokenCost  int     `json:"token_cost"`  // estimated token count
-	Redundancy float64 `json:"redundancy"`  // 0-1: 0=novel project info, 1=generic knowledge
-	Worth      float64 `json:"worth"`       // 0-1: composite injection value
+	Clarity    float64 `json:"clarity"`    // 0-1: is the content unambiguous and specific?
+	TokenCost  int     `json:"token_cost"` // estimated token count
+	Redundancy float64 `json:"redundancy"` // 0-1: 0=novel project info, 1=generic knowledge
+	Worth      float64 `json:"worth"`      // 0-1: composite injection value
 }
 
 // Generic phrases an LLM likely already knows — low value for injection.

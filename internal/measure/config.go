@@ -11,11 +11,11 @@ import (
 // Dream mode can write this file to auto-tune based on observed prompt→output pairs.
 type Config struct {
 	// Word lists (merged with defaults, not replaced)
-	ExtraActionVerbs     []string `json:"extra_action_verbs,omitempty"`
-	ExtraConditionals    []string `json:"extra_conditionals,omitempty"`
-	ExtraConstraints     []string `json:"extra_constraints,omitempty"`
-	ExtraVaguePatterns   []string `json:"extra_vague_patterns,omitempty"`
-	ExtraConcernSeps     []string `json:"extra_concern_separators,omitempty"`
+	ExtraActionVerbs   []string `json:"extra_action_verbs,omitempty"`
+	ExtraConditionals  []string `json:"extra_conditionals,omitempty"`
+	ExtraConstraints   []string `json:"extra_constraints,omitempty"`
+	ExtraVaguePatterns []string `json:"extra_vague_patterns,omitempty"`
+	ExtraConcernSeps   []string `json:"extra_concern_separators,omitempty"`
 
 	// Composite score weights (must sum to 1.0)
 	Weights *Weights `json:"weights,omitempty"`
@@ -62,11 +62,11 @@ type ClarityParams struct {
 
 // TokenEstimationParams controls output token estimation.
 type TokenEstimationParams struct {
-	Base            int `json:"base"`             // default 100
-	VerbMultiplier  int `json:"verb_multiplier"`  // default 200
-	FileMultiplier  int `json:"file_multiplier"`  // default 150
+	Base              int `json:"base"`               // default 100
+	VerbMultiplier    int `json:"verb_multiplier"`    // default 200
+	FileMultiplier    int `json:"file_multiplier"`    // default 150
 	ConcernMultiplier int `json:"concern_multiplier"` // default 100
-	ExampleBonus    int `json:"example_bonus"`    // default 200
+	ExampleBonus      int `json:"example_bonus"`      // default 200
 }
 
 // CalibrationPoint records an observed prompt→output pair for tuning.

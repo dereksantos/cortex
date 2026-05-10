@@ -17,10 +17,10 @@ type mockProvider struct {
 func newMockProvider() *mockProvider {
 	return &mockProvider{
 		responses: map[string]string{
-			"classify the scope": `{"classification": "small", "explanation": "Single function change"}`,
-			"clarity": `{"clarity_score": 0.8, "ambiguities": [], "missing_constraints": ["error handling approach"]}`,
+			"classify the scope":  `{"classification": "small", "explanation": "Single function change"}`,
+			"clarity":             `{"clarity_score": 0.8, "ambiguities": [], "missing_constraints": ["error handling approach"]}`,
 			"broken into smaller": `{"decomposable": false, "sub_tasks": [], "independent_subs": 0}`,
-			"context window": `{"fit_score": 0.9, "explanation": "Simple change fits easily"}`,
+			"context window":      `{"fit_score": 0.9, "explanation": "Simple change fits easily"}`,
 		},
 		available: true,
 	}
@@ -40,7 +40,7 @@ func (m *mockProvider) GenerateWithStats(ctx context.Context, prompt string) (st
 }
 
 func (m *mockProvider) IsAvailable() bool { return m.available }
-func (m *mockProvider) Name() string       { return "mock" }
+func (m *mockProvider) Name() string      { return "mock" }
 
 func (m *mockProvider) matchResponse(prompt string) (string, error) {
 	// Match longest keyword first to avoid ambiguous matches
@@ -214,9 +214,9 @@ func TestMeasureAgenticUnavailable(t *testing.T) {
 
 func TestParseJSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantErr  bool
+		name    string
+		input   string
+		wantErr bool
 	}{
 		{"clean json", `{"classification": "small"}`, false},
 		{"markdown wrapped", "```json\n{\"classification\": \"small\"}\n```", false},
