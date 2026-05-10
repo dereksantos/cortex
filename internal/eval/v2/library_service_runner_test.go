@@ -17,9 +17,9 @@ import (
 // runner tests. The onCall hook lets each test simulate model behavior:
 // happy-path file writes, broken-build code, hard errors, ctx cancellation.
 type fakeHarness struct {
-	mu       sync.Mutex
-	calls    []fakeCall
-	onCall   func(ctx context.Context, prompt, workdir string, idx int) error
+	mu     sync.Mutex
+	calls  []fakeCall
+	onCall func(ctx context.Context, prompt, workdir string, idx int) error
 }
 
 type fakeCall struct {

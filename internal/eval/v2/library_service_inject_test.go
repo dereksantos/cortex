@@ -577,7 +577,7 @@ func TestCompareRuns_WithFrontier(t *testing.T) {
 	cor := &LibraryServiceRun{Condition: ConditionCortex, Model: "small"}
 	front := &LibraryServiceRun{
 		Condition: ConditionFrontier, Model: "sonnet",
-		Score:     LibraryServiceScore{ShapeSimilarity: 0.95},
+		Score: LibraryServiceScore{ShapeSimilarity: 0.95},
 	}
 	out := CompareRuns(base, cor, front)
 	if !strings.Contains(out, "frontier:") {

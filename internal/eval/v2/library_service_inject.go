@@ -90,11 +90,11 @@ const preambleHeader = "## Conventions established in prior sessions\n\nThe foll
 //     prompt. ANSI/styling from the CLI output is left as-is; cortex
 //     search currently emits plain text.
 type CortexInjector struct {
-	binary   string                // absolute path to a cortex binary
-	stateDir string                // doubles as HOME and cwd; isolates all cortex state
-	verbose  bool                  // if true, log preamble + capture summaries
-	logf     func(string, ...any)  // verbose logger; defaults to fmt.Printf
-	initOnce bool                  // tracks lazy `cortex init`
+	binary   string               // absolute path to a cortex binary
+	stateDir string               // doubles as HOME and cwd; isolates all cortex state
+	verbose  bool                 // if true, log preamble + capture summaries
+	logf     func(string, ...any) // verbose logger; defaults to fmt.Printf
+	initOnce bool                 // tracks lazy `cortex init`
 }
 
 // CortexInjectorOption configures a CortexInjector.

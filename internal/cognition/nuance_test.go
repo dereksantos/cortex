@@ -160,6 +160,11 @@ func TestExtractNuances_RealLLM(t *testing.T) {
 
 	nuances, err := ExtractNuances(context.Background(), provider, loggingPattern)
 	if err != nil {
+		// Don't fail the suite for environmental issues like depleted API
+		// credits — those aren't a regression in the code under test.
+		if strings.Contains(err.Error(), "credit balance is too low") {
+			t.Skipf("ANTHROPIC_API_KEY has no credits, skipping: %v", err)
+		}
 		t.Fatalf("ExtractNuances failed: %v", err)
 	}
 
@@ -211,6 +216,9 @@ func TestExtractNuances_ErrorHandlingPattern(t *testing.T) {
 
 	nuances, err := ExtractNuances(context.Background(), provider, errorPattern)
 	if err != nil {
+		if strings.Contains(err.Error(), "credit balance is too low") {
+			t.Skipf("ANTHROPIC_API_KEY has no credits, skipping: %v", err)
+		}
 		t.Fatalf("ExtractNuances failed: %v", err)
 	}
 
