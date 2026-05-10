@@ -37,6 +37,14 @@ type AiderHarness struct {
 	model  string // e.g., "ollama/qwen2.5-coder:1.5b"
 }
 
+// SetModel changes the model used for subsequent RunSession calls.
+// The grid runner type-asserts on this method to re-point one harness
+// instance across multiple model cells without constructing a new
+// AiderHarness per cell.
+func (h *AiderHarness) SetModel(model string) {
+	h.model = model
+}
+
 // NewAiderHarness resolves the aider binary (PATH lookup if binary is
 // empty, $AIDER_BINARY override otherwise) and verifies it exists. A
 // missing binary is a hard error — the runner cannot proceed without it.

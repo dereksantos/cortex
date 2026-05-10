@@ -10,12 +10,13 @@ import (
 )
 
 // gridFakeHarness is a deterministic, threadsafe fake that records each
-// invocation and returns a canned HarnessResult. Implements both
-// Harness and ResultfulHarness so we exercise the type-assertion path.
+// invocation and returns a canned HarnessResult. Implements Harness,
+// ResultfulHarness, and the SetModel assertion the runner uses.
 type gridFakeHarness struct {
-	mu    sync.Mutex
-	calls []gridFakeCall
-	res   HarnessResult
+	mu        sync.Mutex
+	calls     []gridFakeCall
+	res       HarnessResult
+	lastModel string
 }
 
 type gridFakeCall struct {
@@ -35,6 +36,14 @@ func (f *gridFakeHarness) RunSessionWithResult(_ context.Context, prompt, workdi
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, gridFakeCall{prompt: prompt, workdir: workdir})
 	return f.res, nil
+}
+
+// SetModel is recorded by gridFakeHarness so tests can verify the
+// per-cell model-setter assertion fires before each call.
+func (f *gridFakeHarness) SetModel(m string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastModel = m
 }
 
 // Compile-time guards: gridFakeHarness satisfies both interfaces.
@@ -165,6 +174,34 @@ func TestRunGrid_8Cells(t *testing.T) {
 	}
 	if len(prompts) != 2 {
 		t.Errorf("got %d distinct prompts, want 2 (one per scenario)", len(prompts))
+	}
+}
+
+// TestRunGrid_SetModelFiresPerCell verifies the runner re-points the
+// harness's model before each cell. AiderHarness needs this; the fake
+// implements SetModel for verification.
+func TestRunGrid_SetModelFiresPerCell(t *testing.T) {
+	p := newTestPersister(t)
+	fake := &gridFakeHarness{}
+
+	models := []ModelSpec{
+		{Provider: ProviderOpenRouter, Model: "model-a"},
+		{Provider: ProviderOpenRouter, Model: "model-b"},
+	}
+
+	_, err := RunGrid(context.Background(), p,
+		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
+		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		models,
+		[]ContextStrategy{StrategyBaseline})
+	if err != nil {
+		t.Fatalf("RunGrid: %v", err)
+	}
+
+	// Last cell ran model-b (cells iterate models in order, so the last
+	// SetModel call is model-b).
+	if fake.lastModel != "model-b" {
+		t.Errorf("lastModel=%q want %q (final cell should have re-pointed)", fake.lastModel, "model-b")
 	}
 }
 

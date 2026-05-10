@@ -26,6 +26,13 @@ func (c *EvalCommand) Description() string { return "Run evaluation scenarios" }
 
 // Execute runs the eval command.
 func (c *EvalCommand) Execute(ctx *Context) error {
+	// `cortex eval grid <flags>` dispatches to the cross-harness grid
+	// runner (see eval_grid.go). All other usages fall through to the
+	// existing v2 scenario evaluator below.
+	if len(ctx.Args) > 0 && ctx.Args[0] == "grid" {
+		return executeGrid(ctx.Args[1:])
+	}
+
 	// Parse flags
 	scenarioPath := ""
 	scenarioDir := "test/evals/v2"

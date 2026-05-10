@@ -133,6 +133,14 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 
 	prompt := scenarioToPrompt(scn)
 
+	// Harnesses that bake the model at construction time (Aider) can
+	// implement SetModel(string) so the grid can re-point one instance
+	// across cells. Done via inline interface assertion to avoid widening
+	// the Harness contract.
+	if setter, ok := hs.Harness.(interface{ SetModel(string) }); ok {
+		setter.SetModel(ms.Model)
+	}
+
 	var (
 		hres   HarnessResult
 		runErr error
