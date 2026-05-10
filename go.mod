@@ -41,9 +41,9 @@ require (
 	github.com/yalue/onnxruntime_go v1.25.0 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
-	golang.org/x/image v0.34.0 // indirect
+	golang.org/x/image v0.38.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	modernc.org/libc v1.66.3 // indirect
