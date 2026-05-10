@@ -358,7 +358,7 @@ continuing**. The session can't make meaningful progress without them.
     "current state" table mentions cross-harness validation as
     available.
 
-- [ ] **13. Stop the session.** All boxes checked. Print:
+- [x] **13. Stop the session.** All boxes checked. Print:
   - The 13-step record (commits landed).
   - Cross-harness smoke result (which harness x scenario combos
     passed).
