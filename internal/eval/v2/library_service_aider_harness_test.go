@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -46,13 +45,10 @@ sleep 30
 `
 
 // installFakeAider writes the given script to <dir>/aider, chmods it
-// executable, and returns the absolute path. Skips on Windows because
-// the shebang machinery is Unix-only — same constraint as installFakeCortex.
+// executable, and returns the absolute path. The whole file is tagged
+// !windows because the shebang machinery is Unix-only.
 func installFakeAider(t *testing.T, dir, body string) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake aider shell script is Unix-only")
-	}
 	path := filepath.Join(dir, "aider")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake aider: %v", err)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -75,13 +74,10 @@ exit 7
 `
 
 // installFakeCortex writes the given script body to <dir>/cortex and
-// chmods it executable. Returns the absolute path. Skips on Windows
-// because the shebang machinery here is Unix-only.
+// chmods it executable. Returns the absolute path. The whole file is
+// tagged !windows because the shebang machinery here is Unix-only.
 func installFakeCortex(t *testing.T, dir, body string) string {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake cortex shell script is Unix-only")
-	}
 	path := filepath.Join(dir, "cortex")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake cortex: %v", err)

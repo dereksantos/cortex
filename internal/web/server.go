@@ -91,11 +91,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 // handleProjects returns the list of registered projects.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	type projectInfo struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		Path         string `json:"path"`
-		LastActive   string `json:"last_active"`
-		HasPending   bool   `json:"has_pending"`
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		Path       string `json:"path"`
+		LastActive string `json:"last_active"`
+		HasPending bool   `json:"has_pending"`
 	}
 
 	var projects []projectInfo

@@ -104,7 +104,6 @@ func pickFreePort() (int, error) {
 type libraryServerProcess struct {
 	cmd      *exec.Cmd
 	output   *bytes.Buffer
-	waitOnce sync.Once
 	waitErr  chan error // closed when Wait returns
 	stopOnce sync.Once
 }
@@ -205,12 +204,12 @@ func (s *libraryServerProcess) LastOutput() string {
 // runEndpointProbes substitutes them in order. captureKey, when set, parses
 // the response body as JSON and stashes its `id` field for later probes.
 type endpointProbe struct {
-	name        string
-	method      string
-	path        string
-	body        string
-	wantStatus  int
-	captureKey  string
+	name       string
+	method     string
+	path       string
+	body       string
+	wantStatus int
+	captureKey string
 }
 
 // libraryEndpointPlan returns the 25-probe plan in dependency order.
