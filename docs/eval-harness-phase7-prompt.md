@@ -279,7 +279,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** probe runs, event shape documented, models.json (if
     needed) committed at a known path.
 
-- [ ] **6. Implement `PiDevHarness` in
+- [x] **6. Implement `PiDevHarness` in
   `internal/eval/v2/library_service_pidev_harness.go`.**
   - Mirror `OpenCodeHarness` from TODO 2, swapping the CLI
     invocation and the event-stream parser.
