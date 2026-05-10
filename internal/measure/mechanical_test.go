@@ -1,6 +1,7 @@
 package measure
 
 import (
+	"context"
 	"testing"
 )
 
@@ -307,7 +308,7 @@ func TestPromptability(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := New(nil)
-			result, err := m.Measure(nil, tt.prompt)
+			result, err := m.Measure(context.TODO(), tt.prompt)
 			if err != nil {
 				t.Fatalf("Measure() error: %v", err)
 			}
