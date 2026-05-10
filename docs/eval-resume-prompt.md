@@ -281,51 +281,128 @@ supporting data.
 
 ---
 
-## MECE coverage matrix — the experiment space
+## MECE coverage matrix — the experiment space (5 dims)
 
-Three orthogonal axes define the design space. Today we've touched a
-small corner of it. The matrix below makes the gap explicit.
+The design space is a five-dimensional product. Today we've covered a
+sliver. The matrix below makes the structure explicit so each future
+experiment fills *known* cells rather than discovering the gap by
+accident. The space grows as loops capture more of it; this section
+should be updated *by the loops themselves* (see "Multi-loop
+architecture" below — the `driver` loop owns this update).
 
-### Eval shape × model tier (where we have evidence)
+### The five axes
 
-| shape | small (≤10B) | medium (10-70B) | large (70-200B) | frontier (≥200B) |
-|---|---|---|---|---|
-| A. Retrieval / QA | ✅ +52% | ✅ +20% | n/a | ✅ +31% |
-| B. Single-shot coding | ✅ 0 pp (saturated) | ✅ 0 pp (saturated) | n/a | ✅ 0 pp (saturated) |
-| C. Multi-session coding | ❌ | ❌ | ❌ | ❌ |
-| D. Long-horizon agent | ❌ | ❌ | ❌ | ❌ |
-| E. Standard benchmarks (lm-eval) | ❌ | ❌ | ❌ | ❌ |
+| dim | name | values | symbol set |
+|---|---|---|---|
+| 1 | **Eval shape** | retrieval/QA · single-shot coding · multi-session coding · long-horizon agent · standard benchmark (lm-eval) | A, B, C, D, E |
+| 2 | **Model tier** | small (≤10B) · medium (10-70B) · large (70-200B) · frontier (≥200B) | I, II, III, IV |
+| 3 | **Cortex config** | none · static bullets · Reflex-mined · Reflect-reranked · full pipeline | α, β, γ, δ, ε |
+| 4 | **Corpus source** | synthetic YAML · real captures · hybrid | 1, 2, 3 |
+| 5 | **Comparison baseline** | no context · good system prompt · RAG (non-cortex) | a, b, c |
 
-C is the library-service shape. D is multi-tool-call agent work
-(plan → execute → reflect → repeat). E is the lm-eval-harness path.
-The cells most likely to show the small-model amplifier effect are
-**C × small** and **E × small** — those are the bets.
+Notional total: 5 × 4 × 5 × 3 × 3 = **900 cells**. Effective is smaller:
+dim 4 (corpus) is degenerate for configs α and β (no store needed),
+dim 5 collapses for some shapes, so the real space is closer to
+**~300 cells**.
 
-### Cortex configuration (orthogonal to the above)
+We are not going to run all 300. We will run **the ones that move the
+anchor's four pass-criteria** — and the matrix's job is to make sure
+we're not running near-duplicates while missing the high-value gaps.
 
-| config | what it is | tested |
+### Coverage today — flat cube (dims 1×2×3, holding 4=synthetic, 5=no-context)
+
+This is the slice we have actual data for. The right-hand columns and
+bottom rows are the future.
+
+```
+                            CORTEX CONFIG →
+EVAL  MODEL                α(none)   β(static)  γ(Reflex)  δ(Reflect)  ε(full)
+─────────────────────────────────────────────────────────────────────────────
+ A    I(small)              ✅       ✅         ✅(noisy)   ·           ·
+      II(medium)            ✅       ✅         ·           ·           ·
+      III(large)            ·        ·          ·           ·           ·
+      IV(frontier)          ✅       ✅         ✅         ·           ·
+─────────────────────────────────────────────────────────────────────────────
+ B    I                     ✅       ✅         ·           ·           ·
+      II                    ✅       ✅         ·           ·           ·
+      III                   ✅       ✅         ·           ·           ·
+      IV                    ✅       ✅         ·           ·           ·
+─────────────────────────────────────────────────────────────────────────────
+ C    (any tier)            ·        ·          ·           ·           ·    ← library-service: the thesis
+ D    (any tier)            ·        ·          ·           ·           ·    ← long-horizon agent
+ E    (any tier)            ·        ·          ·           ·           ·    ← lm-eval / SWE-bench
+```
+
+~15 cells covered. ~85 in this 1×2×3 slice are open. The other dims
+(4 and 5) add depth behind every ✅ that turn out to matter for
+real-world translation.
+
+### Coverage on dim 4 (corpus source)
+
+| corpus source | description | cells covered today |
 |---|---|---|
-| α. None (baseline) | No cortex in the loop | ✅ |
-| β. Static bullets | Hand-authored `cortex_context:` per scenario | ✅ |
-| γ. Reflex-mined | Real `cortex search` over a populated store | ✅ (retrieval evals only) |
-| δ. Reflect-reranked | γ + LLM reranking of retrieved items | ❌ |
-| ε. Full pipeline | γ + δ + Think (session learning) + Dream (idle mining) | ❌ |
+| 1. Synthetic | Hand-curated `context:` items in scenario YAML | ALL of the ✅ above |
+| 2. Real captures | Items from real dev sessions (this project's logs, git history, claude conversation files) | none |
+| 3. Hybrid | Real captures + synthetic seed | none |
 
-We've only validated α and β at depth, with γ partial. δ and ε —
-which are the *interesting* parts of cortex's architecture — have
-zero eval coverage.
+(2) is the shape most likely to invalidate synthetic-corpus findings.
+Until we test on (2), every cortex claim has the caveat "in a
+synthetic store." This is *the* second-axis-of-doubt for everything we
+report.
 
-### Context source (the corpus side)
+### Coverage on dim 5 (comparison baseline)
 
-| source | description | tested |
+| baseline | description | cells covered today |
 |---|---|---|
-| 1. Synthetic | Hand-curated `context:` items in scenario YAML | ✅ |
-| 2. Real captures | Items captured from real dev sessions | ❌ |
-| 3. Hybrid | Synthetic seed + real captures appended | ❌ |
+| a. No context | Bare query → model → response | ALL of the ✅ above |
+| b. Good system prompt | Query + hand-engineered system prompt that includes conventions | none |
+| c. RAG (non-cortex) | Query + chunks from a basic embedding retriever over project files | none |
 
-(2) is the realistic shape — and the one most likely to invalidate
-synthetic-corpus findings. Until we test on (2), every claim has the
-caveat "in a synthetic store."
+Every "lift" number we have is *against (a) no context*. The real
+deployment choice is "cortex vs (b) a well-written CLAUDE.md / system
+prompt." That's the unfair comparison we owe ourselves.
+
+### Highest-value unexplored cells (what to run next)
+
+Sorted by anchor-impact:
+
+1. **C × I × γ × 2 × a** — multi-session coding × small model ×
+   *real* Reflex retrieval × real-capture corpus × no-context
+   baseline. This is the library-service experiment with the real
+   cortex pipeline and project-derived captures. Lands all four
+   anchor dimensions in one run.
+2. **E × I × γ × 1 × a** — lm-eval HumanEval+ × small model ×
+   Reflex × synthetic corpus × no-context. Lowest-effort
+   standard-benchmark first touch.
+3. **C × I × ε × 3 × a** — same as (1) but with the full Think +
+   Dream pipeline and hybrid corpus. The "what cortex actually
+   claims to be" cell.
+4. **B × I × β × 1 × b** — single-shot coding × small × static
+   bullets × synthetic × good system prompt. Tests whether cortex
+   beats the realistic alternative on the saturated coding tasks
+   we already have.
+5. **C × II × γ × 2 × c** — same shape as (1) but vs RAG, on
+   medium model. Tests "is cortex better than RAG-with-our-files".
+
+Anything beyond (5) is exploration, not anchor-moving. The `driver`
+loop should keep this list reordered as cells fill in.
+
+### How this grows over time
+
+The point of the multi-loop architecture (below) is that this matrix
+fills *automatically* as loops iterate:
+
+- The `experiment` loop pulls work items, runs cells, writes results.
+- The `driver` loop reads the result tables and updates this matrix
+  in place — so the resume prompt always reflects current coverage.
+- The `coverage` loop authors the missing scenarios for the
+  high-value cells.
+- The `watch` loop adds new tiers/models as the OpenRouter catalog
+  shifts (today's "large" tier was empty; tomorrow it might fill
+  in).
+
+The matrix is the *external memory* of the eval program. Treat it as
+the project's eval ledger, not as a one-time document.
 
 ---
 
