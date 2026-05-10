@@ -192,7 +192,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.A — OpenCodeHarness
 
-- [ ] **1. Probe opencode CLI output shape.**
+- [x] **1. Probe opencode CLI output shape.**
   - Write a throwaway `cmd/cortex-opencode-probe/main.go` (delete
     after step 2) that:
     1. Creates a tiny scratch dir with a seed file (a `hello.go` with
