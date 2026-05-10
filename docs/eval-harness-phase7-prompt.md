@@ -346,7 +346,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.D — MECE matrix update + doc
 
-- [ ] **12. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
+- [x] **12. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
   - The matrix's "harness" axis is currently implicit — Aider is
     the only harness, so it doesn't show as a separate dim. Phase 7
     adds a real harness dimension. Update the matrix to include it
