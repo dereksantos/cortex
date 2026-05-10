@@ -6,6 +6,42 @@
 
 ---
 
+## Companion session: Phase 7 (OpenCodeHarness + PiDevHarness)
+
+A parallel session is implementing Phase 7 — the deferred
+`OpenCodeHarness` and `PiDevHarness` — under
+**`docs/eval-harness-phase7-prompt.md`**. That work matters because:
+
+- Every "cortex lift" number we have today is measured through one
+  harness (Aider). The same scenarios through two more harnesses is
+  the ablation that disambiguates "real cortex lift" from "Aider's
+  particular prompt-injection shape working well."
+- Once Phase 7 lands, the MECE matrix below gains a sixth dimension
+  (harness identity) and the cross-harness column of the coverage
+  table starts filling in.
+
+**Coordination:** Both sessions read+write the same
+`.cortex/db/cell_results.{db,jsonl}` through the existing
+`PersistCell` path — that's the shared state. The grid runner
+already type-asserts on `ResultfulHarness` and auto-picks up new
+implementations without runner changes, so the two sessions don't
+need to coordinate beyond avoiding the same scenario IDs during
+concurrent runs.
+
+**If Phase 7 has merged** when you start this session: treat the new
+harnesses as available; the highest-leverage experiments
+(library-service cumulative, lm-eval-harness wrapping) gain a
+"compare across harnesses" dimension for free. Re-running the
+existing $5 experiment across all three harnesses is then a high-
+ROI baseline establish.
+
+**If Phase 7 is still in flight**: keep planning around Aider-only —
+the anchor's pass criteria don't depend on harness diversity, only
+benefit from it. The library-service experiment is still the highest-
+leverage next move.
+
+---
+
 ## The anchor — what we are trying to prove
 
 **Thesis:** Cortex produces measurable lift on real coding tasks at
