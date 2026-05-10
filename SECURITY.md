@@ -8,7 +8,7 @@ Cortex is in public alpha. Only the `main` branch receives security fixes.
 
 Please **do not** open a public GitHub issue for security vulnerabilities.
 
-Instead, report privately via GitHub's "Report a vulnerability" feature on the Security tab of the repository, or email the maintainer listed in `git log` for the most recent commits.
+Instead, report privately via GitHub's [Private Vulnerability Reporting](https://github.com/dereksantos/cortex/security/advisories/new) (the "Report a vulnerability" button on the Security tab). Reports go directly to the maintainer.
 
 Please include:
 - A description of the issue and its impact
