@@ -129,3 +129,73 @@ have no information advantage over the baseline view.
 | **Total** | **110** | **$0.104** | 2.1% of the $5 budget |
 
 Plenty of headroom for the harder-scenario follow-up.
+
+---
+
+## Update: noisy-store retrieval result (later in same session)
+
+After the user asked "the +52% lift on retrieval — is that the actual
+cortex CLI or are answers prebaked?", a noisy variant was constructed:
+the same 15 scenarios, each with **20 decoy `context:` items prepended
+to the real items**. Decoys are plausible-but-unrelated team
+decisions (logging migrations, lint configs, transport choices, etc).
+Then both clean and noisy variants ran against `anthropic/claude-haiku-4.5`
+via OpenRouter.
+
+| metric | clean (n=15) | noisy +20 decoys |
+|---|---:|---:|
+| Avg baseline score | 0.54 | 0.52 |
+| Avg cortex score | 0.66 | **0.70** |
+| **Avg lift** | **+31%** | **+52%** |
+| Avg ABR | 0.64 | 0.67 |
+| Cortex wins | 32/65 (49%) | 34/65 (52%) |
+| Per-scenario regressions | 1 | 0 |
+
+**Cortex did better under noise, not worse.** Baseline stayed flat
+(baseline doesn't see the cortex store — its results should be
+noise-invariant; the small 0.02 delta is model temperature).
+
+Two scenarios that showed 0%/negative lift under clean
+(`auth-evolution -33%`, `auth-patterns 0%`) flipped to positive under
+noise (+0% and +83% respectively). Several scenarios doubled or
+tripled their lift (`abstention-partial-info` 13% → 175%; `db-patterns`
+50% → 100%; `abstention-ambiguous-context` 61% → 111%).
+
+### Mechanism hypothesis
+
+With `cortex search --limit=5` and a store containing only 2-3 items,
+**every item gets returned regardless of query relevance**. The
+"retrieval" is degenerate — there's nothing to discriminate against.
+The model receives whatever happens to be in the store, including
+items unrelated to the current question.
+
+With 20+ items in the store, semantic ranking actually has work to do.
+The top-5 by relevance is a real curation. The noise items provide
+*contrast* — they let the embedding-similarity gradient sort signal
+from non-signal.
+
+This is the *opposite* failure mode from what the user worried about.
+The concern was "real-world stores will be full of irrelevant captures
+and dilute the signal." What we observed: small curated stores are
+actually *under*-stressing the retriever; a larger store with diverse
+items is where retrieval value shows up.
+
+### Caveats
+
+- **n=15 scenarios.** This is suggestive, not conclusive.
+- **The decoys are still semantically reasonable.** A real adversarial
+  test would seed the store with items that mimic the *form* of the
+  real context but invert the content (e.g., a fake "Use sessions, not
+  JWT" decision adjacent to the real "Migrated to JWT" decision in an
+  auth scenario). Worth doing.
+- **`code-review` regressed slightly (17% → 0%) under noise.** One
+  data point, but a reminder that noise tolerance isn't uniform.
+
+### What this changes
+
+If the mechanism holds, it suggests cortex's retrieval mechanism is
+healthier than the per-scenario eval framework can measure. **The next
+fair retrieval eval is one where the cortex store carries
+N×scenarios worth of accumulated context** — a single cortex instance
+populated with all 47 v2 scenarios' context items, then queried by
+each scenario's tests. That mimics real-world usage better.
