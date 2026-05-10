@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package eval — library-service multi-session eval (skeleton).
 //
 // See test/evals/library-service/SPEC.md for the design.

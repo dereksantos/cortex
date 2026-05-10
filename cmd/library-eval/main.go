@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Command library-eval drives the library-service multi-session eval end to
 // end. Not meant to be a permanent CLI surface — a deliberate one-off tool
 // invoked manually when the operator wants to spend Claude CLI time and
