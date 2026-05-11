@@ -321,7 +321,7 @@ without them.
   session_id?}`. Downstream Dream sources need a stable shape.
   Closes gap G4.
 
-- [ ] **0.e Add a rollback procedure.** Insert a "Rollback if
+- [x] **0.e Add a rollback procedure.** Insert a "Rollback if
   regression" subsection: if TODO 10's A/B regresses below 4/5,
   ship the extension behind `CORTEX_PI_EXTENSION=1` env gate
   (default off), document the result in
@@ -559,6 +559,36 @@ without them.
 
 When stopping, leave a single short summary line explaining which
 condition triggered and what the user needs to do.
+
+---
+
+## Rollback if regression
+
+If TODO 10's A/B run lands `pi_dev × cortex_extension` at the
+inconclusive 3/5 boundary or worse, do **not** revert the
+branch. Instead:
+
+1. Gate the extension behind `CORTEX_PI_EXTENSION=1` in
+   `PiDevHarness`: when unset, the harness skips the
+   `.pi/extensions/cortex/` install path and the cell falls
+   back to the prompt-prefix `Hints:` path even if the
+   strategy is `cortex_extension`. The grid runner then
+   defaults the env var to `0` for the next merge to main.
+2. Write the regression evidence to
+   `docs/phase8-extension-vs-prefix.md` with the per-scenario
+   table, the tool-fire rate, and a hypothesis section
+   (e.g. "tool description too generic on coding scenarios").
+3. Open a follow-up TODO 13 in this prompt outlining the next
+   experiment (description rewrite, model swap, held-out
+   scenario set, alternative prompting strategy).
+4. Leave Phase 8 commits on the branch; do not merge to main
+   until the gate flips back on.
+
+Reverting destroys the structured evidence of *what didn't
+work*, which is more valuable than the implementation itself
+for the next iteration. The `CORTEX_PI_EXTENSION=1` gate keeps
+the code reachable for local experiments without forcing it on
+the main grid.
 
 ---
 
