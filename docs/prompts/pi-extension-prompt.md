@@ -207,48 +207,63 @@ B. **Harness-side env flag** (`CORTEX_PI_EXTENSION=1`) the grid
    into one bucket — harder to A/B in `--report-summary`.
 
 Pick A unless adding a `cellresult.go` enum is blocked. See "Hard
-constraints" #1.
+constraints" #6 (CONTRACT — schema additions only).
 
 ---
 
 ## Hard constraints (do not violate)
 
-1. **`internal/eval/v2/cellresult.go` schema additions only.** Adding
-   a new value to the `ContextStrategy` enum (e.g.
-   `StrategyCortexExtension = "cortex_extension"`) is allowed since
-   `Validate()` already accepts a closed set. Adding new optional
-   fields with `omitempty` is allowed. Renaming/removing requires
-   PR-level signoff.
+> Grouped by which part of the I/O/C/M/C decomposition each
+> constraint anchors to. Numbers are monotonic across the whole
+> section; cross-references elsewhere in this file use these
+> numbers.
+
+### IDENTITY — autonomy bounds
+
+1. **Don't push or open PRs autonomously.** Local commits on
+   `feat/phase8-pi-extension` (branch from `main`). Pushing to
+   remote or opening a PR is the user's decision, not the
+   agent's.
+
+### METHOD — how the work proceeds
 
 2. **No regression on AiderHarness / OpenCodeHarness / `pi_dev`
    prefix path.** The grid still needs to run aider+cortex and
    pi_dev+cortex (Hints: prefix) exactly as it does today.
 
 3. **Standard library testing only.** No testify / external
-   assertion libraries.
+   assertion libraries. Table-driven tests with `t.Run` subtests.
 
-4. **Never log `OPEN_ROUTER_API_KEY` or any other secret.** Same
+4. **Real OpenRouter calls cost real money.** `:free` model calls
+   are exempt; paid calls need `CORTEX_EVAL_ALLOW_SPEND=1` in
+   env; frontier (Sonnet/Opus) needs `CORTEX_EVAL_ALLOW_FRONTIER=1`
+   on top.
+
+5. **Extension installs are scoped to the project's
+   `.pi/extensions/` by default.** Don't write to
+   `~/.pi/agent/extensions/` from the grid runner — that'd
+   pollute the engineer's global pi setup across other projects.
+
+### CONTRACT — output and schema discipline
+
+6. **`internal/eval/v2/cellresult.go` schema additions only.**
+   Adding a new value to the `ContextStrategy` enum (e.g.
+   `StrategyCortexExtension = "cortex_extension"`) is allowed
+   since `Validate()` already accepts a closed set. Adding new
+   optional fields with `omitempty` is allowed. Renaming or
+   removing requires PR-level signoff.
+
+7. **Never log `OPEN_ROUTER_API_KEY` or any other secret.** Same
    redaction rule as Phase 7. The extension's `tool_call` hook
-   must scrub args before forwarding to cortex capture.
+   must scrub args before forwarding to cortex capture (see
+   TODO 7 for redaction key shapes and the capture schema).
 
-5. **Real OpenRouter calls cost real money.** `:free` model calls
-   are exempt; paid calls need `CORTEX_EVAL_ALLOW_SPEND=1` in env;
-   frontier (Sonnet/Opus) needs `CORTEX_EVAL_ALLOW_FRONTIER=1` on
-   top.
-
-6. **Don't push or open PRs autonomously.** Local commits on
-   `feat/phase8-pi-extension` (branch from `main`).
-
-7. **Structured outputs.** Every CellResult goes to both SQLite and
-   `.cortex/db/cell_results.jsonl`. The `PersistCell` path enforces
-   this; don't bypass it. Pi `tool_call` capture rows have a
-   **fixed schema** (see TODO 7) — Dream sources will read them as
-   structured data, so the shape is part of the contract.
-
-8. **Extension installs are scoped to the project's `.pi/extensions/`
-   by default.** Don't write to `~/.pi/agent/extensions/` from the
-   grid runner — that'd pollute the engineer's global pi setup
-   across other projects.
+8. **Structured outputs.** Every CellResult goes to both SQLite
+   and `.cortex/db/cell_results.jsonl`. The `PersistCell` path
+   enforces this; don't bypass it. Pi `tool_call` capture rows
+   have a **fixed schema** (see TODO 7) — Dream sources will
+   read them as structured data, so the shape is part of the
+   contract.
 
 ---
 
@@ -339,14 +354,15 @@ without them.
 - [ ] **0.f Dedupe duplicated rules.** One canonical home each;
   other locations carry a short reference:
   - "Read end-to-end" → keep in iteration-protocol step 1 only.
-  - Secret-redaction → keep in hard constraint #4; TODO 7
-    references it.
-  - Project-local install location → keep in hard constraint #8;
-    TODO 9 and anti-checklist reference it.
+  - Secret-redaction → keep in hard constraint #7 (CONTRACT);
+    TODO 7 references it.
+  - Project-local install location → keep in hard constraint #5
+    (METHOD); TODO 9 and anti-checklist reference it.
   - `StrategyCortexExtension` enum → keep in TODO 8; hard
-    constraint #1 and "Where work plugs in" reference it.
-  Closes overlaps O1, O2, O3, O5. Run after 0.h so the constraint
-  numbering is stable.
+    constraint #6 (CONTRACT) and "Where work plugs in"
+    reference it.
+  Closes overlaps O1, O2, O3, O5. Constraint numbers above
+  match the post-0.h reorganization.
 
 - [x] **0.g Define the 3/5 pass-rate boundary.** Edit pass criteria
   to a closed ternary: `≥ 4/5 = pass`, `3/5 = inconclusive → re-run
