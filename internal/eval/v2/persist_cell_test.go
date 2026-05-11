@@ -111,7 +111,7 @@ func TestPersistCell_ValidationFails_NoSideEffects(t *testing.T) {
 		{"injection on baseline", func(r *CellResult) {
 			r.ContextStrategy = StrategyBaseline
 			r.CortexVersion = ""
-		}, "only cortex strategy may inject"},
+		}, "only cortex-flavor strategies may inject"},
 		{"unknown criterion", func(r *CellResult) { r.TaskSuccessCriterion = "vibes" }, "task_success_criterion"},
 		{"negative cost", func(r *CellResult) { r.CostUSD = -0.01 }, "cost_usd"},
 	}

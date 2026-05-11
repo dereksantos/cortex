@@ -132,10 +132,23 @@ func TestCellResultValidate(t *testing.T) {
 		{"cortex without version", func(r *CellResult) {
 			r.ContextStrategy = StrategyCortex
 		}, "cortex_version required"},
+		{"cortex_extension without version", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexExtension
+		}, "cortex_version required"},
+		{"happy cortex_extension with version", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexExtension
+			r.CortexVersion = "0.1.0"
+		}, ""},
+		{"happy cortex_extension with injection tokens", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexExtension
+			r.CortexVersion = "0.1.0"
+			r.InjectedContextTokens = 80
+			r.TokensIn = 1000
+		}, ""},
 		{"injection on baseline", func(r *CellResult) {
 			r.InjectedContextTokens = 100
 			r.TokensIn = 200
-		}, "only cortex strategy may inject"},
+		}, "only cortex-flavor strategies may inject"},
 		{"injection exceeds tokens_in", func(r *CellResult) {
 			r.ContextStrategy = StrategyCortex
 			r.CortexVersion = "0.1.0"
