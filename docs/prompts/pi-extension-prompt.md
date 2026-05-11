@@ -451,7 +451,7 @@ even when the extension code is skipped.
   install layout in `docs/pi-extension-notes.md`. Delete the
   probe directory after step 2.
 
-- [ ] **2. Scaffold `packages/pi-cortex/`.** Real TypeScript
+- [x] **2. Scaffold `packages/pi-cortex/`.** Real TypeScript
   package. `package.json` with `keywords: ["pi-package"]` and the
   `pi.extensions` manifest pointing at `./extensions/`. `tsconfig.json`,
   `extensions/cortex/index.ts` with the factory stub, an `npm test`
