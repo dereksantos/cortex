@@ -525,7 +525,7 @@ even when the extension code is skipped.
   captured yet" — never throw). **Done:** running pi against a real
   project with captures, the tool returns real cortex search results.
 
-- [ ] **6. Real-pi smoke.** With the extension installed in
+- [x] **6. Real-pi smoke.** With the extension installed in
   `.pi/extensions/cortex/`, run:
   ```
   pi --mode json --provider openrouter \
