@@ -247,17 +247,31 @@ export function buildCapturePayload(
  *   - child.unref() so a long-running capture doesn't keep the
  *     pi process alive past its turn
  *   - errors are silently swallowed (capture is best-effort)
+ *
+ * cwd: `cortex capture` walks up from its cwd looking for
+ * `.cortex/config.json`. Pi's cwd is the cell's temp workdir
+ * which has no `.cortex/`, so capture would silently fail.
+ * We set cwd to `$CORTEX_PROJECT_ROOT` when it's defined (set
+ * by the eval grid runner to the absolute path of the cortex
+ * repo root); otherwise we fall back to leaving cwd inherited,
+ * which only works when pi is invoked inside a cortex project
+ * directly.
  */
 export function shellCapture(
   binary: string,
   payload: PiToolCallCapture,
 ): void {
   const json = JSON.stringify(payload);
+  const projectRoot = process.env.CORTEX_PROJECT_ROOT?.trim();
   try {
     const child = spawn(
       binary,
       ["capture", "--type", "pi_tool_call", "--content", json],
-      { stdio: ["ignore", "ignore", "ignore"], detached: false },
+      {
+        stdio: ["ignore", "ignore", "ignore"],
+        detached: false,
+        cwd: projectRoot && projectRoot.length > 0 ? projectRoot : undefined,
+      },
     );
     child.on("error", () => {
       // swallowed — capture is best-effort

@@ -55,6 +55,14 @@ type PiDevHarness struct {
 // this; the harness reads it at install time.
 const EnvPiCortexExtensionSource = "CORTEX_PI_EXTENSION_SOURCE"
 
+// EnvCortexProjectRoot tells the spawned `cortex capture` child
+// (fired by the extension's tool_result hook) where the project's
+// `.cortex/` directory lives. Pi's cwd is the cell's temp workdir
+// which has no `.cortex/`, so `cortex capture`'s findProjectRoot
+// walk would otherwise fail silently. The harness sets this to the
+// directory holding `.cortex/` (typically the cortex repo root).
+const EnvCortexProjectRoot = "CORTEX_PROJECT_ROOT"
+
 // SetModel changes the model used for subsequent RunSession calls.
 // The grid runner type-asserts on this method to swap models on the
 // same harness instance.
@@ -178,6 +186,17 @@ func (h *PiDevHarness) runSession(ctx context.Context, prompt, workdir string) (
 		if os.Getenv("CORTEX_BINARY") == "" {
 			return HarnessResult{ModelEcho: h.model, ProviderEcho: provider},
 				fmt.Errorf("$CORTEX_BINARY must be set for cortex_extension strategy so the extension can shell out to a known-good binary")
+		}
+		// Default $CORTEX_PROJECT_ROOT to the harness process's cwd
+		// if the caller didn't set it. The extension's tool_result
+		// hook reads this to fix the spawn cwd for `cortex capture`
+		// (pi's cwd is the cell's temp workdir, which has no
+		// .cortex/). This is a fallback; the grid runner should set
+		// it explicitly to the directory holding .cortex/.
+		if os.Getenv(EnvCortexProjectRoot) == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				_ = os.Setenv(EnvCortexProjectRoot, cwd)
+			}
 		}
 	}
 

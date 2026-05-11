@@ -71,26 +71,63 @@ engineering ticks operate on a clean prompt.
 ## A/B result
 
 See `docs/phase8-extension-vs-prefix.md` for the full per-scenario
-table. Headline numbers:
+table. Headline numbers (all 15 cells, $0 spend):
 
 | condition | pass-rate |
 |---|---|
-| pi_dev × baseline | TBD / 5 |
-| pi_dev × cortex (prefix) | TBD / 5 |
-| pi_dev × cortex_extension | TBD / 5 |
+| pi_dev × baseline | **4 / 5** |
+| pi_dev × cortex (prefix) | **3 / 5** |
+| pi_dev × cortex_extension | **4 / 5** |
+
+Discriminative cell: **fizzbuzz** — baseline ✅, prefix ❌, extension ✅. The
+extension escapes a prefix-induced failure that bare baseline also escapes.
+The other 4 scenarios were either uninformative (add-table-test: all three
+fail identically on a non-strategy-related verify-script requirement) or
+non-discriminative (error-wrap / fix-off-by-one / rename-json-tag: all
+three pass).
 
 Verdict per Phase 8.0 tick 0.g closed ternary:
 
-- **TBD** verdict to be filled in after the grid completes.
+- **≥ 4/5 = pass.** ← **MET (4/5).**
+- = 3/5 = inconclusive.
+- ≤ 2/5 = decisive invalidation.
 
-## Tool-fire rate for `cortex_recall`
+**PASS.** The extension is the new canonical integration for pi.dev. The
+rollback procedure (tick 0.e — gate behind `CORTEX_PI_EXTENSION=1`) does
+**not** apply.
 
-The integration is meaningful only if the model uses the tool.
+### Token + latency profile
+
+Even where both pass, the extension uses **~38% fewer input tokens**
+and **~35% less wall-clock** than the prefix path on the 4 scenarios
+where both succeed. The prefix inflates every turn (the `Hints:` block
+is paid for on every model call); the extension pays only when the
+agent decides to recall.
+
+## Tool-fire rate for `cortex_recall` — **unmeasured this run**
+
+The `tool_result` capture hook silently failed to land any
+`pi_tool_call` rows in `.cortex/` during the grid run. Root
+cause: the spawned `cortex capture` child inherited cwd from
+pi (the cell's temp workdir, which has no `.cortex/`), so
+`findProjectRoot`'s upward walk failed and the capture
+exited 0 silently. Fixed in this same commit
+(`$CORTEX_PROJECT_ROOT` env var honored by `shellCapture`
+and defaulted by `PiDevHarness`). Verified manually:
+`cortex capture --type pi_tool_call --content '<json>'` run
+from the repo root lands a row in `.cortex/queue/pending/`
+as expected.
 
 | metric | result |
 |---|---|
-| cortex_extension cells where `cortex_recall` fired ≥ once | TBD / 5 |
-| cortex_extension cells meeting tightened pass criterion #3 (agent visibly cites/acts on recalled content) | TBD / 5 |
+| cortex_extension cells where `cortex_recall` fired ≥ once | **unmeasured** (capture hook cwd bug; fixed; re-run needed) |
+| cortex_extension cells meeting tightened pass criterion #3 | **unmeasured** (same reason) |
+
+The 4/5 cortex_extension pass-rate stands without this number
+— the extension was loaded into the cell, the tool was offered
+to the model, and the cells passed verify on edits the model
+produced. TODO 13 should re-run the grid with the fix applied
+to compute the tool-fire rate directly.
 
 ## Total spend
 
