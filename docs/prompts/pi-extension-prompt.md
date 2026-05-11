@@ -427,7 +427,7 @@ even when the extension code is skipped.
   end-to-end" duplication — collapses into overlap O1, closed
   by 0.f.)
 
-- [ ] **0.k Update the Aider-only-signal project-memory note.**
+- [x] **0.k Update the Aider-only-signal project-memory note.**
   Edit
   `~/.claude/projects/-Users-dereksantos-eng-projects-cortex/memory/project_eval_signal_pivot_2026_05.md`
   (and `MEMORY.md` index if its hook line is now misleading): the
