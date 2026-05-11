@@ -578,7 +578,7 @@ even when the extension code is skipped.
   + `go test ./internal/eval/v2/...` green; `cortex eval grid
   --strategies cortex_extension --help` lists it.
 
-- [ ] **9. PiDevHarness ensures the extension is installed.** When
+- [x] **9. PiDevHarness ensures the extension is installed.** When
   the cell's strategy is `cortex_extension`, the harness:
   1. Confirms `.pi/extensions/cortex/` exists in the scenario's
      workdir (or copies the packaged extension there).
