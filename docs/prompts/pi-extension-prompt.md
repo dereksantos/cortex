@@ -1,8 +1,10 @@
 # Phase 8 — Build the cortex pi.dev extension
 
-> Read this file end-to-end. Self-contained: a fresh Claude Code
-> session pastes this in and starts the pi-extension work without any
-> other context.
+> Self-contained: a fresh Claude Code session can paste this
+> in and start the pi-extension work without any other context.
+> Per-tick reading discipline (read this file end-to-end at the
+> start of every tick) lives in the **Iteration Protocol**
+> below — see step 1 there for the canonical rule.
 
 ---
 
@@ -385,18 +387,22 @@ even when the extension code is skipped.
   `docs/phase8-extension-vs-prefix.md`, do not revert the branch.
   Closes gap G5.
 
-- [ ] **0.f Dedupe duplicated rules.** One canonical home each;
+- [x] **0.f Dedupe duplicated rules.** One canonical home each;
   other locations carry a short reference:
-  - "Read end-to-end" → keep in iteration-protocol step 1 only.
-  - Secret-redaction → keep in hard constraint #7 (CONTRACT);
-    TODO 7 references it.
-  - Project-local install location → keep in hard constraint #5
-    (METHOD); TODO 9 and anti-checklist reference it.
-  - `StrategyCortexExtension` enum → keep in TODO 8; hard
-    constraint #6 (CONTRACT) and "Where work plugs in"
-    reference it.
-  Closes overlaps O1, O2, O3, O5. Constraint numbers above
-  match the post-0.h reorganization.
+  - "Read end-to-end" → kept in iteration-protocol step 1.
+    Top-of-file blockquote rewritten to keep only the
+    self-containment claim and forward-reference the protocol.
+    Closes O1 (and smell S3).
+  - Secret-redaction → kept in hard constraint #7 (CONTRACT);
+    TODO 7 referenced from HC #7 (added during 0.h). O2 effectively
+    resolved by the cross-reference.
+  - Project-local install location → kept in hard constraint #5
+    (METHOD); anti-checklist entry shortened to a back-reference.
+    Closes O3.
+  - `StrategyCortexExtension` enum → kept in TODO 8; HC #6 names
+    it as the schema-additions example; Wiring decision A names
+    it as the chosen integration shape. The pre-0.i inline copy
+    in "Where the work plugs in" is gone. Closes O5.
 
 - [x] **0.g Define the 3/5 pass-rate boundary.** Edit pass criteria
   to a closed ternary: `≥ 4/5 = pass`, `3/5 = inconclusive → re-run
@@ -654,10 +660,10 @@ the main grid.
 
 ## Anti-checklist (things to avoid)
 
-- **Don't ship a global install.** The grid runner should install
-  the extension into the cell's workdir (`.pi/extensions/`), not
-  `~/.pi/agent/extensions/`. Otherwise concurrent runs / other
-  projects break.
+- **Don't ship a global install.** Project-local
+  `.pi/extensions/` only — see **Hard Constraint #5** (METHOD)
+  for the rule and rationale (concurrent runs across projects
+  break otherwise).
 - **Don't reimplement `cortex search` in TypeScript.** Shell out
   to the Go binary. The extension is a thin shim; the retrieval
   logic stays in cortex's own codebase.
