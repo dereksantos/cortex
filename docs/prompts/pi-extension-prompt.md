@@ -464,27 +464,49 @@ even when the extension code is skipped.
 ### Phase 8.B — cortex_recall tool
 
 - [ ] **3. Define the `cortex_recall` tool schema.** In
-  `extensions/cortex/index.ts`:
+  `extensions/cortex/index.ts`, using the real pi v0.74.0 API
+  (see `docs/pi-extension-notes.md`):
   ```ts
-  pi.registerTool({
-    name: "cortex_recall",
-    description: "Recall relevant captured context (decisions, " +
-                 "patterns, prior corrections) for the current task. " +
-                 "Use when starting work in an unfamiliar area or " +
-                 "when the user references prior discussions.",
-    input_schema: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Natural-language query" },
-        limit: { type: "number", description: "Max results", default: 5 },
-      },
-      required: ["query"],
-    },
-    run: async ({ query, limit }) => { /* TODO 5 */ },
+  import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+  import { Type } from "typebox";
+
+  const CortexRecallParams = Type.Object({
+    query: Type.String({
+      description: "Natural-language query to search captured context.",
+    }),
+    limit: Type.Optional(
+      Type.Number({
+        description: "Maximum number of results to return.",
+        default: 5,
+        minimum: 1,
+        maximum: 50,
+      }),
+    ),
   });
+
+  export default function (pi: ExtensionAPI): void {
+    pi.registerTool({
+      name: "cortex_recall",
+      label: "Cortex Recall",
+      description:
+        "Recall relevant captured context (decisions, patterns, prior corrections) for the current task. Use when starting work in an unfamiliar area or when the user references prior discussions.",
+      parameters: CortexRecallParams,
+      execute: async (_toolCallId, _params, _signal, _onUpdate, _ctx) => ({
+        content: [{ type: "text" as const, text: "/* TODO 5 wires this */" }],
+        details: {},
+      }),
+    });
+  }
   ```
-  **Done:** the tool registers, schema validates against a known-good
-  input, and a stubbed `run` returns a constant string.
+  Key API differences from earlier drafts: `label` is required;
+  parameters are a **TypeBox** schema (not raw JSON Schema); the
+  handler is named `execute` (not `run`) and takes
+  `(toolCallId, params, signal, onUpdate, ctx)`; the return type
+  is `AgentToolResult = {content, details, terminate?}`, not a
+  plain string.
+  **Done:** the tool registers, schema validates against
+  `{query: "...", limit?: 1..50}`, and a stubbed `execute`
+  returns a non-empty text content item.
 
 - [ ] **4. Add `cortex search --format json` to the cortex CLI.**
   File: `cmd/cortex/commands/search.go` (or wherever `cortex search`
