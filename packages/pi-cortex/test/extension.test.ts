@@ -166,11 +166,20 @@ test("cortex_recall.execute shells out and renders the JSON output as markdown",
   const { tools } = loadExtensionAndCapture();
   const dir = mkdtempSync(join(tmpdir(), "cortex-recall-test-"));
   const fakeCortex = join(dir, "cortex-fake");
-  // Tiny shell script that ignores its args and emits the JSON
-  // shape cortex_recall expects.
+  // Shell script that VERIFIES its args are flags-first (the
+  // ordering required for Go's stdlib flag.Parse to consume
+  // --format and --limit before hitting the positional query)
+  // and then emits the JSON shape cortex_recall expects.
+  // If runCortexSearch ever regresses to flag-after-query
+  // ordering, this script exits 2 and the test fails loudly.
   writeFileSync(
     fakeCortex,
     `#!/bin/sh
+# Expected: cortex search --format json --limit <N> <query>
+if [ "$1" != "search" ] || [ "$2" != "--format" ] || [ "$3" != "json" ] || [ "$4" != "--limit" ]; then
+  echo "BAD ARG ORDER: $@" >&2
+  exit 2
+fi
 cat <<'EOF'
 [
   {

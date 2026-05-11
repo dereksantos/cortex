@@ -87,9 +87,15 @@ export async function runCortexSearch(
   query: string,
   limit: number,
 ): Promise<RecallEntry[]> {
+  // IMPORTANT: flags must come BEFORE the positional query.
+  // Go's stdlib `flag.Parse` stops at the first non-flag argument,
+  // so `cortex search <query> --format json` silently falls back to
+  // the default text format. Passing flags first is the reliable
+  // ordering; if cortex grows a smarter arg splitter later, this
+  // ordering remains correct.
   const { stdout } = await execFileAsync(
     binary,
-    ["search", query, "--format", "json", "--limit", String(limit)],
+    ["search", "--format", "json", "--limit", String(limit), query],
     { timeout: SEARCH_TIMEOUT_MS, maxBuffer: SEARCH_MAX_BUFFER },
   );
   const parsed: unknown = JSON.parse(stdout);
