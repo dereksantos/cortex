@@ -544,7 +544,7 @@ even when the extension code is skipped.
 
 ### Phase 8.C — Capture hook
 
-- [ ] **7. Wire `pi.on("tool_call", …)` to `cortex capture`.**
+- [x] **7. Wire `pi.on("tool_call", …)` to `cortex capture`.**
   After each allowlisted pi tool call, the extension shells out
   to `cortex capture --type pi_tool_call --content
   '<json-redacted-event>'` where the JSON payload conforms to
