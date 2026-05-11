@@ -609,7 +609,7 @@ even when the extension code is skipped.
 
 ### Phase 8.E — Docs + close
 
-- [ ] **11. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
+- [x] **11. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
   Add `extension-based injection` as a value in dim 3 (cortex
   config) or as a sub-axis under dim 6 (harness × injection style).
   Note that the prompt-prefix path is now demoted from "primary
