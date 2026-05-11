@@ -15,6 +15,8 @@ import (
 
 	"time"
 
+	"github.com/gofrs/flock"
+
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/cognition/sources"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -72,6 +74,19 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	// Point storage at the global data directory
 	cfg.ContextDir = globalDir
 
+	// Acquire single-instance lock before doing anything else.
+	// Kernel-level flock auto-releases on process death (incl. SIGKILL), so
+	// orphaned daemons cannot accumulate the way a PID-file check allowed.
+	daemonLock, lockErr := acquireDaemonLock(globalDir)
+	if lockErr != nil {
+		return fmt.Errorf("daemon lock error: %w", lockErr)
+	}
+	if daemonLock == nil {
+		fmt.Fprintln(os.Stderr, "cortex daemon: another instance is already running, exiting")
+		return nil
+	}
+	defer daemonLock.Unlock()
+
 	// Open storage at ~/.cortex/data/
 	store, err := storage.New(cfg)
 	if err != nil {
@@ -79,7 +94,7 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	}
 	defer store.Close()
 
-	// Write PID file to global dir
+	// Write PID file to global dir (informational; the lock is the source of truth)
 	if err := WriteDaemonPID(globalDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Could not write PID file: %v\n", err)
 	}
@@ -432,6 +447,11 @@ func GetDaemonPIDPath(contextDir string) string {
 	return filepath.Join(contextDir, "daemon.pid")
 }
 
+// GetDaemonLockPath returns the path to the daemon single-instance lock file.
+func GetDaemonLockPath(contextDir string) string {
+	return filepath.Join(contextDir, "daemon.lock")
+}
+
 // WriteDaemonPID writes the current process PID to the PID file.
 func WriteDaemonPID(contextDir string) error {
 	pidPath := GetDaemonPIDPath(contextDir)
@@ -457,19 +477,40 @@ func ReadDaemonPID(contextDir string) int {
 	return pid
 }
 
-// IsDaemonRunning checks if the daemon process is running.
-func IsDaemonRunning(contextDir string) bool {
-	pid := ReadDaemonPID(contextDir)
-	if pid == 0 {
-		return false
-	}
-	// Check if process exists
-	process, err := os.FindProcess(pid)
+// acquireDaemonLock takes an exclusive non-blocking flock on daemon.lock.
+// Returns (lock, nil) on acquire; (nil, nil) when another process holds it;
+// (nil, err) for unexpected I/O errors. Callers MUST Unlock() the returned
+// lock to release it (the kernel also releases it on process death).
+func acquireDaemonLock(contextDir string) (*flock.Flock, error) {
+	fl := flock.New(GetDaemonLockPath(contextDir))
+	locked, err := fl.TryLock()
 	if err != nil {
+		return nil, err
+	}
+	if !locked {
+		return nil, nil
+	}
+	return fl, nil
+}
+
+// IsDaemonRunning checks if the daemon process is running.
+// Uses a non-blocking flock probe: if the lock is held by another process,
+// a daemon is running; if we can acquire it, none is.
+func IsDaemonRunning(contextDir string) bool {
+	fl, err := acquireDaemonLock(contextDir)
+	if err != nil {
+		// I/O error probing the lock; fall back to assuming no daemon so the
+		// caller can attempt to start one (the daemon will fail-fast on its own
+		// lock acquire if one is in fact already running).
 		return false
 	}
-	// On Unix, FindProcess always succeeds. Send signal 0 to check if process exists.
-	return isProcessAlive(process)
+	if fl == nil {
+		// Someone else holds the lock — a daemon is running.
+		return true
+	}
+	// We acquired the lock, so no daemon was running. Release immediately.
+	fl.Unlock()
+	return false
 }
 
 // StopDaemon stops a running daemon process.
