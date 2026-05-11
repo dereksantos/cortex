@@ -192,7 +192,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.A — OpenCodeHarness
 
-- [ ] **1. Probe opencode CLI output shape.**
+- [x] **1. Probe opencode CLI output shape.**
   - Write a throwaway `cmd/cortex-opencode-probe/main.go` (delete
     after step 2) that:
     1. Creates a tiny scratch dir with a seed file (a `hello.go` with
@@ -211,7 +211,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** probe runs, both files written, event schema
     summarized.
 
-- [ ] **2. Implement `OpenCodeHarness` in
+- [x] **2. Implement `OpenCodeHarness` in
   `internal/eval/v2/library_service_opencode_harness.go`.**
   - Mirror `AiderHarness` structure:
     - `OpenCodeHarness struct { binary, model string }`
@@ -237,7 +237,7 @@ continuing**. The session can't make meaningful progress without them.
     time `var _ Harness = ...` / `var _ ResultfulHarness = ...`).
   - Delete `cmd/cortex-opencode-probe/`.
 
-- [ ] **3. Test `OpenCodeHarness` against a fake binary.**
+- [x] **3. Test `OpenCodeHarness` against a fake binary.**
   - Mirror `library_service_aider_harness_test.go`'s `installFakeOpencode`
     pattern: a shell script that writes the documented event-stream
     shape to stdout.
@@ -250,7 +250,7 @@ continuing**. The session can't make meaningful progress without them.
       grace window.
   - **Done:** new test file with the above cases, all passing.
 
-- [ ] **4. Real-binary smoke for OpenCodeHarness against
+- [x] **4. Real-binary smoke for OpenCodeHarness against
   OpenRouter.**
   - Test that t.Skips when `opencode` not on PATH OR when
     `OPEN_ROUTER_API_KEY` not set.
@@ -263,7 +263,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.B — PiDevHarness
 
-- [ ] **5. Probe pi.dev CLI output shape.**
+- [x] **5. Probe pi.dev CLI output shape.**
   - Throwaway `cmd/cortex-pidev-probe/main.go`, same shape as TODO 1.
   - Invocation:
     ```
@@ -279,7 +279,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** probe runs, event shape documented, models.json (if
     needed) committed at a known path.
 
-- [ ] **6. Implement `PiDevHarness` in
+- [x] **6. Implement `PiDevHarness` in
   `internal/eval/v2/library_service_pidev_harness.go`.**
   - Mirror `OpenCodeHarness` from TODO 2, swapping the CLI
     invocation and the event-stream parser.
@@ -287,18 +287,18 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** compiles, implements both interfaces, compile-time
     interface guards present.
 
-- [ ] **7. Test `PiDevHarness` against a fake binary.**
+- [x] **7. Test `PiDevHarness` against a fake binary.**
   - Parallel to TODO 3.
   - **Done:** new test file with the same case coverage.
 
-- [ ] **8. Real-binary smoke for PiDevHarness against OpenRouter.**
+- [x] **8. Real-binary smoke for PiDevHarness against OpenRouter.**
   - Parallel to TODO 4.
   - **Done:** test green when prerequisites present, t.Skip
     otherwise.
 
 ### Phase 7.C — wire into the grid runner + CLI
 
-- [ ] **9. Allow `opencode` and `pi_dev` in the grid CLI's
+- [x] **9. Allow `opencode` and `pi_dev` in the grid CLI's
   `buildGridHarnesses`.**
   - File: `cmd/cortex/commands/eval_grid.go`.
   - Current state: rejects both with "deferred to TODOs 10/11"
@@ -315,7 +315,7 @@ continuing**. The session can't make meaningful progress without them.
   - **Done:** `cortex eval grid --harnesses aider,opencode,pi_dev
     --help` works without errors.
 
-- [ ] **10. Cross-harness smoke (gated).**
+- [x] **10. Cross-harness smoke (gated).**
   - Requires `CORTEX_EVAL_ALLOW_SPEND=1` in env (even on free models,
     per the build-loop convention).
   - Run:
@@ -331,7 +331,12 @@ continuing**. The session can't make meaningful progress without them.
     `LatencyMs > 0`, no panics. Both SQLite and JSONL contain rows.
     `cortex eval grid --report` shows all 3.
 
-- [ ] **11. Cross-harness divergence check on the coding scenarios.**
+- [x] **11. Cross-harness divergence check on the coding scenarios.**
+  > 40 pp observed (aider 4/5, opencode 2/5, pi_dev 4/5). Investigation
+  > in `docs/phase7-divergence-finding.md`: root cause is
+  > gpt-oss-20b:free hallucinating paths + opencode's permission gate
+  > auto-rejecting them; aider/pi.dev recover. Real model-on-harness
+  > sensitivity, not a wiring bug. User decision: accept and proceed.
   - Same command shape as TODO 10 but with `--scenarios
     test/evals/coding` and `--strategies baseline`.
     15 cells total (5 scenarios × 3 harnesses).
@@ -341,7 +346,7 @@ continuing**. The session can't make meaningful progress without them.
 
 ### Phase 7.D — MECE matrix update + doc
 
-- [ ] **12. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
+- [x] **12. Update `docs/eval-resume-prompt.md`'s MECE matrix.**
   - The matrix's "harness" axis is currently implicit — Aider is
     the only harness, so it doesn't show as a separate dim. Phase 7
     adds a real harness dimension. Update the matrix to include it
@@ -353,7 +358,7 @@ continuing**. The session can't make meaningful progress without them.
     "current state" table mentions cross-harness validation as
     available.
 
-- [ ] **13. Stop the session.** All boxes checked. Print:
+- [x] **13. Stop the session.** All boxes checked. Print:
   - The 13-step record (commits landed).
   - Cross-harness smoke result (which harness x scenario combos
     passed).

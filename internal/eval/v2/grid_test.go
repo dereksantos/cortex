@@ -513,8 +513,14 @@ func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
 
 // TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy: with
 // strategy=cortex AND a non-empty CortexContext list, the harness sees
-// a prompt that starts with "RELEVANT CONTEXT:" + bullets, and
-// InjectedContextTokens is non-zero (capped by reported TokensIn).
+// a prompt that starts with the natural-language "Hints:" preamble +
+// inlined bullets + the original prompt, and InjectedContextTokens is
+// non-zero (capped by reported TokensIn).
+//
+// The "Hints:" form replaced an earlier "RELEVANT CONTEXT:\n- …\nTASK:\n"
+// shape because the structured heading destabilized gpt-oss-20b's
+// output channel on pi.dev — see
+// docs/phase7-cortex-regression-diagnostic.md.
 func TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy(t *testing.T) {
 	p := newTestPersister(t)
 	t.Setenv(EnvNoFreePreference, "1")
@@ -542,14 +548,17 @@ func TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy(t *testing.T) {
 		t.Fatalf("calls=%d want 1", len(fake.calls))
 	}
 	prompt := fake.calls[0].prompt
-	if !strings.HasPrefix(prompt, "RELEVANT CONTEXT:") {
-		t.Errorf("prompt did not start with prefix; got: %q", prompt)
+	if !strings.HasPrefix(prompt, "Hints: ") {
+		t.Errorf("prompt did not start with 'Hints: ' preamble; got: %q", prompt)
 	}
 	if !strings.Contains(prompt, "Match existing test patterns") {
 		t.Errorf("prompt missing first bullet")
 	}
-	if !strings.Contains(prompt, "TASK:\nimplement the function") {
-		t.Errorf("prompt missing TASK section, got: %q", prompt)
+	if !strings.Contains(prompt, "Use t.Helper() in helpers") {
+		t.Errorf("prompt missing second bullet")
+	}
+	if !strings.Contains(prompt, "\n\nimplement the function") {
+		t.Errorf("prompt missing blank-line separator + original query, got: %q", prompt)
 	}
 	if results[0].InjectedContextTokens == 0 {
 		t.Errorf("InjectedContextTokens=0 on cortex strategy with bullets, want > 0")
@@ -578,7 +587,7 @@ func TestRunGrid_CortexInjection_BaselineSkipsPrefix(t *testing.T) {
 		t.Fatalf("RunGrid: %v", err)
 	}
 	prompt := fake.calls[0].prompt
-	if strings.Contains(prompt, "RELEVANT CONTEXT:") {
+	if strings.HasPrefix(prompt, "Hints: ") {
 		t.Errorf("baseline prompt should NOT have cortex prefix; got: %q", prompt)
 	}
 	if results[0].InjectedContextTokens != 0 {
@@ -589,7 +598,7 @@ func TestRunGrid_CortexInjection_BaselineSkipsPrefix(t *testing.T) {
 // TestRunGrid_CortexInjection_EmptyContextNoOp: cortex strategy with
 // no bullets behaves exactly like baseline — no prefix, no injected
 // tokens. (Catches the regression where empty bullets still produce a
-// "RELEVANT CONTEXT:\n" header.)
+// bare "Hints:" header.)
 func TestRunGrid_CortexInjection_EmptyContextNoOp(t *testing.T) {
 	p := newTestPersister(t)
 	t.Setenv(EnvNoFreePreference, "1")
@@ -608,7 +617,7 @@ func TestRunGrid_CortexInjection_EmptyContextNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunGrid: %v", err)
 	}
-	if strings.Contains(fake.calls[0].prompt, "RELEVANT CONTEXT:") {
+	if strings.HasPrefix(fake.calls[0].prompt, "Hints: ") {
 		t.Errorf("empty-context cortex prompt should be bare; got %q", fake.calls[0].prompt)
 	}
 	if results[0].InjectedContextTokens != 0 {

@@ -164,8 +164,8 @@ func truncate(s string, n int) string {
 // dimensions, validates that every requested harness binary is present,
 // and drives evalv2.RunGrid.
 //
-// Per the eval-harness loop's TODO 7: scope is limited to aider as the
-// only supported harness. opencode + pi.dev are deferred to TODOs 10/11.
+// Supports aider, opencode, and pi_dev as harnesses (Phase 7 wired all
+// three into the grid). Pick the harness via `--harnesses <csv>`.
 func executeGrid(args []string) error {
 	scenarioDir := "test/evals/v2"
 	harnessesCSV := evalv2.HarnessAider
@@ -318,20 +318,30 @@ func buildGridHarnesses(csv string) ([]evalv2.HarnessSpec, error) {
 	for _, name := range names {
 		switch name {
 		case evalv2.HarnessAider:
-			// NewAiderHarness verifies the binary is on PATH
-			// ($AIDER_BINARY env override is honored). The model is
+			// Each NewXxxHarness verifies the binary is on PATH (and
+			// honors its $XXX_BINARY env override). The model is
 			// re-pointed per cell via SetModel; passing "" here is fine.
 			h, err := evalv2.NewAiderHarness("", "")
 			if err != nil {
 				return nil, fmt.Errorf("eval grid: aider harness unavailable: %w", err)
 			}
 			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
-		case evalv2.HarnessOpenCode, evalv2.HarnessPiDev:
-			return nil, fmt.Errorf("eval grid: harness %q not yet wired in CLI (deferred to eval-harness-loop TODOs 10/11)", name)
+		case evalv2.HarnessOpenCode:
+			h, err := evalv2.NewOpenCodeHarness("", "")
+			if err != nil {
+				return nil, fmt.Errorf("eval grid: opencode harness unavailable: %w", err)
+			}
+			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
+		case evalv2.HarnessPiDev:
+			h, err := evalv2.NewPiDevHarness("", "")
+			if err != nil {
+				return nil, fmt.Errorf("eval grid: pi_dev harness unavailable: %w", err)
+			}
+			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
 		case evalv2.HarnessClaudeCLI:
 			return nil, fmt.Errorf("eval grid: harness %q not exposed via grid yet — use the legacy `cortex eval` for claude-cli runs", name)
 		default:
-			return nil, fmt.Errorf("eval grid: unknown harness %q (valid: aider)", name)
+			return nil, fmt.Errorf("eval grid: unknown harness %q (valid: aider, opencode, pi_dev)", name)
 		}
 	}
 	return out, nil
@@ -393,9 +403,10 @@ cell into both .cortex/db/evals_v2.db and .cortex/db/cell_results.jsonl.
 Options:
   --scenarios DIR          Scenario directory (default: test/evals/v2)
   --harnesses LIST         CSV of harness names (default: aider)
-                           Currently supported: aider
-                           Deferred: opencode, pi_dev (eval-harness loop
-                           TODOs 10/11)
+                           Supported: aider, opencode, pi_dev
+                           Each harness's binary must be on PATH (or
+                           pointed at via $AIDER_BINARY, $OPENCODE_BINARY,
+                           $PI_BINARY).
   --provider NAME          Provider for all models in this run
                            (default: openrouter)
                            Valid: openrouter, ollama, anthropic, openai, local
@@ -420,16 +431,16 @@ Options:
 
 Environment:
   OPEN_ROUTER_API_KEY      Required when --provider=openrouter (note the
-                           underscore — Aider/litellm uses the canonical
-                           OPENROUTER_API_KEY internally; the harness
-                           re-exports automatically).
+                           underscore — Aider/litellm, opencode, and pi
+                           all expect the canonical OPENROUTER_API_KEY
+                           name; each harness re-exports automatically).
 
 Examples:
   cortex eval grid --models openai/gpt-oss-20b:free
   cortex eval grid \
     --scenarios test/evals/v2 \
-    --harnesses aider \
+    --harnesses aider,opencode,pi_dev \
     --provider openrouter \
-    --models openai/gpt-oss-20b:free,qwen/qwen3-coder \
-    --strategies baseline,cortex`)
+    --models openai/gpt-oss-20b:free \
+    --strategies baseline`)
 }

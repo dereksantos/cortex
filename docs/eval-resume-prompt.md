@@ -6,39 +6,60 @@
 
 ---
 
-## Companion session: Phase 7 (OpenCodeHarness + PiDevHarness)
+## Phase 7 — LANDED: OpenCodeHarness + PiDevHarness
 
-A parallel session is implementing Phase 7 — the deferred
-`OpenCodeHarness` and `PiDevHarness` — under
-**`docs/eval-harness-phase7-prompt.md`**. That work matters because:
+Phase 7 (`docs/eval-harness-phase7-prompt.md`) shipped on
+`feat/phase7-harnesses`. The grid runner now drives all three:
 
-- Every "cortex lift" number we have today is measured through one
-  harness (Aider). The same scenarios through two more harnesses is
-  the ablation that disambiguates "real cortex lift" from "Aider's
-  particular prompt-injection shape working well."
-- Once Phase 7 lands, the MECE matrix below gains a sixth dimension
-  (harness identity) and the cross-harness column of the coverage
-  table starts filling in.
+```bash
+cortex eval grid --harnesses aider,opencode,pi_dev \
+                 --provider openrouter \
+                 --models openai/gpt-oss-20b:free \
+                 --strategies baseline,cortex
+```
 
-**Coordination:** Both sessions read+write the same
-`.cortex/db/cell_results.{db,jsonl}` through the existing
-`PersistCell` path — that's the shared state. The grid runner
-already type-asserts on `ResultfulHarness` and auto-picks up new
-implementations without runner changes, so the two sessions don't
-need to coordinate beyond avoiding the same scenario IDs during
-concurrent runs.
+**Cross-harness ablation is now possible.** Every "cortex lift"
+number measured pre-Phase 7 was through one harness (Aider) only;
+the same scenarios through opencode + pi.dev disambiguates "real
+cortex lift" from "Aider's particular prompt-injection shape working
+well."
 
-**If Phase 7 has merged** when you start this session: treat the new
-harnesses as available; the highest-leverage experiments
-(library-service cumulative, lm-eval-harness wrapping) gain a
-"compare across harnesses" dimension for free. Re-running the
-existing $5 experiment across all three harnesses is then a high-
-ROI baseline establish.
+**First baseline cross-harness data point (`gpt-oss-20b:free`, 5
+coding scenarios, 2026-05-10):**
 
-**If Phase 7 is still in flight**: keep planning around Aider-only —
-the anchor's pass criteria don't depend on harness diversity, only
-benefit from it. The library-service experiment is still the highest-
-leverage next move.
+| Harness  | Pass rate |
+|----------|-----------|
+| aider    | 4/5 (80%) |
+| opencode | 2/5 (40%) |
+| pi_dev   | 4/5 (80%) |
+
+40 pp spread (over the 30 pp halt threshold in the Phase 7 prompt),
+investigated in `docs/phase7-divergence-finding.md`. Root cause:
+`gpt-oss-20b:free` hallucinates near-but-wrong paths under
+`/private/var/folders/...`; opencode's permission system correctly
+rejects them as external to `--dir`; the small model doesn't retry.
+aider/pi.dev have no per-call path gate so the model recovers.
+
+This is the cross-harness ablation working as designed — model
+sensitivity to harness surface shape, not a wiring bug. **Re-running
+the 5 scenarios through a stronger model is the next move** to see
+how much of that 40 pp gap collapses on a model that doesn't
+hallucinate paths.
+
+**Operational notes:**
+
+- `opencode` emits no `step_finish` for tool-less replies; the
+  harness's `parseOpencodeStream` returns zero tokens then. There is
+  an `opencode export <sessionID>` fallback wired in
+  `internal/eval/v2/library_service_opencode_harness.go` that
+  backfills tokens from the canonical session record. Confirmed
+  on the smoke run — without it, all "Reply with 'ok'"-style cells
+  would persist with `tokens_in=0`.
+- Both new harnesses re-export `OPEN_ROUTER_API_KEY` →
+  `OPENROUTER_API_KEY` for the child env, same convention as Aider.
+- Binary lookup: `$OPENCODE_BINARY` / `$PI_BINARY` override PATH;
+  schema docs in `docs/opencode-tiers.md` and
+  `docs/pidev-events.md`.
 
 ---
 
@@ -109,7 +130,9 @@ The eval-harness build loop (`docs/eval-harness-loop.md`) is **complete
 through TODO 18**. The harness, the grid runner, the scoring layer,
 cortex injection, multi-tier USD ceilings, the 5-coding-scenario
 library, the retry path, the experiment runs, and the CLI surfaces all
-shipped. **Skip TODOs 19/20** (opencode, pi.dev) — on indefinite hold.
+shipped. **Phase 7 (the original TODOs 19/20) also landed** — see
+the "Phase 7" section at the top for the OpenCode + PiDev harnesses
+and the first cross-harness data point.
 
 The findings memo (`docs/eval-findings-2026-05-10.md`) captures the
 diagnostic arc and the **per-eval-shape signal**:
@@ -317,16 +340,16 @@ supporting data.
 
 ---
 
-## MECE coverage matrix — the experiment space (5 dims)
+## MECE coverage matrix — the experiment space (6 dims)
 
-The design space is a five-dimensional product. Today we've covered a
+The design space is a six-dimensional product. Today we've covered a
 sliver. The matrix below makes the structure explicit so each future
 experiment fills *known* cells rather than discovering the gap by
 accident. The space grows as loops capture more of it; this section
 should be updated *by the loops themselves* (see "Multi-loop
 architecture" below — the `driver` loop owns this update).
 
-### The five axes
+### The six axes
 
 | dim | name | values | symbol set |
 |---|---|---|---|
@@ -335,11 +358,21 @@ architecture" below — the `driver` loop owns this update).
 | 3 | **Cortex config** | none · static bullets · Reflex-mined · Reflect-reranked · full pipeline | α, β, γ, δ, ε |
 | 4 | **Corpus source** | synthetic YAML · real captures · hybrid | 1, 2, 3 |
 | 5 | **Comparison baseline** | no context · good system prompt · RAG (non-cortex) | a, b, c |
+| 6 | **Harness** | aider · opencode · pi.dev | H₁, H₂, H₃ |
 
-Notional total: 5 × 4 × 5 × 3 × 3 = **900 cells**. Effective is smaller:
-dim 4 (corpus) is degenerate for configs α and β (no store needed),
-dim 5 collapses for some shapes, so the real space is closer to
-**~300 cells**.
+Notional total: 5 × 4 × 5 × 3 × 3 × 3 = **2700 cells**. Effective is
+smaller: dim 4 (corpus) is degenerate for configs α and β (no store
+needed), dim 5 collapses for some shapes, and dim 6 only changes the
+*tool surface* the model sees (so plenty of cells will be near-
+duplicates of their aider sibling) — the real space is closer to
+**~600 cells**.
+
+Dim 6 is new as of Phase 7 (2026-05-10). Until then, every ✅ in the
+matrix below was **implicitly H₁ (aider)**. The cross-harness column
+is the new front of work; the first 5-scenario triple-harness baseline
+landed showing a 40 pp gap on `gpt-oss-20b:free` — see the Phase 7
+section above and `docs/phase7-divergence-finding.md` for the
+investigation.
 
 We are not going to run all 300. We will run **the ones that move the
 anchor's four pass-criteria** — and the matrix's job is to make sure
@@ -370,8 +403,8 @@ EVAL  MODEL                α(none)   β(static)  γ(Reflex)  δ(Reflect)  ε(fu
 ```
 
 ~15 cells covered. ~85 in this 1×2×3 slice are open. The other dims
-(4 and 5) add depth behind every ✅ that turn out to matter for
-real-world translation.
+(4, 5, and now 6) add depth behind every ✅ that turn out to matter
+for real-world translation.
 
 ### Coverage on dim 4 (corpus source)
 
@@ -393,6 +426,20 @@ report.
 | a. No context | Bare query → model → response | ALL of the ✅ above |
 | b. Good system prompt | Query + hand-engineered system prompt that includes conventions | none |
 | c. RAG (non-cortex) | Query + chunks from a basic embedding retriever over project files | none |
+
+### Coverage on dim 6 (harness)
+
+| harness | description | cells covered today |
+|---|---|---|
+| H₁. aider | The original harness; `--message`-mode prompt injection, `--file` explicit add | ALL of the ✅ above (implicitly H₁ before Phase 7) |
+| H₂. opencode | `opencode run --format json --dir <workdir>` non-interactive; permission-gated tools | 5 baseline cells on `gpt-oss-20b:free` × A/coding, 2026-05-10 (2/5 pass) |
+| H₃. pi.dev | `pi --mode json --provider <p> --model <m> -p` non-interactive; relative paths resolved against cwd | 5 baseline cells on `gpt-oss-20b:free` × A/coding, 2026-05-10 (4/5 pass) |
+
+The dim-6 axis matters for *external validity* of every cortex
+claim. Cortex's static-bullet injection lives in the prompt, which
+each harness wraps differently before sending to the model. A lift
+result that holds across all three harnesses is a strong
+generalization claim; one that holds only on aider is a weak one.
 
 Every "lift" number we have is *against (a) no context*. The real
 deployment choice is "cortex vs (b) a well-written CLAUDE.md / system

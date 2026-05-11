@@ -274,7 +274,7 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 	if strat == StrategyCortex && len(scn.CortexContext) > 0 {
 		prefix := buildCortexPrefix(scn.CortexContext)
 		injectedTokens = approxTokenCount(prefix)
-		prompt = prefix + "\n\nTASK:\n" + prompt
+		prompt = prefix + "\n\n" + prompt
 	}
 
 	// Harnesses that bake the model at construction time (Aider) can
@@ -437,22 +437,36 @@ func isTransient429(err error) bool {
 	return false
 }
 
-// buildCortexPrefix renders the static-cortex injection block. Format
-// is deliberately plain — the agent sees structured bullets without
-// any extra framing we'd later have to remove during prompt-cleanup.
+// buildCortexPrefix renders the static-cortex injection block as an
+// inline natural-language sentence. Format chosen empirically (see
+// docs/phase7-cortex-regression-diagnostic.md):
+//
+//   - A `RELEVANT CONTEXT:` heading + dash-bulleted list destabilized
+//     gpt-oss-20b's output channel on pi.dev — the model emitted
+//     `<|channel|>commentary` markers inside tool names and pi could
+//     not dispatch them.
+//   - Dash bullets without a heading caused the model to emit zero
+//     tool calls and exit.
+//   - Inline "Hints: …" prose worked: clean tool names, edit applied,
+//     verifier passed.
+//
+// The bullets in scenario YAML are already self-contained sentences
+// terminated with periods, so joining with a single space reads
+// naturally. Returns "" when bullets is empty — caller checks length
+// before invoking.
 func buildCortexPrefix(bullets []string) string {
-	var b strings.Builder
-	b.WriteString("RELEVANT CONTEXT:\n")
+	var parts []string
 	for _, line := range bullets {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		b.WriteString("- ")
-		b.WriteString(line)
-		b.WriteString("\n")
+		parts = append(parts, line)
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Hints: " + strings.Join(parts, " ")
 }
 
 // approxTokenCount estimates token count from byte length using the
