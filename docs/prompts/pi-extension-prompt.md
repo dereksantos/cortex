@@ -269,6 +269,15 @@ If pi, node, or npm is missing, stop and tell the user which install
 command worked or didn't — the session cannot meaningfully progress
 without them.
 
+> **Note on `cortex` resolution.** The extension does not assume
+> `cortex` is on `PATH`. It resolves the binary at runtime via
+> `$CORTEX_BINARY` (preferred, set by the eval grid runner) and
+> falls back to `PATH` only when the env var is unset — see
+> **TODO 5** for the exact resolution order and the no-results
+> error shape. If you used the fallback build line above (`go
+> build -o /tmp/cortex …`), export `CORTEX_BINARY=/tmp/cortex`
+> before invoking pi locally so the extension finds it.
+
 ---
 
 ## Wiring decision (A vs B)
@@ -405,10 +414,12 @@ even when the extension code is skipped.
   block adjacent to the iteration protocol. Closes boundary
   smell S1.
 
-- [ ] **0.j Cross-reference `$CORTEX_BINARY` from prerequisites.**
+- [x] **0.j Cross-reference `$CORTEX_BINARY` from prerequisites.**
   Add a forward pointer in the prerequisites block to TODO 5's
   binary-resolution rule so the dependency is discoverable from
-  the install checks. Closes boundary smells S3, S4.
+  the install checks. Closes boundary smell S4. (S3 — "read
+  end-to-end" duplication — collapses into overlap O1, closed
+  by 0.f.)
 
 - [ ] **0.k Update the Aider-only-signal project-memory note.**
   Edit
