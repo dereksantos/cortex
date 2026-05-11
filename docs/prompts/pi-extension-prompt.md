@@ -516,7 +516,7 @@ even when the extension code is skipped.
   in Go. **Done:** `cortex search "auth" --format json | jq .` is
   valid JSON; existing text-output behavior unchanged.
 
-- [ ] **5. Implement `cortex_recall.run`.** From the extension,
+- [x] **5. Implement `cortex_recall.run`.** From the extension,
   shell out to `cortex search "<query>" --format json --limit <n>`.
   Resolve the cortex binary via `$CORTEX_BINARY` env var (preferred,
   set by the eval grid) or `PATH` lookup as fallback. Format the
