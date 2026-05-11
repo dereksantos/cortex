@@ -440,7 +440,7 @@ even when the extension code is skipped.
 
 ### Phase 8.A — Extension scaffold
 
-- [ ] **1. Probe pi's extension API.** Write a throwaway hello-
+- [x] **1. Probe pi's extension API.** Write a throwaway hello-
   world extension at `packages/pi-cortex-probe/index.ts` that
   registers one tool `pi_cortex_probe` returning the constant
   string `"hello from cortex probe"`. Install via the project-local
