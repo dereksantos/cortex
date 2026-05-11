@@ -369,7 +369,7 @@ without them.
   against held-out prompts before deciding`, `≤ 2/5 = decisive
   invalidation`. Closes overlap O4.
 
-- [ ] **0.h Reorganize "Hard constraints" by part.** Group the 8
+- [x] **0.h Reorganize "Hard constraints" by part.** Group the 8
   constraints under IDENTITY / METHOD / CONTRACT subheadings so
   reviewers find rules by lens, not by accident of authorship.
   Closes boundary smell S2.
