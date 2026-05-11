@@ -233,7 +233,9 @@ constraints" #1.
 
 7. **Structured outputs.** Every CellResult goes to both SQLite and
    `.cortex/db/cell_results.jsonl`. The `PersistCell` path enforces
-   this; don't bypass it.
+   this; don't bypass it. Pi `tool_call` capture rows have a
+   **fixed schema** (see TODO 7) — Dream sources will read them as
+   structured data, so the shape is part of the contract.
 
 8. **Extension installs are scoped to the project's `.pi/extensions/`
    by default.** Don't write to `~/.pi/agent/extensions/` from the
@@ -312,7 +314,7 @@ without them.
   `cortex_recall` output in its next turn on ≥ 3 of 5 scenarios.
   Non-empty output is necessary but not sufficient. Closes gap G3.
 
-- [ ] **0.d Define the `pi_tool_call` capture row schema.** Insert
+- [x] **0.d Define the `pi_tool_call` capture row schema.** Insert
   into TODO 7 (and the CONTRACT-level structured-outputs constraint)
   the required shape of captured rows:
   `{tool_name, args_redacted, result_summary, captured_at,
@@ -455,15 +457,29 @@ without them.
 ### Phase 8.C — Capture hook
 
 - [ ] **7. Wire `pi.on("tool_call", …)` to `cortex capture`.**
-  After each pi tool call, the extension shells out to
-  `cortex capture --type pi_tool_call --content
-  '<json-redacted-event>'`. Redaction: drop any field named
-  `api_key`, `*_token`, `*_secret`. Don't capture noisy tools
-  (`read`, `glob`) — gate on a small allowlist (`edit`, `write`,
-  `bash`, plus `cortex_recall` itself). **Done:** running a pi
-  session, the project's `.cortex/db/events.jsonl` (or wherever
-  capture lands) gains rows tagged `pi_tool_call` after the
-  session.
+  After each allowlisted pi tool call, the extension shells out
+  to `cortex capture --type pi_tool_call --content
+  '<json-redacted-event>'` where the JSON payload conforms to
+  this **required schema**:
+  ```json
+  {
+    "tool_name":      "edit",           // required, string: pi tool name
+    "args_redacted":  { /* ... */ },    // required, object: tool args, secrets stripped
+    "result_summary": "...",            // required, string ≤ 500 chars; truncate longer
+    "captured_at":    "2026-05-10T18:04:00Z", // required, ISO-8601 UTC
+    "session_id":     "..."             // optional, string: pi session id if exposed
+  }
+  ```
+  Redaction: drop any field whose key matches `api_key`,
+  `*_token`, `*_secret`; also redact values matching common
+  key shapes (e.g. `sk-or-…` for OpenRouter). Capture
+  allowlist: `edit`, `write`, `bash`, `cortex_recall`. Skip
+  `read`, `glob`, and any unlisted tool — they bury the
+  signal in noise. **Done:** running a pi session, the
+  project's `.cortex/db/events.jsonl` (or wherever capture
+  lands) gains rows tagged `pi_tool_call` matching the schema
+  above byte-for-byte; downstream Dream sources can parse
+  them without bespoke handling.
 
 ### Phase 8.D — Grid integration
 
