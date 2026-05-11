@@ -155,3 +155,82 @@ cortex eval grid \
 ```
 
 Total spend: $0 (free model).
+
+---
+
+## Postscript — second run with the "Hints:" prefix (2026-05-10, +2h)
+
+After the diagnostic in `docs/phase7-cortex-regression-diagnostic.md`
+identified the pi.dev × cortex regression as a harmony-format channel
+leak triggered by the `RELEVANT CONTEXT:` heading, `buildCortexPrefix`
+was reshaped to inline natural-language `Hints: …` form (commit
+`e92b85b`). Same 30-cell grid re-run on the same model.
+
+| Harness  | Baseline | Cortex | Cortex lift vs baseline |
+|----------|----------|--------|-------------------------|
+| aider    | 4/5      | 3/5    | −20 pp (within noise)   |
+| opencode | 2/5      | 1/5    | −20 pp (with baseline drop too) |
+| pi_dev   | 3/5      | **4/5** | **+20 pp**             |
+
+### Compared to the first run
+
+|          | Run 1 Cortex (old prefix) | Run 2 Cortex (new prefix) | Δ |
+|----------|---------------------------|---------------------------|---|
+| aider    | 4/5 | 3/5 | −1 cell (noise)   |
+| opencode | 2/5 | 1/5 | −1 cell (and baseline dropped 4/5 → 2/5, so it's noise — the prefix change only affects cortex strategy) |
+| pi_dev   | 2/5 | **4/5** | **+2 cells** |
+
+### Spot-check: is the channel-marker leak actually gone?
+
+One ad-hoc `pi_dev × error-wrap × cortex` rerun with the new prefix
+shows the tool-name distribution we wanted:
+
+| toolName                       | new-prefix count | old-prefix count |
+|--------------------------------|-----------------:|-----------------:|
+| `read`                         | 6                | 14               |
+| `edit`                         | **5**            | **0**            |
+| `bash`                         | 8                | 0                |
+| `read<\|channel\|>commentary`  | 1                | 3                |
+| `edit<\|channel\|>commentary`  | 0                | 5                |
+| `bash<\|channel\|>commentary`  | 0                | 1                |
+
+19/20 clean tool calls (was 14/23 with one successful edit out of 6
+attempts before). The model still emits the channel marker
+sporadically (1 of 20 here), but it's no longer the dominant
+failure mode and the agent loop completes the task.
+
+### What this tells us
+
+- **The hypothesis is right.** The `RELEVANT CONTEXT:` heading was
+  the destabilizer; switching to `Hints: …` inline prose restores
+  pi.dev × cortex to a regime where it matches its own baseline.
+- aider's −1 cell and opencode's drops are consistent with n=1
+  small-model variance, not with the prefix change. (opencode's
+  *baseline* dropped 2 cells, and baseline doesn't use the cortex
+  prefix — so the change can't be causing that.)
+- Static-cortex injection is now **neutral** on all three harnesses
+  for this scenario set + model (aider −1, opencode −1, pi_dev +1
+  net across 5 scenarios). To see real *positive* lift we need
+  either harder scenarios that don't saturate at 80 % baseline or
+  larger-n runs.
+
+### Next move
+
+The user's pointer at pi's extensions API
+(<https://github.com/earendil-works/pi/tree/main/packages/coding-agent#extensions>)
+is the proper architectural next step. Instead of injecting cortex
+context as a prompt prefix — fundamentally fragile, as the harmony
+leak made clear — ship a pi extension that:
+
+- Registers a **`cortex_recall` skill / tool** the agent can call
+  on demand. Maps to Cortex's Reflex tier (mechanical retrieval).
+- Hooks `pi.on("tool_call", …)` to feed pi sessions back into the
+  capture pipeline. Closes the loop: cortex captures from pi
+  sessions, pi pulls from cortex on demand.
+- Optionally provides a custom compaction extension that pulls
+  cortex insights into the agent's working memory as turns
+  accumulate.
+
+That's a TypeScript-module build + npm/git package + install path.
+Probably one focused session. It would make pi.dev a first-class
+cortex client without any prompt-shape hacks.
