@@ -73,8 +73,15 @@ A run lands as **decisive extension integration** when:
    a `cortex_recall` tool call — visible in pi's `--mode json`
    event stream as a `tool_execution_end` with `toolName:
    "cortex_recall"` and `isError: false`.
-3. The `cortex_recall` output is non-empty and comes from a real
-   cortex search (not a hardcoded stub).
+3. The `cortex_recall` output is non-empty, comes from a real
+   cortex search (not a hardcoded stub), **and** the agent
+   visibly cites or acts on the recalled content in its next
+   turn on ≥ 3 of 5 coding scenarios. Liveness (non-empty
+   result) is necessary but not sufficient — a tool whose
+   output the model ignores is not an integration. Measured
+   from pi's `--mode json` event stream: look for the
+   recalled phrasing in the agent's `assistant_message` or in
+   the arguments of a subsequent `edit` / `write` tool call.
 4. Cross-harness eval grid: 5 coding scenarios ×
    `pi_dev × {baseline, cortex_extension}` × `gpt-oss-20b:free` →
    10 cells, all with `tokens_in > 0`, no panics, both SQLite and
@@ -300,7 +307,7 @@ without them.
   prompt-prefix path as the **compatibility layer** for harnesses
   without an extensions API (Aider today). Closes gap G2.
 
-- [ ] **0.c Tighten the recall quality criterion.** Edit pass-
+- [x] **0.c Tighten the recall quality criterion.** Edit pass-
   criterion #3 to require: the agent visibly cites or acts on
   `cortex_recall` output in its next turn on ≥ 3 of 5 scenarios.
   Non-empty output is necessary but not sufficient. Closes gap G3.
