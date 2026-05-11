@@ -286,9 +286,9 @@ func opencodeProviderFromModel(model string) string {
 type opencodeEvent struct {
 	Type string `json:"type"`
 	Part struct {
-		Tool   string `json:"tool"`   // present on tool_use
-		Reason string `json:"reason"` // present on step_finish
-		Cost   *float64 `json:"cost"` // pointer so missing != 0
+		Tool   string   `json:"tool"`   // present on tool_use
+		Reason string   `json:"reason"` // present on step_finish
+		Cost   *float64 `json:"cost"`   // pointer so missing != 0
 		Tokens struct {
 			Input     int `json:"input"`
 			Output    int `json:"output"`

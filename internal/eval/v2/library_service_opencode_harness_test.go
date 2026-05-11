@@ -305,8 +305,8 @@ func TestParseOpencodeStream(t *testing.T) {
 			wantFilesChanged: []string{"a.go", "b.go"},
 		},
 		{
-			name: "free model: cost field zero",
-			in:   `{"type":"step_finish","part":{"tokens":{"input":42,"output":7},"cost":0}}`,
+			name:    "free model: cost field zero",
+			in:      `{"type":"step_finish","part":{"tokens":{"input":42,"output":7},"cost":0}}`,
 			wantIn:  42,
 			wantOut: 7,
 		},

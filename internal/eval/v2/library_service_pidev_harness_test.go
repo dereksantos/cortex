@@ -448,4 +448,3 @@ func main() {
 		t.Errorf("ModelEcho=%q want openrouter/openai/gpt-oss-20b:free", res.ModelEcho)
 	}
 }
-
