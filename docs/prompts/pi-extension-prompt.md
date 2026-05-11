@@ -216,6 +216,91 @@ without them.
 
 > Each step is one tick. Don't merge steps.
 
+### Phase 8.0 — Prompt hygiene (run before Phase 8.A)
+
+> Closes the MECE decomposition findings (overlaps, gaps, boundary
+> smells) surfaced by `/decompose-prompt` so the engineering ticks
+> operate on a clean prompt. Each step is one tick. Steps are
+> doc-only edits to this file (plus 0.k which touches a memory
+> note); gate is `go build ./...`.
+
+- [ ] **0.a Add IDENTITY block.** Insert one paragraph near the top
+  of this file declaring the executing agent's persona — senior
+  Go/TS engineer landing Phase 8 of cortex eval-harness work,
+  conservative on scope, terse in reporting, never claims to be
+  human, never speculates on cost. Closes decomposition gap G1.
+
+- [ ] **0.b Add cohesive-integration paragraph.** Insert a "How this
+  fits cortex's cognitive architecture" section near the top tying
+  `cortex_recall` to **Reflex** (mechanical, <20ms target),
+  the `tool_call` capture hook to the **Think/Dream** input feed
+  (pi sessions become visible to background modes), and naming the
+  prompt-prefix path as the **compatibility layer** for harnesses
+  without an extensions API (Aider today). Closes gap G2.
+
+- [ ] **0.c Tighten the recall quality criterion.** Edit pass-
+  criterion #3 to require: the agent visibly cites or acts on
+  `cortex_recall` output in its next turn on ≥ 3 of 5 scenarios.
+  Non-empty output is necessary but not sufficient. Closes gap G3.
+
+- [ ] **0.d Define the `pi_tool_call` capture row schema.** Insert
+  into TODO 7 (and the CONTRACT-level structured-outputs constraint)
+  the required shape of captured rows:
+  `{tool_name, args_redacted, result_summary, captured_at,
+  session_id?}`. Downstream Dream sources need a stable shape.
+  Closes gap G4.
+
+- [ ] **0.e Add a rollback procedure.** Insert a "Rollback if
+  regression" subsection: if TODO 10's A/B regresses below 4/5,
+  ship the extension behind `CORTEX_PI_EXTENSION=1` env gate
+  (default off), document the result in
+  `docs/phase8-extension-vs-prefix.md`, do not revert the branch.
+  Closes gap G5.
+
+- [ ] **0.f Dedupe duplicated rules.** One canonical home each;
+  other locations carry a short reference:
+  - "Read end-to-end" → keep in iteration-protocol step 1 only.
+  - Secret-redaction → keep in hard constraint #4; TODO 7
+    references it.
+  - Project-local install location → keep in hard constraint #8;
+    TODO 9 and anti-checklist reference it.
+  - `StrategyCortexExtension` enum → keep in TODO 8; hard
+    constraint #1 and "Where work plugs in" reference it.
+  Closes overlaps O1, O2, O3, O5. Run after 0.h so the constraint
+  numbering is stable.
+
+- [ ] **0.g Define the 3/5 pass-rate boundary.** Edit pass criteria
+  to a closed ternary: `≥ 4/5 = pass`, `3/5 = inconclusive → re-run
+  against held-out prompts before deciding`, `≤ 2/5 = decisive
+  invalidation`. Closes overlap O4.
+
+- [ ] **0.h Reorganize "Hard constraints" by part.** Group the 8
+  constraints under IDENTITY / METHOD / CONTRACT subheadings so
+  reviewers find rules by lens, not by accident of authorship.
+  Closes boundary smell S2.
+
+- [ ] **0.i Split "Where the work plugs in".** Keep package paths
+  and API surface in the CONTEXT-framing section; move the A-vs-B
+  wiring choice (and the "pick A" recommendation) into a METHOD
+  block adjacent to the iteration protocol. Closes boundary
+  smell S1.
+
+- [ ] **0.j Cross-reference `$CORTEX_BINARY` from prerequisites.**
+  Add a forward pointer in the prerequisites block to TODO 5's
+  binary-resolution rule so the dependency is discoverable from
+  the install checks. Closes boundary smells S3, S4.
+
+- [ ] **0.k Update the Aider-only-signal project-memory note.**
+  Edit
+  `~/.claude/projects/-Users-dereksantos-eng-projects-cortex/memory/project_eval_signal_pivot_2026_05.md`
+  (and `MEMORY.md` index if its hook line is now misleading): the
+  2026-05-10 pivot away from pi.dev applied to signal-grid
+  generation only; pi.dev integration / extension work (this
+  Phase 8) is back in scope as of the same date. Record the
+  resumption so future sessions don't re-skip pi.dev work on
+  stale memory. Closes the pivot/scope tension surfaced during
+  decomposition.
+
 ### Phase 8.A — Extension scaffold
 
 - [ ] **1. Probe pi's extension API.** Write a throwaway hello-
