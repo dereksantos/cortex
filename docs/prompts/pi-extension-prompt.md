@@ -97,6 +97,47 @@ A run lands as **decisive invalidation** when:
 
 ---
 
+## How this fits cortex's cognitive architecture
+
+Phase 8 is not a one-off harness adapter. It is the canonical
+shape of cortex's integration with any agent harness that
+exposes an extensions API:
+
+- **`cortex_recall` is the Reflex entrypoint.** Reflex (per
+  `CLAUDE.md`) is cortex's mechanical retrieval mode —
+  embedding + tag + recency, <20ms target, no LLM in the
+  lookup path. The pi extension exposes Reflex as a tool the
+  agent pulls on demand. The agent decides *when* to recall;
+  cortex decides *what* to return. No autonomous injection
+  happens inside the tool body.
+
+- **The `tool_call` hook is the Think / Dream input feed.**
+  Pi sessions today are invisible to cortex's background
+  modes. Hooking `pi.on("tool_call", …)` and shelling out to
+  `cortex capture` makes every pi `edit` / `write` / `bash` /
+  `cortex_recall` event a first-class row in the event log —
+  so Think can later weight session topics from real pi work,
+  and Dream can mine pi tool traces alongside project files,
+  git, and Claude history (per the Dream sources table in
+  `CLAUDE.md`).
+
+- **The prompt-prefix path becomes a compatibility layer.**
+  Inline `Hints: …` prefix was the only integration available
+  before Phase 7 surfaced pi.dev's extensions API. Going
+  forward the prefix is the fallback for harnesses without
+  an extensions API (Aider today). Both paths must coexist —
+  hard constraint #2 forbids regressing the prefix path on
+  Aider / OpenCode / pi_dev — but the extension is the
+  integration of record.
+
+This is why the eval grid carries `cortex_extension` as a
+distinct `ContextStrategy` value (TODO 8) rather than folding
+it into `cortex`: we need to A/B the extension against the
+prefix so future harness work can pick the right integration
+shape per harness.
+
+---
+
 ## Where the work plugs in
 
 ### pi side
@@ -251,7 +292,7 @@ without them.
   conservative on scope, terse in reporting, never claims to be
   human, never speculates on cost. Closes decomposition gap G1.
 
-- [ ] **0.b Add cohesive-integration paragraph.** Insert a "How this
+- [x] **0.b Add cohesive-integration paragraph.** Insert a "How this
   fits cortex's cognitive architecture" section near the top tying
   `cortex_recall` to **Reflex** (mechanical, <20ms target),
   the `tool_call` capture hook to the **Think/Dream** input feed
