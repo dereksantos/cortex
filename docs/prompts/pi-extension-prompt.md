@@ -571,7 +571,7 @@ even when the extension code is skipped.
 
 ### Phase 8.D — Grid integration
 
-- [ ] **8. Add `StrategyCortexExtension` to `cellresult.go`.** New
+- [x] **8. Add `StrategyCortexExtension` to `cellresult.go`.** New
   constant `StrategyCortexExtension = "cortex_extension"`. Update
   `Validate()` and any switch statements that enumerate strategies.
   Existing baseline / cortex tests stay green. **Done:** `go build`
