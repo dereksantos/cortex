@@ -463,7 +463,7 @@ even when the extension code is skipped.
 
 ### Phase 8.B — cortex_recall tool
 
-- [ ] **3. Define the `cortex_recall` tool schema.** In
+- [x] **3. Define the `cortex_recall` tool schema.** In
   `extensions/cortex/index.ts`, using the real pi v0.74.0 API
   (see `docs/pi-extension-notes.md`):
   ```ts
