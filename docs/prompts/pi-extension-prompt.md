@@ -590,7 +590,7 @@ even when the extension code is skipped.
   `pi_dev × cortex_extension` cell with `tokens_in > 0`, no
   panic, both persistence backends written.
 
-- [ ] **10. Cross-harness A/B run.** 5 coding scenarios ×
+- [x] **10. Cross-harness A/B run.** 5 coding scenarios ×
   pi_dev × {baseline, cortex_extension, cortex} ×
   `openai/gpt-oss-20b:free` = 15 cells. Compare pass-rates:
   ```
@@ -617,7 +617,7 @@ even when the extension code is skipped.
   don't expose an extension API." **Done:** matrix reflects the
   new shape, resume prompt mentions the extension landed.
 
-- [ ] **12. Stop the session.** All boxes checked. Print:
+- [x] **12. Stop the session.** All boxes checked. Print:
   - The 12-step record (commits landed).
   - The A/B result (extension vs prefix, baseline).
   - Whether the model actually called `cortex_recall` and how
