@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import cortexExtension from "../extensions/cortex/index.ts";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import cortexExtension, {
+  formatRecallResults,
+  resolveCortexBinary,
+  type RecallEntry,
+} from "../extensions/cortex/index.ts";
 
 type RegisteredTool = {
   name: string;
@@ -17,7 +24,7 @@ type RegisteredTool = {
     signal: unknown,
     onUpdate: unknown,
     ctx: unknown,
-  ) => Promise<{ content: Array<{ type: string; text: string }>; details: unknown }>;
+  ) => Promise<{ content: Array<{ type: string; text: string }>; details: Record<string, unknown> }>;
 };
 
 function loadExtensionAndCapture(): { tools: RegisteredTool[]; events: string[] } {
@@ -32,57 +39,179 @@ function loadExtensionAndCapture(): { tools: RegisteredTool[]; events: string[] 
     },
     registerCommand: () => {},
   };
-  // The ExtensionAPI surface is wider than this test mock; cast at the boundary.
   cortexExtension(fakePi as unknown as Parameters<typeof cortexExtension>[0]);
   return { tools, events };
 }
 
-test("cortex_recall registers exactly once", () => {
+test("cortex_recall registers exactly once with the real pi v0.74 API shape", () => {
   const { tools } = loadExtensionAndCapture();
-  assert.strictEqual(tools.length, 1, "factory must register exactly one tool");
+  assert.strictEqual(tools.length, 1);
   assert.strictEqual(tools[0].name, "cortex_recall");
   assert.strictEqual(tools[0].label, "Cortex Recall");
-  assert.ok(tools[0].description.length > 0, "tool must have a non-empty description");
+  assert.ok(tools[0].description.length > 100, "description must guide tool-call decisions");
 });
 
-test("cortex_recall schema declares required query and optional bounded limit", () => {
+test("schema declares required query and optional bounded limit", () => {
   const { tools } = loadExtensionAndCapture();
   const tool = tools[0];
-
-  assert.strictEqual(tool.parameters.type, "object", "parameters must be an object schema");
-  assert.ok(tool.parameters.properties.query, "schema must declare a query property");
-  assert.strictEqual(tool.parameters.properties.query.type, "string", "query must be a string");
-
-  assert.ok(tool.parameters.properties.limit, "schema must declare a limit property");
-  assert.strictEqual(tool.parameters.properties.limit.type, "number", "limit must be a number");
-  assert.strictEqual(tool.parameters.properties.limit.minimum, 1, "limit must be >= 1");
-  assert.strictEqual(tool.parameters.properties.limit.maximum, 50, "limit must be <= 50");
-
-  // typebox emits `required: [...]` only for non-Optional fields.
-  assert.deepStrictEqual(tool.parameters.required, ["query"], "only query is required");
-});
-
-test("cortex_recall stubbed execute returns a non-empty text content item", async () => {
-  const { tools } = loadExtensionAndCapture();
-  const result = await tools[0].execute(
-    "tool-call-id-1",
-    { query: "authentication", limit: 3 },
-    undefined,
-    undefined,
-    {},
-  );
-  assert.ok(Array.isArray(result.content), "result.content must be an array");
-  assert.strictEqual(result.content.length, 1, "stub returns exactly one content item");
-  assert.strictEqual(result.content[0].type, "text", "content item must be text");
-  assert.ok(result.content[0].text.length > 0, "content text must be non-empty");
-  assert.deepStrictEqual(result.details, {}, "stub details is empty object");
+  assert.strictEqual(tool.parameters.type, "object");
+  assert.strictEqual(tool.parameters.properties.query.type, "string");
+  assert.strictEqual(tool.parameters.properties.limit.type, "number");
+  assert.strictEqual(tool.parameters.properties.limit.minimum, 1);
+  assert.strictEqual(tool.parameters.properties.limit.maximum, 50);
+  assert.deepStrictEqual(tool.parameters.required, ["query"]);
 });
 
 test("factory does not hook events yet (TODO 7 wires tool_call)", () => {
   const { events } = loadExtensionAndCapture();
-  assert.deepStrictEqual(events, [], "no event hooks expected before TODO 7");
+  assert.deepStrictEqual(events, []);
+});
+
+test("resolveCortexBinary prefers $CORTEX_BINARY over default", () => {
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = "/tmp/some/cortex";
+    assert.strictEqual(resolveCortexBinary(), "/tmp/some/cortex");
+
+    process.env.CORTEX_BINARY = "  /padded/path  ";
+    assert.strictEqual(resolveCortexBinary(), "/padded/path", "must trim whitespace");
+
+    delete process.env.CORTEX_BINARY;
+    assert.strictEqual(resolveCortexBinary(), "cortex", "falls back to the bare name for PATH lookup");
+
+    process.env.CORTEX_BINARY = "";
+    assert.strictEqual(resolveCortexBinary(), "cortex", "empty env var falls back to default");
+  } finally {
+    if (prior === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = prior;
+    }
+  }
+});
+
+test("formatRecallResults: empty / non-array input returns the no-results sentence", () => {
+  assert.strictEqual(formatRecallResults([]), "No relevant context captured yet.");
+  // Defensive: callers should always pass an array, but if they
+  // pass null/undefined the formatter must not throw.
+  assert.strictEqual(
+    formatRecallResults(null as unknown as RecallEntry[]),
+    "No relevant context captured yet.",
+  );
+});
+
+test("formatRecallResults: one entry renders as a single-item list", () => {
+  const text = formatRecallResults([
+    {
+      id: "1",
+      content: "Use pgx not database/sql.",
+      score: 0.87,
+      captured_at: "2026-05-10T18:04:00Z",
+      category: "decision",
+    },
+  ]);
+  assert.match(text, /Found 1 relevant context item:/);
+  assert.match(text, /1\. \*\*\[decision\]\*\* _\(87%\)_ Use pgx not database\/sql\./);
+});
+
+test("formatRecallResults: pluralizes header and lists multiple entries", () => {
+  const text = formatRecallResults([
+    { id: "1", content: "A", score: 0.9, captured_at: "2026-05-10T18:04:00Z" },
+    { id: "2", content: "B", score: 0, captured_at: "2026-05-10T18:04:00Z" },
+  ]);
+  assert.match(text, /Found 2 relevant context items:/);
+  assert.match(text, /^1\. .*A$/m, "entry 1 must end with A on its own line");
+  assert.match(text, /^2\. B$/m, "entry 2 must be the bare numbered line with B");
+  // Entries must appear in order.
+  const ixA = text.indexOf(" A");
+  const ixB = text.indexOf(" B");
+  assert.ok(ixA > -1 && ixB > -1 && ixA < ixB, "A must precede B in the rendered list");
+  // Score 0 should not render a percentage suffix.
+  assert.ok(!/_\(0%\)_/.test(text), "score=0 should not render a percentage");
+});
+
+test("cortex_recall.execute returns a benign result when the binary errors", async () => {
+  const { tools } = loadExtensionAndCapture();
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = "/nonexistent/cortex-binary-for-test";
+    const result = await tools[0].execute(
+      "tool-call-id-1",
+      { query: "anything" },
+      undefined,
+      undefined,
+      {},
+    );
+    assert.strictEqual(result.content.length, 1);
+    assert.strictEqual(result.content[0].type, "text");
+    assert.match(
+      result.content[0].text,
+      /No relevant context captured yet/,
+      "must degrade to the no-results sentence so the agent loop continues",
+    );
+    assert.ok(
+      typeof result.details.error === "string" && (result.details.error as string).length > 0,
+      "details.error must capture the underlying message for debugging",
+    );
+  } finally {
+    if (prior === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = prior;
+    }
+  }
+});
+
+test("cortex_recall.execute shells out and renders the JSON output as markdown", async () => {
+  const { tools } = loadExtensionAndCapture();
+  const dir = mkdtempSync(join(tmpdir(), "cortex-recall-test-"));
+  const fakeCortex = join(dir, "cortex-fake");
+  // Tiny shell script that ignores its args and emits the JSON
+  // shape cortex_recall expects.
+  writeFileSync(
+    fakeCortex,
+    `#!/bin/sh
+cat <<'EOF'
+[
+  {
+    "id": "ev-1",
+    "content": "Use pgx not database/sql.",
+    "score": 0.91,
+    "captured_at": "2026-05-10T18:04:00Z",
+    "category": "decision"
+  }
+]
+EOF
+`,
+    "utf8",
+  );
+  chmodSync(fakeCortex, 0o755);
+
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = fakeCortex;
+    const result = await tools[0].execute(
+      "tool-call-id-fake",
+      { query: "pgx", limit: 3 },
+      undefined,
+      undefined,
+      {},
+    );
+    assert.strictEqual(result.content[0].type, "text");
+    assert.match(result.content[0].text, /Found 1 relevant context item:/);
+    assert.match(result.content[0].text, /Use pgx not database\/sql\./);
+    assert.strictEqual(result.details.count, 1);
+    assert.ok(Array.isArray(result.details.entries));
+  } finally {
+    if (prior === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = prior;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("factory has a default export", () => {
-  assert.strictEqual(typeof cortexExtension, "function", "default export must be the factory function");
+  assert.strictEqual(typeof cortexExtension, "function");
 });
