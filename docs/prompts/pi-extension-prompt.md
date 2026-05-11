@@ -86,10 +86,16 @@ A run lands as **decisive extension integration** when:
    `pi_dev × {baseline, cortex_extension}` × `gpt-oss-20b:free` →
    10 cells, all with `tokens_in > 0`, no panics, both SQLite and
    JSONL rows present.
-5. pi_dev cortex pass-rate via the extension ≥ pi_dev cortex
-   pass-rate via the `Hints:` prefix (i.e., we don't regress on the
-   integration win Phase 7 delivered). Either matching at 4/5 or
-   beating it.
+5. pi_dev cortex-extension pass-rate, as a closed ternary:
+   - **≥ 4/5 = pass.** Matches or beats the `Hints:` prefix
+     at 4/5. Flip the box.
+   - **= 3/5 = inconclusive.** Do **not** flip the box and
+     do **not** invalidate. Re-run against a held-out
+     scenario set distinct from the 5 used in TODO 10. If
+     the held-out run is ≥ 3/5 → pass; otherwise → decisive
+     invalidation (rollback per the section below).
+   - **≤ 2/5 = decisive invalidation.** Engage the rollback
+     procedure.
 
 A run lands as **decisive invalidation** when:
 
@@ -99,8 +105,10 @@ A run lands as **decisive invalidation** when:
 - Cortex search returns junk (e.g. only seed files, no real captured
   insights) — the integration is mechanically wired but provides no
   signal. Re-seed the cortex store before flipping the box.
-- pi_dev cortex-extension pass-rate < 3/5 (worse than the
-  `Hints:` prefix at 4/5).
+- pi_dev cortex-extension pass-rate ≤ 2/5 on the TODO 10
+  scenarios. The 3/5 case is **inconclusive** (see pass
+  criterion #5 above) — do not invalidate on 3/5 without
+  held-out evidence.
 
 ---
 
@@ -340,7 +348,7 @@ without them.
   Closes overlaps O1, O2, O3, O5. Run after 0.h so the constraint
   numbering is stable.
 
-- [ ] **0.g Define the 3/5 pass-rate boundary.** Edit pass criteria
+- [x] **0.g Define the 3/5 pass-rate boundary.** Edit pass criteria
   to a closed ternary: `≥ 4/5 = pass`, `3/5 = inconclusive → re-run
   against held-out prompts before deciding`, `≤ 2/5 = decisive
   invalidation`. Closes overlap O4.
