@@ -508,7 +508,7 @@ even when the extension code is skipped.
   `{query: "...", limit?: 1..50}`, and a stubbed `execute`
   returns a non-empty text content item.
 
-- [ ] **4. Add `cortex search --format json` to the cortex CLI.**
+- [x] **4. Add `cortex search --format json` to the cortex CLI.**
   File: `cmd/cortex/commands/search.go` (or wherever `cortex search`
   lives). Emit a JSON array of `{id, content, score, captured_at,
   tags?}` objects on stdout when `--format json` is passed.
