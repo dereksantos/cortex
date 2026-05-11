@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -40,11 +41,17 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	searchFlags := flag.NewFlagSet("search", flag.ExitOnError)
 	modeFlag := searchFlags.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
 	limitFlag := searchFlags.Int("limit", 5, "Maximum number of results")
+	formatFlag := searchFlags.String("format", "text", "Output format: text (default, human-readable) or json (machine-readable, used by pi-cortex extension)")
 	searchFlags.Parse(ctx.Args)
+
+	if *formatFlag != "text" && *formatFlag != "json" {
+		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] [--format=text|json] <query>\n")
+		return fmt.Errorf("unknown --format value: %q (expected text or json)", *formatFlag)
+	}
 
 	args := searchFlags.Args()
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] <query>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] [--format=text|json] <query>\n")
 		return fmt.Errorf("missing query argument")
 	}
 
@@ -121,6 +128,26 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		modeStr = "Full (Reflex + Reflect)"
 	}
 
+	// JSON output path (used by the pi-cortex extension). Build a
+	// normalized recallEntry list from whichever search path
+	// produced results, emit a single JSON array on stdout, and
+	// return. No text-formatted lines hit stdout in this mode —
+	// stdout is JSON-pure so consumers can pipe through jq.
+	if *formatFlag == "json" {
+		entries := make([]recallEntry, 0, *limitFlag)
+		if result != nil && len(result.Results) > 0 {
+			for _, r := range result.Results {
+				entries = append(entries, recallFromResult(r))
+			}
+		} else {
+			eventResults := runFallbackEventSearch(store, query, *limitFlag)
+			for _, e := range eventResults {
+				entries = append(entries, recallFromEvent(e))
+			}
+		}
+		return emitRecallJSON(os.Stdout, entries)
+	}
+
 	// Display results
 	if result == nil || len(result.Results) == 0 {
 		// Fallback: search events directly when Reflex returns nothing.
@@ -163,6 +190,87 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		fmt.Println()
 	}
 
+	return nil
+}
+
+// recallEntry is the normalized JSON shape emitted by
+// `cortex search --format json`. Both the Reflex pipeline
+// (cognition.Result) and the event-search fallback
+// (*events.Event) map into this so downstream consumers
+// (the pi-cortex extension, eval scripts) see one stable
+// schema.
+//
+// `tags`, `category`, and `source` are emitted only when
+// non-empty / non-zero.
+type recallEntry struct {
+	ID         string   `json:"id"`
+	Content    string   `json:"content"`
+	Score      float64  `json:"score"`
+	CapturedAt string   `json:"captured_at"`
+	Tags       []string `json:"tags,omitempty"`
+	Category   string   `json:"category,omitempty"`
+	Source     string   `json:"source,omitempty"`
+}
+
+func recallFromResult(r cognition.Result) recallEntry {
+	return recallEntry{
+		ID:         r.ID,
+		Content:    r.Content,
+		Score:      r.Score,
+		CapturedAt: r.Timestamp.UTC().Format(time.RFC3339),
+		Tags:       r.Tags,
+		Category:   r.Category,
+		Source:     string(r.Source),
+	}
+}
+
+func recallFromEvent(e *events.Event) recallEntry {
+	content := e.ToolResult
+	if content == "" {
+		content = e.ToolName
+	}
+	if content == "" {
+		content = e.Prompt
+	}
+	return recallEntry{
+		ID:         e.ID,
+		Content:    content,
+		Score:      0,
+		CapturedAt: e.Timestamp.UTC().Format(time.RFC3339),
+		Source:     string(e.Source),
+		Category:   string(e.EventType),
+	}
+}
+
+// runFallbackEventSearch mirrors the event-search fallback
+// the text path uses when Reflex returns nothing.
+func runFallbackEventSearch(store *storage.Storage, query string, limit int) []*events.Event {
+	terms := intcognition.ExtractTerms(query)
+	var eventResults []*events.Event
+	var searchErr error
+	if len(terms) > 0 {
+		eventResults, searchErr = store.SearchEventsMultiTerm(terms, limit)
+	} else {
+		eventResults, searchErr = store.SearchEvents(query, limit)
+	}
+	if searchErr != nil {
+		return nil
+	}
+	return eventResults
+}
+
+// emitRecallJSON writes a JSON array of recall entries to the
+// given writer. nil / zero-length entries serialize as `[]`,
+// not `null`, so consumers can rely on always-an-array.
+func emitRecallJSON(w io.Writer, entries []recallEntry) error {
+	if entries == nil {
+		entries = []recallEntry{}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(entries); err != nil {
+		return fmt.Errorf("failed to encode recall entries: %w", err)
+	}
 	return nil
 }
 
