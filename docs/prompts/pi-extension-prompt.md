@@ -192,22 +192,11 @@ shape per harness.
 ### eval grid side
 
 The grid runner is at `internal/eval/v2/grid.go`. `ContextStrategy`
-is the axis to extend. Current values: `StrategyBaseline`,
-`StrategyCortex`, `StrategyFrontier`. Two clean ways to wire the
-extension in:
-
-A. **New strategy value** `StrategyCortexExtension`. Grid runner sets
-   it on the cell; PiDevHarness runs differently when it sees that
-   strategy (installs/verifies the extension before invoking pi).
-   Cleanest for analysis. Adds an enum value to `cellresult.go`.
-
-B. **Harness-side env flag** (`CORTEX_PI_EXTENSION=1`) the grid
-   runner sets before invoking PiDevHarness. No schema change but
-   the `context_strategy` column collapses extension and prefix
-   into one bucket — harder to A/B in `--report-summary`.
-
-Pick A unless adding a `cellresult.go` enum is blocked. See "Hard
-constraints" #6 (CONTRACT — schema additions only).
+is the axis to extend; current values are `StrategyBaseline`,
+`StrategyCortex`, `StrategyFrontier`. The wiring choice (new
+enum value vs harness-side env flag) is a procedural decision
+and lives in the **Wiring decision** section below, adjacent
+to the iteration protocol.
 
 ---
 
@@ -279,6 +268,42 @@ which cortex || (cd /Users/dereksantos/eng/projects/cortex && go build -o /tmp/c
 If pi, node, or npm is missing, stop and tell the user which install
 command worked or didn't — the session cannot meaningfully progress
 without them.
+
+---
+
+## Wiring decision (A vs B)
+
+> Procedural decision applied during TODOs 8–9. Captured here
+> under METHOD (adjacent to the iteration protocol) rather
+> than inline in "Where the work plugs in", so reviewers find
+> a *decision* under METHOD instead of buried in CONTEXT.
+
+Two ways to expose the extension to the grid:
+
+A. **New strategy value `StrategyCortexExtension`.** Grid
+   runner sets it on the cell; PiDevHarness runs differently
+   when it sees that strategy (installs / verifies the
+   extension before invoking pi). Cleanest for analysis —
+   each row in `cell_results.jsonl` carries the strategy as
+   a first-class column. Adds one enum value to
+   `cellresult.go`.
+
+B. **Harness-side env flag (`CORTEX_PI_EXTENSION=1`).** Grid
+   runner sets it before invoking PiDevHarness. No schema
+   change, but the `context_strategy` column collapses
+   extension and prefix into one bucket — harder to A/B in
+   `--report-summary`.
+
+**Pick A** unless adding a `cellresult.go` enum is blocked.
+See "Hard constraints" #6 (CONTRACT — schema additions only).
+
+Note: option B's `CORTEX_PI_EXTENSION=1` env var is reused by
+the **Rollback if regression** procedure as the gate for
+whether the extension code path executes at all. There is no
+conflict — A picks the *strategy axis*; the env var picks
+whether the extension *runs* under that strategy. After
+rollback the strategy column still distinguishes the cells
+even when the extension code is skipped.
 
 ---
 
@@ -374,7 +399,7 @@ without them.
   reviewers find rules by lens, not by accident of authorship.
   Closes boundary smell S2.
 
-- [ ] **0.i Split "Where the work plugs in".** Keep package paths
+- [x] **0.i Split "Where the work plugs in".** Keep package paths
   and API surface in the CONTEXT-framing section; move the A-vs-B
   wiring choice (and the "pick A" recommendation) into a METHOD
   block adjacent to the iteration protocol. Closes boundary
