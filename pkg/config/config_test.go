@@ -170,9 +170,7 @@ func TestEnsureDirectories(t *testing.T) {
 
 		expectedDirs := []string{
 			cfg.ContextDir,
-			filepath.Join(cfg.ContextDir, "queue", "pending"),
-			filepath.Join(cfg.ContextDir, "queue", "processing"),
-			filepath.Join(cfg.ContextDir, "queue", "processed"),
+			filepath.Join(cfg.ContextDir, "journal", "capture"),
 			filepath.Join(cfg.ContextDir, "knowledge", "decisions"),
 			filepath.Join(cfg.ContextDir, "knowledge", "patterns"),
 			filepath.Join(cfg.ContextDir, "knowledge", "insights"),

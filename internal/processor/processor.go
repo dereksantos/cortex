@@ -89,14 +89,6 @@ func (p *Processor) AddJournalDir(classDir string) {
 	}))
 }
 
-// AddQueueDir is a deprecated compatibility shim for the pre-journal API.
-// dir is expected to be a .cortex/queue/ path; the corresponding sibling
-// .cortex/journal/capture/ is registered instead. Removed in slice C6.
-func (p *Processor) AddQueueDir(dir string) {
-	contextDir := filepath.Dir(dir)
-	p.AddJournalDir(filepath.Join(contextDir, "journal", "capture"))
-}
-
 // Start starts the processor's tick loop.
 func (p *Processor) Start() error {
 	if !p.running.CompareAndSwap(false, true) {

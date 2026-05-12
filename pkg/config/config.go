@@ -162,9 +162,7 @@ func (c *Config) Save(path string) error {
 func (c *Config) EnsureDirectories() error {
 	dirs := []string{
 		c.ContextDir,
-		filepath.Join(c.ContextDir, "queue", "pending"),
-		filepath.Join(c.ContextDir, "queue", "processing"),
-		filepath.Join(c.ContextDir, "queue", "processed"),
+		filepath.Join(c.ContextDir, "journal", "capture"),
 		filepath.Join(c.ContextDir, "knowledge", "decisions"),
 		filepath.Join(c.ContextDir, "knowledge", "patterns"),
 		filepath.Join(c.ContextDir, "knowledge", "insights"),

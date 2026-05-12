@@ -223,11 +223,8 @@ func TestProcessor_RunBatchIdempotent(t *testing.T) {
 	}
 }
 
-func TestProcessor_AddQueueDirCompatShim(t *testing.T) {
-	// AddQueueDir(".cortex/queue") must register the sibling
-	// .cortex/journal/capture as the indexer source — preserves the
-	// pre-journal multi-project registration API until slice C6.
-	processor, cfg, cleanup := setupTestProcessor(t)
+func TestProcessor_AddJournalDirAddsIndexer(t *testing.T) {
+	processor, _, cleanup := setupTestProcessor(t)
 	defer cleanup()
 
 	initialDirs := len(processor.indexers)
@@ -238,18 +235,15 @@ func TestProcessor_AddQueueDirCompatShim(t *testing.T) {
 	}
 	defer os.RemoveAll(otherProject)
 
-	queueDir := filepath.Join(otherProject, ".cortex", "queue")
-	processor.AddQueueDir(queueDir)
+	contextDir := filepath.Join(otherProject, ".cortex")
+	processor.AddJournalDir(filepath.Join(contextDir, "journal", "capture"))
 	if len(processor.indexers) != initialDirs+1 {
-		t.Errorf("indexer count after AddQueueDir = %d, want %d",
+		t.Errorf("indexer count after AddJournalDir = %d, want %d",
 			len(processor.indexers), initialDirs+1)
 	}
 
-	// Write an event to the inferred journal location and verify the new
-	// indexer picks it up.
-	contextDir := filepath.Join(otherProject, ".cortex")
 	ev := &events.Event{
-		ID:        "compat-shim-test",
+		ID:        "multi-project-test",
 		Source:    events.SourceClaude,
 		EventType: events.EventToolUse,
 		Timestamp: time.Now(),
@@ -262,9 +256,6 @@ func TestProcessor_AddQueueDirCompatShim(t *testing.T) {
 		t.Fatalf("RunBatch: %v", err)
 	}
 	if n < 1 {
-		t.Errorf("RunBatch projected = %d, want >= 1", n)
+		t.Errorf("RunBatch projected = %d, want >= 1 (new project's journal entry)", n)
 	}
-
-	// Suppress unused warning if cfg ever becomes irrelevant.
-	_ = cfg
 }
