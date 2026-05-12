@@ -2,6 +2,9 @@ package commands
 
 import (
 	"fmt"
+
+	"github.com/dereksantos/cortex/internal/processor"
+	"github.com/dereksantos/cortex/internal/storage"
 )
 
 // JournalCommand dispatches journal subcommands. Subcommand bodies land in
@@ -30,7 +33,7 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	sub := ctx.Args[0]
 	switch sub {
 	case "ingest":
-		return notImplemented(sub, "C3")
+		return c.runIngest(ctx)
 	case "rebuild":
 		return notImplemented(sub, "C5 (capture) / X1 (full DAG)")
 	case "replay":
@@ -55,11 +58,48 @@ func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
 }
 
+// runIngest drains the project's capture journal once and exits. Lower
+// level than `cortex ingest` — does not embed or analyze, just projects
+// journal entries to SQLite.
+func (c *JournalCommand) runIngest(ctx *Context) error {
+	cfg := ctx.Config
+	store := ctx.Storage
+
+	if cfg == nil || store == nil {
+		captureCfg, captureErr := loadCaptureConfig()
+		if captureErr != nil {
+			return fmt.Errorf("load config: %w", captureErr)
+		}
+		storageCfg, err := loadStorageConfig()
+		if err != nil {
+			return fmt.Errorf("load storage config: %w", err)
+		}
+		s, err := storage.New(storageCfg)
+		if err != nil {
+			return fmt.Errorf("open storage: %w", err)
+		}
+		defer s.Close()
+		// ContextDir must be project-local so the journal/capture/ lookup
+		// hits the project's journal, not the global ~/.cortex/.
+		storageCfg.ContextDir = captureCfg.ContextDir
+		cfg = storageCfg
+		store = s
+	}
+
+	proc := processor.New(cfg, store)
+	n, err := proc.RunBatch()
+	if err != nil {
+		return fmt.Errorf("drain journal: %w", err)
+	}
+	fmt.Printf("Projected %d journal entries\n", n)
+	return nil
+}
+
 func journalUsage() string {
 	return `Usage: cortex journal <subcommand>
 
 Subcommands:
-  ingest      Run indexer once; exits when caught up.            (slice C3)
+  ingest      Run indexer once; exits when caught up.
   rebuild     Truncate derived state, replay journal from 0.     (slice C5 / X1)
   replay      Re-run cognition with config overrides.            (slice X2)
   verify      Source-offset integrity, projection row counts.    (slice X3)
