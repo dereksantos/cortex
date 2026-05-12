@@ -71,6 +71,9 @@ type Storage struct {
 	// Retrieval indexes (slice Z2)
 	retrievals []*Retrieval
 
+	// SessionContext snapshots (slice T2)
+	sessionContextSnapshots []*SessionContextSnapshot
+
 	// Open file handles for append
 	eventFile         *os.File
 	insightFile       *os.File
@@ -81,6 +84,7 @@ type Storage struct {
 	observationFile   *os.File
 	contradictionFile *os.File
 	retrievalFile     *os.File
+	sessionCtxFile    *os.File
 }
 
 type embeddingEntry struct {
@@ -144,6 +148,29 @@ type insightRecord struct {
 	SourceType   string    `json:"source_type,omitempty"`
 	WasRetrieved bool      `json:"was_retrieved,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// sessionContextRecord projects a think.session_context snapshot. One
+// row per Think cycle. Earlier snapshots are kept for replay / debugging.
+type sessionContextRecord struct {
+	ProjectID     string             `json:"project_id,omitempty"`
+	TopicWeights  map[string]float64 `json:"topic_weights"`
+	RecentQueries []string           `json:"recent_queries,omitempty"`
+	CachedQueries []string           `json:"cached_queries,omitempty"`
+	SessionID     string             `json:"session_id,omitempty"`
+	JournalOffset int64              `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time          `json:"recorded_at"`
+}
+
+// SessionContextSnapshot is the derived view of one recorded
+// think.session_context journal entry.
+type SessionContextSnapshot struct {
+	TopicWeights  map[string]float64
+	RecentQueries []string
+	CachedQueries []string
+	SessionID     string
+	JournalOffset int64
+	RecordedAt    time.Time
 }
 
 // retrievalRecord projects a resolve.retrieval journal entry. Captures one
@@ -357,6 +384,19 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.contradictionFile.Close()
 		return nil, fmt.Errorf("failed to open retrievals file: %w", err)
 	}
+	s.sessionCtxFile, err = openAppend(filepath.Join(dataDir, "session_context.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		s.retrievalFile.Close()
+		return nil, fmt.Errorf("failed to open session_context file: %w", err)
+	}
 
 	return s, nil
 }
@@ -367,7 +407,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile, s.sessionCtxFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -445,7 +485,75 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildRetrievalIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildSessionContextIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildSessionContextIndexes replays session_context.jsonl into the
+// snapshot list.
+func (s *Storage) rebuildSessionContextIndexes() error {
+	records, err := readLines[sessionContextRecord](filepath.Join(s.dataDir, "session_context.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.sessionContextSnapshots = append(s.sessionContextSnapshots, &SessionContextSnapshot{
+			TopicWeights:  r.TopicWeights,
+			RecentQueries: r.RecentQueries,
+			CachedQueries: r.CachedQueries,
+			SessionID:     r.SessionID,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordSessionContextSnapshot projects one think.session_context entry.
+// Append-only — every Think cycle adds a snapshot.
+func (s *Storage) RecordSessionContextSnapshot(snap *SessionContextSnapshot) error {
+	if snap == nil {
+		return fmt.Errorf("nil snapshot")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if snap.RecordedAt.IsZero() {
+		snap.RecordedAt = time.Now().UTC()
+	}
+	rec := sessionContextRecord{
+		ProjectID:     s.projectID,
+		TopicWeights:  snap.TopicWeights,
+		RecentQueries: snap.RecentQueries,
+		CachedQueries: snap.CachedQueries,
+		SessionID:     snap.SessionID,
+		JournalOffset: snap.JournalOffset,
+		RecordedAt:    snap.RecordedAt,
+	}
+	if err := appendLine(s.sessionCtxFile, rec); err != nil {
+		return fmt.Errorf("append session_context: %w", err)
+	}
+	s.sessionContextSnapshots = append(s.sessionContextSnapshots, snap)
+	return nil
+}
+
+// LatestSessionContext returns the most recent recorded snapshot, or nil.
+func (s *Storage) LatestSessionContext() *SessionContextSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.sessionContextSnapshots) == 0 {
+		return nil
+	}
+	return s.sessionContextSnapshots[len(s.sessionContextSnapshots)-1]
+}
+
+// SessionContextSnapshotCount returns the number of recorded snapshots.
+func (s *Storage) SessionContextSnapshotCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.sessionContextSnapshots)
 }
 
 // rebuildRetrievalIndexes replays retrievals.jsonl into the in-memory list.

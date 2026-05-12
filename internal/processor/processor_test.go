@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 5 {
-		t.Errorf("expected 5 default indexers (capture, observation, dream, reflect, resolve), got %d", len(processor.indexers))
+	if len(processor.indexers) != 6 {
+		t.Errorf("expected 6 default indexers (capture, observation, dream, reflect, resolve, think), got %d", len(processor.indexers))
 	}
 }
 
@@ -432,6 +432,56 @@ func TestProcessor_ProjectsResolveRetrieval(t *testing.T) {
 	got := processor.storage.GetRetrievals(10)
 	if len(got) != 2 {
 		t.Errorf("retrievals = %d, want 2", len(got))
+	}
+}
+
+func TestProcessor_ProjectsThinkSessionContext(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "think")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	// Two snapshots — second supersedes the first as "latest".
+	e1, _ := journal.NewThinkSessionContextEntry(journal.ThinkSessionContextPayload{
+		TopicWeights:  map[string]float64{"auth": 0.6},
+		RecentQueries: []string{"first q"},
+		SessionID:     "sess-1",
+	})
+	if _, err := w.Append(e1); err != nil {
+		t.Fatalf("Append e1: %v", err)
+	}
+	e2, _ := journal.NewThinkSessionContextEntry(journal.ThinkSessionContextPayload{
+		TopicWeights:  map[string]float64{"auth": 0.8, "db": 0.4},
+		RecentQueries: []string{"second q"},
+		SessionID:     "sess-1",
+	})
+	if _, err := w.Append(e2); err != nil {
+		t.Fatalf("Append e2: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("indexed = %d, want 2", n)
+	}
+	if processor.storage.SessionContextSnapshotCount() != 2 {
+		t.Errorf("snapshot count = %d, want 2", processor.storage.SessionContextSnapshotCount())
+	}
+	latest := processor.storage.LatestSessionContext()
+	if latest == nil {
+		t.Fatal("LatestSessionContext returned nil")
+	}
+	if latest.TopicWeights["auth"] != 0.8 {
+		t.Errorf("latest TopicWeights[auth] = %v, want 0.8", latest.TopicWeights["auth"])
+	}
+	if latest.TopicWeights["db"] != 0.4 {
+		t.Errorf("latest TopicWeights[db] = %v, want 0.4", latest.TopicWeights["db"])
 	}
 }
 

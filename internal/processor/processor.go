@@ -66,6 +66,7 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 	p.registry.Register(journal.TypeDreamInsight, 1, p.projectDreamInsight)
 	p.registry.Register(journal.TypeReflectRerank, 1, p.projectReflectRerank)
 	p.registry.Register(journal.TypeResolveRetrieval, 1, p.projectResolveRetrieval)
+	p.registry.Register(journal.TypeThinkSessionContext, 1, p.projectThinkSessionContext)
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
@@ -73,6 +74,7 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "dream"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "reflect"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "resolve"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "think"))
 	}
 	return p
 }
@@ -92,6 +94,25 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectThinkSessionContext records a session-context snapshot.
+func (p *Processor) projectThinkSessionContext(e *journal.Entry) error {
+	payload, err := journal.ParseThinkSessionContext(e)
+	if err != nil {
+		return fmt.Errorf("parse think.session_context at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordSessionContextSnapshot(&storage.SessionContextSnapshot{
+		TopicWeights:  payload.TopicWeights,
+		RecentQueries: payload.RecentQueries,
+		CachedQueries: payload.CachedQueries,
+		SessionID:     payload.SessionID,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record session_context at offset %d: %w", e.Offset, err)
+	}
 	return nil
 }
 
