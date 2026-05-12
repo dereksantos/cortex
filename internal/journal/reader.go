@@ -2,19 +2,24 @@ package journal
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // Reader iterates entries within a writer-class in offset (segment then
-// line) order.
+// line) order. Transparently handles both uncompressed .jsonl and gzipped
+// .jsonl.gz segments — closed segments may be gzipped by the gzip-on-close
+// path (slice I2) without affecting reader behavior.
 type Reader struct {
 	classDir string
 	segments []int
 	segIdx   int
 	f        *os.File
+	gz       *gzip.Reader
 	br       *bufio.Reader
 	closed   bool
 }
@@ -81,30 +86,52 @@ func (r *Reader) advanceSegment() error {
 	if r.segIdx >= len(r.segments) {
 		return io.EOF
 	}
-	path := segmentPath(r.classDir, r.segments[r.segIdx])
+	path, err := resolveSegmentPath(r.classDir, r.segments[r.segIdx])
+	if err != nil {
+		return err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("journal: open %s: %w", path, err)
 	}
 	r.f = f
-	r.br = bufio.NewReader(f)
+	if strings.HasSuffix(path, segmentExtGZ) {
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			r.f = nil
+			return fmt.Errorf("journal: gzip reader for %s: %w", path, err)
+		}
+		r.gz = gz
+		r.br = bufio.NewReader(gz)
+	} else {
+		r.br = bufio.NewReader(f)
+	}
 	return nil
 }
 
 func (r *Reader) closeCurrent() error {
+	var err error
+	if r.gz != nil {
+		if cerr := r.gz.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		r.gz = nil
+	}
 	if r.f != nil {
-		err := r.f.Close()
+		if cerr := r.f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
 		r.f = nil
-		r.br = nil
-		return err
 	}
 	r.br = nil
-	return nil
+	return err
 }
 
 func (r *Reader) currentPath() string {
 	if r.segIdx < 0 || r.segIdx >= len(r.segments) {
 		return ""
 	}
-	return segmentPath(r.classDir, r.segments[r.segIdx])
+	path, _ := resolveSegmentPath(r.classDir, r.segments[r.segIdx])
+	return path
 }
