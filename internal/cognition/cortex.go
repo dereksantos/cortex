@@ -67,6 +67,9 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		dreamStatePath = contextDir + "/dream_state.json"
 	}
 	dream := NewDream(store, provider, activity, dreamStatePath)
+	if contextDir != "" {
+		dream.SetJournalDir(contextDir + "/journal")
+	}
 	digest := NewDigest(store, contextDir)
 	resolve := NewResolve()
 

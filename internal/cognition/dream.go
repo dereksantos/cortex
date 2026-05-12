@@ -7,11 +7,13 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cognition/fractal"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -66,6 +68,12 @@ type Dream struct {
 	llm      llm.Provider
 	activity *ActivityTracker
 
+	// Journal output (slice D1). When set, Dream emits dream.insight
+	// entries to <journalDir>/dream/ on each insight discovery. Empty
+	// disables journal emission (storage write-through is used instead;
+	// the dual path goes away after slice D2 lands the projector).
+	journalDir string
+
 	// Fractal primitives
 	novelty   *fractal.Novelty
 	followUps *fractal.FollowUpQueue
@@ -86,6 +94,50 @@ type Dream struct {
 	queuedTranscripts []QueuedTranscript
 
 	stateWriter *StateWriter
+}
+
+// SetJournalDir wires the project's <ContextDir>/journal/ root. When set,
+// Dream emits dream.insight entries to <journalDir>/dream/ on each
+// extracted insight. Pass empty to disable journal emission.
+func (d *Dream) SetJournalDir(dir string) {
+	d.journalDir = dir
+}
+
+// emitInsightToJournal best-effort writes a dream.insight entry. Errors
+// are logged via log.Printf but never returned — journal emission must
+// not block Dream's main loop.
+func (d *Dream) emitInsightToJournal(insight cognition.Result, item cognition.DreamItem, sessionID string) {
+	if d.journalDir == "" {
+		return
+	}
+	payload := journal.DreamInsightPayload{
+		InsightID:    insight.ID,
+		Category:     insight.Category,
+		Content:      insight.Content,
+		Importance:   int(insight.Score * 10),
+		Tags:         insight.Tags,
+		SessionID:    sessionID,
+		SourceItemID: item.ID,
+		SourceName:   item.Source,
+	}
+	entry, err := journal.NewDreamInsightEntry(payload)
+	if err != nil {
+		log.Printf("dream: build journal entry: %v", err)
+		return
+	}
+	classDir := filepath.Join(d.journalDir, "dream")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("dream: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("dream: append journal entry: %v", err)
+	}
 }
 
 // NewDream creates a new Dream instance.
@@ -315,11 +367,11 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 	}
 	d.novelty.RecordSeen(item.ID, contentHash, true)
 
+	var sessionID string
+	if sid, ok := item.Metadata["session_id"].(string); ok {
+		sessionID = sid
+	}
 	if d.storage != nil {
-		var sessionID string
-		if sid, ok := item.Metadata["session_id"].(string); ok {
-			sessionID = sid
-		}
 		d.storage.StoreInsightWithSession(
 			item.ID,
 			insight.Category,
@@ -331,6 +383,7 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 			item.Source,
 		)
 	}
+	d.emitInsightToJournal(*insight, item, sessionID)
 
 	select {
 	case d.insightsChan <- *insight:
@@ -453,18 +506,27 @@ func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Re
 		supplementalID := insight.ID + ":nuance"
 		nuanceContent := fmt.Sprintf("NUANCE for '%s': %s (Why: %s)",
 			TruncateInsight(insight.Content, 50), nuance.Detail, nuance.Why)
+		nuanceTags := append(insight.Tags, "nuance", "implementation-detail")
 		if d.storage != nil {
 			d.storage.StoreInsightWithSession(
 				supplementalID,
 				"nuance",
 				nuanceContent,
 				int(insight.Score*10),
-				append(insight.Tags, "nuance", "implementation-detail"),
+				nuanceTags,
 				"",
 				sessionID,
 				item.Source,
 			)
 		}
+		nuanceResultForJournal := cognition.Result{
+			ID:       supplementalID,
+			Category: "nuance",
+			Content:  nuanceContent,
+			Score:    insight.Score,
+			Tags:     nuanceTags,
+		}
+		d.emitInsightToJournal(nuanceResultForJournal, item, sessionID)
 		nuanceResult := cognition.Result{
 			ID:        supplementalID,
 			Content:   nuanceContent,
