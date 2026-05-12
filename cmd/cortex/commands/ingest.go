@@ -12,9 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"log"
+
 	"github.com/dereksantos/cortex/integrations/claude"
 	"github.com/dereksantos/cortex/integrations/cursor"
 	"github.com/dereksantos/cortex/internal/capture"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -22,6 +25,40 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 	projreg "github.com/dereksantos/cortex/pkg/registry"
 )
+
+// emitCorrection writes a feedback.correction journal entry for the user-
+// supplied correction text. Best-effort: errors logged.
+func emitCorrection(cfg *config.Config, content string) {
+	if cfg == nil || cfg.ContextDir == "" {
+		return
+	}
+	classDir := filepath.Join(cfg.ContextDir, "journal", "feedback")
+	// GradedID is "correction:user-text" — free-form corrections don't
+	// yet target a specific derivation. The projection (B3) attaches
+	// these to recent insights heuristically; better resolution lands
+	// when corrections include a specific target.
+	entry, err := journal.NewFeedbackEntry(journal.TypeFeedbackCorrection, journal.FeedbackPayload{
+		GradedID:    "free-form",
+		Note:        content,
+		Replacement: content,
+	})
+	if err != nil {
+		log.Printf("correct: build feedback entry: %v", err)
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		log.Printf("correct: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("correct: append journal entry: %v", err)
+	}
+}
 
 // CaptureCommand implements event capture from stdin.
 type CaptureCommand struct{}
@@ -114,6 +151,13 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 		if err := cap.CaptureEvent(event); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to capture: %v\n", err)
 			os.Exit(1)
+		}
+		// Slice B2: corrections also emit a feedback.correction journal
+		// entry so the projection (B3) can mark related derivations as
+		// superseded. GradedID is empty for free-form corrections;
+		// downstream consumers match on Note text.
+		if captureType == "correction" {
+			emitCorrection(cfg, content)
 		}
 		fmt.Printf("Captured %s: %s\n", captureType, truncateString(content, 60))
 		os.Exit(0)

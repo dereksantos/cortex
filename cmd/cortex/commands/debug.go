@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -923,6 +925,8 @@ func (c *ForgetCommand) Execute(ctx *Context) error {
 		if err := store.ForgetInsight(id); err != nil {
 			return fmt.Errorf("failed to forget insight: %w", err)
 		}
+		// Journal feedback.retraction (B2) — best-effort, doesn't block.
+		emitRetraction(ctx, fmt.Sprintf("insight-%d", id), input, "cortex forget")
 		fmt.Printf("Forgot insight #%d\n", id)
 		return nil
 	}
@@ -950,8 +954,45 @@ func (c *ForgetCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("failed to forget insights: %w", err)
 	}
 
+	// One feedback.retraction per matched insight ID.
+	for _, ins := range insights {
+		emitRetraction(ctx, fmt.Sprintf("insight-%d", ins.ID), input,
+			fmt.Sprintf("cortex forget keyword=%q", input))
+	}
+
 	fmt.Printf("\nForgot %d insight(s)\n", deleted)
 	return nil
+}
+
+// emitRetraction writes a feedback.retraction journal entry for the given
+// graded ID. Best-effort: errors via log.Printf only. Used by the forget
+// command path (slice B2).
+func emitRetraction(ctx *Context, gradedID, note, reason string) {
+	if ctx == nil || ctx.Config == nil || ctx.Config.ContextDir == "" {
+		return
+	}
+	classDir := filepath.Join(ctx.Config.ContextDir, "journal", "feedback")
+	entry, err := journal.NewFeedbackEntry(journal.TypeFeedbackRetraction, journal.FeedbackPayload{
+		GradedID: gradedID,
+		Note:     note,
+		Reason:   reason,
+	})
+	if err != nil {
+		log.Printf("forget: build feedback entry: %v", err)
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry, // user-issued retractions are durable
+	})
+	if err != nil {
+		log.Printf("forget: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("forget: append journal entry: %v", err)
+	}
 }
 
 // OverviewCommand shows a visual summary of context.
