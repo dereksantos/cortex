@@ -371,7 +371,11 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 	if sid, ok := item.Metadata["session_id"].(string); ok {
 		sessionID = sid
 	}
-	if d.storage != nil {
+	d.emitInsightToJournal(*insight, item, sessionID)
+	// Storage write is the projector's job (slice D2). If no journalDir is
+	// wired (some tests construct Dream without one), fall back to direct
+	// storage write so the in-process tests still observe the insight.
+	if d.journalDir == "" && d.storage != nil {
 		d.storage.StoreInsightWithSession(
 			item.ID,
 			insight.Category,
@@ -383,7 +387,6 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 			item.Source,
 		)
 	}
-	d.emitInsightToJournal(*insight, item, sessionID)
 
 	select {
 	case d.insightsChan <- *insight:
@@ -507,7 +510,17 @@ func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Re
 		nuanceContent := fmt.Sprintf("NUANCE for '%s': %s (Why: %s)",
 			TruncateInsight(insight.Content, 50), nuance.Detail, nuance.Why)
 		nuanceTags := append(insight.Tags, "nuance", "implementation-detail")
-		if d.storage != nil {
+		nuanceResultForJournal := cognition.Result{
+			ID:       supplementalID,
+			Category: "nuance",
+			Content:  nuanceContent,
+			Score:    insight.Score,
+			Tags:     nuanceTags,
+		}
+		d.emitInsightToJournal(nuanceResultForJournal, item, sessionID)
+		// Fallback to direct storage write when no journal is wired —
+		// see equivalent guard in tryAnalyzeItem above.
+		if d.journalDir == "" && d.storage != nil {
 			d.storage.StoreInsightWithSession(
 				supplementalID,
 				"nuance",
@@ -519,14 +532,6 @@ func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Re
 				item.Source,
 			)
 		}
-		nuanceResultForJournal := cognition.Result{
-			ID:       supplementalID,
-			Category: "nuance",
-			Content:  nuanceContent,
-			Score:    insight.Score,
-			Tags:     nuanceTags,
-		}
-		d.emitInsightToJournal(nuanceResultForJournal, item, sessionID)
 		nuanceResult := cognition.Result{
 			ID:        supplementalID,
 			Content:   nuanceContent,

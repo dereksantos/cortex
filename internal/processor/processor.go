@@ -63,10 +63,12 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 	} {
 		p.registry.Register(typ, 1, p.projectObservation)
 	}
+	p.registry.Register(journal.TypeDreamInsight, 1, p.projectDreamInsight)
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "observation"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "dream"))
 	}
 	return p
 }
@@ -86,6 +88,28 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectDreamInsight projects a dream.insight entry to storage. Calls
+// StoreInsightWithSession with the payload's fields. Storage's insight
+// log is append-only with soft-update semantics (op="update" records),
+// so re-projection during rebuild is safe.
+func (p *Processor) projectDreamInsight(e *journal.Entry) error {
+	payload, err := journal.ParseDreamInsight(e)
+	if err != nil {
+		return fmt.Errorf("parse dream.insight at offset %d: %w", e.Offset, err)
+	}
+	p.storage.StoreInsightWithSession(
+		payload.InsightID,
+		payload.Category,
+		payload.Content,
+		payload.Importance,
+		payload.Tags,
+		payload.Reasoning,
+		payload.SessionID,
+		payload.SourceName,
+	)
 	return nil
 }
 

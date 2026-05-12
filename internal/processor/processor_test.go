@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 2 {
-		t.Errorf("expected 2 default indexers (capture, observation), got %d", len(processor.indexers))
+	if len(processor.indexers) != 3 {
+		t.Errorf("expected 3 default indexers (capture, observation, dream), got %d", len(processor.indexers))
 	}
 }
 
@@ -280,6 +280,60 @@ func TestProcessor_ProjectsObservationsAndDedups(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Errorf("second RunBatch indexed = %d, want 0 (already at tail)", n2)
+	}
+}
+
+func TestProcessor_ProjectsDreamInsight(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "dream")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	e, err := journal.NewDreamInsightEntry(journal.DreamInsightPayload{
+		InsightID:    "dream-test-1",
+		Category:     "decision",
+		Content:      "Use journal as source of truth",
+		Importance:   8,
+		Tags:         []string{"architecture"},
+		SessionID:    "sess-1",
+		SourceItemID: "memory:CLAUDE.md:Direction",
+		SourceName:   "memory-md",
+	})
+	if err != nil {
+		t.Fatalf("NewDreamInsightEntry: %v", err)
+	}
+	if _, err := w.Append(e); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("indexed = %d, want 1", n)
+	}
+	// Storage projection: query the insight back through storage.
+	insights, err := processor.storage.GetRecentInsights(10)
+	if err != nil {
+		t.Fatalf("GetRecentInsights: %v", err)
+	}
+	var found bool
+	for _, ins := range insights {
+		if ins.EventID == "dream-test-1" && ins.Summary == "Use journal as source of truth" {
+			found = true
+			if ins.Importance != 8 {
+				t.Errorf("Importance = %d, want 8", ins.Importance)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("dream insight not projected to storage")
 	}
 }
 
