@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -23,6 +24,7 @@ import (
 type ClaudeHistorySource struct {
 	transcriptDir string // Path to Claude session transcripts
 	rng           *rand.Rand
+	observer      *Observer
 }
 
 // NewClaudeHistorySource creates a new ClaudeHistorySource.
@@ -34,6 +36,10 @@ func NewClaudeHistorySource(transcriptDir string) *ClaudeHistorySource {
 		rng:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
+
+// SetObserver wires the source to emit observation.claude_transcript
+// entries when transcript files are read. Pass nil to disable.
+func (s *ClaudeHistorySource) SetObserver(o *Observer) { s.observer = o }
 
 // Name returns the source identifier.
 func (s *ClaudeHistorySource) Name() string {
@@ -149,6 +155,18 @@ func (s *ClaudeHistorySource) parseTranscript(path string) ([]cognition.DreamIte
 		return nil, err
 	}
 	defer file.Close()
+
+	// Observe the substrate (full file content hash, no copy retained).
+	if s.observer != nil {
+		if content, err := os.ReadFile(path); err == nil {
+			var mod time.Time
+			if info, statErr := os.Stat(path); statErr == nil {
+				mod = info.ModTime()
+			}
+			s.observer.Observe(journal.TypeObservationClaudeTranscript, s.Name(),
+				"file://"+path, content, mod)
+		}
+	}
 
 	var items []cognition.DreamItem
 	scanner := bufio.NewScanner(file)
