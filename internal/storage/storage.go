@@ -68,6 +68,9 @@ type Storage struct {
 	// Contradiction indexes (slice R2)
 	contradictions []*Contradiction
 
+	// Retrieval indexes (slice Z2)
+	retrievals []*Retrieval
+
 	// Open file handles for append
 	eventFile         *os.File
 	insightFile       *os.File
@@ -77,6 +80,7 @@ type Storage struct {
 	embFile           *os.File
 	observationFile   *os.File
 	contradictionFile *os.File
+	retrievalFile     *os.File
 }
 
 type embeddingEntry struct {
@@ -140,6 +144,46 @@ type insightRecord struct {
 	SourceType   string    `json:"source_type,omitempty"`
 	WasRetrieved bool      `json:"was_retrieved,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// retrievalRecord projects a resolve.retrieval journal entry. Captures one
+// retrieval decision; the aggregate stats (counts by decision) are
+// re-derived in-memory at rebuild time.
+type retrievalRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	QueryText     string    `json:"query_text"`
+	Decision      string    `json:"decision"`
+	Confidence    float64   `json:"confidence"`
+	ResultCount   int       `json:"result_count"`
+	InjectedIDs   []string  `json:"injected_ids,omitempty"`
+	AvgScore      float64   `json:"avg_score,omitempty"`
+	MaxScore      float64   `json:"max_score,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Retrieval is the derived view of one recorded retrieval decision.
+type Retrieval struct {
+	QueryText     string
+	Decision      string
+	Confidence    float64
+	ResultCount   int
+	InjectedIDs   []string
+	AvgScore      float64
+	MaxScore      float64
+	Reason        string
+	SessionID     string
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
+// RetrievalStats aggregates the recorded retrievals: total count + count
+// per decision.
+type RetrievalStats struct {
+	Total       int
+	ByDecision  map[string]int
 }
 
 // contradictionRecord projects a contradiction detected during reflect.rerank.
@@ -301,6 +345,18 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.observationFile.Close()
 		return nil, fmt.Errorf("failed to open contradictions file: %w", err)
 	}
+	s.retrievalFile, err = openAppend(filepath.Join(dataDir, "retrievals.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		return nil, fmt.Errorf("failed to open retrievals file: %w", err)
+	}
 
 	return s, nil
 }
@@ -311,7 +367,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -386,7 +442,100 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildContradictionIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildRetrievalIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildRetrievalIndexes replays retrievals.jsonl into the in-memory list.
+func (s *Storage) rebuildRetrievalIndexes() error {
+	records, err := readLines[retrievalRecord](filepath.Join(s.dataDir, "retrievals.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.retrievals = append(s.retrievals, &Retrieval{
+			QueryText:     r.QueryText,
+			Decision:      r.Decision,
+			Confidence:    r.Confidence,
+			ResultCount:   r.ResultCount,
+			InjectedIDs:   r.InjectedIDs,
+			AvgScore:      r.AvgScore,
+			MaxScore:      r.MaxScore,
+			Reason:        r.Reason,
+			SessionID:     r.SessionID,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordRetrieval projects one resolve.retrieval entry. Append-only — no
+// dedup. Rebuild safely re-projects everything.
+func (s *Storage) RecordRetrieval(r *Retrieval) error {
+	if r == nil {
+		return fmt.Errorf("nil retrieval")
+	}
+	if r.Decision == "" {
+		return fmt.Errorf("retrieval requires Decision")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if r.RecordedAt.IsZero() {
+		r.RecordedAt = time.Now().UTC()
+	}
+	rec := retrievalRecord{
+		ProjectID:     s.projectID,
+		QueryText:     r.QueryText,
+		Decision:      r.Decision,
+		Confidence:    r.Confidence,
+		ResultCount:   r.ResultCount,
+		InjectedIDs:   r.InjectedIDs,
+		AvgScore:      r.AvgScore,
+		MaxScore:      r.MaxScore,
+		Reason:        r.Reason,
+		SessionID:     r.SessionID,
+		JournalOffset: r.JournalOffset,
+		RecordedAt:    r.RecordedAt,
+	}
+	if err := appendLine(s.retrievalFile, rec); err != nil {
+		return fmt.Errorf("append retrieval: %w", err)
+	}
+	s.retrievals = append(s.retrievals, r)
+	return nil
+}
+
+// GetRetrievals returns the most recent N retrievals.
+func (s *Storage) GetRetrievals(limit int) []*Retrieval {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := len(s.retrievals)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]*Retrieval, 0, n)
+	for i := len(s.retrievals) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, s.retrievals[i])
+	}
+	return out
+}
+
+// GetRetrievalStats aggregates the recorded retrievals into total +
+// per-decision counts. Computed at call time from the in-memory list.
+func (s *Storage) GetRetrievalStats() RetrievalStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := RetrievalStats{
+		ByDecision: make(map[string]int),
+	}
+	for _, r := range s.retrievals {
+		stats.Total++
+		stats.ByDecision[r.Decision]++
+	}
+	return stats
 }
 
 // rebuildContradictionIndexes replays contradictions.jsonl into the

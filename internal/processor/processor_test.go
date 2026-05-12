@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 4 {
-		t.Errorf("expected 4 default indexers (capture, observation, dream, reflect), got %d", len(processor.indexers))
+	if len(processor.indexers) != 5 {
+		t.Errorf("expected 5 default indexers (capture, observation, dream, reflect, resolve), got %d", len(processor.indexers))
 	}
 }
 
@@ -383,6 +383,55 @@ func TestProcessor_ProjectsReflectRerankContradictions(t *testing.T) {
 		if c.QueryText != "auth flow" {
 			t.Errorf("QueryText = %s, want auth flow", c.QueryText)
 		}
+	}
+}
+
+func TestProcessor_ProjectsResolveRetrieval(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "resolve")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	// Two entries: one inject decision, one wait.
+	for _, p := range []journal.ResolveRetrievalPayload{
+		{QueryText: "q1", Decision: "inject", Confidence: 0.9, ResultCount: 3, InjectedIDs: []string{"a", "b", "c"}},
+		{QueryText: "q2", Decision: "wait", Confidence: 0.3, ResultCount: 1},
+	} {
+		e, err := journal.NewResolveRetrievalEntry(p)
+		if err != nil {
+			t.Fatalf("build entry: %v", err)
+		}
+		if _, err := w.Append(e); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("indexed = %d, want 2", n)
+	}
+
+	stats := processor.storage.GetRetrievalStats()
+	if stats.Total != 2 {
+		t.Errorf("Total = %d, want 2", stats.Total)
+	}
+	if stats.ByDecision["inject"] != 1 {
+		t.Errorf("ByDecision[inject] = %d, want 1", stats.ByDecision["inject"])
+	}
+	if stats.ByDecision["wait"] != 1 {
+		t.Errorf("ByDecision[wait] = %d, want 1", stats.ByDecision["wait"])
+	}
+
+	got := processor.storage.GetRetrievals(10)
+	if len(got) != 2 {
+		t.Errorf("retrievals = %d, want 2", len(got))
 	}
 }
 
