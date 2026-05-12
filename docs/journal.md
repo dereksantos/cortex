@@ -1,6 +1,8 @@
 # The Journal
 
-**Draft v0.1** — *Cortex's commitment to event-sourcing*
+**Draft v0.2** — *Cortex's commitment to event-sourcing*
+
+> **Implementation status (2026-05-12)**: v0.1 of the journal architecture is implemented on branch `feat/journal`. All 33 slices in [`journal-implementation-plan.md`](./journal-implementation-plan.md) landed across 12 buckets. See [`journal-design-log.md`](./journal-design-log.md) for the deltas discovered during implementation — most notably, Cortex's "read side" is **not SQLite** but **JSONL-with-in-memory-indexes** in `internal/storage`. The CQRS commitment is unchanged; the engine on the read side just happens to be a different file format.
 
 ## Thesis
 
@@ -17,19 +19,19 @@ Two existing JSONL artifacts — `.cortex/db/cell_results.jsonl` and the `retrie
 ## The CQRS commitment
 
 - **Journal = write side.** JSONL, append-only, durable, portable, human-readable. Source of truth.
-- **SQLite = read side.** Regeneratable, optimized for query (FTS5, sqlite-vec, joins). Never authoritative.
+- **Storage layer = read side.** Regeneratable, optimized for query. Never authoritative.
 
-SQLite is not retired; it is repositioned. Two storage engines, both boring, both well-understood. The journal records the history of the system's thinking; SQLite is a queryable projection of that history. `cortex journal rebuild` drops every derived table and reproduces them by replaying the journal.
+The read side is `internal/storage`: in-memory indexes hydrated from per-derivation JSONL projection files (events.jsonl, observations.jsonl, contradictions.jsonl, retrievals.jsonl, session_context.jsonl, feedback.jsonl, eval_cell_results.jsonl). It is not SQLite — that was an assumption in v0.1 of this doc that didn't survive implementation. The CQRS property holds either way: `cortex journal rebuild` drops every derived projection and reproduces it by replaying the journal.
 
-Why files (not SQLite) for the write side:
-- **Append + fsync** is the OS's hot path. SQLite would do this internally with more layers of indirection.
-- **Per-writer-class isolation** is just per-directory. Capture (per-hook, separate process) doesn't contend with Dream (daemon, batchy). SQLite as the write side would force single-writer or per-process connection overhead.
-- **Inspectability** — `jq`, `grep`, `tail -f`, `wc -l` all work. The user can audit Cortex's thinking with standard Unix tools.
+Why files (not a SQL engine) for the write side:
+- **Append + fsync** is the OS's hot path. A SQL engine would do this internally with more layers of indirection.
+- **Per-writer-class isolation** is just per-directory. Capture (per-hook, separate process) doesn't contend with Dream (daemon, batchy). A shared SQL engine would force single-writer or per-process connection overhead.
+- **Inspectability** — `jq`, `grep`, `tail -f`, `wc -l` all work. The user can audit Cortex's thinking with standard Unix tools. `cortex journal show <offset>` and `cortex journal tail` are convenience layers on top of this.
 - **Standard ops apply** — segment rotation, gzip on closure, archival, rsync to backup, all just work on files.
 
 ## The ten principles
 
-1. **CQRS, explicit.** Journal = write side. SQLite = read side. SQLite is regeneratable; the journal is not.
+1. **CQRS, explicit.** Journal = write side. Storage layer = read side (JSONL-with-in-memory-indexes, not SQLite). The read side is regeneratable; the journal is not.
 2. **The journal contains inputs AND decisions AND corrections.** Raw events (`capture.event`), derivations (`dream.insight`, `reflect.rerank`, `resolve.retrieval`, `think.topic_weight`), and grading (`feedback.correction`, `feedback.confirmation`, `feedback.retraction`, `eval.cell_result`). Each derivation/grade entry references its sources by offset. Provenance is structural, not metadata.
 3. **External substrates stay external.** Claude transcripts, user memory files, git, project docs — observed and recorded as `observation.X` entries at content-hash + time, not copied wholesale. Producers retain ownership.
 4. **fsync is per-writer-class.** Input boundary (`capture/`) fsyncs every entry — input loss is permanent. Cognitive modes (`dream/`, `reflect/`, `resolve/`, `think/`) fsync per batch — derivation loss is recoverable via replay.
