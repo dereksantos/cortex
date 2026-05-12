@@ -41,9 +41,23 @@ const (
 // ContextStrategy values. Maps 1:1 to v2 LibraryServiceCondition.
 const (
 	StrategyBaseline = "baseline"
-	StrategyCortex   = "cortex"
-	StrategyFrontier = "frontier"
+	StrategyCortex   = "cortex" // prompt-prefix injection (Phase 7 Hints:)
+	// StrategyCortexExtension installs the pi-cortex extension into
+	// .pi/extensions/cortex/ for the cell's workdir. The agent calls
+	// cortex_recall on demand instead of receiving a prepended Hints:
+	// prefix; the tool_result hook captures pi tool calls back into
+	// the cortex event log. Both strategies draw from the same cortex
+	// store, so both require cortex_version.
+	StrategyCortexExtension = "cortex_extension"
+	StrategyFrontier        = "frontier"
 )
+
+// isCortexFlavor reports whether the strategy draws from the cortex
+// store at all (and therefore requires a cortex_version + may legally
+// charge injected_context_tokens).
+func isCortexFlavor(strat string) bool {
+	return strat == StrategyCortex || strat == StrategyCortexExtension
+}
 
 // TaskSuccessCriterion qualifies what TaskSuccess actually means for a row.
 // A row's bool is meaningless without it — different harnesses + scenarios
@@ -133,15 +147,15 @@ func (r *CellResult) Validate() error {
 		return fmt.Errorf("unknown provider: %q", r.Provider)
 	}
 	switch r.ContextStrategy {
-	case StrategyBaseline, StrategyCortex, StrategyFrontier:
+	case StrategyBaseline, StrategyCortex, StrategyCortexExtension, StrategyFrontier:
 	default:
 		return fmt.Errorf("unknown context_strategy: %q", r.ContextStrategy)
 	}
-	if r.ContextStrategy == StrategyCortex && r.CortexVersion == "" {
-		return errors.New("cortex_version required when context_strategy=cortex")
+	if isCortexFlavor(r.ContextStrategy) && r.CortexVersion == "" {
+		return fmt.Errorf("cortex_version required when context_strategy=%q", r.ContextStrategy)
 	}
-	if r.InjectedContextTokens > 0 && r.ContextStrategy != StrategyCortex {
-		return fmt.Errorf("injected_context_tokens=%d but context_strategy=%q (only cortex strategy may inject)", r.InjectedContextTokens, r.ContextStrategy)
+	if r.InjectedContextTokens > 0 && !isCortexFlavor(r.ContextStrategy) {
+		return fmt.Errorf("injected_context_tokens=%d but context_strategy=%q (only cortex-flavor strategies may inject)", r.InjectedContextTokens, r.ContextStrategy)
 	}
 	if r.InjectedContextTokens > r.TokensIn {
 		return fmt.Errorf("injected_context_tokens=%d exceeds tokens_in=%d", r.InjectedContextTokens, r.TokensIn)

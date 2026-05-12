@@ -374,6 +374,13 @@ landed showing a 40 pp gap on `gpt-oss-20b:free` — see the Phase 7
 section above and `docs/phase7-divergence-finding.md` for the
 investigation.
 
+Phase 8 (2026-05-11) adds a **sub-axis to dim 6: injection
+style** (prefix vs extension). The extension shape is the new
+canonical integration for harnesses with extension APIs; the
+prefix is the compatibility layer for those without. See the
+"Sub-axis on dim 6" subsection below and
+`docs/prompts/pi-extension-prompt.md`.
+
 We are not going to run all 300. We will run **the ones that move the
 anchor's four pass-criteria** — and the matrix's job is to make sure
 we're not running near-duplicates while missing the high-value gaps.
@@ -444,6 +451,38 @@ generalization claim; one that holds only on aider is a weak one.
 Every "lift" number we have is *against (a) no context*. The real
 deployment choice is "cortex vs (b) a well-written CLAUDE.md / system
 prompt." That's the unfair comparison we owe ourselves.
+
+#### Sub-axis on dim 6: injection style (Phase 8, 2026-05-11)
+
+A second axis is now necessary inside dim 6 because cortex's
+integration shape varies per-harness. The prompt-prefix path
+that Phase 7 measured is **no longer the primary integration** —
+it is the compatibility layer for harnesses without an extensions
+API. Where the harness exposes one, cortex moves to a first-class
+extension.
+
+| injection style | description | applies to | first-class? |
+|---|---|---|---|
+| **prefix** | Cortex search results prepended to the user prompt as inline `Hints: …` natural-language prose (Phase 7 shape). Harness-agnostic; what we measured on Aider × cortex and pi.dev × cortex. | H₁ aider, H₂ opencode, H₃ pi.dev | compatibility layer |
+| **extension** | Cortex registers a `cortex_recall` tool the agent calls on demand; hooks `tool_call` to capture pi sessions back into the cortex event log. Phase 8 build, `packages/pi-cortex/`. Wired into the grid as `StrategyCortexExtension`. | H₃ pi.dev (today); future harnesses with extension APIs | primary integration |
+
+Implication for the matrix: the existing "✅" cells under dim 3 ×
+H₃ all reflect the **prefix** style. The extension style adds a
+new sub-row that needs its own coverage, independent of dim 3
+(prefix-vs-extension is orthogonal to which cognitive tier
+generates the content). Phase 8 TODO 10 lands the first 5
+cells × prefix + 5 cells × extension data point on H₃ ×
+`gpt-oss-20b:free`. Earlier free-model tool-call findings (see
+`docs/pi-extension-smoke-notes.md`) predict the extension may
+land in the inconclusive 3/5 band — the tightened pass criterion
+#3 (Phase 8.0 tick 0.c) treats *cite-or-act on recalled content*
+as required, not just liveness, so a model that fails to invoke
+the tool also fails the cell.
+
+Aider has no extensions API today, so the prefix path remains
+**necessary** for H₁ and H₂. The two coexist by design — hard
+constraint #2 in `docs/prompts/pi-extension-prompt.md` forbids
+regressing the prefix path on the harnesses that depend on it.
 
 ### Highest-value unexplored cells (what to run next)
 

@@ -448,3 +448,156 @@ func main() {
 		t.Errorf("ModelEcho=%q want openrouter/openai/gpt-oss-20b:free", res.ModelEcho)
 	}
 }
+
+// ---- Phase 8: cortex extension wiring -------------------------------------
+
+func TestPiDevHarness_CortexExtensionToggle(t *testing.T) {
+	h, err := NewPiDevHarness(installFakePi(t, t.TempDir(), fakePiHappyScript), "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewPiDevHarness: %v", err)
+	}
+	if h.CortexExtensionEnabled() {
+		t.Fatal("new harness must start with extension disabled")
+	}
+	h.SetCortexExtensionEnabled(true)
+	if !h.CortexExtensionEnabled() {
+		t.Fatal("SetCortexExtensionEnabled(true) did not stick")
+	}
+	h.SetCortexExtensionEnabled(false)
+	if h.CortexExtensionEnabled() {
+		t.Fatal("SetCortexExtensionEnabled(false) did not reset")
+	}
+}
+
+func TestEnsurePiCortexExtensionInstalled_MissingSourceErrors(t *testing.T) {
+	t.Setenv(EnvPiCortexExtensionSource, "")
+	t.Setenv("CORTEX_BINARY", "/tmp/some-cortex")
+	err := ensurePiCortexExtensionInstalled(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when $CORTEX_PI_EXTENSION_SOURCE is unset")
+	}
+	if !strings.Contains(err.Error(), "CORTEX_PI_EXTENSION_SOURCE") {
+		t.Errorf("err = %v, want mention of the env var name", err)
+	}
+}
+
+func TestEnsurePiCortexExtensionInstalled_RelativeSourceRejected(t *testing.T) {
+	t.Setenv(EnvPiCortexExtensionSource, "packages/pi-cortex")
+	err := ensurePiCortexExtensionInstalled(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for relative source path")
+	}
+	if !strings.Contains(err.Error(), "must be absolute") {
+		t.Errorf("err = %v, want 'must be absolute'", err)
+	}
+}
+
+func TestEnsurePiCortexExtensionInstalled_HappyPathSymlinks(t *testing.T) {
+	// Stand up a fake "packages/pi-cortex" source tree.
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvPiCortexExtensionSource, source)
+
+	workdir := t.TempDir()
+	if err := ensurePiCortexExtensionInstalled(workdir); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	dest := filepath.Join(workdir, ".pi", "extensions", "cortex")
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatalf("dest missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("dest is not a symlink: mode=%v", info.Mode())
+	}
+	target, err := os.Readlink(dest)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != source {
+		t.Errorf("symlink target = %q, want %q", target, source)
+	}
+
+	// Idempotent — calling again should replace the stale symlink
+	// without error.
+	if err := ensurePiCortexExtensionInstalled(workdir); err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+}
+
+func TestPiDevHarness_CortexExtension_RunSession_InstallsAndChecksEnv(t *testing.T) {
+	bin := installFakePi(t, t.TempDir(), fakePiHappyScript)
+	h, err := NewPiDevHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewPiDevHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	// Source + binary both set → install runs, pi gets invoked.
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvPiCortexExtensionSource, source)
+	t.Setenv("CORTEX_BINARY", "/tmp/fake-cortex")
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "do thing", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	dest := filepath.Join(workdir, ".pi", "extensions", "cortex")
+	if _, err := os.Lstat(dest); err != nil {
+		t.Errorf("expected extension symlink at %s, got: %v", dest, err)
+	}
+}
+
+func TestPiDevHarness_CortexExtension_MissingCortexBinaryErrors(t *testing.T) {
+	bin := installFakePi(t, t.TempDir(), fakePiHappyScript)
+	h, err := NewPiDevHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewPiDevHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "package.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvPiCortexExtensionSource, source)
+	t.Setenv("CORTEX_BINARY", "")
+
+	err = h.RunSession(context.Background(), "x", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when CORTEX_BINARY is unset and extension is enabled")
+	}
+	if !strings.Contains(err.Error(), "CORTEX_BINARY") {
+		t.Errorf("err = %v, want mention of CORTEX_BINARY", err)
+	}
+}
+
+func TestPiDevHarness_CortexExtensionDisabled_NoInstall(t *testing.T) {
+	bin := installFakePi(t, t.TempDir(), fakePiHappyScript)
+	h, err := NewPiDevHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewPiDevHarness: %v", err)
+	}
+	// Explicitly disabled (default state too).
+	h.SetCortexExtensionEnabled(false)
+
+	// Even with the source env var set, RunSession with extension
+	// disabled must NOT install — baseline cells share the same
+	// harness instance and would otherwise leak the install.
+	source := t.TempDir()
+	t.Setenv(EnvPiCortexExtensionSource, source)
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "x", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".pi", "extensions", "cortex")); err == nil {
+		t.Error("extension dir must NOT be created when SetCortexExtensionEnabled(false)")
+	}
+}
