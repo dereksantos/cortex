@@ -32,7 +32,7 @@ func TestJournalCommand_UnknownSubcommand(t *testing.T) {
 
 func TestJournalCommand_StubsReportSliceTarget(t *testing.T) {
 	cmd := &JournalCommand{}
-	for _, sub := range []string{"verify", "show", "tail"} {
+	for _, sub := range []string{"show", "tail"} {
 		err := cmd.Execute(&Context{Args: []string{sub}})
 		if err == nil {
 			t.Errorf("%s stub returned nil (expected not-implemented error)", sub)
@@ -428,6 +428,63 @@ func TestJournalCommand_ReplayWalksRange(t *testing.T) {
 		Args:   []string{"replay", "--config-overrides=model=claude-haiku"},
 	}); err != nil {
 		t.Errorf("replay with config-overrides: %v", err)
+	}
+}
+
+func TestJournalCommand_VerifyHealthyJournal(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-verify-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		ev := &events.Event{ID: "v-" + string(rune('a'+i)), Source: events.SourceClaude, Timestamp: time.Now()}
+		data, _ := json.Marshal(ev)
+		if _, err := w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: data}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	w.Close()
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cmd := &JournalCommand{}
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"verify"}}); err != nil {
+		t.Errorf("verify on healthy journal: %v", err)
+	}
+}
+
+func TestJournalCommand_VerifyDetectsCursorPastTail(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-verify-bad-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ev := &events.Event{ID: "v-1", Source: events.SourceClaude, Timestamp: time.Now()}
+	data, _ := json.Marshal(ev)
+	w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: data})
+	w.Close()
+
+	// Corrupt cursor: set past the tail.
+	if err := journal.OpenCursor(classDir).Set(99); err != nil {
+		t.Fatalf("Set cursor: %v", err)
+	}
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cmd := &JournalCommand{}
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"verify"}}); err == nil {
+		t.Error("verify should fail when cursor past tail")
 	}
 }
 

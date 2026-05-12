@@ -46,7 +46,7 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	case "replay":
 		return c.runReplay(ctx)
 	case "verify":
-		return notImplemented(sub, "X3")
+		return c.runVerify(ctx)
 	case "show":
 		return notImplemented(sub, "I1")
 	case "tail":
@@ -63,6 +63,124 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 
 func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
+}
+
+// runVerify checks the journal's structural integrity:
+//
+//  1. Cursor consistency: each class's cursor offset is ≤ the highest
+//     entry offset in that class. A cursor past the tail means the
+//     index was advanced without a matching entry — corruption.
+//  2. Source-offset references resolve: every entry with a non-empty
+//     Sources list points at offsets that exist in their respective
+//     writer-classes. Implemented as same-class lookups for now;
+//     cross-class source references are recorded but not strictly
+//     verified across class boundaries (entries within a class are
+//     monotonic, so same-class is the common case).
+//
+// Returns nonzero exit if any check fails. Used post-migration and
+// periodically as a health probe.
+func (c *JournalCommand) runVerify(ctx *Context) error {
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+
+	classes := []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval"}
+
+	// Pass 1: collect highest offset per class.
+	maxOffsets := make(map[string]journal.Offset)
+	totals := make(map[string]int)
+	for _, class := range classes {
+		classDir := filepath.Join(contextDir, "journal", class)
+		r, err := journal.NewReader(classDir)
+		if err != nil {
+			return fmt.Errorf("open reader for %s: %w", class, err)
+		}
+		for {
+			e, err := r.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				r.Close()
+				return fmt.Errorf("read %s: %w", class, err)
+			}
+			if e.Offset > maxOffsets[class] {
+				maxOffsets[class] = e.Offset
+			}
+			totals[class]++
+		}
+		r.Close()
+	}
+
+	// Pass 2: cursor checks.
+	issues := 0
+	for _, class := range classes {
+		classDir := filepath.Join(contextDir, "journal", class)
+		cur, err := journal.OpenCursor(classDir).Get()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: cursor read error: %v\n", class, err)
+			issues++
+			continue
+		}
+		if cur > maxOffsets[class] {
+			fmt.Fprintf(os.Stderr, "%s: cursor=%d past max offset=%d\n",
+				class, cur, maxOffsets[class])
+			issues++
+		}
+	}
+
+	// Pass 3: source-offset reference checks. Same-class lookup only.
+	for _, class := range classes {
+		classDir := filepath.Join(contextDir, "journal", class)
+		r, err := journal.NewReader(classDir)
+		if err != nil {
+			continue
+		}
+		for {
+			e, err := r.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				break
+			}
+			for _, src := range e.Sources {
+				// Source offsets cite earlier entries. Within this class
+				// the max-offset upper-bound is sufficient; cross-class
+				// source references are recorded but not strictly
+				// verified across boundaries here.
+				if src <= 0 || src > maxOffsets[class] {
+					// Cross-class source — accept if any class has it.
+					found := false
+					for _, c := range classes {
+						if src <= maxOffsets[c] && src > 0 {
+							found = true
+							break
+						}
+					}
+					if !found {
+						fmt.Fprintf(os.Stderr,
+							"%s offset=%d: source offset %d not resolvable in any class\n",
+							class, e.Offset, src)
+						issues++
+					}
+				}
+			}
+		}
+		r.Close()
+	}
+
+	// Pretty-print summary.
+	fmt.Println("Journal verify:")
+	for _, class := range classes {
+		fmt.Printf("  %s: %d entries (max offset %d)\n", class, totals[class], maxOffsets[class])
+	}
+	if issues > 0 {
+		return fmt.Errorf("verify: %d issue(s) found", issues)
+	}
+	fmt.Println("OK")
+	return nil
 }
 
 // runReplay re-walks a range of capture entries and reports what the
