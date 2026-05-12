@@ -1,0 +1,21 @@
+{
+  "name": "opencode-cortex",
+  "private": true,
+  "version": "0.1.0-pre",
+  "description": "Cortex plugin for opencode: exposes cortex_recall as a tool and hooks tool.execute.after back to cortex capture. Phase 8 of the cortex eval-harness program.",
+  "type": "module",
+  "keywords": [
+    "opencode-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node --test --experimental-strip-types --experimental-test-coverage=false test/**/*.test.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.14.48"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.0"
+  }
+}
