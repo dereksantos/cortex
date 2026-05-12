@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 1 {
-		t.Errorf("expected 1 default indexer (capture), got %d", len(processor.indexers))
+	if len(processor.indexers) != 2 {
+		t.Errorf("expected 2 default indexers (capture, observation), got %d", len(processor.indexers))
 	}
 }
 
@@ -220,6 +220,66 @@ func TestProcessor_RunBatchIdempotent(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Errorf("second RunBatch projected = %d, want 0 (cursor should skip already-indexed)", n2)
+	}
+}
+
+func TestProcessor_ProjectsObservationsAndDedups(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "observation")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	// Three observations:
+	//   - two with same (URI, content_hash) → second is a no-op
+	//   - one with different content_hash → records a new row
+	e1, _ := journal.NewObservationEntry(
+		journal.TypeObservationMemoryFile, "memory-md", "file:///a",
+		[]byte("alpha"), 5, time.Time{})
+	if _, err := w.Append(e1); err != nil {
+		t.Fatalf("append e1: %v", err)
+	}
+	e2, _ := journal.NewObservationEntry(
+		journal.TypeObservationMemoryFile, "memory-md", "file:///a",
+		[]byte("alpha"), 5, time.Time{})
+	if _, err := w.Append(e2); err != nil {
+		t.Fatalf("append e2: %v", err)
+	}
+	e3, _ := journal.NewObservationEntry(
+		journal.TypeObservationMemoryFile, "memory-md", "file:///a",
+		[]byte("alpha-updated"), 13, time.Time{})
+	if _, err := w.Append(e3); err != nil {
+		t.Fatalf("append e3: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("indexed = %d, want 3", n)
+	}
+
+	// Dedup: storage should hold both hashes for file:///a.
+	if !processor.storage.HasObservation("file:///a", journal.HashContent([]byte("alpha"))) {
+		t.Error("first observation not recorded")
+	}
+	if !processor.storage.HasObservation("file:///a", journal.HashContent([]byte("alpha-updated"))) {
+		t.Error("second observation (new hash) not recorded")
+	}
+	// But the duplicate e2 must not have created a second derived row.
+	// We can't enumerate; instead, verify the journal has 3 entries but
+	// the cursor advanced past all 3 (RunBatch returns 3 above) AND
+	// re-running should add 0 more.
+	n2, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("second RunBatch: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second RunBatch indexed = %d, want 0 (already at tail)", n2)
 	}
 }
 

@@ -62,13 +62,17 @@ type Storage struct {
 	sessionsByTime []*SessionMetadata          // sorted by started_at DESC
 	nextSessionID  int64
 
+	// Observation indexes (slice O3)
+	observations map[string]map[string]*Observation // uri -> content_hash -> Observation
+
 	// Open file handles for append
-	eventFile   *os.File
-	insightFile *os.File
-	entityFile  *os.File
-	relFile     *os.File
-	sessionFile *os.File
-	embFile     *os.File
+	eventFile       *os.File
+	insightFile     *os.File
+	entityFile      *os.File
+	relFile         *os.File
+	sessionFile     *os.File
+	embFile         *os.File
+	observationFile *os.File
 }
 
 type embeddingEntry struct {
@@ -134,6 +138,33 @@ type insightRecord struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// observationRecord projects a journal observation entry into the storage
+// log. Two observations with the same (URI, ContentHash) are deduplicated
+// at record time — the substrate hasn't changed, no new evidence.
+type observationRecord struct {
+	ProjectID   string    `json:"project_id,omitempty"`
+	Type        string    `json:"type"` // observation.<kind>
+	SourceName  string    `json:"source_name"`
+	URI         string    `json:"uri"`
+	ContentHash string    `json:"content_hash"`
+	Size        int64     `json:"size,omitempty"`
+	Modified    time.Time `json:"modified,omitempty"`
+	JournalOffset int64   `json:"journal_offset,omitempty"`
+	RecordedAt  time.Time `json:"recorded_at"`
+}
+
+// Observation is the derived view of a recorded substrate sighting.
+type Observation struct {
+	Type          string
+	SourceName    string
+	URI           string
+	ContentHash   string
+	Size          int64
+	Modified      time.Time
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
 type sessionRecord struct {
 	ProjectID     string    `json:"project_id,omitempty"`
 	Op            string    `json:"op,omitempty"` // "" = insert, "update" = replace
@@ -174,6 +205,7 @@ func New(cfg *config.Config) (*Storage, error) {
 		embeddings:        make(map[string]*embeddingEntry),
 		sessions:          make(map[string]*SessionMetadata),
 		nextSessionID:     1,
+		observations:      make(map[string]map[string]*Observation),
 	}
 
 	// Rebuild in-memory indexes from JSONL files
@@ -222,6 +254,16 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.sessionFile.Close()
 		return nil, fmt.Errorf("failed to open embeddings file: %w", err)
 	}
+	s.observationFile, err = openAppend(filepath.Join(dataDir, "observations.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		return nil, fmt.Errorf("failed to open observations file: %w", err)
+	}
 
 	return s, nil
 }
@@ -232,7 +274,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -301,7 +343,101 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildSessionIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildObservationIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildObservationIndexes replays observations.jsonl into the in-memory
+// dedup map. Later observations of the same (URI, content_hash) overwrite
+// earlier ones (preserving the most recent JournalOffset / RecordedAt
+// metadata) but do not produce duplicate keys.
+func (s *Storage) rebuildObservationIndexes() error {
+	records, err := readLines[observationRecord](filepath.Join(s.dataDir, "observations.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		if r.URI == "" || r.ContentHash == "" {
+			continue
+		}
+		byHash, ok := s.observations[r.URI]
+		if !ok {
+			byHash = make(map[string]*Observation)
+			s.observations[r.URI] = byHash
+		}
+		byHash[r.ContentHash] = &Observation{
+			Type:          r.Type,
+			SourceName:    r.SourceName,
+			URI:           r.URI,
+			ContentHash:   r.ContentHash,
+			Size:          r.Size,
+			Modified:      r.Modified,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		}
+	}
+	return nil
+}
+
+// RecordObservation projects a journal observation entry. Idempotent on
+// (URI, content_hash): if the substrate hasn't changed since the last
+// observation, returns false and does not append a new record.
+// Returns true when a new (URI, content_hash) is recorded.
+func (s *Storage) RecordObservation(o *Observation) (bool, error) {
+	if o == nil {
+		return false, fmt.Errorf("nil observation")
+	}
+	if o.URI == "" || o.ContentHash == "" {
+		return false, fmt.Errorf("observation requires URI and ContentHash")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byHash, ok := s.observations[o.URI]
+	if !ok {
+		byHash = make(map[string]*Observation)
+		s.observations[o.URI] = byHash
+	}
+	if _, exists := byHash[o.ContentHash]; exists {
+		return false, nil
+	}
+
+	if o.RecordedAt.IsZero() {
+		o.RecordedAt = time.Now().UTC()
+	}
+	rec := observationRecord{
+		ProjectID:     s.projectID,
+		Type:          o.Type,
+		SourceName:    o.SourceName,
+		URI:           o.URI,
+		ContentHash:   o.ContentHash,
+		Size:          o.Size,
+		Modified:      o.Modified,
+		JournalOffset: o.JournalOffset,
+		RecordedAt:    o.RecordedAt,
+	}
+	if err := appendLine(s.observationFile, rec); err != nil {
+		return false, fmt.Errorf("append observation: %w", err)
+	}
+	byHash[o.ContentHash] = o
+	return true, nil
+}
+
+// HasObservation reports whether (uri, contentHash) is already recorded.
+// Used by `cortex journal verify` and by callers that want to short-circuit
+// substrate parsing when content hasn't changed.
+func (s *Storage) HasObservation(uri, contentHash string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byHash, ok := s.observations[uri]
+	if !ok {
+		return false
+	}
+	_, exists := byHash[contentHash]
+	return exists
 }
 
 func (s *Storage) rebuildEventIndexes() error {

@@ -42,10 +42,13 @@ type Processor struct {
 	batchEvents []*events.Event
 }
 
-// New creates a Processor wired with the capture.event projector. The
-// default journal class dir (<ContextDir>/journal/capture/) is registered
-// automatically; additional projects' journals can be added via
-// AddJournalDir.
+// New creates a Processor wired with the capture.event and observation.*
+// projectors. The default journal class dirs (<ContextDir>/journal/capture/
+// and <ContextDir>/journal/observation/) are registered automatically;
+// additional projects' journals can be added via AddJournalDir.
+//
+// Future writer-classes (dream, reflect, resolve, think, feedback, eval)
+// register their projectors here in their respective slices.
 func New(cfg *config.Config, store *storage.Storage) *Processor {
 	p := &Processor{
 		cfg:     cfg,
@@ -53,9 +56,17 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 	}
 	p.registry = journal.NewRegistry()
 	p.registry.Register("capture.event", 1, p.projectCaptureEvent)
+	for _, typ := range []string{
+		journal.TypeObservationClaudeTranscript,
+		journal.TypeObservationGitCommit,
+		journal.TypeObservationMemoryFile,
+	} {
+		p.registry.Register(typ, 1, p.projectObservation)
+	}
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "observation"))
 	}
 	return p
 }
@@ -75,6 +86,29 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectObservation projects an observation.* entry to storage. Idempotent
+// via storage.RecordObservation's (URI, content_hash) dedup.
+func (p *Processor) projectObservation(e *journal.Entry) error {
+	payload, err := journal.ParseObservation(e)
+	if err != nil {
+		return fmt.Errorf("parse observation at offset %d: %w", e.Offset, err)
+	}
+	obs := &storage.Observation{
+		Type:          e.Type,
+		SourceName:    payload.SourceName,
+		URI:           payload.URI,
+		ContentHash:   payload.ContentHash,
+		Size:          payload.Size,
+		Modified:      payload.Modified,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}
+	if _, err := p.storage.RecordObservation(obs); err != nil {
+		return fmt.Errorf("record observation: %w", err)
+	}
 	return nil
 }
 
