@@ -300,6 +300,93 @@ func TestJournalCommand_RebuildReplaysCaptureJournal(t *testing.T) {
 	store.Close()
 }
 
+func TestJournalCommand_RebuildWalksFullDAG(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-rebuild-dag-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{ContextDir: tempDir}
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+
+	// Seed entries across multiple writer-classes.
+	writeOne := func(class string, entry *journal.Entry) {
+		w, err := journal.NewWriter(journal.WriterOpts{
+			ClassDir: filepath.Join(tempDir, "journal", class),
+			Fsync:    journal.FsyncPerBatch,
+		})
+		if err != nil {
+			t.Fatalf("writer for %s: %v", class, err)
+		}
+		if _, err := w.Append(entry); err != nil {
+			t.Fatalf("append %s: %v", class, err)
+		}
+		w.Close()
+	}
+
+	// capture
+	ev := &events.Event{
+		ID:        "dag-event",
+		Source:    events.SourceClaude,
+		EventType: events.EventToolUse,
+		Timestamp: time.Now(),
+		ToolName:  "Edit",
+	}
+	evJSON, _ := json.Marshal(ev)
+	writeOne("capture", &journal.Entry{Type: "capture.event", V: 1, Payload: evJSON})
+
+	// observation
+	obs, _ := journal.NewObservationEntry(
+		journal.TypeObservationMemoryFile, "memory-md", "file:///x",
+		[]byte("hello"), 5, time.Time{})
+	writeOne("observation", obs)
+
+	// reflect rerank with a contradiction
+	rerank, _ := journal.NewReflectRerankEntry(journal.ReflectRerankPayload{
+		QueryText: "q",
+		InputIDs:  []string{"a", "b"},
+		RankedIDs: []string{"b", "a"},
+		Contradictions: []journal.ContradictionRecord{
+			{IDs: []string{"a", "b"}, Reason: "conflict"},
+		},
+	})
+	writeOne("reflect", rerank)
+
+	// resolve retrieval
+	retr, _ := journal.NewResolveRetrievalEntry(journal.ResolveRetrievalPayload{
+		QueryText:   "q",
+		Decision:    "inject",
+		Confidence:  0.9,
+		ResultCount: 2,
+	})
+	writeOne("resolve", retr)
+
+	// Run rebuild — should truncate + replay everything.
+	cmd := &JournalCommand{}
+	if err := cmd.Execute(&Context{Config: cfg, Storage: store, Args: []string{"rebuild"}}); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	// Verify each writer-class's derived state is populated.
+	if _, err := store.GetEvent("dag-event"); err != nil {
+		t.Errorf("capture event missing after rebuild: %v", err)
+	}
+	if !store.HasObservation("file:///x", journal.HashContent([]byte("hello"))) {
+		t.Error("observation missing after rebuild")
+	}
+	if got := store.GetContradictions(10); len(got) != 1 {
+		t.Errorf("contradictions = %d, want 1", len(got))
+	}
+	if got := store.GetRetrievals(10); len(got) != 1 {
+		t.Errorf("retrievals = %d, want 1", len(got))
+	}
+	store.Close()
+}
+
 func TestJournalCommand_MigrateHandlesMissingQueueDir(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cortex-migrate-empty-*")
 	if err != nil {

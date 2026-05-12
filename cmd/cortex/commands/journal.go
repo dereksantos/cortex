@@ -64,17 +64,21 @@ func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
 }
 
-// runRebuild truncates the events log and replays the capture journal from
-// offset 0 into storage. C5 scope is capture-only — derivation writer-classes
-// (dream, reflect, resolve, think, feedback, eval) get their projections
-// chained in here in slice X1. Verifies that journal is sufficient to
-// regenerate event state.
+// runRebuild walks the full writer-class DAG: truncates all derived state
+// and replays every writer-class's journal from offset 0. Slice X1 — the
+// full-DAG version of the capture-only rebuild from C5.
+//
+// Order is implicit from processor.New's indexer registration order:
+// capture + observation are registered before derivation classes
+// (dream, reflect, resolve, think) and feedback. Since RunBatch iterates
+// indexers in registration order, derivations that reference earlier
+// classes by source-offset see their dependencies materialized first
+// within the same batch.
 func (c *JournalCommand) runRebuild(ctx *Context) error {
 	contextDir, err := journalContextDir(ctx)
 	if err != nil {
 		return err
 	}
-	classDir := filepath.Join(contextDir, "journal", "capture")
 
 	cfg := ctx.Config
 	store := ctx.Storage
@@ -93,23 +97,29 @@ func (c *JournalCommand) runRebuild(ctx *Context) error {
 		store = s
 	}
 
-	// 1. Truncate the events log + clear in-memory event indexes.
-	if err := store.TruncateEventLog(); err != nil {
-		return fmt.Errorf("truncate events: %w", err)
+	// 1. Truncate every derived JSONL + in-memory index reachable by
+	//    a journal-side writer-class. Insights/entities/etc. (Dream's
+	//    direct-storage products) are left intact for now.
+	if err := store.TruncateAllDerivedState(); err != nil {
+		return fmt.Errorf("truncate derived state: %w", err)
 	}
-	// 2. Reset the capture cursor so the indexer replays from offset 0.
-	cursor := journal.OpenCursor(classDir)
-	if err := cursor.Set(0); err != nil {
-		return fmt.Errorf("reset cursor: %w", err)
+	// 2. Reset cursors for every known writer-class so the indexer
+	//    replays from offset 0.
+	for _, class := range []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval"} {
+		classDir := filepath.Join(contextDir, "journal", class)
+		if err := journal.OpenCursor(classDir).Set(0); err != nil {
+			return fmt.Errorf("reset cursor for %s: %w", class, err)
+		}
 	}
-	// 3. Run the indexer to project every capture.event entry.
+	// 3. Run the indexer; processor.New registers projectors for every
+	//    writer-class and adds each class dir to its indexer set.
 	proc := processor.New(cfg, store)
 	n, err := proc.RunBatch()
 	if err != nil {
 		return fmt.Errorf("replay journal: %w", err)
 	}
 
-	fmt.Printf("Rebuilt events from journal: replayed %d capture entries\n", n)
+	fmt.Printf("Rebuilt derived state from journal: replayed %d entries across writer-classes\n", n)
 	return nil
 }
 

@@ -526,6 +526,80 @@ func (s *Storage) Close() error {
 	return firstErr
 }
 
+// TruncateAllDerivedState removes ALL derived JSONL files written by the
+// journal-class projections and clears the corresponding in-memory
+// indexes. Used by `cortex journal rebuild` (X1) to clear derived state
+// before replaying the full writer-class DAG.
+//
+// What gets truncated:
+//   - events.jsonl (capture)
+//   - observations.jsonl (observation)
+//   - contradictions.jsonl (reflect)
+//   - retrievals.jsonl (resolve)
+//   - session_context.jsonl (think)
+//   - feedback.jsonl (feedback)
+//   - eval_cell_results.jsonl (eval, journaled-mirror only — the
+//     canonical internal/eval/v2 SQLite + cell_results.jsonl is left
+//     alone until the eval-storage unification follow-up)
+//
+// Insights / entities / relationships / sessions / embeddings are NOT
+// truncated — those derive from Dream's earlier direct-storage path
+// (the dual-write transition that landed with D1/D2) and depend on
+// LLM regeneration to repopulate. A future slice will move them under
+// the journal model fully; for now rebuild is best understood as
+// "rebuild every writer-class that has a journal-side source of truth."
+//
+// Caller must ensure no concurrent reads are in flight.
+func (s *Storage) TruncateAllDerivedState() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	type fileEntry struct {
+		handle **os.File
+		name   string
+	}
+	files := []fileEntry{
+		{&s.eventFile, "events.jsonl"},
+		{&s.observationFile, "observations.jsonl"},
+		{&s.contradictionFile, "contradictions.jsonl"},
+		{&s.retrievalFile, "retrievals.jsonl"},
+		{&s.sessionCtxFile, "session_context.jsonl"},
+		{&s.feedbackFile, "feedback.jsonl"},
+		{&s.evalCellFile, "eval_cell_results.jsonl"},
+	}
+	for _, f := range files {
+		if *f.handle != nil {
+			if err := (*f.handle).Close(); err != nil {
+				return fmt.Errorf("close %s: %w", f.name, err)
+			}
+			*f.handle = nil
+		}
+		path := filepath.Join(s.dataDir, f.name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+		nf, err := openAppend(path)
+		if err != nil {
+			return fmt.Errorf("reopen %s: %w", path, err)
+		}
+		*f.handle = nf
+	}
+
+	// Reset in-memory indexes for the truncated derived state.
+	s.events = make(map[string]*events.Event)
+	s.eventsByTime = nil
+	s.sessionEvents = make(map[string][]string)
+	s.observations = make(map[string]map[string]*Observation)
+	s.contradictions = nil
+	s.retrievals = nil
+	s.sessionContextSnapshots = nil
+	s.feedbackAll = nil
+	s.feedbackByID = make(map[string][]*Feedback)
+	s.retractedIDs = make(map[string]bool)
+	s.evalCellResults = nil
+	return nil
+}
+
 // TruncateEventLog removes events.jsonl and resets the in-memory event
 // indexes. Used by `cortex journal rebuild` to clear the derived event
 // state before replaying the journal — see docs/journal.md principle 1
