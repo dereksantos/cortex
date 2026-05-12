@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -39,7 +41,23 @@ type Think struct {
 
 	// State writer for daemon status updates
 	stateWriter *StateWriter
+
+	// Journal output (slice T1). When set, Think emits
+	// think.session_context entries to <journalDir>/think/ at the end
+	// of each MaybeThink cycle.
+	journalDir string
+
+	// SessionID tagged on emitted entries.
+	sessionID string
 }
+
+// SetJournalDir wires the project's <ContextDir>/journal/ root.
+// Empty disables journal emission.
+func (t *Think) SetJournalDir(dir string) { t.journalDir = dir }
+
+// SetSessionID tags emitted think.session_context entries with the
+// current session.
+func (t *Think) SetSessionID(id string) { t.sessionID = id }
 
 // NewThink creates a new Think instance.
 func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Think {
@@ -169,6 +187,9 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 	t.sessionCtx.LastUpdated = time.Now()
 	t.mu.Unlock()
 
+	// Snapshot session context to the journal (slice T1).
+	t.emitSessionContextToJournal()
+
 	log.Printf("Think: completed (%d ops, %v)", ops, time.Since(start))
 
 	return &cognition.ThinkResult{
@@ -176,6 +197,48 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 		Operations: ops,
 		Duration:   time.Since(start),
 	}, nil
+}
+
+// emitSessionContextToJournal best-effort writes a think.session_context
+// snapshot. Errors logged, never returned.
+func (t *Think) emitSessionContextToJournal() {
+	if t.journalDir == "" {
+		return
+	}
+	snap := t.SessionContextSnapshot()
+
+	cachedQueries := make([]string, 0, len(snap.CachedReflect))
+	for q := range snap.CachedReflect {
+		cachedQueries = append(cachedQueries, q)
+	}
+	recent := make([]string, 0, len(snap.RecentQueries))
+	for _, q := range snap.RecentQueries {
+		recent = append(recent, q.Text)
+	}
+	payload := journal.ThinkSessionContextPayload{
+		TopicWeights:  snap.TopicWeights,
+		RecentQueries: recent,
+		CachedQueries: cachedQueries,
+		SessionID:     t.sessionID,
+	}
+	entry, err := journal.NewThinkSessionContextEntry(payload)
+	if err != nil {
+		log.Printf("think: build journal entry: %v", err)
+		return
+	}
+	classDir := filepath.Join(t.journalDir, "think")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("think: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("think: append journal entry: %v", err)
+	}
 }
 
 // SessionContext returns the current session's accumulated context.

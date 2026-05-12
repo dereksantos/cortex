@@ -63,6 +63,9 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		contextDir = cfg.ContextDir
 	}
 	if contextDir != "" {
+		think.SetJournalDir(contextDir + "/journal")
+	}
+	if contextDir != "" {
 		reflect.SetJournalDir(contextDir + "/journal")
 	}
 	resolve := NewResolve()
