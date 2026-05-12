@@ -44,8 +44,14 @@ const SEARCH_MAX_BUFFER = 2 * 1024 * 1024; // 2 MiB — plenty for ≤50 results
  * source attribution stays clean across harnesses in the events table.
  * Downstream Dream sources read these as structured data — the shape
  * is part of the cortex contract.
+ *
+ * NOT exported — opencode's plugin loader iterates every named export
+ * looking for Plugin functions. Exporting helper functions/types from
+ * a discovered plugin file confuses the loader (observed: "plugin
+ * config hook failed" with `O.config` evaluation on null/undefined).
+ * Keep helpers file-local.
  */
-export type OpencodeToolCallCapture = {
+type OpencodeToolCallCapture = {
   tool_name: string;
   args_redacted: Record<string, unknown>;
   result_summary: string;
@@ -71,7 +77,7 @@ function summarizeStringOutput(s: unknown, maxChars: number = RESULT_SUMMARY_MAX
  * allowlist — callers can short-circuit instead of spawning cortex
  * capture.
  */
-export function buildOpencodeCapturePayload(
+function buildOpencodeCapturePayload(
   toolName: string,
   args: unknown,
   output: unknown,
@@ -111,7 +117,7 @@ export function buildOpencodeCapturePayload(
  * $CORTEX_PROJECT_ROOT when set; otherwise fall back to the project
  * directory captured from PluginInput at plugin-load time.
  */
-export function shellCapture(
+function shellCapture(
   binary: string,
   payload: OpencodeToolCallCapture,
   fallbackCwd: string,
