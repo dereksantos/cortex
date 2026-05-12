@@ -36,32 +36,7 @@ import (
 type PiDevHarness struct {
 	binary string // path to pi executable
 	model  string // e.g., "openrouter/openai/gpt-oss-20b:free"
-
-	// Phase 8 — set per-cell by the grid runner via SetCortexExtensionEnabled.
-	// When true, runSession symlinks $CORTEX_PI_EXTENSION_SOURCE into
-	// <workdir>/.pi/extensions/cortex/ before invoking pi, and asserts
-	// that $CORTEX_BINARY is set in the harness env so the loaded
-	// extension can shell out to a known-good cortex binary.
-	//
-	// When false, no extension install happens — the harness behaves
-	// exactly as it did pre-Phase 8 for baseline / cortex (prefix) /
-	// frontier strategies.
-	cortexExtensionEnabled bool
 }
-
-// EnvPiCortexExtensionSource names the env var that must hold an
-// absolute path to packages/pi-cortex/ (the extension package root)
-// when the cortex_extension strategy is active. The grid runner sets
-// this; the harness reads it at install time.
-const EnvPiCortexExtensionSource = "CORTEX_PI_EXTENSION_SOURCE"
-
-// EnvCortexProjectRoot tells the spawned `cortex capture` child
-// (fired by the extension's tool_result hook) where the project's
-// `.cortex/` directory lives. Pi's cwd is the cell's temp workdir
-// which has no `.cortex/`, so `cortex capture`'s findProjectRoot
-// walk would otherwise fail silently. The harness sets this to the
-// directory holding `.cortex/` (typically the cortex repo root).
-const EnvCortexProjectRoot = "CORTEX_PROJECT_ROOT"
 
 // SetModel changes the model used for subsequent RunSession calls.
 // The grid runner type-asserts on this method to swap models on the
@@ -73,58 +48,6 @@ func (h *PiDevHarness) SetModel(model string) {
 // Model returns the currently configured model string.
 func (h *PiDevHarness) Model() string {
 	return h.model
-}
-
-// SetCortexExtensionEnabled toggles whether RunSession installs the
-// pi-cortex extension into the cell's workdir before invoking pi.
-// The grid runner calls this per-cell based on cell.ContextStrategy
-// — true for StrategyCortexExtension, false for everything else.
-//
-// Must be reset between cells so a baseline cell following a
-// cortex_extension cell doesn't accidentally load the extension.
-func (h *PiDevHarness) SetCortexExtensionEnabled(enabled bool) {
-	h.cortexExtensionEnabled = enabled
-}
-
-// CortexExtensionEnabled reports the current state of the extension
-// install flag. Mainly useful for tests.
-func (h *PiDevHarness) CortexExtensionEnabled() bool {
-	return h.cortexExtensionEnabled
-}
-
-// ensurePiCortexExtensionInstalled symlinks the pi-cortex package
-// into <workdir>/.pi/extensions/cortex so pi's auto-discovery picks
-// it up for the upcoming run. Idempotent — removes any prior
-// install in the dest path first. Symlink (rather than copy) is
-// used because the package tree is many MB once node_modules is
-// included, and the workdir is short-lived.
-//
-// Errors when $CORTEX_PI_EXTENSION_SOURCE is unset or invalid.
-func ensurePiCortexExtensionInstalled(workdir string) error {
-	source := os.Getenv(EnvPiCortexExtensionSource)
-	if source == "" {
-		return fmt.Errorf("$%s must be set for cortex_extension strategy (expected absolute path to packages/pi-cortex/)", EnvPiCortexExtensionSource)
-	}
-	if !filepath.IsAbs(source) {
-		return fmt.Errorf("$%s must be absolute, got %q", EnvPiCortexExtensionSource, source)
-	}
-	if info, err := os.Stat(source); err != nil {
-		return fmt.Errorf("%s=%s: %w", EnvPiCortexExtensionSource, source, err)
-	} else if !info.IsDir() {
-		return fmt.Errorf("%s=%s: not a directory", EnvPiCortexExtensionSource, source)
-	}
-	parent := filepath.Join(workdir, ".pi", "extensions")
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return fmt.Errorf("mkdir .pi/extensions: %w", err)
-	}
-	dest := filepath.Join(parent, "cortex")
-	if err := os.RemoveAll(dest); err != nil {
-		return fmt.Errorf("clear stale dest %s: %w", dest, err)
-	}
-	if err := os.Symlink(source, dest); err != nil {
-		return fmt.Errorf("symlink %s -> %s: %w", dest, source, err)
-	}
-	return nil
 }
 
 // NewPiDevHarness resolves the pi binary (PATH lookup if binary is
@@ -174,32 +97,6 @@ func (h *PiDevHarness) RunSessionWithResult(ctx context.Context, prompt, workdir
 func (h *PiDevHarness) runSession(ctx context.Context, prompt, workdir string) (HarnessResult, error) {
 	provider, modelSlug := splitPiModel(h.model)
 
-	// Phase 8: install the cortex extension into the cell's workdir
-	// before invoking pi. Pi's project-local auto-discovery picks it
-	// up from .pi/extensions/cortex/. This is gated on the per-cell
-	// flag the grid runner sets via SetCortexExtensionEnabled.
-	if h.cortexExtensionEnabled {
-		if err := ensurePiCortexExtensionInstalled(workdir); err != nil {
-			return HarnessResult{ModelEcho: h.model, ProviderEcho: provider},
-				fmt.Errorf("install cortex extension: %w", err)
-		}
-		if os.Getenv("CORTEX_BINARY") == "" {
-			return HarnessResult{ModelEcho: h.model, ProviderEcho: provider},
-				fmt.Errorf("$CORTEX_BINARY must be set for cortex_extension strategy so the extension can shell out to a known-good binary")
-		}
-		// Default $CORTEX_PROJECT_ROOT to the harness process's cwd
-		// if the caller didn't set it. The extension's tool_result
-		// hook reads this to fix the spawn cwd for `cortex capture`
-		// (pi's cwd is the cell's temp workdir, which has no
-		// .cortex/). This is a fallback; the grid runner should set
-		// it explicitly to the directory holding .cortex/.
-		if os.Getenv(EnvCortexProjectRoot) == "" {
-			if cwd, err := os.Getwd(); err == nil {
-				_ = os.Setenv(EnvCortexProjectRoot, cwd)
-			}
-		}
-	}
-
 	args := []string{"--mode", "json"}
 	if provider != "" {
 		args = append(args, "--provider", provider)
@@ -215,8 +112,7 @@ func (h *PiDevHarness) runSession(ctx context.Context, prompt, workdir string) (
 
 	// pi reads OPENROUTER_API_KEY from env. The project env exports
 	// OPEN_ROUTER_API_KEY (underscore form). Re-export only when the
-	// canonical name isn't already set. CORTEX_BINARY is inherited
-	// directly from os.Environ() (no remapping needed).
+	// canonical name isn't already set.
 	if k := os.Getenv("OPEN_ROUTER_API_KEY"); k != "" && os.Getenv("OPENROUTER_API_KEY") == "" {
 		cmd.Env = append(os.Environ(), "OPENROUTER_API_KEY="+k)
 	}
