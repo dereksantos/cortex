@@ -41,7 +41,7 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	case "ingest":
 		return c.runIngest(ctx)
 	case "rebuild":
-		return notImplemented(sub, "C5 (capture) / X1 (full DAG)")
+		return c.runRebuild(ctx)
 	case "replay":
 		return notImplemented(sub, "X2")
 	case "verify":
@@ -62,6 +62,55 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 
 func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
+}
+
+// runRebuild truncates the events log and replays the capture journal from
+// offset 0 into storage. C5 scope is capture-only — derivation writer-classes
+// (dream, reflect, resolve, think, feedback, eval) get their projections
+// chained in here in slice X1. Verifies that journal is sufficient to
+// regenerate event state.
+func (c *JournalCommand) runRebuild(ctx *Context) error {
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+	classDir := filepath.Join(contextDir, "journal", "capture")
+
+	cfg := ctx.Config
+	store := ctx.Storage
+	if cfg == nil || store == nil {
+		storageCfg, sErr := loadStorageConfig()
+		if sErr != nil {
+			return fmt.Errorf("load storage config: %w", sErr)
+		}
+		storageCfg.ContextDir = contextDir
+		s, oErr := storage.New(storageCfg)
+		if oErr != nil {
+			return fmt.Errorf("open storage: %w", oErr)
+		}
+		defer s.Close()
+		cfg = storageCfg
+		store = s
+	}
+
+	// 1. Truncate the events log + clear in-memory event indexes.
+	if err := store.TruncateEventLog(); err != nil {
+		return fmt.Errorf("truncate events: %w", err)
+	}
+	// 2. Reset the capture cursor so the indexer replays from offset 0.
+	cursor := journal.OpenCursor(classDir)
+	if err := cursor.Set(0); err != nil {
+		return fmt.Errorf("reset cursor: %w", err)
+	}
+	// 3. Run the indexer to project every capture.event entry.
+	proc := processor.New(cfg, store)
+	n, err := proc.RunBatch()
+	if err != nil {
+		return fmt.Errorf("replay journal: %w", err)
+	}
+
+	fmt.Printf("Rebuilt events from journal: replayed %d capture entries\n", n)
+	return nil
 }
 
 // runMigrate packs the project's .cortex/queue/processed/*.json files into
@@ -219,7 +268,10 @@ func journalUsage() string {
 
 Subcommands:
   ingest      Run indexer once; exits when caught up.
-  rebuild     Truncate derived state, replay journal from 0.     (slice C5 / X1)
+  rebuild     Truncate the events log and replay the capture
+              journal from offset 0. Use after corruption or to
+              verify the journal is sufficient to regenerate
+              derived state. Extended to walk derivations in X1.
   replay      Re-run cognition with config overrides.            (slice X2)
   verify      Source-offset integrity, projection row counts.    (slice X3)
   show        Print a single entry by offset.                    (slice I1)

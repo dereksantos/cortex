@@ -32,7 +32,7 @@ func TestJournalCommand_UnknownSubcommand(t *testing.T) {
 
 func TestJournalCommand_StubsReportSliceTarget(t *testing.T) {
 	cmd := &JournalCommand{}
-	for _, sub := range []string{"rebuild", "replay", "verify", "show", "tail"} {
+	for _, sub := range []string{"replay", "verify", "show", "tail"} {
 		err := cmd.Execute(&Context{Args: []string{sub}})
 		if err == nil {
 			t.Errorf("%s stub returned nil (expected not-implemented error)", sub)
@@ -229,6 +229,75 @@ func TestJournalCommand_MigrateRefusesIfJournalNonEmpty(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("migrate --force: %v", err)
 	}
+}
+
+func TestJournalCommand_RebuildReplaysCaptureJournal(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-rebuild-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{ContextDir: tempDir}
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+
+	// Write 3 capture.event entries to the journal AND store them in
+	// storage so we have both sides of derived state populated. Then
+	// blow away storage and verify rebuild repopulates it from journal
+	// alone.
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	for i, id := range []string{"r-a", "r-b", "r-c"} {
+		ev := &events.Event{
+			ID:        id,
+			Source:    events.SourceClaude,
+			EventType: events.EventToolUse,
+			Timestamp: time.Now().Add(time.Duration(i) * time.Second),
+			ToolName:  "Edit",
+		}
+		payload, _ := json.Marshal(ev)
+		if _, err := w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: payload}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		// Also store in storage directly — simulates the indexer having
+		// already projected these.
+		if err := store.StoreEvent(ev); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+	w.Close()
+
+	// Sanity: storage has 3 events.
+	for _, id := range []string{"r-a", "r-b", "r-c"} {
+		if _, err := store.GetEvent(id); err != nil {
+			t.Fatalf("pre-rebuild GetEvent %s: %v", id, err)
+		}
+	}
+
+	cmd := &JournalCommand{}
+	err = cmd.Execute(&Context{Config: cfg, Storage: store, Args: []string{"rebuild"}})
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	// After rebuild, all 3 events should be back in storage.
+	for _, id := range []string{"r-a", "r-b", "r-c"} {
+		got, err := store.GetEvent(id)
+		if err != nil {
+			t.Errorf("post-rebuild GetEvent %s: %v", id, err)
+		}
+		if got == nil {
+			t.Errorf("event %s missing after rebuild", id)
+		}
+	}
+
+	store.Close()
 }
 
 func TestJournalCommand_MigrateHandlesMissingQueueDir(t *testing.T) {

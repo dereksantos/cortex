@@ -242,6 +242,44 @@ func (s *Storage) Close() error {
 	return firstErr
 }
 
+// TruncateEventLog removes events.jsonl and resets the in-memory event
+// indexes. Used by `cortex journal rebuild` to clear the derived event
+// state before replaying the journal — see docs/journal.md principle 1
+// (CQRS): derived state must be regeneratable from the journal.
+//
+// Caller must ensure no concurrent reads are in flight; rebuild is
+// expected to run with the daemon stopped.
+//
+// Insights, entities, relationships, sessions, and embeddings are NOT
+// touched — those derive from other writer-classes (dream, reflect, etc.)
+// and have their own rebuild paths (slices D2, R2, etc.).
+func (s *Storage) TruncateEventLog() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.eventFile != nil {
+		if err := s.eventFile.Close(); err != nil {
+			return fmt.Errorf("close event file: %w", err)
+		}
+		s.eventFile = nil
+	}
+	eventPath := filepath.Join(s.dataDir, "events.jsonl")
+	if err := os.Remove(eventPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", eventPath, err)
+	}
+
+	s.events = make(map[string]*events.Event)
+	s.eventsByTime = nil
+	s.sessionEvents = make(map[string][]string)
+
+	f, err := openAppend(eventPath)
+	if err != nil {
+		return fmt.Errorf("reopen %s: %w", eventPath, err)
+	}
+	s.eventFile = f
+	return nil
+}
+
 // --- Index rebuild ---
 
 func (s *Storage) rebuildIndexes() error {
