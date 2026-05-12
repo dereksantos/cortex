@@ -62,6 +62,9 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	if cfg != nil {
 		contextDir = cfg.ContextDir
 	}
+	if contextDir != "" {
+		reflect.SetJournalDir(contextDir + "/journal")
+	}
 	dreamStatePath := ""
 	if contextDir != "" {
 		dreamStatePath = contextDir + "/dream_state.json"

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"path/filepath"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -39,7 +42,15 @@ type Reflect struct {
 
 	// ActivityLogger for logging contradictions to activity.log
 	activityLogger *ActivityLogger
+
+	// Journal output (slice R1). When set, Reflect emits reflect.rerank
+	// entries to <journalDir>/reflect/ after each rerank operation.
+	journalDir string
 }
+
+// SetJournalDir wires the project's <ContextDir>/journal/ root for
+// reflect.rerank emission. Empty disables journal emission.
+func (r *Reflect) SetJournalDir(dir string) { r.journalDir = dir }
 
 // NewReflect creates a new Reflect instance.
 // If llm is nil, Reflect will gracefully degrade to returning candidates as-is.
@@ -73,13 +84,65 @@ func (r *Reflect) Reflect(ctx context.Context, q cognition.Query, candidates []c
 	}
 
 	// Parse response
-	reranked, err := r.parseRerankResponse(response, candidates)
+	reranked, parsed, err := r.parseRerankResponseV2(response, candidates)
 	if err != nil {
 		// Graceful degradation: return candidates as-is
 		return candidates, nil
 	}
 
+	// Best-effort journal emission (slice R1). Errors logged, never returned.
+	r.emitRerankToJournal(q, candidates, reranked, parsed)
+
 	return reranked, nil
+}
+
+// emitRerankToJournal writes a reflect.rerank entry capturing this
+// rerank's inputs, outputs, and contradictions. No-op when journalDir is
+// empty.
+func (r *Reflect) emitRerankToJournal(q cognition.Query, input, ranked []cognition.Result, parsed rerankResponse) {
+	if r.journalDir == "" || len(ranked) == 0 {
+		return
+	}
+	inputIDs := make([]string, len(input))
+	for i, c := range input {
+		inputIDs[i] = c.ID
+	}
+	rankedIDs := make([]string, len(ranked))
+	for i, c := range ranked {
+		rankedIDs[i] = c.ID
+	}
+	var contradictions []journal.ContradictionRecord
+	for _, c := range parsed.Contradictions {
+		contradictions = append(contradictions, journal.ContradictionRecord{
+			IDs:    c.IDs,
+			Reason: c.Reason,
+		})
+	}
+	payload := journal.ReflectRerankPayload{
+		QueryText:      q.Text,
+		InputIDs:       inputIDs,
+		RankedIDs:      rankedIDs,
+		Contradictions: contradictions,
+		Reasoning:      parsed.Reasoning,
+	}
+	entry, err := journal.NewReflectRerankEntry(payload)
+	if err != nil {
+		log.Printf("reflect: build journal entry: %v", err)
+		return
+	}
+	classDir := filepath.Join(r.journalDir, "reflect")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("reflect: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("reflect: append journal entry: %v", err)
+	}
 }
 
 // buildRerankPrompt creates the prompt for LLM reranking.
@@ -118,6 +181,23 @@ type rerankResponse struct {
 type contradiction struct {
 	IDs    []string `json:"ids"`
 	Reason string   `json:"reason"`
+}
+
+// parseRerankResponseV2 wraps parseRerankResponse to also surface the
+// parsed rerankResponse, which the journal emitter needs to record
+// contradictions.
+func (r *Reflect) parseRerankResponseV2(response string, candidates []cognition.Result) ([]cognition.Result, rerankResponse, error) {
+	start := strings.Index(response, "{")
+	end := strings.LastIndex(response, "}")
+	if start == -1 || end == -1 || end <= start {
+		return candidates, rerankResponse{}, fmt.Errorf("no JSON found in response")
+	}
+	var rr rerankResponse
+	if err := json.Unmarshal([]byte(response[start:end+1]), &rr); err != nil {
+		return candidates, rerankResponse{}, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	reranked, _ := r.parseRerankResponse(response, candidates)
+	return reranked, rr, nil
 }
 
 // parseRerankResponse parses the LLM response and reorders candidates.
