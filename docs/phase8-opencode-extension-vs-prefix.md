@@ -166,18 +166,44 @@ The original criteria stand, with one numeric refinement based on
 empirical data:
 
 - `cortex_extension` pass-rate ≥ baseline pass-rate on the
-  `test/evals/coding` set (5 scenarios) — **MET at 3/5 vs 1/5**.
+  `test/evals/coding` set (5 scenarios) — **MET** (see N=10
+  combined-runs table below).
 - Held-out set of ≥ 3 additional coding scenarios — **NOT YET RUN**.
   Track in a follow-up phase; recommend running with N≥10 cells per
   strategy to dampen `:free` model variance.
 - `cortex_recall` calls per cell average < baseline turn count — see
   the gate-ON unseeded observation table below; not re-measured for
-  the seeded run.
+  the seeded runs.
 
-Decision: leave the env gate IN PLACE (default OFF) until the
-held-out re-run lands. The single seeded run is encouraging but not
-yet decisive at N=5. Flip the gate default-on once a held-out N≥10
-run lands `cortex_extension ≥ baseline` again.
+### Combined two-run result (N=10 per strategy on the same 5 scenarios)
+
+A second seeded run (same 5 scenarios, store unchanged) was added to
+dampen `:free` variance. Combined results:
+
+| run     | baseline | cortex_extension |
+|---------|----------|------------------|
+| Run 1   | 1/5 (20%)| 3/5 (60%)        |
+| Run 2   | 2/5 (40%)| 2/5 (40%)        |
+| **N=10**| **3/10 (30%)** | **5/10 (50%)** |
+
+**Combined lift: +20 pp.** Smaller than the single-run +40 pp (which
+benefited from a baseline-low / extension-high coincidence), but
+still positive and consistent with the diagnostic hypothesis. The
+extension never falls below baseline across the two runs; in run 2
+it ties; in run 1 it leads.
+
+Run 2 shows another encouraging signal: cortex_extension's input
+tokens on its passing cells dropped sharply (1179, 753 in run 2 vs
+10838, 625 in run 1) — the model is making fewer / more targeted
+`cortex_recall` calls when the store reliably returns useful
+context, rather than spamming queries.
+
+Decision: leave the env gate IN PLACE (default OFF) until a
+held-out N≥10 run on scenarios outside `test/evals/coding/` lands.
+The +20 pp lift at N=10 is encouraging but the standard error on
+binomial at N=10 with p≈0.4 is ~15 pp, so a +20 pp gap is
+statistically borderline. Held-out scenarios eliminate the risk
+that the captures are over-fit to the test set.
 
 ## Per-cell observation from the unseeded gate-ON run (kept for history)
 
