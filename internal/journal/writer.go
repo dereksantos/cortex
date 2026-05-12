@@ -107,22 +107,31 @@ func (w *Writer) recover() error {
 	if err != nil {
 		return fmt.Errorf("journal: open %s for append: %w", path, err)
 	}
+	if err := acquireExclusiveLock(int(f.Fd())); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("journal: lock %s: %w", path, err)
+	}
 	w.f = f
 	return nil
 }
 
-// openSegment closes the current segment (if any) and opens segment n.
-// The new segment starts empty; nextOffset is preserved across rotation.
+// openSegment closes the current segment (if any, releasing its lock) and
+// opens segment n with a fresh exclusive lock. The new segment starts
+// empty; nextOffset is preserved across rotation.
 func (w *Writer) openSegment(n int) error {
 	if w.f != nil {
 		_ = w.f.Sync()
-		_ = w.f.Close()
+		_ = w.f.Close() // releases flock
 		w.f = nil
 	}
 	path := segmentPath(w.opts.ClassDir, n)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("journal: open %s: %w", path, err)
+	}
+	if err := acquireExclusiveLock(int(f.Fd())); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("journal: lock %s: %w", path, err)
 	}
 	w.f = f
 	w.segmentN = n
