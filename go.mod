@@ -3,6 +3,7 @@ module github.com/dereksantos/cortex
 go 1.25.1
 
 require (
+	github.com/gofrs/flock v0.13.0
 	github.com/knights-analytics/hugot v0.6.1
 	github.com/viterin/vek v0.4.3
 	golang.org/x/term v0.38.0
@@ -17,7 +18,6 @@ require (
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect
 	github.com/gomlx/go-huggingface v0.3.1 // indirect
 	github.com/gomlx/go-xla v0.1.4 // indirect
