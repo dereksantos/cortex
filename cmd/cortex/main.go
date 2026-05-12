@@ -22,7 +22,7 @@ func main() {
 	command := os.Args[1]
 
 	switch command {
-	case "capture", "ingest", "analyze", "process", "feed":
+	case "capture", "ingest", "analyze", "process", "feed", "journal":
 		if cmd := commands.Get(command); cmd != nil {
 			ctx := &commands.Context{
 				Args: os.Args[2:],
@@ -296,6 +296,7 @@ Commands:
   analyze        Run LLM analysis on recent events [limit]
   process        Process queue + analyze (backward compat)
   feed           Seed knowledge from files or directories
+  journal        Journal operations (rebuild/replay/verify/show/tail/migrate/ingest)
   daemon         Start background processor (dashboard at :9090)
 
   search         Search captured context
