@@ -18,7 +18,6 @@ import (
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/cognition/sources"
 	"github.com/dereksantos/cortex/internal/processor"
-	"github.com/dereksantos/cortex/internal/queue"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/web"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -85,22 +84,19 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	}
 	defer RemoveDaemonPID(globalDir)
 
-	// Create queue manager (default queue at global dir)
-	queueMgr := queue.New(cfg, store)
+	// Create and start processor (journal indexer per project)
+	proc := processor.New(cfg, store)
 
-	// Create and start processor
-	proc := processor.New(cfg, store, queueMgr)
-
-	// Register all project queues from the registry
+	// Register all project journals from the registry
 	reg, regErr := projreg.Open()
 	if regErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not open project registry: %v\n", regErr)
 	} else {
 		for _, project := range reg.List() {
-			queueDir := filepath.Join(project.Path, ".cortex", "queue")
-			if _, err := os.Stat(filepath.Join(queueDir, "pending")); err == nil {
-				proc.AddQueueDir(queueDir)
-				fmt.Printf("   Watching queue: %s\n", project.ID)
+			classDir := filepath.Join(project.Path, ".cortex", "journal", "capture")
+			if _, err := os.Stat(classDir); err == nil {
+				proc.AddJournalDir(classDir)
+				fmt.Printf("   Watching journal: %s\n", project.ID)
 			}
 		}
 	}
