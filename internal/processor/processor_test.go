@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 6 {
-		t.Errorf("expected 6 default indexers (capture, observation, dream, reflect, resolve, think), got %d", len(processor.indexers))
+	if len(processor.indexers) != 7 {
+		t.Errorf("expected 7 default indexers (capture, observation, dream, reflect, resolve, think, feedback), got %d", len(processor.indexers))
 	}
 }
 
@@ -482,6 +482,61 @@ func TestProcessor_ProjectsThinkSessionContext(t *testing.T) {
 	}
 	if latest.TopicWeights["db"] != 0.4 {
 		t.Errorf("latest TopicWeights[db] = %v, want 0.4", latest.TopicWeights["db"])
+	}
+}
+
+func TestProcessor_ProjectsFeedback(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "feedback")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+
+	// One correction (graded ID = insight-7) followed by a retraction of
+	// a different insight (graded ID = insight-8).
+	e1, err := journal.NewFeedbackEntry(journal.TypeFeedbackCorrection, journal.FeedbackPayload{
+		GradedID:    "insight-7",
+		Note:        "use Postgres",
+		Replacement: "use Postgres not SQLite",
+	})
+	if err != nil {
+		t.Fatalf("NewFeedbackEntry corr: %v", err)
+	}
+	if _, err := w.Append(e1); err != nil {
+		t.Fatalf("Append e1: %v", err)
+	}
+	e2, err := journal.NewFeedbackEntry(journal.TypeFeedbackRetraction, journal.FeedbackPayload{
+		GradedID: "insight-8",
+		Reason:   "user forget",
+	})
+	if err != nil {
+		t.Fatalf("NewFeedbackEntry retr: %v", err)
+	}
+	if _, err := w.Append(e2); err != nil {
+		t.Fatalf("Append e2: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("indexed = %d, want 2", n)
+	}
+
+	feedbacks := processor.storage.FeedbackFor("insight-7")
+	if len(feedbacks) != 1 || feedbacks[0].Type != journal.TypeFeedbackCorrection {
+		t.Errorf("insight-7 feedbacks = %+v, want one correction", feedbacks)
+	}
+	if processor.storage.IsRetracted("insight-7") {
+		t.Error("insight-7 should not be retracted")
+	}
+	if !processor.storage.IsRetracted("insight-8") {
+		t.Error("insight-8 should be retracted")
 	}
 }
 

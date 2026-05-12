@@ -74,6 +74,11 @@ type Storage struct {
 	// SessionContext snapshots (slice T2)
 	sessionContextSnapshots []*SessionContextSnapshot
 
+	// Feedback indexes (slice B3)
+	feedbackAll    []*Feedback
+	feedbackByID   map[string][]*Feedback // graded_id -> feedbacks
+	retractedIDs   map[string]bool        // graded_ids with a retraction
+
 	// Open file handles for append
 	eventFile         *os.File
 	insightFile       *os.File
@@ -85,6 +90,7 @@ type Storage struct {
 	contradictionFile *os.File
 	retrievalFile     *os.File
 	sessionCtxFile    *os.File
+	feedbackFile      *os.File
 }
 
 type embeddingEntry struct {
@@ -148,6 +154,35 @@ type insightRecord struct {
 	SourceType   string    `json:"source_type,omitempty"`
 	WasRetrieved bool      `json:"was_retrieved,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// feedbackRecord projects a feedback.* journal entry. One row per
+// grading event (correction/confirmation/retraction). Provides the input
+// for supersession flags on derivation rows.
+type feedbackRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	Type          string    `json:"type"` // feedback.<kind>
+	GradedID      string    `json:"graded_id,omitempty"`
+	GradedOffset  int64     `json:"graded_offset,omitempty"`
+	Note          string    `json:"note,omitempty"`
+	Replacement   string    `json:"replacement,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Feedback is the derived view of a recorded feedback entry.
+type Feedback struct {
+	Type          string
+	GradedID      string
+	GradedOffset  int64
+	Note          string
+	Replacement   string
+	Reason        string
+	SessionID     string
+	JournalOffset int64
+	RecordedAt    time.Time
 }
 
 // sessionContextRecord projects a think.session_context snapshot. One
@@ -303,6 +338,8 @@ func New(cfg *config.Config) (*Storage, error) {
 		sessions:          make(map[string]*SessionMetadata),
 		nextSessionID:     1,
 		observations:      make(map[string]map[string]*Observation),
+		feedbackByID:      make(map[string][]*Feedback),
+		retractedIDs:      make(map[string]bool),
 	}
 
 	// Rebuild in-memory indexes from JSONL files
@@ -397,6 +434,20 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.retrievalFile.Close()
 		return nil, fmt.Errorf("failed to open session_context file: %w", err)
 	}
+	s.feedbackFile, err = openAppend(filepath.Join(dataDir, "feedback.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		s.retrievalFile.Close()
+		s.sessionCtxFile.Close()
+		return nil, fmt.Errorf("failed to open feedback file: %w", err)
+	}
 
 	return s, nil
 }
@@ -407,7 +458,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile, s.sessionCtxFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile, s.sessionCtxFile, s.feedbackFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -488,7 +539,101 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildSessionContextIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildFeedbackIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildFeedbackIndexes replays feedback.jsonl into the feedback maps.
+func (s *Storage) rebuildFeedbackIndexes() error {
+	records, err := readLines[feedbackRecord](filepath.Join(s.dataDir, "feedback.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		fb := &Feedback{
+			Type:          r.Type,
+			GradedID:      r.GradedID,
+			GradedOffset:  r.GradedOffset,
+			Note:          r.Note,
+			Replacement:   r.Replacement,
+			Reason:        r.Reason,
+			SessionID:     r.SessionID,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		}
+		s.feedbackAll = append(s.feedbackAll, fb)
+		if r.GradedID != "" {
+			s.feedbackByID[r.GradedID] = append(s.feedbackByID[r.GradedID], fb)
+			if r.Type == "feedback.retraction" {
+				s.retractedIDs[r.GradedID] = true
+			}
+		}
+	}
+	return nil
+}
+
+// RecordFeedback projects one feedback.* entry. Updates the by-id index
+// and the retracted-ids set. Append-only.
+func (s *Storage) RecordFeedback(f *Feedback) error {
+	if f == nil {
+		return fmt.Errorf("nil feedback")
+	}
+	if f.Type == "" {
+		return fmt.Errorf("feedback requires Type")
+	}
+	if f.GradedID == "" && f.GradedOffset == 0 {
+		return fmt.Errorf("feedback requires GradedID or GradedOffset")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if f.RecordedAt.IsZero() {
+		f.RecordedAt = time.Now().UTC()
+	}
+	rec := feedbackRecord{
+		ProjectID:     s.projectID,
+		Type:          f.Type,
+		GradedID:      f.GradedID,
+		GradedOffset:  f.GradedOffset,
+		Note:          f.Note,
+		Replacement:   f.Replacement,
+		Reason:        f.Reason,
+		SessionID:     f.SessionID,
+		JournalOffset: f.JournalOffset,
+		RecordedAt:    f.RecordedAt,
+	}
+	if err := appendLine(s.feedbackFile, rec); err != nil {
+		return fmt.Errorf("append feedback: %w", err)
+	}
+	s.feedbackAll = append(s.feedbackAll, f)
+	if f.GradedID != "" {
+		s.feedbackByID[f.GradedID] = append(s.feedbackByID[f.GradedID], f)
+		if f.Type == "feedback.retraction" {
+			s.retractedIDs[f.GradedID] = true
+		}
+	}
+	return nil
+}
+
+// FeedbackFor returns the feedback entries that grade a given derivation
+// (matched by GradedID). Most-recent-last.
+func (s *Storage) FeedbackFor(gradedID string) []*Feedback {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Feedback, len(s.feedbackByID[gradedID]))
+	copy(out, s.feedbackByID[gradedID])
+	return out
+}
+
+// IsRetracted reports whether the given graded ID has at least one
+// feedback.retraction entry recorded. Used by query paths to hide
+// retracted derivations from results.
+func (s *Storage) IsRetracted(gradedID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.retractedIDs[gradedID]
 }
 
 // rebuildSessionContextIndexes replays session_context.jsonl into the

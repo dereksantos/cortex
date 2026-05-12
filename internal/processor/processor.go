@@ -67,6 +67,13 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 	p.registry.Register(journal.TypeReflectRerank, 1, p.projectReflectRerank)
 	p.registry.Register(journal.TypeResolveRetrieval, 1, p.projectResolveRetrieval)
 	p.registry.Register(journal.TypeThinkSessionContext, 1, p.projectThinkSessionContext)
+	for _, typ := range []string{
+		journal.TypeFeedbackCorrection,
+		journal.TypeFeedbackConfirmation,
+		journal.TypeFeedbackRetraction,
+	} {
+		p.registry.Register(typ, 1, p.projectFeedback)
+	}
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
@@ -75,6 +82,7 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "reflect"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "resolve"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "think"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "feedback"))
 	}
 	return p
 }
@@ -94,6 +102,30 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectFeedback records a feedback.* entry to storage. The entry's Type
+// (correction / confirmation / retraction) is preserved in the Feedback
+// row; storage indexes by GradedID and tracks the retracted-id set.
+func (p *Processor) projectFeedback(e *journal.Entry) error {
+	payload, err := journal.ParseFeedback(e)
+	if err != nil {
+		return fmt.Errorf("parse feedback at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordFeedback(&storage.Feedback{
+		Type:          e.Type,
+		GradedID:      payload.GradedID,
+		GradedOffset:  int64(payload.GradedOffset),
+		Note:          payload.Note,
+		Replacement:   payload.Replacement,
+		Reason:        payload.Reason,
+		SessionID:     payload.SessionID,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record feedback at offset %d: %w", e.Offset, err)
+	}
 	return nil
 }
 
