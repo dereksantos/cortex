@@ -1,8 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { ToolContext } from "@opencode-ai/plugin/tool";
 import { CortexPlugin } from "../plugins/cortex.ts";
@@ -139,6 +147,110 @@ test("cortex_recall.execute returns benign output when binary errors (never thro
   } finally {
     if (prior === undefined) delete process.env.CORTEX_BINARY;
     else process.env.CORTEX_BINARY = prior;
+  }
+});
+
+// ---- tool.execute.after capture hook (TODO 5) ------------------------------
+
+test("tool.execute.after spawns cortex capture for allowlisted tools (smoke)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "opencode-capture-test-"));
+  const hooks = await CortexPlugin(fakePluginInput({ directory: dir }));
+  const afterHandler = hooks["tool.execute.after"];
+  assert.ok(afterHandler, "tool.execute.after must be registered");
+
+  const fakeCortex = join(dir, "cortex-fake-capture");
+  const outFile = join(dir, "capture.log");
+  writeFileSync(fakeCortex, `#!/bin/sh\necho "$@" > "${outFile}"\n`, "utf8");
+  chmodSync(fakeCortex, 0o755);
+
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = fakeCortex;
+    await afterHandler(
+      { tool: "bash", sessionID: "ses_test", callID: "call_test", args: { command: "echo hi" } },
+      { title: "Run command", output: "hi\n", metadata: {} },
+    );
+    // shellCapture is fire-and-forget; give the child time to land.
+    const start = Date.now();
+    while (!existsSync(outFile) && Date.now() - start < 3000) {
+      await delay(50);
+    }
+    assert.ok(existsSync(outFile), "fake cortex must have run within 3s");
+    const captured = readFileSync(outFile, "utf8");
+    assert.match(captured, /^capture --type opencode_tool_call --content /);
+    assert.match(captured, /"tool_name":"bash"/);
+    assert.match(captured, /"args_redacted":\{"command":"echo hi"\}/);
+    assert.match(captured, /"result_summary":"hi/);
+    assert.match(captured, /"session_id":"ses_test"/);
+  } finally {
+    if (prior === undefined) delete process.env.CORTEX_BINARY;
+    else process.env.CORTEX_BINARY = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tool.execute.after does NOT spawn capture for unlisted tools", async () => {
+  const hooks = await CortexPlugin(fakePluginInput());
+  const afterHandler = hooks["tool.execute.after"]!;
+
+  const dir = mkdtempSync(join(tmpdir(), "opencode-capture-skip-"));
+  const fakeCortex = join(dir, "cortex-fake-skip");
+  const outFile = join(dir, "capture.log");
+  writeFileSync(fakeCortex, `#!/bin/sh\necho "$@" > "${outFile}"\n`, "utf8");
+  chmodSync(fakeCortex, 0o755);
+
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = fakeCortex;
+    for (const skip of ["read", "glob", "ls", "find", "grep"]) {
+      await afterHandler(
+        { tool: skip, sessionID: "ses", callID: "call", args: {} },
+        { title: skip, output: "", metadata: {} },
+      );
+    }
+    await delay(300); // let any (unwanted) spawn write
+    assert.ok(!existsSync(outFile), "fake cortex must NOT have been invoked for unlisted tools");
+  } finally {
+    if (prior === undefined) delete process.env.CORTEX_BINARY;
+    else process.env.CORTEX_BINARY = prior;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tool.execute.after redacts secret-shaped args before capturing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "opencode-capture-redact-"));
+  const hooks = await CortexPlugin(fakePluginInput({ directory: dir }));
+  const afterHandler = hooks["tool.execute.after"]!;
+
+  const fakeCortex = join(dir, "cortex-fake-redact");
+  const outFile = join(dir, "capture.log");
+  writeFileSync(fakeCortex, `#!/bin/sh\necho "$@" > "${outFile}"\n`, "utf8");
+  chmodSync(fakeCortex, 0o755);
+
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = fakeCortex;
+    await afterHandler(
+      {
+        tool: "bash",
+        sessionID: "ses_red",
+        callID: "call_red",
+        args: { command: "AUTH_TOKEN=sk-or-v1-abc123def456 curl https://api" },
+      },
+      { title: "Run", output: "", metadata: {} },
+    );
+    const start = Date.now();
+    while (!existsSync(outFile) && Date.now() - start < 3000) {
+      await delay(50);
+    }
+    assert.ok(existsSync(outFile));
+    const captured = readFileSync(outFile, "utf8");
+    assert.match(captured, /<REDACTED>/);
+    assert.ok(!/sk-or-v1-abc123def456/.test(captured));
+  } finally {
+    if (prior === undefined) delete process.env.CORTEX_BINARY;
+    else process.env.CORTEX_BINARY = prior;
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
