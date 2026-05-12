@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -43,7 +44,7 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	case "rebuild":
 		return c.runRebuild(ctx)
 	case "replay":
-		return notImplemented(sub, "X2")
+		return c.runReplay(ctx)
 	case "verify":
 		return notImplemented(sub, "X3")
 	case "show":
@@ -62,6 +63,112 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 
 func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
+}
+
+// runReplay re-walks a range of capture entries and reports what the
+// cognition pipeline would project against the current configuration —
+// the foundation of the counterfactual-eval primitive. Slice X2 lands
+// the structural skeleton; future work threads --config-overrides
+// (model, prompt-hash, budget) through cognition to compare derivations
+// without overwriting the originals.
+//
+// Flags:
+//
+//	--class=capture           Writer-class to replay (default: capture).
+//	--from-offset=N           First offset to replay (default: 1).
+//	--to-offset=N             Last offset to replay (default: tail).
+//	--config-overrides=...    Reserved for future use; parsed but not
+//	                          yet threaded through cognition.
+func (c *JournalCommand) runReplay(ctx *Context) error {
+	class := "capture"
+	var fromOff, toOff Offset = 1, 0
+	configOverrides := ""
+
+	for _, a := range ctx.Args[1:] {
+		switch {
+		case a == "--help" || a == "-h":
+			fmt.Print(replayUsage())
+			return nil
+		case strings.HasPrefix(a, "--class="):
+			class = strings.TrimPrefix(a, "--class=")
+		case strings.HasPrefix(a, "--from-offset="):
+			fromOff = parseOffsetFlag(a, "--from-offset=", fromOff)
+		case strings.HasPrefix(a, "--to-offset="):
+			toOff = parseOffsetFlag(a, "--to-offset=", toOff)
+		case strings.HasPrefix(a, "--config-overrides="):
+			configOverrides = strings.TrimPrefix(a, "--config-overrides=")
+		}
+	}
+
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+	classDir := filepath.Join(contextDir, "journal", class)
+
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		return fmt.Errorf("open journal reader for %s: %w", class, err)
+	}
+	defer r.Close()
+
+	scanned, replayed := 0, 0
+	for {
+		entry, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read entry: %w", err)
+		}
+		scanned++
+		if entry.Offset < fromOff {
+			continue
+		}
+		if toOff != 0 && entry.Offset > toOff {
+			break
+		}
+		// Skeleton: print one summary line per replayed entry. Future
+		// work feeds entry into cognition with config overrides and
+		// emits comparison records to a side journal.
+		fmt.Printf("offset=%d type=%s v=%d\n", entry.Offset, entry.Type, entry.V)
+		replayed++
+	}
+
+	fmt.Printf("\nReplayed %d/%d entries from %s (range %d..%v)\n",
+		replayed, scanned, class, fromOff, toOff)
+	if configOverrides != "" {
+		fmt.Printf("--config-overrides=%q parsed but not yet threaded through cognition.\n", configOverrides)
+		fmt.Println("Counterfactual replay against overridden config lands in a follow-up slice.")
+	}
+	return nil
+}
+
+func parseOffsetFlag(arg, prefix string, fallback Offset) Offset {
+	v := strings.TrimPrefix(arg, prefix)
+	if v == "" {
+		return fallback
+	}
+	var n int64
+	if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+		return Offset(n)
+	}
+	return fallback
+}
+
+// Offset is re-exported here so flag parsing stays in this file.
+type Offset = journal.Offset
+
+func replayUsage() string {
+	return `Usage: cortex journal replay [flags]
+
+Flags:
+  --class=NAME             Writer-class to replay (default: capture)
+  --from-offset=N          First offset (default: 1)
+  --to-offset=N            Last offset (default: tail)
+  --config-overrides=KV    Reserved for counterfactual eval; parsed but
+                           not yet threaded through cognition.
+`
 }
 
 // runRebuild walks the full writer-class DAG: truncates all derived state

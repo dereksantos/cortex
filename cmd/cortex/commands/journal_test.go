@@ -32,7 +32,7 @@ func TestJournalCommand_UnknownSubcommand(t *testing.T) {
 
 func TestJournalCommand_StubsReportSliceTarget(t *testing.T) {
 	cmd := &JournalCommand{}
-	for _, sub := range []string{"replay", "verify", "show", "tail"} {
+	for _, sub := range []string{"verify", "show", "tail"} {
 		err := cmd.Execute(&Context{Args: []string{sub}})
 		if err == nil {
 			t.Errorf("%s stub returned nil (expected not-implemented error)", sub)
@@ -385,6 +385,50 @@ func TestJournalCommand_RebuildWalksFullDAG(t *testing.T) {
 		t.Errorf("retrievals = %d, want 1", len(got))
 	}
 	store.Close()
+}
+
+func TestJournalCommand_ReplayWalksRange(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-replay-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		ev := &events.Event{ID: "replay-" + string(rune('a'+i)), Source: events.SourceClaude, Timestamp: time.Now()}
+		data, _ := json.Marshal(ev)
+		if _, err := w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: data}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	w.Close()
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cmd := &JournalCommand{}
+
+	// Replay all entries (no range).
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"replay"}}); err != nil {
+		t.Errorf("replay all: %v", err)
+	}
+	// Replay a sub-range.
+	if err := cmd.Execute(&Context{
+		Config: cfg,
+		Args:   []string{"replay", "--from-offset=2", "--to-offset=4"},
+	}); err != nil {
+		t.Errorf("replay sub-range: %v", err)
+	}
+	// Flag parsing for config-overrides (no-op for now).
+	if err := cmd.Execute(&Context{
+		Config: cfg,
+		Args:   []string{"replay", "--config-overrides=model=claude-haiku"},
+	}); err != nil {
+		t.Errorf("replay with config-overrides: %v", err)
+	}
 }
 
 func TestJournalCommand_MigrateHandlesMissingQueueDir(t *testing.T) {
