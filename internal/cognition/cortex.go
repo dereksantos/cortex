@@ -65,6 +65,10 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	if contextDir != "" {
 		reflect.SetJournalDir(contextDir + "/journal")
 	}
+	resolve := NewResolve()
+	if contextDir != "" {
+		resolve.SetJournalDir(contextDir + "/journal")
+	}
 	dreamStatePath := ""
 	if contextDir != "" {
 		dreamStatePath = contextDir + "/dream_state.json"
@@ -74,7 +78,6 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 		dream.SetJournalDir(contextDir + "/journal")
 	}
 	digest := NewDigest(store, contextDir)
-	resolve := NewResolve()
 
 	// Connect resolve to think for session context (race-safe via snapshots)
 	resolve.SetThinker(think)
