@@ -2,9 +2,15 @@ package commands
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/events"
 )
 
 // JournalCommand dispatches journal subcommands. Subcommand bodies land in
@@ -45,7 +51,7 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	case "tail":
 		return notImplemented(sub, "I1")
 	case "migrate":
-		return notImplemented(sub, "C4")
+		return c.runMigrate(ctx)
 	case "help", "-h", "--help":
 		fmt.Print(journalUsage())
 		return nil
@@ -56,6 +62,119 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 
 func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
+}
+
+// runMigrate packs the project's .cortex/queue/processed/*.json files into
+// the journal/capture/ writer-class. Files are appended in lexicographic
+// order, which corresponds to chronological order for the existing event
+// ID format ("20060102-150405-xxxxxxxx"). Refuses to run if the target
+// journal already has entries unless --force is passed; .cortex/queue/
+// is not deleted here (slice C6 handles cleanup after verification).
+func (c *JournalCommand) runMigrate(ctx *Context) error {
+	force := false
+	for _, a := range ctx.Args[1:] {
+		if a == "--force" || a == "-f" {
+			force = true
+		}
+	}
+
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+	queueDir := filepath.Join(contextDir, "queue", "processed")
+	classDir := filepath.Join(contextDir, "journal", "capture")
+
+	// Refuse to run on top of an existing populated journal unless --force.
+	if !force {
+		r, err := journal.NewReader(classDir)
+		if err == nil {
+			_, nextErr := r.Next()
+			r.Close()
+			if nextErr == nil {
+				return fmt.Errorf("journal %s already has entries; pass --force to append", classDir)
+			} else if nextErr != io.EOF {
+				return fmt.Errorf("check existing journal: %w", nextErr)
+			}
+		}
+	}
+
+	if _, err := os.Stat(queueDir); os.IsNotExist(err) {
+		fmt.Printf("No queue at %s — nothing to migrate.\n", queueDir)
+		return nil
+	}
+
+	files, err := filepath.Glob(filepath.Join(queueDir, "*.json"))
+	if err != nil {
+		return fmt.Errorf("list %s: %w", queueDir, err)
+	}
+	if len(files) == 0 {
+		fmt.Printf("No events in %s — nothing to migrate.\n", queueDir)
+		return nil
+	}
+	sort.Strings(files)
+
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return fmt.Errorf("open journal writer: %w", err)
+	}
+	defer w.Close()
+
+	migrated, skipped := 0, 0
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  skip %s: %v\n", filepath.Base(path), err)
+			skipped++
+			continue
+		}
+		// Validate it parses as an Event before appending; malformed files
+		// are skipped rather than wedging the journal.
+		if _, err := events.FromJSON(data); err != nil {
+			fmt.Fprintf(os.Stderr, "  skip %s: bad event JSON: %v\n",
+				filepath.Base(path), err)
+			skipped++
+			continue
+		}
+		entry := &journal.Entry{
+			Type:    "capture.event",
+			V:       1,
+			Payload: data,
+		}
+		if _, err := w.Append(entry); err != nil {
+			return fmt.Errorf("append %s: %w", filepath.Base(path), err)
+		}
+		migrated++
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+
+	fmt.Printf("Migrated %d events to %s", migrated, classDir)
+	if skipped > 0 {
+		fmt.Printf(" (%d skipped)", skipped)
+	}
+	fmt.Println()
+	fmt.Println("Old queue files at " + queueDir + " left in place.")
+	fmt.Println("Run `cortex journal rebuild` to verify, then slice C6 will remove them.")
+	return nil
+}
+
+// journalContextDir returns the project-local .cortex/ path. Uses the
+// Context's cfg if provided; otherwise walks up from cwd via the existing
+// loadCaptureConfig helper.
+func journalContextDir(ctx *Context) (string, error) {
+	if ctx.Config != nil && ctx.Config.ContextDir != "" {
+		return ctx.Config.ContextDir, nil
+	}
+	captureCfg, err := loadCaptureConfig()
+	if err != nil {
+		return "", fmt.Errorf("load config: %w", err)
+	}
+	return captureCfg.ContextDir, nil
 }
 
 // runIngest drains the project's capture journal once and exits. Lower
@@ -105,7 +224,8 @@ Subcommands:
   verify      Source-offset integrity, projection row counts.    (slice X3)
   show        Print a single entry by offset.                    (slice I1)
   tail        Stream entries as they're appended.                (slice I1)
-  migrate     Pack .cortex/queue/processed/*.json into segments. (slice C4)
+  migrate     Pack .cortex/queue/processed/*.json into segments.
+              Pass --force to append when the journal already has entries.
 
 See docs/journal.md for the architecture and docs/journal-implementation-plan.md
 for the full slice plan.
