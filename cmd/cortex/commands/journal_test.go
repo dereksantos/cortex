@@ -30,20 +30,9 @@ func TestJournalCommand_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-func TestJournalCommand_StubsReportSliceTarget(t *testing.T) {
-	cmd := &JournalCommand{}
-	for _, sub := range []string{"show", "tail"} {
-		err := cmd.Execute(&Context{Args: []string{sub}})
-		if err == nil {
-			t.Errorf("%s stub returned nil (expected not-implemented error)", sub)
-			continue
-		}
-		// Error message should name the slice that lands the body.
-		if !contains(err.Error(), "slice") {
-			t.Errorf("%s error %q should name the implementing slice", sub, err.Error())
-		}
-	}
-}
+// All journal subcommands have bodies as of slice I1; the
+// "stubs report slice target" guard test landed earlier in the loop
+// and is no longer applicable.
 
 func TestJournalCommand_IngestProjectsJournalEntries(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "cortex-journal-cmd-test-*")
@@ -485,6 +474,64 @@ func TestJournalCommand_VerifyDetectsCursorPastTail(t *testing.T) {
 	cmd := &JournalCommand{}
 	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"verify"}}); err == nil {
 		t.Error("verify should fail when cursor past tail")
+	}
+}
+
+func TestJournalCommand_ShowEntry(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-show-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ev := &events.Event{ID: "show-me", Source: events.SourceClaude, Timestamp: time.Now()}
+	data, _ := json.Marshal(ev)
+	w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: data})
+	w.Close()
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cmd := &JournalCommand{}
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"show", "1"}}); err != nil {
+		t.Errorf("show offset 1: %v", err)
+	}
+	// Missing offset returns an error.
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"show", "99"}}); err == nil {
+		t.Error("show on missing offset should error")
+	}
+	// No offset returns usage error.
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"show"}}); err == nil {
+		t.Error("show without offset should error")
+	}
+}
+
+func TestJournalCommand_TailOnce(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-tail-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	classDir := filepath.Join(tempDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		ev := &events.Event{ID: "tail-" + string(rune('a'+i)), Source: events.SourceClaude, Timestamp: time.Now()}
+		data, _ := json.Marshal(ev)
+		w.Append(&journal.Entry{Type: "capture.event", V: 1, Payload: data})
+	}
+	w.Close()
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cmd := &JournalCommand{}
+	if err := cmd.Execute(&Context{Config: cfg, Args: []string{"tail", "--once"}}); err != nil {
+		t.Errorf("tail --once: %v", err)
 	}
 }
 

@@ -1,12 +1,14 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -48,9 +50,9 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	case "verify":
 		return c.runVerify(ctx)
 	case "show":
-		return notImplemented(sub, "I1")
+		return c.runShow(ctx)
 	case "tail":
-		return notImplemented(sub, "I1")
+		return c.runTail(ctx)
 	case "migrate":
 		return c.runMigrate(ctx)
 	case "help", "-h", "--help":
@@ -63,6 +65,128 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 
 func notImplemented(sub, slice string) error {
 	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
+}
+
+// runShow prints a single journal entry by offset. Defaults to the
+// capture class; --class=NAME selects another writer-class.
+//
+//	cortex journal show 42
+//	cortex journal show --class=dream 17
+func (c *JournalCommand) runShow(ctx *Context) error {
+	class := "capture"
+	var targetOff journal.Offset
+	for _, a := range ctx.Args[1:] {
+		switch {
+		case strings.HasPrefix(a, "--class="):
+			class = strings.TrimPrefix(a, "--class=")
+		default:
+			var n int64
+			if _, err := fmt.Sscanf(a, "%d", &n); err == nil && n > 0 {
+				targetOff = journal.Offset(n)
+			}
+		}
+	}
+	if targetOff == 0 {
+		return fmt.Errorf("usage: cortex journal show [--class=NAME] <offset>")
+	}
+
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+	r, err := journal.NewReader(filepath.Join(contextDir, "journal", class))
+	if err != nil {
+		return fmt.Errorf("open reader for %s: %w", class, err)
+	}
+	defer r.Close()
+
+	for {
+		e, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read: %w", err)
+		}
+		if e.Offset == targetOff {
+			data, err := json.MarshalIndent(e, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal: %w", err)
+			}
+			fmt.Println(string(data))
+			return nil
+		}
+	}
+	return fmt.Errorf("offset %d not found in %s", targetOff, class)
+}
+
+// runTail streams new entries as they're appended to a writer-class.
+// Polls every 500ms by default; Ctrl-C stops.
+//
+//	cortex journal tail                  # capture, follow forever
+//	cortex journal tail --class=dream
+//	cortex journal tail --from-offset=10 # start at offset 10
+//	cortex journal tail --once           # print current tail and exit
+func (c *JournalCommand) runTail(ctx *Context) error {
+	class := "capture"
+	var lastSeen journal.Offset
+	once := false
+	for _, a := range ctx.Args[1:] {
+		switch {
+		case strings.HasPrefix(a, "--class="):
+			class = strings.TrimPrefix(a, "--class=")
+		case strings.HasPrefix(a, "--from-offset="):
+			lastSeen = parseOffsetFlag(a, "--from-offset=", 0) - 1
+			if lastSeen < 0 {
+				lastSeen = 0
+			}
+		case a == "--once":
+			once = true
+		}
+	}
+
+	contextDir, err := journalContextDir(ctx)
+	if err != nil {
+		return err
+	}
+	classDir := filepath.Join(contextDir, "journal", class)
+
+	pollOnce := func() error {
+		r, err := journal.NewReader(classDir)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for {
+			e, err := r.Next()
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if e.Offset <= lastSeen {
+				continue
+			}
+			line, _ := json.Marshal(e)
+			fmt.Println(string(line))
+			lastSeen = e.Offset
+		}
+	}
+
+	if once {
+		return pollOnce()
+	}
+
+	// Follow mode — poll every 500ms.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := pollOnce(); err != nil {
+			return err
+		}
+		<-ticker.C
+	}
 }
 
 // runVerify checks the journal's structural integrity:
