@@ -64,11 +64,13 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 		p.registry.Register(typ, 1, p.projectObservation)
 	}
 	p.registry.Register(journal.TypeDreamInsight, 1, p.projectDreamInsight)
+	p.registry.Register(journal.TypeReflectRerank, 1, p.projectReflectRerank)
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "observation"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "dream"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "reflect"))
 	}
 	return p
 }
@@ -88,6 +90,32 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectReflectRerank records each contradiction surfaced by a rerank
+// entry to storage. The rerank itself is preserved by the journal; the
+// projection extracts the contradictions sub-records into a queryable
+// derived view (storage.GetContradictions).
+func (p *Processor) projectReflectRerank(e *journal.Entry) error {
+	payload, err := journal.ParseReflectRerank(e)
+	if err != nil {
+		return fmt.Errorf("parse reflect.rerank at offset %d: %w", e.Offset, err)
+	}
+	for _, c := range payload.Contradictions {
+		if c.Reason == "" || len(c.IDs) == 0 {
+			continue
+		}
+		if err := p.storage.RecordContradiction(&storage.Contradiction{
+			IDs:           c.IDs,
+			Reason:        c.Reason,
+			JournalOffset: int64(e.Offset),
+			QueryText:     payload.QueryText,
+			RecordedAt:    e.TS,
+		}); err != nil {
+			return fmt.Errorf("record contradiction at offset %d: %w", e.Offset, err)
+		}
+	}
 	return nil
 }
 

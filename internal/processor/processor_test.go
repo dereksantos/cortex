@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 3 {
-		t.Errorf("expected 3 default indexers (capture, observation, dream), got %d", len(processor.indexers))
+	if len(processor.indexers) != 4 {
+		t.Errorf("expected 4 default indexers (capture, observation, dream, reflect), got %d", len(processor.indexers))
 	}
 }
 
@@ -334,6 +334,55 @@ func TestProcessor_ProjectsDreamInsight(t *testing.T) {
 	}
 	if !found {
 		t.Error("dream insight not projected to storage")
+	}
+}
+
+func TestProcessor_ProjectsReflectRerankContradictions(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "reflect")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	e, err := journal.NewReflectRerankEntry(journal.ReflectRerankPayload{
+		QueryText: "auth flow",
+		InputIDs:  []string{"a", "b", "c"},
+		RankedIDs: []string{"c", "a", "b"},
+		Contradictions: []journal.ContradictionRecord{
+			{IDs: []string{"a", "b"}, Reason: "use JWT vs sessions"},
+			{IDs: []string{"a", "c"}, Reason: "rotation policy disagrees"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewReflectRerankEntry: %v", err)
+	}
+	if _, err := w.Append(e); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("indexed = %d, want 1", n)
+	}
+
+	got := processor.storage.GetContradictions(10)
+	if len(got) != 2 {
+		t.Fatalf("contradictions = %d, want 2", len(got))
+	}
+	// Most-recent-first ordering. Both should reference the same journal offset.
+	for _, c := range got {
+		if c.JournalOffset != 1 {
+			t.Errorf("JournalOffset = %d, want 1", c.JournalOffset)
+		}
+		if c.QueryText != "auth flow" {
+			t.Errorf("QueryText = %s, want auth flow", c.QueryText)
+		}
 	}
 }
 

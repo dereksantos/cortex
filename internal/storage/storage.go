@@ -65,14 +65,18 @@ type Storage struct {
 	// Observation indexes (slice O3)
 	observations map[string]map[string]*Observation // uri -> content_hash -> Observation
 
+	// Contradiction indexes (slice R2)
+	contradictions []*Contradiction
+
 	// Open file handles for append
-	eventFile       *os.File
-	insightFile     *os.File
-	entityFile      *os.File
-	relFile         *os.File
-	sessionFile     *os.File
-	embFile         *os.File
-	observationFile *os.File
+	eventFile         *os.File
+	insightFile       *os.File
+	entityFile        *os.File
+	relFile           *os.File
+	sessionFile       *os.File
+	embFile           *os.File
+	observationFile   *os.File
+	contradictionFile *os.File
 }
 
 type embeddingEntry struct {
@@ -136,6 +140,28 @@ type insightRecord struct {
 	SourceType   string    `json:"source_type,omitempty"`
 	WasRetrieved bool      `json:"was_retrieved,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// contradictionRecord projects a contradiction detected during reflect.rerank.
+// Each record links one pairwise (or n-way) conflict back to the journal
+// offset of the rerank that detected it.
+type contradictionRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	IDs           []string  `json:"ids"`
+	Reason        string    `json:"reason"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	QueryText     string    `json:"query_text,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Contradiction is the derived view of one recorded conflict between
+// candidates during a Reflect rerank.
+type Contradiction struct {
+	IDs           []string
+	Reason        string
+	JournalOffset int64
+	QueryText     string
+	RecordedAt    time.Time
 }
 
 // observationRecord projects a journal observation entry into the storage
@@ -264,6 +290,17 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.embFile.Close()
 		return nil, fmt.Errorf("failed to open observations file: %w", err)
 	}
+	s.contradictionFile, err = openAppend(filepath.Join(dataDir, "contradictions.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		return nil, fmt.Errorf("failed to open contradictions file: %w", err)
+	}
 
 	return s, nil
 }
@@ -274,7 +311,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -346,7 +383,76 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildObservationIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildContradictionIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildContradictionIndexes replays contradictions.jsonl into the
+// in-memory list. Order preserved.
+func (s *Storage) rebuildContradictionIndexes() error {
+	records, err := readLines[contradictionRecord](filepath.Join(s.dataDir, "contradictions.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.contradictions = append(s.contradictions, &Contradiction{
+			IDs:           r.IDs,
+			Reason:        r.Reason,
+			JournalOffset: r.JournalOffset,
+			QueryText:     r.QueryText,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordContradiction projects one contradiction detected during reranking.
+// Append-only — no dedup. Replay during rebuild may produce duplicate rows
+// if the same rerank entry projects twice; callers can dedup at query
+// time by (JournalOffset, IDs joined).
+func (s *Storage) RecordContradiction(c *Contradiction) error {
+	if c == nil {
+		return fmt.Errorf("nil contradiction")
+	}
+	if c.Reason == "" || len(c.IDs) == 0 {
+		return fmt.Errorf("contradiction requires Reason and at least one ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if c.RecordedAt.IsZero() {
+		c.RecordedAt = time.Now().UTC()
+	}
+	rec := contradictionRecord{
+		ProjectID:     s.projectID,
+		IDs:           c.IDs,
+		Reason:        c.Reason,
+		JournalOffset: c.JournalOffset,
+		QueryText:     c.QueryText,
+		RecordedAt:    c.RecordedAt,
+	}
+	if err := appendLine(s.contradictionFile, rec); err != nil {
+		return fmt.Errorf("append contradiction: %w", err)
+	}
+	s.contradictions = append(s.contradictions, c)
+	return nil
+}
+
+// GetContradictions returns the most recent N contradictions.
+func (s *Storage) GetContradictions(limit int) []*Contradiction {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := len(s.contradictions)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]*Contradiction, 0, n)
+	for i := len(s.contradictions) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, s.contradictions[i])
+	}
+	return out
 }
 
 // rebuildObservationIndexes replays observations.jsonl into the in-memory
