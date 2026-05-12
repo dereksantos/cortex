@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 	if processor.registry == nil {
 		t.Fatal("expected non-nil registry")
 	}
-	if len(processor.indexers) != 7 {
-		t.Errorf("expected 7 default indexers (capture, observation, dream, reflect, resolve, think, feedback), got %d", len(processor.indexers))
+	if len(processor.indexers) != 8 {
+		t.Errorf("expected 8 default indexers (capture, observation, dream, reflect, resolve, think, feedback, eval), got %d", len(processor.indexers))
 	}
 }
 
@@ -537,6 +537,52 @@ func TestProcessor_ProjectsFeedback(t *testing.T) {
 	}
 	if !processor.storage.IsRetracted("insight-8") {
 		t.Error("insight-8 should be retracted")
+	}
+}
+
+func TestProcessor_ProjectsEvalCellResult(t *testing.T) {
+	processor, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "eval")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	seed := int64(7)
+	e, err := journal.NewEvalCellResultEntry(journal.EvalCellResultPayload{
+		SchemaVersion:        "1.0",
+		RunID:                "eval-run-1",
+		Timestamp:            time.Now().UTC().Format(time.RFC3339),
+		ScenarioID:           "auth-service",
+		Harness:              "aider",
+		Provider:             "anthropic",
+		Model:                "claude-haiku-4.5",
+		ContextStrategy:      "cortex",
+		Seed:                 &seed,
+		Temperature:          0.0,
+		TokensIn:             1200,
+		TokensOut:            450,
+		TaskSuccess:          true,
+		TaskSuccessCriterion: "all_tests_pass",
+	})
+	if err != nil {
+		t.Fatalf("NewEvalCellResultEntry: %v", err)
+	}
+	if _, err := w.Append(e); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	w.Close()
+
+	n, err := processor.RunBatch()
+	if err != nil {
+		t.Fatalf("RunBatch: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("indexed = %d, want 1", n)
+	}
+	if processor.storage.EvalCellResultCount() != 1 {
+		t.Errorf("eval row count = %d, want 1", processor.storage.EvalCellResultCount())
 	}
 }
 

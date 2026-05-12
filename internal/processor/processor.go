@@ -74,6 +74,7 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 	} {
 		p.registry.Register(typ, 1, p.projectFeedback)
 	}
+	p.registry.Register(journal.TypeEvalCellResult, 1, p.projectEvalCellResult)
 
 	if cfg != nil && cfg.ContextDir != "" {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
@@ -83,6 +84,7 @@ func New(cfg *config.Config, store *storage.Storage) *Processor {
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "resolve"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "think"))
 		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "feedback"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "eval"))
 	}
 	return p
 }
@@ -102,6 +104,36 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	p.batchMu.Lock()
 	p.batchEvents = append(p.batchEvents, ev)
 	p.batchMu.Unlock()
+	return nil
+}
+
+// projectEvalCellResult records a journaled eval cell result in storage's
+// parallel eval-row list. The canonical eval persistence path remains
+// internal/eval/v2/persist_cell.go for now; this projection lets
+// `cortex journal verify` and counterfactual replay see eval rows
+// through the same lens as the other writer-classes.
+func (p *Processor) projectEvalCellResult(e *journal.Entry) error {
+	payload, err := journal.ParseEvalCellResult(e)
+	if err != nil {
+		return fmt.Errorf("parse eval.cell_result at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordEvalCellResult(&storage.EvalCellResultRow{
+		RunID:         payload.RunID,
+		ScenarioID:    payload.ScenarioID,
+		Harness:       payload.Harness,
+		Provider:      payload.Provider,
+		Model:         payload.Model,
+		Strategy:      payload.ContextStrategy,
+		TaskSuccess:   payload.TaskSuccess,
+		TokensIn:      payload.TokensIn,
+		TokensOut:     payload.TokensOut,
+		CostUSD:       payload.CostUSD,
+		LatencyMs:     payload.LatencyMs,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record eval row at offset %d: %w", e.Offset, err)
+	}
 	return nil
 }
 
