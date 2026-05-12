@@ -678,6 +678,7 @@ func TestOpenCodeHarness_CortexExtension_RunSession_InstallsAndChecksEnv(t *test
 		t.Fatalf("seed source: %v", err)
 	}
 	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv(EnvOpencodeCortexExtension, "1") // env-gate ON
 	t.Setenv("CORTEX_BINARY", "/tmp/fake-cortex")
 
 	workdir := t.TempDir()
@@ -704,6 +705,7 @@ func TestOpenCodeHarness_CortexExtension_MissingCortexBinaryErrors(t *testing.T)
 		t.Fatalf("seed source: %v", err)
 	}
 	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv(EnvOpencodeCortexExtension, "1") // env-gate ON
 	t.Setenv("CORTEX_BINARY", "")
 
 	err = h.RunSession(context.Background(), "x", t.TempDir())
@@ -712,6 +714,65 @@ func TestOpenCodeHarness_CortexExtension_MissingCortexBinaryErrors(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "CORTEX_BINARY") {
 		t.Errorf("err = %v, want mention of CORTEX_BINARY", err)
+	}
+}
+
+func TestOpenCodeHarness_CortexExtension_EnvGateOff_NoInstall(t *testing.T) {
+	// Pi-extension rollback policy (docs/phase8-close-report.md):
+	// extension defaults OFF — install only fires when both the per-cell
+	// flag is true AND $CORTEX_OPENCODE_EXTENSION=1. With per-cell flag
+	// true and env unset, the harness behaves as baseline. This is how
+	// the regressing integration ships safely: opt-in.
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte("// cortex plugin"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv(EnvOpencodeCortexExtension, "") // explicitly unset
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "x", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".opencode", "plugins", "cortex.ts")); err == nil {
+		t.Error("plugin symlink must NOT be created when $CORTEX_OPENCODE_EXTENSION is unset (env-gate default-off)")
+	}
+}
+
+func TestOpenCodeHarness_CortexExtension_EnvGateOnButNot1_NoInstall(t *testing.T) {
+	// Strict comparison: only "1" enables. "true", "yes", "on", anything
+	// else must keep the gate closed — predictable bootstrapping is more
+	// important than convenience here.
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte("// cortex plugin"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv(EnvOpencodeCortexExtension, "true") // not "1" — must NOT enable
+	t.Setenv("CORTEX_BINARY", "/tmp/fake-cortex")
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "x", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".opencode", "plugins", "cortex.ts")); err == nil {
+		t.Error("plugin symlink must NOT be created when $CORTEX_OPENCODE_EXTENSION != \"1\"")
 	}
 }
 

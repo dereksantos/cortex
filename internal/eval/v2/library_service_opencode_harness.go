@@ -63,6 +63,23 @@ type OpenCodeHarness struct {
 // per-session cwd.
 const EnvOpencodeCortexPluginSource = "CORTEX_OPENCODE_PLUGIN_SOURCE"
 
+// EnvOpencodeCortexExtension is the rollback gate. Per the pi-extension
+// close report (docs/phase8-close-report.md "Rollback if regression"),
+// the cortex_extension strategy ships default-OFF when the cell-level
+// eval shows a pass-rate regression vs baseline. The opencode-cortex
+// integration regressed -40pp on test/evals/coding × gpt-oss-20b:free
+// (see docs/phase8-opencode-extension-vs-prefix.md), so the install
+// is gated behind this env var even when the per-cell flag is true.
+//
+// Set to literal "1" to enable. Anything else (unset, "true", "yes",
+// empty, …) keeps the gate closed — predictable bootstrapping is more
+// important than convenience here.
+//
+// Reviewers/operators flip this on after seeding the cortex store with
+// scenario-relevant context; default-off avoids the regression's blast
+// radius on day one of merge.
+const EnvOpencodeCortexExtension = "CORTEX_OPENCODE_EXTENSION"
+
 // SetModel changes the model used for subsequent RunSession calls.
 // The grid runner type-asserts on this method to re-point one harness
 // instance across multiple model cells without constructing a new
@@ -177,9 +194,18 @@ func (h *OpenCodeHarness) RunSessionWithResult(ctx context.Context, prompt, work
 func (h *OpenCodeHarness) runSession(ctx context.Context, prompt, workdir string) (HarnessResult, error) {
 	// Phase 8: install the opencode-cortex plugin into the cell's workdir
 	// before invoking opencode. opencode's project-local auto-discovery
-	// picks it up from .opencode/plugins/cortex.ts. Gated on the per-cell
-	// flag the grid runner sets via SetCortexExtensionEnabled.
-	if h.cortexExtensionEnabled {
+	// picks it up from .opencode/plugins/cortex.ts. Gated on BOTH:
+	//   1) the per-cell flag the grid runner sets via
+	//      SetCortexExtensionEnabled (true for cortex_extension strategy)
+	//   2) the env rollback gate $CORTEX_OPENCODE_EXTENSION="1"
+	//      (pi-extension precedent: docs/phase8-close-report.md;
+	//      regression details in docs/phase8-opencode-extension-vs-prefix.md)
+	//
+	// Both must be true. If the per-cell flag is true but the env gate
+	// is closed, the harness behaves as baseline (no install, normal
+	// opencode run). This is how the regressing integration ships
+	// safely: opt-in for operators who have seeded their cortex store.
+	if h.cortexExtensionEnabled && os.Getenv(EnvOpencodeCortexExtension) == "1" {
 		if err := ensureOpencodeCortexPluginInstalled(workdir); err != nil {
 			return HarnessResult{ModelEcho: h.model, ProviderEcho: opencodeProviderFromModel(h.model)},
 				fmt.Errorf("install cortex plugin: %w", err)
