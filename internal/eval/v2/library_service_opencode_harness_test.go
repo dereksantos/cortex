@@ -562,3 +562,183 @@ func TestOpencodeProviderFromModel(t *testing.T) {
 		})
 	}
 }
+
+// ---- Phase 8: cortex extension wiring -------------------------------------
+// Mirrors library_service_pidev_harness_test.go:454-603. Differences:
+//   - Plugin source is a FILE (packages/opencode-cortex/plugins/cortex.ts),
+//     NOT a directory like pi's packages/pi-cortex/.
+//   - Symlink dest is .opencode/plugins/cortex.ts (flat file) vs pi's
+//     .pi/extensions/cortex/ (subdir).
+//   - Env var name is CORTEX_OPENCODE_PLUGIN_SOURCE.
+
+func TestOpenCodeHarness_CortexExtensionToggle(t *testing.T) {
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	if h.CortexExtensionEnabled() {
+		t.Fatal("new harness must start with extension disabled")
+	}
+	h.SetCortexExtensionEnabled(true)
+	if !h.CortexExtensionEnabled() {
+		t.Fatal("SetCortexExtensionEnabled(true) did not stick")
+	}
+	h.SetCortexExtensionEnabled(false)
+	if h.CortexExtensionEnabled() {
+		t.Fatal("SetCortexExtensionEnabled(false) did not reset")
+	}
+}
+
+func TestEnsureOpencodeCortexPluginInstalled_MissingSourceErrors(t *testing.T) {
+	t.Setenv(EnvOpencodeCortexPluginSource, "")
+	t.Setenv("CORTEX_BINARY", "/tmp/some-cortex")
+	err := ensureOpencodeCortexPluginInstalled(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when $CORTEX_OPENCODE_PLUGIN_SOURCE is unset")
+	}
+	if !strings.Contains(err.Error(), "CORTEX_OPENCODE_PLUGIN_SOURCE") {
+		t.Errorf("err = %v, want mention of the env var name", err)
+	}
+}
+
+func TestEnsureOpencodeCortexPluginInstalled_RelativeSourceRejected(t *testing.T) {
+	t.Setenv(EnvOpencodeCortexPluginSource, "packages/opencode-cortex/plugins/cortex.ts")
+	err := ensureOpencodeCortexPluginInstalled(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for relative source path")
+	}
+	if !strings.Contains(err.Error(), "must be absolute") {
+		t.Errorf("err = %v, want 'must be absolute'", err)
+	}
+}
+
+func TestEnsureOpencodeCortexPluginInstalled_DirectorySourceRejected(t *testing.T) {
+	// opencode plugins are flat .ts files, not packages. A source pointing
+	// at a directory must error — symlinking a dir to .opencode/plugins/cortex.ts
+	// would make opencode's loader stat it as a non-file and skip.
+	source := t.TempDir() // directory, not a file
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	err := ensureOpencodeCortexPluginInstalled(t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when source is a directory, not a regular file")
+	}
+	if !strings.Contains(err.Error(), "regular file") && !strings.Contains(err.Error(), "not a file") {
+		t.Errorf("err = %v, want mention of file-vs-dir mismatch", err)
+	}
+}
+
+func TestEnsureOpencodeCortexPluginInstalled_HappyPathSymlinks(t *testing.T) {
+	// Stand up a fake plugin source file.
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte(`export const CortexPlugin = () => ({});`), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+
+	workdir := t.TempDir()
+	if err := ensureOpencodeCortexPluginInstalled(workdir); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	dest := filepath.Join(workdir, ".opencode", "plugins", "cortex.ts")
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatalf("dest missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("dest is not a symlink: mode=%v", info.Mode())
+	}
+	target, err := os.Readlink(dest)
+	if err != nil {
+		t.Fatalf("readlink: %v", err)
+	}
+	if target != source {
+		t.Errorf("symlink target = %q, want %q", target, source)
+	}
+
+	// Idempotent — calling again replaces the stale symlink without error.
+	if err := ensureOpencodeCortexPluginInstalled(workdir); err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+}
+
+func TestOpenCodeHarness_CortexExtension_RunSession_InstallsAndChecksEnv(t *testing.T) {
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte("// cortex plugin"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv("CORTEX_BINARY", "/tmp/fake-cortex")
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "do thing", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	dest := filepath.Join(workdir, ".opencode", "plugins", "cortex.ts")
+	if _, err := os.Lstat(dest); err != nil {
+		t.Errorf("expected plugin symlink at %s, got: %v", dest, err)
+	}
+}
+
+func TestOpenCodeHarness_CortexExtension_MissingCortexBinaryErrors(t *testing.T) {
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	h.SetCortexExtensionEnabled(true)
+
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte("// cortex plugin"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+	t.Setenv("CORTEX_BINARY", "")
+
+	err = h.RunSession(context.Background(), "x", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when CORTEX_BINARY is unset and extension is enabled")
+	}
+	if !strings.Contains(err.Error(), "CORTEX_BINARY") {
+		t.Errorf("err = %v, want mention of CORTEX_BINARY", err)
+	}
+}
+
+func TestOpenCodeHarness_CortexExtensionDisabled_NoInstall(t *testing.T) {
+	bin := installFakeOpencode(t, t.TempDir(), fakeOpencodeHappyScript)
+	h, err := NewOpenCodeHarness(bin, "openrouter/openai/gpt-oss-20b:free")
+	if err != nil {
+		t.Fatalf("NewOpenCodeHarness: %v", err)
+	}
+	// Explicitly disabled (default state too).
+	h.SetCortexExtensionEnabled(false)
+
+	// Even with the source env var set, RunSession with extension disabled
+	// must NOT install — baseline cells share the same harness instance and
+	// would otherwise leak the install.
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "cortex.ts")
+	if err := os.WriteFile(source, []byte("// cortex plugin"), 0o644); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	t.Setenv(EnvOpencodeCortexPluginSource, source)
+
+	workdir := t.TempDir()
+	if err := h.RunSession(context.Background(), "x", workdir); err != nil {
+		t.Fatalf("RunSession: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".opencode", "plugins", "cortex.ts")); err == nil {
+		t.Error("plugin symlink must NOT be created when SetCortexExtensionEnabled(false)")
+	}
+}

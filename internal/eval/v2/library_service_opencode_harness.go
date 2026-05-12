@@ -35,7 +35,33 @@ import (
 type OpenCodeHarness struct {
 	binary string // path to opencode executable
 	model  string // e.g., "openrouter/openai/gpt-oss-20b:free"
+
+	// Phase 8 — set per-cell by the grid runner via SetCortexExtensionEnabled.
+	// When true, runSession symlinks $CORTEX_OPENCODE_PLUGIN_SOURCE into
+	// <workdir>/.opencode/plugins/cortex.ts before invoking opencode, and
+	// asserts that $CORTEX_BINARY is set in the harness env so the loaded
+	// plugin can shell out to a known-good cortex binary.
+	//
+	// When false, no install happens — the harness behaves exactly as it
+	// did pre-Phase 8 for baseline / cortex (prefix) / frontier strategies.
+	cortexExtensionEnabled bool
 }
+
+// EnvOpencodeCortexPluginSource names the env var that must hold an
+// absolute path to the opencode-cortex plugin file
+// (packages/opencode-cortex/plugins/cortex.ts) when the cortex_extension
+// strategy is active. The grid runner sets this; the harness reads it
+// at install time.
+//
+// Differs from pi-cortex (CORTEX_PI_EXTENSION_SOURCE) in that it points
+// at a single .ts FILE — opencode auto-discovers plugins from
+// .opencode/plugins/*.{ts,js} as flat files, not package subdirs.
+//
+// $CORTEX_PROJECT_ROOT is shared with the pi-dev harness (defined as
+// EnvCortexProjectRoot in library_service_pidev_harness.go) so plugins
+// can locate the project's .cortex/ directory regardless of opencode's
+// per-session cwd.
+const EnvOpencodeCortexPluginSource = "CORTEX_OPENCODE_PLUGIN_SOURCE"
 
 // SetModel changes the model used for subsequent RunSession calls.
 // The grid runner type-asserts on this method to re-point one harness
@@ -48,6 +74,63 @@ func (h *OpenCodeHarness) SetModel(model string) {
 // Model returns the currently configured model string.
 func (h *OpenCodeHarness) Model() string {
 	return h.model
+}
+
+// SetCortexExtensionEnabled toggles whether RunSession installs the
+// opencode-cortex plugin into the cell's workdir before invoking
+// opencode. The grid runner calls this per-cell based on
+// cell.ContextStrategy — true for StrategyCortexExtension, false for
+// everything else.
+//
+// Must be reset between cells so a baseline cell following a
+// cortex_extension cell doesn't accidentally load the plugin.
+func (h *OpenCodeHarness) SetCortexExtensionEnabled(enabled bool) {
+	h.cortexExtensionEnabled = enabled
+}
+
+// CortexExtensionEnabled reports the current state of the plugin
+// install flag. Mainly useful for tests.
+func (h *OpenCodeHarness) CortexExtensionEnabled() bool {
+	return h.cortexExtensionEnabled
+}
+
+// ensureOpencodeCortexPluginInstalled symlinks the opencode-cortex
+// plugin file into <workdir>/.opencode/plugins/cortex.ts so opencode's
+// auto-discovery (Glob.scan("{plugin,plugins}/*.{ts,js}")) picks it up
+// for the upcoming run. Idempotent — removes any prior install in the
+// dest path first. Symlink (rather than copy) is used so the package's
+// node_modules tree doesn't have to be re-resolved per cell.
+//
+// Differs from pi-cortex's installer in that the source points at a
+// single .ts FILE; opencode plugins are flat, not package subdirs.
+//
+// Errors when $CORTEX_OPENCODE_PLUGIN_SOURCE is unset, relative, or
+// does not point at a regular file.
+func ensureOpencodeCortexPluginInstalled(workdir string) error {
+	source := os.Getenv(EnvOpencodeCortexPluginSource)
+	if source == "" {
+		return fmt.Errorf("$%s must be set for cortex_extension strategy (expected absolute path to packages/opencode-cortex/plugins/cortex.ts)", EnvOpencodeCortexPluginSource)
+	}
+	if !filepath.IsAbs(source) {
+		return fmt.Errorf("$%s must be absolute, got %q", EnvOpencodeCortexPluginSource, source)
+	}
+	if info, err := os.Stat(source); err != nil {
+		return fmt.Errorf("%s=%s: %w", EnvOpencodeCortexPluginSource, source, err)
+	} else if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s=%s: not a regular file (opencode plugins are flat .ts files, not directories)", EnvOpencodeCortexPluginSource, source)
+	}
+	parent := filepath.Join(workdir, ".opencode", "plugins")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("mkdir .opencode/plugins: %w", err)
+	}
+	dest := filepath.Join(parent, "cortex.ts")
+	if err := os.RemoveAll(dest); err != nil {
+		return fmt.Errorf("clear stale dest %s: %w", dest, err)
+	}
+	if err := os.Symlink(source, dest); err != nil {
+		return fmt.Errorf("symlink %s -> %s: %w", dest, source, err)
+	}
+	return nil
 }
 
 // NewOpenCodeHarness resolves the opencode binary (PATH lookup if binary
@@ -92,6 +175,32 @@ func (h *OpenCodeHarness) RunSessionWithResult(ctx context.Context, prompt, work
 //     --file globbing).
 //   - `--format json` gives NDJSON events on stdout.
 func (h *OpenCodeHarness) runSession(ctx context.Context, prompt, workdir string) (HarnessResult, error) {
+	// Phase 8: install the opencode-cortex plugin into the cell's workdir
+	// before invoking opencode. opencode's project-local auto-discovery
+	// picks it up from .opencode/plugins/cortex.ts. Gated on the per-cell
+	// flag the grid runner sets via SetCortexExtensionEnabled.
+	if h.cortexExtensionEnabled {
+		if err := ensureOpencodeCortexPluginInstalled(workdir); err != nil {
+			return HarnessResult{ModelEcho: h.model, ProviderEcho: opencodeProviderFromModel(h.model)},
+				fmt.Errorf("install cortex plugin: %w", err)
+		}
+		if os.Getenv("CORTEX_BINARY") == "" {
+			return HarnessResult{ModelEcho: h.model, ProviderEcho: opencodeProviderFromModel(h.model)},
+				fmt.Errorf("$CORTEX_BINARY must be set for cortex_extension strategy so the plugin can shell out to a known-good binary")
+		}
+		// Default $CORTEX_PROJECT_ROOT to the harness process's cwd if
+		// the caller didn't set it. The plugin's tool.execute.after
+		// hook reads this to fix the spawn cwd for `cortex capture`
+		// (opencode's per-session cwd may not contain .cortex/). This
+		// is a fallback; the grid runner should set it explicitly to
+		// the directory holding .cortex/.
+		if os.Getenv(EnvCortexProjectRoot) == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				_ = os.Setenv(EnvCortexProjectRoot, cwd)
+			}
+		}
+	}
+
 	args := []string{
 		"run",
 		"--format", "json",
