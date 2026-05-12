@@ -300,11 +300,47 @@ func (c *JournalCommand) runVerify(ctx *Context) error {
 	for _, class := range classes {
 		fmt.Printf("  %s: %d entries (max offset %d)\n", class, totals[class], maxOffsets[class])
 	}
+
+	// Privacy guardrail (slice I3): warn if .cortex/ is not gitignored.
+	// The journal lives under .cortex/ and may contain sensitive substrate
+	// (tool outputs, file contents, LLM responses). Local-only by design.
+	if msg := privacyGitignoreCheck(contextDir); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		issues++
+	}
+
 	if issues > 0 {
 		return fmt.Errorf("verify: %d issue(s) found", issues)
 	}
 	fmt.Println("OK")
 	return nil
+}
+
+// privacyGitignoreCheck returns a warning message if the parent of
+// contextDir is a git repo and the contextDir is not in .gitignore.
+// Empty return means "either gitignored or not in a git repo" — both
+// are fine. The journal must never be committed because it contains
+// sensitive substrate (file contents, LLM outputs, user prompts).
+func privacyGitignoreCheck(contextDir string) string {
+	// contextDir is typically <projectRoot>/.cortex
+	projectRoot := filepath.Dir(contextDir)
+	gitDir := filepath.Join(projectRoot, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return "" // not a git repo, gitignore irrelevant
+	}
+	gitignorePath := filepath.Join(projectRoot, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		return fmt.Sprintf("warning: %s does not exist; "+
+			".cortex/ contains the journal and must not be committed",
+			gitignorePath)
+	}
+	if !strings.Contains(string(data), ".cortex") {
+		return fmt.Sprintf("warning: .cortex/ is not in %s; "+
+			"journal contents will be committed if you run git add",
+			gitignorePath)
+	}
+	return ""
 }
 
 // runReplay re-walks a range of capture entries and reports what the
