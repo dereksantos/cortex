@@ -79,14 +79,19 @@ func (ix *Indexer) RunOnce() (int, error) {
 		}
 		proj, ok := ix.registry.Lookup(e.Type, e.V)
 		if !ok {
+			reason := "unknown type"
+			if ix.registry.HasType(e.Type) {
+				reason = fmt.Sprintf("known type %s, unsupported version (have %v)",
+					e.Type, ix.registry.Versions(e.Type))
+			}
 			switch ix.onUnknown {
 			case UnknownError:
 				return projected, fmt.Errorf(
-					"indexer: unknown entry type %s/v%d at offset %d",
-					e.Type, e.V, e.Offset)
+					"indexer: %s at offset %d (type=%s v=%d)",
+					reason, e.Offset, e.Type, e.V)
 			case UnknownLogAndSkip:
-				ix.log("journal: skipping unknown %s/v%d at offset %d",
-					e.Type, e.V, e.Offset)
+				ix.log("journal: skipping %s/v%d at offset %d (%s)",
+					e.Type, e.V, e.Offset, reason)
 				// fall through to advance cursor
 			}
 		} else if err := proj(e); err != nil {

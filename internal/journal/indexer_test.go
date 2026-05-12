@@ -148,8 +148,8 @@ func TestIndexer_UnknownErrorPolicy(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "unknown entry type") {
-		t.Errorf("error message = %q, want contains 'unknown entry type'", err.Error())
+	if !strings.Contains(err.Error(), "unknown type") {
+		t.Errorf("error message = %q, want contains 'unknown type'", err.Error())
 	}
 	got, _ := ix.Cursor().Get()
 	if got != 0 {
@@ -208,6 +208,88 @@ func TestRegistry_RegisterLookup(t *testing.T) {
 	}
 	if r.Known("nope", 1) {
 		t.Error("Known returned true for unregistered")
+	}
+}
+
+func TestRegistry_HasType(t *testing.T) {
+	r := NewRegistry()
+	if r.HasType("x.y") {
+		t.Error("HasType true for empty registry")
+	}
+	r.Register("x.y", 1, func(*Entry) error { return nil })
+	if !r.HasType("x.y") {
+		t.Error("HasType false after register")
+	}
+	if r.HasType("x.z") {
+		t.Error("HasType true for different type")
+	}
+	// Prefix-collision guard: "x.yy" must not match "x.y".
+	if r.HasType("x.yy") {
+		t.Error("HasType matched on prefix only")
+	}
+}
+
+func TestRegistry_Versions(t *testing.T) {
+	r := NewRegistry()
+	if v := r.Versions("x.y"); v != nil {
+		t.Errorf("Versions on empty = %v, want nil", v)
+	}
+	r.Register("x.y", 3, func(*Entry) error { return nil })
+	r.Register("x.y", 1, func(*Entry) error { return nil })
+	r.Register("x.y", 2, func(*Entry) error { return nil })
+	r.Register("other", 1, func(*Entry) error { return nil })
+	got := r.Versions("x.y")
+	want := []int{1, 2, 3}
+	if len(got) != len(want) {
+		t.Fatalf("Versions(x.y) = %v, want %v", got, want)
+	}
+	for i, v := range want {
+		if got[i] != v {
+			t.Errorf("Versions[%d] = %d, want %d", i, got[i], v)
+		}
+	}
+}
+
+func TestIndexer_DistinguishesUnknownTypeVsVersion(t *testing.T) {
+	dir := newClassDir(t)
+	w, err := NewWriter(WriterOpts{ClassDir: dir, Fsync: FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	// Entry 1: completely unknown type.
+	if _, err := w.Append(&Entry{Type: "alien.thing", Payload: []byte(`{}`)}); err != nil {
+		t.Fatalf("Append alien: %v", err)
+	}
+	// Entry 2: known type, unsupported version.
+	e2 := &Entry{Type: "capture.event", V: 99, Payload: []byte(`{}`)}
+	if _, err := w.Append(e2); err != nil {
+		t.Fatalf("Append v99: %v", err)
+	}
+	w.Close()
+
+	reg := NewRegistry()
+	reg.Register("capture.event", 1, func(*Entry) error { return nil })
+
+	var buf bytes.Buffer
+	logger := log.New(&buf, "", 0)
+	ix := NewIndexer(IndexerOpts{
+		ClassDir:  dir,
+		Registry:  reg,
+		OnUnknown: UnknownLogAndSkip,
+		Logger:    logger,
+	})
+	if _, err := ix.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "alien.thing") || !strings.Contains(out, "unknown type") {
+		t.Errorf("expected 'unknown type' log for alien.thing, got: %q", out)
+	}
+	if !strings.Contains(out, "v99") || !strings.Contains(out, "unsupported version") {
+		t.Errorf("expected 'unsupported version' log for v99, got: %q", out)
+	}
+	if !strings.Contains(out, "[1]") {
+		t.Errorf("expected registered-versions list in v99 log, got: %q", out)
 	}
 }
 
