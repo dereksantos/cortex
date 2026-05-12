@@ -235,10 +235,3 @@ dist/
 *.tar.gz
 *.zip
 .claude/
-
-# pi.dev local config + auto-discovered extension symlinks
-.pi/
-
-# Node module trees inside packages/* (reproducible via npm install)
-node_modules/
-packages/*/node_modules/

@@ -294,16 +294,6 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		setter.SetModel(harnessModel)
 	}
 
-	// Phase 8: tell the harness whether this cell uses the pi-cortex
-	// extension (StrategyCortexExtension) so it can install the
-	// extension into the cell's workdir before invoking pi. MUST be
-	// called for every cell (true OR false) — harnesses are reused
-	// across cells, so a stale "true" from the previous cell would
-	// otherwise load the extension into a baseline cell's workdir.
-	if setter, ok := hs.Harness.(interface{ SetCortexExtensionEnabled(bool) }); ok {
-		setter.SetCortexExtensionEnabled(strat == StrategyCortexExtension)
-	}
-
 	var (
 		hres       HarnessResult
 		runErr     error
@@ -371,9 +361,7 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		TaskSuccess:           runErr == nil,
 		TaskSuccessCriterion:  CriterionTestsPassAll,
 	}
-	if strat == StrategyCortex || strat == StrategyCortexExtension {
-		// Both cortex-flavor strategies draw from the same cortex
-		// store; both require cortex_version per CellResult.Validate.
+	if strat == StrategyCortex {
 		cr.CortexVersion = CortexVersion
 	}
 	if retryCount > 0 {

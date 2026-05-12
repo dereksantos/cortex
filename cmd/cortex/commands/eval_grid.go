@@ -373,9 +373,9 @@ func buildGridStrategies(csv string) ([]evalv2.ContextStrategy, error) {
 	out := make([]evalv2.ContextStrategy, 0, len(names))
 	for _, s := range names {
 		switch s {
-		case evalv2.StrategyBaseline, evalv2.StrategyCortex, evalv2.StrategyCortexExtension, evalv2.StrategyFrontier:
+		case evalv2.StrategyBaseline, evalv2.StrategyCortex, evalv2.StrategyFrontier:
 		default:
-			return nil, fmt.Errorf("eval grid: unknown strategy %q (valid: baseline, cortex, cortex_extension, frontier)", s)
+			return nil, fmt.Errorf("eval grid: unknown strategy %q (valid: baseline, cortex, frontier)", s)
 		}
 		out = append(out, evalv2.ContextStrategy(s))
 	}
@@ -417,7 +417,7 @@ Options:
                              anthropic/claude-haiku-4.5
   --strategies LIST        CSV of context strategies
                            (default: baseline,cortex)
-                           Valid: baseline, cortex, cortex_extension, frontier
+                           Valid: baseline, cortex, frontier
   --report                 Print the last N CellResult rows from the
                            JSONL log; do not run any cells.
   --report-limit N         How many rows --report shows (default: 20)
