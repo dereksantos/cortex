@@ -81,10 +81,41 @@ All agents share the same `.cortex/` directory — one agent's captured decision
 ### Notes for automated environments
 
 - **Binary path**: Check the binary into the repo (e.g., `bin/cortex`) or install to a fixed path so all agents find it
-- **Shared `.cortex/`**: SQLite WAL mode handles concurrent readers. Concurrent writers may hit brief locks under heavy parallel writes — this is fine for typical agent workloads
+- **Shared `.cortex/`**: The journal (`.cortex/journal/<class>/`) uses per-segment flock for cross-process capture safety. Storage (read side) hydrates from JSONL projection files
 - **No daemon needed**: Capture and search work standalone. The daemon adds background processing (Dream/Think) and the web dashboard, but is optional
 - **No `~/.claude/` required**: `cortex init` and CLI commands work without Claude Code installed. Only `cortex install` requires it (sets up hooks)
-- **Ingest after capture**: Run `./bin/cortex ingest` to move queued events into the database. Without the daemon, events stay in the queue until ingest runs
+- **Ingest after capture**: Run `./bin/cortex ingest` (or `./bin/cortex journal ingest` — lower-level, no embedding) to project journal entries into storage. Without the daemon, entries stay in the journal until ingest runs
+
+## Journal — source of truth
+
+Cortex uses CQRS event-sourcing. The journal (append-only JSONL per writer-class) is canonical; the storage layer (in-memory indexes + projection JSONL files) is regeneratable from the journal. See [`docs/journal.md`](docs/journal.md) for the architecture and [`docs/journal-implementation-plan.md`](docs/journal-implementation-plan.md) for the slice plan.
+
+Eight writer-classes, each in its own directory:
+
+| Class | Directory | Entry types | fsync |
+|---|---|---|---|
+| capture | `.cortex/journal/capture/` | `capture.event` | per entry |
+| observation | `.cortex/journal/observation/` | `observation.{claude_transcript,git_commit,memory_file}` | per batch |
+| dream | `.cortex/journal/dream/` | `dream.insight` | per batch |
+| reflect | `.cortex/journal/reflect/` | `reflect.rerank` | per batch |
+| resolve | `.cortex/journal/resolve/` | `resolve.retrieval` | per batch |
+| think | `.cortex/journal/think/` | `think.{topic_weight,session_context}` | per batch |
+| feedback | `.cortex/journal/feedback/` | `feedback.{correction,confirmation,retraction}` | per entry |
+| eval | `.cortex/journal/eval/` | `eval.cell_result` | per batch |
+
+CLI surface:
+- `cortex journal ingest` — drain journal → storage (one-shot).
+- `cortex journal rebuild` — truncate derived state, replay full DAG.
+- `cortex journal replay [flags]` — counterfactual-eval primitive (skeleton; full overrides land in a follow-up).
+- `cortex journal verify` — cursor + source-offset integrity, plus `.gitignore` privacy check.
+- `cortex journal show <offset>` / `cortex journal tail` — inspection.
+- `cortex journal migrate` — pack legacy `.cortex/queue/processed/*.json` into capture segments.
+
+Invariants:
+- **Local-only**: journal contents never leave the local machine by default. `journal.AssertLocalOnly(path)` is a code-review tripwire for outbound paths.
+- **`.cortex/` in `.gitignore`**: enforced at `cortex init`; surfaced by `cortex journal verify` if drift occurs.
+- **jq-readable**: plain JSONL, no encryption by default. `cat journal/**/*.jsonl | jq` always works.
+- **Closed segments are gzippable**: `journal.CompactClosedSegments` shrinks closed segments ~10×; the reader handles both `.jsonl` and `.jsonl.gz` transparently.
 
 ## Cognitive Architecture
 
