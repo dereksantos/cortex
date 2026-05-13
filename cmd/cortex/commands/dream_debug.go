@@ -60,12 +60,19 @@ func (c *DreamDebugCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("init cortex: %w", err)
 	}
 
-	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+	observer := sources.NewObserver(cfg.ContextDir)
+	projSrc := sources.NewProjectSource(cfg.ProjectRoot)
+	projSrc.SetObserver(observer)
+	cortex.RegisterSource(projSrc)
 	cortex.RegisterSource(sources.NewCortexSource(store))
-	cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+	gitSrc := sources.NewGitSource(cfg.ProjectRoot)
+	gitSrc.SetObserver(observer)
+	cortex.RegisterSource(gitSrc)
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
-		cortex.RegisterSource(sources.NewClaudeHistorySource(filepath.Join(homeDir, ".claude", "projects")))
+		claudeSrc := sources.NewClaudeHistorySource(filepath.Join(homeDir, ".claude", "projects"))
+		claudeSrc.SetObserver(observer)
+		cortex.RegisterSource(claudeSrc)
 	}
 
 	fmt.Println("== Dream debug ==")

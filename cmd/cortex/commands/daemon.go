@@ -175,23 +175,37 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 		homeDir, _ := os.UserHomeDir()
 		if homeDir != "" {
 			claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
-			cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
+			claudeSrc := sources.NewClaudeHistorySource(claudeProjectsDir)
+			claudeSrc.SetObserver(sources.NewObserver(cfg.ContextDir))
+			cortex.RegisterSource(claudeSrc)
 		}
 
-		// Register per-project dream sources
+		// Register per-project dream sources, each with an observer scoped
+		// to the project's .cortex/journal/observation directory so
+		// substrate reads are traceable.
 		if reg != nil {
 			for _, project := range reg.List() {
-				cortex.RegisterSource(sources.NewProjectSource(project.Path))
-				cortex.RegisterSource(sources.NewGitSource(project.Path))
+				projectObserver := sources.NewObserver(filepath.Join(project.Path, ".cortex"))
+				projSrc := sources.NewProjectSource(project.Path)
+				projSrc.SetObserver(projectObserver)
+				cortex.RegisterSource(projSrc)
+				gitSrc := sources.NewGitSource(project.Path)
+				gitSrc.SetObserver(projectObserver)
+				cortex.RegisterSource(gitSrc)
 				transcriptDir := filepath.Join(project.Path, ".cortex", "transcript_queue")
 				if _, err := os.Stat(transcriptDir); err == nil {
 					cortex.RegisterSource(sources.NewTranscriptQueueSource(transcriptDir))
 				}
 			}
 		} else {
-			// Fallback: use current project root if registry unavailable
-			cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
-			cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+			// Fallback: current project root.
+			fallbackObserver := sources.NewObserver(cfg.ContextDir)
+			projSrc := sources.NewProjectSource(cfg.ProjectRoot)
+			projSrc.SetObserver(fallbackObserver)
+			cortex.RegisterSource(projSrc)
+			gitSrc := sources.NewGitSource(cfg.ProjectRoot)
+			gitSrc.SetObserver(fallbackObserver)
+			cortex.RegisterSource(gitSrc)
 		}
 	}
 

@@ -87,6 +87,7 @@ func New(cfg *config.Config, store *storage.Storage, opts ...Option) *Processor 
 		journal.TypeObservationClaudeTranscript,
 		journal.TypeObservationGitCommit,
 		journal.TypeObservationMemoryFile,
+		journal.TypeObservationProjectFile,
 	} {
 		p.registry.Register(typ, 1, p.projectObservation)
 	}

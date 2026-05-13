@@ -157,19 +157,28 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
 	cortex.SetStateWriter(stateWriter)
 
-	// Register dream sources for background exploration
-	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+	// Register dream sources for background exploration. The observer
+	// emits observation.* journal entries on each substrate read so
+	// derivations carry full provenance.
+	observer := sources.NewObserver(cfg.ContextDir)
+	projSrc := sources.NewProjectSource(cfg.ProjectRoot)
+	projSrc.SetObserver(observer)
+	cortex.RegisterSource(projSrc)
 	cortex.RegisterSource(sources.NewCortexSource(store))
 
 	// Register Claude history source for session transcript exploration
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
-		cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
+		claudeSrc := sources.NewClaudeHistorySource(claudeProjectsDir)
+		claudeSrc.SetObserver(observer)
+		cortex.RegisterSource(claudeSrc)
 	}
 
 	// Register git source for commit history exploration
-	cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+	gitSrc := sources.NewGitSource(cfg.ProjectRoot)
+	gitSrc.SetObserver(observer)
+	cortex.RegisterSource(gitSrc)
 
 	// Determine if this is the first prompt of the session
 	isFirstPrompt := isFirstPromptInSession(store, sessionID)

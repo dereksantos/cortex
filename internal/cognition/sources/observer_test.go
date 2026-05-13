@@ -60,6 +60,61 @@ func TestObserver_AppendsObservationEntry(t *testing.T) {
 	}
 }
 
+// TestProjectSource_EmitsObservation verifies the O2 contract: every
+// file that contributes regions to a Sample produces exactly one
+// observation.project_file entry (deduped within the Sample).
+func TestProjectSource_EmitsObservation(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "projsrc-observe-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	src := filepath.Join(tempDir, "src.go")
+	if err := os.WriteFile(src, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	cortexDir := filepath.Join(tempDir, ".cortex")
+	o := NewObserver(cortexDir)
+	ps := NewProjectSource(tempDir)
+	ps.SetObserver(o)
+	if _, err := ps.Sample(context.Background(), 4); err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+
+	r, err := journal.NewReader(filepath.Join(cortexDir, "journal", "observation"))
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	var foundProjectFiles int
+	for {
+		e, err := r.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if e.Type != journal.TypeObservationProjectFile {
+			continue
+		}
+		p, err := journal.ParseObservation(e)
+		if err != nil {
+			t.Fatalf("ParseObservation: %v", err)
+		}
+		if p.SourceName != "project" {
+			t.Errorf("SourceName=%q want %q", p.SourceName, "project")
+		}
+		foundProjectFiles++
+	}
+	if foundProjectFiles == 0 {
+		t.Error("no observation.project_file entries emitted")
+	}
+}
+
 func TestMemoryMDSource_EmitsObservation(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "memorymd-observe-*")
 	if err != nil {

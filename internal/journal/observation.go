@@ -17,6 +17,7 @@ const (
 	TypeObservationClaudeTranscript = "observation.claude_transcript"
 	TypeObservationGitCommit        = "observation.git_commit"
 	TypeObservationMemoryFile       = "observation.memory_file"
+	TypeObservationProjectFile      = "observation.project_file"
 )
 
 // ObservationPayload is the shared shape for every observation entry. The
@@ -88,7 +89,8 @@ func isObservationType(t string) bool {
 	switch t {
 	case TypeObservationClaudeTranscript,
 		TypeObservationGitCommit,
-		TypeObservationMemoryFile:
+		TypeObservationMemoryFile,
+		TypeObservationProjectFile:
 		return true
 	}
 	return false
