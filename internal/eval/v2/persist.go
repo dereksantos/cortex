@@ -10,25 +10,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	_ "modernc.org/sqlite"
 )
 
 // CortexVersion is the current version of Cortex.
 const CortexVersion = "0.1.0"
 
-// Persister saves eval results to SQLite + a JSONL append log.
+// defaultEvalJournalDir is the canonical writer-class directory for
+// eval.cell_result entries (sibling to .cortex/journal/{capture,dream,...}).
+const defaultEvalJournalDir = ".cortex/journal/eval"
+
+// Persister saves eval results to SQLite + a JSONL append log + the
+// eval writer-class journal.
+//
+// The journal is the source of truth — PersistCell appends an
+// eval.cell_result entry first, then projects to SQLite + JSONL. SQLite
+// and JSONL remain the read-side projections required by the
+// eval-harness contract (hard constraint #8); rebuild regenerates both
+// from the journal alone.
 //
 // dbDir is tracked so PersistCell can locate the
-// `.cortex/db/cell_results.jsonl` companion file (the structured
-// analysis log mandated by the eval-harness contract — every CellResult
-// lands in BOTH backends so downstream tools never have to scrape).
+// `.cortex/db/cell_results.jsonl` companion file. journalDir defaults to
+// `.cortex/journal/eval`; tests override via newTestPersister.
 type Persister struct {
-	db    *sql.DB
-	dbDir string
+	db         *sql.DB
+	dbDir      string
+	journal    *journal.Writer
+	journalDir string
 }
 
-// NewPersister creates a new SQLite persister.
-// The database is stored in .cortex/db/evals_v2.db relative to the current directory.
+// NewPersister creates a new SQLite + journal persister.
+// The database is stored in .cortex/db/evals_v2.db and the journal
+// writer-class at .cortex/journal/eval, both relative to the current
+// directory.
 func NewPersister() (*Persister, error) {
 	dbDir := filepath.Join(".cortex", "db")
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -47,7 +62,29 @@ func NewPersister() (*Persister, error) {
 		return nil, err
 	}
 
+	if err := p.openJournal(defaultEvalJournalDir); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	return p, nil
+}
+
+// openJournal opens the eval writer-class journal at classDir. Stored on
+// the Persister so PersistCell can emit eval.cell_result entries.
+// FsyncPerBatch is appropriate for derivations (regeneratable via
+// rebuild) — per principle 4 in docs/journal.md.
+func (p *Persister) openJournal(classDir string) error {
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return fmt.Errorf("open eval journal: %w", err)
+	}
+	p.journal = w
+	p.journalDir = classDir
+	return nil
 }
 
 // init creates the schema if needed.
@@ -362,9 +399,20 @@ func (p *Persister) GetABRTrend(n int) ([]ABRTrendPoint, error) {
 	return points, nil
 }
 
-// Close closes the database connection.
+// Close closes the journal writer (flushing any unfsynced entries) and
+// the database connection. Errors from the journal close are returned
+// only if the DB close also succeeds — a failed DB close masks the
+// journal-close error to keep the call site error chain simple.
 func (p *Persister) Close() error {
-	return p.db.Close()
+	var jErr error
+	if p.journal != nil {
+		jErr = p.journal.Close()
+		p.journal = nil
+	}
+	if err := p.db.Close(); err != nil {
+		return err
+	}
+	return jErr
 }
 
 // PersistAgentic saves agentic eval results to the database.

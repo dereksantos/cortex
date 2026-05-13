@@ -31,6 +31,12 @@ func newTestPersister(t *testing.T) *Persister {
 		t.Fatal(err)
 	}
 
+	journalDir := filepath.Join(tmpDir, ".cortex", "journal", "eval")
+	if err := p.openJournal(journalDir); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+
 	t.Cleanup(func() { p.Close() })
 	return p
 }

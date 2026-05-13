@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 // cellResultsSchema is the SQL DDL for the per-cell grid output table.
@@ -220,26 +222,37 @@ func (p *Persister) RecentCellsFromJSONL(n int) ([]CellResult, error) {
 	return all[len(all)-n:], nil
 }
 
-// PersistCell writes one CellResult to BOTH backends required by hard
-// constraint #8:
+// PersistCell writes one CellResult to all required backends in order:
+//   - Journal eval.cell_result entry (source of truth, regen substrate)
 //   - SQLite cell_results table (fast queries, uniqueness)
 //   - JSONL append log <dbDir>/cell_results.jsonl (portable analysis)
 //
-// Validation runs first; an invalid row touches neither backend.
+// Validation runs first; an invalid row touches no backend.
+//
+// The journal entry is appended FIRST so rebuild can regenerate SQLite +
+// JSONL from the journal alone (hard constraint #8 stays satisfied
+// because both projections are deterministic functions of the journal).
 //
 // SQLite uses INSERT OR IGNORE on run_id so retries — including the
-// "JSONL append failed, caller retries" path — stay idempotent. JSONL
-// is append-only and may legitimately accumulate duplicates on retry;
-// downstream consumers should de-dup by run_id when that matters.
+// "JSONL append failed, caller retries" path — stay idempotent. JSONL is
+// append-only and may legitimately accumulate duplicates on retry;
+// downstream consumers should de-dup by run_id when that matters. The
+// journal itself is also append-only: a retry produces a second entry
+// with a new offset, and the projector handles dedup at the SQLite
+// layer.
 //
-// JSONL append failure does NOT roll back the SQLite insert: a missing
-// row is worse than a duplicate.
+// JSONL append failure does NOT roll back the SQLite insert nor the
+// journal entry: a missing row is worse than a duplicate.
 func (p *Persister) PersistCell(ctx context.Context, r *CellResult) error {
 	if r == nil {
 		return errors.New("PersistCell: nil CellResult")
 	}
 	if err := r.Validate(); err != nil {
 		return fmt.Errorf("validate: %w", err)
+	}
+
+	if err := p.appendCellJournal(r); err != nil {
+		return fmt.Errorf("journal append: %w", err)
 	}
 
 	if err := p.insertCellSQLite(ctx, r); err != nil {
@@ -250,6 +263,60 @@ func (p *Persister) PersistCell(ctx context.Context, r *CellResult) error {
 		return fmt.Errorf("jsonl append: %w", err)
 	}
 	return nil
+}
+
+// appendCellJournal writes one eval.cell_result entry to the journal
+// writer-class. Returns an error if the writer is not configured —
+// every Persister opened via NewPersister or newTestPersister has one;
+// a nil journal is a programming error from a hand-built Persister.
+func (p *Persister) appendCellJournal(r *CellResult) error {
+	if p.journal == nil {
+		return errors.New("eval journal writer is nil; construct Persister via NewPersister")
+	}
+	entry, err := journal.NewEvalCellResultEntry(cellResultToPayload(r))
+	if err != nil {
+		return fmt.Errorf("build entry: %w", err)
+	}
+	if _, err := p.journal.Append(entry); err != nil {
+		return fmt.Errorf("append: %w", err)
+	}
+	return nil
+}
+
+// cellResultToPayload maps a CellResult to its journal payload. The two
+// types are intentionally mirror-image structs (every CellResult field
+// has the same JSON tag in EvalCellResultPayload) so this is a flat copy
+// rather than a transform.
+func cellResultToPayload(r *CellResult) journal.EvalCellResultPayload {
+	return journal.EvalCellResultPayload{
+		SchemaVersion:         r.SchemaVersion,
+		RunID:                 r.RunID,
+		Timestamp:             r.Timestamp,
+		GitCommitSHA:          r.GitCommitSHA,
+		GitBranch:             r.GitBranch,
+		ScenarioID:            r.ScenarioID,
+		SessionID:             r.SessionID,
+		Harness:               r.Harness,
+		Provider:              r.Provider,
+		Model:                 r.Model,
+		Backend:               r.Backend,
+		ContextStrategy:       r.ContextStrategy,
+		CortexVersion:         r.CortexVersion,
+		Seed:                  r.Seed,
+		Temperature:           r.Temperature,
+		TokensIn:              r.TokensIn,
+		TokensOut:             r.TokensOut,
+		InjectedContextTokens: r.InjectedContextTokens,
+		CostUSD:               r.CostUSD,
+		LatencyMs:             r.LatencyMs,
+		AgentTurnsTotal:       r.AgentTurnsTotal,
+		CorrectionTurns:       r.CorrectionTurns,
+		TestsPassed:           r.TestsPassed,
+		TestsFailed:           r.TestsFailed,
+		TaskSuccess:           r.TaskSuccess,
+		TaskSuccessCriterion:  r.TaskSuccessCriterion,
+		Notes:                 r.Notes,
+	}
 }
 
 func (p *Persister) insertCellSQLite(ctx context.Context, r *CellResult) error {

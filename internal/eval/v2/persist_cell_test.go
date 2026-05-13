@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 // validCellResult returns a complete, valid CellResult suitable as a
@@ -308,6 +311,77 @@ func TestRecentCellsFromJSONL(t *testing.T) {
 			t.Errorf("len=%d want 5", len(got))
 		}
 	})
+}
+
+// TestPersistCell_EmitsJournalEntry asserts the unification contract:
+// a successful PersistCell appends one eval.cell_result entry to the
+// writer-class journal, whose payload mirrors the CellResult. The
+// journal is the source of truth; SQLite + JSONL are projections of it.
+func TestPersistCell_EmitsJournalEntry(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+
+	if err := p.PersistCell(context.Background(), r); err != nil {
+		t.Fatalf("PersistCell: %v", err)
+	}
+
+	// Flush so FsyncPerBatch writes hit disk before the reader opens.
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+
+	e, err := reader.Next()
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if e.Type != journal.TypeEvalCellResult {
+		t.Errorf("entry Type=%q want %q", e.Type, journal.TypeEvalCellResult)
+	}
+
+	payload, err := journal.ParseEvalCellResult(e)
+	if err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	wantPayload := cellResultToPayload(r)
+	if !reflect.DeepEqual(payload, &wantPayload) {
+		t.Errorf("payload mismatch:\n got: %+v\nwant: %+v", payload, &wantPayload)
+	}
+
+	if _, err := reader.Next(); err != io.EOF {
+		t.Errorf("want exactly one entry; second Next returned err=%v", err)
+	}
+}
+
+// TestPersistCell_ValidationFails_NoJournalEntry covers the
+// no-side-effects guarantee on the journal: an invalid input must not
+// produce a phantom entry that rebuild would later try to project.
+func TestPersistCell_ValidationFails_NoJournalEntry(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+	r.RunID = "" // forces validation failure
+
+	if err := p.PersistCell(context.Background(), r); err == nil {
+		t.Fatal("PersistCell on invalid input: want error, got nil")
+	}
+
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Next(); err != io.EOF {
+		t.Errorf("journal should be empty after validation failure; got Next err=%v", err)
+	}
 }
 
 func readJSONL(t *testing.T, path string) []string {
