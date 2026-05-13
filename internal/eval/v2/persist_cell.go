@@ -230,8 +230,9 @@ func (p *Persister) RecentCellsFromJSONL(n int) ([]CellResult, error) {
 // Validation runs first; an invalid row touches no backend.
 //
 // The journal entry is appended FIRST so rebuild can regenerate SQLite +
-// JSONL from the journal alone (hard constraint #8 stays satisfied
-// because both projections are deterministic functions of the journal).
+// JSONL from the journal alone via ProjectCellFromEntry. Hard constraint
+// #8 stays satisfied because both projections are deterministic
+// functions of the journal.
 //
 // SQLite uses INSERT OR IGNORE on run_id so retries — including the
 // "JSONL append failed, caller retries" path — stay idempotent. JSONL is
@@ -255,10 +256,47 @@ func (p *Persister) PersistCell(ctx context.Context, r *CellResult) error {
 		return fmt.Errorf("journal append: %w", err)
 	}
 
+	return p.projectCell(ctx, r)
+}
+
+// ProjectCell writes one CellResult to the read-side projections (SQLite
+// + JSONL) WITHOUT emitting a journal entry. This is the entry point
+// callers use when replaying journal entries during `cortex journal
+// rebuild`: the journal already has the entry, we just need to
+// regenerate derived state.
+//
+// Validation still runs — a malformed payload in the journal (e.g., from
+// a future writer version with looser invariants) should not corrupt the
+// projection.
+func (p *Persister) ProjectCell(ctx context.Context, r *CellResult) error {
+	if r == nil {
+		return errors.New("ProjectCell: nil CellResult")
+	}
+	if err := r.Validate(); err != nil {
+		return fmt.Errorf("validate: %w", err)
+	}
+	return p.projectCell(ctx, r)
+}
+
+// ProjectCellFromEntry is the projector adapter wired into the journal
+// indexer: take a parsed eval.cell_result payload, materialize SQLite +
+// JSONL state. Idempotent on retries via SQLite's INSERT OR IGNORE.
+func (p *Persister) ProjectCellFromEntry(ctx context.Context, payload *journal.EvalCellResultPayload) error {
+	if payload == nil {
+		return errors.New("ProjectCellFromEntry: nil payload")
+	}
+	r := payloadToCellResult(payload)
+	return p.ProjectCell(ctx, r)
+}
+
+// projectCell is the shared SQLite + JSONL write path. Callers must
+// validate before invoking — PersistCell does this once before journal
+// append, ProjectCell does it as a guard against unprojectable journal
+// entries.
+func (p *Persister) projectCell(ctx context.Context, r *CellResult) error {
 	if err := p.insertCellSQLite(ctx, r); err != nil {
 		return fmt.Errorf("sqlite insert: %w", err)
 	}
-
 	if err := p.appendCellJSONL(r); err != nil {
 		return fmt.Errorf("jsonl append: %w", err)
 	}
@@ -281,6 +319,41 @@ func (p *Persister) appendCellJournal(r *CellResult) error {
 		return fmt.Errorf("append: %w", err)
 	}
 	return nil
+}
+
+// payloadToCellResult is the inverse of cellResultToPayload — used by
+// the rebuild projector to turn a journal-decoded payload back into the
+// CellResult the validator and SQLite/JSONL writers expect.
+func payloadToCellResult(p *journal.EvalCellResultPayload) *CellResult {
+	return &CellResult{
+		SchemaVersion:         p.SchemaVersion,
+		RunID:                 p.RunID,
+		Timestamp:             p.Timestamp,
+		GitCommitSHA:          p.GitCommitSHA,
+		GitBranch:             p.GitBranch,
+		ScenarioID:            p.ScenarioID,
+		SessionID:             p.SessionID,
+		Harness:               p.Harness,
+		Provider:              p.Provider,
+		Model:                 p.Model,
+		Backend:               p.Backend,
+		ContextStrategy:       p.ContextStrategy,
+		CortexVersion:         p.CortexVersion,
+		Seed:                  p.Seed,
+		Temperature:           p.Temperature,
+		TokensIn:              p.TokensIn,
+		TokensOut:             p.TokensOut,
+		InjectedContextTokens: p.InjectedContextTokens,
+		CostUSD:               p.CostUSD,
+		LatencyMs:             p.LatencyMs,
+		AgentTurnsTotal:       p.AgentTurnsTotal,
+		CorrectionTurns:       p.CorrectionTurns,
+		TestsPassed:           p.TestsPassed,
+		TestsFailed:           p.TestsFailed,
+		TaskSuccess:           p.TaskSuccess,
+		TaskSuccessCriterion:  p.TaskSuccessCriterion,
+		Notes:                 p.Notes,
+	}
 }
 
 // cellResultToPayload maps a CellResult to its journal payload. The two
