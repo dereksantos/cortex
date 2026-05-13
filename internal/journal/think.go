@@ -25,10 +25,10 @@ type ThinkTopicWeightPayload struct {
 // queries for which cached Reflect results have been pre-computed.
 // One entry per MaybeThink cycle.
 type ThinkSessionContextPayload struct {
-	TopicWeights   map[string]float64 `json:"topic_weights"`
-	RecentQueries  []string           `json:"recent_queries,omitempty"`
-	CachedQueries  []string           `json:"cached_queries,omitempty"`
-	SessionID      string             `json:"session_id,omitempty"`
+	TopicWeights  map[string]float64 `json:"topic_weights"`
+	RecentQueries []string           `json:"recent_queries,omitempty"`
+	CachedQueries []string           `json:"cached_queries,omitempty"`
+	SessionID     string             `json:"session_id,omitempty"`
 }
 
 // NewThinkTopicWeightEntry builds an entry for a single topic-weight update.

@@ -1,16 +1,16 @@
 // Forward-compatibility contract for the registry:
 //
-//   1. Unknown type — the entry's type has no projectors registered at any
-//      version. Indexer treats per UnknownPolicy. Typical cause: an older
-//      build reads a journal written by a newer build with a new entry
-//      class. We log and skip so the older build does not crash on data
-//      it cannot interpret. The cursor advances; if the newer build runs
-//      later, it can re-project by rebuild.
+//  1. Unknown type — the entry's type has no projectors registered at any
+//     version. Indexer treats per UnknownPolicy. Typical cause: an older
+//     build reads a journal written by a newer build with a new entry
+//     class. We log and skip so the older build does not crash on data
+//     it cannot interpret. The cursor advances; if the newer build runs
+//     later, it can re-project by rebuild.
 //
-//   2. Known type, unsupported version — the type has projectors at one
-//      or more versions, but not this entry's V. Same policy applies, but
-//      logged distinctly so it is visible during debugging that a schema
-//      evolved and a migrator or new projector is needed.
+//  2. Known type, unsupported version — the type has projectors at one
+//     or more versions, but not this entry's V. Same policy applies, but
+//     logged distinctly so it is visible during debugging that a schema
+//     evolved and a migrator or new projector is needed.
 //
 // Schema migration (e.g. registering a v1→v2 transform that feeds the v2
 // projector) is intentionally deferred — it lands when we have a real

@@ -75,9 +75,9 @@ type Storage struct {
 	sessionContextSnapshots []*SessionContextSnapshot
 
 	// Feedback indexes (slice B3)
-	feedbackAll    []*Feedback
-	feedbackByID   map[string][]*Feedback // graded_id -> feedbacks
-	retractedIDs   map[string]bool        // graded_ids with a retraction
+	feedbackAll  []*Feedback
+	feedbackByID map[string][]*Feedback // graded_id -> feedbacks
+	retractedIDs map[string]bool        // graded_ids with a retraction
 
 	// Open file handles for append
 	eventFile         *os.File
@@ -250,8 +250,8 @@ type Retrieval struct {
 // RetrievalStats aggregates the recorded retrievals: total count + count
 // per decision.
 type RetrievalStats struct {
-	Total       int
-	ByDecision  map[string]int
+	Total      int
+	ByDecision map[string]int
 }
 
 // contradictionRecord projects a contradiction detected during reflect.rerank.
@@ -280,15 +280,15 @@ type Contradiction struct {
 // log. Two observations with the same (URI, ContentHash) are deduplicated
 // at record time — the substrate hasn't changed, no new evidence.
 type observationRecord struct {
-	ProjectID   string    `json:"project_id,omitempty"`
-	Type        string    `json:"type"` // observation.<kind>
-	SourceName  string    `json:"source_name"`
-	URI         string    `json:"uri"`
-	ContentHash string    `json:"content_hash"`
-	Size        int64     `json:"size,omitempty"`
-	Modified    time.Time `json:"modified,omitempty"`
-	JournalOffset int64   `json:"journal_offset,omitempty"`
-	RecordedAt  time.Time `json:"recorded_at"`
+	ProjectID     string    `json:"project_id,omitempty"`
+	Type          string    `json:"type"` // observation.<kind>
+	SourceName    string    `json:"source_name"`
+	URI           string    `json:"uri"`
+	ContentHash   string    `json:"content_hash"`
+	Size          int64     `json:"size,omitempty"`
+	Modified      time.Time `json:"modified,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
 }
 
 // Observation is the derived view of a recorded substrate sighting.
