@@ -382,7 +382,7 @@ func privacyGitignoreCheck(contextDir string) string {
 func (c *JournalCommand) runReplay(ctx *Context) error {
 	class := "capture"
 	var fromOff, toOff Offset = 1, 0
-	configOverrides := ""
+	configOverridesRaw := ""
 
 	for _, a := range ctx.Args[1:] {
 		switch {
@@ -396,8 +396,13 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 		case strings.HasPrefix(a, "--to-offset="):
 			toOff = parseOffsetFlag(a, "--to-offset=", toOff)
 		case strings.HasPrefix(a, "--config-overrides="):
-			configOverrides = strings.TrimPrefix(a, "--config-overrides=")
+			configOverridesRaw = strings.TrimPrefix(a, "--config-overrides=")
 		}
+	}
+
+	overrides, err := ParseConfigOverrides(configOverridesRaw)
+	if err != nil {
+		return fmt.Errorf("invalid --config-overrides: %w", err)
 	}
 
 	contextDir, err := journalContextDir(ctx)
@@ -428,18 +433,19 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 		if toOff != 0 && entry.Offset > toOff {
 			break
 		}
-		// Skeleton: print one summary line per replayed entry. Future
-		// work feeds entry into cognition with config overrides and
-		// emits comparison records to a side journal.
+		// Skeleton: print one summary line per replayed entry. Counterfactual
+		// re-invocation of cognition with overrides lands in a follow-up
+		// once the source entries carry enough content to re-run without
+		// re-scraping storage.
 		fmt.Printf("offset=%d type=%s v=%d\n", entry.Offset, entry.Type, entry.V)
 		replayed++
 	}
 
 	fmt.Printf("\nReplayed %d/%d entries from %s (range %d..%v)\n",
 		replayed, scanned, class, fromOff, toOff)
-	if configOverrides != "" {
-		fmt.Printf("--config-overrides=%q parsed but not yet threaded through cognition.\n", configOverrides)
-		fmt.Println("Counterfactual replay against overridden config lands in a follow-up slice.")
+	if !overrides.IsEmpty() {
+		fmt.Printf("--config-overrides parsed: %s\n", overrides.summary())
+		fmt.Println("Counterfactual cognition runs land in a follow-up; this output marks the targeted set.")
 	}
 	return nil
 }
