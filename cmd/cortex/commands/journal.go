@@ -232,7 +232,7 @@ func (c *JournalCommand) runVerify(ctx *Context) error {
 		return err
 	}
 
-	classes := []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval"}
+	classes := []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval", "replay"}
 
 	// Pass 1: collect highest offset per class.
 	maxOffsets := make(map[string]journal.Offset)
@@ -277,7 +277,15 @@ func (c *JournalCommand) runVerify(ctx *Context) error {
 		}
 	}
 
-	// Pass 3: source-offset reference checks. Same-class lookup only.
+	// Pass 3: source-offset reference checks.
+	//
+	// Some entry types carry the source's writer-class in their payload
+	// (e.g., replay.counterfactual.SourceClass) — those get a strict
+	// check: offset must exist in the named class. Others fall back to
+	// the permissive "exists in SOME class" check, which is sufficient
+	// for the within-class case (same-class offsets are bounded by
+	// maxOffsets[class]) but ambiguous across classes.
+	ambiguous := 0
 	for _, class := range classes {
 		classDir := filepath.Join(contextDir, "journal", class)
 		r, err := journal.NewReader(classDir)
@@ -292,30 +300,53 @@ func (c *JournalCommand) runVerify(ctx *Context) error {
 			if err != nil {
 				break
 			}
+			expectedClass := payloadSourceClass(e)
 			for _, src := range e.Sources {
-				// Source offsets cite earlier entries. Within this class
-				// the max-offset upper-bound is sufficient; cross-class
-				// source references are recorded but not strictly
-				// verified across boundaries here.
-				if src <= 0 || src > maxOffsets[class] {
-					// Cross-class source — accept if any class has it.
-					found := false
-					for _, c := range classes {
-						if src <= maxOffsets[c] && src > 0 {
-							found = true
-							break
-						}
-					}
-					if !found {
+				if src <= 0 {
+					fmt.Fprintf(os.Stderr,
+						"%s offset=%d: source offset %d is non-positive\n",
+						class, e.Offset, src)
+					issues++
+					continue
+				}
+				if expectedClass != "" {
+					// Strict path: payload names the source's writer-class.
+					if max, ok := maxOffsets[expectedClass]; !ok || src > max {
 						fmt.Fprintf(os.Stderr,
-							"%s offset=%d: source offset %d not resolvable in any class\n",
-							class, e.Offset, src)
+							"%s offset=%d: source offset %d not in declared class %q (max=%d)\n",
+							class, e.Offset, src, expectedClass, max)
 						issues++
 					}
+					continue
+				}
+				// Permissive path: same-class first, then any class.
+				if src <= maxOffsets[class] {
+					continue
+				}
+				resolvingClasses := []string{}
+				for _, c := range classes {
+					if src <= maxOffsets[c] && src > 0 {
+						resolvingClasses = append(resolvingClasses, c)
+					}
+				}
+				if len(resolvingClasses) == 0 {
+					fmt.Fprintf(os.Stderr,
+						"%s offset=%d: source offset %d not resolvable in any class\n",
+						class, e.Offset, src)
+					issues++
+					continue
+				}
+				if len(resolvingClasses) > 1 {
+					ambiguous++
 				}
 			}
 		}
 		r.Close()
+	}
+	if ambiguous > 0 {
+		fmt.Fprintf(os.Stderr,
+			"%d cross-class source references resolve in multiple classes (ambiguous; payload-tagged class would tighten this)\n",
+			ambiguous)
 	}
 
 	// Pretty-print summary.
@@ -624,7 +655,7 @@ func (c *JournalCommand) runRebuild(ctx *Context) error {
 	}
 	// 2. Reset cursors for every known writer-class so the indexer
 	//    replays from offset 0.
-	for _, class := range []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval"} {
+	for _, class := range []string{"capture", "observation", "dream", "reflect", "resolve", "think", "feedback", "eval", "replay"} {
 		classDir := filepath.Join(contextDir, "journal", class)
 		if err := journal.OpenCursor(classDir).Set(0); err != nil {
 			return fmt.Errorf("reset cursor for %s: %w", class, err)
@@ -806,6 +837,30 @@ func (c *JournalCommand) runIngest(ctx *Context) error {
 	}
 	fmt.Printf("Projected %d journal entries\n", n)
 	return nil
+}
+
+// payloadSourceClass returns the writer-class that an entry's Sources
+// field points at, when the payload encodes it explicitly. Used by
+// verify to upgrade from permissive (any class) to strict (declared
+// class) source-offset resolution.
+//
+// Currently only replay.counterfactual declares this; other writer
+// classes use Sources for within-class references (where the permissive
+// check is already sufficient because same-class offsets are bounded).
+// Adding a new declarative-source writer-class is two lines: parse the
+// payload, return its class.
+func payloadSourceClass(e *journal.Entry) string {
+	if e == nil {
+		return ""
+	}
+	if e.Type == journal.TypeReplayCounterfactual {
+		p, err := journal.ParseReplayCounterfactual(e)
+		if err != nil {
+			return ""
+		}
+		return p.SourceClass
+	}
+	return ""
 }
 
 func journalUsage() string {
