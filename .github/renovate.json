@@ -1,0 +1,34 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "automerge": false,
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 10,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"]
+  },
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "description": "Group minor and patch updates per ecosystem to reduce PR noise. Majors always stay separate so they get individual review.",
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "{{manager}} minor & patch"
+    },
+    {
+      "description": "Tag major-version PRs explicitly. These are the ones most likely to break the build and deserve a human read.",
+      "matchUpdateTypes": ["major"],
+      "labels": ["major-update", "review-required"]
+    },
+    {
+      "description": "GitHub Actions get pinned to SHA by helpers:pinGitHubActionDigests. Bumps are pure SHA refreshes; group them together so a CVE fix to actions/checkout doesn't sit alone for a week.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    }
+  ]
+}
