@@ -372,21 +372,11 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 		sessionID = sid
 	}
 	d.emitInsightToJournal(*insight, item, sessionID)
-	// Storage write is the projector's job (slice D2). If no journalDir is
-	// wired (some tests construct Dream without one), fall back to direct
-	// storage write so the in-process tests still observe the insight.
-	if d.journalDir == "" && d.storage != nil {
-		d.storage.StoreInsightWithSession(
-			item.ID,
-			insight.Category,
-			insight.Content,
-			int(insight.Score*10),
-			insight.Tags,
-			"",
-			sessionID,
-			item.Source,
-		)
-	}
+	// Storage write is the projector's job — Dream owns the journal
+	// entry, the indexer owns the SQLite row. Tests that need to observe
+	// the insight in storage should configure a journalDir + run the
+	// indexer (see processor_test.go) rather than relying on a side
+	// channel from Dream.
 
 	select {
 	case d.insightsChan <- *insight:
@@ -518,20 +508,8 @@ func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Re
 			Tags:     nuanceTags,
 		}
 		d.emitInsightToJournal(nuanceResultForJournal, item, sessionID)
-		// Fallback to direct storage write when no journal is wired —
-		// see equivalent guard in tryAnalyzeItem above.
-		if d.journalDir == "" && d.storage != nil {
-			d.storage.StoreInsightWithSession(
-				supplementalID,
-				"nuance",
-				nuanceContent,
-				int(insight.Score*10),
-				nuanceTags,
-				"",
-				sessionID,
-				item.Source,
-			)
-		}
+		// Storage write happens via the indexer projecting dream.insight
+		// entries; Dream does not write to storage directly.
 		nuanceResult := cognition.Result{
 			ID:        supplementalID,
 			Content:   nuanceContent,
