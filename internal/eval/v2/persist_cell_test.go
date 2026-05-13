@@ -398,6 +398,71 @@ func TestProjectCell_NoJournalWrite(t *testing.T) {
 	}
 }
 
+// TestPersistCell_RebuildFromJournalAloneRegeneratesProjections is the
+// E2 acceptance test: after PersistCell, truncating SQLite +
+// cell_results.jsonl and replaying the journal entry via
+// ProjectCellFromEntry must restore identical projection state.
+// Demonstrates that the journal is the source of truth — both
+// projections are deterministic functions of it.
+func TestPersistCell_RebuildFromJournalAloneRegeneratesProjections(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+
+	if err := p.PersistCell(context.Background(), r); err != nil {
+		t.Fatalf("PersistCell: %v", err)
+	}
+
+	// Capture original projection state.
+	originalLines := readJSONL(t, p.cellResultsJSONLPath())
+	if len(originalLines) != 1 {
+		t.Fatalf("setup: jsonl lines=%d want 1", len(originalLines))
+	}
+
+	// Truncate both projections so only the journal entry survives.
+	if _, err := p.db.Exec("DELETE FROM cell_results"); err != nil {
+		t.Fatalf("truncate sqlite: %v", err)
+	}
+	if err := os.Remove(p.cellResultsJSONLPath()); err != nil {
+		t.Fatalf("remove jsonl: %v", err)
+	}
+
+	// Flush journal so the entry is on disk for the replay reader.
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Replay: read the eval.cell_result entry and project it.
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+	entry, err := reader.Next()
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	payload, err := journal.ParseEvalCellResult(entry)
+	if err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	if err := p.ProjectCellFromEntry(context.Background(), payload); err != nil {
+		t.Fatalf("ProjectCellFromEntry: %v", err)
+	}
+
+	// Both projections should be restored byte-identical.
+	var rows int
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM cell_results WHERE run_id=?`, r.RunID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("sqlite rows after rebuild=%d want 1", rows)
+	}
+	rebuiltLines := readJSONL(t, p.cellResultsJSONLPath())
+	if !reflect.DeepEqual(originalLines, rebuiltLines) {
+		t.Errorf("jsonl mismatch after rebuild:\n original: %v\n rebuilt:  %v", originalLines, rebuiltLines)
+	}
+}
+
 // TestProjectCellFromEntry mirrors what the journal indexer's projector
 // will do: take a parsed payload, project to SQLite + JSONL. Used by
 // `cortex journal rebuild` to regenerate eval state from the journal
