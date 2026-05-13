@@ -52,7 +52,7 @@ jobs:
         ./cortex eval --dry-run --verbose
 
     - name: Upload eval results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: eval-results-dry-run
         path: eval-results.json
@@ -97,7 +97,7 @@ jobs:
         ./cortex eval --model "$MODEL" --verbose
 
     - name: Upload eval results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: eval-results-${{ github.event.inputs.model }}
         path: eval-results.json
