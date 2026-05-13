@@ -3,7 +3,10 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,6 +25,11 @@ const DefaultHugotModel = "sentence-transformers/all-MiniLM-L12-v2"
 type HugotEmbedder struct {
 	modelPath string
 	modelName string
+
+	// expectedSHA, when non-empty, is the SHA256 of the trusted
+	// model.onnx blob. init() refuses to load a model whose ONNX
+	// weights don't match. See verifyModelSHA for the contract.
+	expectedSHA string
 
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
@@ -53,6 +61,16 @@ func NewHugotEmbedderWithPath(modelPath string) *HugotEmbedder {
 	}
 }
 
+// SetExpectedSHA pins the SHA256 of the model.onnx blob to verify on
+// init. Call with an empty string to opt out of verification. Must be
+// called before the first Embed() call — init() reads the field once
+// and ignores later changes.
+func (h *HugotEmbedder) SetExpectedSHA(sha string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.expectedSHA = sha
+}
+
 // init performs lazy initialization of the model.
 // It downloads the model if needed and creates the pipeline.
 func (h *HugotEmbedder) init() error {
@@ -80,6 +98,13 @@ func (h *HugotEmbedder) init() error {
 			return h.initErr
 		}
 		h.modelPath = modelPath
+	}
+
+	// Pin check: refuse a tampered model before its weights ever
+	// influence retrieval. No-op when expectedSHA is empty.
+	if err := verifyModelSHA(modelPath, h.expectedSHA); err != nil {
+		h.initErr = err
+		return h.initErr
 	}
 
 	// Create a Go session (pure Go backend, no cgo)
@@ -110,6 +135,65 @@ func (h *HugotEmbedder) init() error {
 
 	log.Printf("[hugot] Initialized embedding model: %s", h.modelName)
 	return nil
+}
+
+// verifyModelSHA computes the SHA256 of `<modelDir>/model.onnx` and
+// compares it to `expected`. Used to refuse a tampered embedding model
+// before it can bias retrieval — a poisoned model is a near-perfect
+// attack on a RAG-shaped system, because the bias is invisible to
+// downstream consumers.
+//
+// Contract:
+//   - `expected == ""` is a no-op (verification opt-out). Existing
+//     setups without a pinned SHA continue working unchanged.
+//   - Otherwise, model.onnx must exist and its SHA256 must match the
+//     expected hex string (case-insensitive comparison via lowercase
+//     normalization).
+//   - Returns an error naming both digests on mismatch so the operator
+//     can compare against the real hub value.
+func verifyModelSHA(modelDir, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	modelFile := filepath.Join(modelDir, "model.onnx")
+	f, err := os.Open(modelFile)
+	if err != nil {
+		return fmt.Errorf("verify model SHA: open %s: %w", modelFile, err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("verify model SHA: read %s: %w", modelFile, err)
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+
+	if !equalFoldHex(got, expected) {
+		return fmt.Errorf("verify model SHA: tampered weights at %s: expected %s, got %s", modelFile, expected, got)
+	}
+	return nil
+}
+
+// equalFoldHex compares two hex strings case-insensitively. Used for
+// SHA256 digests where operators sometimes paste uppercase from one
+// tool and lowercase from another.
+func equalFoldHex(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ai, bi := a[i], b[i]
+		if ai >= 'A' && ai <= 'F' {
+			ai += 'a' - 'A'
+		}
+		if bi >= 'A' && bi <= 'F' {
+			bi += 'a' - 'A'
+		}
+		if ai != bi {
+			return false
+		}
+	}
+	return true
 }
 
 // getCacheDir returns the directory to cache downloaded models.

@@ -26,6 +26,14 @@ type Config struct {
 	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
 	AnthropicModel string `json:"anthropic_model,omitempty"`
 
+	// Embedding model SHA pinning (HF Hub). When non-empty, the Hugot
+	// embedder verifies the SHA256 of the downloaded model.onnx file
+	// before use and refuses a mismatch. A tampered embedding model is
+	// invisible to downstream consumers — pinning closes that vector.
+	// Leave empty during initial setup; pin after recording the SHA
+	// from the first trusted download.
+	EmbeddingModelSHA256 string `json:"embedding_model_sha256,omitempty"`
+
 	// Storage
 	DatabaseURL string `json:"database_url,omitempty"` // SQLite path override (default: .cortex/db/events.db)
 

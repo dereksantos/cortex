@@ -355,7 +355,11 @@
   }
 
   function connect() {
-    const es = new EventSource('/api/events');
+    // window.__CORTEX_TOKEN__ is injected into the head by the server.
+    // EventSource cannot set custom headers, so the token rides as a
+    // query param (the server accepts both forms).
+    const tok = encodeURIComponent(window.__CORTEX_TOKEN__ || '');
+    const es = new EventSource('/api/events?token=' + tok);
     es.addEventListener('state', function(e) {
       setConnected(true);
       try {

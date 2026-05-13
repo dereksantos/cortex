@@ -58,7 +58,7 @@ type OpenCodeHarness struct {
 // .opencode/plugins/*.{ts,js} as flat files, not package subdirs.
 //
 // $CORTEX_PROJECT_ROOT is shared with the pi-dev harness (defined as
-// EnvCortexProjectRoot in library_service_pidev_harness.go) so plugins
+// "CORTEX_PROJECT_ROOT" in library_service_pidev_harness.go) so plugins
 // can locate the project's .cortex/ directory regardless of opencode's
 // per-session cwd.
 const EnvOpencodeCortexPluginSource = "CORTEX_OPENCODE_PLUGIN_SOURCE"
@@ -220,9 +220,9 @@ func (h *OpenCodeHarness) runSession(ctx context.Context, prompt, workdir string
 		// (opencode's per-session cwd may not contain .cortex/). This
 		// is a fallback; the grid runner should set it explicitly to
 		// the directory holding .cortex/.
-		if os.Getenv(EnvCortexProjectRoot) == "" {
+		if os.Getenv("CORTEX_PROJECT_ROOT") == "" {
 			if cwd, err := os.Getwd(); err == nil {
-				_ = os.Setenv(EnvCortexProjectRoot, cwd)
+				_ = os.Setenv("CORTEX_PROJECT_ROOT", cwd)
 			}
 		}
 	}

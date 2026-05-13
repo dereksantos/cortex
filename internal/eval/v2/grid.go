@@ -518,6 +518,13 @@ var (
 // error; any other exit (including signals) → error wrapping the
 // captured stderr. The 5-minute timeout is a safety net — long
 // verifiers (full integration suites) should be designed to fit.
+//
+// TRUST CONTRACT: `command` MUST come from a developer-authored
+// scenario YAML committed to the repo. It is passed verbatim to
+// `bash -c`, so any caller-controlled string here is RCE-equivalent.
+// If verification commands ever become sourceable from user input,
+// AI agents, or Dream-extracted content, this needs an allowlist or
+// a sandboxed exec.
 func runVerifier(ctx context.Context, command, workdir string) (passed, failed int, err error) {
 	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()

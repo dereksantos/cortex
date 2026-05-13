@@ -8,11 +8,42 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
+
+// safeEventIDRE is the allowlist of characters legal in an event ID
+// that flows into a filename: alphanumeric, dot, hyphen, underscore.
+// Must start with an alphanumeric (so a leading "." can't produce a
+// dotfile or path component) and total length capped at 128.
+//
+// We never accept an unsafe ID as-is, because event.ID is attacker-
+// influenceable from upstream payloads (e.g., a prompt-injected tool
+// call with a crafted ID). Unsafe IDs trigger ID regeneration in the
+// capture caller — the upstream-supplied value is discarded.
+var safeEventIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// isSafeEventID reports whether id is safe to use as a filename
+// component without risking path traversal or filesystem-special
+// interpretation. The regex permits dots in the middle of the ID
+// (legitimate uses: "bash-allowed-make.test", "pattern-test-main.go")
+// but the additional ".." check rejects path traversal sequences.
+func isSafeEventID(id string) bool {
+	if !safeEventIDRE.MatchString(id) {
+		return false
+	}
+	// Reject any double-dot run — single dots are fine as separators
+	// inside an ID, but ".." is the path-traversal sigil.
+	for i := 0; i+1 < len(id); i++ {
+		if id[i] == '.' && id[i+1] == '.' {
+			return false
+		}
+	}
+	return true
+}
 
 // Capture handles fast event capture
 type Capture struct {
@@ -51,8 +82,12 @@ func (c *Capture) CaptureFromStdin() error {
 		return nil
 	}
 
-	// Generate ID if not provided
-	if event.ID == "" {
+	// Generate ID if not provided OR if the upstream-supplied ID is
+	// unsafe for use as a filename. Path traversal via event.ID is the
+	// concrete bug this guards: an attacker-influenced ID like
+	// "../../etc/passwd" would otherwise flow into filepath.Join and
+	// escape the queue directory.
+	if !isSafeEventID(event.ID) {
 		event.ID = generateEventID()
 	}
 
@@ -77,8 +112,9 @@ func (c *Capture) CaptureEvent(event *events.Event) error {
 		return nil
 	}
 
-	// Generate ID if not provided
-	if event.ID == "" {
+	// Generate ID if not provided OR if unsafe for filenames.
+	// See CaptureFromStdin for the threat model.
+	if !isSafeEventID(event.ID) {
 		event.ID = generateEventID()
 	}
 
@@ -86,11 +122,16 @@ func (c *Capture) CaptureEvent(event *events.Event) error {
 	return c.writeToQueue(event)
 }
 
-// writeToQueue writes event to pending queue with atomic rename
+// writeToQueue writes event to pending queue with atomic rename.
+//
+// Permissions are intentionally tight (0700 dir, 0600 file): captured
+// events frequently contain user prompts, file diffs, and partially-
+// redacted secrets. The store is single-user; world-readable perms
+// would expose this content to any local user / other process.
 func (c *Capture) writeToQueue(event *events.Event) error {
 	// Ensure queue directory exists
 	queueDir := filepath.Join(c.cfg.ContextDir, "queue", "pending")
-	if err := os.MkdirAll(queueDir, 0755); err != nil {
+	if err := os.MkdirAll(queueDir, 0700); err != nil {
 		return fmt.Errorf("failed to create queue dir: %w", err)
 	}
 
@@ -102,7 +143,7 @@ func (c *Capture) writeToQueue(event *events.Event) error {
 
 	// Write to temp file first
 	tempFile := filepath.Join(queueDir, event.ID+".tmp")
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	if err := os.WriteFile(tempFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
@@ -135,10 +176,10 @@ func (c *Capture) logSlow(duration time.Duration) {
 	logFile := filepath.Join(c.cfg.ContextDir, "logs", "capture.log")
 
 	// Ensure logs directory exists
-	os.MkdirAll(filepath.Dir(logFile), 0755)
+	os.MkdirAll(filepath.Dir(logFile), 0700)
 
 	// Append log entry
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return // Silent failure
 	}

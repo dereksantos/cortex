@@ -563,6 +563,17 @@ func (d *Dream) parseInsightResponse(response string, item cognition.DreamItem) 
 		ir.Importance = 0.5
 	}
 
+	// Defense against indirect prompt injection: if a sampled source
+	// contained an "ignore prior instructions" payload and the LLM
+	// faithfully echoed it back as the insight content, neuter the
+	// insight (force importance to the floor, tag it) rather than
+	// drop it — keeping the data lets an operator inspect the source
+	// later. See pkg/llm.IsLikelyPromptInjection for the heuristic.
+	if llm.IsLikelyPromptInjection(ir.Content) {
+		ir.Importance = 0.01
+		ir.Tags = append(ir.Tags, "flagged:prompt-injection")
+	}
+
 	meta := map[string]any{
 		"source":      item.Source,
 		"source_path": item.Path,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/config"
@@ -28,14 +29,32 @@ func NewOllamaClient(cfg *config.Config) *OllamaClient {
 	if embeddingModel == "" {
 		embeddingModel = "nomic-embed-text"
 	}
+	// Egress allowlist: extract host:port from the configured Ollama
+	// URL and restrict the client to that single endpoint. Ollama is
+	// always local in the supported setups, but we don't hardcode
+	// 127.0.0.1 — operators may run it on a remote box.
+	allowed := allowedHostFromURL(cfg.OllamaURL)
 	return &OllamaClient{
 		baseURL:        cfg.OllamaURL,
 		model:          cfg.OllamaModel,
 		embeddingModel: embeddingModel,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient: NewRestrictedHTTPClient(
+			30*time.Second,
+			allowed,
+		),
 	}
+}
+
+// allowedHostFromURL extracts the host:port component from a URL so it
+// can be added to an egress allowlist. Falls back to a sentinel that
+// never matches if the URL is unparseable — this fails closed: if
+// configuration is broken, no egress.
+func allowedHostFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "__cortex_invalid_url__"
+	}
+	return u.Host
 }
 
 // OllamaRequest represents a request to Ollama

@@ -118,7 +118,13 @@ EOF
     // ToolResult shape: {output, metadata} (NOT a content array)
     assert.strictEqual(typeof result, "object");
     const r = result as { output: string; metadata?: Record<string, unknown> };
-    assert.match(r.output, /Found 1 relevant context item:/);
+    // Recall output is now wrapped in a retrieved-context trust frame
+    // — the LLM sees an explicit "untrusted data" directive plus the
+    // results inside a <retrieved_context> tag. See _helpers.ts for
+    // the rationale.
+    assert.match(r.output, /1 retrieved context item/);
+    assert.match(r.output, /untrusted/i);
+    assert.match(r.output, /<retrieved_context\b[^>]*>/);
     assert.match(r.output, /Use pgx not database\/sql/);
     assert.strictEqual(r.metadata?.count, 1);
     assert.strictEqual(r.metadata?.binary, fakeCortex);

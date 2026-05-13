@@ -67,9 +67,11 @@ func NewOpenRouterClient(cfg *config.Config) *OpenRouterClient {
 		model:     model,
 		maxTokens: defaultMaxTokens,
 		apiURL:    openrouterAPIURL,
-		httpClient: &http.Client{
-			Timeout: openrouterTimeoutSec * time.Second,
-		},
+		// Egress allowlist: only ever talk to openrouter.ai.
+		httpClient: NewRestrictedHTTPClient(
+			openrouterTimeoutSec*time.Second,
+			"openrouter.ai",
+		),
 	}
 }
 
@@ -92,8 +94,17 @@ func (c *OpenRouterClient) Model() string { return c.model }
 // SetMaxTokens overrides the default response token cap.
 func (c *OpenRouterClient) SetMaxTokens(n int) { c.maxTokens = n }
 
-// SetAPIURL replaces the OpenRouter endpoint. Test-only.
-func (c *OpenRouterClient) SetAPIURL(u string) { c.apiURL = u }
+// SetAPIURL replaces the OpenRouter endpoint and updates the egress
+// allowlist on the underlying http.Client so the new host is reachable.
+// Test-only: production code constructs the client via NewOpenRouterClient,
+// which pins the allowlist to openrouter.ai.
+func (c *OpenRouterClient) SetAPIURL(u string) {
+	c.apiURL = u
+	c.httpClient = NewRestrictedHTTPClient(
+		openrouterTimeoutSec*time.Second,
+		allowedHostFromURL(u),
+	)
+}
 
 // LastCostUSD returns the per-call USD cost reported by OpenRouter for
 // the most recent successful call. Zero on free models, zero before the

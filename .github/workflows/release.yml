@@ -7,6 +7,11 @@ on:
 
 permissions:
   contents: write
+  # id-token + attestations are required by actions/attest-build-provenance
+  # to sign releases via the GitHub OIDC identity. Scoped to this workflow
+  # so other jobs don't inherit signing capability.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -14,6 +19,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # harden-runner audits/blocks unexpected egress during the build.
+    # A compromised dep trying to phone home shows up here. Starting
+    # in `audit` mode so we observe traffic before enforcing.
+    - name: Harden runner
+      uses: step-security/harden-runner@v2
+      with:
+        egress-policy: audit
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
@@ -28,15 +41,24 @@ jobs:
       id: get_version
       run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
+    # Reproducible-build flags:
+    #   -trimpath        strips local filesystem paths from the binary
+    #   -buildid=        clears the build ID so two builds of the same
+    #                    source produce byte-identical binaries
+    # This makes attestation meaningful: a third party can rebuild from
+    # source and compare against the signed artifact.
     - name: Build binaries for all platforms
       run: |
+        LDFLAGS="-X 'main.version=${{ steps.get_version.outputs.VERSION }}' -buildid="
+        BUILDFLAGS="-trimpath -ldflags=$LDFLAGS"
+
         # Linux
-        GOOS=linux GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-amd64 ./cmd/cortex
-        GOOS=linux GOARCH=arm64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-arm64 ./cmd/cortex
+        GOOS=linux GOARCH=amd64 go build $BUILDFLAGS -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-amd64 ./cmd/cortex
+        GOOS=linux GOARCH=arm64 go build $BUILDFLAGS -o cortex-${{ steps.get_version.outputs.VERSION }}-linux-arm64 ./cmd/cortex
 
         # macOS
-        GOOS=darwin GOARCH=amd64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 ./cmd/cortex
-        GOOS=darwin GOARCH=arm64 go build -ldflags="-X 'main.version=${{ steps.get_version.outputs.VERSION }}'" -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 ./cmd/cortex
+        GOOS=darwin GOARCH=amd64 go build $BUILDFLAGS -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 ./cmd/cortex
+        GOOS=darwin GOARCH=arm64 go build $BUILDFLAGS -o cortex-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 ./cmd/cortex
 
         # Windows dropped: eval-harness relies on POSIX subprocess
         # group semantics. Files needing the exclusion carry
@@ -46,6 +68,17 @@ jobs:
     - name: Create checksums
       run: |
         sha256sum cortex-${{ steps.get_version.outputs.VERSION }}-* > checksums.txt
+
+    # SLSA-style build provenance. The action signs each artifact with
+    # the workflow's OIDC identity and uploads the attestation to the
+    # Rekor transparency log. Verify with:
+    #   gh attestation verify <binary> --repo dereksantos/cortex
+    - name: Generate build attestation
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: |
+          cortex-${{ steps.get_version.outputs.VERSION }}-*
+          checksums.txt
 
     - name: Generate changelog
       id: changelog
