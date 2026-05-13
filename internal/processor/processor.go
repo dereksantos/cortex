@@ -95,6 +95,7 @@ func New(cfg *config.Config, store *storage.Storage, opts ...Option) *Processor 
 	p.registry.Register(journal.TypeReflectRerank, 1, p.projectReflectRerank)
 	p.registry.Register(journal.TypeResolveRetrieval, 1, p.projectResolveRetrieval)
 	p.registry.Register(journal.TypeThinkSessionContext, 1, p.projectThinkSessionContext)
+	p.registry.Register(journal.TypeThinkTopicWeight, 1, p.projectThinkTopicWeight)
 	for _, typ := range []string{
 		journal.TypeFeedbackCorrection,
 		journal.TypeFeedbackConfirmation,
@@ -175,6 +176,21 @@ func (p *Processor) projectFeedback(e *journal.Entry) error {
 		RecordedAt:    e.TS,
 	}); err != nil {
 		return fmt.Errorf("record feedback at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectThinkTopicWeight is a placeholder projector for granular
+// topic_weight delta entries (T1 follow-up). The session_context
+// snapshot already captures the latest weights for retrieval; the
+// granular stream is currently consumed only by replay tooling reading
+// the journal directly, so this projector validates the payload but
+// does not write to storage. A future writer-class index (e.g.,
+// per-topic weight history table) can be added without re-emitting the
+// underlying entries.
+func (p *Processor) projectThinkTopicWeight(e *journal.Entry) error {
+	if _, err := journal.ParseThinkTopicWeight(e); err != nil {
+		return fmt.Errorf("parse think.topic_weight at offset %d: %w", e.Offset, err)
 	}
 	return nil
 }
