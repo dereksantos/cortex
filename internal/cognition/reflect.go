@@ -104,8 +104,16 @@ func (r *Reflect) emitRerankToJournal(q cognition.Query, input, ranked []cogniti
 		return
 	}
 	inputIDs := make([]string, len(input))
+	inputContents := make(map[string]string, len(input))
 	for i, c := range input {
 		inputIDs[i] = c.ID
+		// Snapshot content so counterfactual replay (slice X2) can
+		// reconstruct candidates without a storage round-trip. Skipped
+		// when ID is empty or content already captured (last-write-wins
+		// for duplicate IDs in input — Reflect treats them as one).
+		if c.ID != "" {
+			inputContents[c.ID] = c.Content
+		}
 	}
 	rankedIDs := make([]string, len(ranked))
 	for i, c := range ranked {
@@ -121,6 +129,7 @@ func (r *Reflect) emitRerankToJournal(q cognition.Query, input, ranked []cogniti
 	payload := journal.ReflectRerankPayload{
 		QueryText:      q.Text,
 		InputIDs:       inputIDs,
+		InputContents:  inputContents,
 		RankedIDs:      rankedIDs,
 		Contradictions: contradictions,
 		Reasoning:      parsed.Reasoning,

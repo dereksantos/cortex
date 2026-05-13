@@ -44,6 +44,47 @@ func TestReflectRerank_RejectsEmptyRequired(t *testing.T) {
 	}
 }
 
+// TestReflectRerank_BackwardCompatNoInputContents verifies that
+// ReflectRerankPayload remains forward/backward compatible: an entry
+// emitted before InputContents existed still parses, and the field is
+// nil rather than empty-map (omitempty contract). New entries with
+// content round-trip the map.
+func TestReflectRerank_BackwardCompatNoInputContents(t *testing.T) {
+	t.Run("old entry without input_contents", func(t *testing.T) {
+		e := &Entry{
+			Type:    TypeReflectRerank,
+			V:       1,
+			Payload: []byte(`{"query_text":"q","input_ids":["a"],"ranked_ids":["a"]}`),
+		}
+		got, err := ParseReflectRerank(e)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if got.InputContents != nil {
+			t.Errorf("InputContents = %v, want nil for old entries", got.InputContents)
+		}
+	})
+	t.Run("new entry with input_contents round-trips", func(t *testing.T) {
+		p := ReflectRerankPayload{
+			QueryText:     "q",
+			InputIDs:      []string{"a", "b"},
+			InputContents: map[string]string{"a": "alpha", "b": "beta"},
+			RankedIDs:     []string{"b", "a"},
+		}
+		e, err := NewReflectRerankEntry(p)
+		if err != nil {
+			t.Fatalf("new: %v", err)
+		}
+		got, err := ParseReflectRerank(e)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if got.InputContents["a"] != "alpha" || got.InputContents["b"] != "beta" {
+			t.Errorf("InputContents=%v want {a:alpha b:beta}", got.InputContents)
+		}
+	})
+}
+
 func TestParseReflectRerank_RejectsNonReflectEntry(t *testing.T) {
 	e := &Entry{Type: "capture.event", V: 1, Payload: []byte(`{}`)}
 	if _, err := ParseReflectRerank(e); err == nil {

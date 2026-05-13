@@ -21,9 +21,16 @@ type ContradictionRecord struct {
 // contradictions detected. Enables replay against the same inputs with
 // different configs (counterfactual eval, slice X2) and a contradictions
 // table for audit / debugging.
+//
+// InputContents (slice X2.2, optional) snapshots the content of each
+// candidate at the moment of reranking. Without it, counterfactual
+// replay cannot reconstruct the candidate list — IDs alone are not
+// portable across storage rotations. Old entries without
+// InputContents parse fine (omitempty); they just can't be replayed.
 type ReflectRerankPayload struct {
 	QueryText      string                `json:"query_text"`
 	InputIDs       []string              `json:"input_ids"`
+	InputContents  map[string]string     `json:"input_contents,omitempty"`
 	RankedIDs      []string              `json:"ranked_ids"`
 	Contradictions []ContradictionRecord `json:"contradictions,omitempty"`
 	Reasoning      string                `json:"reasoning,omitempty"`
