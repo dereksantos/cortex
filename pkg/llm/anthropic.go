@@ -42,9 +42,14 @@ func NewAnthropicClient(cfg *config.Config) *AnthropicClient {
 		apiKey:    apiKey,
 		model:     model,
 		maxTokens: defaultMaxTokens,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		// Egress allowlist: the Anthropic client must only ever talk
+		// to api.anthropic.com. A poisoned dep that swaps the URL
+		// (or a typo'd config) gets blocked at the transport layer
+		// before bytes leave the process.
+		httpClient: NewRestrictedHTTPClient(
+			30*time.Second,
+			"api.anthropic.com",
+		),
 	}
 }
 
