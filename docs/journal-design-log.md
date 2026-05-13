@@ -221,12 +221,22 @@ deferred items (see commits `feat(journal): E2.1..2.3`, `X2.1..2.3`,
    --config-overrides=... --execute --class=reflect` re-invokes Reflect
    with the override, computes Jaccard@K against the original ranking,
    and emits one `replay.counterfactual` journal entry per source.
-3. **retrieval_stats.json / daemon_state.json removal** — **STILL
-   DEFERRED**. These remain because removing them requires migrating
-   the watch UI off the snapshot files (see `cmd/cortex/commands/
-   watch_state.go`). `daemon_state.json` is also a runtime heartbeat
-   that's not really a journal-replaceable concept. The journal
-   projections already exist; what's missing is the UI migration.
+3. **retrieval_stats.json removal** — **DONE**. resolve.retrieval gained
+   optional Mode/ResolveMs/TotalMs fields and the watch UI reads
+   `RetrievalStats` from `storage.GetRetrievals(1)` +
+   `GetRetrievalStats()` via `retrievalStatsFromStorage`.
+   `retrieval_stats.json` is no longer written from
+   `session.writeRetrievalStats`. The trend log
+   `retrieval_stats_history.jsonl` is preserved — its per-step
+   reflex/reflect latency breakdown isn't yet captured in journal
+   payloads.
+
+   **daemon_state.json removal** — **DELIBERATELY KEPT**. It records the
+   daemon's *current* mode/description for the watch UI to display
+   live, which is a heartbeat, not an event. The journal is for
+   immutable history; a heartbeat needs a different mechanism (e.g.,
+   the daemon's web endpoint or a Unix socket). Removing the file
+   would force one of those redesigns without a clear payoff.
 4. **Dream's direct-storage fallback removal** — **DONE**. The
    conditional `d.journalDir == "" && d.storage != nil` fallback in
    `internal/cognition/dream.go` is removed. Tests that exercised it
