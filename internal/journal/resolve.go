@@ -14,6 +14,11 @@ const TypeResolveRetrieval = "resolve.retrieval"
 // that were ultimately injected (subset of all candidates). Enables
 // replay against the same inputs with different thresholds (counterfactual
 // eval), and feeds an aggregate stats projection.
+//
+// Mode is "fast" or "full"; ResolveMs and TotalMs are populated by the
+// retriever (session.writeRetrievalStats path) and consumed by the watch
+// UI. Old entries without latencies parse fine (omitempty); their watch
+// projections show "-" for unknown timings.
 type ResolveRetrievalPayload struct {
 	QueryText   string   `json:"query_text"`
 	Decision    string   `json:"decision"` // "inject" | "wait" | "queue" | "skip"
@@ -24,6 +29,9 @@ type ResolveRetrievalPayload struct {
 	MaxScore    float64  `json:"max_score,omitempty"`
 	Reason      string   `json:"reason,omitempty"`
 	SessionID   string   `json:"session_id,omitempty"`
+	Mode        string   `json:"mode,omitempty"`       // "fast" | "full"
+	ResolveMs   int64    `json:"resolve_ms,omitempty"` // Resolve step latency
+	TotalMs     int64    `json:"total_ms,omitempty"`   // End-to-end retrieve latency
 }
 
 // NewResolveRetrievalEntry builds a journal entry for one resolve decision.

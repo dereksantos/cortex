@@ -206,6 +206,8 @@ func (c *Cortex) IsModeEnabled(mode string) bool {
 // Fast mode: Reflex → Resolve (Reflect runs async, cached for next time)
 // Full mode: Reflex → Reflect → Resolve (synchronous, higher accuracy)
 func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition.RetrieveMode) (*cognition.ResolveResult, error) {
+	retrievalStart := time.Now()
+
 	// Record activity
 	c.activity.RecordRetrieve()
 	c.think.RecordQuery(q)
@@ -254,9 +256,18 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 		c.dream.ClearProactiveQueue()
 	}
 
-	// Step 3: Resolve (with timing)
+	// Step 3: Resolve (with timing). ResolveWithContext threads the
+	// retrieval-start time through so the journal entry records the full
+	// end-to-end latency, not just the Resolve step.
 	resolveStart := time.Now()
-	result, err := c.resolve.Resolve(ctx, q, candidates)
+	modeStr := "fast"
+	if mode == cognition.Full {
+		modeStr = "full"
+	}
+	result, err := c.resolve.ResolveWithContext(ctx, q, candidates, &RetrievalContext{
+		Mode:    modeStr,
+		Started: retrievalStart,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve failed: %w", err)
 	}

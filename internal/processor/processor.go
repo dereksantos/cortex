@@ -231,6 +231,9 @@ func (p *Processor) projectResolveRetrieval(e *journal.Entry) error {
 		MaxScore:      payload.MaxScore,
 		Reason:        payload.Reason,
 		SessionID:     payload.SessionID,
+		Mode:          payload.Mode,
+		ResolveMs:     payload.ResolveMs,
+		TotalMs:       payload.TotalMs,
 		JournalOffset: int64(e.Offset),
 		RecordedAt:    e.TS,
 	}); err != nil {

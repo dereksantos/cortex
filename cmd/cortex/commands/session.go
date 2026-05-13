@@ -410,11 +410,12 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 		stats.LastReflexMs = elapsedMinusResolve
 	}
 
-	// Write stats
-	statsWriter := intcognition.NewRetrievalStatsWriter(contextDir)
-	statsWriter.WriteStats(stats)
-
-	// Append to history for latency trend analysis
+	// Note: retrieval_stats.json is no longer written from this path
+	// (Z1 unification). The watch UI now reads from the journal-projected
+	// storage.Retrievals via retrievalStatsFromStorage(). The
+	// retrieval_stats_history.jsonl latency-trend log is preserved
+	// because its per-step latency breakdown isn't yet captured in
+	// resolve.retrieval entries — see docs/journal-design-log.md item 5.
 	historyWriter := intcognition.NewRetrievalStatsHistoryWriter(contextDir)
 	historyWriter.AppendFromStats(stats)
 

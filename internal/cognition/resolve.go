@@ -99,8 +99,28 @@ func (r *Resolve) ClearProactiveQueue() {
 	r.proactiveQueue = nil
 }
 
+// RetrievalContext carries optional metadata about the surrounding
+// retrieval call into Resolve so the emitted resolve.retrieval entry
+// can record mode + total elapsed. Pass nil when the call is direct
+// (e.g., tests, top-level Cortex.Resolve) — the entry then omits those
+// fields, which the watch UI renders as "-".
+type RetrievalContext struct {
+	Mode    string    // "fast" | "full"
+	Started time.Time // start of the overall retrieval (NOT just Resolve)
+}
+
 // Resolve decides whether to inject, wait, queue, or discard results.
+// See ResolveWithContext for the variant that records mode + total
+// elapsed time in the journal entry.
 func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cognition.Result) (*cognition.ResolveResult, error) {
+	return r.ResolveWithContext(ctx, q, results, nil)
+}
+
+// ResolveWithContext is Resolve with optional retrieval metadata. The
+// extra context flows only into the journal entry — the returned
+// ResolveResult is identical to what Resolve returns.
+func (r *Resolve) ResolveWithContext(ctx context.Context, q cognition.Query, results []cognition.Result, rctx *RetrievalContext) (*cognition.ResolveResult, error) {
+	resolveStart := time.Now()
 	// Get a race-safe snapshot of session context
 	// Prefer thinker (provides fresh snapshot) over static sessionCtx
 	var sessionCtx *cognition.SessionContext
@@ -154,9 +174,10 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 	r.recordFeedback(q.Text, results, decision)
 
 	reason := r.explainDecision(decision, avgScore, count)
+	resolveMs := time.Since(resolveStart).Milliseconds()
 
 	// Best-effort journal emission (slice Z1). Errors logged, never returned.
-	r.emitRetrievalToJournal(q, results, decision, confidence, avgScore, maxScore, count, reason)
+	r.emitRetrievalToJournal(q, results, decision, confidence, avgScore, maxScore, count, reason, rctx, resolveMs)
 
 	return &cognition.ResolveResult{
 		Decision:   decision,
@@ -171,7 +192,7 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 // retrieval's query, decision, and (if injected) the result IDs that went
 // to the user. No-op when journalDir is empty.
 func (r *Resolve) emitRetrievalToJournal(q cognition.Query, results []cognition.Result,
-	decision cognition.Decision, confidence, avgScore, maxScore float64, count int, reason string) {
+	decision cognition.Decision, confidence, avgScore, maxScore float64, count int, reason string, rctx *RetrievalContext, resolveMs int64) {
 	if r.journalDir == "" {
 		return
 	}
@@ -192,6 +213,13 @@ func (r *Resolve) emitRetrievalToJournal(q cognition.Query, results []cognition.
 		MaxScore:    maxScore,
 		Reason:      reason,
 		SessionID:   r.sessionID,
+		ResolveMs:   resolveMs,
+	}
+	if rctx != nil {
+		payload.Mode = rctx.Mode
+		if !rctx.Started.IsZero() {
+			payload.TotalMs = time.Since(rctx.Started).Milliseconds()
+		}
 	}
 	entry, err := journal.NewResolveRetrievalEntry(payload)
 	if err != nil {

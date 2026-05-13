@@ -222,6 +222,9 @@ type retrievalRecord struct {
 	MaxScore      float64   `json:"max_score,omitempty"`
 	Reason        string    `json:"reason,omitempty"`
 	SessionID     string    `json:"session_id,omitempty"`
+	Mode          string    `json:"mode,omitempty"`
+	ResolveMs     int64     `json:"resolve_ms,omitempty"`
+	TotalMs       int64     `json:"total_ms,omitempty"`
 	JournalOffset int64     `json:"journal_offset,omitempty"`
 	RecordedAt    time.Time `json:"recorded_at"`
 }
@@ -237,6 +240,9 @@ type Retrieval struct {
 	MaxScore      float64
 	Reason        string
 	SessionID     string
+	Mode          string
+	ResolveMs     int64
+	TotalMs       int64
 	JournalOffset int64
 	RecordedAt    time.Time
 }
@@ -791,6 +797,9 @@ func (s *Storage) rebuildRetrievalIndexes() error {
 			MaxScore:      r.MaxScore,
 			Reason:        r.Reason,
 			SessionID:     r.SessionID,
+			Mode:          r.Mode,
+			ResolveMs:     r.ResolveMs,
+			TotalMs:       r.TotalMs,
 			JournalOffset: r.JournalOffset,
 			RecordedAt:    r.RecordedAt,
 		})
@@ -824,6 +833,9 @@ func (s *Storage) RecordRetrieval(r *Retrieval) error {
 		MaxScore:      r.MaxScore,
 		Reason:        r.Reason,
 		SessionID:     r.SessionID,
+		Mode:          r.Mode,
+		ResolveMs:     r.ResolveMs,
+		TotalMs:       r.TotalMs,
 		JournalOffset: r.JournalOffset,
 		RecordedAt:    r.RecordedAt,
 	}
