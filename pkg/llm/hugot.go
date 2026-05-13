@@ -74,7 +74,7 @@ func (h *HugotEmbedder) init() error {
 			return h.initErr
 		}
 
-		modelPath, err = hugot.DownloadModel(h.modelName, cacheDir, hugot.NewDownloadOptions())
+		modelPath, err = hugot.DownloadModel(context.Background(), h.modelName, cacheDir, hugot.NewDownloadOptions())
 		if err != nil {
 			h.initErr = fmt.Errorf("failed to download model %s: %w", h.modelName, err)
 			return h.initErr
@@ -83,7 +83,7 @@ func (h *HugotEmbedder) init() error {
 	}
 
 	// Create a Go session (pure Go backend, no cgo)
-	session, err := hugot.NewGoSession()
+	session, err := hugot.NewGoSession(context.Background())
 	if err != nil {
 		h.initErr = fmt.Errorf("failed to create Go session: %w", err)
 		return h.initErr
@@ -143,7 +143,7 @@ func (h *HugotEmbedder) Embed(ctx context.Context, text string) ([]float32, erro
 	}
 
 	// Run pipeline with single input
-	output, err := h.pipeline.RunPipeline([]string{text})
+	output, err := h.pipeline.RunPipeline(ctx, []string{text})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embedding: %w", err)
 	}
@@ -174,7 +174,7 @@ func (h *HugotEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]flo
 	}
 
 	// Run pipeline with batch input
-	output, err := h.pipeline.RunPipeline(texts)
+	output, err := h.pipeline.RunPipeline(ctx, texts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embeddings: %w", err)
 	}
