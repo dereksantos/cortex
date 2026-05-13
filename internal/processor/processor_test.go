@@ -540,9 +540,34 @@ func TestProcessor_ProjectsFeedback(t *testing.T) {
 	}
 }
 
+// TestProcessor_ProjectsEvalCellResult verifies the injected
+// EvalCellResultProjector callback receives each journal entry's
+// payload. The processor itself owns no eval read-side state — the
+// canonical projection lives in internal/eval/v2 — so the test asserts
+// the callback wiring, not a downstream side-channel.
 func TestProcessor_ProjectsEvalCellResult(t *testing.T) {
-	processor, cfg, cleanup := setupTestProcessor(t)
-	defer cleanup()
+	tempDir, err := os.MkdirTemp("", "cortex-processor-eval-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	if err := os.MkdirAll(filepath.Join(tempDir, "db"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	cfg := &config.Config{ContextDir: tempDir, OllamaURL: "http://localhost:11434", OllamaModel: "mistral:7b"}
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	var projected []*journal.EvalCellResultPayload
+	proc := New(cfg, store, WithEvalCellResultProjector(func(p *journal.EvalCellResultPayload) error {
+		projected = append(projected, p)
+		return nil
+	}))
+	defer proc.Stop()
 
 	classDir := filepath.Join(cfg.ContextDir, "journal", "eval")
 	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
@@ -574,15 +599,47 @@ func TestProcessor_ProjectsEvalCellResult(t *testing.T) {
 	}
 	w.Close()
 
-	n, err := processor.RunBatch()
+	n, err := proc.RunBatch()
 	if err != nil {
 		t.Fatalf("RunBatch: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("indexed = %d, want 1", n)
 	}
-	if processor.storage.EvalCellResultCount() != 1 {
-		t.Errorf("eval row count = %d, want 1", processor.storage.EvalCellResultCount())
+	if len(projected) != 1 {
+		t.Fatalf("projector calls = %d, want 1", len(projected))
+	}
+	if projected[0].RunID != "eval-run-1" {
+		t.Errorf("RunID=%q want %q", projected[0].RunID, "eval-run-1")
+	}
+}
+
+// TestProcessor_NoEvalProjector_SkipsEntries verifies the default
+// behavior: when no projector is wired, eval entries advance the cursor
+// without side effects. Rebuild resets the cursor so a later run with a
+// wired projector picks up everything.
+func TestProcessor_NoEvalProjector_SkipsEntries(t *testing.T) {
+	proc, cfg, cleanup := setupTestProcessor(t)
+	defer cleanup()
+
+	classDir := filepath.Join(cfg.ContextDir, "journal", "eval")
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		t.Fatalf("journal writer: %v", err)
+	}
+	e, err := journal.NewEvalCellResultEntry(journal.EvalCellResultPayload{
+		RunID: "x", ScenarioID: "y",
+	})
+	if err != nil {
+		t.Fatalf("entry: %v", err)
+	}
+	if _, err := w.Append(e); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	w.Close()
+
+	if _, err := proc.RunBatch(); err != nil {
+		t.Fatalf("RunBatch: %v", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,11 +11,32 @@ import (
 	"strings"
 	"time"
 
+	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/events"
 )
+
+// openEvalProjector opens a projection-only eval Persister and returns
+// the processor option that wires its ProjectCellFromEntry as the
+// eval.cell_result projector, plus a cleanup func that closes the
+// Persister.
+//
+// If the Persister cannot be opened the option is omitted — the
+// processor falls back to skipping eval entries, advancing the cursor
+// without materializing them. The caller logs the warning so the user
+// knows derived eval state will not regenerate this run.
+func openEvalProjector() (processor.Option, func(), error) {
+	p, err := evalv2.NewPersisterForProjection()
+	if err != nil {
+		return nil, func() {}, err
+	}
+	opt := processor.WithEvalCellResultProjector(func(payload *journal.EvalCellResultPayload) error {
+		return p.ProjectCellFromEntry(context.Background(), payload)
+	})
+	return opt, func() { p.Close() }, nil
+}
 
 // JournalCommand dispatches journal subcommands. Subcommand bodies land in
 // later slices per docs/journal-implementation-plan.md; F2 only provides
@@ -497,8 +519,17 @@ func (c *JournalCommand) runRebuild(ctx *Context) error {
 		}
 	}
 	// 3. Run the indexer; processor.New registers projectors for every
-	//    writer-class and adds each class dir to its indexer set.
-	proc := processor.New(cfg, store)
+	//    writer-class and adds each class dir to its indexer set. The eval
+	//    projector is wired via a projection-only Persister so SQLite +
+	//    cell_results.jsonl regenerate from the journal alone.
+	var procOpts []processor.Option
+	if opt, cleanup, err := openEvalProjector(); err == nil {
+		procOpts = append(procOpts, opt)
+		defer cleanup()
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: eval projector not wired (%v); eval.cell_result entries will be skipped\n", err)
+	}
+	proc := processor.New(cfg, store, procOpts...)
 	n, err := proc.RunBatch()
 	if err != nil {
 		return fmt.Errorf("replay journal: %w", err)
@@ -649,7 +680,14 @@ func (c *JournalCommand) runIngest(ctx *Context) error {
 		store = s
 	}
 
-	proc := processor.New(cfg, store)
+	var procOpts []processor.Option
+	if opt, cleanup, err := openEvalProjector(); err == nil {
+		procOpts = append(procOpts, opt)
+		defer cleanup()
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: eval projector not wired (%v); eval.cell_result entries will be skipped\n", err)
+	}
+	proc := processor.New(cfg, store, procOpts...)
 	n, err := proc.RunBatch()
 	if err != nil {
 		return fmt.Errorf("drain journal: %w", err)

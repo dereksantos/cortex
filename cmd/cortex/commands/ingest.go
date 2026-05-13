@@ -234,7 +234,12 @@ func (c *IngestCommand) Execute(ctx *Context) error {
 
 	// Drain the journal: project capture.event entries past the cursor
 	// into SQLite. Replaces the pre-journal queue.ProcessPending path.
-	proc := processor.New(cfg, store)
+	var procOpts []processor.Option
+	if opt, cleanup, err := openEvalProjector(); err == nil {
+		procOpts = append(procOpts, opt)
+		defer cleanup()
+	}
+	proc := processor.New(cfg, store, procOpts...)
 	processed, err := proc.RunBatch()
 	if err != nil {
 		return fmt.Errorf("failed to drain journal: %w", err)
@@ -381,7 +386,12 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 	}
 
 	// Drain the journal: project capture.event entries past the cursor.
-	proc := processor.New(cfg, store)
+	var procOpts []processor.Option
+	if opt, cleanup, err := openEvalProjector(); err == nil {
+		procOpts = append(procOpts, opt)
+		defer cleanup()
+	}
+	proc := processor.New(cfg, store, procOpts...)
 	processed, err := proc.RunBatch()
 	if err != nil {
 		return fmt.Errorf("failed to drain journal: %w", err)

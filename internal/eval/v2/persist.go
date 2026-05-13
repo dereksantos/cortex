@@ -70,6 +70,32 @@ func NewPersister() (*Persister, error) {
 	return p, nil
 }
 
+// NewPersisterForProjection opens a Persister for the projection-only
+// path used by `cortex journal rebuild` and `cortex ingest`: SQLite +
+// cell_results.jsonl are wired up, but the writer-class journal is NOT
+// opened, so PersistCell rejects writes (as it should — the caller
+// already has the entry on disk and only wants to materialize it).
+//
+// Skipping the writer also avoids fighting a concurrent
+// `cortex eval grid` for the segment flock.
+func NewPersisterForProjection() (*Persister, error) {
+	dbDir := filepath.Join(".cortex", "db")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+	dbPath := filepath.Join(dbDir, "evals_v2.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	p := &Persister{db: db, dbDir: dbDir}
+	if err := p.init(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return p, nil
+}
+
 // openJournal opens the eval writer-class journal at classDir. Stored on
 // the Persister so PersistCell can emit eval.cell_result entries.
 // FsyncPerBatch is appropriate for derivations (regeneratable via

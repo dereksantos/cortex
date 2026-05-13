@@ -25,6 +25,26 @@ import (
 // cognition pipeline (Dream, Think) consumes this.
 type EventCallback func([]*events.Event)
 
+// EvalCellResultProjector materializes one parsed eval.cell_result
+// payload to the read-side. Wired by callers via
+// WithEvalCellResultProjector; production callers route this to
+// internal/eval/v2's Persister.ProjectCellFromEntry so SQLite +
+// cell_results.jsonl regenerate from the journal alone.
+//
+// When no projector is wired, eval.cell_result entries are skipped: the
+// cursor advances without side effects. Rebuild resets the cursor, so a
+// later run with a wired projector picks them up.
+type EvalCellResultProjector func(*journal.EvalCellResultPayload) error
+
+// Option configures a Processor at construction time.
+type Option func(*Processor)
+
+// WithEvalCellResultProjector wires the eval.cell_result projector. See
+// EvalCellResultProjector for semantics.
+func WithEvalCellResultProjector(fn EvalCellResultProjector) Option {
+	return func(p *Processor) { p.evalCellResultProjector = fn }
+}
+
 // Processor runs journal indexers on a tick, projecting capture.event
 // entries (and, post slices O/D/R/Z/T/B/E, other writer-classes) to SQLite,
 // then notifies the cognition pipeline with the events it just stored.
@@ -38,21 +58,28 @@ type Processor struct {
 
 	eventCallback EventCallback
 
+	evalCellResultProjector EvalCellResultProjector
+
 	batchMu     sync.Mutex
 	batchEvents []*events.Event
 }
 
-// New creates a Processor wired with the capture.event and observation.*
-// projectors. The default journal class dirs (<ContextDir>/journal/capture/
-// and <ContextDir>/journal/observation/) are registered automatically;
+// New creates a Processor wired with the default writer-class projectors.
+// The default journal class dirs (<ContextDir>/journal/{capture,observation,
+// dream,reflect,resolve,think,feedback,eval}) are registered automatically;
 // additional projects' journals can be added via AddJournalDir.
 //
-// Future writer-classes (dream, reflect, resolve, think, feedback, eval)
-// register their projectors here in their respective slices.
-func New(cfg *config.Config, store *storage.Storage) *Processor {
+// eval.cell_result entries require an injected projector (see
+// WithEvalCellResultProjector) — production callers route this to
+// internal/eval/v2's Persister.ProjectCellFromEntry so SQLite +
+// cell_results.jsonl regenerate from the journal alone.
+func New(cfg *config.Config, store *storage.Storage, opts ...Option) *Processor {
 	p := &Processor{
 		cfg:     cfg,
 		storage: store,
+	}
+	for _, opt := range opts {
+		opt(p)
 	}
 	p.registry = journal.NewRegistry()
 	p.registry.Register("capture.event", 1, p.projectCaptureEvent)
@@ -107,32 +134,22 @@ func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
 	return nil
 }
 
-// projectEvalCellResult records a journaled eval cell result in storage's
-// parallel eval-row list. The canonical eval persistence path remains
-// internal/eval/v2/persist_cell.go for now; this projection lets
-// `cortex journal verify` and counterfactual replay see eval rows
-// through the same lens as the other writer-classes.
+// projectEvalCellResult dispatches to the injected
+// EvalCellResultProjector. When nil (no projector wired) the entry is
+// skipped — the indexer's cursor still advances, but the read side is
+// not materialized. This matches the policy that production callers
+// (daemon, ingest, journal rebuild) MUST wire a projector; absence is
+// treated as deliberate skip rather than an error.
 func (p *Processor) projectEvalCellResult(e *journal.Entry) error {
+	if p.evalCellResultProjector == nil {
+		return nil
+	}
 	payload, err := journal.ParseEvalCellResult(e)
 	if err != nil {
 		return fmt.Errorf("parse eval.cell_result at offset %d: %w", e.Offset, err)
 	}
-	if err := p.storage.RecordEvalCellResult(&storage.EvalCellResultRow{
-		RunID:         payload.RunID,
-		ScenarioID:    payload.ScenarioID,
-		Harness:       payload.Harness,
-		Provider:      payload.Provider,
-		Model:         payload.Model,
-		Strategy:      payload.ContextStrategy,
-		TaskSuccess:   payload.TaskSuccess,
-		TokensIn:      payload.TokensIn,
-		TokensOut:     payload.TokensOut,
-		CostUSD:       payload.CostUSD,
-		LatencyMs:     payload.LatencyMs,
-		JournalOffset: int64(e.Offset),
-		RecordedAt:    e.TS,
-	}); err != nil {
-		return fmt.Errorf("record eval row at offset %d: %w", e.Offset, err)
+	if err := p.evalCellResultProjector(payload); err != nil {
+		return fmt.Errorf("project eval.cell_result at offset %d: %w", e.Offset, err)
 	}
 	return nil
 }
