@@ -1,9 +1,19 @@
 package commands
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // ConfigOverrides holds whitelisted counterfactual overrides for
@@ -162,3 +172,183 @@ func validateOverrideValue(s string) error {
 	}
 	return nil
 }
+
+// asJournalOverrides converts the commands-side ConfigOverrides to the
+// journal-side CounterfactualOverrides serialization shape. Mirrors
+// field-for-field; the duplicate types exist only to break the package
+// dependency (internal/journal cannot import cmd/cortex/commands).
+func (o ConfigOverrides) asJournalOverrides() journal.CounterfactualOverrides {
+	out := journal.CounterfactualOverrides{Model: o.Model, Provider: o.Provider}
+	if o.Temperature != nil {
+		t := *o.Temperature
+		out.Temperature = &t
+	}
+	if o.MaxTokens != nil {
+		m := *o.MaxTokens
+		out.MaxTokens = &m
+	}
+	return out
+}
+
+// buildOverrideLLM returns an llm.Provider configured per overrides,
+// falling back to the base config for unspecified fields. Used by the
+// counterfactual --execute path so a replay run uses the chosen
+// model/provider instead of the daemon-time defaults.
+//
+// Provider is inferred from the model when not specified: a model
+// beginning with "claude" routes to Anthropic, everything else to
+// Ollama. Returns an error for explicitly-unknown providers.
+func buildOverrideLLM(base *config.Config, o ConfigOverrides) (llm.Provider, error) {
+	cfg := *base
+	provider := strings.ToLower(strings.TrimSpace(o.Provider))
+	if provider == "" {
+		if strings.HasPrefix(strings.ToLower(o.Model), "claude") {
+			provider = "anthropic"
+		} else if o.Model != "" {
+			provider = "ollama"
+		} else {
+			provider = "anthropic"
+		}
+	}
+	switch provider {
+	case "anthropic":
+		if o.Model != "" {
+			cfg.AnthropicModel = o.Model
+		}
+		return llm.NewAnthropicClient(&cfg), nil
+	case "ollama":
+		if o.Model != "" {
+			cfg.OllamaModel = o.Model
+		}
+		return llm.NewOllamaClient(&cfg), nil
+	default:
+		return nil, fmt.Errorf("unsupported provider %q (allowed: anthropic, ollama)", provider)
+	}
+}
+
+// jaccardTopK returns the Jaccard similarity of the first k elements of
+// each ranking (or len if shorter). Returns 1.0 when both lists are
+// empty. k must be > 0.
+func jaccardTopK(a, b []string, k int) float64 {
+	if k <= 0 {
+		return 0
+	}
+	if len(a) == 0 && len(b) == 0 {
+		return 1
+	}
+	pick := func(xs []string) map[string]struct{} {
+		m := make(map[string]struct{}, k)
+		for i := 0; i < len(xs) && i < k; i++ {
+			m[xs[i]] = struct{}{}
+		}
+		return m
+	}
+	left, right := pick(a), pick(b)
+	if len(left) == 0 && len(right) == 0 {
+		return 1
+	}
+	var intersect int
+	for id := range left {
+		if _, ok := right[id]; ok {
+			intersect++
+		}
+	}
+	union := len(left) + len(right) - intersect
+	if union == 0 {
+		return 1
+	}
+	return float64(intersect) / float64(union)
+}
+
+// counterfactualReflectRerank replays one reflect.rerank entry against
+// an LLM provider built from the overrides and returns the corresponding
+// replay.counterfactual payload. Returns a "failed" payload (not an
+// error) when the original entry lacks the InputContents needed to
+// reconstruct candidates — caller logs that and continues.
+func counterfactualReflectRerank(ctx context.Context, src *journal.Entry, payload *journal.ReflectRerankPayload, overrides ConfigOverrides, llmFactory func(ConfigOverrides) (llm.Provider, error)) journal.ReplayCounterfactualPayload {
+	out := journal.ReplayCounterfactualPayload{
+		SourceOffset:      int64(src.Offset),
+		SourceClass:       "reflect",
+		SourceType:        src.Type,
+		Overrides:         overrides.asJournalOverrides(),
+		OriginalRankedIDs: append([]string(nil), payload.RankedIDs...),
+	}
+
+	if len(payload.InputContents) == 0 {
+		out.Status = journal.ReplayStatusFailed
+		out.Error = "source entry has no input_contents; cannot reconstruct candidates"
+		return out
+	}
+
+	candidates := make([]cognition.Result, 0, len(payload.InputIDs))
+	for _, id := range payload.InputIDs {
+		content, ok := payload.InputContents[id]
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, cognition.Result{ID: id, Content: content})
+	}
+	if len(candidates) == 0 {
+		out.Status = journal.ReplayStatusFailed
+		out.Error = "all input ids missing from input_contents"
+		return out
+	}
+	// Stable order for deterministic prompt construction even if the
+	// map iteration order was non-stable in some path.
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+
+	provider, err := llmFactory(overrides)
+	if err != nil {
+		out.Status = journal.ReplayStatusFailed
+		out.Error = fmt.Sprintf("build provider: %v", err)
+		return out
+	}
+	if provider == nil || !provider.IsAvailable() {
+		out.Status = journal.ReplayStatusFailed
+		out.Error = "configured provider is unavailable"
+		return out
+	}
+
+	reflector := intcognition.NewReflect(provider)
+	// Do NOT set JournalDir — the counterfactual must not emit its own
+	// reflect.rerank entry into the live journal.
+	reranked, err := reflector.Reflect(ctx, cognition.Query{Text: payload.QueryText}, candidates)
+	if err != nil {
+		out.Status = journal.ReplayStatusFailed
+		out.Error = fmt.Sprintf("reflect: %v", err)
+		return out
+	}
+	cfRanked := make([]string, len(reranked))
+	for i, c := range reranked {
+		cfRanked[i] = c.ID
+	}
+	out.CounterfactualRankedIDs = cfRanked
+	k := 5
+	if k > len(payload.RankedIDs) {
+		k = len(payload.RankedIDs)
+	}
+	if k > len(cfRanked) {
+		k = len(cfRanked)
+	}
+	if k > 0 {
+		out.JaccardK = k
+		out.JaccardTopK = jaccardTopK(payload.RankedIDs, cfRanked, k)
+	}
+	out.Status = journal.ReplayStatusExecuted
+	return out
+}
+
+// openReplayWriter opens the writer-class journal at
+// <contextDir>/journal/replay/. Used to emit replay.counterfactual
+// entries from runReplay.
+func openReplayWriter(contextDir string) (*journal.Writer, error) {
+	return journal.NewWriter(journal.WriterOpts{
+		ClassDir: filepath.Join(contextDir, "journal", "replay"),
+		Fsync:    journal.FsyncPerBatch,
+	})
+}
+
+// nowUTC is a hook so tests can pin time. Kept as a free var rather
+// than threaded through APIs because it's only ever called from one
+// place.
+var nowUTC = func() time.Time { return time.Now().UTC() }

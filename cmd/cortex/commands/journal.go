@@ -16,6 +16,7 @@ import (
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // openEvalProjector opens a projection-only eval Persister and returns
@@ -383,12 +384,15 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 	class := "capture"
 	var fromOff, toOff Offset = 1, 0
 	configOverridesRaw := ""
+	execute := false
 
 	for _, a := range ctx.Args[1:] {
 		switch {
 		case a == "--help" || a == "-h":
 			fmt.Print(replayUsage())
 			return nil
+		case a == "--execute":
+			execute = true
 		case strings.HasPrefix(a, "--class="):
 			class = strings.TrimPrefix(a, "--class=")
 		case strings.HasPrefix(a, "--from-offset="):
@@ -404,6 +408,12 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid --config-overrides: %w", err)
 	}
+	if execute && overrides.IsEmpty() {
+		return fmt.Errorf("--execute requires --config-overrides=...")
+	}
+	if execute && class != "reflect" {
+		return fmt.Errorf("--execute currently supports --class=reflect only; got %q", class)
+	}
 
 	contextDir, err := journalContextDir(ctx)
 	if err != nil {
@@ -417,7 +427,32 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 	}
 	defer r.Close()
 
+	var replayWriter *journal.Writer
+	if !overrides.IsEmpty() {
+		w, err := openReplayWriter(contextDir)
+		if err != nil {
+			return fmt.Errorf("open replay journal: %w", err)
+		}
+		defer w.Close()
+		replayWriter = w
+	}
+
 	scanned, replayed := 0, 0
+	executed, planned, failed := 0, 0, 0
+	cfgForLLM := ctx.Config
+	if cfgForLLM == nil {
+		captureCfg, cErr := loadCaptureConfig()
+		if cErr == nil {
+			cfgForLLM = captureCfg
+		}
+	}
+	llmFactory := func(o ConfigOverrides) (llm.Provider, error) {
+		if cfgForLLM == nil {
+			return nil, fmt.Errorf("no base config available to build provider")
+		}
+		return buildOverrideLLM(cfgForLLM, o)
+	}
+
 	for {
 		entry, err := r.Next()
 		if err == io.EOF {
@@ -433,21 +468,85 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 		if toOff != 0 && entry.Offset > toOff {
 			break
 		}
-		// Skeleton: print one summary line per replayed entry. Counterfactual
-		// re-invocation of cognition with overrides lands in a follow-up
-		// once the source entries carry enough content to re-run without
-		// re-scraping storage.
 		fmt.Printf("offset=%d type=%s v=%d\n", entry.Offset, entry.Type, entry.V)
 		replayed++
+
+		if replayWriter == nil {
+			continue
+		}
+		cfPayload, ok := buildReplayPayload(context.Background(), entry, class, *overrides, execute, llmFactory)
+		if !ok {
+			continue
+		}
+		cfEntry, err := journal.NewReplayCounterfactualEntry(cfPayload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build counterfactual entry for offset %d: %v\n", entry.Offset, err)
+			continue
+		}
+		if _, err := replayWriter.Append(cfEntry); err != nil {
+			return fmt.Errorf("append counterfactual entry: %w", err)
+		}
+		switch cfPayload.Status {
+		case journal.ReplayStatusExecuted:
+			executed++
+		case journal.ReplayStatusPlanned:
+			planned++
+		case journal.ReplayStatusFailed:
+			failed++
+		}
 	}
 
 	fmt.Printf("\nReplayed %d/%d entries from %s (range %d..%v)\n",
 		replayed, scanned, class, fromOff, toOff)
 	if !overrides.IsEmpty() {
 		fmt.Printf("--config-overrides parsed: %s\n", overrides.summary())
-		fmt.Println("Counterfactual cognition runs land in a follow-up; this output marks the targeted set.")
+		fmt.Printf("Counterfactual records emitted: executed=%d planned=%d failed=%d\n", executed, planned, failed)
 	}
 	return nil
+}
+
+// buildReplayPayload constructs a replay.counterfactual payload for one
+// source entry. Returns (payload, true) when an entry of the configured
+// class produces a record, or (_, false) when this entry is outside the
+// replayable set (wrong type, or planned-only with non-reflect class).
+func buildReplayPayload(ctx context.Context, src *journal.Entry, srcClass string, overrides ConfigOverrides, execute bool, llmFactory func(ConfigOverrides) (llm.Provider, error)) (journal.ReplayCounterfactualPayload, bool) {
+	switch srcClass {
+	case "reflect":
+		if src.Type != journal.TypeReflectRerank {
+			return journal.ReplayCounterfactualPayload{}, false
+		}
+		payload, err := journal.ParseReflectRerank(src)
+		if err != nil {
+			return journal.ReplayCounterfactualPayload{
+				SourceOffset: int64(src.Offset),
+				SourceClass:  srcClass,
+				SourceType:   src.Type,
+				Overrides:    overrides.asJournalOverrides(),
+				Status:       journal.ReplayStatusFailed,
+				Error:        fmt.Sprintf("parse source: %v", err),
+			}, true
+		}
+		if !execute {
+			return journal.ReplayCounterfactualPayload{
+				SourceOffset:      int64(src.Offset),
+				SourceClass:       srcClass,
+				SourceType:        src.Type,
+				Overrides:         overrides.asJournalOverrides(),
+				Status:            journal.ReplayStatusPlanned,
+				OriginalRankedIDs: append([]string(nil), payload.RankedIDs...),
+			}, true
+		}
+		return counterfactualReflectRerank(ctx, src, payload, overrides, llmFactory), true
+	default:
+		// Other classes get planned-only records (scheduling primitive).
+		return journal.ReplayCounterfactualPayload{
+			SourceOffset: int64(src.Offset),
+			SourceClass:  srcClass,
+			SourceType:   src.Type,
+			Overrides:    overrides.asJournalOverrides(),
+			Status:       journal.ReplayStatusPlanned,
+		}, true
+	}
 }
 
 func parseOffsetFlag(arg, prefix string, fallback Offset) Offset {
@@ -469,11 +568,18 @@ func replayUsage() string {
 	return `Usage: cortex journal replay [flags]
 
 Flags:
-  --class=NAME             Writer-class to replay (default: capture)
-  --from-offset=N          First offset (default: 1)
-  --to-offset=N            Last offset (default: tail)
-  --config-overrides=KV    Reserved for counterfactual eval; parsed but
-                           not yet threaded through cognition.
+  --class=NAME             Writer-class to replay (default: capture).
+  --from-offset=N          First offset (default: 1).
+  --to-offset=N            Last offset (default: tail).
+  --config-overrides=KV    Counterfactual overrides for replay; emits a
+                           replay.counterfactual entry per source entry.
+                           Allowed keys: model, provider, temperature,
+                           max_tokens. Example:
+                             --config-overrides=model=claude-haiku-4.5
+  --execute                Actually invoke the cognitive mode with the
+                           overrides (requires --config-overrides and
+                           --class=reflect). Without --execute, only
+                           "planned" records are emitted.
 `
 }
 
