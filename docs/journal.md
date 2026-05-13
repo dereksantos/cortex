@@ -81,27 +81,27 @@ Segments rotate at 10MB or 10,000 entries, whichever comes first. Naming: `0001.
 Three modes, all driven by walking the journal in offset order:
 
 **Rebuild** (`cortex journal rebuild`):
-1. Truncate all derived tables in SQLite.
-2. Walk the writer-class DAG in topological order: `capture` + `observation` → `dream`, `reflect`, `resolve`, `think` → `feedback`.
-3. Within each class, replay entries in offset order, dispatching each to its projector.
+1. Truncate all derived state.
+2. Walk the writer-class DAG in topological order: `capture` + `observation` → `dream`, `reflect`, `resolve`, `think` → `feedback`, `eval`.
+3. Within each class, replay entries in offset order, dispatching each to its projector. For `eval.cell_result`, the projector is an injected callback that routes through `internal/eval/v2.ProjectCellFromEntry` so SQLite + `cell_results.jsonl` regenerate from the journal alone.
 4. Refresh FTS5 / vec indexes via existing `rebuildEventIndexes`.
 
 Used after corruption, schema change, or to reset for evals.
 
 **Verify** (`cortex journal verify`):
 1. Each `sources` offset resolves to a real entry.
-2. Projection row counts match journal entry counts (modulo retractions).
+2. Entry types whose payload declares the source's writer-class (today: `replay.counterfactual` via `SourceClass`) get a *strict* check — the offset must exist in that class. Other types resolve permissively and the verifier counts cross-class ambiguity so the operator sees the SNR.
 3. Cursor offset is consistent with the last successfully projected entry.
 
 Used after migration and as a periodic health check.
 
-**Counterfactual replay** (`cortex journal replay --config-overrides=...`):
-1. Walk historical capture entries from offset A to B.
-2. Re-run cognitive modes (Dream, Reflect, etc.) with overridden config — different model, different prompt, different budget.
-3. Emit results to a comparison journal or side table, never overwriting the original derivations.
-4. Diff against original; report which decisions changed.
+**Counterfactual replay** (`cortex journal replay --config-overrides=K=V[,K=V]... [--execute]`):
+1. Walk historical entries in the chosen class (`--class=reflect` for the implemented path) from offset A to B.
+2. Without `--execute`, emit a `replay.counterfactual` entry with `status="planned"` per source — a non-destructive scheduling primitive.
+3. With `--execute`, re-invoke the matching cognitive mode against an LLM provider built from the overrides (model/provider/temperature/max_tokens) and emit `status="executed"` with the new ranking + Jaccard@K vs the original. Results land in `journal/replay/`, never overwriting the original derivations.
+4. Allowed overrides are explicit-allow-listed at parse time; shell-meta and control characters in values are rejected.
 
-This is the eval primitive that makes auto-tuning mechanical: you can ask "would the new prompt have made better decisions on last week's traffic?" and get a numeric answer without re-running the user's work.
+This is the eval primitive that makes auto-tuning mechanical: you can ask "would the new prompt have made better decisions on last week's traffic?" and get a numeric answer without re-running the user's work. Dream/Resolve/Think classes currently emit only planned-status entries; their cognition re-invocation is a follow-up that does not require journal-layer changes.
 
 ## Operational invariants
 
