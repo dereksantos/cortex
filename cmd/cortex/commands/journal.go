@@ -86,10 +86,6 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 	}
 }
 
-func notImplemented(sub, slice string) error {
-	return fmt.Errorf("cortex journal %s: not yet implemented (lands in slice %s — see docs/journal-implementation-plan.md)", sub, slice)
-}
-
 // runShow prints a single journal entry by offset. Defaults to the
 // capture class; --class=NAME selects another writer-class.
 //
@@ -440,7 +436,7 @@ func (c *JournalCommand) runReplay(ctx *Context) error {
 		return fmt.Errorf("invalid --config-overrides: %w", err)
 	}
 	if execute && overrides.IsEmpty() {
-		return fmt.Errorf("--execute requires --config-overrides=...")
+		return fmt.Errorf("--execute requires --config-overrides")
 	}
 	if execute && class != "reflect" {
 		return fmt.Errorf("--execute currently supports --class=reflect only; got %q", class)

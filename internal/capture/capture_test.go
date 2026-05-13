@@ -72,12 +72,12 @@ func TestCapture_CaptureEvent(t *testing.T) {
 	cap := New(cfg)
 
 	event := &events.Event{
-		ID:        "test-event-123",
-		Source:    events.SourceClaude,
-		EventType: events.EventEdit,
-		Timestamp: time.Now(),
-		ToolName:  "Edit",
-		ToolInput: map[string]interface{}{"file_path": "test.go"},
+		ID:         "test-event-123",
+		Source:     events.SourceClaude,
+		EventType:  events.EventEdit,
+		Timestamp:  time.Now(),
+		ToolName:   "Edit",
+		ToolInput:  map[string]interface{}{"file_path": "test.go"},
 		ToolResult: "success",
 		Context: events.EventContext{
 			ProjectPath: "/test/project",
@@ -224,12 +224,12 @@ func TestCapture_SkipRoutineBashCommands(t *testing.T) {
 		t.Run("skips "+cmd, func(t *testing.T) {
 			id := "bash-" + cmd
 			event := &events.Event{
-				ID:        id,
-				Source:    events.SourceClaude,
-				EventType: events.EventToolUse,
-				Timestamp: time.Now(),
-				ToolName:  "Bash",
-				ToolInput: map[string]interface{}{"command": cmd},
+				ID:         id,
+				Source:     events.SourceClaude,
+				EventType:  events.EventToolUse,
+				Timestamp:  time.Now(),
+				ToolName:   "Bash",
+				ToolInput:  map[string]interface{}{"command": cmd},
 				ToolResult: "output",
 			}
 			if err := cap.CaptureEvent(event); err != nil {
@@ -260,12 +260,12 @@ func TestCapture_AllowNonRoutineBashCommands(t *testing.T) {
 		t.Run("allows "+cmd, func(t *testing.T) {
 			id := "bash-allowed-" + filepath.Base(cmd)
 			event := &events.Event{
-				ID:        id,
-				Source:    events.SourceClaude,
-				EventType: events.EventToolUse,
-				Timestamp: time.Now(),
-				ToolName:  "Bash",
-				ToolInput: map[string]interface{}{"command": cmd},
+				ID:         id,
+				Source:     events.SourceClaude,
+				EventType:  events.EventToolUse,
+				Timestamp:  time.Now(),
+				ToolName:   "Bash",
+				ToolInput:  map[string]interface{}{"command": cmd},
 				ToolResult: "success",
 			}
 			if err := cap.CaptureEvent(event); err != nil {
@@ -308,12 +308,12 @@ func TestCapture_MultipleSkipPatterns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			id := "pattern-test-" + filepath.Base(tt.filePath)
 			event := &events.Event{
-				ID:        id,
-				Source:    events.SourceClaude,
-				EventType: events.EventToolUse,
-				Timestamp: time.Now(),
-				ToolName:  "Edit",
-				ToolInput: map[string]interface{}{"file_path": tt.filePath},
+				ID:         id,
+				Source:     events.SourceClaude,
+				EventType:  events.EventToolUse,
+				Timestamp:  time.Now(),
+				ToolName:   "Edit",
+				ToolInput:  map[string]interface{}{"file_path": tt.filePath},
 				ToolResult: "modified",
 			}
 			if err := cap.CaptureEvent(event); err != nil {
@@ -344,12 +344,12 @@ func TestCapture_SkipByToolResult(t *testing.T) {
 	cap := New(cfg)
 
 	event := &events.Event{
-		ID:        "result-skip-test",
-		Source:    events.SourceClaude,
-		EventType: events.EventToolUse,
-		Timestamp: time.Now(),
-		ToolName:  "Grep",
-		ToolInput: map[string]interface{}{"pattern": "TODO"},
+		ID:         "result-skip-test",
+		Source:     events.SourceClaude,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   "Grep",
+		ToolInput:  map[string]interface{}{"pattern": "TODO"},
 		ToolResult: "Found in node_modules/pkg/file.js:10",
 	}
 	if err := cap.CaptureEvent(event); err != nil {

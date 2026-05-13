@@ -174,4 +174,3 @@ func TestMemoryMDSource_EmitsObservation(t *testing.T) {
 		t.Errorf("no observation entry for %s", memoryPath)
 	}
 }
-

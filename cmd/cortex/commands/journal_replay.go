@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
@@ -347,8 +346,3 @@ func openReplayWriter(contextDir string) (*journal.Writer, error) {
 		Fsync:    journal.FsyncPerBatch,
 	})
 }
-
-// nowUTC is a hook so tests can pin time. Kept as a free var rather
-// than threaded through APIs because it's only ever called from one
-// place.
-var nowUTC = func() time.Time { return time.Now().UTC() }

@@ -329,10 +329,20 @@ func floatNear(a, b, eps float64) bool {
 // fakeFile keeps os imported.
 var _ = os.Stat
 
-func fptr(f float64) *float64    { return &f }
-func iptr(i int) *int            { return &i }
-func deref(p *float64) any       { if p == nil { return nil }; return *p }
-func iptrDeref(p *int) any       { if p == nil { return nil }; return *p }
+func fptr(f float64) *float64 { return &f }
+func iptr(i int) *int         { return &i }
+func deref(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+func iptrDeref(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
 func fptrEqual(a, b *float64) bool {
 	if a == nil || b == nil {
 		return a == b
