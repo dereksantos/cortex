@@ -15,24 +15,92 @@ import {
 } from "../plugins/_helpers.ts";
 
 // ---- resolveCortexBinary ---------------------------------------------------
+//
+// PATH-shadowing is a real supply-chain attack: a malicious dep that
+// drops `./cortex` into a writable PATH entry hijacks every recall and
+// capture from that point on. Defense: require the resolved binary to
+// be absolute. $CORTEX_BINARY may be set explicitly by callers (e.g.
+// the eval-grid runner), and a relative value is rejected outright.
+// When the env var is unset we fall back to a manual PATH walk that
+// returns the resolved absolute path, never the bare `"cortex"` name.
 
-test("resolveCortexBinary prefers $CORTEX_BINARY over default", () => {
+test("resolveCortexBinary returns $CORTEX_BINARY when set to an absolute path", () => {
   const prior = process.env.CORTEX_BINARY;
   try {
     process.env.CORTEX_BINARY = "/tmp/some/cortex";
     assert.strictEqual(resolveCortexBinary(), "/tmp/some/cortex");
     process.env.CORTEX_BINARY = "  /padded/path  ";
     assert.strictEqual(resolveCortexBinary(), "/padded/path");
-    delete process.env.CORTEX_BINARY;
-    assert.strictEqual(resolveCortexBinary(), "cortex");
-    process.env.CORTEX_BINARY = "";
-    assert.strictEqual(resolveCortexBinary(), "cortex");
   } finally {
     if (prior === undefined) {
       delete process.env.CORTEX_BINARY;
     } else {
       process.env.CORTEX_BINARY = prior;
     }
+  }
+});
+
+test("resolveCortexBinary throws if $CORTEX_BINARY is a relative path", () => {
+  const prior = process.env.CORTEX_BINARY;
+  try {
+    process.env.CORTEX_BINARY = "cortex";
+    assert.throws(() => resolveCortexBinary(), /absolute/i);
+    process.env.CORTEX_BINARY = "./bin/cortex";
+    assert.throws(() => resolveCortexBinary(), /absolute/i);
+    process.env.CORTEX_BINARY = "../cortex";
+    assert.throws(() => resolveCortexBinary(), /absolute/i);
+  } finally {
+    if (prior === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = prior;
+    }
+  }
+});
+
+test("resolveCortexBinary throws when env var unset and PATH lookup fails", () => {
+  const priorBinary = process.env.CORTEX_BINARY;
+  const priorPath = process.env.PATH;
+  try {
+    delete process.env.CORTEX_BINARY;
+    process.env.PATH = "/nonexistent-dir-for-cortex-test";
+    assert.throws(() => resolveCortexBinary(), /not found/i);
+  } finally {
+    if (priorBinary === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = priorBinary;
+    }
+    process.env.PATH = priorPath;
+  }
+});
+
+test("resolveCortexBinary resolves PATH to an absolute path when env var unset", async () => {
+  // Build a fake cortex executable in a temp dir, point PATH at it,
+  // and assert the absolute path comes back — NOT bare "cortex".
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cortex-which-"));
+  const fakeBin = path.join(tmp, "cortex");
+  fs.writeFileSync(fakeBin, "#!/bin/sh\necho fake\n", { mode: 0o755 });
+
+  const priorBinary = process.env.CORTEX_BINARY;
+  const priorPath = process.env.PATH;
+  try {
+    delete process.env.CORTEX_BINARY;
+    process.env.PATH = tmp;
+    const resolved = resolveCortexBinary();
+    assert.strictEqual(resolved, fakeBin);
+    assert.ok(path.isAbsolute(resolved), `expected absolute, got: ${resolved}`);
+  } finally {
+    if (priorBinary === undefined) {
+      delete process.env.CORTEX_BINARY;
+    } else {
+      process.env.CORTEX_BINARY = priorBinary;
+    }
+    process.env.PATH = priorPath;
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
@@ -51,7 +119,7 @@ test("formatRecallResults: pluralizes header and omits 0% scores", () => {
     { id: "1", content: "A", score: 0.9, captured_at: "2026-05-10T18:04:00Z" },
     { id: "2", content: "B", score: 0, captured_at: "2026-05-10T18:04:00Z" },
   ]);
-  assert.match(text, /Found 2 relevant context items:/);
+  assert.match(text, /2 retrieved context items/);
   assert.match(text, /^1\. .*A$/m);
   assert.match(text, /^2\. B$/m);
   assert.ok(!/_\(0%\)_/.test(text));
@@ -67,9 +135,51 @@ test("formatRecallResults: singular header for one entry; category badge present
       category: "decision",
     },
   ]);
-  assert.match(text, /Found 1 relevant context item:/);
+  assert.match(text, /1 retrieved context item/);
   assert.match(text, /\*\*\[decision\]\*\*/);
   assert.match(text, /_\(50%\)_/);
+});
+
+// ---- formatRecallResults trust framing -------------------------------------
+// Retrieved context flows into the agent's prompt verbatim. That makes the
+// retrieval pipeline an indirect-prompt-injection vector: a poisoned source
+// (a malicious README, a tainted commit message, an attacker-controlled
+// session log captured into the store) could carry "ignore prior
+// instructions" payloads that the LLM would otherwise treat as commands.
+// The mitigation is a clear in-band signal that the wrapped content is
+// data, not instructions.
+
+test("formatRecallResults frames non-empty output with an untrusted-context directive", () => {
+  const text = formatRecallResults([
+    { id: "a", content: "alpha", score: 0.9, captured_at: "2026-05-10T00:00:00Z" },
+  ]);
+  // The directive must mention that the content is untrusted / data,
+  // and must instruct the model not to follow embedded instructions.
+  assert.match(text, /untrusted/i);
+  assert.match(text, /do not (?:follow|execute|treat .* as instructions)/i);
+});
+
+test("formatRecallResults wraps items in a tagged block the LLM can recognize", () => {
+  const text = formatRecallResults([
+    { id: "a", content: "alpha", score: 0.9, captured_at: "2026-05-10T00:00:00Z" },
+    { id: "b", content: "beta", score: 0.8, captured_at: "2026-05-10T00:00:00Z" },
+  ]);
+  // Both an opening and closing tag must surround the numbered list.
+  assert.match(text, /<retrieved_context\b[^>]*>/);
+  assert.match(text, /<\/retrieved_context>/);
+  const open = text.indexOf("<retrieved_context");
+  const close = text.indexOf("</retrieved_context>");
+  const itemAt = text.indexOf("1. ");
+  assert.ok(open < itemAt && itemAt < close, "items must live inside the tagged block");
+});
+
+test("formatRecallResults: no framing on empty results (no-results sentence stays clean)", () => {
+  // When there are no results, the function returns the dedicated
+  // no-results sentence verbatim. Framing it would just add noise — the
+  // LLM has nothing to be misled by.
+  const text = formatRecallResults([]);
+  assert.strictEqual(text, NO_RESULTS_TEXT);
+  assert.ok(!/<retrieved_context/.test(text));
 });
 
 // ---- redactSecrets ---------------------------------------------------------
@@ -185,4 +295,78 @@ test("SECRET_VALUE_PATTERN catches sk-or / sk-ant / sk-* shapes", () => {
   SECRET_VALUE_PATTERN.lastIndex = 0;
   // Short sk- prefix doesn't trigger (length floor is 32).
   assert.ok(!SECRET_VALUE_PATTERN.test("sk-tooshort"));
+});
+
+// ---- expanded SECRET_VALUE_PATTERN coverage --------------------------------
+// LLM tool output regularly contains pasted secrets from .env files, error
+// messages, or curl examples. The original regex only caught Anthropic /
+// OpenRouter / OpenAI shapes; the expansion below catches the most common
+// other formats so they don't end up in the capture queue verbatim.
+
+test("SECRET_VALUE_PATTERN catches AWS access key IDs (AKIA-prefix)", () => {
+  SECRET_VALUE_PATTERN.lastIndex = 0;
+  assert.match("AKIAIOSFODNN7EXAMPLE", SECRET_VALUE_PATTERN);
+  SECRET_VALUE_PATTERN.lastIndex = 0;
+  // Inline in a string (e.g. a curl example) should still be caught.
+  const out = "AKIAIOSFODNN7EXAMPLE".replace(SECRET_VALUE_PATTERN, REDACTED);
+  assert.strictEqual(out, REDACTED);
+});
+
+test("SECRET_VALUE_PATTERN catches GitHub PAT shapes (ghp/ghs/gho/ghr/ghu)", () => {
+  for (const prefix of ["ghp_", "ghs_", "gho_", "ghr_", "ghu_"]) {
+    SECRET_VALUE_PATTERN.lastIndex = 0;
+    const tok = `${prefix}${"A".repeat(36)}`;
+    assert.match(tok, SECRET_VALUE_PATTERN);
+  }
+});
+
+test("SECRET_VALUE_PATTERN catches Slack tokens (xoxb / xoxp / xoxa / xoxs)", () => {
+  for (const prefix of ["xoxb-", "xoxp-", "xoxa-", "xoxs-"]) {
+    SECRET_VALUE_PATTERN.lastIndex = 0;
+    const tok = `${prefix}1234567890-1234567890-deadbeefdeadbeefdeadbeef`;
+    assert.match(tok, SECRET_VALUE_PATTERN);
+  }
+});
+
+test("SECRET_VALUE_PATTERN catches GCP service-account private-key marker", () => {
+  // The signature material itself rather than the (large) PEM body —
+  // hitting just the marker is enough to redact the surrounding text
+  // when it appears in a JSON service-account dump.
+  SECRET_VALUE_PATTERN.lastIndex = 0;
+  assert.match("-----BEGIN PRIVATE KEY-----", SECRET_VALUE_PATTERN);
+  SECRET_VALUE_PATTERN.lastIndex = 0;
+  assert.match("-----BEGIN RSA PRIVATE KEY-----", SECRET_VALUE_PATTERN);
+  SECRET_VALUE_PATTERN.lastIndex = 0;
+  assert.match("-----BEGIN OPENSSH PRIVATE KEY-----", SECRET_VALUE_PATTERN);
+});
+
+test("SECRET_VALUE_PATTERN does NOT over-match common ambient strings", () => {
+  // False-positive guard: short tokens, normal sentences, file paths must
+  // pass through unchanged. The point of the expansion is sensitivity to
+  // realistic shapes, not paranoia.
+  for (const s of [
+    "hello world",
+    "/usr/local/bin/cortex",
+    "ghp_short", // too short — must NOT match
+    "BEGIN PRIVATE KEY", // missing the dash anchor
+    "AKIAshort", // too short — must NOT match
+    "import { Foo } from 'bar'",
+  ]) {
+    SECRET_VALUE_PATTERN.lastIndex = 0;
+    assert.ok(!SECRET_VALUE_PATTERN.test(s), `unexpected match for: ${s}`);
+  }
+});
+
+test("redactSecrets scrubs AWS / GitHub / Slack / PEM-header values inline", () => {
+  const input = {
+    deploy_cmd: "export AWS=AKIAIOSFODNN7EXAMPLE && deploy",
+    note: `token: ghp_${"A".repeat(36)}`,
+    slack: `xoxb-1234567890-1234567890-${"d".repeat(24)}`,
+    keypem: "header\n-----BEGIN PRIVATE KEY-----\nMIIE…",
+  };
+  const out = redactSecrets(input) as Record<string, string>;
+  assert.ok(!/AKIAIOSFODNN7EXAMPLE/.test(out.deploy_cmd));
+  assert.ok(!/ghp_AAA/.test(out.note));
+  assert.ok(!/xoxb-1234567890-1234567890-d{24}/.test(out.slack));
+  assert.ok(!/BEGIN PRIVATE KEY/.test(out.keypem));
 });

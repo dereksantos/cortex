@@ -408,7 +408,10 @@ func (p *ProjectSource) isHardExcludedFile(path string) bool {
 		return true
 	}
 
-	// Named secret files
+	// Named secret files (base names) + relative-path-only entries.
+	// Two lookups: `lower` is the basename (cheap fast path), `rel` is
+	// the project-relative path (needed for files inside a sensitive
+	// directory like `.aws/`, `.kube/`, `.config/gcloud/`).
 	secretFiles := map[string]bool{
 		"id_rsa": true, "id_ed25519": true, "id_ecdsa": true, "id_dsa": true,
 		"credentials.json": true, "service-account.json": true,
@@ -416,9 +419,31 @@ func (p *ProjectSource) isHardExcludedFile(path string) bool {
 		".npmrc": true, ".pypirc": true, ".netrc": true,
 		".docker/config.json": true,
 		"htpasswd":            true, ".htpasswd": true,
+		// AI-era credentials commonly seen in dev sandboxes
+		".git-credentials": true,
+		".pgpass":          true,
+		"known_hosts":      true, "authorized_keys": true,
 	}
 	if secretFiles[lower] || secretFiles[rel] {
 		return true
+	}
+
+	// Directory-prefix denylist: anything under these paths is treated
+	// as credential material regardless of file name, so a stray
+	// `~/.aws/credentials` or `~/.kube/config` checked into the project
+	// can't be picked up by Dream.
+	credentialDirs := []string{
+		".aws/", ".aws\\",
+		".kube/", ".kube\\",
+		".ssh/", ".ssh\\",
+		".gnupg/", ".gnupg\\",
+		".config/gcloud/", ".config\\gcloud\\",
+		".azure/", ".azure\\",
+	}
+	for _, d := range credentialDirs {
+		if strings.HasPrefix(rel, d) {
+			return true
+		}
 	}
 
 	// === CORTEX OWN STATE ===
