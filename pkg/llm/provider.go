@@ -4,6 +4,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -118,7 +119,14 @@ Respond in JSON format:
 JSON:`
 }
 
-// ParseAnalysisWithFallback parses analysis response, returning a fallback on failure
+// ParseAnalysisWithFallback parses analysis response, returning a fallback on failure.
+//
+// Post-parse, the analysis Summary and Reasoning are checked for prompt-
+// injection signatures via IsLikelyPromptInjection. If either fires, the
+// analysis is neutered (Importance → 1, "flagged:prompt-injection" tag
+// added) rather than dropped — keeping the data lets an operator inspect
+// the original later; the importance floor keeps it from influencing
+// future retrieval/inject decisions.
 func ParseAnalysisWithFallback(response string) *Analysis {
 	analysis, err := parseAnalysisJSON(response)
 	if err != nil || analysis == nil {
@@ -130,8 +138,61 @@ func ParseAnalysisWithFallback(response string) *Analysis {
 			Reasoning:  "Could not parse structured response",
 		}
 	}
+	if IsLikelyPromptInjection(analysis.Summary) || IsLikelyPromptInjection(analysis.Reasoning) {
+		analysis.Importance = 1
+		analysis.Tags = append(analysis.Tags, "flagged:prompt-injection")
+	}
 	return analysis
 }
+
+// IsLikelyPromptInjection returns true when `text` looks like an indirect
+// prompt-injection payload. Used to neuter insights extracted from a
+// source that may have been attacker-controlled (a poisoned README, a
+// crafted commit message, a session log containing pasted attacker text).
+//
+// The detector is intentionally narrow — false positives suppress real
+// insights, which is its own damage. We catch known attack shapes and
+// accept that novel phrasings will get through. Defense-in-depth: the
+// retrieval pipeline frames everything as untrusted anyway (see
+// formatRecallResults), so a missed flag here is not a single point of
+// failure.
+//
+// Patterns covered:
+//   - "ignore (all|prior|previous|earlier) instructions"
+//   - "disregard ... instructions"
+//   - "forget ... instructions"
+//   - "ignore everything (above|before)"
+//   - "new instructions:" (leading or after a newline)
+//   - role-override: "you are now <name>", "pretend you are <name>"
+//   - chat-template delimiter smuggling: </system>, <|im_start|>, <|endoftext|>
+//   - "override (your) system prompt"
+func IsLikelyPromptInjection(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	return promptInjectionRE.MatchString(text)
+}
+
+// promptInjectionRE compiles the union of known indirect-prompt-injection
+// shapes into a single case-insensitive regex. Anchored on whole-word
+// boundaries where it matters; intentionally NOT anchored to the start
+// of the string because the payload often comes after a benign preamble.
+var promptInjectionRE = func() *regexp.Regexp {
+	patterns := []string{
+		`(?i)\bignore\s+(?:all\s+)?(?:prior|previous|earlier|the\s+above)\s+instructions?\b`,
+		`(?i)\bdisregard\s+(?:the\s+)?(?:prior|previous|above|earlier)?\s*instructions?\b`,
+		`(?i)\bforget\s+(?:all\s+)?(?:everything|earlier|prior|previous|all)\s+(?:instructions?|messages?|context|turns)\b`,
+		`(?i)\bignore\s+everything\s+(?:above|before)\b`,
+		`(?i)(?:^|\n)\s*new\s+instructions?\s*:`,
+		`(?i)\byou\s+are\s+now\s+\w+\b`,
+		`(?i)\bpretend\s+(?:you|to\s+be)\s+(?:are\s+)?(?:a\s+different|an?)\s+\w+\s+(?:assistant|model|ai)\b`,
+		`(?i)</\s*system\s*>`,
+		`<\|im_start\|>`,
+		`<\|endoftext\|>`,
+		`(?i)\boverride\s+(?:your\s+)?system\s+prompt\b`,
+	}
+	return regexp.MustCompile(strings.Join(patterns, "|"))
+}()
 
 // parseAnalysisJSON parses the LLM response into structured analysis
 func parseAnalysisJSON(response string) (*Analysis, error) {

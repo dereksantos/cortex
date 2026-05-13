@@ -143,6 +143,13 @@ func (r *Reflect) parseRerankResponse(response string, candidates []cognition.Re
 		candidateMap[c.ID] = c
 	}
 
+	// Drop any IDs from ranking/contradictions that weren't in the
+	// input candidate set. A poisoned candidate can otherwise fabricate
+	// IDs (either to inject phantom results, or to fabricate conflicts
+	// against real entries to discredit them).
+	rr.Ranking = filterKnownIDs(rr.Ranking, candidateMap)
+	rr.Contradictions = filterKnownContradictions(rr.Contradictions, candidateMap)
+
 	// Log detected contradictions for noise ratio analysis
 	if r.activityLogger != nil && len(rr.Contradictions) > 0 {
 		for _, cont := range rr.Contradictions {
@@ -203,6 +210,38 @@ func containsID(ids []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// filterKnownIDs returns only the IDs that are present in candidateMap,
+// preserving order. Used to drop fabricated IDs returned by Reflect.
+func filterKnownIDs(ids []string, candidateMap map[string]cognition.Result) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := candidateMap[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// filterKnownContradictions drops any contradiction that references an
+// ID not in candidateMap. Even one fabricated ID invalidates the whole
+// contradiction — the LLM's reasoning was based on a non-existent peer.
+func filterKnownContradictions(conts []contradiction, candidateMap map[string]cognition.Result) []contradiction {
+	out := make([]contradiction, 0, len(conts))
+	for _, c := range conts {
+		allKnown := true
+		for _, id := range c.IDs {
+			if _, ok := candidateMap[id]; !ok {
+				allKnown = false
+				break
+			}
+		}
+		if allKnown {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // truncate shortens a string to maxLen, adding "..." if truncated.
