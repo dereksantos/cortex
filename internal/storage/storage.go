@@ -150,7 +150,9 @@ type sessionRecord struct {
 // New creates a new Storage instance backed by JSONL files.
 func New(cfg *config.Config) (*Storage, error) {
 	dataDir := filepath.Join(cfg.ContextDir, "data")
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	// 0700: data dir holds JSONL streams of captured events and eval
+	// results. Single-user; world-readable would leak content.
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
