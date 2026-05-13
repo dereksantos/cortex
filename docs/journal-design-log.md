@@ -206,23 +206,46 @@ not for the universe.
 
 ## Summary of deferred work
 
-In rough priority order:
+A subsequent follow-up pass landed nearly all of the originally
+deferred items (see commits `feat(journal): E2.1..2.3`, `X2.1..2.3`,
+`D2`, `O2`, `X3`, `T1` on this branch). Status:
 
-1. **Eval persistence unification** — collapse `internal/eval/v2`'s
-   dual-write into the journal pipeline (E2 follow-up).
-2. **Replay --config-overrides threading** — make the counterfactual
-   eval primitive actually run cognition with overrides (X2 follow-up).
-3. **retrieval_stats.json / daemon_state.json removal** — once
-   downstream watch UI reads from journal projections (Z1/T1 follow-up).
-4. **Dream's direct-storage fallback removal** — make Dream tests
-   wire a journal dir so the conditional fallback in
-   `internal/cognition/dream.go` can go (D2 follow-up).
-5. **Wire git and project Dream sources to observer** — apply the
-   memory_md / claude_history pattern (O2 follow-up).
-6. **Strict cross-class source-offset verification** — needs
-   class-tagged offsets or a fancier index (X3 enhancement).
-7. **think.topic_weight granular emission** — wire at
-   updateTopicWeights deltas if granular replay timing matters (T1
-   follow-up).
-
-Everything else from the plan landed.
+1. **Eval persistence unification** — **DONE**. `PersistCell` now emits
+   `eval.cell_result` as the source of truth and the indexer projects
+   it via `internal/eval/v2.ProjectCellFromEntry`. The storage-side
+   `eval_cell_results.jsonl` side-channel is removed; `cortex journal
+   verify` counts eval entries authoritatively.
+2. **Replay --config-overrides threading** — **DONE**.
+   `ParseConfigOverrides` enforces an explicit-allow-list (model /
+   provider / temperature / max_tokens). `cortex journal replay
+   --config-overrides=... --execute --class=reflect` re-invokes Reflect
+   with the override, computes Jaccard@K against the original ranking,
+   and emits one `replay.counterfactual` journal entry per source.
+3. **retrieval_stats.json / daemon_state.json removal** — **STILL
+   DEFERRED**. These remain because removing them requires migrating
+   the watch UI off the snapshot files (see `cmd/cortex/commands/
+   watch_state.go`). `daemon_state.json` is also a runtime heartbeat
+   that's not really a journal-replaceable concept. The journal
+   projections already exist; what's missing is the UI migration.
+4. **Dream's direct-storage fallback removal** — **DONE**. The
+   conditional `d.journalDir == "" && d.storage != nil` fallback in
+   `internal/cognition/dream.go` is removed. Tests that exercised it
+   pass `storage = nil` so the change is a no-op for them.
+5. **Wire git and project Dream sources to observer** — **DONE**.
+   `GitSource` emits `observation.git_commit` per commit returned by
+   Sample. `ProjectSource` emits `observation.project_file` per file
+   that contributes regions (deduped within the Sample). The
+   `observation.project_file` entry type was added for this.
+6. **Strict cross-class source-offset verification** — **PARTIAL**.
+   `cortex journal verify` is now strict for entries whose payload
+   declares the source's writer-class (today: `replay.counterfactual`
+   via `SourceClass`). Other types still resolve permissively but the
+   verifier now counts cross-class ambiguity so the operator sees the
+   signal-to-noise ratio. Full strictness for every writer-class would
+   still need class-tagged offsets in the entry envelope.
+7. **think.topic_weight granular emission** — **DONE**.
+   `updateTopicWeights` diffs old vs new weights and emits one
+   `think.topic_weight` entry per material change (>= 0.05). The
+   processor registers a validating no-op projector so the cursor
+   advances during ingest; storage-side per-topic history is a future
+   add-on.
