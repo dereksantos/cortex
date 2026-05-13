@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -18,6 +19,7 @@ import (
 type GitSource struct {
 	projectRoot string
 	rng         *rand.Rand
+	observer    *Observer
 }
 
 // NewGitSource creates a new GitSource.
@@ -27,6 +29,12 @@ func NewGitSource(projectRoot string) *GitSource {
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
+
+// SetObserver wires the source to emit observation.git_commit journal
+// entries on each commit returned by Sample. Pass nil to disable.
+// Observations carry the URI + content_hash but not the commit body
+// itself (principle 3: external substrate stays external).
+func (g *GitSource) SetObserver(o *Observer) { g.observer = o }
 
 // Name returns the source identifier.
 func (g *GitSource) Name() string {
@@ -157,6 +165,24 @@ func (g *GitSource) makeCommitItem(hash, author, date, subject, body string) cog
 
 	// Detect type of commit
 	commitType := classifyCommit(subject)
+
+	// Best-effort observation: the projector dedupes by (uri, content_hash)
+	// so repeated sampling of the same commit is a no-op at the read side.
+	// Modified is parsed from the git date; a parse failure falls back to
+	// zero, which the projector treats as "unknown".
+	if g.observer != nil {
+		var modified time.Time
+		if t, err := time.Parse("2006-01-02 15:04:05 -0700", date); err == nil {
+			modified = t
+		}
+		g.observer.Observe(
+			journal.TypeObservationGitCommit,
+			"git",
+			"git:commit:"+hash,
+			[]byte(content),
+			modified,
+		)
+	}
 
 	return cognition.DreamItem{
 		ID:      "git:commit:" + hash[:8],

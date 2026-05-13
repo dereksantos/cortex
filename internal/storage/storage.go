@@ -62,13 +62,35 @@ type Storage struct {
 	sessionsByTime []*SessionMetadata          // sorted by started_at DESC
 	nextSessionID  int64
 
+	// Observation indexes (slice O3)
+	observations map[string]map[string]*Observation // uri -> content_hash -> Observation
+
+	// Contradiction indexes (slice R2)
+	contradictions []*Contradiction
+
+	// Retrieval indexes (slice Z2)
+	retrievals []*Retrieval
+
+	// SessionContext snapshots (slice T2)
+	sessionContextSnapshots []*SessionContextSnapshot
+
+	// Feedback indexes (slice B3)
+	feedbackAll  []*Feedback
+	feedbackByID map[string][]*Feedback // graded_id -> feedbacks
+	retractedIDs map[string]bool        // graded_ids with a retraction
+
 	// Open file handles for append
-	eventFile   *os.File
-	insightFile *os.File
-	entityFile  *os.File
-	relFile     *os.File
-	sessionFile *os.File
-	embFile     *os.File
+	eventFile         *os.File
+	insightFile       *os.File
+	entityFile        *os.File
+	relFile           *os.File
+	sessionFile       *os.File
+	embFile           *os.File
+	observationFile   *os.File
+	contradictionFile *os.File
+	retrievalFile     *os.File
+	sessionCtxFile    *os.File
+	feedbackFile      *os.File
 }
 
 type embeddingEntry struct {
@@ -134,6 +156,153 @@ type insightRecord struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// feedbackRecord projects a feedback.* journal entry. One row per
+// grading event (correction/confirmation/retraction). Provides the input
+// for supersession flags on derivation rows.
+type feedbackRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	Type          string    `json:"type"` // feedback.<kind>
+	GradedID      string    `json:"graded_id,omitempty"`
+	GradedOffset  int64     `json:"graded_offset,omitempty"`
+	Note          string    `json:"note,omitempty"`
+	Replacement   string    `json:"replacement,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Feedback is the derived view of a recorded feedback entry.
+type Feedback struct {
+	Type          string
+	GradedID      string
+	GradedOffset  int64
+	Note          string
+	Replacement   string
+	Reason        string
+	SessionID     string
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
+// sessionContextRecord projects a think.session_context snapshot. One
+// row per Think cycle. Earlier snapshots are kept for replay / debugging.
+type sessionContextRecord struct {
+	ProjectID     string             `json:"project_id,omitempty"`
+	TopicWeights  map[string]float64 `json:"topic_weights"`
+	RecentQueries []string           `json:"recent_queries,omitempty"`
+	CachedQueries []string           `json:"cached_queries,omitempty"`
+	SessionID     string             `json:"session_id,omitempty"`
+	JournalOffset int64              `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time          `json:"recorded_at"`
+}
+
+// SessionContextSnapshot is the derived view of one recorded
+// think.session_context journal entry.
+type SessionContextSnapshot struct {
+	TopicWeights  map[string]float64
+	RecentQueries []string
+	CachedQueries []string
+	SessionID     string
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
+// retrievalRecord projects a resolve.retrieval journal entry. Captures one
+// retrieval decision; the aggregate stats (counts by decision) are
+// re-derived in-memory at rebuild time.
+type retrievalRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	QueryText     string    `json:"query_text"`
+	Decision      string    `json:"decision"`
+	Confidence    float64   `json:"confidence"`
+	ResultCount   int       `json:"result_count"`
+	InjectedIDs   []string  `json:"injected_ids,omitempty"`
+	AvgScore      float64   `json:"avg_score,omitempty"`
+	MaxScore      float64   `json:"max_score,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	Mode          string    `json:"mode,omitempty"`
+	ResolveMs     int64     `json:"resolve_ms,omitempty"`
+	TotalMs       int64     `json:"total_ms,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Retrieval is the derived view of one recorded retrieval decision.
+type Retrieval struct {
+	QueryText     string
+	Decision      string
+	Confidence    float64
+	ResultCount   int
+	InjectedIDs   []string
+	AvgScore      float64
+	MaxScore      float64
+	Reason        string
+	SessionID     string
+	Mode          string
+	ResolveMs     int64
+	TotalMs       int64
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
+// RetrievalStats aggregates the recorded retrievals: total count + count
+// per decision.
+type RetrievalStats struct {
+	Total      int
+	ByDecision map[string]int
+}
+
+// contradictionRecord projects a contradiction detected during reflect.rerank.
+// Each record links one pairwise (or n-way) conflict back to the journal
+// offset of the rerank that detected it.
+type contradictionRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	IDs           []string  `json:"ids"`
+	Reason        string    `json:"reason"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	QueryText     string    `json:"query_text,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Contradiction is the derived view of one recorded conflict between
+// candidates during a Reflect rerank.
+type Contradiction struct {
+	IDs           []string
+	Reason        string
+	JournalOffset int64
+	QueryText     string
+	RecordedAt    time.Time
+}
+
+// observationRecord projects a journal observation entry into the storage
+// log. Two observations with the same (URI, ContentHash) are deduplicated
+// at record time — the substrate hasn't changed, no new evidence.
+type observationRecord struct {
+	ProjectID     string    `json:"project_id,omitempty"`
+	Type          string    `json:"type"` // observation.<kind>
+	SourceName    string    `json:"source_name"`
+	URI           string    `json:"uri"`
+	ContentHash   string    `json:"content_hash"`
+	Size          int64     `json:"size,omitempty"`
+	Modified      time.Time `json:"modified,omitempty"`
+	JournalOffset int64     `json:"journal_offset,omitempty"`
+	RecordedAt    time.Time `json:"recorded_at"`
+}
+
+// Observation is the derived view of a recorded substrate sighting.
+type Observation struct {
+	Type          string
+	SourceName    string
+	URI           string
+	ContentHash   string
+	Size          int64
+	Modified      time.Time
+	JournalOffset int64
+	RecordedAt    time.Time
+}
+
 type sessionRecord struct {
 	ProjectID     string    `json:"project_id,omitempty"`
 	Op            string    `json:"op,omitempty"` // "" = insert, "update" = replace
@@ -174,6 +343,9 @@ func New(cfg *config.Config) (*Storage, error) {
 		embeddings:        make(map[string]*embeddingEntry),
 		sessions:          make(map[string]*SessionMetadata),
 		nextSessionID:     1,
+		observations:      make(map[string]map[string]*Observation),
+		feedbackByID:      make(map[string][]*Feedback),
+		retractedIDs:      make(map[string]bool),
 	}
 
 	// Rebuild in-memory indexes from JSONL files
@@ -222,7 +394,66 @@ func New(cfg *config.Config) (*Storage, error) {
 		s.sessionFile.Close()
 		return nil, fmt.Errorf("failed to open embeddings file: %w", err)
 	}
-
+	s.observationFile, err = openAppend(filepath.Join(dataDir, "observations.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		return nil, fmt.Errorf("failed to open observations file: %w", err)
+	}
+	s.contradictionFile, err = openAppend(filepath.Join(dataDir, "contradictions.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		return nil, fmt.Errorf("failed to open contradictions file: %w", err)
+	}
+	s.retrievalFile, err = openAppend(filepath.Join(dataDir, "retrievals.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		return nil, fmt.Errorf("failed to open retrievals file: %w", err)
+	}
+	s.sessionCtxFile, err = openAppend(filepath.Join(dataDir, "session_context.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		s.retrievalFile.Close()
+		return nil, fmt.Errorf("failed to open session_context file: %w", err)
+	}
+	s.feedbackFile, err = openAppend(filepath.Join(dataDir, "feedback.jsonl"))
+	if err != nil {
+		s.eventFile.Close()
+		s.insightFile.Close()
+		s.entityFile.Close()
+		s.relFile.Close()
+		s.sessionFile.Close()
+		s.embFile.Close()
+		s.observationFile.Close()
+		s.contradictionFile.Close()
+		s.retrievalFile.Close()
+		s.sessionCtxFile.Close()
+		return nil, fmt.Errorf("failed to open feedback file: %w", err)
+	}
 	return s, nil
 }
 
@@ -232,7 +463,7 @@ func (s *Storage) Close() error {
 	defer s.mu.Unlock()
 
 	var firstErr error
-	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile} {
+	for _, f := range []*os.File{s.eventFile, s.insightFile, s.entityFile, s.relFile, s.sessionFile, s.embFile, s.observationFile, s.contradictionFile, s.retrievalFile, s.sessionCtxFile, s.feedbackFile} {
 		if f != nil {
 			if err := f.Close(); err != nil && firstErr == nil {
 				firstErr = err
@@ -240,6 +471,118 @@ func (s *Storage) Close() error {
 		}
 	}
 	return firstErr
+}
+
+// TruncateAllDerivedState removes ALL derived JSONL files written by the
+// journal-class projections and clears the corresponding in-memory
+// indexes. Used by `cortex journal rebuild` (X1) to clear derived state
+// before replaying the full writer-class DAG.
+//
+// What gets truncated:
+//   - events.jsonl (capture)
+//   - observations.jsonl (observation)
+//   - contradictions.jsonl (reflect)
+//   - retrievals.jsonl (resolve)
+//   - session_context.jsonl (think)
+//   - feedback.jsonl (feedback)
+//
+// Eval results are projected by internal/eval/v2's Persister directly
+// (the projector is injected via processor.WithEvalCellResultProjector);
+// the canonical .cortex/db/cell_results.{table,jsonl} are truncated and
+// regenerated by that path, not here.
+//
+// Insights / entities / relationships / sessions / embeddings are NOT
+// truncated — those derive from Dream's earlier direct-storage path
+// (the dual-write transition that landed with D1/D2) and depend on
+// LLM regeneration to repopulate. A future slice will move them under
+// the journal model fully; for now rebuild is best understood as
+// "rebuild every writer-class that has a journal-side source of truth."
+//
+// Caller must ensure no concurrent reads are in flight.
+func (s *Storage) TruncateAllDerivedState() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	type fileEntry struct {
+		handle **os.File
+		name   string
+	}
+	files := []fileEntry{
+		{&s.eventFile, "events.jsonl"},
+		{&s.observationFile, "observations.jsonl"},
+		{&s.contradictionFile, "contradictions.jsonl"},
+		{&s.retrievalFile, "retrievals.jsonl"},
+		{&s.sessionCtxFile, "session_context.jsonl"},
+		{&s.feedbackFile, "feedback.jsonl"},
+	}
+	for _, f := range files {
+		if *f.handle != nil {
+			if err := (*f.handle).Close(); err != nil {
+				return fmt.Errorf("close %s: %w", f.name, err)
+			}
+			*f.handle = nil
+		}
+		path := filepath.Join(s.dataDir, f.name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+		nf, err := openAppend(path)
+		if err != nil {
+			return fmt.Errorf("reopen %s: %w", path, err)
+		}
+		*f.handle = nf
+	}
+
+	// Reset in-memory indexes for the truncated derived state.
+	s.events = make(map[string]*events.Event)
+	s.eventsByTime = nil
+	s.sessionEvents = make(map[string][]string)
+	s.observations = make(map[string]map[string]*Observation)
+	s.contradictions = nil
+	s.retrievals = nil
+	s.sessionContextSnapshots = nil
+	s.feedbackAll = nil
+	s.feedbackByID = make(map[string][]*Feedback)
+	s.retractedIDs = make(map[string]bool)
+	return nil
+}
+
+// TruncateEventLog removes events.jsonl and resets the in-memory event
+// indexes. Used by `cortex journal rebuild` to clear the derived event
+// state before replaying the journal — see docs/journal.md principle 1
+// (CQRS): derived state must be regeneratable from the journal.
+//
+// Caller must ensure no concurrent reads are in flight; rebuild is
+// expected to run with the daemon stopped.
+//
+// Insights, entities, relationships, sessions, and embeddings are NOT
+// touched — those derive from other writer-classes (dream, reflect, etc.)
+// and have their own rebuild paths (slices D2, R2, etc.).
+func (s *Storage) TruncateEventLog() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.eventFile != nil {
+		if err := s.eventFile.Close(); err != nil {
+			return fmt.Errorf("close event file: %w", err)
+		}
+		s.eventFile = nil
+	}
+	eventPath := filepath.Join(s.dataDir, "events.jsonl")
+	if err := os.Remove(eventPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", eventPath, err)
+	}
+
+	s.events = make(map[string]*events.Event)
+	s.eventsByTime = nil
+	s.sessionEvents = make(map[string][]string)
+
+	f, err := openAppend(eventPath)
+	if err != nil {
+		return fmt.Errorf("reopen %s: %w", eventPath, err)
+	}
+	s.eventFile = f
+	return nil
 }
 
 // --- Index rebuild ---
@@ -263,7 +606,431 @@ func (s *Storage) rebuildIndexes() error {
 	if err := s.rebuildSessionIndexes(); err != nil {
 		return err
 	}
+	if err := s.rebuildObservationIndexes(); err != nil {
+		return err
+	}
+	if err := s.rebuildContradictionIndexes(); err != nil {
+		return err
+	}
+	if err := s.rebuildRetrievalIndexes(); err != nil {
+		return err
+	}
+	if err := s.rebuildSessionContextIndexes(); err != nil {
+		return err
+	}
+	if err := s.rebuildFeedbackIndexes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// rebuildFeedbackIndexes replays feedback.jsonl into the feedback maps.
+func (s *Storage) rebuildFeedbackIndexes() error {
+	records, err := readLines[feedbackRecord](filepath.Join(s.dataDir, "feedback.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		fb := &Feedback{
+			Type:          r.Type,
+			GradedID:      r.GradedID,
+			GradedOffset:  r.GradedOffset,
+			Note:          r.Note,
+			Replacement:   r.Replacement,
+			Reason:        r.Reason,
+			SessionID:     r.SessionID,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		}
+		s.feedbackAll = append(s.feedbackAll, fb)
+		if r.GradedID != "" {
+			s.feedbackByID[r.GradedID] = append(s.feedbackByID[r.GradedID], fb)
+			if r.Type == "feedback.retraction" {
+				s.retractedIDs[r.GradedID] = true
+			}
+		}
+	}
+	return nil
+}
+
+// RecordFeedback projects one feedback.* entry. Updates the by-id index
+// and the retracted-ids set. Append-only.
+func (s *Storage) RecordFeedback(f *Feedback) error {
+	if f == nil {
+		return fmt.Errorf("nil feedback")
+	}
+	if f.Type == "" {
+		return fmt.Errorf("feedback requires Type")
+	}
+	if f.GradedID == "" && f.GradedOffset == 0 {
+		return fmt.Errorf("feedback requires GradedID or GradedOffset")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if f.RecordedAt.IsZero() {
+		f.RecordedAt = time.Now().UTC()
+	}
+	rec := feedbackRecord{
+		ProjectID:     s.projectID,
+		Type:          f.Type,
+		GradedID:      f.GradedID,
+		GradedOffset:  f.GradedOffset,
+		Note:          f.Note,
+		Replacement:   f.Replacement,
+		Reason:        f.Reason,
+		SessionID:     f.SessionID,
+		JournalOffset: f.JournalOffset,
+		RecordedAt:    f.RecordedAt,
+	}
+	if err := appendLine(s.feedbackFile, rec); err != nil {
+		return fmt.Errorf("append feedback: %w", err)
+	}
+	s.feedbackAll = append(s.feedbackAll, f)
+	if f.GradedID != "" {
+		s.feedbackByID[f.GradedID] = append(s.feedbackByID[f.GradedID], f)
+		if f.Type == "feedback.retraction" {
+			s.retractedIDs[f.GradedID] = true
+		}
+	}
+	return nil
+}
+
+// FeedbackFor returns the feedback entries that grade a given derivation
+// (matched by GradedID). Most-recent-last.
+func (s *Storage) FeedbackFor(gradedID string) []*Feedback {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Feedback, len(s.feedbackByID[gradedID]))
+	copy(out, s.feedbackByID[gradedID])
+	return out
+}
+
+// IsRetracted reports whether the given graded ID has at least one
+// feedback.retraction entry recorded. Used by query paths to hide
+// retracted derivations from results.
+func (s *Storage) IsRetracted(gradedID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.retractedIDs[gradedID]
+}
+
+// rebuildSessionContextIndexes replays session_context.jsonl into the
+// snapshot list.
+func (s *Storage) rebuildSessionContextIndexes() error {
+	records, err := readLines[sessionContextRecord](filepath.Join(s.dataDir, "session_context.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.sessionContextSnapshots = append(s.sessionContextSnapshots, &SessionContextSnapshot{
+			TopicWeights:  r.TopicWeights,
+			RecentQueries: r.RecentQueries,
+			CachedQueries: r.CachedQueries,
+			SessionID:     r.SessionID,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordSessionContextSnapshot projects one think.session_context entry.
+// Append-only — every Think cycle adds a snapshot.
+func (s *Storage) RecordSessionContextSnapshot(snap *SessionContextSnapshot) error {
+	if snap == nil {
+		return fmt.Errorf("nil snapshot")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if snap.RecordedAt.IsZero() {
+		snap.RecordedAt = time.Now().UTC()
+	}
+	rec := sessionContextRecord{
+		ProjectID:     s.projectID,
+		TopicWeights:  snap.TopicWeights,
+		RecentQueries: snap.RecentQueries,
+		CachedQueries: snap.CachedQueries,
+		SessionID:     snap.SessionID,
+		JournalOffset: snap.JournalOffset,
+		RecordedAt:    snap.RecordedAt,
+	}
+	if err := appendLine(s.sessionCtxFile, rec); err != nil {
+		return fmt.Errorf("append session_context: %w", err)
+	}
+	s.sessionContextSnapshots = append(s.sessionContextSnapshots, snap)
+	return nil
+}
+
+// LatestSessionContext returns the most recent recorded snapshot, or nil.
+func (s *Storage) LatestSessionContext() *SessionContextSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.sessionContextSnapshots) == 0 {
+		return nil
+	}
+	return s.sessionContextSnapshots[len(s.sessionContextSnapshots)-1]
+}
+
+// SessionContextSnapshotCount returns the number of recorded snapshots.
+func (s *Storage) SessionContextSnapshotCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.sessionContextSnapshots)
+}
+
+// rebuildRetrievalIndexes replays retrievals.jsonl into the in-memory list.
+func (s *Storage) rebuildRetrievalIndexes() error {
+	records, err := readLines[retrievalRecord](filepath.Join(s.dataDir, "retrievals.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.retrievals = append(s.retrievals, &Retrieval{
+			QueryText:     r.QueryText,
+			Decision:      r.Decision,
+			Confidence:    r.Confidence,
+			ResultCount:   r.ResultCount,
+			InjectedIDs:   r.InjectedIDs,
+			AvgScore:      r.AvgScore,
+			MaxScore:      r.MaxScore,
+			Reason:        r.Reason,
+			SessionID:     r.SessionID,
+			Mode:          r.Mode,
+			ResolveMs:     r.ResolveMs,
+			TotalMs:       r.TotalMs,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordRetrieval projects one resolve.retrieval entry. Append-only — no
+// dedup. Rebuild safely re-projects everything.
+func (s *Storage) RecordRetrieval(r *Retrieval) error {
+	if r == nil {
+		return fmt.Errorf("nil retrieval")
+	}
+	if r.Decision == "" {
+		return fmt.Errorf("retrieval requires Decision")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if r.RecordedAt.IsZero() {
+		r.RecordedAt = time.Now().UTC()
+	}
+	rec := retrievalRecord{
+		ProjectID:     s.projectID,
+		QueryText:     r.QueryText,
+		Decision:      r.Decision,
+		Confidence:    r.Confidence,
+		ResultCount:   r.ResultCount,
+		InjectedIDs:   r.InjectedIDs,
+		AvgScore:      r.AvgScore,
+		MaxScore:      r.MaxScore,
+		Reason:        r.Reason,
+		SessionID:     r.SessionID,
+		Mode:          r.Mode,
+		ResolveMs:     r.ResolveMs,
+		TotalMs:       r.TotalMs,
+		JournalOffset: r.JournalOffset,
+		RecordedAt:    r.RecordedAt,
+	}
+	if err := appendLine(s.retrievalFile, rec); err != nil {
+		return fmt.Errorf("append retrieval: %w", err)
+	}
+	s.retrievals = append(s.retrievals, r)
+	return nil
+}
+
+// GetRetrievals returns the most recent N retrievals.
+func (s *Storage) GetRetrievals(limit int) []*Retrieval {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := len(s.retrievals)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]*Retrieval, 0, n)
+	for i := len(s.retrievals) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, s.retrievals[i])
+	}
+	return out
+}
+
+// GetRetrievalStats aggregates the recorded retrievals into total +
+// per-decision counts. Computed at call time from the in-memory list.
+func (s *Storage) GetRetrievalStats() RetrievalStats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stats := RetrievalStats{
+		ByDecision: make(map[string]int),
+	}
+	for _, r := range s.retrievals {
+		stats.Total++
+		stats.ByDecision[r.Decision]++
+	}
+	return stats
+}
+
+// rebuildContradictionIndexes replays contradictions.jsonl into the
+// in-memory list. Order preserved.
+func (s *Storage) rebuildContradictionIndexes() error {
+	records, err := readLines[contradictionRecord](filepath.Join(s.dataDir, "contradictions.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		s.contradictions = append(s.contradictions, &Contradiction{
+			IDs:           r.IDs,
+			Reason:        r.Reason,
+			JournalOffset: r.JournalOffset,
+			QueryText:     r.QueryText,
+			RecordedAt:    r.RecordedAt,
+		})
+	}
+	return nil
+}
+
+// RecordContradiction projects one contradiction detected during reranking.
+// Append-only — no dedup. Replay during rebuild may produce duplicate rows
+// if the same rerank entry projects twice; callers can dedup at query
+// time by (JournalOffset, IDs joined).
+func (s *Storage) RecordContradiction(c *Contradiction) error {
+	if c == nil {
+		return fmt.Errorf("nil contradiction")
+	}
+	if c.Reason == "" || len(c.IDs) == 0 {
+		return fmt.Errorf("contradiction requires Reason and at least one ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if c.RecordedAt.IsZero() {
+		c.RecordedAt = time.Now().UTC()
+	}
+	rec := contradictionRecord{
+		ProjectID:     s.projectID,
+		IDs:           c.IDs,
+		Reason:        c.Reason,
+		JournalOffset: c.JournalOffset,
+		QueryText:     c.QueryText,
+		RecordedAt:    c.RecordedAt,
+	}
+	if err := appendLine(s.contradictionFile, rec); err != nil {
+		return fmt.Errorf("append contradiction: %w", err)
+	}
+	s.contradictions = append(s.contradictions, c)
+	return nil
+}
+
+// GetContradictions returns the most recent N contradictions.
+func (s *Storage) GetContradictions(limit int) []*Contradiction {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := len(s.contradictions)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	out := make([]*Contradiction, 0, n)
+	for i := len(s.contradictions) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, s.contradictions[i])
+	}
+	return out
+}
+
+// rebuildObservationIndexes replays observations.jsonl into the in-memory
+// dedup map. Later observations of the same (URI, content_hash) overwrite
+// earlier ones (preserving the most recent JournalOffset / RecordedAt
+// metadata) but do not produce duplicate keys.
+func (s *Storage) rebuildObservationIndexes() error {
+	records, err := readLines[observationRecord](filepath.Join(s.dataDir, "observations.jsonl"))
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		if r.URI == "" || r.ContentHash == "" {
+			continue
+		}
+		byHash, ok := s.observations[r.URI]
+		if !ok {
+			byHash = make(map[string]*Observation)
+			s.observations[r.URI] = byHash
+		}
+		byHash[r.ContentHash] = &Observation{
+			Type:          r.Type,
+			SourceName:    r.SourceName,
+			URI:           r.URI,
+			ContentHash:   r.ContentHash,
+			Size:          r.Size,
+			Modified:      r.Modified,
+			JournalOffset: r.JournalOffset,
+			RecordedAt:    r.RecordedAt,
+		}
+	}
+	return nil
+}
+
+// RecordObservation projects a journal observation entry. Idempotent on
+// (URI, content_hash): if the substrate hasn't changed since the last
+// observation, returns false and does not append a new record.
+// Returns true when a new (URI, content_hash) is recorded.
+func (s *Storage) RecordObservation(o *Observation) (bool, error) {
+	if o == nil {
+		return false, fmt.Errorf("nil observation")
+	}
+	if o.URI == "" || o.ContentHash == "" {
+		return false, fmt.Errorf("observation requires URI and ContentHash")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	byHash, ok := s.observations[o.URI]
+	if !ok {
+		byHash = make(map[string]*Observation)
+		s.observations[o.URI] = byHash
+	}
+	if _, exists := byHash[o.ContentHash]; exists {
+		return false, nil
+	}
+
+	if o.RecordedAt.IsZero() {
+		o.RecordedAt = time.Now().UTC()
+	}
+	rec := observationRecord{
+		ProjectID:     s.projectID,
+		Type:          o.Type,
+		SourceName:    o.SourceName,
+		URI:           o.URI,
+		ContentHash:   o.ContentHash,
+		Size:          o.Size,
+		Modified:      o.Modified,
+		JournalOffset: o.JournalOffset,
+		RecordedAt:    o.RecordedAt,
+	}
+	if err := appendLine(s.observationFile, rec); err != nil {
+		return false, fmt.Errorf("append observation: %w", err)
+	}
+	byHash[o.ContentHash] = o
+	return true, nil
+}
+
+// HasObservation reports whether (uri, contentHash) is already recorded.
+// Used by `cortex journal verify` and by callers that want to short-circuit
+// substrate parsing when content hasn't changed.
+func (s *Storage) HasObservation(uri, contentHash string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byHash, ok := s.observations[uri]
+	if !ok {
+		return false
+	}
+	_, exists := byHash[contentHash]
+	return exists
 }
 
 func (s *Storage) rebuildEventIndexes() error {

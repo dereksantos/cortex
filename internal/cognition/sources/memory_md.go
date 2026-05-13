@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -20,6 +21,7 @@ type MemoryMDSource struct {
 	homeDir     string
 	projectRoot string
 	rng         *rand.Rand
+	observer    *Observer
 }
 
 // NewMemoryMDSource creates a new MemoryMDSource.
@@ -30,6 +32,10 @@ func NewMemoryMDSource(homeDir, projectRoot string) *MemoryMDSource {
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
+
+// SetObserver wires the source to emit observation.memory_file journal
+// entries on each file read. Pass nil to disable.
+func (m *MemoryMDSource) SetObserver(o *Observer) { m.observer = o }
 
 // Name returns the source identifier.
 func (m *MemoryMDSource) Name() string {
@@ -117,6 +123,16 @@ func (m *MemoryMDSource) parseMemoryFile(path string) ([]cognition.DreamItem, er
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+
+	// Record the observation: source pointer + content hash, no copy.
+	if m.observer != nil {
+		var mod time.Time
+		if info, err := os.Stat(path); err == nil {
+			mod = info.ModTime()
+		}
+		m.observer.Observe(journal.TypeObservationMemoryFile, m.Name(),
+			"file://"+path, content, mod)
 	}
 
 	text := string(content)

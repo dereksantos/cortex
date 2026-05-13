@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cognition/fractal"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -31,10 +32,39 @@ type ProjectSource struct {
 	projectRoot    string
 	rng            *rand.Rand
 	gitignoreRules []gitignoreRule
+	observer       *Observer
 
 	churnMu     sync.Mutex
 	churnCache  map[string]int
 	churnLoaded time.Time
+}
+
+// SetObserver wires the source to emit observation.project_file journal
+// entries per file that contributes to a Sample. Pass nil to disable.
+// Observations carry the URI + content_hash + size only — the file's
+// bytes never enter the journal (principle 3).
+func (p *ProjectSource) SetObserver(o *Observer) { p.observer = o }
+
+// observeFile emits one observation.project_file entry for fc. The
+// content hash is computed over the file's bytes (capped at 5 MiB by
+// walkCandidates), so it's a one-shot read per observed file. Best
+// effort: errors are swallowed by the observer; an unreadable file
+// produces no entry.
+func (p *ProjectSource) observeFile(fc fileCandidate) {
+	if p.observer == nil {
+		return
+	}
+	data, err := os.ReadFile(fc.path)
+	if err != nil {
+		return
+	}
+	p.observer.Observe(
+		journal.TypeObservationProjectFile,
+		"project",
+		"file://"+fc.path,
+		data,
+		fc.mtime,
+	)
 }
 
 // gitignoreRule represents a single .gitignore pattern.
@@ -111,11 +141,20 @@ func (p *ProjectSource) Sample(ctx context.Context, n int) ([]cognition.DreamIte
 	// Weighted reservoir over the rest.
 	picked := weightedSample(candidates, n-len(seeds), p.rng)
 
-	// Stitch and emit regions.
+	// Stitch and emit regions. Observe each unique file once per Sample
+	// so the journal volume is proportional to selected files, not to
+	// regions or to the candidate pool.
 	all := append(seeds, picked...)
 	items := make([]cognition.DreamItem, 0, n)
+	observed := make(map[string]struct{}, len(all))
 	for _, fc := range all {
 		regs := p.regionsFor(fc)
+		if p.observer != nil {
+			if _, seen := observed[fc.path]; !seen {
+				observed[fc.path] = struct{}{}
+				p.observeFile(fc)
+			}
+		}
 		for _, r := range regs {
 			content, rerr := fractal.ReadRegion(fc.path, r.Offset, r.Length)
 			if rerr != nil || content == "" {

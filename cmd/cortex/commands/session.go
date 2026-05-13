@@ -157,19 +157,28 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 	stateWriter := intcognition.NewStateWriter(cfg.ContextDir)
 	cortex.SetStateWriter(stateWriter)
 
-	// Register dream sources for background exploration
-	cortex.RegisterSource(sources.NewProjectSource(cfg.ProjectRoot))
+	// Register dream sources for background exploration. The observer
+	// emits observation.* journal entries on each substrate read so
+	// derivations carry full provenance.
+	observer := sources.NewObserver(cfg.ContextDir)
+	projSrc := sources.NewProjectSource(cfg.ProjectRoot)
+	projSrc.SetObserver(observer)
+	cortex.RegisterSource(projSrc)
 	cortex.RegisterSource(sources.NewCortexSource(store))
 
 	// Register Claude history source for session transcript exploration
 	homeDir, _ := os.UserHomeDir()
 	if homeDir != "" {
 		claudeProjectsDir := filepath.Join(homeDir, ".claude", "projects")
-		cortex.RegisterSource(sources.NewClaudeHistorySource(claudeProjectsDir))
+		claudeSrc := sources.NewClaudeHistorySource(claudeProjectsDir)
+		claudeSrc.SetObserver(observer)
+		cortex.RegisterSource(claudeSrc)
 	}
 
 	// Register git source for commit history exploration
-	cortex.RegisterSource(sources.NewGitSource(cfg.ProjectRoot))
+	gitSrc := sources.NewGitSource(cfg.ProjectRoot)
+	gitSrc.SetObserver(observer)
+	cortex.RegisterSource(gitSrc)
 
 	// Determine if this is the first prompt of the session
 	isFirstPrompt := isFirstPromptInSession(store, sessionID)
@@ -401,11 +410,12 @@ func writeRetrievalStats(contextDir string, query string, mode cognition.Retriev
 		stats.LastReflexMs = elapsedMinusResolve
 	}
 
-	// Write stats
-	statsWriter := intcognition.NewRetrievalStatsWriter(contextDir)
-	statsWriter.WriteStats(stats)
-
-	// Append to history for latency trend analysis
+	// Note: retrieval_stats.json is no longer written from this path
+	// (Z1 unification). The watch UI now reads from the journal-projected
+	// storage.Retrievals via retrievalStatsFromStorage(). The
+	// retrieval_stats_history.jsonl latency-trend log is preserved
+	// because its per-step latency breakdown isn't yet captured in
+	// resolve.retrieval entries — see docs/journal-design-log.md item 5.
 	historyWriter := intcognition.NewRetrievalStatsHistoryWriter(contextDir)
 	historyWriter.AppendFromStats(stats)
 

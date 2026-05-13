@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
@@ -56,9 +57,9 @@ func (c *Capture) CaptureFromStdin() error {
 		event.ID = generateEventID()
 	}
 
-	// Write to queue (atomic operation)
-	if err := c.writeToQueue(event); err != nil {
-		return fmt.Errorf("failed to write to queue: %w", err)
+	// Append to journal (capture writer-class, fsync per entry)
+	if err := c.writeToJournal(event); err != nil {
+		return fmt.Errorf("failed to write to journal: %w", err)
 	}
 
 	elapsed := time.Since(start)
@@ -82,37 +83,37 @@ func (c *Capture) CaptureEvent(event *events.Event) error {
 		event.ID = generateEventID()
 	}
 
-	// Write to queue
-	return c.writeToQueue(event)
+	// Append to journal
+	return c.writeToJournal(event)
 }
 
-// writeToQueue writes event to pending queue with atomic rename
-func (c *Capture) writeToQueue(event *events.Event) error {
-	// Ensure queue directory exists
-	queueDir := filepath.Join(c.cfg.ContextDir, "queue", "pending")
-	if err := os.MkdirAll(queueDir, 0755); err != nil {
-		return fmt.Errorf("failed to create queue dir: %w", err)
-	}
-
-	// Serialize event
-	data, err := event.ToJSON()
+// writeToJournal serializes the event and appends it to the capture
+// writer-class of the journal at <ContextDir>/journal/capture/. fsync is
+// applied per entry so input loss on power-fail is bounded to the last
+// in-flight write — see principle 4 in docs/journal.md.
+func (c *Capture) writeToJournal(event *events.Event) error {
+	classDir := filepath.Join(c.cfg.ContextDir, "journal", "capture")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to serialize event: %w", err)
+		return fmt.Errorf("open journal writer: %w", err)
 	}
+	defer w.Close()
 
-	// Write to temp file first
-	tempFile := filepath.Join(queueDir, event.ID+".tmp")
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	payload, err := event.ToJSON()
+	if err != nil {
+		return fmt.Errorf("serialize event: %w", err)
 	}
-
-	// Atomic rename
-	finalFile := filepath.Join(queueDir, event.ID+".json")
-	if err := os.Rename(tempFile, finalFile); err != nil {
-		os.Remove(tempFile) // Cleanup on failure
-		return fmt.Errorf("failed to rename file: %w", err)
+	entry := &journal.Entry{
+		Type:    "capture.event",
+		V:       1,
+		Payload: payload,
 	}
-
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append to journal: %w", err)
+	}
 	return nil
 }
 

@@ -1,128 +1,396 @@
-// Package processor provides async event processing with queue management
+// Package processor projects journal entries to derived state in SQLite
+// and routes the freshly-projected events through the cognition pipeline.
+//
+// Pre-journal, this package drained .cortex/queue/ via queue.ProcessPending.
+// Post-C2 it runs a journal.Indexer per writer-class instead — see
+// docs/journal.md for the CQRS commitment. The queue package will be
+// removed in slice C6 once no callers remain.
 package processor
 
 import (
 	"fmt"
 	"log"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/queue"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
-// EventCallback is called when events are processed from the queue.
-// This allows external components (like Cortex) to ingest events.
+// EventCallback is invoked with the events projected in a batch. Cortex's
+// cognition pipeline (Dream, Think) consumes this.
 type EventCallback func([]*events.Event)
 
-// Processor handles async event processing.
-// Queue management and routing to cognition pipeline.
-// LLM analysis is handled by cognitive modes (Dream, Think) not here.
+// EvalCellResultProjector materializes one parsed eval.cell_result
+// payload to the read-side. Wired by callers via
+// WithEvalCellResultProjector; production callers route this to
+// internal/eval/v2's Persister.ProjectCellFromEntry so SQLite +
+// cell_results.jsonl regenerate from the journal alone.
+//
+// When no projector is wired, eval.cell_result entries are skipped: the
+// cursor advances without side effects. Rebuild resets the cursor, so a
+// later run with a wired projector picks them up.
+type EvalCellResultProjector func(*journal.EvalCellResultPayload) error
+
+// Option configures a Processor at construction time.
+type Option func(*Processor)
+
+// WithEvalCellResultProjector wires the eval.cell_result projector. See
+// EvalCellResultProjector for semantics.
+func WithEvalCellResultProjector(fn EvalCellResultProjector) Option {
+	return func(p *Processor) { p.evalCellResultProjector = fn }
+}
+
+// Processor runs journal indexers on a tick, projecting capture.event
+// entries (and, post slices O/D/R/Z/T/B/E, other writer-classes) to SQLite,
+// then notifies the cognition pipeline with the events it just stored.
 type Processor struct {
 	cfg     *config.Config
 	storage *storage.Storage
-	queue   *queue.Manager
 	running atomic.Bool
 
-	// Additional queue directories to process (for multi-project support)
-	extraQueueDirs []string
+	registry *journal.Registry
+	indexers []*journal.Indexer
 
-	// Callback for routing events through cognition pipeline
 	eventCallback EventCallback
+
+	evalCellResultProjector EvalCellResultProjector
+
+	batchMu     sync.Mutex
+	batchEvents []*events.Event
 }
 
-// New creates a new Processor
-func New(cfg *config.Config, store *storage.Storage, queueMgr *queue.Manager) *Processor {
-	return &Processor{
+// New creates a Processor wired with the default writer-class projectors.
+// The default journal class dirs (<ContextDir>/journal/{capture,observation,
+// dream,reflect,resolve,think,feedback,eval}) are registered automatically;
+// additional projects' journals can be added via AddJournalDir.
+//
+// eval.cell_result entries require an injected projector (see
+// WithEvalCellResultProjector) — production callers route this to
+// internal/eval/v2's Persister.ProjectCellFromEntry so SQLite +
+// cell_results.jsonl regenerate from the journal alone.
+func New(cfg *config.Config, store *storage.Storage, opts ...Option) *Processor {
+	p := &Processor{
 		cfg:     cfg,
 		storage: store,
-		queue:   queueMgr,
-		// running zero-value is false
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	p.registry = journal.NewRegistry()
+	p.registry.Register("capture.event", 1, p.projectCaptureEvent)
+	for _, typ := range []string{
+		journal.TypeObservationClaudeTranscript,
+		journal.TypeObservationGitCommit,
+		journal.TypeObservationMemoryFile,
+		journal.TypeObservationProjectFile,
+	} {
+		p.registry.Register(typ, 1, p.projectObservation)
+	}
+	p.registry.Register(journal.TypeDreamInsight, 1, p.projectDreamInsight)
+	p.registry.Register(journal.TypeReflectRerank, 1, p.projectReflectRerank)
+	p.registry.Register(journal.TypeResolveRetrieval, 1, p.projectResolveRetrieval)
+	p.registry.Register(journal.TypeThinkSessionContext, 1, p.projectThinkSessionContext)
+	p.registry.Register(journal.TypeThinkTopicWeight, 1, p.projectThinkTopicWeight)
+	for _, typ := range []string{
+		journal.TypeFeedbackCorrection,
+		journal.TypeFeedbackConfirmation,
+		journal.TypeFeedbackRetraction,
+	} {
+		p.registry.Register(typ, 1, p.projectFeedback)
+	}
+	p.registry.Register(journal.TypeEvalCellResult, 1, p.projectEvalCellResult)
+
+	if cfg != nil && cfg.ContextDir != "" {
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "capture"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "observation"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "dream"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "reflect"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "resolve"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "think"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "feedback"))
+		p.AddJournalDir(filepath.Join(cfg.ContextDir, "journal", "eval"))
+	}
+	return p
 }
 
-// AddQueueDir adds an additional queue directory to process each tick.
-// The directory should contain pending/, processing/, and processed/ subdirectories.
-func (p *Processor) AddQueueDir(dir string) {
-	p.extraQueueDirs = append(p.extraQueueDirs, dir)
+// projectCaptureEvent stores a capture.event entry's payload to SQLite and
+// records the event for the post-batch cognition callback. Idempotent:
+// storage.StoreEvent uses INSERT OR REPLACE by event ID so re-projection
+// during rebuild does not double-count.
+func (p *Processor) projectCaptureEvent(e *journal.Entry) error {
+	ev, err := events.FromJSON(e.Payload)
+	if err != nil {
+		return fmt.Errorf("parse capture.event payload at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.StoreEvent(ev); err != nil {
+		return fmt.Errorf("store event %s: %w", ev.ID, err)
+	}
+	p.batchMu.Lock()
+	p.batchEvents = append(p.batchEvents, ev)
+	p.batchMu.Unlock()
+	return nil
 }
 
-// Start starts the processor
+// projectEvalCellResult dispatches to the injected
+// EvalCellResultProjector. When nil (no projector wired) the entry is
+// skipped — the indexer's cursor still advances, but the read side is
+// not materialized. This matches the policy that production callers
+// (daemon, ingest, journal rebuild) MUST wire a projector; absence is
+// treated as deliberate skip rather than an error.
+func (p *Processor) projectEvalCellResult(e *journal.Entry) error {
+	if p.evalCellResultProjector == nil {
+		return nil
+	}
+	payload, err := journal.ParseEvalCellResult(e)
+	if err != nil {
+		return fmt.Errorf("parse eval.cell_result at offset %d: %w", e.Offset, err)
+	}
+	if err := p.evalCellResultProjector(payload); err != nil {
+		return fmt.Errorf("project eval.cell_result at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectFeedback records a feedback.* entry to storage. The entry's Type
+// (correction / confirmation / retraction) is preserved in the Feedback
+// row; storage indexes by GradedID and tracks the retracted-id set.
+func (p *Processor) projectFeedback(e *journal.Entry) error {
+	payload, err := journal.ParseFeedback(e)
+	if err != nil {
+		return fmt.Errorf("parse feedback at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordFeedback(&storage.Feedback{
+		Type:          e.Type,
+		GradedID:      payload.GradedID,
+		GradedOffset:  int64(payload.GradedOffset),
+		Note:          payload.Note,
+		Replacement:   payload.Replacement,
+		Reason:        payload.Reason,
+		SessionID:     payload.SessionID,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record feedback at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectThinkTopicWeight is a placeholder projector for granular
+// topic_weight delta entries (T1 follow-up). The session_context
+// snapshot already captures the latest weights for retrieval; the
+// granular stream is currently consumed only by replay tooling reading
+// the journal directly, so this projector validates the payload but
+// does not write to storage. A future writer-class index (e.g.,
+// per-topic weight history table) can be added without re-emitting the
+// underlying entries.
+func (p *Processor) projectThinkTopicWeight(e *journal.Entry) error {
+	if _, err := journal.ParseThinkTopicWeight(e); err != nil {
+		return fmt.Errorf("parse think.topic_weight at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectThinkSessionContext records a session-context snapshot.
+func (p *Processor) projectThinkSessionContext(e *journal.Entry) error {
+	payload, err := journal.ParseThinkSessionContext(e)
+	if err != nil {
+		return fmt.Errorf("parse think.session_context at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordSessionContextSnapshot(&storage.SessionContextSnapshot{
+		TopicWeights:  payload.TopicWeights,
+		RecentQueries: payload.RecentQueries,
+		CachedQueries: payload.CachedQueries,
+		SessionID:     payload.SessionID,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record session_context at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectResolveRetrieval records one retrieval decision to storage's
+// retrieval log (slice Z2).
+func (p *Processor) projectResolveRetrieval(e *journal.Entry) error {
+	payload, err := journal.ParseResolveRetrieval(e)
+	if err != nil {
+		return fmt.Errorf("parse resolve.retrieval at offset %d: %w", e.Offset, err)
+	}
+	if err := p.storage.RecordRetrieval(&storage.Retrieval{
+		QueryText:     payload.QueryText,
+		Decision:      payload.Decision,
+		Confidence:    payload.Confidence,
+		ResultCount:   payload.ResultCount,
+		InjectedIDs:   payload.InjectedIDs,
+		AvgScore:      payload.AvgScore,
+		MaxScore:      payload.MaxScore,
+		Reason:        payload.Reason,
+		SessionID:     payload.SessionID,
+		Mode:          payload.Mode,
+		ResolveMs:     payload.ResolveMs,
+		TotalMs:       payload.TotalMs,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}); err != nil {
+		return fmt.Errorf("record retrieval at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectReflectRerank records each contradiction surfaced by a rerank
+// entry to storage. The rerank itself is preserved by the journal; the
+// projection extracts the contradictions sub-records into a queryable
+// derived view (storage.GetContradictions).
+func (p *Processor) projectReflectRerank(e *journal.Entry) error {
+	payload, err := journal.ParseReflectRerank(e)
+	if err != nil {
+		return fmt.Errorf("parse reflect.rerank at offset %d: %w", e.Offset, err)
+	}
+	for _, c := range payload.Contradictions {
+		if c.Reason == "" || len(c.IDs) == 0 {
+			continue
+		}
+		if err := p.storage.RecordContradiction(&storage.Contradiction{
+			IDs:           c.IDs,
+			Reason:        c.Reason,
+			JournalOffset: int64(e.Offset),
+			QueryText:     payload.QueryText,
+			RecordedAt:    e.TS,
+		}); err != nil {
+			return fmt.Errorf("record contradiction at offset %d: %w", e.Offset, err)
+		}
+	}
+	return nil
+}
+
+// projectDreamInsight projects a dream.insight entry to storage. Calls
+// StoreInsightWithSession with the payload's fields. Storage's insight
+// log is append-only with soft-update semantics (op="update" records),
+// so re-projection during rebuild is safe.
+func (p *Processor) projectDreamInsight(e *journal.Entry) error {
+	payload, err := journal.ParseDreamInsight(e)
+	if err != nil {
+		return fmt.Errorf("parse dream.insight at offset %d: %w", e.Offset, err)
+	}
+	p.storage.StoreInsightWithSession(
+		payload.InsightID,
+		payload.Category,
+		payload.Content,
+		payload.Importance,
+		payload.Tags,
+		payload.Reasoning,
+		payload.SessionID,
+		payload.SourceName,
+	)
+	return nil
+}
+
+// projectObservation projects an observation.* entry to storage. Idempotent
+// via storage.RecordObservation's (URI, content_hash) dedup.
+func (p *Processor) projectObservation(e *journal.Entry) error {
+	payload, err := journal.ParseObservation(e)
+	if err != nil {
+		return fmt.Errorf("parse observation at offset %d: %w", e.Offset, err)
+	}
+	obs := &storage.Observation{
+		Type:          e.Type,
+		SourceName:    payload.SourceName,
+		URI:           payload.URI,
+		ContentHash:   payload.ContentHash,
+		Size:          payload.Size,
+		Modified:      payload.Modified,
+		JournalOffset: int64(e.Offset),
+		RecordedAt:    e.TS,
+	}
+	if _, err := p.storage.RecordObservation(obs); err != nil {
+		return fmt.Errorf("record observation: %w", err)
+	}
+	return nil
+}
+
+// AddJournalDir adds an additional writer-class directory to project from
+// each tick. Used for multi-project setups where each project has its own
+// .cortex/journal/capture/.
+func (p *Processor) AddJournalDir(classDir string) {
+	p.indexers = append(p.indexers, journal.NewIndexer(journal.IndexerOpts{
+		ClassDir:  classDir,
+		Registry:  p.registry,
+		OnUnknown: journal.UnknownLogAndSkip,
+	}))
+}
+
+// Start starts the processor's tick loop.
 func (p *Processor) Start() error {
 	if !p.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("processor already running")
 	}
-
 	log.Println("Processor started")
-
-	// Start main processing loop
 	go p.processLoop()
-
 	return nil
 }
 
-// Stop stops the processor
+// Stop stops the tick loop. Idempotent.
 func (p *Processor) Stop() {
 	p.running.Store(false)
 	log.Println("Processor stopped")
 }
 
-// SetEventCallback sets a callback to be called when events are processed.
-// This allows routing events through the cognition pipeline.
+// SetEventCallback wires the cognition pipeline. Called with the events
+// projected during each batch.
 func (p *Processor) SetEventCallback(cb EventCallback) {
 	p.eventCallback = cb
 }
 
-// processLoop is the main processing loop
+// RunBatch projects a single tick of work synchronously. Exposed so the
+// `cortex ingest` one-shot command (slice C3) can drive the same indexer
+// without starting the loop.
+func (p *Processor) RunBatch() (int, error) {
+	return p.processBatchSync()
+}
+
 func (p *Processor) processLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-
 	for p.running.Load() {
 		<-ticker.C
-		p.processBatch()
+		if _, err := p.processBatchSync(); err != nil {
+			log.Printf("processor: %v", err)
+		}
 	}
 }
 
-// processBatch processes a batch of events from all queue directories
-// and routes them through the cognition pipeline.
-func (p *Processor) processBatch() {
-	totalProcessed := 0
-
-	// Process default queue
-	processed, err := p.queue.ProcessPending()
-	if err != nil {
-		log.Printf("Error processing default queue: %v", err)
-	} else {
-		totalProcessed += processed
-	}
-
-	// Process additional project queues
-	for _, dir := range p.extraQueueDirs {
-		n, err := p.queue.ProcessPendingAt(dir)
-		if err != nil {
-			log.Printf("Error processing queue at %s: %v", dir, err)
-			continue
+// processBatchSync runs each indexer once and dispatches the cognition
+// callback if events were projected. Returns the total entry count handled
+// (including LogAndSkip'd unknown entries).
+func (p *Processor) processBatchSync() (int, error) {
+	total := 0
+	var firstErr error
+	for _, ix := range p.indexers {
+		n, err := ix.RunOnce()
+		total += n
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-		totalProcessed += n
 	}
-
-	if totalProcessed > 0 {
-		log.Printf("Processed %d events from queue(s)", totalProcessed)
-
-		// Get recent events for routing through cognition
-		events, err := p.storage.GetRecentEvents(totalProcessed)
-		if err != nil {
-			log.Printf("Error getting recent events: %v", err)
-			return
-		}
-
-		// Route events through cognition pipeline
-		// Analysis is handled by cognitive modes (Dream, Think, etc.)
-		if p.eventCallback != nil {
+	if total > 0 {
+		log.Printf("Projected %d journal entries", total)
+		events := p.drainBatchEvents()
+		if p.eventCallback != nil && len(events) > 0 {
 			p.eventCallback(events)
 		}
 	}
+	return total, firstErr
+}
+
+func (p *Processor) drainBatchEvents() []*events.Event {
+	p.batchMu.Lock()
+	defer p.batchMu.Unlock()
+	out := p.batchEvents
+	p.batchEvents = nil
+	return out
 }

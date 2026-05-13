@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/measure"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
@@ -38,7 +40,15 @@ type Resolve struct {
 	// Feedback tracking
 	contextDir string // For recording injection outcomes
 	sessionID  string
+
+	// Journal output (slice Z1). When set, Resolve emits resolve.retrieval
+	// entries to <journalDir>/resolve/ on each Resolve call.
+	journalDir string
 }
+
+// SetJournalDir wires the project's <ContextDir>/journal/ root for
+// resolve.retrieval emission. Empty disables journal emission.
+func (r *Resolve) SetJournalDir(dir string) { r.journalDir = dir }
 
 // NewResolve creates a new Resolve instance with default thresholds.
 func NewResolve() *Resolve {
@@ -89,8 +99,28 @@ func (r *Resolve) ClearProactiveQueue() {
 	r.proactiveQueue = nil
 }
 
+// RetrievalContext carries optional metadata about the surrounding
+// retrieval call into Resolve so the emitted resolve.retrieval entry
+// can record mode + total elapsed. Pass nil when the call is direct
+// (e.g., tests, top-level Cortex.Resolve) — the entry then omits those
+// fields, which the watch UI renders as "-".
+type RetrievalContext struct {
+	Mode    string    // "fast" | "full"
+	Started time.Time // start of the overall retrieval (NOT just Resolve)
+}
+
 // Resolve decides whether to inject, wait, queue, or discard results.
+// See ResolveWithContext for the variant that records mode + total
+// elapsed time in the journal entry.
 func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cognition.Result) (*cognition.ResolveResult, error) {
+	return r.ResolveWithContext(ctx, q, results, nil)
+}
+
+// ResolveWithContext is Resolve with optional retrieval metadata. The
+// extra context flows only into the journal entry — the returned
+// ResolveResult is identical to what Resolve returns.
+func (r *Resolve) ResolveWithContext(ctx context.Context, q cognition.Query, results []cognition.Result, rctx *RetrievalContext) (*cognition.ResolveResult, error) {
+	resolveStart := time.Now()
 	// Get a race-safe snapshot of session context
 	// Prefer thinker (provides fresh snapshot) over static sessionCtx
 	var sessionCtx *cognition.SessionContext
@@ -143,13 +173,72 @@ func (r *Resolve) Resolve(ctx context.Context, q cognition.Query, results []cogn
 	// Record injection outcomes for feedback loop
 	r.recordFeedback(q.Text, results, decision)
 
+	reason := r.explainDecision(decision, avgScore, count)
+	resolveMs := time.Since(resolveStart).Milliseconds()
+
+	// Best-effort journal emission (slice Z1). Errors logged, never returned.
+	r.emitRetrievalToJournal(q, results, decision, confidence, avgScore, maxScore, count, reason, rctx, resolveMs)
+
 	return &cognition.ResolveResult{
 		Decision:   decision,
 		Results:    results,
 		Formatted:  formatted,
 		Confidence: confidence,
-		Reason:     r.explainDecision(decision, avgScore, count),
+		Reason:     reason,
 	}, nil
+}
+
+// emitRetrievalToJournal writes a resolve.retrieval entry capturing this
+// retrieval's query, decision, and (if injected) the result IDs that went
+// to the user. No-op when journalDir is empty.
+func (r *Resolve) emitRetrievalToJournal(q cognition.Query, results []cognition.Result,
+	decision cognition.Decision, confidence, avgScore, maxScore float64, count int, reason string, rctx *RetrievalContext, resolveMs int64) {
+	if r.journalDir == "" {
+		return
+	}
+	var injectedIDs []string
+	if decision == cognition.Inject {
+		injectedIDs = make([]string, 0, len(results))
+		for _, c := range results {
+			injectedIDs = append(injectedIDs, c.ID)
+		}
+	}
+	payload := journal.ResolveRetrievalPayload{
+		QueryText:   q.Text,
+		Decision:    decision.String(),
+		Confidence:  confidence,
+		ResultCount: count,
+		InjectedIDs: injectedIDs,
+		AvgScore:    avgScore,
+		MaxScore:    maxScore,
+		Reason:      reason,
+		SessionID:   r.sessionID,
+		ResolveMs:   resolveMs,
+	}
+	if rctx != nil {
+		payload.Mode = rctx.Mode
+		if !rctx.Started.IsZero() {
+			payload.TotalMs = time.Since(rctx.Started).Milliseconds()
+		}
+	}
+	entry, err := journal.NewResolveRetrievalEntry(payload)
+	if err != nil {
+		log.Printf("resolve: build journal entry: %v", err)
+		return
+	}
+	classDir := filepath.Join(r.journalDir, "resolve")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("resolve: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("resolve: append journal entry: %v", err)
+	}
 }
 
 // mergeProactive merges proactive results with main results.

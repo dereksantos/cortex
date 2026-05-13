@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -39,7 +42,23 @@ type Think struct {
 
 	// State writer for daemon status updates
 	stateWriter *StateWriter
+
+	// Journal output (slice T1). When set, Think emits
+	// think.session_context entries to <journalDir>/think/ at the end
+	// of each MaybeThink cycle.
+	journalDir string
+
+	// SessionID tagged on emitted entries.
+	sessionID string
 }
+
+// SetJournalDir wires the project's <ContextDir>/journal/ root.
+// Empty disables journal emission.
+func (t *Think) SetJournalDir(dir string) { t.journalDir = dir }
+
+// SetSessionID tags emitted think.session_context entries with the
+// current session.
+func (t *Think) SetSessionID(id string) { t.sessionID = id }
 
 // NewThink creates a new Think instance.
 func NewThink(reflex *Reflex, reflect *Reflect, activity *ActivityTracker) *Think {
@@ -169,6 +188,9 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 	t.sessionCtx.LastUpdated = time.Now()
 	t.mu.Unlock()
 
+	// Snapshot session context to the journal (slice T1).
+	t.emitSessionContextToJournal()
+
 	log.Printf("Think: completed (%d ops, %v)", ops, time.Since(start))
 
 	return &cognition.ThinkResult{
@@ -176,6 +198,48 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 		Operations: ops,
 		Duration:   time.Since(start),
 	}, nil
+}
+
+// emitSessionContextToJournal best-effort writes a think.session_context
+// snapshot. Errors logged, never returned.
+func (t *Think) emitSessionContextToJournal() {
+	if t.journalDir == "" {
+		return
+	}
+	snap := t.SessionContextSnapshot()
+
+	cachedQueries := make([]string, 0, len(snap.CachedReflect))
+	for q := range snap.CachedReflect {
+		cachedQueries = append(cachedQueries, q)
+	}
+	recent := make([]string, 0, len(snap.RecentQueries))
+	for _, q := range snap.RecentQueries {
+		recent = append(recent, q.Text)
+	}
+	payload := journal.ThinkSessionContextPayload{
+		TopicWeights:  snap.TopicWeights,
+		RecentQueries: recent,
+		CachedQueries: cachedQueries,
+		SessionID:     t.sessionID,
+	}
+	entry, err := journal.NewThinkSessionContextEntry(payload)
+	if err != nil {
+		log.Printf("think: build journal entry: %v", err)
+		return
+	}
+	classDir := filepath.Join(t.journalDir, "think")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("think: open journal writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("think: append journal entry: %v", err)
+	}
 }
 
 // SessionContext returns the current session's accumulated context.
@@ -412,16 +476,29 @@ func (t *Think) extractTopics(prompt string) []string {
 	return ExtractTerms(prompt)
 }
 
-// updateTopicWeights analyzes recent queries to detect session patterns.
+// topicWeightDeltaThreshold is the minimum absolute change in a topic
+// weight that triggers a granular think.topic_weight journal entry.
+// Below this, the change is treated as noise and only the periodic
+// session_context snapshot reflects it.
+const topicWeightDeltaThreshold = 0.05
+
+// updateTopicWeights analyzes recent queries to detect session patterns
+// and emits one think.topic_weight journal entry per material change
+// (T1 follow-up: granular emission for counterfactual replay timing).
 func (t *Think) updateTopicWeights() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if len(t.sessionCtx.RecentQueries) == 0 {
+		t.mu.Unlock()
 		return
 	}
 
-	// Count term frequency across queries
+	// Snapshot old weights before mutation so we can emit deltas without
+	// holding the lock across the journal write.
+	previous := make(map[string]float64, len(t.sessionCtx.TopicWeights))
+	for term, w := range t.sessionCtx.TopicWeights {
+		previous[term] = w
+	}
+
 	termCounts := make(map[string]int)
 	for _, q := range t.sessionCtx.RecentQueries {
 		terms := ExtractTerms(q.Text)
@@ -430,7 +507,6 @@ func (t *Think) updateTopicWeights() {
 		}
 	}
 
-	// Find max count for normalization
 	maxCount := 1
 	for _, count := range termCounts {
 		if count > maxCount {
@@ -438,18 +514,98 @@ func (t *Think) updateTopicWeights() {
 		}
 	}
 
-	// Update weights (normalized to 0-1)
 	for term, count := range termCounts {
-		// Only keep terms that appear multiple times
 		if count >= 2 {
 			t.sessionCtx.TopicWeights[term] = float64(count) / float64(maxCount)
 		}
 	}
 
-	// Prune low-weight topics
 	for term, weight := range t.sessionCtx.TopicWeights {
 		if weight < 0.2 {
 			delete(t.sessionCtx.TopicWeights, term)
+		}
+	}
+
+	// Compute deltas while still under the lock so the emitted entries
+	// reflect a consistent snapshot of the new state.
+	deltas := topicWeightDeltas(previous, t.sessionCtx.TopicWeights, topicWeightDeltaThreshold)
+	sessionID := t.sessionID
+	journalDir := t.journalDir
+	t.mu.Unlock()
+
+	t.emitTopicWeightDeltas(deltas, sessionID, journalDir)
+}
+
+// topicWeightDelta records one weight change for journal emission.
+type topicWeightDelta struct {
+	Topic     string
+	OldWeight float64
+	NewWeight float64
+}
+
+// topicWeightDeltas returns the topics whose weight changed by at least
+// threshold (in absolute value), including additions (old=0) and
+// removals (new=0). Sorted by topic for determinism so replay output is
+// stable across runs.
+func topicWeightDeltas(old, new map[string]float64, threshold float64) []topicWeightDelta {
+	var out []topicWeightDelta
+	seen := make(map[string]struct{}, len(old)+len(new))
+	for term, w := range new {
+		seen[term] = struct{}{}
+		prev := old[term]
+		if absDelta(prev, w) >= threshold {
+			out = append(out, topicWeightDelta{Topic: term, OldWeight: prev, NewWeight: w})
+		}
+	}
+	for term, w := range old {
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		if absDelta(w, 0) >= threshold {
+			out = append(out, topicWeightDelta{Topic: term, OldWeight: w, NewWeight: 0})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Topic < out[j].Topic })
+	return out
+}
+
+func absDelta(a, b float64) float64 {
+	d := a - b
+	if d < 0 {
+		return -d
+	}
+	return d
+}
+
+// emitTopicWeightDeltas appends one think.topic_weight journal entry per
+// delta. Best-effort: errors are logged but never returned — callers
+// hold no expectation that journal emission succeeds.
+func (t *Think) emitTopicWeightDeltas(deltas []topicWeightDelta, sessionID, journalDir string) {
+	if len(deltas) == 0 || journalDir == "" {
+		return
+	}
+	classDir := filepath.Join(journalDir, "think")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		log.Printf("think: open journal writer for topic_weight: %v", err)
+		return
+	}
+	defer w.Close()
+	for _, d := range deltas {
+		entry, err := journal.NewThinkTopicWeightEntry(journal.ThinkTopicWeightPayload{
+			Topic:     d.Topic,
+			Weight:    d.NewWeight,
+			SessionID: sessionID,
+		})
+		if err != nil {
+			log.Printf("think: build topic_weight entry: %v", err)
+			continue
+		}
+		if _, err := w.Append(entry); err != nil {
+			log.Printf("think: append topic_weight entry: %v", err)
 		}
 	}
 }

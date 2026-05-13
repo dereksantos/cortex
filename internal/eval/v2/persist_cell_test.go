@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/journal"
 )
 
 // validCellResult returns a complete, valid CellResult suitable as a
@@ -308,6 +311,216 @@ func TestRecentCellsFromJSONL(t *testing.T) {
 			t.Errorf("len=%d want 5", len(got))
 		}
 	})
+}
+
+// TestPersistCell_EmitsJournalEntry asserts the unification contract:
+// a successful PersistCell appends one eval.cell_result entry to the
+// writer-class journal, whose payload mirrors the CellResult. The
+// journal is the source of truth; SQLite + JSONL are projections of it.
+func TestPersistCell_EmitsJournalEntry(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+
+	if err := p.PersistCell(context.Background(), r); err != nil {
+		t.Fatalf("PersistCell: %v", err)
+	}
+
+	// Flush so FsyncPerBatch writes hit disk before the reader opens.
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+
+	e, err := reader.Next()
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if e.Type != journal.TypeEvalCellResult {
+		t.Errorf("entry Type=%q want %q", e.Type, journal.TypeEvalCellResult)
+	}
+
+	payload, err := journal.ParseEvalCellResult(e)
+	if err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	wantPayload := cellResultToPayload(r)
+	if !reflect.DeepEqual(payload, &wantPayload) {
+		t.Errorf("payload mismatch:\n got: %+v\nwant: %+v", payload, &wantPayload)
+	}
+
+	if _, err := reader.Next(); err != io.EOF {
+		t.Errorf("want exactly one entry; second Next returned err=%v", err)
+	}
+}
+
+// TestProjectCell_NoJournalWrite is the projection-side contract: when
+// the indexer replays a journal entry it must materialize SQLite + JSONL
+// state WITHOUT producing a duplicate journal entry. ProjectCell is the
+// journal-free entry point both rebuild and live PersistCell route
+// through.
+func TestProjectCell_NoJournalWrite(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+
+	if err := p.ProjectCell(context.Background(), r); err != nil {
+		t.Fatalf("ProjectCell: %v", err)
+	}
+
+	// SQLite: row exists.
+	var rows int
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM cell_results WHERE run_id=?`, r.RunID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("sqlite rows=%d want 1", rows)
+	}
+	// JSONL: one line.
+	if lines := readJSONL(t, p.cellResultsJSONLPath()); len(lines) != 1 {
+		t.Errorf("jsonl lines=%d want 1", len(lines))
+	}
+
+	// Journal: empty (ProjectCell must NOT emit).
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Next(); err != io.EOF {
+		t.Errorf("journal should be empty after ProjectCell; got Next err=%v", err)
+	}
+}
+
+// TestPersistCell_RebuildFromJournalAloneRegeneratesProjections is the
+// E2 acceptance test: after PersistCell, truncating SQLite +
+// cell_results.jsonl and replaying the journal entry via
+// ProjectCellFromEntry must restore identical projection state.
+// Demonstrates that the journal is the source of truth — both
+// projections are deterministic functions of it.
+func TestPersistCell_RebuildFromJournalAloneRegeneratesProjections(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+
+	if err := p.PersistCell(context.Background(), r); err != nil {
+		t.Fatalf("PersistCell: %v", err)
+	}
+
+	// Capture original projection state.
+	originalLines := readJSONL(t, p.cellResultsJSONLPath())
+	if len(originalLines) != 1 {
+		t.Fatalf("setup: jsonl lines=%d want 1", len(originalLines))
+	}
+
+	// Truncate both projections so only the journal entry survives.
+	if _, err := p.db.Exec("DELETE FROM cell_results"); err != nil {
+		t.Fatalf("truncate sqlite: %v", err)
+	}
+	if err := os.Remove(p.cellResultsJSONLPath()); err != nil {
+		t.Fatalf("remove jsonl: %v", err)
+	}
+
+	// Flush journal so the entry is on disk for the replay reader.
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Replay: read the eval.cell_result entry and project it.
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+	entry, err := reader.Next()
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	payload, err := journal.ParseEvalCellResult(entry)
+	if err != nil {
+		t.Fatalf("parse payload: %v", err)
+	}
+	if err := p.ProjectCellFromEntry(context.Background(), payload); err != nil {
+		t.Fatalf("ProjectCellFromEntry: %v", err)
+	}
+
+	// Both projections should be restored byte-identical.
+	var rows int
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM cell_results WHERE run_id=?`, r.RunID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("sqlite rows after rebuild=%d want 1", rows)
+	}
+	rebuiltLines := readJSONL(t, p.cellResultsJSONLPath())
+	if !reflect.DeepEqual(originalLines, rebuiltLines) {
+		t.Errorf("jsonl mismatch after rebuild:\n original: %v\n rebuilt:  %v", originalLines, rebuiltLines)
+	}
+}
+
+// TestProjectCellFromEntry mirrors what the journal indexer's projector
+// will do: take a parsed payload, project to SQLite + JSONL. Used by
+// `cortex journal rebuild` to regenerate eval state from the journal
+// alone.
+func TestProjectCellFromEntry(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+	payload := cellResultToPayload(r)
+
+	if err := p.ProjectCellFromEntry(context.Background(), &payload); err != nil {
+		t.Fatalf("ProjectCellFromEntry: %v", err)
+	}
+
+	var rows int
+	if err := p.db.QueryRow(`SELECT COUNT(*) FROM cell_results WHERE run_id=?`, r.RunID).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("sqlite rows=%d want 1", rows)
+	}
+
+	lines := readJSONL(t, p.cellResultsJSONLPath())
+	if len(lines) != 1 {
+		t.Fatalf("jsonl lines=%d want 1", len(lines))
+	}
+	var got CellResult
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(&got, r) {
+		t.Errorf("round-trip mismatch:\n got: %+v\nwant: %+v", got, r)
+	}
+}
+
+// TestPersistCell_ValidationFails_NoJournalEntry covers the
+// no-side-effects guarantee on the journal: an invalid input must not
+// produce a phantom entry that rebuild would later try to project.
+func TestPersistCell_ValidationFails_NoJournalEntry(t *testing.T) {
+	p := newTestPersister(t)
+	r := validCellResult()
+	r.RunID = "" // forces validation failure
+
+	if err := p.PersistCell(context.Background(), r); err == nil {
+		t.Fatal("PersistCell on invalid input: want error, got nil")
+	}
+
+	if err := p.journal.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	reader, err := journal.NewReader(p.journalDir)
+	if err != nil {
+		t.Fatalf("journal reader: %v", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Next(); err != io.EOF {
+		t.Errorf("journal should be empty after validation failure; got Next err=%v", err)
+	}
 }
 
 func readJSONL(t *testing.T, path string) []string {

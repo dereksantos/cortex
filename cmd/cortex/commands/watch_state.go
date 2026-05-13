@@ -41,12 +41,19 @@ func NewWatchData(cfg *config.Config, store *storage.Storage) *WatchData {
 
 // Refresh reloads all state data from files and storage.
 func (w *WatchData) Refresh(cfg *config.Config, store *storage.Storage) {
-	// Read daemon state
+	// Read daemon state (live mode heartbeat — not in journal)
 	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
 	w.Daemon, _ = intcognition.ReadDaemonState(statePath)
 
-	// Read retrieval stats
-	w.Retrieval, _ = intcognition.ReadRetrievalStats(cfg.ContextDir)
+	// Read retrieval stats from journal projection (post-Z1 unification:
+	// resolve.retrieval entries are the source of truth, the legacy
+	// retrieval_stats.json snapshot is no longer written). Falls back to
+	// the legacy file when storage is unavailable so this command works
+	// against historical .cortex/ directories.
+	w.Retrieval = retrievalStatsFromStorage(store)
+	if w.Retrieval == nil {
+		w.Retrieval, _ = intcognition.ReadRetrievalStats(cfg.ContextDir)
+	}
 
 	// Read background metrics
 	w.Background, _ = intcognition.ReadBackgroundMetrics(cfg.ContextDir)
@@ -90,6 +97,33 @@ func (w *WatchData) Refresh(cfg *config.Config, store *storage.Storage) {
 				w.TotalInsights = i
 			}
 		}
+	}
+}
+
+// retrievalStatsFromStorage materializes the watch UI's RetrievalStats
+// view from the journal-projected storage.Retrievals list. Returns nil
+// when no retrievals have been projected yet (caller falls back to the
+// legacy retrieval_stats.json reader for historical data).
+func retrievalStatsFromStorage(store *storage.Storage) *intcognition.RetrievalStats {
+	if store == nil {
+		return nil
+	}
+	recent := store.GetRetrievals(1)
+	if len(recent) == 0 {
+		return nil
+	}
+	agg := store.GetRetrievalStats()
+	last := recent[0]
+	return &intcognition.RetrievalStats{
+		LastQuery:       last.QueryText,
+		LastMode:        last.Mode,
+		LastReflexMs:    0, // not separately measured in the journal
+		LastReflectMs:   0, // not separately measured in the journal
+		LastResolveMs:   last.ResolveMs,
+		LastResults:     last.ResultCount,
+		LastDecision:    last.Decision,
+		TotalRetrievals: agg.Total,
+		UpdatedAt:       last.RecordedAt,
 	}
 }
 
