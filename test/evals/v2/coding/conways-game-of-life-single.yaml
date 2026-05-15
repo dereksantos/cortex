@@ -1,0 +1,26 @@
+id: conways-gol-single
+name: "Conway's Game of Life (single session)"
+mode: single
+generations: 4
+seed_dir: conways-game-of-life/seed
+fixtures_dir: conways-game-of-life/fixtures
+freeform_input: conways-game-of-life/freeform/prompt.txt
+prompt: |
+  Implement Conway's Game of Life as a Go CLI per the spec in
+  README.md. Read an initial ASCII grid from stdin, write
+  successive generations to stdout separated by blank lines.
+  Use "." for dead and "#" for alive. Honor the --generations N
+  flag (default 5).
+
+  Workflow:
+    1. Read README.md for the exact specification (charset, output
+       format, --generations behavior, fixed-bounded grid).
+    2. Write main.go implementing the program.
+    3. Run `go build` to verify it compiles.
+    4. Test it by piping a small grid through `go run . --generations 2`
+       and confirming the output looks right (blinker oscillates,
+       glider translates diagonally).
+    5. When you're confident, respond with a brief summary and stop
+       calling tools.
+
+  Do not write tests — scoring happens outside this session.
