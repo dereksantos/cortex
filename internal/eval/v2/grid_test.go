@@ -968,3 +968,107 @@ func TestScenarioToPrompt(t *testing.T) {
 		})
 	}
 }
+
+func TestScenarioHasExpect(t *testing.T) {
+	tests := []struct {
+		name string
+		scn  *Scenario
+		want bool
+	}{
+		{"no tests", &Scenario{ID: "x"}, false},
+		{"test with empty expect", &Scenario{ID: "x", Tests: []Test{{Query: "q"}}}, false},
+		{"includes only", &Scenario{ID: "x", Tests: []Test{{Expect: Expect{Includes: []string{"foo"}}}}}, true},
+		{"excludes only", &Scenario{ID: "x", Tests: []Test{{Expect: Expect{Excludes: []string{"bar"}}}}}, true},
+		{"mixed across tests", &Scenario{ID: "x", Tests: []Test{
+			{Query: "q1"},
+			{Expect: Expect{Includes: []string{"baz"}}},
+		}}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scenarioHasExpect(tc.scn); got != tc.want {
+				t.Errorf("scenarioHasExpect: got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateScenarioAssertion(t *testing.T) {
+	tests := []struct {
+		name       string
+		tests      []Test
+		output     string
+		wantPassed int
+		wantFailed int
+	}{
+		{
+			name:       "all includes present, no excludes",
+			tests:      []Test{{Expect: Expect{Includes: []string{"alpha", "beta"}}}},
+			output:     "we discussed alpha and then beta in detail",
+			wantPassed: 1,
+			wantFailed: 0,
+		},
+		{
+			name:       "one include missing",
+			tests:      []Test{{Expect: Expect{Includes: []string{"alpha", "gamma"}}}},
+			output:     "alpha shows up but the other term does not",
+			wantPassed: 0,
+			wantFailed: 1,
+		},
+		{
+			name:       "excluded substring present",
+			tests:      []Test{{Expect: Expect{Includes: []string{"alpha"}, Excludes: []string{"forbidden"}}}},
+			output:     "alpha and forbidden both appear",
+			wantPassed: 0,
+			wantFailed: 1,
+		},
+		{
+			name:       "case-insensitive match",
+			tests:      []Test{{Expect: Expect{Includes: []string{"Team A", "TEAM B"}}}},
+			output:     "team a and team b are conflicting",
+			wantPassed: 1,
+			wantFailed: 0,
+		},
+		{
+			name: "multiple tests, mixed",
+			tests: []Test{
+				{Expect: Expect{Includes: []string{"foo"}}},
+				{Expect: Expect{Includes: []string{"missing"}}},
+				{Expect: Expect{Excludes: []string{"forbidden"}}},
+			},
+			output:     "foo appears, forbidden too",
+			wantPassed: 1,
+			wantFailed: 2,
+		},
+		{
+			name:       "tests with empty expect are skipped",
+			tests:      []Test{{Query: "q"}, {Expect: Expect{Includes: []string{"x"}}}},
+			output:     "x",
+			wantPassed: 1,
+			wantFailed: 0,
+		},
+		{
+			name:       "no tests",
+			tests:      nil,
+			output:     "anything",
+			wantPassed: 0,
+			wantFailed: 0,
+		},
+		{
+			name:       "excludes-only, none present",
+			tests:      []Test{{Expect: Expect{Excludes: []string{"oops"}}}},
+			output:     "clean output",
+			wantPassed: 1,
+			wantFailed: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, f := evaluateScenarioAssertion(tc.tests, tc.output)
+			if p != tc.wantPassed || f != tc.wantFailed {
+				t.Errorf("got (passed=%d failed=%d), want (passed=%d failed=%d)",
+					p, f, tc.wantPassed, tc.wantFailed)
+			}
+		})
+	}
+}

@@ -377,11 +377,13 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 		return cr, nil
 	}
 
-	// Optional post-harness verifier. Only runs when the scenario
-	// declares one — empty Verify keeps the legacy "harness exit code
-	// IS the success" behavior so older retrieval scenarios stay
-	// unaffected.
-	if scn.Verify != "" {
+	// Decide the cell's pass criterion based on scenario shape, in order:
+	//   1. `verify:` shell command → CriterionTestsPassAll via runVerifier
+	//   2. `tests:[].expect:` Q&A shape → CriterionScenarioAssertion
+	//   3. neither → legacy "harness exit code IS success" fallback
+	//      (criterion stays TestsPassAll for backwards compatibility)
+	switch {
+	case scn.Verify != "":
 		passed, failed, vErr := runVerifier(ctx, scn.Verify, workdir)
 		cr.TestsPassed = passed
 		cr.TestsFailed = failed
@@ -392,8 +394,71 @@ func runOneCell(ctx context.Context, scn *Scenario, hs HarnessSpec, ms ModelSpec
 			}
 			cr.Notes += fmt.Sprintf("verify failed: %v", vErr)
 		}
+	case scenarioHasExpect(scn):
+		cr.TaskSuccessCriterion = CriterionScenarioAssertion
+		passed, failed := evaluateScenarioAssertion(scn.Tests, hres.OutputText)
+		cr.TestsPassed = passed
+		cr.TestsFailed = failed
+		cr.TaskSuccess = failed == 0 && passed > 0
+		if failed > 0 {
+			if cr.Notes != "" {
+				cr.Notes += "; "
+			}
+			cr.Notes += fmt.Sprintf("assertion: %d/%d tests failed", failed, passed+failed)
+		}
 	}
 	return cr, nil
+}
+
+// scenarioHasExpect reports whether any of scn.Tests carries Includes or
+// Excludes substrings worth asserting against. Used to route v2 Q&A
+// scenarios into the assertion criterion when no `verify:` shell command
+// is present.
+func scenarioHasExpect(scn *Scenario) bool {
+	for _, t := range scn.Tests {
+		if len(t.Expect.Includes) > 0 || len(t.Expect.Excludes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// evaluateScenarioAssertion checks each test's Expect.Includes/Excludes
+// against the harness output text. A test passes when every required
+// substring appears AND no excluded substring appears. Substring match
+// is case-insensitive — model outputs vary in capitalization and the
+// scenario keyword lists are hand-authored.
+//
+// Tests with no Includes and no Excludes are skipped (neither counted).
+// Returns (passed, failed) counts for the caller to set on CellResult.
+func evaluateScenarioAssertion(tests []Test, output string) (passed, failed int) {
+	hay := strings.ToLower(output)
+	for _, t := range tests {
+		if len(t.Expect.Includes) == 0 && len(t.Expect.Excludes) == 0 {
+			continue
+		}
+		ok := true
+		for _, needle := range t.Expect.Includes {
+			if !strings.Contains(hay, strings.ToLower(needle)) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			for _, needle := range t.Expect.Excludes {
+				if strings.Contains(hay, strings.ToLower(needle)) {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	return passed, failed
 }
 
 // retryBackoff is the per-attempt sleep duration before retrying a

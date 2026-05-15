@@ -61,6 +61,12 @@ type HarnessResult struct {
 	// confirm the trip ID matches the requested grid cell.
 	ProviderEcho string
 	ModelEcho    string
+
+	// OutputText is the harness's captured model-response text. Used by
+	// the grid runner to evaluate scenario-assertion criteria (substring
+	// includes/excludes on Q&A scenarios). Internal to the run — not
+	// persisted to CellResult. Empty when the harness can't capture it.
+	OutputText string
 }
 
 // ResultfulHarness is the optional extension over Harness. The grid
