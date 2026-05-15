@@ -177,11 +177,13 @@ func (h *AiderHarness) runSession(ctx context.Context, prompt, workdir string) (
 		return HarnessResult{LatencyMs: elapsed, ModelEcho: h.model, ProviderEcho: aiderProviderFromModel(h.model)}, runErr
 	}
 
-	res := parseAiderOutput(stdout.String())
+	out := stdout.String()
+	res := parseAiderOutput(out)
 	res.LatencyMs = elapsed
 	res.ModelEcho = h.model
 	res.ProviderEcho = aiderProviderFromModel(h.model)
 	res.AgentTurnsTotal = 1 // single --message invocation
+	res.OutputText = out
 	return res, nil
 }
 
