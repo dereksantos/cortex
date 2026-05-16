@@ -124,6 +124,15 @@ time per cell — divide by `queries=N` from `Notes` for per-query mean.
 | `--embedder ID`   | Reserved; not yet plumbed to `internal/storage`    |
 | `-m / --model`    | **Rejected** — MTEB measures the embedder, not LLM |
 
+## First findings
+
+See [`mteb-rerank-findings.md`](mteb-rerank-findings.md) for the
+end-to-end Phase A comparison of `nomic-embed-text` (embedder-only)
+vs three rerank-LLM choices (qwen2.5-coder:1.5b, gemma2:2b,
+claude-haiku-4.5). Headline: Cortex's mechanical retrieval lands at
+the embedder's leaderboard expectation, and frontier-tier rerank lifts
+NDCG@10 +0.022 / MRR@10 +0.09 on top of that.
+
 ## Phase B — what's deferred
 
 - The rest of the BEIR retrieval suite (~15 tasks: SciFact, FiQA,
