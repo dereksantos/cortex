@@ -2,6 +2,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -81,6 +82,87 @@ func TestEmitEmbedStoreJSON(t *testing.T) {
 	if got != want {
 		t.Errorf("emitEmbedStoreJSON output mismatch\n got: %+v\nwant: %+v", got, want)
 	}
+}
+
+// fakeEmbedder is a deterministic stand-in for tests that exercise the
+// store/bulk paths without spinning up Ollama or downloading Hugot.
+// It writes len(text)-sensitive vectors so different inputs produce
+// different vectors (verifies the bulk path doesn't dedup or reuse).
+type fakeEmbedder struct{ dim int }
+
+func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	vec := make([]float32, f.dim)
+	for i := range vec {
+		vec[i] = float32(len(text)+i) / 100.0
+	}
+	return vec, nil
+}
+func (f *fakeEmbedder) IsEmbeddingAvailable() bool { return true }
+
+// TestExecuteBulkEmbed verifies the NDJSON-stdin path embeds and stores
+// each request, emits a final summary, and rejects malformed input
+// with a line number. The storage write itself is covered by
+// internal/storage tests; here we just exercise the CLI handler.
+func TestExecuteBulkEmbed(t *testing.T) {
+	t.Run("happy path stores all + emits summary", func(t *testing.T) {
+		workdir := t.TempDir()
+		embedder := &fakeEmbedder{dim: 8}
+		input := strings.Join([]string{
+			`{"doc_id":"d1","text":"alpha"}`,
+			`{"doc_id":"d2","text":"bravo charlie","content_type":"corpus"}`,
+			`{"doc_id":"d3","text":"delta"}`,
+		}, "\n") + "\n"
+		var out bytes.Buffer
+		err := executeBulkEmbed(workdir, "corpus", embedder, "test-model", "local", strings.NewReader(input), &out)
+		if err != nil {
+			t.Fatalf("executeBulkEmbed: %v", err)
+		}
+		var got bulkEmbedSummary
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal summary: %v", err)
+		}
+		want := bulkEmbedSummary{Stored: 3, Model: "test-model", Provider: "local", Dim: 8}
+		if got != want {
+			t.Errorf("summary = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("missing doc_id names line", func(t *testing.T) {
+		workdir := t.TempDir()
+		input := `{"doc_id":"d1","text":"ok"}` + "\n" + `{"text":"no id"}` + "\n"
+		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{})
+		if err == nil {
+			t.Fatal("expected error for missing doc_id on line 2")
+		}
+		if !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "doc_id") {
+			t.Errorf("error %q should mention line 2 + doc_id", err)
+		}
+	})
+
+	t.Run("empty text rejected per line", func(t *testing.T) {
+		workdir := t.TempDir()
+		input := `{"doc_id":"d1","text":""}` + "\n"
+		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "text") {
+			t.Errorf("expected text-required error, got %v", err)
+		}
+	})
+
+	t.Run("blank lines skipped", func(t *testing.T) {
+		workdir := t.TempDir()
+		input := `{"doc_id":"d1","text":"alpha"}` + "\n\n" + `{"doc_id":"d2","text":"bravo"}` + "\n"
+		var out bytes.Buffer
+		if err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &out); err != nil {
+			t.Fatalf("executeBulkEmbed: %v", err)
+		}
+		var got bulkEmbedSummary
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.Stored != 2 {
+			t.Errorf("Stored = %d, want 2 (blank line must be skipped, not counted)", got.Stored)
+		}
+	})
 }
 
 // TestEmbedCommand_Validation covers the flag-validation paths so a
