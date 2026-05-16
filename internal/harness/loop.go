@@ -51,15 +51,15 @@ const (
 
 // LoopResult is returned after Run() completes.
 type LoopResult struct {
-	Reason          LoopReason
-	Final           string // the final assistant content (may be empty on turn_limit/budget)
-	Turns           int    // number of assistant turns taken
-	TokensIn        int
-	TokensOut       int
-	CostUSD         float64
-	StartedAt       time.Time
-	EndedAt         time.Time
-	Err             error  // non-nil only when Reason == ReasonError or ReasonContextDone
+	Reason    LoopReason
+	Final     string // the final assistant content (may be empty on turn_limit/budget)
+	Turns     int    // number of assistant turns taken
+	TokensIn  int
+	TokensOut int
+	CostUSD   float64
+	StartedAt time.Time
+	EndedAt   time.Time
+	Err       error // non-nil only when Reason == ReasonError or ReasonContextDone
 
 	// Tool accounting, surfaced for the HarnessResult mapping.
 	InjectedContextTokens int
@@ -207,10 +207,10 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 
 		for _, call := range callRes.ToolCalls {
 			l.note("coding.tool_call", map[string]any{
-				"turn":    turn,
-				"id":      call.ID,
-				"name":    call.Function.Name,
-				"args":    call.Function.Arguments,
+				"turn": turn,
+				"id":   call.ID,
+				"name": call.Function.Name,
+				"args": call.Function.Arguments,
 			})
 			out, _ := l.Registry.Dispatch(ctx, call)
 			msgs = append(msgs, llm.ToolResultMessage(call.ID, call.Function.Name, out))

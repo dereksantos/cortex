@@ -35,9 +35,9 @@ type cortexSearchTool struct {
 	// the error and return it for subsequent calls too — re-trying
 	// open on every call when the store is broken would just waste
 	// turns.
-	cortex *intcognition.Cortex
-	store  *storage.Storage
-	cfg    *config.Config
+	cortex  *intcognition.Cortex
+	store   *storage.Storage
+	cfg     *config.Config
 	initErr error
 }
 

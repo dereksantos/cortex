@@ -30,10 +30,6 @@ import (
 // ErrNotFound is returned when no source has the requested key.
 var ErrNotFound = errors.New("openrouter api key not found")
 
-// errKeychainUnsupported is returned by LookupOpenRouterKey on
-// non-darwin platforms. Callers fall back to the env var.
-var errKeychainUnsupported = errors.New("keychain not supported on this platform")
-
 // openRouterServiceName is the keychain service identifier the user
 // stores the key under, per their durable convention:
 //
