@@ -159,6 +159,8 @@ Options:
   --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
   --seed N               NIAH only: deterministic filler seed (default: 1)
   --filler MODE          NIAH only: filler corpus (adversarial|lorem; default: adversarial)
+  --strategy LIST        Comma-separated strategies for benchmark cells (baseline,cortex)
+  --question-type NAME   LongMemEval ability filter (single-hop|multi-hop|temporal|knowledge-update|abstention); repeatable
   -h, --help             Show this help
 
 Examples:
@@ -170,7 +172,8 @@ Examples:
   cortex eval --compare-provider anthropic --compare-model claude-haiku-4-5-20251001
   cortex eval --summary                    # Show lift trend
   cortex eval --summary --agentic          # Show tool call reduction trend
-  cortex eval --abr-trend                  # Show ABR progression`)
+  cortex eval --abr-trend                  # Show ABR progression
+  cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge`)
 			return nil
 		}
 	}
