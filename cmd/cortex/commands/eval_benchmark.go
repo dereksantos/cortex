@@ -12,6 +12,7 @@ import (
 	// Side-effect imports register per-benchmark constructors via init().
 	// Add new benchmarks here as they land.
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/longmemeval"
+	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/mteb"
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/niah"
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/swebench"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
