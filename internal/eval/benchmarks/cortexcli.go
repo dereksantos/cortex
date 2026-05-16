@@ -182,14 +182,21 @@ func truncate(s string, n int) string {
 // CodeOpts configures a `cortex code` subprocess invocation. Workdir,
 // Model, and Prompt are required; other fields are forwarded as flags
 // only when non-zero so the CLI defaults stay in charge.
+//
+// SystemPrompt overrides the harness's default system prompt. Per
+// eval-principles #2 (no coaching): use this for *framing* the task
+// (declaring role, output format), NOT for *coaching* tool use. A
+// benchmark that teaches the model "call cortex_search aggressively"
+// is laundering its score.
 type CodeOpts struct {
-	Workdir  string
-	Model    string
-	Prompt   string
-	NoSearch bool    // --no-search (omit cortex_search from tool registry)
-	MaxTurns int     // --max-turns (0 = CLI default)
-	MaxCost  float64 // --max-cost USD (0 = CLI default)
-	APIURL   string  // --api-url (empty = OpenRouter default)
+	Workdir      string
+	Model        string
+	Prompt       string
+	SystemPrompt string  // --system-prompt (empty = harness default)
+	NoSearch     bool    // --no-search (omit cortex_search from tool registry)
+	MaxTurns     int     // --max-turns (0 = CLI default)
+	MaxCost      float64 // --max-cost USD (0 = CLI default)
+	APIURL       string  // --api-url (empty = OpenRouter default)
 }
 
 // CodeOutput mirrors the codeJSONOutput struct emitted by `cortex code
@@ -236,6 +243,9 @@ func RunCode(ctx context.Context, binary string, opts CodeOpts) (*CodeOutput, er
 	args := []string{"code", "--workdir", opts.Workdir, "--model", opts.Model, "--json"}
 	if opts.NoSearch {
 		args = append(args, "--no-search")
+	}
+	if opts.SystemPrompt != "" {
+		args = append(args, "--system-prompt", opts.SystemPrompt)
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))

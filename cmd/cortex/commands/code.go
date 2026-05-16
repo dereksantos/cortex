@@ -54,6 +54,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	quiet := false
 	noSearch := false
 	jsonOut := false
+	systemPrompt := ""
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -119,6 +120,11 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			noSearch = true
 		case "--json":
 			jsonOut = true
+		case "--system-prompt":
+			if i+1 < len(args) {
+				systemPrompt = args[i+1]
+				i++
+			}
 		case "-h", "--help":
 			printCodeHelp()
 			return nil
@@ -144,7 +150,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		case "-m", "--model", "-w", "--workdir", "--max-turns", "--max-cost",
 			"--max-tokens", "--max-cumulative-tokens",
 			"--max-output", "--max-output-tokens",
-			"--api-url":
+			"--api-url", "--system-prompt":
 			skipNext = true
 			continue
 		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "-h", "--help", "--local":
@@ -200,6 +206,9 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	}
 	if noSearch {
 		h.SetCortexSearchEnabled(false)
+	}
+	if systemPrompt != "" {
+		h.SetSystemPrompt(systemPrompt)
 	}
 	// --json owns stdout exclusively; suppress the live notifier (which
 	// writes to stdout) and the framing banner. Verbose/quiet still apply
@@ -444,6 +453,12 @@ Optional:
                                   registry. Used by baseline benchmark cells
                                   that need a clean "no Cortex augmentation"
                                   run for comparison.
+  --system-prompt STRING          Override the default agent system prompt.
+                                  Use for task framing (declaring role/format),
+                                  NOT for coaching tool usage. Benchmarks that
+                                  teach the model how to call cortex_search
+                                  via this flag launder their scores; see
+                                  docs/prompts/eval-principles.md principle 2.
   --json                          Emit a single JSON object on stdout (suppresses
                                   the live notifier + summary lines). Carries
                                   turns, tokens, cost, latency, files_changed,

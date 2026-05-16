@@ -70,7 +70,7 @@ The doc serves as an active TODO list — flip ✗ to ✓ as benchmarks land. Se
 |---|---|---|---|---|---|---|
 | MTEB | ✗ uses `internal/storage`, `intcognition.Reflect` | ~ `--rerank` is opt-in | ~ partial | ✓ | ✓ | ~ partial |
 | NIAH | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunSearch` | ✓ | ~ | ✓ | ✓ | ~ |
-| LongMemEval | ✗ uses `evalv2.CortexHarness` in-process | ✗ system prompt coaches `cortex_search` usage | ~ | ~ | ✓ | ~ |
+| LongMemEval | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunCode` | ✓ system prompt is framing only (no tool coaching) | ~ | ~ | ✓ | ~ |
 | SWE-bench | ✓ shells out via `benchmarks.RunCode` | ✓ baseline uses `--no-search` CLI flag | ~ | ~ | ✓ | ~ |
 | Library-service | ✓ shells out to `cortex search` | ✓ | ~ | ✓ | ✓ | ~ |
 
