@@ -69,6 +69,7 @@ type CellResult struct {
 	// Grid dimensions.
 	ScenarioID      string `json:"scenario_id"`
 	SessionID       string `json:"session_id,omitempty"` // for multi-session scenarios (library-service)
+	Benchmark       string `json:"benchmark,omitempty"`  // dataset-driven eval family: longmemeval | mteb | swebench | niah; empty for hand-authored scenarios
 	Harness         string `json:"harness"`
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`             // provider-qualified, e.g. "openrouter/anthropic/claude-3-5-haiku"

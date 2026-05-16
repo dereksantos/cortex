@@ -54,6 +54,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	compareProviderName := ""
 	compareModelOverride := ""
 	harnessName := ""
+	benchmarkName := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -69,6 +70,11 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 		case "--harness":
 			if i+1 < len(ctx.Args) {
 				harnessName = ctx.Args[i+1]
+				i++
+			}
+		case "--benchmark":
+			if i+1 < len(ctx.Args) {
+				benchmarkName = ctx.Args[i+1]
 				i++
 			}
 		case "--claude-binary":
@@ -145,6 +151,9 @@ Options:
   --compare-model MODEL    Frontier model override (default: provider default)
   --summary              Show lift trend over recent runs
   --abr-trend            Show ABR progression across runs
+  --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
+  --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
+  --limit N              Cap number of benchmark instances
   -h, --help             Show this help
 
 Examples:
@@ -210,6 +219,15 @@ Examples:
 	// fan-out.
 	if harnessName == evalv2.HarnessCortex {
 		return runCortexCodingHarness(scenarioPath, modelOverride, judgeModel, useJudge, verbose)
+	}
+
+	// BENCHMARK MODE: dataset-driven eval (LongMemEval, MTEB, SWE-bench,
+	// NIAH). Dispatched when --benchmark is set; the per-benchmark
+	// package owns its loader, scorer, and CLI flag parsing.
+	// CellResults flow through the standard persister fan-out so analysis
+	// pipelines see them alongside scenario-driven results.
+	if benchmarkName != "" {
+		return runBenchmark(benchmarkName, ctx.Args, verbose)
 	}
 
 	// Create provider
