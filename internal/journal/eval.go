@@ -30,6 +30,7 @@ type EvalCellResultPayload struct {
 
 	ScenarioID      string `json:"scenario_id"`
 	SessionID       string `json:"session_id,omitempty"`
+	Benchmark       string `json:"benchmark,omitempty"`
 	Harness         string `json:"harness"`
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`

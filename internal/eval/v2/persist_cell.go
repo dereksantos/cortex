@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS cell_results (
     git_branch TEXT,
     scenario_id TEXT NOT NULL,
     session_id TEXT,
+    benchmark TEXT,
     harness TEXT NOT NULL,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -57,7 +58,17 @@ CREATE INDEX IF NOT EXISTS idx_cell_results_scenario ON cell_results(scenario_id
 CREATE INDEX IF NOT EXISTS idx_cell_results_harness ON cell_results(harness);
 CREATE INDEX IF NOT EXISTS idx_cell_results_strategy ON cell_results(context_strategy);
 CREATE INDEX IF NOT EXISTS idx_cell_results_timestamp ON cell_results(timestamp);
+CREATE INDEX IF NOT EXISTS idx_cell_results_benchmark ON cell_results(benchmark);
 `
+
+// cellResultsMigrations adds new columns to a pre-existing cell_results
+// table. SQLite ALTER TABLE silently errors out if the column already
+// exists; we ignore those errors (the migration is idempotent on retry).
+// Add new columns as additional entries here; never remove or rename.
+var cellResultsMigrations = []string{
+	"ALTER TABLE cell_results ADD COLUMN benchmark TEXT",
+	"CREATE INDEX IF NOT EXISTS idx_cell_results_benchmark ON cell_results(benchmark)",
+}
 
 // cellResultsJSONLName is the filename inside dbDir for the append log.
 // Stays a constant (not a Persister field) so analysis scripts can
@@ -333,6 +344,7 @@ func payloadToCellResult(p *journal.EvalCellResultPayload) *CellResult {
 		GitBranch:             p.GitBranch,
 		ScenarioID:            p.ScenarioID,
 		SessionID:             p.SessionID,
+		Benchmark:             p.Benchmark,
 		Harness:               p.Harness,
 		Provider:              p.Provider,
 		Model:                 p.Model,
@@ -369,6 +381,7 @@ func cellResultToPayload(r *CellResult) journal.EvalCellResultPayload {
 		GitBranch:             r.GitBranch,
 		ScenarioID:            r.ScenarioID,
 		SessionID:             r.SessionID,
+		Benchmark:             r.Benchmark,
 		Harness:               r.Harness,
 		Provider:              r.Provider,
 		Model:                 r.Model,
@@ -396,21 +409,21 @@ func (p *Persister) insertCellSQLite(ctx context.Context, r *CellResult) error {
 	const stmt = `
         INSERT OR IGNORE INTO cell_results (
             schema_version, run_id, timestamp, git_commit_sha, git_branch,
-            scenario_id, session_id, harness, provider, model, backend,
+            scenario_id, session_id, benchmark, harness, provider, model, backend,
             context_strategy, cortex_version, seed, temperature,
             tokens_in, tokens_out, injected_context_tokens, cost_usd,
             latency_ms, agent_turns_total, correction_turns,
             tests_passed, tests_failed, task_success, task_success_criterion,
             notes
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?
         )
     `
 	_, err := p.db.ExecContext(ctx, stmt,
 		r.SchemaVersion, r.RunID, r.Timestamp,
 		nullableString(r.GitCommitSHA), nullableString(r.GitBranch),
-		r.ScenarioID, nullableString(r.SessionID),
+		r.ScenarioID, nullableString(r.SessionID), nullableString(r.Benchmark),
 		r.Harness, r.Provider, r.Model, nullableString(r.Backend),
 		r.ContextStrategy, nullableString(r.CortexVersion),
 		nullableSeed(r.Seed),

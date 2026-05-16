@@ -203,6 +203,14 @@ func (p *Persister) init() error {
 		return fmt.Errorf("init cell_results: %w", err)
 	}
 
+	// Per-column migrations for pre-existing cell_results tables. Errors
+	// ignored: SQLite raises "duplicate column" on add-existing, and
+	// "index already exists" is masked by IF NOT EXISTS but partial
+	// migrations from older versions might lack the index.
+	for _, m := range cellResultsMigrations {
+		p.db.Exec(m)
+	}
+
 	// daily_spend — UTC-day buckets for the multi-tier USD ceiling
 	// system (TODO 8 in eval-harness loop). Lifetime spend is SUM(usd)
 	// across all rows.
