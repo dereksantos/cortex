@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	// Side-effect imports register per-benchmark constructors via init().
@@ -39,13 +38,13 @@ func runBenchmark(name string, args []string, verbose bool) error {
 	}
 
 	// Benchmark-specific flag parsing layered on top of the shared
-	// --subset / --limit handling. Each benchmark owns its own flags
-	// (--length / --depth for niah, --tasks for mteb, ...) and decodes
-	// them into opts.Filter; benchmark.Load reads from there.
-	switch name {
-	case "niah":
-		if err := applyNIAHFlags(args, &opts); err != nil {
-			return fmt.Errorf("parse niah flags: %w", err)
+	// --subset / --limit handling. Each benchmark owns its flags by
+	// implementing benchmarks.ArgsApplier (no name-switch in the
+	// CLI). Unknown flags must be tolerated by Applier impls since
+	// the same args slice carries the shared flags too.
+	if applier, ok := bench.(benchmarks.ArgsApplier); ok {
+		if err := applier.ApplyArgs(args, &opts); err != nil {
+			return fmt.Errorf("parse %s flags: %w", name, err)
 		}
 	}
 
@@ -115,73 +114,6 @@ func runBenchmark(name string, args []string, verbose bool) error {
 		name, passed, ran, len(instances))
 
 	return firstErr
-}
-
-// applyNIAHFlags walks the raw arg slice a second time, extracting
-// niah-specific flags into opts.Filter. Repeated flags accumulate
-// (--length 8k --length 16k → "8k,16k"); singletons overwrite.
-// Refuses --model in this layer — NIAH measures the retrieval substrate,
-// not the LLM, so a --model flag is meaningless and almost always an
-// operator error worth surfacing loudly.
-func applyNIAHFlags(args []string, opts *benchmarks.LoadOpts) error {
-	if opts.Filter == nil {
-		opts.Filter = map[string]string{}
-	}
-	var lengths, depths []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--length":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--length requires a value")
-			}
-			lengths = append(lengths, args[i+1])
-			i++
-		case "--depth":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--depth requires a value")
-			}
-			depths = append(depths, args[i+1])
-			i++
-		case "--needle":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--needle requires a value")
-			}
-			opts.Filter["needle"] = args[i+1]
-			i++
-		case "--seed":
-			if i+1 >= len(args) {
-				return fmt.Errorf("--seed requires a value")
-			}
-			opts.Filter["seed"] = args[i+1]
-			i++
-		case "-m", "--model":
-			return fmt.Errorf("--model is not valid with --benchmark niah (NIAH measures retrieval, not LLMs)")
-		}
-	}
-	if len(lengths) > 0 {
-		// Honor comma-separated values within a single flag too, so
-		// `--length 8k,16k` and `--length 8k --length 16k` both work.
-		opts.Filter["lengths"] = joinExpandingCSV(lengths)
-	}
-	if len(depths) > 0 {
-		opts.Filter["depths"] = joinExpandingCSV(depths)
-	}
-	return nil
-}
-
-// joinExpandingCSV joins values with commas, flattening any
-// already-comma-separated values inside. Empty/whitespace fragments
-// are dropped so "8k, ,16k" round-trips to "8k,16k".
-func joinExpandingCSV(vals []string) string {
-	var out []string
-	for _, v := range vals {
-		for _, part := range strings.Split(v, ",") {
-			if part = strings.TrimSpace(part); part != "" {
-				out = append(out, part)
-			}
-		}
-	}
-	return strings.Join(out, ",")
 }
 
 // parseBenchmarkArgs extracts the shared --subset and --limit flags

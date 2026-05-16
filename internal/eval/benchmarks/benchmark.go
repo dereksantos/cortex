@@ -82,3 +82,21 @@ type Env struct {
 	Workdir       string
 	Verbose       bool
 }
+
+// ArgsApplier is an optional interface a Benchmark can implement to
+// parse its own CLI flags off the raw arg slice and stash the
+// results in LoadOpts.Filter. The dispatcher (cmd/cortex/commands)
+// calls ApplyArgs after parseBenchmarkArgs and before Load, so
+// benchmark-specific flags do not need a switch on benchmark name
+// in the CLI layer.
+//
+// Conventions for implementers:
+//   - Tolerate unknown flags silently — the dispatcher's shared flags
+//     (--subset, --limit, --benchmark) will appear in args too.
+//   - Reject flags that are meaningless for this benchmark (e.g. NIAH
+//     rejects --model) with a clean error.
+//   - Encode repeated values as comma-separated strings in
+//     opts.Filter (Filter is map[string]string, not []string).
+type ArgsApplier interface {
+	ApplyArgs(args []string, opts *LoadOpts) error
+}

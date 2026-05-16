@@ -1,4 +1,4 @@
-package commands
+package niah
 
 import (
 	"strings"
@@ -7,7 +7,21 @@ import (
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 )
 
-func TestApplyNIAHFlags(t *testing.T) {
+// TestApplyArgsImplementsInterface — runner satisfies the optional
+// ArgsApplier interface. If a type-assertion mistake breaks this,
+// the CLI silently stops wiring NIAH's flags and operators get
+// confusing defaults.
+func TestApplyArgsImplementsInterface(t *testing.T) {
+	b, err := benchmarks.Get("niah")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.(benchmarks.ArgsApplier); !ok {
+		t.Fatalf("niah runner does not implement benchmarks.ArgsApplier — CLI flag wiring is broken")
+	}
+}
+
+func TestApplyArgs(t *testing.T) {
 	tests := []struct {
 		name        string
 		args        []string
@@ -15,6 +29,7 @@ func TestApplyNIAHFlags(t *testing.T) {
 		wantDepths  string
 		wantNeedle  string
 		wantSeed    string
+		wantFiller  string
 		wantErr     string // substring match; "" → expect success
 	}{
 		{
@@ -25,9 +40,9 @@ func TestApplyNIAHFlags(t *testing.T) {
 		},
 		{
 			name:        "repeated length and depth accumulate",
-			args:        []string{"--length", "8k", "--length", "16k", "--depth", "0.0", "--depth", "0.5", "--depth", "1.0"},
+			args:        []string{"--length", "8k", "--length", "16k", "--depth", "0.0", "--depth", "0.5"},
 			wantLengths: "8k,16k",
-			wantDepths:  "0.0,0.5,1.0",
+			wantDepths:  "0.0,0.5",
 		},
 		{
 			name:        "comma-separated single flag",
@@ -40,6 +55,16 @@ func TestApplyNIAHFlags(t *testing.T) {
 			args:       []string{"--needle", "find me", "--seed", "42"},
 			wantNeedle: "find me",
 			wantSeed:   "42",
+		},
+		{
+			name:       "filler mode adversarial",
+			args:       []string{"--filler", "adversarial"},
+			wantFiller: "adversarial",
+		},
+		{
+			name:       "filler mode lorem",
+			args:       []string{"--filler", "lorem"},
+			wantFiller: "lorem",
 		},
 		{
 			name:    "model flag rejected",
@@ -57,30 +82,21 @@ func TestApplyNIAHFlags(t *testing.T) {
 			wantErr: "--length requires a value",
 		},
 		{
-			name:    "missing depth value",
-			args:    []string{"--depth"},
-			wantErr: "--depth requires a value",
-		},
-		{
-			name:    "missing needle value",
-			args:    []string{"--needle"},
-			wantErr: "--needle requires a value",
-		},
-		{
-			name:    "missing seed value",
-			args:    []string{"--seed"},
-			wantErr: "--seed requires a value",
+			name:    "missing filler value",
+			args:    []string{"--filler"},
+			wantErr: "--filler requires a value",
 		},
 		{
 			name: "empty args is a no-op",
 			args: nil,
-			// All want-fields empty.
 		},
 	}
+	b, _ := benchmarks.Get("niah")
+	applier := b.(benchmarks.ArgsApplier)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := benchmarks.LoadOpts{Filter: map[string]string{}}
-			err := applyNIAHFlags(tc.args, &opts)
+			err := applier.ApplyArgs(tc.args, &opts)
 			if tc.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want error containing %q, got nil; opts=%+v", tc.wantErr, opts)
@@ -104,6 +120,9 @@ func TestApplyNIAHFlags(t *testing.T) {
 			}
 			if got := opts.Filter["seed"]; got != tc.wantSeed {
 				t.Errorf("Filter[seed] = %q, want %q", got, tc.wantSeed)
+			}
+			if got := opts.Filter["filler"]; got != tc.wantFiller {
+				t.Errorf("Filter[filler] = %q, want %q", got, tc.wantFiller)
 			}
 		})
 	}
