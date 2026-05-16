@@ -68,7 +68,7 @@ func Load(ctx context.Context, opts benchmarks.LoadOpts) ([]benchmarks.Instance,
 	case SubsetOracle:
 		// supported
 	case SubsetS, SubsetM:
-		return nil, fmt.Errorf("Phase B: subset %q not yet wired (only %q in this release)", subset, SubsetOracle)
+		return nil, fmt.Errorf("subset %q not yet wired — Phase B follow-up (only %q in this release)", subset, SubsetOracle)
 	default:
 		return nil, fmt.Errorf("unknown subset %q (want %q)", subset, SubsetOracle)
 	}
