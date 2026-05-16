@@ -217,6 +217,37 @@ func hydrateHaystack(_ context.Context, storeDir string, q Question) error {
 	return nil
 }
 
+// longmemevalSystemPrompt overrides the harness's default coding-
+// programmer framing for QA-style instances. The default frames the
+// model as a Go programmer with workdir tools; under that contract
+// the model treats personal-knowledge questions ("How many postcards
+// have I added since I started collecting again?") as out-of-scope
+// and refuses on principle, even when cortex_search returned the
+// evidence. This prompt re-positions cortex_search as the model's
+// memory of prior conversations — which is exactly what LongMemEval
+// is testing.
+//
+// Note: this is a per-benchmark override, not a default-harness
+// change. The Go-coding framing of the default itself is being
+// tracked as a separate generalization follow-up (the harness is
+// positioned as language-agnostic but the default prompt names Go).
+const longmemevalSystemPrompt = `You are a helpful assistant answering questions about your prior conversations with the user.
+
+You have these tools:
+  - cortex_search(query): search your memory of prior conversations with this user. Use this aggressively — the answer is usually grounded in something the user told you in an earlier session.
+  - list_dir, read_file, write_file, run_shell: scratch workspace tools; rarely needed for these questions.
+
+Workflow:
+  1. Read the question carefully — note any dates, names, quantities, or "since X" temporal anchors.
+  2. Call cortex_search with the most distinctive terms from the question.
+  3. If the first search returns "empty" or unrelated results, try one or two more queries with different terms before giving up.
+  4. Once you have the evidence, answer concisely. Cite the specific fact from memory if possible.
+
+Rules:
+  - If the evidence in cortex_search clearly answers the question, ANSWER IT. Do not hedge with "I don't have access to your personal data" — cortex_search is precisely how you have access.
+  - If after a few searches you genuinely cannot find the evidence, say "I don't know" rather than inventing a fact.
+  - Keep answers short: one to three sentences usually suffices.`
+
 // runCortexHarness wraps the v2 CortexHarness so this package does not
 // import v2 in package scope (avoid a heavier graph). Returns the
 // harness result and the model's final text reply for judging.
@@ -225,6 +256,7 @@ func runCortexHarness(ctx context.Context, model, question, workdir string, verb
 	if err != nil {
 		return evalv2.HarnessResult{}, "", err
 	}
+	h.SetSystemPrompt(longmemevalSystemPrompt)
 	if verbose {
 		h.SetNotify(func(kind string, payload any) {
 			fmt.Fprintf(os.Stderr, "  [harness %s] %v\n", kind, payload)
