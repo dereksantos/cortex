@@ -55,14 +55,47 @@ var embedderFactory = func() (llm.Embedder, string, string) {
 	return hugot, llm.DefaultHugotModel, evalv2.ProviderLocal
 }
 
-// reflectFactory builds a reranker bound to provider. nil provider →
-// nil Reflect; the runner just skips reranking.
+// reflectFactory builds a reranker bound to provider. If provider is
+// nil it falls back to whatever LLM the local environment offers
+// (Ollama → Anthropic), so an operator running `--benchmark mteb
+// --rerank` doesn't need to wire env.Provider through the CLI by hand.
+// nil-on-no-LLM is intentional: the runner downgrades to no-rerank
+// with a stderr note rather than failing the run.
 var reflectFactory = func(provider llm.Provider) reranker {
+	if provider == nil {
+		provider = defaultLocalProvider()
+	}
 	if provider == nil {
 		return nil
 	}
 	r := intcognition.NewReflect(provider)
 	return reflectAdapter{r: r}
+}
+
+// defaultLocalProvider returns the first available LLM provider: Ollama
+// first (most likely already running in the operator's dev env), then
+// Anthropic if an API key is set. Returns nil when neither is
+// available — the caller's --rerank request will be a no-op with a
+// warning rather than a hard failure.
+//
+// Honors CORTEX_MTEB_RERANK_MODEL to override the Ollama model used for
+// reranking without changing the global default (which other commands
+// share). Useful for probing rerank quality across models without
+// edits — e.g. CORTEX_MTEB_RERANK_MODEL=gemma2:2b.
+func defaultLocalProvider() llm.Provider {
+	cfg := config.Default()
+	if m := os.Getenv("CORTEX_MTEB_RERANK_MODEL"); m != "" {
+		cfg.OllamaModel = m
+	}
+	ollama := llm.NewOllamaClient(cfg)
+	if ollama.IsAvailable() {
+		return ollama
+	}
+	anthropic := llm.NewAnthropicClient(cfg)
+	if anthropic.IsAvailable() {
+		return anthropic
+	}
+	return nil
 }
 
 // reranker is the narrow interface the runner needs from cognition.Reflect.
@@ -204,7 +237,21 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 // storage layer keys embeddings on (content_id, content_type). We use
 // content_type="corpus" so MTEB embeddings never collide with the
 // existing "event"/"insight" namespaces.
+//
+// Idempotent: if the storage already has at least len(corpus)
+// embeddings (e.g. the operator re-ran against a warm workdir),
+// indexing is skipped. The embeddings JSONL is append-only, so
+// re-indexing would still produce correct results — but at ~75ms per
+// embed call, skipping a no-op re-index saves multiple minutes on
+// follow-up `--rerank` smoke comparisons.
 func indexCorpus(ctx context.Context, store *storage.Storage, embedder llm.Embedder, corpus map[string]Doc, verbose bool) error {
+	if existing, err := store.GetEmbeddingCount(); err == nil && existing >= len(corpus) {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "[mteb] %d embeddings already in storage; skipping index\n", existing)
+		}
+		return nil
+	}
+
 	// Deterministic order for log progress and reproducibility.
 	ids := make([]string, 0, len(corpus))
 	for id := range corpus {
