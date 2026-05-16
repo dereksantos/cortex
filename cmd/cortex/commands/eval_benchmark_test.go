@@ -58,7 +58,7 @@ func TestParseBenchmarkArgs(t *testing.T) {
 		{"missing subset value", []string{"--subset"}, "", 0, true},
 		{"missing limit value", []string{"--limit"}, "", 0, true},
 		{"limit not int", []string{"--limit", "abc"}, "", 0, true},
-		{"swebench combo", []string{"--subset", "verified", "--limit", "3", "--model", "x", "--strategy", "baseline,cortex"}, "verified", 3, false},
+		{"shared flags survive unknown per-benchmark flags", []string{"--subset", "verified", "--limit", "3", "--model", "x", "--strategy", "baseline,cortex"}, "verified", 3, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,40 +138,10 @@ func TestRunBenchmark_EndToEndPersists(t *testing.T) {
 	}
 }
 
-func TestParseBenchmarkArgs_RepoRepeatable(t *testing.T) {
-	opts, err := parseBenchmarkArgs([]string{"--repo", "django/django", "--repo", "psf/requests"})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	got := opts.Filter["repo"]
-	if got != "django/django,psf/requests" {
-		t.Errorf("repo filter: %q want comma-joined", got)
-	}
-}
-
-func TestParseBenchmarkArgs_PerBenchmarkFlags(t *testing.T) {
-	opts, err := parseBenchmarkArgs([]string{
-		"--model", "anthropic/claude-3-5-haiku",
-		"--strategy", "baseline,cortex",
-		"--docker-image-prefix", "myregistry/sweb.eval.x86_64.",
-		"--git-cache-dir", "/tmp/cortex-git-cache",
-	})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if opts.Filter["model"] != "anthropic/claude-3-5-haiku" {
-		t.Errorf("model: %q", opts.Filter["model"])
-	}
-	if opts.Filter["strategy"] != "baseline,cortex" {
-		t.Errorf("strategy: %q", opts.Filter["strategy"])
-	}
-	if opts.Filter["docker-image-prefix"] != "myregistry/sweb.eval.x86_64." {
-		t.Errorf("prefix: %q", opts.Filter["docker-image-prefix"])
-	}
-	if opts.Filter["git-cache-dir"] != "/tmp/cortex-git-cache" {
-		t.Errorf("cache: %q", opts.Filter["git-cache-dir"])
-	}
-}
+// Per-benchmark flag parsing (--repo, --strategy, --model, etc.) is
+// covered in the per-benchmark ApplyArgs tests (see
+// internal/eval/benchmarks/swebench/applyargs_test.go and the niah
+// equivalent). The CLI dispatch layer only owns --subset / --limit.
 
 func TestRunBenchmark_UnknownReturnsCleanError(t *testing.T) {
 	dir := t.TempDir()

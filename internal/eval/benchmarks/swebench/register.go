@@ -2,6 +2,7 @@ package swebench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -66,6 +67,55 @@ func (b *SWEBench) SetConfig(cfg SWEBenchConfig) {
 
 // Config returns the current configuration. Useful for tests.
 func (b *SWEBench) Config() SWEBenchConfig { return b.cfg }
+
+// ApplyArgs implements benchmarks.ArgsApplier so the CLI dispatcher
+// doesn't need a switch-on-name to wire SWE-bench's flags. Values
+// land in opts.Filter; Load reads them out via applyFilterConfig.
+// --repo is repeatable (accumulates into a comma-separated value).
+func (b *SWEBench) ApplyArgs(args []string, opts *benchmarks.LoadOpts) error {
+	if opts.Filter == nil {
+		opts.Filter = map[string]string{}
+	}
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--repo":
+			if i+1 >= len(args) {
+				return errors.New("--repo requires a value")
+			}
+			if prev := opts.Filter["repo"]; prev == "" {
+				opts.Filter["repo"] = args[i+1]
+			} else {
+				opts.Filter["repo"] = prev + "," + args[i+1]
+			}
+			i++
+		case "--strategy":
+			if i+1 >= len(args) {
+				return errors.New("--strategy requires a value")
+			}
+			opts.Filter["strategy"] = args[i+1]
+			i++
+		case "-m", "--model":
+			if i+1 >= len(args) {
+				return errors.New("--model requires a value")
+			}
+			opts.Filter["model"] = args[i+1]
+			i++
+		case "--docker-image-prefix":
+			if i+1 >= len(args) {
+				return errors.New("--docker-image-prefix requires a value")
+			}
+			opts.Filter["docker-image-prefix"] = args[i+1]
+			i++
+		case "--git-cache-dir":
+			if i+1 >= len(args) {
+				return errors.New("--git-cache-dir requires a value")
+			}
+			opts.Filter["git-cache-dir"] = args[i+1]
+			i++
+		}
+	}
+	return nil
+}
 
 // Load implements benchmarks.Benchmark.
 //
