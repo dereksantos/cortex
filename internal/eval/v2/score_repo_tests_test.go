@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +23,6 @@ func writeRepoTestFile(t *testing.T, path, content string) {
 }
 
 func TestRunRepoTests_BuildOnly_Success(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("non-windows only")
-	}
 	workdir, err := os.MkdirTemp("", "cortex-repo-tests-build-*")
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -58,9 +54,6 @@ func main() {}
 }
 
 func TestRunRepoTests_BuildFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("non-windows only")
-	}
 	workdir, err := os.MkdirTemp("", "cortex-repo-tests-buildfail-*")
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -92,9 +85,6 @@ func main() { totally_undefined() }
 }
 
 func TestRunRepoTests_GoTestPassFail(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("non-windows only")
-	}
 	workdir, err := os.MkdirTemp("", "cortex-repo-tests-gotest-*")
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -138,9 +128,6 @@ func TestAddFails(t *testing.T)  { if Add(1, 2) == 3 { t.Fatal("intentional") } 
 }
 
 func TestRunRepoTests_TimeoutOnBuild(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("non-windows only")
-	}
 	workdir, err := os.MkdirTemp("", "cortex-repo-tests-timeout-*")
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
