@@ -78,7 +78,7 @@ func (c *SearchVectorCommand) Execute(ctx *Context) error {
 	)
 	if hasText {
 		embedder, m, p := resolveEmbedder(ctx.Config)
-		if embedder == nil || !embedder.IsEmbeddingAvailable() {
+		if embedder == nil {
 			return errors.New("no embedder available (install Ollama or Hugot)")
 		}
 		v, err := embedder.Embed(context.Background(), *text)

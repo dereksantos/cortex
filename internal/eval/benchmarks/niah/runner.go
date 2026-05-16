@@ -210,12 +210,12 @@ func (runner) Load(_ context.Context, opts benchmarks.LoadOpts) ([]benchmarks.In
 // Run executes one NIAH instance through the cortex CLI as a black box
 // (per docs/prompts/eval-principles.md). The flow:
 //
-//	1. Generate the haystack (in-memory, no Cortex involvement)
-//	2. Chunk into overlapping windows -> []*events.Event
-//	3. exec `cortex capture --bulk --workdir env.Workdir` over NDJSON stdin
-//	4. exec `cortex ingest --workdir env.Workdir`
-//	5. exec `cortex search --workdir env.Workdir --json` and parse output
-//	6. Score on substring match (offline, no Cortex involvement)
+//  1. Generate the haystack (in-memory, no Cortex involvement)
+//  2. Chunk into overlapping windows -> []*events.Event
+//  3. exec `cortex capture --bulk --workdir env.Workdir` over NDJSON stdin
+//  4. exec `cortex ingest --workdir env.Workdir`
+//  5. exec `cortex search --workdir env.Workdir --json` and parse output
+//  6. Score on substring match (offline, no Cortex involvement)
 //
 // All Cortex interaction is mediated by the CLI; no internal package
 // imports. This means the benchmark genuinely tests what users run.

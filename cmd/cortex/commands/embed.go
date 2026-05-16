@@ -57,28 +57,35 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		return err
 	}
 
-	embedder, modelID, providerID := resolveEmbedder(ctx.Config)
-	if embedder == nil || !embedder.IsEmbeddingAvailable() {
-		return errors.New("no embedder available (install Ollama or Hugot)")
-	}
-
+	// Validate flags BEFORE resolving the embedder so a typo in a
+	// benchmark wrapper still surfaces a clear flag error even on
+	// machines without Ollama/Hugot installed (the embedder lookup
+	// would otherwise mask the real issue).
 	if *bulk {
 		if *workdir == "" {
 			return errors.New("--bulk requires --workdir")
 		}
-		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout)
+	} else {
+		if strings.TrimSpace(*text) == "" {
+			return errors.New("--text is required (or use --bulk for NDJSON stdin)")
+		}
+		if *store {
+			if *workdir == "" {
+				return errors.New("--store requires --workdir")
+			}
+			if *docID == "" {
+				return errors.New("--store requires --doc-id")
+			}
+		}
 	}
 
-	if strings.TrimSpace(*text) == "" {
-		return errors.New("--text is required (or use --bulk for NDJSON stdin)")
+	embedder, modelID, providerID := resolveEmbedder(ctx.Config)
+	if embedder == nil {
+		return errors.New("no embedder available (install Ollama or Hugot)")
 	}
-	if *store {
-		if *workdir == "" {
-			return errors.New("--store requires --workdir")
-		}
-		if *docID == "" {
-			return errors.New("--store requires --doc-id")
-		}
+
+	if *bulk {
+		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout)
 	}
 
 	vec, err := embedder.Embed(context.Background(), *text)
@@ -192,28 +199,28 @@ func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder,
 	})
 }
 
-// resolveEmbedder mirrors internal/eval/benchmarks/mteb's embedderFactory
-// and cmd/cortex/commands/ingest.go's embedder construction: Ollama
-// primary, Hugot fallback. Returns the embedder ready-to-use plus the
-// model + provider names so callers can stamp them on output.
+// resolveEmbedder mirrors cmd/cortex/commands/ingest.go's embedder
+// construction: Ollama primary, Hugot fallback. Returns the embedder
+// ready-to-use plus the model + provider names so callers can stamp
+// them on output.
 //
-// cfg may be nil; we fall back to config.Default() to pick up the
-// canonical embedding-model name.
+// Returns (nil, "", "") when neither embedder is available so the
+// caller's nil-check is the single source of truth — that lets
+// staticcheck reason about the comparison correctly.
+//
+// cfg may be nil; we fall back to config.Default() for the canonical
+// embedding-model name.
 func resolveEmbedder(cfg *config.Config) (llm.Embedder, string, string) {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	ollama := llm.NewOllamaClient(cfg)
-	if ollama.IsEmbeddingAvailable() {
+	if ollama := llm.NewOllamaClient(cfg); ollama.IsEmbeddingAvailable() {
 		return ollama, cfg.OllamaEmbeddingModel, "ollama"
 	}
-	hugot := llm.NewHugotEmbedder()
-	if hugot.IsEmbeddingAvailable() {
+	if hugot := llm.NewHugotEmbedder(); hugot.IsEmbeddingAvailable() {
 		return hugot, llm.DefaultHugotModel, "local"
 	}
-	// Return the unavailable one so the caller's IsEmbeddingAvailable()
-	// check fails cleanly instead of nil-panicking.
-	return hugot, llm.DefaultHugotModel, "local"
+	return nil, "", ""
 }
 
 // embedJSONOutput is the contract emitted by `cortex embed` (no --store).
@@ -256,4 +263,3 @@ func emitEmbedStoreJSON(w io.Writer, docID, contentType, model, provider string,
 		Provider:    provider,
 	})
 }
-

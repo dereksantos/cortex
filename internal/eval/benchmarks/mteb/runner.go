@@ -224,4 +224,3 @@ func safeDiv(a float64, n int) float64 {
 	}
 	return a / float64(n)
 }
-
