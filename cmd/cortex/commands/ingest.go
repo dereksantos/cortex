@@ -220,11 +220,31 @@ func (c *IngestCommand) Description() string { return "Move queued events to dat
 
 // Execute runs the ingest command.
 func (c *IngestCommand) Execute(ctx *Context) error {
+	// --workdir short-circuits the dual-config (project-local queue,
+	// global storage) resolution below: benchmarks call ingest against
+	// a single isolated <workdir>/.cortex where queue and storage are
+	// co-located.
+	workdir := ""
+	for i := 0; i < len(ctx.Args); i++ {
+		arg := ctx.Args[i]
+		if arg == "--workdir" && i+1 < len(ctx.Args) {
+			workdir = ctx.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--workdir=") {
+			workdir = strings.TrimPrefix(arg, "--workdir=")
+		}
+	}
+
 	cfg := ctx.Config
 	store := ctx.Storage
-
-	// Load config and storage if not provided
-	if cfg == nil || store == nil {
+	if workdir != "" {
+		var err error
+		cfg, store, err = openWorkdirContext(workdir)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+	} else if cfg == nil || store == nil {
 		var err error
 		// Use capture config for queue path (project-local)
 		captureCfg, captureErr := loadCaptureConfig()
