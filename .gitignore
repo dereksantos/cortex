@@ -235,3 +235,6 @@ dist/
 *.tar.gz
 *.zip
 .claude/
+
+# Loop scratchpad (live REPL build progress, not source of truth)
+PROGRESS-REPL.md
