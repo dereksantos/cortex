@@ -691,8 +691,8 @@ func ensureStubOpenRouterKey(apiURL string) error {
 
 // verifier kinds — small enum, easy to extend.
 const (
-	verifierNone     = "none"
-	verifierGoBuild  = "go build"
+	verifierNone    = "none"
+	verifierGoBuild = "go build"
 )
 
 type verifyResult struct {
@@ -816,15 +816,15 @@ func (s *replState) captureTurn(row turnRow) error {
 			WorkingDir:  s.workdir,
 		},
 		Metadata: map[string]interface{}{
-			"capture_type":  "repl_turn",
-			"source":        "cortex-repl",
-			"session_id":    row.SessionID,
-			"turn":          row.Turn,
-			"verify_kind":   row.VerifyKind,
-			"verify_ok":     row.VerifyOK || row.RetryVerifyOK || row.UserRetryVerifyOK,
-			"agent_turns":   row.AgentTurns,
-			"tokens_in":     row.TokensIn,
-			"tokens_out":    row.TokensOut,
+			"capture_type": "repl_turn",
+			"source":       "cortex-repl",
+			"session_id":   row.SessionID,
+			"turn":         row.Turn,
+			"verify_kind":  row.VerifyKind,
+			"verify_ok":    row.VerifyOK || row.RetryVerifyOK || row.UserRetryVerifyOK,
+			"agent_turns":  row.AgentTurns,
+			"tokens_in":    row.TokensIn,
+			"tokens_out":   row.TokensOut,
 		},
 	}
 	return cap.CaptureEvent(event)
@@ -1247,13 +1247,13 @@ func probeOllamaAndPickModel(chatAPI, fallback string) (string, bool, string) {
 // PROGRESS-REPL.md — qwen-1.5b loses discipline with 5 tools, mistral:7b
 // handles it cleanly, gemma2 and qwen:0.5b can't tool-call at all):
 //
-//   +30 if model family is in the "known good function-callers" list
-//        (qwen2.5-coder ≥3b, llama3.1/3.2, mistral-nemo, granite-code,
-//         command-r, mistral 7b+)
-//   +10 if the name contains "coder" or "instruct"
-//   +size-bucket-bonus by parameter count parsed from the name suffix
-//   −50 if the model family is known-broken for our tool registry
-//        (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm)
+//	+30 if model family is in the "known good function-callers" list
+//	     (qwen2.5-coder ≥3b, llama3.1/3.2, mistral-nemo, granite-code,
+//	      command-r, mistral 7b+)
+//	+10 if the name contains "coder" or "instruct"
+//	+size-bucket-bonus by parameter count parsed from the name suffix
+//	−50 if the model family is known-broken for our tool registry
+//	     (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm)
 //
 // Ties broken by name (alphabetical, deterministic). We only return a
 // non-fallback if the best score beats the fallback's score by at
