@@ -64,7 +64,6 @@ var (
 	errCommandNotAllowed   = errors.New("command not allowed")
 	errArgContainsMeta     = errors.New("argument contains shell metacharacter")
 	errArgIsAbsolutePath   = errors.New("argument is an absolute path; use a workdir-relative path")
-	errArgEscapesWorkdir   = errors.New("argument escapes workdir")
 	errPathEscapesWorkdir  = errors.New("path escapes workdir")
 	errPathIsReservedDir   = errors.New("path is under reserved directory (.git or .cortex)")
 	errPathIsSymlink       = errors.New("path is a symlink; refused for safety")

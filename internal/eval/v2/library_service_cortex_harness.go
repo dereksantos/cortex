@@ -28,9 +28,9 @@ import (
 // OpenRouter client and tool registry happens on every RunSession so
 // the harness is reusable across cells without stateful contamination.
 type CortexHarness struct {
-	model    string
-	apiKey   string
-	keySrc   string
+	model  string
+	apiKey string
+	keySrc string
 
 	// system is the agent's standing instructions. Empty -> default.
 	// Override-able so a scenario-specific system prompt can be wired

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -22,25 +23,25 @@ import (
 // SQLite + JSONL + journal, so this struct is for human-readable
 // reporting only.
 type CodingRunResult struct {
-	Scenario    *CodingScenario
-	Attempts    []CodingAttemptResult
-	Passed      bool   // true if any attempt achieved TaskSuccess
+	Scenario     *CodingScenario
+	Attempts     []CodingAttemptResult
+	Passed       bool // true if any attempt achieved TaskSuccess
 	WinningRunID string
-	LoopRoot    string // absolute path of the persistent per-eval root
+	LoopRoot     string // absolute path of the persistent per-eval root
 }
 
 // CodingAttemptResult is one attempt's outcome.
 type CodingAttemptResult struct {
-	Attempt      int
-	RunID        string
-	SessionID    string
-	Workdir      string
+	Attempt       int
+	RunID         string
+	SessionID     string
+	Workdir       string
 	HarnessResult HarnessResult
-	Frames       FrameDiffResult
-	Judge        GoLJudgeResult
-	TaskSuccess  bool
-	CellRunID    string
-	Err          error
+	Frames        FrameDiffResult
+	Judge         GoLJudgeResult
+	TaskSuccess   bool
+	CellRunID     string
+	Err           error
 }
 
 // RunCodingScenario executes a CodingScenario end-to-end. It branches
@@ -272,29 +273,18 @@ func setupAttemptWorkdir(loopRoot string, s *CodingScenario, attempt int) (strin
 	return workdir, nil
 }
 
-// errorsIsExist is a thin wrapper around os.IsExist to avoid the
-// "errors" import in this file. The original os.IsExist is fine for
-// our limited use (Symlink already-exists detection).
+// errorsIsExist reports whether err indicates the target already
+// exists. Used to ignore EEXIST on the shared-store Symlink call
+// when a prior attempt already created it.
 func errorsIsExist(err error) bool {
 	if err == nil {
 		return false
 	}
 	var pathErr *os.PathError
-	if asPathErr(err, &pathErr) {
+	if errors.As(err, &pathErr) {
 		return os.IsExist(pathErr) || pathErr.Err == fs.ErrExist
 	}
 	return os.IsExist(err)
-}
-
-func asPathErr(err error, dst **os.PathError) bool {
-	for e := err; e != nil; {
-		if pe, ok := e.(*os.PathError); ok {
-			*dst = pe
-			return true
-		}
-		break
-	}
-	return false
 }
 
 // buildCellNotes summarizes the loop's terminal state, frame results,

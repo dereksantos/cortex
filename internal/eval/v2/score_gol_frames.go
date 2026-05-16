@@ -26,7 +26,7 @@ type FrameDiffResult struct {
 	AllPassed  bool
 	BuildOK    bool
 	BinaryPath string // path to the built binary (workdir/<module-name>)
-	BuildOut   string // truncateGoLd build output on failure
+	BuildOut   string // truncated build output on failure
 }
 
 // FrameCaseResult is one fixture pair's outcome.
@@ -114,7 +114,7 @@ func ScoreGoLFrames(ctx context.Context, workdir, fixturesDir string, generation
 
 // framePair holds the paths of one fixture pair.
 type framePair struct {
-	Name  string
+	Name    string
 	InPath  string
 	OutPath string
 }
