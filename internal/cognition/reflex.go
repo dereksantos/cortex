@@ -3,6 +3,7 @@ package cognition
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -71,8 +72,11 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 	defer func() {
 		elapsed := time.Since(start)
 		if elapsed > 50*time.Millisecond {
-			// Log warning but don't fail - latency target is aspirational
-			fmt.Printf("[reflex] warning: took %v (target <50ms)\n", elapsed)
+			// Log warning but don't fail — latency target is aspirational.
+			// Must go to stderr: `cortex search --json` owns stdout, and a
+			// stdout-bound warning here corrupts the JSON contract callers
+			// rely on (seen on slow CI runners).
+			fmt.Fprintf(os.Stderr, "[reflex] warning: took %v (target <50ms)\n", elapsed)
 		}
 	}()
 
