@@ -69,6 +69,15 @@ type CortexHarness struct {
 	// per-session registry. Used by benchmarks that need a baseline
 	// run with no Cortex augmentation (SWE-bench --strategy baseline).
 	disableCortexSearch bool
+
+	// minimalTools restricts the per-session registry to write_file +
+	// read_file + run_shell only. Used by the `cortex` REPL when
+	// driving small local models (qwen2.5-coder:1.5b et al.) whose
+	// tool-call discipline degrades with 5 tools registered. Setting
+	// this drops list_dir and cortex_search from the registry so the
+	// model sees a 3-tool surface area it can reliably function-call
+	// against. See PROGRESS-REPL.md iter 3/4 for the probe matrix.
+	minimalTools bool
 }
 
 // NewCortexHarness resolves the OpenRouter API key (keychain first, env
@@ -126,6 +135,13 @@ func (h *CortexHarness) SetAPIURL(url string) { h.apiURL = url }
 // tool in subsequent RunSession* calls. Defaults to enabled. Pass
 // false to run a baseline-style cell with no Cortex augmentation.
 func (h *CortexHarness) SetCortexSearchEnabled(enabled bool) { h.disableCortexSearch = !enabled }
+
+// SetMinimalTools restricts the per-session registry to read_file +
+// write_file + run_shell when enabled. Used by the `cortex` REPL when
+// driving small local models whose function-call discipline degrades
+// at the default 5-tool surface area. When true, this overrides
+// SetCortexSearchEnabled (cortex_search is dropped regardless).
+func (h *CortexHarness) SetMinimalTools(enabled bool) { h.minimalTools = enabled }
 
 // defaultSystemPrompt is the default agent contract. Deliberately
 // concise — small models tend to ignore long system prompts, and the
@@ -191,9 +207,11 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	registry := harness.NewToolRegistry()
 	registry.Register(harness.NewReadFileTool(workdir))
 	registry.Register(harness.NewWriteFileTool(workdir, registry))
-	registry.Register(harness.NewListDirTool(workdir))
+	if !h.minimalTools {
+		registry.Register(harness.NewListDirTool(workdir))
+	}
 	registry.Register(harness.NewRunShellTool(workdir, registry))
-	if !h.disableCortexSearch {
+	if !h.minimalTools && !h.disableCortexSearch {
 		cortexSearch, err := harness.NewCortexSearchTool(workdir)
 		if err != nil {
 			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)

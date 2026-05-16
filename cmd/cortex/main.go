@@ -16,13 +16,27 @@ const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
+		// Bare `cortex` (no subcommand) drops into the interactive REPL
+		// rooted at cwd with the default tiny model. See repl.go.
+		runREPL(nil)
+		return
+	}
+
+	// `cortex --flag ...` (no subcommand, only flags) also enters the
+	// REPL — flags are forwarded. This matches the bare-cortex UX
+	// promise: `cortex --model phi3:mini` should "just work" without
+	// requiring `cortex repl --model phi3:mini`.
+	if strings.HasPrefix(os.Args[1], "-") {
+		runREPL(os.Args[1:])
+		return
 	}
 
 	command := os.Args[1]
 
 	switch command {
+	case "repl":
+		runREPL(os.Args[2:])
+		return
 	case "capture", "ingest", "analyze", "process", "feed", "journal":
 		if cmd := commands.Get(command); cmd != nil {
 			ctx := &commands.Context{
@@ -253,6 +267,24 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", command)
 		printUsage()
+		os.Exit(1)
+	}
+}
+
+// runREPL invokes the bare-`cortex` REPL command. Bare invocation and
+// explicit `cortex repl` both land here. No config / storage init
+// happens here — the REPL state code in commands/repl.go does its own
+// per-workdir .cortex/ bootstrap, since the user may be in a fresh
+// directory that's never been touched by cortex before.
+func runREPL(args []string) {
+	cmd := commands.Get("repl")
+	if cmd == nil {
+		fmt.Fprintln(os.Stderr, "cortex: repl command not registered (build error?)")
+		os.Exit(1)
+	}
+	ctx := &commands.Context{Args: args}
+	if err := cmd.Execute(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
