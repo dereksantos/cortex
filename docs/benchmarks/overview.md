@@ -14,6 +14,11 @@ Both paths emit the same `CellResult` through the same `Persister` fan-out,
 so analysis tooling (`.cortex/db/cell_results.jsonl`, the SQLite
 `cell_results` table, `.cortex/journal/eval/`) treats them uniformly.
 
+For the full "what dimension of a chat-REPL coding harness does each benchmark
+cover, what's still a gap, and what's the roadmap to close them" picture, see
+[`coverage-matrix.md`](coverage-matrix.md) — the living map of the 10
+dimensions against wrapped + candidate + proxy benchmarks.
+
 ## Package layout
 
 ```
