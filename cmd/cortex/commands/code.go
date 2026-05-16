@@ -48,6 +48,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	maxCostStr := ""
 	maxCumulativeTokens := 0
 	maxOutputTokens := 0
+	apiURL := ""
 	verbose := false
 	quiet := false
 
@@ -98,6 +99,15 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 				maxOutputTokens = n
 				i++
 			}
+		case "--api-url", "--local":
+			if args[i] == "--local" {
+				// Convenience: --local is shorthand for the standard
+				// Ollama OpenAI-compatible endpoint.
+				apiURL = "http://localhost:11434/v1/chat/completions"
+			} else if i+1 < len(args) {
+				apiURL = args[i+1]
+				i++
+			}
 		case "-v", "--verbose":
 			verbose = true
 		case "-q", "--quiet":
@@ -126,10 +136,11 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		switch a {
 		case "-m", "--model", "-w", "--workdir", "--max-turns", "--max-cost",
 			"--max-tokens", "--max-cumulative-tokens",
-			"--max-output", "--max-output-tokens":
+			"--max-output", "--max-output-tokens",
+			"--api-url":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "-h", "--help":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -177,12 +188,18 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	if maxOutputTokens > 0 {
 		h.SetMaxOutputTokens(maxOutputTokens)
 	}
+	if apiURL != "" {
+		h.SetAPIURL(apiURL)
+	}
 	if !quiet {
 		h.SetNotify(makeCodeNotifier(verbose))
 	}
 
 	fmt.Printf("[cortex code] workdir: %s\n", resolvedWorkdir)
 	fmt.Printf("[cortex code] model:   %s\n", model)
+	if apiURL != "" {
+		fmt.Printf("[cortex code] api-url: %s\n", apiURL)
+	}
 	fmt.Println("[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)")
 	fmt.Println()
 

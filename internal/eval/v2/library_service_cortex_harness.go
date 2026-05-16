@@ -58,6 +58,12 @@ type CortexHarness struct {
 	// OpenRouter client. 0 -> derive from the model id via
 	// harness.ModelMaxOutputTokens.
 	maxOutputTokens int
+
+	// apiURL overrides the chat-completions endpoint. Empty means
+	// the OpenRouter default. Used to point at a local Ollama
+	// instance (`http://localhost:11434/v1/chat/completions`) or
+	// any other OpenAI-compatible server.
+	apiURL string
 }
 
 // NewCortexHarness resolves the OpenRouter API key (keychain first, env
@@ -104,6 +110,12 @@ func (h *CortexHarness) SetNotify(f func(kind string, payload any)) { h.notify =
 // SetMaxOutputTokens overrides the per-turn output cap. 0 reverts
 // to the harness.ModelMaxOutputTokens default for the current model.
 func (h *CortexHarness) SetMaxOutputTokens(n int) { h.maxOutputTokens = n }
+
+// SetAPIURL overrides the chat-completions endpoint. Useful for
+// pointing at a local Ollama instance
+// (`http://localhost:11434/v1/chat/completions`) or any other
+// OpenAI-compatible server. Empty -> default OpenRouter endpoint.
+func (h *CortexHarness) SetAPIURL(url string) { h.apiURL = url }
 
 // defaultSystemPrompt is the default agent contract. Deliberately
 // concise — small models tend to ignore long system prompts, and the
@@ -153,6 +165,9 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	// LastCostUSD / LastProvider from a prior cell.
 	client := llm.NewOpenRouterClientWithKey(nil, h.apiKey)
 	client.SetModel(h.model)
+	if h.apiURL != "" {
+		client.SetAPIURL(h.apiURL)
+	}
 
 	// Per-turn output cap: derive from the model id unless the
 	// caller overrode it via SetMaxOutputTokens. The cap bounds a
