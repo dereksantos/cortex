@@ -64,14 +64,16 @@ When a benchmark compares strategies (baseline vs. cortex vs. frontier), each st
 
 ## Current compliance
 
-As of 2026-05-16, compliance is poor and the doc serves as an active TODO list. See [`docs/benchmarks/integrity.md`](../benchmarks/integrity.md) for the PR #32 retrospective and per-benchmark remediation plan.
+The doc serves as an active TODO list — flip ✗ to ✓ as benchmarks land. See [`docs/benchmarks/integrity.md`](../benchmarks/integrity.md) for the PR #32 retrospective and per-benchmark remediation playbook.
 
 | Benchmark | Black box (1) | No coaching (2) | Versioned (3) | Reproducible (5) | Isolated (6) | Structured (7) |
 |---|---|---|---|---|---|---|
 | MTEB | ✗ uses `internal/storage`, `intcognition.Reflect` | ~ `--rerank` is opt-in | ~ partial | ✓ | ✓ | ~ partial |
-| NIAH | ✗ uses `internal/capture`, `internal/processor` | ✓ | ~ | ✓ | ✓ | ~ |
+| NIAH | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunSearch` | ✓ | ~ | ✓ | ✓ | ~ |
 | LongMemEval | ✗ uses `evalv2.CortexHarness` in-process | ✗ system prompt coaches `cortex_search` usage | ~ | ~ | ✓ | ~ |
 | SWE-bench | ✗ uses `evalv2.CortexHarness` in-process | ✗ `SetCortexSearchEnabled(false)` toggles tool registry | ~ | ~ | ✓ | ~ |
 | Library-service | ✓ shells out to `cortex search` | ✓ | ~ | ✓ | ✓ | ~ |
 
-0 of 4 benchmarks meet principle 1 today. The remediation, per principle 4, is to file the missing CLI surfaces (`cortex embed`, `cortex search-vector`, `cortex capture --bulk`, `cortex code --no-search`) and convert each benchmark to subprocess invocation as those land.
+**CLI surfaces landed** (per principle 4): `cortex capture --bulk`, `cortex search --workdir --json`, `cortex ingest --workdir`, `cortex code --no-search`. Shared subprocess helpers live in `internal/eval/benchmarks/cortexcli.go`.
+
+**CLI surfaces still needed**: `cortex code --json` (for SWE-bench conversion — agent telemetry), `cortex embed` + `cortex search-vector` (for MTEB conversion — direct embedding/retrieval substrate).

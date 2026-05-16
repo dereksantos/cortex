@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -52,6 +53,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	verbose := false
 	quiet := false
 	noSearch := false
+	jsonOut := false
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -115,6 +117,8 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			quiet = true
 		case "--no-search":
 			noSearch = true
+		case "--json":
+			jsonOut = true
 		case "-h", "--help":
 			printCodeHelp()
 			return nil
@@ -143,7 +147,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			"--api-url":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "-h", "--help", "--local":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -197,17 +201,22 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	if noSearch {
 		h.SetCortexSearchEnabled(false)
 	}
-	if !quiet {
+	// --json owns stdout exclusively; suppress the live notifier (which
+	// writes to stdout) and the framing banner. Verbose/quiet still apply
+	// for the non-JSON case.
+	if !quiet && !jsonOut {
 		h.SetNotify(makeCodeNotifier(verbose))
 	}
 
-	fmt.Printf("[cortex code] workdir: %s\n", resolvedWorkdir)
-	fmt.Printf("[cortex code] model:   %s\n", model)
-	if apiURL != "" {
-		fmt.Printf("[cortex code] api-url: %s\n", apiURL)
+	if !jsonOut {
+		fmt.Printf("[cortex code] workdir: %s\n", resolvedWorkdir)
+		fmt.Printf("[cortex code] model:   %s\n", model)
+		if apiURL != "" {
+			fmt.Printf("[cortex code] api-url: %s\n", apiURL)
+		}
+		fmt.Println("[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)")
+		fmt.Println()
 	}
-	fmt.Println("[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)")
-	fmt.Println()
 
 	hr, err := h.RunSessionWithResult(context.Background(), prompt, resolvedWorkdir)
 	if err != nil {
@@ -215,6 +224,10 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	}
 
 	loopRes := h.LastLoopResult()
+	if jsonOut {
+		return emitCodeJSON(os.Stdout, resolvedWorkdir, model, hr, loopRes)
+	}
+
 	fmt.Println()
 	fmt.Printf("[cortex code] turns=%d tokens=%d/%d cost=$%.4f latency=%dms reason=%s\n",
 		hr.AgentTurnsTotal, hr.TokensIn, hr.TokensOut, hr.CostUSD, hr.LatencyMs, loopRes.Reason)
@@ -227,6 +240,44 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		fmt.Println(loopRes.Final)
 	}
 	return nil
+}
+
+// codeJSONOutput is the structured contract returned by --json. Fields
+// carry the same telemetry as the [cortex code] summary line plus the
+// per-result detail benchmarks need to populate evalv2.CellResult
+// without re-parsing prose.
+type codeJSONOutput struct {
+	Workdir         string   `json:"workdir"`
+	Model           string   `json:"model"`
+	Turns           int      `json:"turns"`
+	TokensIn        int      `json:"tokens_in"`
+	TokensOut       int      `json:"tokens_out"`
+	CostUSD         float64  `json:"cost_usd"`
+	LatencyMs       int64    `json:"latency_ms"`
+	Reason          string   `json:"reason"`
+	FilesChanged    []string `json:"files_changed"`
+	Final           string   `json:"final"`
+	InjectedContext int      `json:"injected_context_tokens"`
+}
+
+func emitCodeJSON(w io.Writer, workdir, model string, hr evalv2.HarnessResult, loopRes harness.LoopResult) error {
+	out := codeJSONOutput{
+		Workdir:         workdir,
+		Model:           model,
+		Turns:           hr.AgentTurnsTotal,
+		TokensIn:        hr.TokensIn,
+		TokensOut:       hr.TokensOut,
+		CostUSD:         hr.CostUSD,
+		LatencyMs:       hr.LatencyMs,
+		Reason:          string(loopRes.Reason),
+		FilesChanged:    hr.FilesChanged,
+		Final:           loopRes.Final,
+		InjectedContext: loopRes.InjectedContextTokens,
+	}
+	if out.FilesChanged == nil {
+		out.FilesChanged = []string{}
+	}
+	return json.NewEncoder(w).Encode(out)
 }
 
 // resolveCodeWorkdir returns the absolute workdir path. If initFresh
@@ -393,6 +444,11 @@ Optional:
                                   registry. Used by baseline benchmark cells
                                   that need a clean "no Cortex augmentation"
                                   run for comparison.
+  --json                          Emit a single JSON object on stdout (suppresses
+                                  the live notifier + summary lines). Carries
+                                  turns, tokens, cost, latency, files_changed,
+                                  final, reason — enough to populate a
+                                  CellResult from a subprocess call.
   -v, --verbose                   Print tool arguments and result sizes.
   -q, --quiet                     No live stream; only final summary.
 
