@@ -158,6 +158,7 @@ Options:
   --depth F              NIAH only: needle depth 0.0..1.0; repeatable, default 0.0,0.5,1.0
   --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
   --seed N               NIAH only: deterministic filler seed (default: 1)
+  --filler MODE          NIAH only: filler corpus (adversarial|lorem; default: adversarial)
   -h, --help             Show this help
 
 Examples:

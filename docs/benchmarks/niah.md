@@ -13,38 +13,66 @@ The benchmark is intentionally cheap: no HuggingFace fetcher, no LLM
 judge, no Docker. The generator is the source of truth — running the
 same flags twice produces byte-identical haystacks.
 
+## Two modes, two questions
+
+NIAH ships two filler modes that ask different questions of the
+retrieval substrate:
+
+| Mode | Question | Behavior of the lorem corpus |
+|---|---|---|
+| `adversarial` (default) | "Can retrieval discriminate the needle from chunks that share words with the probe?" | Every filler phrase contains `secret`, `recipe`, or `code` — so the retriever sees a crowd of candidates and the scorer has to actually rank. |
+| `lorem` | "Does the pipeline shape work end-to-end?" | Filler has zero overlap with probe terms — only the needle chunk matches, so a miss means the substrate (capture / ingest / chunking) is broken. |
+
+Use **lorem first** when triaging an unfamiliar failure (does the
+pipeline even work?), then **adversarial** to measure retrieval
+quality. The default is adversarial because that's the regression
+signal that compounds with shipping changes.
+
 ## What it measures
 
 For each `(length × depth)` cell:
 
-1. **Generate** a `Length * 4` char haystack of deterministic lorem
-   filler, splice the needle in at `depth * fillerLen`.
+1. **Generate** a `Length * 4` char haystack from the chosen filler
+   corpus, splice the needle in at `depth * fillerLen`.
 2. **Capture** ~400-char overlapping chunks (overlap = needle-safe)
    into a fresh per-instance `<workdir>/.cortex/`.
 3. **Ingest** the journal in-process (`processor.RunBatch`).
 4. **Retrieve** via `cognition.Fast` (Reflex → Resolve) with a probe
    derived from the needle (needle minus its trailing secret token).
 5. **Score**: pass iff the needle string appears as a substring in any
-   of the top-K results.
+   of the top-K (default 10) results.
 
 A `*evalv2.CellResult` is emitted per cell, with `Benchmark="niah"`,
-`Harness=cortex`, `ContextStrategy=cortex`, and `Notes` containing the
-length, depth, top score, and the 1-indexed position of the needle in
-the result list (or `"missing"` on a miss).
+`Harness=cortex`, `ContextStrategy=cortex`, and `Notes` carrying the
+full diagnostic:
+
+```
+length=16k depth=0.50 filler=adversarial top_score=0.850 runner_up=0.850 gap=0.000 results=10 needle_position=missing
+```
+
+Each field is a leading indicator of a different regression class:
+
+| Field | What it tells you |
+|---|---|
+| `top_score` | Best score returned. A drop in absolute value across runs = scorer regression. |
+| `runner_up` | 2nd-best score. Reveals how close the contest was. |
+| `gap` | `top_score − runner_up`. **The most actionable metric.** A shrinking gap means the needle is barely winning; a gap of 0.0 with many results means the scorer can't discriminate at all. |
+| `results` | How many chunks Reflex actually returned. A drop from N to 1 = retrieval over-filters. |
+| `needle_position` | 1-indexed rank, or `missing`. Pass requires `needle_position != missing`. |
 
 ## CLI
 
 ```bash
-# Default: 8K haystack, three depths (0.0, 0.5, 1.0), seed=1
+# Default: adversarial filler, 8K haystack, three depths (0.0, 0.5, 1.0), seed=1
 ./cortex eval --benchmark niah
 
-# Sweep lengths and depths (cross-product = 3 × 3 = 9 cells)
+# Cross-product sweep (4 × 3 = 12 cells)
 ./cortex eval --benchmark niah \
-  --length 8k --length 16k --length 32k \
-  --depth 0.0 --depth 0.5 --depth 1.0
+  --length 8k,16k,32k,64k --depth 0.0,0.5,1.0
 
-# Equivalent comma-form
-./cortex eval --benchmark niah --length 8k,16k,32k --depth 0.0,0.5,1.0
+# Pipeline-shape smoke (no scorer competition)
+./cortex eval --benchmark niah --filler lorem \
+  --length 8k,16k,32k --depth 0.0,0.5,1.0
 
 # Single cell, custom needle and seed
 ./cortex eval --benchmark niah \
@@ -56,63 +84,87 @@ the result list (or `"missing"` on a miss).
 ./cortex eval --benchmark niah --length 8k,16k --depth 0.0,0.5,1.0 --limit 4
 ```
 
+Repeat-or-CSV: `--length 8k --length 16k` and `--length 8k,16k` are
+equivalent. Same for `--depth`.
+
 The `--model` flag is **rejected** with `--benchmark niah`: NIAH
 measures the retrieval substrate, not LLM quality, so a model
 selection here is almost always operator error.
 
-## How "passing" is defined
+## Current findings (text-search baseline, no embedder)
 
-A cell passes when the needle string is a substring of **any** result
-returned by `cognition.Fast`. Position 1 means it was the top result;
-higher positions still count as a pass (the agent would still surface
-it via top-K injection), but operators reading the rollup should treat
-"pass at position 5" with more suspicion than "pass at position 1" —
-it implies the retrieval substrate ranked irrelevant chunks higher.
+Baseline established in PR #32 against `cognition.Fast` with
+`embedder=nil` (the default Reflex falls back to text-search). Two
+runs over the canonical grid:
 
-`Notes` carries the diagnostic detail: `length=16k depth=0.50
-top_score=0.732 needle_position=3`.
+| Mode | Pass rate | Pattern |
+|---|---|---|
+| `lorem` | 12/12 | Pipeline shape is sound at every (length, depth). |
+| `adversarial` | 4/12 | All depth=0.0 and 0.5 cells **miss**. All depth=1.0 cells **pass**. |
+
+The adversarial finding is a real, reproducible signal about the
+current Reflex scorer:
+
+- The scorer ties every full-coverage chunk at exactly `top_score = 0.850`
+  (text 1.0 × 0.40 + tag 0.5 × 0.20 + category 0.15 + recency ~1.0 ×
+  0.15 + importance 0.5 × 0.10). With 0 gap, ordering falls back to
+  insertion order.
+- `SearchEventsMultiTerm` iterates `eventsByTime` (recency DESC) and
+  caps at the query limit (10). For an N-chunk haystack with N > 10,
+  the 10 most recently captured chunks come back first.
+- The needle at depth 0.0 or 0.5 lands in a chunk captured early
+  (chunk index ≪ N), so it is not in the recency-DESC top 10 → miss.
+- At depth 1.0 the needle is in the LAST chunk captured → it tops
+  the recency-DESC list → pass.
+
+NIAH is doing its job: surfacing that the text-search path has a
+strong recency bias that defeats depth-invariance. This is the kind
+of finding that would otherwise hide for weeks until LongMemEval
+shows an unexplained drop.
 
 ## How to interpret a miss
 
 A miss at one cell with passes around it is the most actionable
 signal NIAH produces. Triage by ruling out, in order:
 
-1. **Chunking** — did the needle get split across two chunks? Check
-   `generator.go`'s `chunkStride` (320) and `chunkSize` (400) against
-   the needle length. The default needle is 36 chars, well inside the
-   overlap. A custom `--needle` longer than ~320 chars will straddle.
+1. **Did `--filler lorem` also miss?** If yes, the substrate is
+   broken (capture / ingest / chunking). If no, the scorer or ranker
+   is the suspect.
 
-2. **Probe specificity** — Reflex falls back to text search with
+2. **Chunking** — did the needle get split across two chunks? Check
+   `runner.go`'s `chunkStride` (320) and `chunkSize` (400) against
+   the needle length. The default needle is 36 chars, well inside the
+   overlap. A custom `--needle` longer than 320 chars will straddle
+   (the `TestRunNeedleSplitAcrossChunks` test demonstrates this).
+
+3. **Probe specificity** — Reflex falls back to text search with
    stopwords stripped. The probe is the needle minus its last token,
    so a needle like `"NEEDLE"` (one word) makes the probe equal to
    the needle itself. Pick a needle with at least 3 tokens that
-   includes content words not in `loremCorpus`.
+   includes content words distinct from the filler corpus.
 
-3. **Storage truncation** — Reflex's `eventToResult` caps content at
+4. **Storage truncation** — Reflex's `eventToResult` caps content at
    500 chars. The chunk size (400) keeps the full chunk inside the
    truncation window, so the needle is preserved. If you bump
    `chunkSize` above 500, the needle can land in the dropped tail.
 
-4. **Depth bias** — consistent failure at `depth=0.5` while
+5. **Depth bias** — consistent failure at `depth=0.5` while
    `depth=0.0` and `1.0` pass is a real signal about the embedder
    (the classic NIAH/RULER finding: middle context decays faster).
-   The text-search fallback path is depth-invariant, so this only
-   surfaces when an embedder is wired up.
-
-5. **Embedder** — by default NIAH runs with `embedder=nil` and falls
-   back to text search. Once an embedder lands in the Reflex hot
-   path, NIAH becomes the canary for embedding-quality regressions.
+   The text-search fallback path is *recency*-biased, not depth-biased,
+   so this only cleanly surfaces once an embedder is wired into Reflex.
 
 ## Reproduction
 
 Every run is byte-deterministic for fixed `(length, depth, needle,
-seed)`. To reproduce a miss reported by CI:
+seed, filler)`. To reproduce a miss reported by CI:
 
 ```bash
 ./cortex eval --benchmark niah \
   --length 16k --depth 0.5 \
   --needle "<exact needle from Notes>" \
   --seed <seed from Notes> \
+  --filler <filler from Notes> \
   -v
 ```
 
@@ -125,7 +177,7 @@ is there to surface.
 CellResults flow through the standard fan-out:
 
 - **Journal**: `.cortex/journal/eval/*.jsonl` (canonical, replayable)
-- **SQLite**: `.cortex/db/cortex.db` → `cell_results` table (queryable)
+- **SQLite**: `.cortex/db/evals_v2.db` → `cell_results` table (queryable)
 - **JSONL**: `.cortex/db/cell_results.jsonl` (append log for analysis)
 
 Query the latest NIAH run from SQLite:

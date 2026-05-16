@@ -53,6 +53,7 @@ type Payload struct {
 	Depth       float64
 	Needle      string
 	Seed        int64
+	FillerMode  FillerMode // empty → adversarial (the meaningful default)
 }
 
 func init() { benchmarks.Register("niah", func() benchmarks.Benchmark { return &runner{} }) }
@@ -60,6 +61,77 @@ func init() { benchmarks.Register("niah", func() benchmarks.Benchmark { return &
 type runner struct{}
 
 func (runner) Name() string { return "niah" }
+
+// ApplyArgs implements benchmarks.ArgsApplier so the CLI dispatcher
+// doesn't need a switch-on-name to wire NIAH's flags. Repeated
+// --length / --depth accumulate into comma-separated Filter values;
+// --needle / --seed / --filler are singletons. --model is rejected
+// here so an operator who forgets that NIAH measures retrieval (not
+// LLMs) gets a clean error instead of a silently-honored flag.
+func (runner) ApplyArgs(args []string, opts *benchmarks.LoadOpts) error {
+	if opts.Filter == nil {
+		opts.Filter = map[string]string{}
+	}
+	var lengths, depths []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--length":
+			if i+1 >= len(args) {
+				return errors.New("--length requires a value")
+			}
+			lengths = append(lengths, args[i+1])
+			i++
+		case "--depth":
+			if i+1 >= len(args) {
+				return errors.New("--depth requires a value")
+			}
+			depths = append(depths, args[i+1])
+			i++
+		case "--needle":
+			if i+1 >= len(args) {
+				return errors.New("--needle requires a value")
+			}
+			opts.Filter["needle"] = args[i+1]
+			i++
+		case "--seed":
+			if i+1 >= len(args) {
+				return errors.New("--seed requires a value")
+			}
+			opts.Filter["seed"] = args[i+1]
+			i++
+		case "--filler":
+			if i+1 >= len(args) {
+				return errors.New("--filler requires a value (adversarial|lorem)")
+			}
+			opts.Filter["filler"] = args[i+1]
+			i++
+		case "-m", "--model":
+			return errors.New("--model is not valid with --benchmark niah (NIAH measures retrieval, not LLMs)")
+		}
+	}
+	if len(lengths) > 0 {
+		opts.Filter["lengths"] = joinExpandingCSV(lengths)
+	}
+	if len(depths) > 0 {
+		opts.Filter["depths"] = joinExpandingCSV(depths)
+	}
+	return nil
+}
+
+// joinExpandingCSV joins values with commas, flattening any
+// already-comma-separated values inside. Empty/whitespace fragments
+// are dropped so "8k, ,16k" round-trips to "8k,16k".
+func joinExpandingCSV(vals []string) string {
+	var out []string
+	for _, v := range vals {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return strings.Join(out, ",")
+}
 
 // Load expands the (length × depth) cross-product from opts.Filter into
 // one Instance per combination. Filter keys "lengths" and "depths" carry
@@ -78,6 +150,15 @@ func (runner) Load(_ context.Context, opts benchmarks.LoadOpts) ([]benchmarks.In
 			return nil, fmt.Errorf("parse seed %q: %w", v, err)
 		}
 		seed = n
+	}
+	var fillerMode FillerMode
+	if v := opts.Filter["filler"]; v != "" {
+		switch FillerMode(v) {
+		case FillerLorem, FillerAdversarial:
+			fillerMode = FillerMode(v)
+		default:
+			return nil, fmt.Errorf("unknown filler mode %q (want %q or %q)", v, FillerAdversarial, FillerLorem)
+		}
 	}
 
 	type lenSpec struct {
@@ -121,6 +202,7 @@ func (runner) Load(_ context.Context, opts benchmarks.LoadOpts) ([]benchmarks.In
 					Depth:       d,
 					Needle:      needle,
 					Seed:        seed,
+					FillerMode:  fillerMode,
 				},
 			})
 		}
@@ -149,10 +231,11 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 	start := time.Now()
 
 	hay := Generate(GenerateOpts{
-		Length: p.LengthTok,
-		Depth:  p.Depth,
-		Needle: p.Needle,
-		Seed:   p.Seed,
+		Length:     p.LengthTok,
+		Depth:      p.Depth,
+		Needle:     p.Needle,
+		Seed:       p.Seed,
+		FillerMode: p.FillerMode, // zero value resolves to adversarial
 	})
 
 	storeDir := filepath.Join(env.Workdir, ".cortex")
@@ -178,6 +261,11 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 	if err != nil {
 		return nil, fmt.Errorf("niah: cognition.New: %w", err)
 	}
+	// Block on async cognition goroutines (Think/Dream triggered by
+	// Retrieve) before returning so the workdir is safe to remove by
+	// the caller. Without this, t.TempDir cleanup races with
+	// background journal writes.
+	defer cx.Wait()
 
 	probe := buildProbe(p.Needle)
 	res, err := cx.Retrieve(ctx, cognition.Query{Text: probe, Limit: 10}, cognition.Fast)
@@ -185,9 +273,16 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 		return nil, fmt.Errorf("niah: retrieve: %w", err)
 	}
 
-	hit, topScore, position := scoreRetrieval(res, p.Needle)
-	notes := fmt.Sprintf("length=%s depth=%.2f top_score=%.3f needle_position=%s",
-		p.LengthLabel, p.Depth, topScore, position)
+	score := scoreRetrieval(res, p.Needle)
+	fillerLabel := string(p.FillerMode)
+	if fillerLabel == "" {
+		fillerLabel = string(FillerAdversarial)
+	}
+	notes := fmt.Sprintf(
+		"length=%s depth=%.2f filler=%s top_score=%.3f runner_up=%.3f gap=%.3f results=%d needle_position=%s",
+		p.LengthLabel, p.Depth, fillerLabel,
+		score.TopScore, score.RunnerUpScore, score.ScoreGap, score.ResultCount, score.Position,
+	)
 
 	cell := &evalv2.CellResult{
 		SchemaVersion:        evalv2.CellResultSchemaVersion,
@@ -204,18 +299,18 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 		Temperature:          0,
 		LatencyMs:            time.Since(start).Milliseconds(),
 		TaskSuccessCriterion: evalv2.CriterionScenarioAssertion,
-		TaskSuccess:          hit,
+		TaskSuccess:          score.Hit,
 		Notes:                notes,
 	}
-	if hit {
+	if score.Hit {
 		cell.TestsPassed = 1
 	} else {
 		cell.TestsFailed = 1
 	}
 
 	if env.Verbose {
-		fmt.Printf("[niah] %s %s top_score=%.3f position=%s\n",
-			inst.ID, passFail(hit), topScore, position)
+		fmt.Printf("[niah] %s %s top=%.3f gap=%.3f results=%d position=%s\n",
+			inst.ID, passFail(score.Hit), score.TopScore, score.ScoreGap, score.ResultCount, score.Position)
 	}
 	return cell, nil
 }
@@ -277,31 +372,59 @@ func buildProbe(needle string) string {
 	return trimmed
 }
 
-// scoreRetrieval inspects res for any result whose Content contains
-// the needle as a substring. Returns (hit, topScore, position):
-//   - topScore is the MAX score across all returned results (robust
-//     to unsorted result slices; matches operator intuition for
-//     "best result's score").
-//   - position is the 1-indexed rank of the EARLIEST matching result,
-//     or "missing" when no result contains the needle.
+// retrievalScore is the structured summary of a Reflex retrieval. It
+// captures enough signal for an operator to triage a regression
+// without re-running the benchmark:
 //
-// Nil-safe: a nil or empty result returns (false, 0, "missing").
-func scoreRetrieval(res *cognition.ResolveResult, needle string) (bool, float64, string) {
+//   - Hit: did the needle survive at all (substring in any top-K)?
+//   - Position: 1-indexed rank of the earliest matching result, or
+//     "missing" on a miss.
+//   - TopScore, RunnerUpScore: the two highest scores returned.
+//   - ScoreGap: TopScore − RunnerUpScore. A shrinking gap across
+//     runs is the leading indicator of scorer regression — the
+//     needle still hits position 1 but only barely.
+//   - ResultCount: how many chunks Reflex actually returned. A drop
+//     from N to 1 is the leading indicator of a retrieval regression
+//     (overly aggressive filtering, broken text-search fallback).
+//
+// Nil-safe: zero results → Hit=false, Position="missing", zeros for
+// the scalar fields.
+type retrievalScore struct {
+	Hit           bool
+	Position      string
+	TopScore      float64
+	RunnerUpScore float64
+	ScoreGap      float64
+	ResultCount   int
+}
+
+func scoreRetrieval(res *cognition.ResolveResult, needle string) retrievalScore {
+	out := retrievalScore{Position: "missing"}
 	if res == nil || len(res.Results) == 0 {
-		return false, 0, "missing"
+		return out
 	}
-	var top float64
+	out.ResultCount = len(res.Results)
+
+	// Find the two highest scores — robust to unsorted result slices.
 	for _, r := range res.Results {
-		if r.Score > top {
-			top = r.Score
+		switch {
+		case r.Score > out.TopScore:
+			out.RunnerUpScore = out.TopScore
+			out.TopScore = r.Score
+		case r.Score > out.RunnerUpScore:
+			out.RunnerUpScore = r.Score
 		}
 	}
+	out.ScoreGap = out.TopScore - out.RunnerUpScore
+
 	for i, r := range res.Results {
 		if strings.Contains(r.Content, needle) {
-			return true, top, strconv.Itoa(i + 1)
+			out.Hit = true
+			out.Position = strconv.Itoa(i + 1)
+			break
 		}
 	}
-	return false, top, "missing"
+	return out
 }
 
 // ParseLengthLabel parses CLI length tokens ("8k", "16K", "4000") into
