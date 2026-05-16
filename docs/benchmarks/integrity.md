@@ -9,6 +9,8 @@ failure modes seen during the LongMemEval integration (PR #32) and are
 intended as a checklist the next benchmark author can apply *before*
 writing code.
 
+Canonical principles: [`docs/prompts/eval-principles.md`](../prompts/eval-principles.md). Per-run lab notebook: [`docs/eval-journal.md`](../eval-journal.md).
+
 ## 1. The CLI is the system under test
 
 The `./cortex` binary is the only Cortex a user has. A benchmark that
