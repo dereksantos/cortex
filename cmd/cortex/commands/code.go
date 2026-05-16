@@ -51,6 +51,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	apiURL := ""
 	verbose := false
 	quiet := false
+	noSearch := false
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -112,6 +113,8 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			verbose = true
 		case "-q", "--quiet":
 			quiet = true
+		case "--no-search":
+			noSearch = true
 		case "-h", "--help":
 			printCodeHelp()
 			return nil
@@ -140,7 +143,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			"--api-url":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "-h", "--help", "--local":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -190,6 +193,9 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	}
 	if apiURL != "" {
 		h.SetAPIURL(apiURL)
+	}
+	if noSearch {
+		h.SetCortexSearchEnabled(false)
 	}
 	if !quiet {
 		h.SetNotify(makeCodeNotifier(verbose))
@@ -383,6 +389,10 @@ Optional:
                                   model-id-based default; e.g. 16000 for
                                   Claude, 4000 for gpt-oss-20b).
   --max-cost USD                  Cap cumulative cost (default 0.20).
+  --no-search                     Omit the cortex_search tool from the agent's
+                                  registry. Used by baseline benchmark cells
+                                  that need a clean "no Cortex augmentation"
+                                  run for comparison.
   -v, --verbose                   Print tool arguments and result sizes.
   -q, --quiet                     No live stream; only final summary.
 
