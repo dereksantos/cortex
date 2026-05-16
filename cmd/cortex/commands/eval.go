@@ -274,43 +274,36 @@ Examples:
 				return fmt.Errorf("ollama is not running, start with: ollama serve")
 			}
 			provider = ollamaClient
-		case "anthropic":
-			anthropicClient := llm.NewAnthropicClient(cfg)
-			if !anthropicClient.IsAvailable() {
-				return fmt.Errorf("ANTHROPIC_API_KEY not set")
-			}
-			provider = anthropicClient
-		case "openrouter":
-			orClient := llm.NewOpenRouterClient(cfg)
-			if !orClient.IsAvailable() {
-				return fmt.Errorf("OPEN_ROUTER_API_KEY not set (note the underscore — this project uses the underscore form)")
-			}
+		case "anthropic", "openrouter", "auto":
+			// All hosted-LLM aliases route through the unified surface
+			// (OpenRouter primary, Anthropic fallback). "anthropic" /
+			// "openrouter" are kept as user-facing aliases for
+			// back-compat; "auto" is the documented new name.
+			var opts []llm.LLMOption
 			if modelOverride != "" {
-				orClient.SetModel(modelOverride)
+				opts = append(opts, llm.WithModel(modelOverride))
 			}
-			provider = orClient
+			p, _, err := llm.NewLLMClient(cfg, opts...)
+			if err != nil {
+				return fmt.Errorf("no hosted LLM available: %w", err)
+			}
+			provider = p
 		default:
-			return fmt.Errorf("unknown provider: %s (valid: ollama, anthropic, openrouter)", providerName)
+			return fmt.Errorf("unknown provider: %s (valid: ollama, anthropic, openrouter, auto)", providerName)
 		}
 	}
 
 	// Determine actual model name (used for display + judge model
-	// fallback). For openrouter, the OpenRouterClient holds the model
-	// internally — no cfg field — so we ask it directly.
+	// fallback). The unified surface tracks the model on the concrete
+	// client; llm.ModelOf reads it back without the caller knowing
+	// which backend resolved.
 	var modelName string
 	if modelOverride != "" {
 		modelName = modelOverride
+	} else if providerName == "ollama" {
+		modelName = cfg.OllamaModel
 	} else {
-		switch providerName {
-		case "anthropic":
-			modelName = cfg.AnthropicModel
-		case "openrouter":
-			if orClient, ok := provider.(*llm.OpenRouterClient); ok {
-				modelName = orClient.Model()
-			}
-		default:
-			modelName = cfg.OllamaModel
-		}
+		modelName = llm.ModelOf(provider)
 	}
 
 	// Create judge provider if enabled
@@ -329,13 +322,12 @@ Examples:
 			// Create judge provider (can be different model, same provider type)
 			judgeCfg := *cfg
 			switch providerName {
-			case "anthropic":
-				judgeCfg.AnthropicModel = judgeModelName
-				judgeProvider = llm.NewAnthropicClient(&judgeCfg)
-			case "openrouter":
-				orJudge := llm.NewOpenRouterClient(&judgeCfg)
-				orJudge.SetModel(judgeModelName)
-				judgeProvider = orJudge
+			case "anthropic", "openrouter", "auto":
+				p, _, err := llm.NewLLMClient(&judgeCfg, llm.WithModel(judgeModelName))
+				if err != nil {
+					return fmt.Errorf("judge provider: %w", err)
+				}
+				judgeProvider = p
 			default:
 				judgeCfg.OllamaModel = judgeModelName
 				judgeProvider = llm.NewOllamaClient(&judgeCfg)
@@ -358,14 +350,19 @@ Examples:
 		} else {
 			compareCfg := *cfg
 			switch compareProviderName {
-			case "anthropic":
+			case "anthropic", "openrouter", "auto":
+				var opts []llm.LLMOption
 				if compareModelName != "" {
-					compareCfg.AnthropicModel = compareModelName
+					opts = append(opts, llm.WithModel(compareModelName))
 				}
+				p, _, err := llm.NewLLMClient(&compareCfg, opts...)
+				if err != nil {
+					return fmt.Errorf("compare provider: %w", err)
+				}
+				compareProvider = p
 				if compareModelName == "" {
-					compareModelName = compareCfg.AnthropicModel
+					compareModelName = llm.ModelOf(compareProvider)
 				}
-				compareProvider = llm.NewAnthropicClient(&compareCfg)
 			case "ollama":
 				if compareModelName != "" {
 					compareCfg.OllamaModel = compareModelName

@@ -77,6 +77,19 @@ type modelSetter interface {
 	SetModel(string)
 }
 
+// ModelOf returns the current model name from p if p is a concrete LLM
+// client that tracks one (OpenRouterClient, AnthropicClient, etc.).
+// Returns "" otherwise so callers can fall back to a config default.
+//
+// Use when telemetry or display needs the model attribution without
+// the caller knowing which concrete type the unified surface returned.
+func ModelOf(p Provider) string {
+	if mg, ok := p.(interface{ Model() string }); ok {
+		return mg.Model()
+	}
+	return ""
+}
+
 // NewLLMClient returns the first available provider, trying OpenRouter
 // before Anthropic. Resolution order:
 //
