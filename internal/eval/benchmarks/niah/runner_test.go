@@ -10,7 +10,6 @@ import (
 
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
-	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
 // TestRegistered — the package registers itself under "niah" via init().
@@ -122,10 +121,10 @@ func TestParseLengthLabel(t *testing.T) {
 // score struct exposes top/runner-up/gap for downstream notes.
 func TestScoreRetrievalHit(t *testing.T) {
 	needle := "The secret recipe code is 4F-9X-2B."
-	res := &cognition.ResolveResult{
-		Results: []cognition.Result{
-			{ID: "a", Content: "irrelevant chunk", Score: 0.4},
-			{ID: "b", Content: "preamble then The secret recipe code is 4F-9X-2B. then more", Score: 0.9},
+	res := &benchmarks.SearchOutput{
+		Results: []benchmarks.SearchResult{
+			{Content: "irrelevant chunk", Score: 0.4},
+			{Content: "preamble then The secret recipe code is 4F-9X-2B. then more", Score: 0.9},
 		},
 	}
 	got := scoreRetrieval(res, needle)
@@ -154,10 +153,10 @@ func TestScoreRetrievalHit(t *testing.T) {
 // operators can distinguish "got results, none had the needle" from
 // "got nothing back at all".
 func TestScoreRetrievalMiss(t *testing.T) {
-	res := &cognition.ResolveResult{
-		Results: []cognition.Result{
-			{ID: "a", Content: "irrelevant chunk", Score: 0.4},
-			{ID: "b", Content: "preamble then more lorem", Score: 0.2},
+	res := &benchmarks.SearchOutput{
+		Results: []benchmarks.SearchResult{
+			{Content: "irrelevant chunk", Score: 0.4},
+			{Content: "preamble then more lorem", Score: 0.2},
 		},
 	}
 	got := scoreRetrieval(res, "secret-needle")
@@ -180,11 +179,11 @@ func TestScoreRetrievalMiss(t *testing.T) {
 // would actually act on).
 func TestScoreRetrievalMultipleNeedles(t *testing.T) {
 	needle := "NEEDLE"
-	res := &cognition.ResolveResult{
-		Results: []cognition.Result{
-			{ID: "a", Content: "no match", Score: 0.4},
-			{ID: "b", Content: "first NEEDLE here", Score: 0.7},
-			{ID: "c", Content: "another NEEDLE later", Score: 0.6},
+	res := &benchmarks.SearchOutput{
+		Results: []benchmarks.SearchResult{
+			{Content: "no match", Score: 0.4},
+			{Content: "first NEEDLE here", Score: 0.7},
+			{Content: "another NEEDLE later", Score: 0.6},
 		},
 	}
 	got := scoreRetrieval(res, needle)
@@ -205,7 +204,7 @@ func TestScoreRetrievalNilSafe(t *testing.T) {
 	if got.Hit || got.Position != "missing" || got.ResultCount != 0 {
 		t.Errorf("nil result: hit=%v pos=%q count=%d", got.Hit, got.Position, got.ResultCount)
 	}
-	got = scoreRetrieval(&cognition.ResolveResult{}, "x")
+	got = scoreRetrieval(&benchmarks.SearchOutput{}, "x")
 	if got.Hit || got.Position != "missing" || got.ResultCount != 0 {
 		t.Errorf("empty result: hit=%v pos=%q count=%d", got.Hit, got.Position, got.ResultCount)
 	}
@@ -216,8 +215,8 @@ func TestScoreRetrievalNilSafe(t *testing.T) {
 // leading-indicator of scorer regression, so the single-result
 // "maximum gap" baseline must be unambiguous.
 func TestScoreRetrievalSingleResultZeroGap(t *testing.T) {
-	got := scoreRetrieval(&cognition.ResolveResult{
-		Results: []cognition.Result{{ID: "a", Content: "needle in here", Score: 0.85}},
+	got := scoreRetrieval(&benchmarks.SearchOutput{
+		Results: []benchmarks.SearchResult{{Content: "needle in here", Score: 0.85}},
 	}, "needle")
 	if got.RunnerUpScore != 0 {
 		t.Errorf("single-result RunnerUp = %v, want 0", got.RunnerUpScore)
