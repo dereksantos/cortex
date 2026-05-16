@@ -356,14 +356,10 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 
 	// Use LLM directly for analysis (cognition modes handle this normally)
 	var llmProvider llm.Provider
-	anthropic := llm.NewAnthropicClient(cfg)
-	if anthropic.IsAvailable() {
-		llmProvider = anthropic
-	} else {
-		ollama := llm.NewOllamaClient(cfg)
-		if ollama.IsAvailable() {
-			llmProvider = ollama
-		}
+	if p, _, err := llm.NewLLMClient(cfg); err == nil {
+		llmProvider = p
+	} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+		llmProvider = ollama
 	}
 
 	if llmProvider == nil {
@@ -436,16 +432,12 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 
 	// If events were processed, run analysis immediately
 	if processed > 0 {
-		// Get LLM provider
+		// Get LLM provider via the unified surface (OpenRouter → Anthropic).
 		var llmProvider llm.Provider
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 
 		if llmProvider == nil {
@@ -546,20 +538,17 @@ func (c *FeedCommand) Execute(ctx *Context) error {
 		return nil
 	}
 
-	// Get LLM provider (only needed for non-raw mode)
+	// Get LLM provider (only needed for non-raw mode). Unified surface
+	// first, Ollama as a local fallback.
 	var llmProvider llm.Provider
 	if !raw {
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 		if llmProvider == nil {
-			fmt.Println("No LLM available. Use --raw to store without analysis, or set ANTHROPIC_API_KEY / start Ollama.")
+			fmt.Println("No LLM available. Use --raw to store without analysis, or set OPEN_ROUTER_API_KEY / ANTHROPIC_API_KEY / start Ollama.")
 			return nil
 		}
 	}

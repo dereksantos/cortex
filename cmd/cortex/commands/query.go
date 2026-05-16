@@ -73,18 +73,15 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		defer store.Close()
 	}
 
-	// Initialize LLM provider (required for Full mode, optional for Fast)
+	// Initialize LLM provider (required for Full mode, optional for Fast).
+	// Try the unified surface (OpenRouter→Anthropic) first, fall back to
+	// Ollama for users running a fully local stack.
 	var llmProvider llm.Provider
 	if mode == cognition.Full {
-		// Try Anthropic first, then Ollama
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 		if llmProvider == nil {
 			fmt.Fprintf(os.Stderr, "Warning: No LLM provider available, falling back to fast mode\n")

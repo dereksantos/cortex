@@ -210,18 +210,27 @@ func buildOverrideLLM(base *config.Config, o ConfigOverrides) (llm.Provider, err
 		}
 	}
 	switch provider {
-	case "anthropic":
+	case "anthropic", "openrouter", "auto":
+		// Hosted-LLM aliases route through the unified surface
+		// (OpenRouter primary, Anthropic fallback). The o.Model knob is
+		// passed via WithModel so OpenRouter receives provider-prefixed
+		// model IDs like "anthropic/claude-haiku-4.5".
+		var opts []llm.LLMOption
 		if o.Model != "" {
-			cfg.AnthropicModel = o.Model
+			opts = append(opts, llm.WithModel(o.Model))
 		}
-		return llm.NewAnthropicClient(&cfg), nil
+		client, _, err := llm.NewLLMClient(&cfg, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("no hosted LLM available: %w", err)
+		}
+		return client, nil
 	case "ollama":
 		if o.Model != "" {
 			cfg.OllamaModel = o.Model
 		}
 		return llm.NewOllamaClient(&cfg), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider %q (allowed: anthropic, ollama)", provider)
+		return nil, fmt.Errorf("unsupported provider %q (allowed: anthropic, openrouter, auto, ollama)", provider)
 	}
 }
 
