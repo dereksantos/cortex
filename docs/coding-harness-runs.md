@@ -171,6 +171,3 @@ shifts faster than my mental model; always query
   at an actual task on this repo (e.g. "add unit tests for
   `internal/harness/tools.go`") and see whether the harness can self-host
   its own development.
-- **Commit pending fixes.** Tool-name normalization, error notifier,
-  budget rename, and model-caps table are on top of `fbd34bb` but
-  uncommitted as of this entry.
