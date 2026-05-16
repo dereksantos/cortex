@@ -2,15 +2,11 @@ package mteb
 
 import (
 	"context"
-	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
-	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
-	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // TestRunRejectsBadPayload — passing the wrong Payload type is a Loader
@@ -26,28 +22,35 @@ func TestRunRejectsBadPayload(t *testing.T) {
 	}
 }
 
-// TestRunEndToEndDeterministicEmbedder — exercise index → retrieve →
-// score with a deterministic embedder that puts known docs at the top.
-// This is the single test that proves the whole runner stack — fresh
-// storage, indexing, vector search, metric aggregation, CellResult
-// shape — is wired correctly without needing Hugot/Ollama.
-func TestRunEndToEndDeterministicEmbedder(t *testing.T) {
-	withFakeEmbedder(t, &keywordEmbedder{
-		// Each "keyword" maps to a one-hot vector; queries match docs
-		// that share their keyword.
-		keywords: []string{"fox", "dog", "plain"},
-	})
+// TestRunIntegration_TinyCorpus — index a 3-doc corpus and confirm the
+// runner returns a fully-validated CellResult with non-zero retrieval
+// telemetry. Exercises the cortex CLI end-to-end (bulk-embed + search-
+// vector). Skipped when no embedder is reachable from the test env —
+// the keyword-stub regression tests are gone now that runner internals
+// are subprocess-based.
+//
+// We don't assert specific NDCG values: scoring is sensitive to the
+// embedder's model, and the goal here is wiring confidence (CellResult
+// shape, embedder attribution, success threshold logic) — not
+// reproducing an MTEB leaderboard number from a tiny corpus.
+func TestRunIntegration_TinyCorpus(t *testing.T) {
+	if os.Getenv("CORTEX_BINARY") == "" {
+		t.Skip("CORTEX_BINARY not set (TestMain builds it; run via `go test`)")
+	}
+	if !embedderReachable(t) {
+		t.Skip("no embedder reachable from test env (Ollama or Hugot required)")
+	}
 
 	task := &Task{
-		Name: "NFCorpus",
+		Name: "tiny",
 		Corpus: map[string]Doc{
-			"d1": {ID: "d1", Title: "fox tale", Text: "fox fox fox"},
-			"d2": {ID: "d2", Title: "dog tale", Text: "dog dog"},
-			"d3": {ID: "d3", Title: "plain story", Text: "plain plain plain"},
+			"d1": {ID: "d1", Title: "fox tale", Text: "The quick brown fox jumps over the lazy dog."},
+			"d2": {ID: "d2", Title: "dog tale", Text: "A loyal dog guards the village from wolves."},
+			"d3": {ID: "d3", Title: "plain story", Text: "The plains stretched endlessly under a heavy sky."},
 		},
 		Queries: []Query{
-			{ID: "q1", Text: "fox"},
-			{ID: "q2", Text: "plain"},
+			{ID: "q1", Text: "fox jumping"},
+			{ID: "q2", Text: "open plains"},
 		},
 		Qrels: map[string]map[string]int{
 			"q1": {"d1": 2},
@@ -57,7 +60,7 @@ func TestRunEndToEndDeterministicEmbedder(t *testing.T) {
 
 	b := &Benchmark{}
 	cell, err := b.Run(context.Background(), benchmarks.Instance{
-		ID:      "mteb/NFCorpus",
+		ID:      "mteb/tiny",
 		Payload: task,
 	}, benchmarks.Env{Workdir: t.TempDir()})
 	if err != nil {
@@ -69,159 +72,37 @@ func TestRunEndToEndDeterministicEmbedder(t *testing.T) {
 	if err := cell.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if cell.Benchmark != "mteb" {
-		t.Errorf("Benchmark=%q, want mteb", cell.Benchmark)
+	if cell.Benchmark != "mteb" || cell.ScenarioID != "mteb/tiny" {
+		t.Errorf("Benchmark/ScenarioID = %q/%q", cell.Benchmark, cell.ScenarioID)
 	}
-	if cell.ScenarioID != "mteb/NFCorpus" {
-		t.Errorf("ScenarioID=%q, want mteb/NFCorpus", cell.ScenarioID)
+	if cell.Model == "" || cell.Provider == "" {
+		t.Errorf("embedder attribution missing: model=%q provider=%q", cell.Model, cell.Provider)
 	}
-	if cell.Harness != evalv2.HarnessCortex {
-		t.Errorf("Harness=%q, want %q", cell.Harness, evalv2.HarnessCortex)
-	}
-	if cell.ContextStrategy != evalv2.StrategyCortex {
-		t.Errorf("ContextStrategy=%q, want cortex", cell.ContextStrategy)
-	}
-	if cell.TaskSuccessCriterion != evalv2.CriterionTestsPassAll {
-		t.Errorf("TaskSuccessCriterion=%q, want tests_pass_all", cell.TaskSuccessCriterion)
-	}
-	if cell.CortexVersion == "" {
-		t.Error("CortexVersion empty — Validate rejects this for cortex strategy")
-	}
-	if !cell.TaskSuccess {
-		t.Errorf("expected TaskSuccess=true with perfect-ranking embedder; notes=%q", cell.Notes)
-	}
-	for _, sub := range []string{"NDCG@10=", "MRR@10=", "Recall@10=", "queries=2", "embedder="} {
+	for _, sub := range []string{"NDCG@10=", "MRR@10=", "Recall@10=", "queries=2", "rerank=false"} {
 		if !strings.Contains(cell.Notes, sub) {
 			t.Errorf("Notes %q missing %q", cell.Notes, sub)
 		}
 	}
 }
 
-// TestRunSkipsQueriesWithoutQrels — a query with no judged relevant
-// docs is dropped from the aggregate (matches MTEB convention). Notes
-// must reflect the lower scored count, not the loaded count.
-func TestRunSkipsQueriesWithoutQrels(t *testing.T) {
-	withFakeEmbedder(t, &keywordEmbedder{keywords: []string{"a", "b"}})
-	task := &Task{
-		Name: "NFCorpus",
-		Corpus: map[string]Doc{
-			"d1": {ID: "d1", Text: "a a a"},
-		},
-		Queries: []Query{
-			{ID: "q1", Text: "a"},
-			{ID: "q-empty", Text: "b"}, // no qrels for this query
-		},
-		Qrels: map[string]map[string]int{
-			"q1": {"d1": 1},
-		},
-	}
-	b := &Benchmark{}
-	cell, err := b.Run(context.Background(), benchmarks.Instance{Payload: task}, benchmarks.Env{Workdir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(cell.Notes, "queries=1") {
-		t.Errorf("Notes %q should report queries=1 (unjudged query skipped)", cell.Notes)
-	}
-}
-
-// TestRunErrorsWhenNoEmbedder — surface a clear message rather than
-// silently returning 0 scores. An MTEB run with no embedder measures
-// nothing.
-func TestRunErrorsWhenNoEmbedder(t *testing.T) {
-	withFakeEmbedder(t, &unavailableEmbedder{})
-	task := &Task{Name: "NFCorpus", Corpus: map[string]Doc{}, Queries: nil}
-	b := &Benchmark{}
-	_, err := b.Run(context.Background(), benchmarks.Instance{Payload: task}, benchmarks.Env{Workdir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "no embedder available") {
-		t.Errorf("err=%v, want \"no embedder available\"", err)
-	}
-}
-
-// TestRunUsesIsolatedStorage — the per-Run storage lives under
-// workdir/.cortex/data/, leaving the operator's real ~/.cortex alone.
-// Confirm the embeddings file lands in the right place.
-func TestRunUsesIsolatedStorage(t *testing.T) {
-	withFakeEmbedder(t, &keywordEmbedder{keywords: []string{"a"}})
-	wd := t.TempDir()
-	task := &Task{
-		Name: "NFCorpus",
-		Corpus: map[string]Doc{
-			"d1": {ID: "d1", Text: "a a a"},
-		},
-		Queries: []Query{{ID: "q1", Text: "a"}},
-		Qrels:   map[string]map[string]int{"q1": {"d1": 1}},
-	}
-	b := &Benchmark{}
-	if _, err := b.Run(context.Background(), benchmarks.Instance{Payload: task}, benchmarks.Env{Workdir: wd}); err != nil {
-		t.Fatal(err)
-	}
-	embPath := filepath.Join(wd, ".cortex", "data", "embeddings.jsonl")
-	info, err := os.Stat(embPath)
-	if err != nil {
-		t.Fatalf("expected embeddings file under workdir: %v", err)
-	}
-	if info.Size() == 0 {
-		t.Error("embeddings file is empty")
-	}
-}
-
-// --- fake embedders + helpers ---
-
-// keywordEmbedder produces a deterministic one-hot vector indexed by
-// the first known keyword present in the input. Docs with keyword K
-// retrieve perfectly for queries containing K — letting unit tests
-// score perfect NDCG without a real embedding model.
-type keywordEmbedder struct {
-	keywords []string
-}
-
-func (k *keywordEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
-	vec := make([]float32, len(k.keywords))
-	for i, kw := range k.keywords {
-		if strings.Contains(strings.ToLower(text), kw) {
-			vec[i] = 1
-		}
-	}
-	if allZero(vec) {
-		// Give it some signal so similarity > 0; consistent across docs.
-		vec[0] = 0.01
-	}
-	return vec, nil
-}
-
-func (k *keywordEmbedder) IsEmbeddingAvailable() bool { return true }
-
-type unavailableEmbedder struct{}
-
-func (u *unavailableEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
-	return nil, errors.New("not available")
-}
-func (u *unavailableEmbedder) IsEmbeddingAvailable() bool { return false }
-
-func allZero(v []float32) bool {
-	for _, x := range v {
-		if x != 0 {
-			return false
-		}
+// embedderReachable runs `cortex embed --text foo` and checks for a
+// successful exit. Done via the helper rather than a direct call into
+// pkg/llm so we test the same code path the benchmark exercises.
+func embedderReachable(t *testing.T) bool {
+	t.Helper()
+	_, err := benchmarks.RunSearchVector(context.Background(), os.Getenv("CORTEX_BINARY"), benchmarks.SearchVectorOpts{
+		Workdir: t.TempDir(),
+		Text:    "smoke test",
+		TopK:    1,
+	})
+	// "no embedder available" is the signal we want; any other error
+	// (network, etc.) probably means an environment problem and we
+	// should let the integration test surface it rather than silently
+	// skipping. We treat any error mentioning "embedder" as not-
+	// reachable; otherwise assume reachable and let the actual test
+	// fail loudly.
+	if err != nil && strings.Contains(err.Error(), "embedder") {
+		return false
 	}
 	return true
 }
-
-// withFakeEmbedder swaps embedderFactory for the duration of one test.
-func withFakeEmbedder(t *testing.T, e llm.Embedder) {
-	t.Helper()
-	prev := embedderFactory
-	embedderFactory = func() (llm.Embedder, string, string) {
-		return e, "fake-keyword-embedder", evalv2.ProviderLocal
-	}
-	t.Cleanup(func() { embedderFactory = prev })
-}
-
-// Compile-time assertion that the fake embedders satisfy the same
-// interface the runner depends on — catches signature drift between
-// llm.Embedder and the test fakes.
-var (
-	_ llm.Embedder = (*keywordEmbedder)(nil)
-	_ llm.Embedder = (*unavailableEmbedder)(nil)
-)

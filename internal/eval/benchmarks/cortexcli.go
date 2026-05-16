@@ -273,6 +273,153 @@ func RunCode(ctx context.Context, binary string, opts CodeOpts) (*CodeOutput, er
 	return out, nil
 }
 
+// EmbedBulkRequest is one entry in the NDJSON stream piped to
+// `cortex embed --bulk`. ContentType is optional — when empty, the
+// CLI applies its --content-type default (typically "corpus" for
+// MTEB-style indexing).
+type EmbedBulkRequest struct {
+	DocID       string `json:"doc_id"`
+	ContentType string `json:"content_type,omitempty"`
+	Text        string `json:"text"`
+}
+
+// EmbedBulkSummary mirrors the stdout JSON returned by --bulk:
+// {stored, model, provider, dim}. Callers should assert Stored equals
+// the number of requests they piped in — silent drops are a bug.
+type EmbedBulkSummary struct {
+	Stored   int    `json:"stored"`
+	Model    string `json:"model"`
+	Provider string `json:"provider"`
+	Dim      int    `json:"dim"`
+}
+
+// RunEmbedBulk pipes the requests to `cortex embed --bulk --workdir
+// <workdir> --content-type <defaultContentType>` and decodes the
+// summary. defaultContentType is forwarded as the CLI flag; per-request
+// ContentType overrides win at decode time inside the CLI.
+//
+// Returns the summary so callers can verify Stored == len(requests).
+// A subprocess failure surfaces with stderr (truncated) in the wrapped
+// error.
+func RunEmbedBulk(ctx context.Context, binary, workdir, defaultContentType string, requests []EmbedBulkRequest) (*EmbedBulkSummary, error) {
+	if binary == "" {
+		return nil, errors.New("cortex binary is empty")
+	}
+	if workdir == "" {
+		return nil, errors.New("workdir is empty")
+	}
+	if len(requests) == 0 {
+		return &EmbedBulkSummary{}, nil
+	}
+
+	var stdin bytes.Buffer
+	enc := json.NewEncoder(&stdin)
+	for i, req := range requests {
+		if err := enc.Encode(req); err != nil {
+			return nil, fmt.Errorf("encode request %d: %w", i, err)
+		}
+	}
+
+	args := []string{"embed", "--bulk", "--workdir", workdir}
+	if defaultContentType != "" {
+		args = append(args, "--content-type", defaultContentType)
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Stdin = &stdin
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cortex embed --bulk: %w (stderr: %s)", err, truncate(stderr.String(), 500))
+	}
+	out := &EmbedBulkSummary{}
+	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
+		return nil, fmt.Errorf("decode embed --bulk summary: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	}
+	return out, nil
+}
+
+// SearchVectorOpts configures `cortex search-vector`. Workdir is
+// required. Exactly one of Text or Vector must be set (the CLI rejects
+// otherwise). ContentType filters server-side to a single bucket.
+type SearchVectorOpts struct {
+	Workdir     string
+	Text        string    // --text: CLI embeds + searches in one shot
+	Vector      []float32 // --vector: caller-supplied pre-computed vector
+	TopK        int       // --top-k (defaults to 10 in the CLI when ≤0)
+	Threshold   float64   // --threshold (0.0 = no filter)
+	ContentType string    // --content-type bucket filter (empty = no filter)
+}
+
+// SearchVectorResult is one entry in the search-vector JSON output.
+type SearchVectorResult struct {
+	ContentID   string  `json:"content_id"`
+	ContentType string  `json:"content_type"`
+	Score       float64 `json:"score"`
+	Content     string  `json:"content,omitempty"`
+}
+
+// SearchVectorOutput is the top-level shape of `cortex search-vector`.
+// Model + Provider are present only when the query came from --text
+// (i.e. the CLI embedded it).
+type SearchVectorOutput struct {
+	Results   []SearchVectorResult `json:"results"`
+	K         int                  `json:"k"`
+	ElapsedMs int64                `json:"elapsed_ms"`
+	Model     string               `json:"model,omitempty"`
+	Provider  string               `json:"provider,omitempty"`
+}
+
+// RunSearchVector invokes `cortex search-vector --json` and decodes
+// the structured output. Used by MTEB to issue per-query retrievals
+// without importing internal/storage or internal/cognition.
+func RunSearchVector(ctx context.Context, binary string, opts SearchVectorOpts) (*SearchVectorOutput, error) {
+	if binary == "" {
+		return nil, errors.New("cortex binary is empty")
+	}
+	if opts.Workdir == "" {
+		return nil, errors.New("workdir is empty")
+	}
+	hasText := opts.Text != ""
+	hasVec := len(opts.Vector) > 0
+	if hasText == hasVec {
+		return nil, errors.New("exactly one of Text or Vector must be set")
+	}
+
+	args := []string{"search-vector", "--workdir", opts.Workdir}
+	if opts.TopK > 0 {
+		args = append(args, "--top-k", strconv.Itoa(opts.TopK))
+	}
+	if opts.Threshold > 0 {
+		args = append(args, "--threshold", strconv.FormatFloat(opts.Threshold, 'f', -1, 64))
+	}
+	if opts.ContentType != "" {
+		args = append(args, "--content-type", opts.ContentType)
+	}
+	if hasText {
+		args = append(args, "--text", opts.Text)
+	} else {
+		v, err := json.Marshal(opts.Vector)
+		if err != nil {
+			return nil, fmt.Errorf("marshal vector: %w", err)
+		}
+		args = append(args, "--vector", string(v))
+	}
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cortex search-vector: %w (stderr: %s)", err, truncate(stderr.String(), 500))
+	}
+	out := &SearchVectorOutput{}
+	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
+		return nil, fmt.Errorf("decode search-vector JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	}
+	return out, nil
+}
+
 // CompileBinary builds the cortex CLI to a tempfile and returns its
 // absolute path. Used by benchmark test suites that need a real binary
 // before exercising the CLI helpers above. The caller is responsible

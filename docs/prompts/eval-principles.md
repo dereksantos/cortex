@@ -68,12 +68,14 @@ The doc serves as an active TODO list — flip ✗ to ✓ as benchmarks land. Se
 
 | Benchmark | Black box (1) | No coaching (2) | Versioned (3) | Reproducible (5) | Isolated (6) | Structured (7) |
 |---|---|---|---|---|---|---|
-| MTEB | ✗ uses `internal/storage`, `intcognition.Reflect` | ~ `--rerank` is opt-in | ~ partial | ✓ | ✓ | ~ partial |
+| MTEB | ✓ shells out via `benchmarks.RunEmbedBulk/RunSearchVector` | ✓ no coaching; `--rerank` disabled pending cortex rerank CLI | ~ partial | ✓ | ✓ | ~ partial |
 | NIAH | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunSearch` | ✓ | ~ | ✓ | ✓ | ~ |
 | LongMemEval | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunCode` | ✓ system prompt is framing only (no tool coaching) | ~ | ~ | ✓ | ~ |
 | SWE-bench | ✓ shells out via `benchmarks.RunCode` | ✓ baseline uses `--no-search` CLI flag | ~ | ~ | ✓ | ~ |
 | Library-service | ✓ shells out to `cortex search` | ✓ | ~ | ✓ | ✓ | ~ |
 
-**CLI surfaces landed** (per principle 4): `cortex capture --bulk`, `cortex search --workdir --json`, `cortex ingest --workdir`, `cortex code --no-search --json`. Shared subprocess helpers live in `internal/eval/benchmarks/cortexcli.go`.
+**CLI surfaces landed** (per principle 4): `cortex capture --bulk`, `cortex search --workdir --json`, `cortex ingest --workdir`, `cortex code --no-search --json --system-prompt`, `cortex embed [--store --bulk]`, `cortex search-vector [--text --vector --content-type]`. Shared subprocess helpers live in `internal/eval/benchmarks/cortexcli.go`.
 
-**CLI surfaces still needed**: `cortex embed` + `cortex search-vector` (for MTEB conversion — direct embedding/retrieval substrate).
+**CLI surfaces still needed**: `cortex rerank` (NDJSON candidates in, reordered out — to re-enable MTEB `--rerank` once the helper exists).
+
+**Compliance**: 5 of 5 evals now ✓ on principle 1 (black box) and principle 2 (no coaching). Remaining work tracked under principles 3/5/7 (versioning metadata, reproducibility, structured outputs) is per-benchmark cleanup rather than architectural debt.

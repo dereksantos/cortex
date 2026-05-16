@@ -170,7 +170,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-	case "search", "recent", "insights", "entities", "graph", "prune", "reembed":
+	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
