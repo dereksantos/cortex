@@ -64,6 +64,11 @@ type CortexHarness struct {
 	// instance (`http://localhost:11434/v1/chat/completions`) or
 	// any other OpenAI-compatible server.
 	apiURL string
+
+	// disableCortexSearch omits the cortex_search tool from the
+	// per-session registry. Used by benchmarks that need a baseline
+	// run with no Cortex augmentation (SWE-bench --strategy baseline).
+	disableCortexSearch bool
 }
 
 // NewCortexHarness resolves the OpenRouter API key (keychain first, env
@@ -116,6 +121,11 @@ func (h *CortexHarness) SetMaxOutputTokens(n int) { h.maxOutputTokens = n }
 // (`http://localhost:11434/v1/chat/completions`) or any other
 // OpenAI-compatible server. Empty -> default OpenRouter endpoint.
 func (h *CortexHarness) SetAPIURL(url string) { h.apiURL = url }
+
+// SetCortexSearchEnabled toggles registration of the cortex_search
+// tool in subsequent RunSession* calls. Defaults to enabled. Pass
+// false to run a baseline-style cell with no Cortex augmentation.
+func (h *CortexHarness) SetCortexSearchEnabled(enabled bool) { h.disableCortexSearch = !enabled }
 
 // defaultSystemPrompt is the default agent contract. Deliberately
 // concise — small models tend to ignore long system prompts, and the
@@ -183,11 +193,13 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	registry.Register(harness.NewWriteFileTool(workdir, registry))
 	registry.Register(harness.NewListDirTool(workdir))
 	registry.Register(harness.NewRunShellTool(workdir, registry))
-	cortexSearch, err := harness.NewCortexSearchTool(workdir)
-	if err != nil {
-		return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
+	if !h.disableCortexSearch {
+		cortexSearch, err := harness.NewCortexSearchTool(workdir)
+		if err != nil {
+			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
+		}
+		registry.Register(cortexSearch)
 	}
-	registry.Register(cortexSearch)
 
 	runID := newCodingRunID()
 	transcript, err := harness.NewTranscript(workdir, runID)
