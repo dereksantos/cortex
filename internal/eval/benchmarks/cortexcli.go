@@ -163,9 +163,13 @@ func RunSearch(ctx context.Context, binary, workdir string, mode SearchMode, lim
 		return nil, fmt.Errorf("cortex search: %w (stderr: %s)", err, stderr.String())
 	}
 
+	// Preserve raw stdout for error diagnostics; json.NewDecoder consumes
+	// the buffer it reads from, so the otherwise-empty `(stdout: )` in
+	// a wrapped error hides what actually came back.
+	raw := stdout.String()
 	out := &SearchOutput{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode search JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if err := json.Unmarshal([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("decode search JSON: %w (stdout %d bytes: %q)", err, len(raw), truncate(raw, 400))
 	}
 	return out, nil
 }
