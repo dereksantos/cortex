@@ -285,14 +285,31 @@ func makeCellResult(b *Benchmark, pl InstancePayload, axis, finalText string, hr
 }
 
 // parseHaystackDate is tolerant of common upstream date formats.
+// LongMemEval's haystack_dates uses formats like
+// "2021/06/01 (Tue) 21:10"; question_date is usually "YYYY-MM-DD".
 // Falls back to time.Now if parsing fails so capture writes still
 // land; downstream rollups read the date from metadata, not from the
 // event timestamp itself.
 func parseHaystackDate(s string) time.Time {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Now().UTC()
 	}
-	for _, layout := range []string{"2006-01-02T15:04:05Z", time.RFC3339, "2006-01-02", "2006/01/02"} {
+	// Strip the "(Tue)" weekday tag if present — leaves
+	// "2021/06/01 21:10" which time.Parse can handle.
+	if i := strings.Index(s, " ("); i >= 0 {
+		if j := strings.Index(s[i:], ") "); j >= 0 {
+			s = s[:i] + s[i+j+1:]
+		}
+	}
+	for _, layout := range []string{
+		"2006-01-02T15:04:05Z",
+		time.RFC3339,
+		"2006/01/02 15:04",
+		"2006-01-02 15:04",
+		"2006/01/02",
+		"2006-01-02",
+	} {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t.UTC()
 		}

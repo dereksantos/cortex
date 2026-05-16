@@ -209,6 +209,42 @@ func TestLoad_StableOrderByQuestionID(t *testing.T) {
 	}
 }
 
+// TestUnmarshalQuestion_PolymorphicAnswer covers the real-world
+// upstream shape where `answer` is sometimes a JSON number rather
+// than a string (counting questions in the multi-session axis).
+func TestUnmarshalQuestion_PolymorphicAnswer(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{"string answer", `{"question_id":"x","answer":"Berlin"}`, "Berlin", false},
+		{"number answer", `{"question_id":"x","answer":3}`, "3", false},
+		{"float answer", `{"question_id":"x","answer":3.5}`, "3.5", false},
+		{"null answer", `{"question_id":"x","answer":null}`, "", false},
+		{"empty value", `{"question_id":"x"}`, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var q Question
+			err := q.UnmarshalJSON([]byte(tc.raw))
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("want error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected err: %v", err)
+			}
+			if q.Answer != tc.want {
+				t.Errorf("Answer=%q want %q", q.Answer, tc.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeAxis(t *testing.T) {
 	tests := []struct {
 		in, want string

@@ -173,19 +173,26 @@ func TestRun_RegistersThroughBenchmarksRegistry(t *testing.T) {
 
 func TestParseHaystackDate_TolerantOfFormats(t *testing.T) {
 	tests := []struct {
-		in   string
-		zero bool // expect non-zero parsed time
+		in       string
+		wantYear int // 0 means "fallback to now is OK"
 	}{
-		{"2024-01-15", false},
-		{"2024-01-15T10:30:00Z", false},
-		{"2024/01/15", false},
-		{"", false},         // falls back to now; non-zero
-		{"nonsense", false}, // falls back to now; non-zero
+		{"2024-01-15", 2024},
+		{"2024-01-15T10:30:00Z", 2024},
+		{"2024/01/15", 2024},
+		// LongMemEval upstream format with weekday tag.
+		{"2021/06/01 (Tue) 21:10", 2021},
+		{"2022/12/31 (Sat) 23:59", 2022},
+		{"", 0},
+		{"nonsense", 0},
 	}
 	for _, tc := range tests {
 		got := parseHaystackDate(tc.in)
-		if got.IsZero() == !tc.zero {
-			t.Errorf("parseHaystackDate(%q) zero=%v want zero=%v", tc.in, got.IsZero(), tc.zero)
+		if got.IsZero() {
+			t.Errorf("parseHaystackDate(%q) returned zero time", tc.in)
+			continue
+		}
+		if tc.wantYear != 0 && got.Year() != tc.wantYear {
+			t.Errorf("parseHaystackDate(%q) year=%d want %d", tc.in, got.Year(), tc.wantYear)
 		}
 	}
 }
