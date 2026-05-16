@@ -82,6 +82,58 @@ func TestParseBenchmarkArgs(t *testing.T) {
 	}
 }
 
+func TestParseBenchmarkArgs_LongMemEvalFlags(t *testing.T) {
+	opts, err := parseBenchmarkArgs([]string{
+		"--subset", "oracle",
+		"--strategy", "baseline,cortex",
+		"--question-type", "single-hop",
+		"--question-type", "abstention",
+		"--model", "qwen/qwen3-coder",
+		"--judge",
+		"--judge-model", "openai/gpt-4o",
+		"--limit", "5",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.Subset != "oracle" {
+		t.Errorf("Subset=%q", opts.Subset)
+	}
+	if opts.Limit != 5 {
+		t.Errorf("Limit=%d", opts.Limit)
+	}
+	if got := opts.Filter["strategy"]; got != "baseline,cortex" {
+		t.Errorf("strategy=%q", got)
+	}
+	// --question-type repeats join with comma.
+	if got := opts.Filter["question-type"]; got != "single-hop,abstention" {
+		t.Errorf("question-type=%q want single-hop,abstention", got)
+	}
+	if got := opts.Filter["model"]; got != "qwen/qwen3-coder" {
+		t.Errorf("model=%q", got)
+	}
+	// --judge-model implies --judge.
+	if opts.Filter["judge"] != "true" {
+		t.Errorf("judge=%q want true", opts.Filter["judge"])
+	}
+	if opts.Filter["judge-model"] != "openai/gpt-4o" {
+		t.Errorf("judge-model=%q", opts.Filter["judge-model"])
+	}
+}
+
+func TestParseBenchmarkArgs_BareJudgeFlag(t *testing.T) {
+	opts, err := parseBenchmarkArgs([]string{"--judge"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.Filter["judge"] != "true" {
+		t.Errorf("--judge alone should set judge=true; got %q", opts.Filter["judge"])
+	}
+	if opts.Filter["judge-model"] != "" {
+		t.Errorf("--judge alone should NOT set judge-model; got %q", opts.Filter["judge-model"])
+	}
+}
+
 func TestRunBenchmark_EndToEndPersists(t *testing.T) {
 	// Isolate from any real ~/.cortex/ — runBenchmark calls NewPersister
 	// which uses cwd-relative paths.

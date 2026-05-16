@@ -159,8 +159,9 @@ Options:
   --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
   --seed N               NIAH only: deterministic filler seed (default: 1)
   --filler MODE          NIAH only: filler corpus (adversarial|lorem; default: adversarial)
+  --strategy LIST        Comma-separated strategies for benchmark cells (baseline,cortex)
+  --question-type NAME   LongMemEval: ability filter (single-hop|multi-hop|temporal|knowledge-update|abstention); repeatable
   --repo SLUG            SWE-bench: (repeatable) restrict to upstream repo (e.g. django/django)
-  --strategy LIST        SWE-bench: comma-separated strategies (e.g. baseline,cortex)
   --docker-image-prefix PFX  SWE-bench: override scoring image prefix
   --git-cache-dir DIR    SWE-bench: reuse a git mirror for repo clones
   -h, --help             Show this help
@@ -175,6 +176,7 @@ Examples:
   cortex eval --summary                    # Show lift trend
   cortex eval --summary --agentic          # Show tool call reduction trend
   cortex eval --abr-trend                  # Show ABR progression
+  cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
   cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
 			return nil
 		}

@@ -68,10 +68,12 @@ func (b *SWEBench) SetConfig(cfg SWEBenchConfig) {
 // Config returns the current configuration. Useful for tests.
 func (b *SWEBench) Config() SWEBenchConfig { return b.cfg }
 
-// ApplyArgs implements benchmarks.ArgsApplier so the CLI dispatcher
-// doesn't need a switch-on-name to wire SWE-bench's flags. Values
-// land in opts.Filter; Load reads them out via applyFilterConfig.
-// --repo is repeatable (accumulates into a comma-separated value).
+// ApplyArgs implements benchmarks.ArgsApplier for SWE-bench-only
+// flags (--repo, --docker-image-prefix, --git-cache-dir). The
+// dispatcher's parseBenchmarkArgs owns --strategy and --model now
+// that they're shared with LongMemEval, so we don't re-parse them
+// here. --repo is repeatable; repeats accumulate into a
+// comma-separated value.
 func (b *SWEBench) ApplyArgs(args []string, opts *benchmarks.LoadOpts) error {
 	if opts.Filter == nil {
 		opts.Filter = map[string]string{}
@@ -87,18 +89,6 @@ func (b *SWEBench) ApplyArgs(args []string, opts *benchmarks.LoadOpts) error {
 			} else {
 				opts.Filter["repo"] = prev + "," + args[i+1]
 			}
-			i++
-		case "--strategy":
-			if i+1 >= len(args) {
-				return errors.New("--strategy requires a value")
-			}
-			opts.Filter["strategy"] = args[i+1]
-			i++
-		case "-m", "--model":
-			if i+1 >= len(args) {
-				return errors.New("--model requires a value")
-			}
-			opts.Filter["model"] = args[i+1]
 			i++
 		case "--docker-image-prefix":
 			if i+1 >= len(args) {

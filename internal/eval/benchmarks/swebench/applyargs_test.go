@@ -21,8 +21,6 @@ func TestApplyArgs_AllSWEBenchFlags(t *testing.T) {
 	b := NewSWEBench()
 	opts := benchmarks.LoadOpts{Filter: map[string]string{}}
 	err := b.ApplyArgs([]string{
-		"--model", "anthropic/claude-3-5-haiku",
-		"--strategy", "baseline,cortex",
 		"--docker-image-prefix", "myregistry/sweb.eval.x86_64.",
 		"--git-cache-dir", "/tmp/cortex-git-cache",
 		"--repo", "django/django",
@@ -30,12 +28,6 @@ func TestApplyArgs_AllSWEBenchFlags(t *testing.T) {
 	}, &opts)
 	if err != nil {
 		t.Fatalf("ApplyArgs: %v", err)
-	}
-	if opts.Filter["model"] != "anthropic/claude-3-5-haiku" {
-		t.Errorf("model: %q", opts.Filter["model"])
-	}
-	if opts.Filter["strategy"] != "baseline,cortex" {
-		t.Errorf("strategy: %q", opts.Filter["strategy"])
 	}
 	if opts.Filter["docker-image-prefix"] != "myregistry/sweb.eval.x86_64." {
 		t.Errorf("prefix: %q", opts.Filter["docker-image-prefix"])
@@ -49,24 +41,22 @@ func TestApplyArgs_AllSWEBenchFlags(t *testing.T) {
 }
 
 func TestApplyArgs_TolerateSharedFlags(t *testing.T) {
-	// --subset / --limit are owned by parseBenchmarkArgs; ApplyArgs
-	// must silently skip them rather than error.
+	// --subset / --limit / --strategy / --model are owned by
+	// parseBenchmarkArgs; ApplyArgs must silently skip them.
 	b := NewSWEBench()
 	opts := benchmarks.LoadOpts{Filter: map[string]string{}}
-	if err := b.ApplyArgs([]string{"--subset", "verified", "--limit", "5", "--model", "x"}, &opts); err != nil {
+	if err := b.ApplyArgs([]string{"--subset", "verified", "--limit", "5", "--model", "x", "--strategy", "baseline,cortex"}, &opts); err != nil {
 		t.Fatalf("ApplyArgs should tolerate shared flags: %v", err)
 	}
-	if opts.Filter["model"] != "x" {
-		t.Errorf("model not captured: %v", opts.Filter)
+	if len(opts.Filter) != 0 {
+		t.Errorf("shared flags should not land in Filter via ApplyArgs: %v", opts.Filter)
 	}
 }
 
 func TestApplyArgs_MissingValueErrors(t *testing.T) {
 	b := NewSWEBench()
 	cases := [][]string{
-		{"--model"},
 		{"--repo"},
-		{"--strategy"},
 		{"--docker-image-prefix"},
 		{"--git-cache-dir"},
 	}
