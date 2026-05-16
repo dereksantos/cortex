@@ -142,7 +142,7 @@ func (m *nuanceMockProvider) GenerateWithStats(ctx context.Context, prompt strin
 // TestExtractNuances_RealLLM tests with a real LLM to verify the prompt works.
 // Skip if no LLM is available.
 func TestExtractNuances_RealLLM(t *testing.T) {
-	provider, src, err := llm.NewLLMClient(config.Default())
+	provider, src, err := llm.NewLLMClient(config.Default(), llm.WithModel("anthropic/claude-haiku-4.5"))
 	if err != nil {
 		t.Skipf("no LLM client available: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestExtractNuances_RealLLM(t *testing.T) {
 
 // TestExtractNuances_ErrorHandlingPattern tests nuance extraction on error handling patterns
 func TestExtractNuances_ErrorHandlingPattern(t *testing.T) {
-	provider, src, err := llm.NewLLMClient(config.Default())
+	provider, src, err := llm.NewLLMClient(config.Default(), llm.WithModel("anthropic/claude-haiku-4.5"))
 	if err != nil {
 		t.Skipf("no LLM client available: %v", err)
 	}

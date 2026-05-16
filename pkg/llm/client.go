@@ -43,6 +43,40 @@ const (
 // empty → fall through to env") without machine-level state.
 type openRouterKeyResolver func() (key string, source string, err error)
 
+// LLMOption tunes NewLLMClient construction. Options are applied after
+// the underlying client is resolved so they work uniformly across both
+// OpenRouter and Anthropic backends.
+type LLMOption func(*llmOpts)
+
+// llmOpts is the internal config accumulator. Kept unexported so the
+// shape of the option set can grow without breaking the API.
+type llmOpts struct {
+	model string
+}
+
+// WithModel sets the model the returned client will use for subsequent
+// calls. Pass model IDs in their provider-native form:
+//
+//   - OpenRouter: "anthropic/claude-haiku-4.5", "qwen/qwen3-coder",
+//     "openai/gpt-oss-20b:free"
+//   - Anthropic-direct: "claude-3-haiku-20240307", "claude-opus-4-7"
+//
+// Crossing model IDs across backends doesn't error here — the API
+// call itself will fail with a clear provider-side error. Use the
+// LLMClientSource returned from NewLLMClient to pick the right form
+// when you genuinely need different model IDs per backend.
+func WithModel(m string) LLMOption {
+	return func(o *llmOpts) { o.model = m }
+}
+
+// modelSetter is the narrow interface both OpenRouterClient and
+// AnthropicClient satisfy. Defined here (not in provider.go) so the
+// Provider interface stays minimal — SetModel is a constructor knob,
+// not part of every backend's contract.
+type modelSetter interface {
+	SetModel(string)
+}
+
 // NewLLMClient returns the first available provider, trying OpenRouter
 // before Anthropic. Resolution order:
 //
@@ -53,14 +87,32 @@ type openRouterKeyResolver func() (key string, source string, err error)
 // Returns the constructed Provider plus the source that produced it
 // (useful for telemetry and for tests asserting fallback behavior).
 //
+// Options modify the returned client after construction. The common
+// case is WithModel:
+//
+//	client, src, err := llm.NewLLMClient(cfg, llm.WithModel("anthropic/claude-haiku-4.5"))
+//
 // Callers that need to insist on a specific provider should construct
 // it directly via NewOpenRouterClient / NewAnthropicClient — this
 // function is for the common case where "any LLM" will do.
 //
 // cfg may be nil; downstream constructors call config.Default() as
 // needed.
-func NewLLMClient(cfg *config.Config) (Provider, LLMClientSource, error) {
-	return resolveLLMClient(cfg, secret.OpenRouterKey)
+func NewLLMClient(cfg *config.Config, opts ...LLMOption) (Provider, LLMClientSource, error) {
+	options := llmOpts{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	client, source, err := resolveLLMClient(cfg, secret.OpenRouterKey)
+	if err != nil {
+		return nil, "", err
+	}
+	if options.model != "" {
+		if ms, ok := client.(modelSetter); ok {
+			ms.SetModel(options.model)
+		}
+	}
+	return client, source, nil
 }
 
 // resolveLLMClient is the testable core of NewLLMClient. orKey is the
@@ -97,8 +149,8 @@ func resolveLLMClient(cfg *config.Config, orKey openRouterKeyResolver) (Provider
 // genuinely cannot proceed without a provider can collapse two lines
 // into one. Use sparingly — most CLI commands prefer to render a clean
 // error message rather than panic.
-func MustLLMClient(cfg *config.Config) (Provider, LLMClientSource) {
-	c, src, err := NewLLMClient(cfg)
+func MustLLMClient(cfg *config.Config, opts ...LLMOption) (Provider, LLMClientSource) {
+	c, src, err := NewLLMClient(cfg, opts...)
 	if err != nil {
 		panic(fmt.Sprintf("llm.MustLLMClient: %v", err))
 	}

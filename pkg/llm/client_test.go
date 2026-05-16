@@ -96,6 +96,81 @@ func TestResolveLLMClient_Order(t *testing.T) {
 	}
 }
 
+// TestNewLLMClient_WithModel pins that WithModel applies uniformly to
+// whichever backend resolves first. Both clients expose Model() so we
+// can assert without touching SetModel internals.
+func TestNewLLMClient_WithModel(t *testing.T) {
+	cases := []struct {
+		name  string
+		envOR string
+		envAn string
+		model string
+		want  string
+	}{
+		{"openrouter receives model", "or-key", "ant-key", "anthropic/claude-haiku-4.5", "anthropic/claude-haiku-4.5"},
+		{"anthropic receives model", "", "ant-key", "claude-3-haiku-20240307", "claude-3-haiku-20240307"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OPEN_ROUTER_API_KEY", c.envOR)
+			t.Setenv("ANTHROPIC_API_KEY", c.envAn)
+			// Force keychain miss so env wins.
+			got, _, err := resolveLLMClient(nil, stubKey("", errors.New("no keychain")))
+			if err != nil {
+				t.Fatalf("resolveLLMClient: %v", err)
+			}
+			// Apply WithModel as the public path does.
+			(&llmOpts{model: c.model}).applyTo(got)
+
+			gotModel := modelOf(t, got)
+			if gotModel != c.want {
+				t.Errorf("Model() = %q, want %q", gotModel, c.want)
+			}
+		})
+	}
+}
+
+// TestNewLLMClient_WithModelPublicAPI exercises the public option path
+// (NewLLMClient(...) with opts...) end-to-end, asserting via a
+// post-resolution Model() readout.
+func TestNewLLMClient_WithModelPublicAPI(t *testing.T) {
+	t.Setenv("OPEN_ROUTER_API_KEY", "env-key")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	got, _, err := NewLLMClient(nil, WithModel("anthropic/claude-haiku-4.5"))
+	if err != nil {
+		t.Skipf("no LLM client (this run has keychain or env empty): %v", err)
+	}
+	if m := modelOf(t, got); m != "anthropic/claude-haiku-4.5" {
+		t.Errorf("Model() = %q, want anthropic/claude-haiku-4.5", m)
+	}
+}
+
+// applyTo lets the WithModel-application test loop drive options
+// without re-implementing the dispatch logic inside NewLLMClient.
+func (o *llmOpts) applyTo(p Provider) {
+	if o.model != "" {
+		if ms, ok := p.(modelSetter); ok {
+			ms.SetModel(o.model)
+		}
+	}
+}
+
+// modelOf reads Model() off whichever concrete type p is. Used by the
+// WithModel tests since Provider doesn't include Model() in its public
+// interface.
+func modelOf(t *testing.T, p Provider) string {
+	t.Helper()
+	switch c := p.(type) {
+	case *OpenRouterClient:
+		return c.Model()
+	case *AnthropicClient:
+		return c.Model()
+	default:
+		t.Fatalf("unexpected Provider concrete type %T", p)
+		return ""
+	}
+}
+
 // TestNewLLMClient_LiveResolver smoke-tests the public API by going
 // through the real secret.OpenRouterKey resolver. It doesn't assert a
 // specific source (that depends on the machine) — only that the
