@@ -16,6 +16,12 @@ import (
 	"time"
 )
 
+// ScoreGoLFrames is a thin specialization on top of RunRepoTests: it
+// uses RunRepoTests for the build step and then layers fixture-based
+// stdin/stdout frame diffing as its own test phase. The build env and
+// truncation behavior come from the generic helper so SWE-bench and
+// future Go-test benchmarks share the same plumbing.
+
 // FrameDiffResult is the structured outcome of comparing the harness's
 // built binary against canonical Game-of-Life fixtures (blinker,
 // glider, …). One sub-result per fixture pair.
@@ -65,28 +71,18 @@ func ScoreGoLFrames(ctx context.Context, workdir, fixturesDir string, generation
 	}
 
 	binaryPath := filepath.Join(workdir, "gol")
-	buildCtx, buildCancel := context.WithTimeout(ctx, 60*time.Second)
-	defer buildCancel()
-	build := exec.CommandContext(buildCtx, "go", "build", "-o", binaryPath, ".")
-	build.Dir = workdir
-	// Same env discipline as the harness's run_shell — keep go's
-	// caches inside the workdir.
-	build.Env = []string{
-		"PATH=/usr/bin:/bin:/usr/local/bin",
-		"HOME=" + workdir,
-		"GOPATH=" + filepath.Join(workdir, ".gopath"),
-		"GOCACHE=" + filepath.Join(workdir, ".gocache"),
-		"GOMODCACHE=" + filepath.Join(workdir, ".gomodcache"),
+	repoRes, err := RunRepoTests(ctx, workdir, RepoTestSpec{
+		BuildCmd: []string{"go", "build", "-o", binaryPath, "."},
+		Timeout:  60 * time.Second,
+	})
+	if err != nil {
+		return FrameDiffResult{BinaryPath: binaryPath}, err
 	}
-	var buildOut bytes.Buffer
-	build.Stdout = &buildOut
-	build.Stderr = &buildOut
-
-	if err := build.Run(); err != nil {
+	if !repoRes.BuildOK {
 		return FrameDiffResult{
 			BuildOK:    false,
 			BinaryPath: binaryPath,
-			BuildOut:   truncateGoL(buildOut.String(), 2048),
+			BuildOut:   repoRes.BuildOut,
 		}, nil
 	}
 
