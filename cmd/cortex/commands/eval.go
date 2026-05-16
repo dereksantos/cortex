@@ -154,6 +154,10 @@ Options:
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances
+  --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
+  --depth F              NIAH only: needle depth 0.0..1.0; repeatable, default 0.0,0.5,1.0
+  --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
+  --seed N               NIAH only: deterministic filler seed (default: 1)
   -h, --help             Show this help
 
 Examples:
