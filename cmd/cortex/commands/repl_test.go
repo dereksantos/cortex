@@ -540,6 +540,79 @@ func TestSalvageWriteFile(t *testing.T) {
 	})
 }
 
+// TestSummarizeToolArgs covers the streamed-event one-liners that show
+// up next to "  → <tool>" in the REPL. The smart per-tool summaries
+// are the user-visible difference between "I see what's happening" and
+// "I'm staring at JSON" during a multi-second turn.
+func TestSummarizeToolArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		tool    string
+		args    string
+		verbose bool
+		want    string
+	}{
+		{
+			name: "write_file shows path + byte count",
+			tool: "write_file",
+			args: `{"path":"main.go","content":"package main\n\nfunc main() {}\n"}`,
+			want: "(main.go, 29 bytes)",
+		},
+		{
+			name: "read_file shows just the path",
+			tool: "read_file",
+			args: `{"path":"main.go"}`,
+			want: "(main.go)",
+		},
+		{
+			name: "run_shell shows command + args",
+			tool: "run_shell",
+			args: `{"command":"go","args":["build","./..."]}`,
+			want: "(go build ./...)",
+		},
+		{
+			name: "run_shell with bare command",
+			tool: "run_shell",
+			args: `{"command":"ls"}`,
+			want: "(ls)",
+		},
+		{
+			name: "cortex_search shows quoted query",
+			tool: "cortex_search",
+			args: `{"query":"auth decisions"}`,
+			want: `("auth decisions")`,
+		},
+		{
+			name: "unknown tool falls through to generic truncate",
+			tool: "mystery",
+			args: `{"foo":"bar"}`,
+			want: `({"foo":"bar"})`,
+		},
+		{
+			name: "malformed json falls through to truncated string",
+			tool: "write_file",
+			args: `not json`,
+			want: `(not json)`,
+		},
+		{
+			name:    "verbose lifts truncation cap on run_shell",
+			tool:    "run_shell",
+			args:    `{"command":"go","args":["test","-run","TestAReallyLongIdentifierThatWouldGetTruncatedAtDefaultCapButShouldSurviveInVerboseMode","./..."]}`,
+			verbose: true,
+			want:    `(go test -run TestAReallyLongIdentifierThatWouldGetTruncatedAtDefaultCapButShouldSurviveInVerboseMode ./...)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := summarizeToolArgs(tt.tool, tt.args, tt.verbose)
+			if got != tt.want {
+				t.Errorf("summarizeToolArgs(%q, %q, verbose=%v)\n  got:  %q\n  want: %q",
+					tt.tool, tt.args, tt.verbose, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 func mustWrite(t *testing.T, root, rel, content string) {

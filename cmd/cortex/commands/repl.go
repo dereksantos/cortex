@@ -645,6 +645,11 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if s.apiURL == defaultOllamaAPIURL {
 		h.SetMinimalTools(true)
 	}
+	// Stream the agent loop into the REPL: one line per tool call so
+	// the human sees what's happening during long turns (gpt-oss-20b
+	// takes 20-30s per turn; without this it's a silent stare). Token
+	// + per-turn telemetry is gated behind --verbose.
+	h.SetNotify(makeREPLNotifier(s.verbose))
 	h.SetMaxTurns(defaultMaxTurns)
 	h.SetMaxOutputTokens(defaultMaxOutputTokens)
 
@@ -1619,6 +1624,138 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 		}
 		return nil, ""
 	}
+}
+
+// ============================================================================
+// In-flight observability — stream the agent loop into the REPL
+// ============================================================================
+//
+// `cortex code` has had a live progress notifier since iteration 1 of the
+// coding harness (see makeCodeNotifier in code.go); the REPL just didn't
+// wire it up in the initial cuts. Without streaming, long turns
+// (gpt-oss-20b: 20–30s; qwen-1.5b on a complex prompt: 30–60s) feel like
+// a silent stare. With streaming the user sees a per-tool-call line as
+// the agent works.
+//
+// Default mode (no --verbose) shows only tool calls with smart per-tool
+// arg summaries. Verbose adds inner-turn telemetry + tool-result sizes
+// + session-start banner + error stack.
+
+// makeREPLNotifier returns the callback wired to the harness's Notify
+// hook. The shape mirrors makeCodeNotifier in code.go but the visible
+// surface is narrower — the REPL prints its own per-user-turn summary,
+// so we don't echo the agent loop's internal turn/final events at
+// default verbosity.
+func makeREPLNotifier(verbose bool) func(string, any) {
+	return func(kind string, payload any) {
+		switch kind {
+		case "coding.tool_call":
+			p := mapOf(payload)
+			name, _ := p["name"].(string)
+			argsStr, _ := p["args"].(string)
+			summary := summarizeToolArgs(name, argsStr, verbose)
+			fmt.Printf("  → %s%s\n", name, summary)
+		case "coding.tool_result":
+			if !verbose {
+				return
+			}
+			p := mapOf(payload)
+			fmt.Printf("    (result: %v chars)\n", p["output_chars"])
+		case "coding.turn":
+			if !verbose {
+				return
+			}
+			p := mapOf(payload)
+			fmt.Printf("  · agent turn %v · finish=%v · tokens=%v/%v · calls=%v\n",
+				p["turn"], p["finish_reason"],
+				p["tokens_in"], p["tokens_out"],
+				p["tool_calls"])
+		case "coding.session_start":
+			if !verbose {
+				return
+			}
+			p := mapOf(payload)
+			fmt.Printf("  · session_start · max_turns=%v · num_tools=%v\n",
+				p["max_turns"], p["num_tools"])
+		case "coding.turn_limit":
+			fmt.Printf("  ⚠ agent turn limit hit\n")
+		case "coding.budget_exceeded":
+			p := mapOf(payload)
+			fmt.Printf("  ⚠ budget exceeded · cumulative_tokens=%v/%v · cost=$%.4f\n",
+				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"]))
+		case "coding.error":
+			p := mapOf(payload)
+			fmt.Printf("  ⚠ provider error: %v\n", p["error"])
+		}
+	}
+}
+
+// summarizeToolArgs produces a one-line arg snippet sized for the REPL.
+// Smart per-tool summaries make the dominant tools (write_file,
+// read_file, run_shell) self-explanatory at a glance; everything else
+// falls through to a generic truncated dump. Verbose mode lifts the
+// truncation cap so the human can see exactly what was called.
+//
+// Arg formats by tool:
+//
+//	write_file → "(main.go, 168 bytes)"
+//	read_file  → "(main.go)"
+//	run_shell  → "(go build ./...)"
+//	default    → "(first-80-chars…)"
+//
+// The argsStr coming in is the harness's JSON-stringified arguments
+// — same shape the tool dispatcher saw. We do a forgiving parse: if
+// the JSON doesn't decode (rare), fall through to the generic path.
+func summarizeToolArgs(name, argsStr string, verbose bool) string {
+	max := 80
+	if verbose {
+		max = 240
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
+		switch name {
+		case "write_file":
+			path, _ := args["path"].(string)
+			content, _ := args["content"].(string)
+			if path != "" {
+				return fmt.Sprintf("(%s, %d bytes)", path, len(content))
+			}
+		case "read_file", "list_dir":
+			if path, ok := args["path"].(string); ok && path != "" {
+				return fmt.Sprintf("(%s)", path)
+			}
+		case "run_shell":
+			cmd, _ := args["command"].(string)
+			if rest, ok := args["args"].([]any); ok && len(rest) > 0 {
+				parts := make([]string, 0, len(rest))
+				for _, r := range rest {
+					if s, ok := r.(string); ok {
+						parts = append(parts, s)
+					}
+				}
+				full := cmd + " " + strings.Join(parts, " ")
+				return "(" + truncateHead(full, max) + ")"
+			}
+			if cmd != "" {
+				return "(" + truncateHead(cmd, max) + ")"
+			}
+		case "cortex_search":
+			if q, ok := args["query"].(string); ok && q != "" {
+				return fmt.Sprintf("(%q)", truncateHead(q, max))
+			}
+		}
+	}
+	return "(" + truncateHead(argsStr, max) + ")"
+}
+
+// truncate caps s at max chars and appends an ellipsis when truncated.
+// Distinct from tailString (which keeps the tail) because for argument
+// previews we care about the head.
+func truncateHead(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 // Compile-time guard: ensure REPLCommand satisfies the Command interface.
