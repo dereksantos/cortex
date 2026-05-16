@@ -22,7 +22,7 @@ internal/eval/benchmarks/
 ├── registry.go       # Register/Get + ErrUnknownBenchmark
 ├── cache.go          # EnsureCached helper for HF/HTTPS dataset fetches
 ├── longmemeval/      # memory benchmark (LLM-judge scored) — loop 03
-├── mteb/             # retrieval+rerank, mechanical NDCG/MRR  — loop 05
+├── mteb/             # retrieval+rerank, mechanical NDCG/MRR  — loop 05 (NFCorpus wired; see mteb.md)
 ├── swebench/         # coding via in-process harness          — loop 04
 └── niah/             # synthetic long-context smoke test       — loop 02
 ```

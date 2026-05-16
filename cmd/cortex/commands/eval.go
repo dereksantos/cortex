@@ -153,7 +153,7 @@ Options:
   --abr-trend            Show ABR progression across runs
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
-  --limit N              Cap number of benchmark instances
+  --limit N              Cap number of benchmark instances (for mteb: caps queries scored)
   --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
   --depth F              NIAH only: needle depth 0.0..1.0; repeatable, default 0.0,0.5,1.0
   --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
@@ -164,6 +164,9 @@ Options:
   --repo SLUG            SWE-bench: (repeatable) restrict to upstream repo (e.g. django/django)
   --docker-image-prefix PFX  SWE-bench: override scoring image prefix
   --git-cache-dir DIR    SWE-bench: reuse a git mirror for repo clones
+  --tasks NAME           MTEB only: task name (Phase A accepts only NFCorpus; default NFCorpus)
+  --rerank               MTEB only: rerank top-K via cognition.Reflect (adds ~10-20x latency)
+  --embedder ID          MTEB only: reserved for future embedder switch (default: Hugot MiniLM)
   -h, --help             Show this help
 
 Examples:
