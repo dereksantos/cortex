@@ -264,13 +264,18 @@ func createMeasureProvider(providerName, modelOverride string, ctx *Context) (ll
 			return nil, fmt.Errorf("ollama is not running; start with: ollama serve")
 		}
 		return client, nil
-	case "anthropic":
-		client := llm.NewAnthropicClient(cfg)
-		if !client.IsAvailable() {
-			return nil, fmt.Errorf("anthropic API key not set; set ANTHROPIC_API_KEY")
+	case "anthropic", "openrouter", "auto":
+		// All hosted-LLM aliases route through the unified surface
+		// (OpenRouter primary, Anthropic fallback). "anthropic" is kept
+		// for back-compat with existing scripts — it no longer pins to
+		// Anthropic-direct; use NewAnthropicClient explicitly if that
+		// is what you need.
+		client, _, err := llm.NewLLMClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("no hosted LLM available: %w", err)
 		}
 		return client, nil
 	default:
-		return nil, fmt.Errorf("unknown provider: %s (use ollama or anthropic)", providerName)
+		return nil, fmt.Errorf("unknown provider: %s (use ollama, anthropic, openrouter, or auto)", providerName)
 	}
 }

@@ -76,23 +76,22 @@ func main() {
 // to the runner's defaultLocalProvider (Ollama → Anthropic).
 func buildProvider() llm.Provider {
 	switch os.Getenv("CORTEX_MTEB_RERANK_PROVIDER") {
-	case "openrouter":
+	case "openrouter", "anthropic", "auto":
+		// Hosted-LLM aliases collapse onto the unified surface
+		// (OpenRouter primary, Anthropic fallback). The CORTEX_MTEB_
+		// RERANK_MODEL env var is forwarded via WithModel so callers
+		// can pin provider-prefixed IDs (anthropic/claude-haiku-4.5).
 		cfg := config.Default()
-		c := llm.NewOpenRouterClient(cfg)
+		var opts []llm.LLMOption
 		if m := os.Getenv("CORTEX_MTEB_RERANK_MODEL"); m != "" {
-			c.SetModel(m)
+			opts = append(opts, llm.WithModel(m))
 		}
-		if !c.IsAvailable() {
-			fmt.Fprintln(os.Stderr, "openrouter not available (OPEN_ROUTER_API_KEY not set?); falling back to defaultLocalProvider")
+		c, _, err := llm.NewLLMClient(cfg, opts...)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hosted LLM not available (%v); falling back to defaultLocalProvider\n", err)
 			return nil
 		}
 		return c
-	case "anthropic":
-		cfg := config.Default()
-		if m := os.Getenv("CORTEX_MTEB_RERANK_MODEL"); m != "" {
-			cfg.AnthropicModel = m
-		}
-		return llm.NewAnthropicClient(cfg)
 	case "ollama":
 		cfg := config.Default()
 		if m := os.Getenv("CORTEX_MTEB_RERANK_MODEL"); m != "" {

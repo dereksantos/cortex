@@ -6,19 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/capture"
-	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
-	"github.com/dereksantos/cortex/internal/processor"
-	"github.com/dereksantos/cortex/internal/storage"
-	"github.com/dereksantos/cortex/pkg/cognition"
-	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
@@ -214,11 +207,18 @@ func (runner) Load(_ context.Context, opts benchmarks.LoadOpts) ([]benchmarks.In
 	return insts, nil
 }
 
-// Run executes one NIAH instance: synthesize the haystack, capture it
-// into a fresh per-workdir Cortex store, ingest, query via Fast mode,
-// score on substring match. Returns a fully-validated CellResult that
-// the CLI hands off to the standard Persister fan-out (journal →
-// SQLite + JSONL).
+// Run executes one NIAH instance through the cortex CLI as a black box
+// (per docs/prompts/eval-principles.md). The flow:
+//
+//  1. Generate the haystack (in-memory, no Cortex involvement)
+//  2. Chunk into overlapping windows -> []*events.Event
+//  3. exec `cortex capture --bulk --workdir env.Workdir` over NDJSON stdin
+//  4. exec `cortex ingest --workdir env.Workdir`
+//  5. exec `cortex search --workdir env.Workdir --json` and parse output
+//  6. Score on substring match (offline, no Cortex involvement)
+//
+// All Cortex interaction is mediated by the CLI; no internal package
+// imports. This means the benchmark genuinely tests what users run.
 func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.Env) (*evalv2.CellResult, error) {
 	p, ok := inst.Payload.(Payload)
 	if !ok {
@@ -230,6 +230,11 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 
 	start := time.Now()
 
+	binary, err := benchmarks.ResolveCortexBinary()
+	if err != nil {
+		return nil, fmt.Errorf("niah: %w", err)
+	}
+
 	hay := Generate(GenerateOpts{
 		Length:     p.LengthTok,
 		Depth:      p.Depth,
@@ -238,42 +243,23 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 		FillerMode: p.FillerMode, // zero value resolves to adversarial
 	})
 
-	storeDir := filepath.Join(env.Workdir, ".cortex")
-	cfg := &config.Config{ContextDir: storeDir}
-	store, err := storage.New(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("niah: storage.New: %w", err)
-	}
-	defer store.Close()
-
-	captureClient := capture.New(cfg)
 	sessionID := fmt.Sprintf("niah-%s-%g", p.LengthLabel, p.Depth)
-	if err := captureHaystack(captureClient, hay.Text, sessionID); err != nil {
+	evs := chunkHaystack(hay.Text, sessionID)
+
+	if err := benchmarks.RunBulkCapture(ctx, binary, env.Workdir, evs); err != nil {
 		return nil, fmt.Errorf("niah: capture haystack: %w", err)
 	}
-
-	proc := processor.New(cfg, store)
-	if _, err := proc.RunBatch(); err != nil {
+	if err := benchmarks.RunIngest(ctx, binary, env.Workdir); err != nil {
 		return nil, fmt.Errorf("niah: ingest: %w", err)
 	}
 
-	cx, err := intcognition.New(store, nil, nil, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("niah: cognition.New: %w", err)
-	}
-	// Block on async cognition goroutines (Think/Dream triggered by
-	// Retrieve) before returning so the workdir is safe to remove by
-	// the caller. Without this, t.TempDir cleanup races with
-	// background journal writes.
-	defer cx.Wait()
-
 	probe := buildProbe(p.Needle)
-	res, err := cx.Retrieve(ctx, cognition.Query{Text: probe, Limit: 10}, cognition.Fast)
+	out, err := benchmarks.RunSearch(ctx, binary, env.Workdir, benchmarks.SearchFast, 10, probe)
 	if err != nil {
-		return nil, fmt.Errorf("niah: retrieve: %w", err)
+		return nil, fmt.Errorf("niah: search: %w", err)
 	}
 
-	score := scoreRetrieval(res, p.Needle)
+	score := scoreRetrieval(out, p.Needle)
 	fillerLabel := string(p.FillerMode)
 	if fillerLabel == "" {
 		fillerLabel = string(FillerAdversarial)
@@ -315,24 +301,30 @@ func (runner) Run(ctx context.Context, inst benchmarks.Instance, env benchmarks.
 	return cell, nil
 }
 
-// captureHaystack chunks text into overlapping windows and writes one
-// capture.event per chunk. The overlap (chunkSize - chunkStride) is
+// chunkHaystack splits text into overlapping windows and returns one
+// events.Event per chunk. The overlap (chunkSize - chunkStride) is
 // sized so any substring of length ≤ chunkStride is fully contained in
 // at least one chunk — protecting the needle from being split across
 // chunk boundaries.
-func captureHaystack(c *capture.Capture, text, sessionID string) error {
+//
+// Pure function: no I/O, no time-dependent IDs. Timestamp is set to
+// time.Now once per chunk because the journal serializer rejects zero
+// timestamps; the precise value doesn't matter for retrieval.
+func chunkHaystack(text, sessionID string) []*events.Event {
 	if text == "" {
 		return nil
 	}
+	now := time.Now()
+	var evs []*events.Event
 	for i := 0; i < len(text); i += chunkStride {
 		end := i + chunkSize
 		if end > len(text) {
 			end = len(text)
 		}
-		ev := &events.Event{
+		evs = append(evs, &events.Event{
 			Source:     events.SourceGeneric,
 			EventType:  events.EventToolUse,
-			Timestamp:  time.Now(),
+			Timestamp:  now,
 			ToolName:   "niah_chunk",
 			ToolInput:  map[string]any{"chunk_offset": i},
 			ToolResult: text[i:end],
@@ -340,15 +332,12 @@ func captureHaystack(c *capture.Capture, text, sessionID string) error {
 				SessionID: sessionID,
 			},
 			Metadata: map[string]any{"capture_type": "observation"},
-		}
-		if err := c.CaptureEvent(ev); err != nil {
-			return fmt.Errorf("capture chunk @%d: %w", i, err)
-		}
+		})
 		if end == len(text) {
 			break
 		}
 	}
-	return nil
+	return evs
 }
 
 // buildProbe derives the search query from the needle. For
@@ -372,8 +361,8 @@ func buildProbe(needle string) string {
 	return trimmed
 }
 
-// retrievalScore is the structured summary of a Reflex retrieval. It
-// captures enough signal for an operator to triage a regression
+// retrievalScore is the structured summary of a single search response.
+// It captures enough signal for an operator to triage a regression
 // without re-running the benchmark:
 //
 //   - Hit: did the needle survive at all (substring in any top-K)?
@@ -383,7 +372,7 @@ func buildProbe(needle string) string {
 //   - ScoreGap: TopScore − RunnerUpScore. A shrinking gap across
 //     runs is the leading indicator of scorer regression — the
 //     needle still hits position 1 but only barely.
-//   - ResultCount: how many chunks Reflex actually returned. A drop
+//   - ResultCount: how many chunks the CLI actually returned. A drop
 //     from N to 1 is the leading indicator of a retrieval regression
 //     (overly aggressive filtering, broken text-search fallback).
 //
@@ -398,33 +387,33 @@ type retrievalScore struct {
 	ResultCount   int
 }
 
-func scoreRetrieval(res *cognition.ResolveResult, needle string) retrievalScore {
-	out := retrievalScore{Position: "missing"}
-	if res == nil || len(res.Results) == 0 {
-		return out
+func scoreRetrieval(out *benchmarks.SearchOutput, needle string) retrievalScore {
+	s := retrievalScore{Position: "missing"}
+	if out == nil || len(out.Results) == 0 {
+		return s
 	}
-	out.ResultCount = len(res.Results)
+	s.ResultCount = len(out.Results)
 
 	// Find the two highest scores — robust to unsorted result slices.
-	for _, r := range res.Results {
+	for _, r := range out.Results {
 		switch {
-		case r.Score > out.TopScore:
-			out.RunnerUpScore = out.TopScore
-			out.TopScore = r.Score
-		case r.Score > out.RunnerUpScore:
-			out.RunnerUpScore = r.Score
+		case r.Score > s.TopScore:
+			s.RunnerUpScore = s.TopScore
+			s.TopScore = r.Score
+		case r.Score > s.RunnerUpScore:
+			s.RunnerUpScore = r.Score
 		}
 	}
-	out.ScoreGap = out.TopScore - out.RunnerUpScore
+	s.ScoreGap = s.TopScore - s.RunnerUpScore
 
-	for i, r := range res.Results {
+	for i, r := range out.Results {
 		if strings.Contains(r.Content, needle) {
-			out.Hit = true
-			out.Position = strconv.Itoa(i + 1)
+			s.Hit = true
+			s.Position = strconv.Itoa(i + 1)
 			break
 		}
 	}
-	return out
+	return s
 }
 
 // ParseLengthLabel parses CLI length tokens ("8k", "16K", "4000") into

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 )
 
@@ -42,16 +43,27 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		return failedCell(inst, strategy, cfg, env, "clone: "+err.Error()), nil
 	}
 
-	h, err := newHarness(cfg.Model, strategy)
+	binary, err := benchmarks.ResolveCortexBinary()
 	if err != nil {
-		return failedCell(inst, strategy, cfg, env, "harness setup: "+err.Error()), nil
+		return failedCell(inst, strategy, cfg, env, "resolve cortex binary: "+err.Error()), nil
 	}
 
 	start := time.Now()
-	hr, runErr := h.RunSessionWithResult(ctx, inst.ProblemStatement, repoDir)
+	out, runErr := benchmarks.RunCode(ctx, binary, benchmarks.CodeOpts{
+		Workdir:  repoDir,
+		Model:    cfg.Model,
+		Prompt:   inst.ProblemStatement,
+		NoSearch: strategy == "baseline",
+	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {
-		fmt.Fprintf(os.Stderr, "[swebench %s] harness err: %v\n", inst.InstanceID, runErr)
+		fmt.Fprintf(os.Stderr, "[swebench %s] cortex code err: %v\n", inst.InstanceID, runErr)
+	}
+	// A subprocess failure still produces a patch attempt if the agent
+	// got that far before crashing; if not, extractPatch below writes an
+	// empty file and the scorer marks the instance failed.
+	if out == nil {
+		out = &benchmarks.CodeOutput{}
 	}
 
 	patchPath := filepath.Join(workdir, "cortex.patch")
@@ -75,11 +87,11 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		Model:                cfg.Model,
 		ContextStrategy:      strategyToContext(strategy),
 		CortexVersion:        evalv2.CortexVersion,
-		TokensIn:             hr.TokensIn,
-		TokensOut:            hr.TokensOut,
-		CostUSD:              hr.CostUSD,
+		TokensIn:             out.TokensIn,
+		TokensOut:            out.TokensOut,
+		CostUSD:              out.CostUSD,
 		LatencyMs:            elapsed,
-		AgentTurnsTotal:      hr.AgentTurnsTotal,
+		AgentTurnsTotal:      out.Turns,
 		TestsPassed:          result.F2PPassed + result.P2PPassed,
 		TestsFailed:          result.F2PFailed + result.P2PFailed,
 		TaskSuccess:          result.AllPassed,
@@ -123,19 +135,6 @@ func strategyToContext(s string) string {
 	default:
 		return evalv2.StrategyCortex
 	}
-}
-
-// newHarness constructs a CortexHarness with cortex_search toggled
-// per strategy. Returns the harness ready for RunSessionWithResult.
-func newHarness(model, strategy string) (*evalv2.CortexHarness, error) {
-	h, err := evalv2.NewCortexHarness(model)
-	if err != nil {
-		return nil, err
-	}
-	if strategy == "baseline" {
-		h.SetCortexSearchEnabled(false)
-	}
-	return h, nil
 }
 
 // cloneRepoAt does `git clone https://github.com/<repo>.git <dest>` then

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -40,11 +41,13 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	searchFlags := flag.NewFlagSet("search", flag.ExitOnError)
 	modeFlag := searchFlags.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
 	limitFlag := searchFlags.Int("limit", 5, "Maximum number of results")
+	workdirFlag := searchFlags.String("workdir", "", "Open storage rooted at <workdir>/.cortex (overrides default global storage)")
+	jsonFlag := searchFlags.Bool("json", false, "Emit a single JSON object on stdout with full result content (no truncation)")
 	searchFlags.Parse(ctx.Args)
 
 	args := searchFlags.Args()
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] <query>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] [--workdir=DIR] [--json] <query>\n")
 		return fmt.Errorf("missing query argument")
 	}
 
@@ -61,19 +64,24 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 
 	cfg := ctx.Config
 	store := ctx.Storage
+	if *workdirFlag != "" {
+		var err error
+		cfg, store, err = openWorkdirContext(*workdirFlag)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+	}
 
-	// Initialize LLM provider (required for Full mode, optional for Fast)
+	// Initialize LLM provider (required for Full mode, optional for Fast).
+	// Try the unified surface (OpenRouter→Anthropic) first, fall back to
+	// Ollama for users running a fully local stack.
 	var llmProvider llm.Provider
 	if mode == cognition.Full {
-		// Try Anthropic first, then Ollama
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 		if llmProvider == nil {
 			fmt.Fprintf(os.Stderr, "Warning: No LLM provider available, falling back to fast mode\n")
@@ -121,6 +129,15 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		modeStr = "Full (Reflex + Reflect)"
 	}
 
+	// JSON output: emit full content (no truncation) so callers (benchmark
+	// runners, scripts) can score against the raw chunk text. The text
+	// fallback below is intentionally NOT applied — benchmarks need a
+	// stable contract over the cognitive pipeline's output, not an
+	// opportunistic SearchEvents rescue.
+	if *jsonFlag {
+		return emitSearchJSON(os.Stdout, strings.ToLower(strings.Fields(modeStr)[0]), elapsed, result)
+	}
+
 	// Display results
 	if result == nil || len(result.Results) == 0 {
 		// Fallback: search events directly when Reflex returns nothing.
@@ -164,6 +181,38 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	}
 
 	return nil
+}
+
+// searchJSONOutput is the structured contract returned by --json. Stable
+// keys, full content (no truncation), so benchmarks and downstream tools
+// can parse without depending on the human-readable formatting.
+type searchJSONOutput struct {
+	Mode      string             `json:"mode"`
+	ElapsedMs int64              `json:"elapsed_ms"`
+	Results   []searchJSONResult `json:"results"`
+}
+
+type searchJSONResult struct {
+	Score   float64 `json:"score"`
+	Content string  `json:"content"`
+}
+
+func emitSearchJSON(w io.Writer, mode string, elapsed time.Duration, result *cognition.ResolveResult) error {
+	out := searchJSONOutput{
+		Mode:      mode,
+		ElapsedMs: elapsed.Milliseconds(),
+		Results:   []searchJSONResult{},
+	}
+	if result != nil {
+		out.Results = make([]searchJSONResult, 0, len(result.Results))
+		for _, r := range result.Results {
+			out.Results = append(out.Results, searchJSONResult{
+				Score:   r.Score,
+				Content: r.Content,
+			})
+		}
+	}
+	return json.NewEncoder(w).Encode(out)
 }
 
 // RecentCommand shows recent events.

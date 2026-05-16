@@ -2,7 +2,6 @@ package cognition
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 
@@ -143,27 +142,19 @@ func (m *nuanceMockProvider) GenerateWithStats(ctx context.Context, prompt strin
 // TestExtractNuances_RealLLM tests with a real LLM to verify the prompt works.
 // Skip if no LLM is available.
 func TestExtractNuances_RealLLM(t *testing.T) {
-	// Check for Anthropic API key
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		t.Skip("ANTHROPIC_API_KEY not set, skipping real LLM test")
+	provider, src, err := llm.NewLLMClient(config.Default(), llm.WithModel("anthropic/claude-haiku-4.5"))
+	if err != nil {
+		t.Skipf("no LLM client available: %v", err)
 	}
-
-	cfg := config.Default()
-	cfg.AnthropicModel = "claude-3-haiku-20240307"
-	provider := llm.NewAnthropicClient(cfg)
-	if !provider.IsAvailable() {
-		t.Skip("Anthropic provider not available")
-	}
+	t.Logf("using LLM client source: %s", src)
 
 	// Test with the actual logging pattern from our journey
 	loggingPattern := "Use slog.Info() for successful operations, slog.Error() for failures with err attribute, slog.Debug() for verbose/troubleshooting output"
 
 	nuances, err := ExtractNuances(context.Background(), provider, loggingPattern)
 	if err != nil {
-		// Don't fail the suite for environmental issues like depleted API
-		// credits — those aren't a regression in the code under test.
-		if strings.Contains(err.Error(), "credit balance is too low") {
-			t.Skipf("ANTHROPIC_API_KEY has no credits, skipping: %v", err)
+		if isEnvironmentalLLMError(err) {
+			t.Skipf("environmental: %v", err)
 		}
 		t.Fatalf("ExtractNuances failed: %v", err)
 	}
@@ -201,23 +192,18 @@ func TestExtractNuances_RealLLM(t *testing.T) {
 
 // TestExtractNuances_ErrorHandlingPattern tests nuance extraction on error handling patterns
 func TestExtractNuances_ErrorHandlingPattern(t *testing.T) {
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		t.Skip("ANTHROPIC_API_KEY not set, skipping real LLM test")
+	provider, src, err := llm.NewLLMClient(config.Default(), llm.WithModel("anthropic/claude-haiku-4.5"))
+	if err != nil {
+		t.Skipf("no LLM client available: %v", err)
 	}
-
-	cfg := config.Default()
-	cfg.AnthropicModel = "claude-3-haiku-20240307"
-	provider := llm.NewAnthropicClient(cfg)
-	if !provider.IsAvailable() {
-		t.Skip("Anthropic provider not available")
-	}
+	t.Logf("using LLM client source: %s", src)
 
 	errorPattern := "Always wrap errors with context using fmt.Errorf(\"failed to X: %w\", err). Return errors up the call stack, don't log and return."
 
 	nuances, err := ExtractNuances(context.Background(), provider, errorPattern)
 	if err != nil {
-		if strings.Contains(err.Error(), "credit balance is too low") {
-			t.Skipf("ANTHROPIC_API_KEY has no credits, skipping: %v", err)
+		if isEnvironmentalLLMError(err) {
+			t.Skipf("environmental: %v", err)
 		}
 		t.Fatalf("ExtractNuances failed: %v", err)
 	}
@@ -230,4 +216,30 @@ func TestExtractNuances_ErrorHandlingPattern(t *testing.T) {
 	if len(nuances) == 0 {
 		t.Error("expected at least one nuance from error handling pattern")
 	}
+}
+
+// isEnvironmentalLLMError reports whether err looks like a developer-
+// environment problem rather than a regression in the code under test.
+// Real-LLM tests must skip on these so an expired API key, exhausted
+// credits, or transient rate limiting doesn't masquerade as a code
+// failure in CI. New environmental signals (e.g. timeouts under load)
+// should be added here as they're identified.
+func isEnvironmentalLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"credit balance is too low", // depleted credits
+		"401",                       // unauthorized
+		"invalid x-api-key",         // expired / wrong key
+		"invalid api key",           // alternative wording
+		"authentication",            // catch-all auth wording
+		"rate limit",                // transient throttling
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }

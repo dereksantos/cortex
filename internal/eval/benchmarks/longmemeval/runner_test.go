@@ -14,16 +14,16 @@ import (
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 )
 
-// TestHydrateHaystack_DrainsToStorage proves the in-process capture +
-// processor pipeline actually lands events in storage where the
-// cortex_search tool will find them. We don't drive the harness here
-// (that requires an OpenRouter key); we just check the journal +
-// projection.
+// TestHydrateHaystack_DrainsToStorage proves the bulk-capture + ingest
+// pipeline actually lands events in <workdir>/.cortex where the
+// subsequent `cortex code` invocation's cortex_search tool will find
+// them. We don't drive `cortex code` here (that needs an OpenRouter
+// key); we just check the journal + projection.
 func TestHydrateHaystack_DrainsToStorage(t *testing.T) {
 	workdir := t.TempDir()
-	storeDir := filepath.Join(workdir, ".cortex")
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	binary := os.Getenv("CORTEX_BINARY")
+	if binary == "" {
+		t.Skip("CORTEX_BINARY not set (run via go test, which builds via TestMain)")
 	}
 
 	q := Question{
@@ -45,12 +45,12 @@ func TestHydrateHaystack_DrainsToStorage(t *testing.T) {
 		},
 	}
 
-	if err := hydrateHaystack(context.Background(), storeDir, q); err != nil {
+	if err := hydrateHaystack(context.Background(), binary, workdir, q); err != nil {
 		t.Fatalf("hydrate: %v", err)
 	}
 
 	// Journal should contain capture entries for all 3 turns.
-	journalDir := filepath.Join(storeDir, "journal", "capture")
+	journalDir := filepath.Join(workdir, ".cortex", "journal", "capture")
 	entries, err := os.ReadDir(journalDir)
 	if err != nil {
 		t.Fatalf("read journal: %v", err)
@@ -73,14 +73,9 @@ func TestHydrateHaystack_DrainsToStorage(t *testing.T) {
 }
 
 // TestHydrateHaystack_SkipsEmptyTurns confirms a blank turn doesn't
-// trip the writer or create a useless capture.
+// trip the writer or create a useless capture. Exercises
+// buildHaystackEvents directly so it doesn't need a binary.
 func TestHydrateHaystack_SkipsEmptyTurns(t *testing.T) {
-	workdir := t.TempDir()
-	storeDir := filepath.Join(workdir, ".cortex")
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
 	q := Question{
 		QuestionID:         "qa_t2",
 		HaystackSessionIDs: []string{"s1"},
@@ -93,18 +88,12 @@ func TestHydrateHaystack_SkipsEmptyTurns(t *testing.T) {
 			},
 		},
 	}
-	if err := hydrateHaystack(context.Background(), storeDir, q); err != nil {
-		t.Fatalf("hydrate: %v", err)
+	evs := buildHaystackEvents(q)
+	if len(evs) != 1 {
+		t.Fatalf("buildHaystackEvents returned %d events, want 1 (empty turns must be skipped)", len(evs))
 	}
-	// Reads only confirm we wrote SOMETHING — the empty-turn-skipping
-	// invariant fails closed via a single non-zero segment.
-	journalDir := filepath.Join(storeDir, "journal", "capture")
-	entries, err := os.ReadDir(journalDir)
-	if err != nil {
-		t.Fatalf("read journal: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("journal dir empty after hydrate-with-real-content")
+	if evs[0].ToolResult != "real content" {
+		t.Errorf("kept turn content = %q, want %q", evs[0].ToolResult, "real content")
 	}
 }
 
@@ -114,8 +103,8 @@ func TestMakeCellResult_CortexStrategySetsVersionAndPasses(t *testing.T) {
 		Q:        Question{QuestionID: "qa_x"},
 		Strategy: StrategyCortex,
 	}
-	hr := evalv2.HarnessResult{TokensIn: 100, TokensOut: 50, CostUSD: 0.001, LatencyMs: 1234, AgentTurnsTotal: 3}
-	cell := makeCellResult(b, pl, AxisSingleHop, "Berlin.", hr, true, "axis=single-hop")
+	out := &benchmarks.CodeOutput{TokensIn: 100, TokensOut: 50, CostUSD: 0.001, LatencyMs: 1234, Turns: 3}
+	cell := makeCellResult(b, pl, AxisSingleHop, "Berlin.", out, true, "axis=single-hop")
 	if err := cell.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -145,7 +134,7 @@ func TestMakeCellResult_BaselineStrategyOmitsCortexVersion(t *testing.T) {
 		Q:        Question{QuestionID: "qa_x"},
 		Strategy: StrategyBaseline,
 	}
-	cell := makeCellResult(b, pl, AxisMultiHop, "answer", evalv2.HarnessResult{}, false, "axis=multi-hop")
+	cell := makeCellResult(b, pl, AxisMultiHop, "answer", nil, false, "axis=multi-hop")
 	if err := cell.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}

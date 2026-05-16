@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +52,9 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	apiURL := ""
 	verbose := false
 	quiet := false
+	noSearch := false
+	jsonOut := false
+	systemPrompt := ""
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -112,6 +116,15 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			verbose = true
 		case "-q", "--quiet":
 			quiet = true
+		case "--no-search":
+			noSearch = true
+		case "--json":
+			jsonOut = true
+		case "--system-prompt":
+			if i+1 < len(args) {
+				systemPrompt = args[i+1]
+				i++
+			}
 		case "-h", "--help":
 			printCodeHelp()
 			return nil
@@ -137,10 +150,10 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		case "-m", "--model", "-w", "--workdir", "--max-turns", "--max-cost",
 			"--max-tokens", "--max-cumulative-tokens",
 			"--max-output", "--max-output-tokens",
-			"--api-url":
+			"--api-url", "--system-prompt":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "-h", "--help", "--local":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -191,17 +204,28 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	if apiURL != "" {
 		h.SetAPIURL(apiURL)
 	}
-	if !quiet {
+	if noSearch {
+		h.SetCortexSearchEnabled(false)
+	}
+	if systemPrompt != "" {
+		h.SetSystemPrompt(systemPrompt)
+	}
+	// --json owns stdout exclusively; suppress the live notifier (which
+	// writes to stdout) and the framing banner. Verbose/quiet still apply
+	// for the non-JSON case.
+	if !quiet && !jsonOut {
 		h.SetNotify(makeCodeNotifier(verbose))
 	}
 
-	fmt.Printf("[cortex code] workdir: %s\n", resolvedWorkdir)
-	fmt.Printf("[cortex code] model:   %s\n", model)
-	if apiURL != "" {
-		fmt.Printf("[cortex code] api-url: %s\n", apiURL)
+	if !jsonOut {
+		fmt.Printf("[cortex code] workdir: %s\n", resolvedWorkdir)
+		fmt.Printf("[cortex code] model:   %s\n", model)
+		if apiURL != "" {
+			fmt.Printf("[cortex code] api-url: %s\n", apiURL)
+		}
+		fmt.Println("[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)")
+		fmt.Println()
 	}
-	fmt.Println("[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)")
-	fmt.Println()
 
 	hr, err := h.RunSessionWithResult(context.Background(), prompt, resolvedWorkdir)
 	if err != nil {
@@ -209,6 +233,10 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	}
 
 	loopRes := h.LastLoopResult()
+	if jsonOut {
+		return emitCodeJSON(os.Stdout, resolvedWorkdir, model, hr, loopRes)
+	}
+
 	fmt.Println()
 	fmt.Printf("[cortex code] turns=%d tokens=%d/%d cost=$%.4f latency=%dms reason=%s\n",
 		hr.AgentTurnsTotal, hr.TokensIn, hr.TokensOut, hr.CostUSD, hr.LatencyMs, loopRes.Reason)
@@ -221,6 +249,44 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		fmt.Println(loopRes.Final)
 	}
 	return nil
+}
+
+// codeJSONOutput is the structured contract returned by --json. Fields
+// carry the same telemetry as the [cortex code] summary line plus the
+// per-result detail benchmarks need to populate evalv2.CellResult
+// without re-parsing prose.
+type codeJSONOutput struct {
+	Workdir         string   `json:"workdir"`
+	Model           string   `json:"model"`
+	Turns           int      `json:"turns"`
+	TokensIn        int      `json:"tokens_in"`
+	TokensOut       int      `json:"tokens_out"`
+	CostUSD         float64  `json:"cost_usd"`
+	LatencyMs       int64    `json:"latency_ms"`
+	Reason          string   `json:"reason"`
+	FilesChanged    []string `json:"files_changed"`
+	Final           string   `json:"final"`
+	InjectedContext int      `json:"injected_context_tokens"`
+}
+
+func emitCodeJSON(w io.Writer, workdir, model string, hr evalv2.HarnessResult, loopRes harness.LoopResult) error {
+	out := codeJSONOutput{
+		Workdir:         workdir,
+		Model:           model,
+		Turns:           hr.AgentTurnsTotal,
+		TokensIn:        hr.TokensIn,
+		TokensOut:       hr.TokensOut,
+		CostUSD:         hr.CostUSD,
+		LatencyMs:       hr.LatencyMs,
+		Reason:          string(loopRes.Reason),
+		FilesChanged:    hr.FilesChanged,
+		Final:           loopRes.Final,
+		InjectedContext: loopRes.InjectedContextTokens,
+	}
+	if out.FilesChanged == nil {
+		out.FilesChanged = []string{}
+	}
+	return json.NewEncoder(w).Encode(out)
 }
 
 // resolveCodeWorkdir returns the absolute workdir path. If initFresh
@@ -383,6 +449,21 @@ Optional:
                                   model-id-based default; e.g. 16000 for
                                   Claude, 4000 for gpt-oss-20b).
   --max-cost USD                  Cap cumulative cost (default 0.20).
+  --no-search                     Omit the cortex_search tool from the agent's
+                                  registry. Used by baseline benchmark cells
+                                  that need a clean "no Cortex augmentation"
+                                  run for comparison.
+  --system-prompt STRING          Override the default agent system prompt.
+                                  Use for task framing (declaring role/format),
+                                  NOT for coaching tool usage. Benchmarks that
+                                  teach the model how to call cortex_search
+                                  via this flag launder their scores; see
+                                  docs/prompts/eval-principles.md principle 2.
+  --json                          Emit a single JSON object on stdout (suppresses
+                                  the live notifier + summary lines). Carries
+                                  turns, tokens, cost, latency, files_changed,
+                                  final, reason — enough to populate a
+                                  CellResult from a subprocess call.
   -v, --verbose                   Print tool arguments and result sizes.
   -q, --quiet                     No live stream; only final summary.
 

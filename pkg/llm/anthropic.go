@@ -203,6 +203,13 @@ func (c *AnthropicClient) Model() string {
 	return c.model
 }
 
+// SetModel updates the model used for subsequent calls. Symmetric with
+// OpenRouterClient.SetModel so NewLLMClient + WithModel can apply the
+// caller's choice uniformly to either backend.
+func (c *AnthropicClient) SetModel(m string) {
+	c.model = m
+}
+
 // AnalyzeEvent analyzes an event and extracts insights
 func (c *AnthropicClient) AnalyzeEvent(event *events.Event) (*Analysis, error) {
 	filePath, _ := event.ToolInput["file_path"].(string)

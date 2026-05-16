@@ -7,17 +7,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
-	"github.com/dereksantos/cortex/internal/processor"
-	"github.com/dereksantos/cortex/internal/storage"
-	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
@@ -83,9 +78,10 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 	if err != nil {
 		return nil, fmt.Errorf("abs workdir: %w", err)
 	}
-	storeDir := filepath.Join(workdir, ".cortex")
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir .cortex: %w", err)
+
+	binary, err := benchmarks.ResolveCortexBinary()
+	if err != nil {
+		return nil, fmt.Errorf("longmemeval: %w", err)
 	}
 
 	axis := NormalizeAxis(pl.Q.QuestionType)
@@ -97,24 +93,30 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 	// store empty so cortex_search returns "empty" regardless of
 	// what the model asks — that's the comparison apples-to-apples.
 	if pl.Strategy == StrategyCortex {
-		if err := hydrateHaystack(ctx, storeDir, pl.Q); err != nil {
+		if err := hydrateHaystack(ctx, binary, workdir, pl.Q); err != nil {
 			return nil, fmt.Errorf("hydrate %s: %w", pl.Q.QuestionID, err)
 		}
 	}
 
-	// Drive the harness. We use a thin local wrapper around the
-	// existing CortexHarness so the package stays decoupled from
-	// the harness construction details — switch one symbol if the
-	// constructor signature changes upstream.
-	hr, finalText, err := runCortexHarness(ctx, b.model, pl.Q.Question, workdir, env.Verbose)
+	// Drive the agent through `cortex code --json` so this benchmark
+	// measures the same harness shipped to users. The system prompt
+	// declares the QA framing but does NOT teach tool usage — per
+	// eval-principles #2, that's coaching and would launder the score.
+	out, err := benchmarks.RunCode(ctx, binary, benchmarks.CodeOpts{
+		Workdir:      workdir,
+		Model:        b.model,
+		Prompt:       pl.Q.Question,
+		SystemPrompt: longmemevalSystemPrompt,
+	})
 	if err != nil {
-		// A hard failure (no key, harness crash) emits a cell with
+		// A hard failure (no key, CLI crash) emits a cell with
 		// TaskSuccess=false and a Notes diagnosis rather than
 		// bubbling — that way one bad instance doesn't tank an
 		// entire run, and the cell stays in the rollup as a
 		// signal of fragility.
-		return makeCellResult(b, pl, axis, "", evalv2.HarnessResult{}, false, "harness error: "+err.Error()), nil
+		return makeCellResult(b, pl, axis, "", nil, false, "harness error: "+err.Error()), nil
 	}
+	finalText := out.Final
 
 	// Score. With --judge we have a real verdict; without it we
 	// emit the cell but flag it.
@@ -136,22 +138,33 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 		notes += " judge=disabled"
 	}
 
-	return makeCellResult(b, pl, axis, finalText, hr, verdictCorrect, notes), nil
+	return makeCellResult(b, pl, axis, finalText, out, verdictCorrect, notes), nil
 }
 
-// hydrateHaystack writes each turn of each haystack session into the
-// per-eval Cortex journal, then drains the journal into storage so the
-// harness's cortex_search tool sees the events when it opens its own
-// view of the same store.
-func hydrateHaystack(_ context.Context, storeDir string, q Question) error {
-	// Build a config that points capture at <workdir>/.cortex. We do
-	// NOT use config.DefaultConfig() — that resolves a project root
-	// from cwd, which is the wrong path here.
-	cfg := &config.Config{
-		ContextDir: storeDir,
+// hydrateHaystack marshals each turn of each haystack session into an
+// events.Event and ships them all to `cortex capture --bulk --workdir`
+// in a single subprocess call, then drains the journal via
+// `cortex ingest --workdir`. The result lands in <workdir>/.cortex/
+// where the subsequent `cortex code` call's cortex_search tool reads
+// from the same store.
+func hydrateHaystack(ctx context.Context, binary, workdir string, q Question) error {
+	evs := buildHaystackEvents(q)
+	if err := benchmarks.RunBulkCapture(ctx, binary, workdir, evs); err != nil {
+		return fmt.Errorf("bulk capture: %w", err)
 	}
-	cap := capture.New(cfg)
+	if err := benchmarks.RunIngest(ctx, binary, workdir); err != nil {
+		return fmt.Errorf("ingest: %w", err)
+	}
+	return nil
+}
 
+// buildHaystackEvents flattens a Question's haystack sessions into a
+// list of events.Event values ready for bulk capture. Pure function:
+// no I/O, no time-of-day dependence beyond the event timestamps
+// derived from haystack_dates. Empty turns are dropped (a blank turn
+// is metadata, not content worth indexing).
+func buildHaystackEvents(q Question) []*events.Event {
+	var evs []*events.Event
 	for i, session := range q.HaystackSessions {
 		date := ""
 		if i < len(q.HaystackDates) {
@@ -168,13 +181,7 @@ func hydrateHaystack(_ context.Context, storeDir string, q Question) error {
 			if content == "" {
 				continue
 			}
-			// Use ToolUse + a synthetic "Capture" toolname so the
-			// router stores via the existing capture path (the same
-			// shape `cortex capture --type=observation` produces).
-			// Category is "observation" — the haystack is
-			// conversation history we want recallable, not a
-			// "decision" the user made.
-			ev := &events.Event{
+			evs = append(evs, &events.Event{
 				Source:    events.SourceClaude,
 				EventType: events.EventToolUse,
 				Timestamp: ts.Add(time.Duration(j) * time.Second),
@@ -196,82 +203,40 @@ func hydrateHaystack(_ context.Context, storeDir string, q Question) error {
 					"longmemeval_session": sessionID,
 					"longmemeval_date":    date,
 				},
-			}
-			if err := cap.CaptureEvent(ev); err != nil {
-				return fmt.Errorf("capture session=%s turn=%d: %w", sessionID, j, err)
-			}
+			})
 		}
 	}
-
-	// Drain the journal into storage so cortex_search sees it on
-	// the next call.
-	store, err := storage.New(cfg)
-	if err != nil {
-		return fmt.Errorf("open store: %w", err)
-	}
-	defer store.Close()
-	proc := processor.New(cfg, store)
-	if _, err := proc.RunBatch(); err != nil {
-		return fmt.Errorf("drain journal: %w", err)
-	}
-	return nil
+	return evs
 }
 
-// longmemevalSystemPrompt overrides the harness's default coding-
-// programmer framing for QA-style instances. The default frames the
-// model as a Go programmer with workdir tools; under that contract
-// the model treats personal-knowledge questions ("How many postcards
-// have I added since I started collecting again?") as out-of-scope
-// and refuses on principle, even when cortex_search returned the
-// evidence. This prompt re-positions cortex_search as the model's
-// memory of prior conversations — which is exactly what LongMemEval
-// is testing.
+// longmemevalSystemPrompt is FRAMING ONLY (per eval-principles #2). It
+// declares the task role and the expected answer format. It does NOT:
+//   - Mention cortex_search by name.
+//   - Prescribe a search workflow ("call cortex_search aggressively").
+//   - Instruct the model to ignore "I don't have access" reflexes.
 //
-// Note: this is a per-benchmark override, not a default-harness
-// change. The Go-coding framing of the default itself is being
-// tracked as a separate generalization follow-up (the harness is
-// positioned as language-agnostic but the default prompt names Go).
-const longmemevalSystemPrompt = `You are a helpful assistant answering questions about your prior conversations with the user.
+// The previous version coached all three explicitly, which laundered
+// the benchmark's score — measuring "what we taught the model to do"
+// instead of "what the production harness does naturally". Keep this
+// prompt narrow; if a future change requires re-adding any of the
+// stripped lines, that requires a principle-2 reconsideration first,
+// not a silent edit.
+//
+// (Background on why a per-benchmark override exists at all: the
+// default `cortex code` system prompt frames the model as a Go
+// programmer, which makes personal-knowledge questions feel out-of-
+// scope. Generalizing the default is tracked separately; this prompt
+// is the minimum framing needed to keep the QA semantics legible.)
+const longmemevalSystemPrompt = `You are a helpful assistant answering questions about prior conversations with the user.
 
-You have these tools:
-  - cortex_search(query): search your memory of prior conversations with this user. Use this aggressively — the answer is usually grounded in something the user told you in an earlier session.
-  - list_dir, read_file, write_file, run_shell: scratch workspace tools; rarely needed for these questions.
-
-Workflow:
-  1. Read the question carefully — note any dates, names, quantities, or "since X" temporal anchors.
-  2. Call cortex_search with the most distinctive terms from the question.
-  3. If the first search returns "empty" or unrelated results, try one or two more queries with different terms before giving up.
-  4. Once you have the evidence, answer concisely. Cite the specific fact from memory if possible.
-
-Rules:
-  - If the evidence in cortex_search clearly answers the question, ANSWER IT. Do not hedge with "I don't have access to your personal data" — cortex_search is precisely how you have access.
-  - If after a few searches you genuinely cannot find the evidence, say "I don't know" rather than inventing a fact.
-  - Keep answers short: one to three sentences usually suffices.`
-
-// runCortexHarness wraps the v2 CortexHarness so this package does not
-// import v2 in package scope (avoid a heavier graph). Returns the
-// harness result and the model's final text reply for judging.
-func runCortexHarness(ctx context.Context, model, question, workdir string, verbose bool) (evalv2.HarnessResult, string, error) {
-	h, err := evalv2.NewCortexHarness(model)
-	if err != nil {
-		return evalv2.HarnessResult{}, "", err
-	}
-	h.SetSystemPrompt(longmemevalSystemPrompt)
-	if verbose {
-		h.SetNotify(func(kind string, payload any) {
-			fmt.Fprintf(os.Stderr, "  [harness %s] %v\n", kind, payload)
-		})
-	}
-	hr, err := h.RunSessionWithResult(ctx, question, workdir)
-	if err != nil {
-		return hr, "", err
-	}
-	final := h.LastLoopResult().Final
-	return hr, final, nil
-}
+If you genuinely cannot find the answer in your available context, say "I don't know" rather than inventing a fact. Keep answers short: one to three sentences usually suffices.`
 
 // makeCellResult builds a fully-populated, validation-ready CellResult.
-func makeCellResult(b *Benchmark, pl InstancePayload, axis, finalText string, hr evalv2.HarnessResult, success bool, notes string) *evalv2.CellResult {
+// out may be nil when the upstream CLI call failed before producing
+// telemetry; in that case the token/cost/turn counters stay at zero,
+// which the rollup layer interprets as "instance attempted but no
+// agent activity happened".
+func makeCellResult(b *Benchmark, pl InstancePayload, axis, finalText string, out *benchmarks.CodeOutput, success bool, notes string) *evalv2.CellResult {
 	strategy := evalv2.StrategyCortex
 	if pl.Strategy == StrategyBaseline {
 		strategy = evalv2.StrategyBaseline
@@ -287,26 +252,19 @@ func makeCellResult(b *Benchmark, pl InstancePayload, axis, finalText string, hr
 		Provider:             evalv2.ProviderOpenRouter,
 		Model:                b.model,
 		ContextStrategy:      strategy,
-		TokensIn:             hr.TokensIn,
-		TokensOut:            hr.TokensOut,
-		CostUSD:              hr.CostUSD,
-		LatencyMs:            hr.LatencyMs,
-		AgentTurnsTotal:      hr.AgentTurnsTotal,
 		TaskSuccess:          success,
 		TaskSuccessCriterion: evalv2.CriterionJudgeLLM,
 		Notes:                notes,
 	}
+	if out != nil {
+		cell.TokensIn = out.TokensIn
+		cell.TokensOut = out.TokensOut
+		cell.CostUSD = out.CostUSD
+		cell.LatencyMs = out.LatencyMs
+		cell.AgentTurnsTotal = out.Turns
+	}
 	if strategy == evalv2.StrategyCortex {
 		cell.CortexVersion = evalv2.CortexVersion
-		// InjectedContextTokens reflects what cortex_search injected
-		// into the prompt. The CortexHarness surfaces this via
-		// LastLoopResult; we only stamp it on cortex-strategy cells
-		// because Validate refuses non-zero on baseline.
-		// hr already carries the value through HarnessResult fields
-		// the runner sees; right now harness/loop.LoopResult exposes
-		// InjectedContextTokens but evalv2.HarnessResult does not
-		// surface it directly. Leaving 0 here keeps the cell valid
-		// while we lobby the harness layer to expose it.
 	}
 	// Suppress the assistant message from cell-level fields — we
 	// don't have a Notes-safe place to log it; the journal entry

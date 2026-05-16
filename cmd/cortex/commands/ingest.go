@@ -2,6 +2,7 @@
 package commands
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -91,21 +92,14 @@ func (c *CaptureCommand) Description() string { return "Capture event from stdin
 
 // Execute runs the capture command.
 func (c *CaptureCommand) Execute(ctx *Context) error {
-	// Load config if not provided
-	cfg := ctx.Config
-	if cfg == nil {
-		var err error
-		cfg, err = loadCaptureConfig()
-		if err != nil {
-			// Silent failure for capture
-			os.Exit(0)
-		}
-	}
-
-	// Parse flags
+	// Parse flags first — bulk mode resolves its own config from --workdir
+	// and short-circuits the cwd-walking loadCaptureConfig() path used by
+	// the AI-tool-integration flows below.
 	source := "claude" // default
 	captureType := ""
 	content := ""
+	bulk := false
+	workdir := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -123,6 +117,27 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 		case arg == "--content" && i+1 < len(ctx.Args):
 			content = ctx.Args[i+1]
 			i++
+		case arg == "--bulk":
+			bulk = true
+		case arg == "--workdir" && i+1 < len(ctx.Args):
+			workdir = ctx.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--workdir="):
+			workdir = strings.TrimPrefix(arg, "--workdir=")
+		}
+	}
+
+	if bulk {
+		return executeBulkCapture(workdir, os.Stdin)
+	}
+
+	cfg := ctx.Config
+	if cfg == nil {
+		var err error
+		cfg, err = loadCaptureConfig()
+		if err != nil {
+			// Silent failure for capture
+			os.Exit(0)
 		}
 	}
 
@@ -205,11 +220,31 @@ func (c *IngestCommand) Description() string { return "Move queued events to dat
 
 // Execute runs the ingest command.
 func (c *IngestCommand) Execute(ctx *Context) error {
+	// --workdir short-circuits the dual-config (project-local queue,
+	// global storage) resolution below: benchmarks call ingest against
+	// a single isolated <workdir>/.cortex where queue and storage are
+	// co-located.
+	workdir := ""
+	for i := 0; i < len(ctx.Args); i++ {
+		arg := ctx.Args[i]
+		if arg == "--workdir" && i+1 < len(ctx.Args) {
+			workdir = ctx.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "--workdir=") {
+			workdir = strings.TrimPrefix(arg, "--workdir=")
+		}
+	}
+
 	cfg := ctx.Config
 	store := ctx.Storage
-
-	// Load config and storage if not provided
-	if cfg == nil || store == nil {
+	if workdir != "" {
+		var err error
+		cfg, store, err = openWorkdirContext(workdir)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+	} else if cfg == nil || store == nil {
 		var err error
 		// Use capture config for queue path (project-local)
 		captureCfg, captureErr := loadCaptureConfig()
@@ -321,14 +356,10 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 
 	// Use LLM directly for analysis (cognition modes handle this normally)
 	var llmProvider llm.Provider
-	anthropic := llm.NewAnthropicClient(cfg)
-	if anthropic.IsAvailable() {
-		llmProvider = anthropic
-	} else {
-		ollama := llm.NewOllamaClient(cfg)
-		if ollama.IsAvailable() {
-			llmProvider = ollama
-		}
+	if p, _, err := llm.NewLLMClient(cfg); err == nil {
+		llmProvider = p
+	} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+		llmProvider = ollama
 	}
 
 	if llmProvider == nil {
@@ -401,16 +432,12 @@ func (c *ProcessCommand) Execute(ctx *Context) error {
 
 	// If events were processed, run analysis immediately
 	if processed > 0 {
-		// Get LLM provider
+		// Get LLM provider via the unified surface (OpenRouter → Anthropic).
 		var llmProvider llm.Provider
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 
 		if llmProvider == nil {
@@ -511,20 +538,17 @@ func (c *FeedCommand) Execute(ctx *Context) error {
 		return nil
 	}
 
-	// Get LLM provider (only needed for non-raw mode)
+	// Get LLM provider (only needed for non-raw mode). Unified surface
+	// first, Ollama as a local fallback.
 	var llmProvider llm.Provider
 	if !raw {
-		anthropic := llm.NewAnthropicClient(cfg)
-		if anthropic.IsAvailable() {
-			llmProvider = anthropic
-		} else {
-			ollama := llm.NewOllamaClient(cfg)
-			if ollama.IsAvailable() {
-				llmProvider = ollama
-			}
+		if p, _, err := llm.NewLLMClient(cfg); err == nil {
+			llmProvider = p
+		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
+			llmProvider = ollama
 		}
 		if llmProvider == nil {
-			fmt.Println("No LLM available. Use --raw to store without analysis, or set ANTHROPIC_API_KEY / start Ollama.")
+			fmt.Println("No LLM available. Use --raw to store without analysis, or set OPEN_ROUTER_API_KEY / ANTHROPIC_API_KEY / start Ollama.")
 			return nil
 		}
 	}
@@ -804,4 +828,65 @@ func findProjectRoot(dir string) string {
 		}
 		dir = parent
 	}
+}
+
+// executeBulkCapture reads NDJSON from r — one events.Event per line —
+// and writes each into the journal at <workdir>/.cortex/. Used by
+// benchmarks that need to hydrate hundreds of events per instance
+// without paying fork+exec overhead per event.
+//
+// Workdir is required and resolved to an absolute path. .cortex/ is
+// created if missing (the journal subsystem MkdirAlls its segment
+// directories). Events with a zero Timestamp are stamped with time.Now()
+// so callers can omit it.
+//
+// Returns the count printed to stdout on full success. The first parse
+// or capture error aborts the batch and returns a wrapped error naming
+// the offending line number (1-indexed). Partial state is left in the
+// journal — callers that need atomicity should write to a fresh workdir.
+func executeBulkCapture(workdir string, r io.Reader) error {
+	if strings.TrimSpace(workdir) == "" {
+		return fmt.Errorf("--bulk requires --workdir")
+	}
+	abs, err := filepath.Abs(workdir)
+	if err != nil {
+		return fmt.Errorf("--workdir: %w", err)
+	}
+	cfg := &config.Config{
+		ContextDir:  filepath.Join(abs, ".cortex"),
+		ProjectRoot: abs,
+	}
+	cap := capture.New(cfg)
+
+	scanner := bufio.NewScanner(r)
+	// Default 64KB line cap is too small for tool_result fields that
+	// carry multi-KB chunks (e.g. NIAH haystack chunks up to chunkSize).
+	// 16MB max line accommodates worst-case captures without OOM risk.
+	scanner.Buffer(make([]byte, 0, 1<<20), 16<<20)
+
+	count := 0
+	line := 0
+	for scanner.Scan() {
+		line++
+		b := scanner.Bytes()
+		if len(b) == 0 {
+			continue
+		}
+		var ev events.Event
+		if err := json.Unmarshal(b, &ev); err != nil {
+			return fmt.Errorf("line %d: parse: %w", line, err)
+		}
+		if ev.Timestamp.IsZero() {
+			ev.Timestamp = time.Now()
+		}
+		if err := cap.CaptureEvent(&ev); err != nil {
+			return fmt.Errorf("line %d: capture: %w", line, err)
+		}
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	fmt.Printf("Captured %d events\n", count)
+	return nil
 }

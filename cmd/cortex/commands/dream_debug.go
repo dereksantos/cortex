@@ -39,14 +39,16 @@ func (c *DreamDebugCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("project not initialized; run `cortex init` first")
 	}
 
-	// Build LLM provider (graceful: nil is allowed; analysis will
-	// short-circuit and we still see source emissions).
+	// Build LLM provider via the unified surface (OpenRouter primary,
+	// Anthropic fallback). Graceful: nil is allowed — analysis will
+	// short-circuit and we still see source emissions. Ollama remains
+	// a separate local fallback below.
 	var llmProvider llm.Provider
-	anthropic := llm.NewAnthropicClient(cfg)
+	if p, _, err := llm.NewLLMClient(cfg); err == nil {
+		llmProvider = p
+	}
 	ollama := llm.NewOllamaClient(cfg)
-	if anthropic.IsAvailable() {
-		llmProvider = anthropic
-	} else if ollama.IsAvailable() {
+	if llmProvider == nil && ollama.IsAvailable() {
 		llmProvider = ollama
 	}
 

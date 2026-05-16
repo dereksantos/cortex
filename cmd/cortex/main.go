@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dereksantos/cortex/cmd/cortex/commands"
 	"github.com/dereksantos/cortex/internal/storage"
@@ -170,14 +171,26 @@ func main() {
 				os.Exit(1)
 			}
 		}
-	case "search", "recent", "insights", "entities", "graph", "prune", "reembed":
+	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
+			// --workdir signals an isolated invocation (benchmarks,
+			// tests, multi-tenant tools). Skip the global init dance:
+			// no daemon, no global cfg/storage. The command opens its
+			// own workdir-rooted state via openWorkdirContext.
+			if hasWorkdirFlag(os.Args[2:]) {
+				ctx := &commands.Context{Args: os.Args[2:]}
+				if err := cmd.Execute(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
 			cfg, err := loadConfig()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
 			}
-			// Auto-start daemon on search/insights (covers CLI-only multi-agent usage)
+			// Auto-start daemon on search/insights (covers CLI-only multi-agent usage).
 			if command == "search" || command == "insights" {
 				maybeStartDaemon(cfg)
 			}
@@ -276,6 +289,18 @@ func loadConfig() (*config.Config, error) {
 // maybeStartDaemon auto-starts the global daemon if it's not running.
 // Fire-and-forget: never blocks the caller, never fails the caller.
 // Writes to stderr only so it doesn't pollute hook stdout.
+// hasWorkdirFlag returns true if args carries --workdir or --workdir=...
+// — used to suppress global side effects (auto-daemon, ~/.cortex
+// touches) on isolated benchmark invocations.
+func hasWorkdirFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--workdir" || strings.HasPrefix(a, "--workdir=") {
+			return true
+		}
+	}
+	return false
+}
+
 func maybeStartDaemon(_ *config.Config) {
 	globalDir := registry.GlobalDir()
 	if commands.IsDaemonRunning(globalDir) {

@@ -119,13 +119,14 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("failed to start processor: %w", err)
 	}
 
-	// Initialize LLM provider for cognitive modes
+	// Initialize LLM provider for cognitive modes via the unified surface
+	// (OpenRouter then Anthropic). Ollama as a local fallback.
 	var llmProvider llm.Provider
-	anthropic := llm.NewAnthropicClient(cfg)
+	if p, _, err := llm.NewLLMClient(cfg); err == nil {
+		llmProvider = p
+	}
 	ollama := llm.NewOllamaClient(cfg)
-	if anthropic.IsAvailable() {
-		llmProvider = anthropic
-	} else if ollama.IsAvailable() {
+	if llmProvider == nil && ollama.IsAvailable() {
 		llmProvider = ollama
 	}
 

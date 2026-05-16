@@ -133,13 +133,13 @@ func (c *InjectContextCommand) Execute(ctx *Context) error {
 		}()
 	}
 
-	// Initialize LLM provider (optional - Reflect will degrade gracefully if nil)
+	// Initialize LLM provider via the unified surface (OpenRouter then
+	// Anthropic). Optional — Reflect will degrade gracefully if nil.
 	var llmProvider llm.Provider
-	anthropic := llm.NewAnthropicClient(cfg)
-	ollama := llm.NewOllamaClient(cfg)
-	if anthropic.IsAvailable() {
-		llmProvider = anthropic
+	if p, _, err := llm.NewLLMClient(cfg); err == nil {
+		llmProvider = p
 	}
+	ollama := llm.NewOllamaClient(cfg)
 
 	// Initialize embedder with fallback: Ollama -> Hugot
 	hugotEmbedder := llm.NewHugotEmbedder()
