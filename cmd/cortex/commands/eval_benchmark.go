@@ -10,9 +10,10 @@ import (
 
 	"github.com/dereksantos/cortex/internal/eval/benchmarks"
 	// Side-effect imports register per-benchmark constructors via init().
-	// Without these, benchmarks.Get(name) returns ErrUnknownBenchmark.
+	// Add new benchmarks here as they land.
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/longmemeval"
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/niah"
+	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/swebench"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -27,7 +28,8 @@ import (
 //
 // Shared flags handled here: --subset, --limit, --strategy,
 // --question-type, --model, --judge, --judge-model. Benchmark-specific
-// flags (--length, --depth for NIAH) are parsed via each Benchmark's
+// flags (--length, --depth for NIAH; --repo, --docker-image-prefix,
+// --git-cache-dir for SWE-bench) are parsed via each Benchmark's
 // optional benchmarks.ArgsApplier implementation — no name-switch in
 // the CLI.
 func runBenchmark(name string, args []string, verbose bool) error {
@@ -44,11 +46,6 @@ func runBenchmark(name string, args []string, verbose bool) error {
 		return fmt.Errorf("parse benchmark args: %w", err)
 	}
 
-	// Benchmark-specific flag parsing layered on top of the shared
-	// --subset / --limit handling. Each benchmark owns its flags by
-	// implementing benchmarks.ArgsApplier (no name-switch in the
-	// CLI). Unknown flags must be tolerated by Applier impls since
-	// the same args slice carries the shared flags too.
 	if applier, ok := bench.(benchmarks.ArgsApplier); ok {
 		if err := applier.ApplyArgs(args, &opts); err != nil {
 			return fmt.Errorf("parse %s flags: %w", name, err)
@@ -165,7 +162,8 @@ func runBenchmark(name string, args []string, verbose bool) error {
 
 // parseBenchmarkArgs extracts shared flags from a raw arg slice into
 // LoadOpts. Unknown flags are tolerated so per-benchmark flag parsers
-// in downstream loops can re-walk the same slice without colliding.
+// (benchmarks.ArgsApplier impls) can re-walk the same slice without
+// colliding.
 //
 // Supported:
 //

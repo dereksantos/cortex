@@ -58,6 +58,7 @@ func TestParseBenchmarkArgs(t *testing.T) {
 		{"missing subset value", []string{"--subset"}, "", 0, true},
 		{"missing limit value", []string{"--limit"}, "", 0, true},
 		{"limit not int", []string{"--limit", "abc"}, "", 0, true},
+		{"shared flags survive unknown per-benchmark flags", []string{"--subset", "verified", "--limit", "3", "--model", "x", "--strategy", "baseline,cortex"}, "verified", 3, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,6 +189,11 @@ func TestRunBenchmark_EndToEndPersists(t *testing.T) {
 		t.Errorf("journal dir %q is empty; expected at least one segment", journalDir)
 	}
 }
+
+// Per-benchmark flag parsing (--repo, --strategy, --model, etc.) is
+// covered in the per-benchmark ApplyArgs tests (see
+// internal/eval/benchmarks/swebench/applyargs_test.go and the niah
+// equivalent). The CLI dispatch layer only owns --subset / --limit.
 
 func TestRunBenchmark_UnknownReturnsCleanError(t *testing.T) {
 	dir := t.TempDir()
