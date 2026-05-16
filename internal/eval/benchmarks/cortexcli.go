@@ -179,6 +179,90 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// CodeOpts configures a `cortex code` subprocess invocation. Workdir,
+// Model, and Prompt are required; other fields are forwarded as flags
+// only when non-zero so the CLI defaults stay in charge.
+type CodeOpts struct {
+	Workdir  string
+	Model    string
+	Prompt   string
+	NoSearch bool    // --no-search (omit cortex_search from tool registry)
+	MaxTurns int     // --max-turns (0 = CLI default)
+	MaxCost  float64 // --max-cost USD (0 = CLI default)
+	APIURL   string  // --api-url (empty = OpenRouter default)
+}
+
+// CodeOutput mirrors the codeJSONOutput struct emitted by `cortex code
+// --json` (defined in cmd/cortex/commands/code.go). Keep the two in
+// sync — this is the public CLI contract benchmarks parse.
+type CodeOutput struct {
+	Workdir         string   `json:"workdir"`
+	Model           string   `json:"model"`
+	Turns           int      `json:"turns"`
+	TokensIn        int      `json:"tokens_in"`
+	TokensOut       int      `json:"tokens_out"`
+	CostUSD         float64  `json:"cost_usd"`
+	LatencyMs       int64    `json:"latency_ms"`
+	Reason          string   `json:"reason"`
+	FilesChanged    []string `json:"files_changed"`
+	Final           string   `json:"final"`
+	InjectedContext int      `json:"injected_context_tokens"`
+}
+
+// RunCode invokes `cortex code --json` and decodes the structured
+// output. Used by SWE-bench (and future agent-driven benchmarks) to
+// drive the Cortex coding harness through the CLI without importing
+// internal/harness or evalv2.NewCortexHarness directly.
+//
+// The returned error carries CLI stderr (truncated) for triage. A nil
+// CodeOutput with non-nil error means the subprocess failed before
+// emitting JSON; a non-nil CodeOutput with TaskSuccess-like fields set
+// to zero means the agent ran but didn't accomplish anything (use
+// CodeOutput.FilesChanged and Final to triage further).
+func RunCode(ctx context.Context, binary string, opts CodeOpts) (*CodeOutput, error) {
+	if binary == "" {
+		return nil, errors.New("cortex binary is empty")
+	}
+	if opts.Workdir == "" {
+		return nil, errors.New("workdir is empty")
+	}
+	if opts.Model == "" {
+		return nil, errors.New("model is empty")
+	}
+	if opts.Prompt == "" {
+		return nil, errors.New("prompt is empty")
+	}
+
+	args := []string{"code", "--workdir", opts.Workdir, "--model", opts.Model, "--json"}
+	if opts.NoSearch {
+		args = append(args, "--no-search")
+	}
+	if opts.MaxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
+	}
+	if opts.MaxCost > 0 {
+		args = append(args, "--max-cost", strconv.FormatFloat(opts.MaxCost, 'f', -1, 64))
+	}
+	if opts.APIURL != "" {
+		args = append(args, "--api-url", opts.APIURL)
+	}
+	args = append(args, opts.Prompt)
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cortex code: %w (stderr: %s)", err, truncate(stderr.String(), 500))
+	}
+
+	out := &CodeOutput{}
+	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
+		return nil, fmt.Errorf("decode code JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	}
+	return out, nil
+}
+
 // CompileBinary builds the cortex CLI to a tempfile and returns its
 // absolute path. Used by benchmark test suites that need a real binary
 // before exercising the CLI helpers above. The caller is responsible

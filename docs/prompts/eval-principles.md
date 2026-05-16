@@ -71,9 +71,9 @@ The doc serves as an active TODO list — flip ✗ to ✓ as benchmarks land. Se
 | MTEB | ✗ uses `internal/storage`, `intcognition.Reflect` | ~ `--rerank` is opt-in | ~ partial | ✓ | ✓ | ~ partial |
 | NIAH | ✓ shells out via `benchmarks.RunBulkCapture/RunIngest/RunSearch` | ✓ | ~ | ✓ | ✓ | ~ |
 | LongMemEval | ✗ uses `evalv2.CortexHarness` in-process | ✗ system prompt coaches `cortex_search` usage | ~ | ~ | ✓ | ~ |
-| SWE-bench | ✗ uses `evalv2.CortexHarness` in-process | ✗ `SetCortexSearchEnabled(false)` toggles tool registry | ~ | ~ | ✓ | ~ |
+| SWE-bench | ✓ shells out via `benchmarks.RunCode` | ✓ baseline uses `--no-search` CLI flag | ~ | ~ | ✓ | ~ |
 | Library-service | ✓ shells out to `cortex search` | ✓ | ~ | ✓ | ✓ | ~ |
 
-**CLI surfaces landed** (per principle 4): `cortex capture --bulk`, `cortex search --workdir --json`, `cortex ingest --workdir`, `cortex code --no-search`. Shared subprocess helpers live in `internal/eval/benchmarks/cortexcli.go`.
+**CLI surfaces landed** (per principle 4): `cortex capture --bulk`, `cortex search --workdir --json`, `cortex ingest --workdir`, `cortex code --no-search --json`. Shared subprocess helpers live in `internal/eval/benchmarks/cortexcli.go`.
 
-**CLI surfaces still needed**: `cortex code --json` (for SWE-bench conversion — agent telemetry), `cortex embed` + `cortex search-vector` (for MTEB conversion — direct embedding/retrieval substrate).
+**CLI surfaces still needed**: `cortex embed` + `cortex search-vector` (for MTEB conversion — direct embedding/retrieval substrate).

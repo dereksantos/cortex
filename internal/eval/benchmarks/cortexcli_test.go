@@ -165,6 +165,34 @@ func TestCortexCLI_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestRunCode_Validation covers the input-checking paths that don't
+// require a binary or an OpenRouter API key (a full integration would
+// burn real tokens; we trust cmd/cortex/commands/code_test.go for the
+// JSON-shape contract).
+func TestRunCode_Validation(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		opts CodeOpts
+	}{
+		{"empty workdir", CodeOpts{Model: "m", Prompt: "p"}},
+		{"empty model", CodeOpts{Workdir: "/w", Prompt: "p"}},
+		{"empty prompt", CodeOpts{Workdir: "/w", Model: "m"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := RunCode(ctx, "/bin/true", c.opts); err == nil {
+				t.Error("expected error")
+			}
+		})
+	}
+	t.Run("empty binary", func(t *testing.T) {
+		if _, err := RunCode(ctx, "", CodeOpts{Workdir: "/w", Model: "m", Prompt: "p"}); err == nil {
+			t.Error("expected error")
+		}
+	})
+}
+
 // TestRunSearch_Validation covers the input-checking paths that don't
 // require a binary.
 func TestRunSearch_Validation(t *testing.T) {
