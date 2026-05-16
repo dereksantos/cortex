@@ -223,8 +223,10 @@ func LoadAll(dir string) ([]*Scenario, error) {
 		if entry.IsDir() {
 			// Skip subdirectories that hold scenarios in a different schema
 			// loaded by their own dedicated path (e.g., measure/* is loaded
-			// via LoadMeasureScenario when `cortex eval --measure` is used).
-			if entry.Name() == "measure" {
+			// via LoadMeasureScenario when `cortex eval --measure` is used;
+			// coding/* is loaded via LoadCodingScenario under
+			// `cortex eval --harness cortex`).
+			if entry.Name() == "measure" || entry.Name() == "coding" {
 				continue
 			}
 			// Recurse into subdirectories

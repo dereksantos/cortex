@@ -171,10 +171,6 @@ type orErr struct {
 }
 
 func (c *OpenRouterClient) generate(ctx context.Context, prompt, system string) (string, GenerationStats, error) {
-	if c.apiKey == "" {
-		return "", GenerationStats{}, fmt.Errorf("openrouter: OPEN_ROUTER_API_KEY not set")
-	}
-
 	msgs := make([]orMessage, 0, 2)
 	if system != "" {
 		msgs = append(msgs, orMessage{Role: "system", Content: system})
@@ -187,44 +183,16 @@ func (c *OpenRouterClient) generate(ctx context.Context, prompt, system string) 
 		Messages:  msgs,
 		Usage:     orUsageReq{Include: true},
 	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return "", GenerationStats{}, fmt.Errorf("openrouter: marshal request: %w", err)
-	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(raw))
+	bb, err := c.doRaw(ctx, body)
 	if err != nil {
-		return "", GenerationStats{}, fmt.Errorf("openrouter: new request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HTTP-Referer", openrouterReferer)
-	req.Header.Set("X-Title", openrouterTitle)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", GenerationStats{}, fmt.Errorf("openrouter: request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bb, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", GenerationStats{}, fmt.Errorf("openrouter: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var er orResponse
-		if json.Unmarshal(bb, &er) == nil && er.Error != nil {
-			return "", GenerationStats{}, fmt.Errorf("openrouter (%d): %s", resp.StatusCode, er.Error.Message)
-		}
-		return "", GenerationStats{}, fmt.Errorf("openrouter status %d: %s", resp.StatusCode, string(bb))
+		return "", GenerationStats{}, err
 	}
 
 	var apiResp orResponse
 	if err := json.Unmarshal(bb, &apiResp); err != nil {
 		return "", GenerationStats{}, fmt.Errorf("openrouter: decode response: %w", err)
 	}
-
 	if len(apiResp.Choices) == 0 {
 		return "", GenerationStats{}, fmt.Errorf("openrouter: response had no choices")
 	}
@@ -237,4 +205,53 @@ func (c *OpenRouterClient) generate(ctx context.Context, prompt, system string) 
 		OutputTokens: apiResp.Usage.CompletionTokens,
 	}
 	return apiResp.Choices[0].Message.Content, stats, nil
+}
+
+// doRaw sends body to the chat-completions endpoint and returns the
+// raw response bytes. Extracted so the plaintext generate() path and
+// the tool-call GenerateWithTools() path (openrouter_tools.go) share
+// authentication, header setup, and error decoding without duplicating
+// the HTTP plumbing.
+//
+// body may be any JSON-serializable value. Non-200 responses are
+// decoded as orResponse so the structured error message comes through
+// when OpenRouter returns one.
+func (c *OpenRouterClient) doRaw(ctx context.Context, body any) ([]byte, error) {
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("openrouter: OPEN_ROUTER_API_KEY not set")
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("HTTP-Referer", openrouterReferer)
+	req.Header.Set("X-Title", openrouterTitle)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter: read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var er orResponse
+		if json.Unmarshal(bb, &er) == nil && er.Error != nil {
+			return nil, fmt.Errorf("openrouter (%d): %s", resp.StatusCode, er.Error.Message)
+		}
+		return nil, fmt.Errorf("openrouter status %d: %s", resp.StatusCode, string(bb))
+	}
+	return bb, nil
 }

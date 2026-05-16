@@ -1,0 +1,30 @@
+id: conways-gol-multi
+name: "Conway's Game of Life (multi-session loop)"
+mode: multi-session
+max_tries: 5
+dream_idle_seconds: 30
+generations: 4
+seed_dir: conways-game-of-life/seed
+fixtures_dir: conways-game-of-life/fixtures
+freeform_input: conways-game-of-life/freeform/prompt.txt
+prompt: |
+  Implement Conway's Game of Life as a Go CLI per the spec in
+  README.md. Read an initial ASCII grid from stdin, write
+  successive generations to stdout separated by blank lines.
+  Use "." for dead and "#" for alive. Honor the --generations N
+  flag (default 5).
+
+  IMPORTANT: This is a multi-attempt scenario. Before you write any
+  code, call cortex_search with a query like "conways game of life
+  failure" or "previous attempt build error". If the result is not
+  "empty", read the entries carefully — they describe what a prior
+  attempt got wrong and you should avoid repeating those mistakes.
+
+  Workflow:
+    1. Call cortex_search("previous attempts conways game of life").
+    2. Read README.md for the exact specification.
+    3. Write main.go implementing the program.
+    4. Run `go build` to verify it compiles.
+    5. Test it by piping a small grid through `go run . --generations 2`.
+    6. When you're confident, respond with a brief summary and stop
+       calling tools.

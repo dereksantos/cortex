@@ -102,6 +102,18 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	case "code":
+		// `cortex code` is the ad-hoc coding harness: no config or
+		// storage needed (the harness opens its own per-workdir store).
+		if cmd := commands.Get("code"); cmd != nil {
+			ctx := &commands.Context{
+				Args: os.Args[2:],
+			}
+			if err := cmd.Execute(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	case "measure":
 		if cmd := commands.Get("measure"); cmd != nil {
 			ctx := &commands.Context{

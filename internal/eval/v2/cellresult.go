@@ -27,6 +27,7 @@ const (
 	HarnessOpenCode  = "opencode"
 	HarnessPiDev     = "pi_dev"
 	HarnessClaudeCLI = "claude_cli"
+	HarnessCortex    = "cortex" // Cortex's own LLM-driven agent loop (internal/harness)
 )
 
 // Provider names. Align with pkg/llm provider IDs where possible.
@@ -123,7 +124,7 @@ func (r *CellResult) Validate() error {
 	}
 
 	switch r.Harness {
-	case HarnessAider, HarnessOpenCode, HarnessPiDev, HarnessClaudeCLI:
+	case HarnessAider, HarnessOpenCode, HarnessPiDev, HarnessClaudeCLI, HarnessCortex:
 	default:
 		return fmt.Errorf("unknown harness: %q", r.Harness)
 	}
