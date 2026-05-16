@@ -154,6 +154,10 @@ Options:
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances
+  --repo SLUG            (repeatable) Restrict benchmark to upstream repo (e.g. django/django)
+  --strategy LIST        Comma-separated benchmark strategies (e.g. baseline,cortex)
+  --docker-image-prefix PFX  Override SWE-bench scoring image prefix
+  --git-cache-dir DIR    Reuse a git mirror for SWE-bench repo clones
   -h, --help             Show this help
 
 Examples:
@@ -165,7 +169,8 @@ Examples:
   cortex eval --compare-provider anthropic --compare-model claude-haiku-4-5-20251001
   cortex eval --summary                    # Show lift trend
   cortex eval --summary --agentic          # Show tool call reduction trend
-  cortex eval --abr-trend                  # Show ABR progression`)
+  cortex eval --abr-trend                  # Show ABR progression
+  cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
 			return nil
 		}
 	}
