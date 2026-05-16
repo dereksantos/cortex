@@ -154,10 +154,14 @@ Options:
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances
-  --repo SLUG            (repeatable) Restrict benchmark to upstream repo (e.g. django/django)
-  --strategy LIST        Comma-separated benchmark strategies (e.g. baseline,cortex)
-  --docker-image-prefix PFX  Override SWE-bench scoring image prefix
-  --git-cache-dir DIR    Reuse a git mirror for SWE-bench repo clones
+  --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
+  --depth F              NIAH only: needle depth 0.0..1.0; repeatable, default 0.0,0.5,1.0
+  --needle STR           NIAH only: needle text (default: "The secret recipe code is 4F-9X-2B.")
+  --seed N               NIAH only: deterministic filler seed (default: 1)
+  --repo SLUG            SWE-bench: (repeatable) restrict to upstream repo (e.g. django/django)
+  --strategy LIST        SWE-bench: comma-separated strategies (e.g. baseline,cortex)
+  --docker-image-prefix PFX  SWE-bench: override scoring image prefix
+  --git-cache-dir DIR    SWE-bench: reuse a git mirror for repo clones
   -h, --help             Show this help
 
 Examples:
