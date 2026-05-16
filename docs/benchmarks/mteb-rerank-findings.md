@@ -119,6 +119,61 @@ queries pay the LLM cost.
   `text-embedding-3-large` would lift NDCG further; that's the
   highest-leverage follow-up after the prompt rewrite.
 
+## Where this sits in the landscape
+
+A single NFCorpus number tells you "does the system work at all"; the
+public MTEB Retrieval leaderboard tracks the *mean NDCG@10 across ~15
+retrieval tasks*, which is the real ranking surface. Both are useful
+context for reading our number honestly.
+
+**NFCorpus NDCG@10 reference points** (public leaderboards):
+
+| System                                       | NDCG@10   |
+|----------------------------------------------|-----------|
+| BM25 keyword baseline                        | ~0.32     |
+| OpenAI `text-embedding-3-small`              | ~0.34     |
+| BGE-large-en-v1.5                            | ~0.37     |
+| OpenAI `text-embedding-3-large`              | ~0.42     |
+| Cohere embed-v3 / v4, Voyage AI              | ~0.40–0.42 |
+| Top 7B-class (NV-Embed-v2, SFR-Embedding-2, gte-Qwen2-7B) | ~0.44–0.47 |
+| **Cortex (nomic-embed-text + Haiku rerank)** | **0.4129** |
+
+Our 0.41 with a 137M-param embedder + general-LLM rerank is
+competitive with `text-embedding-3-large`'s embedder-only number using
+a 28× smaller embedder, by paying ~3.4 s/query for the rerank LLM
+call. That's a real cost-vs-quality tradeoff, not a free win.
+
+**MTEB Retrieval aggregate** (mean NDCG@10 across ~15 tasks — the
+headline benchmark number people compare):
+
+| Tier                                           | Aggregate NDCG@10 |
+|------------------------------------------------|-------------------|
+| BM25 baseline                                  | ~0.42             |
+| Top open-source embedders                      | ~0.59–0.62        |
+| Best commercial APIs (Cohere v3/v4, Voyage, OpenAI v3-large) | ~0.55–0.61 |
+| Best closed-source + reranker cascade          | ~0.62–0.65        |
+
+We don't have an aggregate yet — Phase A wires NFCorpus only. The
+full retrieval suite is Phase B.
+
+**Rerank-on-top numbers from the literature.** Purpose-built
+rerankers (Cohere `rerank-3`, BGE-`reranker-v2-m3`,
+`mxbai-rerank-large`) typically lift the underlying embedder by **+3
+to +8 NDCG points**. Our +0.022 with Haiku-as-reranker is on the low
+end of that range, likely because (a) Haiku is a general LLM doing
+reranking via a generic Reflect prompt, not a model fine-tuned for
+the task; (b) NFCorpus is *hard* to lift on NDCG@10 (many queries
+have 50+ relevant docs); (c) we're reranking only top-10, while the
+standard cascade reranks top-50 or top-100 — see Phase B levers
+below.
+
+**On MRR specifically:** MRR is rarely the headline metric on
+MTEB-style leaderboards (NDCG dominates). MRR is more common in
+QA-style benchmarks (NaturalQuestions, TriviaQA) where there's *one*
+correct answer document. On NQ retrieval, top systems hit MRR around
+0.55–0.65; our 0.81 on NFCorpus isn't directly comparable because
+NFCorpus has graded multi-relevance and many relevant docs per query.
+
 ## Reproduction
 
 The smoke script under `cmd/mteb-rerank-smoke/` runs one MTEB
@@ -150,26 +205,54 @@ OPEN_ROUTER_API_KEY="$(security find-generic-password -s cortex-openrouter -w)" 
 To re-index from scratch (e.g. after swapping embedder), delete
 `/tmp/mteb-rerank-shared/.cortex/`.
 
-## Next probes
+## Next probes — roadmap with expected gains
+
+Expected NDCG@10 gains below are quoted from the rerank-cascade
+literature for NFCorpus-class tasks; treat them as *direction +
+order-of-magnitude*, not as commitments. The 20-query smoke variance
+is ±0.02, so any gain below that needs the full 323-query run to
+distinguish from noise.
 
 In rough order of expected leverage on this benchmark:
 
-1. **Retrieval-specific rerank prompt.** Cheapest move; should lift
-   the `gemma2:2b` row (and possibly `qwen` from harmful to neutral)
-   without re-running indexing.
-2. **Wider K before rerank.** Currently `SearchByVector` returns top-10
-   and Reflect can only reorder those. Pulling top-50 from the
+1. **Retrieval-specific rerank prompt.** Cheapest move; replace the
+   generic insight-reranking Reflect prompt with one written for
+   "rank these documents by relevance to this query." Expected lift:
+   **+0.02–0.04 NDCG** with the same Haiku model. Should also recover
+   the `gemma2:2b` row (and possibly turn `qwen2.5-coder` from
+   harmful to neutral). No re-indexing required.
+2. **Wider K before rerank.** Currently `SearchByVector` returns
+   top-10 and Reflect can only reorder those. Pulling top-50 from the
    embedder and reranking to top-10 lets rerank *recover* good docs
-   the embedder ranked 11–50. This is the standard cascade.
-3. **Embedder swap.** BGE-base/large, `text-embedding-3-large`. Highest
-   ceiling but requires wiring the `--embedder` flag through to
+   the embedder ranked 11–50 — the standard cascade pattern.
+   Expected lift: **+0.03–0.05 NDCG**.
+3. **Embedder swap.** Move from `nomic-embed-text` (137M) to a
+   stronger embedder (BGE-large-en-v1.5,
+   `text-embedding-3-large`, or a 7B-class model like
+   `gte-Qwen2-7B-instruct`). Expected lift: **+0.05 NDCG** for
+   `text-embedding-3-large`; **+0.05–0.08 NDCG** for the 7B-class
+   ceiling. Requires wiring the `--embedder` flag through to
    `internal/storage`.
-4. **Full 323-query run with Haiku 4.5 rerank.** Tightens the +0.022
+4. **Purpose-built reranker model** instead of a general LLM. Cohere
+   `rerank-3`, BGE-`reranker-v2-m3`, `mxbai-rerank-large`. These are
+   trained on relevance judgments and consistently outperform
+   general-purpose LLMs at this task in the literature. Expected
+   lift: **+0.02–0.04 NDCG** over Haiku-as-reranker; significantly
+   lower per-query cost (BGE-reranker runs locally, sub-second).
+5. **Full 323-query run with Haiku 4.5 rerank.** Tightens the +0.022
    NDCG / +0.09 MRR signal to leaderboard-comparable confidence at
-   ~$0.50 total cost.
-5. **One more frontier reranker as a sanity check** (GPT-4o-mini,
+   ~$0.50 total cost. No code change required — already supported by
+   the smoke script.
+6. **One more frontier reranker as a sanity check** (GPT-4o-mini,
    Gemini Flash, or Claude Sonnet 4.6) to confirm the rerank lift
    tracks LLM capability rather than being a Haiku-specific quirk.
 
-Each of these is small enough to slot into a follow-up loop without
-expanding the Phase A scope.
+**Stack-all-three target.** Independently the gains from (1)+(2)+(3)
+plausibly compound to **~0.50+ NDCG@10 on NFCorpus** — landing
+ahead of `text-embedding-3-large` embedder-only (0.42) and near the
+top of the public NFCorpus leaderboard. Gains rarely add linearly in
+practice (each lever steals a bit of the headroom the next one
+needs), but a midpoint of ~0.48 is a reasonable Phase B target.
+
+Each of (1)–(6) is small enough to slot into a follow-up loop
+without expanding the Phase A scope.
