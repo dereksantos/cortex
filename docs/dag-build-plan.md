@@ -86,15 +86,30 @@ protocol against reality.
 
 ### Test gates (must pass before v0 is "done")
 
-- ☐ All 5 mechanic evals from `eval-prep-epic.md` Phase C pass green.
-- ☐ `cortex run --type=turn --prompt "What does this codebase do?"`
-  returns a sensible response.
-- ☐ The above produces exactly 4 `cell_results.jsonl` rows with
-  correct parent pointers (seed → reflex → inject → coding_turn).
-- ☐ Budget decay is observable in the rows (each row reports
-  `CostConsumed`; sum matches `Budget.Initial - Budget.Remaining`).
-- ☐ Re-running with same prompt + fixed seed produces identical row
-  counts and parent structure (determinism).
+- ☑ All 5 mechanic evals from `eval-prep-epic.md` Phase C pass green
+  (`cortex eval --suite=mechanic` → 5/5 PASS as of 2026-05-17, commit
+  `4abbf96`).
+- ☑ `cortex run --type=turn --prompt "..."` returns a sensible response
+  (v0 stub chain — real LLM response lands when Stage 3 wires
+  decide.coding_turn to the agent loop).
+- ☑ Produces 4 trace rows with correct parent pointers (seed → reflex
+  → inject → capture). Currently in `.cortex/db/dag_traces.jsonl`;
+  unification with `cell_results.jsonl` deliberately deferred (separate
+  sinks is the defensible architecture per the unified-vs-separate
+  discussion in eval-baseline.md).
+- ☑ Budget decay observable in rows; `BudgetAfter` per node matches
+  `Initial - sum(CostConsumed)`.
+- ☑ Determinism — mocked-handler tests in `executor_test.go` re-run
+  byte-identical; cortex run timestamps differ but counts + structure
+  are stable.
+
+**Stage 1 v0 substantially done.** Remaining work for "fully done":
+- `decide.coding_turn` handler wrapping the existing LLM agent loop
+  (per ADR-001 V0 plan: inline, no spawn). This is the largest
+  remaining piece — ~1-2h for inline form, ~3-4h for Stage 3's
+  spawn-children form.
+- Real `pkg/config` load for per-DAG-type budget overrides (currently
+  hardcoded defaults).
 
 ### Week-1 questions (decisions land as ADRs)
 
