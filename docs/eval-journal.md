@@ -36,6 +36,72 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Phase B + D audit (pre-implementation)
+
+Pre-implementation audit for `loop-phase-b-legacy-cognition.md` and
+`loop-phase-d-journeys.md` per the goal queue. No execution attempted;
+this entry captures the inventory + classification that informs the
+runner implementation choices.
+
+**Phase D inventory — journeys/**
+
+10 scenarios in `test/evals/journeys/`. None currently runnable:
+- `cortex eval` CLI does NOT support `--suite=journeys` (no `--suite`
+  flag at all — see `./bin/cortex eval --help`).
+- No `type: e2e` scenario handler in current `internal/eval/` code
+  (verified by grep — runner code was deleted per memory
+  `project_deleted_eval_runners`).
+- Project scaffolds DO exist under `test/evals/projects/` (verified:
+  `hello-service/` has go.mod + greeter.go + tests).
+
+**Path recommendation for Phase D:** (a) thin journey-runner +
+`--suite=journeys` CLI wiring. Porting all 10 to v2 format (option (b))
+is plausible but loses the multi-session phase/events structure that
+journeys use; v2's scenario format doesn't natively support
+session/phase/event hierarchies.
+
+**Phase B classification — legacy/cognition/ (22 scenarios)**
+
+Re-running the prompt's "two patterns" claim against actuals:
+
+- **3 SELF-CONTAINED** (inline all results): `resolve_inject`,
+  `resolve_queue`, `resolve_wait`. Runner can dispatch directly to
+  `Resolver.Resolve(ctx, query, inlineResults)`.
+- **19 STORAGE-DEPENDENT** (reference fixture IDs like `auth_module`,
+  `jwt_handler` that aren't defined inline): all `abr_*`, `dream_*`,
+  `reflect_*`, `reflex_*`, `session_*`, plus `indent_conflict` and
+  `testing_conflict`.
+
+**Path recommendation for Phase B — FLIPPED from prompt:**
+- Original prompt recommended (b) migrate 19 scenarios to inline
+  fixtures.
+- Audit shows (b) is more work than (a): 19 scenarios × ~5-10
+  fixture entries each = ~100-200 fixture rows to author by hand.
+- (a) build a shared `seedFixtures(store)` helper in the runner that
+  loads ~10-15 canonical fixtures (auth_module, jwt_handler,
+  db_schema, db_connection, error_pattern, etc.) once per suite
+  invocation. Scenarios reference IDs; the seed makes them resolve.
+- The canonical fixture set itself becomes documented in
+  `internal/eval/legacy/fixtures.go` — readable and reusable.
+
+**Phase 1 telemetry alignment:** both B and D runners must write to
+`.cortex/db/cell_results.jsonl` via the unified Phase 1 sink (commit
+`14d2170`). The legacy v2 runner already lands rows there; the new
+suite runner must do the same.
+
+**Out of scope today:** actual runner implementation. Both runners
+are multi-hour code work; tracked in their respective loop prompts.
+This entry blocks neither — it surfaces the path recommendations so
+the implementing session has the decisions pre-made.
+
+**Follow-ups:**
+- Build Phase D thin runner per path (a)
+- Build Phase B runner with seedFixtures helper per flipped (a)
+- Re-run Phase F consolidation once B + D produce baselines (the
+  pending sections in `docs/eval-baseline.md`)
+
+---
+
 ### 2026-05-17 — InjectedContextTokens flows end-to-end on ABR session cells
 
 **Cortex**: `86e9458` (branch `derek.s/dag-build`)
