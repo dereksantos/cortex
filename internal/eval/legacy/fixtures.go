@@ -21,6 +21,10 @@
 package legacy
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
@@ -172,48 +176,73 @@ var CanonicalFixtures = []Fixture{
 	},
 }
 
-// SeedFixtures loads CanonicalFixtures into the given storage.
+// SeedFixtures writes CanonicalFixtures to the insights.jsonl backing
+// file under contextDir, so a subsequent storage.New(cfg) call with
+// cfg.ContextDir == contextDir loads them via the standard JSONL path.
 //
-// Status: stub (returns nil). Implementing this is genuine multi-hour
-// work — see the design constraint below.
+// This honors the public storage API: storage.New reads
+// <contextDir>/data/insights.jsonl as a sequence of insightRecord
+// JSON lines (one per fixture). No internal-only seed helper is
+// needed; no parallel write path. Determinism is by construction
+// (the JSONL is byte-identical given the same CanonicalFixtures).
 //
-// Design constraint surfaced during Phase B work:
-//   storage.Storage has NO public Insight-insertion API. The internal
-//   `insights` map + `addInsightToSecondaryIndexes` are populated by
-//   `recordToInsight(r)` calls inside the JSONL-loading code path.
-//   The intended-by-design flow is:
-//      event captured → ingested → LLM-analyzed → Insight derived
-//   not direct fixture insertion.
+// Note: the file is OVERWRITTEN — SeedFixtures replaces any prior
+// content under the same contextDir. Callers are expected to use a
+// fresh temp dir per scenario invocation.
 //
-// Two paths the implementing session must choose between:
-//
-//   (A) **Go through the ingest pipeline.** For each fixture:
-//       construct an events.Event with the fixture content, call the
-//       capture API, run analyze. Honors the storage API; produces
-//       real Insights via the real path. Cost: requires LLM available
-//       (for analyze), slow (per-fixture LLM call), and the analyzed
-//       Insight may not match the canonical fixture EventID/text
-//       exactly (the analyzer transforms content).
-//
-//   (B) **Bypass with an internal-only seed helper.** Add an internal
-//       `seedInsight` method to storage.Storage (or expose
-//       recordToInsight + index-add as a test-helper API) that
-//       inserts a constructed Insight directly. Faster + deterministic
-//       but creates a parallel write path the storage maintainers
-//       must keep in sync.
-//
-// Recommended: (B) with a clear "test-only" marker. The fixtures are
-// for eval verification, not production traffic; bypassing the
-// ingest pipeline is justified by the determinism requirement
-// (eval-principles 4: Reproducible — running the suite twice must
-// produce byte-identical output).
-//
-// Implementing session: see docs/prompts/loop-phase-b-legacy-cognition.md.
-// Carry-forward: this design decision is non-trivial; surface to
-// the user before committing to (A) or (B) since it adds API surface.
-func SeedFixtures(store *storage.Storage) error {
-	// STUB. See doc comment above for the design constraint.
+// Embeddings are not seeded here. Reflex with embedder=nil falls back
+// to text-based scoring per its constructor doc — which is sufficient
+// for the legacy/cognition scenarios that score against EventID +
+// text-match (not semantic similarity). Reflex's text-based path is
+// what runs against these fixtures.
+func SeedFixtures(contextDir string) error {
+	dataDir := filepath.Join(contextDir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("seed fixtures: mkdir %s: %w", dataDir, err)
+	}
+	path := filepath.Join(dataDir, "insights.jsonl")
+	f, err := os.Create(path) // truncates if exists
+	if err != nil {
+		return fmt.Errorf("seed fixtures: open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	// Use a stable base time so different runs produce identical files
+	// (determinism per eval-principles 4). Fixtures are spaced 1s apart
+	// in importance-descending order, so recency boost matches importance
+	// loosely — useful for scenarios that test recency-vs-importance.
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	enc := json.NewEncoder(f)
+	for i, fx := range CanonicalFixtures {
+		rec := map[string]any{
+			"id":          int64(i + 1),
+			"event_id":    fx.EventID,
+			"category":    fx.Category,
+			"summary":     fx.Summary,
+			"importance":  fx.Importance,
+			"tags":        fx.Tags,
+			"reasoning":   fx.Reasoning,
+			"source_type": "fixture",
+			"created_at":  base.Add(time.Duration(i) * time.Second),
+		}
+		if err := enc.Encode(rec); err != nil {
+			return fmt.Errorf("seed fixtures: encode %s: %w", fx.EventID, err)
+		}
+	}
 	return nil
+}
+
+// SeedFixturesInto is a convenience wrapper that seeds fixtures into
+// the contextDir and then opens a *storage.Storage rooted there.
+// Callers that need both steps can use this; callers that want the
+// JSONL on disk for inspection should use SeedFixtures + their own
+// storage.New() call.
+func SeedFixturesInto(contextDir string, openStorage func(string) (*storage.Storage, error)) (*storage.Storage, error) {
+	if err := SeedFixtures(contextDir); err != nil {
+		return nil, err
+	}
+	return openStorage(contextDir)
 }
 
 // FixtureByID returns the canonical fixture with the given EventID,

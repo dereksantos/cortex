@@ -31,7 +31,9 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/storage"
 	cog "github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -135,14 +137,17 @@ func runScenario(ctx context.Context, s *Scenario, suite *SuiteResult) {
 		switch s.Mode {
 		case "resolve":
 			ok, errCode, errMsg = runResolveTest(ctx, &t)
-		case "reflex", "reflect", "think", "dream", "router":
-			// Storage-dependent modes: need seeded fixture set before
-			// they can resolve referenced IDs. Deferred to a follow-up
-			// in the same Phase B workstream. See Phase B + D audit
-			// entry in docs/eval-journal.md for the fixture-seed plan.
+		case "reflex":
+			ok, errCode, errMsg = runReflexTest(ctx, &t)
+		case "reflect", "think", "dream", "router":
+			// Other storage-dependent modes need additional per-mode
+			// dispatchers (similar shape to runReflexTest). Deferred
+			// to a follow-up. Reflex is wired today as the smallest
+			// end-to-end demonstration of the seed-and-dispatch
+			// pattern; same pattern extends to reflect/think/dream/router.
 			ok = false
-			errCode = "needs_fixture_seed"
-			errMsg = fmt.Sprintf("mode=%s scenarios reference fixture IDs that need a seeded storage layer (auth_module, jwt_handler, etc). Runner extension pending — see Phase B fixture-seed follow-up.", s.Mode)
+			errCode = "needs_per_mode_dispatcher"
+			errMsg = fmt.Sprintf("mode=%s dispatcher not yet wired; fixtures + storage seeding work (see runReflexTest pattern). Phase B follow-up.", s.Mode)
 		default:
 			ok = false
 			errCode = "unknown_mode"
@@ -201,6 +206,128 @@ func runResolveTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 	}
 
 	return true, "", ""
+}
+
+// runReflexTest dispatches one reflex-mode test against a seeded
+// storage instance. Constructs a temp context dir, seeds canonical
+// fixtures via SeedFixtures (JSONL-write path that honors the public
+// storage API), opens storage, runs Reflex with nil embedder
+// (text-based scoring — sufficient for the canonical fixture set
+// which scores by EventID + text match, not semantic similarity),
+// and compares returned Result IDs against expected.result_ids.
+func runReflexTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg string) {
+	// Build query from input.
+	q, qerr := buildReflexQuery(t.Input)
+	if qerr != nil {
+		return false, "input_invalid", qerr.Error()
+	}
+
+	// Per-scenario temp dir so seeded fixtures don't bleed between tests.
+	tempDir, err := os.MkdirTemp("", "cortex-legacy-reflex-*")
+	if err != nil {
+		return false, "tempdir_failed", err.Error()
+	}
+	defer os.RemoveAll(tempDir)
+
+	if err := SeedFixtures(tempDir); err != nil {
+		return false, "seed_failed", err.Error()
+	}
+
+	store, err := storage.New(&config.Config{ContextDir: tempDir})
+	if err != nil {
+		return false, "storage_open_failed", err.Error()
+	}
+	defer store.Close()
+
+	// nil embedder: Reflex falls back to text-based scoring per its
+	// NewReflex doc. Canonical fixtures' Summary text contains the
+	// keywords scenarios search for (auth, jwt, db, etc).
+	r := cognition.NewReflex(store, nil)
+	results, err := r.Reflex(ctx, q)
+	if err != nil {
+		return false, "reflex_error", err.Error()
+	}
+
+	// Assertions per the scenario's expected block.
+	gotIDs := make([]string, 0, len(results))
+	for _, res := range results {
+		gotIDs = append(gotIDs, res.ID)
+	}
+
+	expRaw, hasExp := t.Expected["result_ids"].([]any)
+	if !hasExp {
+		// Without result_ids, just check we got >= min_results.
+		if minR, ok := t.Expected["min_results"].(int); ok {
+			if len(results) < minR {
+				return false, "too_few_results", fmt.Sprintf("got %d results, want >= %d", len(results), minR)
+			}
+		}
+		return true, "", ""
+	}
+
+	// Check that EVERY expected ID appears in results (order not enforced
+	// at this level; ranking checks would be a separate assertion).
+	gotSet := make(map[string]bool, len(gotIDs))
+	for _, id := range gotIDs {
+		gotSet[id] = true
+	}
+	missing := []string{}
+	for _, e := range expRaw {
+		eid, _ := e.(string)
+		if eid == "" {
+			continue
+		}
+		if !gotSet[eid] {
+			missing = append(missing, eid)
+		}
+	}
+	if len(missing) > 0 {
+		return false, "missing_expected_ids", fmt.Sprintf("expected ids missing from results: %v (got: %v)", missing, gotIDs)
+	}
+
+	// Optional min_results check.
+	if minR, ok := t.Expected["min_results"].(int); ok {
+		if len(results) < minR {
+			return false, "too_few_results", fmt.Sprintf("got %d results, want >= %d", len(results), minR)
+		}
+	}
+
+	return true, "", ""
+}
+
+// buildReflexQuery converts the YAML input.query map into a typed
+// cognition.Query. Reflex inputs are simpler than Resolve inputs —
+// just query text + optional limit/tags/categories.
+func buildReflexQuery(input map[string]any) (cog.Query, error) {
+	var q cog.Query
+	qm, ok := input["query"].(map[string]any)
+	if !ok {
+		return q, fmt.Errorf("input.query missing or not a map")
+	}
+	if t, ok := qm["text"].(string); ok {
+		q.Text = t
+	}
+	if v, ok := qm["limit"].(int); ok {
+		q.Limit = v
+	}
+	if tags, ok := qm["tags"].([]any); ok {
+		for _, tg := range tags {
+			if s, ok := tg.(string); ok {
+				q.Tags = append(q.Tags, s)
+			}
+		}
+	}
+	if cats, ok := qm["categories"].([]any); ok {
+		for _, c := range cats {
+			if s, ok := c.(string); ok {
+				q.Categories = append(q.Categories, s)
+			}
+		}
+	}
+	if strings.TrimSpace(q.Text) == "" {
+		return q, fmt.Errorf("input.query.text is empty")
+	}
+	return q, nil
 }
 
 // buildResolveInput converts the YAML input map into a typed Query +
