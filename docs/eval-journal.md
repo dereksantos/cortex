@@ -36,6 +36,66 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — SWE-bench: iteration wired via REPL + correction of prior 0/3 cells
+
+**Cortex**: `a8d47bf` (and predecessors `ecb10fc`, `3244bad`, `a8b39d1`, `12cc6dd`, `2b789f7`, `90474e3`).
+
+**What this entry is**: a connected arc of seven commits that:
+1. Adds `cortex --prompt --verifier --auto-retry --max-retries --json --workdir --system-prompt` headless flags to the REPL.
+2. Refactors SWE-bench's runner to drive the REPL (instead of single-shot `cortex code`) so the verify-and-retry loop GoL eval uses is now CLI-accessible (closes the principle 1 + principle 4 violation flagged in prior entries).
+3. Adds pre-flight gates so SWE-bench fails fast with actionable errors when Docker is down, when the per-instance scoring image is missing, or when subordinate infra breaks.
+4. Fixes the image-id format (`<org>_1776_<repo>-<issue>:latest`, not the obsolete `<org>__<repo>:v<version>`).
+5. Writes `.gitignore` in the cloned repo so the verifier's `git add -A` doesn't slurp the REPL's per-turn snapshots into the patch.
+6. Adds `set -eo pipefail` + `$PIPESTATUS` to the verifier so pytest's exit code can no longer be masked by the `tail -c 4096` pipeline.
+
+**Correction to prior 2026-05-17 SWE-bench entries** (sonnet django + qwen3-coder-30b-a3b django + the original astropy entry): the "0/N pass" results in those entries were **silent infra failures**, not model failures. With docker daemon down (later runs) or with the new image format unsupported (earlier runs), the verifier's docker invocation failed; `scoreFromOutput` saw no pytest patterns, returned 0/0; `len(inst.FailToPass) = N` became the denominator; the cell looked like a clean "model failed" row.
+
+| Entry | What was actually happening |
+|---|---|
+| Original haiku astropy | Image id wrong (`...:v4.3` doesn't exist on Docker Hub). docker pull failed, verifier exit 1, scorer parsed 0/0. |
+| Sonnet django | Same image-id bug + docker daemon was down at probe time on at least one run. |
+| Qwen django | Same as sonnet. The "qwen used half the tokens" finding may stand, but the 0/N pass-rate was infra not model. |
+
+The numbers in those entries should be read as "this run didn't actually score against pytest" rather than as a real model pass-rate. The qualitative observations (token usage, latency) are still valid since the agent + verifier loop did execute.
+
+**End-to-end probe through new surface**:
+
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+./bin/cortex eval --benchmark swebench --subset verified --limit 1 \
+  --repo django/django --strategy cortex --model anthropic/claude-sonnet-4.5
+```
+
+Sequence observed:
+1. Preflight: docker daemon up ✓, scoring image already local ✓.
+2. `.gitignore` appended to cloned repo with `.cortex/` and verifier sentinels ✓.
+3. REPL invoked headless: 5 agent turns, 75k tokens, $0.23.
+4. Verifier ran: docker pulled the (now-correct) image, applied an empty patch (agent didn't write files — see below), ran pytest, got `No module named pytest` from miniconda's testbed env.
+5. With pipefail + `$PIPESTATUS`, the verifier correctly exited non-zero. `verify_ok=False` (honest).
+6. Auto-retry budget (default 3) ran one more attempt; same result.
+7. Final cell persisted with `tests_passed=0, tests_failed=1870` from `RunSWEBenchTests` — same infra mode hits final scoring too.
+
+Latency: 54 s end-to-end for one instance + 2 attempts × verifier docker overhead. Per-attempt agent cost ≈ $0.23 sonnet.
+
+**Remaining gap (out of scope for this entry; logged for follow-up)**:
+- **Per-repo test-runner adapters**. The new `swebench/sweb.eval.x86_64.<org>_1776_<repo>-<issue>:latest` image set uses Django's `python tests/runtests.py <names>` for django and `pytest` for some others, NOT a single pytest invocation across the board. Today's verifier hardcodes `python -m pytest`, which produces `No module named pytest` on django images. Mirrors a gap the upstream SWE-bench evaluator solves via per-instance `test_cmd` config. We need an equivalent (probably as a JSON file in `internal/eval/benchmarks/swebench/testdata/` or a per-instance lookup against a small repo-keyed map).
+- **F2P name format**. The dataset stores Django test names as `test_method (full.dotted.TestClass)` with a SPACE; pytest and django runner both want different formats. Whatever per-repo adapter we add needs to normalize these.
+- **arm64/amd64 platform warning**. Each docker run on Apple Silicon emits `WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8)`. Works via Rosetta but slow (~3× verifier time). Long-term fix is `--platform linux/amd64` explicit or arm64 images upstream.
+
+**Why this still counts as success despite still being 0/1**:
+- Principle 1 violation flagged in earlier entries is resolved: SWE-bench now drives the same agent loop as GoL via subprocess. No `internal/` imports added.
+- Principle 4 violation resolved: REPL exposes iteration as a CLI surface; benchmark harnesses don't need to re-implement retry-with-feedback.
+- The "silent zero" failure mode that contaminated three prior journal entries is now impossible: preflight surfaces docker / image issues before model spend, and pipefail surfaces pytest issues before they masquerade as model failures.
+- The deeper problem (per-repo test runners) was previously *hidden* behind the silent infra failure. Surfacing it correctly is what makes the next step actionable.
+
+**Follow-ups queued (priority order)**:
+1. Per-repo test-runner adapter (`internal/eval/benchmarks/swebench/testrunners.go`): map repo → test command template (django → `python tests/runtests.py`, sympy → `bin/test`, pytest for the rest). Updates the verifier `inner` shell command per-instance.
+2. Token/cost accounting from `RunREPLHeadless`: today's REPL JSON summary returns only `accepted` + paths. Extend to include token totals + cost so cells aren't always zero-cost.
+3. Same `_1776_` change applied to `score.go`'s `imageNameFor` already; verify it lands in the next baseline run too.
+4. Document the corrected format in `docs/benchmarks/swebench.md`.
+
+---
+
 ### 2026-05-17 — LongMemEval (oracle, limit=5) / cortex +analyze 50
 
 **Cortex**: `6885a8f` + uncommitted CLI gap-closure (`cortex analyze --workdir --limit` flags) + `benchmarks.RunAnalyze` helper + `longmemeval` `--analyze-limit` filter. Committed as part of this entry; see commit hash after the record commit.
