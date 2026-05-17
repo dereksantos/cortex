@@ -36,6 +36,52 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — SWE-bench (verified, django subset, limit=3) / sonnet-4.5
+
+**Cortex**: `5a5f06c`; `cortex_version=0.1.0`
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval --benchmark swebench --subset verified --limit 3 \
+  --repo django/django --strategy baseline,cortex \
+  --model anthropic/claude-sonnet-4.5
+```
+**Versions**: provider=`openrouter`, llm=`anthropic/claude-sonnet-4.5`, judge=n/a (Docker tests-pass-all). Scoring images: `swebench/sweb.eval.x86_64.django__django:v2.2` and `v3.1`.
+
+**Result**:
+
+| Strategy | n | Pass | Total cost | Avg latency | Avg tokens in | Avg turns |
+|---|---|---|---|---|---|---|
+| baseline | 3 | 0/3 | $0.660 | 29.2 s | 67 018 | 9.7 |
+| cortex   | 3 | 0/3 | $0.661 | 34.9 s | 68 354 | 11.0 |
+
+Per-instance F2P:
+
+| Instance | baseline | cortex |
+|---|---|---|
+| django-10097 | F2P=0/438 P2P=0/1432 | F2P=0/438 P2P=0/1432 |
+| django-10554 | F2P=0/2 P2P=0/23 | F2P=0/2 P2P=0/23 |
+| django-10880 | F2P=0/1 P2P=0/55 | F2P=0/1 P2P=0/55 |
+
+Per-cell records in `.cortex/db/cell_results.jsonl`.
+
+**Why this run**: Phase A follow-up — replace haiku's all-zero astropy baseline with a stronger model on django, to see whether the 0% was capability or scaffolding.
+
+**Observations**:
+- **Still 0/3.** Sonnet-4.5 emits patches but they don't pass any F2P test. This is harness-quality limited, not raw model capability: published Sonnet-4.5 SWE-bench Verified pass rates with proper scaffolding (Aider, SWE-Agent) are ~30–40%. Our `cortex code` harness is a single-shot edit loop with file ops + shell + cortex_search — substantially simpler than the published harnesses.
+- **django-10097 alone has 438 fail-to-pass tests** — even a partially-correct patch would land 0/438 without a near-perfect fix. The instance distribution biases toward "all-or-nothing" outcomes.
+- Cortex strategy turns slightly higher (11.0 vs 9.7) — extra calls to `cortex_search`, which never returns useful results because the per-instance `.cortex/` is empty.
+- **Cost note**: $0.22/cell — bumping limit to 10 would be ~$4.40, still under the default $5 ceiling (estimator over-projects so ceilings still need raising).
+
+**Follow-ups**:
+- A pre-seed for SWE-bench cortex strategy (related issues / PRs / commit messages for the same repo) is the principled fix to make the "cortex" cell meaningful — see correction entry below for the framing.
+- A harness comparison run (Aider as the harness instead of `cortex code`) would isolate "is the agent loop the bottleneck" from "is the model the bottleneck." Out of scope for this loop.
+
+---
+
 ### 2026-05-17 — v2 suite (full sweep) / cell-level telemetry now landing
 
 **Cortex**: `40aa466` + uncommitted `internal/eval/v2/eval.go` + `cmd/cortex/commands/eval.go` changes that add `Evaluator.SetPersister` and emit one `CellResult` per (test × strategy). Committed as part of this entry; see commit hash in `git log` after the record commit.
