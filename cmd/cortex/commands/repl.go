@@ -130,6 +130,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxTurnsOverride := 0          // --max-turns N: override the per-attempt agent-loop cap (default 8)
 	maxCostOverride := 0.0         // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
 	maxCumulativeOverride := 0     // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
+	fullTools := false             // --full-tools: register the full 5-tool surface even when routed to Ollama
+	keepOnFail := false            // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -186,6 +188,10 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &maxCumulativeOverride)
 				i++
 			}
+		case "--full-tools":
+			fullTools = true
+		case "--keep-on-fail":
+			keepOnFail = true
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -239,6 +245,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxTurns = maxTurnsOverride
 	state.maxCostUSD = maxCostOverride
 	state.maxCumulativeTokens = maxCumulativeOverride
+	state.fullTools = fullTools
+	state.keepOnFail = keepOnFail
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -375,6 +383,23 @@ type replState struct {
 	maxTurns            int
 	maxCostUSD          float64
 	maxCumulativeTokens int
+	// fullTools forces the 5-tool registry (read/write/list_dir/
+	// run_shell/cortex_search) even when routed to Ollama. Defaults
+	// to false so interactive ollama use keeps the iter-4 fix that
+	// drops list_dir+cortex_search for tiny models that lose
+	// function-call discipline at 5 tools. Benchmark harnesses that
+	// NEED list_dir (e.g. SWE-bench navigating a 5000-file repo)
+	// set this to true.
+	fullTools bool
+	// keepOnFail suppresses runTurn's snapshot rollback when verify
+	// fails. For interactive REPL use the default (rollback) is
+	// right: don't keep half-broken edits. For benchmark harnesses
+	// it's wrong — a real engineer iterating on a failing test
+	// keeps their changes and refines, doesn't reset to scratch
+	// every attempt. SWE-bench in particular needs this so the
+	// agent's file writes persist across retries and the final
+	// scorer sees the actual attempt rather than an empty diff.
+	keepOnFail bool
 }
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
@@ -566,6 +591,15 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
       --max-turns N    Per-attempt agent-loop cap (default 8).
       --max-cost-usd X Per-attempt USD budget (default 0.20).
       --max-cumulative-tokens N  Per-attempt token budget (default 300000).
+      --full-tools     Register the full 5-tool surface (read, write,
+                       list_dir, run_shell, cortex_search) even when
+                       routed to Ollama. Default off; small models
+                       lose function-call discipline at >3 tools, so
+                       interactive Ollama drops to 3.
+      --keep-on-fail   Don't roll back the workdir when the verifier
+                       fails. Benchmark default — iterations build
+                       on prior work instead of restarting from
+                       scratch each attempt.
 
 In the REPL:
   /help                Show slash-command help.
@@ -789,7 +823,10 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 
 // finalize completes a turn: writes the JSONL row, pushes the snapshot
 // to the undo stack and fires background capture on accept, or rolls
-// back from snapshot on reject. Always writes the row.
+// back from snapshot on reject (unless --keep-on-fail suppresses
+// the rollback for benchmark callers that want iteration to build on
+// prior attempts instead of resetting to scratch). Always writes the
+// row.
 func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	row.Accepted = accepted
 	if accepted {
@@ -800,6 +837,15 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
 		} else if s.verbose {
 			fmt.Println("  (captured)")
+		}
+	} else if s.keepOnFail {
+		// Benchmark mode: preserve the agent's attempt so the next
+		// retry's verifier sees what it actually did, and so an
+		// out-of-budget mid-attempt termination doesn't lose all
+		// the work the agent did get done. Snapshot still lives on
+		// disk; `/undo` could surface it if needed.
+		if s.verbose {
+			fmt.Println("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
 		}
 	} else {
 		if err := s.restoreFromSnapshot(snapDir); err != nil {
@@ -839,7 +885,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// (read_file + write_file + run_shell). The probe matrix in
 	// PROGRESS-REPL.md iter 3 showed qwen-1.5b function-calls cleanly
 	// with ≤3 tools but emits text shapes at ≥5.
-	if s.apiURL == defaultOllamaAPIURL {
+	//
+	// --full-tools overrides this for callers that need list_dir +
+	// cortex_search even on Ollama-routed models (e.g. SWE-bench
+	// against a local 30B coder — list_dir is non-negotiable for
+	// navigating a 5000-file repo).
+	if s.apiURL == defaultOllamaAPIURL && !s.fullTools {
 		h.SetMinimalTools(true)
 	}
 	// Stream the agent loop into the REPL: one line per tool call so

@@ -381,6 +381,13 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		MaxTurns:            50,
 		MaxCostUSD:           5.0,
 		MaxCumulativeTokens: 800_000,
+		// list_dir is non-negotiable for navigating a real repo;
+		// keep the 5-tool surface even when routed to Ollama (local
+		// model probes via mistral:7b etc.).
+		FullTools: true,
+		// Preserve agent edits across retries — a real engineer
+		// iterating doesn't reset to scratch every failed test run.
+		KeepOnFail: true,
 	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {
