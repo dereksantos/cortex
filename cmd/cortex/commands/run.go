@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
+	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
@@ -40,6 +41,8 @@ func (c *RunCommand) Description() string { return "Run a DAG by type (turn|thin
 func (c *RunCommand) Execute(ctx *Context) error {
 	dagType := ""
 	prompt := ""
+	model := ""
+	workdir := ""
 	outputFormat := "human"
 	verbose := false
 
@@ -54,6 +57,16 @@ func (c *RunCommand) Execute(ctx *Context) error {
 		case "--prompt":
 			if i+1 < len(ctx.Args) {
 				prompt = ctx.Args[i+1]
+				i++
+			}
+		case "--model", "-m":
+			if i+1 < len(ctx.Args) {
+				model = ctx.Args[i+1]
+				i++
+			}
+		case "--workdir":
+			if i+1 < len(ctx.Args) {
+				workdir = ctx.Args[i+1]
 				i++
 			}
 		case "-o", "--output":
@@ -71,6 +84,10 @@ func (c *RunCommand) Execute(ctx *Context) error {
 				dagType = strings.TrimPrefix(arg, "--type=")
 			} else if strings.HasPrefix(arg, "--prompt=") {
 				prompt = strings.TrimPrefix(arg, "--prompt=")
+			} else if strings.HasPrefix(arg, "--model=") {
+				model = strings.TrimPrefix(arg, "--model=")
+			} else if strings.HasPrefix(arg, "--workdir=") {
+				workdir = strings.TrimPrefix(arg, "--workdir=")
 			}
 		}
 	}
@@ -81,7 +98,7 @@ func (c *RunCommand) Execute(ctx *Context) error {
 
 	switch dagType {
 	case "turn":
-		return runTurnDAG(prompt, outputFormat, verbose)
+		return runTurnDAG(prompt, model, workdir, outputFormat, verbose)
 	case "think", "dream", "capture", "eval":
 		return fmt.Errorf("--type=%s not yet implemented (Stage 5 of dag-build-plan.md)", dagType)
 	default:
@@ -89,12 +106,14 @@ func (c *RunCommand) Execute(ctx *Context) error {
 	}
 }
 
-// runTurnDAG seeds a turn-type DAG with a minimal 4-op stub chain
-// and runs it through the executor. V0 surface: demonstrates the
-// executor walks end-to-end with telemetry; does NOT yet wire to
-// real LLM-backed ops (that's Stage 2 of the build plan).
-func runTurnDAG(prompt, outputFormat string, verbose bool) error {
-	reg := buildV0Registry()
+// runTurnDAG seeds a turn-type DAG with a minimal 4-op chain and runs
+// it through the executor. V0 surface: demonstrates the executor
+// walks end-to-end with telemetry. The decide.coding_turn node uses
+// the real LLM agent loop (via internal/harness/dagnode) when
+// --model is provided; otherwise runs in stub mode (no provider) so
+// developers can exercise the protocol without API keys.
+func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error {
+	reg := buildV0Registry(prompt, model, workdir)
 	turnID := fmt.Sprintf("turn-%d", time.Now().UnixNano())
 
 	// Wire structured trace writes to .cortex/db/dag_traces.jsonl.
@@ -161,12 +180,15 @@ func runTurnDAG(prompt, outputFormat string, verbose bool) error {
 	return nil
 }
 
-// buildV0Registry registers the 4 v0 ops with stub handlers. Each
-// op consumes a small fixed cost and spawns the next op in the chain
-// — enough to exercise the executor end-to-end. Real handlers land
-// in Stage 2 (registry expansion to per-cognitive-mode ops) and
-// Stage 3 (decide.coding_turn wraps the LLM loop).
-func buildV0Registry() *dag.Registry {
+// buildV0Registry registers the 4 v0 ops. sense.prompt / attend.reflex
+// / decide.inject / maintain.capture use stub handlers (real per-mode
+// implementations land in Stage 2 of the build plan).
+//
+// decide.coding_turn uses the REAL agent-loop wrapper from
+// internal/harness/dagnode when model != "", otherwise the wrapper
+// returns a stub-mode result so the protocol can be exercised
+// without API keys. This is the inline form per ADR-001.
+func buildV0Registry(prompt, model, workdir string) *dag.Registry {
 	reg := dag.NewRegistry()
 
 	stubHandler := func(cost dag.Cost, next []dag.NodeSpec) dag.Handler {
@@ -186,13 +208,49 @@ func buildV0Registry() *dag.Registry {
 		Cost:        dag.Cost{LatencyMS: 20, Tokens: 10},
 		Handler:     stubHandler(dag.Cost{LatencyMS: 20, Tokens: 10}, nil),
 	})
+
+	// decide.coding_turn — REAL handler when model configured, stub fallback
+	// otherwise. Spawns maintain.capture after it returns.
+	codingTurnHandler := dagnode.NewCodingTurnHandler(dagnode.CodingTurnConfig{
+		Model:   model,
+		Workdir: workdir,
+	})
+	// Wrap so the registered handler returns the maintain.capture spawn
+	// in its NodeResult.Spawn (the real handler doesn't know about
+	// downstream nodes; that's the v0 chain orchestrator's job).
+	_ = reg.Register(dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "coding_turn",
+		Description: "wraps existing LLM agent loop (ADR-001 V0 inline form)",
+		// Cost hint = 0 to skip the pre-spawn budget check — stub mode
+		// is ~10ms, real LLM is seconds. Actual CostConsumed determines
+		// whether downstream nodes get refused.
+		Cost: dag.Cost{LatencyMS: 0, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			// V0 chain: propagate the closure-captured prompt into the
+			// handler's input. Stage 2 will use proper $node.out flow
+			// once attend.reflex / decide.inject return structured outputs.
+			if in == nil {
+				in = map[string]any{}
+			}
+			if _, has := in["prompt"]; !has {
+				in["prompt"] = prompt
+			}
+			res, err := codingTurnHandler(ctx, in, b)
+			res.Spawn = []dag.NodeSpec{
+				{Function: dag.FuncMaintain, Op: "capture", ID: "n5"},
+			}
+			return res, err
+		},
+	})
+
 	_ = reg.Register(dag.NodeSpec{
 		Function:    dag.FuncDecide,
 		Op:          "inject",
 		Description: "stub: format candidates as injected context (real impl in Stage 2)",
 		Cost:        dag.Cost{LatencyMS: 30, Tokens: 20},
 		Handler: stubHandler(dag.Cost{LatencyMS: 30, Tokens: 20}, []dag.NodeSpec{
-			{Function: dag.FuncMaintain, Op: "capture", ID: "n4"},
+			{Function: dag.FuncDecide, Op: "coding_turn", ID: "n4"},
 		}),
 	})
 	_ = reg.Register(dag.NodeSpec{
