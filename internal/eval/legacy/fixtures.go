@@ -173,27 +173,69 @@ var CanonicalFixtures = []Fixture{
 }
 
 // SeedFixtures loads CanonicalFixtures into the given storage.
-// Integration with storage.Storage's actual Insight-insertion API is
-// the remaining ~2-3h of Phase B implementation; this stub returns
-// nil so callers can see the wiring point.
 //
-// Once implemented, the legacy runner uses this to populate per-test
-// storage instances before dispatching reflex/reflect/dream/etc.
+// Status: stub (returns nil). Implementing this is genuine multi-hour
+// work — see the design constraint below.
+//
+// Design constraint surfaced during Phase B work:
+//   storage.Storage has NO public Insight-insertion API. The internal
+//   `insights` map + `addInsightToSecondaryIndexes` are populated by
+//   `recordToInsight(r)` calls inside the JSONL-loading code path.
+//   The intended-by-design flow is:
+//      event captured → ingested → LLM-analyzed → Insight derived
+//   not direct fixture insertion.
+//
+// Two paths the implementing session must choose between:
+//
+//   (A) **Go through the ingest pipeline.** For each fixture:
+//       construct an events.Event with the fixture content, call the
+//       capture API, run analyze. Honors the storage API; produces
+//       real Insights via the real path. Cost: requires LLM available
+//       (for analyze), slow (per-fixture LLM call), and the analyzed
+//       Insight may not match the canonical fixture EventID/text
+//       exactly (the analyzer transforms content).
+//
+//   (B) **Bypass with an internal-only seed helper.** Add an internal
+//       `seedInsight` method to storage.Storage (or expose
+//       recordToInsight + index-add as a test-helper API) that
+//       inserts a constructed Insight directly. Faster + deterministic
+//       but creates a parallel write path the storage maintainers
+//       must keep in sync.
+//
+// Recommended: (B) with a clear "test-only" marker. The fixtures are
+// for eval verification, not production traffic; bypassing the
+// ingest pipeline is justified by the determinism requirement
+// (eval-principles 4: Reproducible — running the suite twice must
+// produce byte-identical output).
 //
 // Implementing session: see docs/prompts/loop-phase-b-legacy-cognition.md.
+// Carry-forward: this design decision is non-trivial; surface to
+// the user before committing to (A) or (B) since it adds API surface.
 func SeedFixtures(store *storage.Storage) error {
-	// STUB: real implementation will iterate CanonicalFixtures and
-	// insert each via store's Insight-insertion API + embedder.
-	// Returning nil here so the runner can detect "seeding attempted"
-	// vs "fixtures unavailable."
-	//
-	// The integration steps (for the implementing session):
-	//   1. For each fixture: construct *storage.Insight with
-	//      EventID, Category, Summary, Importance, Tags, CreatedAt.
-	//   2. Generate embeddings via the embedder used elsewhere
-	//      (pkg/llm.NewEmbedder configured for nomic-embed-text).
-	//   3. Insert into store; verify retrieval by EventID round-trips.
-	//   4. Update the runner to construct a temp storage + embedder
-	//      per scenario invocation, call SeedFixtures, then dispatch.
+	// STUB. See doc comment above for the design constraint.
 	return nil
+}
+
+// FixtureByID returns the canonical fixture with the given EventID,
+// or nil if not present. Useful for runners that want to validate a
+// scenario's expected_result_ids reference real fixtures before
+// dispatching.
+func FixtureByID(eventID string) *Fixture {
+	for i := range CanonicalFixtures {
+		if CanonicalFixtures[i].EventID == eventID {
+			return &CanonicalFixtures[i]
+		}
+	}
+	return nil
+}
+
+// AllFixtureIDs returns every canonical EventID. Useful for the
+// legacy runner's pre-flight check (verify scenario references
+// known fixtures before attempting to seed).
+func AllFixtureIDs() []string {
+	out := make([]string, len(CanonicalFixtures))
+	for i, f := range CanonicalFixtures {
+		out[i] = f.EventID
+	}
+	return out
 }
