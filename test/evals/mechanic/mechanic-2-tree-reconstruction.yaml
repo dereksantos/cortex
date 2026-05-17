@@ -1,0 +1,93 @@
+id: mechanic-2-tree-reconstruction
+version: 1
+suite: mechanic
+description: |
+  Tree reconstruction from parent_node_id chains. A known 5-node tree
+  (seed → 2 children → 2 grandchildren under one of them) executes;
+  reconstructing the tree from cell_results.jsonl parent pointers
+  produces the same shape.
+
+  Verifies: telemetry integrity; replay-from-journal correctness;
+  parent_node_id propagation through spawn.
+
+# Tree shape:
+#   n1 (root, seed)
+#   ├── n2 (child of n1)
+#   │   ├── n4 (grandchild of n1)
+#   │   └── n5 (grandchild of n1)
+#   └── n3 (child of n1)
+mocked_handlers:
+  - node_id: n1
+    function: sense
+    op: prompt
+    cost_consumed: {latency_ms: 50, tokens: 20}
+    spawn:
+      - node_id: n2
+        function: attend
+        op: reflex
+      - node_id: n3
+        function: attend
+        op: rerank
+  - node_id: n2
+    function: attend
+    op: reflex
+    cost_consumed: {latency_ms: 100, tokens: 40}
+    spawn:
+      - node_id: n4
+        function: remember
+        op: vector_search
+      - node_id: n5
+        function: represent
+        op: embed
+  - node_id: n3
+    function: attend
+    op: rerank
+    cost_consumed: {latency_ms: 80, tokens: 30}
+    spawn: []
+  - node_id: n4
+    function: remember
+    op: vector_search
+    cost_consumed: {latency_ms: 30, tokens: 0}
+    spawn: []
+  - node_id: n5
+    function: represent
+    op: embed
+    cost_consumed: {latency_ms: 60, tokens: 10}
+    spawn: []
+
+seed:
+  - node_id: n1
+    function: sense
+    op: prompt
+
+initial_budget:
+  latency_ms: 2000
+  tokens: 500
+  depth: 10
+
+expected:
+  total_nodes_executed: 5
+  # Each node's expected parent in the trace
+  parent_chain:
+    n1: null  # root
+    n2: n1
+    n3: n1
+    n4: n2
+    n5: n2
+  # Reconstructed tree shape (children sorted by execution order)
+  tree_shape:
+    n1:
+      children: [n2, n3]
+    n2:
+      children: [n4, n5]
+    n3:
+      children: []
+    n4:
+      children: []
+    n5:
+      children: []
+  final_outcome: ok
+
+failure_message_today: |
+  DAG executor not implemented (Phase 5 / dag-build-plan.md Stage 1).
+  This fixture is the TDD signal for parent_node_id chain integrity.

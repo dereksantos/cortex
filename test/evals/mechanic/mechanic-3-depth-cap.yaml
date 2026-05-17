@@ -1,0 +1,80 @@
+id: mechanic-3-depth-cap
+version: 1
+suite: mechanic
+description: |
+  Hard depth cap enforcement. Given budget.depth = 3 and a node at
+  depth 3 that attempts to spawn a child at depth 4, the spawn is
+  refused with error_code: depth_exceeded. The in-flight node
+  finishes normally; no crash.
+
+  Verifies: hard recursion bound; clean spawn refusal; in-flight
+  completion guarantee.
+
+# Chain: n1 (depth 0) → n2 (depth 1) → n3 (depth 2) → n4 (depth 3)
+# n4 attempts to spawn n5 at depth 4 — must be refused.
+mocked_handlers:
+  - node_id: n1
+    function: sense
+    op: prompt
+    cost_consumed: {latency_ms: 50, tokens: 10}
+    spawn:
+      - node_id: n2
+        function: attend
+        op: reflex
+  - node_id: n2
+    function: attend
+    op: reflex
+    cost_consumed: {latency_ms: 50, tokens: 10}
+    spawn:
+      - node_id: n3
+        function: attend
+        op: rerank
+  - node_id: n3
+    function: attend
+    op: rerank
+    cost_consumed: {latency_ms: 50, tokens: 10}
+    spawn:
+      - node_id: n4
+        function: decide
+        op: inject
+  - node_id: n4
+    function: decide
+    op: inject
+    cost_consumed: {latency_ms: 50, tokens: 10}
+    # n4 is at depth 3 (the cap). It tries to spawn n5 at depth 4.
+    # The executor must refuse this spawn; n4 itself still completes.
+    spawn:
+      - node_id: n5
+        function: maintain
+        op: capture
+  # n5 is declared but should never execute — depth cap refuses it.
+  - node_id: n5
+    function: maintain
+    op: capture
+    cost_consumed: {latency_ms: 10, tokens: 5}
+    spawn: []
+
+seed:
+  - node_id: n1
+    function: sense
+    op: prompt
+
+initial_budget:
+  latency_ms: 1000
+  tokens: 500
+  depth: 3  # explicit small cap so n4's spawn trips it
+
+expected:
+  total_nodes_executed: 4   # n1, n2, n3, n4 — NOT n5
+  spawn_refusals:
+    - parent: n4
+      child: n5
+      error_code: depth_exceeded
+  # n4 itself completes successfully despite its spawn being refused
+  n4_outcome: ok
+  final_outcome: ok  # overall turn ok; depth cap is a soft signal, not a turn-fail
+  n5_executed: false
+
+failure_message_today: |
+  DAG executor not implemented (Phase 5 / dag-build-plan.md Stage 1).
+  This fixture is the TDD signal for depth cap enforcement.

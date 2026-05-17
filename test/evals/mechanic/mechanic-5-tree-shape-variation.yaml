@@ -1,0 +1,104 @@
+id: mechanic-5-tree-shape-variation
+version: 1
+suite: mechanic
+description: |
+  Tree shape varies based on inputs. Two seeded runs (trivial prompt
+  vs. code-symbol-rich prompt) must produce measurably different
+  trees (depth, fan-out, op mix). This verifies the tree is actually
+  grown based on inputs, not always the same default walk.
+
+  Verifies: handlers self-modulate based on inputs; the "grown not
+  fixed" claim is real; planner ops route based on what they see.
+
+# This fixture runs TWO scenarios back-to-back and compares.
+# Both use the same seed but different prompt strings; the
+# attend.reflex handler is mocked to behave differently based on
+# the prompt input.
+
+scenarios:
+  - id: scenario-a-trivial
+    description: "Trivial prompt → shallow narrow tree"
+    initial_budget:
+      latency_ms: 2000
+      tokens: 4000
+      depth: 10
+    seed:
+      - node_id: n1
+        function: sense
+        op: prompt
+        attrs:
+          prompt: "what time is it"
+    mocked_handlers:
+      - node_id: n1
+        cost_consumed: {latency_ms: 20, tokens: 5}
+        spawn:
+          - {node_id: n2, function: attend, op: reflex}
+      - node_id: n2
+        # Trivial prompt — handler returns few candidates and skips rerank
+        cost_consumed: {latency_ms: 30, tokens: 10}
+        spawn:
+          - {node_id: n3, function: decide, op: inject}
+      - node_id: n3
+        cost_consumed: {latency_ms: 15, tokens: 8}
+        spawn: []
+    expected:
+      total_nodes_executed: 3
+      max_depth: 3
+      max_fanout: 1
+      ops_used: [sense.prompt, attend.reflex, decide.inject]
+
+  - id: scenario-b-code-symbol-rich
+    description: "Prompt with code symbol → deeper wider tree"
+    initial_budget:
+      latency_ms: 2000
+      tokens: 4000
+      depth: 10
+    seed:
+      - node_id: n1
+        function: sense
+        op: prompt
+        attrs:
+          prompt: "refactor AuthMiddleware to use JWT validation per token-validation.go"
+    mocked_handlers:
+      - node_id: n1
+        cost_consumed: {latency_ms: 20, tokens: 5}
+        spawn:
+          - {node_id: n2, function: attend, op: reflex}
+          - {node_id: n3, function: represent, op: parse_ast}
+          - {node_id: n4, function: remember, op: vector_search}
+      - node_id: n2
+        # Rich prompt — handler returns more candidates, rerank spawns
+        cost_consumed: {latency_ms: 50, tokens: 30}
+        spawn:
+          - {node_id: n5, function: attend, op: rerank}
+      - node_id: n3
+        cost_consumed: {latency_ms: 80, tokens: 0}
+        spawn: []
+      - node_id: n4
+        cost_consumed: {latency_ms: 40, tokens: 0}
+        spawn: []
+      - node_id: n5
+        cost_consumed: {latency_ms: 120, tokens: 80}
+        spawn:
+          - {node_id: n6, function: decide, op: inject}
+      - node_id: n6
+        cost_consumed: {latency_ms: 25, tokens: 15}
+        spawn: []
+    expected:
+      total_nodes_executed: 6
+      max_depth: 4
+      max_fanout: 3   # n1 spawns 3 children
+      ops_used: [sense.prompt, attend.reflex, attend.rerank, represent.parse_ast, remember.vector_search, decide.inject]
+
+# Cross-scenario assertions — the variation itself
+expected_variation:
+  depth_differs: true
+  fanout_differs: true
+  ops_differ: true
+  # The trivial scenario must have strictly fewer nodes
+  trivial_nodes_lt_rich: true
+
+failure_message_today: |
+  DAG executor not implemented (Phase 5 / dag-build-plan.md Stage 1).
+  This fixture is the TDD signal that the executor's tree-growth is
+  actually input-driven, not a fixed walk.

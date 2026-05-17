@@ -1,0 +1,77 @@
+id: mechanic-1-budget-decay
+version: 1
+suite: mechanic
+description: |
+  Budget decay determinism. Given a fixed seed + 3 mock nodes with
+  fixed CostConsumed values, the remaining_budget at each step
+  matches expected to the millisecond / token.
+
+  Verifies: decay arithmetic is correct; no accumulation drift; no
+  rounding errors across a small chain.
+
+# Mocked handlers — each node returns a fixed cost when invoked.
+# The executor must subtract these from the running budget.
+mocked_handlers:
+  - node_id: n1
+    function: sense
+    op: prompt
+    cost_consumed:
+      latency_ms: 100
+      tokens: 50
+    spawn:
+      - node_id: n2
+        function: attend
+        op: reflex
+  - node_id: n2
+    function: attend
+    op: reflex
+    cost_consumed:
+      latency_ms: 200
+      tokens: 75
+    spawn:
+      - node_id: n3
+        function: decide
+        op: inject
+  - node_id: n3
+    function: decide
+    op: inject
+    cost_consumed:
+      latency_ms: 150
+      tokens: 100
+    spawn: []
+
+seed:
+  - node_id: n1
+    function: sense
+    op: prompt
+
+initial_budget:
+  latency_ms: 1000
+  tokens: 500
+  depth: 10
+
+# After each node runs, the executor reports remaining budget.
+# Assertions are exact (no tolerance).
+expected:
+  remaining_budget_after:
+    - node: n1
+      latency_ms: 900
+      tokens: 450
+      depth: 9
+    - node: n2
+      latency_ms: 700
+      tokens: 375
+      depth: 8
+    - node: n3
+      latency_ms: 550
+      tokens: 275
+      depth: 7
+  final_outcome: ok
+  exhausted_axis: null
+  total_nodes_executed: 3
+
+# Until the DAG executor lands (Stage 1 v0), this fixture fails with
+# a structured row, not a crash.
+failure_message_today: |
+  DAG executor not implemented (Phase 5 / dag-build-plan.md Stage 1).
+  This fixture is the TDD signal for budget decay arithmetic.
