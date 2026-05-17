@@ -219,6 +219,15 @@ match each step to one of the 10 dimensions. Each step has a clear
 pass/fail criterion. The runner is explicitly deferred to Phase 5
 (the scenario is authored, not yet executable).
 
+**Status.** ✅ Done (2026-05-17). Authored at
+`test/evals/e2e/10-dim-library-service.yaml` — 10 sessions, each
+mapped 1:1 to a dimension via `dimension` / `dimension_name` /
+`metric_source` fields. Acceptance blocks reuse metrics named in
+`coverage-matrix.md`'s per-dimension sections (no new scoring
+scheme). Runner deferred to Phase 5 per `runner_notes` in the
+fixture; CLI-surface gaps required for execution are listed
+there.
+
 ---
 
 ## Phase F — Pre-integration baseline doc
@@ -254,7 +263,7 @@ All 6 phases complete:
 - Phase B: legacy/cognition green
 - Phase C: 5 mechanic fixtures authored (failing as expected)
 - Phase D: journeys status known
-- Phase E: 10-dim scenario authored
+- Phase E: 10-dim scenario authored ✅ (`test/evals/e2e/10-dim-library-service.yaml`)
 - Phase F: baseline doc consolidated
 
 Then proceed to [`dag-build-plan.md`](dag-build-plan.md).
