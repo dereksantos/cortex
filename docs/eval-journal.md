@@ -36,6 +36,47 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Phase A baseline complete
+
+Aggregate "before" snapshot for the DAG-protocol build per
+`docs/eval-prep-epic.md` Phase A. Loop:
+`docs/prompts/loop-eval-prep-phase-a.md`.
+
+**Common attribution** (all four suites unless noted):
+- Branch: `derek.s/dag-build`
+- Cortex binary: locally-built `bin/cortex` (`go build -o bin/cortex ./cmd/cortex`) pinned via `CORTEX_BINARY`
+- Provider: `openrouter` (resolved via macOS keychain `cortex-openrouter` per `pkg/llm/client.go:137` — `-p anthropic` ALIASES to OpenRouter when the keychain key is present, so the OpenRouter-style model id is mandatory)
+- Model: `anthropic/claude-haiku-4.5`
+- Spend ceilings raised to $25 run / $25 daily / $25 lifetime for the LongMemEval, SWE-bench, and ABR sweeps because the cost estimator (`internal/eval/v2/spend.go`) over-projects haiku-4.5 by ~250×; **actual total spend across all of Phase A ≈ $1.50**.
+
+**Headline numbers**:
+
+| Suite | Status | Headline number | Cells written |
+|---|---|---|---|
+| v2 scenarios (40+, end-to-end) | **BLOCKED** — Phase 1 telemetry gap | n/a (runner doesn't write `cell_results.jsonl`) | 0 to unified sink; 1 row in legacy `eval_scenario_results` per scenario |
+| LongMemEval (oracle, limit=25, both strategies) | recorded | baseline **15.6%** (5/32) · cortex **13.3%** (4/30); cortex injects 0 ctx | 62 cells in `cell_results.jsonl` |
+| SWE-bench Verified (limit=5, both strategies) | recorded | baseline **0%** (0/5) · cortex **0%** (0/5) on `astropy` subset | 11 cells in `cell_results.jsonl` |
+| ABR (v2 full sweep, 43 scenarios) | recorded (with Phase-1 caveat) | **0.586 run-level / 0.409 scenario-mean** vs ROADMAP's 0.77 | 0 to unified sink; 43 rows in legacy `eval_scenario_results` |
+
+**Cross-cutting findings worth carrying into Phase 6**:
+
+1. **`cell_results.jsonl` parity is the gating Phase-1 work.** Only the benchmark path (`cmd/cortex/commands/eval_benchmark.go:141`) calls `evalv2.Persister.PersistCell`. The v2 scenario runner and the ABR computation path don't — both write to legacy `eval_runs` / `eval_scenario_results` SQLite tables instead. Until that is unified, principle 6 (Structured) cannot be honored for v2 or ABR.
+2. **The `cortex-fast` vs `cortex-full` strategy taxonomy does not exist in the cell schema.** `internal/eval/v2/cellresult.go:44` allows only `baseline` / `cortex` / `frontier`. The loop's principle 8 ("no-context / Cortex-Fast / Cortex-Full as 3 distinct rows per scenario") is **structurally unsupported** today for *every* benchmark. Adding this distinction is a Phase 1 / DAG-protocol prerequisite, not a v2-only fix.
+3. **Cortex strategy injects 0 context across every benchmark run.** `injected_context_tokens=0` on every cortex cell in LongMemEval and SWE-bench. The pre-integration store has nothing relevant to either benchmark, so today's "cortex" strategy is "baseline + search-tax" (+~10% tokens, +~2 s latency on LongMemEval). The post-DAG delta will only be interpretable if Phase 5/6 pre-seeds the store for each benchmark.
+4. **Negative token reduction.** Across v2 (−12.8%) and LongMemEval (+9% tokens_in), cortex spends *more* tokens than baseline, not fewer. This contradicts the "Token Cost Reduction over time" North Star in `ROADMAP.md` Line 5.
+5. **ABR ≠ ROADMAP claim.** Run-level ABR is 0.586, not 0.77. ROADMAP needs either an update or an investigation; flagged per the loop's ≥20% deviation rule.
+6. **Cost estimator is ~250× pessimistic for haiku-4.5.** Real spend was $1.50 across all four suites combined; estimator wanted $50+ in ceiling headroom to permit them. Recalibrating `spend.EstimateCost` for the haiku-4.5 price band is a pre-req for letting the default $5 ceiling be the actual safety boundary the loop instructions assume.
+
+**Verification artifacts**:
+- Journal entries: this section plus the four per-suite entries below.
+- Structured cells (where principle 6 is honored): 73 rows in `.cortex/db/cell_results.jsonl` (62 LongMemEval + 11 SWE-bench), 73 entries in `.cortex/journal/eval/0001.jsonl`.
+- Structured cells (legacy-only sink): 45 rows in `.cortex/db/evals_v2.db` `eval_scenario_results` (43 from v2-full-sweep + 2 from single-scenario probes), 3 rows in `eval_runs`.
+- Commits: `f815d06` (v2 BLOCKED), `533ca06` (LongMemEval), `4dbeede` (SWE-bench), `94980d3` (ABR), and this summary commit (next).
+
+**Exit per loop**: STOP. Do not start Phase B in this session.
+
+---
+
 ### 2026-05-17 — ABR baseline (v2 full sweep) / 43 scenarios
 
 **Cortex**: `4dbeede` (branch `derek.s/dag-build`); `cortex_version=0.1.0`
