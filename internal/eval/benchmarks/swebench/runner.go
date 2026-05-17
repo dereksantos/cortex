@@ -32,6 +32,52 @@ type runnerPayload struct {
 // agent attempt AND a docker verifier pass).
 const defaultMaxRetries = 3
 
+// swebenchSystemPrompt is the system prompt the REPL uses for
+// SWE-bench attempts. Differences vs the REPL's default seed
+// (cmd/cortex/commands/repl.go defaultREPLSystemPrompt):
+//
+//   - Language/repo-neutral: SWE-bench Verified instances span django,
+//     sympy, astropy, scikit-learn, etc. — Python, not Go. The
+//     default's "You are a Go programmer" framing actively misleads.
+//   - Mentions list_dir + cortex_search: the OpenRouter (non-Ollama)
+//     path enables a 5-tool registry, but the default seed only
+//     mentions 3, so the agent under-uses the explorer tools on
+//     unfamiliar codebases.
+//   - Explicitly anti-skip: the prior probe's agent ran 5 tool calls
+//     reading code, then exited without write_file. The default's
+//     "respond with a short summary and NO further tool calls" line
+//     encouraged that. SWE-bench instead emphasizes "produce a source
+//     edit, then wait for verifier feedback."
+//   - Verifier-loop awareness: tells the agent it'll see the test
+//     failure as retry context on subsequent attempts.
+const swebenchSystemPrompt = `You are a software engineer fixing a bug in an open-source codebase.
+You are working inside a workdir that contains a clone of the repository.
+
+Available tools:
+  - list_dir(path): list the contents of a directory
+  - read_file(path): read a file
+  - write_file(path, content): create or replace a file
+  - run_shell(command, args): run shell commands available in your sandbox
+  - cortex_search(query): semantic search over project context (may be empty for new repos)
+
+Workflow:
+  1. Use list_dir + read_file to locate the source file(s) implicated by
+     the bug report.
+  2. Use write_file to apply your fix. Edit source code only — do NOT
+     modify test files or fixtures.
+  3. A test verifier runs after each of your attempts. If it fails, you
+     will see the failing test output as 'PREVIOUS ATTEMPT FAILED' in
+     your next turn — use it to refine the fix.
+
+Rules:
+  - Paths are relative to the workdir.
+  - Never write under .git or .cortex.
+  - Make the smallest change that makes the failing tests pass.
+  - You MUST produce at least one write_file call per attempt — reading
+    alone is not progress. If you cannot find the relevant file, list_dir
+    deeper and search broader before giving up.
+`
+
 // buildAgentPrompt returns the prompt the REPL feeds the agent. It
 // pairs the upstream problem_statement (always the bulk of the
 // signal) with the explicit list of FAIL_TO_PASS test names the
@@ -184,6 +230,16 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 	// what kept the prior single-shot baseline at 0/3 even on Sonnet.
 	prompt := buildAgentPrompt(inst)
 
+	// Write the SWE-bench-flavored system prompt to a temp file so we
+	// can pass it via the REPL's --system-prompt flag. The REPL's
+	// auto-seeded default declares the agent a "Go programmer" using
+	// `go build` — actively misleading on a Django repo, and a major
+	// reason the prior probe got zero source edits in 5 agent turns.
+	sysPromptPath := filepath.Join(workdir, "swebench-system-prompt.md")
+	if err := os.WriteFile(sysPromptPath, []byte(swebenchSystemPrompt), 0o644); err != nil {
+		return failedCell(inst, strategy, cfg, env, "write system prompt: "+err.Error()), nil
+	}
+
 	start := time.Now()
 	// Drive the REPL (the unified agent surface, same one humans use
 	// and that GoL eval drives in-process) via headless flags. The
@@ -192,11 +248,12 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 	// agent's next prompt as retry context. Up to maxRetries
 	// attempts, then the loop exits with the last verify result.
 	headlessOut, runErr := benchmarks.RunREPLHeadless(ctx, binary, benchmarks.REPLHeadlessOpts{
-		Workdir:    repoDir,
-		Model:      cfg.Model,
-		Prompt:     prompt,
-		Verifier:   verifierCmd,
-		MaxRetries: maxRetries,
+		Workdir:      repoDir,
+		Model:        cfg.Model,
+		Prompt:       prompt,
+		Verifier:     verifierCmd,
+		MaxRetries:   maxRetries,
+		SystemPrompt: sysPromptPath,
 	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {

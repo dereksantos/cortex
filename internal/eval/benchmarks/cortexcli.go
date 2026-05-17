@@ -114,11 +114,12 @@ func RunIngest(ctx context.Context, binary, workdir string) error {
 // RunCode when they need the REPL's verify-and-retry loop —
 // principle 1 (black-box CLI) over re-implementing retry in Go.
 type REPLHeadlessOpts struct {
-	Workdir    string
-	Model      string
-	Prompt     string
-	Verifier   string // shell command run after each attempt; exit 0 = pass
-	MaxRetries int    // total auto-retry budget (>=1)
+	Workdir      string
+	Model        string
+	Prompt       string
+	Verifier     string // shell command run after each attempt; exit 0 = pass
+	MaxRetries   int    // total auto-retry budget (>=1)
+	SystemPrompt string // path to a system prompt file; empty = REPL's auto-seeded default
 }
 
 // REPLHeadlessOutput is the parsed JSON summary the REPL emits on
@@ -172,6 +173,9 @@ func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) 
 	}
 	if opts.Verifier != "" {
 		args = append(args, "--verifier", opts.Verifier)
+	}
+	if opts.SystemPrompt != "" {
+		args = append(args, "--system-prompt", opts.SystemPrompt)
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)

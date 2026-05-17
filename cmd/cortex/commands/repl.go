@@ -126,6 +126,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxRetries := 1
 	jsonOutput := false
 	workdirOverride := ""
+	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -160,6 +161,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		case "--workdir":
 			if i+1 < len(args) {
 				workdirOverride = args[i+1]
+				i++
+			}
+		case "--system-prompt":
+			if i+1 < len(args) {
+				systemPromptOverride = args[i+1]
 				i++
 			}
 		case "-h", "--help":
@@ -211,6 +217,17 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.headless = autoRetry
 	if maxRetries > 0 {
 		state.maxRetries = maxRetries
+	}
+	// Override the auto-seeded system prompt when the caller pinned
+	// one. Benchmark harnesses use this to swap the Go-flavored
+	// default for a language/repo-appropriate prompt (e.g. SWE-bench
+	// on a Django repo wants Python tooling guidance, not `go build`).
+	if systemPromptOverride != "" {
+		b, rerr := os.ReadFile(systemPromptOverride)
+		if rerr != nil {
+			return fmt.Errorf("read --system-prompt %s: %w", systemPromptOverride, rerr)
+		}
+		state.systemPrompt = string(b)
 	}
 
 	// Headless one-shot path. Skips the stdin scanner entirely:
@@ -513,6 +530,10 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
       --max-retries N  Cap on auto-retry attempts (default 1).
       --json           Emit a one-line JSON summary on stdout instead of
                        the human-readable banner + session-saved tail.
+      --system-prompt FILE  Read the system prompt from FILE instead of
+                       the auto-seeded Go-flavored default. Useful for
+                       benchmark harnesses that need a different
+                       language / repo-shape guidance.
 
 In the REPL:
   /help                Show slash-command help.
