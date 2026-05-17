@@ -178,6 +178,11 @@
       "version": "0.1.0"
     },
     {
+      "name": "run",
+      "description": "Run a DAG by type (turn|think|dream|capture|eval)",
+      "version": "0.1.0"
+    },
+    {
       "name": "search",
       "description": "Search context using cognitive retrieval",
       "version": "0.1.0",
