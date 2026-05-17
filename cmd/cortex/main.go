@@ -91,6 +91,14 @@ func main() {
 		if cmd := commands.Get("code"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
+	case "run":
+		// `cortex run --type=<dag-type>` invokes the DAG executor
+		// per docs/dag-build-plan.md Stage 1 v0. No config or storage
+		// needed for v0; later stages will wire to the unified Phase
+		// 1 telemetry sink.
+		if cmd := commands.Get("run"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
 	case "tools":
 		if cmd := commands.Get("tools"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
