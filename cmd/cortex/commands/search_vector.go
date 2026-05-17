@@ -115,7 +115,7 @@ func (c *SearchVectorCommand) Execute(ctx *Context) error {
 	}
 	elapsed := time.Since(start)
 
-	emitter := cliout.NewEmitter(*workdir)
+	emitter := EmitterFor(ctx, *workdir)
 	return emitSearchVectorJSON(os.Stdout, emitter, results, *contentType, *topK, elapsed, modelID, provider)
 }
 

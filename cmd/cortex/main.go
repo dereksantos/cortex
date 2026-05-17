@@ -273,6 +273,7 @@ func runCommand(command string, cmd commands.Command, ctx *commands.Context) {
 	ctx.Args = cliout.StripNoTelemetry(ctx.Args)
 	workdir := cliout.WorkdirFromArgs(ctx.Args)
 	inv := cliout.NewInvocation(command, cliout.CortexFunctionFor(command), workdir)
+	ctx.Invocation = inv
 
 	err := cmd.Execute(ctx)
 

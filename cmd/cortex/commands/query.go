@@ -149,7 +149,7 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	// NOT applied — benchmarks need a stable contract over the cognitive
 	// pipeline's output, not an opportunistic SearchEvents rescue.
 	if *jsonFlag {
-		emitter := cliout.NewEmitter(*workdirFlag)
+		emitter := EmitterFor(ctx, *workdirFlag)
 		return emitter.Ok(os.Stdout, buildSearchPayload(strings.ToLower(strings.Fields(modeStr)[0]), elapsed, result))
 	}
 

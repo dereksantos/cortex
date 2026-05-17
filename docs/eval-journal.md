@@ -36,6 +36,25 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Phase 1 complete; Phase A re-run viable
+
+**Cortex**: `14d2170` (branch `derek.s/dag-build`)
+**Loop**: `docs/prompts/loop-phase-1-tool-surface.md`
+**Result**: All three Phase 1 deliverables land green (`go test ./...` passes other than the pre-existing OpenRouter-credit failures in `internal/cognition/nuance_test.go`). `tools.json` is generated from the registry; every `--json` path wraps output in `pkg/cliout.Envelope`; every CLI invocation writes a `{source:"cli", trace_id, cortex_function, command, latency_ms, ok}` row to `.cortex/db/cell_results.jsonl` (or skips silently when there's no `.cortex/` tree nearby).
+
+**Why this run**: Close the BLOCKED status on the Phase A v2 / ABR baselines below — both lacked the unified telemetry sink that Phase 1 lands.
+
+**Observations**:
+- **Trace-id joins envelopes to rows.** `cliout.Invocation.Emitter(workdir)` shares its trace id with the envelope it emits, so an analyst reading `cell_results.jsonl` can pivot directly into the matching envelope payload that came out on stdout. Verified end-to-end with `cortex search --workdir <tmp> --json "x"`: envelope `meta.trace_id == ` JSONL row `trace_id`.
+- **Schema coexistence works.** Eval `CellResult` rows (no `source` field, populated `run_id`/`scenario_id`/etc.) and CLI telemetry rows (`source:"cli"`, telemetry-specific fields) live in the same `.cortex/db/cell_results.jsonl` without breaking either consumer. Discriminator is `source` field presence.
+- **`--no-telemetry` + `CORTEX_NO_TELEMETRY` env** both opt out; verified row count stays unchanged across both modes.
+- **Ad-hoc CLI invocations from a non-cortex cwd skip silently** instead of littering the user's home with stray `.cortex/` trees — confirmed via tempdir test.
+
+**Follow-ups**:
+- File a v2 runner change to thread `ctx.Invocation` through `internal/eval/v2/*` so the v2 scenario runner can emit telemetry rows alongside its existing `eval_scenario_results` SQLite writes (the v2 BLOCKED entry below remains accurate as a snapshot until that lands).
+- Re-running the full v2 (40 scenarios) + ABR sweep is now mechanically possible but deliberately deferred: this loop's goal was the *floor*, not the rerun itself. The next eval loop should consume that floor.
+- The legacy ABR sweep that was BLOCKED on principle 6 will now produce CLI rows when re-run (it shells out via `internal/eval/benchmarks/cortexcli.go`'s `RunSearch` / `RunCode`, both migrated). Rerunning it is a separate eval-loop entry.
+
 ### 2026-05-17 — ABR diagnostic: 0.586 vs 0.77 resolved as stale doc
 
 **Cortex**: `861f0ff` (branch `derek.s/dag-build`)

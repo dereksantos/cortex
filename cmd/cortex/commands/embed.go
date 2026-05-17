@@ -95,7 +95,7 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		return errors.New("no embedder available (install Ollama or Hugot)")
 	}
 
-	emitter := cliout.NewEmitter(*workdir)
+	emitter := EmitterFor(ctx, *workdir)
 	if *bulk {
 		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout, emitter)
 	}

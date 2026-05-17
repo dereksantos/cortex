@@ -93,6 +93,34 @@ func NewInvocation(command, cortexFunction, workdir string) *Invocation {
 // to telemetry rows requires this id matching across both.
 func (inv *Invocation) TraceID() string { return inv.traceID }
 
+// Emitter returns an envelope Emitter that shares this invocation's
+// trace id and start time. Commands SHOULD construct their `--json`
+// emitter via this method instead of NewEmitter so the envelope's
+// `meta.trace_id` matches the telemetry row's `trace_id` — that's the
+// join key analysis pipelines use to correlate envelopes with rows.
+//
+// projectDir is forwarded to the Emitter for path redaction; pass the
+// command's --workdir (or "") so paths outside the workdir get redacted.
+func (inv *Invocation) Emitter(projectDir string) *Emitter {
+	home, _ := os.UserHomeDir()
+	cortexHome := ""
+	if home != "" {
+		cortexHome = filepath.Join(home, ".cortex")
+	}
+	abs := projectDir
+	if abs != "" {
+		if resolved, err := filepath.Abs(abs); err == nil {
+			abs = resolved
+		}
+	}
+	return &Emitter{
+		traceID:    inv.traceID,
+		start:      inv.start,
+		projectDir: abs,
+		homeDir:    cortexHome,
+	}
+}
+
 // FinishOk builds a success row.
 func (inv *Invocation) FinishOk() TelemetryRow {
 	return inv.row(true, "")

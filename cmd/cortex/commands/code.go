@@ -235,7 +235,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 
 	loopRes := h.LastLoopResult()
 	if jsonOut {
-		emitter := cliout.NewEmitter(resolvedWorkdir)
+		emitter := EmitterFor(ctx, resolvedWorkdir)
 		return emitCodeJSON(os.Stdout, emitter, resolvedWorkdir, model, hr, loopRes)
 	}
 

@@ -274,7 +274,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			fmt.Fprintf(os.Stderr, "  turn error: %v\n", turnErr)
 		}
 		if jsonOutput {
-			emitOneShotJSON(state, turnErr)
+			emitOneShotJSON(ctx, state, turnErr)
 		} else {
 			fmt.Printf("\nsession saved → %s\n", state.sessionPath)
 		}
@@ -535,7 +535,7 @@ Rules:
 // full turn row already lands in <sessionDir>/session.jsonl for callers
 // that want the long-form transcript; this is just the at-a-glance
 // "did it pass, what did it cost" view.
-func emitOneShotJSON(s *replState, turnErr error) {
+func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
 	data := map[string]any{
 		"session_id":   s.sessionID,
 		"session_path": s.sessionPath,
@@ -543,7 +543,7 @@ func emitOneShotJSON(s *replState, turnErr error) {
 		"model":        s.model,
 		"accepted":     s.turns > 0, // finalize() only bumps turns on accept
 	}
-	emitter := cliout.NewEmitter(s.workdir)
+	emitter := EmitterFor(ctx, s.workdir)
 	if turnErr != nil {
 		// Failure surfaces both as ok=false + structured error code AND in
 		// the data payload's legacy "error" field so the existing benchmark

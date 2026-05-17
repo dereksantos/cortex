@@ -11,10 +11,18 @@ import (
 )
 
 // Context holds shared dependencies for command execution.
+//
+// Invocation is the per-invocation telemetry handle the dispatcher
+// stamped in main.go's runCommand. Commands that emit `--json` should
+// build their envelope via `ctx.Invocation.Emitter(workdir)` (rather
+// than `cliout.NewEmitter`) so the envelope's meta.trace_id matches
+// the telemetry row's trace_id. Nil when the command was invoked
+// outside the runCommand wrapper (e.g. in-process tests).
 type Context struct {
-	Config  *config.Config
-	Storage *storage.Storage
-	Args    []string
+	Config     *config.Config
+	Storage    *storage.Storage
+	Args       []string
+	Invocation *cliout.Invocation
 }
 
 // Command defines the interface for CLI commands.
@@ -53,6 +61,20 @@ type ArgsDescriber interface {
 // manifest generator's caller.
 type Versioner interface {
 	SurfaceVersion() string
+}
+
+// EmitterFor returns an envelope emitter wired to ctx.Invocation
+// (sharing its trace id + start time) when the dispatcher provided
+// one, or a fresh cliout.NewEmitter otherwise. Use this in `--json`
+// paths so the envelope's meta.trace_id matches the telemetry row.
+//
+// workdir is the command's --workdir flag value (forwarded for path
+// redaction).
+func EmitterFor(ctx *Context, workdir string) *cliout.Emitter {
+	if ctx != nil && ctx.Invocation != nil {
+		return ctx.Invocation.Emitter(workdir)
+	}
+	return cliout.NewEmitter(workdir)
 }
 
 // registry holds all registered commands.
