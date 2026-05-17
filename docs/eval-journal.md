@@ -36,6 +36,58 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — ABR baseline (v2 full sweep) / 43 scenarios
+
+**Cortex**: `4dbeede` (branch `derek.s/dag-build`); `cortex_version=0.1.0`
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval -d test/evals/v2 -p anthropic -m anthropic/claude-haiku-4.5 -o json
+```
+**Versions**: provider=`openrouter`, llm=`anthropic/claude-haiku-4.5`, judge=none (NDCG-based ABR, not judge-based), `cortex_version=0.1.0`. Persisted run id: `eval-20260517-030846` in `.cortex/db/evals_v2.db` table `eval_runs` + 43 per-scenario rows in `eval_scenario_results`.
+
+**Result** (top-line aggregates from this run):
+
+| Metric | Value |
+|---|---|
+| Scenarios run | 43 |
+| Pass | 39 / 43 (90.7%) |
+| Avg ABR (run-level / cell-weighted, from `eval_runs.avg_abr`)     | **0.586** |
+| Avg ABR (scenario-mean of `eval_scenario_results.avg_abr`)         | **0.409** |
+| Avg lift (cortex vs baseline judge-free score) | +31.8% |
+| Avg Fast NDCG | 0.093 |
+| Avg Full NDCG | 0.535 |
+| Total baseline tokens / cortex tokens | 62 968 / 71 021 |
+| Avg token reduction | **−12.8%** (cortex uses *more* tokens than baseline) |
+
+ABR distribution across 43 scenarios:
+
+| ABR bucket | Count | Scenarios (sample) |
+|---|---|---|
+| 0.00          | 14 | `abstention-missing-info`, `adversarial-abstention`, `agentic-find-*`, `db-patterns`, `locomo-*`, `updates-api-versions`, `temporal-release-history` (the locomo and agentic-find scenarios show Full NDCG = 0, so 0/0 → 0) |
+| 0.25–0.50     | 14 | `abstention-partial-info`, `reasoning-debug-journey`, `debugging`, `deployment`, `go-*`, `error-handling`, `temporal-*` |
+| 0.50–0.75     | 9  | `extraction-*`, `security-practices`, `api-design`, `auth-evolution`, `auth-patterns`, `code-review`, `adversarial-defaults`, `updates-policy-changes` |
+| 0.75–1.00     | 6  | `cache-evolution`, `extraction-infra-config`, `abstention-ambiguous-context`, `adversarial-noise`, `api-evolution`, `error-convention`, `testing-patterns` |
+
+**Why this run**: Phase A Step 4 — establish current ABR. The ABR trend was reading only two prior `auth-patterns`-only runs (0.67 latest); a full-suite sweep is needed for an honest baseline.
+
+**Observations**:
+- **Run-level avg ABR (0.586) and ROADMAP's 0.77 disagree by ~24%.** Per the loop's "When to ask for human input" rule, this is a ≥20% deviation worth surfacing. The user pre-authorized continuing without pausing; flagging for follow-up. Likely explanations: (a) ROADMAP cites a stale single-scenario reading, (b) prior sweeps used a different model or context priming, or (c) recent code changes regressed ABR. The git SHA on the latest stored eval row is `55d7427`, same as this branch's recent commit — so no obvious "old code" alibi.
+- **The scenario-mean (0.409) is lower than the run-level (0.586)**: cell-weighted averaging hides per-scenario zeros that the unweighted mean reveals. 14 scenarios sit at ABR=0 (often because Full NDCG itself is 0, e.g. `locomo-*` and `agentic-find-*` — their `expect` blocks don't seed retrieval correctly).
+- **Cortex uses 12.8% MORE tokens than baseline**, not fewer — the "Token Cost Reduction" North Star in `ROADMAP.md` is currently negative. Consistent with the LongMemEval finding (cortex strategy is mostly search-tax pre-integration).
+- Pass-rate of 90.7% reflects the lift-based pass criterion (`avg_lift > 0` ties pass), not actual task success. Don't confuse it with LongMemEval or SWE-bench task-success pass rates.
+- **Principle 6 (Structured) gap reaffirmed.** This entire ABR baseline lives in `eval_scenario_results` SQLite only — no `cell_results.jsonl` row, no journal entry. Same Phase-1 telemetry blocker recorded in the v2 entry below; the ABR baseline is therefore officially BLOCKED on principle 6 but recorded here as the best available pre-integration anchor.
+
+**Follow-ups**:
+- Reconcile ROADMAP.md's 0.77 → 0.586 (this run) — either update the ROADMAP number, or investigate the regression.
+- 14 scenarios with Full NDCG = 0 are silently zeroing the ABR. Either fix the `expect` blocks (so retrieval can be scored) or exclude them from the ABR mean — current behavior penalizes the metric for fixture bugs.
+- Negative token reduction (cortex > baseline) is a North Star regression worth surfacing separately; recommend a dedicated follow-up.
+
+---
+
 ### 2026-05-17 — SWE-bench (verified, limit=5) / baseline vs cortex
 
 **Cortex**: `533ca06` (branch `derek.s/dag-build`); `cortex_version=0.1.0`
