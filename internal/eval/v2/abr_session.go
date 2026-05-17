@@ -250,7 +250,17 @@ func runREPLPass(parentCtx context.Context, opts ABRSessionOptions, workdir, str
 		defer cancel()
 	}
 
-	args := []string{"repl", "--workdir", workdir, "--model", opts.Model}
+	// Bare `cortex` (no subcommand) enters the interactive REPL. See
+	// `cortex --help`: "Bare cortex with no subcommand enters an
+	// interactive coding REPL in the current directory."
+	//
+	// --full-tools is mandatory for ABR: when routed to local Ollama
+	// the REPL auto-drops cortex_search from the tool registry for
+	// tiny models (repl.go:899 SetMinimalTools). Without cortex_search
+	// the agent literally cannot use the retrieval pipeline this
+	// adapter is trying to measure. The flag is a no-op for OpenRouter
+	// / Anthropic-direct paths where the auto-drop never fires.
+	args := []string{"--workdir", workdir, "--model", opts.Model, "--full-tools"}
 	cmd := exec.CommandContext(ctx, opts.REPLBinary, args...)
 
 	// Inherit parent env so OPENROUTER_API_KEY, ANTHROPIC_API_KEY, PATH
