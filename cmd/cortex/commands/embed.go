@@ -42,6 +42,16 @@ func (c *EmbedCommand) Description() string {
 	return "Embed text to a vector (and optionally store under doc_id/content_type)"
 }
 
+// DescribeFlags surfaces embed's flags into tools.json.
+func (c *EmbedCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("text", "", "Text to embed (required unless --bulk)")
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex (required with --store or --bulk)")
+	fs.Bool("store", false, "Store the resulting vector instead of just emitting it")
+	fs.String("doc-id", "", "Content ID to store the embedding under (required when --store is set without --bulk)")
+	fs.String("content-type", "corpus", "Content type bucket for stored embeddings")
+	fs.Bool("bulk", false, "Read NDJSON {doc_id, content_type?, text} from stdin and store each. Implies --store.")
+}
+
 // Execute parses flags and dispatches to one of the three modes:
 // bulk (NDJSON in, count out), store (single text → stored), or
 // default (single text → vector JSON).

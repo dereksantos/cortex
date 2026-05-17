@@ -13,6 +13,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -35,6 +36,21 @@ func (c *SearchCommand) Name() string { return "search" }
 // Description returns the command description.
 func (c *SearchCommand) Description() string { return "Search context using cognitive retrieval" }
 
+// DescribeFlags surfaces search's flags into tools.json.
+func (c *SearchCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
+	fs.Int("limit", 5, "Maximum number of results")
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex (overrides default global storage)")
+	fs.Bool("json", false, "Emit a single JSON envelope on stdout with full result content (no truncation)")
+}
+
+// DescribeArgs surfaces search's positional argument.
+func (c *SearchCommand) DescribeArgs() []cliout.ArgSpec {
+	return []cliout.ArgSpec{
+		{Name: "query", Description: "Search query (free text; words joined with spaces)", Required: true, Variadic: true},
+	}
+}
+
 // Execute runs the search command.
 func (c *SearchCommand) Execute(ctx *Context) error {
 	// Parse flags
@@ -42,7 +58,7 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	modeFlag := searchFlags.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
 	limitFlag := searchFlags.Int("limit", 5, "Maximum number of results")
 	workdirFlag := searchFlags.String("workdir", "", "Open storage rooted at <workdir>/.cortex (overrides default global storage)")
-	jsonFlag := searchFlags.Bool("json", false, "Emit a single JSON object on stdout with full result content (no truncation)")
+	jsonFlag := searchFlags.Bool("json", false, "Emit a single JSON envelope on stdout with full result content (no truncation)")
 	searchFlags.Parse(ctx.Args)
 
 	args := searchFlags.Args()

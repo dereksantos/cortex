@@ -14,6 +14,12 @@ import (
 
 const version = "0.1.0"
 
+func init() {
+	// Stamp the manifest generator with the binary's version so
+	// regenerating tools.json picks up the build that's running.
+	commands.BinaryVersion = version
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		// Bare `cortex` (no subcommand) drops into the interactive REPL
@@ -124,6 +130,14 @@ func main() {
 			ctx := &commands.Context{
 				Args: os.Args[2:],
 			}
+			if err := cmd.Execute(ctx); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	case "tools":
+		if cmd := commands.Get("tools"); cmd != nil {
+			ctx := &commands.Context{Args: os.Args[2:]}
 			if err := cmd.Execute(ctx); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)

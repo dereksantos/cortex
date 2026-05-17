@@ -1,0 +1,317 @@
+{
+  "schema_version": "1.0.0",
+  "generated_from": "cortex command registry",
+  "tools": [
+    {
+      "name": "analyze",
+      "description": "Run LLM analysis on recent events",
+      "version": "0.1.0"
+    },
+    {
+      "name": "capture",
+      "description": "Capture event from stdin (used by AI tools)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "cli",
+      "description": "Route slash command arguments for /cortex",
+      "version": "0.1.0"
+    },
+    {
+      "name": "code",
+      "description": "Run the Cortex coding harness against a workdir (requires --workdir and --model)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "daemon",
+      "description": "Run background context processor",
+      "version": "0.1.0"
+    },
+    {
+      "name": "dream-debug",
+      "description": "Run Dream cycles synchronously and dump regions + fractal metadata",
+      "version": "0.1.0"
+    },
+    {
+      "name": "embed",
+      "description": "Embed text to a vector (and optionally store under doc_id/content_type)",
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "bulk",
+          "type": "bool",
+          "default": "false",
+          "description": "Read NDJSON {doc_id, content_type?, text} from stdin and store each. Implies --store."
+        },
+        {
+          "name": "content-type",
+          "type": "string",
+          "default": "corpus",
+          "description": "Content type bucket for stored embeddings"
+        },
+        {
+          "name": "doc-id",
+          "type": "string",
+          "description": "Content ID to store the embedding under (required when --store is set without --bulk)"
+        },
+        {
+          "name": "store",
+          "type": "bool",
+          "default": "false",
+          "description": "Store the resulting vector instead of just emitting it"
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "description": "Text to embed (required unless --bulk)"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex (required with --store or --bulk)"
+        }
+      ]
+    },
+    {
+      "name": "entities",
+      "description": "Show knowledge graph entities",
+      "version": "0.1.0"
+    },
+    {
+      "name": "eval",
+      "description": "Run evaluation scenarios",
+      "version": "0.1.0"
+    },
+    {
+      "name": "feed",
+      "description": "Seed knowledge from files or directories",
+      "version": "0.1.0"
+    },
+    {
+      "name": "forget",
+      "description": "Remove outdated context",
+      "version": "0.1.0"
+    },
+    {
+      "name": "graph",
+      "description": "Show entity relationship graph",
+      "version": "0.1.0"
+    },
+    {
+      "name": "info",
+      "description": "Show system info and model recommendations",
+      "version": "0.1.0"
+    },
+    {
+      "name": "ingest",
+      "description": "Move queued events to database",
+      "version": "0.1.0"
+    },
+    {
+      "name": "init",
+      "description": "Initialize Cortex in the current directory",
+      "version": "0.1.0"
+    },
+    {
+      "name": "inject-context",
+      "description": "Inject relevant context into prompt for hooks",
+      "version": "0.1.0"
+    },
+    {
+      "name": "insights",
+      "description": "Show extracted insights",
+      "version": "0.1.0"
+    },
+    {
+      "name": "install",
+      "description": "Install Cortex hooks for Claude Code",
+      "version": "0.1.0"
+    },
+    {
+      "name": "journal",
+      "description": "Journal operations (rebuild, replay, verify, show, tail, migrate, ingest)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "mcp",
+      "description": "Start MCP server (for cross-tool access)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "measure",
+      "description": "Measure prompt quality for small context windows",
+      "version": "0.1.0"
+    },
+    {
+      "name": "overview",
+      "description": "Show context overview (visual summary)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "process",
+      "description": "Process queue + analyze (backward compat)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "projects",
+      "description": "List registered projects",
+      "version": "0.1.0"
+    },
+    {
+      "name": "prune",
+      "description": "Check/manage context size relative to project",
+      "version": "0.1.0"
+    },
+    {
+      "name": "recent",
+      "description": "Show recent captured events",
+      "version": "0.1.0"
+    },
+    {
+      "name": "reembed",
+      "description": "Re-generate embeddings with current model",
+      "version": "0.1.0"
+    },
+    {
+      "name": "repl",
+      "description": "Start an interactive coding REPL in the current directory (default model: qwen2.5-coder:1.5b via Ollama)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "search",
+      "description": "Search context using cognitive retrieval",
+      "version": "0.1.0",
+      "args": [
+        {
+          "name": "query",
+          "description": "Search query (free text; words joined with spaces)",
+          "required": true,
+          "variadic": true
+        }
+      ],
+      "flags": [
+        {
+          "name": "json",
+          "type": "bool",
+          "default": "false",
+          "description": "Emit a single JSON envelope on stdout with full result content (no truncation)"
+        },
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "5",
+          "description": "Maximum number of results"
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "default": "fast",
+          "description": "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex (overrides default global storage)"
+        }
+      ]
+    },
+    {
+      "name": "search-vector",
+      "description": "Vector-search the workdir's storage (--text or --vector); JSON output",
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "content-type",
+          "type": "string",
+          "description": "Filter results to a single content type bucket (empty = no filter)"
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "description": "Query text — embed and search in one shot"
+        },
+        {
+          "name": "threshold",
+          "type": "float64",
+          "default": "0",
+          "description": "Minimum similarity score to include (0.0 = no filter)"
+        },
+        {
+          "name": "top-k",
+          "type": "int",
+          "default": "10",
+          "description": "Maximum number of results to return"
+        },
+        {
+          "name": "vector",
+          "type": "string",
+          "description": "Pre-computed query vector as JSON array (alternative to --text)"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex (required)"
+        }
+      ]
+    },
+    {
+      "name": "session-start",
+      "description": "Print session start instructions for hooks",
+      "version": "0.1.0"
+    },
+    {
+      "name": "stats",
+      "description": "Show storage statistics",
+      "version": "0.1.0"
+    },
+    {
+      "name": "status",
+      "description": "Show status (for status line)",
+      "version": "0.1.0"
+    },
+    {
+      "name": "stop",
+      "description": "Handle session stop and capture transcript for hooks",
+      "version": "0.1.0"
+    },
+    {
+      "name": "test",
+      "description": "Test LLM analysis quality",
+      "version": "0.1.0"
+    },
+    {
+      "name": "tools",
+      "description": "Generate the tools.json manifest from the command registry",
+      "version": "1.0.0",
+      "flags": [
+        {
+          "name": "check",
+          "type": "bool",
+          "default": "false",
+          "description": "Verify the committed manifest matches the generator output; exit 1 on drift"
+        },
+        {
+          "name": "out",
+          "type": "string",
+          "default": "tools.json",
+          "description": "Path to write manifest to (use '-' for stdout)"
+        },
+        {
+          "name": "version",
+          "type": "string",
+          "description": "Version string stamped on tools without their own SurfaceVersion (defaults to binary version)"
+        }
+      ]
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove Cortex hooks from Claude Code",
+      "version": "0.1.0"
+    },
+    {
+      "name": "watch",
+      "description": "Watch cognitive activity in real-time",
+      "version": "0.1.0"
+    }
+  ]
+}

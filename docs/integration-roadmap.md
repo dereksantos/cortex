@@ -227,10 +227,10 @@ phase depends on. Without this, no later change is honestly measurable.
 
 **Deliverables.**
 
-1. **`tools.json` generator** (axis 1 Contract).
-   - Generated from the cobra command tree at build time.
-   - Includes name, JSON schema, description, version field.
-   - CI diff that fails when the surface changes without a version bump.
+1. **[x] `tools.json` generator** (axis 1 Contract).
+   - Generated from the command registry via `cortex tools` / `go generate ./cmd/cortex/commands/`.
+   - Includes per-tool name, description, version, args, and flag schema.
+   - `cortex tools --check` fails when the committed `tools.json` diverges from the generator output (CI hook + `TestToolsJSONUpToDate`).
 
 2. **Uniform result envelope** (axis 4 Result).
    - `{ok, data, error, meta:{trace_id, latency_ms}}` shape.
