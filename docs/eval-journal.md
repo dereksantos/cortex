@@ -36,6 +36,62 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Auto-capture loop reinstated: ABR=1.000 on intra-session JWT scenario
+
+**Cortex**: `9b6539b` (branch `derek.s/dag-build`)
+**Command**:
+```
+RUN_ABR_SESSION=1 \
+  CORTEX_ABR_MODEL=anthropic/claude-haiku-4.5 \
+  CORTEX_ABR_JUDGE=anthropic/claude-haiku-4.5 \
+  go test ./internal/eval/v2 -run TestABRSession_Real -v \
+  -timeout 30m -count=1
+```
+**Versions**:
+- Adapter: `internal/eval/v2/abr_session.go` @ `9b6539b`
+- REPL agent: `anthropic/claude-haiku-4.5` via OpenRouter (keychain)
+- Judge: `anthropic/claude-haiku-4.5` via OpenRouter (keychain) — `ScoreWithJudgeCriteria` → `CompositeQuality`
+- Auto-capture: REPL's existing `captureTurn` now writes to both the journal AND the shared Storage; the harness's `cortex_search` tool retrieves from that same shared Cortex.
+- Embedder: not exercised (Reflex falls back to text-search; no precomputed embeddings in the per-eval store)
+
+**Result**:
+- **MeanABR = 1.000** (denominator: 4 turns where Full > 0; all 4 turns scored)
+- **MeanFast = 0.910 · MeanFull = 0.910** — both passes high quality, both grounded in retrieved content
+- Per-turn ABR: 0.973 / 1.000 / 1.029 / 1.000
+- 59.6s end-to-end · cost ≈ $0.02 (4 turns × 2 passes × judge calls)
+- 8 CellResults written (cortex-fast / cortex-full × 4 turns, shared session_id, turn_index 0-3)
+
+**Why this run**: The prior run on the same plumbing (commit `7362d4d`, journal entry below) hit `MeanFast=0.093 / MeanFull=0.197` — both responses kept saying "store is empty." The root cause was discovered as a two-part gap, **not** a tiny-model JSON-as-text artifact:
+
+1. REPL had a `captureClient` but never invoked it from the turn loop. Captures never landed anywhere.
+2. Even if they had, the `cortex_search` tool constructed its own `Storage` separate from any capture path — in-memory indexes drifted, captures from one were invisible to the other.
+
+Both fixes landed in this commit (`9b6539b`):
+- `capture.NewWithStorage` writes journal AND `storage.StoreEvent` (synchronous, in-process searchable).
+- `replState` now constructs ONE shared `Storage + Cortex` at session init, passed to both the captureClient and the harness's cortex_search tool via `SetSharedCortex`.
+
+**Observations**:
+
+- **Auto-capture is real.** Turn-1's agent response was *"JWT tokens enable stateless horizontal scaling by eliminating server-side session storage dependencies."* Turn-2's response: *"Based on the cortex store search, here's what I found ... 'JWT tokens enable stateless horizontal scaling by eliminating server-side session storage dependencies.'"* — the agent is quoting turn-1 verbatim, meaning `cortex_search` retrieved turn-1's captured event. End-to-end pipeline works.
+
+- **Think actually runs and accumulates.** Per-turn budget shows decay: 5 → 4 → 4 → 4 across the 4 turns (Think consumed capacity as patterns emerged). Each turn shows `Think: starting (budget: N) ... completed (1 ops)` in the REPL log. This was nominally true before but with no events to actually learn from; now it has signal.
+
+- **ABR = 1.000 is the expected outcome for this scenario size.** With one captured decision and 3 follow-up retrievals on the same topic, Reflex finds the decision on every Full pass too, so Reflect has nothing to rerank — Full and Fast converge by construction. The story to tell here is: "the captures land, retrieval works, scoring matches." Not: "ABR has reached 1.0 as a research milestone."
+
+- **The classic ABR shape (cold-start → convergence over many turns) needs a larger N scenario.** `abr_convergence.yaml` had 10 queries across multiple domains; porting that shape (with captures triggered along the way to populate the topical store mid-session) is the next step to produce a non-degenerate ABR < 1 from a meaningful place.
+
+- **`InjectedContextTokens` is currently 0 on every emitted CellResult.** The adapter doesn't yet plumb the `cortex_search` tool's `observedInjectedTokens` (`internal/harness/tools.go:33`) into the per-turn CellResult. Functional but the cell field reads as 0 even when injection actually happened — the LongMemEval-style "cortex injects 0 context" check should be performed via session.jsonl payload size for now, not the cell field.
+
+- **Bonus carry-through for LongMemEval / SWE-bench.** Same `captureTurn` path means every REPL-driven benchmark now auto-populates the store as the agent works. The "cortex injects 0 context across every benchmark run" cross-cutting finding from the Phase A summary is *structurally* addressed for any benchmark routed through the REPL harness, not just ABR. SWE-bench's multi-attempt retry pattern would benefit immediately: failed attempt N captures into the store, attempt N+1 can `cortex_search` for what went wrong.
+
+**Follow-ups**:
+- Wire `observedInjectedTokens` from the harness tool registry into the per-turn CellResult so analytics can spot 0-context cells without re-reading session.jsonl.
+- Port the legacy `abr_convergence.yaml` shape (10-turn multi-domain trajectory) so we measure ABR under conditions where Reflect matters and Fast vs Full can diverge meaningfully.
+- Add a non-recurring-topic control scenario so the asymmetry "ABR ≈ 1.0 means converged" vs "ABR ≈ 1.0 means topics never overlapped" is distinguishable in the journal.
+- Consider whether to extend `captureTurn` with per-tool-call EventToolUse events (currently the whole turn is one event). Trade-off: granularity vs. capture overhead — defer until a scenario actually demands it.
+
+---
+
 ### 2026-05-17 — ABR session adapter: end-to-end plumbing, signal is noise
 
 **Cortex**: `7362d4d` (branch `derek.s/dag-build`)
