@@ -50,8 +50,15 @@ const defaultMaxRetries = 3
 //     edit, then wait for verifier feedback."
 //   - Verifier-loop awareness: tells the agent it'll see the test
 //     failure as retry context on subsequent attempts.
+//   - Repo-discovery responsibility: the agent figures out the test
+//     command by reading CONTRIBUTING / tox.ini / pyproject.toml /
+//     CI configs, then writes it to .cortex/test-cmd.sh so the
+//     verifier uses the same command. Hardcoding per-repo runners
+//     in the verifier would be coaching (eval-principles #2) and
+//     wouldn't generalize past the half-dozen repos in Verified;
+//     real-world variability needs agent-driven discovery.
 const swebenchSystemPrompt = `You are a software engineer fixing a bug in an open-source codebase.
-You are working inside a workdir that contains a clone of the repository.
+You are working inside a workdir that contains a clone of the repository at the commit BEFORE the bug was fixed. Failing tests have already been written.
 
 Available tools:
   - list_dir(path): list the contents of a directory
@@ -61,17 +68,34 @@ Available tools:
   - cortex_search(query): semantic search over project context (may be empty for new repos)
 
 Workflow:
-  1. Use list_dir + read_file to locate the source file(s) implicated by
-     the bug report.
-  2. Use write_file to apply your fix. Edit source code only — do NOT
+  1. Discover how to run this repo's tests. Read CONTRIBUTING.md /
+     README.md / pyproject.toml / tox.ini / setup.cfg / Makefile /
+     .github/workflows/*.yml — at least one will document the test
+     command. Frameworks vary: some repos use pytest, others Django's
+     'python tests/runtests.py', others 'bin/test' or 'make test'.
+     Do not guess; verify by reading.
+  2. Write the test command for the failing tests to
+     '.cortex/test-cmd.sh' as a single line: 'cd <test-dir> && <runner>
+     <test-names>'. The verifier reads this file each attempt and
+     runs it inside the canonical scoring docker image (/testbed).
+     Format the test names as your discovered runner expects them
+     (pytest wants 'path/to/test.py::Class::test'; Django wants
+     'app.tests.Class.test_name'). When in doubt, run the command
+     locally via run_shell to confirm it discovers the tests.
+  3. Use list_dir + read_file to locate the source file(s) implicated
+     by the bug report.
+  4. Use write_file to apply your fix. Edit source code only — do NOT
      modify test files or fixtures.
-  3. A test verifier runs after each of your attempts. If it fails, you
-     will see the failing test output as 'PREVIOUS ATTEMPT FAILED' in
-     your next turn — use it to refine the fix.
+  5. A test verifier runs after each of your attempts using your
+     .cortex/test-cmd.sh. If it fails, you will see the failing test
+     output as 'PREVIOUS ATTEMPT FAILED' in your next turn — use it
+     to refine the fix (or to refine the test command if discovery
+     was wrong).
 
 Rules:
-  - Paths are relative to the workdir.
-  - Never write under .git or .cortex.
+  - Paths in tool calls are relative to the workdir.
+  - Never write under .git.
+  - .cortex/test-cmd.sh is the ONLY file you should create under .cortex/.
   - Make the smallest change that makes the failing tests pass.
   - You MUST produce at least one write_file call per attempt — reading
     alone is not progress. If you cannot find the relevant file, list_dir
@@ -183,17 +207,47 @@ func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout ti
 	//     interaction where pytest writes to a closed pipe when
 	//     tail finishes early on very large outputs.
 	//
+	// Test command priority:
+	//   1. If the agent wrote /tmp/cortex-test-cmd.sh, run THAT —
+	//      the agent discovered the repo's actual test runner
+	//      (django runtests.py, sympy bin/test, pytest, etc.) and
+	//      formatted F2P names per that runner's expectations.
+	//      This is the eval-principles #2-compliant path: no
+	//      per-repo hardcoding in the verifier; agent figures it
+	//      out from CONTRIBUTING / tox.ini / pyproject.toml / CI
+	//      configs.
+	//   2. Else fall back to `pytest <F2P>` for repos where pytest
+	//      Just Works. When this fallback fails with "no module
+	//      named pytest" or "ERROR: not found:" the agent sees
+	//      that in retry context and is expected to discover +
+	//      write test-cmd.sh on the next attempt.
+	//
 	// `tail -c 4096` bounds retry context (django can emit MBs).
 	inner := "set -eo pipefail; cd /testbed && " +
 		"git apply --whitespace=nowarn /tmp/cortex-attempt.patch 2>&1 && " +
-		"if [ -s /tmp/cortex-f2p-tests.txt ]; then " +
-		"  python -m pytest --no-header -q $(cat /tmp/cortex-f2p-tests.txt | tr '\\n' ' ') 2>&1 | tee /tmp/cortex-pytest.log; " +
-		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-pytest.log; exit $rc; " +
+		"if [ -s /tmp/cortex-test-cmd.sh ]; then " +
+		"  echo '[verifier] using agent-supplied test-cmd.sh'; " +
+		"  bash /tmp/cortex-test-cmd.sh 2>&1 | tee /tmp/cortex-verify.log; " +
+		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-verify.log; exit $rc; " +
+		"elif [ -s /tmp/cortex-f2p-tests.txt ]; then " +
+		"  echo '[verifier] no agent test-cmd.sh; falling back to pytest'; " +
+		"  python -m pytest --no-header -q $(cat /tmp/cortex-f2p-tests.txt | tr '\\n' ' ') 2>&1 | tee /tmp/cortex-verify.log; " +
+		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-verify.log; exit $rc; " +
 		"else echo 'no F2P tests configured; verifier trivially passes'; fi"
+
+	// Path the agent writes its discovered test command to (per
+	// swebenchSystemPrompt). Mounted into the container only when
+	// the agent has actually created it — the inner script's
+	// priority branch handles both cases.
+	agentTestCmd := filepath.Join(repoDir, ".cortex", "test-cmd.sh")
 
 	// Outer script: snapshot the diff, write tests list, run docker.
 	// We avoid `set -e` on the OUTER script because we want to keep
-	// running past the NO_PATCH branch and emit the marker.
+	// running past the NO_PATCH branch and emit the marker. The
+	// test-cmd.sh mount uses a bash test-and-mount trick so the
+	// docker run only includes the volume flag when the file
+	// exists (otherwise docker errors with "no such file or
+	// directory" before the container even starts).
 	return fmt.Sprintf(
 		"cd %s && git add -A && git diff --no-color HEAD > %s && "+
 			"if [ ! -s %s ]; then "+
@@ -201,15 +255,19 @@ func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout ti
 			"  exit 1; "+
 			"fi && "+
 			"printf '%%s' %s > %s && "+
+			"TEST_CMD_MOUNT=''; if [ -s %s ]; then TEST_CMD_MOUNT=\"-v %s:/tmp/cortex-test-cmd.sh:ro\"; fi; "+
 			"docker run --rm --network=none --stop-timeout=%d "+
 			"-v %s:/tmp/cortex-attempt.patch:ro "+
 			"-v %s:/tmp/cortex-f2p-tests.txt:ro "+
+			"$TEST_CMD_MOUNT "+
 			"%s bash -lc %s",
 		shellEscape(repoDir),
 		shellEscape(tmpPatch),
 		shellEscape(tmpPatch),
 		shellEscape(testsList),
 		shellEscape(tmpTests),
+		shellEscape(agentTestCmd),
+		shellEscape(agentTestCmd),
 		timeoutSec,
 		shellEscape(tmpPatch),
 		shellEscape(tmpTests),
