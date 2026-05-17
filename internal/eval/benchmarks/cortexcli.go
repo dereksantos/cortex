@@ -120,6 +120,13 @@ type REPLHeadlessOpts struct {
 	Verifier     string // shell command run after each attempt; exit 0 = pass
 	MaxRetries   int    // total auto-retry budget (>=1)
 	SystemPrompt string // path to a system prompt file; empty = REPL's auto-seeded default
+	// Per-attempt budget overrides. Zero = inherit REPL defaults
+	// (defaultMaxTurns=8, $0.20 cost, 300k cumulative tokens).
+	// Benchmark harnesses bump these because real repo exploration
+	// blows past the interactive-mode defaults in 4-5 turns.
+	MaxTurns            int
+	MaxCostUSD          float64
+	MaxCumulativeTokens int
 }
 
 // REPLHeadlessOutput is the parsed JSON summary the REPL emits on
@@ -176,6 +183,15 @@ func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) 
 	}
 	if opts.SystemPrompt != "" {
 		args = append(args, "--system-prompt", opts.SystemPrompt)
+	}
+	if opts.MaxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
+	}
+	if opts.MaxCostUSD > 0 {
+		args = append(args, "--max-cost-usd", strconv.FormatFloat(opts.MaxCostUSD, 'f', -1, 64))
+	}
+	if opts.MaxCumulativeTokens > 0 {
+		args = append(args, "--max-cumulative-tokens", strconv.Itoa(opts.MaxCumulativeTokens))
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)

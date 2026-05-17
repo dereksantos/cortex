@@ -126,7 +126,10 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxRetries := 1
 	jsonOutput := false
 	workdirOverride := ""
-	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	systemPromptOverride := ""    // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	maxTurnsOverride := 0          // --max-turns N: override the per-attempt agent-loop cap (default 8)
+	maxCostOverride := 0.0         // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
+	maxCumulativeOverride := 0     // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -166,6 +169,21 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		case "--system-prompt":
 			if i+1 < len(args) {
 				systemPromptOverride = args[i+1]
+				i++
+			}
+		case "--max-turns":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxTurnsOverride)
+				i++
+			}
+		case "--max-cost-usd":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%f", &maxCostOverride)
+				i++
+			}
+		case "--max-cumulative-tokens":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxCumulativeOverride)
 				i++
 			}
 		case "-h", "--help":
@@ -218,6 +236,9 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	if maxRetries > 0 {
 		state.maxRetries = maxRetries
 	}
+	state.maxTurns = maxTurnsOverride
+	state.maxCostUSD = maxCostOverride
+	state.maxCumulativeTokens = maxCumulativeOverride
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -346,6 +367,14 @@ type replState struct {
 	customVerifierCmd string
 	headless          bool
 	maxRetries        int
+	// Optional per-attempt budget overrides. Zero = inherit the REPL
+	// defaults (defaultMaxTurns / defaults from internal/harness).
+	// Benchmark harnesses bump these because SWE-bench-class repo
+	// exploration blows past the interactive-mode defaults in 4-5
+	// list_dir + read_file turns.
+	maxTurns            int
+	maxCostUSD          float64
+	maxCumulativeTokens int
 }
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
@@ -534,6 +563,9 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        the auto-seeded Go-flavored default. Useful for
                        benchmark harnesses that need a different
                        language / repo-shape guidance.
+      --max-turns N    Per-attempt agent-loop cap (default 8).
+      --max-cost-usd X Per-attempt USD budget (default 0.20).
+      --max-cumulative-tokens N  Per-attempt token budget (default 300000).
 
 In the REPL:
   /help                Show slash-command help.
@@ -815,8 +847,21 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// takes 20-30s per turn; without this it's a silent stare). Token
 	// + per-turn telemetry is gated behind --verbose.
 	h.SetNotify(makeREPLNotifier(s.verbose))
-	h.SetMaxTurns(defaultMaxTurns)
+	turns := defaultMaxTurns
+	if s.maxTurns > 0 {
+		turns = s.maxTurns
+	}
+	h.SetMaxTurns(turns)
 	h.SetMaxOutputTokens(defaultMaxOutputTokens)
+	// Per-attempt budget overrides for benchmark harnesses. Leaving
+	// either field at 0 lets internal/harness fall back to its own
+	// defaults (300k cumulative tokens, $0.20 cost).
+	if s.maxCostUSD > 0 || s.maxCumulativeTokens > 0 {
+		h.SetBudget(harness.Budget{
+			MaxCostUSD:          s.maxCostUSD,
+			MaxCumulativeTokens: s.maxCumulativeTokens,
+		})
+	}
 
 	prompt := userPrompt
 	if retryContext != "" {

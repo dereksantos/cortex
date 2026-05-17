@@ -373,6 +373,14 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		Verifier:     verifierCmd,
 		MaxRetries:   maxRetries,
 		SystemPrompt: sysPromptPath,
+		// SWE-bench-sized budgets: interactive REPL defaults
+		// (8 turns, $0.20, 300k tokens) blow up in 4-5 exploratory
+		// reads on a real repo. These caps give the agent room to
+		// discover the test command + locate + fix the bug across
+		// one attempt; per-retry the budget is renewed.
+		MaxTurns:            50,
+		MaxCostUSD:           5.0,
+		MaxCumulativeTokens: 800_000,
 	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {
