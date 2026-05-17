@@ -132,16 +132,48 @@ func TestCellResultValidate(t *testing.T) {
 		{"cortex without version", func(r *CellResult) {
 			r.ContextStrategy = StrategyCortex
 		}, "cortex_version required"},
+		{"cortex-fast without version", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexFast
+		}, "cortex_version required"},
+		{"cortex-full without version", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexFull
+		}, "cortex_version required"},
 		{"injection on baseline", func(r *CellResult) {
 			r.InjectedContextTokens = 100
 			r.TokensIn = 200
-		}, "only cortex strategy may inject"},
+		}, "only cortex strategies may inject"},
 		{"injection exceeds tokens_in", func(r *CellResult) {
 			r.ContextStrategy = StrategyCortex
 			r.CortexVersion = "0.1.0"
 			r.InjectedContextTokens = 200
 			r.TokensIn = 100
 		}, "exceeds tokens_in"},
+		{"injection on cortex-fast is allowed", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexFast
+			r.CortexVersion = "0.1.0"
+			r.InjectedContextTokens = 100
+			r.TokensIn = 200
+		}, ""},
+		{"injection on cortex-full is allowed", func(r *CellResult) {
+			r.ContextStrategy = StrategyCortexFull
+			r.CortexVersion = "0.1.0"
+			r.InjectedContextTokens = 100
+			r.TokensIn = 200
+		}, ""},
+		{"turn_index 0 is valid with session_id", func(r *CellResult) {
+			turn := 0
+			r.TurnIndex = &turn
+			r.SessionID = "abr-2026-05-17-001"
+		}, ""},
+		{"turn_index requires session_id", func(r *CellResult) {
+			turn := 0
+			r.TurnIndex = &turn
+		}, "turn_index requires session_id"},
+		{"turn_index negative rejected", func(r *CellResult) {
+			turn := -1
+			r.TurnIndex = &turn
+			r.SessionID = "abr-2026-05-17-001"
+		}, "turn_index must be non-negative"},
 		{"unknown criterion", func(r *CellResult) { r.TaskSuccessCriterion = "vibes" }, "task_success_criterion"},
 		{"negative latency", func(r *CellResult) { r.LatencyMs = -1 }, "latency_ms"},
 		{"negative cost", func(r *CellResult) { r.CostUSD = -0.01 }, "cost_usd"},

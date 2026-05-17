@@ -212,7 +212,7 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	}
 	registry.Register(harness.NewRunShellTool(workdir, registry))
 	if !h.minimalTools && !h.disableCortexSearch {
-		cortexSearch, err := harness.NewCortexSearchTool(workdir)
+		cortexSearch, err := harness.NewCortexSearchTool(workdir, client)
 		if err != nil {
 			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
 		}

@@ -31,6 +31,12 @@ const cortexSearchToolName = "cortex_search"
 type cortexSearchTool struct {
 	storeDir string // absolute path to <workdir>/.cortex
 
+	// provider, when non-nil, enables Full retrieval mode (Reflect needs
+	// an LLM). Fast mode never touches it. Passed in at construction
+	// time so the tool can share the agent loop's LLM client instead of
+	// spinning up its own — keeps spend on one quota.
+	provider llm.Provider
+
 	// Lazy state. nil until the first call. If init fails we cache
 	// the error and return it for subsequent calls too — re-trying
 	// open on every call when the store is broken would just waste
@@ -44,6 +50,13 @@ type cortexSearchTool struct {
 type cortexSearchArgs struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
+	// Mode selects the retrieval pipeline: "fast" (Reflex → Resolve,
+	// default) or "full" (Reflex → Reflect → Resolve). Full requires
+	// the tool to have been constructed with a non-nil provider; if
+	// missing, Full silently degrades to Fast and records a notes field
+	// in the response so callers can audit. ABR measurement runs need
+	// both: same prompt sequence under each mode, score ratio = ABR.
+	Mode string `json:"mode,omitempty"`
 }
 
 // NewCortexSearchTool constructs the tool with an EXPLICIT workdir-local
@@ -52,12 +65,16 @@ type cortexSearchArgs struct {
 // against accidental contamination.
 //
 // workdir must be absolute. The store lives at <workdir>/.cortex.
-func NewCortexSearchTool(workdir string) (ToolHandler, error) {
+//
+// provider may be nil; when nil, the tool serves Fast mode only and
+// Full requests degrade to Fast with a `degraded_to_fast: true` note
+// in the response payload.
+func NewCortexSearchTool(workdir string, provider llm.Provider) (ToolHandler, error) {
 	if !filepath.IsAbs(workdir) {
 		return nil, fmt.Errorf("%w: %q", errWorkdirNotAbsolute, workdir)
 	}
 	storeDir := filepath.Join(workdir, ".cortex")
-	return &cortexSearchTool{storeDir: storeDir}, nil
+	return &cortexSearchTool{storeDir: storeDir, provider: provider}, nil
 }
 
 func (t *cortexSearchTool) Name() string { return cortexSearchToolName }
@@ -75,7 +92,8 @@ func (t *cortexSearchTool) Spec() llm.ToolSpec {
 				"type": "object",
 				"properties": {
 					"query": {"type": "string", "description": "Natural-language search query."},
-					"limit": {"type": "integer", "description": "Max results (default 5)."}
+					"limit": {"type": "integer", "description": "Max results (default 5)."},
+					"mode":  {"type": "string", "enum": ["fast", "full"], "description": "Retrieval mode: fast (Reflex → Resolve, default) or full (Reflex → Reflect → Resolve, requires LLM judge — slower, higher quality)."}
 				},
 				"required": ["query"]
 			}`),
@@ -95,17 +113,17 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 		return errorJSON(fmt.Errorf("query must not be empty")), nil
 	}
 
+	mode, degraded, err := resolveRetrieveMode(args.Mode, t.provider != nil)
+	if err != nil {
+		return errorJSON(err), nil
+	}
+
 	if err := t.ensureInit(); err != nil {
 		return errorJSON(fmt.Errorf("cortex unavailable: %w", err)), nil
 	}
 
 	q := cognition.Query{Text: args.Query, Limit: args.Limit}
-	// Fast mode: Reflex → Resolve, no synchronous Reflect. Reflect
-	// would need an LLM provider; we deliberately don't wire one in
-	// because (a) we don't have a "judge" client at this layer, and
-	// (b) reflect is a quality/latency tradeoff that's better done at
-	// the runner level (Dream between sessions does the deep work).
-	res, err := t.cortex.Retrieve(ctx, q, cognition.Fast)
+	res, err := t.cortex.Retrieve(ctx, q, mode)
 	if err != nil {
 		return errorJSON(fmt.Errorf("retrieve: %w", err)), nil
 	}
@@ -113,6 +131,9 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 	// Empty store / no matches is the dominant Mode-A outcome; the
 	// model should be told plainly rather than receive an empty list.
 	if res == nil || len(res.Results) == 0 {
+		if degraded {
+			return `{"empty":true,"note":"no prior captures matched this query in the per-eval store","degraded_to_fast":true}`, nil
+		}
 		return `{"empty":true,"note":"no prior captures matched this query in the per-eval store"}`, nil
 	}
 
@@ -122,10 +143,14 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 		Content  string  `json:"content"`
 	}
 	out := struct {
-		Empty   bool    `json:"empty"`
-		Entries []entry `json:"entries"`
+		Empty          bool    `json:"empty"`
+		Mode           string  `json:"mode"`
+		DegradedToFast bool    `json:"degraded_to_fast,omitempty"`
+		Entries        []entry `json:"entries"`
 	}{
-		Empty: false,
+		Empty:          false,
+		Mode:           modeString(mode),
+		DegradedToFast: degraded,
 	}
 	for _, r := range res.Results {
 		out.Entries = append(out.Entries, entry{
@@ -141,15 +166,42 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 	return string(bb), nil
 }
 
+// resolveRetrieveMode parses the requested mode and decides whether
+// Full is actually serviceable. Unknown values are an error so callers
+// see a typo immediately rather than silently getting Fast.
+//
+// Returns (mode, degradedToFast, error). degradedToFast = true means
+// the caller asked for Full but we have no provider, so we ran Fast.
+func resolveRetrieveMode(requested string, haveProvider bool) (cognition.RetrieveMode, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case "", "fast":
+		return cognition.Fast, false, nil
+	case "full":
+		if !haveProvider {
+			return cognition.Fast, true, nil
+		}
+		return cognition.Full, false, nil
+	default:
+		return cognition.Fast, false, fmt.Errorf("unknown mode %q (want fast or full)", requested)
+	}
+}
+
+func modeString(m cognition.RetrieveMode) string {
+	if m == cognition.Full {
+		return "full"
+	}
+	return "fast"
+}
+
 // ensureInit lazily opens the workdir-local storage and constructs
 // the cognition pipeline. Cached on the struct after first call.
 //
-// Provider and embedder are intentionally nil:
-//   - Provider would only be used by Reflect (skipped in Fast mode).
-//   - Embedder is nil so Reflex falls back to text search. The
-//     per-eval store has no precomputed embeddings; bootstrapping a
-//     Hugot embedder here would cost ~100ms on cold cache and add
-//     dependency on the embedding model being downloaded.
+// Provider is threaded through from the constructor — nil disables
+// Full mode (calls degrade to Fast). Embedder stays nil so Reflex
+// falls back to text search; the per-eval store has no precomputed
+// embeddings, and bootstrapping a Hugot embedder here would cost
+// ~100ms on cold cache and add a dependency on the embedding model
+// being downloaded.
 func (t *cortexSearchTool) ensureInit() error {
 	if t.cortex != nil {
 		return nil
@@ -166,7 +218,7 @@ func (t *cortexSearchTool) ensureInit() error {
 	}
 	t.store = store
 
-	cx, err := intcognition.New(store, nil, nil, t.cfg)
+	cx, err := intcognition.New(store, t.provider, nil, t.cfg)
 	if err != nil {
 		t.initErr = fmt.Errorf("init cortex: %w", err)
 		return t.initErr
