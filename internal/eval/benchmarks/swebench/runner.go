@@ -33,32 +33,28 @@ type runnerPayload struct {
 const defaultMaxRetries = 3
 
 // swebenchSystemPrompt is the system prompt the REPL uses for
-// SWE-bench attempts. Differences vs the REPL's default seed
-// (cmd/cortex/commands/repl.go defaultREPLSystemPrompt):
+// SWE-bench attempts. Designed for general-purpose coding-task
+// behavior: framing only (eval-principles #2), no per-language /
+// per-framework / per-file coaching. The agent discovers the
+// project's technology, its test runner, and how to verify its
+// own fix — those are exactly what a real engineer landing in an
+// unfamiliar repo has to figure out.
 //
-//   - Language/repo-neutral: SWE-bench Verified instances span django,
-//     sympy, astropy, scikit-learn, etc. — Python, not Go. The
-//     default's "You are a Go programmer" framing actively misleads.
-//   - Mentions list_dir + cortex_search: the OpenRouter (non-Ollama)
-//     path enables a 5-tool registry, but the default seed only
-//     mentions 3, so the agent under-uses the explorer tools on
-//     unfamiliar codebases.
-//   - Explicitly anti-skip: the prior probe's agent ran 5 tool calls
-//     reading code, then exited without write_file. The default's
-//     "respond with a short summary and NO further tool calls" line
-//     encouraged that. SWE-bench instead emphasizes "produce a source
-//     edit, then wait for verifier feedback."
-//   - Verifier-loop awareness: tells the agent it'll see the test
-//     failure as retry context on subsequent attempts.
-//   - Repo-discovery responsibility: the agent figures out the test
-//     command by reading CONTRIBUTING / tox.ini / pyproject.toml /
-//     CI configs, then writes it to .cortex/test-cmd.sh so the
-//     verifier uses the same command. Hardcoding per-repo runners
-//     in the verifier would be coaching (eval-principles #2) and
-//     wouldn't generalize past the half-dozen repos in Verified;
-//     real-world variability needs agent-driven discovery.
-const swebenchSystemPrompt = `You are a software engineer fixing a bug in an open-source codebase.
-You are working inside a workdir that contains a clone of the repository at the commit BEFORE the bug was fixed. Failing tests have already been written.
+// What this prompt deliberately does NOT say:
+//   - Names of specific config files to read (CONTRIBUTING.md,
+//     tox.ini, etc.) — listing them biases discovery toward the
+//     handful of repos we happen to know about and stops working
+//     on the next repo that uses a different convention.
+//   - Names of specific test frameworks (pytest, django runtests,
+//     sympy bin/test, etc.) — same coaching problem.
+//   - Format details for specific runners' test ids — same.
+//
+// The ONLY non-framing piece is the .cortex/test-cmd.sh convention.
+// That isn't coaching, it's the protocol between agent and
+// verifier — the agent has to record SOMETHING somewhere so a
+// later process can run the same command, just as a human would
+// add a 'just test' or 'make test' target.
+const swebenchSystemPrompt = `You are a software engineer landing in an unfamiliar open-source repository to fix a bug. The repo is checked out at the commit BEFORE the bug was fixed; failing tests describing the bug already exist.
 
 Available tools:
   - list_dir(path): list the contents of a directory
@@ -67,39 +63,34 @@ Available tools:
   - run_shell(command, args): run shell commands available in your sandbox
   - cortex_search(query): semantic search over project context (may be empty for new repos)
 
-Workflow:
-  1. Discover how to run this repo's tests. Read CONTRIBUTING.md /
-     README.md / pyproject.toml / tox.ini / setup.cfg / Makefile /
-     .github/workflows/*.yml — at least one will document the test
-     command. Frameworks vary: some repos use pytest, others Django's
-     'python tests/runtests.py', others 'bin/test' or 'make test'.
-     Do not guess; verify by reading.
-  2. Write the test command for the failing tests to
-     '.cortex/test-cmd.sh' as a single line: 'cd <test-dir> && <runner>
-     <test-names>'. The verifier reads this file each attempt and
-     runs it inside the canonical scoring docker image (/testbed).
-     Format the test names as your discovered runner expects them
-     (pytest wants 'path/to/test.py::Class::test'; Django wants
-     'app.tests.Class.test_name'). When in doubt, run the command
-     locally via run_shell to confirm it discovers the tests.
-  3. Use list_dir + read_file to locate the source file(s) implicated
-     by the bug report.
-  4. Use write_file to apply your fix. Edit source code only — do NOT
-     modify test files or fixtures.
-  5. A test verifier runs after each of your attempts using your
-     .cortex/test-cmd.sh. If it fails, you will see the failing test
-     output as 'PREVIOUS ATTEMPT FAILED' in your next turn — use it
-     to refine the fix (or to refine the test command if discovery
-     was wrong).
+What you have to figure out for yourself:
+  - What technology this project uses and how it is organized.
+  - How its tests are run, and what command verifies the failing tests for THIS bug.
+  - Which source file(s) the failing tests are pointing at.
 
-Rules:
+Outputs the harness requires:
+  - Your source-code fix, written via write_file.
+  - A single-line shell command at '.cortex/test-cmd.sh' that runs
+    the failing tests inside the project's standard test environment
+    (assume cwd is the project root). The harness invokes this
+    command after each of your attempts; its exit code is the
+    verifier's pass/fail signal. If you cannot work out a meaningful
+    test command, write one that runs SOMETHING relevant — even an
+    approximation is more useful to the next iteration than nothing.
+
+How iteration works:
+  - After each attempt the harness runs your test command and feeds
+    the output back to you on the next turn as 'PREVIOUS ATTEMPT
+    FAILED'. Use it to refine the fix — or the test command if your
+    first guess at how to invoke the tests was wrong.
+  - You MUST produce at least one write_file call per attempt;
+    inspection alone is not progress.
+
+Constraints:
   - Paths in tool calls are relative to the workdir.
-  - Never write under .git.
-  - .cortex/test-cmd.sh is the ONLY file you should create under .cortex/.
+  - Do not write under .git.
+  - Do not modify test files or fixtures — fix the source the tests exercise.
   - Make the smallest change that makes the failing tests pass.
-  - You MUST produce at least one write_file call per attempt — reading
-    alone is not progress. If you cannot find the relevant file, list_dir
-    deeper and search broader before giving up.
 `
 
 // writeWorkdirGitignore appends the REPL's per-turn cruft to the
