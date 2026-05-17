@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,9 +26,10 @@ const DefaultModel = "anthropic/claude-haiku-4.5"
 // gathered at Load() is retained on the struct so Run() can read it
 // per-instance without re-parsing flags.
 type Benchmark struct {
-	model      string
-	useJudge   bool
-	judgeModel string
+	model        string
+	useJudge     bool
+	judgeModel   string
+	analyzeLimit int // > 0 enables a `cortex analyze --limit N` pass after hydrate (cortex strategy only)
 }
 
 // New constructs an unconfigured benchmark. Defaults are applied at
@@ -50,6 +52,9 @@ func (b *Benchmark) Load(ctx context.Context, opts benchmarks.LoadOpts) ([]bench
 	b.judgeModel = strings.TrimSpace(opts.Filter[FilterJudgeModel])
 	if b.judgeModel == "" {
 		b.judgeModel = DefaultJudgeModel
+	}
+	if v := strings.TrimSpace(opts.Filter[FilterAnalyze]); v != "" {
+		fmt.Sscanf(v, "%d", &b.analyzeLimit)
 	}
 	return Load(ctx, opts)
 }
@@ -92,9 +97,26 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 	// Hydrate only for cortex strategy. For baseline we leave the
 	// store empty so cortex_search returns "empty" regardless of
 	// what the model asks — that's the comparison apples-to-apples.
+	analyzeRan := 0
 	if pl.Strategy == StrategyCortex {
 		if err := hydrateHaystack(ctx, binary, workdir, pl.Q); err != nil {
 			return nil, fmt.Errorf("hydrate %s: %w", pl.Q.QuestionID, err)
+		}
+		// Optional Dream-style insight extraction pass. Tests
+		// whether running `cortex analyze` over the freshly-
+		// ingested haystack changes downstream retrieval quality
+		// (per the Cortex thesis: agentic insight extraction during
+		// idle time amplifies subsequent search). Failure is soft —
+		// log and continue with raw embedding retrieval, so an
+		// analyze provider hiccup doesn't kill the whole cell.
+		if b.analyzeLimit > 0 {
+			if err := benchmarks.RunAnalyze(ctx, binary, workdir, b.analyzeLimit); err != nil {
+				if env.Verbose {
+					fmt.Fprintf(os.Stderr, "[longmemeval %s] analyze skipped: %v\n", pl.Q.QuestionID, err)
+				}
+			} else {
+				analyzeRan = b.analyzeLimit
+			}
 		}
 	}
 
@@ -122,6 +144,9 @@ func (b *Benchmark) Run(ctx context.Context, inst benchmarks.Instance, env bench
 	// emit the cell but flag it.
 	verdictCorrect := false
 	notes := fmt.Sprintf("question_type=%s axis=%s", pl.Q.QuestionType, axis)
+	if analyzeRan > 0 {
+		notes += fmt.Sprintf(" analyze=%d", analyzeRan)
+	}
 	if b.useJudge {
 		if env.JudgeProvider == nil {
 			notes += " judge=missing-provider"

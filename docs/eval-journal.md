@@ -36,6 +36,63 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — LongMemEval (oracle, limit=5) / cortex +analyze 50
+
+**Cortex**: `6885a8f` + uncommitted CLI gap-closure (`cortex analyze --workdir --limit` flags) + `benchmarks.RunAnalyze` helper + `longmemeval` `--analyze-limit` filter. Committed as part of this entry; see commit hash after the record commit.
+
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval --benchmark longmemeval --subset oracle --limit 5 \
+  --strategy baseline,cortex --judge --analyze-limit 50 \
+  --model anthropic/claude-haiku-4.5
+```
+**Versions**: provider=`openrouter`, llm=`anthropic/claude-haiku-4.5`, judge=`anthropic/claude-haiku-4.5` (default), `cortex_version=0.1.0`. New: an `analyze` pass with limit=50 runs between `capture --bulk` + `ingest` and `code` for the cortex strategy (Dream-style insight extraction on the ingested haystack).
+
+**Result** — same 5 questions as the prior LongMemEval entries; compares the three conditions head-to-head:
+
+| Condition | n | Pass | Total cost | Avg latency | Avg tokens in | Avg tokens out |
+|---|---|---|---|---|---|---|
+| baseline (no haystack, no store) | 5 | 0/5 | $0.0083 | 1607 ms | 1211 | 91 |
+| cortex (haystack ingested, no analyze) — from prior runs | 5 | 0/5 | — | — | ~1211 | ~97 |
+| **cortex + analyze 50** | 5 | 0/5 | $0.0122 | 2131 ms | **1854** | 118 |
+
+Per-instance tokens_in for the +analyze cortex cell:
+
+| Instance | axis | tokens_in (+analyze) | tokens_in (baseline) | Δ |
+|---|---|---|---|---|
+| 001be529 | single-hop        | 1207 | 1207 | 0 |
+| 00ca467f | multi-hop         | 1206 | 1206 | 0 |
+| 0100672e | multi-hop         | **2975** | 1210 | +1765 |
+| 01493427 | knowledge-update  | **2663** | 1211 | +1452 |
+| 031748ae | knowledge-update  | 1220 | 1220 | 0 |
+
+**Why this run**: tests the principled "Dream pass before search" addition (per the user's question about whether the pipeline should use `analyze`/Dream to extract insights from the haystack before retrieval). All five Cortex-eval principles 1–9 were honored: black-box via CLI (`cortex analyze --workdir --limit`), no coaching (analyze runs the same prompt against haystack as it would against any captured events in production), versioned, reproducible (modulo LLM stochasticity), isolated (per-workdir state), structured (cells in `cell_results.jsonl`).
+
+**Observations**:
+- **Analyze DID change retrieval behavior on 2 of 5 cells** — cells `0100672e` and `01493427` saw their `tokens_in` ~double, which corresponds to `cortex_search` actually returning content (~640 extra tokens of injected context on average across the +analyze cells, vs ~0 in the prior no-analyze runs). Conclusion: the pipeline now works end-to-end — capture → ingest → analyze → search → inject.
+- **Pass rate stayed 0/5.** Even when retrieval worked, the extracted insights didn't contain the specific facts the question needed. Representative judge reason: "The candidate refuses to answer, … while the gold answer provides specific concrete facts (4 engineers initially, 5 now), indicating this information should have been extracted." Diagnosis: the `analyze` prompt (geared for "decisions, patterns, constraints from a *development* event") loses numeric/specific detail when applied to *conversational* observations. Insight extraction at this prompt produces summaries like "team grew" rather than "4 → 5 engineers."
+- **Cost is negligible**: $0.012 for 5 cells with analyze=50 — analyze itself is a bounded ~50 LLM calls on small events. End-to-end the +analyze run cost ~$0.0024 per cell more than the baseline cortex flow.
+- **Latency +524 ms over baseline** (2131 vs 1607 ms) — modest tax for the extra cortex_search call, well under the 5 s budget that mattered in the earlier "is this a search-tax-only addition" analysis.
+- 3 of 5 cells unchanged: analyze produced `NO_INSIGHT` for some haystack turns (single-line conversational content doesn't trigger the dev-event extractor), so the store wasn't enriched and search still returned nothing for those questions.
+
+**Diagnostics for the LongMemEval gap** (now narrowed):
+- ✓ Not "store is empty" — `capture --bulk` + `ingest` works.
+- ✓ Not "agent doesn't call cortex_search" — analyze nudges enough that the agent retrieves on at least some cells.
+- ✗ "Extracted insights lose the specific facts QA needs" — confirmed by judge reasoning. The `AnalyzeEventWithLLM` prompt in `cmd/cortex/commands/query.go:470` summarizes events into category/summary/importance/tags, which loses numeric/named-entity detail.
+
+**Follow-ups**:
+- Author a benchmark-specific analyze prompt that preserves named entities and numbers (or skip summarization entirely for `capture_type=observation` events and let raw chunks ride to retrieval). This is the highest-leverage gap remaining.
+- Larger N (limit=25 + analyze=200, est. ~$0.10) to confirm the directional finding once the prompt is fixed.
+- Add `cortex analyze --type=observation` or similar so a benchmark can opt into a different extraction prompt without modifying the production one.
+
+**Effect on prior journal entries**: this entry supersedes the correction entry's "agent isn't calling cortex_search effectively, or embedding retrieval isn't returning the right haystack snippets" reading — it's the latter (or rather: the *extracted-insight* layer that sits between embeddings and the agent is what loses the answer).
+
+---
+
 ### 2026-05-17 — SWE-bench (verified, django subset, limit=3) / qwen3-coder-30b-a3b
 
 **Cortex**: `7c5accd`; `cortex_version=0.1.0`

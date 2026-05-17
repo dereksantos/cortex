@@ -317,11 +317,53 @@ func (c *AnalyzeCommand) Description() string { return "Run LLM analysis on rece
 
 // Execute runs the analyze command.
 func (c *AnalyzeCommand) Execute(ctx *Context) error {
+	// --workdir scopes both config and storage to <workdir>/.cortex,
+	// mirroring `cortex ingest --workdir`. Required for benchmark
+	// harnesses (LongMemEval, future per-instance Dream/analyze
+	// passes) to operate on an isolated store rather than the
+	// developer's real ~/.cortex (eval-principles #6 — Isolated).
+	// --limit (or first positional arg, for back-compat) caps the
+	// number of recent events processed.
+	workdir := ""
+	limit := 10
+	for i := 0; i < len(ctx.Args); i++ {
+		arg := ctx.Args[i]
+		switch {
+		case arg == "--workdir" && i+1 < len(ctx.Args):
+			workdir = ctx.Args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--workdir="):
+			workdir = strings.TrimPrefix(arg, "--workdir=")
+		case arg == "--limit" && i+1 < len(ctx.Args):
+			fmt.Sscanf(ctx.Args[i+1], "%d", &limit)
+			i++
+		case strings.HasPrefix(arg, "--limit="):
+			fmt.Sscanf(strings.TrimPrefix(arg, "--limit="), "%d", &limit)
+		default:
+			// First non-flag positional is treated as limit
+			// (existing CLI back-compat: `cortex analyze 10`).
+			if !strings.HasPrefix(arg, "--") {
+				fmt.Sscanf(arg, "%d", &limit)
+			}
+		}
+	}
+
 	cfg := ctx.Config
 	store := ctx.Storage
 
-	// Load config and storage if not provided
-	if cfg == nil || store == nil {
+	// Workdir mode: open an isolated <workdir>/.cortex context,
+	// independent of any ctx.Config / ctx.Storage the caller may
+	// have set up.
+	if workdir != "" {
+		var err error
+		cfg, store, err = openWorkdirContext(workdir)
+		if err != nil {
+			return fmt.Errorf("failed to open workdir context: %w", err)
+		}
+		defer store.Close()
+	} else if cfg == nil || store == nil {
+		// Fall-through: existing default (user's real ~/.cortex via
+		// loadStorageConfig).
 		var err error
 		cfg, err = loadStorageConfig()
 		if err != nil {
@@ -333,12 +375,6 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 			return fmt.Errorf("failed to open storage: %w", err)
 		}
 		defer store.Close()
-	}
-
-	// Get limit from args (default: 10)
-	limit := 10
-	if len(ctx.Args) >= 1 {
-		fmt.Sscanf(ctx.Args[0], "%d", &limit)
 	}
 
 	// Get recent events

@@ -33,6 +33,12 @@ const (
 	FilterModel        = "model"
 	FilterJudge        = "judge"
 	FilterJudgeModel   = "judge-model"
+	// FilterAnalyze, when set to an integer N > 0, runs
+	// `cortex analyze --limit N` against the per-instance store
+	// between hydrate and code (cortex strategy only). Models the
+	// Dream-style insight extraction pass that would happen in
+	// production during idle time. N = 0 (default) skips analyze.
+	FilterAnalyze = "analyze-limit"
 )
 
 // loadFile is overridable so tests can swap in a local fixture without

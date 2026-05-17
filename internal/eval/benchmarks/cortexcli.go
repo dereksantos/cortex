@@ -108,6 +108,36 @@ func RunIngest(ctx context.Context, binary, workdir string) error {
 	return nil
 }
 
+// RunAnalyze runs `cortex analyze --workdir <workdir> --limit <limit>`,
+// which applies LLM-driven insight extraction (Dream-style) to the
+// most recent events in the store. Intended to be called between
+// RunIngest and RunCode in benchmarks that want to test cortex's
+// agentic insight layer rather than raw embedding retrieval.
+//
+// limit <= 0 falls back to the CLI default (10). Failures bubble up
+// with the CLI's stderr — analyze is bounded but its LLM calls can
+// fail (provider errors, rate limits), and callers should decide
+// whether to skip the cell or fail the run.
+func RunAnalyze(ctx context.Context, binary, workdir string, limit int) error {
+	if binary == "" {
+		return errors.New("cortex binary is empty")
+	}
+	if workdir == "" {
+		return errors.New("workdir is empty")
+	}
+	args := []string{"analyze", "--workdir", workdir}
+	if limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(limit))
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cortex analyze: %w (stderr: %s)", err, stderr.String())
+	}
+	return nil
+}
+
 // SearchMode selects the retrieval pipeline. Mirrors --mode on the CLI:
 // Fast = Reflex only; Full = Reflex + Reflect.
 type SearchMode string
