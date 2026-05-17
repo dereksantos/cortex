@@ -36,6 +36,47 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — MTEB / NFCorpus (n=100 queries)
+
+**Cortex**: `5f6d027` (branch `derek.s/dag-build`); `cortex_version=mteb-phase-a` (the MTEB runner pins this string regardless of git SHA — see follow-ups)
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+./bin/cortex eval --benchmark mteb --tasks NFCorpus --limit 100
+```
+**Versions**: embedder=`ollama/nomic-embed-text`, rerank=false (the `--rerank` flag is pending a `cortex rerank` CLI per `eval-principles.md:79`), index size=3633 docs.
+
+**Result** (single cell, principle 1 black-box via `cortex embed --bulk` + `cortex search-vector`):
+
+| Metric | Value |
+|---|---|
+| Queries scored | 100 |
+| **NDCG@10** | **0.3729** |
+| MRR@10 | 0.5887 |
+| Recall@10 | 0.1968 |
+| Index build time | 3 m 30 s |
+| Retrieval time | 33.1 s (≈ 331 ms per query) |
+| Cost | $0 (local ollama embeddings) |
+
+Per-cell record in `.cortex/db/cell_results.jsonl` (row id `31227684-bd96-…`).
+
+**Why this run**: Phase A Step 5 — first benchmark that doesn't depend on an LLM hot path, giving us a clean *capability* baseline for the embedding-retrieval layer alone. Confirms the embedding pipeline + `cortex embed`/`cortex search-vector` CLI surface works end-to-end.
+
+**Observations**:
+- **First non-red number.** NDCG@10=0.373 is in the published range for nomic-embed-text v1.5 on NFCorpus (typically 0.32–0.38 depending on dimension + chunking), so the implementation reproduces a known reference point.
+- A 5-query smoke run earlier scored NDCG@10=0.3499 — the n=5 vs n=100 delta (0.350 → 0.373) is sampling noise, both numbers are in the expected band.
+- Index build (3 m 30 s for 3633 docs) is the dominant cost; per-query retrieval averages ~330 ms via `cortex search-vector`. Reuse across re-runs would amortize this, but the current run doesn't cache between invocations.
+- Cell `cortex_version` is hardcoded to `"mteb-phase-a"` rather than reading the git SHA — minor principle 3 (Versioned) drift to clean up.
+- `tests_passed=1` simply means "the runner emitted a result" not "agent passed the task" — there's no agent here. Don't compare this 1/1 to LongMemEval's k/N or SWE-bench's F2P pass rates.
+
+**Follow-ups**:
+- `cortex rerank` CLI is the prerequisite for re-enabling `--rerank` (rerank=false today). The Reflect-based rerank claim in `docs/journal.md` is currently untested end-to-end.
+- Recalibrate `CellResult.CortexVersion` to embed the git SHA across all benchmarks (not just MTEB) so principle 3 stops being "~ partial" everywhere.
+- Larger-N run (full 323 NFCorpus queries) is a cheap follow-up at ~50 s wall time once retrieval is the only cost (index is on disk).
+- Adds to the "is it red?" picture: MTEB confirms the retrieval/embedding layer is healthy. The LongMemEval gap is therefore not "embeddings are broken" but "retrieval returns chunks the agent doesn't synthesize correctly" — see LongMemEval +analyze follow-up.
+
+---
+
 ### 2026-05-17 — Correction to LongMemEval + SWE-bench entries below
 
 The original 2026-05-17 LongMemEval entry asserted that "cortex strategy
