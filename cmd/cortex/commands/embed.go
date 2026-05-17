@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -94,8 +95,9 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		return errors.New("no embedder available (install Ollama or Hugot)")
 	}
 
+	emitter := cliout.NewEmitter(*workdir)
 	if *bulk {
-		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout)
+		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout, emitter)
 	}
 
 	vec, err := embedder.Embed(context.Background(), *text)
@@ -115,10 +117,22 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		if err := st.StoreEmbedding(*docID, *contentType, vec); err != nil {
 			return fmt.Errorf("store embedding: %w", err)
 		}
-		return emitEmbedStoreJSON(os.Stdout, *docID, *contentType, modelID, providerID, len(vec))
+		return emitter.Ok(os.Stdout, embedStoreJSONOutput{
+			Stored:      true,
+			DocID:       *docID,
+			ContentType: *contentType,
+			Dim:         len(vec),
+			Model:       modelID,
+			Provider:    providerID,
+		})
 	}
 
-	return emitEmbedJSON(os.Stdout, vec, modelID, providerID)
+	return emitter.Ok(os.Stdout, embedJSONOutput{
+		Vector:   vec,
+		Dim:      len(vec),
+		Model:    modelID,
+		Provider: providerID,
+	})
 }
 
 // bulkEmbedRequest is one NDJSON line in the --bulk stdin stream.
@@ -145,7 +159,7 @@ type bulkEmbedSummary struct {
 // embed failure aborts the batch with a line-numbered error — partial
 // state is left in storage (callers needing atomicity should write to
 // a fresh workdir).
-func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder, model, provider string, r io.Reader, w io.Writer) error {
+func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder, model, provider string, r io.Reader, w io.Writer, emitter *cliout.Emitter) error {
 	_, st, err := openWorkdirContext(workdir)
 	if err != nil {
 		return err
@@ -201,7 +215,7 @@ func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder,
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
-	return json.NewEncoder(w).Encode(bulkEmbedSummary{
+	return emitter.Ok(w, bulkEmbedSummary{
 		Stored:   count,
 		Model:    model,
 		Provider: provider,
@@ -254,22 +268,3 @@ type embedStoreJSONOutput struct {
 	Provider    string `json:"provider"`
 }
 
-func emitEmbedJSON(w io.Writer, vec []float32, model, provider string) error {
-	return json.NewEncoder(w).Encode(embedJSONOutput{
-		Vector:   vec,
-		Dim:      len(vec),
-		Model:    model,
-		Provider: provider,
-	})
-}
-
-func emitEmbedStoreJSON(w io.Writer, docID, contentType, model, provider string, dim int) error {
-	return json.NewEncoder(w).Encode(embedStoreJSONOutput{
-		Stored:      true,
-		DocID:       docID,
-		ContentType: contentType,
-		Dim:         dim,
-		Model:       model,
-		Provider:    provider,
-	})
-}

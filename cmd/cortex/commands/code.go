@@ -23,6 +23,7 @@ import (
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 func init() {
@@ -234,7 +235,8 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 
 	loopRes := h.LastLoopResult()
 	if jsonOut {
-		return emitCodeJSON(os.Stdout, resolvedWorkdir, model, hr, loopRes)
+		emitter := cliout.NewEmitter(resolvedWorkdir)
+		return emitCodeJSON(os.Stdout, emitter, resolvedWorkdir, model, hr, loopRes)
 	}
 
 	fmt.Println()
@@ -269,7 +271,7 @@ type codeJSONOutput struct {
 	InjectedContext int      `json:"injected_context_tokens"`
 }
 
-func emitCodeJSON(w io.Writer, workdir, model string, hr evalv2.HarnessResult, loopRes harness.LoopResult) error {
+func emitCodeJSON(w io.Writer, emitter *cliout.Emitter, workdir, model string, hr evalv2.HarnessResult, loopRes harness.LoopResult) error {
 	out := codeJSONOutput{
 		Workdir:         workdir,
 		Model:           model,
@@ -286,7 +288,7 @@ func emitCodeJSON(w io.Writer, workdir, model string, hr evalv2.HarnessResult, l
 	if out.FilesChanged == nil {
 		out.FilesChanged = []string{}
 	}
-	return json.NewEncoder(w).Encode(out)
+	return emitter.Ok(w, out)
 }
 
 // resolveCodeWorkdir returns the absolute workdir path. If initFresh

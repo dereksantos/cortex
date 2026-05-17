@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -145,13 +144,13 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		modeStr = "Full (Reflex + Reflect)"
 	}
 
-	// JSON output: emit full content (no truncation) so callers (benchmark
-	// runners, scripts) can score against the raw chunk text. The text
-	// fallback below is intentionally NOT applied — benchmarks need a
-	// stable contract over the cognitive pipeline's output, not an
-	// opportunistic SearchEvents rescue.
+	// JSON output: wrap the per-search payload in the canonical
+	// envelope (axis 4 Result). The text fallback below is intentionally
+	// NOT applied — benchmarks need a stable contract over the cognitive
+	// pipeline's output, not an opportunistic SearchEvents rescue.
 	if *jsonFlag {
-		return emitSearchJSON(os.Stdout, strings.ToLower(strings.Fields(modeStr)[0]), elapsed, result)
+		emitter := cliout.NewEmitter(*workdirFlag)
+		return emitter.Ok(os.Stdout, buildSearchPayload(strings.ToLower(strings.Fields(modeStr)[0]), elapsed, result))
 	}
 
 	// Display results
@@ -199,9 +198,10 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// searchJSONOutput is the structured contract returned by --json. Stable
-// keys, full content (no truncation), so benchmarks and downstream tools
-// can parse without depending on the human-readable formatting.
+// searchJSONOutput is the structured Data payload inside the envelope
+// returned by --json. Stable keys, full content (no truncation), so
+// benchmarks and downstream tools can parse without depending on the
+// human-readable formatting.
 type searchJSONOutput struct {
 	Mode      string             `json:"mode"`
 	ElapsedMs int64              `json:"elapsed_ms"`
@@ -213,7 +213,7 @@ type searchJSONResult struct {
 	Content string  `json:"content"`
 }
 
-func emitSearchJSON(w io.Writer, mode string, elapsed time.Duration, result *cognition.ResolveResult) error {
+func buildSearchPayload(mode string, elapsed time.Duration, result *cognition.ResolveResult) searchJSONOutput {
 	out := searchJSONOutput{
 		Mode:      mode,
 		ElapsedMs: elapsed.Milliseconds(),
@@ -228,7 +228,7 @@ func emitSearchJSON(w io.Writer, mode string, elapsed time.Duration, result *cog
 			})
 		}
 	}
-	return json.NewEncoder(w).Encode(out)
+	return out
 }
 
 // RecentCommand shows recent events.

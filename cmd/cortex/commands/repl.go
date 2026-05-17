@@ -47,6 +47,7 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
@@ -529,24 +530,29 @@ Rules:
   - When a build fails, read the error, fix the code, and try again.
 `
 
-// emitOneShotJSON prints a single-line JSON summary of the headless
-// one-shot run to stdout. Schema is intentionally minimal — the full
-// turn row already lands in <sessionDir>/session.jsonl for callers
+// emitOneShotJSON prints a single-line JSON envelope summary of the
+// headless one-shot run to stdout. Data is intentionally minimal — the
+// full turn row already lands in <sessionDir>/session.jsonl for callers
 // that want the long-form transcript; this is just the at-a-glance
 // "did it pass, what did it cost" view.
 func emitOneShotJSON(s *replState, turnErr error) {
-	out := map[string]any{
+	data := map[string]any{
 		"session_id":   s.sessionID,
 		"session_path": s.sessionPath,
 		"workdir":      s.workdir,
 		"model":        s.model,
 		"accepted":     s.turns > 0, // finalize() only bumps turns on accept
 	}
+	emitter := cliout.NewEmitter(s.workdir)
 	if turnErr != nil {
-		out["error"] = turnErr.Error()
+		// Failure surfaces both as ok=false + structured error code AND in
+		// the data payload's legacy "error" field so the existing benchmark
+		// parser keeps working.
+		data["error"] = turnErr.Error()
+		_ = emitter.Fail(os.Stdout, cliout.ErrCodeInternal, turnErr.Error(), data)
+		return
 	}
-	b, _ := json.Marshal(out)
-	fmt.Println(string(b))
+	_ = emitter.Ok(os.Stdout, data)
 }
 
 // printREPLBanner prints the welcome line. One line, no ASCII art.

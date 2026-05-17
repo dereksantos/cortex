@@ -232,11 +232,16 @@ phase depends on. Without this, no later change is honestly measurable.
    - Includes per-tool name, description, version, args, and flag schema.
    - `cortex tools --check` fails when the committed `tools.json` diverges from the generator output (CI hook + `TestToolsJSONUpToDate`).
 
-2. **Uniform result envelope** (axis 4 Result).
-   - `{ok, data, error, meta:{trace_id, latency_ms}}` shape.
-   - Wrapper applied to every `--json` output.
-   - Explicit `truncated:true` flag where output is capped.
-   - Path-redaction outside `.cortex/` + project root.
+2. **[x] Uniform result envelope** (axis 4 Result).
+   - `pkg/cliout.Envelope` and `Emitter` ship the canonical
+     `{ok, data, error, meta:{trace_id, latency_ms, truncated}}` shape.
+   - Wrapper applied to every `--json` output: search, code, embed
+     (single + bulk + store), search-vector, repl (one-shot summary).
+   - `cliout.DecodeEnvelope` shared by consumers in
+     `internal/eval/benchmarks/cortexcli.go` (RunSearch / RunCode /
+     RunSearchVector / RunEmbedBulk / RunREPLHeadless).
+   - `OkTruncated` flag + path redaction outside `.cortex/` and project
+     root, with envelope and consumer tests.
 
 3. **Unified `cell_results.jsonl`** (axis 6 Observability).
    - Every CLI invocation writes a row, not just eval cells.

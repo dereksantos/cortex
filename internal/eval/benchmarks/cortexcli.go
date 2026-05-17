@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
@@ -219,7 +220,8 @@ func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) 
 
 	// The REPL prints human-readable status lines before the JSON
 	// summary (banner, turn summary). Pluck the last non-empty line
-	// that parses as JSON.
+	// that parses as an envelope. Envelope's Data is the actual
+	// REPLHeadlessOutput payload.
 	var out REPLHeadlessOutput
 	parsed := false
 	for _, line := range bytes.Split(stdout.Bytes(), []byte("\n")) {
@@ -227,12 +229,17 @@ func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) 
 		if len(l) == 0 || l[0] != '{' {
 			continue
 		}
-		if err := json.Unmarshal(l, &out); err == nil {
+		var probe REPLHeadlessOutput
+		if env, err := cliout.DecodeEnvelope(l, &probe); err == nil || (env != nil && env.Error != nil) {
+			// Either ok envelope (decoded into probe) or failure envelope
+			// (data field still carried REPL state, error code surfaces
+			// the failure reason). Adopt the latest one we see.
+			out = probe
 			parsed = true
 		}
 	}
 	if !parsed {
-		return nil, fmt.Errorf("cortex repl headless: no JSON summary in stdout (got %d bytes)", stdout.Len())
+		return nil, fmt.Errorf("cortex repl headless: no JSON envelope in stdout (got %d bytes)", stdout.Len())
 	}
 	return &out, nil
 }
@@ -322,13 +329,13 @@ func RunSearch(ctx context.Context, binary, workdir string, mode SearchMode, lim
 		return nil, fmt.Errorf("cortex search: %w (stderr: %s)", err, stderr.String())
 	}
 
-	// Preserve raw stdout for error diagnostics; json.NewDecoder consumes
-	// the buffer it reads from, so the otherwise-empty `(stdout: )` in
-	// a wrapped error hides what actually came back.
+	// Preserve raw stdout for error diagnostics; the envelope decoder
+	// shares the buffer it reads from, so an otherwise-empty `(stdout: )`
+	// in a wrapped error hides what actually came back.
 	raw := stdout.String()
 	out := &SearchOutput{}
-	if err := json.Unmarshal([]byte(raw), out); err != nil {
-		return nil, fmt.Errorf("decode search JSON: %w (stdout %d bytes: %q)", err, len(raw), truncate(raw, 400))
+	if _, err := cliout.DecodeEnvelope([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("decode search envelope: %w (stdout %d bytes: %q)", err, len(raw), truncate(raw, 400))
 	}
 	return out, nil
 }
@@ -430,8 +437,8 @@ func RunCode(ctx context.Context, binary string, opts CodeOpts) (*CodeOutput, er
 	}
 
 	out := &CodeOutput{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode code JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode code envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }
@@ -496,8 +503,8 @@ func RunEmbedBulk(ctx context.Context, binary, workdir, defaultContentType strin
 		return nil, fmt.Errorf("cortex embed --bulk: %w (stderr: %s)", err, truncate(stderr.String(), 500))
 	}
 	out := &EmbedBulkSummary{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode embed --bulk summary: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode embed --bulk envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }
@@ -577,8 +584,8 @@ func RunSearchVector(ctx context.Context, binary string, opts SearchVectorOpts) 
 		return nil, fmt.Errorf("cortex search-vector: %w (stderr: %s)", err, truncate(stderr.String(), 500))
 	}
 	out := &SearchVectorOutput{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode search-vector JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode search-vector envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }

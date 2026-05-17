@@ -2,12 +2,12 @@ package commands
 
 import (
 	"bytes"
-	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -52,12 +52,13 @@ func TestOpenWorkdirContext(t *testing.T) {
 func TestEmitSearchJSON(t *testing.T) {
 	t.Run("nil result emits empty array", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := emitSearchJSON(&buf, "fast", 12*time.Millisecond, nil); err != nil {
-			t.Fatalf("emitSearchJSON: %v", err)
+		em := cliout.NewEmitter("")
+		if err := em.Ok(&buf, buildSearchPayload("fast", 12*time.Millisecond, nil)); err != nil {
+			t.Fatalf("emit: %v", err)
 		}
 		var got searchJSONOutput
-		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+			t.Fatalf("decode envelope: %v", err)
 		}
 		if got.Mode != "fast" {
 			t.Errorf("Mode = %q, want %q", got.Mode, "fast")
@@ -85,12 +86,13 @@ func TestEmitSearchJSON(t *testing.T) {
 			},
 		}
 		var buf bytes.Buffer
-		if err := emitSearchJSON(&buf, "full", 200*time.Millisecond, result); err != nil {
-			t.Fatalf("emitSearchJSON: %v", err)
+		em := cliout.NewEmitter("")
+		if err := em.Ok(&buf, buildSearchPayload("full", 200*time.Millisecond, result)); err != nil {
+			t.Fatalf("emit: %v", err)
 		}
 		var got searchJSONOutput
-		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+			t.Fatalf("decode envelope: %v", err)
 		}
 		if len(got.Results) != 2 {
 			t.Fatalf("len(Results) = %d, want 2", len(got.Results))

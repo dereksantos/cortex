@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 func init() { Register(&SearchVectorCommand{}) }
@@ -114,7 +115,8 @@ func (c *SearchVectorCommand) Execute(ctx *Context) error {
 	}
 	elapsed := time.Since(start)
 
-	return emitSearchVectorJSON(os.Stdout, results, *contentType, *topK, elapsed, modelID, provider)
+	emitter := cliout.NewEmitter(*workdir)
+	return emitSearchVectorJSON(os.Stdout, emitter, results, *contentType, *topK, elapsed, modelID, provider)
 }
 
 // searchVectorResult is one entry in the --json output. Content is
@@ -140,6 +142,7 @@ type searchVectorOutput struct {
 
 func emitSearchVectorJSON(
 	w io.Writer,
+	emitter *cliout.Emitter,
 	results []storage.VectorSearchResult,
 	contentTypeFilter string,
 	k int,
@@ -161,7 +164,7 @@ func emitSearchVectorJSON(
 			break
 		}
 	}
-	return json.NewEncoder(w).Encode(searchVectorOutput{
+	return emitter.Ok(w, searchVectorOutput{
 		Results:   filtered,
 		K:         k,
 		ElapsedMs: elapsed.Milliseconds(),
