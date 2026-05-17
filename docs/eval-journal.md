@@ -36,6 +36,36 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — InjectedContextTokens flows end-to-end on ABR session cells
+
+**Cortex**: `86e9458` (branch `derek.s/dag-build`)
+**Result**: `CellResult.InjectedContextTokens` is now populated from real harness telemetry on per-turn cells written by the ABR session adapter, closing the first of the three follow-ups in the prior entry.
+
+**Wires (4 hops)**:
+- `internal/harness/loop.go:247` — `LoopResult.InjectedContextTokens = l.Registry.InjectedContextTokens()` (was always populated; never propagated past here).
+- `cmd/cortex/commands/repl.go` — `turnRow` gains the field; `runTurn` copies `lres.InjectedContextTokens` into it before the JSONL write.
+- `internal/eval/v2/abr_session.go` — `replTurnRow` decoder picks up the new field; `emitCell` threads it onto the `CellResult`; `ABRTurn` summary struct exposes `FastInjected` / `FullInjected` so it's visible in the test log too.
+
+**Observed on the verification re-run** (haiku-4.5 × 2 passes × 4-turn JWT scenario):
+
+| Turn | Prompt | Fast injected (tok) | Full injected (tok) |
+|---|---|---|---|
+| 0 | Record JWT decision | 20 | 20 |
+| 1 | Cite our auth approach | 53 | 59 |
+| 2 | Cite the JWT rationale | 243 | 142 |
+| 3 | Do we use session cookies? | 266 | 285 |
+
+The "grow over the session" shape is exactly the signal cross-cutting finding #3 from the Phase A summary ("cortex injects 0 context across every benchmark run") was missing — turns 2-3 inject ~200+ tokens of real captured content, not zero.
+
+MeanABR for this run = 0.957 · MeanFast = 0.911 · MeanFull = 0.866. The slight Full > Fast on later turns (turn-3 ABR = 0.947) is consistent with Reflect adding small reranking value once there's a non-trivial result set to reorder.
+
+**Follow-ups still open** (carried from prior entries, not addressed in this commit):
+- **10-turn multi-domain ABR scenario.** Port the legacy `abr_convergence.yaml` shape — warm-up queries across mixed topics, then domain-focused queries that should benefit from Think's cached reflections. The current 4-turn single-topic scenario can't produce the cold-start → convergence trajectory the original metric was designed for.
+- **Non-recurring-topic control scenario.** A scenario where prompts deliberately don't recur, so the journal can distinguish "ABR ≈ 1.0 = converged" from "ABR ≈ 1.0 = topics never overlapped." Same plumbing, different prompt list.
+- **Per-tool-call EventToolUse capture.** Currently `captureTurn` fires once at end-of-turn with the whole turn bundled as one event. Per-tool-call granularity would let Reflex match finer signals; trade-off is capture overhead. Defer until a scenario demands it.
+
+---
+
 ### 2026-05-17 — Auto-capture loop reinstated: ABR=1.000 on intra-session JWT scenario
 
 **Cortex**: `9b6539b` (branch `derek.s/dag-build`)
