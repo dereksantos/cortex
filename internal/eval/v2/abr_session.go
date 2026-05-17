@@ -73,6 +73,15 @@ type ABRTurn struct {
 	FullResponse string  `json:"full_response"`
 	FastScore    float64 `json:"fast_score"`
 	FullScore    float64 `json:"full_score"`
+	// FastInjected / FullInjected are the cortex_search tool's
+	// observedInjectedTokens counter for each pass — the proxy for
+	// "how much retrieved context did the agent actually see this
+	// turn." 0 in BOTH passes means the agent didn't call
+	// cortex_search successfully, which is the key signal for "ABR
+	// is 1.0 because nothing was retrieved" vs "ABR is 1.0 because
+	// retrieval converged."
+	FastInjected int `json:"fast_injected_tokens"`
+	FullInjected int `json:"full_injected_tokens"`
 	// ABR is FastScore/FullScore. Zero when FullScore == 0; analytics
 	// should filter on FullScore > 0 before averaging to avoid mis-
 	// counting "Full also failed" turns as ABR=0.
@@ -175,6 +184,8 @@ func RunABRSession(ctx context.Context, opts ABRSessionOptions) (ABRSessionResul
 			FullResponse: fullRow.FinalText,
 			FastScore:    fastScore,
 			FullScore:    fullScore,
+			FastInjected: fastRow.InjectedContextTokens,
+			FullInjected: fullRow.InjectedContextTokens,
 			ABR:          abr,
 		})
 		result.TurnsScored++
@@ -305,14 +316,15 @@ func runREPLPass(parentCtx context.Context, opts ABRSessionOptions, workdir, str
 // upstream type — staying decoupled keeps the cmd package from
 // becoming a public surface for internal/eval.
 type replTurnRow struct {
-	Turn        int    `json:"turn"`
-	SessionID   string `json:"session_id"`
-	UserMessage string `json:"user_message"`
-	FinalText   string `json:"final_text"`
-	TokensIn    int    `json:"tokens_in"`
-	TokensOut   int    `json:"tokens_out"`
-	CostUSD     float64 `json:"cost_usd"`
-	LatencyMs   int64  `json:"latency_ms"`
+	Turn                  int     `json:"turn"`
+	SessionID             string  `json:"session_id"`
+	UserMessage           string  `json:"user_message"`
+	FinalText             string  `json:"final_text"`
+	TokensIn              int     `json:"tokens_in"`
+	TokensOut             int     `json:"tokens_out"`
+	InjectedContextTokens int     `json:"injected_context_tokens"`
+	CostUSD               float64 `json:"cost_usd"`
+	LatencyMs             int64   `json:"latency_ms"`
 }
 
 func latestSessionJSONL(workdir string) (string, error) {
@@ -387,11 +399,12 @@ func emitCell(ctx context.Context, opts ABRSessionOptions, sessionID string, tur
 		Model:                opts.Model,
 		ContextStrategy:      strategy,
 		CortexVersion:        opts.CortexVersion,
-		Temperature:          0,
-		TokensIn:             row.TokensIn,
-		TokensOut:            row.TokensOut,
-		CostUSD:              row.CostUSD,
-		LatencyMs:            row.LatencyMs,
+		Temperature:           0,
+		TokensIn:              row.TokensIn,
+		TokensOut:             row.TokensOut,
+		InjectedContextTokens: row.InjectedContextTokens,
+		CostUSD:               row.CostUSD,
+		LatencyMs:             row.LatencyMs,
 		TaskSuccess:          score >= 0.5, // soft threshold; the real signal is the score, captured in Notes
 		TaskSuccessCriterion: CriterionJudgeLLM,
 		Notes:                fmt.Sprintf(`{"quality_score":%.4f}`, score),

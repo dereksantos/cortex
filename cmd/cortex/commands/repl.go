@@ -805,6 +805,7 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.AgentTurns = hres.AgentTurnsTotal
 	row.TokensIn = hres.TokensIn
 	row.TokensOut = hres.TokensOut
+	row.InjectedContextTokens = lres.InjectedContextTokens
 	row.CostUSD = hres.CostUSD
 	row.LatencyMs = hres.LatencyMs
 	row.FilesChanged = hres.FilesChanged
@@ -1265,17 +1266,18 @@ type turnRow struct {
 	SnapshotDir  string `json:"snapshot_dir"`
 
 	// Initial attempt (no error context).
-	HarnessError string   `json:"harness_error,omitempty"`
-	AgentTurns   int      `json:"agent_turns"`
-	TokensIn     int      `json:"tokens_in"`
-	TokensOut    int      `json:"tokens_out"`
-	CostUSD      float64  `json:"cost_usd"`
-	LatencyMs    int64    `json:"latency_ms"`
-	FilesChanged []string `json:"files_changed,omitempty"`
-	FinalText    string   `json:"final_text,omitempty"`
-	VerifyKind   string   `json:"verify_kind"`
-	VerifyOK     bool     `json:"verify_ok"`
-	VerifyOutput string   `json:"verify_output,omitempty"`
+	HarnessError          string   `json:"harness_error,omitempty"`
+	AgentTurns            int      `json:"agent_turns"`
+	TokensIn              int      `json:"tokens_in"`
+	TokensOut             int      `json:"tokens_out"`
+	InjectedContextTokens int      `json:"injected_context_tokens,omitempty"` // bytes the cortex_search tool returned across this turn / 4 (proxy)
+	CostUSD               float64  `json:"cost_usd"`
+	LatencyMs             int64    `json:"latency_ms"`
+	FilesChanged          []string `json:"files_changed,omitempty"`
+	FinalText             string   `json:"final_text,omitempty"`
+	VerifyKind            string   `json:"verify_kind"`
+	VerifyOK              bool     `json:"verify_ok"`
+	VerifyOutput          string   `json:"verify_output,omitempty"`
 
 	// Automatic single retry (model gets the verifier output).
 	RetryAgentTurns   int    `json:"retry_agent_turns,omitempty"`
