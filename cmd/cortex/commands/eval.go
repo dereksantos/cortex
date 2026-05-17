@@ -528,6 +528,26 @@ Examples:
 		evaluator.SetCompareProvider(compareProvider, compareModelName)
 	}
 
+	// Construct the per-cell persister up front so v2 scenarios emit
+	// CellResult rows alongside the legacy eval_scenario_results
+	// aggregation (eval-principles #7). Failure is non-fatal: the
+	// run still produces the legacy rollup. Skip in dry-run mode —
+	// the mock provider's responses aren't worth archiving.
+	var cellPersister *evalv2.Persister
+	if !dryRun {
+		cp, perr := evalv2.NewPersister()
+		if perr != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: per-cell persister disabled: %v\n", perr)
+			}
+		} else {
+			cellPersister = cp
+			defer cellPersister.Close()
+			providerNameForCell := canonicalProviderName(providerName, provider)
+			evaluator.SetPersister(cellPersister, providerNameForCell)
+		}
+	}
+
 	// Run eval
 	var results *evalv2.Results
 	if scenarioPath != "" {
@@ -558,14 +578,22 @@ Examples:
 		evalv2.Report(os.Stdout, results)
 	}
 
-	// Persist results
-	persister, err := evalv2.NewPersister()
-	if err != nil {
-		if verbose {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
+	// Persist results (legacy aggregation). Reuse the per-cell
+	// persister opened above when present; otherwise open a fresh one
+	// so the legacy rollup still lands in dry-run.
+	persister := cellPersister
+	if persister == nil {
+		p, perr := evalv2.NewPersister()
+		if perr != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", perr)
+			}
+		} else {
+			persister = p
+			defer persister.Close()
 		}
-	} else {
-		defer persister.Close()
+	}
+	if persister != nil {
 		if err := persister.Persist(results, durationMs); err != nil {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
@@ -581,6 +609,41 @@ Examples:
 		return fmt.Errorf("eval failed: ABR below threshold")
 	}
 	return nil
+}
+
+// canonicalProviderName maps the user-facing --provider flag (which
+// accepts back-compat aliases "anthropic" and "openrouter" alongside
+// the canonical "auto") onto the evalv2.Provider* constant required
+// by CellResult.Validate. When the unified surface resolved to
+// OpenRouter (keychain or env) the concrete provider implements
+// Name() == "openrouter"; falling back to that ensures cells written
+// during an "anthropic" CLI invocation but routed through OpenRouter
+// don't fail validation.
+func canonicalProviderName(flag string, p llm.Provider) string {
+	switch flag {
+	case "ollama":
+		return evalv2.ProviderOllama
+	case "anthropic":
+		// May actually resolve to OpenRouter via keychain. Trust the
+		// concrete provider's Name() over the CLI flag.
+		if p != nil && p.Name() == "openrouter" {
+			return evalv2.ProviderOpenRouter
+		}
+		return evalv2.ProviderAnthropic
+	case "openrouter":
+		return evalv2.ProviderOpenRouter
+	}
+	if p != nil {
+		switch p.Name() {
+		case "openrouter":
+			return evalv2.ProviderOpenRouter
+		case "ollama":
+			return evalv2.ProviderOllama
+		case "anthropic":
+			return evalv2.ProviderAnthropic
+		}
+	}
+	return evalv2.ProviderOpenRouter
 }
 
 // loadEvalConfig loads the config for eval command.

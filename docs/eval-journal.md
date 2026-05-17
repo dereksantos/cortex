@@ -36,6 +36,63 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — v2 suite (full sweep) / cell-level telemetry now landing
+
+**Cortex**: `40aa466` + uncommitted `internal/eval/v2/eval.go` + `cmd/cortex/commands/eval.go` changes that add `Evaluator.SetPersister` and emit one `CellResult` per (test × strategy). Committed as part of this entry; see commit hash in `git log` after the record commit.
+
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval -d test/evals/v2 -p anthropic -m anthropic/claude-haiku-4.5
+```
+**Versions**: provider=`openrouter`, llm=`anthropic/claude-haiku-4.5`, judge=none (lift/NDCG/ABR scoring only), `cortex_version=0.1.0`. Persisted as 342 cell rows in `.cortex/db/cell_results.jsonl` + 43 scenario rows in `eval_scenario_results` (legacy aggregation still emitted alongside).
+
+**Result** (per-strategy aggregates across 171 tests × 2 strategies = 342 cells):
+
+| Strategy | n | Tests passed | Pass rate (per test) | Avg latency | Total tokens in | Total tokens out | Total injected ctx |
+|---|---|---|---|---|---|---|---|
+| baseline | 171 | 143 | **83.6%** | 3217 ms | 2 925 | 61 802 | 0 |
+| cortex   | 171 | 158 | **92.4%** | 2208 ms | 41 922 | 30 716 | 26 688 |
+
+Scenario-level rollup (`eval_runs.eval-20260517-121309`):
+
+| Metric | This sweep | Prior sweep (`eval-20260517-030846`) |
+|---|---|---|
+| Scenarios | 43 | 43 |
+| Pass rate (scenario, lift-based) | 88.4% (38/43) | 90.7% (39/43) |
+| Avg ABR (run-level) | 0.492 | 0.586 |
+| Avg lift | +33.0% | +31.8% |
+| Total baseline tokens / cortex tokens | 62 935 / 71 612 | 62 968 / 71 021 |
+
+**Why this run**: Phase A follow-up — close the v2 telemetry gap so the suite stops being BLOCKED on principle 6 (Structured) and the journal has per-cell data to anchor the integration delta against.
+
+**What changed in code** (committed with this entry):
+- `internal/eval/v2/Evaluator` gains a `persister *Persister` field + `SetPersister(p, providerName)` setter. When non-nil, each test in `runTest` emits two `CellResult` rows (baseline + cortex) through the standard `PersistCell` fan-out (journal → SQLite `cell_results` table → `.cortex/db/cell_results.jsonl`).
+- `cmd/cortex/commands/eval.go` constructs the persister up front (skipped in `--dry-run`) and reuses it for both per-cell persistence and the existing legacy scenario rollup, so we open the database once per process.
+- `scenarioID` is now threaded through `walkTree → runTest` so cell rows carry the YAML scenario id (`v2/<scenario_id>`) instead of just the test id.
+- Persistence failure logs at verbose level but does **not** fail the test — a missing row is more recoverable than a failed run.
+
+**Observations**:
+- **Cortex strategy lifts per-test pass rate by ~9 pp** (92.4% vs 83.6%) on this sweep — first time we have per-cell data fine-grained enough to see that. Worth treating as a "preliminary green" signal pending judge enablement.
+- **Cortex generations are faster than baseline** (avg 2208 ms vs 3217 ms): cortex output is shorter (179 tokens out avg vs 361) because the retrieved context grounds shorter answers. Re-frames the earlier "cortex uses more tokens" finding — that was true on tokens_in (because of injected context) but not on tokens_out, and end-to-end latency wins.
+- **Injected context averaged ~156 tokens per cortex cell** — my `len(cortexContext)/4` heuristic is an under-estimate vs the true delta (`avg cortex tokens_in 245 - avg baseline tokens_in 17 = ~228`). Acceptable for now; recalibrate when a per-call tokenizer is wired.
+- **ABR varies run-to-run** (0.586 → 0.492 at temperature=0, no seed pinning) — direct evidence for principle 8 (LLM-judged variance). Single-run ABR numbers should be quoted with a sample-size caveat from here on.
+- **Provider routing fixed at cell level**: `canonicalProviderName(flag, provider)` in the CLI maps `-p anthropic` to `provider=openrouter` on the cell when the keychain key is present, so the CellResult passes validation (`ContextStrategy == cortex` requires a matching provider enum).
+
+**Carry-over gaps** (still unaddressed; flagged for follow-up):
+- Principle 1 (Black box): the v2 runner still imports `internal/eval/v2/` directly — it IS the internal runner. This work closes principle 6/7 but not principle 1. A proper fix is wrapping each scenario as a benchmark with a CLI-shell harness.
+- Principle 8 (Variance): single-run ABR numbers still cited as point estimates. Need repeated runs + σ reporting.
+- Principle 9 (Separated baselines): only `baseline` / `cortex` cells emitted; no Fast/Full split (taxonomy missing from `CellResult.ContextStrategy`).
+- Principle 3 (Versioned): `cortex_version=0.1.0` still a static constant; should include git SHA.
+
+**Effect on prior journal entries**:
+- The v2 "BLOCKED" entry below remains accurate as a snapshot of the gap that existed; this entry is its resolution. The Phase A summary's cross-cutting finding #1 ("v2 + ABR runners don't write `cell_results.jsonl`") is now partially obsolete — v2 does write; ABR is still computed from the same v2 cells but its specific entry below still reflects the legacy-only path (since the ABR aggregate is computed from scenario rollups, not raw cells, the ABR cell row situation is unchanged).
+
+---
+
 ### 2026-05-17 — MTEB / NFCorpus (n=100 queries)
 
 **Cortex**: `5f6d027` (branch `derek.s/dag-build`); `cortex_version=mteb-phase-a` (the MTEB runner pins this string regardless of git SHA — see follow-ups)
