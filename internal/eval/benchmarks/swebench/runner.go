@@ -78,6 +78,32 @@ Rules:
     deeper and search broader before giving up.
 `
 
+// writeWorkdirGitignore appends the REPL's per-turn cruft to the
+// cloned repo's .gitignore so the verifier's `git add -A` doesn't
+// pick it up. Idempotent: appends a single fence block so re-running
+// against an already-prepped workdir is a no-op.
+func writeWorkdirGitignore(repoDir string) error {
+	path := filepath.Join(repoDir, ".gitignore")
+	existing, _ := os.ReadFile(path) // empty bytes if missing — that's fine
+	const marker = "# cortex-bench (do not edit)"
+	if strings.Contains(string(existing), marker) {
+		return nil
+	}
+	block := "\n" + marker + "\n" +
+		".cortex/\n" +
+		".cortex-attempt.patch\n" +
+		".cortex-f2p-tests.txt\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(block); err != nil {
+		return err
+	}
+	return nil
+}
+
 // buildAgentPrompt returns the prompt the REPL feeds the agent. It
 // pairs the upstream problem_statement (always the bulk of the
 // signal) with the explicit list of FAIL_TO_PASS test names the
@@ -232,6 +258,17 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 	binary, err := benchmarks.ResolveCortexBinary()
 	if err != nil {
 		return failedCell(inst, strategy, cfg, env, "resolve cortex binary: "+err.Error()), nil
+	}
+
+	// Append .cortex/ and verifier sentinel files to the cloned
+	// repo's .gitignore. The REPL writes per-turn workdir snapshots
+	// under repo/.cortex/sessions/.../snapshots/, which without this
+	// would get swept into the verifier's `git add -A` and produce a
+	// 10 MB diff full of binary fixtures (.mo, .gz). docker's
+	// `git apply` then refuses the binary hunks with "patch does
+	// not apply", masking whatever real source edit the agent made.
+	if err := writeWorkdirGitignore(repoDir); err != nil {
+		return failedCell(inst, strategy, cfg, env, "write .gitignore: "+err.Error()), nil
 	}
 
 	// Build the verifier shell command that the REPL runs after each
