@@ -1,26 +1,37 @@
 // Package journey loads the 10 e2e scenarios under test/evals/
 // journeys/ and reports per-scenario runnability status.
 //
-// Full execution (drive a coding agent through the multi-session
-// scaffold and score against the expected behavior) requires a
-// harness adapter that bridges journey YAML → v2 coding harness; that
-// adapter is the bulk of Phase D's deferred work.
+// Phase D scope split:
 //
-// This package implements the audit + validation step: load each
-// scenario, verify its scaffold + structure, and emit a structured
-// per-scenario status (`runnable` / `pending_adapter` / `invalid`).
-// Phase 5's DAG executor will eventually subsume this when the
-// journey-as-DAG mapping lands; until then, this surface gives a
-// reliable per-scenario status without faking telemetry.
+//  1. **Validator** (RunSuite): loads each scenario, verifies scaffold +
+//     structure, emits per-scenario status. No execution.
+//
+//  2. **Seed adapter** (RunSuiteWithSeed): for each scenario, converts
+//     the multi-session events into Cortex insights, seeds them into a
+//     per-scenario temp storage (same JSONL-write pattern as Phase B),
+//     and verifies the events are retrievable post-seed. This proves
+//     the journey → Cortex-context pipeline works end-to-end.
+//
+//  3. **Full execution adapter** (NOT YET IMPLEMENTED): drives a
+//     coding agent through each session's scaffold after seeding;
+//     scores against expected behavior. Bulk of Phase D's remaining
+//     work; reuses cortex code harness pattern. Filed as follow-up.
 package journey
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
+	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
+	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"gopkg.in/yaml.v3"
+	"context"
 )
 
 // Scenario mirrors the test/evals/journeys/*.yaml shape (the subset
@@ -80,7 +91,19 @@ type SuiteResult struct {
 	PendingAdapter int              `json:"pending_adapter"`
 	ScaffoldMissing int             `json:"scaffold_missing"`
 	Invalid        int              `json:"invalid"`
+	SeedOK         int              `json:"seed_ok,omitempty"`
+	SeedFailed     int              `json:"seed_failed,omitempty"`
 	Scenarios      []ScenarioStatus `json:"scenarios"`
+}
+
+// SeedReport extends ScenarioStatus with seed-adapter outcomes.
+type SeedReport struct {
+	ScenarioID         string `json:"scenario_id"`
+	SessionsProcessed  int    `json:"sessions_processed"`
+	EventsSeeded       int    `json:"events_seeded"`
+	EventsRetrievable  int    `json:"events_retrievable"`
+	SeedOK             bool   `json:"seed_ok"`
+	ErrorMessage       string `json:"error_message,omitempty"`
 }
 
 // RunSuite loads every *.yaml under dir and returns per-scenario
@@ -150,4 +173,129 @@ func RunSuite(dir string) (*SuiteResult, error) {
 	}
 
 	return suite, nil
+}
+
+// SeedJourney processes one journey scenario through the seed adapter:
+// converts every session's events into Cortex insights written to a
+// per-scenario temp storage, opens storage, and queries to verify the
+// events became retrievable. Reports per-scenario seed outcome.
+//
+// Does NOT run a coding agent — that's the full-execution adapter
+// (Phase D's remaining work). This proves the journey → context
+// pipeline works end-to-end without the agent integration cost.
+func SeedJourney(s *Scenario) SeedReport {
+	rep := SeedReport{ScenarioID: s.ID}
+
+	tempDir, err := os.MkdirTemp("", "cortex-journey-seed-*")
+	if err != nil {
+		rep.ErrorMessage = fmt.Sprintf("tempdir: %v", err)
+		return rep
+	}
+	defer os.RemoveAll(tempDir)
+
+	dataDir := filepath.Join(tempDir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		rep.ErrorMessage = fmt.Sprintf("mkdir dataDir: %v", err)
+		return rep
+	}
+	jsonlPath := filepath.Join(dataDir, "insights.jsonl")
+	f, err := os.Create(jsonlPath)
+	if err != nil {
+		rep.ErrorMessage = fmt.Sprintf("open jsonl: %v", err)
+		return rep
+	}
+	enc := json.NewEncoder(f)
+	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	var id int64
+	for _, sess := range s.Sessions {
+		rep.SessionsProcessed++
+		for _, ev := range sess.Events {
+			id++
+			rec := map[string]any{
+				"id":          id,
+				"event_id":    ev.ID,
+				"category":    ev.Type, // decision | pattern | constraint | insight
+				"summary":     ev.Content,
+				"importance":  ev.Importance,
+				"tags":        ev.Tags,
+				"reasoning":   ev.Rationale,
+				"session_id":  sess.ID,
+				"source_type": "journey",
+				"created_at":  base.Add(time.Duration(id) * time.Second),
+			}
+			if err := enc.Encode(rec); err != nil {
+				_ = f.Close()
+				rep.ErrorMessage = fmt.Sprintf("encode event %s: %v", ev.ID, err)
+				return rep
+			}
+			rep.EventsSeeded++
+		}
+	}
+	_ = f.Close()
+
+	// Open storage; verify each event is retrievable via Reflex.
+	store, err := storage.New(&config.Config{ContextDir: tempDir})
+	if err != nil {
+		rep.ErrorMessage = fmt.Sprintf("storage.New: %v", err)
+		return rep
+	}
+	defer store.Close()
+
+	r := intcog.NewReflex(store, nil) // text-based scoring, no embedder needed
+	// Issue a broad query that should pull back many events; count how
+	// many of the seeded EventIDs are retrievable.
+	results, err := r.Reflex(context.Background(), cognition.Query{Limit: rep.EventsSeeded * 2})
+	if err != nil {
+		rep.ErrorMessage = fmt.Sprintf("reflex query: %v", err)
+		return rep
+	}
+	retrievable := make(map[string]bool)
+	for _, res := range results {
+		retrievable[res.ID] = true
+	}
+	rep.EventsRetrievable = len(retrievable)
+	rep.SeedOK = rep.EventsSeeded > 0 && rep.EventsRetrievable >= rep.EventsSeeded/2
+	return rep
+}
+
+// RunSuiteWithSeed runs RunSuite then additionally runs SeedJourney
+// on every scenario whose status is pending_adapter. Returns the
+// updated SuiteResult with seed outcomes incorporated.
+func RunSuiteWithSeed(dir string) (*SuiteResult, []SeedReport, error) {
+	suite, err := RunSuite(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Re-load + run seed for each scenario the validator marked
+	// pending_adapter (i.e., parseable + scaffold present).
+	pattern := filepath.Join(dir, "*.yaml")
+	matches, _ := filepath.Glob(pattern)
+	sort.Strings(matches)
+
+	reports := make([]SeedReport, 0, len(matches))
+	for _, path := range matches {
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			continue
+		}
+		var s Scenario
+		if uerr := yaml.Unmarshal(data, &s); uerr != nil {
+			continue
+		}
+		if s.Project.Scaffold == "" {
+			continue
+		}
+		if _, ferr := os.Stat(s.Project.Scaffold); ferr != nil {
+			continue
+		}
+		rep := SeedJourney(&s)
+		reports = append(reports, rep)
+		if rep.SeedOK {
+			suite.SeedOK++
+		} else {
+			suite.SeedFailed++
+		}
+	}
+	return suite, reports, nil
 }

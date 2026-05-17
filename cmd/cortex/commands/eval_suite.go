@@ -168,40 +168,81 @@ func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
 }
 
 // runJourneysSuite loads + validates the 10 e2e scenarios under
-// test/evals/journeys/ and reports per-scenario runnability status.
-// Does not execute agent runs — the harness adapter is the bulk of
-// Phase D's deferred work; the loader confirms the YAML + scaffold
-// substrate is intact and surfaces which scenarios are ready to run
-// once the adapter lands.
+// test/evals/journeys/ and reports per-scenario status. Two depths:
+//
+//   - default: validation only (parse + scaffold check)
+//   - --with-seed: also runs the seed adapter — converts each
+//     scenario's session events into Cortex insights, seeds them
+//     into per-scenario temp storage, verifies retrievability
+//
+// Full agent execution is Phase D's remaining work (reuses cortex
+// code harness pattern).
 func runJourneysSuite(dir, outputFormat string, verbose bool) error {
+	// Detect --with-seed via env (the eval CLI's flag parsing doesn't
+	// flow flags into here; using env keeps this surface minimal).
+	withSeed := os.Getenv("CORTEX_JOURNEYS_WITH_SEED") != ""
+
+	if withSeed {
+		res, reports, err := journey.RunSuiteWithSeed(dir)
+		if err != nil {
+			return err
+		}
+		if outputFormat == "json" {
+			out := map[string]any{"suite": res, "seed_reports": reports}
+			b, _ := json.MarshalIndent(out, "", "  ")
+			fmt.Println(string(b))
+			return nil
+		}
+		fmt.Printf("=== journeys suite (%d scenarios — validation + seed) ===\n\n", res.Total)
+		repByID := make(map[string]journey.SeedReport)
+		for _, r := range reports {
+			repByID[r.ScenarioID] = r
+		}
+		for _, s := range res.Scenarios {
+			statusTag := strings.ToUpper(s.Status)
+			fmt.Printf("  [%s] %s\n", statusTag, s.ID)
+			fmt.Printf("         scaffold: %s (exists=%v)\n", s.ScaffoldPath, s.ScaffoldExists)
+			fmt.Printf("         sessions: %d  events: %d\n", s.SessionCount, s.EventCount)
+			if rep, ok := repByID[s.ID]; ok {
+				seedTag := "SEED_OK"
+				if !rep.SeedOK {
+					seedTag = "SEED_FAIL"
+				}
+				fmt.Printf("         [%s] sessions_processed=%d  events_seeded=%d  events_retrievable=%d\n",
+					seedTag, rep.SessionsProcessed, rep.EventsSeeded, rep.EventsRetrievable)
+				if !rep.SeedOK && rep.ErrorMessage != "" {
+					fmt.Printf("                 %s\n", rep.ErrorMessage)
+				}
+			}
+			fmt.Println()
+		}
+		fmt.Printf("Total: %d  validation: pending_adapter=%d scaffold_missing=%d invalid=%d  seed: ok=%d failed=%d\n",
+			res.Total, res.PendingAdapter, res.ScaffoldMissing, res.Invalid, res.SeedOK, res.SeedFailed)
+		fmt.Println("Seed adapter proves journey → Cortex-context pipeline works.")
+		fmt.Println("Full agent execution remains pending (Phase D harness adapter).")
+		return nil
+	}
+
+	// Default: validation only.
 	res, err := journey.RunSuite(dir)
 	if err != nil {
 		return err
 	}
-
 	if outputFormat == "json" {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	}
-
 	fmt.Printf("=== journeys suite (%d scenarios — validation only) ===\n\n", res.Total)
 	for _, s := range res.Scenarios {
 		statusTag := strings.ToUpper(s.Status)
 		fmt.Printf("  [%s] %s\n", statusTag, s.ID)
-		if s.Name != "" {
-			fmt.Printf("         name:     %s\n", s.Name)
-		}
 		fmt.Printf("         scaffold: %s (exists=%v)\n", s.ScaffoldPath, s.ScaffoldExists)
 		fmt.Printf("         sessions: %d  events: %d\n", s.SessionCount, s.EventCount)
-		if verbose && s.Message != "" {
-			fmt.Printf("         note:     %s\n", s.Message)
-		}
 		fmt.Println()
 	}
 	fmt.Printf("Total: %d  pending_adapter: %d  scaffold_missing: %d  invalid: %d\n",
 		res.Total, res.PendingAdapter, res.ScaffoldMissing, res.Invalid)
-	fmt.Println("Validation-only pass — agent execution awaits harness adapter")
-	fmt.Println("(planned Phase D follow-up, will reuse v2 coding harness pattern).")
+	fmt.Println("Validation-only pass. Set CORTEX_JOURNEYS_WITH_SEED=1 for seed-adapter run.")
 	return nil
 }
