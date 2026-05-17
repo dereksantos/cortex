@@ -46,10 +46,17 @@ type cortexSearchTool struct {
 	// spinning up its own — keeps spend on one quota.
 	provider llm.Provider
 
+	// sharedCortex, when non-nil, replaces the tool's lazy
+	// self-construction. This is the wire that lets auto-capture from
+	// the REPL turn loop become visible to retrievals in-process —
+	// without a shared instance, captures and retrievals each open
+	// their own Storage and the in-memory indexes drift.
+	sharedCortex *intcognition.Cortex
+
 	// Lazy state. nil until the first call. If init fails we cache
 	// the error and return it for subsequent calls too — re-trying
 	// open on every call when the store is broken would just waste
-	// turns.
+	// turns. When sharedCortex is non-nil, these stay nil.
 	cortex  *intcognition.Cortex
 	store   *storage.Storage
 	cfg     *config.Config
@@ -84,6 +91,34 @@ func NewCortexSearchTool(workdir string, provider llm.Provider) (ToolHandler, er
 	}
 	storeDir := filepath.Join(workdir, ".cortex")
 	return &cortexSearchTool{storeDir: storeDir, provider: provider}, nil
+}
+
+// NewCortexSearchToolFromCortex wires the tool to a pre-built Cortex
+// instance instead of having it construct its own on first call. This
+// is the path the REPL uses to share one Cortex across the
+// captureClient (write side) and this tool (read side) — captures
+// land in storage and become visible to Retrieve in the same session,
+// which is what makes intra-session Think learning measurable at all.
+//
+// The provider for Full mode is taken from the shared Cortex; passing
+// it again here would just be ignored.
+//
+// workdir is still required so the tool can validate path containment
+// for any per-tool diagnostics, but it does NOT have to match the
+// Cortex's storage path (the caller is responsible for that).
+func NewCortexSearchToolFromCortex(workdir string, cortex *intcognition.Cortex, provider llm.Provider) (ToolHandler, error) {
+	if !filepath.IsAbs(workdir) {
+		return nil, fmt.Errorf("%w: %q", errWorkdirNotAbsolute, workdir)
+	}
+	if cortex == nil {
+		return nil, fmt.Errorf("nil cortex (use NewCortexSearchTool for self-construction)")
+	}
+	storeDir := filepath.Join(workdir, ".cortex")
+	return &cortexSearchTool{
+		storeDir:     storeDir,
+		provider:     provider,
+		sharedCortex: cortex,
+	}, nil
 }
 
 func (t *cortexSearchTool) Name() string { return cortexSearchToolName }
@@ -127,12 +162,13 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 		return errorJSON(err), nil
 	}
 
-	if err := t.ensureInit(); err != nil {
+	cx, err := t.resolveCortex()
+	if err != nil {
 		return errorJSON(fmt.Errorf("cortex unavailable: %w", err)), nil
 	}
 
 	q := cognition.Query{Text: args.Query, Limit: args.Limit}
-	res, err := t.cortex.Retrieve(ctx, q, mode)
+	res, err := cx.Retrieve(ctx, q, mode)
 	if err != nil {
 		return errorJSON(fmt.Errorf("retrieve: %w", err)), nil
 	}
@@ -212,6 +248,20 @@ func modeString(m cognition.RetrieveMode) string {
 		return "full"
 	}
 	return "fast"
+}
+
+// resolveCortex returns the Cortex instance to retrieve against. When
+// a shared one was supplied at construction time it wins (the REPL
+// path); otherwise we lazy-build a workdir-local one (the legacy
+// path, used by harness paths that don't run capture).
+func (t *cortexSearchTool) resolveCortex() (*intcognition.Cortex, error) {
+	if t.sharedCortex != nil {
+		return t.sharedCortex, nil
+	}
+	if err := t.ensureInit(); err != nil {
+		return nil, err
+	}
+	return t.cortex, nil
 }
 
 // ensureInit lazily opens the workdir-local storage and constructs

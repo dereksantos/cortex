@@ -122,17 +122,33 @@ func TestABRSession_Real(t *testing.T) {
 	tmp := t.TempDir()
 	t.Logf("workdir: %s", tmp)
 
+	// Option-3 intra-session learning scenario: turn 1 establishes a
+	// JWT-auth decision, turns 2-4 ask about authentication. With
+	// auto-capture live, turn 1's content lands in the per-eval store;
+	// turns 2-4's cortex_search should retrieve it. Without auto-capture
+	// the store stays empty across all turns and every response says
+	// "no prior context."
+	//
+	// The recurring "JWT" / "authentication" / "session" terms across
+	// turns mean Reflex's text-match has something to find.
 	prompts := []string{
-		"Search the cortex store for any prior context about authentication patterns. If you find any, summarize. If not, say so plainly.",
-		"Now search the cortex store for prior notes about error handling conventions. Summarize what you find or note it's empty.",
-		"Finally, search the cortex store for testing conventions and report what you find.",
+		"Record this decision: we use JWT tokens for authentication, NOT session-based cookies, because our API needs to be stateless for horizontal scaling. After recording it, confirm in one sentence.",
+		"Search the cortex store and tell me: what's our authentication approach? Cite what you find verbatim if possible.",
+		"Search the cortex store again. Why did we choose JWT over session-based auth? Cite from any prior captures.",
+		"One more search: do we use session-based cookies anywhere in this project?",
 	}
 
-	criteria := `The response should:
-1. Have actually called the cortex_search tool (not just answered from prior knowledge).
-2. Accurately reflect what cortex_search returned — if empty, say so; if results, summarize them faithfully.
-3. Be concise and not hallucinate context that wasn't retrieved.
-A perfect answer calls cortex_search, accurately reports its findings, and adds no fabricated detail.`
+	criteria := `Evaluate whether the response uses information actually retrieved from the cortex store (vs. fabricating or answering from prior knowledge).
+
+For turn 1 (decision-recording): full credit for confirming the decision was captured.
+
+For turns 2-4 (retrieval): the project's actual authentication approach is JWT (decided in turn 1 because the API needs to be stateless for horizontal scaling). A correct answer is grounded in that captured decision and ideally cites or paraphrases it. A wrong answer either:
+- says the store is empty / no prior captures (it should NOT be empty by turn 2+),
+- answers from generic prior knowledge without retrieving,
+- contradicts the captured decision (e.g. recommending sessions when we said JWT),
+- fabricates details not in the capture.
+
+Score correctness high (0.8-1.0) only when the response clearly grounds in retrieved cortex content. Score low (0-0.3) when the response says the store is empty or doesn't engage with the captured decision.`
 
 	provider := ProviderOllama
 	if cortexProviderFromModel(model) != "" {
@@ -140,7 +156,7 @@ A perfect answer calls cortex_search, accurately reports its findings, and adds 
 	}
 
 	opts := ABRSessionOptions{
-		ScenarioID:     "abr-degenerate-empty-store-v1",
+		ScenarioID:     "abr-intra-session-jwt-v1",
 		REPLBinary:     binary,
 		Model:          model,
 		Workdir:        tmp,

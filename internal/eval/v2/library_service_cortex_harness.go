@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/pkg/llm"
 	"github.com/dereksantos/cortex/pkg/secret"
@@ -78,6 +79,16 @@ type CortexHarness struct {
 	// model sees a 3-tool surface area it can reliably function-call
 	// against. See PROGRESS-REPL.md iter 3/4 for the probe matrix.
 	minimalTools bool
+
+	// sharedCortex is plumbed through to the cortex_search tool via
+	// NewCortexSearchToolFromCortex when non-nil. This is what lets the
+	// REPL's auto-capture path become searchable in-session: the
+	// captureClient writes to the same Storage that the cortex_search
+	// tool's Cortex reads from, with both pointing at the same
+	// in-memory indexes. Nil here keeps the legacy
+	// self-construct-per-call behavior for benchmark cells that don't
+	// capture anything.
+	sharedCortex *intcognition.Cortex
 }
 
 // NewCortexHarness resolves the OpenRouter API key (keychain first, env
@@ -142,6 +153,11 @@ func (h *CortexHarness) SetCortexSearchEnabled(enabled bool) { h.disableCortexSe
 // at the default 5-tool surface area. When true, this overrides
 // SetCortexSearchEnabled (cortex_search is dropped regardless).
 func (h *CortexHarness) SetMinimalTools(enabled bool) { h.minimalTools = enabled }
+
+// SetSharedCortex wires a caller-built Cortex into the harness so the
+// cortex_search tool registered for the next RunSession uses it. See
+// the sharedCortex field for the reasoning. nil clears the wiring.
+func (h *CortexHarness) SetSharedCortex(cx *intcognition.Cortex) { h.sharedCortex = cx }
 
 // defaultSystemPrompt is the default agent contract. Deliberately
 // concise — small models tend to ignore long system prompts, and the
@@ -212,7 +228,15 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	}
 	registry.Register(harness.NewRunShellTool(workdir, registry))
 	if !h.minimalTools && !h.disableCortexSearch {
-		cortexSearch, err := harness.NewCortexSearchTool(workdir, client)
+		var (
+			cortexSearch harness.ToolHandler
+			err          error
+		)
+		if h.sharedCortex != nil {
+			cortexSearch, err = harness.NewCortexSearchToolFromCortex(workdir, h.sharedCortex, client)
+		} else {
+			cortexSearch, err = harness.NewCortexSearchTool(workdir, client)
+		}
 		if err != nil {
 			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
 		}

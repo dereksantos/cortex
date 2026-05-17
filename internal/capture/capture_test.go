@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
@@ -98,6 +99,128 @@ func TestCapture_CaptureEvent(t *testing.T) {
 	}
 	if got.ToolName != "Edit" {
 		t.Errorf("ToolName = %q, want Edit", got.ToolName)
+	}
+}
+
+// TestCapture_WithStorage covers the auto-capture wire that lets REPL
+// events become searchable in-process. CaptureEvent must populate
+// storage on top of writing the journal entry; without this Reflex /
+// cortex_search would only see what survives a separate ingest pass.
+func TestCapture_WithStorage(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-capture-storage-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{ContextDir: tempDir}
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	cap := NewWithStorage(cfg, store)
+
+	event := &events.Event{
+		ID:        "evt-in-storage-1",
+		Source:    events.SourceClaude,
+		EventType: events.EventUserPrompt,
+		Timestamp: time.Now(),
+		Prompt:    "We use JWT for auth, not sessions",
+		Context: events.EventContext{
+			SessionID: "abr-session-1",
+		},
+	}
+
+	if err := cap.CaptureEvent(event); err != nil {
+		t.Fatalf("CaptureEvent: %v", err)
+	}
+
+	// Journal landed (same invariant as the no-storage path).
+	if got := findCaptured(t, tempDir, "evt-in-storage-1"); got == nil {
+		t.Fatal("event missing from journal")
+	}
+
+	// Storage landed — this is the new behavior. cortex_search can now
+	// find this event without an external ingest step.
+	got, err := store.GetEvent("evt-in-storage-1")
+	if err != nil {
+		t.Fatalf("storage.GetEvent: %v", err)
+	}
+	if got.Prompt != "We use JWT for auth, not sessions" {
+		t.Errorf("prompt round-trip failed: %q", got.Prompt)
+	}
+}
+
+// TestCapture_WithStorage_DuplicateIDNonFatal covers the case where
+// CaptureEvent is called twice with the same id (e.g. CaptureFromStdin
+// followed by CaptureEvent on the same payload). Storage's UNIQUE
+// constraint must NOT propagate; the journal write already succeeded
+// and the storage row is the same content.
+func TestCapture_WithStorage_DuplicateIDNonFatal(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-capture-dupe-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{ContextDir: tempDir}
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	cap := NewWithStorage(cfg, store)
+
+	event := &events.Event{
+		ID:        "evt-dupe-1",
+		Source:    events.SourceClaude,
+		EventType: events.EventUserPrompt,
+		Timestamp: time.Now(),
+		Prompt:    "hello",
+	}
+
+	if err := cap.CaptureEvent(event); err != nil {
+		t.Fatalf("first CaptureEvent: %v", err)
+	}
+	if err := cap.CaptureEvent(event); err != nil {
+		t.Fatalf("duplicate CaptureEvent should be no-op, got: %v", err)
+	}
+}
+
+// TestCapture_SetStorage covers the post-construction attachment used
+// when REPL builds the captureClient and the Storage at different
+// points in its init sequence.
+func TestCapture_SetStorage(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-capture-setstore-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	cfg := &config.Config{ContextDir: tempDir}
+	cap := New(cfg) // no storage yet
+
+	store, err := storage.New(cfg)
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+	cap.SetStorage(store)
+
+	event := &events.Event{
+		ID:        "evt-setstore-1",
+		Source:    events.SourceClaude,
+		EventType: events.EventStop,
+		Timestamp: time.Now(),
+	}
+	if err := cap.CaptureEvent(event); err != nil {
+		t.Fatalf("CaptureEvent: %v", err)
+	}
+	if _, err := store.GetEvent("evt-setstore-1"); err != nil {
+		t.Fatalf("event missing from storage after SetStorage: %v", err)
 	}
 }
 

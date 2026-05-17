@@ -8,21 +8,43 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
 // Capture handles fast event capture
 type Capture struct {
-	cfg *config.Config
+	cfg     *config.Config
+	storage *storage.Storage // optional; when non-nil CaptureEvent also writes events synchronously into storage so they are searchable within the same session
 }
 
 // New creates a new Capture instance
 func New(cfg *config.Config) *Capture {
 	return &Capture{cfg: cfg}
+}
+
+// NewWithStorage wires a Capture to a Storage so events become
+// searchable in-process the moment they are captured. Without this,
+// captures only land in the journal (durable) and the Storage layer
+// can't see them until a journal→storage projection step runs — which
+// breaks intra-session learning (Think can't cache what Reflex can't
+// find).
+//
+// store may be nil, in which case this behaves like New().
+func NewWithStorage(cfg *config.Config, store *storage.Storage) *Capture {
+	return &Capture{cfg: cfg, storage: store}
+}
+
+// SetStorage attaches a Storage after construction. Useful when the
+// REPL builds its captureClient before its Storage is available (or
+// the inverse). nil is allowed — clears the attachment.
+func (c *Capture) SetStorage(store *storage.Storage) {
+	c.storage = store
 }
 
 // CaptureFromStdin reads an event from stdin and captures it
@@ -83,8 +105,25 @@ func (c *Capture) CaptureEvent(event *events.Event) error {
 		event.ID = generateEventID()
 	}
 
-	// Append to journal
-	return c.writeToJournal(event)
+	// Journal first — durability before searchability. If the journal
+	// write fails we surface the error; the storage write is a derived
+	// projection and can be replayed from the journal later.
+	if err := c.writeToJournal(event); err != nil {
+		return err
+	}
+
+	// Storage write — makes the event findable by Reflex/cortex_search
+	// in-process. Duplicate-id errors from StoreEvent mean the event
+	// already landed (e.g. CaptureFromStdin → CaptureEvent paths both
+	// firing on the same id); not fatal.
+	if c.storage != nil {
+		if err := c.storage.StoreEvent(event); err != nil {
+			if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				return fmt.Errorf("storage: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // writeToJournal serializes the event and appends it to the capture

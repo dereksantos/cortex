@@ -45,11 +45,15 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
+	"github.com/dereksantos/cortex/pkg/secret"
 )
 
 func init() {
@@ -356,6 +360,22 @@ type replState struct {
 	captureCfg    *config.Config
 	captureClient *capture.Capture
 
+	// store + cortex are the shared cognition surface for this REPL
+	// session. They're built once at newREPLState and reused by (a)
+	// captureClient — events written by the turn loop land in the
+	// same Storage that — (b) the harness's cortex_search tool
+	// retrieves from. Without this sharing the tool's Storage would
+	// be a separate in-memory index that never sees session captures
+	// and cortex_search returns empty forever.
+	//
+	// Constructed eagerly because the LLM-provider arg needed by
+	// Cortex (for Full mode's synchronous Reflect) requires key
+	// resolution we'd rather fail fast on. nil store/cortex is the
+	// signal that this session opted out of the shared path (e.g.
+	// future readonly mode).
+	store  *storage.Storage
+	cortex *intcognition.Cortex
+
 	// sessionID is a short random identifier shared across all turn
 	// rows + capture events in a single REPL invocation. Lets analysis
 	// group "everything done in one session" without parsing paths.
@@ -430,17 +450,83 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		return nil, fmt.Errorf("open session jsonl: %w", err)
 	}
 
+	apiURL := resolveAPIURL(model)
+
+	// Shared cognition surface. Captures from the turn loop and reads
+	// from the cortex_search tool both target this Storage/Cortex —
+	// that's the wire that makes intra-session learning measurable at
+	// all (without it, a capture from turn 1 isn't visible to a
+	// retrieval on turn 2 because each consumer would have opened its
+	// own in-memory Storage).
+	//
+	// Failures here are NOT fatal: a session with no cognition surface
+	// still runs (we just lose the auto-capture pipeline). REPL
+	// readonly use cases or environments without an LLM key still get
+	// a working REPL — the captureClient simply runs without storage
+	// attached and falls back to journal-only persistence.
+	store, cortex, cogErr := newSessionCognition(cortexDir, model, apiURL)
+	if cogErr != nil && verbose {
+		fmt.Fprintf(os.Stderr, "warn: cortex auto-capture disabled (%v)\n", cogErr)
+	}
+
 	return &replState{
 		workdir:      workdir,
 		model:        model,
-		apiURL:       resolveAPIURL(model),
+		apiURL:       apiURL,
 		verbose:      verbose,
 		systemPrompt: systemPrompt,
 		sessionDir:   sessionDir,
 		sessionPath:  sessionPath,
 		jsonl:        f,
 		sessionID:    ts,
+		store:        store,
+		cortex:       cortex,
 	}, nil
+}
+
+// newSessionCognition builds the shared Storage + Cortex pair for one
+// REPL session. The Cortex carries an LLM provider so cortex_search's
+// Full mode (synchronous Reflect) can actually call out. For Ollama
+// routes the provider is an OpenRouter client pointed at the local
+// chat endpoint (it speaks the OpenAI-compat protocol Ollama exposes);
+// for OpenRouter routes the keychain key is required.
+//
+// Returns (nil, nil, err) on any setup failure — caller decides
+// whether to abort the session or continue without auto-capture.
+func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *intcognition.Cortex, error) {
+	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
+	store, err := storage.New(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("storage init: %w", err)
+	}
+
+	// LLM provider for the shared Cortex. For Ollama-routed sessions
+	// the OpenRouter constructor still works — Ollama just needs the
+	// API URL pointed at its OpenAI-compat endpoint. We use a stub
+	// key in that case so the client refuses to error out on init.
+	var provider llm.Provider
+	if apiURL == defaultOllamaAPIURL {
+		client := llm.NewOpenRouterClientWithKey(cfg, "ollama-local-stub")
+		client.SetModel(model)
+		client.SetAPIURL(apiURL)
+		provider = client
+	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
+		client := llm.NewOpenRouterClientWithKey(cfg, key)
+		client.SetModel(model)
+		if apiURL != "" {
+			client.SetAPIURL(apiURL)
+		}
+		provider = client
+	}
+	// provider may still be nil — Cortex tolerates that (Full mode
+	// degrades to Fast with a flagged response).
+
+	cortex, err := intcognition.New(store, provider, nil, cfg)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("cognition init: %w", err)
+	}
+	return store, cortex, nil
 }
 
 // ensureCaptureClient lazily builds the workdir-rooted Capture once,
@@ -458,14 +544,24 @@ func (s *replState) ensureCaptureClient() (*capture.Capture, error) {
 		ContextDir:  filepath.Join(s.workdir, ".cortex"),
 		ProjectRoot: s.workdir,
 	}
-	s.captureClient = capture.New(s.captureCfg)
+	// Attach the shared Storage when available so captures populate
+	// the same in-memory indexes that cortex_search reads. nil store
+	// is the fallback path where captures still land in the journal
+	// for later replay but aren't searchable in-session.
+	s.captureClient = capture.NewWithStorage(s.captureCfg, s.store)
 	return s.captureClient, nil
 }
 
-// close flushes and closes the session JSONL.
+// close flushes and closes the session JSONL plus any shared cognition
+// state. The Storage close flushes its append-mode JSONL handles so
+// the events.jsonl on disk matches the in-memory indexes at the
+// moment of session end.
 func (s *replState) close() {
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
+	}
+	if s.store != nil {
+		_ = s.store.Close()
 	}
 }
 
@@ -878,6 +974,13 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	h, err := evalv2.NewCortexHarness(s.model)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
+	}
+	// Share the REPL's Cortex with the cortex_search tool so captures
+	// from earlier turns in this session are findable. Nil cortex is
+	// the legacy path: the tool builds its own Cortex on first call,
+	// captures from this session aren't visible to it.
+	if s.cortex != nil {
+		h.SetSharedCortex(s.cortex)
 	}
 	if s.systemPrompt != "" {
 		h.SetSystemPrompt(s.systemPrompt)
