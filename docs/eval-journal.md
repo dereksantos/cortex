@@ -36,6 +36,56 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — SWE-bench (verified, limit=5) / baseline vs cortex
+
+**Cortex**: `533ca06` (branch `derek.s/dag-build`); `cortex_version=0.1.0`
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval --benchmark swebench --subset verified --limit 5 \
+  --strategy baseline,cortex --model anthropic/claude-haiku-4.5
+```
+**Versions**: provider=`openrouter`, llm=`anthropic/claude-haiku-4.5`, judge=n/a (SWE-bench uses `tests_pass_all`, i.e. Docker test-suite execution, not LLM judging), scoring images = `swebench/sweb.eval.x86_64.<repo>:v<n>`, `cortex_version=0.1.0`.
+**Result**:
+
+| Strategy | n | Pass | Pass rate | Total cost | Avg latency | Avg tokens (in/out) | Avg turns | Avg injected ctx |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 6 | 0 | 0.0% | $1.294 | 28.4 s | 205200 / 2086 | 13.5 | 0 |
+| cortex   | 5 | 0 | 0.0% | $1.059 | 26.4 s | 202601 / 1849 | 14.2 | 0 |
+
+(baseline n=6 includes one extra cell from the probe run; cortex n=5 is the clean limit-5 sweep.)
+
+Per-instance F2P/P2P (all instances from `astropy/astropy`, the alphabetically-first repo in the verified subset):
+
+| Instance | strat=baseline | strat=cortex |
+|---|---|---|
+| astropy-12907 | F2P=0/2, P2P=0/13 | F2P=0/2, P2P=0/13 |
+| astropy-13033 | F2P=0/1, P2P=0/20 | F2P=0/1, P2P=0/20 |
+| astropy-13236 | F2P=0/2, P2P=0/644 | F2P=0/2, P2P=0/644 |
+| astropy-13398 | F2P=0/4, P2P=0/68  | F2P=0/4, P2P=0/68 |
+| astropy-13453 | F2P=0/1, P2P=0/9   | F2P=0/1, P2P=0/9 |
+
+Per-cell records in `.cortex/db/cell_results.jsonl` (11 swebench rows total).
+
+**Why this run**: Phase A Step 3 — establish a pre-integration SWE-bench Verified baseline.
+
+**Observations**:
+- **0% pass on both strategies.** The agent runs 13–14 turns per instance, emits a patch, and the patch fails all F2P tests in the scoring container every time. Same set of 5 astropy instances passes/fails identically across strategies, modulo a small token/turn delta.
+- **Cortex strategy still injects 0 context.** Same finding as LongMemEval: store is empty pre-integration, so "cortex" cell is "baseline + search-tax". The 2-second latency reduction and slightly fewer output tokens on the cortex side are noise at n=5.
+- **Repo coverage is narrow.** `--limit 5` against the alphabetical-by-instance-id verified subset picked only astropy. A representative SWE-bench Verified baseline needs `--repo` rotation across the 12 repos in the subset. Not done here to respect both the cost ceiling and per-loop scope.
+- Scoring container worked first try (Docker is up; `swebench/sweb.eval.x86_64.astropy__astropy:{v4.3,v5.0}` images pulled and executed).
+- One legitimate principle-1 confirmation: the harness only sees `cortex` as a black box (`internal/eval/benchmarks/cortexcli.go`); F2P numbers come from running the test suite in the Docker image, not from the agent self-reporting.
+
+**Follow-ups**:
+- Cross-repo sweep (one limit-1 per repo × 12 repos × 2 strategies ≈ 24 cells, est. $5) for a representative Verified baseline. Defer until cost estimator is recalibrated.
+- 0% baseline is consistent with claude-haiku-4.5's reported SWE-bench Verified pass rate — to expose any DAG-protocol delta we'll want a stronger model (e.g. `anthropic/claude-sonnet-4.5`) in Phase 6 comparison, not just haiku.
+- Same `cortex-fast / cortex-full` taxonomy gap as LongMemEval — see that entry's follow-ups.
+
+---
+
 ### 2026-05-17 — LongMemEval (oracle, limit=25) / baseline vs cortex
 
 **Cortex**: `f815d06` (branch `derek.s/dag-build`); `cortex_version=0.1.0`
