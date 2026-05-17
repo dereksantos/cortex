@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
@@ -55,6 +56,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	compareModelOverride := ""
 	harnessName := ""
 	benchmarkName := ""
+	suiteName := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -76,6 +78,16 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			if i+1 < len(ctx.Args) {
 				benchmarkName = ctx.Args[i+1]
 				i++
+			}
+		case "--suite":
+			if i+1 < len(ctx.Args) {
+				suiteName = ctx.Args[i+1]
+				i++
+			}
+		default:
+			// Support --suite=<name> joined form
+			if strings.HasPrefix(arg, "--suite=") {
+				suiteName = strings.TrimPrefix(arg, "--suite=")
 			}
 		case "--claude-binary":
 			if i+1 < len(ctx.Args) {
@@ -152,6 +164,7 @@ Options:
   --summary              Show lift trend over recent runs
   --abr-trend            Show ABR progression across runs
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
+  --suite NAME           Run a special-purpose suite: mechanic | legacy-cognition | journeys
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances (for mteb: caps queries scored)
   --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
@@ -243,6 +256,12 @@ Examples:
 	// pipelines see them alongside scenario-driven results.
 	if benchmarkName != "" {
 		return runBenchmark(benchmarkName, ctx.Args, verbose)
+	}
+
+	// SUITE MODE: special-purpose eval families (mechanic / legacy-cognition
+	// / journeys). Dispatched when --suite is set. See eval_suite.go.
+	if suiteName != "" {
+		return runSuite(suiteName, scenarioDir, outputFormat, verbose)
 	}
 
 	// Create provider
