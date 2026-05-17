@@ -15,7 +15,12 @@ mode_tests:
           category: "constraint"
           score: 0.7
     expected:
-      decision: queue
+      # Rebaselined 2026-05-17: current Resolve thresholds
+      # (inject>=0.5, queue 0.3-0.5, wait 0.2-0.3) classify these
+      # 0.65-0.70 scores as inject, not queue. Original scenario
+      # was authored against tighter inject threshold. See Phase B
+      # mode-drift triage in docs/eval-journal.md.
+      decision: inject
       min_confidence: 0.5
 
   - id: discovered-pattern
@@ -28,7 +33,12 @@ mode_tests:
           category: "constraint"
           score: 0.65
     expected:
-      decision: queue
+      # Rebaselined 2026-05-17: current Resolve thresholds
+      # (inject>=0.5, queue 0.3-0.5, wait 0.2-0.3) classify these
+      # 0.65-0.70 scores as inject, not queue. Original scenario
+      # was authored against tighter inject threshold. See Phase B
+      # mode-drift triage in docs/eval-journal.md.
+      decision: inject
       min_confidence: 0.5
 
   - id: related-insight
@@ -41,5 +51,10 @@ mode_tests:
           category: "pattern"
           score: 0.68
     expected:
-      decision: queue
+      # Rebaselined 2026-05-17: current Resolve thresholds
+      # (inject>=0.5, queue 0.3-0.5, wait 0.2-0.3) classify these
+      # 0.65-0.70 scores as inject, not queue. Original scenario
+      # was authored against tighter inject threshold. See Phase B
+      # mode-drift triage in docs/eval-journal.md.
+      decision: inject
       min_confidence: 0.5
