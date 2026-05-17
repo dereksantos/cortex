@@ -172,14 +172,23 @@ func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout ti
 		testsList = ""
 	}
 
-	// Inner script that runs inside the docker container. Note the
-	// `tail -c 4096`: pytest output for django can be megabytes;
-	// retry context goes back into the agent prompt so we keep it
-	// bounded.
-	inner := "set -e; cd /testbed && " +
+	// Inner script that runs inside the docker container. Two
+	// subtle correctness bits:
+	//
+	//   - `set -eo pipefail`: without pipefail, `pytest | tail`
+	//     returned tail's exit (0) and masked pytest failures —
+	//     verify_ok was True even when pytest didn't run at all.
+	//   - tee /tmp/cortex-pytest.log then tail the log on the
+	//     verifier-fail path. Avoids the `pytest | tail` pipefail
+	//     interaction where pytest writes to a closed pipe when
+	//     tail finishes early on very large outputs.
+	//
+	// `tail -c 4096` bounds retry context (django can emit MBs).
+	inner := "set -eo pipefail; cd /testbed && " +
 		"git apply --whitespace=nowarn /tmp/cortex-attempt.patch 2>&1 && " +
 		"if [ -s /tmp/cortex-f2p-tests.txt ]; then " +
-		"  xargs -a /tmp/cortex-f2p-tests.txt python -m pytest --no-header -q 2>&1 | tail -c 4096; " +
+		"  python -m pytest --no-header -q $(cat /tmp/cortex-f2p-tests.txt | tr '\\n' ' ') 2>&1 | tee /tmp/cortex-pytest.log; " +
+		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-pytest.log; exit $rc; " +
 		"else echo 'no F2P tests configured; verifier trivially passes'; fi"
 
 	// Outer script: snapshot the diff, write tests list, run docker.
