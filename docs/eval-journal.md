@@ -36,6 +36,56 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — SWE-bench: agent reaches write-source state; two new blockers
+
+**Cortex**: `b37b170` (and predecessors `0314114`, `e58463c`).
+
+Continuation of today's SWE-bench arc. Three further commits since the prior entry:
+
+1. **Agent-driven test-runner discovery** (`e58463c`). Verifier now reads `.cortex/test-cmd.sh` if present and runs that inside docker; falls back to pytest. System prompt instructs the agent to discover the project's test runner and write the command to that file. Cleanest replacement for the per-repo hardcoding that would otherwise be required (django → `runtests.py`, sympy → `bin/test`, …).
+2. **Stripped coaching from system prompt** (`0314114`). The previous version listed CONTRIBUTING.md / tox.ini / pyproject.toml as files to read and pytest / Django / sympy as frameworks to expect — both biased discovery toward the half-dozen repos in Verified. The new prompt frames the task ("you are an engineer landing in an unfamiliar repo; figure out the technology, how its tests run, what command verifies the failing tests"), names only the agent's tools and the test-cmd.sh protocol, and otherwise lets the model discover. Eval-principles #2-compliant: framing, not coaching.
+3. **Per-attempt budget flags** (`b37b170`). REPL gains `--max-turns / --max-cost-usd / --max-cumulative-tokens` that override the interactive-mode defaults (8 turns / $0.20 / 300k tokens). SWE-bench passes 50 / $5 / 800k since the prior probe blew the $0.20 cap in 4 exploratory reads on Django.
+
+**End-to-end probe** (sonnet-4.5 on `django__django-10097`):
+
+| Metric | Value |
+|---|---|
+| Agent turns (attempt 1) | 21 |
+| Tool-call mix (attempt 1) | list_dir × 7, read_file × 6, run_shell × 4, **write_file × 4** |
+| Last tool call (attempt 1) | `write_file django/core/validators.py` |
+| Tokens (attempt 1) | 620 918 in / 17 322 out |
+| Cost (attempt 1) | $2.12 |
+| End reason | `openrouter (402)`: credit exhaustion mid-attempt 2 |
+| Final cell | F2P=0/438, P2P=0/1432 |
+| Wall time | 250 s |
+
+The agent reached the **write-source state** for the first time today — list_dir to find the implicated module, run_shell to probe the test setup, read_file on `validators.py` (the actual file the bug fix lives in!), then `write_file django/core/validators.py`. This is qualitatively different from every prior attempt this session. The probe died not because the model failed but because mid-attempt-2 the OpenRouter account hit a 402 credit-exhaustion error.
+
+**Two new blockers surfaced** (worth flagging before tomorrow's probes):
+
+1. **OpenRouter credits exhausted.** `openrouter (402): This request requires more credits, or fewer max_tokens. You requested up to 4000 tokens, but can only afford 1825.` Top up at https://openrouter.ai/settings/credits before the next sonnet probe. Local-model probe (mistral:7b via ollama) is the credit-free alternative for harness iteration — needs a `--full-tools` flag added to the REPL because the current Ollama path force-toggles `minimalTools=true` and drops `list_dir`/`cortex_search` (`cmd/cortex/commands/repl.go:839`), which SWE-bench can't function without.
+
+2. **Snapshot rollback throws away agent progress on verify_fail.** The REPL's `runTurn → finalize` calls `restoreFromSnapshot` whenever `accepted=false` (i.e. verifier failed). For interactive use that's right — don't keep half-broken edits. For benchmarks it's wrong: the agent's 4 `write_file` calls on attempt 1 were rolled back when attempt 2 started, then attempt 2 errored out on credits with the workdir at zero progress. The verifier sees an empty diff and the cell records "no source change" even though the agent really did work. Fix: add `--keep-on-fail` to the headless mode (default-on for benchmark harnesses) so iterations build on prior work instead of restarting from scratch — that's closer to how a real engineer iterates anyway.
+
+**What's confirmed working at this point**:
+- Headless REPL (`--prompt --verifier --auto-retry --max-retries --json --workdir --system-prompt --max-turns --max-cost-usd --max-cumulative-tokens`).
+- Preflight gates (docker daemon, per-instance scoring image).
+- Image-id format for the new SWE-bench Verified registry.
+- `.gitignore` on cloned repos to keep verifier diffs clean.
+- `pipefail` + `$PIPESTATUS` so pytest exit can't be masked.
+- Agent-driven test runner discovery convention (`.cortex/test-cmd.sh`).
+- Coaching-free system prompt.
+- Per-attempt budgets sized for real repos.
+- Agent reaches write-source state on a real SWE-bench instance.
+
+**Follow-ups queued (priority order)**:
+1. `--keep-on-fail` flag on REPL (default-on for benchmark callers) so iterative progress survives verify failures.
+2. `--full-tools` flag on REPL to override the Ollama auto-minimal so small local models can also exercise the SWE-bench flow once tool-use discipline allows.
+3. Re-run after credit top-up to see whether the agent's discovered fix actually moves F2P off zero.
+4. Token/cost accounting from `RunREPLHeadless` JSON summary so cells capture real spend.
+
+---
+
 ### 2026-05-17 — SWE-bench: iteration wired via REPL + correction of prior 0/3 cells
 
 **Cortex**: `a8d47bf` (and predecessors `ecb10fc`, `3244bad`, `a8b39d1`, `12cc6dd`, `2b789f7`, `90474e3`).
