@@ -36,6 +36,42 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — ABR diagnostic: 0.586 vs 0.77 resolved as stale doc
+
+**Cortex**: `861f0ff` (branch `derek.s/dag-build`)
+**Loop**: `docs/prompts/loop-abr-diagnostic.md`
+**Result**: Category (a) Stale doc. `ROADMAP.md` rebaselined from 0.77 → 0.586; this entry supersedes the "(flagged)" status on the ABR row in the session-close health card below.
+
+**Why this run**: Reconcile the ≥20% deviation between Phase A's measured ABR (0.586, see the "Phase A baseline complete" entry below) and `ROADMAP.md`'s stated 0.77.
+
+**Provenance of 0.77** (traced via `git log --all -p -- ROADMAP.md`):
+
+| Field | 0.77 (2025-12-30) | 0.586 (2026-05-17) |
+|---|---|---|
+| Commit that established the number | `3c18d17` ("feat: add paper structure, eval improvements…") | `2e90738` ("docs(eval): Phase A baseline complete") |
+| Runner | `internal/eval/cognition.go` + `cognition_eval.go` (invoked via `--cognition` flag) | `internal/eval/v2/Evaluator` (unified post-consolidation runner) |
+| Runner status today | **Deleted** in commit `1628173` (2026-01-04, "refactor: consolidate eval system 23 files → 5 files", removed ~11k lines) | Active |
+| Scenarios | `test/evals/scenarios/cognition/*.yaml` (moved to `test/evals/legacy/`) | 43-scenario v2 sweep in `test/evals/v2/` |
+| LLM | Ollama default (qwen2:0.5b per adjacent ROADMAP context at the time) | `anthropic/claude-haiku-4.5` via OpenRouter |
+| Embedder | all-MiniLM-L6-v2 (per ROADMAP context at the time) | nomic-embed-text v1.5 |
+| Companion pass-rate | 87% (cognition tests) | 90.7% (v2 lift-based) |
+
+**Categorization**: Unambiguously **(a) Stale doc**. The 0.77 cannot be a regression because the runner that produced it no longer exists in the repo — it was deleted four months ago and the scenarios were archived to `test/evals/legacy/`. Every condition that produced 0.77 has been replaced. The 0.586 figure is the current best estimate under the only runner that still exists, with the documented run-to-run variance caveat (0.586 → 0.492 on a same-day re-run, recorded in the Phase A entry).
+
+**Action taken**:
+- `ROADMAP.md`: replaced the four current-state mentions of 0.77 with 0.586, added a one-sentence rebaseline note adjacent to the Current Eval Results table, bumped `Last Updated` to `2026-05-17`. Historical references in "Recently Completed" and the Phase 3 dashboard example were left intact (they remain accurate as history / placeholders).
+- This entry filed.
+- Per the loop's "Diagnosis only" constraint, no scenario or framework changes were made; the underlying variance issue (Full NDCG = 0 for 14 scenarios) remains open per the Phase A "Follow-ups" list.
+
+**Observations**:
+- `ROADMAP.md`'s "Recently Completed" item `- [x] ABR metric baseline (0.77)` is still factually correct as a historical record (work that completed at the time) and was left as-is.
+- The 0.77 had drifted across multiple ROADMAP rewrites (commits `f0927d6`, `627867a`, `ca7d61a`) without ever being re-measured under the new runner — a useful reminder that headline numbers in design docs need a "measured-under" stamp, not just a value.
+
+**Follow-ups**:
+- None for this loop (diagnostic only). The ABR optimization work itself remains scoped to Phase 4 in `ROADMAP.md`.
+
+---
+
 ### 2026-05-17 — Session close: --full-tools + --keep-on-fail, mistral:7b probe, eval health
 
 **Cortex**: `63107a8` (and one minor bug found, not yet fixed).

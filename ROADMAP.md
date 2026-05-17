@@ -1,6 +1,6 @@
 # Cortex Roadmap
 
-**Last Updated:** May 2026
+**Last Updated:** 2026-05-17
 **Status:** Experimental. Core pipeline working; ABR optimization ongoing.
 **North Stars:** ABR ≥ 0.9 | Token Cost Reduction over time
 
@@ -21,7 +21,7 @@
 - **MCP server:** wired up but not validated against real external clients
 - **Slash-command UX:** functional but rough; some output is stubby
 - **Eval LLM mix:** Haiku runs landed but the 3-way comparison (Cortex / native memory / no-context) is still settling — see `docs/archive/`
-- **ABR:** 0.77 against a target of 0.9
+- **ABR:** 0.586 run-level (43-scenario v2 sweep, 2026-05-17) against a target of 0.9
 
 ## Current Eval Results
 
@@ -29,9 +29,11 @@
 |--------|---------|--------|
 | Semantic Lift | +35% | >0% |
 | Win Rate | 44% (8/18) | >50% |
-| ABR | 0.77 | ≥0.9 |
+| ABR | 0.586 | ≥0.9 |
 
 Most recent runs use Claude Haiku 4.5 with hooks-active; archived under `docs/archive/`. qwen 1.5B was retired (below task floor — see commit `bb309ce`).
+
+**ABR baseline rebaselined 2026-05-17** under `anthropic/claude-haiku-4.5` (via OpenRouter) on the 43-scenario v2 full sweep — run-level avg from `eval_runs.avg_abr`, recorded in `docs/eval-journal.md`. The prior 0.77 was measured 2025-12-30 under the `--cognition` runner (since deleted in commit `1628173`, which removed ~11k lines including `internal/eval/cognition.go` and moved its scenarios to `test/evals/legacy/`); that figure is unreproducible because the code path no longer exists. The 0.586 figure has known run-to-run variance — a same-day re-run scored 0.492 (see Phase A entry).
 
 ---
 
@@ -51,7 +53,7 @@ Goal: ABR → 1.0 as session progresses
 | 0.70-0.85 | Needs work |
 | < 0.70 | Failing |
 
-**Current: 0.77 (Needs work)**
+**Current: 0.586 (Failing per the rubric; rebaselined 2026-05-17 — see Current Eval Results above for provenance.)**
 
 ABR validates Cortex's core innovation: bounded intelligence through background processing. Alongside ABR, **token cost reduction** measures the practical payoff -- fewer tokens spent re-discovering context across sessions.
 
@@ -124,7 +126,7 @@ tests:
 
 ### Phase 4: ABR Optimization 📋 NEXT
 
-**Goal:** Improve ABR from 0.77 → 0.9
+**Goal:** Improve ABR from 0.586 → 0.9
 
 Landscape-informed priorities (Mar 2026 review):
 - [ ] Replace brute-force vector search with sqlite-vec (indexed search)
