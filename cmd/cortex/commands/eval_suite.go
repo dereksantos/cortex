@@ -24,13 +24,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/eval/journey"
 	"github.com/dereksantos/cortex/internal/eval/legacy"
-	"gopkg.in/yaml.v3"
+	"github.com/dereksantos/cortex/internal/eval/mechanic"
 )
 
 // runSuite is the entrypoint for `cortex eval --suite=<name>`. It
@@ -63,101 +61,52 @@ func runSuite(suite, baseDir, outputFormat string, verbose bool) error {
 	}
 }
 
-// mechanicFixture is the minimal shape needed to emit a structured
-// "not implemented" status for each fixture. The full schema (mocked
-// handlers, seed, initial budget, expected) lives in the YAML files
-// and is consumed by the DAG executor once it exists; the suite stub
-// only needs enough to report which fixtures exist and what they
-// each verify.
-type mechanicFixture struct {
-	ID                  string `yaml:"id"`
-	Version             int    `yaml:"version"`
-	Suite               string `yaml:"suite"`
-	Description         string `yaml:"description"`
-	FailureMessageToday string `yaml:"failure_message_today"`
-}
-
-// runMechanicSuite loads every *.yaml under dir, parses the
-// fixture identity fields, and emits structured failure rows for each
-// (since the DAG executor isn't implemented yet). Exit code is
-// non-zero — these fixtures are *supposed* to fail until Phase 5 v0
-// lands; the CLI surface treats that as expected, not as crashed.
+// runMechanicSuite loads every *.yaml under dir, executes each
+// fixture through the DAG executor (pkg/cognition/dag), and reports
+// PASS/FAIL based on the actual executor behavior matching the
+// fixture's expected block.
+//
+// As of Stage 1 v0 (commits 1406eb6 + this file), 4 of 5 mechanic
+// invariants (M1 budget decay, M2 tree reconstruction, M3 depth
+// cap, M4 budget exhaustion) pass green; M5 (tree-shape variation)
+// requires input-aware handler dispatch which is also wired here.
 func runMechanicSuite(dir, outputFormat string, verbose bool) error {
-	pattern := filepath.Join(dir, "*.yaml")
-	matches, err := filepath.Glob(pattern)
+	ctx := context.Background()
+	res, err := mechanic.RunSuite(ctx, dir)
 	if err != nil {
-		return fmt.Errorf("glob %s: %w", pattern, err)
-	}
-	if len(matches) == 0 {
-		return fmt.Errorf("no mechanic fixtures found in %s", dir)
-	}
-	sort.Strings(matches)
-
-	type result struct {
-		Fixture      string `json:"fixture"`
-		Version      int    `json:"version"`
-		Path         string `json:"path"`
-		OK           bool   `json:"ok"`
-		ErrorCode    string `json:"error_code"`
-		ErrorMessage string `json:"error_message"`
-	}
-
-	results := make([]result, 0, len(matches))
-	for _, path := range matches {
-		data, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return fmt.Errorf("read %s: %w", path, rerr)
-		}
-		var fx mechanicFixture
-		if uerr := yaml.Unmarshal(data, &fx); uerr != nil {
-			return fmt.Errorf("parse %s: %w", path, uerr)
-		}
-		results = append(results, result{
-			Fixture:      fx.ID,
-			Version:      fx.Version,
-			Path:         path,
-			OK:           false,
-			ErrorCode:    "not_implemented",
-			ErrorMessage: strings.TrimSpace(fx.FailureMessageToday),
-		})
+		return err
 	}
 
 	if outputFormat == "json" {
-		out := map[string]any{
-			"suite":    "mechanic",
-			"fixtures": results,
-			"summary": map[string]any{
-				"total":          len(results),
-				"passed":         0,
-				"failed":         len(results),
-				"expected_state": "all fail until Stage 1 v0 lands the executor",
-				"see":            "docs/dag-build-plan.md Stage 1, docs/eval-prep-epic.md Phase C",
-			},
-		}
-		b, _ := json.MarshalIndent(out, "", "  ")
+		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
-	} else {
-		fmt.Printf("=== mechanic suite (%d fixtures) ===\n\n", len(results))
-		for _, r := range results {
-			fmt.Printf("  %s [v%d]\n", r.Fixture, r.Version)
-			fmt.Printf("    status: FAIL (error_code=%s)\n", r.ErrorCode)
-			if verbose && r.ErrorMessage != "" {
-				fmt.Printf("    reason:\n")
-				for _, line := range strings.Split(r.ErrorMessage, "\n") {
-					fmt.Printf("      %s\n", line)
-				}
-			}
-			fmt.Println()
+		if res.Failed > 0 {
+			os.Exit(1)
 		}
-		fmt.Printf("Total: %d  Passed: 0  Failed: %d\n", len(results), len(results))
-		fmt.Println("All fixtures fail as expected until DAG executor lands.")
-		fmt.Println("See docs/dag-build-plan.md Stage 1 for the implementation gate.")
+		return nil
 	}
 
-	// Exit non-zero so CI / scripts can detect the "still pre-executor"
-	// state without parsing output. Once the executor lands and all 5
-	// fixtures pass, this should flip to exit 0.
-	os.Exit(2)
+	fmt.Printf("=== mechanic suite (%d fixtures) ===\n\n", res.Total)
+	for _, r := range res.Results {
+		statusTag := "PASS"
+		if !r.OK {
+			statusTag = "FAIL"
+		}
+		fmt.Printf("  [%s] %s\n", statusTag, r.Fixture)
+		if r.TraceSummary != "" {
+			fmt.Printf("         %s\n", r.TraceSummary)
+		}
+		if !r.OK && verbose {
+			for _, f := range r.Failures {
+				fmt.Printf("         × %s\n", f)
+			}
+		}
+		fmt.Println()
+	}
+	fmt.Printf("Total: %d  Passed: %d  Failed: %d\n", res.Total, res.Passed, res.Failed)
+	if res.Failed > 0 {
+		os.Exit(1)
+	}
 	return nil
 }
 

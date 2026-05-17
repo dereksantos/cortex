@@ -191,6 +191,24 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 					})
 					continue
 				}
+				// Pre-spawn budget check: if the child's registered cost
+				// hint exceeds the remaining budget on any axis, refuse
+				// before scheduling. Modulate model from dag-protocol.md.
+				if childRegistered, getErr := e.registry.Get(childSpec.QualifiedName()); getErr == nil {
+					if !budget.CanAfford(childRegistered.Cost) {
+						axis := "latency_ms"
+						if childRegistered.Cost.Tokens > budget.Tokens {
+							axis = "tokens"
+						}
+						trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
+							ParentID:      item.spec.ID,
+							ChildQualName: childSpec.QualifiedName(),
+							ErrorCode:     "budget_exceeded",
+							ExhaustedAxis: axis,
+						})
+						continue
+					}
+				}
 				// MaxFanout check (per the parent spec).
 				if len(entry.SpawnedChildren) >= spec.MaxFanout {
 					trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
