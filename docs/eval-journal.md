@@ -36,6 +36,45 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — SWE-bench (verified, django subset, limit=3) / qwen3-coder-30b-a3b
+
+**Cortex**: `7c5accd`; `cortex_version=0.1.0`
+**Command**:
+```
+CORTEX_BINARY=$PWD/bin/cortex \
+CORTEX_EVAL_RUN_USD_CEILING=25 \
+CORTEX_EVAL_DAILY_USD_CEILING=25 \
+CORTEX_EVAL_LIFETIME_USD_CEILING=25 \
+./bin/cortex eval --benchmark swebench --subset verified --limit 3 \
+  --repo django/django --strategy baseline,cortex \
+  --model qwen/qwen3-coder-30b-a3b-instruct
+```
+**Versions**: provider=`openrouter`, llm=`qwen/qwen3-coder-30b-a3b-instruct` (selected because user asked for "32b qwen coder on OpenRouter" and `qwen-2.5-coder-32b-instruct` returned `openrouter (404): No endpoints found that support tool use` — the 30b-A3B MoE coder is the closest tool-use-capable Qwen coder at that scale; pricing $0.07 per million input tokens). Same 3 django instances as the sonnet entry below for direct comparison.
+
+**Result**:
+
+| Strategy | n | Pass | Total cost | Avg latency | Avg tokens in | Avg tokens out | Avg turns |
+|---|---|---|---|---|---|---|---|
+| baseline | 3 | 0/3 | $0.0598 | 87.2 s | 268 440 | 4 238 | 17.0 |
+| cortex   | 3 | 0/3 | $0.0326 | 76.9 s | 135 513 | 5 111 | 11.0 |
+
+(Note: two ghost cells from a prior `qwen/qwen-2.5-coder-32b-instruct` attempt landed in `cell_results.jsonl` with `tokens_in=0, cost=0` and the same `F2P=0/438` placeholder — those are from before tool-use support was confirmed missing. Filter by `model=='qwen/qwen3-coder-30b-a3b-instruct'` to exclude them.)
+
+**Why this run**: per user request — compare a mid-sized OpenRouter coder model against sonnet-4.5 on the same django instances. Tests whether SWE-bench pass-rate is capability-bound or scaffolding-bound.
+
+**Observations**:
+- **Same 0/3 pass-rate as sonnet-4.5** on identical instances. Reinforces the "scaffolding-bound, not capability-bound" reading from the sonnet entry — even an 11× cheaper model on the same harness gets the same outcome.
+- **Cost is 10–20× cheaper**: $0.03/cell for qwen3-coder vs $0.22/cell for sonnet-4.5 on the same problems. Useful as a fast-feedback model for harness iteration even if final benchmarks use sonnet.
+- **Cortex strategy used HALF the tokens (135 k vs 268 k avg in) and 6 fewer turns** than baseline. Agent terminated earlier under cortex — possibly because `cortex_search` returned a confident-looking (but unhelpful) result the model chased. Interesting pattern; not enough cells to know if it's signal or noise.
+- **Qwen's per-call latency is 3× sonnet's** (87s vs 29s baseline) — slower per turn AND more turns. Throughput is the practical limit on qwen for this benchmark, not cost.
+- **`qwen-2.5-coder-32b-instruct` is a no-go for tool-use benchmarks** on OpenRouter today (`openrouter (404): No endpoints found that support tool use`). Future SWE-bench runs targeting the 32b qwen tier must use the 30b-A3B MoE coder, `qwen3-coder` (full), or the free-tier `qwen3-coder:free`.
+
+**Follow-ups**:
+- A direct sonnet-vs-qwen comparison on a "fixable" SWE-bench instance (one with F2P <= 5) would isolate whether the qwen-cortex token-reduction is "agent gives up early" vs "actually finds the right answer cheaper."
+- Two ghost cells are noise — worth a small `cortex eval grid` filter that drops `tokens_in == 0` rows by default unless explicitly asked.
+
+---
+
 ### 2026-05-17 — SWE-bench (verified, django subset, limit=3) / sonnet-4.5
 
 **Cortex**: `5a5f06c`; `cortex_version=0.1.0`
