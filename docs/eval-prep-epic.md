@@ -230,21 +230,26 @@ there.
 
 ---
 
-## Phase F — Pre-integration baseline doc
+## Phase F — Pre-integration baseline doc ✅ DONE 2026-05-17 (partial)
 
 **Goal.** Single doc summarizing all "before" numbers, so post-Phase-5
 delta is one comparison, not five scattered claims.
 
 **Deliverables.**
 
-- `docs/eval-baseline.md` consolidating:
-  - Phase A baseline scores (v2, LongMemEval, SWE-bench, ABR)
-  - Phase B legacy/cognition baseline (per-op current scores)
-  - Phase D journeys baseline (per-scenario current scores)
-  - Per-axis cost/latency breakdown from Phase 1 telemetry
-- Time-stamped; model-versions pinned.
-- Linked from `eval-journal.md` and `ROADMAP.md` as the canonical
+- [x] `docs/eval-baseline.md` consolidating:
+  - [x] Phase A baseline scores (v2, LongMemEval, SWE-bench, ABR, MTEB)
+  - [ ] Phase B legacy/cognition baseline (per-op current scores) — _marked pending_
+  - [ ] Phase D journeys baseline (per-scenario current scores) — _marked pending_
+  - [x] Per-axis cost/latency notes from Phase 1 telemetry
+- [x] Time-stamped; model-versions pinned; git ref `387468f`.
+- [x] Linked from `eval-journal.md` and `ROADMAP.md` as the canonical
   "before" snapshot.
+
+**Status:** Phase F is complete *for the data that exists* (Phase A + MTEB).
+Phase B and D sections explicitly marked "pending Phase X; will be added
+once that loop completes" — see eval-baseline.md. Once B + D land, this
+doc gets a second pass to incorporate those numbers.
 
 **Success criteria.** Reading `eval-baseline.md` end-to-end gives a
 single time-stamped snapshot of where everything stood before any DAG

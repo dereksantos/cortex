@@ -35,6 +35,8 @@ Most recent runs use Claude Haiku 4.5 with hooks-active; archived under `docs/ar
 
 **ABR baseline rebaselined 2026-05-17** under `anthropic/claude-haiku-4.5` (via OpenRouter) on the 43-scenario v2 full sweep — run-level avg from `eval_runs.avg_abr`, recorded in `docs/eval-journal.md`. The prior 0.77 was measured 2025-12-30 under the `--cognition` runner (since deleted in commit `1628173`, which removed ~11k lines including `internal/eval/cognition.go` and moved its scenarios to `test/evals/legacy/`); that figure is unreproducible because the code path no longer exists. The 0.586 figure has known run-to-run variance — a same-day re-run scored 0.492 (see Phase A entry).
 
+**Canonical pre-DAG baseline snapshot:** [`docs/eval-baseline.md`](docs/eval-baseline.md) — time-stamped consolidation of all Phase A baselines, pinned to git SHA `387468f`. Phase 6 of the integration roadmap will diff post-DAG numbers against this snapshot.
+
 ---
 
 ## Core Metric: ABR (Agentic Benefit Ratio)

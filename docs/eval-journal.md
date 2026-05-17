@@ -2,7 +2,7 @@
 
 A human-readable log of eval runs — what we ran, why, what we noticed. The structured record lives in `.cortex/journal/eval/` (`eval.cell_result` JSONL) and is the canonical source for analysis. This file is the lab notebook around those numbers.
 
-Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Operational checklist: [`docs/benchmarks/integrity.md`](benchmarks/integrity.md).
+Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Operational checklist: [`docs/benchmarks/integrity.md`](benchmarks/integrity.md). **Consolidated time-stamped baseline snapshot:** [`docs/eval-baseline.md`](eval-baseline.md) — the "before" picture Phase 6 of the integration roadmap will diff against.
 
 ## How to use this journal
 
