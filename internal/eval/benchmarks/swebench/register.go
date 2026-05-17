@@ -25,6 +25,9 @@ type SWEBenchConfig struct {
 	DockerImagePrefix string
 	GitCacheDir       string
 	InstanceTimeout   time.Duration
+	// MaxRetries caps the REPL's verify-and-retry auto-retry budget
+	// per instance. 0 means use defaultMaxRetries.
+	MaxRetries int
 }
 
 // SWEBench implements benchmarks.Benchmark. Configured via the setters

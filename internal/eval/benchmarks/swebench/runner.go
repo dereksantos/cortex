@@ -25,6 +25,122 @@ type runnerPayload struct {
 	Strategy string
 }
 
+// defaultMaxRetries is the REPL auto-retry budget used when --max-retries
+// isn't set on the CLI. Picked so a typical Verified instance has at
+// least 2–3 chances to converge on a passing patch given verifier
+// feedback, while keeping cost bounded (each retry runs both a fresh
+// agent attempt AND a docker verifier pass).
+const defaultMaxRetries = 3
+
+// buildAgentPrompt returns the prompt the REPL feeds the agent. It
+// pairs the upstream problem_statement (always the bulk of the
+// signal) with the explicit list of FAIL_TO_PASS test names the
+// verifier will check. Without the test list the agent has to infer
+// what "good" looks like from the issue description alone — and the
+// prior single-shot baseline showed it can't, even on Sonnet-4.5.
+//
+// The test names are NOT coaching (eval-principles #2 — coaching is
+// telling the model HOW to use tools; this is telling the model WHAT
+// success looks like, which is the same information the canonical
+// scoring uses). SWE-Agent and Aider's harnesses do the equivalent.
+func buildAgentPrompt(inst Instance) string {
+	if len(inst.FailToPass) == 0 {
+		return inst.ProblemStatement
+	}
+	var b strings.Builder
+	b.WriteString(inst.ProblemStatement)
+	b.WriteString("\n\n---\n\nYour patch must make these tests pass (they currently fail):\n")
+	for _, t := range inst.FailToPass {
+		b.WriteString("  - ")
+		b.WriteString(t)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nThe verifier runs these tests after each attempt and reports the result back. Do not modify the test files themselves; fix the source code under test.")
+	return b.String()
+}
+
+// buildVerifierCommand returns the shell command the REPL runs after
+// each agent attempt to decide pass/fail. The command:
+//
+//  1. Snapshots the agent's current diff from repoDir.
+//  2. Spins up the canonical SWE-bench scoring image for the instance.
+//  3. Inside the image, applies the agent's diff on top of the test
+//     patch (already in the image's pristine /testbed at base_commit
+//     + test_patch).
+//  4. Runs the F2P tests via the SWE-bench scoring entrypoint and
+//     exits 0 iff every F2P test passes.
+//
+// Per-attempt docker overhead is ~15–30s — that's the cost of using
+// the same scoring stack as final evaluation, in exchange for
+// guaranteed parity between "the verifier says pass" and "final
+// scoring says pass." Falling back to a lighter pytest invocation in
+// the workdir was considered but rejected: workdir tests would need
+// per-repo Python env setup we don't currently maintain, and any
+// divergence from the docker scorer would launder the result.
+//
+// Image id mirrors score.go's derivation: <imagePrefix><repo with /
+// → __>:v<version>.
+func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout time.Duration) string {
+	image := imageIDFor(inst, imagePrefix)
+	timeoutSec := int(timeout.Seconds())
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	// shellQuote escapes for inclusion inside a single-quoted bash
+	// string; we wrap the per-attempt command so the REPL invokes it
+	// via `sh -c <quoted>` per runCustomVerifier's contract.
+	tmpPatch := filepath.Join(repoDir, ".cortex-attempt.patch")
+	return fmt.Sprintf(
+		"set -e; cd %s; git add -A; git diff --no-color HEAD > %s; "+
+			"docker run --rm --network=none -i --stop-timeout=%d "+
+			"-v %s:/tmp/cortex-attempt.patch:ro "+
+			"%s bash -lc 'set -e; cd /testbed && git apply --whitespace=nowarn /tmp/cortex-attempt.patch && %s'",
+		shellEscape(repoDir),
+		shellEscape(tmpPatch),
+		timeoutSec,
+		shellEscape(tmpPatch),
+		shellEscape(image),
+		f2pPytestCommand(inst),
+	)
+}
+
+// f2pPytestCommand returns a shell command that runs the instance's
+// FAIL_TO_PASS tests inside the SWE-bench docker image's /testbed.
+// We use pytest with the dotted test ids; SWE-bench's Verified images
+// all ship with pytest available and the test discovery rooted at
+// /testbed. Empty F2P list returns `true` so the verifier passes
+// trivially (some instances ship without F2P — those score on P2P
+// only and final docker scoring will catch real failures).
+func f2pPytestCommand(inst Instance) string {
+	if len(inst.FailToPass) == 0 {
+		return "true"
+	}
+	parts := []string{"python -m pytest --no-header -q"}
+	for _, t := range inst.FailToPass {
+		parts = append(parts, shellEscape(t))
+	}
+	return strings.Join(parts, " ")
+}
+
+// shellEscape wraps s in single-quotes, escaping any embedded single
+// quotes via the standard '\'' trick. Suitable for `sh -c "<...>"`
+// substitution into the verifier command above.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// imageIDFor mirrors score.go's logic for deriving the canonical
+// SWE-bench scoring image id from an instance: <prefix><repo with /
+// → __>:v<version>. Lives here so the verifier and the final scorer
+// can both reference the same image without circular imports.
+func imageIDFor(inst Instance, imagePrefix string) string {
+	if imagePrefix == "" {
+		imagePrefix = "swebench/sweb.eval.x86_64."
+	}
+	repoSlug := strings.ReplaceAll(inst.Repo, "/", "__")
+	return fmt.Sprintf("%s%s:v%s", imagePrefix, repoSlug, inst.Version)
+}
+
 // runInstance executes one (instance, strategy) pair end-to-end:
 // clone → harness run → diff → docker score → CellResult.
 //
@@ -48,22 +164,55 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		return failedCell(inst, strategy, cfg, env, "resolve cortex binary: "+err.Error()), nil
 	}
 
+	// Build the verifier shell command that the REPL runs after each
+	// agent attempt. Mirrors RunSWEBenchTests's docker invocation in
+	// score.go — same image, same patch-then-pytest sequence — but
+	// returns exit 0 iff every F2P test passes, so the REPL can use
+	// it as a verify-and-retry signal. Agent gets pytest output as
+	// the retry context, which is the principled equivalent of
+	// SWE-Agent's "test failure → next turn" loop.
+	verifierCmd := buildVerifierCommand(inst, cfg.DockerImagePrefix, repoDir, cfg.InstanceTimeout)
+
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = defaultMaxRetries
+	}
+
+	// Augment the agent's prompt with the F2P test names so the
+	// agent knows which tests must pass. Without this, the agent has
+	// to infer targets from the problem statement alone, which is
+	// what kept the prior single-shot baseline at 0/3 even on Sonnet.
+	prompt := buildAgentPrompt(inst)
+
 	start := time.Now()
-	out, runErr := benchmarks.RunCode(ctx, binary, benchmarks.CodeOpts{
-		Workdir:  repoDir,
-		Model:    cfg.Model,
-		Prompt:   inst.ProblemStatement,
-		NoSearch: strategy == "baseline",
+	// Drive the REPL (the unified agent surface, same one humans use
+	// and that GoL eval drives in-process) via headless flags. The
+	// REPL's verify-and-retry loop runs the verifier above after each
+	// attempt; on fail it feeds the verifier output back into the
+	// agent's next prompt as retry context. Up to maxRetries
+	// attempts, then the loop exits with the last verify result.
+	headlessOut, runErr := benchmarks.RunREPLHeadless(ctx, binary, benchmarks.REPLHeadlessOpts{
+		Workdir:    repoDir,
+		Model:      cfg.Model,
+		Prompt:     prompt,
+		Verifier:   verifierCmd,
+		MaxRetries: maxRetries,
 	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {
-		fmt.Fprintf(os.Stderr, "[swebench %s] cortex code err: %v\n", inst.InstanceID, runErr)
+		fmt.Fprintf(os.Stderr, "[swebench %s] cortex repl headless err: %v\n", inst.InstanceID, runErr)
 	}
 	// A subprocess failure still produces a patch attempt if the agent
 	// got that far before crashing; if not, extractPatch below writes an
 	// empty file and the scorer marks the instance failed.
-	if out == nil {
-		out = &benchmarks.CodeOutput{}
+	//
+	// We don't have token/cost accounting from the headless REPL
+	// summary today (JSON shape is minimal); use zero placeholders.
+	// The session.jsonl at headlessOut.SessionPath has the per-attempt
+	// detail for downstream analysis.
+	out := &benchmarks.CodeOutput{}
+	if headlessOut != nil && env.Verbose {
+		fmt.Fprintf(os.Stderr, "[swebench %s] session: %s\n", inst.InstanceID, headlessOut.SessionPath)
 	}
 
 	patchPath := filepath.Join(workdir, "cortex.patch")
