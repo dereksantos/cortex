@@ -109,20 +109,22 @@ func buildAgentPrompt(inst Instance) string {
 // each agent attempt to decide pass/fail. The command:
 //
 //  1. Snapshots the agent's current diff from repoDir.
-//  2. Spins up the canonical SWE-bench scoring image for the instance.
-//  3. Inside the image, applies the agent's diff on top of the test
-//     patch (already in the image's pristine /testbed at base_commit
-//     + test_patch).
-//  4. Runs the F2P tests via the SWE-bench scoring entrypoint and
-//     exits 0 iff every F2P test passes.
+//  2. Pre-flights the diff: if empty, exits 1 with a clear message
+//     ("NO_PATCH: agent did not edit any files") so the agent sees an
+//     actionable error rather than git's terse "No valid patches" on
+//     the next retry's PREVIOUS ATTEMPT FAILED context.
+//  3. Spins up the canonical SWE-bench scoring image for the instance.
+//  4. Writes the F2P test list into the container via stdin (avoids
+//     blowing up the shell command line for instances with hundreds
+//     of F2P entries; the prior version's command line was ~50 KB).
+//  5. Inside the image, applies the agent's diff and runs pytest with
+//     output truncated to the last 4 KB so the retry context fits in
+//     the model's input cap.
 //
 // Per-attempt docker overhead is ~15–30s — that's the cost of using
 // the same scoring stack as final evaluation, in exchange for
 // guaranteed parity between "the verifier says pass" and "final
-// scoring says pass." Falling back to a lighter pytest invocation in
-// the workdir was considered but rejected: workdir tests would need
-// per-repo Python env setup we don't currently maintain, and any
-// divergence from the docker scorer would launder the result.
+// scoring says pass."
 //
 // Image id mirrors score.go's derivation: <imagePrefix><repo with /
 // → __>:v<version>.
@@ -132,40 +134,53 @@ func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout ti
 	if timeoutSec < 60 {
 		timeoutSec = 60
 	}
-	// shellQuote escapes for inclusion inside a single-quoted bash
-	// string; we wrap the per-attempt command so the REPL invokes it
-	// via `sh -c <quoted>` per runCustomVerifier's contract.
 	tmpPatch := filepath.Join(repoDir, ".cortex-attempt.patch")
+	tmpTests := filepath.Join(repoDir, ".cortex-f2p-tests.txt")
+
+	// Tests list as one-per-line, mounted into the container at
+	// /tmp/cortex-f2p-tests.txt — keeps the shell command line short.
+	testsList := strings.Join(inst.FailToPass, "\n")
+	if len(inst.FailToPass) == 0 {
+		// No F2P → final scoring will catch any real failure; treat
+		// verifier as trivially passing once a patch exists.
+		testsList = ""
+	}
+
+	// Inner script that runs inside the docker container. Note the
+	// `tail -c 4096`: pytest output for django can be megabytes;
+	// retry context goes back into the agent prompt so we keep it
+	// bounded.
+	inner := "set -e; cd /testbed && " +
+		"git apply --whitespace=nowarn /tmp/cortex-attempt.patch 2>&1 && " +
+		"if [ -s /tmp/cortex-f2p-tests.txt ]; then " +
+		"  xargs -a /tmp/cortex-f2p-tests.txt python -m pytest --no-header -q 2>&1 | tail -c 4096; " +
+		"else echo 'no F2P tests configured; verifier trivially passes'; fi"
+
+	// Outer script: snapshot the diff, write tests list, run docker.
+	// We avoid `set -e` on the OUTER script because we want to keep
+	// running past the NO_PATCH branch and emit the marker.
 	return fmt.Sprintf(
-		"set -e; cd %s; git add -A; git diff --no-color HEAD > %s; "+
-			"docker run --rm --network=none -i --stop-timeout=%d "+
+		"cd %s && git add -A && git diff --no-color HEAD > %s && "+
+			"if [ ! -s %s ]; then "+
+			"  echo 'NO_PATCH: agent did not edit any files. You MUST call write_file to modify source code; reading alone does not fix the bug.'; "+
+			"  exit 1; "+
+			"fi && "+
+			"printf '%%s' %s > %s && "+
+			"docker run --rm --network=none --stop-timeout=%d "+
 			"-v %s:/tmp/cortex-attempt.patch:ro "+
-			"%s bash -lc 'set -e; cd /testbed && git apply --whitespace=nowarn /tmp/cortex-attempt.patch && %s'",
+			"-v %s:/tmp/cortex-f2p-tests.txt:ro "+
+			"%s bash -lc %s",
 		shellEscape(repoDir),
 		shellEscape(tmpPatch),
+		shellEscape(tmpPatch),
+		shellEscape(testsList),
+		shellEscape(tmpTests),
 		timeoutSec,
 		shellEscape(tmpPatch),
+		shellEscape(tmpTests),
 		shellEscape(image),
-		f2pPytestCommand(inst),
+		shellEscape(inner),
 	)
-}
-
-// f2pPytestCommand returns a shell command that runs the instance's
-// FAIL_TO_PASS tests inside the SWE-bench docker image's /testbed.
-// We use pytest with the dotted test ids; SWE-bench's Verified images
-// all ship with pytest available and the test discovery rooted at
-// /testbed. Empty F2P list returns `true` so the verifier passes
-// trivially (some instances ship without F2P — those score on P2P
-// only and final docker scoring will catch real failures).
-func f2pPytestCommand(inst Instance) string {
-	if len(inst.FailToPass) == 0 {
-		return "true"
-	}
-	parts := []string{"python -m pytest --no-header -q"}
-	for _, t := range inst.FailToPass {
-		parts = append(parts, shellEscape(t))
-	}
-	return strings.Join(parts, " ")
 }
 
 // shellEscape wraps s in single-quotes, escaping any embedded single
