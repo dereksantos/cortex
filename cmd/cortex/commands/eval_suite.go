@@ -20,6 +20,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/eval/legacy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,8 +46,11 @@ func runSuite(suite, baseDir, outputFormat string, verbose bool) error {
 		}
 		return runMechanicSuite(dir, outputFormat, verbose)
 	case "legacy-cognition":
-		return suiteNotYetImplemented(suite,
-			"Phase B runner — see docs/prompts/loop-phase-b-legacy-cognition.md")
+		dir := baseDir
+		if dir == "" || dir == "test/evals/v2" {
+			dir = "test/evals/legacy/cognition"
+		}
+		return runLegacyCognitionSuite(dir, outputFormat, verbose)
 	case "journeys":
 		return suiteNotYetImplemented(suite,
 			"Phase D runner — see docs/prompts/loop-phase-d-journeys.md")
@@ -157,4 +162,54 @@ func runMechanicSuite(dir, outputFormat string, verbose bool) error {
 // at the loop prompt that will land the runner.
 func suiteNotYetImplemented(suite, pointer string) error {
 	return fmt.Errorf("suite %q: runner not yet implemented (%s)", suite, pointer)
+}
+
+// runLegacyCognitionSuite dispatches the 22 scenarios under
+// test/evals/legacy/cognition/ to internal/eval/legacy.RunSuite.
+// Self-contained resolve-mode scenarios run end-to-end; storage-
+// dependent modes (reflex / reflect / think / dream / router) are
+// reported as skipped with error_code=needs_fixture_seed until the
+// canonical fixture-seed helper lands as a follow-up.
+func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
+	ctx := context.Background()
+	res, err := legacy.RunSuite(ctx, dir)
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		if res.Failed > 0 {
+			os.Exit(1)
+		}
+		return nil
+	}
+
+	fmt.Printf("=== legacy-cognition suite (%d tests across scenarios) ===\n\n", res.Total)
+	for _, t := range res.TestResults {
+		statusTag := "PASS"
+		switch {
+		case t.OK:
+			statusTag = "PASS"
+		case t.ErrorCode == "needs_fixture_seed":
+			statusTag = "SKIP"
+		default:
+			statusTag = "FAIL"
+		}
+		fmt.Printf("  [%s] %s / %s (mode=%s, %dms)\n", statusTag, t.Scenario, t.TestID, t.Mode, t.LatencyMs)
+		if !t.OK && verbose && t.ErrorMessage != "" {
+			fmt.Printf("         %s\n", t.ErrorMessage)
+		}
+	}
+	fmt.Printf("\nTotal: %d  Passed: %d  Failed: %d  Skipped: %d\n",
+		res.Total, res.Passed, res.Failed, res.Skipped)
+	if res.Skipped > 0 {
+		fmt.Println("Skipped tests need the canonical fixture-seed helper")
+		fmt.Println("(planned follow-up — see Phase B + D audit entry in docs/eval-journal.md).")
+	}
+	if res.Failed > 0 {
+		os.Exit(1)
+	}
+	return nil
 }
