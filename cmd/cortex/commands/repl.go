@@ -98,6 +98,15 @@ func (c *REPLCommand) Description() string {
 
 // Execute parses flags, sets up session state, and runs the REPL loop
 // until EOF or /quit.
+//
+// Headless mode (for benchmark harnesses) is opted into via --prompt:
+// the REPL skips the stdin scanner, runs runTurn(--prompt) once with
+// the configured verifier + retry budget, optionally emits a JSON
+// summary, and exits. --auto-retry suppresses the interactive
+// [r/e/s/q] gate so the loop never blocks on stdin. --verifier and
+// --max-retries let the caller override the v1 hardcoded
+// "go build, one auto-retry" defaults so a SWE-bench / pytest /
+// arbitrary verifier can drive the same loop.
 func (c *REPLCommand) Execute(ctx *Context) error {
 	// Track whether the user pinned the model. Both env-var and --model
 	// count as explicit — auto-upgrade only happens when the model
@@ -108,6 +117,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		model = defaultREPLModel
 	}
 	verbose := false
+
+	// Headless-mode config — all default to "interactive REPL as
+	// before" when unset. See doc comment above.
+	oneShotPrompt := ""
+	customVerifier := ""
+	autoRetry := false
+	maxRetries := 1
+	jsonOutput := false
+	workdirOverride := ""
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -120,15 +138,49 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			}
 		case "-v", "--verbose":
 			verbose = true
+		case "--prompt":
+			if i+1 < len(args) {
+				oneShotPrompt = args[i+1]
+				i++
+			}
+		case "--verifier":
+			if i+1 < len(args) {
+				customVerifier = args[i+1]
+				i++
+			}
+		case "--auto-retry":
+			autoRetry = true
+		case "--max-retries":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxRetries)
+				i++
+			}
+		case "--json":
+			jsonOutput = true
+		case "--workdir":
+			if i+1 < len(args) {
+				workdirOverride = args[i+1]
+				i++
+			}
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
 		}
 	}
 
-	workdir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
+	workdir := workdirOverride
+	if workdir == "" {
+		var err error
+		workdir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getwd: %w", err)
+		}
+	} else {
+		abs, err := filepath.Abs(workdir)
+		if err != nil {
+			return fmt.Errorf("abs workdir: %w", err)
+		}
+		workdir = abs
 	}
 
 	// Fix A: when the user hasn't pinned a model AND we're routing to
@@ -155,6 +207,32 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		return err
 	}
 	defer state.close()
+	state.customVerifierCmd = customVerifier
+	state.headless = autoRetry
+	if maxRetries > 0 {
+		state.maxRetries = maxRetries
+	}
+
+	// Headless one-shot path. Skips the stdin scanner entirely:
+	// runTurn runs once with --prompt, the verifier + retry budget
+	// drive the loop to completion (no human gate), and we either
+	// emit a JSON summary (--json) or rely on the standard turn
+	// summary printed at finalize-time.
+	if oneShotPrompt != "" {
+		if !jsonOutput {
+			printREPLBanner(state)
+		}
+		turnErr := state.runTurn(oneShotPrompt)
+		if turnErr != nil && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "  turn error: %v\n", turnErr)
+		}
+		if jsonOutput {
+			emitOneShotJSON(state, turnErr)
+		} else {
+			fmt.Printf("\nsession saved → %s\n", state.sessionPath)
+		}
+		return nil
+	}
 
 	printREPLBanner(state)
 
@@ -239,6 +317,18 @@ type replState struct {
 	// exitRequested is set by the /quit gate-response path so runTurn
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
+
+	// Headless-mode config (zero values preserve interactive behavior):
+	//   customVerifierCmd: shell command to run instead of `go build`.
+	//   headless:          skip promptGate; treat unresolved verify-fail
+	//                      as the final state for the turn.
+	//   maxRetries:        total auto-retry attempts (default 1 = the
+	//                      original "one auto-retry" behavior; values >1
+	//                      let the loop iterate further with verifier
+	//                      output fed back each round).
+	customVerifierCmd string
+	headless          bool
+	maxRetries        int
 }
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
@@ -368,6 +458,26 @@ Rules:
   - When a build fails, read the error, fix the code, and try again.
 `
 
+// emitOneShotJSON prints a single-line JSON summary of the headless
+// one-shot run to stdout. Schema is intentionally minimal — the full
+// turn row already lands in <sessionDir>/session.jsonl for callers
+// that want the long-form transcript; this is just the at-a-glance
+// "did it pass, what did it cost" view.
+func emitOneShotJSON(s *replState, turnErr error) {
+	out := map[string]any{
+		"session_id":   s.sessionID,
+		"session_path": s.sessionPath,
+		"workdir":      s.workdir,
+		"model":        s.model,
+		"accepted":     s.turns > 0, // finalize() only bumps turns on accept
+	}
+	if turnErr != nil {
+		out["error"] = turnErr.Error()
+	}
+	b, _ := json.Marshal(out)
+	fmt.Println(string(b))
+}
+
 // printREPLBanner prints the welcome line. One line, no ASCII art.
 func printREPLBanner(s *replState) {
 	api := s.apiURL
@@ -391,7 +501,18 @@ Flags:
                        Default: qwen2.5-coder:1.5b. Override via
                        CORTEX_REPL_MODEL env var.
   -v, --verbose        Print agent-loop telemetry (tool calls + tokens).
+      --workdir DIR    Use DIR instead of cwd as the workdir.
   -h, --help           Show this help.
+
+Headless flags (skip stdin scanner, used by benchmark harnesses):
+      --prompt TEXT    Run one turn with TEXT as the user message, then exit.
+      --verifier CMD   Shell command used to verify each attempt instead of
+                       the auto-detected 'go build'. Exit 0 = pass.
+      --auto-retry     Skip the interactive [r/e/s/q] gate; treat unresolved
+                       verify-fail as the final state for the turn.
+      --max-retries N  Cap on auto-retry attempts (default 1).
+      --json           Emit a one-line JSON summary on stdout instead of
+                       the human-readable banner + session-saved tail.
 
 In the REPL:
   /help                Show slash-command help.
@@ -505,29 +626,52 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.VerifyOK = verifyRes.OK
 	row.VerifyOutput = verifyRes.OutputTail
 
-	// Attempt 2: automatic single retry on verify-fail with the
-	// verifier output fed back into the prompt.
-	if !verifyRes.OK && verifyRes.Kind != verifierNone {
-		fmt.Printf("  verify failed (%s), auto-retrying once with error context...\n", verifyRes.Kind)
+	// Auto-retry loop. Default is one extra attempt (the historical
+	// "one auto-retry" behavior) so interactive REPL UX is unchanged.
+	// --max-retries N raises the cap; verifier output from the most
+	// recent fail is fed back into each subsequent attempt as the
+	// retry context. The first auto-retry's telemetry stays on the
+	// dedicated Row.Retry* fields for back-compat with existing JSONL
+	// consumers; later attempts merge their files-changed into the
+	// row but are not individually broken out (they would land as
+	// extra session.jsonl fields in a follow-up schema bump).
+	retryBudget := s.maxRetries
+	if retryBudget < 1 {
+		retryBudget = 1
+	}
+	autoAttempt := 0
+	for autoAttempt < retryBudget && !verifyRes.OK && verifyRes.Kind != verifierNone {
+		autoAttempt++
+		if autoAttempt == 1 {
+			fmt.Printf("  verify failed (%s), auto-retrying with error context (1/%d)...\n", verifyRes.Kind, retryBudget)
+		} else {
+			fmt.Printf("  verify still failing, auto-retry %d/%d...\n", autoAttempt, retryBudget)
+		}
 		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
-		row.RetryAgentTurns = hres2.AgentTurnsTotal
-		row.RetryTokensIn = hres2.TokensIn
-		row.RetryTokensOut = hres2.TokensOut
-		row.RetryHarnessError = errString(runErr2)
-		row.RetryFinalText = lres2.Final
+		if autoAttempt == 1 {
+			row.RetryAgentTurns = hres2.AgentTurnsTotal
+			row.RetryTokensIn = hres2.TokensIn
+			row.RetryTokensOut = hres2.TokensOut
+			row.RetryHarnessError = errString(runErr2)
+			row.RetryFinalText = lres2.Final
+		}
 		row.FilesChanged = mergeFiles(row.FilesChanged, hres2.FilesChanged)
 
 		verifyRes = s.runVerifier()
-		row.RetryVerifyOK = verifyRes.OK
-		row.RetryVerifyOutput = verifyRes.OutputTail
+		if autoAttempt == 1 {
+			row.RetryVerifyOK = verifyRes.OK
+			row.RetryVerifyOutput = verifyRes.OutputTail
+		}
 	}
 
 	// User-driven retry/edit loop. Loops until verify passes, user
 	// skips, or user quits. Bounded by userGateMaxAttempts so a stuck
-	// model can't trap the REPL.
+	// model can't trap the REPL. SKIPPED in headless mode (--auto-retry)
+	// — the auto-retry budget is the only escalation a benchmark
+	// harness ever wants.
 	userHints := []string{}
 	attempts := 0
-	for !verifyRes.OK && verifyRes.Kind != verifierNone {
+	for !s.headless && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		attempts++
 		if attempts > userGateMaxAttempts {
 			fmt.Printf("  reached %d user-retry attempts; rolling back\n", userGateMaxAttempts)
@@ -693,6 +837,7 @@ func ensureStubOpenRouterKey(apiURL string) error {
 const (
 	verifierNone    = "none"
 	verifierGoBuild = "go build"
+	verifierCustom  = "custom"
 )
 
 type verifyResult struct {
@@ -701,10 +846,15 @@ type verifyResult struct {
 	OutputTail string
 }
 
-// runVerifier picks a verifier based on workdir contents. v1 supports
-// go.mod → `go build ./...`. Anything else returns a no-op result with
-// a one-time warning.
+// runVerifier picks a verifier in priority order:
+//  1. --verifier <cmd>: arbitrary shell command, treated as success on
+//     exit 0. Used by benchmark harnesses (SWE-bench → pytest, etc.).
+//  2. go.mod present: `go build ./...` (v1 default for Go projects).
+//  3. fallback: no verifier, one-time warning, accept the turn.
 func (s *replState) runVerifier() verifyResult {
+	if s.customVerifierCmd != "" {
+		return s.runCustomVerifier()
+	}
 	if _, err := os.Stat(filepath.Join(s.workdir, "go.mod")); err == nil {
 		return s.runGoBuild()
 	}
@@ -713,6 +863,24 @@ func (s *replState) runVerifier() verifyResult {
 		s.verifyWarned = true
 	}
 	return verifyResult{Kind: verifierNone, OK: true}
+}
+
+// runCustomVerifier runs the --verifier shell command in the workdir
+// and reports OK iff the command exits 0. 5-minute hard cap so a
+// hung test suite doesn't trap a benchmark run. Output is tailed to
+// 8 KiB — enough to fit a few stack traces while keeping the
+// retry-context prompt under the model's input cap.
+func (s *replState) runCustomVerifier() verifyResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", s.customVerifierCmd)
+	cmd.Dir = s.workdir
+	out, err := cmd.CombinedOutput()
+	return verifyResult{
+		Kind:       verifierCustom,
+		OK:         err == nil,
+		OutputTail: tailString(string(out), 8192),
+	}
 }
 
 // runGoBuild shells out to `go build ./...`. We cap wall time at 60s
