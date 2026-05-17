@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/eval/journey"
 	"github.com/dereksantos/cortex/internal/eval/legacy"
 	"gopkg.in/yaml.v3"
 )
@@ -52,8 +53,11 @@ func runSuite(suite, baseDir, outputFormat string, verbose bool) error {
 		}
 		return runLegacyCognitionSuite(dir, outputFormat, verbose)
 	case "journeys":
-		return suiteNotYetImplemented(suite,
-			"Phase D runner — see docs/prompts/loop-phase-d-journeys.md")
+		dir := baseDir
+		if dir == "" || dir == "test/evals/v2" {
+			dir = "test/evals/journeys"
+		}
+		return runJourneysSuite(dir, outputFormat, verbose)
 	default:
 		return fmt.Errorf("unknown suite %q (known: mechanic, legacy-cognition, journeys)", suite)
 	}
@@ -211,5 +215,44 @@ func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
 	if res.Failed > 0 {
 		os.Exit(1)
 	}
+	return nil
+}
+
+// runJourneysSuite loads + validates the 10 e2e scenarios under
+// test/evals/journeys/ and reports per-scenario runnability status.
+// Does not execute agent runs — the harness adapter is the bulk of
+// Phase D's deferred work; the loader confirms the YAML + scaffold
+// substrate is intact and surfaces which scenarios are ready to run
+// once the adapter lands.
+func runJourneysSuite(dir, outputFormat string, verbose bool) error {
+	res, err := journey.RunSuite(dir)
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+
+	fmt.Printf("=== journeys suite (%d scenarios — validation only) ===\n\n", res.Total)
+	for _, s := range res.Scenarios {
+		statusTag := strings.ToUpper(s.Status)
+		fmt.Printf("  [%s] %s\n", statusTag, s.ID)
+		if s.Name != "" {
+			fmt.Printf("         name:     %s\n", s.Name)
+		}
+		fmt.Printf("         scaffold: %s (exists=%v)\n", s.ScaffoldPath, s.ScaffoldExists)
+		fmt.Printf("         sessions: %d  events: %d\n", s.SessionCount, s.EventCount)
+		if verbose && s.Message != "" {
+			fmt.Printf("         note:     %s\n", s.Message)
+		}
+		fmt.Println()
+	}
+	fmt.Printf("Total: %d  pending_adapter: %d  scaffold_missing: %d  invalid: %d\n",
+		res.Total, res.PendingAdapter, res.ScaffoldMissing, res.Invalid)
+	fmt.Println("Validation-only pass — agent execution awaits harness adapter")
+	fmt.Println("(planned Phase D follow-up, will reuse v2 coding harness pattern).")
 	return nil
 }
