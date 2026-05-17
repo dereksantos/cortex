@@ -243,11 +243,19 @@ phase depends on. Without this, no later change is honestly measurable.
    - `OkTruncated` flag + path redaction outside `.cortex/` and project
      root, with envelope and consumer tests.
 
-3. **Unified `cell_results.jsonl`** (axis 6 Observability).
-   - Every CLI invocation writes a row, not just eval cells.
-   - Schema includes cortex-function tag, tool name, latency, exit, tokens.
-   - Default location: `.cortex/db/cell_results.jsonl`.
-   - Existing eval rows continue to land there unchanged.
+3. **[x] Unified `cell_results.jsonl`** (axis 6 Observability).
+   - `pkg/cliout.Invocation` + `WriteRow` lands one row per CLI
+     invocation under `.cortex/db/cell_results.jsonl` (workdir-rooted
+     when `--workdir` is set, cwd-rooted otherwise, skipped when no
+     `.cortex/` tree exists nearby).
+   - Row schema: `{source:"cli", timestamp, trace_id, cortex_function,
+     command, latency_ms, ok, error_code}` — a superset of the eval
+     `CellResult` shape via the `source` discriminator. Eval rows land
+     in the same file unchanged.
+   - `--no-telemetry` flag (any command) + `CORTEX_NO_TELEMETRY` env
+     opt-out.
+   - `cortex/main.go` wraps every dispatch through `runCommand` so the
+     hook lands once for every verb the registry exposes.
 
 **Success criteria.** Running the same `cortex search` query inside an
 eval cell and outside one produces structurally identical telemetry rows.
