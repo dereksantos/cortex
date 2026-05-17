@@ -36,6 +36,58 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Phase C complete: 5/5 mechanic evals PASS via CLI executor
+
+Stage 1 v0's primary test gate is met. `cortex eval --suite=mechanic`
+exercises the real DAG executor (commits 1406eb6 + 4abbf96) against
+all 5 fixtures and reports 5/5 PASS:
+
+| Fixture | Invariant verified | Result |
+|---|---|---|
+| mechanic-1-budget-decay | budget arithmetic correct, no drift | PASS |
+| mechanic-2-tree-reconstruction | parent_node_id chains rebuild tree | PASS |
+| mechanic-3-depth-cap | hard depth bound trips cleanly | PASS |
+| mechanic-4-budget-exhaustion | in-flight finishes, pre-spawn refusal | PASS |
+| mechanic-5-tree-shape-variation | trees grown from inputs, not fixed | PASS |
+
+Plus Go unit tests in `pkg/cognition/dag/executor_test.go` (M1-M4 +
+Registry + Budget invariants) pass independently.
+
+Per-node telemetry now lands in `.cortex/db/dag_traces.jsonl`:
+- `cortex run --type=turn` produces 4 rows per turn
+- `cortex eval --suite=mechanic` produces 23 rows across all 5 fixtures
+- Schema: schema_version, timestamp, turn_id, node_id, parent_node_id,
+  qualified_name, ok, cost_{latency_ms,tokens}, budget_after_{*},
+  spawned_children[], wall timing
+
+**Sibling sink note:** dag_traces.jsonl is a separate JSONL from
+cell_results.jsonl. Unification with the Phase-1 unified sink is a
+deliberate follow-up — CellResult.Validate requires Model/Harness
+fields that don't apply to mock DAG nodes. Schema reconciliation
+deserves its own focused work; flagged.
+
+**Session progress for the Stop-hook goal "all items above completed":**
+
+Completed this session:
+- Phase C fixtures (387468f) + CLI stub (316432c) + executor wiring (4abbf96)
+- Phase F baseline consolidation (88c0d92)
+- Phase B + D audit (c09e4c8)
+- Phase B runner for self-contained resolve scenarios (9567358) — 3 PASS, 6 mode-drift FAIL, 20 SKIP pending fixture seed
+- Phase D journey loader + scaffold validator (6ce3e45) — 10/10 validated, agent execution deferred
+- Stage 1 v0 executor foundation (1406eb6) — Registry + Budget + Executor + tests
+- Stage 1 v0 cortex run CLI (f1aab97)
+- Stage 1 v0 trace writer (this commit)
+
+**Still pending** (multi-session work, beyond what one session can finish):
+- Phase B fixture-seed mechanism — unblock 20 storage-dependent scenarios
+- Phase B mode-drift triage — investigate the 6 resolve-queue / resolve-wait FAILs
+- Phase D harness adapter — drive agent through journey scaffolds
+- Stage 1 v0 decide.coding_turn handler — wrap LLM agent loop
+- Stage 1 v0 unified telemetry — cell_results.jsonl schema unification with dag_traces.jsonl
+- ADRs 001-003 from dag-build-plan.md
+
+---
+
 ### 2026-05-17 — Phase B + D audit (pre-implementation)
 
 Pre-implementation audit for `loop-phase-b-legacy-cognition.md` and

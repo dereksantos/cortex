@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/eval/dagtrace"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"gopkg.in/yaml.v3"
 )
@@ -160,7 +161,12 @@ func runFixture(ctx context.Context, fx *Fixture, res *Result) {
 		Depth:     fx.InitialBudget.Depth,
 	}
 
-	ex := dag.NewExecutor(reg, nil)
+	// Best-effort trace writer; runner continues if it can't open.
+	var cb dag.TraceCallback
+	if tw, terr := dagtrace.NewWriter(""); terr == nil {
+		cb = tw.Callback(fx.ID)
+	}
+	ex := dag.NewExecutor(reg, cb)
 	trace, err := ex.Run(ctx, fx.ID, seed, budget)
 	if err != nil {
 		res.OK = false
@@ -292,7 +298,12 @@ func runVariationFixture(ctx context.Context, fx *Fixture, res *Result) {
 		reg := buildRegistry(backfilled)
 		seed := buildSeed(sc.Seed)
 		budget := dag.Budget{LatencyMS: sc.InitialBudget.LatencyMS, Tokens: sc.InitialBudget.Tokens, Depth: sc.InitialBudget.Depth}
-		ex := dag.NewExecutor(reg, nil)
+		// Best-effort trace writer; runner continues if it can't open.
+	var cb dag.TraceCallback
+	if tw, terr := dagtrace.NewWriter(""); terr == nil {
+		cb = tw.Callback(fx.ID)
+	}
+	ex := dag.NewExecutor(reg, cb)
 		tr, err := ex.Run(ctx, fx.ID+"/"+sc.ID, seed, budget)
 		subs = append(subs, sub{id: sc.ID, trace: tr, err: err})
 	}

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/eval/dagtrace"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
@@ -94,7 +95,19 @@ func (c *RunCommand) Execute(ctx *Context) error {
 // real LLM-backed ops (that's Stage 2 of the build plan).
 func runTurnDAG(prompt, outputFormat string, verbose bool) error {
 	reg := buildV0Registry()
-	ex := dag.NewExecutor(reg, nil) // TODO Phase 1 sink integration in Stage 2
+	turnID := fmt.Sprintf("turn-%d", time.Now().UnixNano())
+
+	// Wire structured trace writes to .cortex/db/dag_traces.jsonl.
+	// Tolerant: if the writer can't be constructed (e.g., no writable
+	// cwd), continue without telemetry rather than abort.
+	tw, twErr := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if twErr == nil {
+		traceCB = tw.Callback(turnID)
+	} else if verbose {
+		fmt.Fprintf(os.Stderr, "[run] trace writer init failed: %v (continuing without dag_traces.jsonl)\n", twErr)
+	}
+	ex := dag.NewExecutor(reg, traceCB)
 
 	seed := []dag.NodeSpec{
 		{
@@ -105,8 +118,6 @@ func runTurnDAG(prompt, outputFormat string, verbose bool) error {
 		},
 	}
 	budget := dag.DefaultTurnBudget()
-
-	turnID := fmt.Sprintf("turn-%d", time.Now().UnixNano())
 	trace, err := ex.Run(context.Background(), turnID, seed, budget)
 	if err != nil {
 		return fmt.Errorf("run turn DAG: %w", err)
