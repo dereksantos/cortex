@@ -36,6 +36,68 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — Correction to LongMemEval + SWE-bench entries below
+
+The original 2026-05-17 LongMemEval entry asserted that "cortex strategy
+injects 0 context" and concluded "the persistent store is empty
+pre-integration, so the 'cortex' cell pays a search-overhead tax without
+retrieving anything." That misreads the harness.
+
+What the harness actually does (`internal/eval/benchmarks/longmemeval/runner.go:95-99`):
+
+- For `--strategy cortex`, the runner calls `hydrateHaystack` which
+  shells out to `cortex capture --bulk --workdir <wd>` with all haystack
+  sessions for the question, then `cortex ingest --workdir <wd>`. The
+  per-instance `.cortex/` store IS populated with the question's
+  haystack before the agent runs.
+- The subsequent `cortex code` call has `cortex_search` available as a
+  tool; the agent decides whether and how to call it.
+- `CellResult.InjectedContextTokens` measures **session-start prompt-prefix
+  injection**, not tool-call retrieval (`internal/eval/v2/cellresult.go:87`:
+  "subset of TokensIn attributable to cortex injection"). LongMemEval
+  uses tool-based retrieval, so 0 is expected and correct — it does NOT
+  mean the store is empty.
+
+Honest reread of the LongMemEval numbers below:
+
+- baseline 5/32 (15.6%) is the model answering questions with zero
+  haystack and no store — it's the "no context" arm. 15.6% is in the
+  range published in the LongMemEval paper for cheap models.
+- cortex 4/30 (13.3%) is the model with the haystack ingested into the
+  store and `cortex_search` available. The fact that it's slightly under
+  baseline at n=30 (within noise) actually shows a real signal: either
+  the agent isn't calling `cortex_search` effectively, or the embedding
+  retrieval isn't returning the right haystack snippets, or both. Worth
+  investigating before claiming the pipeline doesn't help — it just
+  isn't *currently* helping above no-context.
+
+For SWE-bench, the correction is the opposite direction:
+
+- `internal/eval/benchmarks/swebench/runner.go:56` shows that baseline
+  vs cortex differs only by `NoSearch: strategy == "baseline"`. There is
+  **no haystack pre-seed for SWE-bench** — the cortex strategy just
+  toggles `cortex_search` availability against a freshly-created empty
+  `.cortex/` per workdir. The "store is empty" reading is correct for
+  this benchmark, but the principled fix is *not* a per-instance
+  pre-seed (there's no haystack to seed); it's seeding with related
+  issues / PRs / prior commits to make `cortex_search` actually useful
+  for code understanding.
+
+**Why this correction matters**: the original entries implied "cortex
+adds search-tax with no retrieval benefit because store is empty." The
+accurate framing is "LongMemEval retrieval pipeline runs end-to-end but
+underperforms no-context at n=30; SWE-bench cortex strategy is
+unevaluable today because there is nothing to retrieve from." Those
+are different problems and need different fixes.
+
+Cross-cutting finding #3 in the "Phase A baseline complete" summary above
+("Cortex strategy injects 0 context tokens on every benchmark cell
+pre-integration. … today's 'cortex' strategy is 'baseline + search-tax'")
+is partially wrong — it correctly describes SWE-bench's situation but
+incorrectly describes LongMemEval's.
+
+---
+
 ### 2026-05-17 — Phase A baseline complete
 
 Aggregate "before" snapshot for the DAG-protocol build per
