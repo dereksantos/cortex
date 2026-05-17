@@ -33,6 +33,120 @@ type Result struct {
 // rather than mutating PATH.
 var dockerLookPath = exec.LookPath
 
+// preflightDockerInfo is the actual `docker info` invocation, hoisted
+// behind a var so tests can stub the daemon-down branch without
+// mucking with the host's Docker socket.
+var preflightDockerInfo = func(ctx context.Context) ([]byte, error) {
+	// short timeout: the only thing this should ever do is fail-fast
+	// when the daemon is down. A healthy daemon answers in <100ms.
+	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(tCtx, "docker", "info").CombinedOutput()
+}
+
+// preflightImageInspect is the actual `docker image inspect IMAGE`
+// invocation, hoisted behind a var so tests can stub the
+// missing-image branch without pre-staging container images.
+var preflightImageInspect = func(ctx context.Context, image string) ([]byte, error) {
+	tCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(tCtx, "docker", "image", "inspect", image).CombinedOutput()
+}
+
+// preflightImagePull is the actual `docker pull IMAGE` invocation,
+// kept variable so tests can stub the pull-fail branch deterministically.
+// 2-minute timeout matches a normal SWE-bench image pull (~1 GB on a
+// fast link).
+var preflightImagePull = func(ctx context.Context, image string) ([]byte, error) {
+	tCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return exec.CommandContext(tCtx, "docker", "pull", image).CombinedOutput()
+}
+
+// preflightImage verifies the scoring image for one representative
+// instance can be inspected locally OR pulled from the registry.
+// Called by SWEBench.Load after the first instance is known.
+//
+// Sequence: image inspect → on miss, docker pull → on pull failure,
+// surface the registry error with the resolved image id so the
+// operator can debug. Successful inspect short-circuits the pull
+// (no network round-trip on warm laptops).
+//
+// We deliberately do NOT pre-pull every instance's image — Verified
+// has 500 instances at ~1 GB each. The first-instance check is a
+// pragmatic "if THIS pulls, the rest of the family probably will
+// too." A future improvement is to pull lazily per (instance, attempt)
+// inside RunSWEBenchTests; for now the one-image gate catches the
+// "no SWE-bench images at all locally" failure mode that previously
+// produced silent F2P=0/N rows.
+func preflightImage(ctx context.Context, inst Instance, imagePrefix string) error {
+	if imagePrefix == "" {
+		imagePrefix = "swebench/sweb.eval.x86_64."
+	}
+	image := imageNameFor(imagePrefix, inst)
+	if _, err := preflightImageInspect(ctx, image); err == nil {
+		return nil
+	}
+	pullOut, pullErr := preflightImagePull(ctx, image)
+	if pullErr == nil {
+		return nil
+	}
+	tail := strings.TrimSpace(string(pullOut))
+	if len(tail) > 512 {
+		tail = "…" + tail[len(tail)-512:]
+	}
+	return fmt.Errorf(
+		"swebench preflight: scoring image %q not local and pull failed.\n"+
+			"  hint: SWE-bench Verified images live on Docker Hub under "+
+			"swebench/sweb.eval.x86_64.<org>_1776_<repo>-<issue>. "+
+			"Check the image exists (`docker search swebench`) and that "+
+			"you can `docker pull` it manually before re-running.\n"+
+			"  raw: %s\n"+
+			"  err: %w",
+		image, tail, pullErr,
+	)
+}
+
+// preflight verifies SWE-bench's runtime pre-requisites and returns a
+// clean, actionable error when any are missing. Called from
+// SWEBench.Load before any instances are returned, so the operator
+// finds out about a host-side problem BEFORE burning model spend on
+// a doomed run.
+//
+// Today the only hard pre-req is a running Docker daemon (scoring
+// runs inside the canonical sweb.eval.* images). Image availability
+// is checked separately via preflightImage once the first instance
+// is known. Without these gates, Docker-down OR image-missing runs
+// silently produced "F2P=0/N" rows that looked like real model
+// failures rather than infra error — that's how the 2026-05-17
+// SWE-bench probes got mis-recorded as zero pass-rate.
+func preflight(ctx context.Context) error {
+	if _, err := dockerLookPath("docker"); err != nil {
+		return fmt.Errorf(
+			"swebench preflight: docker not on PATH. Install Docker " +
+				"Desktop (macOS) or the docker CLI (Linux): " +
+				"https://docs.docker.com/get-docker/",
+		)
+	}
+	out, err := preflightDockerInfo(ctx)
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		// Trim noisy multi-line client banner so the message is one
+		// thing the operator can act on.
+		if i := strings.Index(msg, "\nerror"); i > 0 {
+			msg = msg[i+1:]
+		}
+		hint := "Cannot connect to the Docker daemon. " +
+			"Start Docker Desktop (macOS: `open -a Docker`; Linux: " +
+			"`sudo systemctl start docker`) and retry."
+		if msg != "" {
+			return fmt.Errorf("swebench preflight: %s\n  raw: %s", hint, msg)
+		}
+		return fmt.Errorf("swebench preflight: %s (docker info: %w)", hint, err)
+	}
+	return nil
+}
+
 // RunSWEBenchTests applies patchPath inside the prebuilt SWE-bench
 // Docker image for the instance, runs pytest against FAIL_TO_PASS +
 // PASS_TO_PASS, and returns a structured Result.
@@ -112,14 +226,23 @@ func RunSWEBenchTests(ctx context.Context, inst Instance, patchPath, imagePrefix
 }
 
 // imageNameFor builds the canonical sweb.eval.* image tag from a
-// prefix and instance. Format mirrors the upstream registry layout:
+// prefix and instance. Format mirrors the upstream Docker Hub
+// layout under hub.docker.com/u/swebench:
 //
-//	<prefix><repo-with-dunder>:v<version>
+//	<prefix><org>_1776_<repo>-<issue>:latest
 //
-// e.g. "swebench/sweb.eval.x86_64.django__django:v4.2".
+// e.g. "swebench/sweb.eval.x86_64.django_1776_django-10097:latest".
+//
+// The `_1776_` is a fixed separator used by SWE-bench's image
+// publisher (corresponds to a specific upstream PR number; treat it
+// as an opaque token). The instance_id format
+// "<org>__<repo>-<issue>" maps directly: replace the double-underscore
+// with `_1776_`. The earlier ":v<version>" tag scheme returned
+// "repository does not exist" — Verified images are per-instance,
+// not per-(repo, major version), tagged :latest.
 func imageNameFor(prefix string, inst Instance) string {
-	repo := strings.ReplaceAll(inst.Repo, "/", "__")
-	return prefix + repo + ":v" + inst.Version
+	suffix := strings.Replace(inst.InstanceID, "__", "_1776_", 1)
+	return prefix + suffix + ":latest"
 }
 
 // pytestLineRE matches the verbose pytest line format used by both the

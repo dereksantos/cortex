@@ -133,6 +133,26 @@ func (b *SWEBench) Load(ctx context.Context, opts benchmarks.LoadOpts) ([]benchm
 	if err != nil {
 		return nil, err
 	}
+
+	// Pre-flight: SWE-bench can't score without (1) a running
+	// Docker daemon and (2) the per-instance scoring image locally
+	// pullable. Without these gates, every instance silently
+	// produced "F2P=0/N" rows when Docker was down OR the image was
+	// missing — the denominator came from len(inst.FailToPass) and
+	// scoreFromOutput saw zero output, so failures looked like
+	// model errors rather than infra. Fail fast with an actionable
+	// message so the operator fixes the host before burning model
+	// spend. Image check uses the FIRST loaded instance; if pull
+	// fails for instance 1 it'll almost certainly fail for all of
+	// them (they share the same registry).
+	if err := preflight(ctx); err != nil {
+		return nil, err
+	}
+	if len(raw) > 0 {
+		if err := preflightImage(ctx, raw[0], b.cfg.DockerImagePrefix); err != nil {
+			return nil, err
+		}
+	}
 	if len(b.cfg.Strategies) == 0 {
 		return nil, fmt.Errorf("swebench: no strategies configured")
 	}

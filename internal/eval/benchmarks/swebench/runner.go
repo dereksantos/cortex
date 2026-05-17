@@ -190,16 +190,25 @@ func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// imageIDFor mirrors score.go's logic for deriving the canonical
-// SWE-bench scoring image id from an instance: <prefix><repo with /
-// → __>:v<version>. Lives here so the verifier and the final scorer
-// can both reference the same image without circular imports.
+// imageIDFor mirrors score.go's imageNameFor: derives the canonical
+// SWE-bench scoring image id from an instance. Format:
+//
+//	<prefix><org>_1776_<repo>-<issue>:latest
+//
+// e.g. "swebench/sweb.eval.x86_64.django_1776_django-10097:latest".
+// Verified images are per-instance, tagged :latest, with `_1776_` as
+// a fixed separator standing in for the instance_id's `__`.
+//
+// MUST stay byte-identical to score.imageNameFor — verifier and final
+// scorer would diverge otherwise. Kept here (rather than imported)
+// only because the docker-shell command lives in runner.go alongside
+// the rest of the verifier construction.
 func imageIDFor(inst Instance, imagePrefix string) string {
 	if imagePrefix == "" {
 		imagePrefix = "swebench/sweb.eval.x86_64."
 	}
-	repoSlug := strings.ReplaceAll(inst.Repo, "/", "__")
-	return fmt.Sprintf("%s%s:v%s", imagePrefix, repoSlug, inst.Version)
+	suffix := strings.Replace(inst.InstanceID, "__", "_1776_", 1)
+	return fmt.Sprintf("%s%s:latest", imagePrefix, suffix)
 }
 
 // runInstance executes one (instance, strategy) pair end-to-end:
