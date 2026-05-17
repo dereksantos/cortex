@@ -36,6 +36,110 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-17 — ABR session adapter: end-to-end plumbing, signal is noise
+
+**Cortex**: `7362d4d` (branch `derek.s/dag-build`)
+**Command**:
+```
+RUN_ABR_SESSION=1 CORTEX_ABR_JUDGE=gemma2:2b go test \
+  ./internal/eval/v2 -run TestABRSession_Real -v \
+  -timeout 30m -count=1
+```
+**Versions**:
+- Adapter: `internal/eval/v2/abr_session.go` @ `7362d4d`
+- REPL agent: `qwen2.5-coder:1.5b` via Ollama (`http://localhost:11434/v1/chat/completions`)
+- Judge: `gemma2:2b` via Ollama (`ScoreWithJudgeCriteria` → `CompositeQuality`)
+- Embedder: not exercised (cortex_search Reflex falls back to text search when no embedder, per `tool_cortex_search.go:147`)
+- Tool surface: full 5-tool (`--full-tools`), required because the Ollama auto-drop in `repl.go:899` would otherwise remove `cortex_search` from the registry
+
+**Result**: PASS for the plumbing, GARBAGE for the numbers.
+- 3 turns × 2 passes = 6 REPL invocations + 6 judge calls in 17.67s
+- MeanABR = 0.793 (denominator: 2 turns where Full > 0)
+- MeanFast quality = 0.755 · MeanFull quality = 0.640
+- Per-turn ABR: 0 (Full scored 0), 0.690, 0.897
+- 6 CellResults written via PersistCell, strategy=`cortex-fast` / `cortex-full`, `turn_index` populated, `session_id="abr-20260517T191704Z"`
+
+**Why this run**: First end-to-end smoke of the ABR session adapter
+landed across commits `cd79ebf` (cortex_search mode param + strategy
+enum split), `9b019ef` (adapter), and `7362d4d` (--full-tools fix +
+runtime test). The three together close principle 9 (Fast/Full
+strategy split — first time `cortex-fast` / `cortex-full` rows have
+ever been written) and re-establish the trajectory-shaped ABR
+measurement the deleted `--cognition` runner used to do, this time
+through the REPL harness instead of the deleted in-process evaluator.
+
+**Observations**:
+
+- **Plumbing is correct end-to-end.** REPL spawned twice with separate
+  workdirs and `CORTEX_SEARCH_DEFAULT_MODE` set per pass; each pass
+  produced a `session.jsonl` with three turn rows; both were parsed,
+  paired by turn index, judged, scored, and persisted. The
+  cell_results.jsonl now has the first-ever rows tagged
+  `cortex-fast` / `cortex-full` with `turn_index ∈ {0,1,2}` and a
+  shared `session_id`. Analytics groupings work.
+
+- **The numbers are not interpretable.** Looking at the per-turn
+  responses in the test log, qwen2.5-coder:1.5b is emitting tool-call
+  JSON as *text* in `final_text` instead of invoking the tools.
+  Example (turn 0, Fast pass): the response is the literal string
+  `\`\`\`json\n{\n  "name": "cortex_search",\n  "arguments": ...\n}\n\`\`\``
+  rather than a tool call. The model is below the function-call
+  discipline floor at the 5-tool surface — matches `PROGRESS-REPL.md`
+  iter 3 finding (qwen-1.5b clean at ≤3 tools, text shapes at ≥5).
+  With `--full-tools` mandatory for ABR (we need cortex_search), this
+  is a known dead-end on tiny local models.
+
+- **The judge can't recover signal that isn't there.** gemma2:2b
+  scored the JSON-as-text dumps with composite qualities ranging
+  0.69–0.92, which is essentially noise about surface JSON-ness, not
+  retrieval quality. The 0.793 ABR is meaningless as an ABR number;
+  it's a measurement of "how similarly does gemma2:2b score qwen's
+  garbage in both passes."
+
+- **`turn_full_nonzero = 2` (not 3).** Full pass turn 0 was scored 0
+  by gemma2:2b ("No results found." string-only response). When Full
+  scores 0, the per-turn ABR is forced to 0 (we don't compute the
+  ratio) and the turn is excluded from the MeanABR denominator — so
+  MeanABR is averaged over the 2 turns where Full was non-zero. This
+  is the right policy (treating "Full also failed" turns as ABR=0
+  would conflate "Fast caught up" with "everything broke equally")
+  but means the headline number's denominator is small.
+
+- **OpenRouter remains the blocker for an honest run.** The
+  session-close health card noted "What 'good' looks like next
+  session: OpenRouter top-up". That's still gating: the only path to
+  meaningful ABR numbers is haiku-4.5 on the agent and a real judge
+  (haiku-4.5 also fine). Local 1.5B can't drive a 5-tool surface;
+  local 2B can't reliably judge JSON dumps; the credit-exhausted
+  keychain key is what's between us and the proper measurement.
+
+- **Anthropic-direct also blocked: `ANTHROPIC_API_KEY` returns 401**
+  (`invalid x-api-key`) when the adapter tries to use it as the judge
+  fallback. Either the env-set key is for a different account or has
+  rotated. Not in scope for this run; flagged for the user to
+  refresh.
+
+**Follow-ups**:
+- Re-run this test once OpenRouter is topped up:
+  `RUN_ABR_SESSION=1 CORTEX_ABR_MODEL=anthropic/claude-haiku-4.5 go test ./internal/eval/v2 -run TestABRSession_Real -v -timeout 30m -count=1`.
+  Same plumbing, real numbers.
+- Even with haiku-4.5 on both sides, the per-eval Cortex store is
+  empty on a fresh workdir, so this scenario will likely show ABR
+  ≈ 1.0 (degenerate — nothing for Think to cache, nothing for Full's
+  Reflect to rerank). To produce a non-degenerate run, the next
+  iteration should pre-seed the store via `cortex capture` against
+  the workdir's `.cortex/` before invoking the adapter. The legacy
+  `abr_convergence.yaml` 10-query sequence is then portable as-is.
+- Refresh `ANTHROPIC_API_KEY` so the adapter's default judge path
+  (anthropic-direct) works without `CORTEX_ABR_JUDGE=<local>`
+  override.
+- This run does NOT update ROADMAP.md's 0.586 baseline — that number
+  came from the v2 single-shot ABR sweep, which measures something
+  different (per-cell lift, not session trajectory) and remains the
+  canonical "snapshot" pre-DAG-protocol baseline.
+
+---
+
 ### 2026-05-17 — Phase 1 complete; Phase A re-run viable
 
 **Cortex**: `14d2170` (branch `derek.s/dag-build`)
