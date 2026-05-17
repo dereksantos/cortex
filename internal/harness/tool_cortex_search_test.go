@@ -6,6 +6,43 @@ import (
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
+// TestResolveRetrieveMode_EnvVar covers the ABR adapter's hook: when
+// the agent doesn't specify mode, CORTEX_SEARCH_DEFAULT_MODE picks it.
+// Explicit args always win — that's how runtime callers can opt out of
+// the benchmark default without code changes.
+func TestResolveRetrieveMode_EnvVar(t *testing.T) {
+	t.Setenv(CortexSearchDefaultModeEnv, "full")
+
+	t.Run("empty falls through to env default", func(t *testing.T) {
+		mode, degraded, err := resolveRetrieveMode("", true)
+		if err != nil || mode != cognition.Full || degraded {
+			t.Fatalf("want Full,nil; got mode=%v degraded=%v err=%v", mode, degraded, err)
+		}
+	})
+
+	t.Run("explicit fast overrides env", func(t *testing.T) {
+		mode, _, err := resolveRetrieveMode("fast", true)
+		if err != nil || mode != cognition.Fast {
+			t.Fatalf("want Fast,nil; got mode=%v err=%v", mode, err)
+		}
+	})
+
+	t.Run("env full degrades without provider", func(t *testing.T) {
+		mode, degraded, err := resolveRetrieveMode("", false)
+		if err != nil || mode != cognition.Fast || !degraded {
+			t.Fatalf("want Fast,degraded; got mode=%v degraded=%v err=%v", mode, degraded, err)
+		}
+	})
+
+	t.Run("garbage env value falls through to fast", func(t *testing.T) {
+		t.Setenv(CortexSearchDefaultModeEnv, "deep")
+		mode, _, err := resolveRetrieveMode("", true)
+		if err != nil || mode != cognition.Fast {
+			t.Fatalf("want Fast,nil; got mode=%v err=%v", mode, err)
+		}
+	})
+}
+
 // TestResolveRetrieveMode covers the three live paths through mode
 // parsing: empty/fast → Fast, full with provider → Full, full without
 // provider → Fast + degraded flag, unknown → error.

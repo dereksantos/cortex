@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -13,6 +14,14 @@ import (
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// CortexSearchDefaultModeEnv overrides the default retrieval mode when
+// the agent calls cortex_search without specifying one. Set to "fast"
+// or "full" by the ABR session adapter so the same prompt sequence can
+// be replayed under each mode without prompt-engineering the agent
+// (which is unreliable). Unset / unknown values fall through to "fast",
+// matching the historical default.
+const CortexSearchDefaultModeEnv = "CORTEX_SEARCH_DEFAULT_MODE"
 
 // cortexSearchToolName is the tool identifier. Exported as an unexported
 // constant the registry can match on (for accounting; see
@@ -170,10 +179,22 @@ func (t *cortexSearchTool) Call(ctx context.Context, rawArgs string) (string, er
 // Full is actually serviceable. Unknown values are an error so callers
 // see a typo immediately rather than silently getting Fast.
 //
+// When `requested` is empty, the CortexSearchDefaultModeEnv environment
+// variable is consulted — this is the hook ABR session runs use to
+// flip the default per pass without injecting mode= into every prompt.
+// An unset / unknown env var falls through to "fast".
+//
 // Returns (mode, degradedToFast, error). degradedToFast = true means
 // the caller asked for Full but we have no provider, so we ran Fast.
 func resolveRetrieveMode(requested string, haveProvider bool) (cognition.RetrieveMode, bool, error) {
-	switch strings.ToLower(strings.TrimSpace(requested)) {
+	effective := strings.ToLower(strings.TrimSpace(requested))
+	if effective == "" {
+		envDefault := strings.ToLower(strings.TrimSpace(os.Getenv(CortexSearchDefaultModeEnv)))
+		if envDefault == "fast" || envDefault == "full" {
+			effective = envDefault
+		}
+	}
+	switch effective {
 	case "", "fast":
 		return cognition.Fast, false, nil
 	case "full":
