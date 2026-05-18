@@ -1,0 +1,49 @@
+[cortex code] workdir: /tmp/cortex-abr-test/qwen-cold/trial-3
+[cortex code] model:   qwen2.5-coder:1.5b
+[cortex code] api-url: http://localhost:11434/v1/chat/completions
+[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)
+
+
+[cortex code] turns=1 tokens=854/211 cost=$0.0000 latency=3837ms reason=model_done
+
+--- final ---
+```go
+package main
+
+import (
+    "log"
+    "net/url"
+    "database/sql"
+    _ "github.com/lib/pq" // import necessary for postgres driver
+)
+
+type User struct {
+    ID   int    `json:"id"`
+    Name string `json:"name"`
+    Email string `json:"email"`
+}
+
+func InsertUser(name, email string) error {
+    connStr := "user=postgres dbname=test sslmode=disable"
+    db, err := sql.Open("postgres", connStr)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    insertStmt := `INSERT INTO users (name, email) VALUES (?, ?)`
+    result, err := db.Exec(insertStmt, name, email)
+    if err != nil {
+        return err
+    }
+
+    rowsAffected, err := result.RowsAffected()
+    if err != nil {
+        return err
+    }
+
+    log.Printf("Inserted %d user(s)", rowsAffected)
+
+    return nil
+}
+```

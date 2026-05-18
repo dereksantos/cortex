@@ -36,6 +36,149 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — ABR receipts: Cortex amplifies the frontier model 0%→100%; the small model gets 0 lift on this scenario
+
+**Cortex**: `5ff25f6` (branch `derek.s/dag-stage-2`)
+**Command**:
+```
+# 4 configs × 3 trials = 12 sessions
+# Strategies: qwen2.5-coder:1.5b (local) and anthropic/claude-haiku-4.5 (cloud),
+# each in two arms: cold (no context) vs context-injected (system prompt with
+# project decision "use sqlx, not pgx, not database/sql").
+/tmp/cortex-abr-test/run.sh
+```
+**Versions**: provider=`openrouter-keychain` (haiku) + `ollama-local` (qwen); judge=manual inspection of returned code; rerank=n/a
+**Result**: Haiku 4.5 amplification 0/3 → **3/3** (100% lift). qwen2.5-coder:1.5b amplification 0/3 → **0/3** strict (no lift; 1/3 partial — surface-imports sqlx but function body stays on database/sql).
+
+**Why this run**: prior entry (immediately below) walked back the over-broad "thesis VALIDATED" claim. This run actually tests the small-model amplifier thesis stated correctly: does Cortex-style context injection raise the model's pass rate on tasks that depend on that context?
+
+**Scenario design**:
+- Project decision (the context): "Use sqlx for postgres. REJECTED: pgx, database/sql alone."
+- Task: "Write a Go function `InsertUser` that connects to postgres and inserts a row."
+- Cold default (both models, all 6 cold trials): `database/sql` + `_ "github.com/lib/pq"` — the legacy stdlib pattern. Cold sqlx use rate: 0/6.
+- PASS criterion (strict): the `InsertUser` function actually uses sqlx APIs (`sqlx.DB`, `NamedExec`, `MustExec`). Surface-imports of sqlx without functional use are FAIL.
+- 4 configs × 3 trials = 12 sessions, ~$0.012 total cost (only the 6 haiku trials cost anything; qwen runs on local Ollama).
+
+**Per-trial scoring (strict)**:
+
+| Config | trial-1 | trial-2 | trial-3 | Pass rate |
+|---|---|---|---|---|
+| qwen-cold | FAIL (database/sql) | FAIL (database/sql) | FAIL (database/sql) | **0/3 (0%)** |
+| qwen-context | FAIL (uses sqlx.Connect in main but function takes `*sql.DB` — won't compile) | FAIL (side-imports sqlx, ignores context) | FAIL (side-imports sqlx, ignores context) | **0/3 (0%)** |
+| haiku-cold | FAIL (database/sql) | FAIL (database/sql) | FAIL (database/sql) | **0/3 (0%)** |
+| haiku-context | PASS (sqlx.Connect + db.NamedExec) | PASS (same) | PASS (same) | **3/3 (100%)** |
+
+**Amplification (context vs no-context delta)**:
+- Haiku 4.5: **+100%** (0/3 → 3/3). Clean, unambiguous lift.
+- qwen2.5-coder:1.5b: **+0% strict** (0/3 → 0/3), or +33% partial credit (one trial side-imported sqlx but the function body remained database/sql with a `*sql.DB` parameter — code that wouldn't compile).
+
+**Confidence intervals (n=3 binomial)**:
+- haiku-context 3/3 → 95% CI [29.2%, 100%]
+- qwen-context 0/3 → 95% CI [0%, 70.8%]
+- CIs overlap → at n=3 we can't statistically reject "they're the same." But the practical pattern (haiku passes consistently, qwen fails consistently) is unambiguous at this n. Larger n would tighten this; n=10 would land non-overlapping CIs.
+
+**The actual finding** (replaces the prior entry's overclaim):
+
+The small-model amplifier thesis as I framed it earlier ("small model + Cortex context → frontier-class output") **is refuted in this scenario** for qwen2.5-coder:1.5b. The model acknowledges the context (imports sqlx as a side-import) but doesn't have the knowledge to actually USE sqlx — its database/sql training is strong, its sqlx training is weak/absent, and a system-prompt instruction "use sqlx not database/sql" doesn't fix that. The model writes database/sql code with an unused sqlx import as a token compliance gesture.
+
+The frontier model (Haiku 4.5) DOES amplify cleanly: it knows both libraries, the context tells it which to prefer, and it produces correct sqlx code. The thesis is validated at frontier scale on this scenario.
+
+**Implications for the architecture**:
+
+The Cortex injection format may need to grow beyond "decisions as text." What worked for Haiku won't work for qwen-1.5b because the small model needs more than a preference statement — it needs the API surface to imitate. Two follow-up hypotheses worth testing:
+
+1. **Code-example injection**: instead of "Decision: use sqlx," inject a short sqlx code snippet. Hypothesis: qwen can pattern-match from an example even when it can't translate "use sqlx" → "write sqlx code" cold.
+2. **Library skeleton in workdir**: place a `db/sqlx_helpers.go` file in the workdir with the project's actual sqlx wrapper. Hypothesis: qwen-coder's training distribution includes "imitate the surrounding code," so a concrete file would propagate better than a system-prompt declaration.
+
+If either flips qwen from 0/3 → 2-3/3 on this scenario, the small-model amplifier thesis has a more specific operational form: **Cortex injects executable patterns, not just decisions, for small models.** That's the architecture spec that would actually emerge from this experiment as evidence-driven.
+
+**Principle compliance** (acknowledging earlier violations):
+- ✅ Principle 3 (Graded fairly and honestly): scoring criterion stated up-front; partial-credit case explicitly named; CIs reported.
+- ✅ Principle 8 (Variance): n=3 per cell with confidence intervals shown. Not great n; explicitly acknowledged as such.
+- ✅ Principle 9 (Multi-strategy separation): each of 4 configs reports its own row, no aggregation.
+
+**Sample outputs** (one each, for context):
+
+qwen-cold/trial-1 — the cold-default pattern (database/sql + lib/pq):
+```go
+import (
+    "database/sql"
+    _ "github.com/lib/pq"
+)
+func InsertUser(name, email string) error {
+    db, err := sql.Open("postgres", ...)
+    db.Exec(...)
+}
+```
+
+qwen-context/trial-1 — partial credit case (sqlx.Connect in main, but InsertUser still on database/sql):
+```go
+import (
+    "database/sql"
+    _ "github.com/jmoiron/sqlx"   // ← imported but used only as side-import
+)
+func InsertUser(db *sql.DB, name, email string) error {   // ← signature still database/sql
+    db.Exec(...)
+}
+func main() {
+    db, err := sqlx.Connect(...)   // ← uses sqlx HERE only
+}
+```
+
+haiku-context/trial-1 — clean amplification:
+```go
+import (
+    "github.com/jmoiron/sqlx"
+    _ "github.com/lib/pq"
+)
+func InsertUser(name, email string) error {
+    db, err := sqlx.Connect("postgres", ...)
+    db.NamedExec(`INSERT INTO users (name, email) VALUES (:name, :email)`, ...)
+}
+```
+
+**Follow-ups**:
+1. Run hypothesis #1 above — inject a 5-line sqlx code example in the system prompt. n≥5 per cell. If qwen flips, the architecture has its first evidence-driven amplification-injection format.
+2. Run on a scenario the small model SHOULD be able to amplify (within its training distribution). E.g., "Decision: rename function `Foo` → `Bar`" — refactoring within familiar APIs. Tests whether qwen amplifies AT ALL on context within its strength zone.
+3. Scale n to 10 per cell to tighten the CIs. Cost: ~$0.04 extra for haiku trials, free for qwen.
+
+---
+
+### 2026-05-18 — CORRECTION: prior "thesis VALIDATED" entry overclaimed; reframe as feasibility floor + run actual ABR test
+
+**Cortex**: `5ff25f6` (branch `derek.s/dag-stage-2`)
+**Result**: this entry walks back the overclaim from the prior "Small-model amplifier thesis VALIDATED" entry of the same date.
+
+**The overclaim**:
+
+The prior entry titled `Small-model amplifier thesis VALIDATED` made three causal claims from one probe round:
+
+1. "Small-model amplifier thesis VALIDATED" — the calibrate probe measured each op's wall time + fallback rate on `qwen2.5-coder:1.5b` and `mistral:7b`. It did not measure amplification (the delta a small model gets from Cortex's context injection vs running cold).
+2. "Training distribution beats parameter count" — comparing `qwen2.5-coder:1.5b` (0/7 fallbacks) to `mistral:7b` (2/7 fallbacks) confounds at least four axes: parameter count, training distribution, vendor, generation. The data can't isolate the cause.
+3. n=1 per cell, no variance — violates principle 8 (LLM-judged evals must include variance). Treating point estimates as truth.
+
+**What the prior probe actually measured**:
+
+A **feasibility floor**: the 1.5B code-tuned model can produce valid JSON for the ≤100-token per-op contracts at all. That's a necessary precondition for the small-model amplifier story to work (if it couldn't, the architecture is dead). It is not evidence that Cortex amplifies anything — the probe fed canned inputs directly to op handlers with no Cortex retrieval/injection in the loop.
+
+**Principle violations to record**:
+- Principle 3 (Graded fairly and honestly): the "VALIDATED" framing isn't supported by the data; a triumphalist entry left in the journal without correction is a self-reinforcing error.
+- Principle 8 (Variance): n=1 per cell, no error bars, point-estimate framing.
+
+**The corrected reading of the prior entry**:
+
+- Latency claim survives: the ~13× total wall speedup of qwen-coder local vs Haiku cloud is observable even at n=1 because the effect size dwarfs any plausible run-to-run noise. (Network round-trip ↔ syscall is a multiple-of-magnitude effect.)
+- Fallback-rate claim weakens: `qwen-coder 0/7` is consistent with "the architecture's ≤100 token output cap is the right ceiling" but doesn't establish it as causally responsible for the result. Could be qwen-coder's general JSON discipline.
+- "Code-trained > general" claim: not supported. Needs a same-family comparison (e.g. qwen-coder-1.5b vs same-vendor general-tuned at the same size) and n≥5 per cell to control vendor/generation/training noise.
+
+**What's actually being tested next, in the entry that follows**:
+
+A real ABR-style test — same model, with vs without context, on a project-specific decision the model can't know cold. The hypothesis it tests: "right context, surfaced to a small model, raises the model's pass rate on tasks that depend on that context." This is the small-model amplifier thesis stated correctly.
+
+Running this now. Receipts will land in the next entry under this date.
+
+---
+
 ### 2026-05-18 — Small-model amplifier thesis VALIDATED: qwen2.5-coder:1.5b runs every Stage 2 op cleanly
 
 **Cortex**: `18082e9` (branch `derek.s/dag-stage-2`)
