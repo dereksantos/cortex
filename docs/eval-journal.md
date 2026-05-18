@@ -36,6 +36,53 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — DAG operationalized: Stages 4 + 3.5 + 5-A + CLI audit landed end-to-end on derek.s/dag-stage-4
+
+**Cortex**: branch `derek.s/dag-stage-4` (tip after `b7a55fe` CLI cleanup + `1b43839` prototype docs fold-in)
+**Commands**:
+```
+go test -race ./pkg/cognition/dag/ -count=1
+go test ./...
+./bin/cortex eval --suite=mechanic
+./bin/cortex run --type=eval --scenario=test/evals/coding/sqlx-insert-user.yaml --workdir /tmp/eval-test
+./bin/cortex calibrate --help
+```
+**Versions**: provider=N/A (DAG mechanics); judge=N/A; rerank=N/A
+**Result**: DAG is now production-grade. All 5 mechanic evals PASS. Race-detector clean. Full suite green. New `sqlx-insert-user` scenario flows end-to-end through `cortex run --type=eval` (baseline-fails as designed until fetch ops exist).
+
+**Why this run**: `/goal` set this iteration: fast-forward main, complete the deferred backlog, make the DAG operational. Each item in the list converted from "deferred" to "shipped" except the explicit follow-ups noted below.
+
+**What landed (8 commits on derek.s/dag-stage-4)**:
+
+| Commit | Deliverable |
+|---|---|
+| `a84fe30` | `sqlx-insert-user` eval scenario + seed (fetch-op target) |
+| `b27cf05` | Stage 4-A: parallel batch executor + race-clean tests + ADR-005 |
+| `9c523fa` | Stage 4-B: cross-turn budget rollover + 7 tests + ADR-006 |
+| `aca43b0` | Stage 4-C: per-op cost-hint self-calibration + `cortex calibrate` CLI + 5 tests + Stage 4 journal entry |
+| `522ceb6` | Stage 3.5: DAG dispatch becomes the default for `cortex code` + REPL (`--no-dag` kept as debug escape) |
+| `a9c1ca5` | Stage 5-A: `cortex run --type=eval` — load v2 scenario, route through DAG, run verify |
+| `b7a55fe` | CLI audit: wire `run/calibrate/eval/code` into main help; expand `run --help` |
+| `1b43839` | Fold prototype branch's third-arm ABR docs into this branch's history |
+
+**Outcomes (vs `/goal` text)**:
+- ✓ "fast-forward main and new worktree" — main caught up to `efb257f`; `cortex-dag-stage-4` worktree on a fresh branch
+- ✓ "commit the eval" — `a84fe30`
+- ✓ "REPL is fully dag driven" — operational form (Stage 3.5: dispatch flows through DAG by default in both `cortex code` and REPL). Structural form (REPL turn IS one `dag.Executor.Run` over the Stage 2 chain) deferred to Stage 5/6 — needs the chain to read prompt via Attrs at runtime instead of capturing at registry build, plus REPL state plumbing through the dag layer. Flagged in the Stage 3.5 commit body.
+- ✓ "evals adhere to the eval principles" — `cortex run --type=eval` shells through the same executor as `--type=turn`, no parallel eval-only path. The grid runner retains `cell_results.jsonl` ownership (one source of truth per principle 7).
+- ✓ "CLI surface clean and aligned" — main help lists all DAG-related subcommands; `run --help` documents per-stage status; `--dag`/`--no-dag` consistently surfaced.
+
+**Carryover for the next loop iteration**:
+- **Stage 5-B/C/D** — `cortex run --type=capture` (hook payload integration), `--type=think` + `--type=dream` (daemon scheduler integration). Loop prompt at `docs/prompts/loop-dag-stage-5-additional-types.md`.
+- **Fetch ops** — `value.detect_unfamiliarity` + `remember.fetch_external`. Eval target (`sqlx-insert-user`) is in place and routes through `cortex run --type=eval`; ops themselves need design + impl. Note the third-arm prototype's caveats: needs n≥10 re-run before locking in op shape; current evidence is qualitative.
+- **REPL chain unification** (Stage 5/6 structural form of "REPL fully DAG-driven"). Mechanical: chain wrappers in `commands/run.go` capture `prompt` at build time; the unification requires either rebuilding the registry per turn or moving prompt to runtime Attrs. Plus REPL notifier/system-prompt/dispatcher state needs to thread through.
+- **Small-model amplifier walk-back follow-up** (commit `657145a` on main) — once fetch ops land, re-run the sqlx scenario through `cortex run --type=eval --scenario=…` × {qwen / haiku} × {baseline / cortex / cortex+fetch}. The new eval makes this a one-line invocation per cell.
+- **Push** `derek.s/dag-stage-4` and open PR — needs explicit user consent; not pushed in this iteration.
+
+**Cost**: $0 (all mechanic + unit tests; no LLM calls in this iteration; the smoke-test `cortex run --type=eval` ran in stub mode).
+
+---
+
 ### 2026-05-18 — Stage 4 complete: parallel batch execution + cross-turn budget rollover + per-op cost-hint self-calibration
 
 **Cortex**: branch `derek.s/dag-stage-4` (`9c523fa` + Stage 4-C HEAD)
