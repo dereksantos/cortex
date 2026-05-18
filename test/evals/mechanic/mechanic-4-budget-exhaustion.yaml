@@ -1,0 +1,86 @@
+id: mechanic-4-budget-exhaustion
+version: 1
+suite: mechanic
+description: |
+  Budget exhaustion graceful degradation. A node sequence exhausts
+  latency_ms mid-tree. The in-flight node finishes; no new spawns
+  happen; the exhaustion event names the exhausted axis. No orphaned
+  in-flight nodes.
+
+  Verifies: soft budget bound; clean in-flight completion; structured
+  exhaustion telemetry; no silent failures.
+
+# n1 (cheap) → n2 (eats most of budget) → tries to spawn n3, n4
+# After n2 runs, remaining_budget.latency_ms = 50 which is less than
+# both n3.cost_consumed.latency_ms (100) and n4 (80).
+# Both spawns must be refused with error_code: budget_exceeded.
+mocked_handlers:
+  - node_id: n1
+    function: sense
+    op: prompt
+    cost_consumed: {latency_ms: 50, tokens: 10}
+    spawn:
+      - node_id: n2
+        function: attend
+        op: reflex
+  - node_id: n2
+    function: attend
+    op: reflex
+    cost_consumed: {latency_ms: 400, tokens: 100}
+    spawn:
+      - node_id: n3
+        function: decide
+        op: inject
+      - node_id: n4
+        function: maintain
+        op: capture
+  # n3 and n4 are declared with cost hints; executor should check
+  # before scheduling and refuse both.
+  - node_id: n3
+    function: decide
+    op: inject
+    cost_consumed: {latency_ms: 100, tokens: 50}
+    cost_hint: {latency_ms: 100, tokens: 50}
+    spawn: []
+  - node_id: n4
+    function: maintain
+    op: capture
+    cost_consumed: {latency_ms: 80, tokens: 30}
+    cost_hint: {latency_ms: 80, tokens: 30}
+    spawn: []
+
+seed:
+  - node_id: n1
+    function: sense
+    op: prompt
+
+initial_budget:
+  latency_ms: 500  # after n1 + n2: 50 left — both children over-budget
+  tokens: 500
+  depth: 10
+
+expected:
+  total_nodes_executed: 2   # n1 + n2 — neither n3 nor n4
+  in_flight_completed: true  # n2 finished cleanly despite exhausting budget
+  spawn_refusals:
+    - parent: n2
+      child: n3
+      error_code: budget_exceeded
+      exhausted_axis: latency_ms
+    - parent: n2
+      child: n4
+      error_code: budget_exceeded
+      exhausted_axis: latency_ms
+  orphaned_in_flight: []  # critical — no node should be left dangling
+  final_outcome: ok       # turn completed; budget exhaustion is expected behavior
+  exhausted_axis: latency_ms
+  remaining_budget:
+    latency_ms: 50
+    tokens: 390
+    depth: 8
+
+failure_message_today: |
+  DAG executor not implemented (Phase 5 / dag-build-plan.md Stage 1).
+  This fixture is the TDD signal for budget exhaustion graceful
+  degradation. Critical: no silent failures, no orphaned in-flight
+  nodes.

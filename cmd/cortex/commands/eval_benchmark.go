@@ -227,6 +227,15 @@ func parseBenchmarkArgs(args []string) (benchmarks.LoadOpts, error) {
 			opts.Filter["judge-model"] = args[i+1]
 			opts.Filter["judge"] = "true"
 			i++
+		case "--analyze-limit":
+			// Wired for LongMemEval today; ignored by benchmarks that
+			// don't read FilterAnalyze. Documents the Dream-style
+			// extraction-pass budget per cell.
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("--analyze-limit requires a value")
+			}
+			opts.Filter["analyze-limit"] = args[i+1]
+			i++
 		}
 	}
 	return opts, nil

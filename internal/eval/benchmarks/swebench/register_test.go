@@ -10,6 +10,11 @@ import (
 )
 
 func TestSWEBench_LoadStrategyMultiplication(t *testing.T) {
+	// Stub preflight: this test exercises the (instance, strategy)
+	// multiplication path, not the host-Docker / image-pull gates.
+	// preflight + preflightImage have dedicated coverage in
+	// score_test.go.
+	stubPreflightForTest(t)
 	defer withFreshCache(t)()
 
 	pages := map[int][]byte{

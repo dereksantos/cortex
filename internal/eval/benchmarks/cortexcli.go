@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/events"
 )
 
@@ -108,6 +109,171 @@ func RunIngest(ctx context.Context, binary, workdir string) error {
 	return nil
 }
 
+// REPLHeadlessOpts configures a one-shot subprocess invocation of the
+// REPL (the bare `cortex` command), driven via the headless flags
+// added in PR #(repl-headless). Benchmarks use this instead of
+// RunCode when they need the REPL's verify-and-retry loop —
+// principle 1 (black-box CLI) over re-implementing retry in Go.
+type REPLHeadlessOpts struct {
+	Workdir      string
+	Model        string
+	Prompt       string
+	Verifier     string // shell command run after each attempt; exit 0 = pass
+	MaxRetries   int    // total auto-retry budget (>=1)
+	SystemPrompt string // path to a system prompt file; empty = REPL's auto-seeded default
+	// Per-attempt budget overrides. Zero = inherit REPL defaults
+	// (defaultMaxTurns=8, $0.20 cost, 300k cumulative tokens).
+	// Benchmark harnesses bump these because real repo exploration
+	// blows past the interactive-mode defaults in 4-5 turns.
+	MaxTurns            int
+	MaxCostUSD          float64
+	MaxCumulativeTokens int
+	// FullTools registers the REPL's full 5-tool surface even when
+	// routed to Ollama. SWE-bench-class benchmarks need list_dir to
+	// navigate real repos and must set this to true.
+	FullTools bool
+	// KeepOnFail suppresses the REPL's snapshot-rollback when the
+	// verifier fails so iterative agent attempts build on prior
+	// work. Benchmark-default true; interactive REPL keeps the
+	// old behavior (rollback on broken edits).
+	KeepOnFail bool
+}
+
+// REPLHeadlessOutput is the parsed JSON summary the REPL emits on
+// stdout when invoked with --json. The on-disk session JSONL holds
+// the long-form transcript; this struct is just the at-a-glance
+// "did it pass" view.
+type REPLHeadlessOutput struct {
+	SessionID   string `json:"session_id"`
+	SessionPath string `json:"session_path"`
+	Workdir     string `json:"workdir"`
+	Model       string `json:"model"`
+	Accepted    bool   `json:"accepted"`
+	Error       string `json:"error,omitempty"`
+}
+
+// RunREPLHeadless invokes `cortex --workdir <wd> --prompt <p>
+// --verifier <cmd> --auto-retry --max-retries N --json --model M` as
+// a subprocess and parses the JSON summary line. Stderr is captured
+// and surfaced on non-zero exit.
+//
+// This is the principled SWE-bench / future-benchmark surface: the
+// REPL's verify-and-retry loop runs in-process inside the subprocess,
+// so principle 1 (black box) and principle 4 (close CLI gaps) are
+// both honored. Callers no longer need to re-implement the retry +
+// failure-feedback loop in Go.
+func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) (*REPLHeadlessOutput, error) {
+	if binary == "" {
+		return nil, errors.New("cortex binary is empty")
+	}
+	if opts.Workdir == "" {
+		return nil, errors.New("workdir is empty")
+	}
+	if opts.Prompt == "" {
+		return nil, errors.New("prompt is empty")
+	}
+	if opts.Model == "" {
+		return nil, errors.New("model is empty")
+	}
+	maxRetries := opts.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = 1
+	}
+
+	args := []string{
+		"--workdir", opts.Workdir,
+		"--model", opts.Model,
+		"--prompt", opts.Prompt,
+		"--auto-retry",
+		"--max-retries", strconv.Itoa(maxRetries),
+		"--json",
+	}
+	if opts.Verifier != "" {
+		args = append(args, "--verifier", opts.Verifier)
+	}
+	if opts.SystemPrompt != "" {
+		args = append(args, "--system-prompt", opts.SystemPrompt)
+	}
+	if opts.MaxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
+	}
+	if opts.MaxCostUSD > 0 {
+		args = append(args, "--max-cost-usd", strconv.FormatFloat(opts.MaxCostUSD, 'f', -1, 64))
+	}
+	if opts.MaxCumulativeTokens > 0 {
+		args = append(args, "--max-cumulative-tokens", strconv.Itoa(opts.MaxCumulativeTokens))
+	}
+	if opts.FullTools {
+		args = append(args, "--full-tools")
+	}
+	if opts.KeepOnFail {
+		args = append(args, "--keep-on-fail")
+	}
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cortex repl headless: %w (stderr: %s)", err, stderr.String())
+	}
+
+	// The REPL prints human-readable status lines before the JSON
+	// summary (banner, turn summary). Pluck the last non-empty line
+	// that parses as an envelope. Envelope's Data is the actual
+	// REPLHeadlessOutput payload.
+	var out REPLHeadlessOutput
+	parsed := false
+	for _, line := range bytes.Split(stdout.Bytes(), []byte("\n")) {
+		l := bytes.TrimSpace(line)
+		if len(l) == 0 || l[0] != '{' {
+			continue
+		}
+		var probe REPLHeadlessOutput
+		if env, err := cliout.DecodeEnvelope(l, &probe); err == nil || (env != nil && env.Error != nil) {
+			// Either ok envelope (decoded into probe) or failure envelope
+			// (data field still carried REPL state, error code surfaces
+			// the failure reason). Adopt the latest one we see.
+			out = probe
+			parsed = true
+		}
+	}
+	if !parsed {
+		return nil, fmt.Errorf("cortex repl headless: no JSON envelope in stdout (got %d bytes)", stdout.Len())
+	}
+	return &out, nil
+}
+
+// RunAnalyze runs `cortex analyze --workdir <workdir> --limit <limit>`,
+// which applies LLM-driven insight extraction (Dream-style) to the
+// most recent events in the store. Intended to be called between
+// RunIngest and RunCode in benchmarks that want to test cortex's
+// agentic insight layer rather than raw embedding retrieval.
+//
+// limit <= 0 falls back to the CLI default (10). Failures bubble up
+// with the CLI's stderr — analyze is bounded but its LLM calls can
+// fail (provider errors, rate limits), and callers should decide
+// whether to skip the cell or fail the run.
+func RunAnalyze(ctx context.Context, binary, workdir string, limit int) error {
+	if binary == "" {
+		return errors.New("cortex binary is empty")
+	}
+	if workdir == "" {
+		return errors.New("workdir is empty")
+	}
+	args := []string{"analyze", "--workdir", workdir}
+	if limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(limit))
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cortex analyze: %w (stderr: %s)", err, stderr.String())
+	}
+	return nil
+}
+
 // SearchMode selects the retrieval pipeline. Mirrors --mode on the CLI:
 // Fast = Reflex only; Full = Reflex + Reflect.
 type SearchMode string
@@ -163,13 +329,13 @@ func RunSearch(ctx context.Context, binary, workdir string, mode SearchMode, lim
 		return nil, fmt.Errorf("cortex search: %w (stderr: %s)", err, stderr.String())
 	}
 
-	// Preserve raw stdout for error diagnostics; json.NewDecoder consumes
-	// the buffer it reads from, so the otherwise-empty `(stdout: )` in
-	// a wrapped error hides what actually came back.
+	// Preserve raw stdout for error diagnostics; the envelope decoder
+	// shares the buffer it reads from, so an otherwise-empty `(stdout: )`
+	// in a wrapped error hides what actually came back.
 	raw := stdout.String()
 	out := &SearchOutput{}
-	if err := json.Unmarshal([]byte(raw), out); err != nil {
-		return nil, fmt.Errorf("decode search JSON: %w (stdout %d bytes: %q)", err, len(raw), truncate(raw, 400))
+	if _, err := cliout.DecodeEnvelope([]byte(raw), out); err != nil {
+		return nil, fmt.Errorf("decode search envelope: %w (stdout %d bytes: %q)", err, len(raw), truncate(raw, 400))
 	}
 	return out, nil
 }
@@ -271,8 +437,8 @@ func RunCode(ctx context.Context, binary string, opts CodeOpts) (*CodeOutput, er
 	}
 
 	out := &CodeOutput{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode code JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode code envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }
@@ -337,8 +503,8 @@ func RunEmbedBulk(ctx context.Context, binary, workdir, defaultContentType strin
 		return nil, fmt.Errorf("cortex embed --bulk: %w (stderr: %s)", err, truncate(stderr.String(), 500))
 	}
 	out := &EmbedBulkSummary{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode embed --bulk summary: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode embed --bulk envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }
@@ -418,8 +584,8 @@ func RunSearchVector(ctx context.Context, binary string, opts SearchVectorOpts) 
 		return nil, fmt.Errorf("cortex search-vector: %w (stderr: %s)", err, truncate(stderr.String(), 500))
 	}
 	out := &SearchVectorOutput{}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
-		return nil, fmt.Errorf("decode search-vector JSON: %w (stdout: %s)", err, truncate(stdout.String(), 200))
+	if _, err := cliout.DecodeEnvelope(stdout.Bytes(), out); err != nil {
+		return nil, fmt.Errorf("decode search-vector envelope: %w (stdout: %s)", err, truncate(stdout.String(), 200))
 	}
 	return out, nil
 }

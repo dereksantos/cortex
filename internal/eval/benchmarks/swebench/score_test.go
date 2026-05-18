@@ -103,9 +103,12 @@ func TestScoreFromOutput_MissingTestCountsAsFail(t *testing.T) {
 }
 
 func TestImageNameFor(t *testing.T) {
-	inst := Instance{Repo: "django/django", Version: "4.2"}
+	// Verified images live on Docker Hub at
+	// swebench/sweb.eval.x86_64.<org>_1776_<repo>-<issue>:latest.
+	// The InstanceID's `__` separator maps to `_1776_`.
+	inst := Instance{InstanceID: "django__django-10097", Repo: "django/django", Version: "4.2"}
 	got := imageNameFor("swebench/sweb.eval.x86_64.", inst)
-	want := "swebench/sweb.eval.x86_64.django__django:v4.2"
+	want := "swebench/sweb.eval.x86_64.django_1776_django-10097:latest"
 	if got != want {
 		t.Errorf("imageNameFor: got %q want %q", got, want)
 	}
@@ -123,6 +126,115 @@ func TestRunSWEBenchTests_DockerMissing(t *testing.T) {
 	}
 }
 
+func TestPreflight_DockerMissing(t *testing.T) {
+	prev := dockerLookPath
+	dockerLookPath = func(string) (string, error) { return "", errors.New("missing") }
+	defer func() { dockerLookPath = prev }()
+
+	err := preflight(context.Background())
+	if err == nil {
+		t.Fatal("want preflight error when docker is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "docker not on PATH") {
+		t.Errorf("want 'docker not on PATH' in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "docs.docker.com") {
+		t.Errorf("want install link in error message, got %v", err)
+	}
+}
+
+func TestPreflight_DaemonDown(t *testing.T) {
+	// Docker IS on PATH, but `docker info` fails. Stub LookPath too so
+	// the test passes on hosts without Docker (macOS CI), and stub
+	// info to return the actual error macOS prints when the daemon
+	// isn't running so the assertion proves we propagate it usefully.
+	prevLook := dockerLookPath
+	prevInfo := preflightDockerInfo
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
+	preflightDockerInfo = func(context.Context) ([]byte, error) {
+		out := []byte("Client:\n Version: 28.1.1\nerror during connect: Cannot connect to the Docker daemon at unix:///run/docker.sock. Is the docker daemon running?")
+		return out, errors.New("exit status 1")
+	}
+	defer func() {
+		dockerLookPath = prevLook
+		preflightDockerInfo = prevInfo
+	}()
+
+	err := preflight(context.Background())
+	if err == nil {
+		t.Fatal("want preflight error when daemon is down, got nil")
+	}
+	if !strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
+		t.Errorf("want daemon-down hint in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "open -a Docker") {
+		t.Errorf("want macOS start hint in error, got %v", err)
+	}
+}
+
+func TestPreflight_DaemonUp(t *testing.T) {
+	prevLook := dockerLookPath
+	prevInfo := preflightDockerInfo
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
+	preflightDockerInfo = func(context.Context) ([]byte, error) {
+		return []byte("Client:\n Version: 28.1.1\nServer:\n Server Version: 28.1.1\n"), nil
+	}
+	defer func() {
+		dockerLookPath = prevLook
+		preflightDockerInfo = prevInfo
+	}()
+
+	if err := preflight(context.Background()); err != nil {
+		t.Fatalf("want nil when docker is up, got %v", err)
+	}
+}
+
+func TestPreflightImage_AlreadyLocal(t *testing.T) {
+	prevInspect := preflightImageInspect
+	prevPull := preflightImagePull
+	pullCalled := false
+	preflightImageInspect = func(context.Context, string) ([]byte, error) {
+		return []byte(`[{"Id":"sha256:abc"}]`), nil
+	}
+	preflightImagePull = func(context.Context, string) ([]byte, error) {
+		pullCalled = true
+		return nil, errors.New("should not have been called")
+	}
+	defer func() { preflightImageInspect = prevInspect; preflightImagePull = prevPull }()
+
+	inst := Instance{InstanceID: "django__django-10097", Repo: "django/django", Version: "2.2"}
+	if err := preflightImage(context.Background(), inst, "swebench/sweb.eval.x86_64."); err != nil {
+		t.Fatalf("want nil when image is local, got %v", err)
+	}
+	if pullCalled {
+		t.Error("pull should be skipped when inspect succeeds")
+	}
+}
+
+func TestPreflightImage_PullFails(t *testing.T) {
+	prevInspect := preflightImageInspect
+	prevPull := preflightImagePull
+	preflightImageInspect = func(context.Context, string) ([]byte, error) {
+		return []byte("Error: No such object"), errors.New("exit status 1")
+	}
+	preflightImagePull = func(context.Context, string) ([]byte, error) {
+		return []byte("Error response from daemon: pull access denied for swebench/sweb.eval.x86_64.django_1776_django-10097"), errors.New("exit status 1")
+	}
+	defer func() { preflightImageInspect = prevInspect; preflightImagePull = prevPull }()
+
+	inst := Instance{InstanceID: "django__django-10097", Repo: "django/django", Version: "2.2"}
+	err := preflightImage(context.Background(), inst, "swebench/sweb.eval.x86_64.")
+	if err == nil {
+		t.Fatal("want error when pull fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "django_1776_django-10097") {
+		t.Errorf("want resolved image id in error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pull access denied") {
+		t.Errorf("want registry error in 'raw' tail, got %v", err)
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -133,4 +245,36 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// stubPreflightForTest swaps every preflight indirection so the Load
+// path treats Docker + the per-instance image as available. Restores
+// originals via t.Cleanup. Use in tests whose subject isn't the
+// preflight gate itself.
+//
+// Includes dockerLookPath so the test works on hosts without Docker
+// installed (e.g. macOS CI runners), where preflight would otherwise
+// fail at the LookPath step before reaching the stubbed info path.
+func stubPreflightForTest(t *testing.T) {
+	t.Helper()
+	prevLook := dockerLookPath
+	prevInfo := preflightDockerInfo
+	prevInspect := preflightImageInspect
+	prevPull := preflightImagePull
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
+	preflightDockerInfo = func(context.Context) ([]byte, error) {
+		return []byte("Client:\n Server: ok\n"), nil
+	}
+	preflightImageInspect = func(context.Context, string) ([]byte, error) {
+		return []byte(`[{"Id":"sha256:stub"}]`), nil
+	}
+	preflightImagePull = func(context.Context, string) ([]byte, error) {
+		return []byte("Using cached"), nil
+	}
+	t.Cleanup(func() {
+		dockerLookPath = prevLook
+		preflightDockerInfo = prevInfo
+		preflightImageInspect = prevInspect
+		preflightImagePull = prevPull
+	})
 }

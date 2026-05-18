@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
@@ -55,6 +56,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	compareModelOverride := ""
 	harnessName := ""
 	benchmarkName := ""
+	suiteName := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -75,6 +77,11 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 		case "--benchmark":
 			if i+1 < len(ctx.Args) {
 				benchmarkName = ctx.Args[i+1]
+				i++
+			}
+		case "--suite":
+			if i+1 < len(ctx.Args) {
+				suiteName = ctx.Args[i+1]
 				i++
 			}
 		case "--claude-binary":
@@ -152,6 +159,7 @@ Options:
   --summary              Show lift trend over recent runs
   --abr-trend            Show ABR progression across runs
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
+  --suite NAME           Run a special-purpose suite: mechanic | legacy-cognition | journeys
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances (for mteb: caps queries scored)
   --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
@@ -182,6 +190,12 @@ Examples:
   cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
   cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
 			return nil
+		default:
+			// Support --suite=<name> / --benchmark=<name> joined form
+			// not covered by the case arms above.
+			if strings.HasPrefix(arg, "--suite=") {
+				suiteName = strings.TrimPrefix(arg, "--suite=")
+			}
 		}
 	}
 
@@ -243,6 +257,12 @@ Examples:
 	// pipelines see them alongside scenario-driven results.
 	if benchmarkName != "" {
 		return runBenchmark(benchmarkName, ctx.Args, verbose)
+	}
+
+	// SUITE MODE: special-purpose eval families (mechanic / legacy-cognition
+	// / journeys). Dispatched when --suite is set. See eval_suite.go.
+	if suiteName != "" {
+		return runSuite(suiteName, scenarioDir, outputFormat, verbose)
 	}
 
 	// Create provider
@@ -528,6 +548,26 @@ Examples:
 		evaluator.SetCompareProvider(compareProvider, compareModelName)
 	}
 
+	// Construct the per-cell persister up front so v2 scenarios emit
+	// CellResult rows alongside the legacy eval_scenario_results
+	// aggregation (eval-principles #7). Failure is non-fatal: the
+	// run still produces the legacy rollup. Skip in dry-run mode —
+	// the mock provider's responses aren't worth archiving.
+	var cellPersister *evalv2.Persister
+	if !dryRun {
+		cp, perr := evalv2.NewPersister()
+		if perr != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: per-cell persister disabled: %v\n", perr)
+			}
+		} else {
+			cellPersister = cp
+			defer cellPersister.Close()
+			providerNameForCell := canonicalProviderName(providerName, provider)
+			evaluator.SetPersister(cellPersister, providerNameForCell)
+		}
+	}
+
 	// Run eval
 	var results *evalv2.Results
 	if scenarioPath != "" {
@@ -558,14 +598,22 @@ Examples:
 		evalv2.Report(os.Stdout, results)
 	}
 
-	// Persist results
-	persister, err := evalv2.NewPersister()
-	if err != nil {
-		if verbose {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
+	// Persist results (legacy aggregation). Reuse the per-cell
+	// persister opened above when present; otherwise open a fresh one
+	// so the legacy rollup still lands in dry-run.
+	persister := cellPersister
+	if persister == nil {
+		p, perr := evalv2.NewPersister()
+		if perr != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", perr)
+			}
+		} else {
+			persister = p
+			defer persister.Close()
 		}
-	} else {
-		defer persister.Close()
+	}
+	if persister != nil {
 		if err := persister.Persist(results, durationMs); err != nil {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
@@ -581,6 +629,41 @@ Examples:
 		return fmt.Errorf("eval failed: ABR below threshold")
 	}
 	return nil
+}
+
+// canonicalProviderName maps the user-facing --provider flag (which
+// accepts back-compat aliases "anthropic" and "openrouter" alongside
+// the canonical "auto") onto the evalv2.Provider* constant required
+// by CellResult.Validate. When the unified surface resolved to
+// OpenRouter (keychain or env) the concrete provider implements
+// Name() == "openrouter"; falling back to that ensures cells written
+// during an "anthropic" CLI invocation but routed through OpenRouter
+// don't fail validation.
+func canonicalProviderName(flag string, p llm.Provider) string {
+	switch flag {
+	case "ollama":
+		return evalv2.ProviderOllama
+	case "anthropic":
+		// May actually resolve to OpenRouter via keychain. Trust the
+		// concrete provider's Name() over the CLI flag.
+		if p != nil && p.Name() == "openrouter" {
+			return evalv2.ProviderOpenRouter
+		}
+		return evalv2.ProviderAnthropic
+	case "openrouter":
+		return evalv2.ProviderOpenRouter
+	}
+	if p != nil {
+		switch p.Name() {
+		case "openrouter":
+			return evalv2.ProviderOpenRouter
+		case "ollama":
+			return evalv2.ProviderOllama
+		case "anthropic":
+			return evalv2.ProviderAnthropic
+		}
+	}
+	return evalv2.ProviderOpenRouter
 }
 
 // loadEvalConfig loads the config for eval command.

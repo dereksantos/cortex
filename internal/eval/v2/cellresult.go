@@ -40,11 +40,27 @@ const (
 )
 
 // ContextStrategy values. Maps 1:1 to v2 LibraryServiceCondition.
+//
+// `cortex` is the strategy when the harness only exposes Fast mode (the
+// historical default — what every Cortex cell wrote before ABR session
+// runs existed). `cortex-fast` and `cortex-full` are the explicit split
+// used by ABR runs where the *same* prompt sequence is replayed under
+// each retrieval mode so the score ratio can be computed. Downstream
+// analytics that want "any cortex cell" should match all three.
 const (
-	StrategyBaseline = "baseline"
-	StrategyCortex   = "cortex"
-	StrategyFrontier = "frontier"
+	StrategyBaseline   = "baseline"
+	StrategyCortex     = "cortex"
+	StrategyCortexFast = "cortex-fast"
+	StrategyCortexFull = "cortex-full"
+	StrategyFrontier   = "frontier"
 )
+
+// IsCortexStrategy reports whether the strategy is any of the cortex
+// variants. Use this in validation / analytics rather than equality
+// against StrategyCortex alone, which would miss the ABR-split rows.
+func IsCortexStrategy(s string) bool {
+	return s == StrategyCortex || s == StrategyCortexFast || s == StrategyCortexFull
+}
 
 // TaskSuccessCriterion qualifies what TaskSuccess actually means for a row.
 // A row's bool is meaningless without it — different harnesses + scenarios
@@ -68,14 +84,15 @@ type CellResult struct {
 
 	// Grid dimensions.
 	ScenarioID      string `json:"scenario_id"`
-	SessionID       string `json:"session_id,omitempty"` // for multi-session scenarios (library-service)
+	SessionID       string `json:"session_id,omitempty"` // for multi-session scenarios (library-service) and ABR multi-turn sessions
+	TurnIndex       *int   `json:"turn_index,omitempty"` // 0-based position within a multi-turn session; nil for single-shot cells. Pointer to distinguish "turn 0" from "not a session".
 	Benchmark       string `json:"benchmark,omitempty"`  // dataset-driven eval family: longmemeval | mteb | swebench | niah; empty for hand-authored scenarios
 	Harness         string `json:"harness"`
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`             // provider-qualified, e.g. "openrouter/anthropic/claude-3-5-haiku"
 	Backend         string `json:"backend,omitempty"` // local-only: cuda | vulkan | metal | cpu
 	ContextStrategy string `json:"context_strategy"`
-	CortexVersion   string `json:"cortex_version,omitempty"` // required when ContextStrategy == StrategyCortex
+	CortexVersion   string `json:"cortex_version,omitempty"` // required when ContextStrategy is any cortex variant (StrategyCortex / StrategyCortexFast / StrategyCortexFull)
 
 	// Determinism.
 	Seed        *int64  `json:"seed,omitempty"` // pointer to distinguish unset from 0
@@ -135,15 +152,23 @@ func (r *CellResult) Validate() error {
 		return fmt.Errorf("unknown provider: %q", r.Provider)
 	}
 	switch r.ContextStrategy {
-	case StrategyBaseline, StrategyCortex, StrategyFrontier:
+	case StrategyBaseline, StrategyCortex, StrategyCortexFast, StrategyCortexFull, StrategyFrontier:
 	default:
 		return fmt.Errorf("unknown context_strategy: %q", r.ContextStrategy)
 	}
-	if r.ContextStrategy == StrategyCortex && r.CortexVersion == "" {
-		return errors.New("cortex_version required when context_strategy=cortex")
+	if IsCortexStrategy(r.ContextStrategy) && r.CortexVersion == "" {
+		return fmt.Errorf("cortex_version required when context_strategy=%q", r.ContextStrategy)
 	}
-	if r.InjectedContextTokens > 0 && r.ContextStrategy != StrategyCortex {
-		return fmt.Errorf("injected_context_tokens=%d but context_strategy=%q (only cortex strategy may inject)", r.InjectedContextTokens, r.ContextStrategy)
+	if r.InjectedContextTokens > 0 && !IsCortexStrategy(r.ContextStrategy) {
+		return fmt.Errorf("injected_context_tokens=%d but context_strategy=%q (only cortex strategies may inject)", r.InjectedContextTokens, r.ContextStrategy)
+	}
+	if r.TurnIndex != nil {
+		if *r.TurnIndex < 0 {
+			return fmt.Errorf("turn_index must be non-negative, got %d", *r.TurnIndex)
+		}
+		if r.SessionID == "" {
+			return errors.New("turn_index requires session_id (a turn without a session is unscored)")
+		}
 	}
 	if r.InjectedContextTokens > r.TokensIn {
 		return fmt.Errorf("injected_context_tokens=%d exceeds tokens_in=%d", r.InjectedContextTokens, r.TokensIn)

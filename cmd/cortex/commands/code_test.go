@@ -8,6 +8,7 @@ import (
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 // TestEmitCodeJSON pins the --json schema benchmarks (and other
@@ -29,13 +30,14 @@ func TestEmitCodeJSON(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := emitCodeJSON(&buf, "/tmp/work", "anthropic/claude-haiku-4.5", hr, loopRes); err != nil {
+	emitter := cliout.NewEmitter("/tmp/work")
+	if err := emitCodeJSON(&buf, emitter, "/tmp/work", "anthropic/claude-haiku-4.5", hr, loopRes); err != nil {
 		t.Fatalf("emitCodeJSON: %v", err)
 	}
 
 	var got codeJSONOutput
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode envelope: %v", err)
 	}
 
 	want := codeJSONOutput{
@@ -63,16 +65,24 @@ func TestEmitCodeJSON(t *testing.T) {
 // Benchmark parsers shouldn't have to handle both forms.
 func TestEmitCodeJSON_NilFilesChanged(t *testing.T) {
 	var buf bytes.Buffer
-	if err := emitCodeJSON(&buf, "/w", "m", evalv2.HarnessResult{}, harness.LoopResult{}); err != nil {
+	emitter := cliout.NewEmitter("/w")
+	if err := emitCodeJSON(&buf, emitter, "/w", "m", evalv2.HarnessResult{}, harness.LoopResult{}); err != nil {
 		t.Fatalf("emitCodeJSON: %v", err)
 	}
-	var got map[string]any
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	// Probe the underlying Data shape (not the typed struct) so the
+	// JSON-encoding behavior — null vs [] for nil slices — is what the
+	// test enforces, not the unmarshaler's normalization.
+	var env map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
 	}
-	fc, ok := got["files_changed"]
+	data, ok := env["data"].(map[string]any)
 	if !ok {
-		t.Fatal("files_changed key missing")
+		t.Fatalf("envelope.data missing or wrong type: %T", env["data"])
+	}
+	fc, ok := data["files_changed"]
+	if !ok {
+		t.Fatal("data.files_changed key missing")
 	}
 	arr, ok := fc.([]any)
 	if !ok {

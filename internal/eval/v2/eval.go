@@ -2,6 +2,8 @@ package eval
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +23,15 @@ type Evaluator struct {
 	judgeModel      string       // Judge model name for tracking
 	compareProvider llm.Provider // Frontier model for MPR comparison (optional)
 	compareModel    string       // Compare model name for tracking
+
+	// Per-cell persistence. When set, each test emits two CellResult
+	// rows (baseline + cortex) through the standard fan-out (journal →
+	// SQLite + cell_results.jsonl), satisfying eval-principles #7 +
+	// #9. providerName is the canonical provider id (one of
+	// evalv2.Provider* constants) and is required when persister is
+	// non-nil.
+	persister    *Persister
+	providerName string
 }
 
 // New creates a new Evaluator.
@@ -50,6 +61,20 @@ func (e *Evaluator) SetJudge(provider llm.Provider, model string) {
 func (e *Evaluator) SetCompareProvider(provider llm.Provider, model string) {
 	e.compareProvider = provider
 	e.compareModel = model
+}
+
+// SetPersister enables per-cell CellResult persistence. After this is
+// called, each test produces two CellResult rows (baseline + cortex)
+// through the standard journal/SQLite/JSONL fan-out, so v2 scenarios
+// satisfy eval-principles #7 (structured) and #9 (separated baselines)
+// alongside the existing legacy eval_scenario_results aggregation.
+//
+// providerName must be one of the canonical Provider* constants
+// (ProviderOpenRouter / ProviderOllama / etc.); it is recorded
+// verbatim on every emitted cell.
+func (e *Evaluator) SetPersister(p *Persister, providerName string) {
+	e.persister = p
+	e.providerName = providerName
 }
 
 // Run executes all scenarios in a directory and returns results.
@@ -137,7 +162,7 @@ func (e *Evaluator) runFlatScenario(s *Scenario) (*ScenarioResult, error) {
 	// Run tests
 	var testResults []TestResult
 	for _, test := range s.Tests {
-		result, err := e.runTest(cortex, test, 0) // flat scenarios are depth 0
+		result, err := e.runTest(cortex, test, 0, s.ID) // flat scenarios are depth 0
 		if err != nil {
 			if e.verbose {
 				fmt.Printf("  [!] Test %s failed: %v\n", test.ID, err)
@@ -160,7 +185,7 @@ func (e *Evaluator) runTreeScenario(s *Scenario) (*ScenarioResult, error) {
 	var allResults []TestResult
 
 	// Walk all paths through the tree
-	err := e.walkTree(s.Tree, []Context{}, &allResults, 0)
+	err := e.walkTree(s.Tree, []Context{}, &allResults, 0, s.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +198,7 @@ func (e *Evaluator) runTreeScenario(s *Scenario) (*ScenarioResult, error) {
 }
 
 // walkTree recursively walks the tree, accumulating context and running tests.
-func (e *Evaluator) walkTree(node *TreeNode, inherited []Context, results *[]TestResult, depth int) error {
+func (e *Evaluator) walkTree(node *TreeNode, inherited []Context, results *[]TestResult, depth int, scenarioID string) error {
 	if node == nil {
 		return nil
 	}
@@ -210,7 +235,7 @@ func (e *Evaluator) walkTree(node *TreeNode, inherited []Context, results *[]Tes
 			indent := strings.Repeat("  ", depth+1)
 			fmt.Printf("%sTest: %s (depth=%d, context=%d items)\n", indent, test.ID, depth, len(accumulated))
 		}
-		result, err := e.runTest(cortex, test, depth)
+		result, err := e.runTest(cortex, test, depth, scenarioID)
 		if err != nil {
 			if e.verbose {
 				fmt.Printf("  [!] Test %s failed: %v\n", test.ID, err)
@@ -222,7 +247,7 @@ func (e *Evaluator) walkTree(node *TreeNode, inherited []Context, results *[]Tes
 
 	// Recurse into children
 	for _, child := range node.Children {
-		if err := e.walkTree(child, accumulated, results, depth+1); err != nil {
+		if err := e.walkTree(child, accumulated, results, depth+1, scenarioID); err != nil {
 			return err
 		}
 	}
@@ -231,7 +256,7 @@ func (e *Evaluator) walkTree(node *TreeNode, inherited []Context, results *[]Tes
 }
 
 // runTest executes a single test: baseline vs cortex.
-func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResult, error) {
+func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int, scenarioID string) (*TestResult, error) {
 	if e.verbose {
 		fmt.Printf("  Test: %s\n", test.ID)
 	}
@@ -239,7 +264,9 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 	ctx := context.Background()
 
 	// 1. BASELINE: Generate response WITHOUT any context
+	baselineStart := time.Now()
 	baselineResponse, baselineStats, err := e.provider.GenerateWithStats(ctx, test.Query)
+	baselineLatencyMs := time.Since(baselineStart).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("baseline generate: %w", err)
 	}
@@ -270,7 +297,9 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 
 	// 3. CORTEX: Generate response WITH context
 	cortexPrompt := buildPrompt(test.Query, cortexContext)
+	cortexStart := time.Now()
 	cortexResponse, cortexStats, err := e.provider.GenerateWithStats(ctx, cortexPrompt)
+	cortexLatencyMs := time.Since(cortexStart).Milliseconds()
 	if err != nil {
 		return nil, fmt.Errorf("cortex generate: %w", err)
 	}
@@ -389,7 +418,108 @@ func (e *Evaluator) runTest(cortex *cliCortex, test Test, depth int) (*TestResul
 		}
 	}
 
+	// 7. Per-cell persistence (eval-principles #7 + #9). Emit one row
+	// per strategy so analysis can treat baseline and cortex as
+	// independent observations rather than a pre-aggregated delta.
+	// Persistence failure is logged but does NOT fail the test —
+	// missing rows are better surfaced via journal verify than by
+	// aborting an otherwise-valid run.
+	e.persistTestCells(ctx, scenarioID, test, result, baselineResponse, baselineStats, baselineLatencyMs,
+		cortexResponse, cortexStats, cortexLatencyMs, cortexContext)
+
 	return result, nil
+}
+
+// persistTestCells emits two CellResult rows (baseline + cortex) for a
+// single test. No-op when SetPersister has not been called, so the
+// existing "legacy aggregation only" callers (tests, ad-hoc scripts)
+// keep working unchanged.
+//
+// scenarioIDIn is the YAML scenario.ID (e.g. "auth-patterns"); we
+// prefix with "v2/" to namespace alongside benchmark scenario_ids
+// like "longmemeval/<question>".
+func (e *Evaluator) persistTestCells(ctx context.Context, scenarioIDIn string, test Test, result *TestResult,
+	baselineResp string, baselineStats llm.GenerationStats, baselineLatencyMs int64,
+	cortexResp string, cortexStats llm.GenerationStats, cortexLatencyMs int64,
+	cortexContext string,
+) {
+	if e.persister == nil || e.providerName == "" {
+		return
+	}
+	scenarioID := "v2/" + scenarioIDIn
+
+	// Estimate injected context tokens as len(cortexContext)/4
+	// (rough chars-per-token heuristic). Capped at TokensIn so the
+	// CellResult.Validate invariant InjectedContextTokens <= TokensIn
+	// holds even when the heuristic overshoots a small generation.
+	injected := len(cortexContext) / 4
+	if injected > cortexStats.TotalTokens() {
+		injected = cortexStats.TotalTokens()
+	}
+
+	baseline := &CellResult{
+		SchemaVersion:        CellResultSchemaVersion,
+		RunID:                newScenarioCellRunID("v2", test.ID, StrategyBaseline),
+		Timestamp:            time.Now().UTC().Format(time.RFC3339Nano),
+		ScenarioID:           scenarioID,
+		SessionID:            test.ID,
+		Harness:              HarnessCortex,
+		Provider:             e.providerName,
+		Model:                e.model,
+		ContextStrategy:      StrategyBaseline,
+		Temperature:          0,
+		TokensIn:             baselineStats.InputTokens,
+		TokensOut:            baselineStats.OutputTokens,
+		LatencyMs:            baselineLatencyMs,
+		AgentTurnsTotal:      1,
+		TaskSuccess:          result.BaselineScore > 0,
+		TaskSuccessCriterion: CriterionScenarioAssertion,
+		Notes: fmt.Sprintf("test_id=%s score=%.3f winner=%s lift=%.3f",
+			test.ID, result.BaselineScore, result.Winner, result.Lift),
+	}
+	if err := e.persister.PersistCell(ctx, baseline); err != nil && e.verbose {
+		fmt.Fprintf(os.Stderr, "    [persist baseline] %s: %v\n", test.ID, err)
+	}
+
+	cortex := &CellResult{
+		SchemaVersion:         CellResultSchemaVersion,
+		RunID:                 newScenarioCellRunID("v2", test.ID, StrategyCortex),
+		Timestamp:             time.Now().UTC().Format(time.RFC3339Nano),
+		ScenarioID:            scenarioID,
+		SessionID:             test.ID,
+		Harness:               HarnessCortex,
+		Provider:              e.providerName,
+		Model:                 e.model,
+		ContextStrategy:       StrategyCortex,
+		CortexVersion:         CortexVersion,
+		Temperature:           0,
+		TokensIn:              cortexStats.InputTokens,
+		TokensOut:             cortexStats.OutputTokens,
+		InjectedContextTokens: injected,
+		LatencyMs:             cortexLatencyMs,
+		AgentTurnsTotal:       1,
+		TaskSuccess:           result.CortexScore > 0,
+		TaskSuccessCriterion:  CriterionScenarioAssertion,
+		Notes: fmt.Sprintf("test_id=%s score=%.3f winner=%s lift=%.3f ndcg=%.3f fast_ndcg=%.3f full_ndcg=%.3f abr=%.3f",
+			test.ID, result.CortexScore, result.Winner, result.Lift,
+			result.NDCG, result.FastNDCG, result.FullNDCG, result.ABR),
+	}
+	if err := e.persister.PersistCell(ctx, cortex); err != nil && e.verbose {
+		fmt.Fprintf(os.Stderr, "    [persist cortex] %s: %v\n", test.ID, err)
+	}
+}
+
+// newScenarioCellRunID builds a unique-per-cell run id for v2
+// scenario tests. Format: "<benchmark>-<test_id>-<strategy>-<8 hex>".
+// The hex suffix keeps retries unique without colliding on the same
+// test_id within a single run. The benchmark-runner equivalent
+// (newCellRunID in coding_runner.go) uses a time-prefixed form
+// instead; keeping the two formats distinct makes the producer
+// obvious when grepping the journal.
+func newScenarioCellRunID(benchmark, testID, strategy string) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%s-%s-%s-%s", benchmark, testID, strategy, hex.EncodeToString(b))
 }
 
 // parseSearchResults splits search output into individual result strings.

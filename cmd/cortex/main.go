@@ -8,11 +8,18 @@ import (
 
 	"github.com/dereksantos/cortex/cmd/cortex/commands"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/registry"
 )
 
 const version = "0.1.0"
+
+func init() {
+	// Stamp the manifest generator with the binary's version so
+	// regenerating tools.json picks up the build that's running.
+	commands.BinaryVersion = version
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -39,23 +46,11 @@ func main() {
 		return
 	case "capture", "ingest", "analyze", "process", "feed", "journal":
 		if cmd := commands.Get(command); cmd != nil {
-			ctx := &commands.Context{
-				Args: os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "init", "install", "uninstall", "projects":
 		if cmd := commands.Get(command); cmd != nil {
-			ctx := &commands.Context{
-				Args: os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "daemon":
 		if cmd := commands.Get("daemon"); cmd != nil {
@@ -64,14 +59,7 @@ func main() {
 				// Daemon can run without a per-project config
 				cfg = config.Default()
 			}
-			ctx := &commands.Context{
-				Config: cfg,
-				Args:   os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Args: os.Args[2:]})
 		}
 	case "info", "test", "stats", "status", "forget", "overview", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
@@ -79,13 +67,7 @@ func main() {
 			if err != nil {
 				// For info and status, we can proceed without config
 				if command == "info" || command == "status" {
-					ctx := &commands.Context{
-						Args: os.Args[2:],
-					}
-					if err := cmd.Execute(ctx); err != nil {
-						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-						os.Exit(1)
-					}
+					runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 					return
 				}
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
@@ -97,47 +79,33 @@ func main() {
 				os.Exit(1)
 			}
 			defer store.Close()
-			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
 	case "eval":
 		if cmd := commands.Get("eval"); cmd != nil {
-			ctx := &commands.Context{
-				Args: os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "code":
 		// `cortex code` is the ad-hoc coding harness: no config or
 		// storage needed (the harness opens its own per-workdir store).
 		if cmd := commands.Get("code"); cmd != nil {
-			ctx := &commands.Context{
-				Args: os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
+	case "run":
+		// `cortex run --type=<dag-type>` invokes the DAG executor
+		// per docs/dag-build-plan.md Stage 1 v0. No config or storage
+		// needed for v0; later stages will wire to the unified Phase
+		// 1 telemetry sink.
+		if cmd := commands.Get("run"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
+	case "tools":
+		if cmd := commands.Get("tools"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "measure":
 		if cmd := commands.Get("measure"); cmd != nil {
-			ctx := &commands.Context{
-				Args: os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "watch":
 		if cmd := commands.Get("watch"); cmd != nil {
@@ -152,15 +120,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer store.Close()
-			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
 	case "mcp":
 		if cmd := commands.Get("mcp"); cmd != nil {
@@ -175,15 +135,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer store.Close()
-			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
 	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
@@ -192,11 +144,7 @@ func main() {
 			// no daemon, no global cfg/storage. The command opens its
 			// own workdir-rooted state via openWorkdirContext.
 			if hasWorkdirFlag(os.Args[2:]) {
-				ctx := &commands.Context{Args: os.Args[2:]}
-				if err := cmd.Execute(ctx); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
-				}
+				runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 				return
 			}
 			cfg, err := loadConfig()
@@ -214,15 +162,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer store.Close()
-			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
 	case "session-start", "inject-context", "stop", "cli":
 		if cmd := commands.Get(command); cmd != nil {
@@ -250,15 +190,7 @@ func main() {
 				os.Exit(1)
 			}
 			defer store.Close()
-			ctx := &commands.Context{
-				Config:  cfg,
-				Storage: store,
-				Args:    os.Args[2:],
-			}
-			if err := cmd.Execute(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
+			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
@@ -333,6 +265,42 @@ func hasWorkdirFlag(args []string) bool {
 	return false
 }
 
+// runCommand executes a registered command with unified telemetry +
+// error handling. Behavior:
+//   - --no-telemetry (or CORTEX_NO_TELEMETRY env) suppresses the row
+//     write but the flag is still stripped from ctx.Args so the
+//     downstream parser doesn't reject it.
+//   - One TelemetryRow is appended per invocation. Errors during the
+//     write are swallowed — telemetry must never crash a successful
+//     command.
+//   - On Execute error, prints to stderr and exits 1 (matches the
+//     prior per-case behavior). The telemetry row is written FIRST so
+//     failed invocations still leave a trace.
+func runCommand(command string, cmd commands.Command, ctx *commands.Context) {
+	noTelemetry := cliout.HasNoTelemetryFlag(ctx.Args)
+	ctx.Args = cliout.StripNoTelemetry(ctx.Args)
+	workdir := cliout.WorkdirFromArgs(ctx.Args)
+	inv := cliout.NewInvocation(command, cliout.CortexFunctionFor(command), workdir)
+	ctx.Invocation = inv
+
+	err := cmd.Execute(ctx)
+
+	if !noTelemetry {
+		var row cliout.TelemetryRow
+		if err != nil {
+			row = inv.FinishErr("")
+		} else {
+			row = inv.FinishOk()
+		}
+		_ = inv.WriteRow(row)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func maybeStartDaemon(_ *config.Config) {
 	globalDir := registry.GlobalDir()
 	if commands.IsDaemonRunning(globalDir) {
@@ -386,8 +354,16 @@ Commands:
   overview       Show context overview (visual summary)
   cli            Route slash command arguments (for /cortex)
 
+  tools          Generate / verify tools.json manifest
+
   version        Show version
   help           Show this help
+
+Global flags (accepted on every command):
+  --no-telemetry    Suppress the per-invocation row write to
+                    .cortex/db/cell_results.jsonl. The CORTEX_NO_TELEMETRY
+                    environment variable (set to any non-empty value) has
+                    the same effect.
 
 Examples:
   # Get system info and model recommendations

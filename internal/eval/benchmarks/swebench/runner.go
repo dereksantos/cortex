@@ -25,6 +25,276 @@ type runnerPayload struct {
 	Strategy string
 }
 
+// defaultMaxRetries is the REPL auto-retry budget used when --max-retries
+// isn't set on the CLI. Picked so a typical Verified instance has at
+// least 2–3 chances to converge on a passing patch given verifier
+// feedback, while keeping cost bounded (each retry runs both a fresh
+// agent attempt AND a docker verifier pass).
+const defaultMaxRetries = 3
+
+// swebenchSystemPrompt is the system prompt the REPL uses for
+// SWE-bench attempts. Designed for general-purpose coding-task
+// behavior: framing only (eval-principles #2), no per-language /
+// per-framework / per-file coaching. The agent discovers the
+// project's technology, its test runner, and how to verify its
+// own fix — those are exactly what a real engineer landing in an
+// unfamiliar repo has to figure out.
+//
+// What this prompt deliberately does NOT say:
+//   - Names of specific config files to read (CONTRIBUTING.md,
+//     tox.ini, etc.) — listing them biases discovery toward the
+//     handful of repos we happen to know about and stops working
+//     on the next repo that uses a different convention.
+//   - Names of specific test frameworks (pytest, django runtests,
+//     sympy bin/test, etc.) — same coaching problem.
+//   - Format details for specific runners' test ids — same.
+//
+// The ONLY non-framing piece is the .cortex/test-cmd.sh convention.
+// That isn't coaching, it's the protocol between agent and
+// verifier — the agent has to record SOMETHING somewhere so a
+// later process can run the same command, just as a human would
+// add a 'just test' or 'make test' target.
+const swebenchSystemPrompt = `You are a software engineer landing in an unfamiliar open-source repository to fix a bug. The repo is checked out at the commit BEFORE the bug was fixed; failing tests describing the bug already exist.
+
+Available tools:
+  - list_dir(path): list the contents of a directory
+  - read_file(path): read a file
+  - write_file(path, content): create or replace a file
+  - run_shell(command, args): run shell commands available in your sandbox
+  - cortex_search(query): semantic search over project context (may be empty for new repos)
+
+What you have to figure out for yourself:
+  - What technology this project uses and how it is organized.
+  - How its tests are run, and what command verifies the failing tests for THIS bug.
+  - Which source file(s) the failing tests are pointing at.
+
+Outputs the harness requires:
+  - Your source-code fix, written via write_file.
+  - A single-line shell command at '.cortex/test-cmd.sh' that runs
+    the failing tests inside the project's standard test environment
+    (assume cwd is the project root). The harness invokes this
+    command after each of your attempts; its exit code is the
+    verifier's pass/fail signal. If you cannot work out a meaningful
+    test command, write one that runs SOMETHING relevant — even an
+    approximation is more useful to the next iteration than nothing.
+
+How iteration works:
+  - After each attempt the harness runs your test command and feeds
+    the output back to you on the next turn as 'PREVIOUS ATTEMPT
+    FAILED'. Use it to refine the fix — or the test command if your
+    first guess at how to invoke the tests was wrong.
+  - You MUST produce at least one write_file call per attempt;
+    inspection alone is not progress.
+
+Constraints:
+  - Paths in tool calls are relative to the workdir.
+  - Do not write under .git.
+  - Do not modify test files or fixtures — fix the source the tests exercise.
+  - Make the smallest change that makes the failing tests pass.
+`
+
+// writeWorkdirGitignore appends the REPL's per-turn cruft to the
+// cloned repo's .gitignore so the verifier's `git add -A` doesn't
+// pick it up. Idempotent: appends a single fence block so re-running
+// against an already-prepped workdir is a no-op.
+func writeWorkdirGitignore(repoDir string) error {
+	path := filepath.Join(repoDir, ".gitignore")
+	existing, _ := os.ReadFile(path) // empty bytes if missing — that's fine
+	const marker = "# cortex-bench (do not edit)"
+	if strings.Contains(string(existing), marker) {
+		return nil
+	}
+	block := "\n" + marker + "\n" +
+		".cortex/\n" +
+		".cortex-attempt.patch\n" +
+		".cortex-f2p-tests.txt\n"
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(block); err != nil {
+		return err
+	}
+	return nil
+}
+
+// buildAgentPrompt returns the prompt the REPL feeds the agent. It
+// pairs the upstream problem_statement (always the bulk of the
+// signal) with the explicit list of FAIL_TO_PASS test names the
+// verifier will check. Without the test list the agent has to infer
+// what "good" looks like from the issue description alone — and the
+// prior single-shot baseline showed it can't, even on Sonnet-4.5.
+//
+// The test names are NOT coaching (eval-principles #2 — coaching is
+// telling the model HOW to use tools; this is telling the model WHAT
+// success looks like, which is the same information the canonical
+// scoring uses). SWE-Agent and Aider's harnesses do the equivalent.
+func buildAgentPrompt(inst Instance) string {
+	if len(inst.FailToPass) == 0 {
+		return inst.ProblemStatement
+	}
+	var b strings.Builder
+	b.WriteString(inst.ProblemStatement)
+	b.WriteString("\n\n---\n\nYour patch must make these tests pass (they currently fail):\n")
+	for _, t := range inst.FailToPass {
+		b.WriteString("  - ")
+		b.WriteString(t)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nThe verifier runs these tests after each attempt and reports the result back. Do not modify the test files themselves; fix the source code under test.")
+	return b.String()
+}
+
+// buildVerifierCommand returns the shell command the REPL runs after
+// each agent attempt to decide pass/fail. The command:
+//
+//  1. Snapshots the agent's current diff from repoDir.
+//  2. Pre-flights the diff: if empty, exits 1 with a clear message
+//     ("NO_PATCH: agent did not edit any files") so the agent sees an
+//     actionable error rather than git's terse "No valid patches" on
+//     the next retry's PREVIOUS ATTEMPT FAILED context.
+//  3. Spins up the canonical SWE-bench scoring image for the instance.
+//  4. Writes the F2P test list into the container via stdin (avoids
+//     blowing up the shell command line for instances with hundreds
+//     of F2P entries; the prior version's command line was ~50 KB).
+//  5. Inside the image, applies the agent's diff and runs pytest with
+//     output truncated to the last 4 KB so the retry context fits in
+//     the model's input cap.
+//
+// Per-attempt docker overhead is ~15–30s — that's the cost of using
+// the same scoring stack as final evaluation, in exchange for
+// guaranteed parity between "the verifier says pass" and "final
+// scoring says pass."
+//
+// Image id mirrors score.go's derivation: <imagePrefix><repo with /
+// → __>:v<version>.
+func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout time.Duration) string {
+	image := imageIDFor(inst, imagePrefix)
+	timeoutSec := int(timeout.Seconds())
+	if timeoutSec < 60 {
+		timeoutSec = 60
+	}
+	tmpPatch := filepath.Join(repoDir, ".cortex-attempt.patch")
+	tmpTests := filepath.Join(repoDir, ".cortex-f2p-tests.txt")
+
+	// Tests list as one-per-line, mounted into the container at
+	// /tmp/cortex-f2p-tests.txt — keeps the shell command line short.
+	testsList := strings.Join(inst.FailToPass, "\n")
+	if len(inst.FailToPass) == 0 {
+		// No F2P → final scoring will catch any real failure; treat
+		// verifier as trivially passing once a patch exists.
+		testsList = ""
+	}
+
+	// Inner script that runs inside the docker container. Two
+	// subtle correctness bits:
+	//
+	//   - `set -eo pipefail`: without pipefail, `pytest | tail`
+	//     returned tail's exit (0) and masked pytest failures —
+	//     verify_ok was True even when pytest didn't run at all.
+	//   - tee /tmp/cortex-pytest.log then tail the log on the
+	//     verifier-fail path. Avoids the `pytest | tail` pipefail
+	//     interaction where pytest writes to a closed pipe when
+	//     tail finishes early on very large outputs.
+	//
+	// Test command priority:
+	//   1. If the agent wrote /tmp/cortex-test-cmd.sh, run THAT —
+	//      the agent discovered the repo's actual test runner
+	//      (django runtests.py, sympy bin/test, pytest, etc.) and
+	//      formatted F2P names per that runner's expectations.
+	//      This is the eval-principles #2-compliant path: no
+	//      per-repo hardcoding in the verifier; agent figures it
+	//      out from CONTRIBUTING / tox.ini / pyproject.toml / CI
+	//      configs.
+	//   2. Else fall back to `pytest <F2P>` for repos where pytest
+	//      Just Works. When this fallback fails with "no module
+	//      named pytest" or "ERROR: not found:" the agent sees
+	//      that in retry context and is expected to discover +
+	//      write test-cmd.sh on the next attempt.
+	//
+	// `tail -c 4096` bounds retry context (django can emit MBs).
+	inner := "set -eo pipefail; cd /testbed && " +
+		"git apply --whitespace=nowarn /tmp/cortex-attempt.patch 2>&1 && " +
+		"if [ -s /tmp/cortex-test-cmd.sh ]; then " +
+		"  echo '[verifier] using agent-supplied test-cmd.sh'; " +
+		"  bash /tmp/cortex-test-cmd.sh 2>&1 | tee /tmp/cortex-verify.log; " +
+		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-verify.log; exit $rc; " +
+		"elif [ -s /tmp/cortex-f2p-tests.txt ]; then " +
+		"  echo '[verifier] no agent test-cmd.sh; falling back to pytest'; " +
+		"  python -m pytest --no-header -q $(cat /tmp/cortex-f2p-tests.txt | tr '\\n' ' ') 2>&1 | tee /tmp/cortex-verify.log; " +
+		"  rc=${PIPESTATUS[0]}; tail -c 4096 /tmp/cortex-verify.log; exit $rc; " +
+		"else echo 'no F2P tests configured; verifier trivially passes'; fi"
+
+	// Path the agent writes its discovered test command to (per
+	// swebenchSystemPrompt). Mounted into the container only when
+	// the agent has actually created it — the inner script's
+	// priority branch handles both cases.
+	agentTestCmd := filepath.Join(repoDir, ".cortex", "test-cmd.sh")
+
+	// Outer script: snapshot the diff, write tests list, run docker.
+	// We avoid `set -e` on the OUTER script because we want to keep
+	// running past the NO_PATCH branch and emit the marker. The
+	// test-cmd.sh mount uses a bash test-and-mount trick so the
+	// docker run only includes the volume flag when the file
+	// exists (otherwise docker errors with "no such file or
+	// directory" before the container even starts).
+	return fmt.Sprintf(
+		"cd %s && git add -A && git diff --no-color HEAD > %s && "+
+			"if [ ! -s %s ]; then "+
+			"  echo 'NO_PATCH: agent did not edit any files. You MUST call write_file to modify source code; reading alone does not fix the bug.'; "+
+			"  exit 1; "+
+			"fi && "+
+			"printf '%%s' %s > %s && "+
+			"TEST_CMD_MOUNT=''; if [ -s %s ]; then TEST_CMD_MOUNT=\"-v %s:/tmp/cortex-test-cmd.sh:ro\"; fi; "+
+			"docker run --rm --network=none --stop-timeout=%d "+
+			"-v %s:/tmp/cortex-attempt.patch:ro "+
+			"-v %s:/tmp/cortex-f2p-tests.txt:ro "+
+			"$TEST_CMD_MOUNT "+
+			"%s bash -lc %s",
+		shellEscape(repoDir),
+		shellEscape(tmpPatch),
+		shellEscape(tmpPatch),
+		shellEscape(testsList),
+		shellEscape(tmpTests),
+		shellEscape(agentTestCmd),
+		shellEscape(agentTestCmd),
+		timeoutSec,
+		shellEscape(tmpPatch),
+		shellEscape(tmpTests),
+		shellEscape(image),
+		shellEscape(inner),
+	)
+}
+
+// shellEscape wraps s in single-quotes, escaping any embedded single
+// quotes via the standard '\” trick. Suitable for `sh -c "<...>"`
+// substitution into the verifier command above.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// imageIDFor mirrors score.go's imageNameFor: derives the canonical
+// SWE-bench scoring image id from an instance. Format:
+//
+//	<prefix><org>_1776_<repo>-<issue>:latest
+//
+// e.g. "swebench/sweb.eval.x86_64.django_1776_django-10097:latest".
+// Verified images are per-instance, tagged :latest, with `_1776_` as
+// a fixed separator standing in for the instance_id's `__`.
+//
+// MUST stay byte-identical to score.imageNameFor — verifier and final
+// scorer would diverge otherwise. Kept here (rather than imported)
+// only because the docker-shell command lives in runner.go alongside
+// the rest of the verifier construction.
+func imageIDFor(inst Instance, imagePrefix string) string {
+	if imagePrefix == "" {
+		imagePrefix = "swebench/sweb.eval.x86_64."
+	}
+	suffix := strings.Replace(inst.InstanceID, "__", "_1776_", 1)
+	return fmt.Sprintf("%s%s:latest", imagePrefix, suffix)
+}
+
 // runInstance executes one (instance, strategy) pair end-to-end:
 // clone → harness run → diff → docker score → CellResult.
 //
@@ -48,22 +318,92 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		return failedCell(inst, strategy, cfg, env, "resolve cortex binary: "+err.Error()), nil
 	}
 
+	// Append .cortex/ and verifier sentinel files to the cloned
+	// repo's .gitignore. The REPL writes per-turn workdir snapshots
+	// under repo/.cortex/sessions/.../snapshots/, which without this
+	// would get swept into the verifier's `git add -A` and produce a
+	// 10 MB diff full of binary fixtures (.mo, .gz). docker's
+	// `git apply` then refuses the binary hunks with "patch does
+	// not apply", masking whatever real source edit the agent made.
+	if err := writeWorkdirGitignore(repoDir); err != nil {
+		return failedCell(inst, strategy, cfg, env, "write .gitignore: "+err.Error()), nil
+	}
+
+	// Build the verifier shell command that the REPL runs after each
+	// agent attempt. Mirrors RunSWEBenchTests's docker invocation in
+	// score.go — same image, same patch-then-pytest sequence — but
+	// returns exit 0 iff every F2P test passes, so the REPL can use
+	// it as a verify-and-retry signal. Agent gets pytest output as
+	// the retry context, which is the principled equivalent of
+	// SWE-Agent's "test failure → next turn" loop.
+	verifierCmd := buildVerifierCommand(inst, cfg.DockerImagePrefix, repoDir, cfg.InstanceTimeout)
+
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 1 {
+		maxRetries = defaultMaxRetries
+	}
+
+	// Augment the agent's prompt with the F2P test names so the
+	// agent knows which tests must pass. Without this, the agent has
+	// to infer targets from the problem statement alone, which is
+	// what kept the prior single-shot baseline at 0/3 even on Sonnet.
+	prompt := buildAgentPrompt(inst)
+
+	// Write the SWE-bench-flavored system prompt to a temp file so we
+	// can pass it via the REPL's --system-prompt flag. The REPL's
+	// auto-seeded default declares the agent a "Go programmer" using
+	// `go build` — actively misleading on a Django repo, and a major
+	// reason the prior probe got zero source edits in 5 agent turns.
+	sysPromptPath := filepath.Join(workdir, "swebench-system-prompt.md")
+	if err := os.WriteFile(sysPromptPath, []byte(swebenchSystemPrompt), 0o644); err != nil {
+		return failedCell(inst, strategy, cfg, env, "write system prompt: "+err.Error()), nil
+	}
+
 	start := time.Now()
-	out, runErr := benchmarks.RunCode(ctx, binary, benchmarks.CodeOpts{
-		Workdir:  repoDir,
-		Model:    cfg.Model,
-		Prompt:   inst.ProblemStatement,
-		NoSearch: strategy == "baseline",
+	// Drive the REPL (the unified agent surface, same one humans use
+	// and that GoL eval drives in-process) via headless flags. The
+	// REPL's verify-and-retry loop runs the verifier above after each
+	// attempt; on fail it feeds the verifier output back into the
+	// agent's next prompt as retry context. Up to maxRetries
+	// attempts, then the loop exits with the last verify result.
+	headlessOut, runErr := benchmarks.RunREPLHeadless(ctx, binary, benchmarks.REPLHeadlessOpts{
+		Workdir:      repoDir,
+		Model:        cfg.Model,
+		Prompt:       prompt,
+		Verifier:     verifierCmd,
+		MaxRetries:   maxRetries,
+		SystemPrompt: sysPromptPath,
+		// SWE-bench-sized budgets: interactive REPL defaults
+		// (8 turns, $0.20, 300k tokens) blow up in 4-5 exploratory
+		// reads on a real repo. These caps give the agent room to
+		// discover the test command + locate + fix the bug across
+		// one attempt; per-retry the budget is renewed.
+		MaxTurns:            50,
+		MaxCostUSD:          5.0,
+		MaxCumulativeTokens: 800_000,
+		// list_dir is non-negotiable for navigating a real repo;
+		// keep the 5-tool surface even when routed to Ollama (local
+		// model probes via mistral:7b etc.).
+		FullTools: true,
+		// Preserve agent edits across retries — a real engineer
+		// iterating doesn't reset to scratch every failed test run.
+		KeepOnFail: true,
 	})
 	elapsed := time.Since(start).Milliseconds()
 	if runErr != nil && env.Verbose {
-		fmt.Fprintf(os.Stderr, "[swebench %s] cortex code err: %v\n", inst.InstanceID, runErr)
+		fmt.Fprintf(os.Stderr, "[swebench %s] cortex repl headless err: %v\n", inst.InstanceID, runErr)
 	}
 	// A subprocess failure still produces a patch attempt if the agent
 	// got that far before crashing; if not, extractPatch below writes an
 	// empty file and the scorer marks the instance failed.
-	if out == nil {
-		out = &benchmarks.CodeOutput{}
+	//
+	// We don't have token/cost accounting from the headless REPL
+	// summary today (JSON shape is minimal); use zero placeholders.
+	// The session.jsonl at headlessOut.SessionPath has the per-attempt
+	// detail for downstream analysis.
+	out := &benchmarks.CodeOutput{}
+	if headlessOut != nil && env.Verbose {
+		fmt.Fprintf(os.Stderr, "[swebench %s] session: %s\n", inst.InstanceID, headlessOut.SessionPath)
 	}
 
 	patchPath := filepath.Join(workdir, "cortex.patch")

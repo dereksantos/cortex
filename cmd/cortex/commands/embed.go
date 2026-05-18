@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -40,6 +41,16 @@ func (c *EmbedCommand) Name() string { return "embed" }
 // Description returns a brief description.
 func (c *EmbedCommand) Description() string {
 	return "Embed text to a vector (and optionally store under doc_id/content_type)"
+}
+
+// DescribeFlags surfaces embed's flags into tools.json.
+func (c *EmbedCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("text", "", "Text to embed (required unless --bulk)")
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex (required with --store or --bulk)")
+	fs.Bool("store", false, "Store the resulting vector instead of just emitting it")
+	fs.String("doc-id", "", "Content ID to store the embedding under (required when --store is set without --bulk)")
+	fs.String("content-type", "corpus", "Content type bucket for stored embeddings")
+	fs.Bool("bulk", false, "Read NDJSON {doc_id, content_type?, text} from stdin and store each. Implies --store.")
 }
 
 // Execute parses flags and dispatches to one of the three modes:
@@ -84,8 +95,9 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		return errors.New("no embedder available (install Ollama or Hugot)")
 	}
 
+	emitter := EmitterFor(ctx, *workdir)
 	if *bulk {
-		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout)
+		return executeBulkEmbed(*workdir, *contentType, embedder, modelID, providerID, os.Stdin, os.Stdout, emitter)
 	}
 
 	vec, err := embedder.Embed(context.Background(), *text)
@@ -105,10 +117,22 @@ func (c *EmbedCommand) Execute(ctx *Context) error {
 		if err := st.StoreEmbedding(*docID, *contentType, vec); err != nil {
 			return fmt.Errorf("store embedding: %w", err)
 		}
-		return emitEmbedStoreJSON(os.Stdout, *docID, *contentType, modelID, providerID, len(vec))
+		return emitter.Ok(os.Stdout, embedStoreJSONOutput{
+			Stored:      true,
+			DocID:       *docID,
+			ContentType: *contentType,
+			Dim:         len(vec),
+			Model:       modelID,
+			Provider:    providerID,
+		})
 	}
 
-	return emitEmbedJSON(os.Stdout, vec, modelID, providerID)
+	return emitter.Ok(os.Stdout, embedJSONOutput{
+		Vector:   vec,
+		Dim:      len(vec),
+		Model:    modelID,
+		Provider: providerID,
+	})
 }
 
 // bulkEmbedRequest is one NDJSON line in the --bulk stdin stream.
@@ -135,7 +159,7 @@ type bulkEmbedSummary struct {
 // embed failure aborts the batch with a line-numbered error — partial
 // state is left in storage (callers needing atomicity should write to
 // a fresh workdir).
-func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder, model, provider string, r io.Reader, w io.Writer) error {
+func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder, model, provider string, r io.Reader, w io.Writer, emitter *cliout.Emitter) error {
 	_, st, err := openWorkdirContext(workdir)
 	if err != nil {
 		return err
@@ -191,7 +215,7 @@ func executeBulkEmbed(workdir, defaultContentType string, embedder llm.Embedder,
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
-	return json.NewEncoder(w).Encode(bulkEmbedSummary{
+	return emitter.Ok(w, bulkEmbedSummary{
 		Stored:   count,
 		Model:    model,
 		Provider: provider,
@@ -242,24 +266,4 @@ type embedStoreJSONOutput struct {
 	Dim         int    `json:"dim"`
 	Model       string `json:"model"`
 	Provider    string `json:"provider"`
-}
-
-func emitEmbedJSON(w io.Writer, vec []float32, model, provider string) error {
-	return json.NewEncoder(w).Encode(embedJSONOutput{
-		Vector:   vec,
-		Dim:      len(vec),
-		Model:    model,
-		Provider: provider,
-	})
-}
-
-func emitEmbedStoreJSON(w io.Writer, docID, contentType, model, provider string, dim int) error {
-	return json.NewEncoder(w).Encode(embedStoreJSONOutput{
-		Stored:      true,
-		DocID:       docID,
-		ContentType: contentType,
-		Dim:         dim,
-		Model:       model,
-		Provider:    provider,
-	})
 }

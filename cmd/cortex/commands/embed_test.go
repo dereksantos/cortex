@@ -3,33 +3,31 @@ package commands
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
-// TestEmitEmbedJSON pins the --json contract for the default
-// (text → vector) mode. Keys + types are the public contract
-// downstream consumers (benchmarks, scripts) parse.
+// TestEmitEmbedJSON pins the --json envelope-wrapped contract for the
+// default (text → vector) mode. The Data shape is the public contract
+// downstream consumers (benchmarks, scripts) parse via
+// cliout.DecodeEnvelope.
 func TestEmitEmbedJSON(t *testing.T) {
 	vec := []float32{0.1, -0.2, 0.3, 0.4}
 	var buf bytes.Buffer
-	if err := emitEmbedJSON(&buf, vec, "nomic-embed-text", "ollama"); err != nil {
-		t.Fatalf("emitEmbedJSON: %v", err)
+	em := cliout.NewEmitter("")
+	if err := em.Ok(&buf, embedJSONOutput{Vector: vec, Dim: 4, Model: "nomic-embed-text", Provider: "ollama"}); err != nil {
+		t.Fatalf("emit: %v", err)
 	}
 	var got embedJSONOutput
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	want := embedJSONOutput{
-		Vector:   vec,
-		Dim:      4,
-		Model:    "nomic-embed-text",
-		Provider: "ollama",
-	}
+	want := embedJSONOutput{Vector: vec, Dim: 4, Model: "nomic-embed-text", Provider: "ollama"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("emitEmbedJSON output mismatch\n got: %+v\nwant: %+v", got, want)
+		t.Errorf("embed payload mismatch\n got: %+v\nwant: %+v", got, want)
 	}
 }
 
@@ -42,12 +40,13 @@ func TestEmitEmbedJSON_FullVectorPreserved(t *testing.T) {
 		vec[i] = float32(i) / 1000.0
 	}
 	var buf bytes.Buffer
-	if err := emitEmbedJSON(&buf, vec, "m", "p"); err != nil {
-		t.Fatalf("emitEmbedJSON: %v", err)
+	em := cliout.NewEmitter("")
+	if err := em.Ok(&buf, embedJSONOutput{Vector: vec, Dim: 768, Model: "m", Provider: "p"}); err != nil {
+		t.Fatalf("emit: %v", err)
 	}
 	var got embedJSONOutput
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 	if got.Dim != 768 {
 		t.Errorf("Dim = %d, want 768", got.Dim)
@@ -64,12 +63,20 @@ func TestEmitEmbedJSON_FullVectorPreserved(t *testing.T) {
 // TestEmitEmbedStoreJSON pins the --store mode contract.
 func TestEmitEmbedStoreJSON(t *testing.T) {
 	var buf bytes.Buffer
-	if err := emitEmbedStoreJSON(&buf, "doc-42", "corpus", "nomic-embed-text", "ollama", 768); err != nil {
-		t.Fatalf("emitEmbedStoreJSON: %v", err)
+	em := cliout.NewEmitter("")
+	if err := em.Ok(&buf, embedStoreJSONOutput{
+		Stored:      true,
+		DocID:       "doc-42",
+		ContentType: "corpus",
+		Dim:         768,
+		Model:       "nomic-embed-text",
+		Provider:    "ollama",
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
 	}
 	var got embedStoreJSONOutput
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 	want := embedStoreJSONOutput{
 		Stored:      true,
@@ -80,7 +87,7 @@ func TestEmitEmbedStoreJSON(t *testing.T) {
 		Provider:    "ollama",
 	}
 	if got != want {
-		t.Errorf("emitEmbedStoreJSON output mismatch\n got: %+v\nwant: %+v", got, want)
+		t.Errorf("store payload mismatch\n got: %+v\nwant: %+v", got, want)
 	}
 }
 
@@ -113,13 +120,13 @@ func TestExecuteBulkEmbed(t *testing.T) {
 			`{"doc_id":"d3","text":"delta"}`,
 		}, "\n") + "\n"
 		var out bytes.Buffer
-		err := executeBulkEmbed(workdir, "corpus", embedder, "test-model", "local", strings.NewReader(input), &out)
+		err := executeBulkEmbed(workdir, "corpus", embedder, "test-model", "local", strings.NewReader(input), &out, cliout.NewEmitter(workdir))
 		if err != nil {
 			t.Fatalf("executeBulkEmbed: %v", err)
 		}
 		var got bulkEmbedSummary
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal summary: %v", err)
+		if _, err := cliout.DecodeEnvelope(out.Bytes(), &got); err != nil {
+			t.Fatalf("decode summary: %v", err)
 		}
 		want := bulkEmbedSummary{Stored: 3, Model: "test-model", Provider: "local", Dim: 8}
 		if got != want {
@@ -130,7 +137,7 @@ func TestExecuteBulkEmbed(t *testing.T) {
 	t.Run("missing doc_id names line", func(t *testing.T) {
 		workdir := t.TempDir()
 		input := `{"doc_id":"d1","text":"ok"}` + "\n" + `{"text":"no id"}` + "\n"
-		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{})
+		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{}, cliout.NewEmitter(workdir))
 		if err == nil {
 			t.Fatal("expected error for missing doc_id on line 2")
 		}
@@ -142,7 +149,7 @@ func TestExecuteBulkEmbed(t *testing.T) {
 	t.Run("empty text rejected per line", func(t *testing.T) {
 		workdir := t.TempDir()
 		input := `{"doc_id":"d1","text":""}` + "\n"
-		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{})
+		err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &bytes.Buffer{}, cliout.NewEmitter(workdir))
 		if err == nil || !strings.Contains(err.Error(), "text") {
 			t.Errorf("expected text-required error, got %v", err)
 		}
@@ -152,12 +159,12 @@ func TestExecuteBulkEmbed(t *testing.T) {
 		workdir := t.TempDir()
 		input := `{"doc_id":"d1","text":"alpha"}` + "\n\n" + `{"doc_id":"d2","text":"bravo"}` + "\n"
 		var out bytes.Buffer
-		if err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &out); err != nil {
+		if err := executeBulkEmbed(workdir, "corpus", &fakeEmbedder{dim: 4}, "m", "p", strings.NewReader(input), &out, cliout.NewEmitter(workdir)); err != nil {
 			t.Fatalf("executeBulkEmbed: %v", err)
 		}
 		var got bulkEmbedSummary
-		if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if _, err := cliout.DecodeEnvelope(out.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
 		}
 		if got.Stored != 2 {
 			t.Errorf("Stored = %d, want 2 (blank line must be skipped, not counted)", got.Stored)

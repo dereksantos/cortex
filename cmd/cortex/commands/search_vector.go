@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 func init() { Register(&SearchVectorCommand{}) }
@@ -39,6 +40,16 @@ func (c *SearchVectorCommand) Name() string { return "search-vector" }
 // Description returns a brief description.
 func (c *SearchVectorCommand) Description() string {
 	return "Vector-search the workdir's storage (--text or --vector); JSON output"
+}
+
+// DescribeFlags surfaces search-vector's flags into tools.json.
+func (c *SearchVectorCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex (required)")
+	fs.String("text", "", "Query text — embed and search in one shot")
+	fs.String("vector", "", "Pre-computed query vector as JSON array (alternative to --text)")
+	fs.Int("top-k", 10, "Maximum number of results to return")
+	fs.Float64("threshold", 0.0, "Minimum similarity score to include (0.0 = no filter)")
+	fs.String("content-type", "", "Filter results to a single content type bucket (empty = no filter)")
 }
 
 // Execute parses flags and runs one search.
@@ -104,7 +115,8 @@ func (c *SearchVectorCommand) Execute(ctx *Context) error {
 	}
 	elapsed := time.Since(start)
 
-	return emitSearchVectorJSON(os.Stdout, results, *contentType, *topK, elapsed, modelID, provider)
+	emitter := EmitterFor(ctx, *workdir)
+	return emitSearchVectorJSON(os.Stdout, emitter, results, *contentType, *topK, elapsed, modelID, provider)
 }
 
 // searchVectorResult is one entry in the --json output. Content is
@@ -130,6 +142,7 @@ type searchVectorOutput struct {
 
 func emitSearchVectorJSON(
 	w io.Writer,
+	emitter *cliout.Emitter,
 	results []storage.VectorSearchResult,
 	contentTypeFilter string,
 	k int,
@@ -151,7 +164,7 @@ func emitSearchVectorJSON(
 			break
 		}
 	}
-	return json.NewEncoder(w).Encode(searchVectorOutput{
+	return emitter.Ok(w, searchVectorOutput{
 		Results:   filtered,
 		K:         k,
 		ElapsedMs: elapsed.Milliseconds(),

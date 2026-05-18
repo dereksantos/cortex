@@ -45,10 +45,15 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
+	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
+	"github.com/dereksantos/cortex/pkg/secret"
 )
 
 func init() {
@@ -98,6 +103,15 @@ func (c *REPLCommand) Description() string {
 
 // Execute parses flags, sets up session state, and runs the REPL loop
 // until EOF or /quit.
+//
+// Headless mode (for benchmark harnesses) is opted into via --prompt:
+// the REPL skips the stdin scanner, runs runTurn(--prompt) once with
+// the configured verifier + retry budget, optionally emits a JSON
+// summary, and exits. --auto-retry suppresses the interactive
+// [r/e/s/q] gate so the loop never blocks on stdin. --verifier and
+// --max-retries let the caller override the v1 hardcoded
+// "go build, one auto-retry" defaults so a SWE-bench / pytest /
+// arbitrary verifier can drive the same loop.
 func (c *REPLCommand) Execute(ctx *Context) error {
 	// Track whether the user pinned the model. Both env-var and --model
 	// count as explicit — auto-upgrade only happens when the model
@@ -108,6 +122,21 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		model = defaultREPLModel
 	}
 	verbose := false
+
+	// Headless-mode config — all default to "interactive REPL as
+	// before" when unset. See doc comment above.
+	oneShotPrompt := ""
+	customVerifier := ""
+	autoRetry := false
+	maxRetries := 1
+	jsonOutput := false
+	workdirOverride := ""
+	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
+	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
+	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
+	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
+	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -120,15 +149,73 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			}
 		case "-v", "--verbose":
 			verbose = true
+		case "--prompt":
+			if i+1 < len(args) {
+				oneShotPrompt = args[i+1]
+				i++
+			}
+		case "--verifier":
+			if i+1 < len(args) {
+				customVerifier = args[i+1]
+				i++
+			}
+		case "--auto-retry":
+			autoRetry = true
+		case "--max-retries":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxRetries)
+				i++
+			}
+		case "--json":
+			jsonOutput = true
+		case "--workdir":
+			if i+1 < len(args) {
+				workdirOverride = args[i+1]
+				i++
+			}
+		case "--system-prompt":
+			if i+1 < len(args) {
+				systemPromptOverride = args[i+1]
+				i++
+			}
+		case "--max-turns":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxTurnsOverride)
+				i++
+			}
+		case "--max-cost-usd":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%f", &maxCostOverride)
+				i++
+			}
+		case "--max-cumulative-tokens":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &maxCumulativeOverride)
+				i++
+			}
+		case "--full-tools":
+			fullTools = true
+		case "--keep-on-fail":
+			keepOnFail = true
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
 		}
 	}
 
-	workdir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getwd: %w", err)
+	workdir := workdirOverride
+	if workdir == "" {
+		var err error
+		workdir, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("getwd: %w", err)
+		}
+	} else {
+		abs, err := filepath.Abs(workdir)
+		if err != nil {
+			return fmt.Errorf("abs workdir: %w", err)
+		}
+		workdir = abs
 	}
 
 	// Fix A: when the user hasn't pinned a model AND we're routing to
@@ -155,6 +242,48 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		return err
 	}
 	defer state.close()
+	state.customVerifierCmd = customVerifier
+	state.headless = autoRetry
+	if maxRetries > 0 {
+		state.maxRetries = maxRetries
+	}
+	state.maxTurns = maxTurnsOverride
+	state.maxCostUSD = maxCostOverride
+	state.maxCumulativeTokens = maxCumulativeOverride
+	state.fullTools = fullTools
+	state.keepOnFail = keepOnFail
+	// Override the auto-seeded system prompt when the caller pinned
+	// one. Benchmark harnesses use this to swap the Go-flavored
+	// default for a language/repo-appropriate prompt (e.g. SWE-bench
+	// on a Django repo wants Python tooling guidance, not `go build`).
+	if systemPromptOverride != "" {
+		b, rerr := os.ReadFile(systemPromptOverride)
+		if rerr != nil {
+			return fmt.Errorf("read --system-prompt %s: %w", systemPromptOverride, rerr)
+		}
+		state.systemPrompt = string(b)
+	}
+
+	// Headless one-shot path. Skips the stdin scanner entirely:
+	// runTurn runs once with --prompt, the verifier + retry budget
+	// drive the loop to completion (no human gate), and we either
+	// emit a JSON summary (--json) or rely on the standard turn
+	// summary printed at finalize-time.
+	if oneShotPrompt != "" {
+		if !jsonOutput {
+			printREPLBanner(state)
+		}
+		turnErr := state.runTurn(oneShotPrompt)
+		if turnErr != nil && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "  turn error: %v\n", turnErr)
+		}
+		if jsonOutput {
+			emitOneShotJSON(ctx, state, turnErr)
+		} else {
+			fmt.Printf("\nsession saved → %s\n", state.sessionPath)
+		}
+		return nil
+	}
 
 	printREPLBanner(state)
 
@@ -231,6 +360,22 @@ type replState struct {
 	captureCfg    *config.Config
 	captureClient *capture.Capture
 
+	// store + cortex are the shared cognition surface for this REPL
+	// session. They're built once at newREPLState and reused by (a)
+	// captureClient — events written by the turn loop land in the
+	// same Storage that — (b) the harness's cortex_search tool
+	// retrieves from. Without this sharing the tool's Storage would
+	// be a separate in-memory index that never sees session captures
+	// and cortex_search returns empty forever.
+	//
+	// Constructed eagerly because the LLM-provider arg needed by
+	// Cortex (for Full mode's synchronous Reflect) requires key
+	// resolution we'd rather fail fast on. nil store/cortex is the
+	// signal that this session opted out of the shared path (e.g.
+	// future readonly mode).
+	store  *storage.Storage
+	cortex *intcognition.Cortex
+
 	// sessionID is a short random identifier shared across all turn
 	// rows + capture events in a single REPL invocation. Lets analysis
 	// group "everything done in one session" without parsing paths.
@@ -239,6 +384,43 @@ type replState struct {
 	// exitRequested is set by the /quit gate-response path so runTurn
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
+
+	// Headless-mode config (zero values preserve interactive behavior):
+	//   customVerifierCmd: shell command to run instead of `go build`.
+	//   headless:          skip promptGate; treat unresolved verify-fail
+	//                      as the final state for the turn.
+	//   maxRetries:        total auto-retry attempts (default 1 = the
+	//                      original "one auto-retry" behavior; values >1
+	//                      let the loop iterate further with verifier
+	//                      output fed back each round).
+	customVerifierCmd string
+	headless          bool
+	maxRetries        int
+	// Optional per-attempt budget overrides. Zero = inherit the REPL
+	// defaults (defaultMaxTurns / defaults from internal/harness).
+	// Benchmark harnesses bump these because SWE-bench-class repo
+	// exploration blows past the interactive-mode defaults in 4-5
+	// list_dir + read_file turns.
+	maxTurns            int
+	maxCostUSD          float64
+	maxCumulativeTokens int
+	// fullTools forces the 5-tool registry (read/write/list_dir/
+	// run_shell/cortex_search) even when routed to Ollama. Defaults
+	// to false so interactive ollama use keeps the iter-4 fix that
+	// drops list_dir+cortex_search for tiny models that lose
+	// function-call discipline at 5 tools. Benchmark harnesses that
+	// NEED list_dir (e.g. SWE-bench navigating a 5000-file repo)
+	// set this to true.
+	fullTools bool
+	// keepOnFail suppresses runTurn's snapshot rollback when verify
+	// fails. For interactive REPL use the default (rollback) is
+	// right: don't keep half-broken edits. For benchmark harnesses
+	// it's wrong — a real engineer iterating on a failing test
+	// keeps their changes and refines, doesn't reset to scratch
+	// every attempt. SWE-bench in particular needs this so the
+	// agent's file writes persist across retries and the final
+	// scorer sees the actual attempt rather than an empty diff.
+	keepOnFail bool
 }
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
@@ -268,17 +450,83 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		return nil, fmt.Errorf("open session jsonl: %w", err)
 	}
 
+	apiURL := resolveAPIURL(model)
+
+	// Shared cognition surface. Captures from the turn loop and reads
+	// from the cortex_search tool both target this Storage/Cortex —
+	// that's the wire that makes intra-session learning measurable at
+	// all (without it, a capture from turn 1 isn't visible to a
+	// retrieval on turn 2 because each consumer would have opened its
+	// own in-memory Storage).
+	//
+	// Failures here are NOT fatal: a session with no cognition surface
+	// still runs (we just lose the auto-capture pipeline). REPL
+	// readonly use cases or environments without an LLM key still get
+	// a working REPL — the captureClient simply runs without storage
+	// attached and falls back to journal-only persistence.
+	store, cortex, cogErr := newSessionCognition(cortexDir, model, apiURL)
+	if cogErr != nil && verbose {
+		fmt.Fprintf(os.Stderr, "warn: cortex auto-capture disabled (%v)\n", cogErr)
+	}
+
 	return &replState{
 		workdir:      workdir,
 		model:        model,
-		apiURL:       resolveAPIURL(model),
+		apiURL:       apiURL,
 		verbose:      verbose,
 		systemPrompt: systemPrompt,
 		sessionDir:   sessionDir,
 		sessionPath:  sessionPath,
 		jsonl:        f,
 		sessionID:    ts,
+		store:        store,
+		cortex:       cortex,
 	}, nil
+}
+
+// newSessionCognition builds the shared Storage + Cortex pair for one
+// REPL session. The Cortex carries an LLM provider so cortex_search's
+// Full mode (synchronous Reflect) can actually call out. For Ollama
+// routes the provider is an OpenRouter client pointed at the local
+// chat endpoint (it speaks the OpenAI-compat protocol Ollama exposes);
+// for OpenRouter routes the keychain key is required.
+//
+// Returns (nil, nil, err) on any setup failure — caller decides
+// whether to abort the session or continue without auto-capture.
+func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *intcognition.Cortex, error) {
+	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
+	store, err := storage.New(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("storage init: %w", err)
+	}
+
+	// LLM provider for the shared Cortex. For Ollama-routed sessions
+	// the OpenRouter constructor still works — Ollama just needs the
+	// API URL pointed at its OpenAI-compat endpoint. We use a stub
+	// key in that case so the client refuses to error out on init.
+	var provider llm.Provider
+	if apiURL == defaultOllamaAPIURL {
+		client := llm.NewOpenRouterClientWithKey(cfg, "ollama-local-stub")
+		client.SetModel(model)
+		client.SetAPIURL(apiURL)
+		provider = client
+	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
+		client := llm.NewOpenRouterClientWithKey(cfg, key)
+		client.SetModel(model)
+		if apiURL != "" {
+			client.SetAPIURL(apiURL)
+		}
+		provider = client
+	}
+	// provider may still be nil — Cortex tolerates that (Full mode
+	// degrades to Fast with a flagged response).
+
+	cortex, err := intcognition.New(store, provider, nil, cfg)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("cognition init: %w", err)
+	}
+	return store, cortex, nil
 }
 
 // ensureCaptureClient lazily builds the workdir-rooted Capture once,
@@ -296,14 +544,24 @@ func (s *replState) ensureCaptureClient() (*capture.Capture, error) {
 		ContextDir:  filepath.Join(s.workdir, ".cortex"),
 		ProjectRoot: s.workdir,
 	}
-	s.captureClient = capture.New(s.captureCfg)
+	// Attach the shared Storage when available so captures populate
+	// the same in-memory indexes that cortex_search reads. nil store
+	// is the fallback path where captures still land in the journal
+	// for later replay but aren't searchable in-session.
+	s.captureClient = capture.NewWithStorage(s.captureCfg, s.store)
 	return s.captureClient, nil
 }
 
-// close flushes and closes the session JSONL.
+// close flushes and closes the session JSONL plus any shared cognition
+// state. The Storage close flushes its append-mode JSONL handles so
+// the events.jsonl on disk matches the in-memory indexes at the
+// moment of session end.
 func (s *replState) close() {
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
+	}
+	if s.store != nil {
+		_ = s.store.Close()
 	}
 }
 
@@ -368,6 +626,31 @@ Rules:
   - When a build fails, read the error, fix the code, and try again.
 `
 
+// emitOneShotJSON prints a single-line JSON envelope summary of the
+// headless one-shot run to stdout. Data is intentionally minimal — the
+// full turn row already lands in <sessionDir>/session.jsonl for callers
+// that want the long-form transcript; this is just the at-a-glance
+// "did it pass, what did it cost" view.
+func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
+	data := map[string]any{
+		"session_id":   s.sessionID,
+		"session_path": s.sessionPath,
+		"workdir":      s.workdir,
+		"model":        s.model,
+		"accepted":     s.turns > 0, // finalize() only bumps turns on accept
+	}
+	emitter := EmitterFor(ctx, s.workdir)
+	if turnErr != nil {
+		// Failure surfaces both as ok=false + structured error code AND in
+		// the data payload's legacy "error" field so the existing benchmark
+		// parser keeps working.
+		data["error"] = turnErr.Error()
+		_ = emitter.Fail(os.Stdout, cliout.ErrCodeInternal, turnErr.Error(), data)
+		return
+	}
+	_ = emitter.Ok(os.Stdout, data)
+}
+
 // printREPLBanner prints the welcome line. One line, no ASCII art.
 func printREPLBanner(s *replState) {
 	api := s.apiURL
@@ -391,7 +674,34 @@ Flags:
                        Default: qwen2.5-coder:1.5b. Override via
                        CORTEX_REPL_MODEL env var.
   -v, --verbose        Print agent-loop telemetry (tool calls + tokens).
+      --workdir DIR    Use DIR instead of cwd as the workdir.
   -h, --help           Show this help.
+
+Headless flags (skip stdin scanner, used by benchmark harnesses):
+      --prompt TEXT    Run one turn with TEXT as the user message, then exit.
+      --verifier CMD   Shell command used to verify each attempt instead of
+                       the auto-detected 'go build'. Exit 0 = pass.
+      --auto-retry     Skip the interactive [r/e/s/q] gate; treat unresolved
+                       verify-fail as the final state for the turn.
+      --max-retries N  Cap on auto-retry attempts (default 1).
+      --json           Emit a one-line JSON summary on stdout instead of
+                       the human-readable banner + session-saved tail.
+      --system-prompt FILE  Read the system prompt from FILE instead of
+                       the auto-seeded Go-flavored default. Useful for
+                       benchmark harnesses that need a different
+                       language / repo-shape guidance.
+      --max-turns N    Per-attempt agent-loop cap (default 8).
+      --max-cost-usd X Per-attempt USD budget (default 0.20).
+      --max-cumulative-tokens N  Per-attempt token budget (default 300000).
+      --full-tools     Register the full 5-tool surface (read, write,
+                       list_dir, run_shell, cortex_search) even when
+                       routed to Ollama. Default off; small models
+                       lose function-call discipline at >3 tools, so
+                       interactive Ollama drops to 3.
+      --keep-on-fail   Don't roll back the workdir when the verifier
+                       fails. Benchmark default — iterations build
+                       on prior work instead of restarting from
+                       scratch each attempt.
 
 In the REPL:
   /help                Show slash-command help.
@@ -495,6 +805,7 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.AgentTurns = hres.AgentTurnsTotal
 	row.TokensIn = hres.TokensIn
 	row.TokensOut = hres.TokensOut
+	row.InjectedContextTokens = lres.InjectedContextTokens
 	row.CostUSD = hres.CostUSD
 	row.LatencyMs = hres.LatencyMs
 	row.FilesChanged = hres.FilesChanged
@@ -505,29 +816,52 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.VerifyOK = verifyRes.OK
 	row.VerifyOutput = verifyRes.OutputTail
 
-	// Attempt 2: automatic single retry on verify-fail with the
-	// verifier output fed back into the prompt.
-	if !verifyRes.OK && verifyRes.Kind != verifierNone {
-		fmt.Printf("  verify failed (%s), auto-retrying once with error context...\n", verifyRes.Kind)
+	// Auto-retry loop. Default is one extra attempt (the historical
+	// "one auto-retry" behavior) so interactive REPL UX is unchanged.
+	// --max-retries N raises the cap; verifier output from the most
+	// recent fail is fed back into each subsequent attempt as the
+	// retry context. The first auto-retry's telemetry stays on the
+	// dedicated Row.Retry* fields for back-compat with existing JSONL
+	// consumers; later attempts merge their files-changed into the
+	// row but are not individually broken out (they would land as
+	// extra session.jsonl fields in a follow-up schema bump).
+	retryBudget := s.maxRetries
+	if retryBudget < 1 {
+		retryBudget = 1
+	}
+	autoAttempt := 0
+	for autoAttempt < retryBudget && !verifyRes.OK && verifyRes.Kind != verifierNone {
+		autoAttempt++
+		if autoAttempt == 1 {
+			fmt.Printf("  verify failed (%s), auto-retrying with error context (1/%d)...\n", verifyRes.Kind, retryBudget)
+		} else {
+			fmt.Printf("  verify still failing, auto-retry %d/%d...\n", autoAttempt, retryBudget)
+		}
 		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
-		row.RetryAgentTurns = hres2.AgentTurnsTotal
-		row.RetryTokensIn = hres2.TokensIn
-		row.RetryTokensOut = hres2.TokensOut
-		row.RetryHarnessError = errString(runErr2)
-		row.RetryFinalText = lres2.Final
+		if autoAttempt == 1 {
+			row.RetryAgentTurns = hres2.AgentTurnsTotal
+			row.RetryTokensIn = hres2.TokensIn
+			row.RetryTokensOut = hres2.TokensOut
+			row.RetryHarnessError = errString(runErr2)
+			row.RetryFinalText = lres2.Final
+		}
 		row.FilesChanged = mergeFiles(row.FilesChanged, hres2.FilesChanged)
 
 		verifyRes = s.runVerifier()
-		row.RetryVerifyOK = verifyRes.OK
-		row.RetryVerifyOutput = verifyRes.OutputTail
+		if autoAttempt == 1 {
+			row.RetryVerifyOK = verifyRes.OK
+			row.RetryVerifyOutput = verifyRes.OutputTail
+		}
 	}
 
 	// User-driven retry/edit loop. Loops until verify passes, user
 	// skips, or user quits. Bounded by userGateMaxAttempts so a stuck
-	// model can't trap the REPL.
+	// model can't trap the REPL. SKIPPED in headless mode (--auto-retry)
+	// — the auto-retry budget is the only escalation a benchmark
+	// harness ever wants.
 	userHints := []string{}
 	attempts := 0
-	for !verifyRes.OK && verifyRes.Kind != verifierNone {
+	for !s.headless && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		attempts++
 		if attempts > userGateMaxAttempts {
 			fmt.Printf("  reached %d user-retry attempts; rolling back\n", userGateMaxAttempts)
@@ -592,7 +926,10 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 
 // finalize completes a turn: writes the JSONL row, pushes the snapshot
 // to the undo stack and fires background capture on accept, or rolls
-// back from snapshot on reject. Always writes the row.
+// back from snapshot on reject (unless --keep-on-fail suppresses
+// the rollback for benchmark callers that want iteration to build on
+// prior attempts instead of resetting to scratch). Always writes the
+// row.
 func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	row.Accepted = accepted
 	if accepted {
@@ -603,6 +940,15 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
 		} else if s.verbose {
 			fmt.Println("  (captured)")
+		}
+	} else if s.keepOnFail {
+		// Benchmark mode: preserve the agent's attempt so the next
+		// retry's verifier sees what it actually did, and so an
+		// out-of-budget mid-attempt termination doesn't lose all
+		// the work the agent did get done. Snapshot still lives on
+		// disk; `/undo` could surface it if needed.
+		if s.verbose {
+			fmt.Println("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
 		}
 	} else {
 		if err := s.restoreFromSnapshot(snapDir); err != nil {
@@ -630,6 +976,13 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
+	// Share the REPL's Cortex with the cortex_search tool so captures
+	// from earlier turns in this session are findable. Nil cortex is
+	// the legacy path: the tool builds its own Cortex on first call,
+	// captures from this session aren't visible to it.
+	if s.cortex != nil {
+		h.SetSharedCortex(s.cortex)
+	}
 	if s.systemPrompt != "" {
 		h.SetSystemPrompt(s.systemPrompt)
 	}
@@ -642,7 +995,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// (read_file + write_file + run_shell). The probe matrix in
 	// PROGRESS-REPL.md iter 3 showed qwen-1.5b function-calls cleanly
 	// with ≤3 tools but emits text shapes at ≥5.
-	if s.apiURL == defaultOllamaAPIURL {
+	//
+	// --full-tools overrides this for callers that need list_dir +
+	// cortex_search even on Ollama-routed models (e.g. SWE-bench
+	// against a local 30B coder — list_dir is non-negotiable for
+	// navigating a 5000-file repo).
+	if s.apiURL == defaultOllamaAPIURL && !s.fullTools {
 		h.SetMinimalTools(true)
 	}
 	// Stream the agent loop into the REPL: one line per tool call so
@@ -650,8 +1008,21 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// takes 20-30s per turn; without this it's a silent stare). Token
 	// + per-turn telemetry is gated behind --verbose.
 	h.SetNotify(makeREPLNotifier(s.verbose))
-	h.SetMaxTurns(defaultMaxTurns)
+	turns := defaultMaxTurns
+	if s.maxTurns > 0 {
+		turns = s.maxTurns
+	}
+	h.SetMaxTurns(turns)
 	h.SetMaxOutputTokens(defaultMaxOutputTokens)
+	// Per-attempt budget overrides for benchmark harnesses. Leaving
+	// either field at 0 lets internal/harness fall back to its own
+	// defaults (300k cumulative tokens, $0.20 cost).
+	if s.maxCostUSD > 0 || s.maxCumulativeTokens > 0 {
+		h.SetBudget(harness.Budget{
+			MaxCostUSD:          s.maxCostUSD,
+			MaxCumulativeTokens: s.maxCumulativeTokens,
+		})
+	}
 
 	prompt := userPrompt
 	if retryContext != "" {
@@ -693,6 +1064,7 @@ func ensureStubOpenRouterKey(apiURL string) error {
 const (
 	verifierNone    = "none"
 	verifierGoBuild = "go build"
+	verifierCustom  = "custom"
 )
 
 type verifyResult struct {
@@ -701,10 +1073,15 @@ type verifyResult struct {
 	OutputTail string
 }
 
-// runVerifier picks a verifier based on workdir contents. v1 supports
-// go.mod → `go build ./...`. Anything else returns a no-op result with
-// a one-time warning.
+// runVerifier picks a verifier in priority order:
+//  1. --verifier <cmd>: arbitrary shell command, treated as success on
+//     exit 0. Used by benchmark harnesses (SWE-bench → pytest, etc.).
+//  2. go.mod present: `go build ./...` (v1 default for Go projects).
+//  3. fallback: no verifier, one-time warning, accept the turn.
 func (s *replState) runVerifier() verifyResult {
+	if s.customVerifierCmd != "" {
+		return s.runCustomVerifier()
+	}
 	if _, err := os.Stat(filepath.Join(s.workdir, "go.mod")); err == nil {
 		return s.runGoBuild()
 	}
@@ -713,6 +1090,24 @@ func (s *replState) runVerifier() verifyResult {
 		s.verifyWarned = true
 	}
 	return verifyResult{Kind: verifierNone, OK: true}
+}
+
+// runCustomVerifier runs the --verifier shell command in the workdir
+// and reports OK iff the command exits 0. 5-minute hard cap so a
+// hung test suite doesn't trap a benchmark run. Output is tailed to
+// 8 KiB — enough to fit a few stack traces while keeping the
+// retry-context prompt under the model's input cap.
+func (s *replState) runCustomVerifier() verifyResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", s.customVerifierCmd)
+	cmd.Dir = s.workdir
+	out, err := cmd.CombinedOutput()
+	return verifyResult{
+		Kind:       verifierCustom,
+		OK:         err == nil,
+		OutputTail: tailString(string(out), 8192),
+	}
 }
 
 // runGoBuild shells out to `go build ./...`. We cap wall time at 60s
@@ -871,17 +1266,18 @@ type turnRow struct {
 	SnapshotDir  string `json:"snapshot_dir"`
 
 	// Initial attempt (no error context).
-	HarnessError string   `json:"harness_error,omitempty"`
-	AgentTurns   int      `json:"agent_turns"`
-	TokensIn     int      `json:"tokens_in"`
-	TokensOut    int      `json:"tokens_out"`
-	CostUSD      float64  `json:"cost_usd"`
-	LatencyMs    int64    `json:"latency_ms"`
-	FilesChanged []string `json:"files_changed,omitempty"`
-	FinalText    string   `json:"final_text,omitempty"`
-	VerifyKind   string   `json:"verify_kind"`
-	VerifyOK     bool     `json:"verify_ok"`
-	VerifyOutput string   `json:"verify_output,omitempty"`
+	HarnessError          string   `json:"harness_error,omitempty"`
+	AgentTurns            int      `json:"agent_turns"`
+	TokensIn              int      `json:"tokens_in"`
+	TokensOut             int      `json:"tokens_out"`
+	InjectedContextTokens int      `json:"injected_context_tokens,omitempty"` // bytes the cortex_search tool returned across this turn / 4 (proxy)
+	CostUSD               float64  `json:"cost_usd"`
+	LatencyMs             int64    `json:"latency_ms"`
+	FilesChanged          []string `json:"files_changed,omitempty"`
+	FinalText             string   `json:"final_text,omitempty"`
+	VerifyKind            string   `json:"verify_kind"`
+	VerifyOK              bool     `json:"verify_ok"`
+	VerifyOutput          string   `json:"verify_output,omitempty"`
 
 	// Automatic single retry (model gets the verifier output).
 	RetryAgentTurns   int    `json:"retry_agent_turns,omitempty"`

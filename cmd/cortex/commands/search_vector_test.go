@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 // TestEmitSearchVectorJSON pins the public CLI contract: stable keys,
@@ -22,12 +23,13 @@ func TestEmitSearchVectorJSON(t *testing.T) {
 			{ContentID: "doc-2", ContentType: "corpus", Similarity: 0.88},
 		}
 		var buf bytes.Buffer
-		if err := emitSearchVectorJSON(&buf, results, "corpus", 10, 17*time.Millisecond, "nomic-embed-text", "ollama"); err != nil {
+		em := cliout.NewEmitter("")
+		if err := emitSearchVectorJSON(&buf, em, results, "corpus", 10, 17*time.Millisecond, "nomic-embed-text", "ollama"); err != nil {
 			t.Fatalf("emit: %v", err)
 		}
 		var got searchVectorOutput
-		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+			t.Fatalf("decode envelope: %v", err)
 		}
 		if got.K != 10 {
 			t.Errorf("K=%d want 10", got.K)
@@ -59,12 +61,13 @@ func TestEmitSearchVectorJSON(t *testing.T) {
 			})
 		}
 		var buf bytes.Buffer
-		if err := emitSearchVectorJSON(&buf, results, "", 5, 0, "", ""); err != nil {
+		em := cliout.NewEmitter("")
+		if err := emitSearchVectorJSON(&buf, em, results, "", 5, 0, "", ""); err != nil {
 			t.Fatalf("emit: %v", err)
 		}
 		var got searchVectorOutput
-		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if _, err := cliout.DecodeEnvelope(buf.Bytes(), &got); err != nil {
+			t.Fatalf("decode envelope: %v", err)
 		}
 		if len(got.Results) != 5 {
 			t.Errorf("len(Results)=%d want 5 (top-k)", len(got.Results))
@@ -73,15 +76,18 @@ func TestEmitSearchVectorJSON(t *testing.T) {
 
 	t.Run("empty results emits empty array not null", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := emitSearchVectorJSON(&buf, nil, "", 10, 0, "", ""); err != nil {
+		em := cliout.NewEmitter("")
+		if err := emitSearchVectorJSON(&buf, em, nil, "", 10, 0, "", ""); err != nil {
 			t.Fatalf("emit: %v", err)
 		}
-		// Parse as a raw map so we see how the field landed.
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(buf.Bytes(), &raw); err != nil {
-			t.Fatalf("unmarshal raw: %v", err)
+		// Probe the envelope.data shape so we see how the field landed.
+		var env struct {
+			Data map[string]json.RawMessage `json:"data"`
 		}
-		gotResults := string(raw["results"])
+		if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal envelope: %v", err)
+		}
+		gotResults := string(env.Data["results"])
 		if gotResults != "[]" {
 			t.Errorf("results = %q, want \"[]\" (downstream parsers shouldn't need to handle null)", gotResults)
 		}
@@ -92,8 +98,9 @@ func TestEmitSearchVectorJSON(t *testing.T) {
 		// from JSON (omitempty) so the schema cleanly distinguishes
 		// "embedded by CLI" from "caller supplied vector".
 		var buf bytes.Buffer
+		em := cliout.NewEmitter("")
 		results := []storage.VectorSearchResult{{ContentID: "d1", ContentType: "corpus", Similarity: 0.5}}
-		if err := emitSearchVectorJSON(&buf, results, "", 5, 0, "", ""); err != nil {
+		if err := emitSearchVectorJSON(&buf, em, results, "", 5, 0, "", ""); err != nil {
 			t.Fatalf("emit: %v", err)
 		}
 		s := buf.String()
