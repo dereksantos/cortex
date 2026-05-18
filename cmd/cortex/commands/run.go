@@ -744,27 +744,30 @@ var _ = strconv.Atoi
 // resolve provider/embedder via llm.NewLLMClient and storage via the
 // project ContextDir.
 func buildTurnRegistry(prompt, model, workdir string, traceCB dag.TraceCallback) *dag.Registry {
-	reg := dag.NewRegistry()
+	return buildTurnRegistryWithConfig(prompt, model, workdir, traceCB, dagnode.CodingTurnConfig{
+		Model:   model,
+		Workdir: workdir,
+		TraceCB: traceCB,
+	})
+}
 
-	// Phase 1: register the canonical op set with nil deps. Each op's
-	// mechanical fallback handles missing providers/embedders/storage.
-	// Production paths that wire real deps will override these by
-	// re-registering with non-nil DefaultsConfig (or this function
-	// will grow a Config param).
+// buildTurnRegistryWithConfig is the chain-build entry that lets a
+// caller override the CodingTurnConfig — used by the REPL to inject
+// its preconfigured CortexHarness via HarnessFactory so all REPL
+// state (notifier, system prompt, shared cortex, budget overrides,
+// dispatcher) flows through the DAG path instead of being bypassed
+// by the inline harness construction the default config does.
+func buildTurnRegistryWithConfig(prompt, model, workdir string, traceCB dag.TraceCallback, codingCfg dagnode.CodingTurnConfig) *dag.Registry {
+	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		panic(fmt.Sprintf("ops.RegisterDefaults: %v", err))
 	}
-
-	// Phase 2: re-register the chain nodes with spawn-wiring wrappers
-	// around their underlying handlers. Last-write-wins on the
-	// registry, so this swaps in the chain-aware variants.
-	chain := buildTurnChain(prompt, model, workdir, reg, traceCB)
+	chain := buildTurnChainWithConfig(prompt, model, workdir, reg, traceCB, codingCfg)
 	for _, spec := range chain {
 		if err := reg.Register(spec); err != nil {
 			panic(fmt.Sprintf("chain register %s: %v", spec.QualifiedName(), err))
 		}
 	}
-
 	return reg
 }
 
@@ -779,6 +782,16 @@ func buildTurnRegistry(prompt, model, workdir string, traceCB dag.TraceCallback)
 // (sense.prompt, decide.coding_turn, maintain.capture) get inline
 // implementations.
 func buildTurnChain(prompt, model, workdir string, reg *dag.Registry, traceCB dag.TraceCallback) []dag.NodeSpec {
+	return buildTurnChainWithConfig(prompt, model, workdir, reg, traceCB, dagnode.CodingTurnConfig{
+		Model:   model,
+		Workdir: workdir,
+		TraceCB: traceCB,
+	})
+}
+
+// buildTurnChainWithConfig is the chain-build entry that accepts a
+// caller-supplied CodingTurnConfig. See buildTurnRegistryWithConfig.
+func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, traceCB dag.TraceCallback, codingCfg dagnode.CodingTurnConfig) []dag.NodeSpec {
 	// Reuse the underlying handlers from a fresh registry so the
 	// wrappers can call them via Get() without doing the construction
 	// again. Cleaner than capturing each spec individually.
@@ -802,12 +815,20 @@ func buildTurnChain(prompt, model, workdir string, reg *dag.Registry, traceCB da
 	// nil here preserves V0 behavior for `cortex run --type=turn`.
 	// Callers that want Stage 3 dispatch (cortex code, REPL) build
 	// their own chain with ActRegistry set.
-	codingTurnHandler := dagnode.NewCodingTurnHandler(dagnode.CodingTurnConfig{
-		Model:       model,
-		Workdir:     workdir,
-		ActRegistry: nil, // V0 behavior; Stage-3-aware callers override
-		TraceCB:     traceCB,
-	})
+	// Use the caller-supplied CodingTurnConfig so the REPL (and any
+	// future caller) can inject a preconfigured CortexHarness via
+	// HarnessFactory. Defaults still applied for fields the caller
+	// left unset.
+	if codingCfg.Model == "" {
+		codingCfg.Model = model
+	}
+	if codingCfg.Workdir == "" {
+		codingCfg.Workdir = workdir
+	}
+	if codingCfg.TraceCB == nil {
+		codingCfg.TraceCB = traceCB
+	}
+	codingTurnHandler := dagnode.NewCodingTurnHandler(codingCfg)
 
 	// sense.prompt — captures the trigger prompt; spawns represent.embed.
 	senseSpec := dag.NodeSpec{

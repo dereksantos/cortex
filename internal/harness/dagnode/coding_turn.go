@@ -53,6 +53,25 @@ type CodingTurnConfig struct {
 	// to write per-tool rows to dag_traces.jsonl alongside the
 	// coding_turn's own row.
 	TraceCB dag.TraceCallback
+
+	// HarnessFactory, when non-nil, returns a CortexHarness instance
+	// the handler should drive instead of constructing a fresh one.
+	// Used by the REPL chain unification (Stage 5/6) to pass through
+	// its preconfigured harness — model, shared Cortex, system
+	// prompt, API URL, notifier, budget, full-tools, dispatcher
+	// already wired. When nil the handler calls
+	// evalv2.NewCortexHarness(model) and applies no overrides
+	// (preserves V0 behavior for cortex run --type=turn callers).
+	HarnessFactory func() (*evalv2.CortexHarness, error)
+
+	// ResultCallback, when non-nil, is invoked synchronously after
+	// the underlying harness's RunSessionWithResult returns, with the
+	// full HarnessResult + LoopResult + the post-run harness instance
+	// (so callers can call LastLoopResult, etc.). Lets a chain caller
+	// like the REPL recover the full result objects rather than
+	// reconstructing them from coding_turn's Out map (which only
+	// carries a subset).
+	ResultCallback func(*evalv2.CortexHarness, evalv2.HarnessResult, harness.LoopResult, error)
 }
 
 // NewCodingTurnHandler returns a dag.Handler for decide.coding_turn.
@@ -112,7 +131,15 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		// re-wired. Per-tool trace rows appear alongside the
 		// coding_turn's own row in dag_traces.jsonl.
 		started := time.Now()
-		h, herr := evalv2.NewCortexHarness(model)
+		var (
+			h    *evalv2.CortexHarness
+			herr error
+		)
+		if cfg.HarnessFactory != nil {
+			h, herr = cfg.HarnessFactory()
+		} else {
+			h, herr = evalv2.NewCortexHarness(model)
+		}
 		if herr != nil {
 			return dag.NodeResult{
 				Out:          map[string]any{"error": herr.Error()},
@@ -144,6 +171,10 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)
 		latency := int(time.Since(started).Milliseconds())
+		lr := h.LastLoopResult()
+		if cfg.ResultCallback != nil {
+			cfg.ResultCallback(h, hr, lr, runErr)
+		}
 		if runErr != nil {
 			return dag.NodeResult{
 				Out: map[string]any{
@@ -153,8 +184,6 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 				CostConsumed: dag.Cost{LatencyMS: latency, Tokens: hr.TokensIn + hr.TokensOut},
 			}, fmt.Errorf("decide.coding_turn run: %w", runErr)
 		}
-
-		lr := h.LastLoopResult()
 		return dag.NodeResult{
 			Out: map[string]any{
 				"response":         lr.Final,

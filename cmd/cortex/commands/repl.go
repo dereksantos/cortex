@@ -45,6 +45,9 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
+	"github.com/dereksantos/cortex/internal/eval/dagtrace"
+	"github.com/dereksantos/cortex/internal/harness/dagnode"
+	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
@@ -1005,16 +1008,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
 
-	// Stage 3.5: REPL turns route tool calls through act.* DAG ops
-	// + emit per-tool trace rows to .cortex/db/dag_traces.jsonl by
-	// default. --no-dag disables this for debugging (s.useDAG=false).
-	// Multi-turn sessions share the synthetic parent ID structure
-	// from buildCodeActDispatcher so trace rows are groupable.
-	if s.useDAG {
-		if _, _, derr := buildCodeActDispatcher(h, s.workdir); derr != nil {
-			return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op dispatcher: %w", derr)
-		}
-	}
+	// Stage 5/6 (chain unification): act-op dispatch is wired by the
+	// chain's decide.coding_turn handler via CodingTurnConfig.ActRegistry,
+	// not by a separate buildCodeActDispatcher call. The chain path
+	// gives parent_node_id real lineage (the executor's coding_turn
+	// node ID) instead of the synthetic "code-<pid>-coding_turn"
+	// placeholder. Only the --no-dag escape skips both layers.
 
 	// Share the REPL's Cortex with the cortex_search tool so captures
 	// from earlier turns in this session are findable. Nil cortex is
@@ -1069,8 +1068,26 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		prompt = userPrompt + "\n\nPREVIOUS ATTEMPT FAILED. Verifier output:\n" + retryContext + "\n\nFix this, then stop."
 	}
 
-	hr, runErr := h.RunSessionWithResult(context.Background(), prompt, s.workdir)
-	lr := h.LastLoopResult()
+	// Stage 5/6 (REPL chain unification): every REPL turn IS a
+	// dag.Executor.Run over the Stage 2 chain instead of a direct
+	// h.RunSessionWithResult call. The preconfigured harness flows
+	// through CodingTurnConfig.HarnessFactory so the chain's
+	// decide.coding_turn node drives this same instance (with all
+	// REPL state already set above) rather than constructing a fresh
+	// one. The full HarnessResult + LoopResult are captured back via
+	// ResultCallback. --no-dag (s.useDAG=false) reverts to the V0
+	// direct-harness path for debugging.
+	var (
+		hr     evalv2.HarnessResult
+		lr     harness.LoopResult
+		runErr error
+	)
+	if s.useDAG {
+		hr, lr, runErr = runREPLChainTurn(s, h, prompt)
+	} else {
+		hr, runErr = h.RunSessionWithResult(context.Background(), prompt, s.workdir)
+		lr = h.LastLoopResult()
+	}
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -1080,6 +1097,72 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		hr.FilesChanged = mergeFiles(hr.FilesChanged, salvaged)
 	}
 	return hr, lr, runErr
+}
+
+// runREPLChainTurn executes one REPL coding turn as a full
+// dag.Executor.Run over the Stage 2 chain. The preconfigured harness
+// flows in via CodingTurnConfig.HarnessFactory (so all REPL state —
+// notifier, system prompt, shared cortex, budget, minimal tools —
+// is preserved). The chain's decide.coding_turn handler invokes
+// h.RunSessionWithResult inside the executor, then ResultCallback
+// captures the full HarnessResult + LoopResult back to local vars
+// for the caller. Trace rows for the full 8-node chain land in
+// .cortex/db/dag_traces.jsonl with real parent_node_id lineage.
+//
+// V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
+// path; this function is only on the dag-enabled path.
+func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
+	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
+
+	tw, _ := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if tw != nil {
+		traceCB = tw.Callback(turnID)
+	}
+
+	actReg := dag.NewRegistry()
+	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
+	}
+
+	var (
+		capturedHR  evalv2.HarnessResult
+		capturedLR  harness.LoopResult
+		capturedErr error
+	)
+	codingCfg := dagnode.CodingTurnConfig{
+		Model:       s.model,
+		Workdir:     s.workdir,
+		ActRegistry: actReg,
+		TraceCB:     traceCB,
+		HarnessFactory: func() (*evalv2.CortexHarness, error) {
+			return h, nil
+		},
+		ResultCallback: func(_ *evalv2.CortexHarness, hr evalv2.HarnessResult, lr harness.LoopResult, runErr error) {
+			capturedHR = hr
+			capturedLR = lr
+			capturedErr = runErr
+		},
+	}
+
+	reg := buildTurnRegistryWithConfig(prompt, s.model, s.workdir, traceCB, codingCfg)
+
+	// Warm the registry from the calibration snapshot (Stage 4-C)
+	// so the chain's pre-spawn CanAfford checks reflect observed
+	// reality. Missing snapshot is a cold start; not an error.
+	_, _ = dag.LoadCalibrationSnapshot(reg, "")
+
+	ex := dag.NewExecutor(reg, traceCB)
+	seed := []dag.NodeSpec{{
+		Function: dag.FuncSense,
+		Op:       "prompt",
+		ID:       "n1",
+		Attrs:    map[string]any{"prompt": prompt},
+	}}
+	if _, err := ex.Run(context.Background(), turnID, seed, dag.DefaultTurnBudget()); err != nil {
+		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+	}
+	return capturedHR, capturedLR, capturedErr
 }
 
 // ensureStubOpenRouterKey lets a local-Ollama REPL run even when no
