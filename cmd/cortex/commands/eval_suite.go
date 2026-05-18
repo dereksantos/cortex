@@ -178,9 +178,16 @@ func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
 // Full agent execution is Phase D's remaining work (reuses cortex
 // code harness pattern).
 func runJourneysSuite(dir, outputFormat string, verbose bool) error {
-	// Detect --with-seed via env (the eval CLI's flag parsing doesn't
-	// flow flags into here; using env keeps this surface minimal).
+	// Detect --with-seed / --execute via env (the eval CLI's flag
+	// parsing doesn't flow flags into here; using env keeps this
+	// surface minimal). --execute implies --with-seed (execution
+	// path bundles its own seeding into the workdir's .cortex).
 	withSeed := os.Getenv("CORTEX_JOURNEYS_WITH_SEED") != ""
+	execute := os.Getenv("CORTEX_JOURNEYS_EXECUTE") != ""
+
+	if execute {
+		return runJourneysExecute(dir, outputFormat, verbose)
+	}
 
 	if withSeed {
 		res, reports, err := journey.RunSuiteWithSeed(dir)
@@ -244,5 +251,120 @@ func runJourneysSuite(dir, outputFormat string, verbose bool) error {
 	fmt.Printf("Total: %d  pending_adapter: %d  scaffold_missing: %d  invalid: %d\n",
 		res.Total, res.PendingAdapter, res.ScaffoldMissing, res.Invalid)
 	fmt.Println("Validation-only pass. Set CORTEX_JOURNEYS_WITH_SEED=1 for seed-adapter run.")
+	fmt.Println("Set CORTEX_JOURNEYS_EXECUTE=1 (with CORTEX_JOURNEYS_MODEL) for full-execution run.")
 	return nil
+}
+
+// runJourneysExecute is the full-execution path. Drives a
+// CortexHarness against each journey's task sessions and emits per-
+// session cell_results.jsonl rows. Tunable via env:
+//
+//   - CORTEX_JOURNEYS_MODEL: OpenRouter model id (default:
+//     "anthropic/claude-3-5-haiku")
+//   - CORTEX_JOURNEYS_FILTER: comma-separated scenario IDs to run
+//     (default: all). E.g. CORTEX_JOURNEYS_FILTER=trivial-hello-world
+//     for fast iteration on a single journey.
+//   - CORTEX_JOURNEYS_CELL_SINK: file path for cell_results.jsonl
+//     (default: <dir>/../../.cortex/db/cell_results.jsonl ; created if
+//     missing). Set to "-" to skip the sink.
+func runJourneysExecute(dir, outputFormat string, verbose bool) error {
+	model := os.Getenv("CORTEX_JOURNEYS_MODEL")
+	if model == "" {
+		model = "anthropic/claude-3-5-haiku"
+	}
+	var filter []string
+	if f := os.Getenv("CORTEX_JOURNEYS_FILTER"); f != "" {
+		filter = strings.Split(f, ",")
+	}
+
+	var sink *os.File
+	sinkPath := os.Getenv("CORTEX_JOURNEYS_CELL_SINK")
+	if sinkPath == "" {
+		sinkPath = ".cortex/db/cell_results.jsonl"
+	}
+	if sinkPath != "-" {
+		if err := os.MkdirAll(filepathDirOf(sinkPath), 0o755); err != nil {
+			return fmt.Errorf("mkdir sink dir: %w", err)
+		}
+		f, err := os.OpenFile(sinkPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fmt.Errorf("open cell sink %s: %w", sinkPath, err)
+		}
+		defer f.Close()
+		sink = f
+	}
+
+	ctx := context.Background()
+	suite, reports, err := journey.RunSuiteWithExecution(ctx, dir, model, filter, sinkOrNil(sink))
+	if err != nil {
+		return err
+	}
+
+	if outputFormat == "json" {
+		out := map[string]any{"suite": suite, "execution_reports": reports, "model": model}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
+	}
+
+	fmt.Printf("=== journeys suite (%d scenarios — full execution, model=%s) ===\n\n", suite.Total, model)
+	totalSessions, passedSessions := 0, 0
+	for _, rep := range reports {
+		tag := "EXEC_OK"
+		if !rep.OverallOK {
+			tag = "EXEC_FAIL"
+		}
+		fmt.Printf("  [%s] %s (%dms)\n", tag, rep.ScenarioID, rep.LatencyMs)
+		if rep.ErrorMessage != "" {
+			fmt.Printf("         error: %s\n", rep.ErrorMessage)
+		}
+		for _, sr := range rep.Sessions {
+			totalSessions++
+			if sr.OK {
+				passedSessions++
+			}
+			sessTag := "PASS"
+			if !sr.OK {
+				sessTag = "FAIL"
+			}
+			fmt.Printf("         [%s] %s (%s/%s, %dms, turns=%d)\n",
+				sessTag, sr.SessionID, sr.Phase, sr.Kind, sr.LatencyMs, sr.HarnessTurns)
+			if !sr.OK && verbose {
+				if sr.ErrorMessage != "" {
+					fmt.Printf("                  err=%s\n", sr.ErrorMessage)
+				}
+				if !sr.TestsPassed && len(sr.PatternsRequired) >= 0 {
+					fmt.Printf("                  tests_passed=%v required_matched=%d/%d forbidden_found=%v\n",
+						sr.TestsPassed, len(sr.PatternsRequired), -1, sr.PatternsForbidden)
+				}
+			}
+		}
+		fmt.Println()
+	}
+	fmt.Printf("Total scenarios: %d  scored sessions: %d/%d pass\n", len(reports), passedSessions, totalSessions)
+	if sinkPath != "-" {
+		fmt.Printf("cell_results.jsonl appended to %s\n", sinkPath)
+	}
+	return nil
+}
+
+// filepathDirOf is a thin wrapper to avoid an extra path/filepath import
+// just for filepath.Dir in this file. (eval_suite.go imports through
+// internal packages only.)
+func filepathDirOf(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '/' {
+			return p[:i]
+		}
+	}
+	return "."
+}
+
+// sinkOrNil returns f as io.Writer, or nil if f is nil. Hides the
+// *os.File-vs-io.Writer typing dance at the call site.
+func sinkOrNil(f *os.File) interface{ Write(p []byte) (int, error) } {
+	if f == nil {
+		return nil
+	}
+	return f
 }

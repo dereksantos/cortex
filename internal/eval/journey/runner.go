@@ -52,12 +52,52 @@ type Project struct {
 	Language string `yaml:"language"`
 }
 
-// Session is one phase of the multi-session journey.
+// Session is one phase of the multi-session journey. Sessions can
+// carry any of three optional payloads:
+//
+//   - Events: pre-authored decisions/patterns/etc. that get seeded
+//     into Cortex storage before later sessions run.
+//   - Task: a coding task the full-execution adapter drives a harness
+//     against (used by feature/maintenance sessions).
+//   - Queries: post-hoc recall checks (currently inspection-only;
+//     scored by the full-execution adapter as PASS if all
+//     expected_recall IDs surface via Reflex).
 type Session struct {
 	ID      string  `yaml:"id"`
 	Phase   string  `yaml:"phase"`
 	Context string  `yaml:"context"`
 	Events  []Event `yaml:"events"`
+	Task    *Task   `yaml:"task,omitempty"`
+	Queries []Query `yaml:"queries,omitempty"`
+}
+
+// Task is one coding task within a session. The full-execution adapter
+// turns this into a harness invocation (prompt = description + hints,
+// workdir = temp copy of the scaffold).
+type Task struct {
+	Description    string     `yaml:"description"`
+	FilesToModify  []string   `yaml:"files_to_modify"`
+	MaxTurns       int        `yaml:"max_turns"`
+	Timeout        string     `yaml:"timeout"` // parsed by adapter; e.g. "2m"
+	Hints          []string   `yaml:"hints"`
+	Acceptance     Acceptance `yaml:"acceptance"`
+}
+
+// Acceptance is the per-task scoring contract. Each field is optional;
+// the adapter scores only what's present.
+type Acceptance struct {
+	TestsPass         []string `yaml:"tests_pass"`          // go test -run <name>
+	PatternsRequired  []string `yaml:"patterns_required"`   // grep across files_to_modify
+	PatternsForbidden []string `yaml:"patterns_forbidden"`
+}
+
+// Query is one recall-check within a session. Used for the maintenance
+// phase where we verify earlier sessions' context is still retrievable.
+type Query struct {
+	ID              string   `yaml:"id"`
+	Text            string   `yaml:"text"`
+	ExpectedRecall  []string `yaml:"expected_recall"`
+	ExpectedContent []string `yaml:"expected_content"`
 }
 
 // Event is a captured decision / pattern / etc. authored into the
