@@ -34,6 +34,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	cog "github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/llm"
 	"gopkg.in/yaml.v3"
 )
 
@@ -139,15 +140,18 @@ func runScenario(ctx context.Context, s *Scenario, suite *SuiteResult) {
 			ok, errCode, errMsg = runResolveTest(ctx, &t)
 		case "reflex":
 			ok, errCode, errMsg = runReflexTest(ctx, &t)
-		case "reflect", "think", "dream", "router":
-			// Other storage-dependent modes need additional per-mode
-			// dispatchers (similar shape to runReflexTest). Deferred
-			// to a follow-up. Reflex is wired today as the smallest
-			// end-to-end demonstration of the seed-and-dispatch
-			// pattern; same pattern extends to reflect/think/dream/router.
+		case "reflect":
+			ok, errCode, errMsg = runReflectTest(ctx, &t)
+		case "think", "dream", "router":
+			// No scenarios with mode:think|dream|router exist in
+			// test/evals/legacy/cognition/ today — those modes appear
+			// only as scenario *types* (session_*, dream_*, abr_*,
+			// *_conflict), which need scenario-type dispatchers rather
+			// than per-mode handlers. See eval-journal.md entry
+			// "scenario-type runner gap" for the design call.
 			ok = false
-			errCode = "needs_per_mode_dispatcher"
-			errMsg = fmt.Sprintf("mode=%s dispatcher not yet wired; fixtures + storage seeding work (see runReflexTest pattern). Phase B follow-up.", s.Mode)
+			errCode = "needs_scenario_type_runner"
+			errMsg = fmt.Sprintf("mode=%s has no fixtures under cognition/; type:session/dream/benefit/conflict scenarios need a different runner shape.", s.Mode)
 		default:
 			ok = false
 			errCode = "unknown_mode"
@@ -163,9 +167,10 @@ func runScenario(ctx context.Context, s *Scenario, suite *SuiteResult) {
 		if !ok {
 			tr.ErrorCode = errCode
 			tr.ErrorMessage = errMsg
-			if errCode == "needs_fixture_seed" {
+			switch errCode {
+			case "needs_fixture_seed", "needs_scenario_type_runner", "needs_llm_provider":
 				suite.Skipped++
-			} else {
+			default:
 				suite.Failed++
 			}
 		} else {
@@ -293,6 +298,153 @@ func runReflexTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg s
 	}
 
 	return true, "", ""
+}
+
+// runReflectTest dispatches one reflect-mode test against the current
+// cognition.Reflect implementation. Reflect requires an LLM provider —
+// when none is resolvable (no OpenRouter key, no Anthropic env), the
+// test is reported as Skipped with code needs_llm_provider rather than
+// FAIL, since Reflect is the SUT and there is no LLM-free fallback path
+// the scenarios were written against.
+//
+// Self-contained scenarios (all reflect_*.yaml today) inline both the
+// query and the candidate set, so no storage seeding is required. The
+// runner converts input.candidates into []cognition.Result, calls
+// Reflect, and asserts:
+//
+//   - expected.top_result_ids matches the prefix of the returned ranking
+//     (Reflect returns reranked candidates in priority order; the prefix
+//     up to len(expected) must match exactly).
+//   - expected.contradictions_found (if present) — every ID listed must
+//     appear in the returned candidate's Metadata["conflicts_with"]
+//     (Reflect's surface for surfacing detected conflicts, set in
+//     parseRerankResponse).
+func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg string) {
+	q, candidates, ierr := buildReflectInput(t.Input)
+	if ierr != nil {
+		return false, "input_invalid", ierr.Error()
+	}
+
+	provider, _, perr := llm.NewLLMClient(nil)
+	if perr != nil || provider == nil || !provider.IsAvailable() {
+		// No reachable LLM → Reflect would no-op (return candidates
+		// as-is per its graceful-degradation contract). The scenario
+		// has no LLM-free expected behavior, so skip rather than FAIL.
+		return false, "needs_llm_provider", "no LLM provider available (set OPEN_ROUTER_API_KEY or use keychain cortex-openrouter)"
+	}
+
+	r := cognition.NewReflect(provider)
+	reranked, rerr := r.Reflect(ctx, q, candidates)
+	if rerr != nil {
+		return false, "reflect_error", rerr.Error()
+	}
+
+	// expected.top_result_ids — strict prefix match against returned ranking.
+	if expRaw, hasExp := t.Expected["top_result_ids"].([]any); hasExp {
+		expected := make([]string, 0, len(expRaw))
+		for _, e := range expRaw {
+			if s, ok := e.(string); ok {
+				expected = append(expected, s)
+			}
+		}
+		gotIDs := make([]string, 0, len(reranked))
+		for _, r := range reranked {
+			gotIDs = append(gotIDs, r.ID)
+		}
+		if len(gotIDs) < len(expected) {
+			return false, "ranking_too_short", fmt.Sprintf("expected %d top results, got %d (ranking=%v)", len(expected), len(gotIDs), gotIDs)
+		}
+		for i, eid := range expected {
+			if gotIDs[i] != eid {
+				return false, "ranking_mismatch", fmt.Sprintf("position %d: expected %q, got %q (full ranking=%v, expected prefix=%v)", i, eid, gotIDs[i], gotIDs, expected)
+			}
+		}
+	}
+
+	// expected.contradictions_found — every listed ID must appear with
+	// Metadata["conflicts_with"] populated.
+	if contRaw, hasCont := t.Expected["contradictions_found"].([]any); hasCont {
+		expected := make([]string, 0, len(contRaw))
+		for _, c := range contRaw {
+			if s, ok := c.(string); ok {
+				expected = append(expected, s)
+			}
+		}
+		flagged := make(map[string]bool)
+		for _, r := range reranked {
+			if r.Metadata == nil {
+				continue
+			}
+			if _, has := r.Metadata["conflicts_with"]; has {
+				flagged[r.ID] = true
+			}
+		}
+		missing := []string{}
+		for _, id := range expected {
+			if !flagged[id] {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			return false, "contradictions_not_detected", fmt.Sprintf("expected contradictions on ids=%v, none flagged for %v (flagged=%v)", expected, missing, keysOf(flagged))
+		}
+	}
+
+	return true, "", ""
+}
+
+// buildReflectInput converts the YAML input map into a typed Query +
+// []Result for the cognition.Reflect call. Same shape as the resolve
+// input builder but reads input.candidates (the reflect-scenario term)
+// instead of input.results.
+func buildReflectInput(input map[string]any) (cog.Query, []cog.Result, error) {
+	var q cog.Query
+	if qm, ok := input["query"].(map[string]any); ok {
+		if t, ok := qm["text"].(string); ok {
+			q.Text = t
+		}
+	}
+	candsRaw, _ := input["candidates"].([]any)
+	candidates := make([]cog.Result, 0, len(candsRaw))
+	for i, c := range candsRaw {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			return q, nil, fmt.Errorf("input.candidates[%d] not a map", i)
+		}
+		var res cog.Result
+		if v, ok := cm["id"].(string); ok {
+			res.ID = v
+		}
+		if v, ok := cm["content"].(string); ok {
+			res.Content = v
+		}
+		if v, ok := cm["category"].(string); ok {
+			res.Category = v
+		}
+		switch v := cm["score"].(type) {
+		case float64:
+			res.Score = v
+		case int:
+			res.Score = float64(v)
+		}
+		candidates = append(candidates, res)
+	}
+	if strings.TrimSpace(q.Text) == "" {
+		return q, nil, fmt.Errorf("input.query.text is empty")
+	}
+	if len(candidates) == 0 {
+		return q, nil, fmt.Errorf("input.candidates is empty")
+	}
+	return q, candidates, nil
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // buildReflexQuery converts the YAML input.query map into a typed
