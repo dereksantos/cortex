@@ -138,7 +138,10 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
-	useDAG := false            // --dag: route each tool call through act.* DAG ops + emit per-tool trace rows
+	// Stage 3.5: every REPL coding turn routes tool calls through
+	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
+	// debug escape hatch only.
+	dagEnabled := true
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -200,7 +203,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		case "--keep-on-fail":
 			keepOnFail = true
 		case "--dag":
-			useDAG = true
+			// Backwards-compat no-op; DAG dispatch is the default per
+			// Stage 3.5. Kept so scripts that pass --dag don't fail.
+			dagEnabled = true
+		case "--no-dag":
+			dagEnabled = false
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -256,7 +263,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
 	state.keepOnFail = keepOnFail
-	state.useDAG = useDAG
+	state.useDAG = dagEnabled
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -426,7 +433,8 @@ type replState struct {
 	// agent's file writes persist across retries and the final
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
-	// useDAG opts into Stage 3 act-op dispatch. When set, runHarness
+	// useDAG controls Stage 3.5 act-op dispatch. Defaults to true
+	// (--no-dag disables for debugging). When set, runHarness
 	// installs a ToolDispatcher on the CortexHarness that routes each
 	// tool call through act.<name> ops registered on a private
 	// per-session dag.Registry, then emits one synthetic
@@ -718,6 +726,10 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        fails. Benchmark default — iterations build
                        on prior work instead of restarting from
                        scratch each attempt.
+      --no-dag         Debug escape hatch: skip act-op dispatch and
+                       suppress per-tool dag.TraceEntry rows. By
+                       default (Stage 3.5), every coding turn's
+                       tool calls flow through the DAG runtime.
 
 In the REPL:
   /help                Show slash-command help.
@@ -993,14 +1005,14 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
 
-	// Stage 3 opt-in: --dag routes tool calls through act.* DAG ops
-	// + emits per-tool trace rows to .cortex/db/dag_traces.jsonl.
-	// Same dispatcher path cortex code's --dag uses, with a
-	// per-message synthetic parent ID so multi-turn REPL sessions
-	// produce groupable trace rows.
+	// Stage 3.5: REPL turns route tool calls through act.* DAG ops
+	// + emit per-tool trace rows to .cortex/db/dag_traces.jsonl by
+	// default. --no-dag disables this for debugging (s.useDAG=false).
+	// Multi-turn sessions share the synthetic parent ID structure
+	// from buildCodeActDispatcher so trace rows are groupable.
 	if s.useDAG {
 		if _, _, derr := buildCodeActDispatcher(h, s.workdir); derr != nil {
-			return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("--dag: %w", derr)
+			return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op dispatcher: %w", derr)
 		}
 	}
 
