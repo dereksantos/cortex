@@ -110,13 +110,6 @@ func runMechanicSuite(dir, outputFormat string, verbose bool) error {
 	return nil
 }
 
-// suiteNotYetImplemented is the placeholder dispatcher for suites
-// whose runner hasn't landed yet. Returns a structured error pointing
-// at the loop prompt that will land the runner.
-func suiteNotYetImplemented(suite, pointer string) error {
-	return fmt.Errorf("suite %q: runner not yet implemented (%s)", suite, pointer)
-}
-
 // runLegacyCognitionSuite dispatches the 22 scenarios under
 // test/evals/legacy/cognition/ to internal/eval/legacy.RunSuite.
 // Self-contained resolve-mode scenarios run end-to-end; storage-
@@ -141,7 +134,7 @@ func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
 
 	fmt.Printf("=== legacy-cognition suite (%d tests across scenarios) ===\n\n", res.Total)
 	for _, t := range res.TestResults {
-		statusTag := "PASS"
+		var statusTag string
 		switch {
 		case t.OK:
 			statusTag = "PASS"

@@ -223,10 +223,10 @@ func (o *ABRSessionOptions) validate() error {
 		return fmt.Errorf("Model required")
 	}
 	if o.Workdir == "" {
-		return fmt.Errorf("Workdir required")
+		return fmt.Errorf("workdir required")
 	}
 	if len(o.Prompts) == 0 {
-		return fmt.Errorf("Prompts must be non-empty")
+		return fmt.Errorf("prompts must be non-empty")
 	}
 	for i, p := range o.Prompts {
 		if strings.ContainsRune(p, '\n') {
@@ -240,7 +240,7 @@ func (o *ABRSessionOptions) validate() error {
 		return fmt.Errorf("JudgeCriteria required (free-form rubric for ScoreWithJudgeCriteria)")
 	}
 	if o.Judge == nil {
-		return fmt.Errorf("Judge required")
+		return fmt.Errorf("judge required")
 	}
 	if o.Persister != nil && o.CortexVersion == "" {
 		return fmt.Errorf("CortexVersion required when Persister is set (CellResult.Validate rejects cortex-* rows without it)")

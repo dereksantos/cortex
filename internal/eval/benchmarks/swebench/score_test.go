@@ -144,15 +144,21 @@ func TestPreflight_DockerMissing(t *testing.T) {
 }
 
 func TestPreflight_DaemonDown(t *testing.T) {
-	// Docker IS on PATH, but `docker info` fails. Stub it to return
-	// the actual error message macOS prints when the daemon isn't
-	// running so the assertion proves we propagate it usefully.
+	// Docker IS on PATH, but `docker info` fails. Stub LookPath too so
+	// the test passes on hosts without Docker (macOS CI), and stub
+	// info to return the actual error macOS prints when the daemon
+	// isn't running so the assertion proves we propagate it usefully.
+	prevLook := dockerLookPath
 	prevInfo := preflightDockerInfo
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
 	preflightDockerInfo = func(context.Context) ([]byte, error) {
 		out := []byte("Client:\n Version: 28.1.1\nerror during connect: Cannot connect to the Docker daemon at unix:///run/docker.sock. Is the docker daemon running?")
 		return out, errors.New("exit status 1")
 	}
-	defer func() { preflightDockerInfo = prevInfo }()
+	defer func() {
+		dockerLookPath = prevLook
+		preflightDockerInfo = prevInfo
+	}()
 
 	err := preflight(context.Background())
 	if err == nil {
@@ -167,11 +173,16 @@ func TestPreflight_DaemonDown(t *testing.T) {
 }
 
 func TestPreflight_DaemonUp(t *testing.T) {
+	prevLook := dockerLookPath
 	prevInfo := preflightDockerInfo
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
 	preflightDockerInfo = func(context.Context) ([]byte, error) {
 		return []byte("Client:\n Version: 28.1.1\nServer:\n Server Version: 28.1.1\n"), nil
 	}
-	defer func() { preflightDockerInfo = prevInfo }()
+	defer func() {
+		dockerLookPath = prevLook
+		preflightDockerInfo = prevInfo
+	}()
 
 	if err := preflight(context.Background()); err != nil {
 		t.Fatalf("want nil when docker is up, got %v", err)
@@ -240,11 +251,17 @@ func slicesEqual(a, b []string) bool {
 // path treats Docker + the per-instance image as available. Restores
 // originals via t.Cleanup. Use in tests whose subject isn't the
 // preflight gate itself.
+//
+// Includes dockerLookPath so the test works on hosts without Docker
+// installed (e.g. macOS CI runners), where preflight would otherwise
+// fail at the LookPath step before reaching the stubbed info path.
 func stubPreflightForTest(t *testing.T) {
 	t.Helper()
+	prevLook := dockerLookPath
 	prevInfo := preflightDockerInfo
 	prevInspect := preflightImageInspect
 	prevPull := preflightImagePull
+	dockerLookPath = func(string) (string, error) { return "/usr/bin/docker", nil }
 	preflightDockerInfo = func(context.Context) ([]byte, error) {
 		return []byte("Client:\n Server: ok\n"), nil
 	}
@@ -255,6 +272,7 @@ func stubPreflightForTest(t *testing.T) {
 		return []byte("Using cached"), nil
 	}
 	t.Cleanup(func() {
+		dockerLookPath = prevLook
 		preflightDockerInfo = prevInfo
 		preflightImageInspect = prevInspect
 		preflightImagePull = prevPull

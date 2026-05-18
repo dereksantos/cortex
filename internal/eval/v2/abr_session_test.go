@@ -47,12 +47,12 @@ func TestABRSessionOptionsValidate(t *testing.T) {
 		{"empty ScenarioID", func(o *ABRSessionOptions) { o.ScenarioID = "" }, "ScenarioID"},
 		{"empty REPLBinary", func(o *ABRSessionOptions) { o.REPLBinary = "" }, "REPLBinary"},
 		{"empty Model", func(o *ABRSessionOptions) { o.Model = "" }, "Model"},
-		{"empty Workdir", func(o *ABRSessionOptions) { o.Workdir = "" }, "Workdir"},
-		{"no prompts", func(o *ABRSessionOptions) { o.Prompts = nil }, "Prompts"},
+		{"empty Workdir", func(o *ABRSessionOptions) { o.Workdir = "" }, "workdir"},
+		{"no prompts", func(o *ABRSessionOptions) { o.Prompts = nil }, "prompts"},
 		{"prompt has newline", func(o *ABRSessionOptions) { o.Prompts = []string{"a\nb"} }, "newline"},
 		{"empty prompt", func(o *ABRSessionOptions) { o.Prompts = []string{"   "} }, "empty"},
 		{"no criteria", func(o *ABRSessionOptions) { o.JudgeCriteria = "" }, "JudgeCriteria"},
-		{"no judge", func(o *ABRSessionOptions) { o.Judge = nil }, "Judge"},
+		{"no judge", func(o *ABRSessionOptions) { o.Judge = nil }, "judge"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

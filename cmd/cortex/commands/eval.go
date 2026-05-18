@@ -84,11 +84,6 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 				suiteName = ctx.Args[i+1]
 				i++
 			}
-		default:
-			// Support --suite=<name> joined form
-			if strings.HasPrefix(arg, "--suite=") {
-				suiteName = strings.TrimPrefix(arg, "--suite=")
-			}
 		case "--claude-binary":
 			if i+1 < len(ctx.Args) {
 				claudeBinary = ctx.Args[i+1]
@@ -195,6 +190,12 @@ Examples:
   cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
   cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
 			return nil
+		default:
+			// Support --suite=<name> / --benchmark=<name> joined form
+			// not covered by the case arms above.
+			if strings.HasPrefix(arg, "--suite=") {
+				suiteName = strings.TrimPrefix(arg, "--suite=")
+			}
 		}
 	}
 
