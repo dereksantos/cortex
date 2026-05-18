@@ -36,6 +36,49 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 2 cost recalibration: hints were 10-24× under, budgets sized for stub-era
+
+**Cortex**: `d633d6c` (branch `derek.s/dag-stage-2`)
+**Command**:
+```
+go test -tags=calibrate ./pkg/cognition/dag/ops/ -run TestCalibrate -v
+```
+**Versions**: provider=`openrouter-keychain`, llm=`anthropic/claude-haiku-4.5`
+**Result**: 7/7 calibration probes succeeded. Recalibrated hints + default budgets.
+
+**Why this run**: previous entry's followup #3 — the Stage 2 cost hints I declared (e.g. attend.rerank 800ms / 250 tok) were vendor-doc estimates, never measured. Real OpenRouter Haiku 4.5 wall times during the legacy-cognition rewire suggested 10-20× under-calibration. Calibrated to confirm and update.
+
+**Observed per-op (single call, real LLM)**:
+
+| Op | Old hint (ms/tok) | Observed (ms/tok) | Ratio (latency) | New hint (ms/tok) |
+|---|---|---|---|---|
+| attend.rerank | 800 / 250 | 18,862 / 315 | 24× | 22,000 / 400 |
+| value.score | 600 / 120 | 7,775 / 285 | 13× | 9,000 / 350 |
+| value.detect_contradiction | 850 / 180 | 11,128 / 434 | 13× | 13,000 / 550 |
+| decide.inject | 700 / 150 | 12,442 / 415 | 18× | 15,000 / 500 |
+| decide.should_capture | 600 / 100 | 13,427 / 269 | 22× | 16,000 / 350 |
+| model.predict_next | 850 / 200 | 8,913 / 279 | 10× | 11,000 / 350 |
+| maintain.extract_insight | 900 / 200 | 15,179 / 316 | 17× | 18,000 / 400 |
+
+New hints = observed-wall × ~1.15 for ~15% headroom. Token hints sized to cover observed in+out totals plus margin.
+
+**Second-order finding (the bigger one)**:
+
+The bad hints had a knock-on consequence I hadn't traced: `DefaultTurnBudget` was 2000ms / 4000 tok — sized for the v0 stub regime where each node cost 5-40ms. Under the recalibrated hints, every single LLM op exceeds the entire turn budget on its own, so the executor's pre-spawn `CanAfford` check would refuse the *first* LLM op in the chain. The chain would silently truncate after `sense.prompt` + `represent.embed`.
+
+I updated `DefaultTurnBudget` to 150,000ms / 10,000 tok (5 sequential LLM ops × 18s headroom + coding_turn allowance + slack). `DefaultThinkBudget` and `DefaultDreamBudget` proportionally adjusted. `DefaultCaptureBudget` left at 100ms — capture-class DAGs should only run mechanical ops or self-modulate to fallbacks immediately.
+
+**Surprise**:
+- Expected: 10-20× hint under-calibration (from the previous entry's eyeball estimate). Actual: 10-24×, with `decide.should_capture` and `attend.rerank` at the extreme end. The smallest-output op (Y/N capture decision, 60 tok cap) had the LARGEST under-calibration — the model spends ~13s thinking about whether to capture, regardless of how short the answer is. The bottleneck is round-trip + first-token latency, not generation length.
+- Expected: turn budget might need a small bump. Actual: needed a 75× bump (2000 → 150000). The v0-era budget was effectively a stub-only safety check; making LLM ops fit required rethinking what "a turn's budget" even means.
+
+**Follow-ups**:
+1. **Local-model calibration**: re-run the probe against `ollama qwen2.5-coder:1.5b` and `mistral:7b` to see if local-model latency is materially lower (single-digit ms per token vs OpenRouter's ~15-25s wall). If yes, the small-model-amplifier thesis gets concrete evidence and the per-op hints should grow a "model class" axis (cloud-haiku vs local-small).
+2. **`fallbackBelowLatencyMS` revisit**: currently 200ms — fires only when the budget is essentially exhausted. With realistic hints, the threshold should probably scale with the op's own hint ("fall back when remaining < my hint × 1.2"). Currently the handler tries the LLM call when there's 1500ms remaining and a 22,000ms hint, then blows the budget. The executor's `CanAfford` refuses the spawn first, so the handler never runs — but if `CanAfford` ever passes with marginal budget, the handler will incur the full cost regardless.
+3. **Calibration sidecar in dag_traces.jsonl**: the probe is a one-shot snapshot. A drift detector — "if observed p50 in last N traces > hint × 2 or < hint / 2, emit a calibration alert" — could be a Stage 4 polish item.
+
+---
+
 ### 2026-05-18 — Stage 2 gap closed: legacy runner dispatches reflect + resolve via DAG ops
 
 **Cortex**: `440504d` (branch `derek.s/dag-stage-2`)
