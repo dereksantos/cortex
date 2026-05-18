@@ -28,11 +28,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
+	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
@@ -57,6 +62,8 @@ func (c *RunCommand) Execute(ctx *Context) error {
 	workdir := ""
 	outputFormat := "human"
 	verbose := false
+	scenarioPath := ""
+	strategy := "cortex"
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -81,6 +88,16 @@ func (c *RunCommand) Execute(ctx *Context) error {
 				workdir = ctx.Args[i+1]
 				i++
 			}
+		case "--scenario":
+			if i+1 < len(ctx.Args) {
+				scenarioPath = ctx.Args[i+1]
+				i++
+			}
+		case "--strategy":
+			if i+1 < len(ctx.Args) {
+				strategy = ctx.Args[i+1]
+				i++
+			}
 		case "-o", "--output":
 			if i+1 < len(ctx.Args) {
 				outputFormat = ctx.Args[i+1]
@@ -100,6 +117,10 @@ func (c *RunCommand) Execute(ctx *Context) error {
 				model = strings.TrimPrefix(arg, "--model=")
 			} else if strings.HasPrefix(arg, "--workdir=") {
 				workdir = strings.TrimPrefix(arg, "--workdir=")
+			} else if strings.HasPrefix(arg, "--scenario=") {
+				scenarioPath = strings.TrimPrefix(arg, "--scenario=")
+			} else if strings.HasPrefix(arg, "--strategy=") {
+				strategy = strings.TrimPrefix(arg, "--strategy=")
 			}
 		}
 	}
@@ -111,8 +132,13 @@ func (c *RunCommand) Execute(ctx *Context) error {
 	switch dagType {
 	case "turn":
 		return runTurnDAG(prompt, model, workdir, outputFormat, verbose)
-	case "think", "dream", "capture", "eval":
-		return fmt.Errorf("--type=%s not yet implemented (Stage 5 of dag-build-plan.md)", dagType)
+	case "eval":
+		if scenarioPath == "" {
+			return fmt.Errorf("--type=eval requires --scenario=PATH")
+		}
+		return runEvalDAG(scenarioPath, model, workdir, strategy, outputFormat, verbose)
+	case "think", "dream", "capture":
+		return fmt.Errorf("--type=%s not yet implemented (Stage 5 B/C/D of dag-build-plan.md)", dagType)
 	default:
 		return fmt.Errorf("unknown --type=%s (known: turn, think, dream, capture, eval)", dagType)
 	}
@@ -209,6 +235,167 @@ func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error
 	}
 	return nil
 }
+
+// runEvalDAG (Stage 5-A) loads a v2 scenario YAML, builds the prompt
+// (optionally prepended with CortexContext when strategy=cortex),
+// optionally seeds a workdir from the scenario's SeedDir, executes
+// the same turn-shaped DAG as `cortex run --type=turn`, then runs
+// the scenario's Verify command. Emits a one-line summary (or JSON
+// envelope) and exits non-zero if verify fails.
+//
+// This unifies the eval path with the production runtime — the same
+// executor, the same chain, the same calibration + rollover + parallel
+// behavior. The grid runner that bulk-runs scenarios can layer atop
+// `cortex run --type=eval` by invoking it per cell, keeping
+// cell_results.jsonl emission as the grid's single source of truth
+// (no duplicate sink here).
+func runEvalDAG(scenarioPath, model, workdir, strategy, outputFormat string, verbose bool) error {
+	scn, err := evalv2.Load(scenarioPath)
+	if err != nil {
+		return fmt.Errorf("load scenario %s: %w", scenarioPath, err)
+	}
+
+	if len(scn.Tests) == 0 || scn.Tests[0].Query == "" {
+		return fmt.Errorf("scenario %s has no tests[0].query — nothing to prompt with", scn.ID)
+	}
+	prompt := scn.Tests[0].Query
+
+	// Stage 5-A: same prefix logic the grid runner uses, so a single
+	// `cortex run --type=eval` produces the same prompt that
+	// strategy=cortex would produce in a grid cell.
+	if strategy == "cortex" && len(scn.CortexContext) > 0 {
+		bullets := []string{}
+		for _, b := range scn.CortexContext {
+			b = strings.TrimSpace(b)
+			if b != "" {
+				bullets = append(bullets, b)
+			}
+		}
+		if len(bullets) > 0 {
+			prompt = "Hints: " + strings.Join(bullets, " ") + "\n\n" + prompt
+		}
+	}
+
+	// Seed the workdir if the scenario provides one. scn.SeedDir is
+	// stored as-given in the YAML; convention (per the
+	// internal/eval/v2/scenario.go doc + how grid.go consumes it) is
+	// "relative to cwd of the eval invocation." A scenario file
+	// committed under test/evals/coding/sqlx-insert-user.yaml with
+	// seed_dir: test/evals/coding/seeds/sqlx-insert-user works when
+	// `cortex run --type=eval` is invoked from the repo root.
+	if scn.SeedDir != "" {
+		seedDir := scn.SeedDir
+		if workdir == "" {
+			tmp, terr := os.MkdirTemp("", "cortex-eval-"+scn.ID+"-")
+			if terr != nil {
+				return fmt.Errorf("mktemp workdir: %w", terr)
+			}
+			workdir = tmp
+		}
+		if cerr := copyDir(seedDir, workdir); cerr != nil {
+			return fmt.Errorf("seed workdir from %s: %w", seedDir, cerr)
+		}
+		if verbose {
+			fmt.Fprintf(os.Stderr, "[eval] seeded workdir %s from %s\n", workdir, seedDir)
+		}
+	}
+
+	// Delegate to runTurnDAG — same executor, same chain, same
+	// rollover/calibration. The eval wrapper adds prompt construction
+	// + verify pre/post hooks; everything else flows through.
+	if err := runTurnDAG(prompt, model, workdir, outputFormat, verbose); err != nil {
+		return fmt.Errorf("turn DAG: %w", err)
+	}
+
+	// Verify. The scenario's Verify command runs in the workdir; exit
+	// 0 = pass, non-zero = fail. Empty Verify = scenario reports no
+	// programmatic pass/fail signal (the trace alone is the artifact).
+	if scn.Verify == "" {
+		if outputFormat != "json" {
+			fmt.Printf("\n[eval] %s: no verify command — trace is the artifact\n", scn.ID)
+		}
+		return nil
+	}
+
+	cmd := exec.Command("bash", "-c", scn.Verify)
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
+	out, verifyErr := cmd.CombinedOutput()
+	pass := verifyErr == nil
+
+	if outputFormat == "json" {
+		payload := map[string]any{
+			"scenario_id": scn.ID,
+			"strategy":    strategy,
+			"workdir":     workdir,
+			"verify_pass": pass,
+			"verify_out":  string(out),
+		}
+		bb, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Println(string(bb))
+	} else {
+		status := "PASS"
+		if !pass {
+			status = "FAIL"
+		}
+		fmt.Printf("\n[eval] %s verify: %s\n", scn.ID, status)
+		if !pass {
+			fmt.Printf("  command: %s\n", scn.Verify)
+			tail := strings.TrimSpace(string(out))
+			if len(tail) > 400 {
+				tail = "..." + tail[len(tail)-400:]
+			}
+			if tail != "" {
+				fmt.Printf("  output: %s\n", tail)
+			}
+		}
+	}
+	if !pass {
+		return fmt.Errorf("verify failed")
+	}
+	return nil
+}
+
+// copyDir recursively copies srcDir's contents into dstDir. Files
+// already present in dstDir are overwritten. Directory permissions
+// are preserved from src; file permissions are preserved from src.
+// Used by the eval-type DAG to seed a workdir from the scenario's
+// SeedDir.
+func copyDir(srcDir, dstDir string) error {
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, info.Mode())
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
+		if err != nil {
+			return err
+		}
+		defer out.Close()
+		_, err = io.Copy(out, in)
+		return err
+	})
+}
+
+// _ keeps the strconv import alive if no other code in this file
+// uses it (defensive against future flag-parsing edits).
+var _ = strconv.Atoi
 
 // buildTurnRegistry registers the Stage 2 op set via
 // ops.RegisterDefaults, then overlays chain-wiring wrappers so a
