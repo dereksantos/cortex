@@ -36,6 +36,42 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 5 fully complete + REPL chain unified + fetch ops shipped (loop iteration 2)
+
+**Cortex**: branch `derek.s/dag-stage-4` (tip `20aec58`)
+**Commands**:
+```
+go test -race ./pkg/cognition/dag/ ./pkg/cognition/dag/ops/ -count=1
+go test ./...
+./bin/cortex run --type=capture --event='{"tool_name":"Edit","new_string":"..."}'
+./bin/cortex run --type=think
+./bin/cortex run --type=dream
+```
+**Versions**: provider=N/A (mechanics + AST); judge=N/A; rerank=N/A
+**Result**: Every item from this session's carryover list shipped except the branch push (held per no-push-without-consent). 30/30 packages green.
+
+**What landed (4 commits on top of the prior session summary)**:
+
+| Commit | Deliverable |
+|---|---|
+| `8e1aa83` | Stage 5-B/C/D: `cortex run --type=capture | think | dream` V0 chains. Capture is sequential under 100ms DefaultCaptureBudget with conditional extract_insight on edit-shaped events. Think/dream are single-seed stubs sized for their respective Default*Budget; daemon scheduler integration deferred to its own slice. |
+| `abf18b0` | REPL chain unification (Stage 5/6): every REPL coding turn is now one `dag.Executor.Run` over the Stage 2 chain. Preconfigured harness flows through via new `CodingTurnConfig.HarnessFactory + ResultCallback` fields. `buildTurnRegistryWithConfig` / `buildTurnChainWithConfig` accept caller-supplied configs; existing entry points stay as thin wrappers. The separate `buildCodeActDispatcher` call is gone for the DAG path — act-op dispatch wires through the chain's `ActRegistry`, giving real `parent_node_id` lineage instead of the synthetic `code-<pid>-coding_turn` placeholder. |
+| `20aec58` | Fetch ops: `value.detect_unfamiliarity` (AST-based bleed-pattern detector for Go) + `remember.fetch_external` (go doc fetcher with per-project cache at `.cortex/db/external_snippets/`). Both mechanical, both registered in defaults (count 11 → 13). 7 tests, all green under -race. The third-arm prototype's mechanism is now real DAG ops. |
+
+**Observations**:
+- The REPL chain unification was the most invasive change. The trick was adding `HarnessFactory + ResultCallback` to CodingTurnConfig — that lets the REPL pass its preconfigured CortexHarness through the chain without losing the SetXxx state (notifier, system prompt, shared cortex, budget). The separate buildCodeActDispatcher call became redundant once the chain wired ActRegistry properly.
+- `value.detect_unfamiliarity` is AST-only by design. An LLM cross-check (for cases where AST says "unused" but the body uses the symbol via embedded reflection or `text/template`) is a follow-up only if false positives become a problem in practice.
+- `remember.fetch_external` deliberately uses `go doc` (local) rather than pkg.go.dev (network). The third-arm prototype's caveat about "external lookups are opt-in and logged" applies to a future HTTP path; the V0 op is journal-invariant-clean.
+
+**What's NOT done in this iteration**:
+- Wiring `detect_unfamiliarity` + `fetch_external` into `decide.coding_turn`'s re-attempt loop. The ops exist, the eval target exists (`sqlx-insert-user`), but the loop ("LLM emits code → AST detects bleed → fetch snippet → re-spawn LLM with snippet appended") is one more slice of work. Natural next step is a `decide.reattempt` op that conditionally spawns the LLM op + appends the snippet to its Attrs.
+- Daemon scheduler integration for `--type=think` / `--type=dream`. The CLI entry points work; the daemon hook to invoke them on activity/idle triggers is its own slice.
+- Branch push and PR open. **Held per the no-push-without-consent default.** The branch is 12 commits ahead of main, all green, ready to push when the user gives the word.
+
+**Cost**: $0 (all mechanical tests + AST + go doc; no LLM calls).
+
+---
+
 ### 2026-05-18 — DAG operationalized: Stages 4 + 3.5 + 5-A + CLI audit landed end-to-end on derek.s/dag-stage-4
 
 **Cortex**: branch `derek.s/dag-stage-4` (tip after `b7a55fe` CLI cleanup + `1b43839` prototype docs fold-in)
