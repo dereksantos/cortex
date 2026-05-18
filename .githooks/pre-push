@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — run the heavier checks before the push hits CI.
+#
+# Pre-commit stays fast (gofmt + vet only, staged files). Pre-push is
+# the right gate for slower checks — golangci-lint (5-10s) catches
+# staticcheck / unused / etc. that the pre-commit hook misses. CI is
+# still the enforcement layer; this hook is the "fail fast before the
+# 2-minute round trip" friendly nudge.
+#
+# What it runs:
+#   1. golangci-lint run --timeout=5m  (if installed)
+#   2. go test ./...                   (5-30s depending on cache)
+#
+# Bypass for a single push (when you know what you're doing):
+#   git push --no-verify
+#
+# Install golangci-lint:
+#   brew install golangci-lint                                    # macOS
+#   go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if ! command -v golangci-lint >/dev/null 2>&1; then
+  echo "⚠ golangci-lint not installed — skipping the lint gate locally." >&2
+  echo "  CI will run it. Install to fail-fast before pushing:" >&2
+  echo "    brew install golangci-lint" >&2
+  echo "    # or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest" >&2
+  echo "" >&2
+else
+  echo "→ golangci-lint run ..."
+  if ! golangci-lint run --timeout=5m; then
+    echo "" >&2
+    echo "✖ pre-push: golangci-lint violations above" >&2
+    echo "Fix or bypass with --no-verify (only if CI will pass another way)." >&2
+    exit 1
+  fi
+fi
+
+echo "→ go test ./..."
+# Drain git's stdin (refs being pushed) into a tmp file BEFORE
+# starting go test. Otherwise a parallel test that reads os.Stdin
+# would either misinterpret the ref bytes or EOF-fail.
+push_input="$(mktemp)"
+trap 'rm -f "$push_input"' EXIT
+cat > "$push_input"
+
+# CRITICAL: strip the GIT_* env vars git sets when invoking hooks
+# (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_PREFIX, …). Any test
+# that shells out to `git init` / `git commit` (the library-service
+# eval does, per-session for its fixture sessions) would otherwise
+# inherit them and commit into MY repo's .git instead of its temp
+# dirs — polluting the branch HEAD with "seed"/"session" commits.
+#
+# `env -u NAME` is the portable cross-platform flag (macOS + GNU
+# coreutils both honor it; --unset= is GNU-only).
+env_unset_args=()
+while IFS='=' read -r name _; do
+  case "$name" in GIT_*) env_unset_args+=(-u "$name") ;; esac
+done < <(env)
+
+test_log="$(mktemp)"
+trap 'rm -f "$push_input" "$test_log"' EXIT
+if ! env "${env_unset_args[@]}" go test ./... </dev/null >"$test_log" 2>&1; then
+  echo "" >&2
+  echo "✖ pre-push: tests failing. Tail of output:" >&2
+  tail -40 "$test_log" >&2
+  exit 1
+fi
+
+echo "✓ pre-push checks passed"

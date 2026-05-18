@@ -10,6 +10,7 @@ package dag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 )
@@ -118,6 +119,49 @@ type ParamSpec struct {
 // QualifiedName returns "<function>.<op>" — the canonical lookup key.
 func (n NodeSpec) QualifiedName() string {
 	return fmt.Sprintf("%s.%s", n.Function, n.Op)
+}
+
+// nodeSpecPersist is the on-disk projection of a NodeSpec — only the
+// identity-shaped fields that callers populate at spawn time. Handler
+// and registration-time metadata (Cost, Inputs, Outputs, MaxFanout,
+// AxisContract, Description) are reconstituted from the registry by
+// qualified name on replay. Used by JSON marshalling so DeferredSpawn
+// records can roundtrip through the file-backed queue.
+type nodeSpecPersist struct {
+	Function CortexFunction `json:"function"`
+	Op       string         `json:"op"`
+	ID       string         `json:"id,omitempty"`
+	Parent   string         `json:"parent,omitempty"`
+	Attrs    map[string]any `json:"attrs,omitempty"`
+}
+
+// MarshalJSON projects NodeSpec down to its persistable identity for
+// the DeferredSpawn queue. Non-persistable fields (Handler, cost
+// hints, schema) are dropped — the executor looks them up on replay.
+func (n NodeSpec) MarshalJSON() ([]byte, error) {
+	return json.Marshal(nodeSpecPersist{
+		Function: n.Function,
+		Op:       n.Op,
+		ID:       n.ID,
+		Parent:   n.Parent,
+		Attrs:    n.Attrs,
+	})
+}
+
+// UnmarshalJSON populates a NodeSpec from its persistable identity.
+// The Handler + registration-time fields stay zero; callers (the
+// executor) look them up by QualifiedName before invocation.
+func (n *NodeSpec) UnmarshalJSON(data []byte) error {
+	var p nodeSpecPersist
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	n.Function = p.Function
+	n.Op = p.Op
+	n.ID = p.ID
+	n.Parent = p.Parent
+	n.Attrs = p.Attrs
+	return nil
 }
 
 // Registry is the in-memory map of registered nodes. Construct one

@@ -141,7 +141,7 @@ func TestCreateOrder_SagaCompensation(t *testing.T) {
 	// This will fail because OrderService doesn't implement dependency injection yet
 	_, hasSagaSupport := interface{}(svc).(SagaEnabledService)
 	if !hasSagaSupport {
-		t.Errorf("saga compensation not implemented: OrderService does not support dependency injection; "+
+		t.Errorf("saga compensation not implemented: OrderService does not support dependency injection; " +
 			"expected methods: SetInventoryService, SetPaymentService, SetNotificationService")
 	}
 }

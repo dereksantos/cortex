@@ -8,6 +8,11 @@
       "version": "0.1.0"
     },
     {
+      "name": "calibrate",
+      "description": "Recompute per-op p50 cost hints from .cortex/db/dag_traces.jsonl",
+      "version": "0.1.0"
+    },
+    {
       "name": "capture",
       "description": "Capture event from stdin (used by AI tools)",
       "version": "0.1.0"

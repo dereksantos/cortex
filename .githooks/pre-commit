@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — block commits with formatting or vet errors.
+#
+# Activate this hook directory once per clone:
+#   git config core.hooksPath .githooks
+#
+# What it runs (in order):
+#   1. gofmt -l .   — fails if any Go file would be reformatted
+#   2. go vet ./... — fails on suspicious constructs
+#
+# Skipped intentionally for speed:
+#   - go test       (run before push, not before commit)
+#   - golangci-lint (run in CI; local opt-in via scripts/check.sh)
+#
+# Bypass for a single commit (genuine emergencies only):
+#   git commit --no-verify ...
+# Prefer fixing the issue: gofmt -w . almost always does it.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Only check files actually staged for this commit so an in-progress
+# unrelated file doesn't block the commit.
+staged_go=()
+while IFS= read -r -d '' f; do
+  staged_go+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM -z | grep -z '\.go$' || true)
+
+if [[ ${#staged_go[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+unformatted="$(gofmt -l "${staged_go[@]}" || true)"
+if [[ -n "$unformatted" ]]; then
+  echo "✖ pre-commit: staged Go files need gofmt:" >&2
+  echo "$unformatted" >&2
+  echo "" >&2
+  echo "Fix:  gofmt -w ${staged_go[*]}" >&2
+  echo "Or:   git commit --no-verify  (only in genuine emergencies)" >&2
+  exit 1
+fi
+
+# go vet is whole-package-aware, not per-file. Vet only the packages
+# the staged files belong to. Dedupe via sort -u so we don't need
+# bash 4+ associative arrays (macOS ships bash 3.2). Skip
+# test/evals/{fixtures,projects} — those are eval-target source
+# trees, not Go packages in the cortex module (each has its own
+# go.mod or no go.mod at all).
+pkgs=()
+while IFS= read -r dir; do
+  [[ -z "$dir" ]] && continue
+  case "$dir" in
+    test/evals/library-service/fixtures/*|test/evals/projects/*|test/evals/coding/seeds/*)
+      continue ;;
+  esac
+  pkgs+=("./$dir")
+done < <(printf '%s\n' "${staged_go[@]}" | xargs -n1 dirname | sort -u)
+
+if [[ ${#pkgs[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+if ! go vet "${pkgs[@]}"; then
+  echo "" >&2
+  echo "✖ pre-commit: go vet errors above" >&2
+  echo "Bypass with --no-verify only if you've reviewed the diagnostics." >&2
+  exit 1
+fi
+
+exit 0

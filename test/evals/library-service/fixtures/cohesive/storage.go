@@ -19,8 +19,8 @@ import (
 var (
 	errNotFound = errors.New("not found")
 
-	mu       sync.Mutex
-	stores   = newStoreSet()
+	mu     sync.Mutex
+	stores = newStoreSet()
 )
 
 type storeSet struct {

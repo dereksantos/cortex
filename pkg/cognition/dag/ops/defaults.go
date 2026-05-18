@@ -76,6 +76,14 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		PredictNextSpec(PredictNextConfig{Provider: cfg.Provider}),
 		ExtractInsightSpec(ExtractInsightConfig{Provider: cfg.Provider}),
 
+		// Stage 5/6 fetch ops — value.detect_unfamiliarity +
+		// remember.fetch_external. The third-arm prototype's small-
+		// model amplifier mechanism (eval at test/evals/coding/
+		// sqlx-insert-user.yaml). Both mechanical (no LLM); pre-spawn
+		// CanAfford safe even on tight budgets.
+		DetectUnfamiliaritySpec(DetectUnfamiliarityConfig{}),
+		FetchExternalSpec(FetchExternalConfig{}),
+
 		// Stub: maintain.capture's real impl lands in Stage 3 (per
 		// docs/dag-build-plan.md Stage 3 "Loop rewrite").
 		{

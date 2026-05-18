@@ -46,10 +46,13 @@ import (
 
 	"github.com/dereksantos/cortex/internal/capture"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/eval/dagtrace"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
+	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -138,7 +141,10 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
-	useDAG := false            // --dag: route each tool call through act.* DAG ops + emit per-tool trace rows
+	// Stage 3.5: every REPL coding turn routes tool calls through
+	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
+	// debug escape hatch only.
+	dagEnabled := true
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -200,7 +206,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		case "--keep-on-fail":
 			keepOnFail = true
 		case "--dag":
-			useDAG = true
+			// Backwards-compat no-op; DAG dispatch is the default per
+			// Stage 3.5. Kept so scripts that pass --dag don't fail.
+			dagEnabled = true
+		case "--no-dag":
+			dagEnabled = false
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -256,7 +266,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
 	state.keepOnFail = keepOnFail
-	state.useDAG = useDAG
+	state.useDAG = dagEnabled
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -426,7 +436,8 @@ type replState struct {
 	// agent's file writes persist across retries and the final
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
-	// useDAG opts into Stage 3 act-op dispatch. When set, runHarness
+	// useDAG controls Stage 3.5 act-op dispatch. Defaults to true
+	// (--no-dag disables for debugging). When set, runHarness
 	// installs a ToolDispatcher on the CortexHarness that routes each
 	// tool call through act.<name> ops registered on a private
 	// per-session dag.Registry, then emits one synthetic
@@ -718,6 +729,10 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        fails. Benchmark default — iterations build
                        on prior work instead of restarting from
                        scratch each attempt.
+      --no-dag         Debug escape hatch: skip act-op dispatch and
+                       suppress per-tool dag.TraceEntry rows. By
+                       default (Stage 3.5), every coding turn's
+                       tool calls flow through the DAG runtime.
 
 In the REPL:
   /help                Show slash-command help.
@@ -993,16 +1008,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
 
-	// Stage 3 opt-in: --dag routes tool calls through act.* DAG ops
-	// + emits per-tool trace rows to .cortex/db/dag_traces.jsonl.
-	// Same dispatcher path cortex code's --dag uses, with a
-	// per-message synthetic parent ID so multi-turn REPL sessions
-	// produce groupable trace rows.
-	if s.useDAG {
-		if _, _, derr := buildCodeActDispatcher(h, s.workdir); derr != nil {
-			return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("--dag: %w", derr)
-		}
-	}
+	// Stage 5/6 (chain unification): act-op dispatch is wired by the
+	// chain's decide.coding_turn handler via CodingTurnConfig.ActRegistry,
+	// not by a separate buildCodeActDispatcher call. The chain path
+	// gives parent_node_id real lineage (the executor's coding_turn
+	// node ID) instead of the synthetic "code-<pid>-coding_turn"
+	// placeholder. Only the --no-dag escape skips both layers.
 
 	// Share the REPL's Cortex with the cortex_search tool so captures
 	// from earlier turns in this session are findable. Nil cortex is
@@ -1057,8 +1068,26 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		prompt = userPrompt + "\n\nPREVIOUS ATTEMPT FAILED. Verifier output:\n" + retryContext + "\n\nFix this, then stop."
 	}
 
-	hr, runErr := h.RunSessionWithResult(context.Background(), prompt, s.workdir)
-	lr := h.LastLoopResult()
+	// Stage 5/6 (REPL chain unification): every REPL turn IS a
+	// dag.Executor.Run over the Stage 2 chain instead of a direct
+	// h.RunSessionWithResult call. The preconfigured harness flows
+	// through CodingTurnConfig.HarnessFactory so the chain's
+	// decide.coding_turn node drives this same instance (with all
+	// REPL state already set above) rather than constructing a fresh
+	// one. The full HarnessResult + LoopResult are captured back via
+	// ResultCallback. --no-dag (s.useDAG=false) reverts to the V0
+	// direct-harness path for debugging.
+	var (
+		hr     evalv2.HarnessResult
+		lr     harness.LoopResult
+		runErr error
+	)
+	if s.useDAG {
+		hr, lr, runErr = runREPLChainTurn(s, h, prompt)
+	} else {
+		hr, runErr = h.RunSessionWithResult(context.Background(), prompt, s.workdir)
+		lr = h.LastLoopResult()
+	}
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -1068,6 +1097,72 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		hr.FilesChanged = mergeFiles(hr.FilesChanged, salvaged)
 	}
 	return hr, lr, runErr
+}
+
+// runREPLChainTurn executes one REPL coding turn as a full
+// dag.Executor.Run over the Stage 2 chain. The preconfigured harness
+// flows in via CodingTurnConfig.HarnessFactory (so all REPL state —
+// notifier, system prompt, shared cortex, budget, minimal tools —
+// is preserved). The chain's decide.coding_turn handler invokes
+// h.RunSessionWithResult inside the executor, then ResultCallback
+// captures the full HarnessResult + LoopResult back to local vars
+// for the caller. Trace rows for the full 8-node chain land in
+// .cortex/db/dag_traces.jsonl with real parent_node_id lineage.
+//
+// V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
+// path; this function is only on the dag-enabled path.
+func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
+	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
+
+	tw, _ := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if tw != nil {
+		traceCB = tw.Callback(turnID)
+	}
+
+	actReg := dag.NewRegistry()
+	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
+	}
+
+	var (
+		capturedHR  evalv2.HarnessResult
+		capturedLR  harness.LoopResult
+		capturedErr error
+	)
+	codingCfg := dagnode.CodingTurnConfig{
+		Model:       s.model,
+		Workdir:     s.workdir,
+		ActRegistry: actReg,
+		TraceCB:     traceCB,
+		HarnessFactory: func() (*evalv2.CortexHarness, error) {
+			return h, nil
+		},
+		ResultCallback: func(_ *evalv2.CortexHarness, hr evalv2.HarnessResult, lr harness.LoopResult, runErr error) {
+			capturedHR = hr
+			capturedLR = lr
+			capturedErr = runErr
+		},
+	}
+
+	reg := buildTurnRegistryWithConfig(prompt, s.model, s.workdir, traceCB, codingCfg)
+
+	// Warm the registry from the calibration snapshot (Stage 4-C)
+	// so the chain's pre-spawn CanAfford checks reflect observed
+	// reality. Missing snapshot is a cold start; not an error.
+	_, _ = dag.LoadCalibrationSnapshot(reg, "")
+
+	ex := dag.NewExecutor(reg, traceCB)
+	seed := []dag.NodeSpec{{
+		Function: dag.FuncSense,
+		Op:       "prompt",
+		ID:       "n1",
+		Attrs:    map[string]any{"prompt": prompt},
+	}}
+	if _, err := ex.Run(context.Background(), turnID, seed, dag.DefaultTurnBudget()); err != nil {
+		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+	}
+	return capturedHR, capturedLR, capturedErr
 }
 
 // ensureStubOpenRouterKey lets a local-Ollama REPL run even when no

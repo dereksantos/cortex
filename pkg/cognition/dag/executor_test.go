@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // mockHandler builds a handler that returns a fixed cost and spawns
@@ -254,6 +255,12 @@ func TestExecutor_MechanicM4_BudgetExhaustion(t *testing.T) {
 	initial := Budget{LatencyMS: 500, Tokens: 500, Depth: 10}
 
 	ex := NewExecutor(reg, nil)
+	// Mechanic-4 pins the sequential "in-flight finishes, no new
+	// spawns" semantic: n3 must execute alone (FIFO), n4 must be
+	// refused on the next tick. Parallel mode batches the whole
+	// pending set and so admits both — covered by the M4-parallel
+	// variant below.
+	ex.SetSequential(true)
 	trace, err := ex.Run(context.Background(), "test-m4", seed, initial)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -268,6 +275,145 @@ func TestExecutor_MechanicM4_BudgetExhaustion(t *testing.T) {
 	// At least one spawn refusal recorded.
 	if len(trace.SpawnRefusals) == 0 {
 		t.Errorf("expected spawn refusals due to exhaustion; got none")
+	}
+}
+
+// TestExecutor_Parallel_BatchConcurrency verifies that independent
+// sibling nodes in the same pending batch execute concurrently. Each
+// handler sleeps for sleepDur; with N=3 siblings, wall time should be
+// closer to sleepDur than to N*sleepDur. Tight thresholds risk flake
+// on busy CI; we accept any wall time < 1.5*sleepDur as proof of
+// parallelism (sequential would be ~3*sleepDur).
+func TestExecutor_Parallel_BatchConcurrency(t *testing.T) {
+	const sleepDur = 80 * time.Millisecond
+	reg := NewRegistry()
+
+	sleeper := func(ctx context.Context, in map[string]any, b Budget) (NodeResult, error) {
+		time.Sleep(sleepDur)
+		return NodeResult{
+			Out:          map[string]any{},
+			CostConsumed: Cost{LatencyMS: int(sleepDur / time.Millisecond), Tokens: 1},
+		}, nil
+	}
+
+	mustRegister(t, reg, NodeSpec{Function: FuncAttend, Op: "rerank", Handler: sleeper})
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncSense, Op: "prompt",
+		Handler: mockHandler(Cost{LatencyMS: 5, Tokens: 1}, []NodeSpec{
+			{Function: FuncAttend, Op: "rerank", ID: "n2"},
+			{Function: FuncAttend, Op: "rerank", ID: "n3"},
+			{Function: FuncAttend, Op: "rerank", ID: "n4"},
+		}),
+	})
+
+	seed := []NodeSpec{{Function: FuncSense, Op: "prompt", ID: "n1"}}
+	initial := Budget{LatencyMS: 5000, Tokens: 500, Depth: 10}
+
+	ex := NewExecutor(reg, nil) // default = parallel
+	if ex.Sequential() {
+		t.Fatal("Sequential() = true; want false for default constructor")
+	}
+
+	start := time.Now()
+	trace, err := ex.Run(context.Background(), "test-parallel", seed, initial)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if trace.TotalExecuted != 4 {
+		t.Errorf("TotalExecuted: got %d, want 4", trace.TotalExecuted)
+	}
+
+	threshold := time.Duration(float64(sleepDur) * 1.8)
+	if elapsed > threshold {
+		t.Errorf("wall time %v exceeded threshold %v — siblings did not run concurrently (sequential would be ~%v)",
+			elapsed, threshold, 3*sleepDur)
+	}
+}
+
+// TestExecutor_Parallel_TraceOrderedByWallStart verifies that with
+// concurrent execution, trace entries are sorted by WallStart so the
+// JSONL projection stays time-ordered regardless of goroutine
+// scheduling.
+func TestExecutor_Parallel_TraceOrderedByWallStart(t *testing.T) {
+	reg := NewRegistry()
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncAttend, Op: "rerank",
+		Handler: func(ctx context.Context, in map[string]any, b Budget) (NodeResult, error) {
+			return NodeResult{CostConsumed: Cost{LatencyMS: 5, Tokens: 1}}, nil
+		},
+	})
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncSense, Op: "prompt",
+		Handler: mockHandler(Cost{LatencyMS: 5, Tokens: 1}, []NodeSpec{
+			{Function: FuncAttend, Op: "rerank", ID: "n2"},
+			{Function: FuncAttend, Op: "rerank", ID: "n3"},
+			{Function: FuncAttend, Op: "rerank", ID: "n4"},
+			{Function: FuncAttend, Op: "rerank", ID: "n5"},
+		}),
+	})
+
+	ex := NewExecutor(reg, nil)
+	trace, err := ex.Run(context.Background(),
+		"test-parallel-order",
+		[]NodeSpec{{Function: FuncSense, Op: "prompt", ID: "n1"}},
+		Budget{LatencyMS: 1000, Tokens: 100, Depth: 10})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for i := 1; i < len(trace.Entries); i++ {
+		if trace.Entries[i].WallStart.Before(trace.Entries[i-1].WallStart) {
+			t.Errorf("entry %d (%s) WallStart %v < entry %d (%s) WallStart %v — trace not ordered",
+				i, trace.Entries[i].QualifiedName, trace.Entries[i].WallStart,
+				i-1, trace.Entries[i-1].QualifiedName, trace.Entries[i-1].WallStart)
+		}
+	}
+}
+
+// TestExecutor_Parallel_BatchExhaustionAdmitsAll verifies the
+// parallel-mode budget semantic: every node in the current batch
+// executes (they're already in flight), so the parallel variant of
+// the M4 scenario admits both n3 + n4 even though their combined cost
+// would overshoot. After the batch joins, Exhausted reflects the
+// post-batch state on the next iteration check.
+func TestExecutor_Parallel_BatchExhaustionAdmitsAll(t *testing.T) {
+	reg := NewRegistry()
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncDecide, Op: "inject",
+		Handler: mockHandler(Cost{LatencyMS: 100, Tokens: 50}, nil),
+	})
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncMaintain, Op: "capture",
+		Handler: mockHandler(Cost{LatencyMS: 80, Tokens: 30}, nil),
+	})
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncAttend, Op: "reflex",
+		Handler: mockHandler(Cost{LatencyMS: 400, Tokens: 100}, []NodeSpec{
+			{Function: FuncDecide, Op: "inject", ID: "n3"},
+			{Function: FuncMaintain, Op: "capture", ID: "n4"},
+		}),
+	})
+	mustRegister(t, reg, NodeSpec{
+		Function: FuncSense, Op: "prompt",
+		Handler: mockHandler(Cost{LatencyMS: 50, Tokens: 10}, []NodeSpec{
+			{Function: FuncAttend, Op: "reflex", ID: "n2"},
+		}),
+	})
+
+	ex := NewExecutor(reg, nil)
+	trace, err := ex.Run(context.Background(), "test-m4-parallel",
+		[]NodeSpec{{Function: FuncSense, Op: "prompt", ID: "n1"}},
+		Budget{LatencyMS: 500, Tokens: 500, Depth: 10})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if trace.TotalExecuted != 4 {
+		t.Errorf("TotalExecuted: got %d, want 4 (parallel admits the whole batch)", trace.TotalExecuted)
+	}
+	if trace.FinalBudget.LatencyMS >= 0 {
+		t.Errorf("FinalBudget.LatencyMS: got %d, want < 0 (batch overshoot)", trace.FinalBudget.LatencyMS)
 	}
 }
 

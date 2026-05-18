@@ -321,6 +321,18 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 							})
 						}
 					}()
+					// Stage 5-D cleanup: also fire the DAG-shaped dream
+					// alongside the legacy MaybeDream so trace rows
+					// accumulate. When the V0 stub's body grows real
+					// attend.sample / value.extract_insight /
+					// remember.embed_new spawning, the daemon hook here
+					// stays unchanged — the chain shape lives in
+					// runDreamDAGSilent.
+					go func() {
+						if _, derr := RunDreamDAGSilent(context.Background()); derr != nil {
+							log.Printf("dag dream error: %v", derr)
+						}
+					}()
 				} else if cortex.IsModeEnabled("think") {
 					// Active - run Think for session pattern learning
 					go func() {
@@ -331,6 +343,15 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 								Description: fmt.Sprintf("processed %d operations", result.Operations),
 								LatencyMs:   result.Duration.Milliseconds(),
 							})
+						}
+					}()
+					// Stage 5-C cleanup: also fire the DAG-shaped think
+					// alongside the legacy MaybeThink. Trace rows from
+					// the DAG run accumulate in .cortex/db/
+					// dag_traces.jsonl ready for the calibration loop.
+					go func() {
+						if _, derr := RunThinkDAGSilent(context.Background()); derr != nil {
+							log.Printf("dag think error: %v", derr)
 						}
 					}()
 				}

@@ -13,10 +13,10 @@ import (
 )
 
 var (
-	ErrMissingToken   = errors.New("missing authorization token")
-	ErrInvalidToken   = errors.New("invalid token")
-	ErrExpiredToken   = errors.New("token expired")
-	ErrInvalidClaims  = errors.New("invalid claims")
+	ErrMissingToken  = errors.New("missing authorization token")
+	ErrInvalidToken  = errors.New("invalid token")
+	ErrExpiredToken  = errors.New("token expired")
+	ErrInvalidClaims = errors.New("invalid claims")
 )
 
 // SecretKey is used for signing JWTs.
