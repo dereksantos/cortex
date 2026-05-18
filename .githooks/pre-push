@@ -40,9 +40,33 @@ else
 fi
 
 echo "→ go test ./..."
-if ! go test ./... >/dev/null; then
+# Drain git's stdin (refs being pushed) into a tmp file BEFORE
+# starting go test. Otherwise a parallel test that reads os.Stdin
+# would either misinterpret the ref bytes or EOF-fail.
+push_input="$(mktemp)"
+trap 'rm -f "$push_input"' EXIT
+cat > "$push_input"
+
+# CRITICAL: strip the GIT_* env vars git sets when invoking hooks
+# (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_PREFIX, …). Any test
+# that shells out to `git init` / `git commit` (the library-service
+# eval does, per-session for its fixture sessions) would otherwise
+# inherit them and commit into MY repo's .git instead of its temp
+# dirs — polluting the branch HEAD with "seed"/"session" commits.
+#
+# `env -u NAME` is the portable cross-platform flag (macOS + GNU
+# coreutils both honor it; --unset= is GNU-only).
+env_unset_args=()
+while IFS='=' read -r name _; do
+  case "$name" in GIT_*) env_unset_args+=(-u "$name") ;; esac
+done < <(env)
+
+test_log="$(mktemp)"
+trap 'rm -f "$push_input" "$test_log"' EXIT
+if ! env "${env_unset_args[@]}" go test ./... </dev/null >"$test_log" 2>&1; then
   echo "" >&2
-  echo "✖ pre-push: tests failing. Run 'go test ./...' to see details." >&2
+  echo "✖ pre-push: tests failing. Tail of output:" >&2
+  tail -40 "$test_log" >&2
   exit 1
 fi
 
