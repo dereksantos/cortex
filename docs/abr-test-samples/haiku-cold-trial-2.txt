@@ -1,0 +1,40 @@
+[cortex code] workdir: /tmp/cortex-abr-test/haiku-cold/trial-2
+[cortex code] model:   anthropic/claude-haiku-4.5
+[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)
+
+
+[cortex code] turns=1 tokens=1375/235 cost=$0.0026 latency=1617ms reason=model_done
+
+--- final ---
+```go
+package main
+
+import (
+	"database/sql"
+	"fmt"
+
+	_ "github.com/lib/pq"
+)
+
+func InsertUser(name, email string) error {
+	connStr := "user=postgres password=postgres dbname=postgres sslmode=disable"
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	err = db.Ping()
+	if err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	query := "INSERT INTO users (name, email) VALUES ($1, $2)"
+	_, err = db.Exec(query, name, email)
+	if err != nil {
+		return fmt.Errorf("failed to insert user: %w", err)
+	}
+
+	return nil
+}
+```

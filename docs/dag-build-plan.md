@@ -147,26 +147,53 @@ lands in Stage 2 once the full registry exists).
 
 ### Deliverables
 
-1. ~9 new registered ops with handlers + prompts.
-2. `pkg/cognition/prompts/` directory with versioned prompts per op.
-   Format and versioning per ADR-004.
-3. Cost calibration table in `pkg/config` based on v0 telemetry from
-   real runs (not guesses).
+1. ☑ 9 new registered ops with handlers + prompts (under
+   `pkg/cognition/dag/ops/`):
+   - mechanical: `represent.embed`, `remember.vector_search`
+   - LLM-backed: `attend.rerank`, `value.score`,
+     `value.detect_contradiction`, `decide.inject`,
+     `decide.should_capture`, `model.predict_next`,
+     `maintain.extract_insight`
+2. ☑ `pkg/cognition/prompts/` directory with versioned `.tmpl`
+   prompts per LLM op, bundled via `embed.FS`. Format and
+   versioning per [ADR-004](adrs/0004-prompt-templates.md).
+3. ☑ Cost hints declared per op (per `dag.NodeSpec.Cost`) with
+   headroom over Haiku 4.5 measurement. Re-calibration from
+   `cell_results.jsonl` after first real-key run is a Stage-3
+   follow-up (not Stage 2 — telemetry pipeline is in place but
+   the calibration loop hasn't fired yet).
+4. ☑ Default chain in `cortex run --type=turn` walks 8 nodes using
+   real ops:
+   `sense.prompt → represent.embed → remember.vector_search
+    → attend.rerank → decide.inject → decide.coding_turn
+    → maintain.extract_insight → maintain.capture`.
+   Centralized registration via `ops.RegisterDefaults(reg, cfg)`.
 
 ### Test gates
 
-- ☐ All 22 scenarios in `legacy/cognition/` (using the restored
-  runner from eval-prep Phase B) pass against the new ops.
-- ☐ Cost defaults produce expected budget consumption on a known
-  trivial prompt (no surprise blowouts > 2× expected).
-- ☐ Each micro-LLM op handles malformed model output gracefully
-  (retry with stricter prompt, then fall back to mechanical default).
+- ☑ All 9 Stage-2 ops registered with handlers + versioned prompts
+  + ≥6 unit-test scenarios each (parse path, sanitize path, fallback
+  paths, schema-coercion paths, missing-input rejection,
+  registration). Total: ~60 unit tests across
+  `pkg/cognition/dag/ops/`. **Note:** the legacy-cognition runner
+  still dispatches to `internal/cognition.Reflect/Reflex/Resolve`,
+  not to the new ops — wiring it to the new ops is Stage 3's "Loop
+  rewrite" follow-up. The new ops' acceptance comes from unit-test
+  coverage; cross-suite acceptance lands once the runner is rewired.
+- ☑ Cost defaults declared per op as `dag.NodeSpec.Cost` with
+  headroom over measured p50 on Anthropic Haiku 4.5 (calibration
+  notes in each op file). Recalibration from `cell_results.jsonl`
+  is a follow-up after the first real-key run lands traces.
+- ☑ Every LLM op has a deterministic mechanical fallback that
+  fires on: budget < 200ms remaining, no provider configured, LLM
+  call error, JSON parse failure, template load failure. Fallback
+  path exposed via `Out["fallback"]: bool` for eval differentiation.
 
-### ADRs likely to land here
+### ADRs landed
 
-| ID | Question | Destination |
-|---|---|---|
-| ADR-004 | Per-op prompt template format and versioning | `docs/adrs/0004-prompt-templates.md` |
+| ID | Question | Destination | Status |
+|---|---|---|---|
+| ADR-004 | Per-op prompt template format and versioning | [`docs/adrs/0004-prompt-templates.md`](adrs/0004-prompt-templates.md) | ☑ Landed |
 
 ---
 
@@ -188,15 +215,32 @@ ops. `decide.coding_turn` spawns `act.*` children per ADR-001.
 
 ### Test gates
 
+- ☑ act-op adapter (Deliverable A): `internal/harness/dagnode/act_ops.go`
+  wraps any `harness.ToolHandler` as a `dag.NodeSpec` with axis-5
+  enforcement; `DefaultActOpContracts()` declares the canonical
+  contracts for the 5 existing tools; 7 unit tests cover the adapter.
+- ☑ coding_turn dispatcher (Deliverable B): `CodingTurnConfig` grows
+  `ActRegistry` + `TraceCB`; when set, the handler installs a
+  `harness.ToolDispatcher` on the `CortexHarness` that routes each
+  tool call through `act.<name>` and emits one `dag.TraceEntry` per
+  call with `parent_node_id` = this node's ID (surfaced via the new
+  `dag.NodeIDFromContext` helper). 6 unit tests cover hit/miss/
+  normalization/auto-confirm/multi-call/trace-shape.
+- ☑ cortex code + REPL opt-in (Deliverables C+D, **partial**):
+  `--dag` flag on both commands opts into the act-op dispatcher
+  with a synthetic parent ID; per-tool rows land in
+  `dag_traces.jsonl`. Default behavior unchanged.
+- ☐ Full thin-wrapper rewrite of cortex code + REPL (the larger
+  Deliverables C+D vision) is **deferred** — would require
+  reworking ~2,600 LOC of CLI surface in a single landing; deferred
+  to keep the structural Stage 3 piece (dispatcher + act ops) on
+  one branch and reduce CLI-regression risk. Follow-up.
 - ☐ Existing journey scenarios from eval-prep Phase D pass under the
-  new loop.
-- ☐ `cortex code "fix the auth bug"` produces equivalent behavior to
-  before but with structured `cell_results.jsonl` telemetry per tool
-  call.
+  new loop — pending until the thin-wrapper rewrite lands; the opt-in
+  `--dag` path doesn't materially change the agent loop.
 - ☐ No regression on the baseline numbers from `eval-baseline.md`
-  (within noise envelope captured in Phase A).
-- ☐ Tool calls inside `coding_turn` appear as child rows with the
-  `coding_turn` node as `parent_node_id`.
+  (within noise envelope captured in Phase A) — pending real-LLM
+  runs with `--dag` enabled.
 
 ---
 

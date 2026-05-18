@@ -1,0 +1,24 @@
+---
+version: 1
+op: maintain.extract_insight
+description: extract 1-2 durable insights from content, or none
+max_output_tokens: 100
+vars: [content, source]
+---
+You extract DURABLE, ACTIONABLE insights from development content for future coding sessions.
+
+Content:
+{{.content}}
+
+Source: {{.source}}
+
+DURABLE = won't be stale in a week. ACTIONABLE = a decision, pattern, constraint, or correction.
+
+If nothing significant, output exactly:
+{"insights": []}
+
+Otherwise output ONLY valid JSON (no prose), at most 2 entries:
+{"insights": [{"content": "1-sentence insight", "category": "decision|pattern|constraint|correction", "importance": 0.0-1.0}]}
+
+Example (good): {"insights":[{"content":"Use pgx not database/sql for Postgres","category":"constraint","importance":0.8}]}
+Example (none): {"insights":[]}

@@ -21,9 +21,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/eval/dagtrace"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cliout"
+	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 func init() {
@@ -56,6 +60,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	noSearch := false
 	jsonOut := false
 	systemPrompt := ""
+	useDAG := false // --dag: route tool calls through act.* ops + emit per-tool rows
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -107,8 +112,10 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		case "--api-url", "--local":
 			if args[i] == "--local" {
 				// Convenience: --local is shorthand for the standard
-				// Ollama OpenAI-compatible endpoint.
-				apiURL = "http://localhost:11434/v1/chat/completions"
+				// Ollama OpenAI-compatible endpoint. URL constant is
+				// the single source of truth in pkg/llm so callers
+				// don't drift.
+				apiURL = llm.DefaultOllamaURL
 			} else if i+1 < len(args) {
 				apiURL = args[i+1]
 				i++
@@ -121,6 +128,8 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			noSearch = true
 		case "--json":
 			jsonOut = true
+		case "--dag":
+			useDAG = true
 		case "--system-prompt":
 			if i+1 < len(args) {
 				systemPrompt = args[i+1]
@@ -154,7 +163,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			"--api-url", "--system-prompt":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "-h", "--help", "--local":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "--dag", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -192,6 +201,23 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	if err != nil {
 		return fmt.Errorf("init harness: %w", err)
 	}
+
+	// Stage 3 opt-in: --dag routes every tool call through act.* DAG
+	// ops registered on a private registry (axis-5 gate enforced)
+	// AND emits one synthetic dag.TraceEntry per call to
+	// .cortex/db/dag_traces.jsonl with parent_node_id = a synthetic
+	// "code-<turn>" parent ID. The CLI surface is unchanged otherwise.
+	// V0 (no --dag): inline dispatch via the harness's own
+	// ToolRegistry, no per-tool trace rows.
+	if useDAG {
+		actReg, traceCB, dispatchErr := buildCodeActDispatcher(h, resolvedWorkdir)
+		if dispatchErr != nil {
+			return fmt.Errorf("--dag: %w", dispatchErr)
+		}
+		_ = actReg // retained for potential future inspection / testing
+		_ = traceCB
+	}
+
 	if maxTurns > 0 {
 		h.SetMaxTurns(maxTurns)
 	}
@@ -251,6 +277,54 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		fmt.Println(loopRes.Final)
 	}
 	return nil
+}
+
+// buildCodeActDispatcher wires the --dag opt-in for cortex code +
+// REPL. Registers act-op METADATA (not parallel tool instances) in a
+// per-session dag.Registry, then installs a ToolDispatcher on the
+// harness that delegates actual execution back to the harness's own
+// ToolRegistry while emitting per-tool dag.TraceEntry rows.
+//
+// Why metadata-only registration: the harness builds its own
+// ToolRegistry inside RunSession* with the workdir + shared Cortex
+// context wired correctly (including cortex_search). Constructing a
+// parallel set of tools would lose that wiring AND silently break
+// the harness's FilesWritten / ShellNonZeroExits accounting
+// (principles 5 + 7 — same prompt, different reported field values
+// depending on --dag flag). The dispatcher delegates to the harness
+// registry so accounting flows through to HarnessResult unchanged.
+//
+// Trace shape: each tool call produces one row with
+// parent_node_id = "code-<pid>-coding_turn". The "coding_turn"
+// parent row itself is not emitted (no executor walks the session);
+// downstream analysis can group by parent_node_id to reconstruct
+// the per-session bundle.
+//
+// Returns the act registry + trace callback for inspection.
+func buildCodeActDispatcher(h *evalv2.CortexHarness, workdir string) (*dag.Registry, dag.TraceCallback, error) {
+	_ = workdir // workdir is not needed here — the harness handles it
+
+	actReg := dag.NewRegistry()
+	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+		return nil, nil, fmt.Errorf("register act-op metadata: %w", err)
+	}
+
+	turnID := fmt.Sprintf("code-%d", os.Getpid())
+	tw, twErr := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if twErr == nil {
+		traceCB = tw.Callback(turnID)
+	}
+	parentID := turnID + "-coding_turn"
+
+	var spawned []string
+	cfg := dagnode.CodingTurnConfig{
+		ActRegistry: actReg,
+		TraceCB:     traceCB,
+	}
+	dispatcher := dagnode.NewActDispatcher(cfg, parentID, &spawned)
+	h.SetDispatcher(dispatcher)
+	return actReg, traceCB, nil
 }
 
 // codeJSONOutput is the structured contract returned by --json. Fields
@@ -466,6 +540,14 @@ Optional:
                                   turns, tokens, cost, latency, files_changed,
                                   final, reason — enough to populate a
                                   CellResult from a subprocess call.
+  --dag                           Stage 3 opt-in: route every tool call through
+                                  the DAG executor as an act.<tool_name> op
+                                  (axis-5 gate enforced for destructive ops).
+                                  Emits one row per call to
+                                  .cortex/db/dag_traces.jsonl with
+                                  parent_node_id grouped under a synthetic
+                                  per-session parent. Behavior is otherwise
+                                  identical to the default path.
   -v, --verbose                   Print tool arguments and result sizes.
   -q, --quiet                     No live stream; only final summary.
 

@@ -1,0 +1,19 @@
+---
+version: 1
+op: model.predict_next
+description: predict the top 3 likely follow-up queries given recent session activity
+max_output_tokens: 100
+vars: [recent_queries, current]
+---
+You predict what the user will ask next. Given recent queries from this session, output the top 3 most likely follow-up queries.
+
+Recent queries (most recent last):
+{{.recent_queries}}
+
+Current query: {{.current}}
+
+Output ONLY a JSON object — no prose, no markdown fence. Predictions should be specific (a coder might actually type them), not generic. Each ≤10 words.
+
+{"predictions": ["query 1", "query 2", "query 3"]}
+
+Example: {"predictions":["how do refresh tokens work","what is the JWT signing algorithm","where is the auth middleware"]}

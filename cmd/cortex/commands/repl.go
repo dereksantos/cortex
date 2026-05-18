@@ -67,8 +67,9 @@ const (
 
 	// defaultOllamaAPIURL is the OpenAI-compat endpoint Ollama exposes
 	// on the standard port. We auto-route to this when the model id
-	// has no provider prefix (no slash → not OpenRouter).
-	defaultOllamaAPIURL = "http://localhost:11434/v1/chat/completions"
+	// has no provider prefix (no slash → not OpenRouter). Aliased to
+	// llm.DefaultOllamaURL so the URL has a single source of truth.
+	defaultOllamaAPIURL = llm.DefaultOllamaURL
 
 	// defaultMaxOutputTokens caps a single turn's output. Small enough
 	// to force the model to take one focused step at a time, large
@@ -137,6 +138,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	useDAG := false            // --dag: route each tool call through act.* DAG ops + emit per-tool trace rows
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -197,6 +199,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			fullTools = true
 		case "--keep-on-fail":
 			keepOnFail = true
+		case "--dag":
+			useDAG = true
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -252,6 +256,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
 	state.keepOnFail = keepOnFail
+	state.useDAG = useDAG
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -421,6 +426,14 @@ type replState struct {
 	// agent's file writes persist across retries and the final
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
+	// useDAG opts into Stage 3 act-op dispatch. When set, runHarness
+	// installs a ToolDispatcher on the CortexHarness that routes each
+	// tool call through act.<name> ops registered on a private
+	// per-session dag.Registry, then emits one synthetic
+	// dag.TraceEntry per call to .cortex/db/dag_traces.jsonl with
+	// parent_node_id = the per-turn synthetic ID. Default false
+	// preserves V0 inline-dispatch behavior.
+	useDAG bool
 }
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
@@ -500,16 +513,19 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("storage init: %w", err)
 	}
 
-	// LLM provider for the shared Cortex. For Ollama-routed sessions
-	// the OpenRouter constructor still works — Ollama just needs the
-	// API URL pointed at its OpenAI-compat endpoint. We use a stub
-	// key in that case so the client refuses to error out on init.
+	// LLM provider for the shared Cortex. Use the new llm.WithBackend
+	// API so Ollama-routed sessions don't need to reinvent the stub-
+	// key + SetAPIURL dance. Cloud-routed sessions still use the
+	// auto-resolved keychain path.
 	var provider llm.Provider
 	if apiURL == defaultOllamaAPIURL {
-		client := llm.NewOpenRouterClientWithKey(cfg, "ollama-local-stub")
-		client.SetModel(model)
-		client.SetAPIURL(apiURL)
-		provider = client
+		c, _, err := llm.NewLLMClient(cfg,
+			llm.WithBackend(llm.BackendOllama),
+			llm.WithModel(model),
+		)
+		if err == nil {
+			provider = c
+		}
 	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
 		client := llm.NewOpenRouterClientWithKey(cfg, key)
 		client.SetModel(model)
@@ -976,6 +992,18 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
+
+	// Stage 3 opt-in: --dag routes tool calls through act.* DAG ops
+	// + emits per-tool trace rows to .cortex/db/dag_traces.jsonl.
+	// Same dispatcher path cortex code's --dag uses, with a
+	// per-message synthetic parent ID so multi-turn REPL sessions
+	// produce groupable trace rows.
+	if s.useDAG {
+		if _, _, derr := buildCodeActDispatcher(h, s.workdir); derr != nil {
+			return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("--dag: %w", derr)
+		}
+	}
+
 	// Share the REPL's Cortex with the cortex_search tool so captures
 	// from earlier turns in this session are findable. Nil cortex is
 	// the legacy path: the tool builds its own Cortex on first call,

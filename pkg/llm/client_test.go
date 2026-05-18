@@ -2,7 +2,10 @@ package llm
 
 import (
 	"errors"
+	"os"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/config"
 )
 
 // stubKey returns a fixed (key, source, err) — used to drive
@@ -201,4 +204,84 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestNewLLMClient_BackendOllama exercises the WithBackend(BackendOllama)
+// path: no credential required, default URL applied, source tagged
+// correctly. This is the path that replaces the stub-key + SetAPIURL
+// dance previously duplicated across calibrate_test.go,
+// cmd/cortex/commands/repl.go, cmd/cortex/commands/code.go.
+func TestNewLLMClient_BackendOllama(t *testing.T) {
+	got, src, err := NewLLMClient(nil,
+		WithBackend(BackendOllama),
+		WithModel("qwen2.5-coder:1.5b"),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nil client")
+	}
+	if src != SourceOllamaLocal {
+		t.Errorf("expected source=%s, got %s", SourceOllamaLocal, src)
+	}
+	// IsAvailable must be true so callers don't have to special-case
+	// (the stub-key dance existed precisely because IsAvailable would
+	// otherwise return false).
+	if !got.IsAvailable() {
+		t.Error("ollama-backed client must report IsAvailable=true (stub key handled internally)")
+	}
+	if ModelOf(got) != "qwen2.5-coder:1.5b" {
+		t.Errorf("expected model qwen2.5-coder:1.5b, got %s", ModelOf(got))
+	}
+}
+
+func TestNewLLMClient_BackendOllama_WithAPIURL(t *testing.T) {
+	// Custom URL should override the default.
+	custom := "http://my-ollama:11434/v1/chat/completions"
+	got, _, err := NewLLMClient(nil,
+		WithBackend(BackendOllama),
+		WithAPIURL(custom),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	c, ok := got.(*OpenRouterClient)
+	if !ok {
+		t.Fatalf("expected *OpenRouterClient, got %T", got)
+	}
+	if c.apiURL != custom {
+		t.Errorf("expected apiURL=%s, got %s", custom, c.apiURL)
+	}
+}
+
+func TestConstructOpenRouterClient_ExplicitWithoutKey(t *testing.T) {
+	// When the caller explicitly requests OpenRouter but no key is
+	// reachable (keychain empty + env unset), the constructor must
+	// error — auto-fallback to Anthropic is suppressed.
+	saved := os.Getenv("OPEN_ROUTER_API_KEY")
+	_ = os.Unsetenv("OPEN_ROUTER_API_KEY")
+	defer func() {
+		if saved != "" {
+			_ = os.Setenv("OPEN_ROUTER_API_KEY", saved)
+		}
+	}()
+	emptyResolver := func() (string, string, error) { return "", "", nil }
+	_, _, err := constructOpenRouterClient(config.Default(), "", emptyResolver)
+	if err == nil {
+		t.Fatal("expected error when BackendOpenRouter requested without key")
+	}
+	if !contains(err.Error(), "BackendOpenRouter") {
+		t.Errorf("error should name BackendOpenRouter; got: %v", err)
+	}
+}
+
+func TestNewLLMClient_UnknownBackendErrors(t *testing.T) {
+	_, _, err := NewLLMClient(nil, WithBackend(Backend("nonsense")))
+	if err == nil {
+		t.Fatal("expected error for unknown backend")
+	}
+	if !contains(err.Error(), "unknown backend") {
+		t.Errorf("error should mention unknown backend; got: %v", err)
+	}
 }

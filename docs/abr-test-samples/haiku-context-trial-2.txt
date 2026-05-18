@@ -1,0 +1,37 @@
+[cortex code] workdir: /tmp/cortex-abr-test/haiku-context/trial-2
+[cortex code] model:   anthropic/claude-haiku-4.5
+[cortex code] (Ctrl-C to stop; transcript at <workdir>/.cortex/journal/coding/)
+
+
+[cortex code] turns=1 tokens=1229/194 cost=$0.0022 latency=1518ms reason=model_done
+
+--- final ---
+```go
+package main
+
+import (
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
+)
+
+func InsertUser(name, email string) error {
+	db, err := sqlx.Connect("postgres", "user=postgres password=postgres dbname=postgres sslmode=disable")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	query := `INSERT INTO users (name, email) VALUES (:name, :email)`
+	args := map[string]interface{}{
+		"name":  name,
+		"email": email,
+	}
+
+	_, err = db.NamedExec(query, args)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+```

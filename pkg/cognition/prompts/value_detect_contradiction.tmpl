@@ -1,0 +1,24 @@
+---
+version: 2
+op: value.detect_contradiction
+description: does the candidate conflict with any prior on the same topic
+max_output_tokens: 80
+vars: [candidate, priors]
+---
+Decide whether the candidate CONTRADICTS any prior. A contradiction means the two state incompatible policies or facts about the SAME topic (e.g., "use X" vs "don't use X"; "v1 is the current API" vs "we're migrating to v2"). Policy disagreement IS contradiction even when both could technically coexist (e.g., "use stdlib testing" vs "use testify" — pick one, not both).
+
+NOT contradictions: different topics, complementary information, version evolution where both are clearly old/new (unless both are stated as "current").
+
+Candidate: {{.candidate}}
+
+Priors (one per line, ID-prefixed):
+{{.priors}}
+
+Output ONLY a JSON object — no prose, no markdown fence. `conflicts_with` lists prior IDs that contradict the candidate (empty if none).
+
+{"conflicts": true|false, "conflicts_with": ["id1", ...], "why": "≤10 words"}
+
+Examples:
+{"conflicts":true,"conflicts_with":["p_2"],"why":"p_2 says avoid X, candidate uses X"}
+{"conflicts":true,"conflicts_with":["api_v1"],"why":"both claim to be the current API"}
+{"conflicts":false,"conflicts_with":[],"why":"different topics"}

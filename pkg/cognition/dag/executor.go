@@ -71,6 +71,21 @@ type Executor struct {
 // use).
 type TraceCallback func(TraceEntry)
 
+// nodeIDContextKey is the context key the executor uses to surface
+// the currently-executing node's ID to its handler. Handlers that
+// emit synthetic child trace entries (e.g., Stage 3 coding_turn
+// fabricating act.* rows from intercepted tool calls) need this to
+// set the correct ParentID. Read via NodeIDFromContext.
+type nodeIDContextKey struct{}
+
+// NodeIDFromContext returns the ID of the currently-executing node,
+// or "" if ctx wasn't produced by Executor.Run. Handlers that don't
+// care about their own ID can ignore this.
+func NodeIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(nodeIDContextKey{}).(string)
+	return v
+}
+
 // NewExecutor constructs an executor backed by the given registry.
 // traceCB is optional; nil means no per-node callback.
 func NewExecutor(reg *Registry, traceCB TraceCallback) *Executor {
@@ -159,8 +174,11 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 		invocation.Parent = item.spec.Parent
 		invocation.Attrs = item.spec.Attrs
 
-		// Invoke handler.
-		result, herr := invocation.Handler(ctx, invocation.Attrs, budget)
+		// Invoke handler. Surface the executing node's ID via context
+		// for handlers that emit synthetic child rows (Stage 3
+		// coding_turn dispatcher uses this for ParentID).
+		ctxForHandler := context.WithValue(ctx, nodeIDContextKey{}, invocation.ID)
+		result, herr := invocation.Handler(ctxForHandler, invocation.Attrs, budget)
 		entry.WallEnd = time.Now()
 		entry.CostConsumed = result.CostConsumed
 		entry.Out = result.Out

@@ -1,0 +1,18 @@
+---
+version: 1
+op: decide.should_capture
+description: is this event worth keeping in the journal? Y/N + tag
+max_output_tokens: 60
+vars: [event]
+---
+Decide if the event below is worth recording in the project's persistent context journal. Capture-worthy = a future coding session would benefit from knowing this (decisions made, constraints imposed, patterns chosen, corrections to past behavior). Routine edits, debugging steps, and ephemeral tool outputs are NOT capture-worthy.
+
+Event:
+{{.event}}
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"capture": true|false, "tag": "decision|constraint|pattern|correction|none", "why": "≤10 words"}
+
+Examples:
+{"capture":true,"tag":"decision","why":"chose pgx over database/sql"}
+{"capture":false,"tag":"none","why":"routine edit"}
