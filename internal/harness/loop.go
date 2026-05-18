@@ -76,9 +76,16 @@ type LoopResult struct {
 // shape Registry.Dispatch returns) — the loop forwards it back to
 // the model unchanged.
 //
+// The Loop passes its own *ToolRegistry as reg so the dispatcher
+// can delegate to the harness's actual tool instances via
+// reg.Dispatch — preserving FilesWritten / ShellNonZeroExits /
+// InjectedContextTokens accounting. A dispatcher that constructs
+// its own parallel tools breaks those fields silently; principle 5
+// (Reproducible) + 7 (Structured) forbid that.
+//
 // V0 (no dispatcher set) preserves the inline-dispatch behavior the
 // loop has always had.
-type ToolDispatcher func(ctx context.Context, call llm.ToolCall) (string, error)
+type ToolDispatcher func(ctx context.Context, reg *ToolRegistry, call llm.ToolCall) (string, error)
 
 // Loop holds the per-session state needed to run one harness session.
 // Construct once per session — the registry's accounting (shell exits,
@@ -232,7 +239,7 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 			})
 			var out string
 			if l.Dispatcher != nil {
-				out, _ = l.Dispatcher(ctx, call)
+				out, _ = l.Dispatcher(ctx, l.Registry, call)
 			} else {
 				out, _ = l.Registry.Dispatch(ctx, call)
 			}

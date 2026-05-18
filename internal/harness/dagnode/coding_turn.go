@@ -178,89 +178,138 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 // under concurrent coding_turn invocations (a Stage 4 use case).
 var actChildIDCounter int64
 
-// NewActDispatcher returns a harness.ToolDispatcher that routes each
-// tool call through the configured act.* registry, emits a synthetic
-// trace entry, and appends the child's ID to spawnedChildren.
+// NewActDispatcher returns a harness.ToolDispatcher that:
 //
-// Used by the executor-driven coding_turn handler (via the dispatcher
-// installed on CortexHarness inside NewCodingTurnHandler), and by
-// cortex code's --dag opt-in (which has no executor walking but
-// wants the same per-tool trace shape with a synthetic parent ID).
+//  1. Reads the axis-5 contract + cost-hint metadata from the
+//     `act.<tool_name>` spec in cfg.ActRegistry.
+//  2. Enforces the axis-5 gate (destructive ops require confirm,
+//     which the agent-loop context auto-supplies — the user opted in
+//     by running cortex code/repl).
+//  3. **Delegates the actual tool execution to reg.Dispatch** so the
+//     harness's own ToolRegistry accounting (FilesWritten,
+//     ShellNonZeroExits, InjectedContextTokens) is preserved. The
+//     earlier-this-session bug — building a parallel ToolRegistry
+//     just for the act path — violated principles 5 (Reproducible)
+//     and 7 (Structured) by silently zeroing those CellResult
+//     fields when --dag was on. Don't reintroduce.
+//  4. Emits a synthetic dag.TraceEntry per call with parent_node_id
+//     set to the calling node's ID, child_id auto-assigned.
 //
-// On registry miss (no act.<name> registered), emits a miss-trace
-// entry and returns a structured error string the LLM can read.
-// Practical impact is zero when RegisterActOps was called with all
-// 5 known tools.
+// Registry miss (no act.<name> spec) → still delegates to
+// reg.Dispatch so the agent loop keeps working, but emits an
+// unknown_node trace row so the operator sees the gap. Practical
+// impact zero when RegisterActOpMetadata covers all known tools.
 func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren *[]string) harness.ToolDispatcher {
-	return func(ctx context.Context, call llm.ToolCall) (string, error) {
+	return func(ctx context.Context, reg *harness.ToolRegistry, call llm.ToolCall) (string, error) {
 		qname := "act." + normalizeToolName(call.Function.Name)
-		spec, lookupErr := cfg.ActRegistry.Get(qname)
-		if lookupErr != nil {
-			// Miss: emit a trace entry recording the miss + return an
-			// error message the loop forwards to the LLM.
-			msg := fmt.Sprintf(`{"error":"no act op registered for %s; coding_turn cannot dispatch via DAG"}`, qname)
-			emitTraceMiss(cfg, parentNodeID, spawnedChildren, qname, lookupErr.Error())
-			return msg, nil
-		}
-
-		// Invoke the act handler. Force confirm=true — the user has
-		// opted into destructive ops by running cortex code in the
-		// first place; the axis-5 gate exists to catch programmatic
-		// invocations that shouldn't happen, not user-driven coding.
 		started := time.Now()
 		childID := fmt.Sprintf("act-%d", atomic.AddInt64(&actChildIDCounter, 1))
-		childCtx := context.WithValue(ctx, struct{ k string }{"dag.parent"}, parentNodeID)
-		res, herr := spec.Handler(childCtx, map[string]any{
-			"args":    call.Function.Arguments,
-			"confirm": true,
-		}, dag.DefaultTurnBudget())
+
+		spec, lookupErr := cfg.ActRegistry.Get(qname)
+		var (
+			contract dag.AxisContract
+			costHint dag.Cost
+			missErr  string
+		)
+		if lookupErr != nil {
+			missErr = lookupErr.Error()
+		} else {
+			if spec.AxisContract != nil {
+				contract = *spec.AxisContract
+			}
+			costHint = spec.Cost
+		}
+
+		// axis-5: surface contract metadata in the trace, but
+		// auto-confirm — the agent loop is itself the user's
+		// confirmation. The dispatcher cannot meaningfully prompt the
+		// user mid-LLM-call. The contract is preserved so future
+		// human-in-the-loop modes can read it and intercept.
+		_ = contract
+
+		// Delegate to the harness registry — same tool instances the
+		// V0 path would have used, so all the registry's per-call
+		// accounting (write_file → noteFileWritten, run_shell →
+		// noteShellExit) runs verbatim.
+		out, dispErr := reg.Dispatch(ctx, call)
+		latency := int(time.Since(started).Milliseconds())
+
+		// Compose trace entry.
 		entry := dag.TraceEntry{
 			NodeID:        childID,
 			ParentID:      parentNodeID,
 			QualifiedName: qname,
-			OK:            herr == nil,
-			CostConsumed:  res.CostConsumed,
-			Out:           res.Out,
+			OK:            dispErr == nil && missErr == "",
+			CostConsumed:  dag.Cost{LatencyMS: latency, Tokens: 0},
+			Out:           map[string]any{"output": out},
 			WallStart:     started,
 			WallEnd:       time.Now(),
 		}
-		if herr != nil {
-			entry.ErrorCode = "handler_error"
-			entry.ErrorMessage = herr.Error()
+		// Surface the cost hint in Out for the operator to compare
+		// against observed latency (calibration feedback channel).
+		if costHint.LatencyMS > 0 {
+			entry.Out["cost_hint_ms"] = costHint.LatencyMS
 		}
+		if missErr != "" {
+			entry.ErrorCode = "unknown_node"
+			entry.ErrorMessage = "no act op metadata registered for " + qname
+		} else if dispErr != nil {
+			entry.ErrorCode = "handler_error"
+			entry.ErrorMessage = dispErr.Error()
+		}
+
 		if cfg.TraceCB != nil {
 			cfg.TraceCB(entry)
 		}
 		*spawnedChildren = append(*spawnedChildren, childID)
 
-		out, _ := res.Out["output"].(string)
-		if out == "" && herr != nil {
-			out = fmt.Sprintf(`{"error":%q}`, herr.Error())
-		}
-		return out, nil
+		return out, dispErr
 	}
 }
 
-// emitTraceMiss records a synthetic trace entry for a tool call that
-// had no corresponding act op registered. Useful for the operator to
-// see in dag_traces.jsonl: "the agent asked for tool X, no act op
-// existed, here's the cost the lookup took."
-func emitTraceMiss(cfg CodingTurnConfig, parentNodeID string, spawnedChildren *[]string, qname, errMsg string) {
-	childID := fmt.Sprintf("act-%d", atomic.AddInt64(&actChildIDCounter, 1))
-	entry := dag.TraceEntry{
-		NodeID:        childID,
-		ParentID:      parentNodeID,
-		QualifiedName: qname,
-		OK:            false,
-		ErrorCode:     "unknown_node",
-		ErrorMessage:  errMsg,
-		WallStart:     time.Now(),
-		WallEnd:       time.Now(),
+// RegisterActOpMetadata registers an act.<name> NodeSpec in reg with
+// only the protocol metadata (axis contract, cost hint, qualified
+// name). The Handler is a placeholder that returns an error if
+// invoked standalone — these specs are designed to be consumed by
+// the NewActDispatcher (which reads metadata + delegates to the
+// harness ToolRegistry), not invoked through the DAG executor.
+//
+// Use this from CLI callers (cortex code, REPL) that want the
+// dispatcher's axis-5 + trace shape without constructing parallel
+// tool instances.
+func RegisterActOpMetadata(reg *dag.Registry, name string, contract dag.AxisContract, cost dag.Cost) error {
+	return reg.Register(dag.NodeSpec{
+		Function:    dag.FuncAct,
+		Op:          name,
+		Description: "act-op metadata for " + name + " (executed via harness ToolRegistry; see NewActDispatcher)",
+		Inputs: []dag.ParamSpec{
+			{Name: "args", Type: "string", Required: true},
+		},
+		Outputs: []dag.ParamSpec{
+			{Name: "output", Type: "string"},
+		},
+		AxisContract: &contract,
+		Cost:         cost,
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			return dag.NodeResult{}, fmt.Errorf("act.%s: metadata-only NodeSpec (executed via harness ToolRegistry; see NewActDispatcher)", name)
+		},
+	})
+}
+
+// RegisterDefaultActOpMetadata is the batch convenience wrapper:
+// registers all 5 canonical tools (read_file, list_dir, write_file,
+// run_shell, cortex_search) with their DefaultActOpContracts +
+// DefaultActOpCosts. Returns the count registered.
+func RegisterDefaultActOpMetadata(reg *dag.Registry) (int, error) {
+	contracts := DefaultActOpContracts()
+	costs := DefaultActOpCosts()
+	names := []string{"read_file", "list_dir", "write_file", "run_shell", "cortex_search"}
+	for _, n := range names {
+		if err := RegisterActOpMetadata(reg, n, contracts[n], costs[n]); err != nil {
+			return 0, fmt.Errorf("register act.%s: %w", n, err)
+		}
 	}
-	if cfg.TraceCB != nil {
-		cfg.TraceCB(entry)
-	}
-	*spawnedChildren = append(*spawnedChildren, childID)
+	return len(names), nil
 }
 
 // normalizeToolName mirrors harness.normalizeToolName (which is

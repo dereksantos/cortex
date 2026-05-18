@@ -27,7 +27,6 @@ import (
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
-	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 func init() {
@@ -277,117 +276,53 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// buildCodeActDispatcher wires the --dag opt-in for cortex code:
-// constructs a parallel set of ToolHandlers (mirroring what the
-// harness builds internally for this workdir), registers each as an
-// act op, builds a coding_turn-style dispatcher that fans tool calls
-// through them while emitting per-tool dag.TraceEntry rows to
-// .cortex/db/dag_traces.jsonl, and installs the dispatcher on the
-// harness so the next RunSession* call routes through it.
+// buildCodeActDispatcher wires the --dag opt-in for cortex code +
+// REPL. Registers act-op METADATA (not parallel tool instances) in a
+// per-session dag.Registry, then installs a ToolDispatcher on the
+// harness that delegates actual execution back to the harness's own
+// ToolRegistry while emitting per-tool dag.TraceEntry rows.
 //
-// Returns the act registry + trace callback for inspection (tests
-// may want to assert on them); they're otherwise unused by code.go
-// itself.
+// Why metadata-only registration: the harness builds its own
+// ToolRegistry inside RunSession* with the workdir + shared Cortex
+// context wired correctly (including cortex_search). Constructing a
+// parallel set of tools would lose that wiring AND silently break
+// the harness's FilesWritten / ShellNonZeroExits accounting
+// (principles 5 + 7 — same prompt, different reported field values
+// depending on --dag flag). The dispatcher delegates to the harness
+// registry so accounting flows through to HarnessResult unchanged.
 //
 // Trace shape: each tool call produces one row with
-// parent_node_id = "code-coding_turn". The "coding_turn" parent row
-// is NOT emitted by code.go today — we'd need to either run a real
-// DAG executor for that, or fabricate a synthetic parent row at
-// session start. Deferred — the per-tool rows alone are the most
-// useful Stage 3 telemetry signal; the parent row can be reconstructed
-// by `parent_node_id` grouping in analysis.
+// parent_node_id = "code-<pid>-coding_turn". The "coding_turn"
+// parent row itself is not emitted (no executor walks the session);
+// downstream analysis can group by parent_node_id to reconstruct
+// the per-session bundle.
+//
+// Returns the act registry + trace callback for inspection.
 func buildCodeActDispatcher(h *evalv2.CortexHarness, workdir string) (*dag.Registry, dag.TraceCallback, error) {
-	// Construct a parallel ToolRegistry — needed because some tools
-	// (run_shell, write_file) take *harness.ToolRegistry for noting
-	// shell exits and file writes. The harness's own ToolRegistry is
-	// constructed inside RunSession* and not exposed; this parallel
-	// one's accounting is dropped (a small fidelity loss vs the
-	// non-dag path's stats, acceptable for the trace-emission goal).
-	parallelReg := harness.NewToolRegistry()
-
-	tools := []harness.ToolHandler{
-		harness.NewReadFileTool(workdir),
-		harness.NewListDirTool(workdir),
-		harness.NewWriteFileTool(workdir, parallelReg),
-		harness.NewRunShellTool(workdir, parallelReg),
-	}
+	_ = workdir // workdir is not needed here — the harness handles it
 
 	actReg := dag.NewRegistry()
-	contracts := dagnode.DefaultActOpContracts()
-	costs := dagnode.DefaultActOpCosts()
-	configs := make([]dagnode.ActOpConfig, 0, len(tools))
-	for _, t := range tools {
-		configs = append(configs, dagnode.ActOpConfig{
-			Handler:  t,
-			Contract: contracts[t.Name()],
-			Cost:     costs[t.Name()],
-		})
-	}
-	if _, err := dagnode.RegisterActOps(actReg, configs); err != nil {
-		return nil, nil, fmt.Errorf("register act ops: %w", err)
+	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+		return nil, nil, fmt.Errorf("register act-op metadata: %w", err)
 	}
 
-	// Trace writer: per-process append-only sink at
-	// .cortex/db/dag_traces.jsonl. The synthetic parent ID stays
-	// stable across all tool calls within one cortex code session
-	// (single coding_turn invocation) so grouping in analysis is
-	// straightforward.
 	turnID := fmt.Sprintf("code-%d", os.Getpid())
 	tw, twErr := dagtrace.NewWriter("")
 	var traceCB dag.TraceCallback
 	if twErr == nil {
 		traceCB = tw.Callback(turnID)
 	}
-	// Synthetic parent ID since no DAG executor is walking this
-	// session; the agent loop runs directly through the harness.
-	parentID := "code-coding_turn"
+	parentID := turnID + "-coding_turn"
 
 	var spawned []string
 	cfg := dagnode.CodingTurnConfig{
 		ActRegistry: actReg,
 		TraceCB:     traceCB,
 	}
-	dispatcher := func(ctx context.Context, call llm.ToolCall) (string, error) {
-		// Inline the act-dispatch logic for cortex code's no-DAG-executor
-		// context. The newActDispatcher helper requires a parent ID via
-		// NodeIDFromContext, but we're outside an executor walk — fake
-		// it by injecting the synthetic parent into the closure's state.
-		_ = ctx
-		_ = parentID
-		return dagnodeActDispatchInline(cfg, parentID, &spawned, call)
-	}
+	dispatcher := dagnode.NewActDispatcher(cfg, parentID, &spawned)
 	h.SetDispatcher(dispatcher)
 	return actReg, traceCB, nil
 }
-
-// dagnodeActDispatchInline is a thin shim that calls the unexported
-// newActDispatcher helper. Lives here (rather than as another export
-// from dagnode) so cortex code can opt into the same dispatch path
-// the executor-driven coding_turn uses, with a synthetic parent ID.
-//
-// This is a layering compromise — Stage 4 will fold this back together
-// when cortex code becomes a true thin wrapper around cortex run --type=turn
-// (the full Stage 3 prompt deliverable C envisions that rewrite;
-// the opt-in --dag flag is the minimum-viable landing).
-func dagnodeActDispatchInline(cfg dagnode.CodingTurnConfig, parentID string, spawned *[]string, call llm.ToolCall) (string, error) {
-	ctx := context.Background()
-	// Reuse newActDispatcher by handing it a context that carries the
-	// parent ID under the dag package's nodeIDContextKey. The package
-	// exposes NodeIDFromContext to read it; newActDispatcher uses that
-	// to populate ParentID on emitted trace entries. We can't write
-	// the key directly (it's unexported); instead, parentID is
-	// captured in the closure used inside newActDispatcher itself
-	// (see dagnode/coding_turn.go).
-	dispatch := dagnodeNewActDispatcher(cfg, parentID, spawned)
-	return dispatch(ctx, call)
-}
-
-// dagnodeNewActDispatcher is a re-export shim — dagnode.newActDispatcher
-// is unexported, so we provide a thin export here. (TODO: in a
-// follow-up, promote newActDispatcher to NewActDispatcher in dagnode
-// and remove this shim. Keeping unexported for now to avoid widening
-// the public surface area mid-Stage-3.)
-var dagnodeNewActDispatcher = dagnode.NewActDispatcher
 
 // codeJSONOutput is the structured contract returned by --json. Fields
 // carry the same telemetry as the [cortex code] summary line plus the
