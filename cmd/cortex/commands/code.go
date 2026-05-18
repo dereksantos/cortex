@@ -27,6 +27,7 @@ import (
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 func init() {
@@ -111,8 +112,10 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		case "--api-url", "--local":
 			if args[i] == "--local" {
 				// Convenience: --local is shorthand for the standard
-				// Ollama OpenAI-compatible endpoint.
-				apiURL = "http://localhost:11434/v1/chat/completions"
+				// Ollama OpenAI-compatible endpoint. URL constant is
+				// the single source of truth in pkg/llm so callers
+				// don't drift.
+				apiURL = llm.DefaultOllamaURL
 			} else if i+1 < len(args) {
 				apiURL = args[i+1]
 				i++

@@ -67,8 +67,9 @@ const (
 
 	// defaultOllamaAPIURL is the OpenAI-compat endpoint Ollama exposes
 	// on the standard port. We auto-route to this when the model id
-	// has no provider prefix (no slash → not OpenRouter).
-	defaultOllamaAPIURL = "http://localhost:11434/v1/chat/completions"
+	// has no provider prefix (no slash → not OpenRouter). Aliased to
+	// llm.DefaultOllamaURL so the URL has a single source of truth.
+	defaultOllamaAPIURL = llm.DefaultOllamaURL
 
 	// defaultMaxOutputTokens caps a single turn's output. Small enough
 	// to force the model to take one focused step at a time, large
@@ -512,16 +513,19 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("storage init: %w", err)
 	}
 
-	// LLM provider for the shared Cortex. For Ollama-routed sessions
-	// the OpenRouter constructor still works — Ollama just needs the
-	// API URL pointed at its OpenAI-compat endpoint. We use a stub
-	// key in that case so the client refuses to error out on init.
+	// LLM provider for the shared Cortex. Use the new llm.WithBackend
+	// API so Ollama-routed sessions don't need to reinvent the stub-
+	// key + SetAPIURL dance. Cloud-routed sessions still use the
+	// auto-resolved keychain path.
 	var provider llm.Provider
 	if apiURL == defaultOllamaAPIURL {
-		client := llm.NewOpenRouterClientWithKey(cfg, "ollama-local-stub")
-		client.SetModel(model)
-		client.SetAPIURL(apiURL)
-		provider = client
+		c, _, err := llm.NewLLMClient(cfg,
+			llm.WithBackend(llm.BackendOllama),
+			llm.WithModel(model),
+		)
+		if err == nil {
+			provider = c
+		}
 	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
 		client := llm.NewOpenRouterClientWithKey(cfg, key)
 		client.SetModel(model)

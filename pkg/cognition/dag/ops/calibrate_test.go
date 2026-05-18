@@ -38,28 +38,30 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-const ollamaAPIURL = "http://localhost:11434/v1/chat/completions"
-
+// newCalibrationProvider resolves the backend the probe should run
+// against. Two paths:
+//
+//   - default: cloud — try keychain / env-resolved OpenRouter or
+//     Anthropic. Skips if no credential reachable.
+//   - local Ollama (opt-in): set CORTEX_CALIBRATE_OLLAMA_MODEL to
+//     a model name (e.g. "qwen2.5-coder:1.5b"). The client points
+//     at the default Ollama endpoint with the requested model. No
+//     credential required.
+//
+// The local path used to need a stub-key + SetAPIURL dance; that's
+// now handled by llm.WithBackend(llm.BackendOllama).
 func newCalibrationProvider(t *testing.T) llm.Provider {
 	t.Helper()
 
-	// Local-Ollama opt-in via env var. When set, construct an
-	// OpenRouterClient pointed at Ollama's OpenAI-compatible endpoint
-	// with the requested model. This is the small-model amplifier
-	// signal channel — same probe, different backend.
 	if ollamaModel := os.Getenv("CORTEX_CALIBRATE_OLLAMA_MODEL"); ollamaModel != "" {
-		// Stub the API key so IsAvailable() returns true. Ollama doesn't
-		// validate it; the OpenAI-compat endpoint accepts any value.
-		if os.Getenv("OPEN_ROUTER_API_KEY") == "" {
-			_ = os.Setenv("OPEN_ROUTER_API_KEY", "ollama-local-stub")
+		client, source, err := llm.NewLLMClient(nil,
+			llm.WithBackend(llm.BackendOllama),
+			llm.WithModel(ollamaModel),
+		)
+		if err != nil {
+			t.Skipf("local Ollama resolution failed: %v", err)
 		}
-		client := llm.NewOpenRouterClient(nil)
-		client.SetAPIURL(ollamaAPIURL)
-		client.SetModel(ollamaModel)
-		if !client.IsAvailable() {
-			t.Skip("OpenRouter client not available even after stub key")
-		}
-		t.Logf("provider resolved via local Ollama (model=%s)", ollamaModel)
+		t.Logf("provider resolved via %s (model=%s)", source, ollamaModel)
 		return client
 	}
 
