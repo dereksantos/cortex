@@ -723,18 +723,38 @@ func printRunHelp() {
 Run a DAG of the given type through the seed-and-grow executor.
 
 Options:
-  --type TYPE         DAG type: turn | think | dream | capture | eval
-                      (v0: only turn implemented)
-  --prompt TEXT       User prompt (for --type=turn)
-  -o, --output FMT    Output format: human | json (default: human)
-  -v, --verbose       Verbose trace output
-  -h, --help          Show this help
+  --type TYPE          DAG type: turn | eval | (think | dream | capture
+                       not yet implemented — Stage 5-B/C/D)
+  --prompt TEXT        User prompt (for --type=turn)
+  --scenario PATH      Scenario YAML (for --type=eval); see
+                       test/evals/coding/ + test/evals/v2/
+  --strategy NAME      Eval prompt strategy: cortex | baseline
+                       (default: cortex; prepends CortexContext bullets
+                       as "Hints: ..." prefix)
+  --workdir DIR        Workdir for the turn/eval (seeded from scenario
+                       SeedDir when set; auto-mktemp when omitted)
+  --model NAME         LLM model id (--type=turn / --type=eval). Empty =
+                       stub mode (run the DAG with no real LLM call).
+  -o, --output FMT     Output format: human | json (default: human)
+  -v, --verbose        Verbose trace output
+  -h, --help           Show this help
 
-V0 scope (per docs/dag-build-plan.md Stage 1):
-  - --type=turn only; other types route to "not implemented"
-  - 4 stub ops (sense.prompt, attend.reflex, decide.inject, maintain.capture)
-  - Demonstrates executor walks the seed, decays budget, emits trace
-  - Real LLM handlers + decide.coding_turn integration land in Stage 2/3
+Stage status (docs/dag-build-plan.md):
+  - --type=turn       Stage 2 chain (8 ops); Stage 3 act-op dispatch on
+                      tool calls; Stage 4 parallelism + rollover +
+                      calibration; loads .cortex/db/op_cost_hints.json
+                      at construction
+  - --type=eval       Stage 5-A: loads scenario, builds prompt, seeds
+                      workdir from scenario SeedDir, runs the same
+                      turn chain, runs scenario.Verify post-hoc
+  - --type=think      Stage 5-C: deferred (daemon scheduler integration)
+  - --type=dream      Stage 5-D: deferred (daemon scheduler integration)
+  - --type=capture    Stage 5-B: deferred (hook payload integration)
+
+Examples:
+  cortex run --type=turn --prompt "refactor the auth module"
+  cortex run --type=eval --scenario=test/evals/coding/sqlx-insert-user.yaml
+  cortex run --type=eval --scenario=path.yaml --strategy=baseline --workdir /tmp/run
 
 See docs/dag-protocol.md for the protocol semantics.`)
 }

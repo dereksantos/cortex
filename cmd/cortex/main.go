@@ -363,6 +363,11 @@ Commands:
 
   tools          Generate / verify tools.json manifest
 
+  run            Run a DAG by type (turn|eval; think|dream|capture pending)
+  calibrate      Recompute per-op p50 cost hints from dag_traces.jsonl
+  eval           Run an eval scenario or suite (mechanic|coding|v2)
+  code           One-shot coding agent against a workdir (DAG-driven)
+
   version        Show version
   help           Show this help
 
