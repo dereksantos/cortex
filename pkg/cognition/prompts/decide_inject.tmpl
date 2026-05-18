@@ -1,0 +1,27 @@
+---
+version: 1
+op: decide.inject
+description: inject candidates now, defer for more context, or queue for next opportunity
+max_output_tokens: 80
+vars: [query, candidates]
+---
+Decide what to do with the retrieved context for this query.
+
+Options:
+- inject — context is high-confidence and load-bearing right now; include it
+- wait   — context is ambiguous or low-confidence; wait for more signal
+- queue  — context isn't immediately needed but is worth surfacing on the next hook
+
+Query: {{.query}}
+
+Candidates (one per line, ID-prefixed):
+{{.candidates}}
+
+Output ONLY a JSON object — no prose, no markdown fence. `inject_ids` lists which candidates to inject (empty unless decision="inject"). `why` is one terse line.
+
+{"decision": "inject"|"wait"|"queue", "inject_ids": ["id1", ...], "confidence": 0.0-1.0, "why": "≤10 words"}
+
+Examples:
+{"decision":"inject","inject_ids":["jwt_handler"],"confidence":0.9,"why":"directly answers question"}
+{"decision":"wait","inject_ids":[],"confidence":0.4,"why":"all candidates low-relevance"}
+{"decision":"queue","inject_ids":[],"confidence":0.7,"why":"useful background, not blocking"}
