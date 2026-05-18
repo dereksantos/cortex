@@ -208,8 +208,11 @@ func readResultSlice(in map[string]any, key string) ([]cognition.Result, error) 
 	return nil, fmt.Errorf("input %q has unsupported type %T", key, v)
 }
 
-// formatCandidatesForPrompt renders candidates as a "ID: content" list
-// the LLM can consume. Trims content to 200 chars per row so a 10-row
+// formatCandidatesForPrompt renders candidates as a
+// "ID [category]: content" list the LLM can consume. Category is
+// included because rerank scenarios encode a category preference
+// (decision > constraint > pattern); without it the model can't honor
+// the preference. Trims content to 200 chars per row so a 10-row
 // prompt stays comfortably under typical input budgets.
 func formatCandidatesForPrompt(cs []cognition.Result) string {
 	var sb strings.Builder
@@ -218,7 +221,11 @@ func formatCandidatesForPrompt(cs []cognition.Result) string {
 		if len(content) > 200 {
 			content = content[:200] + "..."
 		}
-		fmt.Fprintf(&sb, "%s: %s\n", c.ID, content)
+		category := c.Category
+		if category == "" {
+			category = "unknown"
+		}
+		fmt.Fprintf(&sb, "%s [%s]: %s\n", c.ID, category, content)
 	}
 	return sb.String()
 }

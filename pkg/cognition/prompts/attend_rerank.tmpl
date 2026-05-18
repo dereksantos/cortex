@@ -1,19 +1,31 @@
 ---
-version: 1
+version: 3
 op: attend.rerank
-description: rerank N candidates by relevance to a query
+description: rerank N candidates by relevance to a query, biased toward decision-class content
 max_output_tokens: 100
 vars: [query, candidates]
 ---
-Rank the candidates by relevance to the query. Most relevant FIRST.
+Rank candidates by relevance to the query. Most relevant FIRST.
 
 Query: {{.query}}
 
-Candidates (one per line, ID-prefixed):
+Candidates ("ID [category]: content", input order is arbitrary):
 {{.candidates}}
 
-Output ONLY a JSON object — no prose, no markdown fence. List IDs from MOST to LEAST relevant. Omit candidates that are clearly irrelevant. Keep reason terse (≤10 words).
+Rules:
+- Category strongly biases ranking: decision > constraint > correction > pattern > insight > implementation.
+- "Decision" content always outranks "implementation" or "pattern" content on the SAME topic, even when implementation/pattern mentions more keywords.
+- Direct off-topic content (different domain entirely) ranks last regardless of category.
+- Omit candidates whose topic is clearly unrelated.
 
-{"ranking": ["id1", "id2", ...], "reason": "1-line why"}
+Output ONLY a JSON object — no prose, no markdown fence. Reason ≤10 words.
 
-Example: {"ranking":["jwt_handler","auth_module"],"reason":"jwt_handler directly answers token-expiry question"}
+{"ranking": ["id1", "id2", ...], "reason": "≤10 words"}
+
+Example A — query "How should errors be handled?":
+  error_pattern [pattern], logging_config [pattern], error_decision [decision]
+  → {"ranking":["error_decision","error_pattern"],"reason":"decision wins; logging off-topic"}
+
+Example B — query "What database should we use?":
+  db_schema [implementation], db_connection [pattern], db_config_v2 [decision]
+  → {"ranking":["db_config_v2","db_schema"],"reason":"decision outranks schema/impl on db-choice question"}
