@@ -801,7 +801,7 @@ func buildTurnRegistryWithConfig(prompt, model, workdir string, traceCB dag.Trac
 	return reg
 }
 
-// buildTurnChain returns NodeSpecs whose handlers wrap the
+// buildTurnChainWithConfig returns NodeSpecs whose handlers wrap the
 // ops-package handlers with chain-wiring spawn logic. Each wrapper:
 //
 //   - reads the underlying op's Out
@@ -811,16 +811,12 @@ func buildTurnRegistryWithConfig(prompt, model, workdir string, traceCB dag.Trac
 // Nodes whose underlying op doesn't exist in the ops package
 // (sense.prompt, decide.coding_turn, maintain.capture) get inline
 // implementations.
-func buildTurnChain(prompt, model, workdir string, reg *dag.Registry, traceCB dag.TraceCallback) []dag.NodeSpec {
-	return buildTurnChainWithConfig(prompt, model, workdir, reg, traceCB, dagnode.CodingTurnConfig{
-		Model:   model,
-		Workdir: workdir,
-		TraceCB: traceCB,
-	})
-}
-
-// buildTurnChainWithConfig is the chain-build entry that accepts a
-// caller-supplied CodingTurnConfig. See buildTurnRegistryWithConfig.
+//
+// The caller-supplied CodingTurnConfig overrides the default
+// coding_turn handler so the REPL (and any other caller) can inject
+// a preconfigured CortexHarness via HarnessFactory + capture the
+// full HarnessResult / LoopResult via ResultCallback. Callers that
+// only need defaults route through buildTurnRegistry.
 func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, traceCB dag.TraceCallback, codingCfg dagnode.CodingTurnConfig) []dag.NodeSpec {
 	// Reuse the underlying handlers from a fresh registry so the
 	// wrappers can call them via Get() without doing the construction

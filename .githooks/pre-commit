@@ -43,16 +43,24 @@ if [[ -n "$unformatted" ]]; then
 fi
 
 # go vet is whole-package-aware, not per-file. Vet only the packages
-# the staged files belong to.
+# the staged files belong to. Dedupe via sort -u so we don't need
+# bash 4+ associative arrays (macOS ships bash 3.2). Skip
+# test/evals/{fixtures,projects} — those are eval-target source
+# trees, not Go packages in the cortex module (each has its own
+# go.mod or no go.mod at all).
 pkgs=()
-declare -A seen_pkg
-for f in "${staged_go[@]}"; do
-  pkg_dir="./$(dirname "$f")"
-  if [[ -z "${seen_pkg[$pkg_dir]:-}" ]]; then
-    pkgs+=("$pkg_dir")
-    seen_pkg[$pkg_dir]=1
-  fi
-done
+while IFS= read -r dir; do
+  [[ -z "$dir" ]] && continue
+  case "$dir" in
+    test/evals/library-service/fixtures/*|test/evals/projects/*|test/evals/coding/seeds/*)
+      continue ;;
+  esac
+  pkgs+=("./$dir")
+done < <(printf '%s\n' "${staged_go[@]}" | xargs -n1 dirname | sort -u)
+
+if [[ ${#pkgs[@]} -eq 0 ]]; then
+  exit 0
+fi
 
 if ! go vet "${pkgs[@]}"; then
   echo "" >&2

@@ -36,7 +36,10 @@ run_fmt() {
 }
 
 run_vet() {
-  if ! go vet ./... 2>&1; then
+  # ./... would include test/evals/{fixtures,projects} which are
+  # eval-target source trees not part of the cortex module. List the
+  # real package roots explicitly.
+  if ! go vet ./cmd/... ./internal/... ./pkg/... ./integrations/... 2>&1; then
     echo "" >&2
     echo "✖ go vet: errors above" >&2
     return 1
@@ -45,11 +48,12 @@ run_vet() {
 
 run_lint() {
   if ! command -v golangci-lint >/dev/null 2>&1; then
-    # Lint is optional locally; CI is the enforcement layer.
-    echo "(golangci-lint not installed — skipping; CI will enforce)"
-    return 0
+    echo "✖ golangci-lint not installed." >&2
+    echo "  Install:  brew install golangci-lint" >&2
+    echo "  Or:       go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest" >&2
+    return 1
   fi
-  if ! golangci-lint run ./...; then
+  if ! golangci-lint run --timeout=5m; then
     echo "" >&2
     echo "✖ golangci-lint: violations above" >&2
     return 1

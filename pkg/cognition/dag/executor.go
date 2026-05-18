@@ -235,9 +235,7 @@ func (e *Executor) runSequential(
 		if entry.OK {
 			children, refusals := e.scheduleChildren(trace.TurnID, item, spec, result.Spawn, *budget, initial, nextChildID)
 			entry.SpawnedChildren = childIDs(children)
-			for _, c := range children {
-				pending = append(pending, c)
-			}
+			pending = append(pending, children...)
 			trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
 		}
 
@@ -335,9 +333,7 @@ func (e *Executor) runParallel(
 			if entry.OK {
 				children, refusals := e.scheduleChildren(trace.TurnID, r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
 				entry.SpawnedChildren = childIDs(children)
-				for _, c := range children {
-					pending = append(pending, c)
-				}
+				pending = append(pending, children...)
 				trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
 			}
 

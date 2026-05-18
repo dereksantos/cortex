@@ -33,15 +33,27 @@ Thank you for your interest in contributing to Cortex! This document provides gu
    ./cortex --help
    ```
 
-4. **Activate the pre-commit hook** (one-time per clone)
+4. **Activate the git hooks** (one-time per clone)
    ```bash
    git config core.hooksPath .githooks
+   # optional but recommended for the pre-push lint gate:
+   brew install golangci-lint
+   # or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
    ```
-   The hook runs `gofmt -l` + `go vet` on staged Go files and blocks
-   commits with formatting errors or vet diagnostics. To bypass for
-   a genuine emergency: `git commit --no-verify` (prefer fixing the
-   issue — `gofmt -w .` almost always does it). Same checks are
-   available as `./scripts/check.sh` for manual runs.
+   Two hooks land:
+   - **pre-commit** runs `gofmt -l` + `go vet` on staged Go files
+     (fast — runs every commit). Blocks commits with formatting
+     errors or vet diagnostics.
+   - **pre-push** runs `golangci-lint` + `go test ./...` (slower —
+     runs once per push, the right gate for staticcheck-level
+     issues that CI would otherwise catch with a 2-minute round
+     trip). Skipped with a warning if `golangci-lint` isn't
+     installed locally.
+
+   Bypass for genuine emergencies: `git commit --no-verify` or
+   `git push --no-verify`. Prefer fixing the issue — `gofmt -w .`
+   almost always does it. Same checks available as
+   `./scripts/check.sh {fmt,vet,lint,all}` for manual runs.
 
 ### Development Environment
 
