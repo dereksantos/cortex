@@ -573,17 +573,40 @@ func eventContent(event map[string]any) string {
 	return string(bb)
 }
 
-// runThinkDAG (Stage 5-C) runs a think-type DAG via the CLI. Real
-// daemon-scheduled invocation per docs/loop-dag-stage-5 lands as a
-// daemon hook that calls into RunCommand.Execute directly; this CLI
-// entry point exists for testability + manual invocation.
-//
-// Budget: DefaultThinkBudget. V0 shape: a single think.session_check
-// seed that records that the think cycle ran; real
-// model.predict_next + attend.warm_cache + value.rerank_session
-// spawning happens when the corresponding handlers exist on the
-// registry.
+// runThinkDAG runs a think-type DAG via the CLI; daemon scheduler
+// integration calls runThinkDAGSilent below (no stdout prints).
 func runThinkDAG(model, outputFormat string, verbose bool) error {
+	trace, err := runThinkDAGSilent(context.Background())
+	if err != nil {
+		return err
+	}
+	emitBackgroundSummary(outputFormat, "think", trace)
+	return nil
+}
+
+// runDreamDAG runs a dream-type DAG via the CLI; daemon scheduler
+// integration calls runDreamDAGSilent below (no stdout prints).
+func runDreamDAG(model, outputFormat string, verbose bool) error {
+	trace, err := runDreamDAGSilent(context.Background())
+	if err != nil {
+		return err
+	}
+	emitBackgroundSummary(outputFormat, "dream", trace)
+	return nil
+}
+
+// runThinkDAGSilent is the daemon-scheduler entry point. Same chain
+// as runThinkDAG but never writes to stdout — the caller decides
+// what to do with the trace. Stage 5-C cleanup: the daemon's
+// cognitiveTicker calls this every tick when activity is high,
+// running the DAG-shaped think alongside the legacy MaybeThink so
+// the trace rows accumulate even before think's V0 stub gets real
+// model.predict_next / attend.warm_cache / value.rerank_session
+// bodies.
+//
+// Budget: DefaultThinkBudget. V0 shape: single maintain.session_check
+// seed.
+func runThinkDAGSilent(ctx context.Context) (*dag.Trace, error) {
 	turnID := fmt.Sprintf("think-%d", time.Now().UnixNano())
 	tw, _ := dagtrace.NewWriter("")
 	var traceCB dag.TraceCallback
@@ -604,25 +627,23 @@ func runThinkDAG(model, outputFormat string, verbose bool) error {
 		},
 	})
 	ex := dag.NewExecutor(reg, traceCB)
-	trace, err := ex.Run(context.Background(), turnID,
+	return ex.Run(ctx, turnID,
 		[]dag.NodeSpec{{Function: dag.FuncMaintain, Op: "session_check", ID: "t1"}},
 		dag.DefaultThinkBudget())
-	if err != nil {
-		return err
-	}
-	emitBackgroundSummary(outputFormat, "think", trace)
-	return nil
 }
 
-// runDreamDAG (Stage 5-D) runs a dream-type DAG via the CLI. Real
-// idle-time-scheduled invocation lands as a daemon hook in a later
-// slice; CLI entry exists for testability + manual invocation.
+// runDreamDAGSilent is the daemon-scheduler entry point. Same chain
+// as runDreamDAG but never writes to stdout — the caller decides
+// what to do with the trace. Stage 5-D cleanup: the daemon's
+// cognitiveTicker calls this every tick when activity is low,
+// running the DAG-shaped dream alongside the legacy MaybeDream so
+// the trace rows accumulate even before dream's V0 stub gets real
+// attend.sample / value.extract_insight / remember.embed_new
+// bodies.
 //
-// Budget: DefaultDreamBudget. V0 shape: a single
-// maintain.idle_probe seed. Real attend.sample +
-// value.extract_insight + remember.embed_new spawning lands when
-// those handlers are registered.
-func runDreamDAG(model, outputFormat string, verbose bool) error {
+// Budget: DefaultDreamBudget. V0 shape: single maintain.idle_probe
+// seed.
+func runDreamDAGSilent(ctx context.Context) (*dag.Trace, error) {
 	turnID := fmt.Sprintf("dream-%d", time.Now().UnixNano())
 	tw, _ := dagtrace.NewWriter("")
 	var traceCB dag.TraceCallback
@@ -643,14 +664,22 @@ func runDreamDAG(model, outputFormat string, verbose bool) error {
 		},
 	})
 	ex := dag.NewExecutor(reg, traceCB)
-	trace, err := ex.Run(context.Background(), turnID,
+	return ex.Run(ctx, turnID,
 		[]dag.NodeSpec{{Function: dag.FuncMaintain, Op: "idle_probe", ID: "d1"}},
 		dag.DefaultDreamBudget())
-	if err != nil {
-		return err
-	}
-	emitBackgroundSummary(outputFormat, "dream", trace)
-	return nil
+}
+
+// RunThinkDAGSilent is the exported daemon-facing wrapper for
+// runThinkDAGSilent. Same shape; exported so daemon.go can call it
+// without an underscore-prefixed name.
+func RunThinkDAGSilent(ctx context.Context) (*dag.Trace, error) {
+	return runThinkDAGSilent(ctx)
+}
+
+// RunDreamDAGSilent is the exported daemon-facing wrapper for
+// runDreamDAGSilent.
+func RunDreamDAGSilent(ctx context.Context) (*dag.Trace, error) {
+	return runDreamDAGSilent(ctx)
 }
 
 // emitBackgroundSummary prints a small summary for the think/dream
@@ -828,7 +857,36 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	if codingCfg.TraceCB == nil {
 		codingCfg.TraceCB = traceCB
 	}
-	codingTurnHandler := dagnode.NewCodingTurnHandler(codingCfg)
+	rawCodingTurnHandler := dagnode.NewCodingTurnHandler(codingCfg)
+	// Wrap with the fetch-op re-attempt loop. After the LLM emits its
+	// response, value.detect_unfamiliarity scans for the bleed pattern
+	// (imports X but doesn't call X — the third-arm ABR prototype's
+	// failure mode). When findings appear AND budget allows AND the
+	// per-turn attempt cap isn't exhausted, remember.fetch_external
+	// pulls API surface for each finding and the LLM is re-invoked
+	// with the snippets prepended to the prompt.
+	//
+	// Bounded by maxReattempts (1 by default) so a model that
+	// consistently emits bleed-pattern code can't unbounded-loop the
+	// turn budget away.
+	codingTurnHandler := wrapCodingTurnWithReattempt(rawCodingTurnHandler, codingCfg, traceCB)
+
+	// readPrompt returns the runtime prompt for this chain step.
+	// Cleanup (post-Stage-5/6): every step reads prompt from in["prompt"]
+	// — the seed's Attrs set it once, then each spawn propagates it to
+	// its child's Attrs. The closure-captured `prompt` argument stays
+	// as a fallback so legacy callers that don't populate seed Attrs
+	// keep working. Once all callers pass prompt via Attrs (they do
+	// today — runTurnDAG + runREPLChainTurn both seed with
+	// Attrs={prompt: prompt}), the closure can be dropped entirely
+	// and the chain registry can be built once and reused across
+	// turns (REPL multi-turn benefit).
+	readPrompt := func(in map[string]any) string {
+		if s, ok := in["prompt"].(string); ok && s != "" {
+			return s
+		}
+		return prompt
+	}
 
 	// sense.prompt — captures the trigger prompt; spawns represent.embed.
 	senseSpec := dag.NodeSpec{
@@ -837,12 +895,13 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		Description: "ingress: user prompt arrives; spawns represent.embed",
 		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
 			return dag.NodeResult{
-				Out: map[string]any{"prompt": prompt},
+				Out: map[string]any{"prompt": p},
 				Spawn: []dag.NodeSpec{
 					{
 						Function: dag.FuncRepresent, Op: "embed", ID: "n2",
-						Attrs: map[string]any{"text": prompt},
+						Attrs: map[string]any{"text": p, "prompt": p},
 					},
 				},
 				CostConsumed: dag.Cost{LatencyMS: 5, Tokens: 0},
@@ -858,6 +917,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		Description: "embed the prompt into a vector; spawns remember.vector_search",
 		Cost:        dag.Cost{LatencyMS: 10, Tokens: 0},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
 			res, err := embedInner(ctx, in, b)
 			if err != nil {
 				// No embedder configured (the common path without deps wired) —
@@ -872,7 +932,10 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 			res.Spawn = []dag.NodeSpec{
 				{
 					Function: dag.FuncRemember, Op: "vector_search", ID: "n3",
-					Attrs: map[string]any{"query_vector": vec, "limit": 10, "threshold": 0.0},
+					Attrs: map[string]any{
+						"query_vector": vec, "limit": 10, "threshold": 0.0,
+						"prompt": p,
+					},
 				},
 			}
 			// Suppress error so the chain keeps walking; mechanical
@@ -889,6 +952,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		Description: "find similar context via vector similarity; spawns attend.rerank",
 		Cost:        dag.Cost{LatencyMS: 15, Tokens: 0},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
 			res, err := searchInner(ctx, in, b)
 			if err != nil {
 				// No storage or no query vector — pass through with no
@@ -902,7 +966,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 			res.Spawn = []dag.NodeSpec{
 				{
 					Function: dag.FuncAttend, Op: "rerank", ID: "n4",
-					Attrs: map[string]any{"query": prompt, "candidates": candidates},
+					Attrs: map[string]any{"query": p, "candidates": candidates, "prompt": p},
 				},
 			}
 			return res, nil
@@ -917,6 +981,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		Description: "rerank candidates by relevance; spawns decide.inject",
 		Cost:        dag.Cost{LatencyMS: 800, Tokens: 250},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
 			res, err := rerankInner(ctx, in, b)
 			if err != nil {
 				return res, err
@@ -925,7 +990,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 			res.Spawn = []dag.NodeSpec{
 				{
 					Function: dag.FuncDecide, Op: "inject", ID: "n5",
-					Attrs: map[string]any{"query": prompt, "candidates": reranked},
+					Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
 				},
 			}
 			return res, nil
@@ -940,6 +1005,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		Description: "decide inject/wait/queue; spawns decide.coding_turn",
 		Cost:        dag.Cost{LatencyMS: 700, Tokens: 150},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
 			res, err := injectInner(ctx, in, b)
 			if err != nil {
 				return res, err
@@ -947,7 +1013,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 			res.Spawn = []dag.NodeSpec{
 				{
 					Function: dag.FuncDecide, Op: "coding_turn", ID: "n6",
-					Attrs: map[string]any{"prompt": prompt},
+					Attrs: map[string]any{"prompt": p},
 				},
 			}
 			return res, nil
@@ -968,7 +1034,10 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 			if in == nil {
 				in = map[string]any{}
 			}
-			if _, has := in["prompt"]; !has {
+			// Prompt flows in via the chain's runtime Attrs propagation
+			// (cleanup post-Stage-5/6). Fallback to closure for legacy
+			// callers that seed without Attrs.
+			if p, ok := in["prompt"].(string); !ok || p == "" {
 				in["prompt"] = prompt
 			}
 			res, err := codingTurnHandler(ctx, in, b)
@@ -1025,6 +1094,122 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	return []dag.NodeSpec{
 		senseSpec, embedSpec, searchSpec, rerankSpec,
 		injectSpec, codingTurnSpec, insightSpec, captureSpec,
+	}
+}
+
+// maxReattempts caps how many fetch-and-re-invoke cycles a single
+// coding turn can run. 1 attempt is the default: if the first LLM
+// pass shows the bleed pattern, fetch the missing API surface and
+// retry once. Anything more risks ratholing — if a model still bleed-
+// patterns after one fetch, it likely needs a different model not
+// another fetch cycle.
+const maxReattempts = 1
+
+// wrapCodingTurnWithReattempt returns a handler that runs the inner
+// coding_turn, scans its response with value.detect_unfamiliarity,
+// and (if findings + budget + attempt cap permit) fetches snippets
+// via remember.fetch_external and re-invokes the inner handler with
+// the snippets prepended to the prompt. Re-attempts emit a synthetic
+// dag.TraceEntry so the trace shows the loop firing.
+//
+// V0 scope: detection runs on the response text. Falsified positives
+// possible (the model's response includes example code in a code
+// fence that imports without calling). The eval target —
+// sqlx-insert-user — uses code-as-response so the detector hits
+// cleanly. Detecting on actually-written files is a future iteration
+// once the harness exposes per-file new-content cleanly.
+func wrapCodingTurnWithReattempt(inner dag.Handler, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) dag.Handler {
+	detect := ops.NewDetectUnfamiliarityHandler(ops.DetectUnfamiliarityConfig{})
+	fetch := ops.NewFetchExternalHandler(ops.FetchExternalConfig{})
+
+	return func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+		res, err := inner(ctx, in, b)
+		if err != nil {
+			return res, err
+		}
+		response, _ := res.Out["response"].(string)
+		if response == "" {
+			return res, nil
+		}
+
+		attempts := 0
+		for attempts < maxReattempts {
+			detectRes, detectErr := detect(ctx, map[string]any{"code": response, "language": "go"}, b)
+			if detectErr != nil {
+				break
+			}
+			findings, _ := detectRes.Out["findings"].([]ops.UnfamiliarityFinding)
+			if len(findings) == 0 {
+				break // clean code; nothing to refetch
+			}
+
+			// Fetch each finding's API surface. Skip on fetch error
+			// or empty snippet — best-effort augmentation.
+			var snippets []string
+			for _, f := range findings {
+				if !b.CanAfford(dag.Cost{LatencyMS: 300, Tokens: 0}) {
+					break // not enough budget for one more fetch
+				}
+				fetchRes, fetchErr := fetch(ctx, map[string]any{"package": f.Package, "language": "go"}, b)
+				if fetchErr != nil {
+					continue
+				}
+				snippet, _ := fetchRes.Out["snippet"].(string)
+				if snippet == "" {
+					continue
+				}
+				snippets = append(snippets, "Reference for "+f.Package+":\n"+snippet)
+				// Account for the fetch cost on the turn budget. Read
+				// it back from the fetch's CostConsumed so the budget
+				// stays accurate.
+				b.Consume(fetchRes.CostConsumed)
+				res.CostConsumed.LatencyMS += fetchRes.CostConsumed.LatencyMS
+				res.CostConsumed.Tokens += fetchRes.CostConsumed.Tokens
+			}
+
+			if len(snippets) == 0 {
+				break // all fetches failed; no point retrying with no new context
+			}
+
+			// Emit a synthetic trace entry so the re-attempt is visible.
+			parentNodeID := dag.NodeIDFromContext(ctx)
+			if traceCB != nil {
+				traceCB(dag.TraceEntry{
+					NodeID:        fmt.Sprintf("%s-reattempt-%d", parentNodeID, attempts+1),
+					ParentID:      parentNodeID,
+					QualifiedName: "decide.reattempt",
+					OK:            true,
+					WallStart:     time.Now(),
+					WallEnd:       time.Now(),
+					Out: map[string]any{
+						"findings_count": len(findings),
+						"snippets_count": len(snippets),
+						"attempt":        attempts + 1,
+					},
+				})
+			}
+
+			// Augment prompt and re-invoke.
+			origPrompt, _ := in["prompt"].(string)
+			augmented := origPrompt + "\n\n--- Reference examples for unfamiliar APIs ---\n\n" + strings.Join(snippets, "\n\n") + "\n\n--- end references ---\n\nReattempt the task following these examples."
+			retryIn := map[string]any{}
+			for k, v := range in {
+				retryIn[k] = v
+			}
+			retryIn["prompt"] = augmented
+
+			retryRes, retryErr := inner(ctx, retryIn, b)
+			if retryErr != nil {
+				break // keep the original result if retry errors
+			}
+			// Roll forward to the retry's response + accumulate cost.
+			retryRes.CostConsumed.LatencyMS += res.CostConsumed.LatencyMS
+			retryRes.CostConsumed.Tokens += res.CostConsumed.Tokens
+			res = retryRes
+			response, _ = res.Out["response"].(string)
+			attempts++
+		}
+		return res, nil
 	}
 }
 
