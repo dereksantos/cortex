@@ -41,9 +41,11 @@ func PredictNextSpec(cfg PredictNextConfig) dag.NodeSpec {
 	}
 }
 
-// predictNextCostHint — ~60-100 tok output; 700ms p50 Haiku 4.5. Set
-// 850ms / 200 tok for headroom.
-var predictNextCostHint = dag.Cost{LatencyMS: 850, Tokens: 200}
+// predictNextCostHint — calibrated 2026-05-18 against OpenRouter
+// Haiku 4.5 (calibrate_test.go probe): top-3 prediction call ≈
+// 8,913ms wall / 279 tokens. Set 11000ms / 350 tok for ~15% headroom.
+// 10× gap vs pre-calibration guess (850ms / 200 tok).
+var predictNextCostHint = dag.Cost{LatencyMS: 11000, Tokens: 350}
 
 // NewPredictNextHandler returns a dag.Handler for model.predict_next.
 //

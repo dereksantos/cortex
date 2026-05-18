@@ -47,9 +47,11 @@ func InjectSpec(cfg InjectConfig) dag.NodeSpec {
 	}
 }
 
-// injectCostHint — small decision, ~50-70 tok output, 600ms p50 Haiku
-// 4.5. Set 700ms / 150 tok for headroom.
-var injectCostHint = dag.Cost{LatencyMS: 700, Tokens: 150}
+// injectCostHint — calibrated 2026-05-18 against OpenRouter Haiku 4.5
+// (calibrate_test.go probe): single 3-way decision with 3 candidates
+// ≈ 12,442ms wall / 415 tokens. Set 15000ms / 500 tok for ~15%
+// headroom. 18× gap vs pre-calibration guess (700ms / 150 tok).
+var injectCostHint = dag.Cost{LatencyMS: 15000, Tokens: 500}
 
 // NewInjectHandler returns a dag.Handler for decide.inject.
 //

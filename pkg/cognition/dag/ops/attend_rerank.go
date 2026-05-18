@@ -44,10 +44,15 @@ func RerankSpec(cfg RerankConfig) dag.NodeSpec {
 	}
 }
 
-// rerankCostHint — micro-LLM rerank with ~5-10 candidates costs ~600ms
-// p50 on Haiku 4.5 (~50-80 token output). Set 800ms / 250 tok for
-// headroom over the ~100-token output budget.
-var rerankCostHint = dag.Cost{LatencyMS: 800, Tokens: 250}
+// rerankCostHint — calibrated 2026-05-18 against OpenRouter Haiku 4.5
+// via the calibrate_test.go probe: single call with 3 candidates ≈
+// 18,862ms wall / 315 tokens (in+out). The wall time is dominated by
+// the OpenRouter round-trip — network + queueing + model inference —
+// not the model's own inference latency. Set 22000ms / 400 tok for
+// ~15% headroom. The 24× gap vs my pre-calibration guess
+// (800ms / 250 tok) is documented in docs/eval-journal.md
+// "Stage 2 cost recalibration".
+var rerankCostHint = dag.Cost{LatencyMS: 22000, Tokens: 400}
 
 // NewRerankHandler returns a dag.Handler for attend.rerank.
 //

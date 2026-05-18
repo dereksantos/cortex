@@ -71,39 +71,68 @@ func (b Budget) String() string {
 }
 
 // DefaultTurnBudget is the seed budget for a turn-type DAG.
-// Conservative defaults per docs/dag-protocol.md "Per-DAG-type seeds".
+// Calibrated 2026-05-18 against OpenRouter Haiku 4.5 real-LLM
+// measurements (calibrate_test.go): the 7 LLM-backed Stage 2 ops
+// take 8-19s wall each, ~280-435 tokens each (315 token average).
+// The Stage 2 turn chain runs 5 LLM ops sequentially (sense → embed →
+// search → rerank → inject → coding_turn → extract_insight → capture)
+// plus coding_turn (variable; the BIG node). For sequential walking:
+//
+//   5 LLM ops × 18s headroom = 90,000ms
+//   + coding_turn allowance   = 30,000ms
+//   + slack                   = 30,000ms
+//   = 150,000ms total
+//
+// Stage 4 will revisit when parallel execution lands — parallel
+// fan-out collapses sequential ops onto a single critical path, so
+// budgets can shrink. For now, this supports the sequential chain.
+//
+// Token budget: 5 LLM ops × 400 tok headroom = 2,000 + coding_turn
+// (~5,000 tok) + slack = 10,000.
+//
+// Depth 10 covers any plausible chain — the Stage 2 chain is depth 7
+// (sense → embed → search → rerank → inject → coding_turn →
+// extract_insight → capture, where each is the parent of the next).
+//
 // pkg/config will override per project.
 func DefaultTurnBudget() Budget {
 	return Budget{
-		LatencyMS: 2000,
-		Tokens:    4000,
+		LatencyMS: 150000,
+		Tokens:    10000,
 		Depth:     10,
 	}
 }
 
 // DefaultThinkBudget is the seed budget for a think-type DAG. Smaller
 // latency budget (background spare cycles); fewer tokens. Real budget
-// is computed by the scheduler from inverse activity level.
+// is computed by the scheduler from inverse activity level. Sized to
+// support 1-2 sequential LLM ops at calibrated cost (e.g., a single
+// value.score + maintain.extract_insight ≈ 7s + 15s + slack).
 func DefaultThinkBudget() Budget {
 	return Budget{
-		LatencyMS: 500,
-		Tokens:    1000,
+		LatencyMS: 30000,
+		Tokens:    3000,
 		Depth:     8,
 	}
 }
 
 // DefaultDreamBudget is the seed budget for a dream-type DAG. Larger
 // latency (idle time); more tokens; deeper exploration allowed.
+// Sized to support ~10 sequential LLM ops + insight extraction at
+// calibrated Haiku 4.5 cost (10 × 15s = 150s + extract overhead).
 func DefaultDreamBudget() Budget {
 	return Budget{
-		LatencyMS: 30000,
-		Tokens:    20000,
+		LatencyMS: 180000,
+		Tokens:    30000,
 		Depth:     15,
 	}
 }
 
 // DefaultCaptureBudget is the seed budget for a capture-type DAG.
-// Tiny — capture is per-event and must not block.
+// Tiny — capture is per-event and must not block. Even
+// decide.should_capture (calibrated at 13s real-LLM) is too expensive
+// for this budget; capture-type DAGs should run mechanical ops only,
+// or self-modulate to fallbacks immediately.
 func DefaultCaptureBudget() Budget {
 	return Budget{
 		LatencyMS: 100,

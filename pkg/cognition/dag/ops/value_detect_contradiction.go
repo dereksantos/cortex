@@ -46,9 +46,11 @@ func DetectContradictionSpec(cfg DetectContradictionConfig) dag.NodeSpec {
 	}
 }
 
-// detectContradictionCostHint — ~50-80 token output; 700ms p50 on
-// Haiku 4.5 with ~5 priors. Set 850ms / 180 tok for headroom.
-var detectContradictionCostHint = dag.Cost{LatencyMS: 850, Tokens: 180}
+// detectContradictionCostHint — calibrated 2026-05-18 against
+// OpenRouter Haiku 4.5 (calibrate_test.go probe): single call with 3
+// priors ≈ 11,128ms wall / 434 tokens. Set 13000ms / 550 tok for
+// ~15% headroom. 13× gap vs pre-calibration guess (850ms / 180 tok).
+var detectContradictionCostHint = dag.Cost{LatencyMS: 13000, Tokens: 550}
 
 // NewDetectContradictionHandler returns a dag.Handler for
 // value.detect_contradiction.

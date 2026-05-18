@@ -44,9 +44,11 @@ func ScoreSpec(cfg ScoreConfig) dag.NodeSpec {
 	}
 }
 
-// scoreCostHint — tight Y/N output, ~30-50 tokens; 500ms p50 on Haiku
-// 4.5. Set 600ms / 120 tok for headroom.
-var scoreCostHint = dag.Cost{LatencyMS: 600, Tokens: 120}
+// scoreCostHint — calibrated 2026-05-18 against OpenRouter Haiku 4.5
+// (calibrate_test.go probe): single Y/N + confidence call ≈ 7,775ms
+// wall / 285 tokens. Set 9000ms / 350 tok for ~15% headroom.
+// 13× gap vs pre-calibration guess (600ms / 120 tok).
+var scoreCostHint = dag.Cost{LatencyMS: 9000, Tokens: 350}
 
 // NewScoreHandler returns a dag.Handler for value.score.
 //

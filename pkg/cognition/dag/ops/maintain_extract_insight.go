@@ -53,12 +53,12 @@ func ExtractInsightSpec(cfg ExtractInsightConfig) dag.NodeSpec {
 	}
 }
 
-// extractInsightCostHint — LLM call dominates; small-model output ≤100
-// tokens. Anthropic Haiku 4.5 measures p50 ≈ 600ms for a 50-token
-// completion; OpenRouter qwen3-coder p50 ≈ 800ms. Set 900ms / 200 tok
-// for headroom. Will recalibrate from cell_results.jsonl after first
-// real run.
-var extractInsightCostHint = dag.Cost{LatencyMS: 900, Tokens: 200}
+// extractInsightCostHint — calibrated 2026-05-18 against OpenRouter
+// Haiku 4.5 (calibrate_test.go probe): single extract call on a
+// 200-char decision note ≈ 15,179ms wall / 316 tokens. Set 18000ms /
+// 400 tok for ~15% headroom. 17× gap vs pre-calibration guess
+// (900ms / 200 tok).
+var extractInsightCostHint = dag.Cost{LatencyMS: 18000, Tokens: 400}
 
 // fallbackBelowLatencyMS — if remaining budget is below this threshold,
 // skip the LLM call and run the mechanical fallback. 200ms is roughly

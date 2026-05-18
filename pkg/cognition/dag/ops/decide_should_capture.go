@@ -43,9 +43,12 @@ func ShouldCaptureSpec(cfg ShouldCaptureConfig) dag.NodeSpec {
 	}
 }
 
-// shouldCaptureCostHint — tight Y/N + tag, ~30-50 tok output, 500ms
-// p50 Haiku 4.5. Set 600ms / 100 tok for headroom.
-var shouldCaptureCostHint = dag.Cost{LatencyMS: 600, Tokens: 100}
+// shouldCaptureCostHint — calibrated 2026-05-18 against OpenRouter
+// Haiku 4.5 (calibrate_test.go probe): single Y/N + tag call ≈
+// 13,427ms wall / 269 tokens. Set 16000ms / 350 tok for ~15%
+// headroom. 22× gap vs pre-calibration guess (600ms / 100 tok) — the
+// largest under-calibration in the Stage 2 op set.
+var shouldCaptureCostHint = dag.Cost{LatencyMS: 16000, Tokens: 350}
 
 // validCaptureTags is the allowed set the prompt asks the model to
 // pick from. Anything else gets normalized to "none" (and capture
