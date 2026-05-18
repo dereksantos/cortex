@@ -139,7 +139,7 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		var spawnedChildren []string
 		parentNodeID := dag.NodeIDFromContext(ctx)
 		if cfg.ActRegistry != nil {
-			h.SetDispatcher(newActDispatcher(cfg, parentNodeID, &spawnedChildren))
+			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, &spawnedChildren))
 		}
 
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)
@@ -178,25 +178,20 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 // under concurrent coding_turn invocations (a Stage 4 use case).
 var actChildIDCounter int64
 
-// newActDispatcher returns a harness.ToolDispatcher that routes each
+// NewActDispatcher returns a harness.ToolDispatcher that routes each
 // tool call through the configured act.* registry, emits a synthetic
 // trace entry, and appends the child's ID to spawnedChildren.
 //
-// On registry miss (no act.<name> registered), falls through to a
-// nil-returning dispatcher — the loop then needs the default
-// Registry.Dispatch path. To make miss handling clean, we wrap the
-// caller's harness registry behind the scenes... actually simpler:
-// on miss we just invoke the underlying tool handler via the
-// CortexHarness's already-constructed ToolRegistry. Since the
-// dispatcher signature only exposes (call) and not the harness
-// registry, we accept a registry passthrough.
+// Used by the executor-driven coding_turn handler (via the dispatcher
+// installed on CortexHarness inside NewCodingTurnHandler), and by
+// cortex code's --dag opt-in (which has no executor walking but
+// wants the same per-tool trace shape with a synthetic parent ID).
 //
-// For Stage 3, miss simply falls back to a synthesized error message
-// — practical impact is zero because RegisterDefaultActOps registers
-// all 5 known tools. If a future tool lands without an act op
-// registration, the agent will see a clear error and the user gets a
-// readable signal to register it.
-func newActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren *[]string) harness.ToolDispatcher {
+// On registry miss (no act.<name> registered), emits a miss-trace
+// entry and returns a structured error string the LLM can read.
+// Practical impact is zero when RegisterActOps was called with all
+// 5 known tools.
+func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren *[]string) harness.ToolDispatcher {
 	return func(ctx context.Context, call llm.ToolCall) (string, error) {
 		qname := "act." + normalizeToolName(call.Function.Name)
 		spec, lookupErr := cfg.ActRegistry.Get(qname)

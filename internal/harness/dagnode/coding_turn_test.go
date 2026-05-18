@@ -34,7 +34,7 @@ func TestNewActDispatcher_routesToRegistry(t *testing.T) {
 		ActRegistry: reg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := newActDispatcher(cfg, "coding_turn_id", &spawned)
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", &spawned)
 
 	out, err := dispatch(context.Background(), llm.ToolCall{
 		ID: "call_1",
@@ -81,7 +81,7 @@ func TestNewActDispatcher_missEmitsTraceAndReturnsError(t *testing.T) {
 		ActRegistry: reg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := newActDispatcher(cfg, "coding_turn_id", &spawned)
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", &spawned)
 
 	out, err := dispatch(context.Background(), llm.ToolCall{
 		ID:       "call_1",
@@ -117,7 +117,7 @@ func TestNewActDispatcher_normalizesToolName(t *testing.T) {
 
 	var spawned []string
 	cfg := CodingTurnConfig{ActRegistry: reg}
-	dispatch := newActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", &spawned)
 
 	out, err := dispatch(context.Background(), llm.ToolCall{
 		Function: llm.ToolCallFunction{Name: "read_file<|channel|>commentary", Arguments: "{}"},
@@ -149,7 +149,7 @@ func TestNewActDispatcher_destructiveOpsAutoConfirmed(t *testing.T) {
 
 	var spawned []string
 	cfg := CodingTurnConfig{ActRegistry: reg}
-	dispatch := newActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", &spawned)
 
 	out, err := dispatch(context.Background(), llm.ToolCall{
 		Function: llm.ToolCallFunction{Name: "run_shell", Arguments: `{"cmd":"ls"}`},
@@ -176,7 +176,7 @@ func TestNewActDispatcher_multipleCallsAccumulateChildren(t *testing.T) {
 		ActRegistry: reg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := newActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", &spawned)
 
 	for i := 0; i < 3; i++ {
 		_, _ = dispatch(context.Background(), llm.ToolCall{
