@@ -215,15 +215,32 @@ ops. `decide.coding_turn` spawns `act.*` children per ADR-001.
 
 ### Test gates
 
+- ☑ act-op adapter (Deliverable A): `internal/harness/dagnode/act_ops.go`
+  wraps any `harness.ToolHandler` as a `dag.NodeSpec` with axis-5
+  enforcement; `DefaultActOpContracts()` declares the canonical
+  contracts for the 5 existing tools; 7 unit tests cover the adapter.
+- ☑ coding_turn dispatcher (Deliverable B): `CodingTurnConfig` grows
+  `ActRegistry` + `TraceCB`; when set, the handler installs a
+  `harness.ToolDispatcher` on the `CortexHarness` that routes each
+  tool call through `act.<name>` and emits one `dag.TraceEntry` per
+  call with `parent_node_id` = this node's ID (surfaced via the new
+  `dag.NodeIDFromContext` helper). 6 unit tests cover hit/miss/
+  normalization/auto-confirm/multi-call/trace-shape.
+- ☑ cortex code + REPL opt-in (Deliverables C+D, **partial**):
+  `--dag` flag on both commands opts into the act-op dispatcher
+  with a synthetic parent ID; per-tool rows land in
+  `dag_traces.jsonl`. Default behavior unchanged.
+- ☐ Full thin-wrapper rewrite of cortex code + REPL (the larger
+  Deliverables C+D vision) is **deferred** — would require
+  reworking ~2,600 LOC of CLI surface in a single landing; deferred
+  to keep the structural Stage 3 piece (dispatcher + act ops) on
+  one branch and reduce CLI-regression risk. Follow-up.
 - ☐ Existing journey scenarios from eval-prep Phase D pass under the
-  new loop.
-- ☐ `cortex code "fix the auth bug"` produces equivalent behavior to
-  before but with structured `cell_results.jsonl` telemetry per tool
-  call.
+  new loop — pending until the thin-wrapper rewrite lands; the opt-in
+  `--dag` path doesn't materially change the agent loop.
 - ☐ No regression on the baseline numbers from `eval-baseline.md`
-  (within noise envelope captured in Phase A).
-- ☐ Tool calls inside `coding_turn` appear as child rows with the
-  `coding_turn` node as `parent_node_id`.
+  (within noise envelope captured in Phase A) — pending real-LLM
+  runs with `--dag` enabled.
 
 ---
 
