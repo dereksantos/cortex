@@ -6,11 +6,11 @@
 // no new spawns happen.
 //
 // V0 scope (per docs/dag-build-plan.md Stage 1):
-// - Single-threaded; spawn-by-spawn FIFO walking
-// - No parallelism (Stage 4 adds it)
-// - Per-node telemetry rows written to a callback (Phase 1
-//   cell_results.jsonl integration is the caller's responsibility)
-// - Depth cap + budget exhaustion graceful degradation
+//   - Single-threaded; spawn-by-spawn FIFO walking
+//   - No parallelism (Stage 4 adds it)
+//   - Per-node telemetry rows written to a callback (Phase 1
+//     cell_results.jsonl integration is the caller's responsibility)
+//   - Depth cap + budget exhaustion graceful degradation
 package dag
 
 import (
@@ -24,31 +24,31 @@ import (
 // One entry per node call. Includes parent pointer for tree
 // reconstruction and the cost actually consumed.
 type TraceEntry struct {
-	NodeID         string
-	ParentID       string
-	QualifiedName  string
-	OK             bool
-	ErrorCode      string
-	ErrorMessage   string
-	CostConsumed   Cost
-	BudgetAfter    Budget
-	Out            map[string]any
+	NodeID          string
+	ParentID        string
+	QualifiedName   string
+	OK              bool
+	ErrorCode       string
+	ErrorMessage    string
+	CostConsumed    Cost
+	BudgetAfter     Budget
+	Out             map[string]any
 	SpawnedChildren []string // node IDs of children spawned by this node
-	WallStart      time.Time
-	WallEnd        time.Time
+	WallStart       time.Time
+	WallEnd         time.Time
 }
 
 // Trace is the executor's post-hoc artifact for one turn.
 type Trace struct {
-	TurnID         string
-	SeedNodeIDs    []string
-	InitialBudget  Budget
-	FinalBudget    Budget
-	Exhausted      bool
-	ExhaustedAxis  string
-	TotalExecuted  int
-	SpawnRefusals  []SpawnRefusal
-	Entries        []TraceEntry
+	TurnID        string
+	SeedNodeIDs   []string
+	InitialBudget Budget
+	FinalBudget   Budget
+	Exhausted     bool
+	ExhaustedAxis string
+	TotalExecuted int
+	SpawnRefusals []SpawnRefusal
+	Entries       []TraceEntry
 }
 
 // SpawnRefusal records a child that was NOT scheduled because of
@@ -93,8 +93,8 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 
 	// Pending set: FIFO queue for v0 (no parallelism).
 	type pendingItem struct {
-		spec    NodeSpec
-		depth   int // tree depth of this node (0 for seed)
+		spec  NodeSpec
+		depth int // tree depth of this node (0 for seed)
 	}
 	pending := make([]pendingItem, 0, len(seed)*2)
 

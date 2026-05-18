@@ -34,13 +34,13 @@ import (
 // scenarios reference. EventID is what scenario `expected.result_ids`
 // blocks compare against after Reflex returns Results.
 type Fixture struct {
-	EventID      string    // matches scenario result_ids entries
-	Category     string    // decision | pattern | constraint | insight | correction
-	Summary      string    // canonical content
-	Importance   int       // 1-10
-	Tags         []string
-	Reasoning    string    // for decision-type fixtures
-	CreatedAt    time.Time // older = lower recency boost
+	EventID    string // matches scenario result_ids entries
+	Category   string // decision | pattern | constraint | insight | correction
+	Summary    string // canonical content
+	Importance int    // 1-10
+	Tags       []string
+	Reasoning  string    // for decision-type fixtures
+	CreatedAt  time.Time // older = lower recency boost
 }
 
 // CanonicalFixtures is the full set referenced across the 19 storage-

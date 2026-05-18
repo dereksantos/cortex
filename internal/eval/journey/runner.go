@@ -26,12 +26,12 @@ import (
 	"sort"
 	"time"
 
+	"context"
+	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
-	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"gopkg.in/yaml.v3"
-	"context"
 )
 
 // Scenario mirrors the test/evals/journeys/*.yaml shape (the subset
@@ -75,19 +75,19 @@ type Session struct {
 // turns this into a harness invocation (prompt = description + hints,
 // workdir = temp copy of the scaffold).
 type Task struct {
-	Description    string     `yaml:"description"`
-	FilesToModify  []string   `yaml:"files_to_modify"`
-	MaxTurns       int        `yaml:"max_turns"`
-	Timeout        string     `yaml:"timeout"` // parsed by adapter; e.g. "2m"
-	Hints          []string   `yaml:"hints"`
-	Acceptance     Acceptance `yaml:"acceptance"`
+	Description   string     `yaml:"description"`
+	FilesToModify []string   `yaml:"files_to_modify"`
+	MaxTurns      int        `yaml:"max_turns"`
+	Timeout       string     `yaml:"timeout"` // parsed by adapter; e.g. "2m"
+	Hints         []string   `yaml:"hints"`
+	Acceptance    Acceptance `yaml:"acceptance"`
 }
 
 // Acceptance is the per-task scoring contract. Each field is optional;
 // the adapter scores only what's present.
 type Acceptance struct {
-	TestsPass         []string `yaml:"tests_pass"`          // go test -run <name>
-	PatternsRequired  []string `yaml:"patterns_required"`   // grep across files_to_modify
+	TestsPass         []string `yaml:"tests_pass"`        // go test -run <name>
+	PatternsRequired  []string `yaml:"patterns_required"` // grep across files_to_modify
 	PatternsForbidden []string `yaml:"patterns_forbidden"`
 }
 
@@ -126,24 +126,24 @@ type ScenarioStatus struct {
 
 // SuiteResult aggregates per-scenario statuses.
 type SuiteResult struct {
-	Suite          string           `json:"suite"`
-	Total          int              `json:"total"`
-	PendingAdapter int              `json:"pending_adapter"`
-	ScaffoldMissing int             `json:"scaffold_missing"`
-	Invalid        int              `json:"invalid"`
-	SeedOK         int              `json:"seed_ok,omitempty"`
-	SeedFailed     int              `json:"seed_failed,omitempty"`
-	Scenarios      []ScenarioStatus `json:"scenarios"`
+	Suite           string           `json:"suite"`
+	Total           int              `json:"total"`
+	PendingAdapter  int              `json:"pending_adapter"`
+	ScaffoldMissing int              `json:"scaffold_missing"`
+	Invalid         int              `json:"invalid"`
+	SeedOK          int              `json:"seed_ok,omitempty"`
+	SeedFailed      int              `json:"seed_failed,omitempty"`
+	Scenarios       []ScenarioStatus `json:"scenarios"`
 }
 
 // SeedReport extends ScenarioStatus with seed-adapter outcomes.
 type SeedReport struct {
-	ScenarioID         string `json:"scenario_id"`
-	SessionsProcessed  int    `json:"sessions_processed"`
-	EventsSeeded       int    `json:"events_seeded"`
-	EventsRetrievable  int    `json:"events_retrievable"`
-	SeedOK             bool   `json:"seed_ok"`
-	ErrorMessage       string `json:"error_message,omitempty"`
+	ScenarioID        string `json:"scenario_id"`
+	SessionsProcessed int    `json:"sessions_processed"`
+	EventsSeeded      int    `json:"events_seeded"`
+	EventsRetrievable int    `json:"events_retrievable"`
+	SeedOK            bool   `json:"seed_ok"`
+	ErrorMessage      string `json:"error_message,omitempty"`
 }
 
 // RunSuite loads every *.yaml under dir and returns per-scenario

@@ -30,24 +30,24 @@ import (
 // Subset of TraceEntry; adds turn_id + timestamp + git ref for
 // provenance + replay.
 type Row struct {
-	SchemaVersion  string         `json:"schema_version"`
-	Timestamp      string         `json:"timestamp"`
-	TurnID         string         `json:"turn_id"`
-	NodeID         string         `json:"node_id"`
-	ParentID       string         `json:"parent_node_id,omitempty"`
-	QualifiedName  string         `json:"qualified_name"`
-	OK             bool           `json:"ok"`
-	ErrorCode      string         `json:"error_code,omitempty"`
-	ErrorMessage   string         `json:"error_message,omitempty"`
-	CostLatencyMS  int            `json:"cost_latency_ms"`
-	CostTokens     int            `json:"cost_tokens"`
-	BudgetAfterLat int            `json:"budget_after_latency_ms"`
-	BudgetAfterTok int            `json:"budget_after_tokens"`
-	BudgetAfterDep int            `json:"budget_after_depth"`
-	SpawnedChildren []string      `json:"spawned_children,omitempty"`
-	WallStartUnix  int64          `json:"wall_start_unix_ns"`
-	WallEndUnix    int64          `json:"wall_end_unix_ns"`
-	Out            map[string]any `json:"out,omitempty"`
+	SchemaVersion   string         `json:"schema_version"`
+	Timestamp       string         `json:"timestamp"`
+	TurnID          string         `json:"turn_id"`
+	NodeID          string         `json:"node_id"`
+	ParentID        string         `json:"parent_node_id,omitempty"`
+	QualifiedName   string         `json:"qualified_name"`
+	OK              bool           `json:"ok"`
+	ErrorCode       string         `json:"error_code,omitempty"`
+	ErrorMessage    string         `json:"error_message,omitempty"`
+	CostLatencyMS   int            `json:"cost_latency_ms"`
+	CostTokens      int            `json:"cost_tokens"`
+	BudgetAfterLat  int            `json:"budget_after_latency_ms"`
+	BudgetAfterTok  int            `json:"budget_after_tokens"`
+	BudgetAfterDep  int            `json:"budget_after_depth"`
+	SpawnedChildren []string       `json:"spawned_children,omitempty"`
+	WallStartUnix   int64          `json:"wall_start_unix_ns"`
+	WallEndUnix     int64          `json:"wall_end_unix_ns"`
+	Out             map[string]any `json:"out,omitempty"`
 }
 
 const schemaVersion = "1"

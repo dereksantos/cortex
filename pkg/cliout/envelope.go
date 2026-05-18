@@ -34,10 +34,10 @@ import (
 // Data may be present (partial result) but Ok is false and Error
 // carries the machine-readable code + message.
 type Envelope struct {
-	Ok    bool             `json:"ok"`
-	Data  json.RawMessage  `json:"data,omitempty"`
-	Error *EnvelopeError   `json:"error,omitempty"`
-	Meta  EnvelopeMeta     `json:"meta"`
+	Ok    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error *EnvelopeError  `json:"error,omitempty"`
+	Meta  EnvelopeMeta    `json:"meta"`
 }
 
 // EnvelopeError carries enough for callers to switch on Code without

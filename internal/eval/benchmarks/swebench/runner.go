@@ -268,7 +268,7 @@ func buildVerifierCommand(inst Instance, imagePrefix, repoDir string, timeout ti
 }
 
 // shellEscape wraps s in single-quotes, escaping any embedded single
-// quotes via the standard '\'' trick. Suitable for `sh -c "<...>"`
+// quotes via the standard '\” trick. Suitable for `sh -c "<...>"`
 // substitution into the verifier command above.
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -379,7 +379,7 @@ func runInstance(ctx context.Context, p runnerPayload, cfg SWEBenchConfig, env b
 		// discover the test command + locate + fix the bug across
 		// one attempt; per-retry the budget is renewed.
 		MaxTurns:            50,
-		MaxCostUSD:           5.0,
+		MaxCostUSD:          5.0,
 		MaxCumulativeTokens: 800_000,
 		// list_dir is non-negotiable for navigating a real repo;
 		// keep the 5-tool surface even when routed to Ollama (local

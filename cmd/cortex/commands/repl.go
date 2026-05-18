@@ -131,12 +131,12 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxRetries := 1
 	jsonOutput := false
 	workdirOverride := ""
-	systemPromptOverride := ""    // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
-	maxTurnsOverride := 0          // --max-turns N: override the per-attempt agent-loop cap (default 8)
-	maxCostOverride := 0.0         // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
-	maxCumulativeOverride := 0     // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
-	fullTools := false             // --full-tools: register the full 5-tool surface even when routed to Ollama
-	keepOnFail := false            // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
+	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
+	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
+	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
+	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {

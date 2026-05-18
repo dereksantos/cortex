@@ -29,11 +29,11 @@ type ToolManifest struct {
 // the per-tool surface version — bump in the command itself when
 // flags/args change in a way callers should notice.
 type ToolEntry struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Version     string      `json:"version"`
-	Args        []ArgSpec   `json:"args,omitempty"`
-	Flags       []FlagSpec  `json:"flags,omitempty"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Version     string     `json:"version"`
+	Args        []ArgSpec  `json:"args,omitempty"`
+	Flags       []FlagSpec `json:"flags,omitempty"`
 }
 
 // ArgSpec describes one positional argument. Order in the slice matches

@@ -26,28 +26,28 @@ import (
 // Fixture mirrors test/evals/mechanic/*.yaml shape (the subset the
 // runner consumes — unknown fields ignored).
 type Fixture struct {
-	ID                  string                  `yaml:"id"`
-	Version             int                     `yaml:"version"`
-	Suite               string                  `yaml:"suite"`
-	Description         string                  `yaml:"description"`
-	MockedHandlers      []MockedHandler         `yaml:"mocked_handlers"`
-	Seed                []SeedNode              `yaml:"seed"`
-	InitialBudget       BudgetSpec              `yaml:"initial_budget"`
-	Expected            map[string]any          `yaml:"expected"`
-	FailureMessageToday string                  `yaml:"failure_message_today"`
-	Scenarios           []FixtureScenario       `yaml:"scenarios,omitempty"` // for mechanic-5
+	ID                  string            `yaml:"id"`
+	Version             int               `yaml:"version"`
+	Suite               string            `yaml:"suite"`
+	Description         string            `yaml:"description"`
+	MockedHandlers      []MockedHandler   `yaml:"mocked_handlers"`
+	Seed                []SeedNode        `yaml:"seed"`
+	InitialBudget       BudgetSpec        `yaml:"initial_budget"`
+	Expected            map[string]any    `yaml:"expected"`
+	FailureMessageToday string            `yaml:"failure_message_today"`
+	Scenarios           []FixtureScenario `yaml:"scenarios,omitempty"` // for mechanic-5
 }
 
 // MockedHandler declares one node's deterministic behavior: fixed
 // cost + fixed spawn list. The runner builds a NodeSpec from this
 // and registers it under <function>.<op>.
 type MockedHandler struct {
-	NodeID        string     `yaml:"node_id"`
-	Function      string     `yaml:"function"`
-	Op            string     `yaml:"op"`
-	CostConsumed  CostSpec   `yaml:"cost_consumed"`
-	CostHint      CostSpec   `yaml:"cost_hint,omitempty"`
-	Spawn         []SeedNode `yaml:"spawn"`
+	NodeID       string     `yaml:"node_id"`
+	Function     string     `yaml:"function"`
+	Op           string     `yaml:"op"`
+	CostConsumed CostSpec   `yaml:"cost_consumed"`
+	CostHint     CostSpec   `yaml:"cost_hint,omitempty"`
+	Spawn        []SeedNode `yaml:"spawn"`
 }
 
 // SeedNode is a seed-or-spawn entry. Identifies a node by id +
@@ -299,11 +299,11 @@ func runVariationFixture(ctx context.Context, fx *Fixture, res *Result) {
 		seed := buildSeed(sc.Seed)
 		budget := dag.Budget{LatencyMS: sc.InitialBudget.LatencyMS, Tokens: sc.InitialBudget.Tokens, Depth: sc.InitialBudget.Depth}
 		// Best-effort trace writer; runner continues if it can't open.
-	var cb dag.TraceCallback
-	if tw, terr := dagtrace.NewWriter(""); terr == nil {
-		cb = tw.Callback(fx.ID)
-	}
-	ex := dag.NewExecutor(reg, cb)
+		var cb dag.TraceCallback
+		if tw, terr := dagtrace.NewWriter(""); terr == nil {
+			cb = tw.Callback(fx.ID)
+		}
+		ex := dag.NewExecutor(reg, cb)
 		tr, err := ex.Run(ctx, fx.ID+"/"+sc.ID, seed, budget)
 		subs = append(subs, sub{id: sc.ID, trace: tr, err: err})
 	}

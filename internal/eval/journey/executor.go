@@ -42,13 +42,13 @@ import (
 // adapter. One report per scenario, but each report aggregates every
 // session-with-a-task in that scenario.
 type ExecutionReport struct {
-	ScenarioID     string            `json:"scenario_id"`
-	Model          string            `json:"model"`
-	WorkdirPath    string            `json:"workdir_path,omitempty"`
-	Sessions       []SessionResult   `json:"sessions"`
-	OverallOK      bool              `json:"overall_ok"`
-	ErrorMessage   string            `json:"error_message,omitempty"`
-	LatencyMs      int64             `json:"latency_ms"`
+	ScenarioID   string          `json:"scenario_id"`
+	Model        string          `json:"model"`
+	WorkdirPath  string          `json:"workdir_path,omitempty"`
+	Sessions     []SessionResult `json:"sessions"`
+	OverallOK    bool            `json:"overall_ok"`
+	ErrorMessage string          `json:"error_message,omitempty"`
+	LatencyMs    int64           `json:"latency_ms"`
 }
 
 // SessionResult is the per-session outcome inside an ExecutionReport.
@@ -80,7 +80,7 @@ type SessionResult struct {
 //  1. Create temp workdir; copy scaffold tree in.
 //  2. Iterate sessions in order:
 //     - events: seed into <workdir>/.cortex/data/insights.jsonl
-//       (cumulative across sessions — later sessions see earlier).
+//     (cumulative across sessions — later sessions see earlier).
 //     - task: prompt the harness; run `go test`; check patterns.
 //     - queries: run Reflex; verify expected_recall IDs surface.
 //  3. Tear down workdir.
@@ -382,26 +382,26 @@ func copyTree(src, dst string) error {
 // richer; this writes only what the journey path can populate.
 func writeCellResult(w io.Writer, scenarioID, model string, sr SessionResult) error {
 	rec := map[string]any{
-		"scenario_id":         scenarioID,
-		"sub_id":              sr.SessionID,
-		"phase":               sr.Phase,
-		"kind":                sr.Kind,
-		"harness":             "cortex",
-		"provider":            "openrouter",
-		"model":               model,
-		"ok":                  sr.OK,
-		"tests_passed":        sr.TestsPassed,
-		"patterns_required":   sr.PatternsRequired,
-		"patterns_forbidden":  sr.PatternsForbidden,
-		"queries_passed":      sr.QueriesPassed,
-		"queries_total":       sr.QueriesTotal,
-		"agent_turns_total":   sr.HarnessTurns,
-		"tokens_in":           sr.HarnessTokensIn,
-		"tokens_out":          sr.HarnessTokensOut,
-		"cost_usd":            sr.HarnessCostUSD,
-		"latency_ms":          sr.LatencyMs,
-		"error_message":       sr.ErrorMessage,
-		"source":              "journey",
+		"scenario_id":        scenarioID,
+		"sub_id":             sr.SessionID,
+		"phase":              sr.Phase,
+		"kind":               sr.Kind,
+		"harness":            "cortex",
+		"provider":           "openrouter",
+		"model":              model,
+		"ok":                 sr.OK,
+		"tests_passed":       sr.TestsPassed,
+		"patterns_required":  sr.PatternsRequired,
+		"patterns_forbidden": sr.PatternsForbidden,
+		"queries_passed":     sr.QueriesPassed,
+		"queries_total":      sr.QueriesTotal,
+		"agent_turns_total":  sr.HarnessTurns,
+		"tokens_in":          sr.HarnessTokensIn,
+		"tokens_out":         sr.HarnessTokensOut,
+		"cost_usd":           sr.HarnessCostUSD,
+		"latency_ms":         sr.LatencyMs,
+		"error_message":      sr.ErrorMessage,
+		"source":             "journey",
 	}
 	enc := json.NewEncoder(w)
 	return enc.Encode(rec)

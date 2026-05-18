@@ -208,11 +208,11 @@ func TestWorkdirFromArgs(t *testing.T) {
 // a regression gate for the listed entries only.
 func TestCortexFunctionFor(t *testing.T) {
 	cases := map[string]string{
-		"search":   "Attend",
-		"capture":  "Sense",
-		"code":     "Decide",
-		"journal":  "Maintain",
-		"unknown":  "",
+		"search":  "Attend",
+		"capture": "Sense",
+		"code":    "Decide",
+		"journal": "Maintain",
+		"unknown": "",
 	}
 	for cmd, want := range cases {
 		t.Run(cmd, func(t *testing.T) {

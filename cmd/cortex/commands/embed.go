@@ -267,4 +267,3 @@ type embedStoreJSONOutput struct {
 	Model       string `json:"model"`
 	Provider    string `json:"provider"`
 }
-

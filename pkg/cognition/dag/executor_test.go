@@ -29,7 +29,7 @@ func TestExecutor_MechanicM1_BudgetDecayDeterminism(t *testing.T) {
 	// Build the spawn chain bottom-up so each parent references its child.
 	mustRegister(t, reg, NodeSpec{
 		Function: FuncDecide, Op: "inject",
-		Cost: Cost{LatencyMS: 150, Tokens: 100},
+		Cost:    Cost{LatencyMS: 150, Tokens: 100},
 		Handler: mockHandler(Cost{LatencyMS: 150, Tokens: 100}, nil),
 	})
 	mustRegister(t, reg, NodeSpec{
@@ -291,10 +291,10 @@ func TestRegistry_UnknownNode(t *testing.T) {
 // TestBudget_Exhausted exercises the per-axis exhaustion check.
 func TestBudget_Exhausted(t *testing.T) {
 	tests := []struct {
-		name      string
-		budget    Budget
-		wantExh   bool
-		wantAxis  string
+		name     string
+		budget   Budget
+		wantExh  bool
+		wantAxis string
 	}{
 		{"all positive", Budget{LatencyMS: 100, Tokens: 100, Depth: 5}, false, ""},
 		{"latency 0", Budget{LatencyMS: 0, Tokens: 100, Depth: 5}, true, "latency_ms"},

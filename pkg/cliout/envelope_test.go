@@ -103,11 +103,11 @@ func TestEnvelopeRedactPathsOutsideProject(t *testing.T) {
 	e := NewEmitter("/repo")
 	var buf bytes.Buffer
 	if err := e.Ok(&buf, map[string]string{
-		"in_repo":    "/repo/internal/foo.go",
-		"outside":    "/etc/passwd",
-		"in_cortex":  "/some/path/.cortex/db/x.json",
-		"relative":   "internal/foo.go",
-		"home_dot":   ".cortex/journal/x",
+		"in_repo":   "/repo/internal/foo.go",
+		"outside":   "/etc/passwd",
+		"in_cortex": "/some/path/.cortex/db/x.json",
+		"relative":  "internal/foo.go",
+		"home_dot":  ".cortex/journal/x",
 	}); err != nil {
 		t.Fatalf("Ok: %v", err)
 	}

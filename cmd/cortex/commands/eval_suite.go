@@ -4,15 +4,15 @@
 // benchmark / harness paths:
 //
 //   - mechanic         : deterministic fixtures verifying DAG executor
-//                        invariants (budget decay, depth cap, tree
-//                        reconstruction, exhaustion graceful-degrade,
-//                        tree-shape variation). All fail today until
-//                        Phase 5 v0 lands the executor.
+//     invariants (budget decay, depth cap, tree
+//     reconstruction, exhaustion graceful-degrade,
+//     tree-shape variation). All fail today until
+//     Phase 5 v0 lands the executor.
 //   - legacy-cognition : per-node scenarios under test/evals/legacy/
-//                        cognition/ — stub awaiting Phase B runner.
+//     cognition/ — stub awaiting Phase B runner.
 //   - journeys         : multi-session e2e scenarios under
-//                        test/evals/journeys/ — stub awaiting Phase D
-//                        runner.
+//     test/evals/journeys/ — stub awaiting Phase D
+//     runner.
 //
 // Each suite is its own dispatcher function; the top-level runSuite
 // chooses by name. Adding a suite is a function + a switch arm; no

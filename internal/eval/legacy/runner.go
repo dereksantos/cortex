@@ -69,12 +69,12 @@ type TestResult struct {
 
 // SuiteResult aggregates per-test outcomes for a full suite run.
 type SuiteResult struct {
-	Suite      string       `json:"suite"`
-	Total      int          `json:"total"`
-	Passed     int          `json:"passed"`
-	Failed     int          `json:"failed"`
-	Skipped    int          `json:"skipped"`
-	TotalMs    int64        `json:"total_ms"`
+	Suite       string       `json:"suite"`
+	Total       int          `json:"total"`
+	Passed      int          `json:"passed"`
+	Failed      int          `json:"failed"`
+	Skipped     int          `json:"skipped"`
+	TotalMs     int64        `json:"total_ms"`
 	TestResults []TestResult `json:"tests"`
 }
 
@@ -131,9 +131,9 @@ func runScenario(ctx context.Context, s *Scenario, suite *SuiteResult) {
 	for _, t := range s.ModeTests {
 		start := time.Now()
 		var (
-			ok        bool
-			errCode   string
-			errMsg    string
+			ok      bool
+			errCode string
+			errMsg  string
 		)
 		switch s.Mode {
 		case "resolve":

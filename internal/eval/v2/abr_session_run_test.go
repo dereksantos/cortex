@@ -34,8 +34,9 @@ func cortexProviderFromModel(model string) string {
 // RUN_ABR_SESSION=1 so CI never trips it.
 //
 // Usage:
-//   RUN_ABR_SESSION=1 go test ./internal/eval/v2 \
-//       -run TestABRSession_Real -v -timeout 30m
+//
+//	RUN_ABR_SESSION=1 go test ./internal/eval/v2 \
+//	    -run TestABRSession_Real -v -timeout 30m
 //
 // Expected outcome on an EMPTY per-eval store (the default for this
 // test): both passes get `{"empty":true}` from cortex_search, the

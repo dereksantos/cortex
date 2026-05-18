@@ -6,12 +6,12 @@
 // .cortex/db/cell_results.jsonl via the Phase 1 unified sink.
 //
 // V0 scope:
-// - --type=turn only (other types route to "not implemented" stubs)
-// - 4 registered ops: sense.prompt, attend.reflex, decide.inject,
-//   maintain.capture — all stub handlers that demonstrate the
-//   executor walks, decays budget, and writes trace correctly
-// - decide.coding_turn handler (wraps the LLM agent loop) lands in
-//   Stage 3 of the build plan, not v0
+//   - --type=turn only (other types route to "not implemented" stubs)
+//   - 4 registered ops: sense.prompt, attend.reflex, decide.inject,
+//     maintain.capture — all stub handlers that demonstrate the
+//     executor walks, decays budget, and writes trace correctly
+//   - decide.coding_turn handler (wraps the LLM agent loop) lands in
+//     Stage 3 of the build plan, not v0
 package commands
 
 import (
@@ -145,14 +145,14 @@ func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error
 	if outputFormat == "json" {
 		// Render trace as JSON envelope.
 		out := map[string]any{
-			"turn_id":          trace.TurnID,
-			"initial_budget":   trace.InitialBudget,
-			"final_budget":     trace.FinalBudget,
-			"total_executed":   trace.TotalExecuted,
-			"exhausted":        trace.Exhausted,
-			"exhausted_axis":   trace.ExhaustedAxis,
-			"spawn_refusals":   trace.SpawnRefusals,
-			"trace_entry_ops":  qualifiedOps(trace.Entries),
+			"turn_id":         trace.TurnID,
+			"initial_budget":  trace.InitialBudget,
+			"final_budget":    trace.FinalBudget,
+			"total_executed":  trace.TotalExecuted,
+			"exhausted":       trace.Exhausted,
+			"exhausted_axis":  trace.ExhaustedAxis,
+			"spawn_refusals":  trace.SpawnRefusals,
+			"trace_entry_ops": qualifiedOps(trace.Entries),
 		}
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))

@@ -90,18 +90,18 @@ type ABRTurn struct {
 
 // ABRSessionResult is the summary produced by RunABRSession.
 type ABRSessionResult struct {
-	SessionID         string    `json:"session_id"`
-	ScenarioID        string    `json:"scenario_id"`
-	Turns             []ABRTurn `json:"turns"`
-	MeanABR           float64   `json:"mean_abr"`            // mean over turns where FullScore > 0
-	MeanFastScore     float64   `json:"mean_fast_score"`     // simple mean across turns
-	MeanFullScore     float64   `json:"mean_full_score"`     // simple mean across turns
-	TurnsScored       int       `json:"turns_scored"`        // turns where both responses + judge succeeded
-	TurnsFullNonzero  int       `json:"turns_full_nonzero"`  // denominator for MeanABR
-	FastPassExitCode  int       `json:"fast_pass_exit_code"` // 0 if REPL exited clean
-	FullPassExitCode  int       `json:"full_pass_exit_code"`
-	FastSessionPath   string    `json:"fast_session_path"`
-	FullSessionPath   string    `json:"full_session_path"`
+	SessionID        string    `json:"session_id"`
+	ScenarioID       string    `json:"scenario_id"`
+	Turns            []ABRTurn `json:"turns"`
+	MeanABR          float64   `json:"mean_abr"`            // mean over turns where FullScore > 0
+	MeanFastScore    float64   `json:"mean_fast_score"`     // simple mean across turns
+	MeanFullScore    float64   `json:"mean_full_score"`     // simple mean across turns
+	TurnsScored      int       `json:"turns_scored"`        // turns where both responses + judge succeeded
+	TurnsFullNonzero int       `json:"turns_full_nonzero"`  // denominator for MeanABR
+	FastPassExitCode int       `json:"fast_pass_exit_code"` // 0 if REPL exited clean
+	FullPassExitCode int       `json:"full_pass_exit_code"`
+	FastSessionPath  string    `json:"fast_session_path"`
+	FullSessionPath  string    `json:"full_session_path"`
 }
 
 // RunABRSession spawns the REPL twice over the same prompt list (once
@@ -388,26 +388,26 @@ func judgeQuality(ctx context.Context, opts ABRSessionOptions, row replTurnRow) 
 func emitCell(ctx context.Context, opts ABRSessionOptions, sessionID string, turnIdx int, strategy string, row replTurnRow, score float64) error {
 	turn := turnIdx // local copy so &turn is valid past the call
 	cell := &CellResult{
-		SchemaVersion:        CellResultSchemaVersion,
-		RunID:                fmt.Sprintf("%s-%s-t%d", sessionID, strategy, turnIdx),
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		ScenarioID:           opts.ScenarioID,
-		SessionID:            sessionID,
-		TurnIndex:            &turn,
-		Harness:              HarnessCortex,
-		Provider:             opts.Provider,
-		Model:                opts.Model,
-		ContextStrategy:      strategy,
-		CortexVersion:        opts.CortexVersion,
+		SchemaVersion:         CellResultSchemaVersion,
+		RunID:                 fmt.Sprintf("%s-%s-t%d", sessionID, strategy, turnIdx),
+		Timestamp:             time.Now().UTC().Format(time.RFC3339),
+		ScenarioID:            opts.ScenarioID,
+		SessionID:             sessionID,
+		TurnIndex:             &turn,
+		Harness:               HarnessCortex,
+		Provider:              opts.Provider,
+		Model:                 opts.Model,
+		ContextStrategy:       strategy,
+		CortexVersion:         opts.CortexVersion,
 		Temperature:           0,
 		TokensIn:              row.TokensIn,
 		TokensOut:             row.TokensOut,
 		InjectedContextTokens: row.InjectedContextTokens,
 		CostUSD:               row.CostUSD,
 		LatencyMs:             row.LatencyMs,
-		TaskSuccess:          score >= 0.5, // soft threshold; the real signal is the score, captured in Notes
-		TaskSuccessCriterion: CriterionJudgeLLM,
-		Notes:                fmt.Sprintf(`{"quality_score":%.4f}`, score),
+		TaskSuccess:           score >= 0.5, // soft threshold; the real signal is the score, captured in Notes
+		TaskSuccessCriterion:  CriterionJudgeLLM,
+		Notes:                 fmt.Sprintf(`{"quality_score":%.4f}`, score),
 	}
 	return opts.Persister.PersistCell(ctx, cell)
 }
