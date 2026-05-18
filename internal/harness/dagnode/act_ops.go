@@ -133,19 +133,36 @@ func DefaultActOpContracts() map[string]dag.AxisContract {
 }
 
 // DefaultActOpCosts returns cost hints for each of the 5 existing
-// tools. Read ops are cheap (filesystem-bound, ~5-20ms); write_file
-// is similar; run_shell varies wildly by command (gofmt ~50ms,
-// go test minutes) so we hint conservatively at 30s and let the
-// op self-report actual via CostConsumed.
+// tools. Calibrated 2026-05-18 against `cortex code --dag` real-LLM
+// runs (sample: 2 sessions, 5 act-op invocations total —
+// eval-journal "Stage 3.5 #1+#2"):
 //
-// These are starter values; recalibrate against dag_traces.jsonl
-// once the act-op path is exercised end-to-end.
+//	act.list_dir       0.20ms wall (1 obs)  → 5ms hint (25× headroom)
+//	act.read_file      0.38ms wall (1 obs)  → 5ms hint (13× headroom)
+//	act.write_file     0.48-0.83ms (2 obs)  → 5ms hint (~7× headroom)
+//	act.run_shell      5.37ms wall (1 obs, `ls`) — but the harness's
+//	                   own tool timeout is 30s for worst case
+//	                   (long `go test`), so the hint stays at the
+//	                   tool timeout. The pre-spawn budget check is
+//	                   "can I afford the worst case" not "what does
+//	                   p50 look like" — `go test` is a real workload.
+//	act.cortex_search  no observation yet; 100ms is the rough
+//	                   upper bound for embed + storage scan on
+//	                   small projects.
+//
+// Sample sizes are tiny — these hints should improve as more
+// `dag_traces.jsonl` data lands. The cost_hint_ms emitted in each
+// trace row's Out is the feedback channel for drift detection.
+//
+// The earlier values (50ms for reads, 30s for everything else) were
+// vendor-doc estimates with no real-data anchor; observed values
+// were 50-250× under for filesystem-bound ops.
 func DefaultActOpCosts() map[string]dag.Cost {
 	return map[string]dag.Cost{
-		"read_file":     {LatencyMS: 50, Tokens: 0},
-		"list_dir":      {LatencyMS: 50, Tokens: 0},
-		"cortex_search": {LatencyMS: 100, Tokens: 0}, // includes embedder + storage scan
-		"write_file":    {LatencyMS: 50, Tokens: 0},
-		"run_shell":     {LatencyMS: 30000, Tokens: 0}, // generous; tools.go's run_shell has 30s timeout
+		"read_file":     {LatencyMS: 5, Tokens: 0},
+		"list_dir":      {LatencyMS: 5, Tokens: 0},
+		"write_file":    {LatencyMS: 5, Tokens: 0},
+		"cortex_search": {LatencyMS: 100, Tokens: 0}, // includes embedder + storage scan; no real-data anchor yet
+		"run_shell":     {LatencyMS: 30000, Tokens: 0}, // matches the tool's own 30s timeout (worst case)
 	}
 }

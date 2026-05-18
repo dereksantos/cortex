@@ -36,6 +36,62 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 3.5 #1+#2: real-LLM trace verification + act-op cost recalibration
+
+**Cortex**: `187e754` (branch `derek.s/dag-stage-2`)
+**Command**:
+```
+mkdir -p /tmp/cortex-dag-verify
+./bin/cortex code --workdir /tmp/cortex-dag-verify --model anthropic/claude-haiku-4.5 --dag --max-turns 5 "Create a file called hello.txt..."
+./bin/cortex code --workdir /tmp/cortex-dag-verify --model anthropic/claude-haiku-4.5 --dag --max-turns 10 "list_dir → read_file → run_shell → write_file..."
+```
+**Versions**: provider=`openrouter-keychain`, llm=`anthropic/claude-haiku-4.5`
+**Result**: 2 sessions, 5 act-op invocations total, $0.014 cost, all trace rows correctly shaped + accounting preserved. Sample saved to `docs/dag-traces-stage-3-sample.jsonl`.
+
+**Why this run**: Stage 3.5 follow-ups #1 (real-LLM E2E verification of --dag) and #2 (recalibrate DefaultActOpCosts from observed p50). #1 is unblocked now that the principle-violation fix is in (`187e754`).
+
+**Session 1 (single-op smoke test)**:
+- Prompt: "Create a file called hello.txt with content 'hello world'. Then stop."
+- 2 turns, $0.0036, 1 tool call → 1 trace row
+- `[cortex code] files written: hello.txt` ← **proves the accounting fix works end-to-end** (this field was empty under the pre-fix --dag path)
+
+**Session 2 (multi-op coverage)**:
+- Prompt: 4 explicit steps — list_dir → read_file → run_shell → write_file
+- 5 turns, $0.0106, 4 tool calls → 4 trace rows
+- All 4 dispatches succeeded; all 4 rows have `parent_node_id=code-<pid>-coding_turn` and chained correctly
+
+**Observed per-op wall time** (n=1-2 each; sample sizes are small):
+
+| Op | Observation | Old hint | New hint | Notes |
+|---|---|---|---|---|
+| `act.list_dir` | 0.20ms | 50ms | **5ms** | 25× headroom for larger dirs |
+| `act.read_file` | 0.38ms | 50ms | **5ms** | 13× headroom for larger files |
+| `act.write_file` | 0.48-0.83ms (n=2) | 50ms | **5ms** | ~7× headroom |
+| `act.run_shell` | 5.37ms (n=1, `ls`) | 30000ms | **30000ms** | unchanged — matches tool's own 30s timeout; `go test` is a real workload the hint must cover |
+| `act.cortex_search` | no observation | 100ms | **100ms** | unchanged — no real-data anchor yet |
+
+The earlier hints (50ms reads, 30s for everything else) were vendor-doc estimates with no real-data anchor; observed values were 50-250× under for filesystem-bound ops. The `cost_hint_ms` emitted in each trace row's `Out` is the drift-detection feedback channel — analysis can compare `cost_latency_ms` vs `cost_hint_ms` over time.
+
+**Trace shape sample** (one row, from `docs/dag-traces-stage-3-sample.jsonl`):
+```json
+{"schema_version":"1","timestamp":"2026-05-18T05:37:59.147003Z","turn_id":"code-69360","node_id":"act-1","parent_node_id":"code-69360-coding_turn","qualified_name":"act.write_file","ok":true,"cost_latency_ms":0,"cost_tokens":0,"wall_start_unix_ns":1779082679146524000,"wall_end_unix_ns":1779082679147002000,"out":{"cost_hint_ms":50,"output":"{\"path\":\"hello.txt\",\"bytes\":11}"}}
+```
+
+Note: `cost_latency_ms: 0` is a precision artifact — `cost` field rounds wall time to ms, and write_file took 0.48ms. The `wall_start/end_unix_ns` fields preserve full precision so analysis pipelines can compute true latency. Worth fixing in a follow-up if precision matters for budget accounting.
+
+**Surprise**:
+- Expected: real-LLM verification would mostly be a sanity check. Actual: it surfaced the precision-loss issue in `cost_latency_ms` (rounds to ms, write_file at 0.48ms → 0ms). Not a correctness issue but a measurement issue; budget calculations using `cost_latency_ms` would undercount sub-ms ops. Filed as a follow-up.
+- Expected: my hints were ~10× off (matching the LLM-op pattern from the prior recalibration). Actual: 50-250× off for filesystem-bound ops. Filesystem operations on local fs are much faster than network-bound LLM calls — the constant-factor difference between "RPC" and "syscall" matters when picking hints.
+
+**Followups (now)**:
+1. Fix `cost_latency_ms` precision — store sub-ms as decimal or switch to microseconds for the budget axis. Affects all ops, not just act ones.
+2. Get an observation for `act.cortex_search` (needs a session where the model invokes it — requires a workdir with an indexed `.cortex/`).
+3. Run a `go test`-class run_shell to verify the 30s hint is the right worst-case bound vs raising it for long compiles.
+
+**Stage 3.5 done**: #1 + #2 landed. #3 (full thin-wrapper rewrite) stays deferred to a new session as the user requested.
+
+---
+
 ### 2026-05-18 — Stage 3 fix: --dag was violating principles 5 + 7 (Reproducible + Structured)
 
 **Cortex**: `187e754` (branch `derek.s/dag-stage-2`)
