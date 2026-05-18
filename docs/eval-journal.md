@@ -36,6 +36,52 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 3 fix: --dag was violating principles 5 + 7 (Reproducible + Structured)
+
+**Cortex**: `187e754` (branch `derek.s/dag-stage-2`)
+**Command**:
+```
+go test ./internal/harness/dagnode/... -v -run TestNewActDispatcher
+go test ./...
+```
+**Result**: 9 dispatcher tests PASS including a new regression test for accounting preservation; full suite green.
+
+**Why this run**: the Stage 3 partial landing (prior entry) introduced a real principle violation that I'd documented as a "follow-up" but should have fixed before claiming Stage 3 done. The user surfaced it: "so then these evals are violating the eval principles? also lets fix the bugs."
+
+**The violation**:
+
+The original `--dag` landing (commit `494d290`) constructed a **parallel** `harness.ToolRegistry` inside `buildCodeActDispatcher`, routing tool calls through duplicate tool instances. Two consequences:
+
+- **Principle 5 (Reproducible)**: same prompt, same workdir, produced different reported `HarnessResult.FilesChanged` and `ShellNonZeroExits` depending on whether `--dag` was set. The fields silently zeroed when `--dag` was on because the harness's own `ToolRegistry` never saw the calls — the parallel registry was discarded after the session. Same input → divergent output is the textbook reproducibility violation.
+
+- **Principle 7 (Structured)**: any `CellResult` written via the `--dag` path carried corrupted structured fields. The analysis pipeline that groups runs by `files_changed` count would see `--dag` cells as zero-write runs. The bug was undetectable from the JSON shape alone — the fields existed and were valid types, just zeroed.
+
+Plus cortex_search was skipped from `--dag` entirely, so users of the flag lost in-session context retrieval.
+
+**Fix shape**:
+
+- `internal/harness/loop.go`: `ToolDispatcher` signature now includes the loop's `*ToolRegistry`. The loop passes `l.Registry` into the dispatcher so dispatchers can delegate to `reg.Dispatch` rather than constructing parallel tools. The harness's per-call accounting (write_file → `noteFileWritten`, run_shell → `noteShellExit`, cortex_search → `injectedContextBytes`) runs verbatim.
+- `internal/harness/dagnode/coding_turn.go`: `NewActDispatcher` rewritten. Reads only metadata (axis contract + cost hint) from the act registry; delegates execution to `reg.Dispatch`. Registry miss still delegates to keep the agent working but emits `unknown_node` trace row. Added `RegisterActOpMetadata` + `RegisterDefaultActOpMetadata` for metadata-only registration (no parallel tool instances).
+- `cmd/cortex/commands/code.go`: `buildCodeActDispatcher` simplified to register the 5 canonical act-op metadata entries (cortex_search **now included**) and install the dispatcher. Two layering shims deleted.
+
+**The regression test**:
+
+```go
+TestNewActDispatcher_preservesHarnessAccountingForFilesWritten
+```
+
+Constructs a real `write_file` tool on a temp dir, registers it on a `harness.ToolRegistry`, runs the dispatcher with `--dag` semantics, asserts `reg.FilesWritten()` returns the written path. **Fails on the old parallel-registry implementation; passes on the fix.** Pinned so we can't regress silently again.
+
+**Surprise**:
+- Expected: the fix would need significant restructuring. Actual: a small `ToolDispatcher` signature change (+ `reg` param) was load-bearing. The dispatcher already had everything it needed — the design just hadn't given it access to the registry.
+- The TestRegisterDefaultActOpMetadata test now covers all 5 tools including cortex_search, which closes the second part of the gap.
+
+**Followup that's now unblocked**:
+- Stage 3.5 #1 (real-LLM end-to-end verification of `--dag` trace shape) can now run safely without silently corrupting CellResult fields. Worth running before any benchmark cell uses `--dag` in production.
+- Stage 3.5 #3 (full thin-wrapper rewrite of code.go + repl.go) is the remaining structural piece; this fix doesn't change the deferral, but it does mean the deferred state is no longer a principle violation — just an architectural simplification opportunity.
+
+---
+
 ### 2026-05-18 — Stage 3 partial landing: act-op adapter + dispatcher + --dag opt-in
 
 **Cortex**: `494d290` (branch `derek.s/dag-stage-2`)
