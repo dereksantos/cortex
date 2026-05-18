@@ -78,49 +78,69 @@ func TestInject_unknownDecisionFallsBack(t *testing.T) {
 	}
 }
 
-func TestInject_scoreFallback_injectPath(t *testing.T) {
-	h := NewInjectHandler(InjectConfig{Provider: nil})
-	got, _ := h(context.Background(), map[string]any{
-		"query": "x",
-		"candidates": []cognition.Result{
-			{ID: "a", Score: 0.9},
-			{ID: "b", Score: 0.75},
-			{ID: "c", Score: 0.3},
-		},
-	}, dag.DefaultTurnBudget())
-	if d, _ := got.Out["decision"].(string); d != "inject" {
-		t.Errorf("expected inject (max >= 0.8), got %s", d)
-	}
-	ids, _ := got.Out["inject_ids"].([]string)
-	if len(ids) != 2 { // a + b are >= 0.7
-		t.Errorf("expected 2 inject_ids (>=0.7), got %v", ids)
-	}
-}
-
-func TestInject_scoreFallback_waitPath(t *testing.T) {
-	h := NewInjectHandler(InjectConfig{Provider: nil})
-	got, _ := h(context.Background(), map[string]any{
-		"query": "x",
-		"candidates": []cognition.Result{
-			{ID: "a", Score: 0.3},
-			{ID: "b", Score: 0.4},
-		},
-	}, dag.DefaultTurnBudget())
-	if d, _ := got.Out["decision"].(string); d != "wait" {
-		t.Errorf("expected wait (max < 0.5), got %s", d)
-	}
-}
-
-func TestInject_scoreFallback_queuePath(t *testing.T) {
+func TestInject_scoreFallback_injectPath_byAvg(t *testing.T) {
+	// avg = (0.6 + 0.7) / 2 = 0.65 → avg >= 0.5 → inject
 	h := NewInjectHandler(InjectConfig{Provider: nil})
 	got, _ := h(context.Background(), map[string]any{
 		"query": "x",
 		"candidates": []cognition.Result{
 			{ID: "a", Score: 0.6},
+			{ID: "b", Score: 0.7},
+		},
+	}, dag.DefaultTurnBudget())
+	if d, _ := got.Out["decision"].(string); d != "inject" {
+		t.Errorf("expected inject (avg >= 0.5), got %s", d)
+	}
+	ids, _ := got.Out["inject_ids"].([]string)
+	if len(ids) != 2 { // both >= 0.5
+		t.Errorf("expected 2 inject_ids (>=0.5), got %v", ids)
+	}
+}
+
+func TestInject_scoreFallback_injectPath_byMaxRescue(t *testing.T) {
+	// avg = (0.9 + 0.1) / 2 = 0.5 → just over inject threshold, but
+	// shape the test so avg < 0.5 and max >= 0.8 → rescue path fires
+	h := NewInjectHandler(InjectConfig{Provider: nil})
+	got, _ := h(context.Background(), map[string]any{
+		"query": "x",
+		"candidates": []cognition.Result{
+			{ID: "a", Score: 0.9},
+			{ID: "b", Score: 0.1},
+			{ID: "c", Score: 0.1},
+		},
+	}, dag.DefaultTurnBudget())
+	if d, _ := got.Out["decision"].(string); d != "inject" {
+		t.Errorf("expected inject (max>=0.8 rescue path; avg=%.2f), got %s", 0.367, d)
+	}
+}
+
+func TestInject_scoreFallback_queuePath(t *testing.T) {
+	// avg = (0.4 + 0.45) / 2 = 0.425 → 0.3 <= avg < 0.5 → queue
+	h := NewInjectHandler(InjectConfig{Provider: nil})
+	got, _ := h(context.Background(), map[string]any{
+		"query": "x",
+		"candidates": []cognition.Result{
+			{ID: "a", Score: 0.4},
+			{ID: "b", Score: 0.45},
 		},
 	}, dag.DefaultTurnBudget())
 	if d, _ := got.Out["decision"].(string); d != "queue" {
-		t.Errorf("expected queue (0.5 <= max < 0.8), got %s", d)
+		t.Errorf("expected queue (0.3 <= avg < 0.5), got %s", d)
+	}
+}
+
+func TestInject_scoreFallback_waitPath(t *testing.T) {
+	// avg = (0.2 + 0.25) / 2 = 0.225 → 0.2 <= avg < 0.3 → wait
+	h := NewInjectHandler(InjectConfig{Provider: nil})
+	got, _ := h(context.Background(), map[string]any{
+		"query": "x",
+		"candidates": []cognition.Result{
+			{ID: "a", Score: 0.2},
+			{ID: "b", Score: 0.25},
+		},
+	}, dag.DefaultTurnBudget())
+	if d, _ := got.Out["decision"].(string); d != "wait" {
+		t.Errorf("expected wait (0.2 <= avg < 0.3), got %s", d)
 	}
 }
 

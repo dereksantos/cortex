@@ -216,31 +216,59 @@ func parseInjectResponse(resp string) (injectResponse, error) {
 	return parsed, nil
 }
 
-// scoreBasedInjectDecision implements the fallback heuristic. Returns
-// (decision, inject_ids, confidence). Confidence reflects the chosen
-// path's certainty, not the candidate scores directly.
+// scoreBasedInjectDecision implements the fallback heuristic. Mirrors
+// the project's lived-in cognition.Resolve thresholds (internal/
+// cognition/resolve.go makeDecision):
+//
+//   - avg ≥ 0.5  → inject (confidence = avg)
+//   - max ≥ 0.8  → inject anyway (high-confidence top result rescue)
+//   - avg ≥ 0.3  → queue   (confidence = avg)
+//   - avg ≥ 0.2  → wait    (confidence = avg)
+//   - else       → wait    (confidence = 1.0 - avg; this is the
+//                           legacy "Discard" path collapsed into wait,
+//                           since decide.inject is 3-way not 4-way)
+//
+// When inject, inject_ids = all candidates whose Score ≥ 0.5 (the
+// threshold needed to clear the inject avg gate). This mirrors the
+// legacy "results passed to formatter as-is" semantics.
+//
+// Returns (decision, inject_ids, confidence).
 func scoreBasedInjectDecision(candidates []cognition.Result) (string, []string, float64) {
 	if len(candidates) == 0 {
 		return "wait", []string{}, 0.5
 	}
-	maxScore := 0.0
+	maxScore, sum := 0.0, 0.0
 	for _, c := range candidates {
+		sum += c.Score
 		if c.Score > maxScore {
 			maxScore = c.Score
 		}
 	}
-	switch {
-	case maxScore >= 0.8:
+	avgScore := sum / float64(len(candidates))
+
+	if avgScore >= 0.5 {
 		ids := []string{}
 		for _, c := range candidates {
-			if c.Score >= 0.7 {
+			if c.Score >= 0.5 {
 				ids = append(ids, c.ID)
 			}
 		}
-		return "inject", ids, 0.8
-	case maxScore < 0.5:
-		return "wait", []string{}, 0.6
-	default:
-		return "queue", []string{}, 0.6
+		return "inject", ids, avgScore
 	}
+	if maxScore >= 0.8 {
+		ids := []string{}
+		for _, c := range candidates {
+			if c.Score >= 0.5 {
+				ids = append(ids, c.ID)
+			}
+		}
+		return "inject", ids, maxScore
+	}
+	if avgScore >= 0.3 {
+		return "queue", []string{}, avgScore
+	}
+	if avgScore >= 0.2 {
+		return "wait", []string{}, avgScore
+	}
+	return "wait", []string{}, 1.0 - avgScore
 }

@@ -33,6 +33,8 @@ import (
 	"github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/storage"
 	cog "github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 	"gopkg.in/yaml.v3"
@@ -180,33 +182,48 @@ func runScenario(ctx context.Context, s *Scenario, suite *SuiteResult) {
 	}
 }
 
-// runResolveTest dispatches one resolve-mode test. Self-contained
-// resolve scenarios inline both the query and the candidate results;
-// runner converts to cognition.Query + []cognition.Result and calls
-// Resolve. Asserts the returned Decision matches expected.decision
-// and (when present) min_confidence is satisfied.
+// runResolveTest dispatches one resolve-mode test through the Stage 2
+// `decide.inject` op (per docs/dag-build-plan.md Stage 2 runner-rewire
+// follow-up logged in eval-journal 2026-05-18). The op's mechanical
+// fallback uses the same score-threshold heuristic as the legacy
+// cognition.Resolve, so resolve-mode scenarios that PASS today
+// continue to PASS via the new dispatcher.
+//
+// We deliberately pass nil provider — the resolve scenarios were
+// authored against deterministic score-threshold logic; running the
+// LLM path would introduce non-deterministic re-orderings the
+// scenarios weren't written for. The right place to exercise the LLM
+// rerank path is the reflect-mode suite (which has top_result_ids
+// assertions designed for it).
 func runResolveTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg string) {
 	q, results, ierr := buildResolveInput(t.Input)
 	if ierr != nil {
 		return false, "input_invalid", ierr.Error()
 	}
-	r := cognition.NewResolve()
-	got, rerr := r.Resolve(ctx, q, results)
-	if rerr != nil {
-		return false, "resolve_error", rerr.Error()
+
+	handler := ops.NewInjectHandler(ops.InjectConfig{Provider: nil})
+	res, herr := handler(ctx, map[string]any{
+		"query":      q.Text,
+		"candidates": results,
+	}, dag.DefaultTurnBudget())
+	if herr != nil {
+		return false, "resolve_error", herr.Error()
 	}
 
 	expectedDecision, _ := t.Expected["decision"].(string)
 	if expectedDecision == "" {
 		return false, "expected_missing", "expected.decision not set"
 	}
-	if got.Decision.String() != expectedDecision {
-		return false, "decision_mismatch", fmt.Sprintf("expected %q, got %q (confidence=%.3f, reason=%s)", expectedDecision, got.Decision.String(), got.Confidence, got.Reason)
+	gotDecision, _ := res.Out["decision"].(string)
+	if gotDecision != expectedDecision {
+		why, _ := res.Out["why"].(string)
+		return false, "decision_mismatch", fmt.Sprintf("expected %q, got %q (why=%s)", expectedDecision, gotDecision, why)
 	}
 
 	if minConf, ok := t.Expected["min_confidence"].(float64); ok {
-		if got.Confidence < minConf {
-			return false, "confidence_too_low", fmt.Sprintf("expected min %.2f, got %.3f", minConf, got.Confidence)
+		gotConf, _ := res.Out["confidence"].(float64)
+		if gotConf < minConf {
+			return false, "confidence_too_low", fmt.Sprintf("expected min %.2f, got %.3f", minConf, gotConf)
 		}
 	}
 
@@ -319,6 +336,21 @@ func runReflexTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg s
 //     appear in the returned candidate's Metadata["conflicts_with"]
 //     (Reflect's surface for surfacing detected conflicts, set in
 //     parseRerankResponse).
+// runReflectTest dispatches a reflect-mode test through the Stage 2
+// ops `attend.rerank` (for top_result_ids) and
+// `value.detect_contradiction` (for contradictions_found). Both ops
+// require an LLM provider; without one, the scenario is reported
+// Skipped (needs_llm_provider) — same as before, since the scenarios'
+// expected behavior is the LLM-evaluated one, and the ops'
+// mechanical fallbacks are weaker (rank by Score, keyword-pair
+// contradictions).
+//
+// Contradiction detection fans out: for each candidate, call
+// value.detect_contradiction with that candidate as `candidate` and
+// the other candidates as `priors`. Any flagged ID — either the
+// current candidate or one returned in conflicts_with — joins the
+// detected set. The expected contradictions_found list must be a
+// subset of the union.
 func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg string) {
 	q, candidates, ierr := buildReflectInput(t.Input)
 	if ierr != nil {
@@ -327,19 +359,12 @@ func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 
 	provider, _, perr := llm.NewLLMClient(nil)
 	if perr != nil || provider == nil || !provider.IsAvailable() {
-		// No reachable LLM → Reflect would no-op (return candidates
-		// as-is per its graceful-degradation contract). The scenario
-		// has no LLM-free expected behavior, so skip rather than FAIL.
 		return false, "needs_llm_provider", "no LLM provider available (set OPEN_ROUTER_API_KEY or use keychain cortex-openrouter)"
 	}
 
-	r := cognition.NewReflect(provider)
-	reranked, rerr := r.Reflect(ctx, q, candidates)
-	if rerr != nil {
-		return false, "reflect_error", rerr.Error()
-	}
+	budget := dag.DefaultTurnBudget()
 
-	// expected.top_result_ids — strict prefix match against returned ranking.
+	// expected.top_result_ids → attend.rerank
 	if expRaw, hasExp := t.Expected["top_result_ids"].([]any); hasExp {
 		expected := make([]string, 0, len(expRaw))
 		for _, e := range expRaw {
@@ -347,6 +372,15 @@ func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 				expected = append(expected, s)
 			}
 		}
+		rerank := ops.NewRerankHandler(ops.RerankConfig{Provider: provider})
+		res, rerr := rerank(ctx, map[string]any{
+			"query":      q.Text,
+			"candidates": candidates,
+		}, budget)
+		if rerr != nil {
+			return false, "reflect_error", fmt.Sprintf("attend.rerank: %v", rerr)
+		}
+		reranked, _ := res.Out["reranked"].([]cog.Result)
 		gotIDs := make([]string, 0, len(reranked))
 		for _, r := range reranked {
 			gotIDs = append(gotIDs, r.ID)
@@ -361,8 +395,7 @@ func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 		}
 	}
 
-	// expected.contradictions_found — every listed ID must appear with
-	// Metadata["conflicts_with"] populated.
+	// expected.contradictions_found → value.detect_contradiction fan-out
 	if contRaw, hasCont := t.Expected["contradictions_found"].([]any); hasCont {
 		expected := make([]string, 0, len(contRaw))
 		for _, c := range contRaw {
@@ -370,13 +403,27 @@ func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 				expected = append(expected, s)
 			}
 		}
+		detect := ops.NewDetectContradictionHandler(ops.DetectContradictionConfig{Provider: provider})
 		flagged := make(map[string]bool)
-		for _, r := range reranked {
-			if r.Metadata == nil {
+		for i, c := range candidates {
+			priors := make([]cog.Result, 0, len(candidates)-1)
+			priors = append(priors, candidates[:i]...)
+			priors = append(priors, candidates[i+1:]...)
+			res, herr := detect(ctx, map[string]any{
+				"candidate": c.Content,
+				"priors":    priors,
+			}, budget)
+			if herr != nil {
+				return false, "reflect_error", fmt.Sprintf("value.detect_contradiction[%s]: %v", c.ID, herr)
+			}
+			conflicts, _ := res.Out["conflicts"].(bool)
+			if !conflicts {
 				continue
 			}
-			if _, has := r.Metadata["conflicts_with"]; has {
-				flagged[r.ID] = true
+			flagged[c.ID] = true
+			conflictIDs, _ := res.Out["conflicts_with"].([]string)
+			for _, id := range conflictIDs {
+				flagged[id] = true
 			}
 		}
 		missing := []string{}
@@ -386,7 +433,7 @@ func runReflectTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg 
 			}
 		}
 		if len(missing) > 0 {
-			return false, "contradictions_not_detected", fmt.Sprintf("expected contradictions on ids=%v, none flagged for %v (flagged=%v)", expected, missing, keysOf(flagged))
+			return false, "contradictions_not_detected", fmt.Sprintf("expected contradictions on ids=%v, missing %v (flagged=%v)", expected, missing, keysOf(flagged))
 		}
 	}
 
