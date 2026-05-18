@@ -66,7 +66,8 @@ type SpawnRefusal struct {
 type Executor struct {
 	registry   *Registry
 	traceCB    TraceCallback
-	sequential bool // when true, run nodes one at a time (Stage 1-3 behavior)
+	sequential bool          // when true, run nodes one at a time (Stage 1-3 behavior)
+	deferred   DeferredQueue // optional; when set, budget_exceeded refusals are queued for rollover and prior fresh deferrals are prepended to the seed
 }
 
 // TraceCallback is invoked after each node executes — callers wire
@@ -109,6 +110,18 @@ func (e *Executor) SetSequential(seq bool) {
 // time. Exposed for tests + diagnostics.
 func (e *Executor) Sequential() bool { return e.sequential }
 
+// SetDeferredQueue wires a persistence layer for cross-turn budget
+// rollover. When set:
+//   - budget_exceeded spawn refusals are also appended to the queue
+//   - on the next Run, fresh deferred spawns from the queue are
+//     prepended to the seed (with their original ParentNodeID
+//     preserved for cross-turn trace continuity)
+//
+// Pass nil to disable rollover. Tests typically leave this unset.
+func (e *Executor) SetDeferredQueue(q DeferredQueue) {
+	e.deferred = q
+}
+
 // pendingItem is one node waiting to execute.
 type pendingItem struct {
 	spec  NodeSpec
@@ -130,6 +143,29 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 	budget := initial
 
 	pending := make([]pendingItem, 0, len(seed)*2)
+
+	// Cross-turn rollover: drain fresh deferred spawns from prior
+	// turns and prepend them to the pending set before the caller's
+	// seed. Failures here are non-fatal — a missing queue file just
+	// means no prior deferrals, and a corrupt one is skipped (the
+	// queue's reader tolerates corrupt lines).
+	if e.deferred != nil {
+		deferred, err := e.deferred.ReadAndConsume()
+		if err == nil {
+			for _, ds := range deferred {
+				spec := ds.Child
+				if spec.Parent == "" {
+					spec.Parent = ds.ParentNodeID
+				}
+				if spec.ID == "" {
+					spec.ID = fmt.Sprintf("deferred-%d", len(pending))
+				}
+				pending = append(pending, pendingItem{spec: spec, depth: 0})
+				trace.SeedNodeIDs = append(trace.SeedNodeIDs, spec.ID)
+			}
+		}
+	}
+
 	for i, s := range seed {
 		if s.ID == "" {
 			s.ID = fmt.Sprintf("seed-%d", i)
@@ -197,7 +233,7 @@ func (e *Executor) runSequential(
 		entry.BudgetAfter = *budget
 
 		if entry.OK {
-			children, refusals := e.scheduleChildren(item, spec, result.Spawn, *budget, initial, nextChildID)
+			children, refusals := e.scheduleChildren(trace.TurnID, item, spec, result.Spawn, *budget, initial, nextChildID)
 			entry.SpawnedChildren = childIDs(children)
 			for _, c := range children {
 				pending = append(pending, c)
@@ -297,7 +333,7 @@ func (e *Executor) runParallel(
 			entry.BudgetAfter = *budget
 
 			if entry.OK {
-				children, refusals := e.scheduleChildren(r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
+				children, refusals := e.scheduleChildren(trace.TurnID, r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
 				entry.SpawnedChildren = childIDs(children)
 				for _, c := range children {
 					pending = append(pending, c)
@@ -371,8 +407,11 @@ func (e *Executor) invokeOne(ctx context.Context, item pendingItem, budgetSnapsh
 
 // scheduleChildren applies depth, per-op MaxFanout, and budget pre-check
 // to the parent's spawned children. Returns the children to enqueue
-// (with parent + auto-IDs filled in) and any spawn refusals.
+// (with parent + auto-IDs filled in) and any spawn refusals. When a
+// DeferredQueue is wired on the executor, budget_exceeded refusals
+// are also appended to the queue for cross-turn rollover.
 func (e *Executor) scheduleChildren(
+	turnID string,
 	parent pendingItem,
 	parentSpec NodeSpec,
 	spawn []NodeSpec,
@@ -405,6 +444,17 @@ func (e *Executor) scheduleChildren(
 					ErrorCode:     "budget_exceeded",
 					ExhaustedAxis: axis,
 				})
+				if e.deferred != nil {
+					// Best-effort: a queue write failure must not
+					// derail the turn (the in-progress trace is more
+					// valuable than the rollover record).
+					_ = e.deferred.Append(DeferredSpawn{
+						TurnID:       turnID,
+						ParentNodeID: parent.spec.ID,
+						Child:        childSpec,
+						Reason:       axis,
+					})
+				}
 				continue
 			}
 		}
