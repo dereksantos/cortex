@@ -1,0 +1,19 @@
+---
+version: 1
+op: attend.rerank
+description: rerank N candidates by relevance to a query
+max_output_tokens: 100
+vars: [query, candidates]
+---
+Rank the candidates by relevance to the query. Most relevant FIRST.
+
+Query: {{.query}}
+
+Candidates (one per line, ID-prefixed):
+{{.candidates}}
+
+Output ONLY a JSON object — no prose, no markdown fence. List IDs from MOST to LEAST relevant. Omit candidates that are clearly irrelevant. Keep reason terse (≤10 words).
+
+{"ranking": ["id1", "id2", ...], "reason": "1-line why"}
+
+Example: {"ranking":["jwt_handler","auth_module"],"reason":"jwt_handler directly answers token-expiry question"}

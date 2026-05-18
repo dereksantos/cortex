@@ -1,0 +1,20 @@
+---
+version: 1
+op: value.detect_contradiction
+description: does this candidate conflict with any prior, and which ones
+max_output_tokens: 80
+vars: [candidate, priors]
+---
+Decide whether the candidate CONTRADICTS any prior statement. A contradiction = priors recommend X while candidate recommends NOT-X (or vice versa) on the SAME topic. Different topics ≠ contradiction.
+
+Candidate: {{.candidate}}
+
+Priors (one per line, ID-prefixed):
+{{.priors}}
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"conflicts": true|false, "conflicts_with": ["id1", ...], "why": "≤10 words"}
+
+Examples:
+{"conflicts":true,"conflicts_with":["p_2"],"why":"p_2 says avoid X, candidate uses X"}
+{"conflicts":false,"conflicts_with":[],"why":"different topics"}

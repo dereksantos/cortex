@@ -1,0 +1,18 @@
+---
+version: 1
+op: value.score
+description: is this candidate load-bearing for the query? Y/N + 1-line why
+max_output_tokens: 60
+vars: [query, candidate]
+---
+Decide if the candidate is LOAD-BEARING for the query — i.e., its presence meaningfully changes what answer the coder should give.
+
+Query: {{.query}}
+Candidate: {{.candidate}}
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"load_bearing": true|false, "confidence": 0.0-1.0, "why": "≤10 words"}
+
+Examples:
+{"load_bearing":true,"confidence":0.9,"why":"directly answers the question"}
+{"load_bearing":false,"confidence":0.7,"why":"covers a different topic"}
