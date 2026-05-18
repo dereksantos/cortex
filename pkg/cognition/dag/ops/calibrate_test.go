@@ -7,18 +7,29 @@
 // dag.NodeSpec.Cost hints to realistic values from real model
 // measurements rather than vendor-doc headroom estimates.
 //
-// Usage:
+// Usage (cloud, OpenRouter Haiku 4.5 default):
 //
 //	go test -tags=calibrate ./pkg/cognition/dag/ops/ -run TestCalibrate -v
 //
 // Requires the OpenRouter key in the macOS keychain (entry
-// "cortex-openrouter") or $OPEN_ROUTER_API_KEY. Skips if no key.
+// "cortex-openrouter") or $OPEN_ROUTER_API_KEY.
+//
+// Usage (local Ollama, tests the small-model amplifier thesis):
+//
+//	CORTEX_CALIBRATE_OLLAMA_MODEL=qwen2.5-coder:1.5b \
+//	  go test -tags=calibrate ./pkg/cognition/dag/ops/ -run TestCalibrate -v
+//
+// Requires Ollama running on localhost:11434 with the model pulled.
+// No API key needed — a stub is set to satisfy the OpenRouter
+// client's IsAvailable check (matches the pattern in
+// cmd/cortex/commands/repl.go ensureStubOpenRouterKey).
 
 package ops
 
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -27,8 +38,31 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
+const ollamaAPIURL = "http://localhost:11434/v1/chat/completions"
+
 func newCalibrationProvider(t *testing.T) llm.Provider {
 	t.Helper()
+
+	// Local-Ollama opt-in via env var. When set, construct an
+	// OpenRouterClient pointed at Ollama's OpenAI-compatible endpoint
+	// with the requested model. This is the small-model amplifier
+	// signal channel — same probe, different backend.
+	if ollamaModel := os.Getenv("CORTEX_CALIBRATE_OLLAMA_MODEL"); ollamaModel != "" {
+		// Stub the API key so IsAvailable() returns true. Ollama doesn't
+		// validate it; the OpenAI-compat endpoint accepts any value.
+		if os.Getenv("OPEN_ROUTER_API_KEY") == "" {
+			_ = os.Setenv("OPEN_ROUTER_API_KEY", "ollama-local-stub")
+		}
+		client := llm.NewOpenRouterClient(nil)
+		client.SetAPIURL(ollamaAPIURL)
+		client.SetModel(ollamaModel)
+		if !client.IsAvailable() {
+			t.Skip("OpenRouter client not available even after stub key")
+		}
+		t.Logf("provider resolved via local Ollama (model=%s)", ollamaModel)
+		return client
+	}
+
 	provider, source, err := llm.NewLLMClient(nil)
 	if err != nil || provider == nil || !provider.IsAvailable() {
 		t.Skipf("no LLM provider available (set OPEN_ROUTER_API_KEY or use keychain cortex-openrouter): %v", err)
