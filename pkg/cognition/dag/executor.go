@@ -5,18 +5,20 @@
 // in the pending set; when budget exhausts, in-flight finishes but
 // no new spawns happen.
 //
-// V0 scope (per docs/dag-build-plan.md Stage 1):
-//   - Single-threaded; spawn-by-spawn FIFO walking
-//   - No parallelism (Stage 4 adds it)
-//   - Per-node telemetry rows written to a callback (Phase 1
-//     cell_results.jsonl integration is the caller's responsibility)
-//   - Depth cap + budget exhaustion graceful degradation
+// Stage 4 introduces batch-parallel execution: each tick drains the
+// pending set into a batch and runs the batch concurrently. Budget
+// state is mutex-guarded; cost application after each handler return
+// is serialized. Sequential mode remains opt-in via SetSequential —
+// the mechanic-4 budget-exhaustion test relies on the in-flight-only
+// semantics that sequential walking guarantees.
 package dag
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -56,14 +58,15 @@ type Trace struct {
 type SpawnRefusal struct {
 	ParentID      string
 	ChildQualName string
-	ErrorCode     string // budget_exceeded | depth_exceeded
+	ErrorCode     string // budget_exceeded | depth_exceeded | max_fanout_exceeded
 	ExhaustedAxis string // for budget_exceeded
 }
 
 // Executor walks a seed under a decaying budget.
 type Executor struct {
-	registry *Registry
-	traceCB  TraceCallback // optional: called per node after execution
+	registry   *Registry
+	traceCB    TraceCallback
+	sequential bool // when true, run nodes one at a time (Stage 1-3 behavior)
 }
 
 // TraceCallback is invoked after each node executes — callers wire
@@ -87,9 +90,29 @@ func NodeIDFromContext(ctx context.Context) string {
 }
 
 // NewExecutor constructs an executor backed by the given registry.
-// traceCB is optional; nil means no per-node callback.
+// Defaults to batch-parallel execution; tests that need deterministic
+// budget-exhaustion semantics call SetSequential(true). traceCB is
+// optional; nil means no per-node callback.
 func NewExecutor(reg *Registry, traceCB TraceCallback) *Executor {
-	return &Executor{registry: reg, traceCB: traceCB}
+	return &Executor{registry: reg, traceCB: traceCB, sequential: false}
+}
+
+// SetSequential toggles batch-parallel vs single-threaded walking.
+// Sequential mode preserves the Stage 1-3 budget semantics where a
+// node that exhausts the budget mid-batch prevents its peers from
+// running.
+func (e *Executor) SetSequential(seq bool) {
+	e.sequential = seq
+}
+
+// Sequential reports whether the executor will walk one node at a
+// time. Exposed for tests + diagnostics.
+func (e *Executor) Sequential() bool { return e.sequential }
+
+// pendingItem is one node waiting to execute.
+type pendingItem struct {
+	spec  NodeSpec
+	depth int // tree depth of this node (0 for seed)
 }
 
 // Run walks the seed under the given budget and returns the trace.
@@ -106,14 +129,7 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 	}
 	budget := initial
 
-	// Pending set: FIFO queue for v0 (no parallelism).
-	type pendingItem struct {
-		spec  NodeSpec
-		depth int // tree depth of this node (0 for seed)
-	}
 	pending := make([]pendingItem, 0, len(seed)*2)
-
-	// Seed nodes get auto-assigned IDs if absent + depth 0.
 	for i, s := range seed {
 		if s.ID == "" {
 			s.ID = fmt.Sprintf("seed-%d", i)
@@ -122,14 +138,39 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 		trace.SeedNodeIDs = append(trace.SeedNodeIDs, s.ID)
 	}
 
-	nextSpawnIdx := 0 // monotonic counter for auto-assigning child IDs
+	// Monotonic counter for auto-assigning child IDs. Mutex-guarded
+	// because parallel handler callbacks (Stage 3 act-op dispatcher)
+	// may race against spawn-scheduling; safer to centralize.
+	var spawnIDMu sync.Mutex
+	nextSpawnIdx := 0
+	nextChildID := func() string {
+		spawnIDMu.Lock()
+		defer spawnIDMu.Unlock()
+		nextSpawnIdx++
+		return fmt.Sprintf("n-%d", nextSpawnIdx)
+	}
 
+	if e.sequential {
+		return e.runSequential(ctx, trace, &budget, pending, initial, nextChildID)
+	}
+	return e.runParallel(ctx, trace, &budget, pending, initial, nextChildID)
+}
+
+// runSequential preserves the Stage 1-3 FIFO single-threaded walk.
+// Mechanic-1..4 expectations are pinned to this path; mechanic-5
+// (tree-shape variation) is mode-agnostic.
+func (e *Executor) runSequential(
+	ctx context.Context,
+	trace *Trace,
+	budget *Budget,
+	pending []pendingItem,
+	initial Budget,
+	nextChildID func() string,
+) (*Trace, error) {
 	for len(pending) > 0 {
-		// Budget exhaustion: stop spawning, abandon remaining pending.
 		if exh, axis := budget.Exhausted(); exh {
 			trace.Exhausted = true
 			trace.ExhaustedAxis = axis
-			// Record refusals for each unscheduled pending item.
 			for _, p := range pending {
 				trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
 					ChildQualName: p.spec.QualifiedName(),
@@ -140,126 +181,257 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 			break
 		}
 
-		// Dequeue head.
 		item := pending[0]
 		pending = pending[1:]
 
-		entry := TraceEntry{
-			NodeID:        item.spec.ID,
-			ParentID:      item.spec.Parent,
-			QualifiedName: item.spec.QualifiedName(),
-			WallStart:     time.Now(),
-		}
-
-		// Look up handler.
-		spec, err := e.registry.Get(item.spec.QualifiedName())
-		if errors.Is(err, ErrUnknownNode) {
-			entry.OK = false
-			entry.ErrorCode = "unknown_node"
-			entry.ErrorMessage = err.Error()
-			entry.WallEnd = time.Now()
+		entry, result, spec, ok := e.invokeOne(ctx, item, *budget)
+		if !ok {
 			trace.Entries = append(trace.Entries, entry)
 			if e.traceCB != nil {
 				e.traceCB(entry)
 			}
 			continue
-		} else if err != nil {
-			return trace, fmt.Errorf("registry get %s: %w", item.spec.QualifiedName(), err)
 		}
 
-		// Merge per-call attrs from the spawn spec with registry defaults.
-		// In v0, the spawn spec's Attrs takes precedence.
-		invocation := spec
-		invocation.ID = item.spec.ID
-		invocation.Parent = item.spec.Parent
-		invocation.Attrs = item.spec.Attrs
-
-		// Invoke handler. Surface the executing node's ID via context
-		// for handlers that emit synthetic child rows (Stage 3
-		// coding_turn dispatcher uses this for ParentID).
-		ctxForHandler := context.WithValue(ctx, nodeIDContextKey{}, invocation.ID)
-		result, herr := invocation.Handler(ctxForHandler, invocation.Attrs, budget)
-		entry.WallEnd = time.Now()
-		entry.CostConsumed = result.CostConsumed
-		entry.Out = result.Out
-
-		if herr != nil {
-			entry.OK = false
-			entry.ErrorCode = "handler_error"
-			entry.ErrorMessage = herr.Error()
-		} else {
-			entry.OK = true
-		}
-
-		// Apply cost to budget regardless of handler error (cost was
-		// already incurred).
 		budget.Consume(result.CostConsumed)
+		entry.BudgetAfter = *budget
 
-		// Schedule spawned children — respecting depth cap and budget.
 		if entry.OK {
-			for _, childSpec := range result.Spawn {
-				childDepth := item.depth + 1
-				// Depth cap: initial.Depth names the *deepest allowed*
-				// depth. A child at depth > initial.Depth is refused.
-				if childDepth > initial.Depth {
-					trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
-						ParentID:      item.spec.ID,
-						ChildQualName: childSpec.QualifiedName(),
-						ErrorCode:     "depth_exceeded",
-					})
-					continue
-				}
-				// Pre-spawn budget check: if the child's registered cost
-				// hint exceeds the remaining budget on any axis, refuse
-				// before scheduling. Modulate model from dag-protocol.md.
-				if childRegistered, getErr := e.registry.Get(childSpec.QualifiedName()); getErr == nil {
-					if !budget.CanAfford(childRegistered.Cost) {
-						axis := "latency_ms"
-						if childRegistered.Cost.Tokens > budget.Tokens {
-							axis = "tokens"
-						}
-						trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
-							ParentID:      item.spec.ID,
-							ChildQualName: childSpec.QualifiedName(),
-							ErrorCode:     "budget_exceeded",
-							ExhaustedAxis: axis,
-						})
-						continue
-					}
-				}
-				// MaxFanout check (per the parent spec).
-				if len(entry.SpawnedChildren) >= spec.MaxFanout {
-					trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
-						ParentID:      item.spec.ID,
-						ChildQualName: childSpec.QualifiedName(),
-						ErrorCode:     "max_fanout_exceeded",
-					})
-					continue
-				}
-				// Auto-assign child ID if not set.
-				if childSpec.ID == "" {
-					nextSpawnIdx++
-					childSpec.ID = fmt.Sprintf("n-%d", nextSpawnIdx)
-				}
-				childSpec.Parent = item.spec.ID
-				pending = append(pending, pendingItem{spec: childSpec, depth: childDepth})
-				entry.SpawnedChildren = append(entry.SpawnedChildren, childSpec.ID)
+			children, refusals := e.scheduleChildren(item, spec, result.Spawn, *budget, initial, nextChildID)
+			entry.SpawnedChildren = childIDs(children)
+			for _, c := range children {
+				pending = append(pending, c)
 			}
+			trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
 		}
 
-		entry.BudgetAfter = budget
 		trace.Entries = append(trace.Entries, entry)
 		trace.TotalExecuted++
-
 		if e.traceCB != nil {
 			e.traceCB(entry)
 		}
-
-		// Pre-spawn budget check for next iteration is handled at the
-		// top of the loop (Exhausted check). Depth-cap is checked at
-		// spawn-schedule time above.
 	}
 
-	trace.FinalBudget = budget
+	trace.FinalBudget = *budget
 	return trace, nil
+}
+
+// runParallel walks the seed by draining the current pending set into
+// a batch each iteration. Handlers in a batch run concurrently;
+// budget application + spawn scheduling happen after the batch joins.
+// Trace entries are sorted by WallStart so the JSONL projection is
+// time-ordered (per dag-protocol.md "Trace ordering").
+func (e *Executor) runParallel(
+	ctx context.Context,
+	trace *Trace,
+	budget *Budget,
+	pending []pendingItem,
+	initial Budget,
+	nextChildID func() string,
+) (*Trace, error) {
+	type batchResult struct {
+		item    pendingItem
+		entry   TraceEntry
+		result  NodeResult
+		spec    NodeSpec
+		ok      bool
+		unknown bool
+	}
+
+	for len(pending) > 0 {
+		if exh, axis := budget.Exhausted(); exh {
+			trace.Exhausted = true
+			trace.ExhaustedAxis = axis
+			for _, p := range pending {
+				trace.SpawnRefusals = append(trace.SpawnRefusals, SpawnRefusal{
+					ChildQualName: p.spec.QualifiedName(),
+					ErrorCode:     "budget_exceeded",
+					ExhaustedAxis: axis,
+				})
+			}
+			break
+		}
+
+		batch := pending
+		pending = pending[:0]
+
+		results := make([]batchResult, len(batch))
+		var wg sync.WaitGroup
+		// Snapshot the budget for handlers — they see the same
+		// pre-batch budget. Real consumption applies after the join.
+		snapshot := *budget
+		for i, item := range batch {
+			wg.Add(1)
+			go func(i int, item pendingItem) {
+				defer wg.Done()
+				entry, result, spec, ok := e.invokeOne(ctx, item, snapshot)
+				results[i] = batchResult{
+					item:    item,
+					entry:   entry,
+					result:  result,
+					spec:    spec,
+					ok:      ok,
+					unknown: !ok,
+				}
+			}(i, item)
+		}
+		wg.Wait()
+
+		// Serialize trace + budget mutations in WallStart order so the
+		// JSONL projection reads time-forward regardless of goroutine
+		// scheduling. Stable sort preserves seed-order ties.
+		sort.SliceStable(results, func(i, j int) bool {
+			return results[i].entry.WallStart.Before(results[j].entry.WallStart)
+		})
+
+		for _, r := range results {
+			if r.unknown {
+				trace.Entries = append(trace.Entries, r.entry)
+				if e.traceCB != nil {
+					e.traceCB(r.entry)
+				}
+				continue
+			}
+			budget.Consume(r.result.CostConsumed)
+			entry := r.entry
+			entry.BudgetAfter = *budget
+
+			if entry.OK {
+				children, refusals := e.scheduleChildren(r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
+				entry.SpawnedChildren = childIDs(children)
+				for _, c := range children {
+					pending = append(pending, c)
+				}
+				trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
+			}
+
+			trace.Entries = append(trace.Entries, entry)
+			trace.TotalExecuted++
+			if e.traceCB != nil {
+				e.traceCB(entry)
+			}
+		}
+	}
+
+	trace.FinalBudget = *budget
+	return trace, nil
+}
+
+// invokeOne looks up the handler, runs it, builds the trace entry,
+// and reports the registered spec. ok=false means the handler couldn't
+// be looked up (entry has ErrorCode set, caller should append and
+// move on); ok=true means handler ran (may still have entry.OK=false
+// if the handler errored).
+func (e *Executor) invokeOne(ctx context.Context, item pendingItem, budgetSnapshot Budget) (TraceEntry, NodeResult, NodeSpec, bool) {
+	entry := TraceEntry{
+		NodeID:        item.spec.ID,
+		ParentID:      item.spec.Parent,
+		QualifiedName: item.spec.QualifiedName(),
+		WallStart:     time.Now(),
+	}
+
+	spec, err := e.registry.Get(item.spec.QualifiedName())
+	if errors.Is(err, ErrUnknownNode) {
+		entry.OK = false
+		entry.ErrorCode = "unknown_node"
+		entry.ErrorMessage = err.Error()
+		entry.WallEnd = time.Now()
+		return entry, NodeResult{}, NodeSpec{}, false
+	} else if err != nil {
+		// Non-ErrUnknownNode registry error — treat as handler_error
+		// shape so the trace still emits a row.
+		entry.OK = false
+		entry.ErrorCode = "registry_error"
+		entry.ErrorMessage = err.Error()
+		entry.WallEnd = time.Now()
+		return entry, NodeResult{}, NodeSpec{}, false
+	}
+
+	invocation := spec
+	invocation.ID = item.spec.ID
+	invocation.Parent = item.spec.Parent
+	invocation.Attrs = item.spec.Attrs
+
+	ctxForHandler := context.WithValue(ctx, nodeIDContextKey{}, invocation.ID)
+	result, herr := invocation.Handler(ctxForHandler, invocation.Attrs, budgetSnapshot)
+	entry.WallEnd = time.Now()
+	entry.CostConsumed = result.CostConsumed
+	entry.Out = result.Out
+
+	if herr != nil {
+		entry.OK = false
+		entry.ErrorCode = "handler_error"
+		entry.ErrorMessage = herr.Error()
+	} else {
+		entry.OK = true
+	}
+
+	return entry, result, spec, true
+}
+
+// scheduleChildren applies depth, per-op MaxFanout, and budget pre-check
+// to the parent's spawned children. Returns the children to enqueue
+// (with parent + auto-IDs filled in) and any spawn refusals.
+func (e *Executor) scheduleChildren(
+	parent pendingItem,
+	parentSpec NodeSpec,
+	spawn []NodeSpec,
+	currentBudget Budget,
+	initial Budget,
+	nextChildID func() string,
+) ([]pendingItem, []SpawnRefusal) {
+	var scheduled []pendingItem
+	var refusals []SpawnRefusal
+	fanoutCount := 0
+	for _, childSpec := range spawn {
+		childDepth := parent.depth + 1
+		if childDepth > initial.Depth {
+			refusals = append(refusals, SpawnRefusal{
+				ParentID:      parent.spec.ID,
+				ChildQualName: childSpec.QualifiedName(),
+				ErrorCode:     "depth_exceeded",
+			})
+			continue
+		}
+		if childRegistered, getErr := e.registry.Get(childSpec.QualifiedName()); getErr == nil {
+			if !currentBudget.CanAfford(childRegistered.Cost) {
+				axis := "latency_ms"
+				if childRegistered.Cost.Tokens > currentBudget.Tokens {
+					axis = "tokens"
+				}
+				refusals = append(refusals, SpawnRefusal{
+					ParentID:      parent.spec.ID,
+					ChildQualName: childSpec.QualifiedName(),
+					ErrorCode:     "budget_exceeded",
+					ExhaustedAxis: axis,
+				})
+				continue
+			}
+		}
+		if fanoutCount >= parentSpec.MaxFanout {
+			refusals = append(refusals, SpawnRefusal{
+				ParentID:      parent.spec.ID,
+				ChildQualName: childSpec.QualifiedName(),
+				ErrorCode:     "max_fanout_exceeded",
+			})
+			continue
+		}
+		if childSpec.ID == "" {
+			childSpec.ID = nextChildID()
+		}
+		childSpec.Parent = parent.spec.ID
+		scheduled = append(scheduled, pendingItem{spec: childSpec, depth: childDepth})
+		fanoutCount++
+	}
+	return scheduled, refusals
+}
+
+// childIDs extracts node IDs from a slice of pending items for the
+// SpawnedChildren trace field.
+func childIDs(items []pendingItem) []string {
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = it.spec.ID
+	}
+	return out
 }
