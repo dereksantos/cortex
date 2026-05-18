@@ -99,6 +99,13 @@ func main() {
 		if cmd := commands.Get("run"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
+	case "calibrate":
+		// `cortex calibrate` recomputes per-op p50 cost hints from the
+		// project's dag_traces.jsonl rolling window and persists them
+		// to .cortex/db/op_cost_hints.json. Stage 4-C deliverable.
+		if cmd := commands.Get("calibrate"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
 	case "tools":
 		if cmd := commands.Get("tools"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})

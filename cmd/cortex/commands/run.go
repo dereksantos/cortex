@@ -148,6 +148,14 @@ func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error
 	// coding_turn can fabricate per-tool act.* rows alongside its own
 	// row in dag_traces.jsonl.
 	reg := buildTurnRegistry(prompt, model, workdir, traceCB)
+
+	// Stage 4-C: warm registry Cost fields from the prior process's
+	// calibration snapshot, if one exists. Tolerant: missing file is
+	// a cold start; corrupt file is logged in verbose mode.
+	if _, err := dag.LoadCalibrationSnapshot(reg, ""); err != nil && verbose {
+		fmt.Fprintf(os.Stderr, "[run] calibration load failed: %v (using registered defaults)\n", err)
+	}
+
 	ex := dag.NewExecutor(reg, traceCB)
 
 	seed := []dag.NodeSpec{

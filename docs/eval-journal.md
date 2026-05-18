@@ -36,6 +36,41 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 4 complete: parallel batch execution + cross-turn budget rollover + per-op cost-hint self-calibration
+
+**Cortex**: branch `derek.s/dag-stage-4` (`9c523fa` + Stage 4-C HEAD)
+**Command**:
+```
+go test -race ./pkg/cognition/dag/ -count=1
+go test ./...
+./bin/cortex eval --suite=mechanic
+./bin/cortex calibrate --help
+```
+**Versions**: provider=N/A (DAG mechanics); judge=N/A; rerank=N/A
+**Result**: 3 Stage 4 deliverables landed end-to-end. Race-detector clean. All 5 mechanic evals PASS. Full suite green. ABR numbers unchanged (no LLM behavior change — only executor mechanics).
+
+**Why this run**: Stage 4 of `docs/dag-build-plan.md`. Without parallelism the DAG executor was a serialized FIFO walker; without rollover, a turn whose budget exhausted simply dropped the deferred work; without calibration, the pre-spawn `CanAfford` gate worked off authored guesses that don't track real prompts/models. This loop closes all three gaps as the prerequisites for Stage 5 (eval/think/dream/capture types) and the post-Stage-5 fetch ops.
+
+**What changed**:
+
+- **Stage 4-A — parallel batch execution** (commit `b27cf05`). `pkg/cognition/dag/executor.Run` now defaults to a batch-parallel walker: each tick drains the current pending set, launches every item in a goroutine against an immutable pre-batch budget snapshot, joins, then serializes cost application + spawn scheduling in `WallStart` order. `SetSequential(true)` preserves the Stage 1-3 FIFO walk for tests that rely on the in-flight-only budget semantic. New unit tests: `BatchConcurrency` (proves siblings actually run concurrently), `TraceOrderedByWallStart`, `BatchExhaustionAdmitsAll`. ADR-005.
+
+- **Stage 4-B — cross-turn budget rollover** (commit `9c523fa`). New `DeferredQueue` interface + `FileDeferredQueue` at `.cortex/db/deferred_spawns.jsonl`. When the executor refuses a spawn for `budget_exceeded` AND a queue is wired, the refusal is also appended to the queue. The next `Run()` that observes the queue drains fresh entries (younger than `DefaultDeferredSpawnMaxAge = 1h`) and prepends them to the seed with original `ParentNodeID` preserved for cross-turn trace lineage. Cross-process safety via `syscall.Flock` (POSIX). `NodeSpec.MarshalJSON` projects to identity-only fields so handlers + registration metadata don't need to be persisted. ADR-006.
+
+- **Stage 4-C — per-op cost-hint self-calibration** (this commit). New `pkg/cognition/dag/calibrate.go` reads the rolling window of `.cortex/db/dag_traces.jsonl`, computes p50 latency + tokens per `qualified_name` from `ok=true` rows, applies the hints to the registry's `NodeSpec.Cost`, and persists an audit-shaped `CalibrationSnapshot` (source path, window, sample counts, observed time range) to `.cortex/db/op_cost_hints.json`. `LoadCalibrationSnapshot()` is called at `cortex run --type=turn` start to warm the registry from the prior process's calibration. New `cortex calibrate` CLI command exposes explicit recalibration with `--trace / --snapshot / --window` flags.
+
+**Observations**:
+- The mechanic-4 unit test had to be pinned to `SetSequential(true)` because the test asserts the "in-flight finishes, no new spawns" semantic, which parallel mode replaces with "all of the current batch executes, future batches are gated." The YAML fixture passes under both modes because it declares `cost_hint` on its children — the pre-spawn `CanAfford` refuses at scheduling time, not at batch-dequeue.
+- Adding `MarshalJSON/UnmarshalJSON` to `NodeSpec` was the cleanest fix for the rollover's JSON roundtrip — `Handler` is a `func`, which `encoding/json` rejects. The persisted form is identity-only; everything registry-shaped reconstitutes on replay via `QualifiedName()`. This also means a registry rename naturally invalidates affected deferrals at replay (the executor's `ErrUnknownNode` path handles it).
+- Calibration deliberately excludes `ok=false` rows so a fail-and-retry handler doesn't poison the hint with the worst-case path's latency.
+
+**Follow-ups**:
+- Stage 3.5: rip the `--dag` opt-in from `cortex code` / REPL. Now that Stage 4 is in (parallelism, rollover, calibration), the DAG path is the production path; the non-DAG thin wrapper has earned its retirement. Tracked as task #5 in this session's plan.
+- Stage 5: implement `cortex run --type=eval` so the new `sqlx-insert-user` scenario (committed `a84fe30`) flows through the DAG runtime. Task #6.
+- Calibration on a schedule: the `cortex calibrate` command exists; running it from a daemon timer is a Stage 5 / post-Stage-5 wiring task once the daemon scheduler picks up DAG types.
+
+---
+
 ### 2026-05-18 — ABR receipts: Cortex amplifies the frontier model 0%→100%; the small model gets 0 lift on this scenario
 
 **Cortex**: `5ff25f6` (branch `derek.s/dag-stage-2`)
