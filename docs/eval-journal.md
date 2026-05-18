@@ -36,6 +36,50 @@ Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Ope
 
 <!-- Newest at the top. -->
 
+### 2026-05-18 — Stage 2 gap closed: legacy runner dispatches reflect + resolve via DAG ops
+
+**Cortex**: `440504d` (branch `derek.s/dag-stage-2`)
+**Command**:
+```
+./bin/cortex eval --suite=legacy-cognition
+./bin/cortex eval --suite=mechanic
+go test ./...
+```
+**Versions**: provider=`openrouter` (keychain `cortex-openrouter`), llm=`anthropic/claude-haiku-4.5` (via reflect path; resolve uses fallback)
+**Result**: legacy-cognition **24/29 PASS** (was 23/29 pre-rewire — net +1 PASS after fixture-aligned threshold rebase); mechanic 5/5 PASS unchanged.
+
+**Why this run**: close the Stage 2 follow-up #1 from the previous entry — wire the legacy runner's mode dispatchers to the new DAG ops so the loop prompt's "24+ PASS" target is genuinely earned, not skipped to Stage 3.
+
+**What landed**:
+- `internal/eval/legacy/runner.go` `runResolveTest` now dispatches through `ops.NewInjectHandler` (nil provider; mechanical fallback path). `runReflectTest` dispatches `attend.rerank` for top_result_ids and a fan-out of `value.detect_contradiction` (one call per candidate, that candidate's content as the SUT and the remainder as priors) for contradictions_found. `runReflexTest` stays on `cognition.NewReflex` — the new ops would need an embedder, which the existing reflex scenarios are designed to bypass.
+- `pkg/cognition/dag/ops/decide_inject.go` `scoreBasedInjectDecision` rebaselined to match `cognition.Resolve.makeDecision`: avg-based thresholds (avg≥0.5 inject, ≥0.3 queue, ≥0.2 wait) with a max-rescue clause (max≥0.8 forces inject even with low avg). Earlier max-only thresholds were guess-calibrated; the avg-based ones are the project's lived-in defaults that the rebaselined `resolve_*.yaml` scenarios were authored against.
+- Unit tests for the inject fallback (`pkg/cognition/dag/ops/decide_inject_test.go`) updated to assert the new avg-based behavior — `_injectPath_byAvg`, `_injectPath_byMaxRescue`, `_queuePath`, `_waitPath` document the four threshold regions explicitly.
+
+**Numbers, with caveats**:
+- **mechanic: 5/5 PASS** (unchanged).
+- **legacy-cognition: 24/29 PASS, 5 FAIL** — final scoreboard:
+  - resolve: **9/9 PASS** (was 9/9 pre-rewire; preserved via threshold alignment — initial naive rewire dropped 5 resolve scenarios because the old max-based thresholds disagreed with the rebaselined fixtures)
+  - reflex: **11/11 PASS** (unchanged — still dispatched through `cognition.Reflex`; no embedder available)
+  - reflect: **4/9 PASS, 5 FAIL** (was 3/9 PASS via `cognition.Reflect` on the previous run; the 5 FAILs are real model-judgment mismatches, not infrastructure):
+    - `reflect-contradictions/testing-framework-conflict` — Haiku doesn't flag stdlib vs testify as conflicting (they coexist as preferences)
+    - `reflect-contradictions/api-version-conflict` — flagged but on the *wrong* IDs (model picks `api_v2` + `api_decision`, scenario wants `api_v1` + `api_v2`)
+    - `reflect-contradictions/database-config-conflict` — flagged but the model marks them as evolution rather than contradiction
+    - `reflect-ndcg/auth-rerank-quality` — model ranks `jwt_handler` above expected `auth_decision`
+    - `reflect-rerank/boost-decisions-over-patterns` — model ranks `logging_config` (highest score) above the decision/pattern split the scenario expects
+- **Loop prompt target met**: 24/29 ≥ 24. The 5 remaining reflect FAILs are LLM-quality issues that should improve with prompt refinement (or a larger model) — they're acceptance feedback for `attend.rerank` + `value.detect_contradiction`, not blocking issues with the dispatcher rewire.
+- **Wall time**: reflect scenarios now cost ~10-40s each (real LLM round-trips, sequential per-test fan-out for contradictions). Full legacy-cognition suite ≈ 4 minutes vs ~3 minutes pre-rewire. The fan-out is the dominant cost (3 candidates × ~10s contradiction call ≈ 30s per scenario).
+
+**Surprise**:
+- Expected: 6 FAILs to drop to ~2-3 with `attend.rerank` doing the reranking. Actual: only 1 net flip in reflect mode (3→4 PASS). The model's per-call judgment is the bottleneck; better prompts (or better few-shots) is the lever, not better dispatching.
+- Expected: resolve mode would PASS unchanged when swapped to `decide.inject`'s fallback. Actual: 5 scenarios FAILed on the first run because my fallback's max-based thresholds disagreed with the avg-based fixture rebasel I hadn't read. Lesson: when claiming "drop-in replacement," verify the heuristics match the fixtures' authored intent, not the op's tests.
+
+**Follow-ups (in priority order)**:
+1. **Reflect FAIL triage** — the 5 remaining reflect FAILs are good prompt-engineering targets. The `attend.rerank` template currently asks for a JSON ranking with no few-shot of "decision-category beats pattern-category at equal scores" — adding that bias might flip 1-2 scenarios. The `value.detect_contradiction` template asks "do these CONTRADICT" — the testing-framework scenario shows that conflicting *recommendations* (stdlib vs testify) aren't always conflicts in the model's mind; the prompt could clarify "policy disagreement = contradiction even if both could technically coexist."
+2. **Reflex embedder path** — once `cortex eval` learns to wire an embedder into the runner, `runReflexTest` can move to `represent.embed` + `remember.vector_search` + `attend.rerank` (a full DAG-op chain instead of `cognition.Reflex`). Deferred to Stage 3.
+3. **Cost calibration** — this entry is the first real-LLM run for the new ops. Capture per-node `cell_results.jsonl` rows on the next run and update `dag.NodeSpec.Cost` hints from observed p50. Current hints: rerank 800ms/250tok, detect_contradiction 850ms/180tok. Observed: rerank ~10-25s wall, detect_contradiction ~10-15s wall. **The hints are ~10-20× under-calibrated for real LLM latency.** This is a real recalibration job, not just a polish item.
+
+---
+
 ### 2026-05-18 — Stage 2 complete: 9 ops registered + ADR-004 + turn DAG walks real ops
 
 **Cortex**: `7b0f9c5` (branch `derek.s/dag-stage-2`)
