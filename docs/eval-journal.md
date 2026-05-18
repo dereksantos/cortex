@@ -71,6 +71,72 @@ go test ./...
 
 ---
 
+### 2026-05-18 — Third-arm ABR: injecting a worked example flips qwen-1.5b from 0/3 → 2/3 (evidence for a `remember.fetch_external` op)
+
+**Cortex**: `efb257f` (main, post-merge of PR #40)
+**Command**:
+```
+/tmp/cortex-abr-test/run-third-arm.sh
+# Archived: docs/abr-fetch-prototype-runner.sh
+```
+**Versions**: provider=`ollama-local`, model=`qwen2.5-coder:1.5b`
+**Result**: qwen-1.5b lifts from **0/3 → 2/3 PASS** when the project decision is paired with a 5-line worked sqlx code example. The remaining FAIL is a qualitatively different failure mode (uses sqlx APIs but with phantom database/sql import — bookkeeping not API knowledge).
+
+**Why this run**: prior ABR entry concluded qwen-1.5b couldn't amplify on the sqlx scenario, but acknowledged the experiment design conflated two questions: "can the small model amplify with context?" and "does the small model have sqlx API depth?" This run tests the architectural hypothesis the user raised: **Cortex could detect when the small model lacks API depth and fetch examples on the fly, then inject them.** The "fetched example" is simulated here by manually adding a 5-line sqlx snippet to the system prompt.
+
+**Three-arm comparison** (same sqlx InsertUser task, same scoring, n=3 per cell):
+
+| Arm | What's in the context | Pass rate |
+|---|---|---|
+| qwen-cold | nothing | **0/3 (0%)** |
+| qwen-context (decision text only) | "Use sqlx, not pgx, not database/sql" | **0/3 (0%)** — imports sqlx as token gesture, writes database/sql code |
+| **qwen-context-example (decision + worked code)** | decision text + 5-line sqlx GetUserByID example | **2/3 (67%)** ← new arm |
+| haiku-context (decision text only) | same as qwen-context | 3/3 (100%) — reference |
+
+**The 2/3 detail**:
+- trial-1 PASS: clean sqlx code, imports sqlx, uses sqlx.Connect + Exec
+- trial-2 FAIL: uses sqlx.Connect + Exec semantically, but imports `database/sql` and never imports `sqlx` (won't compile — bookkeeping wrong, but the API knowledge transferred from the example)
+- trial-3 PASS: clean sqlx code, imports sqlx, uses sqlx.Connect + Exec
+
+The failure mode evolved. Without the example, the model treats sqlx as a foreign token and falls back to database/sql for the actual code. With the example, the model pattern-matches the API surface from the snippet — even when it gets imports wrong, the FUNCTION BODY uses the right shape.
+
+**Confidence interval** (n=3 binomial):
+- qwen-context-example 2/3 → 95% CI [9.4%, 99.2%]
+- qwen-context 0/3 → 95% CI [0%, 70.8%]
+- CIs overlap (small n) but qualitative direction is unambiguous: the example moved the median outcome from FAIL to PASS.
+
+**What this means for the architecture**:
+
+The small-model amplifier thesis has a more specific operational form than "small model + decision text → frontier-class output." The corrected form:
+
+> Small model + decision text + **executable pattern** → frontier-class output, on tasks where the model lacks API depth.
+
+The "executable pattern" piece is what Cortex would inject on-demand via a new op pair. This run is the prototype evidence that the mechanism would work.
+
+**Followup — proper implementation as DAG ops** (the architectural commitment this signal earns):
+
+If this result holds with larger n (say n=10, which would tighten the CI to non-overlapping), build the mechanism properly:
+
+1. **`value.detect_unfamiliarity`** — new LLM-backed op (or AST-based mechanical op). Trigger: detect the bleed pattern in the model's output (imports X but never calls X.* / writes API shape doesn't match imported library / low-confidence tool call). Cheap detection, conservative threshold to avoid false positives. Output: list of (library, missing-API-surface) tuples that need fetching.
+2. **`remember.fetch_external`** — new mechanical op. Input: (library, API-surface) from #1. Output: targeted code snippet from `pkg.go.dev` API or local `go doc` output or a curated library skeleton. Cached per-project (first encounter pays the fetch tax, subsequent encounters reuse). Budget-bounded (per-turn fetch cap).
+3. **Re-attempt loop**: when #1 fires, parent node spawns #2, then re-spawns the original LLM op with the fetched snippet appended to context.
+4. **Capture for next session**: the fetched snippet lands in the project's Cortex journal so future sessions don't re-fetch the same library.
+
+Architectural fit: this is the seed+grow+decay DAG model working as designed. A node detects a gap → spawns a fetch node → fetch result feeds into a re-attempt. The mechanism IS the small-model amplifier; "decision text alone" was only half of it.
+
+**Caveats**:
+- n=3 per cell. Not statistically significant on its own — qualitatively striking, statistically tentative. Needs n=10 before locking in the architecture work.
+- Single scenario (sqlx). Other unfamiliar-API scenarios should show the same shape; tested only one.
+- The 1 FAIL shows the small model still has bookkeeping limits even with examples. Real `remember.fetch_external` outputs may need to include import statements explicitly, not just function-body examples.
+- Privacy/data flow concerns for the real implementation: external fetches mean network requests. The project's "local-only" journal invariant gets a sibling: "external lookups are opt-in and logged."
+- This is a PROTOTYPE — the manually-injected example simulates what the op would do. The real op needs the detection trigger working too, which this experiment didn't test.
+
+**Status**: prototype validated qualitatively at n=3. PROPER IMPLEMENTATION DEFERRED — to be picked up when (a) a larger-n re-run confirms the signal holds, AND (b) the project has bandwidth for a new Stage (5+ish) focused on reactive context-fetching. Filing the followup with this entry as the receipts for "we should build this."
+
+**Cost**: $0 (qwen runs locally).
+
+---
+
 ### 2026-05-18 — ABR receipts: Cortex amplifies the frontier model 0%→100%; the small model gets 0 lift on this scenario
 
 **Cortex**: `5ff25f6` (branch `derek.s/dag-stage-2`)
