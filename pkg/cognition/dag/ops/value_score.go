@@ -183,7 +183,7 @@ func keywordOverlapScore(query, candidate string) (bool, float64) {
 	q := strings.ToLower(query)
 	c := strings.ToLower(candidate)
 	tokens := strings.FieldsFunc(q, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 	})
 	for _, tok := range tokens {
 		if len(tok) >= 4 && strings.Contains(c, tok) {

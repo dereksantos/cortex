@@ -182,7 +182,7 @@ func parsePredictNextResponse(resp string) (predictNextResponse, error) {
 func nounEchoPredict(current string) []string {
 	lower := strings.ToLower(current)
 	tokens := strings.FieldsFunc(lower, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 	})
 	stopwords := map[string]bool{
 		"the": true, "and": true, "for": true, "with": true, "that": true,

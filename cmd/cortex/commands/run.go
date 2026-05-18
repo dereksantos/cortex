@@ -16,9 +16,9 @@
 //     V0 inline form) is registered separately because it crosses the
 //     pkg/cognition/dag/ops vs internal/harness/dagnode boundary.
 //   - Default chain for --type=turn:
-//        sense.prompt → represent.embed → remember.vector_search
-//        → attend.rerank → decide.inject → decide.coding_turn
-//        → maintain.extract_insight → maintain.capture
+//     sense.prompt → represent.embed → remember.vector_search
+//     → attend.rerank → decide.inject → decide.coding_turn
+//     → maintain.extract_insight → maintain.capture
 //     Each step's output flows to the next via Attrs population in
 //     wrapper closures (proper $node.out resolution lands in Stage 4
 //     when the executor gains data-edge handling).

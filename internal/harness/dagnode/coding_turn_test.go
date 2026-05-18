@@ -233,10 +233,10 @@ func TestNewActDispatcher_preservesHarnessAccountingForFilesWritten(t *testing.T
 
 func TestNormalizeToolName(t *testing.T) {
 	cases := map[string]string{
-		"read_file":                       "read_file",
-		"read_file<|channel|>commentary":  "read_file",
-		"  read_file  ":                   "  read_file",
-		"foo<|x":                          "foo",
+		"read_file":                      "read_file",
+		"read_file<|channel|>commentary": "read_file",
+		"  read_file  ":                  "  read_file",
+		"foo<|x":                         "foo",
 	}
 	for in, want := range cases {
 		got := normalizeToolName(in)

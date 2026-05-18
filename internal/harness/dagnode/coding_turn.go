@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/harness"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
+	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/llm"
 )

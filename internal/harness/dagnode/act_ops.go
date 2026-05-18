@@ -162,7 +162,7 @@ func DefaultActOpCosts() map[string]dag.Cost {
 		"read_file":     {LatencyMS: 5, Tokens: 0},
 		"list_dir":      {LatencyMS: 5, Tokens: 0},
 		"write_file":    {LatencyMS: 5, Tokens: 0},
-		"cortex_search": {LatencyMS: 100, Tokens: 0}, // includes embedder + storage scan; no real-data anchor yet
+		"cortex_search": {LatencyMS: 100, Tokens: 0},   // includes embedder + storage scan; no real-data anchor yet
 		"run_shell":     {LatencyMS: 30000, Tokens: 0}, // matches the tool's own 30s timeout (worst case)
 	}
 }

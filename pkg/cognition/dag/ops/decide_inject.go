@@ -68,9 +68,9 @@ var injectCostHint = dag.Cost{LatencyMS: 15000, Tokens: 500}
 //
 // Fallback (score-threshold heuristic, mirrors legacy resolve.go):
 //
-//	- any candidate Score >= 0.8 → inject (high relevance)
-//	- candidates exist but max Score < 0.5 → wait (ambiguous)
-//	- otherwise → queue (some signal, not strong enough to inject now)
+//   - any candidate Score >= 0.8 → inject (high relevance)
+//   - candidates exist but max Score < 0.5 → wait (ambiguous)
+//   - otherwise → queue (some signal, not strong enough to inject now)
 //
 // Empty candidates → wait (no signal at all).
 func NewInjectHandler(cfg InjectConfig) dag.Handler {
@@ -227,8 +227,8 @@ func parseInjectResponse(resp string) (injectResponse, error) {
 //   - avg ≥ 0.3  → queue   (confidence = avg)
 //   - avg ≥ 0.2  → wait    (confidence = avg)
 //   - else       → wait    (confidence = 1.0 - avg; this is the
-//                           legacy "Discard" path collapsed into wait,
-//                           since decide.inject is 3-way not 4-way)
+//     legacy "Discard" path collapsed into wait,
+//     since decide.inject is 3-way not 4-way)
 //
 // When inject, inject_ids = all candidates whose Score ≥ 0.5 (the
 // threshold needed to clear the inject avg gate). This mirrors the

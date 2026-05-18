@@ -175,9 +175,9 @@ func TestExtractInsight_specRegisters(t *testing.T) {
 
 func TestMechanicalExtractInsights_categorization(t *testing.T) {
 	cases := []struct {
-		content      string
-		expectCat    string
-		expectAny    bool
+		content       string
+		expectCat     string
+		expectAny     bool
 		expectAtLeast int
 	}{
 		{"don't use database/sql here", "constraint", true, 1},

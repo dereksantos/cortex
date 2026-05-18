@@ -336,6 +336,7 @@ func runReflexTest(ctx context.Context, t *ModeTest) (ok bool, errCode, errMsg s
 //     appear in the returned candidate's Metadata["conflicts_with"]
 //     (Reflect's surface for surfacing detected conflicts, set in
 //     parseRerankResponse).
+//
 // runReflectTest dispatches a reflect-mode test through the Stage 2
 // ops `attend.rerank` (for top_result_ids) and
 // `value.detect_contradiction` (for contradictions_found). Both ops

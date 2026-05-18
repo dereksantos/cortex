@@ -1,7 +1,5 @@
 package ops
 
-import "fmt"
-
 // readString returns the in[key] value coerced to string. Returns "" if
 // absent or wrong type — callers decide whether absence is fatal.
 func readString(in map[string]any, key string) string {
@@ -99,13 +97,4 @@ func readFloat32Slice(in map[string]any, key string) ([]float32, bool) {
 		return out, true
 	}
 	return nil, false
-}
-
-// requireKey returns a descriptive error if in[key] is absent or empty.
-// Use at the top of handlers that need a specific input.
-func requireKey(in map[string]any, key string) error {
-	if _, ok := in[key]; !ok {
-		return fmt.Errorf("input %q is required", key)
-	}
-	return nil
 }

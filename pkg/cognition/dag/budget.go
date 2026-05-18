@@ -78,10 +78,10 @@ func (b Budget) String() string {
 // search → rerank → inject → coding_turn → extract_insight → capture)
 // plus coding_turn (variable; the BIG node). For sequential walking:
 //
-//   5 LLM ops × 18s headroom = 90,000ms
-//   + coding_turn allowance   = 30,000ms
-//   + slack                   = 30,000ms
-//   = 150,000ms total
+//	5 LLM ops × 18s headroom = 90,000ms
+//	+ coding_turn allowance   = 30,000ms
+//	+ slack                   = 30,000ms
+//	= 150,000ms total
 //
 // Stage 4 will revisit when parallel execution lands — parallel
 // fan-out collapses sequential ops onto a single critical path, so
