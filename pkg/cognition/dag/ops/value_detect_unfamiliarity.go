@@ -170,4 +170,3 @@ func detectUnfamiliarityGo(code string) ([]UnfamiliarityFinding, error) {
 	}
 	return findings, nil
 }
-

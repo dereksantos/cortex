@@ -36,7 +36,7 @@ type OrderItem struct {
 // SagaState tracks the state of a distributed transaction.
 // Used for implementing the saga pattern in order processing.
 type SagaState struct {
-	OrderID          string
+	OrderID           string
 	InventoryReserved bool
 	PaymentProcessed  bool
 	NotificationSent  bool

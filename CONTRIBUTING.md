@@ -33,12 +33,23 @@ Thank you for your interest in contributing to Cortex! This document provides gu
    ./cortex --help
    ```
 
+4. **Activate the pre-commit hook** (one-time per clone)
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   The hook runs `gofmt -l` + `go vet` on staged Go files and blocks
+   commits with formatting errors or vet diagnostics. To bypass for
+   a genuine emergency: `git commit --no-verify` (prefer fixing the
+   issue — `gofmt -w .` almost always does it). Same checks are
+   available as `./scripts/check.sh` for manual runs.
+
 ### Development Environment
 
 - **Go**: 1.25+ required (see `go.mod`)
-- **Code Style**: Use `gofmt` for formatting, `golint` for linting
+- **Code Style**: Use `gofmt` for formatting, `golint` for linting (enforced by `.githooks/pre-commit` once activated)
 - **Testing**: Standard Go testing with `go test`
 - **Tools**: [Ollama](https://ollama.ai) for testing LLM features
+- **Linting**: `golangci-lint` is the heavyweight check. The hook skips it (too slow for every commit); CI enforces. Local opt-in: `./scripts/check.sh lint`.
 
 ## 🔧 Development Workflow
 

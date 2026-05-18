@@ -454,7 +454,8 @@ func runCaptureDAG(eventJSON, outputFormat string, verbose bool) error {
 }
 
 // registerCaptureChain wires the capture-type 3-node chain:
-//   sense.hook_event → maintain.capture → maintain.extract_insight
+//
+//	sense.hook_event → maintain.capture → maintain.extract_insight
 //
 // Each handler is intentionally small — capture's budget is too tight
 // for LLM calls. extract_insight is conditional: it only spawns when

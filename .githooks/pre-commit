@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit — block commits with formatting or vet errors.
+#
+# Activate this hook directory once per clone:
+#   git config core.hooksPath .githooks
+#
+# What it runs (in order):
+#   1. gofmt -l .   — fails if any Go file would be reformatted
+#   2. go vet ./... — fails on suspicious constructs
+#
+# Skipped intentionally for speed:
+#   - go test       (run before push, not before commit)
+#   - golangci-lint (run in CI; local opt-in via scripts/check.sh)
+#
+# Bypass for a single commit (genuine emergencies only):
+#   git commit --no-verify ...
+# Prefer fixing the issue: gofmt -w . almost always does it.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Only check files actually staged for this commit so an in-progress
+# unrelated file doesn't block the commit.
+staged_go=()
+while IFS= read -r -d '' f; do
+  staged_go+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACM -z | grep -z '\.go$' || true)
+
+if [[ ${#staged_go[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+unformatted="$(gofmt -l "${staged_go[@]}" || true)"
+if [[ -n "$unformatted" ]]; then
+  echo "✖ pre-commit: staged Go files need gofmt:" >&2
+  echo "$unformatted" >&2
+  echo "" >&2
+  echo "Fix:  gofmt -w ${staged_go[*]}" >&2
+  echo "Or:   git commit --no-verify  (only in genuine emergencies)" >&2
+  exit 1
+fi
+
+# go vet is whole-package-aware, not per-file. Vet only the packages
+# the staged files belong to.
+pkgs=()
+declare -A seen_pkg
+for f in "${staged_go[@]}"; do
+  pkg_dir="./$(dirname "$f")"
+  if [[ -z "${seen_pkg[$pkg_dir]:-}" ]]; then
+    pkgs+=("$pkg_dir")
+    seen_pkg[$pkg_dir]=1
+  fi
+done
+
+if ! go vet "${pkgs[@]}"; then
+  echo "" >&2
+  echo "✖ pre-commit: go vet errors above" >&2
+  echo "Bypass with --no-verify only if you've reviewed the diagnostics." >&2
+  exit 1
+fi
+
+exit 0

@@ -42,7 +42,7 @@ type DeferredSpawn struct {
 	TurnID       string    `json:"turn_id"`
 	ParentNodeID string    `json:"parent_node_id"`
 	Child        NodeSpec  `json:"child"`
-	Reason       string    `json:"reason"`      // exhausted_axis ("latency_ms" / "tokens")
+	Reason       string    `json:"reason"` // exhausted_axis ("latency_ms" / "tokens")
 	DeferredAt   time.Time `json:"deferred_at"`
 }
 

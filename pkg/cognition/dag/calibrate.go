@@ -46,11 +46,11 @@ type OpCostHint struct {
 // .cortex/db/op_cost_hints.json. Includes the source path + window
 // so the caller can audit what fed the calibration.
 type CalibrationSnapshot struct {
-	SchemaVersion string                 `json:"schema_version"`
-	SourcePath    string                 `json:"source_path"`
-	WindowSize    int                    `json:"window_size"`
-	CalibratedAt  time.Time              `json:"calibrated_at"`
-	Hints         map[string]OpCostHint  `json:"hints"`
+	SchemaVersion string                `json:"schema_version"`
+	SourcePath    string                `json:"source_path"`
+	WindowSize    int                   `json:"window_size"`
+	CalibratedAt  time.Time             `json:"calibrated_at"`
+	Hints         map[string]OpCostHint `json:"hints"`
 }
 
 // DefaultCalibrationWindow is the rolling-window row count over which
