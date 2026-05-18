@@ -89,7 +89,21 @@ type CortexHarness struct {
 	// self-construct-per-call behavior for benchmark cells that don't
 	// capture anything.
 	sharedCortex *intcognition.Cortex
+
+	// dispatcher, when non-nil, is forwarded to the constructed
+	// harness.Loop's Dispatcher field. Replaces inline tool dispatch
+	// per call. Set by Stage 3 callers (coding_turn) to route tool
+	// calls through the DAG executor as act.* nodes. nil → V0
+	// inline dispatch via the ToolRegistry.
+	dispatcher harness.ToolDispatcher
 }
+
+// SetDispatcher overrides the per-tool dispatcher for subsequent
+// RunSession* calls on this harness. Pass nil to restore the V0
+// inline-dispatch behavior. Used by Stage 3 coding_turn handler to
+// route every tool call through the DAG executor (act.* ops + per-tool
+// trace rows).
+func (h *CortexHarness) SetDispatcher(d harness.ToolDispatcher) { h.dispatcher = d }
 
 // NewCortexHarness resolves the OpenRouter API key (keychain first, env
 // fallback via pkg/secret) and returns a configured harness. A missing
@@ -263,6 +277,7 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 		Budget:     h.budget,
 		Transcript: transcript,
 		Notify:     h.notify,
+		Dispatcher: h.dispatcher,
 	}
 
 	start := time.Now()

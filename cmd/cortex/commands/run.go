@@ -131,7 +131,6 @@ func (c *RunCommand) Execute(ctx *Context) error {
 // `cortex run --type=turn --prompt X` works without API keys, just
 // with reduced-quality results.
 func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error {
-	reg := buildTurnRegistry(prompt, model, workdir)
 	turnID := fmt.Sprintf("turn-%d", time.Now().UnixNano())
 
 	// Wire structured trace writes to .cortex/db/dag_traces.jsonl.
@@ -144,6 +143,11 @@ func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error
 	} else if verbose {
 		fmt.Fprintf(os.Stderr, "[run] trace writer init failed: %v (continuing without dag_traces.jsonl)\n", twErr)
 	}
+
+	// Stage 3: build the chain registry with trace callback wiring so
+	// coding_turn can fabricate per-tool act.* rows alongside its own
+	// row in dag_traces.jsonl.
+	reg := buildTurnRegistry(prompt, model, workdir, traceCB)
 	ex := dag.NewExecutor(reg, traceCB)
 
 	seed := []dag.NodeSpec{
@@ -212,7 +216,7 @@ func runTurnDAG(prompt, model, workdir, outputFormat string, verbose bool) error
 // fallback handles nil deps gracefully. A future iteration will
 // resolve provider/embedder via llm.NewLLMClient and storage via the
 // project ContextDir.
-func buildTurnRegistry(prompt, model, workdir string) *dag.Registry {
+func buildTurnRegistry(prompt, model, workdir string, traceCB dag.TraceCallback) *dag.Registry {
 	reg := dag.NewRegistry()
 
 	// Phase 1: register the canonical op set with nil deps. Each op's
@@ -227,7 +231,7 @@ func buildTurnRegistry(prompt, model, workdir string) *dag.Registry {
 	// Phase 2: re-register the chain nodes with spawn-wiring wrappers
 	// around their underlying handlers. Last-write-wins on the
 	// registry, so this swaps in the chain-aware variants.
-	chain := buildTurnChain(prompt, model, workdir)
+	chain := buildTurnChain(prompt, model, workdir, reg, traceCB)
 	for _, spec := range chain {
 		if err := reg.Register(spec); err != nil {
 			panic(fmt.Sprintf("chain register %s: %v", spec.QualifiedName(), err))
@@ -247,7 +251,7 @@ func buildTurnRegistry(prompt, model, workdir string) *dag.Registry {
 // Nodes whose underlying op doesn't exist in the ops package
 // (sense.prompt, decide.coding_turn, maintain.capture) get inline
 // implementations.
-func buildTurnChain(prompt, model, workdir string) []dag.NodeSpec {
+func buildTurnChain(prompt, model, workdir string, reg *dag.Registry, traceCB dag.TraceCallback) []dag.NodeSpec {
 	// Reuse the underlying handlers from a fresh registry so the
 	// wrappers can call them via Get() without doing the construction
 	// again. Cleaner than capturing each spec individually.
@@ -263,9 +267,19 @@ func buildTurnChain(prompt, model, workdir string) []dag.NodeSpec {
 		return spec.Handler
 	}
 
+	// Stage 3 wiring: when act ops are registered on reg, coding_turn
+	// routes its tool calls through them and emits per-tool trace rows
+	// via traceCB. When no act ops are registered, coding_turn falls
+	// back to the V0 inline path. The default chain doesn't register
+	// act ops yet (the harness flag opts that in); leaving cfg.ActRegistry
+	// nil here preserves V0 behavior for `cortex run --type=turn`.
+	// Callers that want Stage 3 dispatch (cortex code, REPL) build
+	// their own chain with ActRegistry set.
 	codingTurnHandler := dagnode.NewCodingTurnHandler(dagnode.CodingTurnConfig{
-		Model:   model,
-		Workdir: workdir,
+		Model:       model,
+		Workdir:     workdir,
+		ActRegistry: nil, // V0 behavior; Stage-3-aware callers override
+		TraceCB:     traceCB,
 	})
 
 	// sense.prompt — captures the trigger prompt; spawns represent.embed.

@@ -67,6 +67,19 @@ type LoopResult struct {
 	FilesWritten          []string
 }
 
+// ToolDispatcher, when set on a Loop, replaces the inline
+// Registry.Dispatch call for each tool the model emits. Used by
+// Stage 3 to route tool calls through the DAG executor as act.*
+// nodes — the dispatcher implementation can record per-tool trace
+// rows, honor AxisContract gates, and surface tool latency / cost
+// as separate child nodes. Returns the tool output string (same
+// shape Registry.Dispatch returns) — the loop forwards it back to
+// the model unchanged.
+//
+// V0 (no dispatcher set) preserves the inline-dispatch behavior the
+// loop has always had.
+type ToolDispatcher func(ctx context.Context, call llm.ToolCall) (string, error)
+
 // Loop holds the per-session state needed to run one harness session.
 // Construct once per session — the registry's accounting (shell exits,
 // files written) is session-scoped.
@@ -85,6 +98,11 @@ type Loop struct {
 	// machine-readable log. Payload shape mirrors what Transcript
 	// receives.
 	Notify func(kind string, payload any)
+
+	// Dispatcher, if set, replaces the inline Registry.Dispatch call
+	// per tool. nil → use Registry.Dispatch (V0 behavior). See
+	// ToolDispatcher doc for the Stage-3 contract.
+	Dispatcher ToolDispatcher
 
 	// Stats accumulated as the loop runs.
 	tokensIn  int
@@ -212,7 +230,12 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 				"name": call.Function.Name,
 				"args": call.Function.Arguments,
 			})
-			out, _ := l.Registry.Dispatch(ctx, call)
+			var out string
+			if l.Dispatcher != nil {
+				out, _ = l.Dispatcher(ctx, call)
+			} else {
+				out, _ = l.Registry.Dispatch(ctx, call)
+			}
 			msgs = append(msgs, llm.ToolResultMessage(call.ID, call.Function.Name, out))
 			l.note("coding.tool_result", map[string]any{
 				"turn":         turn,
