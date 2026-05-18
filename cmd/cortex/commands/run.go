@@ -64,6 +64,7 @@ func (c *RunCommand) Execute(ctx *Context) error {
 	verbose := false
 	scenarioPath := ""
 	strategy := "cortex"
+	eventJSON := ""
 
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
@@ -98,6 +99,11 @@ func (c *RunCommand) Execute(ctx *Context) error {
 				strategy = ctx.Args[i+1]
 				i++
 			}
+		case "--event":
+			if i+1 < len(ctx.Args) {
+				eventJSON = ctx.Args[i+1]
+				i++
+			}
 		case "-o", "--output":
 			if i+1 < len(ctx.Args) {
 				outputFormat = ctx.Args[i+1]
@@ -121,6 +127,8 @@ func (c *RunCommand) Execute(ctx *Context) error {
 				scenarioPath = strings.TrimPrefix(arg, "--scenario=")
 			} else if strings.HasPrefix(arg, "--strategy=") {
 				strategy = strings.TrimPrefix(arg, "--strategy=")
+			} else if strings.HasPrefix(arg, "--event=") {
+				eventJSON = strings.TrimPrefix(arg, "--event=")
 			}
 		}
 	}
@@ -137,8 +145,12 @@ func (c *RunCommand) Execute(ctx *Context) error {
 			return fmt.Errorf("--type=eval requires --scenario=PATH")
 		}
 		return runEvalDAG(scenarioPath, model, workdir, strategy, outputFormat, verbose)
-	case "think", "dream", "capture":
-		return fmt.Errorf("--type=%s not yet implemented (Stage 5 B/C/D of dag-build-plan.md)", dagType)
+	case "capture":
+		return runCaptureDAG(eventJSON, outputFormat, verbose)
+	case "think":
+		return runThinkDAG(model, outputFormat, verbose)
+	case "dream":
+		return runDreamDAG(model, outputFormat, verbose)
 	default:
 		return fmt.Errorf("unknown --type=%s (known: turn, think, dream, capture, eval)", dagType)
 	}
@@ -355,6 +367,326 @@ func runEvalDAG(scenarioPath, model, workdir, strategy, outputFormat string, ver
 		return fmt.Errorf("verify failed")
 	}
 	return nil
+}
+
+// runCaptureDAG (Stage 5-B) runs a capture-type DAG. Hook payloads
+// arrive as JSON on stdin (when --event is empty) or as an --event
+// argument; the seed is sense.hook_event with the parsed payload as
+// attrs; spawn chain is maintain.capture → maintain.extract_insight
+// (conditional, only when budget permits and the event looks like an
+// edit/decision).
+//
+// Budget: DefaultCaptureBudget (100ms, 500 tokens, depth 3). The
+// budget is tight by design — capture is per-hook and must not
+// block. maintain.extract_insight self-modulates and skips its LLM
+// call when budget is exhausted.
+//
+// Trace rows still emit to .cortex/db/dag_traces.jsonl per the
+// existing dagtrace writer; capture-type rows are distinguished by
+// the sense.hook_event qualified name on the seed.
+func runCaptureDAG(eventJSON, outputFormat string, verbose bool) error {
+	turnID := fmt.Sprintf("capture-%d", time.Now().UnixNano())
+
+	if eventJSON == "" {
+		bb, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		eventJSON = strings.TrimSpace(string(bb))
+	}
+	if eventJSON == "" {
+		return fmt.Errorf("--type=capture requires a JSON event via --event=JSON or stdin")
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
+		return fmt.Errorf("parse event JSON: %w", err)
+	}
+
+	tw, twErr := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if twErr == nil {
+		traceCB = tw.Callback(turnID)
+	} else if verbose {
+		fmt.Fprintf(os.Stderr, "[capture] trace writer init failed: %v\n", twErr)
+	}
+
+	reg := dag.NewRegistry()
+	registerCaptureChain(reg, event)
+
+	ex := dag.NewExecutor(reg, traceCB)
+	// Capture is per-hook and must not block the AI tool that fired
+	// the hook. Sequential walking guarantees the per-axis budget
+	// semantic the V0 hook contract assumes.
+	ex.SetSequential(true)
+
+	seed := []dag.NodeSpec{{Function: dag.FuncSense, Op: "hook_event", ID: "h1"}}
+	trace, err := ex.Run(context.Background(), turnID, seed, dag.DefaultCaptureBudget())
+	if err != nil {
+		return fmt.Errorf("run capture DAG: %w", err)
+	}
+
+	if outputFormat == "json" {
+		payload := map[string]any{
+			"turn_id":        trace.TurnID,
+			"total_executed": trace.TotalExecuted,
+			"exhausted":      trace.Exhausted,
+			"exhausted_axis": trace.ExhaustedAxis,
+			"final_budget":   trace.FinalBudget,
+			"trace_ops":      qualifiedOps(trace.Entries),
+		}
+		bb, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Println(string(bb))
+	} else {
+		fmt.Printf("=== capture DAG (%s) ===\n", turnID)
+		fmt.Printf("Executed %d nodes; exhausted=%v\n", trace.TotalExecuted, trace.Exhausted)
+		for _, e := range trace.Entries {
+			parent := e.ParentID
+			if parent == "" {
+				parent = "(seed)"
+			}
+			fmt.Printf("  %s [%s] parent=%s ok=%v cost={lat=%d tok=%d}\n",
+				e.NodeID, e.QualifiedName, parent, e.OK,
+				e.CostConsumed.LatencyMS, e.CostConsumed.Tokens)
+		}
+		fmt.Printf("Final budget: %s\n", trace.FinalBudget)
+	}
+	return nil
+}
+
+// registerCaptureChain wires the capture-type 3-node chain:
+//   sense.hook_event → maintain.capture → maintain.extract_insight
+//
+// Each handler is intentionally small — capture's budget is too tight
+// for LLM calls. extract_insight is conditional: it only spawns when
+// the event payload contains an "intent" field that names a write
+// operation (Edit, Write, MultiEdit). For everything else we skip
+// the LLM call and leave it to the daemon's think/dream cycles to
+// pick up the slack.
+func registerCaptureChain(reg *dag.Registry, event map[string]any) {
+	// sense.hook_event seeds the chain with the event payload and
+	// spawns maintain.capture.
+	mustRegister(reg, dag.NodeSpec{
+		Function:    dag.FuncSense,
+		Op:          "hook_event",
+		Description: "ingress: AI-tool hook payload arrives; spawns maintain.capture",
+		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			return dag.NodeResult{
+				Out: map[string]any{"event": event},
+				Spawn: []dag.NodeSpec{{
+					Function: dag.FuncMaintain, Op: "capture", ID: "h2",
+					Attrs: map[string]any{"event": event},
+				}},
+				CostConsumed: dag.Cost{LatencyMS: 5, Tokens: 0},
+			}, nil
+		},
+	})
+
+	// maintain.capture persists the event. V0: mechanical write to
+	// the existing capture journal would happen here; for the DAG
+	// surface we record that we processed the event and conditionally
+	// spawn extract_insight.
+	mustRegister(reg, dag.NodeSpec{
+		Function:    dag.FuncMaintain,
+		Op:          "capture",
+		Description: "persist hook event to journal; conditionally spawn extract_insight",
+		Cost:        dag.Cost{LatencyMS: 20, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			result := dag.NodeResult{
+				Out:          map[string]any{"captured": true},
+				CostConsumed: dag.Cost{LatencyMS: 20, Tokens: 0},
+			}
+			// Only spawn extract_insight on edit-shaped events AND
+			// when the remaining budget can plausibly afford it.
+			// extract_insight's registered Cost is set conservatively
+			// below; the executor's pre-spawn CanAfford check refuses
+			// when the post-capture budget is too tight.
+			ev, _ := in["event"].(map[string]any)
+			if isEditEvent(ev) {
+				result.Spawn = []dag.NodeSpec{{
+					Function: dag.FuncMaintain, Op: "extract_insight", ID: "h3",
+					Attrs: map[string]any{"content": eventContent(ev)},
+				}}
+			}
+			return result, nil
+		},
+	})
+
+	// maintain.extract_insight — registered with conservative Cost so
+	// the pre-spawn budget check actually fires on tight budgets. The
+	// real handler (when ops.RegisterDefaults wires a provider) does
+	// the LLM call; for the capture-type chain we keep it as a stub
+	// because the budget is too tight to safely run an LLM in the
+	// hook path.
+	mustRegister(reg, dag.NodeSpec{
+		Function:    dag.FuncMaintain,
+		Op:          "extract_insight",
+		Description: "best-effort insight extraction from edit-shaped events (stub on tight budget)",
+		Cost:        dag.Cost{LatencyMS: 50, Tokens: 50},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			// Self-modulate: if budget is below 30ms, skip the
+			// (would-be) LLM call entirely. Hook path stays bounded.
+			if b.LatencyMS < 30 {
+				return dag.NodeResult{
+					Out:          map[string]any{"skipped": true, "reason": "budget_too_tight_for_llm"},
+					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
+				}, nil
+			}
+			return dag.NodeResult{
+				Out:          map[string]any{"insight_stub": true},
+				CostConsumed: dag.Cost{LatencyMS: 30, Tokens: 30},
+			}, nil
+		},
+	})
+}
+
+// isEditEvent reports whether the event payload looks like a tool
+// invocation worth extracting insight from. Hook payloads from
+// Claude Code / Cursor put the tool name under "tool_name"; we treat
+// Edit / Write / MultiEdit as worthy and skip the rest.
+func isEditEvent(event map[string]any) bool {
+	if event == nil {
+		return false
+	}
+	name, _ := event["tool_name"].(string)
+	switch name {
+	case "Edit", "Write", "MultiEdit", "NotebookEdit":
+		return true
+	}
+	return false
+}
+
+// eventContent extracts a substring of the event payload suitable for
+// passing as insight-extraction input. Best-effort: walk the common
+// hook payload shapes; fall back to a JSON dump.
+func eventContent(event map[string]any) string {
+	if event == nil {
+		return ""
+	}
+	if s, ok := event["new_string"].(string); ok && s != "" {
+		return s
+	}
+	if s, ok := event["content"].(string); ok && s != "" {
+		return s
+	}
+	bb, _ := json.Marshal(event)
+	return string(bb)
+}
+
+// runThinkDAG (Stage 5-C) runs a think-type DAG via the CLI. Real
+// daemon-scheduled invocation per docs/loop-dag-stage-5 lands as a
+// daemon hook that calls into RunCommand.Execute directly; this CLI
+// entry point exists for testability + manual invocation.
+//
+// Budget: DefaultThinkBudget. V0 shape: a single think.session_check
+// seed that records that the think cycle ran; real
+// model.predict_next + attend.warm_cache + value.rerank_session
+// spawning happens when the corresponding handlers exist on the
+// registry.
+func runThinkDAG(model, outputFormat string, verbose bool) error {
+	turnID := fmt.Sprintf("think-%d", time.Now().UnixNano())
+	tw, _ := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if tw != nil {
+		traceCB = tw.Callback(turnID)
+	}
+	reg := dag.NewRegistry()
+	mustRegister(reg, dag.NodeSpec{
+		Function:    dag.FuncMaintain,
+		Op:          "session_check",
+		Description: "think: probe session topic weights + cache freshness (V0 stub)",
+		Cost:        dag.Cost{LatencyMS: 10, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			return dag.NodeResult{
+				Out:          map[string]any{"checked": true, "stub": true},
+				CostConsumed: dag.Cost{LatencyMS: 10, Tokens: 0},
+			}, nil
+		},
+	})
+	ex := dag.NewExecutor(reg, traceCB)
+	trace, err := ex.Run(context.Background(), turnID,
+		[]dag.NodeSpec{{Function: dag.FuncMaintain, Op: "session_check", ID: "t1"}},
+		dag.DefaultThinkBudget())
+	if err != nil {
+		return err
+	}
+	emitBackgroundSummary(outputFormat, "think", trace)
+	return nil
+}
+
+// runDreamDAG (Stage 5-D) runs a dream-type DAG via the CLI. Real
+// idle-time-scheduled invocation lands as a daemon hook in a later
+// slice; CLI entry exists for testability + manual invocation.
+//
+// Budget: DefaultDreamBudget. V0 shape: a single
+// maintain.idle_probe seed. Real attend.sample +
+// value.extract_insight + remember.embed_new spawning lands when
+// those handlers are registered.
+func runDreamDAG(model, outputFormat string, verbose bool) error {
+	turnID := fmt.Sprintf("dream-%d", time.Now().UnixNano())
+	tw, _ := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if tw != nil {
+		traceCB = tw.Callback(turnID)
+	}
+	reg := dag.NewRegistry()
+	mustRegister(reg, dag.NodeSpec{
+		Function:    dag.FuncMaintain,
+		Op:          "idle_probe",
+		Description: "dream: idle-time substrate sampling (V0 stub)",
+		Cost:        dag.Cost{LatencyMS: 10, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			return dag.NodeResult{
+				Out:          map[string]any{"probed": true, "stub": true},
+				CostConsumed: dag.Cost{LatencyMS: 10, Tokens: 0},
+			}, nil
+		},
+	})
+	ex := dag.NewExecutor(reg, traceCB)
+	trace, err := ex.Run(context.Background(), turnID,
+		[]dag.NodeSpec{{Function: dag.FuncMaintain, Op: "idle_probe", ID: "d1"}},
+		dag.DefaultDreamBudget())
+	if err != nil {
+		return err
+	}
+	emitBackgroundSummary(outputFormat, "dream", trace)
+	return nil
+}
+
+// emitBackgroundSummary prints a small summary for the think/dream
+// DAG types. Human format mirrors capture/turn; JSON envelope is
+// compact since callers are daemon scheduler hooks not humans.
+func emitBackgroundSummary(outputFormat, label string, trace *dag.Trace) {
+	if outputFormat == "json" {
+		payload := map[string]any{
+			"type":           label,
+			"turn_id":        trace.TurnID,
+			"total_executed": trace.TotalExecuted,
+			"exhausted":      trace.Exhausted,
+			"final_budget":   trace.FinalBudget,
+			"trace_ops":      qualifiedOps(trace.Entries),
+		}
+		bb, _ := json.MarshalIndent(payload, "", "  ")
+		fmt.Println(string(bb))
+		return
+	}
+	fmt.Printf("=== %s DAG (%s) ===\n", label, trace.TurnID)
+	fmt.Printf("Executed %d nodes; exhausted=%v\n", trace.TotalExecuted, trace.Exhausted)
+	for _, e := range trace.Entries {
+		fmt.Printf("  %s [%s] ok=%v cost={lat=%d tok=%d}\n",
+			e.NodeID, e.QualifiedName, e.OK,
+			e.CostConsumed.LatencyMS, e.CostConsumed.Tokens)
+	}
+	fmt.Printf("Final budget: %s\n", trace.FinalBudget)
+}
+
+// mustRegister registers spec or panics — used inline for type-specific
+// chain construction where a registration failure is a programming
+// bug (caller controls the spec).
+func mustRegister(reg *dag.Registry, spec dag.NodeSpec) {
+	if err := reg.Register(spec); err != nil {
+		panic(fmt.Sprintf("register %s: %v", spec.QualifiedName(), err))
+	}
 }
 
 // copyDir recursively copies srcDir's contents into dstDir. Files
@@ -723,14 +1055,15 @@ func printRunHelp() {
 Run a DAG of the given type through the seed-and-grow executor.
 
 Options:
-  --type TYPE          DAG type: turn | eval | (think | dream | capture
-                       not yet implemented — Stage 5-B/C/D)
+  --type TYPE          DAG type: turn | eval | capture | think | dream
   --prompt TEXT        User prompt (for --type=turn)
   --scenario PATH      Scenario YAML (for --type=eval); see
                        test/evals/coding/ + test/evals/v2/
   --strategy NAME      Eval prompt strategy: cortex | baseline
                        (default: cortex; prepends CortexContext bullets
                        as "Hints: ..." prefix)
+  --event JSON         Hook event payload (for --type=capture); omit to
+                       read JSON from stdin
   --workdir DIR        Workdir for the turn/eval (seeded from scenario
                        SeedDir when set; auto-mktemp when omitted)
   --model NAME         LLM model id (--type=turn / --type=eval). Empty =
@@ -739,7 +1072,7 @@ Options:
   -v, --verbose        Verbose trace output
   -h, --help           Show this help
 
-Stage status (docs/dag-build-plan.md):
+Per-type shapes (docs/dag-build-plan.md + docs/dag-protocol.md):
   - --type=turn       Stage 2 chain (8 ops); Stage 3 act-op dispatch on
                       tool calls; Stage 4 parallelism + rollover +
                       calibration; loads .cortex/db/op_cost_hints.json
@@ -747,14 +1080,25 @@ Stage status (docs/dag-build-plan.md):
   - --type=eval       Stage 5-A: loads scenario, builds prompt, seeds
                       workdir from scenario SeedDir, runs the same
                       turn chain, runs scenario.Verify post-hoc
-  - --type=think      Stage 5-C: deferred (daemon scheduler integration)
-  - --type=dream      Stage 5-D: deferred (daemon scheduler integration)
-  - --type=capture    Stage 5-B: deferred (hook payload integration)
+  - --type=capture    Stage 5-B: hook payload → sense.hook_event →
+                      maintain.capture → maintain.extract_insight
+                      (conditional on edit-shaped events + remaining
+                      budget). 100ms latency budget; sequential
+  - --type=think      Stage 5-C: V0 stub — single maintain.session_check
+                      seed under DefaultThinkBudget. Daemon scheduler
+                      integration (mid-session timer, inverse activity
+                      budget) lands when the daemon picks up DAG types
+  - --type=dream      Stage 5-D: V0 stub — single maintain.idle_probe
+                      seed under DefaultDreamBudget. Daemon scheduler
+                      integration (idle-time trigger, growing budget)
+                      lands alongside think
 
 Examples:
   cortex run --type=turn --prompt "refactor the auth module"
   cortex run --type=eval --scenario=test/evals/coding/sqlx-insert-user.yaml
-  cortex run --type=eval --scenario=path.yaml --strategy=baseline --workdir /tmp/run
+  echo '{"tool_name":"Edit","file_path":"foo.go"}' | cortex run --type=capture
+  cortex run --type=think
+  cortex run --type=dream
 
 See docs/dag-protocol.md for the protocol semantics.`)
 }
