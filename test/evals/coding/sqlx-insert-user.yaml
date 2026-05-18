@@ -1,0 +1,37 @@
+id: sqlx-insert-user
+name: "Implement InsertUser using sqlx (not pgx, not database/sql)"
+
+seed_dir: test/evals/coding/seeds/sqlx-insert-user
+
+# Library-choice verifier. Pass requires BOTH correct imports AND
+# sqlx-flavored API usage. Matches the third-arm ABR prototype's
+# scoring (docs/eval-journal.md 2026-05-18 third-arm entry): the
+# model must import sqlx (not database/sql, not pgx) and must use
+# sqlx.Connect / sqlx.Open plus a write API (Exec / MustExec /
+# NamedExec). API-shaped code with the wrong import line still
+# fails — bookkeeping counts.
+verify: |
+  grep -q '"github.com/jmoiron/sqlx"' insert.go && \
+  ! grep -q '"database/sql"' insert.go && \
+  ! grep -q '"github.com/jackc/pgx' insert.go && \
+  grep -qE 'sqlx\.(Connect|Open|MustConnect)' insert.go && \
+  grep -qE '\.(Exec|MustExec|NamedExec)\(' insert.go
+
+# Only the project decision is in cortex_context. No worked example
+# is included — the third-arm prototype showed that decision-text
+# alone is insufficient for small models, and the architectural
+# answer is the `value.detect_unfamiliarity` + `remember.fetch_external`
+# op pair (deferred to a post-Stage-5 DAG slice). Until those ops
+# exist, this eval is expected to fail on small models with
+# `strategy=cortex` — that gap is the eval's purpose.
+cortex_context:
+  - "Use github.com/jmoiron/sqlx (sqlx) for all postgres queries in this project."
+  - "REJECTED: github.com/jackc/pgx (pgx) — do not use."
+  - "REJECTED: database/sql alone — do not use."
+
+tests:
+  - query: |
+      Implement InsertUser in insert.go. The function must connect to
+      a postgres database and insert one row into the users table with
+      the given name and email. Modify insert.go in place; do not add
+      new files. Use the library the project has standardized on.
