@@ -356,9 +356,10 @@ type replState struct {
 	apiURL  string
 	verbose bool
 
-	// systemPrompt is loaded from .cortex/repl-system-prompt.md (created
-	// with a 1.5B-tuned default on first run). Held in memory so /reload
-	// can pick up edits without restarting.
+	// systemPrompt is the worker-model system prompt for coding_turn's
+	// agent loop. Binary-first: defaultREPLSystemPrompt is the source
+	// of truth; .cortex/repl-system-prompt.local.md (when present) is
+	// an opt-in user override. Held in memory across the session.
 	systemPrompt string
 
 	// sessionDir is .cortex/sessions/<ts>/, the per-invocation root for
@@ -475,6 +476,12 @@ type replState struct {
 	// timescales. Refreshes only on explicit /models refresh.
 	openRouterModelsCache []llm.OpenRouterModel
 	openRouterModelsErr   error
+
+	// modelCatalogCache holds the formatted model-catalog string
+	// injected into decide.next's prompt at call time. Computed on
+	// first use, reused across turns. Invalidated by /model swap and
+	// /models refresh — the next runREPLChainTurn rebuilds it.
+	modelCatalogCache string
 }
 
 // turnExchange is one accepted turn condensed to just what the model
@@ -501,7 +508,11 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		return nil, fmt.Errorf("init .cortex/: %w", err)
 	}
 
-	promptPath := filepath.Join(cortexDir, "repl-system-prompt.md")
+	// Binary-first: the in-binary defaultREPLSystemPrompt is the source
+	// of truth. .local.md is an opt-in user override. Earlier versions
+	// seeded .cortex/repl-system-prompt.md on first run; those legacy
+	// files are silently ignored.
+	promptPath := filepath.Join(cortexDir, "repl-system-prompt.local.md")
 	systemPrompt, err := loadOrSeedSystemPrompt(promptPath)
 	if err != nil {
 		return nil, err
@@ -578,6 +589,76 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("cognition init: %w", err)
 	}
 	return store, cortex, nil
+}
+
+// modelCatalogForREPL returns the formatted model-catalog string for
+// decide.next's prompt. Lazy + cached per-session — first call probes
+// Ollama (fast, local) and OpenRouter (slow, remote, cached on the
+// llm side too); subsequent calls reuse the string. Invalidate via
+// resetModelCatalog when /model swaps or /models refresh.
+//
+// Format: local-first list, then a small curated OpenRouter sample
+// (the full 300+ catalogue would dominate the prompt). The LLM
+// picks per-node models from this list via the attrs.model field;
+// names absent from the list still work because per-node dispatch
+// just sets the harness model and api URL — the catalog is a hint,
+// not an allowlist.
+func (s *replState) modelCatalogForREPL() string {
+	if s.modelCatalogCache != "" {
+		return s.modelCatalogCache
+	}
+	var b strings.Builder
+	b.WriteString("Local (Ollama):\n")
+	ollama, _, _ := listOllamaModels(s.apiURL)
+	if len(ollama) == 0 {
+		b.WriteString("  (none — install via `ollama pull`)\n")
+	} else {
+		sort.Strings(ollama)
+		for _, m := range ollama {
+			fmt.Fprintf(&b, "  %s\n", m)
+		}
+	}
+	b.WriteString("Cloud (OpenRouter — use sparingly, paid):\n")
+	openrouter, err := fetchOpenRouterModels()
+	if err != nil || len(openrouter) == 0 {
+		b.WriteString("  (catalogue unavailable)\n")
+	} else {
+		// Curate a short list of well-known IDs rather than dumping
+		// 300+. The LLM can use IDs outside this list (per-node
+		// dispatch doesn't enforce membership), so we just highlight
+		// reasonable defaults.
+		curatedIDs := []string{
+			"anthropic/claude-haiku-4.5",
+			"anthropic/claude-sonnet-4.5",
+			"anthropic/claude-opus-4.5",
+			"openai/gpt-4o-mini",
+			"openai/gpt-4o",
+		}
+		seen := map[string]bool{}
+		for _, m := range openrouter {
+			seen[m.ID] = true
+		}
+		shown := 0
+		for _, id := range curatedIDs {
+			if !seen[id] {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s\n", id)
+			shown++
+		}
+		if shown == 0 {
+			b.WriteString("  (none of the curated IDs are available)\n")
+		}
+	}
+	s.modelCatalogCache = b.String()
+	return s.modelCatalogCache
+}
+
+// resetModelCatalog invalidates the cached catalog. Called when the
+// REPL swaps models (so the LLM sees the current default reflected
+// in the catalog) or when /models refresh is invoked.
+func (s *replState) resetModelCatalog() {
+	s.modelCatalogCache = ""
 }
 
 // buildLLMProviderForREPL constructs an llm.Provider matching the
@@ -685,64 +766,65 @@ func resolveAPIURL(model string) string {
 	return "" // empty → harness uses OpenRouter default
 }
 
-// loadOrSeedSystemPrompt reads the per-workdir REPL system prompt or
-// writes a default one. The default is deliberately short and biased
-// toward single-step changes — small models do better when explicitly
-// told not to attempt too much per turn.
+// loadOrSeedSystemPrompt resolves the worker-model system prompt for
+// this REPL session. Binary-first: the const is the source of truth,
+// .cortex/repl-system-prompt.local.md is an opt-in override the user
+// can write to customize per-workdir.
+//
+// Earlier behavior wrote a seed file (.cortex/repl-system-prompt.md)
+// on first run and then read it back every session. That made every
+// binary update silently stale until the user `rm`'d the file. Now:
+//
+//  1. Always start with defaultREPLSystemPrompt (in-binary const).
+//  2. If <workdir>/.cortex/repl-system-prompt.local.md exists, return
+//     its content instead — this is the explicit user override.
+//  3. Never write a seed file. Legacy .cortex/repl-system-prompt.md
+//     files are silently ignored.
+//
+// `path` is kept as a parameter for call-site clarity but is now
+// interpreted as the *override* file path (the .local.md variant).
 func loadOrSeedSystemPrompt(path string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		return string(b), nil
 	}
-	seed := defaultREPLSystemPrompt
-	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
-		return "", fmt.Errorf("seed system prompt at %s: %w", path, err)
-	}
-	return seed, nil
+	return defaultREPLSystemPrompt, nil
 }
 
-// defaultREPLSystemPrompt is the seed content for
-// .cortex/repl-system-prompt.md on a fresh workdir. Tuned for the
-// REPL's 3-tool minimal registry (read_file + write_file + run_shell)
-// — see CortexHarness.SetMinimalTools and the iter-5 coherence fix.
+// defaultREPLSystemPrompt is the worker-model system prompt for the
+// agent loop inside decide.coding_turn. Assumed floor: 7B+ model with
+// reliable function-calling. The user override lives at
+// <workdir>/.cortex/repl-system-prompt.local.md.
 //
-// Tuning lessons baked in:
-//   - Iter-3: verbose meta-instructions about tool-call format
-//     actively HURT small models — they parrot the prose instead of
-//     acting. Keep it short.
-//   - Iter-4: small models lose function-call discipline with ≥5
-//     tools registered; the REPL drops to 3 tools when Ollama-routed.
-//   - Iter-5: the seeded system prompt previously listed 5 tools, but
-//     the harness only registers 3 in REPL mode. Telling the model
-//     about tools that don't exist is the kind of small coherence bug
-//     that pushes a borderline-competent 1.5B model over the edge into
-//     text-only responses. Prompt matches the registered surface area
-//     exactly.
-//   - Iter-6 (this fix): the prompt was pinned to "You are a Go
-//     programmer" with a "Use go build to verify" instruction. This
-//     made conversational, analysis, and non-Go work feel like a
-//     compliance violation. Generalize: tools are optional, prose is
-//     fine when appropriate, language-specific verify guidance is now
-//     for the user's runVerifier() to surface — not the prompt.
-const defaultREPLSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope — pick the right mode for the user's request.
+// Tuning lessons baked in (history; floor has moved up):
+//   - Iter-3: long meta-instructions about tool-call format HURT small
+//     models. Keep it short.
+//   - Iter-4/5: at the 1.5B floor, register only 3 tools and match the
+//     prompt to the registered surface exactly. No longer the floor.
+//   - Iter-6: "You are a Go programmer" + "use go build to verify"
+//     was over-pinned. Generalize.
+//   - Iter-7 (this version): the "questions → no tools" rule was the
+//     leanjs failure root — model never read README, hallucinated Go
+//     commands from training priors. New framing: when the user asks
+//     about THIS workdir, ground yourself in the actual files first.
+//     The agent loop's tool-call discipline does the rest.
+const defaultREPLSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope.
 
-You have these tools:
-  - read_file(path): read a file
-  - write_file(path, content): create or replace a file
-  - run_shell(command, args): run a shell command (build, test, list, search, etc.)
+You have tools (the harness will surface them in this turn). When the user asks about THIS workdir or its code, ground yourself in the actual files before answering — read the README, the most prominent source files, or whatever's directly relevant. Don't infer project shape from the workdir name; read what's there.
 
-When to use tools vs prose:
-  - The user wants you to read, write, or run something → call the tool. Don't narrate what you're about to do; just do it.
-  - The user is asking a question, exploring an idea, or wants analysis → respond in prose with NO tool calls.
-  - Mixed (e.g. "explain X then change Y") → answer the question first, then do the change.
+When to use tools:
+  - User asks about the workdir / its code → read first, then answer.
+  - User asks for a code change → read what you need, write, then verify with the appropriate build/test command.
+  - User asks a general question with no workdir grounding needed → answer in prose. No tool calls.
 
-When you do make changes:
-  - Make ONE focused change per user message. Edit one file unless the request explicitly spans files. Do not refactor adjacent code that wasn't asked for.
-  - When the workdir is a project with a build/test command, run it via run_shell before declaring success. Read the error, fix the code, try again.
+Discipline:
+  - Make ONE focused change per user message. Edit one file unless the request explicitly spans files.
+  - Don't narrate what you're about to do; just do it.
+  - When making changes, run the project's build/test command (via run_shell) before declaring done. Read errors, fix, retry.
+  - When the step is done, respond with a short summary and NO further tool calls.
 
 Rules:
   - Paths are relative to the workdir; no absolute paths, no "..".
   - Never write under .git or .cortex.
-  - When the requested step is done, respond with a short summary and NO further tool calls.
 `
 
 // emitOneShotJSON prints a single-line JSON envelope summary of the
@@ -867,10 +949,14 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			s.model, s.apiURL = prevModel, prevAPI
 			return true, fmt.Errorf("model swap failed (provider rebind): %w", err)
 		}
+		s.resetModelCatalog()
 		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 		return true, nil
 	case "/models":
 		refresh := len(rest) > 0 && rest[0] == "refresh"
+		if refresh {
+			s.resetModelCatalog()
+		}
 		s.printModels(refresh)
 		return true, nil
 	case "/history":
@@ -1339,26 +1425,34 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	return capturedHR, capturedLR, capturedErr
 }
 
-// buildREPLDynamicRegistry builds a minimal registry for the
-// dynamic-DAG REPL path: defaults + decide.next + decide.coding_turn
-// (with reattempt wrapper) + a REPL-flavored sense.prompt that spawns
-// decide.next instead of the static chain's represent.embed.
+// buildREPLDynamicRegistry builds the registry for the dynamic-DAG
+// REPL path. decide.next is the steering op — it sees the live op
+// catalog + live model catalog via NextConfig and emits the nodes to
+// spawn. Workflow ops the LLM can compose: decide.coding_turn (with
+// optional attrs.model for per-node routing), decide.next (recurse),
+// remember.vector_search.
 //
-// decide.next is wired with a Provider derived from the current REPL
-// model + apiURL. A nil provider (no key, Ollama unreachable, etc.)
-// falls back to the rule-based classifier in ops/decide_next.go.
+// The registry is captured by reference inside decide.next's handler
+// closure, so subsequent registrations (decide.coding_turn,
+// sense.prompt) are visible when the handler runs.
 func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) (*dag.Registry, error) {
 	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		return nil, fmt.Errorf("ops defaults: %w", err)
 	}
 
-	// decide.next — the steering op that picks code | search |
-	// converse | done each step. Reuses the same provider the REPL
-	// is currently routed to; nil → rule-based fallback.
+	// decide.next — the steering op. Provider + Registry + ModelCatalog
+	// give it everything it needs to compose multi-op DAGs at call
+	// time. Provider nil falls back to a single coding_turn spawn so
+	// the chain always walks.
 	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
 	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
-	if err := reg.Register(ops.NextSpec(ops.NextConfig{Provider: nextProvider})); err != nil {
+	modelCatalog := s.modelCatalogForREPL()
+	if err := reg.Register(ops.NextSpec(ops.NextConfig{
+		Provider:     nextProvider,
+		Registry:     reg,
+		ModelCatalog: modelCatalog,
+	})); err != nil {
 		return nil, fmt.Errorf("register decide.next: %w", err)
 	}
 
@@ -1387,18 +1481,27 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		return nil, fmt.Errorf("register sense.prompt: %w", err)
 	}
 
-	// decide.coding_turn — same wiring used by the static chain
-	// (HarnessFactory + ResultCallback) wrapped with the fetch-op
-	// reattempt logic so unfamiliar-API tails get a second pass with
-	// snippets prepended.
+	// decide.coding_turn — runs the harness's agent loop. Exposable
+	// to decide.next's LLM so it can compose coding_turn calls (with
+	// optional attrs.model per-node) into multi-step workflows.
+	// HarnessFactory + ResultCallback flow through the existing
+	// REPL state; reattempt wrapper handles fetch-op retries.
 	rawCT := dagnode.NewCodingTurnHandler(codingCfg)
 	ctHandler := wrapCodingTurnWithReattempt(rawCT, codingCfg, traceCB)
 	if err := reg.Register(dag.NodeSpec{
 		Function:    dag.FuncDecide,
 		Op:          "coding_turn",
-		Description: "drive one harness session against the preconfigured CortexHarness",
-		Cost:        dag.Cost{LatencyMS: 15000, Tokens: 2000},
-		Handler:     ctHandler,
+		Description: "run one LLM agent-loop turn against the workdir; emits a response and may write/run files; supports attrs.model to route this call to a different model",
+		Inputs: []dag.ParamSpec{
+			{Name: "prompt", Type: "string", Required: true},
+			{Name: "model", Type: "string"},
+		},
+		Outputs: []dag.ParamSpec{
+			{Name: "response", Type: "string"},
+		},
+		Cost:      dag.Cost{LatencyMS: 15000, Tokens: 2000},
+		Exposable: true,
+		Handler:   ctHandler,
 	}); err != nil {
 		return nil, fmt.Errorf("register decide.coding_turn: %w", err)
 	}
