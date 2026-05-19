@@ -53,6 +53,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -571,27 +572,7 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("storage init: %w", err)
 	}
 
-	// LLM provider for the shared Cortex. Use the new llm.WithBackend
-	// API so Ollama-routed sessions don't need to reinvent the stub-
-	// key + SetAPIURL dance. Cloud-routed sessions still use the
-	// auto-resolved keychain path.
-	var provider llm.Provider
-	if apiURL == defaultOllamaAPIURL {
-		c, _, err := llm.NewLLMClient(cfg,
-			llm.WithBackend(llm.BackendOllama),
-			llm.WithModel(model),
-		)
-		if err == nil {
-			provider = c
-		}
-	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
-		client := llm.NewOpenRouterClientWithKey(cfg, key)
-		client.SetModel(model)
-		if apiURL != "" {
-			client.SetAPIURL(apiURL)
-		}
-		provider = client
-	}
+	provider := buildLLMProviderForREPL(cfg, model, apiURL)
 	// provider may still be nil — Cortex tolerates that (Full mode
 	// degrades to Fast with a flagged response).
 
@@ -601,6 +582,40 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("cognition init: %w", err)
 	}
 	return store, cortex, nil
+}
+
+// buildLLMProviderForREPL constructs an llm.Provider matching the
+// model + apiURL the REPL is currently routed to. Ollama-shaped URLs
+// route through llm.NewLLMClient(BackendOllama); everything else
+// routes through OpenRouter with the keychain-resolved key. Returns
+// nil when no provider can be configured (Cortex + decide.next both
+// tolerate nil providers by degrading to mechanical / rule-based
+// paths).
+//
+// Shared between newSessionCognition (the eager build) and the REPL
+// chain's decide.next handler (which wants the same provider to
+// classify the next action without re-doing the construction).
+func buildLLMProviderForREPL(cfg *config.Config, model, apiURL string) llm.Provider {
+	if apiURL == defaultOllamaAPIURL {
+		c, _, err := llm.NewLLMClient(cfg,
+			llm.WithBackend(llm.BackendOllama),
+			llm.WithModel(model),
+		)
+		if err == nil {
+			return c
+		}
+		return nil
+	}
+	key, _, kerr := secret.MustOpenRouterKey()
+	if kerr != nil {
+		return nil
+	}
+	client := llm.NewOpenRouterClientWithKey(cfg, key)
+	client.SetModel(model)
+	if apiURL != "" {
+		client.SetAPIURL(apiURL)
+	}
+	return client
 }
 
 // rebindCognitionForModel rebuilds s.store + s.cortex so the shared
@@ -1246,15 +1261,22 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	return hr, lr, runErr
 }
 
-// runREPLChainTurn executes one REPL coding turn as a full
-// dag.Executor.Run over the Stage 2 chain. The preconfigured harness
-// flows in via CodingTurnConfig.HarnessFactory (so all REPL state —
-// notifier, system prompt, shared cortex, budget, minimal tools —
-// is preserved). The chain's decide.coding_turn handler invokes
-// h.RunSessionWithResult inside the executor, then ResultCallback
-// captures the full HarnessResult + LoopResult back to local vars
-// for the caller. Trace rows for the full 8-node chain land in
-// .cortex/db/dag_traces.jsonl with real parent_node_id lineage.
+// runREPLChainTurn executes one REPL turn as a dynamic dag.Executor.Run
+// over a minimal seed (sense.prompt → decide.next). decide.next
+// inspects the prompt and grows the tree based on the user's intent:
+// conversational prompts produce a 3-node tree, code prompts produce
+// a coding_turn branch, search-augmented prompts produce a longer
+// chain. Same seed, different shape per prompt — this is the
+// dynamic-DAG slice that replaces the prior fixed 8-node chain.
+//
+// The preconfigured harness flows in via CodingTurnConfig.HarnessFactory
+// so when decide.next spawns decide.coding_turn the chain drives THIS
+// instance (with all REPL state already set: notifier, system prompt,
+// shared cortex, prior messages, budget, minimal tools). The full
+// HarnessResult + LoopResult are captured back via ResultCallback.
+//
+// Executor runs in sequential mode so search → decide.next is
+// guaranteed FIFO (parallel mode would race them).
 //
 // V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
 // path; this function is only on the dag-enabled path.
@@ -1292,14 +1314,23 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	reg := buildTurnRegistryWithConfig(prompt, s.model, s.workdir, traceCB, codingCfg)
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, traceCB)
+	if err != nil {
+		return evalv2.HarnessResult{}, harness.LoopResult{}, err
+	}
 
 	// Warm the registry from the calibration snapshot (Stage 4-C)
-	// so the chain's pre-spawn CanAfford checks reflect observed
-	// reality. Missing snapshot is a cold start; not an error.
+	// so pre-spawn CanAfford checks reflect observed reality. Missing
+	// snapshot is a cold start; not an error.
 	_, _ = dag.LoadCalibrationSnapshot(reg, "")
 
 	ex := dag.NewExecutor(reg, traceCB)
+	// Sequential mode: when decide.next spawns [vector_search,
+	// decide.next] for the search arm, FIFO ordering puts vector_search
+	// before the follow-up decide.next. Parallel mode would race them
+	// and the follow-up wouldn't see search results.
+	ex.SetSequential(true)
+
 	seed := []dag.NodeSpec{{
 		Function: dag.FuncSense,
 		Op:       "prompt",
@@ -1310,6 +1341,73 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
 	}
 	return capturedHR, capturedLR, capturedErr
+}
+
+// buildREPLDynamicRegistry builds a minimal registry for the
+// dynamic-DAG REPL path: defaults + decide.next + decide.coding_turn
+// (with reattempt wrapper) + a REPL-flavored sense.prompt that spawns
+// decide.next instead of the static chain's represent.embed.
+//
+// decide.next is wired with a Provider derived from the current REPL
+// model + apiURL. A nil provider (no key, Ollama unreachable, etc.)
+// falls back to the rule-based classifier in ops/decide_next.go.
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) (*dag.Registry, error) {
+	reg := dag.NewRegistry()
+	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
+		return nil, fmt.Errorf("ops defaults: %w", err)
+	}
+
+	// decide.next — the steering op that picks code | search |
+	// converse | done each step. Reuses the same provider the REPL
+	// is currently routed to; nil → rule-based fallback.
+	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
+	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+	if err := reg.Register(ops.NextSpec(ops.NextConfig{Provider: nextProvider})); err != nil {
+		return nil, fmt.Errorf("register decide.next: %w", err)
+	}
+
+	// sense.prompt — REPL-flavored: spawns decide.next (instead of
+	// the static chain's represent.embed).
+	if err := reg.Register(dag.NodeSpec{
+		Function:    dag.FuncSense,
+		Op:          "prompt",
+		Description: "ingress: user prompt arrives; spawns decide.next to steer the turn",
+		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p, _ := in["prompt"].(string)
+			if p == "" {
+				p = prompt
+			}
+			return dag.NodeResult{
+				Out: map[string]any{"prompt": p},
+				Spawn: []dag.NodeSpec{{
+					Function: dag.FuncDecide, Op: "next",
+					Attrs: map[string]any{"prompt": p},
+				}},
+				CostConsumed: dag.Cost{LatencyMS: 5},
+			}, nil
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("register sense.prompt: %w", err)
+	}
+
+	// decide.coding_turn — same wiring used by the static chain
+	// (HarnessFactory + ResultCallback) wrapped with the fetch-op
+	// reattempt logic so unfamiliar-API tails get a second pass with
+	// snippets prepended.
+	rawCT := dagnode.NewCodingTurnHandler(codingCfg)
+	ctHandler := wrapCodingTurnWithReattempt(rawCT, codingCfg, traceCB)
+	if err := reg.Register(dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "coding_turn",
+		Description: "drive one harness session against the preconfigured CortexHarness",
+		Cost:        dag.Cost{LatencyMS: 15000, Tokens: 2000},
+		Handler:     ctHandler,
+	}); err != nil {
+		return nil, fmt.Errorf("register decide.coding_turn: %w", err)
+	}
+
+	return reg, nil
 }
 
 // ensureStubOpenRouterKey lets a local-Ollama REPL run even when no
