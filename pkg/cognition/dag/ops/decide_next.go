@@ -139,19 +139,32 @@ The user said:
 
 {{CONTEXT}}
 
-DEFAULT: emit a single decide.coding_turn that handles the whole request. Most prompts — code changes, questions, prose — fit this shape. The coding_turn's own agent loop will use its tools (read_file, write_file, run_shell, list_dir, cortex_search) as needed.
+Match the plan to the shape of the request:
 
-Only use multi-node plans when a step's result fundamentally changes what should happen next. Do NOT loop "search, then decide" — if search returns nothing useful, don't search again.
+- Trivial / conversational ("hi", "what is 17 × 23?", "explain X conceptually"): 1 node. Just a decide.coding_turn with the prompt.
+- Code change in a known file ("add foo to bar.py"): 2-3 nodes. Read, write, optionally verify.
+- Exploration ("what does this project do?", "how does X work in this codebase?"): 3-5 nodes. Multiple focused decide.coding_turn calls, each with a narrow goal (list workdir, read a specific file, etc.), ending with a synthesis node that pulls the threads together. More focused nodes give each step a clear, simple goal — better than one node trying to do everything.
+
+You can also re-enter decide.next when a step's result will fundamentally change what should happen next (e.g., after a search). But do NOT loop "search → decide → search" — if a search returns nothing, don't search again.
+
+Each emitted node should have a CONCRETE prompt naming the specific file/dir/action, not a vague goal. Vague prompts produce vague work.
 
 Common shapes:
 
-  Direct (most prompts — code, questions, prose):
+  Direct (conversational or simple Q&A):
     [{"op":"decide.coding_turn","attrs":{"prompt":"<user prompt verbatim>"}}]
 
-  Explore-then-answer (user asks about an unfamiliar codebase; bias the coding_turn toward tool use via a steered prompt):
-    [{"op":"decide.coding_turn","attrs":{"prompt":"First call list_dir(\".\") and read_file(\"README.md\"), then answer: <user prompt>"}}]
+  Exploration (multiple narrow steps, last one synthesizes):
+    [{"op":"decide.coding_turn","attrs":{"prompt":"Run list_dir(\".\") and report what's in the workdir."}},
+     {"op":"decide.coding_turn","attrs":{"prompt":"Read README.md and summarize what the project says it does."}},
+     {"op":"decide.coding_turn","attrs":{"prompt":"Read package.json or the equivalent manifest and report the language, framework, and entry point."}},
+     {"op":"decide.coding_turn","attrs":{"prompt":"Compose a 2-3 sentence answer to: '<user prompt>'. Use the findings from the prior steps."}}]
 
-  Search-then-act (you have specific reason to believe prior captures contain the answer):
+  Code change:
+    [{"op":"decide.coding_turn","attrs":{"prompt":"Read <target file> and report current content."}},
+     {"op":"decide.coding_turn","attrs":{"prompt":"Apply the change: <user prompt>. Then run the project's build/test command."}}]
+
+  Search-then-act (specific reason to believe prior captures help):
     [{"op":"remember.vector_search","attrs":{"query":"<topic>"}},
      {"op":"decide.next","attrs":{"prompt":"<user prompt>"}}]
 
