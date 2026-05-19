@@ -616,6 +616,7 @@ func (s *replState) modelCatalogForREPL() string {
 	var b strings.Builder
 	b.WriteString("Local (Ollama):\n")
 	ollama, _, _ := listOllamaModels(s.apiURL)
+	ollama = filterChatCapableModels(ollama)
 	if len(ollama) == 0 {
 		b.WriteString("  (none — install via `ollama pull`)\n")
 	} else {
@@ -658,6 +659,32 @@ func (s *replState) modelCatalogForREPL() string {
 	}
 	s.modelCatalogCache = b.String()
 	return s.modelCatalogCache
+}
+
+// filterChatCapableModels drops embedding-only models from the
+// installed-Ollama list. The model catalogue is injected into
+// decide.next's prompt, where the LLM may emit one as attrs.model on
+// a coding_turn spawn — routing a chat call to an embedding-only
+// model fails with a 400 "does not support chat" from Ollama.
+//
+// Heuristic: names containing "embed", "bge-", "minilm", or "rerank"
+// are treated as embedding/reranker-only. Imperfect — a future
+// chat-capable model named "embedded-foo" would be wrongly dropped —
+// but the alternative (calling /api/show for every model) is slow
+// and the current naming conventions are stable across HF/Ollama.
+func filterChatCapableModels(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		lower := strings.ToLower(n)
+		if strings.Contains(lower, "embed") ||
+			strings.Contains(lower, "bge-") ||
+			strings.Contains(lower, "minilm") ||
+			strings.Contains(lower, "rerank") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // resetModelCatalog invalidates the cached catalog. Called when the
