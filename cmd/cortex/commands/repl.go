@@ -629,28 +629,38 @@ func loadOrSeedSystemPrompt(path string) (string, error) {
 //     acting. Keep it short.
 //   - Iter-4: small models lose function-call discipline with ≥5
 //     tools registered; the REPL drops to 3 tools when Ollama-routed.
-//   - Iter-5 (this fix): the seeded system prompt previously listed
-//     5 tools, but the harness only registers 3 in REPL mode. Telling
-//     the model about tools that don't exist is the kind of small
-//     coherence bug that pushes a borderline-competent 1.5B model
-//     over the edge into text-only responses. Prompt now matches
-//     the registered surface area exactly.
-const defaultREPLSystemPrompt = `You are a Go programmer working inside a workdir you fully own.
+//   - Iter-5: the seeded system prompt previously listed 5 tools, but
+//     the harness only registers 3 in REPL mode. Telling the model
+//     about tools that don't exist is the kind of small coherence bug
+//     that pushes a borderline-competent 1.5B model over the edge into
+//     text-only responses. Prompt matches the registered surface area
+//     exactly.
+//   - Iter-6 (this fix): the prompt was pinned to "You are a Go
+//     programmer" with a "Use go build to verify" instruction. This
+//     made conversational, analysis, and non-Go work feel like a
+//     compliance violation. Generalize: tools are optional, prose is
+//     fine when appropriate, language-specific verify guidance is now
+//     for the user's runVerifier() to surface — not the prompt.
+const defaultREPLSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope — pick the right mode for the user's request.
 
 You have these tools:
   - read_file(path): read a file
   - write_file(path, content): create or replace a file
-  - run_shell(command, args): run go build, go test, go run, cat, head, tail, wc, diff, grep, test
+  - run_shell(command, args): run a shell command (build, test, list, search, etc.)
 
-Workflow: read_file the relevant file (if any), then write_file your implementation, then run_shell to build. Iterate on errors. When the requested step is done, respond with a short summary and NO further tool calls.
+When to use tools vs prose:
+  - The user wants you to read, write, or run something → call the tool. Don't narrate what you're about to do; just do it.
+  - The user is asking a question, exploring an idea, or wants analysis → respond in prose with NO tool calls.
+  - Mixed (e.g. "explain X then change Y") → answer the question first, then do the change.
 
-Make ONE focused change per user message. Edit one file unless the request explicitly spans files. Do not refactor adjacent code that wasn't asked for.
+When you do make changes:
+  - Make ONE focused change per user message. Edit one file unless the request explicitly spans files. Do not refactor adjacent code that wasn't asked for.
+  - When the workdir is a project with a build/test command, run it via run_shell before declaring success. Read the error, fix the code, try again.
 
 Rules:
   - Paths are relative to the workdir; no absolute paths, no "..".
   - Never write under .git or .cortex.
-  - Use "go build" to verify your work — don't claim success without running it.
-  - When a build fails, read the error, fix the code, and try again.
+  - When the requested step is done, respond with a short summary and NO further tool calls.
 `
 
 // emitOneShotJSON prints a single-line JSON envelope summary of the
