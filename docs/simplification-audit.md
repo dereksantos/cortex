@@ -181,8 +181,9 @@ Routing fix:
 
 - Standardize the `journal`-style subcommand dispatch for `eval` (promote
   `eval grid|suite|benchmark` from internal switch to real subcommands).
-- Add a test that asserts every registered command resolves to a `case` in
-  `main.go`, or refactor `main.go` to auto-route by name.
+- ~~Add a test that asserts every registered command resolves to a `case` in
+  `main.go`~~ — *done; see Done. Both directions checked (registered →
+  routed, routed → registered).*
 - Implement `DescribeFlags` on remaining commands so the surface is
   machine-readable (only 4 of 40 do it today).
 
@@ -468,6 +469,22 @@ Verified `go build ./...` and `go test ./...` both green.
 Also noted under F: `cortex measure --calibrate` is **not** a duplicate of
 the standalone `cortex calibrate`. They calibrate different subsystems
 (prompt-quality model vs. DAG op cost hints). Both kept.
+
+### F (slice). Routing test added
+
+`cmd/cortex/main_routing_test.go` parses `main.go` via go/ast and
+extracts every `case "<name>":` arm in the routing switch. Two
+assertions, both green:
+
+- `TestEveryRegisteredCommandIsRouted` — every `commands.Register(&X{})`
+  has a matching case arm. Catches "registered a new command but forgot
+  to wire it" silently.
+- `TestEveryRoutedCommandIsRegistered` — every routed name has a real
+  registered Command struct. Catches stale cases left over after
+  command deletions.
+
+Meta commands that are inline-handled (`help`, `-h`, `--help`,
+`version`) are exempt via an explicit allowlist.
 
 ### J. MCP server dropped
 
