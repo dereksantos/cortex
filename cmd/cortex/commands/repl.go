@@ -140,7 +140,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
 	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
-	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
+	fullTools := false         // --full-tools: kept as a no-op alias since full surface is the iter-7 default
+	minimalTools := false      // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	// Stage 3.5: every REPL coding turn routes tool calls through
@@ -205,6 +206,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			}
 		case "--full-tools":
 			fullTools = true
+		case "--minimal-tools":
+			minimalTools = true
 		case "--keep-on-fail":
 			keepOnFail = true
 		case "--history-turns":
@@ -272,6 +275,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCostUSD = maxCostOverride
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
+	state.minimalTools = minimalTools
 	state.keepOnFail = keepOnFail
 	state.useDAG = dagEnabled
 	if historyTurnsOverride >= 0 {
@@ -428,14 +432,16 @@ type replState struct {
 	maxTurns            int
 	maxCostUSD          float64
 	maxCumulativeTokens int
-	// fullTools forces the 5-tool registry (read/write/list_dir/
-	// run_shell/cortex_search) even when routed to Ollama. Defaults
-	// to false so interactive ollama use keeps the iter-4 fix that
-	// drops list_dir+cortex_search for tiny models that lose
-	// function-call discipline at 5 tools. Benchmark harnesses that
-	// NEED list_dir (e.g. SWE-bench navigating a 5000-file repo)
-	// set this to true.
+	// fullTools is a no-op alias kept for backward compat — the
+	// default tool surface is now full (iter-7 default flip). Old
+	// scripts that pass --full-tools continue to work without
+	// effect.
 	fullTools bool
+	// minimalTools opts INTO the 3-tool registry (read_file +
+	// write_file + run_shell) for users still running tiny Ollama
+	// models that lose function-call discipline at ≥5 tools. Default
+	// false; only set when the user passes --minimal-tools.
+	minimalTools bool
 	// keepOnFail suppresses runTurn's snapshot rollback when verify
 	// fails. For interactive REPL use the default (rollback) is
 	// right: don't keep half-broken edits. For benchmark harnesses
@@ -930,11 +936,16 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
       --max-turns N    Per-attempt agent-loop cap (default 8).
       --max-cost-usd X Per-attempt USD budget (default 0.20).
       --max-cumulative-tokens N  Per-attempt token budget (default 300000).
-      --full-tools     Register the full 5-tool surface (read, write,
-                       list_dir, run_shell, cortex_search) even when
-                       routed to Ollama. Default off; small models
-                       lose function-call discipline at >3 tools, so
-                       interactive Ollama drops to 3.
+      --full-tools     No-op alias kept for backward compat. The full
+                       5-tool surface (read/write/list_dir/run_shell/
+                       cortex_search) is now the default — see
+                       --minimal-tools to opt back into the iter-4
+                       3-tool registry.
+      --minimal-tools  Drop list_dir + cortex_search from the registry,
+                       leaving read_file + write_file + run_shell.
+                       Opt-in for users still running tiny (<7B)
+                       Ollama models that lose tool-call discipline
+                       at 5 tools.
       --keep-on-fail   Don't roll back the workdir when the verifier
                        fails. Benchmark default — iterations build
                        on prior work instead of restarting from
@@ -1312,18 +1323,18 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if s.apiURL != "" {
 		h.SetAPIURL(s.apiURL)
 	}
-	// Iter-4 fix: when routed to local Ollama, small models lose
-	// function-call discipline with the default 5-tool registry. Drop
-	// list_dir + cortex_search so the model sees a 3-tool surface
-	// (read_file + write_file + run_shell). The probe matrix in
-	// PROGRESS-REPL.md iter 3 showed qwen-1.5b function-calls cleanly
-	// with ≤3 tools but emits text shapes at ≥5.
+	// Iter-4 auto-trigger ("Ollama → drop to 3 tools") was tuned for
+	// qwen2.5-coder:1.5b which lost function-call discipline at ≥5
+	// tools. The current floor is 7B+ (mistral 7b and qwen-coder 7b
+	// both handle the 5-tool surface fine), and the iter-7 leanjs run
+	// surfaced the real cost: dropping list_dir means the model can't
+	// orient in an unfamiliar workdir even when its system prompt
+	// tells it to. Default is now full 5 tools.
 	//
-	// --full-tools overrides this for callers that need list_dir +
-	// cortex_search even on Ollama-routed models (e.g. SWE-bench
-	// against a local 30B coder — list_dir is non-negotiable for
-	// navigating a 5000-file repo).
-	if s.apiURL == defaultOllamaAPIURL && !s.fullTools {
+	// --minimal-tools is the explicit opt-out for users still on
+	// tiny models. --full-tools stays as a no-op alias so existing
+	// scripts/benchmark harnesses don't break.
+	if s.minimalTools {
 		h.SetMinimalTools(true)
 	}
 	// Stream the agent loop into the REPL: one line per tool call so
