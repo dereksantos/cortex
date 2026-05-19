@@ -14,6 +14,7 @@ package dagnode
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,24 @@ import (
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// localOllamaAPIURL is the chat-completions endpoint for a default
+// Ollama install. Duplicated from cmd/cortex/commands/repl.go's
+// `defaultOllamaAPIURL` to keep dagnode independent of the CLI layer.
+const localOllamaAPIURL = "http://localhost:11434/v1/chat/completions"
+
+// apiURLForModel returns the chat-completions endpoint appropriate
+// for a given model id. Mirrors the same slash-vs-bare-name routing
+// the REPL uses elsewhere: slash → OpenRouter (empty = client default),
+// bare name → local Ollama. Used by per-node model override in
+// decide.coding_turn so an LLM-emitted `attrs.model` lands at the
+// right endpoint without the caller having to specify both.
+func apiURLForModel(modelID string) string {
+	if strings.Contains(modelID, "/") {
+		return ""
+	}
+	return localOllamaAPIURL
+}
 
 // CodingTurnConfig wires the handler to a model + workdir at
 // registration time. Model and Workdir may be empty: if Model is
@@ -150,6 +169,22 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		workdir := cfg.Workdir
 		if workdir == "" {
 			workdir = "."
+		}
+
+		// Per-node model override (Stage 7 dynamic-DAG slice). When
+		// decide.next emits attrs.model="..." on a coding_turn spawn,
+		// retarget the harness at that model + the corresponding
+		// API endpoint BEFORE running the session. The harness
+		// constructs its OpenRouterClient fresh per session reading
+		// h.model + h.apiURL, so SetModel/SetAPIURL takes effect on
+		// the next RunSessionWithResult call.
+		//
+		// The harness is short-lived (one chain execution); no need
+		// to restore the original model after — the next turn builds
+		// a fresh one via HarnessFactory.
+		if model != "" && model != cfg.Model {
+			h.SetModel(model)
+			h.SetAPIURL(apiURLForModel(model))
 		}
 
 		// Spawn-aware dispatch wiring. When ActRegistry is provided,
