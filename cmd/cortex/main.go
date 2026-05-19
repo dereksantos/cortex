@@ -44,7 +44,7 @@ func main() {
 	case "repl":
 		runREPL(os.Args[2:])
 		return
-	case "capture", "ingest", "analyze", "process", "feed", "journal":
+	case "capture", "ingest", "analyze", "feed", "journal":
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
@@ -323,7 +323,6 @@ Commands:
   capture        Capture event from stdin (used by AI tools)
   ingest         Move queued events to database
   analyze        Run LLM analysis on recent events [limit]
-  process        Process queue + analyze (backward compat)
   feed           Seed knowledge from files or directories
   journal        Journal operations (rebuild/replay/verify/show/tail/migrate/ingest)
   daemon         Start background processor (dashboard at :9090)
@@ -375,7 +374,6 @@ Examples:
   # Process workflow (manual)
   cortex ingest              # Queue → Database
   cortex analyze 5           # Analyze last 5 events
-  cortex process             # Both steps combined
 
   # Capture from AI tool (in hook)
   echo '{"tool_name":"Edit",...}' | cortex capture

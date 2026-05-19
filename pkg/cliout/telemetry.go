@@ -287,7 +287,7 @@ func CortexFunctionFor(command string) string {
 		return "Attend" // salience-over-substrate; surfaces candidates
 	case "capture", "ingest", "feed", "embed", "reembed":
 		return "Sense" // intake / encoding / indexing
-	case "analyze", "process", "dream-debug":
+	case "analyze", "dream-debug":
 		return "Maintain" // offline consolidation
 	case "code", "repl":
 		return "Decide" // model selects + acts

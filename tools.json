@@ -148,11 +148,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "process",
-      "description": "Process queue + analyze (backward compat)",
-      "version": "0.1.0"
-    },
-    {
       "name": "projects",
       "description": "List registered projects",
       "version": "0.1.0"

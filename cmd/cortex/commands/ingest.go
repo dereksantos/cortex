@@ -70,9 +70,6 @@ type IngestCommand struct{}
 // AnalyzeCommand implements LLM analysis on recent events.
 type AnalyzeCommand struct{}
 
-// ProcessCommand implements combined ingest + analyze (backward compat).
-type ProcessCommand struct{}
-
 // FeedCommand implements manual knowledge seeding from files.
 type FeedCommand struct{}
 
@@ -80,7 +77,6 @@ func init() {
 	Register(&CaptureCommand{})
 	Register(&IngestCommand{})
 	Register(&AnalyzeCommand{})
-	Register(&ProcessCommand{})
 	Register(&FeedCommand{})
 }
 
@@ -415,92 +411,6 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 		fmt.Printf("Analyzed %d events\n", analyzed)
 	} else {
 		fmt.Println("No events were analyzed")
-	}
-
-	return nil
-}
-
-// Name returns the command name.
-func (c *ProcessCommand) Name() string { return "process" }
-
-// Description returns the command description.
-func (c *ProcessCommand) Description() string { return "Process queue + analyze (backward compat)" }
-
-// Execute runs the process command (ingest + analyze).
-func (c *ProcessCommand) Execute(ctx *Context) error {
-	cfg := ctx.Config
-	store := ctx.Storage
-
-	// Load config and storage if not provided
-	if cfg == nil || store == nil {
-		var err error
-		captureCfg, captureErr := loadCaptureConfig()
-		if captureErr != nil {
-			return fmt.Errorf("failed to load config: %w", captureErr)
-		}
-		cfg, err = loadStorageConfig()
-		if err != nil {
-			return fmt.Errorf("failed to load storage config: %w", err)
-		}
-
-		store, err = storage.New(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to open storage: %w", err)
-		}
-		defer store.Close()
-
-		cfg.ContextDir = captureCfg.ContextDir
-	}
-
-	// Drain the journal: project capture.event entries past the cursor.
-	var procOpts []processor.Option
-	if opt, cleanup, err := openEvalProjector(); err == nil {
-		procOpts = append(procOpts, opt)
-		defer cleanup()
-	}
-	proc := processor.New(cfg, store, procOpts...)
-	processed, err := proc.RunBatch()
-	if err != nil {
-		return fmt.Errorf("failed to drain journal: %w", err)
-	}
-
-	fmt.Printf("Processed %d events\n", processed)
-
-	// If events were processed, run analysis immediately
-	if processed > 0 {
-		// Get LLM provider via the unified surface (OpenRouter → Anthropic).
-		var llmProvider llm.Provider
-		if p, _, err := llm.NewLLMClient(cfg); err == nil {
-			llmProvider = p
-		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
-			llmProvider = ollama
-		}
-
-		if llmProvider == nil {
-			fmt.Println("No LLM available for analysis")
-			return nil
-		}
-
-		// Analyze recent events
-		recentEvents, err := store.GetRecentEvents(processed)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to get recent events: %v\n", err)
-			return nil
-		}
-
-		fmt.Printf("Analyzing %d events with LLM...\n", len(recentEvents))
-
-		// Run analysis synchronously for immediate results
-		analyzed := 0
-		for _, event := range recentEvents {
-			if err := AnalyzeEventWithLLM(event, store, llmProvider); err == nil {
-				analyzed++
-			}
-		}
-
-		if analyzed > 0 {
-			fmt.Printf("Analyzed %d events\n", analyzed)
-		}
 	}
 
 	return nil

@@ -153,8 +153,8 @@ switches in `cmd/cortex/main.go`). Target set:
 Cuts and consolidations:
 
 - **Drop entirely**:
-  - `process` — back-compat for `ingest && analyze`; both still exposed
-  - `mcp` — per D9
+  - ~~`process` — back-compat for `ingest && analyze`; both still exposed~~ — *done.*
+  - ~~`mcp` — per D9~~ — *done under J.*
   - `feed`, `analyze` — verify whether these are subsumed by `ingest` /
     `capture`; if so, drop. Likely yes.
   - `search-vector` — internal benchmark utility; move under `cortex eval`
@@ -186,8 +186,13 @@ Routing fix:
 - Implement `DescribeFlags` on remaining commands so the surface is
   machine-readable (only 4 of 40 do it today).
 
-`measure --calibrate` duplicates the standalone `cortex calibrate` command —
-delete the flag; keep the command.
+~~`measure --calibrate` duplicates the standalone `cortex calibrate` command —
+delete the flag; keep the command.~~ — *not a duplicate.* The standalone
+`cortex calibrate` is **DAG cost-hint** calibration (reads
+`.cortex/db/dag_traces.jsonl`, writes per-op p50 cost snapshots).
+`cortex measure --calibrate` is **measure-subsystem** calibration (records
+prompt→output token pairs for the prompt-quality model in
+`internal/measure`). Different subsystems; keep both.
 
 ### H. Stale-doc rewrite
 
@@ -450,6 +455,19 @@ suite invocation; persister errors are non-fatal (logged to stderr,
 suite still reports).
 
 Verified `go build ./...` and `go test ./...` both green.
+
+### F.a (slice). `process` command dropped
+
+- Deleted `ProcessCommand` from `cmd/cortex/commands/ingest.go` (struct,
+  Register, Name/Description/Execute — ~85 LOC).
+- Removed `"process"` from the routing case in `cmd/cortex/main.go` and
+  from the cortex-function classifier in `pkg/cliout/telemetry.go`.
+- Removed the `process` help line and example in `cmd/cortex/main.go`.
+- Regenerated `tools.json` (38 commands, was 39).
+
+Also noted under F: `cortex measure --calibrate` is **not** a duplicate of
+the standalone `cortex calibrate`. They calibrate different subsystems
+(prompt-quality model vs. DAG op cost hints). Both kept.
 
 ### J. MCP server dropped
 
