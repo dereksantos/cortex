@@ -42,6 +42,8 @@ import (
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
+	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 func init() {
@@ -151,8 +153,13 @@ func (c *RunCommand) Execute(ctx *Context) error {
 		return runThinkDAG(model, outputFormat, verbose)
 	case "dream":
 		return runDreamDAG(model, outputFormat, verbose)
+	case "project":
+		if prompt == "" {
+			return fmt.Errorf("--type=project requires --prompt")
+		}
+		return runProjectDAG(prompt, model, workdir, outputFormat, verbose)
 	default:
-		return fmt.Errorf("unknown --type=%s (known: turn, think, dream, capture, eval)", dagType)
+		return fmt.Errorf("unknown --type=%s (known: turn, eval, capture, think, dream, project)", dagType)
 	}
 }
 
@@ -572,6 +579,367 @@ func eventContent(event map[string]any) string {
 	}
 	bb, _ := json.Marshal(event)
 	return string(bb)
+}
+
+// runProjectDAG (Stage 6) — multi-step project orchestration.
+//
+// Chain shape:
+//
+//	sense.prompt
+//	  → decide.plan                 (LLM decomposes into N sub-tasks)
+//	    → loop per sub-task i in 0..N-1:
+//	        model.route             (complexity → model id)
+//	          → decide.coding_turn  (one LLM turn, possibly with re-attempt
+//	                                 from value.detect_unfamiliarity)
+//	            → act.verify        (run sub-task's verify_cmd; pass/fail)
+//	              → next sub-task's model.route  OR  maintain.capture
+//
+// Sub-tasks execute SEQUENTIALLY (depth chains them). On verify
+// fail in V0 the chain records the fail in trace and moves on
+// rather than spawning a re-attempt — the model can see the failure
+// output in the next sub-task's context via the project's running
+// summary. Re-attempt on verify fail is a follow-up slice.
+//
+// Workdir defaults to a fresh tmp dir under /tmp so the project
+// build doesn't pollute the cwd; pass --workdir to pin a specific
+// location (e.g., for resuming a project across runs).
+func runProjectDAG(projectPrompt, model, workdir, outputFormat string, verbose bool) error {
+	turnID := fmt.Sprintf("project-%d", time.Now().UnixNano())
+
+	if workdir == "" {
+		tmp, err := os.MkdirTemp("", "cortex-project-")
+		if err != nil {
+			return fmt.Errorf("mktemp workdir: %w", err)
+		}
+		workdir = tmp
+		if outputFormat != "json" {
+			fmt.Printf("[project] workdir: %s\n", workdir)
+		}
+	}
+
+	tw, _ := dagtrace.NewWriter("")
+	var traceCB dag.TraceCallback
+	if tw != nil {
+		traceCB = tw.Callback(turnID)
+	}
+
+	provider, _ := resolveProviderForModel(model)
+
+	reg := dag.NewRegistry()
+	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{Provider: provider}); err != nil {
+		return fmt.Errorf("register default ops: %w", err)
+	}
+	// Project-type adds three more ops on top of the defaults.
+	if err := reg.Register(ops.PlanSpec(ops.PlanConfig{Provider: provider})); err != nil {
+		return fmt.Errorf("register decide.plan: %w", err)
+	}
+	if err := reg.Register(ops.VerifySpec(ops.VerifyConfig{})); err != nil {
+		return fmt.Errorf("register act.verify: %w", err)
+	}
+	if err := reg.Register(ops.RouteSpec(ops.RouteConfig{})); err != nil {
+		return fmt.Errorf("register model.route: %w", err)
+	}
+
+	// Override the chain-shaped specs for the project type. Wrappers
+	// thread subtask state across sequential spawns.
+	registerProjectChain(reg, traceCB, projectPrompt, workdir, model, verbose)
+
+	_, _ = dag.LoadCalibrationSnapshot(reg, "")
+	ex := dag.NewExecutor(reg, traceCB)
+
+	seed := []dag.NodeSpec{{
+		Function: dag.FuncSense,
+		Op:       "prompt",
+		ID:       "n1",
+		Attrs:    map[string]any{"prompt": projectPrompt},
+	}}
+	trace, err := ex.Run(context.Background(), turnID, seed, projectBudget())
+	if err != nil {
+		return fmt.Errorf("run project DAG: %w", err)
+	}
+
+	if outputFormat == "json" {
+		bb, _ := json.MarshalIndent(map[string]any{
+			"turn_id":        trace.TurnID,
+			"workdir":        workdir,
+			"total_executed": trace.TotalExecuted,
+			"exhausted":      trace.Exhausted,
+			"trace_ops":      qualifiedOps(trace.Entries),
+			"final_budget":   trace.FinalBudget,
+		}, "", "  ")
+		fmt.Println(string(bb))
+	} else {
+		fmt.Printf("\n=== project DAG (%s) ===\n", turnID)
+		fmt.Printf("Workdir:   %s\n", workdir)
+		fmt.Printf("Executed:  %d nodes\n", trace.TotalExecuted)
+		fmt.Printf("Exhausted: %v\n\n", trace.Exhausted)
+		for _, e := range trace.Entries {
+			parent := e.ParentID
+			if parent == "" {
+				parent = "(seed)"
+			}
+			fmt.Printf("  %-32s parent=%-20s ok=%v cost={lat=%dms tok=%d}\n",
+				e.QualifiedName, parent, e.OK,
+				e.CostConsumed.LatencyMS, e.CostConsumed.Tokens)
+		}
+		fmt.Printf("\nFinal budget: %s\n", trace.FinalBudget)
+	}
+	return nil
+}
+
+// projectBudget — a project's seed budget is larger than a single
+// turn's because we expect 3-6 LLM-backed sub-tasks, each running
+// its own decide.coding_turn (~30-60s with the real LLM agent
+// loop). Sized for ~6 sub-tasks at 60s each + planner + verify
+// overhead.
+func projectBudget() dag.Budget {
+	return dag.Budget{
+		LatencyMS: 600_000, // 10 minutes
+		Tokens:    60_000,
+		Depth:     30, // depth caps the longest sequential chain
+	}
+}
+
+// resolveProviderForModel constructs the llm.Provider matching the
+// model id. Slash-prefixed = OpenRouter; bare name = Ollama local.
+// Empty model = nil provider (each LLM op self-modulates to its
+// mechanical fallback).
+func resolveProviderForModel(model string) (llm.Provider, error) {
+	if model == "" {
+		return nil, nil
+	}
+	// V0: use an empty config and rely on llm.NewLLMClient's resolver
+	// to pick the right backend from the model id (slash = OpenRouter
+	// via OPENROUTER_API_KEY env, bare = Ollama via DefaultOllamaURL).
+	cfg := &config.Config{}
+	provider, _, err := llm.NewLLMClient(cfg, llm.WithModel(model))
+	if err != nil {
+		return nil, err
+	}
+	return provider, nil
+}
+
+// registerProjectChain wires the project-type spawn relationships
+// on top of the default op registry. Each chain step re-registers
+// the spec with a wrapped handler that threads subtask state
+// through the spawn Attrs.
+func registerProjectChain(
+	reg *dag.Registry,
+	traceCB dag.TraceCallback,
+	projectPrompt, projectWorkdir, defaultModel string,
+	verbose bool,
+) {
+	// sense.prompt — emits the project prompt; spawns decide.plan.
+	reg.Register(dag.NodeSpec{
+		Function:    dag.FuncSense,
+		Op:          "prompt",
+		Description: "project seed: capture prompt, spawn decide.plan",
+		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p, _ := in["prompt"].(string)
+			if p == "" {
+				p = projectPrompt
+			}
+			return dag.NodeResult{
+				Out: map[string]any{"prompt": p},
+				Spawn: []dag.NodeSpec{
+					{Function: dag.FuncDecide, Op: "plan", ID: "n-plan",
+						Attrs: map[string]any{"prompt": p, "language": "go"}},
+				},
+				CostConsumed: dag.Cost{LatencyMS: 5, Tokens: 0},
+			}, nil
+		},
+	})
+
+	// Capture the inner plan handler so the wrapper can call it.
+	planInner, _ := reg.Get("decide.plan")
+	planHandler := planInner.Handler
+
+	// decide.plan — wraps the ops handler, spawns the first sub-task's
+	// model.route on success.
+	reg.Register(dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "plan",
+		Description: "decompose project prompt into sub-tasks; spawn first sub-task chain",
+		Inputs:      planInner.Inputs,
+		Outputs:     planInner.Outputs,
+		Cost:        planInner.Cost,
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := planHandler(ctx, in, b)
+			if err != nil {
+				return res, err
+			}
+			subtasks, _ := res.Out["subtasks"].([]ops.Subtask)
+			if len(subtasks) == 0 {
+				// No subtasks: skip straight to capture.
+				res.Spawn = []dag.NodeSpec{{Function: dag.FuncMaintain, Op: "capture", ID: "n-capture"}}
+				return res, nil
+			}
+			if verbose {
+				fmt.Fprintf(os.Stderr, "[project] planned %d sub-task(s)\n", len(subtasks))
+				for i, s := range subtasks {
+					fmt.Fprintf(os.Stderr, "  s%d [%s] %s\n", i+1, s.Complexity, s.Description)
+				}
+			}
+			// Spawn the first sub-task's model.route, threading the
+			// full plan + index through Attrs.
+			first := subtasks[0]
+			res.Spawn = []dag.NodeSpec{spawnRouteFor(0, subtasks, projectPrompt, projectWorkdir, defaultModel, first)}
+			return res, nil
+		},
+	})
+
+	// model.route — picks a model; spawns decide.coding_turn with
+	// the chosen model + sub-task description.
+	routeInner, _ := reg.Get("model.route")
+	routeHandler := routeInner.Handler
+	reg.Register(dag.NodeSpec{
+		Function:    dag.FuncModel,
+		Op:          "route",
+		Description: "pick a model id; spawn coding_turn for the sub-task",
+		Cost:        routeInner.Cost,
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := routeHandler(ctx, in, b)
+			if err != nil {
+				return res, err
+			}
+			chosenModel, _ := res.Out["model"].(string)
+			if chosenModel == "" {
+				chosenModel = defaultModel
+			}
+			// Read threaded state.
+			subtasks, _ := in["subtasks"].([]ops.Subtask)
+			idx, _ := in["subtask_idx"].(int)
+			workdir, _ := in["workdir"].(string)
+			origPrompt, _ := in["project_prompt"].(string)
+			if idx >= len(subtasks) {
+				return res, nil
+			}
+			st := subtasks[idx]
+			// The coding_turn's prompt = project context + this sub-task's
+			// description. Keeps each turn focused while reminding the
+			// model of the larger goal.
+			turnPrompt := "Project goal: " + origPrompt + "\n\nThis turn: " + st.Description
+			res.Spawn = []dag.NodeSpec{{
+				Function: dag.FuncDecide, Op: "coding_turn",
+				ID: fmt.Sprintf("n-ct-%d", idx),
+				Attrs: map[string]any{
+					"prompt":         turnPrompt,
+					"model":          chosenModel,
+					"subtasks":       subtasks,
+					"subtask_idx":    idx,
+					"workdir":        workdir,
+					"project_prompt": origPrompt,
+				},
+			}}
+			return res, nil
+		},
+	})
+
+	// decide.coding_turn — re-uses the existing chain wrapper from
+	// runTurnDAG via buildTurnChainWithConfig, but here we need a
+	// project-aware spawn (spawn act.verify with the sub-task's
+	// verify_cmd). The trick: register coding_turn with a wrapper
+	// that delegates execution to dagnode but overrides Spawn.
+	rawCT := dagnode.NewCodingTurnHandler(dagnode.CodingTurnConfig{
+		Workdir: projectWorkdir, // each sub-task runs in the shared workdir
+		TraceCB: traceCB,
+	})
+	// Add the fetch-op re-attempt wrapper for parity with --type=turn.
+	ctWithReattempt := wrapCodingTurnWithReattempt(rawCT, dagnode.CodingTurnConfig{TraceCB: traceCB}, traceCB)
+	reg.Register(dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "coding_turn",
+		Description: "execute one sub-task via the LLM agent loop; spawn act.verify",
+		Cost:        dag.Cost{LatencyMS: 0, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := ctWithReattempt(ctx, in, b)
+			// Always spawn verify next, even on coding_turn error —
+			// the verify will report the workdir state truthfully.
+			subtasks, _ := in["subtasks"].([]ops.Subtask)
+			idx, _ := in["subtask_idx"].(int)
+			workdir, _ := in["workdir"].(string)
+			origPrompt, _ := in["project_prompt"].(string)
+			var verifyCmd string
+			if idx < len(subtasks) {
+				verifyCmd = subtasks[idx].VerifyCmd
+			}
+			res.Spawn = []dag.NodeSpec{{
+				Function: dag.FuncAct, Op: "verify",
+				ID: fmt.Sprintf("n-vfy-%d", idx),
+				Attrs: map[string]any{
+					"cmd":            verifyCmd,
+					"workdir":        workdir,
+					"subtasks":       subtasks,
+					"subtask_idx":    idx,
+					"project_prompt": origPrompt,
+				},
+			}}
+			return res, err
+		},
+	})
+
+	// act.verify — runs the sub-task's verify, then spawns either the
+	// next sub-task's model.route OR the terminal maintain.capture.
+	vInner, _ := reg.Get("act.verify")
+	vHandler := vInner.Handler
+	reg.Register(dag.NodeSpec{
+		Function:     dag.FuncAct,
+		Op:           "verify",
+		Description:  "run sub-task verify; advance to next sub-task or wrap up",
+		AxisContract: vInner.AxisContract,
+		Cost:         vInner.Cost,
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := vHandler(ctx, in, b)
+			subtasks, _ := in["subtasks"].([]ops.Subtask)
+			idx, _ := in["subtask_idx"].(int)
+			workdir, _ := in["workdir"].(string)
+			origPrompt, _ := in["project_prompt"].(string)
+			pass, _ := res.Out["pass"].(bool)
+			tail, _ := res.Out["output_tail"].(string)
+			if verbose {
+				status := "PASS"
+				if !pass {
+					status = "FAIL"
+				}
+				fmt.Fprintf(os.Stderr, "[project] sub-task %d verify: %s\n", idx+1, status)
+				if !pass && tail != "" {
+					fmt.Fprintf(os.Stderr, "  tail: %s\n", truncate(tail, 200))
+				}
+			}
+			nextIdx := idx + 1
+			if nextIdx < len(subtasks) {
+				next := subtasks[nextIdx]
+				res.Spawn = []dag.NodeSpec{spawnRouteFor(nextIdx, subtasks, origPrompt, workdir, defaultModel, next)}
+			} else {
+				res.Spawn = []dag.NodeSpec{{Function: dag.FuncMaintain, Op: "capture", ID: "n-capture"}}
+			}
+			return res, err
+		},
+	})
+}
+
+// spawnRouteFor constructs the model.route NodeSpec for the i-th
+// sub-task. Centralizes the Attrs payload so the wrappers stay
+// consistent across plan/verify entry points.
+func spawnRouteFor(
+	idx int,
+	subtasks []ops.Subtask,
+	projectPrompt, projectWorkdir, defaultModel string,
+	st ops.Subtask,
+) dag.NodeSpec {
+	return dag.NodeSpec{
+		Function: dag.FuncModel, Op: "route",
+		ID: fmt.Sprintf("n-route-%d", idx),
+		Attrs: map[string]any{
+			"complexity":     st.Complexity,
+			"subtasks":       subtasks,
+			"subtask_idx":    idx,
+			"workdir":        projectWorkdir,
+			"project_prompt": projectPrompt,
+			"default_model":  defaultModel,
+		},
+	}
 }
 
 // runThinkDAG runs a think-type DAG via the CLI; daemon scheduler
@@ -1258,7 +1626,7 @@ func printRunHelp() {
 Run a DAG of the given type through the seed-and-grow executor.
 
 Options:
-  --type TYPE          DAG type: turn | eval | capture | think | dream
+  --type TYPE          DAG type: turn | eval | capture | think | dream | project
   --prompt TEXT        User prompt (for --type=turn)
   --scenario PATH      Scenario YAML (for --type=eval); see
                        test/evals/coding/ + test/evals/v2/
@@ -1295,6 +1663,13 @@ Per-type shapes (docs/dag-build-plan.md + docs/dag-protocol.md):
                       seed under DefaultDreamBudget. Daemon scheduler
                       integration (idle-time trigger, growing budget)
                       lands alongside think
+  - --type=project    Stage 6: multi-step project orchestration.
+                      sense.prompt → decide.plan (LLM decomposes) →
+                      per sub-task: model.route → coding_turn →
+                      act.verify → next sub-task OR maintain.capture.
+                      Sequential; ~10min/60k-tok seed budget for
+                      ~6 sub-tasks. Workdir defaults to a fresh
+                      tmp dir; pass --workdir to pin.
 
 Examples:
   cortex run --type=turn --prompt "refactor the auth module"
@@ -1302,6 +1677,7 @@ Examples:
   echo '{"tool_name":"Edit","file_path":"foo.go"}' | cortex run --type=capture
   cortex run --type=think
   cortex run --type=dream
+  cortex run --type=project --prompt "build a tiny Go CLI that prints UTC time" --model anthropic/claude-haiku-4.5
 
 See docs/dag-protocol.md for the protocol semantics.`)
 }
