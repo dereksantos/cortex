@@ -65,11 +65,29 @@ type NextConfig struct {
 	// single decision.
 	MaxFanout int
 
-	// MaxLatencyMS caps the classifier call. Defaults to 5000 — small
-	// classifier prompt, but on a 14B local model end-to-end can hit
-	// ~3-4s. Tighten when local hardware improves.
+	// MaxRecursionDepth caps decide.next → decide.next recursion. The
+	// LLM can compose multi-step plans, but it tends to spin (e.g.,
+	// "search, then decide" loops) if it can't see whether the prior
+	// step changed anything. When the inherited depth attribute hits
+	// this cap, the handler drops any further decide.next from the
+	// emitted spawn list (other ops still emit normally). Defaults
+	// to 3 — enough for legitimate search-then-act, search-again-
+	// with-results-then-act patterns, but not enough to runaway.
+	MaxRecursionDepth int
+
+	// MaxLatencyMS caps the classifier call. Defaults to 30000 — 7B+
+	// local models digesting the op + model catalogues and emitting
+	// JSON can easily take 10-15s. Tighten when picking smaller
+	// dedicated classifier models (3B+ Phi/Llama) or running on
+	// faster hardware.
 	MaxLatencyMS int
 }
+
+// recursionDepthAttr is the Attr key used to track decide.next →
+// decide.next recursion. Set by the handler on emitted decide.next
+// spawns (parent_depth + 1); read on entry to decide whether further
+// decide.next emission is allowed.
+const recursionDepthAttr = "_dnext_depth"
 
 // NextSpec returns the dag.NodeSpec for decide.next.
 func NextSpec(cfg NextConfig) dag.NodeSpec {
@@ -96,11 +114,11 @@ func NextSpec(cfg NextConfig) dag.NodeSpec {
 // 1-4 specs). Real wall-time settles to model + hardware.
 var nextCostHint = dag.Cost{LatencyMS: 5000, Tokens: 500}
 
-const nextPrompt = `You compose a DAG that will handle the user's request. You don't execute the work yourself — you emit a sequence of nodes to spawn, and the executor schedules them in order.
+const nextPrompt = `You compose a tiny DAG to handle the user's request. You don't execute the work yourself — you emit a list of nodes to spawn, and the executor runs them in order.
 
 Available ops (function.op(params) - what it does):
 {{OPS}}
-Available models (route nodes by setting attrs.model; omit to use the session default):
+Available models (route a node by setting attrs.model; omit to use the session default):
 {{MODELS}}
 The user said:
 """
@@ -109,17 +127,19 @@ The user said:
 
 {{CONTEXT}}
 
-Emit a JSON object describing the nodes to spawn. Keep it short — 1 to 4 nodes per call. If a step's result will change what should run next (e.g., search results that change the answer), end with another decide.next so you can re-decide.
+DEFAULT: emit a single decide.coding_turn that handles the whole request. Most prompts — code changes, questions, prose — fit this shape. The coding_turn's own agent loop will use its tools (read_file, write_file, run_shell, list_dir, cortex_search) as needed.
 
-Common shapes (concrete examples, not a fixed menu — compose as you see fit):
+Only use multi-node plans when a step's result fundamentally changes what should happen next. Do NOT loop "search, then decide" — if search returns nothing useful, don't search again.
 
-  Explore-then-answer (user asks about an unfamiliar codebase):
-    [{"op":"decide.coding_turn","attrs":{"prompt":"List the workdir, read README and the most prominent source files, then answer: <user prompt>"}}]
+Common shapes:
 
-  Direct prose (user asks a general question with no workdir grounding):
-    [{"op":"decide.coding_turn","attrs":{"prompt":"<user prompt>"}}]
+  Direct (most prompts — code, questions, prose):
+    [{"op":"decide.coding_turn","attrs":{"prompt":"<user prompt verbatim>"}}]
 
-  Search-then-act (relevant prior captures may exist):
+  Explore-then-answer (user asks about an unfamiliar codebase; bias the coding_turn toward tool use via a steered prompt):
+    [{"op":"decide.coding_turn","attrs":{"prompt":"First call list_dir(\".\") and read_file(\"README.md\"), then answer: <user prompt>"}}]
+
+  Search-then-act (you have specific reason to believe prior captures contain the answer):
     [{"op":"remember.vector_search","attrs":{"query":"<topic>"}},
      {"op":"decide.next","attrs":{"prompt":"<user prompt>"}}]
 
@@ -168,7 +188,11 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 	}
 	maxLatency := cfg.MaxLatencyMS
 	if maxLatency <= 0 {
-		maxLatency = 5000
+		maxLatency = 30000
+	}
+	maxRecursion := cfg.MaxRecursionDepth
+	if maxRecursion <= 0 {
+		maxRecursion = 3
 	}
 
 	return func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
@@ -180,6 +204,7 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			}, fmt.Errorf("decide.next: 'prompt' (string) is required")
 		}
 		historySummary, _ := in["history_summary"].(string)
+		recDepth := readDecideNextDepth(in)
 
 		// Mechanical fallback: no provider or budget-exhausted.
 		if cfg.Provider == nil || !budget.CanAfford(nextCostHint) {
@@ -223,6 +248,21 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 				skipped = append(skipped, n.Op+"(unknown-op)")
 				continue
 			}
+			// Recursion cap: when the inherited depth is at or above
+			// the configured max, drop any further decide.next emission.
+			// Other ops still spawn — this stops the "search, then
+			// decide, then search again" runaway pattern without
+			// blocking legitimate multi-step plans.
+			if spec.QualifiedName() == "decide.next" {
+				if recDepth >= maxRecursion {
+					skipped = append(skipped, "decide.next(recursion-cap)")
+					continue
+				}
+				if spec.Attrs == nil {
+					spec.Attrs = make(map[string]any)
+				}
+				spec.Attrs[recursionDepthAttr] = recDepth + 1
+			}
 			spawn = append(spawn, spec)
 			accepted++
 		}
@@ -244,6 +284,23 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			CostConsumed: dag.Cost{LatencyMS: latency, Tokens: estimateTokens(respText)},
 		}, nil
 	}
+}
+
+// readDecideNextDepth pulls the recursion-depth Attr out of the
+// handler's input map, tolerating both int and float64 (JSON
+// unmarshalling can yield either). Missing or zero → 0.
+func readDecideNextDepth(in map[string]any) int {
+	v, ok := in[recursionDepthAttr]
+	if !ok {
+		return 0
+	}
+	switch x := v.(type) {
+	case int:
+		return x
+	case float64:
+		return int(x)
+	}
+	return 0
 }
 
 // renderNextPrompt substitutes the runtime catalogs + user prompt
