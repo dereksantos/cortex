@@ -1564,10 +1564,20 @@ func (s *replState) captureTurn(row turnRow) error {
 	return cap.CaptureEvent(event)
 }
 
-// printTurnSummary emits one human-readable line per accepted turn.
+// printTurnSummary prints the model's final response followed by a
+// one-line metadata footer for an accepted turn. The response was
+// previously captured to JSONL but never surfaced to the user —
+// stats-only output is fine for benchmark mode but unusable when
+// you're asking actual questions and want to see the answer.
+//
 // Derives the verify summary from the row's terminal verify status
 // (covers all three rounds: initial, auto-retry, user-driven).
 func printTurnSummary(row turnRow) {
+	if final := strings.TrimSpace(row.FinalText); final != "" {
+		fmt.Println()
+		fmt.Println(final)
+		fmt.Println()
+	}
 	files := "0"
 	if len(row.FilesChanged) > 0 {
 		files = strings.Join(row.FilesChanged, ", ")
