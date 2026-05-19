@@ -1,0 +1,451 @@
+# Simplification Audit — Align to the Cortex Harness
+
+> Living doc. Move items between sections as decisions land or scans return
+> new evidence. This is a punch list, not a design doc.
+
+## North star
+
+Cortex is its own coding harness. It must cover the 10 dimensions in
+[`docs/benchmarks/coverage-matrix.md`](benchmarks/coverage-matrix.md), built on:
+
+- **Memory** — event-capture journal → DAG-driven indexing
+- **Coding UX** — `cortex code` / `cortex repl` / `cortex run`
+- **Background cognition** — Think and Dream as DAG types
+- **Evals** — the standard suite already wrapped (SWE-bench, NIAH, LongMemEval,
+  MTEB) and the integration wave (τ-bench, MINT, BFCL, AgentDojo)
+
+Goal: a harness that gets emergent capability from both small and large models.
+
+**Cut criterion:** anything that doesn't serve the cortex harness covering the
+10 dimensions. Cross-harness comparison, alternative-harness adapters, and
+external-tool probes are out of scope.
+
+---
+
+## Verification
+
+This work is done when all three hold:
+
+1. **Test suites pass.** `go test ./...` is green at the end of every PR.
+2. **Evals run and produce real numbers.** No stubs, no "needs fixture seed,"
+   no runners that print to stdout instead of writing `CellResult` rows.
+3. **No evals left behind.** Every existing eval has been migrated to the
+   shared format, quality-assessed against
+   [`docs/prompts/eval-principles.md`](prompts/eval-principles.md), and
+   integrated alongside SWE-bench / NIAH / LongMemEval / MTEB through the
+   same runner + sink. Evals can be retired only with explicit rationale.
+
+---
+
+## Decisions locked in (this session)
+
+| #   | Decision                                                                 |
+| --- | ------------------------------------------------------------------------ |
+| D1  | Cortex is the only harness. Aider + OpenCode + **pidev** adapters go.    |
+| D2  | `--harness` flag / `Harness*` enum is removed; cortex is implicit.       |
+| D3  | (rolled into D1 — pidev resolved as out)                                 |
+| D4  | Focus = cortex covering the 10 coverage-matrix dimensions.               |
+| D5  | All eval runners emit the unified `cell_results.jsonl` format. Convert non-v2 runners; don't delete them yet. |
+| D6  | No evals left behind. Every existing eval is migrated to v2 format (or wrapped-benchmark form), quality-assessed against the 9 principles, and integrated into the same runner + sink as SWE-bench / NIAH / LongMemEval / MTEB. |
+| D7  | CLI surface collapses to a smaller tiered set. ~40 commands → ~15.       |
+| D8  | The 5 staged DAG ops are unified into the default chain (no separate "RegisterStaged"). |
+| D9  | Drop MCP server for now. Dimension 10 (extensibility) gets revisited later. |
+| D10 | Legacy `Cortex.Retrieve()` pipeline converts to DAG types; `internal/cognition/` removed once each mode has parity. |
+
+---
+
+## Cut — locked (do now)
+
+### A. Alternative-harness code (D1, D2)
+
+Remove. All under `internal/eval/v2/`:
+
+- `library_service_aider_harness.go` (329 LOC) + `_test.go` (435 LOC)
+- `library_service_opencode_harness.go` (397 LOC) + `_test.go` (564 LOC)
+- `library_service_pidev_harness.go` (296 LOC) + `_test.go` (450 LOC)
+- Constants `HarnessAider`, `HarnessOpenCode`, `HarnessPiDev` (or equivalent)
+  in `cellresult.go:26-30`
+- `--harness` / harnesses-CSV plumbing in `cmd/cortex/commands/eval_grid.go:171,208,249`
+  and `cmd/cortex/commands/eval.go:57,74,249`
+- Default `harnessesCSV = evalv2.HarnessAider` in `eval_grid.go:171`
+- `buildGridHarnesses()` in `eval_grid.go:249` — grid keeps model × strategy
+  axes only
+
+Total: ~2,471 LOC plus enum + flag wiring.
+
+### B. Cross-harness comparison infrastructure (D1)
+
+- `internal/eval/v2/library_service_inject.go` (329 LOC) + `_test.go` (596 LOC) —
+  purpose is injecting cortex context into a *different* harness's prompt;
+  vestigial once cortex is the only harness. Before deleting, verify no
+  within-cortex memory-on/off A/B uses the `Injector` interface. If it does,
+  keep `NoOpInjector` + `CortexInjector` as a within-cortex toggle and drop
+  multi-harness wiring (see M).
+- `internal/eval/v2/agentic.go` — Claude-CLI-based evaluator. A frontier-model
+  reference is fine as a `--model` knob on the cortex harness; we don't need
+  a separate `AgenticEvaluator` type. Fold or delete.
+
+### C. Probe binaries and one-off CLIs (not in the 10 dimensions)
+
+- `cortex-or-probe` (root, 8.2MB build artifact)
+- `cortex-pidev-probe` (root, 3.3MB; no source under `cmd/`)
+- `cmd/cortex-or-probe/main.go` — OpenRouter shape now internalized in
+  `pkg/llm/openrouter.go`
+- `cmd/library-eval/` — pre-v2 research one-off
+- `cmd/mteb-rerank-smoke/` — superseded by `internal/eval/benchmarks/mteb/`
+
+### D. Unify eval-runner output to `cell_results.jsonl` (D5)
+
+Three runners currently print results to stdout/JSON instead of writing
+`CellResult` rows. Convert each to call the shared v2 persister so every eval
+output flows through the same sink and analysis pipeline:
+
+- `internal/eval/mechanic/runner.go` — emit `CellResult` per fixture
+  (harness="cortex", strategy depending on fixture)
+- `internal/eval/journey/runner.go` (all three paths: validate, seed, execute) —
+  emit `CellResult` per step (execute already does in one branch; unify)
+- `internal/eval/legacy/runner.go` — emit `CellResult` per scenario
+
+Shared persister: `internal/eval/v2.PersistCell` (or whatever the existing v2
+entry point is). After this lands, scenarios get the E treatment (migration
++ quality-assessment + integration); only then do the legacy runners come
+out. We need uniform output first so the quality assessment in E can read
+real numbers.
+
+Drop the env-var dispatch around the journey runner
+(`CORTEX_JOURNEYS_WITH_SEED`, `CORTEX_JOURNEYS_EXECUTE`) in the same pass —
+mode becomes a flag on the unified runner.
+
+### E. Migrate every existing eval — quality-assess, integrate (D6)
+
+No evals left behind. Each scenario below goes through three steps:
+
+1. **Format migration** — translate to v2 YAML (or wrapped-benchmark form if
+   it's a better fit) so the v2 runner / benchmark dispatcher picks it up.
+2. **Quality assessment** — score the eval itself against the 9 principles in
+   [`docs/prompts/eval-principles.md`](prompts/eval-principles.md): black box,
+   no coaching, versioned, reproducible, isolated, structured output,
+   LLM-judged variance reported, separated baselines, CLI-first gap-closing.
+   Mark each as pass / improve / retire (with rationale for any retire).
+3. **Integration** — runs through the same pipeline as SWE-bench / NIAH /
+   LongMemEval / MTEB, writing `CellResult` rows. Surviving evals get mapped
+   to the dimension they serve in
+   [`docs/benchmarks/coverage-matrix.md`](benchmarks/coverage-matrix.md).
+
+Scenarios to process:
+
+- `test/evals/v2/` (49) — already v2-format. Sweep for quality assessment;
+  most likely pass.
+- `test/evals/coding/` (6) — already on the v2 runner via `coding_runner`.
+  Quality-assess.
+- `test/evals/library-service/` — scenarios are harness-agnostic; under
+  cortex-only they run on the cortex harness. Re-attach to v2 sink; quality-
+  assess.
+- `test/evals/mechanic/` (5 DAG fixtures) — migrate to v2 YAML.
+- `test/evals/journeys/` (10 multi-step) — migrate; sequence-of-steps may
+  need a new v2 scenario shape if v2 doesn't already model it.
+- `test/evals/legacy/cognition/` (22 reflex/reflect/resolve/think/dream) —
+  migrate. The "needs_fixture_seed" entries either get a seed or are retired
+  with rationale.
+- `test/evals/corpus/` (1) — assess intent; migrate or retire with rationale.
+- `test/evals/e2e/` (1) — assess intent; migrate or retire with rationale.
+- `test/evals/smoke/` (1) — assess intent; migrate or retire with rationale.
+- `test/evals/projects/` (11 empty subdirs) — assess original intent. If
+  planned scenarios that never landed, either land them or retire the
+  directory with rationale recorded.
+
+After E + D, `internal/eval/{legacy,journey,mechanic}/` can be removed —
+every scenario they ran is now under v2 (or wrapped-benchmark form), with
+`CellResult` output, and the coverage-matrix mapping is explicit.
+
+### F. CLI surface collapse (D7)
+
+40 registered commands → target ~15. Routing is fragile (5 multi-case
+switches in `cmd/cortex/main.go`). Target set:
+
+| Tier | Command | Notes |
+|---|---|---|
+| harness | `cortex code` | Coding harness (keep) |
+| harness | `cortex repl` | Interactive coding (keep) |
+| harness | `cortex run` | Generic DAG runner (keep) |
+| harness | `cortex search` | Collapses `recent`, `insights`, `entities`, `graph` via `--type` |
+| memory | `cortex capture` | Record an event (keep) |
+| memory | `cortex forget` | Remove an entry (keep) |
+| memory | `cortex journal` | Subcommands: ingest/rebuild/replay/verify/show/tail/migrate (keep — already correct shape) |
+| eval | `cortex eval` | Subcommands: `grid`, `suite`, `benchmark` — promote from internal dispatch to real subcommands |
+| eval | `cortex measure` | Measurement primitives (keep) |
+| eval | `cortex calibrate` | Token calibration (keep; absorb `measure --calibrate`) |
+| lifecycle | `cortex daemon` | Background processor + dashboard (keep) |
+| lifecycle | `cortex init` | Init `.cortex/` (keep) |
+| lifecycle | `cortex install` / `uninstall` | Hook wiring (keep iff Claude-Code hooks stay) |
+| lifecycle | `cortex status` | Collapses `info`, `stats`, `overview` |
+| dev | `cortex tools` | Emit tools.json (keep) |
+| dev | `cortex version` / `help` | Standard |
+
+Cuts and consolidations:
+
+- **Drop entirely**:
+  - `process` — back-compat for `ingest && analyze`; both still exposed
+  - `mcp` — per D9
+  - `feed`, `analyze` — verify whether these are subsumed by `ingest` /
+    `capture`; if so, drop. Likely yes.
+  - `search-vector` — internal benchmark utility; move under `cortex eval`
+    or a hidden `_internal` namespace
+  - `dream-debug` — replace with `cortex run --type=dream --debug`
+  - `test` — verify what it does; if dev-only, move to `scripts/`
+- **Collapse into `search`** via `--type` flag:
+  - `recent`, `insights`, `entities`, `graph`
+- **Collapse into `status`**:
+  - `info`, `stats`, `overview`
+- **Collapse into `maintenance` subcommand** (or under `daemon`):
+  - `prune`, `reembed`, `embed`
+- **Claude-Code hook commands** — `session-start`, `inject-context`, `stop`,
+  `cli`. With cortex as its own harness, the Claude-Code integration story is
+  no longer the primary path. Keep iff we still want Claude Code to consume
+  cortex memory; otherwise drop. Flag for explicit user decision.
+- **Multi-project registry** — `projects`. Keep iff multi-project is still in
+  scope; otherwise drop. Flag for explicit user decision.
+- **Watch / TUI** — `watch` + `internal/tui/`. Keep iff dimension 6 (in-flight
+  observability) wants a TUI surface; otherwise it's optional UX. Coupled to
+  N (Investigate).
+
+Routing fix:
+
+- Standardize the `journal`-style subcommand dispatch for `eval` (promote
+  `eval grid|suite|benchmark` from internal switch to real subcommands).
+- Add a test that asserts every registered command resolves to a `case` in
+  `main.go`, or refactor `main.go` to auto-route by name.
+- Implement `DescribeFlags` on remaining commands so the surface is
+  machine-readable (only 4 of 40 do it today).
+
+`measure --calibrate` duplicates the standalone `cortex calibrate` command —
+delete the flag; keep the command.
+
+### G. Root hygiene
+
+- Delete `tests/` directory (single empty `__init__.py`, Python skeleton from
+  pre-Go era).
+- `tools.json` is tracked but is generated output (`cmd/cortex/commands/tools.go`).
+  Either commit it as a frozen snapshot with a note in `CONTRIBUTING.md`, or
+  `git rm` and add to `.gitignore`. Currently it drifts.
+- Add to `.gitignore`: `.aider.chat.history.md`, `.aider.input.history`,
+  `cortex-or-probe`, `cortex-pidev-probe` (root binaries).
+- Investigate `daemon_state.json`, `session.json` at repo root — already
+  gitignored but may not need to live in the working dir at all.
+
+### H. Stale docs
+
+Move to `docs/archive/` (preserve for context; don't delete in case run data
+is referenced):
+
+- `docs/phase7-cortex-regression-diagnostic.md`
+- `docs/phase7-crossharness-lift.md`
+- `docs/phase7-divergence-finding.md`
+- `docs/eval-harness-phase7-prompt.md`
+- `docs/eval-harness-loop.md` (cross-harness grid loop)
+- `docs/eval-resume-prompt.md`
+- `docs/opencode-tiers.md`, `docs/opencode-probe.json`
+- `docs/pidev-events.md`, `docs/pidev-probe.json` (D1)
+- `docs/eval-findings-2026-05-10.md` if cross-harness-only
+
+Update or rewrite (still relevant but framed around the old grid):
+
+- `docs/integration-roadmap.md`
+- `docs/tool-surface.md`
+- `docs/learning-harness.md`
+- `docs/product.md`
+- `README.md` — Aider mention in "Multi-Agent / CI Setup" section is stale
+
+### I. Test plans tied to removed harnesses
+
+- `test/evals/library-service/plans/02-session-runner.md` (Aider-shaped)
+- `test/evals/library-service/plans/02-session-runner-prompt.md`
+- `test/evals/library-service/plans/05-aider-harness-prompt.md`
+- `test/evals/library-service/plans/05-aider-harness.md`
+- `test/evals/library-service/runs/2026-05-04-qwen1.5b-aider-floor.md`
+- `test/evals/library-service/runs/2026-05-04-haiku-vs-sonnet-3way.md` (verify)
+- `test/evals/library-service/runs/2026-05-04-haiku-hooks-active.md` (verify)
+
+Keep `test/evals/library-service/plans/README.md` + `runs/README.md` but
+update to reflect cortex-only running.
+
+### J. Drop MCP server (D9)
+
+- `internal/mcp/server.go` (310 LOC) and the rest of `internal/mcp/`
+- `cmd/cortex/commands/mcp.go` (1.4K)
+- `mcp` case in `cmd/cortex/main.go`
+- References in `docs/integration-roadmap.md`, `docs/tool-surface.md`, etc.
+- Cross-link in this doc: dimension 10 (extensibility & composition) in the
+  coverage matrix loses its MCP-server route. Revisit when that dimension's
+  proxy work starts.
+
+### K. Unify the 5 staged DAG ops (D8)
+
+These ops are registered in `pkg/cognition/dag/ops/defaults.go:48-127` but
+never spawned by the default turn chain. Wire each into the default chain
+(do not create a separate `RegisterStaged()`):
+
+- `value.score`
+- `value.detect_contradiction`
+- `decide.should_capture`
+- `model.predict_next`
+- `decide.plan`
+
+Their templates in `pkg/cognition/prompts/` (`value_score.tmpl`,
+`value_detect_contradiction.tmpl`, `decide_should_capture.tmpl`,
+`model_predict_next.tmpl`) are already in place. Wiring is the missing
+piece — figure out the right edge in `cmd/cortex/commands/run.go:buildTurnChain`
+for each, ensure budget/depth caps still hold, and remove any "stage 2/3"
+comments left behind.
+
+### L. Convert legacy cognition to DAG types; remove legacy (D10)
+
+`internal/cognition/cortex.go` runs the original Reflex→Reflect→Resolve
+pipeline with Think/Dream/Digest hooks. Convert each mode to a DAG type or
+op, then delete the legacy pipeline. Order:
+
+1. **Reflex** — mechanical retrieval. Already substantially covered by
+   `remember.vector_search` (existing DAG op). Verify behavior parity, then
+   route `Cortex.Retrieve()` callers through DAG `turn`-type seeds.
+2. **Reflect** — agentic reranking. Covered by `attend.rerank`. Wire in
+   contradiction-resolution (overlaps with K's `value.detect_contradiction`).
+3. **Resolve** — inject/wait/queue decision. Covered by `decide.inject`.
+   Verify parity on the "wait" and "queue" paths.
+4. **Think** — currently called from `Cortex.Retrieve()` for active work.
+   Convert to a DAG type (`--type=think` already exists in `run.go`); ensure
+   the daemon's idle/active triggers spawn DAG runs instead of calling
+   `Think.MaybeThink()`.
+5. **Dream** — same shape as Think but idle-budgeted. Convert similarly.
+   Fractal source weighting under `internal/cognition/fractal/` stays
+   load-bearing as a Dream-internal data structure; it just gets called from
+   a DAG handler instead of `Dream.Run()`.
+6. **Digest** — post-Dream consolidation. Either fold into the Dream DAG run
+   (a `maintain.consolidate` op) or keep as a small DAG type. Either way,
+   `internal/cognition/digest.go` goes.
+
+When each mode has DAG-native parity, delete the corresponding file in
+`internal/cognition/`. Final removal target: the entire `internal/cognition/`
+package, except `fractal/` if still needed (verify).
+
+Gating: every step needs an eval cell (against the existing `cell_results.jsonl`
+sink) confirming parity vs. the legacy mode before that mode's legacy
+implementation is removed.
+
+---
+
+## Investigate before cutting
+
+### M. Within-cortex baseline mechanism
+
+The 9 eval principles ([`docs/prompts/eval-principles.md`](prompts/eval-principles.md))
+include "separated baselines." Under cortex-only, baseline = cortex without
+memory injection; cortex condition = cortex with memory. Decide whether
+`library_service.go`'s `Condition{Baseline,Cortex,Frontier}` survives as a
+within-cortex memory-on/off toggle (in which case `NoOpInjector` +
+`CortexInjector` stay) or whether baseline/frontier collapse into a `--model`
+axis and the Condition enum is dropped.
+
+### N. Observability surfaces vs. dimension 6
+
+Dimension 6 (in-flight observability) needs an event-stream CLI surface
+(`cortex code --events` NDJSON per the matrix). Decide whether `internal/web/`
+(dashboard, 215 LOC, used by daemon) and `internal/tui/` (94 LOC, used by
+`cortex watch`) feed that proxy. If not, both are optional and `watch` is a
+candidate to drop under F.
+
+### O. Cursor adapter
+
+`integrations/cursor/` has a real adapter + design doc but no end-to-end
+test. Same dimension-10 surface as MCP. User dropped MCP under D9; Cursor
+likely follows but wasn't explicitly named. Default: cut with MCP unless
+there's a near-term non-MCP use.
+
+---
+
+## Keep — load-bearing for the focus
+
+Confirmed load-bearing; do not touch:
+
+- `pkg/cognition/dag/` — the engine
+- `pkg/cognition/prompts/` — DAG op templates (the consumed ones; K wires the
+  remaining four)
+- `pkg/cognition/dag/calibrate.go`, `rollover.go` — production paths
+- `internal/harness/`, `internal/harness/dagnode/` — coding harness
+- `cmd/cortex/commands/code.go`, `repl.go`, `run.go` — coding UX
+- `internal/eval/v2/` — eval runner + sink writer (consolidation hub)
+- `internal/eval/v2/library_service_cortex_harness.go` — the cortex harness
+  being evaluated
+- `internal/eval/benchmarks/{swebench,niah,longmemeval,mteb}/` — wrapped
+  benchmarks already producing `CellResult` rows
+- `internal/eval/dagtrace/` — DAG telemetry sink
+- `internal/journal/` — event-capture truth
+- `internal/storage/` — derived state, regeneratable from journal
+- `internal/capture/`, `internal/processor/` — capture + projection
+- `internal/cognition/` — **transitional**: load-bearing until each mode has a
+  DAG-native replacement under L. Remove progressively as ops land; don't cut
+  ahead of parity.
+- `internal/cognition/fractal/` — Dream's source weighting (re-evaluate at L.5)
+- `internal/measure/` — measurement primitives used by production and eval
+- `pkg/llm/` — model providers (small + large)
+- `pkg/events/`, `pkg/config/`, `pkg/registry/`, `pkg/secret/`, `pkg/system/`,
+  `pkg/cliout/`, `pkg/models/` — infrastructure
+- `Formula/cortex.rb` — homebrew formula
+- `scripts/build-all.sh`, `install.sh`, `release.sh`, `check.sh` — release/CI
+- `docker-compose.yaml`, `grafana/` — local Grafana dev setup (optional but
+  current)
+
+---
+
+## Order of operations
+
+Each step lands as one PR. Every PR ends green: `go test ./...` passes and
+any eval touched by the step produces real `CellResult` numbers (the
+Verification bar). Cuts ordered to minimize churn: trivial / no-risk first,
+then aider-class deletions, then unification, then the legacy-cognition
+conversion (largest, most-gated).
+
+1. **Root hygiene** (G) — minutes, zero risk.
+2. **Probe binaries and one-off CLIs** (C) — verify with `go list -deps`, then
+   delete.
+3. **Stale docs** (H) — `mv` to `docs/archive/`.
+4. **Aider + OpenCode + pidev deletion** (A) — biggest single cut; lands D1+D2.
+   Update `cellresult.go` enum, `eval.go` + `eval_grid.go` dispatch, delete
+   the six harness files + tests.
+5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
+6. **Drop MCP** (J) — independent of harness deletions.
+7. **Unify eval-runner output to `cell_results.jsonl`** (D) — convert
+   mechanic / journey / legacy runners; one PR per runner is fine.
+8. **Migrate + quality-assess + integrate every eval** (E) — once D is in,
+   walk every scenario: format-migrate, score against the 9 principles
+   (pass / improve / retire-with-rationale), confirm `CellResult` output,
+   map to a coverage-matrix dimension. The legacy runners come out in the
+   final cleanup PR once nothing references them.
+9. **Test plans tied to removed harnesses** (I) — small cleanup after step 4.
+10. **CLI surface collapse** (F) — sequence as a few PRs:
+    a. Routing test + back-compat-alias deletions (`process`, `mcp` already
+       gone after J, `measure --calibrate`).
+    b. View collapses (`recent`/`insights`/`entities`/`graph` → `search --type`).
+    c. Status collapses (`info`/`stats`/`overview` → `status`).
+    d. Hook commands + `projects` decision (needs user input first — flagged in F).
+11. **Unify staged DAG ops** (K) — one PR per op, each gated on no regression
+    in v2 cell results.
+12. **Within-cortex baseline decision** (M) — author the ADR; refactor if needed.
+13. **Convert legacy cognition to DAG types** (L) — six steps (Reflex →
+    Reflect → Resolve → Think → Dream → Digest). Each gated on parity vs.
+    legacy via cell-result evals. Final PR deletes `internal/cognition/`.
+14. **Observability decision** (N) — informs whether `watch` + `internal/tui/` +
+    `internal/web/` stay.
+15. **Cursor adapter** (O) — likely follows MCP; verify and cut or keep.
+
+---
+
+## How to update this doc
+
+- When a cut is made, move the item from "Cut" to a "## Done" section with
+  the PR link.
+- When investigation resolves an item under "Investigate," promote it to
+  "Cut" or move it to "Keep" with the reason.
+- New simplification candidates from future scans go under "Cut — locked"
+  with a confidence note, or "Investigate" if uncertain.
+- The "Keep" section should shrink as items become obviously load-bearing
+  and stop being interesting to track.
