@@ -376,10 +376,6 @@ type replState struct {
 	// chained undo back to session start. Empty before the first turn.
 	snapshotStack []string
 
-	// verifyWarned ensures we warn at most once per session when the
-	// workdir has no recognized verifier.
-	verifyWarned bool
-
 	// captureCfg + captureClient are lazily constructed on first
 	// accepted turn so the capture write doesn't pay setup cost when
 	// the REPL is just used for read-only exploration (no edits, no
@@ -1441,21 +1437,20 @@ type verifyResult struct {
 	OutputTail string
 }
 
-// runVerifier picks a verifier in priority order:
-//  1. --verifier <cmd>: arbitrary shell command, treated as success on
-//     exit 0. Used by benchmark harnesses (SWE-bench → pytest, etc.).
-//  2. go.mod present: `go build ./...` (v1 default for Go projects).
-//  3. fallback: no verifier, one-time warning, accept the turn.
+// runVerifier returns the gate result for a turn. The REPL no longer
+// auto-picks a verifier by detecting project files (go.mod, package.json,
+// etc.) — that was hardcoded language detection living outside the DAG.
+// The agent loop uses run_shell to build/test itself when appropriate;
+// double-checking from outside the loop is redundant.
+//
+// Two paths remain:
+//  1. --verifier <cmd>: explicit user/benchmark-supplied shell command.
+//     Treated as success on exit 0. SWE-bench-style headless runs use
+//     this to gate the auto-retry loop.
+//  2. fallback: no verifier; accept the turn. Trust the agent loop.
 func (s *replState) runVerifier() verifyResult {
 	if s.customVerifierCmd != "" {
 		return s.runCustomVerifier()
-	}
-	if _, err := os.Stat(filepath.Join(s.workdir, "go.mod")); err == nil {
-		return s.runGoBuild()
-	}
-	if !s.verifyWarned {
-		fmt.Println("  (no verifier: workdir has no go.mod; v1 only auto-verifies Go projects)")
-		s.verifyWarned = true
 	}
 	return verifyResult{Kind: verifierNone, OK: true}
 }
@@ -1476,30 +1471,6 @@ func (s *replState) runCustomVerifier() verifyResult {
 		OK:         err == nil,
 		OutputTail: tailString(string(out), 8192),
 	}
-}
-
-// runGoBuild shells out to `go build ./...`. We cap wall time at 60s
-// to avoid wedging the REPL if a build hangs.
-//
-// Subtle bug guarded against: `go build ./...` exits 0 with a warning
-// when there are no Go files to build (e.g. workdir has only a go.mod).
-// Treating that as "ok" hides the failure mode where the model didn't
-// write any code at all. We catch the "matched no packages" pattern
-// and downgrade to no-verify so the turn doesn't accept silently.
-func (s *replState) runGoBuild() verifyResult {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "./...")
-	cmd.Dir = s.workdir
-	out, err := cmd.CombinedOutput()
-	output := string(out)
-	if strings.Contains(output, "matched no packages") {
-		// No Go files yet — treat as no-verify so a turn that wrote
-		// nothing doesn't get a false accept. The verifier kind stays
-		// "go build" so the JSONL row reflects what we tried.
-		return verifyResult{Kind: verifierGoBuild, OK: false, OutputTail: tailString(output, 4096)}
-	}
-	return verifyResult{Kind: verifierGoBuild, OK: err == nil, OutputTail: tailString(output, 4096)}
 }
 
 // gateDecision is what the user chose at the [r/e/s/q] prompt.
