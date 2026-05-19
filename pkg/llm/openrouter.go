@@ -24,11 +24,24 @@ import (
 
 const (
 	openrouterAPIURL       = "https://openrouter.ai/api/v1/chat/completions"
+	openrouterModelsURL    = "https://openrouter.ai/api/v1/models"
 	openrouterReferer      = "https://github.com/dereksantos/cortex"
 	openrouterTitle        = "cortex"
 	openrouterDefaultModel = "openai/gpt-oss-20b:free" // verified-working free model on the OpenInference provider
 	openrouterTimeoutSec   = 60
 )
+
+// OpenRouterModel is the subset of the /api/v1/models response we use
+// for /models discovery in the REPL. Pricing is returned as USD per
+// token by OpenRouter (string-encoded floats); we surface them parsed
+// for caller convenience.
+type OpenRouterModel struct {
+	ID                string
+	Name              string
+	ContextLength     int
+	PricePromptPerTok float64
+	PriceComplPerTok  float64
+}
 
 // OpenRouterClient is a Provider for the OpenRouter unified gateway.
 //
@@ -254,4 +267,71 @@ func (c *OpenRouterClient) doRaw(ctx context.Context, body any) ([]byte, error) 
 		return nil, fmt.Errorf("openrouter status %d: %s", resp.StatusCode, string(bb))
 	}
 	return bb, nil
+}
+
+// ListModels fetches the OpenRouter model catalogue and returns it
+// flattened to OpenRouterModel. The /api/v1/models endpoint is
+// unauthenticated — callers without an API key can still discover
+// models. Used by the REPL's /models slash command.
+//
+// Caller is expected to cache the result for the session — the
+// catalogue changes on OpenRouter-side timescales, not request-time
+// timescales.
+func (c *OpenRouterClient) ListModels(ctx context.Context) ([]OpenRouterModel, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openrouterModelsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter models: new request: %w", err)
+	}
+	req.Header.Set("HTTP-Referer", openrouterReferer)
+	req.Header.Set("X-Title", openrouterTitle)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter models: request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("openrouter models: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openrouter models: status %d: %s", resp.StatusCode, string(bb))
+	}
+
+	var payload struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Name          string `json:"name"`
+			ContextLength int    `json:"context_length"`
+			Pricing       struct {
+				Prompt     string `json:"prompt"`
+				Completion string `json:"completion"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bb, &payload); err != nil {
+		return nil, fmt.Errorf("openrouter models: decode: %w", err)
+	}
+
+	out := make([]OpenRouterModel, 0, len(payload.Data))
+	for _, m := range payload.Data {
+		out = append(out, OpenRouterModel{
+			ID:                m.ID,
+			Name:              m.Name,
+			ContextLength:     m.ContextLength,
+			PricePromptPerTok: parseFloatOrZero(m.Pricing.Prompt),
+			PriceComplPerTok:  parseFloatOrZero(m.Pricing.Completion),
+		})
+	}
+	return out, nil
+}
+
+// parseFloatOrZero is a tolerant parser for the string-encoded pricing
+// floats OpenRouter returns. Bad / empty values return 0 rather than
+// failing the entire ListModels call.
+func parseFloatOrZero(s string) float64 {
+	var f float64
+	_, _ = fmt.Sscanf(s, "%f", &f)
+	return f
 }

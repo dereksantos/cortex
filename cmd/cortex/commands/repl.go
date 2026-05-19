@@ -469,6 +469,15 @@ type replState struct {
 	// turn so the model has working memory beyond what cortex_search
 	// surfaces. /undo pops the last entry alongside the snapshot.
 	history []turnExchange
+
+	// openRouterModelsCache holds the result of the most recent
+	// OpenRouter /api/v1/models fetch for the /models slash command.
+	// nil = never fetched (or last fetch errored — see cacheErr).
+	// Cached per-session because the catalogue is large (~300+
+	// entries) and changes on hour/day timescales, not request-time
+	// timescales. Refreshes only on explicit /models refresh.
+	openRouterModelsCache []llm.OpenRouterModel
+	openRouterModelsErr   error
 }
 
 // turnExchange is one accepted turn condensed to just what the model
@@ -849,6 +858,10 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		}
 		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 		return true, nil
+	case "/models":
+		refresh := len(rest) > 0 && rest[0] == "refresh"
+		s.printModels(refresh)
+		return true, nil
 	case "/history":
 		if len(rest) == 0 {
 			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
@@ -879,6 +892,7 @@ func printSlashHelp() {
   /diff              changed files since session start
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
+  /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
   /history [N]       show buffered turn count, or set the conversation-history cap to N
   /quit              exit (also Ctrl-D)`)
 }
@@ -1850,6 +1864,156 @@ type ollamaTagsResponse struct {
 	} `json:"models"`
 }
 
+// printModels handles the /models slash command: fetches Ollama
+// (fresh each time, local + fast) and OpenRouter (cached per session
+// unless refresh=true, since the catalogue is ~300+ entries) and
+// renders both as two sections, capped at modelListLimit entries each.
+//
+// Ollama uses the current REPL's apiURL if it's Ollama-shaped, else
+// the default Ollama URL — this lets the user list local models even
+// when currently routed to OpenRouter.
+func (s *replState) printModels(refresh bool) {
+	ollamaProbeURL := s.apiURL
+	if ollamaProbeURL == "" {
+		ollamaProbeURL = defaultOllamaAPIURL
+	}
+	ollamaModels, ollamaAvailable, ollamaErr := listOllamaModels(ollamaProbeURL)
+
+	fmt.Println("  Ollama (local):")
+	switch {
+	case !ollamaAvailable:
+		fmt.Println("    (unreachable — run `ollama serve` to enable)")
+	case ollamaErr != nil:
+		fmt.Printf("    (error: %v)\n", ollamaErr)
+	case len(ollamaModels) == 0:
+		fmt.Println("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
+	default:
+		printModelListOllama(ollamaModels)
+	}
+
+	fmt.Println("  OpenRouter:")
+	if refresh || s.openRouterModelsCache == nil && s.openRouterModelsErr == nil {
+		s.openRouterModelsCache, s.openRouterModelsErr = fetchOpenRouterModels()
+	}
+	switch {
+	case s.openRouterModelsErr != nil:
+		fmt.Printf("    (error: %v)\n", s.openRouterModelsErr)
+	case len(s.openRouterModelsCache) == 0:
+		fmt.Println("    (empty catalogue)")
+	default:
+		printModelListOpenRouter(s.openRouterModelsCache)
+	}
+}
+
+// modelListLimit caps how many models per section /models prints
+// before collapsing the tail into a "+N more" footer. Keeps the
+// REPL surface usable when OpenRouter returns 300+ models.
+const modelListLimit = 20
+
+// fetchOpenRouterModels calls OpenRouterClient.ListModels using a
+// throwaway client constructed for the catalog call only (no
+// session-bound state). Results are sorted by ID for deterministic
+// output. The endpoint is unauthenticated; a missing key doesn't
+// block discovery.
+func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
+	client := llm.NewOpenRouterClient(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	models, err := client.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
+}
+
+func printModelListOllama(names []string) {
+	sort.Strings(names)
+	shown := names
+	if len(shown) > modelListLimit {
+		shown = shown[:modelListLimit]
+	}
+	for _, n := range shown {
+		fmt.Printf("    %s\n", n)
+	}
+	if extra := len(names) - len(shown); extra > 0 {
+		fmt.Printf("    +%d more\n", extra)
+	}
+}
+
+func printModelListOpenRouter(models []llm.OpenRouterModel) {
+	shown := models
+	if len(shown) > modelListLimit {
+		shown = shown[:modelListLimit]
+	}
+	for _, m := range shown {
+		ctx := ""
+		if m.ContextLength > 0 {
+			ctx = fmt.Sprintf(" %s ctx", humanCtx(m.ContextLength))
+		}
+		// Prices in API are USD/token; print per 1M to be human-readable.
+		price := ""
+		if m.PricePromptPerTok > 0 || m.PriceComplPerTok > 0 {
+			price = fmt.Sprintf(" $%.2f/$%.2f per 1M (in/out)",
+				m.PricePromptPerTok*1_000_000, m.PriceComplPerTok*1_000_000)
+		}
+		fmt.Printf("    %s%s%s\n", m.ID, ctx, price)
+	}
+	if extra := len(models) - len(shown); extra > 0 {
+		fmt.Printf("    +%d more — /model <id> to pin a specific one\n", extra)
+	}
+}
+
+// humanCtx formats a token count as k or M for compactness. 8192 → 8k.
+func humanCtx(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// listOllamaModels returns the names of all models installed on the
+// Ollama server reachable at chatAPI's host. Returns (names, available,
+// err): available is false iff Ollama itself is unreachable (so the
+// caller can distinguish "Ollama is down" from "Ollama is up but
+// returned an unexpected body").
+//
+// Extracted from probeOllamaAndPickModel so /models can list without
+// re-implementing the /api/tags fetch.
+func listOllamaModels(chatAPI string) ([]string, bool, error) {
+	tagsURL := ollamaTagsURL(chatAPI)
+	if tagsURL == "" {
+		return nil, true, fmt.Errorf("ollama: cannot derive /api/tags URL from %q", chatAPI)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
+	if err != nil {
+		return nil, true, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("ollama /api/tags: status %d", resp.StatusCode)
+	}
+	var tags ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, true, err
+	}
+	out := make([]string, 0, len(tags.Models))
+	for _, m := range tags.Models {
+		out = append(out, m.Name)
+	}
+	return out, true, nil
+}
+
 // probeOllamaAndPickModel asks Ollama what's installed, scores each
 // model for tool-calling fitness, and returns the best choice. The
 // fallback is what we return if (a) Ollama is reachable but our
@@ -1864,31 +2028,12 @@ type ollamaTagsResponse struct {
 //   - note: human-readable explanation when chosen != fallback;
 //     empty when no swap happened
 func probeOllamaAndPickModel(chatAPI, fallback string) (string, bool, string) {
-	tagsURL := ollamaTagsURL(chatAPI)
-	if tagsURL == "" {
-		return fallback, true, ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
-	if err != nil {
-		return fallback, true, ""
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	installed, available, err := listOllamaModels(chatAPI)
+	if !available {
 		return fallback, false, ""
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fallback, false, ""
-	}
-	var tags ollamaTagsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+	if err != nil {
 		return fallback, true, ""
-	}
-	installed := make([]string, 0, len(tags.Models))
-	for _, m := range tags.Models {
-		installed = append(installed, m.Name)
 	}
 	chosen := pickBestOllamaModel(installed, fallback)
 	if chosen == fallback {
