@@ -51,60 +51,12 @@ func TestContainPath(t *testing.T) {
 	}
 }
 
-// TestValidateShellArg covers the shell-arg defense layer that
-// run_shell applies. Each row is one argument string.
-func TestValidateShellArg(t *testing.T) {
-	tests := []struct {
-		name    string
-		arg     string
-		wantErr error
-	}{
-		{name: "plain", arg: "build"},
-		{name: "with =", arg: "-tags=integration"},
-		{name: "with dot path", arg: "./..."},
-		{name: "empty", arg: ""},
-		{name: "abs path", arg: "/etc/passwd", wantErr: errArgIsAbsolutePath},
-		{name: "double dot", arg: "../escape", wantErr: errArgContainsRelative},
-		{name: "semicolon", arg: "x;rm", wantErr: errArgContainsMeta},
-		{name: "pipe", arg: "x|y", wantErr: errArgContainsMeta},
-		{name: "and", arg: "x&&y", wantErr: errArgContainsMeta},
-		{name: "subshell", arg: "$(date)", wantErr: errArgContainsMeta},
-		{name: "backtick", arg: "`whoami`", wantErr: errArgContainsMeta},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateShellArg(tt.arg)
-			if tt.wantErr == nil {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("want error, got nil")
-			}
-			if !strings.Contains(err.Error(), tt.wantErr.Error()) {
-				t.Errorf("error %q does not wrap %v", err.Error(), tt.wantErr)
-			}
-		})
-	}
-}
-
-// TestResolveShellCommand covers the allowlist gate.
-func TestResolveShellCommand(t *testing.T) {
-	if _, err := resolveShellCommand("go"); err != nil {
-		t.Errorf("go should be allowed: %v", err)
-	}
-	if _, err := resolveShellCommand("rm"); err == nil {
-		t.Errorf("rm should be denied")
-	}
-	if _, err := resolveShellCommand("curl"); err == nil {
-		t.Errorf("curl should be denied")
-	}
-	if _, err := resolveShellCommand(""); err == nil {
-		t.Errorf("empty command should be denied")
-	}
-}
+// TestValidateShellArg + TestResolveShellCommand were removed in the
+// iter-7 (2026-05-19) refactor that replaced the binary-allowlist
+// run_shell with a real `bash -c` invocation. The model can now run
+// arbitrary commands; defense moves to user-configurable shell
+// policy (separate slice). The path-containment tests below still
+// cover the fs-tool guarantees that survived the rewrite.
 
 // TestContainPath_AbsoluteWorkdirRequired locks in that workdir must
 // be absolute. A relative workdir could let a chdir later in the

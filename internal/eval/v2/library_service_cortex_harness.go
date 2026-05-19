@@ -186,25 +186,28 @@ func (h *CortexHarness) SetSharedCortex(cx *intcognition.Cortex) { h.sharedCorte
 // final text only — no tool-call traces).
 func (h *CortexHarness) SetPriorMessages(m []llm.ChatMessage) { h.priorMessages = m }
 
-// defaultSystemPrompt is the default agent contract. Deliberately
-// concise — small models tend to ignore long system prompts, and the
-// tool descriptions already document mechanics.
-const defaultSystemPrompt = `You are a Go programmer working inside a workdir you fully own.
+// defaultSystemPrompt is the fallback agent contract used only when a
+// caller doesn't override via SetSystemPrompt (the REPL always
+// overrides; benchmark callers may not). Deliberately concise —
+// small models ignore long system prompts and the tool descriptions
+// already document mechanics. Language-agnostic since the harness is
+// general-purpose.
+const defaultSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope.
 
 You have these tools:
   - list_dir(path): see what files exist
   - read_file(path): read a file
   - write_file(path, content): create or replace a file
-  - run_shell(command, args): run go build, go test, go run, ls, cat, head, tail, wc, diff, grep, test
-  - cortex_search(query): search prior captures from earlier attempts (returns "empty" on a fresh run)
+  - run_shell(command, args): run a build/test/inspect command (allowlisted)
+  - cortex_search(query): search prior captures (returns "empty" on a fresh run)
 
-Workflow: explore with list_dir/read_file, then write_file your implementation, then run_shell to build and test. Iterate on errors. When the task is complete and tests pass, respond with a short summary and NO tool calls.
+When the user asks about THIS workdir, ground yourself by reading actual files before answering. Don't infer project shape from the workdir name. Don't claim you read a file you didn't read.
+
+Workflow: explore with list_dir/read_file when needed, write_file changes, run_shell to verify (the right build/test command for whatever this project uses). Iterate on errors. When the requested step is done, respond with a short summary and NO further tool calls.
 
 Rules:
   - Paths are relative to the workdir; no absolute paths, no "..".
-  - Never write under .git or .cortex.
-  - Use "go run" or "go test" to verify your work — don't claim success without running it.
-  - When a build or test fails, read the error, fix the code, and try again.`
+  - Never write under .git or .cortex.`
 
 // RunSession is the Harness-interface entry point. Discards the
 // result; callers wanting telemetry use RunSessionWithResult.
