@@ -1592,6 +1592,49 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		return nil, fmt.Errorf("register decide.coding_turn: %w", err)
 	}
 
+	// Real act.* handlers registered on the main registry so the
+	// executor can spawn them directly. decide.tool_call's emitted
+	// `act.<tool>` NodeSpecs land here. Coding_turn still has its
+	// own dispatcher path (via codingCfg.ActRegistry → actReg) — this
+	// surface is purely for DAG-level spawns where the specialist
+	// tool-caller has already produced structured args.
+	actToolReg := harness.NewToolRegistry()
+	readTool := harness.NewReadFileTool(s.workdir)
+	writeTool := harness.NewWriteFileTool(s.workdir, actToolReg)
+	listTool := harness.NewListDirTool(s.workdir)
+	shellTool := harness.NewRunShellTool(s.workdir, actToolReg)
+	actToolReg.Register(readTool)
+	actToolReg.Register(writeTool)
+	actToolReg.Register(listTool)
+	actToolReg.Register(shellTool)
+
+	contracts := dagnode.DefaultActOpContracts()
+	costs := dagnode.DefaultActOpCosts()
+	for _, t := range []harness.ToolHandler{readTool, listTool, writeTool, shellTool} {
+		name := t.Name()
+		spec := dagnode.AdaptToolAsAct(dagnode.ActOpConfig{
+			Handler:  t,
+			Contract: contracts[name],
+			Cost:     costs[name],
+		})
+		spec.Exposable = true
+		if err := reg.Register(spec); err != nil {
+			return nil, fmt.Errorf("register act.%s: %w", name, err)
+		}
+	}
+
+	// decide.tool_call — specialist function-calling node. Routes a
+	// natural-language intent through a small purpose-built model
+	// (default = session model; can be routed per-call via attrs.model
+	// e.g. xlam-1.5b). Spawns the resolved act.<tool>.
+	if err := reg.Register(ops.ToolCallSpec(ops.ToolCallConfig{
+		Provider:        nextProvider,
+		ProviderFactory: nextFactory,
+		Registry:        reg,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.tool_call: %w", err)
+	}
+
 	return reg, nil
 }
 

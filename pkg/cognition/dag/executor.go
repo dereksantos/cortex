@@ -186,10 +186,20 @@ func (e *Executor) Run(ctx context.Context, turnID string, seed []NodeSpec, init
 		return fmt.Sprintf("n-%d", nextSpawnIdx)
 	}
 
+	// Per-turn shared output map. Each node's Out is deposited after
+	// it completes; downstream handlers read prior outputs via
+	// dag.PriorOut / PriorOutByName. This is what makes the
+	// "synthesize from prior tool calls" pattern work — synthesis
+	// nodes can read what earlier act.* or decide.coding_turn nodes
+	// produced without the parent threading every output through
+	// Attrs at spawn time.
+	state := newTurnState()
+	ctx = withTurnState(ctx, state)
+
 	if e.sequential {
-		return e.runSequential(ctx, trace, &budget, pending, initial, nextChildID)
+		return e.runSequential(ctx, trace, &budget, pending, initial, nextChildID, state)
 	}
-	return e.runParallel(ctx, trace, &budget, pending, initial, nextChildID)
+	return e.runParallel(ctx, trace, &budget, pending, initial, nextChildID, state)
 }
 
 // runSequential preserves the Stage 1-3 FIFO single-threaded walk.
@@ -202,6 +212,7 @@ func (e *Executor) runSequential(
 	pending []pendingItem,
 	initial Budget,
 	nextChildID func() string,
+	state *turnState,
 ) (*Trace, error) {
 	for len(pending) > 0 {
 		if exh, axis := budget.Exhausted(); exh {
@@ -233,6 +244,9 @@ func (e *Executor) runSequential(
 		entry.BudgetAfter = *budget
 
 		if entry.OK {
+			// Deposit Out into the turn state so subsequent handlers
+			// can read it via dag.PriorOut / PriorOutByName.
+			state.deposit(item.spec.ID, item.spec.QualifiedName(), result.Out)
 			children, refusals := e.scheduleChildren(trace.TurnID, item, spec, result.Spawn, *budget, initial, nextChildID)
 			entry.SpawnedChildren = childIDs(children)
 			pending = append(pending, children...)
@@ -262,6 +276,7 @@ func (e *Executor) runParallel(
 	pending []pendingItem,
 	initial Budget,
 	nextChildID func() string,
+	state *turnState,
 ) (*Trace, error) {
 	type batchResult struct {
 		item    pendingItem
@@ -331,6 +346,9 @@ func (e *Executor) runParallel(
 			entry.BudgetAfter = *budget
 
 			if entry.OK {
+				// Deposit Out into turn state so subsequent batches'
+				// handlers can read it via dag.PriorOut / PriorOutByName.
+				state.deposit(r.item.spec.ID, r.item.spec.QualifiedName(), r.result.Out)
 				children, refusals := e.scheduleChildren(trace.TurnID, r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
 				entry.SpawnedChildren = childIDs(children)
 				pending = append(pending, children...)

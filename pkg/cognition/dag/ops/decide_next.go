@@ -143,25 +143,27 @@ Match the plan to the shape of the request:
 
 - Trivial / conversational ("hi", "what is 17 × 23?", "explain X conceptually"): 1 node. Just a decide.coding_turn with the prompt.
 - Code change in a known file ("add foo to bar.py"): 2-3 nodes. Read, write, optionally verify.
-- Exploration ("what does this project do?", "how does X work in this codebase?"): 3-5 nodes. Multiple focused decide.coding_turn calls, each with a narrow goal (list workdir, read a specific file, etc.), ending with a synthesis node that pulls the threads together. More focused nodes give each step a clear, simple goal — better than one node trying to do everything.
+- Exploration ("what does this project do?", "how does X work in this codebase?"): 3-5 nodes. Use decide.tool_call to perform specific tool actions (list dir, read README, read manifest), then a final decide.coding_turn that synthesizes the answer. The synthesis node automatically sees prior step outputs as context — don't ask it to re-fetch what's already been read.
+
+decide.tool_call is a SPECIALIST node that turns a natural-language intent into a structured tool call (list_dir, read_file, run_shell, write_file). Use it when you need a specific, focused tool action — it's more reliable than a full coding_turn for one-shot reads.
 
 You can also re-enter decide.next when a step's result will fundamentally change what should happen next (e.g., after a search). But do NOT loop "search → decide → search" — if a search returns nothing, don't search again.
 
-Each emitted node should have a CONCRETE prompt naming the specific file/dir/action, not a vague goal. Vague prompts produce vague work.
+Each emitted node should have a CONCRETE prompt or intent naming the specific file/dir/action, not a vague goal. Vague prompts produce vague work.
 
 Common shapes:
 
   Direct (conversational or simple Q&A):
     [{"op":"decide.coding_turn","attrs":{"prompt":"<user prompt verbatim>"}}]
 
-  Exploration (multiple narrow steps, last one synthesizes):
-    [{"op":"decide.coding_turn","attrs":{"prompt":"Run list_dir(\".\") and report what's in the workdir."}},
-     {"op":"decide.coding_turn","attrs":{"prompt":"Read README.md and summarize what the project says it does."}},
-     {"op":"decide.coding_turn","attrs":{"prompt":"Read package.json or the equivalent manifest and report the language, framework, and entry point."}},
-     {"op":"decide.coding_turn","attrs":{"prompt":"Compose a 2-3 sentence answer to: '<user prompt>'. Use the findings from the prior steps."}}]
+  Exploration (tool_call for each read, coding_turn synthesizes at the end):
+    [{"op":"decide.tool_call","attrs":{"intent":"list everything in the workdir root"}},
+     {"op":"decide.tool_call","attrs":{"intent":"read README.md"}},
+     {"op":"decide.tool_call","attrs":{"intent":"read package.json or the equivalent project manifest"}},
+     {"op":"decide.coding_turn","attrs":{"prompt":"Using the prior step outputs, answer in 2-3 sentences: '<user prompt>'"}}]
 
   Code change:
-    [{"op":"decide.coding_turn","attrs":{"prompt":"Read <target file> and report current content."}},
+    [{"op":"decide.tool_call","attrs":{"intent":"read the file <path>"}},
      {"op":"decide.coding_turn","attrs":{"prompt":"Apply the change: <user prompt>. Then run the project's build/test command."}}]
 
   Search-then-act (specific reason to believe prior captures help):
