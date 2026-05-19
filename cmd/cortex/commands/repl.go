@@ -141,6 +141,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	// Stage 3.5: every REPL coding turn routes tool calls through
 	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
 	// debug escape hatch only.
@@ -205,6 +206,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			fullTools = true
 		case "--keep-on-fail":
 			keepOnFail = true
+		case "--history-turns":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
+				i++
+			}
 		case "--dag":
 			// Backwards-compat no-op; DAG dispatch is the default per
 			// Stage 3.5. Kept so scripts that pass --dag don't fail.
@@ -267,6 +273,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.fullTools = fullTools
 	state.keepOnFail = keepOnFail
 	state.useDAG = dagEnabled
+	if historyTurnsOverride >= 0 {
+		state.historyLimit = historyTurnsOverride
+	} else {
+		state.historyLimit = defaultHistoryLimit
+	}
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -445,7 +456,34 @@ type replState struct {
 	// parent_node_id = the per-turn synthetic ID. Default false
 	// preserves V0 inline-dispatch behavior.
 	useDAG bool
+
+	// historyLimit caps the conversation-history block sent to the
+	// model on each turn. Default defaultHistoryLimit; configurable
+	// via --history-turns N at startup or /history N mid-session.
+	// 0 disables history injection entirely (turn 1 behavior).
+	historyLimit int
+	// history is the per-session conversation buffer: one entry per
+	// accepted turn (user prompt + assistant final text), in
+	// chronological order. The tail (most recent historyLimit
+	// entries) becomes the harness's PriorMessages block on the next
+	// turn so the model has working memory beyond what cortex_search
+	// surfaces. /undo pops the last entry alongside the snapshot.
+	history []turnExchange
 }
+
+// turnExchange is one accepted turn condensed to just what the model
+// needs to see on the next turn: the user's message and the assistant's
+// final text. No tool-call traces — those are noise and burn tokens.
+type turnExchange struct {
+	User      string
+	Assistant string
+}
+
+// defaultHistoryLimit is the default cap on the conversation-history
+// block injected into each turn. 6 = three user/assistant pairs of
+// recent context, which is enough for "now do the same for X" patterns
+// without burning a large chunk of the context window.
+const defaultHistoryLimit = 6
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
 // session dir, the JSONL writer, and seeds the system prompt file if
@@ -763,6 +801,10 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        fails. Benchmark default — iterations build
                        on prior work instead of restarting from
                        scratch each attempt.
+      --history-turns N  Cap on the conversation-history block sent to
+                       the model on each turn. Default 6 (last 3
+                       user/assistant pairs). 0 disables history.
+                       Mid-session, /history N changes the cap.
       --no-dag         Debug escape hatch: skip act-op dispatch and
                        suppress per-tool dag.TraceEntry rows. By
                        default (Stage 3.5), every coding turn's
@@ -807,6 +849,18 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		}
 		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 		return true, nil
+	case "/history":
+		if len(rest) == 0 {
+			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
+			return true, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(rest[0], "%d", &n); err != nil || n < 0 {
+			return true, fmt.Errorf("/history N: N must be a non-negative integer")
+		}
+		s.historyLimit = n
+		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
+		return true, nil
 	case "/diff":
 		s.printDiff()
 		return true, nil
@@ -825,6 +879,7 @@ func printSlashHelp() {
   /diff              changed files since session start
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
+  /history [N]       show buffered turn count, or set the conversation-history cap to N
   /quit              exit (also Ctrl-D)`)
 }
 
@@ -1005,6 +1060,13 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	if accepted {
 		s.turns = row.Turn
 		s.snapshotStack = append(s.snapshotStack, snapDir)
+		// Append to the conversation buffer so subsequent turns see this
+		// exchange via PriorMessages. Only the user prompt + assistant
+		// final text — no tool-call traces.
+		s.history = append(s.history, turnExchange{
+			User:      row.UserMessage,
+			Assistant: row.FinalText,
+		})
 		printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
 			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
@@ -1029,6 +1091,35 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		fmt.Fprintf(os.Stderr, "  WARN: session log write failed: %v\n", err)
 	}
 	return nil
+}
+
+// priorMessagesForHarness assembles the conversation-history block for
+// the next harness call: at most s.historyLimit accepted turns, each
+// flattened into a (user, assistant) ChatMessage pair. Tool-call traces
+// are intentionally omitted — they're noise the model doesn't need to
+// reason about future requests, and they burn tokens fast.
+//
+// Returns an empty slice when historyLimit is 0 or no turns have been
+// accepted yet.
+func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
+	if s.historyLimit <= 0 || len(s.history) == 0 {
+		return nil
+	}
+	start := len(s.history) - s.historyLimit
+	if start < 0 {
+		start = 0
+	}
+	tail := s.history[start:]
+	out := make([]llm.ChatMessage, 0, len(tail)*2)
+	for _, ex := range tail {
+		if ex.User != "" {
+			out = append(out, llm.ChatMessage{Role: "user", Content: ex.User})
+		}
+		if ex.Assistant != "" {
+			out = append(out, llm.ChatMessage{Role: "assistant", Content: ex.Assistant})
+		}
+	}
+	return out
 }
 
 // runHarness wraps evalv2.CortexHarness.RunSessionWithResult. Returns
@@ -1063,6 +1154,9 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	}
 	if s.systemPrompt != "" {
 		h.SetSystemPrompt(s.systemPrompt)
+	}
+	if prior := s.priorMessagesForHarness(); len(prior) > 0 {
+		h.SetPriorMessages(prior)
 	}
 	if s.apiURL != "" {
 		h.SetAPIURL(s.apiURL)
@@ -1619,6 +1713,12 @@ func (s *replState) undoLastTurn() error {
 	fmt.Printf("  undone turn %d (%d more available)\n", s.turns, n-1)
 	s.turns--
 	s.snapshotStack = s.snapshotStack[:n-1]
+	// Pop the corresponding conversation-history entry so the model
+	// doesn't see "I made that change" on the next turn for a change
+	// that's been rolled back.
+	if h := len(s.history); h > 0 {
+		s.history = s.history[:h-1]
+	}
 	return nil
 }
 

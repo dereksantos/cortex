@@ -96,6 +96,12 @@ type CortexHarness struct {
 	// calls through the DAG executor as act.* nodes. nil → V0
 	// inline dispatch via the ToolRegistry.
 	dispatcher harness.ToolDispatcher
+
+	// priorMessages is forwarded to the constructed harness.Loop's
+	// PriorMessages field. Used by the REPL to inject conversation
+	// history from earlier accepted turns so the model has working
+	// memory beyond what cortex_search surfaces.
+	priorMessages []llm.ChatMessage
 }
 
 // SetDispatcher overrides the per-tool dispatcher for subsequent
@@ -172,6 +178,13 @@ func (h *CortexHarness) SetMinimalTools(enabled bool) { h.minimalTools = enabled
 // cortex_search tool registered for the next RunSession uses it. See
 // the sharedCortex field for the reasoning. nil clears the wiring.
 func (h *CortexHarness) SetSharedCortex(cx *intcognition.Cortex) { h.sharedCortex = cx }
+
+// SetPriorMessages sets the conversation-history block injected
+// between the system prompt and the current user message. Pass nil
+// or empty to clear. The REPL uses this to give multi-turn sessions
+// working memory of prior accepted turns (user prompt + assistant
+// final text only — no tool-call traces).
+func (h *CortexHarness) SetPriorMessages(m []llm.ChatMessage) { h.priorMessages = m }
 
 // defaultSystemPrompt is the default agent contract. Deliberately
 // concise — small models tend to ignore long system prompts, and the
@@ -270,14 +283,15 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	}
 
 	loop := &harness.Loop{
-		Provider:   client,
-		Registry:   registry,
-		System:     sys,
-		MaxTurns:   h.maxTurns,
-		Budget:     h.budget,
-		Transcript: transcript,
-		Notify:     h.notify,
-		Dispatcher: h.dispatcher,
+		Provider:      client,
+		Registry:      registry,
+		System:        sys,
+		MaxTurns:      h.maxTurns,
+		Budget:        h.budget,
+		Transcript:    transcript,
+		Notify:        h.notify,
+		Dispatcher:    h.dispatcher,
+		PriorMessages: h.priorMessages,
 	}
 
 	start := time.Now()

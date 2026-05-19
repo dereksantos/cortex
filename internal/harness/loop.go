@@ -111,6 +111,16 @@ type Loop struct {
 	// ToolDispatcher doc for the Stage-3 contract.
 	Dispatcher ToolDispatcher
 
+	// PriorMessages, if non-empty, are inserted between the system
+	// prompt and the current user message. Used by the REPL to give
+	// the model conversation history from prior accepted turns
+	// (alternating user/assistant pairs, no tool-call traces).
+	//
+	// The Loop doesn't validate the role sequence — callers are
+	// expected to pass a well-formed alternation. Token-budget
+	// trimming is the caller's job too; the Loop forwards as-is.
+	PriorMessages []llm.ChatMessage
+
 	// Stats accumulated as the loop runs.
 	tokensIn  int
 	tokensOut int
@@ -168,6 +178,9 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 	msgs := []llm.ChatMessage{}
 	if l.System != "" {
 		msgs = append(msgs, llm.ChatMessage{Role: "system", Content: l.System})
+	}
+	if len(l.PriorMessages) > 0 {
+		msgs = append(msgs, l.PriorMessages...)
 	}
 	msgs = append(msgs, llm.ChatMessage{Role: "user", Content: userPrompt})
 
