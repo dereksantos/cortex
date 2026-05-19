@@ -249,7 +249,17 @@ func (e *Executor) runSequential(
 			state.deposit(item.spec.ID, item.spec.QualifiedName(), result.Out)
 			children, refusals := e.scheduleChildren(trace.TurnID, item, spec, result.Spawn, *budget, initial, nextChildID)
 			entry.SpawnedChildren = childIDs(children)
-			pending = append(pending, children...)
+			// DFS-prepend: a node's children run BEFORE its next
+			// sibling. This is what makes multi-step plans like
+			// [tool_call, tool_call, tool_call, synthesize] work —
+			// each tool_call's spawned act.* completes before the
+			// synthesis sibling runs, so turn state is populated
+			// when the synthesizer reads it.
+			//
+			// Earlier BFS-append (children at end of queue) ran the
+			// synthesizer before any of the tool_calls' spawned
+			// act.* executed, defeating the prior-output injection.
+			pending = append(children, pending...)
 			trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
 		}
 
