@@ -351,16 +351,26 @@ func TestPickBestOllamaModel(t *testing.T) {
 			want:      "qwen2.5-coder:1.5b",
 		},
 		{
-			name:      "mistral 7b beats qwen-1.5b",
+			// iter-7 (2026-05-19): mistral:7b is now in knownBad
+			// because live runs showed it emitting prose-shaped fake
+			// tool calls instead of structured tool_calls. The
+			// fallback qwen-1.5b is preferred over it.
+			name:      "mistral 7b demoted — fallback wins",
 			installed: []string{"qwen2.5-coder:1.5b", "mistral:7b"},
 			fallback:  "qwen2.5-coder:1.5b",
-			want:      "mistral:7b",
+			want:      "qwen2.5-coder:1.5b",
 		},
 		{
-			name:      "qwen2.5-coder:7b beats mistral:7b (coder bonus)",
+			name:      "qwen2.5-coder:7b beats mistral:7b decisively",
 			installed: []string{"mistral:7b", "qwen2.5-coder:7b"},
 			fallback:  "qwen2.5-coder:1.5b",
 			want:      "qwen2.5-coder:7b",
+		},
+		{
+			name:      "mistral:latest (= mistral:7b alias) also demoted",
+			installed: []string{"qwen2.5-coder:1.5b", "mistral:latest"},
+			fallback:  "qwen2.5-coder:1.5b",
+			want:      "qwen2.5-coder:1.5b",
 		},
 		{
 			name:      "phi3:mini avoided (no tool support in Ollama)",

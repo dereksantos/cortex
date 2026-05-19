@@ -2272,17 +2272,19 @@ func probeOllamaAndPickModel(chatAPI, fallback string) (string, bool, string) {
 // pickBestOllamaModel ranks installed Ollama models by tool-calling
 // fitness for the cortex harness's 5-tool registry. Higher is better.
 //
-// Scoring rubric (tuned against the iter-2 probe matrix in
-// PROGRESS-REPL.md — qwen-1.5b loses discipline with 5 tools, mistral:7b
-// handles it cleanly, gemma2 and qwen:0.5b can't tool-call at all):
+// Scoring rubric (tuned via live REPL runs — last revision 2026-05-19
+// after mistral:7b was caught emitting text-shape fake tool calls on
+// leanjs while qwen2.5-coder:7b emits proper structured tool_calls):
 //
 //	+30 if model family is in the "known good function-callers" list
 //	     (qwen2.5-coder ≥3b, llama3.1/3.2, mistral-nemo, granite-code,
-//	      command-r, mistral 7b+)
+//	      command-r)
 //	+10 if the name contains "coder" or "instruct"
 //	+size-bucket-bonus by parameter count parsed from the name suffix
 //	−50 if the model family is known-broken for our tool registry
-//	     (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm)
+//	     (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm,
+//	      mistral:7b/8b — see iter-7 note: these emit prose
+//	      describing tool use rather than actual tool_calls)
 //
 // Ties broken by name (alphabetical, deterministic). We only return a
 // non-fallback if the best score beats the fallback's score by at
@@ -2335,7 +2337,7 @@ func scoreOllamaModel(name string) int {
 		"qwen2.5-coder:3", "qwen2.5-coder:7", "qwen2.5-coder:14", "qwen2.5-coder:32",
 		"qwen3-coder",
 		"llama3.1", "llama3.2", "llama3.3",
-		"mistral-nemo", "mistral:7", "mistral:8",
+		"mistral-nemo", // mistral-nemo is distinct from mistral:7b; still scored highly
 		"granite-code", "granite3",
 		"command-r",
 	}
@@ -2351,7 +2353,10 @@ func scoreOllamaModel(name string) int {
 		"qwen2.5:0.5", "qwen2:0.5", "qwen:0.5",
 		"tinyllama", "smollm",
 		"nomic-embed",
-		"phi3:mini", // doesn't support tools in Ollama at all
+		"phi3:mini",  // doesn't support tools in Ollama at all
+		"mistral:7",  // iter-7: emits prose pretending to call tools instead of structured tool_calls
+		"mistral:8",  // same family idiosyncrasy as mistral:7
+		"mistral:la", // matches mistral:latest, which is mistral:7b by default
 	}
 	for _, b := range knownBad {
 		if strings.Contains(lower, b) {
