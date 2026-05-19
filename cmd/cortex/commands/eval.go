@@ -47,9 +47,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 	dryRun := false
 	useJudge := false
 	judgeModel := ""
-	agenticMode := false
 	measureMode := false
-	claudeBinary := ""
 	showSummary := false
 	showABRTrend := false
 	compareProviderName := ""
@@ -65,8 +63,6 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			verbose = true
 		case "--dry-run":
 			dryRun = true
-		case "--agentic":
-			agenticMode = true
 		case "--measure":
 			measureMode = true
 		case "--harness":
@@ -82,11 +78,6 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 		case "--suite":
 			if i+1 < len(ctx.Args) {
 				suiteName = ctx.Args[i+1]
-				i++
-			}
-		case "--claude-binary":
-			if i+1 < len(ctx.Args) {
-				claudeBinary = ctx.Args[i+1]
 				i++
 			}
 		case "-s", "--scenario":
@@ -151,9 +142,7 @@ Options:
   --dry-run              Use mock provider
   --judge                Enable LLM-as-judge scoring (semantic evaluation)
   --judge-model MODEL    Model for judge (default: same as eval model)
-  --agentic              Use Claude CLI for agentic evals (measures tool usage)
   --measure              Run Promptability vs quality correlation evals
-  --claude-binary PATH   Path to claude binary (default: auto-detect)
   --compare-provider NAME  Frontier provider for MPR comparison (e.g., anthropic)
   --compare-model MODEL    Frontier model override (default: provider default)
   --summary              Show lift trend over recent runs
@@ -182,10 +171,8 @@ Examples:
   cortex eval -s auth.yaml                 # Run single scenario
   cortex eval --judge                      # Use LLM judge for scoring
   cortex eval --judge --judge-model gemma2:2b  # Use specific judge model
-  cortex eval --agentic                    # Run with Claude CLI (tool tracking)
   cortex eval --compare-provider anthropic --compare-model claude-haiku-4-5-20251001
   cortex eval --summary                    # Show lift trend
-  cortex eval --summary --agentic          # Show tool call reduction trend
   cortex eval --abr-trend                  # Show ABR progression
   cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
   cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
@@ -223,21 +210,11 @@ Examples:
 		}
 		defer persister.Close()
 
-		if agenticMode {
-			// Show agentic tool call reduction trend
-			points, err := persister.GetAgenticTrend(10)
-			if err != nil {
-				return fmt.Errorf("failed to get agentic trend: %w", err)
-			}
-			evalv2.ReportAgenticTrend(os.Stdout, points)
-		} else {
-			// Show standard lift trend
-			abrs, err := persister.GetTrend(10)
-			if err != nil {
-				return fmt.Errorf("failed to get trend: %w", err)
-			}
-			evalv2.ReportTrend(os.Stdout, abrs)
+		abrs, err := persister.GetTrend(10)
+		if err != nil {
+			return fmt.Errorf("failed to get trend: %w", err)
 		}
+		evalv2.ReportTrend(os.Stdout, abrs)
 		return nil
 	}
 
@@ -403,79 +380,6 @@ Examples:
 
 	// Track start time for duration measurement
 	startTime := time.Now()
-
-	// AGENTIC MODE: Use Claude CLI for tool usage measurement
-	if agenticMode {
-		if dryRun {
-			return fmt.Errorf("--agentic mode does not support --dry-run")
-		}
-
-		// Build claude CLI args
-		var cliArgs []string
-		if modelOverride != "" {
-			cliArgs = append(cliArgs, "--model", modelOverride)
-		}
-
-		agenticEval, err := evalv2.NewAgenticEvaluator(claudeBinary, cliArgs...)
-		if err != nil {
-			return fmt.Errorf("failed to create agentic evaluator: %w", err)
-		}
-		agenticEval.SetVerbose(verbose)
-
-		if verbose {
-			fmt.Println("Running in agentic mode (Claude CLI with tool tracking)")
-		}
-
-		// Run agentic eval
-		var agenticResults *evalv2.AgenticResults
-		if scenarioPath != "" {
-			scenario, err := evalv2.Load(scenarioPath)
-			if err != nil {
-				return fmt.Errorf("failed to load scenario: %w", err)
-			}
-			scenarioResult, err := agenticEval.RunScenario(scenario)
-			if err != nil {
-				return fmt.Errorf("failed to run scenario: %w", err)
-			}
-			agenticResults = evalv2.CalculateAgenticResults([]evalv2.AgenticScenarioResult{*scenarioResult})
-		} else {
-			agenticResults, err = agenticEval.Run(scenarioDir)
-			if err != nil {
-				return fmt.Errorf("failed to run agentic evals: %w", err)
-			}
-		}
-
-		// Calculate duration
-		agenticDurationMs := time.Since(startTime).Milliseconds()
-
-		// Report agentic results
-		switch outputFormat {
-		case "json":
-			evalv2.ReportAgenticJSON(os.Stdout, agenticResults)
-		default:
-			evalv2.ReportAgentic(os.Stdout, agenticResults)
-		}
-
-		// Persist agentic results
-		persister, err := evalv2.NewPersister()
-		if err != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
-			}
-		} else {
-			defer persister.Close()
-			if err := persister.PersistAgentic(agenticResults, agenticDurationMs); err != nil {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
-				}
-			}
-		}
-
-		if !agenticResults.Pass {
-			return fmt.Errorf("agentic eval failed")
-		}
-		return nil
-	}
 
 	// MEASURE MODE: Test Promptability vs response quality correlation
 	if measureMode {

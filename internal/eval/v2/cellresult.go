@@ -21,9 +21,8 @@ import (
 // JSON shape. Persisters and downstream rollups branch on this.
 const CellResultSchemaVersion = "1"
 
-// Harness names. Cortex is its own harness; claude_cli is retained as a
-// frontier-reference name used by the agentic comparator (audit B will fold
-// it into a --model knob).
+// Harness names. Cortex is its own harness; HarnessClaudeCLI is retained
+// for historical CellResult rows.
 const (
 	HarnessClaudeCLI = "claude_cli"
 	HarnessCortex    = "cortex" // Cortex's own LLM-driven agent loop (internal/harness)

@@ -66,7 +66,9 @@ Remaining for full D2 completion:
 - "CORTEX HARNESS MODE" comment and gate in `cmd/cortex/commands/eval.go:244-251`
   follow from that.
 
-### B. Cross-harness comparison infrastructure (D1)
+### B. Cross-harness comparison infrastructure (D1) — *partial; see Done*
+
+Remaining:
 
 - `internal/eval/v2/library_service_inject.go` (329 LOC) + `_test.go` (596 LOC) —
   purpose is injecting cortex context into a *different* harness's prompt;
@@ -74,9 +76,6 @@ Remaining for full D2 completion:
   within-cortex memory-on/off A/B uses the `Injector` interface. If it does,
   keep `NoOpInjector` + `CortexInjector` as a within-cortex toggle and drop
   multi-harness wiring (see M).
-- `internal/eval/v2/agentic.go` — Claude-CLI-based evaluator. A frontier-model
-  reference is fine as a `--model` knob on the cortex harness; we don't need
-  a separate `AgenticEvaluator` type. Fold or delete.
 
 ### D. Unify eval-runner output to `cell_results.jsonl` (D5) — *done (see Done)*
 
@@ -458,6 +457,31 @@ Helper functions `persistMechanicCells`, `persistLegacyCells`,
 `persistJourneyValidationCells` opened-`evalv2.NewPersister()` once per
 suite invocation; persister errors are non-fatal (logged to stderr,
 suite still reports).
+
+Verified `go build ./...` and `go test ./...` both green.
+
+### B (partial). `--agentic` mode + AgenticEvaluator dropped
+
+User confirmed cortex is the only harness; Claude-CLI tool-usage
+comparator (the "agentic" eval mode) was cross-harness infrastructure.
+
+- Deleted `internal/eval/v2/agentic.go` (436 LOC — `AgenticEvaluator`,
+  `AgenticResults`, `AgenticScenarioResult`, related helpers).
+- Removed `--agentic` flag, `--claude-binary` flag, `agenticMode` /
+  `claudeBinary` vars in `cmd/cortex/commands/eval.go`.
+- Removed the AGENTIC MODE block (~70 LOC) in `Execute()`.
+- Removed the agentic branch in the `--summary` trend path.
+- Removed `Persister.PersistAgentic`, `GetAgenticTrend`,
+  `AgenticTrendPoint`, and the `agentic_eval_runs` SQLite schema in
+  `internal/eval/v2/persist.go`.
+- Removed `ReportAgentic`, `ReportAgenticJSON`, `ReportAgenticTrend`,
+  and `reductionBar` helpers in `internal/eval/v2/report.go`.
+- Removed help-text lines + examples in `eval.go`.
+- Regenerated `tools.json` (38 commands).
+
+Note: `internal/measure/agentic.go` (the prompt-quality scorer's
+LLM-judged "agentic" half) is **unrelated** and stays. `Agentic Benefit
+Ratio` (ABR) is the project's defined metric — name preserved.
 
 Verified `go build ./...` and `go test ./...` both green.
 
