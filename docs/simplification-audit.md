@@ -212,22 +212,10 @@ Routing fix:
 `measure --calibrate` duplicates the standalone `cortex calibrate` command —
 delete the flag; keep the command.
 
-### H. Stale docs
+### H. Stale-doc rewrite
 
-Move to `docs/archive/` (preserve for context; don't delete in case run data
-is referenced):
-
-- `docs/phase7-cortex-regression-diagnostic.md`
-- `docs/phase7-crossharness-lift.md`
-- `docs/phase7-divergence-finding.md`
-- `docs/eval-harness-phase7-prompt.md`
-- `docs/eval-harness-loop.md` (cross-harness grid loop)
-- `docs/eval-resume-prompt.md`
-- `docs/opencode-tiers.md`, `docs/opencode-probe.json`
-- `docs/pidev-events.md`, `docs/pidev-probe.json` (D1)
-- `docs/eval-findings-2026-05-10.md` if cross-harness-only
-
-Update or rewrite (still relevant but framed around the old grid):
+Archive-move portion is done (see Done). Remaining: update or rewrite the
+docs that are still relevant but framed around the old cross-harness grid:
 
 - `docs/integration-roadmap.md`
 - `docs/tool-surface.md`
@@ -385,7 +373,9 @@ conversion (largest, most-gated).
 
 1. ~~**Root hygiene** (G)~~ — *done in this commit.*
 2. ~~**Probe binaries and one-off CLIs** (C)~~ — *done in this commit.*
-3. **Stale docs** (H) — `mv` to `docs/archive/`.
+3. ~~**Stale-doc archive move** (H, partial)~~ — *done in this commit.*
+   Rewrite of still-relevant docs (integration-roadmap, tool-surface,
+   learning-harness, product, README) remains pending.
 4. **Aider + OpenCode + pidev deletion** (A) — biggest single cut; lands D1+D2.
    Update `cellresult.go` enum, `eval.go` + `eval_grid.go` dispatch, delete
    the six harness files + tests.
@@ -441,6 +431,26 @@ conversion (largest, most-gated).
   `internal/eval/benchmarks/mteb/`.
 - Verified with `go build ./...` and `go test ./...` both green; no other
   package imported these mains.
+
+### H (archive). Stale docs moved to `docs/archive/`
+
+Moved 11 cross-harness / phase-7 docs to `docs/archive/`:
+
+- `phase7-cortex-regression-diagnostic.md`
+- `phase7-crossharness-lift.md`
+- `phase7-divergence-finding.md`
+- `eval-harness-phase7-prompt.md`
+- `eval-harness-loop.md`
+- `eval-resume-prompt.md`
+- `opencode-tiers.md`, `opencode-probe.json`
+- `pidev-events.md`, `pidev-probe.json`
+- `eval-findings-2026-05-10.md`
+
+Cross-references between archived docs use bare filenames and resolve
+relative to their new location. Updated the one external link in
+`docs/prompts/loop-phase-d-journeys.md` to point at the archive path.
+
+Doc rewrites for still-relevant pages remain pending — see H above.
 
 ---
 

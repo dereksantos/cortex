@@ -4,7 +4,7 @@ All 10 e2e scenarios in `test/evals/journeys/` have explicit status:
 either runnable end-to-end (with a baseline recorded in
 `eval-journal.md`) or pending with a documented reason. Multiple docs
 cite this suite as the canonical E2E test ladder
-(`docs/prompts/eval-data-gathering.md`, `docs/eval-harness-loop.md`,
+(`docs/prompts/eval-data-gathering.md`, `docs/archive/eval-harness-loop.md`,
 `docs/prompts/eval-abr-focus.md`); without verification, those
 references are floating claims.
 
