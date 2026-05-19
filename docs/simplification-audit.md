@@ -78,27 +78,11 @@ Remaining for full D2 completion:
   reference is fine as a `--model` knob on the cortex harness; we don't need
   a separate `AgenticEvaluator` type. Fold or delete.
 
-### D. Unify eval-runner output to `cell_results.jsonl` (D5)
+### D. Unify eval-runner output to `cell_results.jsonl` (D5) — *done (see Done)*
 
-Three runners currently print results to stdout/JSON instead of writing
-`CellResult` rows. Convert each to call the shared v2 persister so every eval
-output flows through the same sink and analysis pipeline:
-
-- `internal/eval/mechanic/runner.go` — emit `CellResult` per fixture
-  (harness="cortex", strategy depending on fixture)
-- `internal/eval/journey/runner.go` (all three paths: validate, seed, execute) —
-  emit `CellResult` per step (execute already does in one branch; unify)
-- `internal/eval/legacy/runner.go` — emit `CellResult` per scenario
-
-Shared persister: `internal/eval/v2.PersistCell` (or whatever the existing v2
-entry point is). After this lands, scenarios get the E treatment (migration
-+ quality-assessment + integration); only then do the legacy runners come
-out. We need uniform output first so the quality assessment in E can read
-real numbers.
-
-Drop the env-var dispatch around the journey runner
-(`CORTEX_JOURNEYS_WITH_SEED`, `CORTEX_JOURNEYS_EXECUTE`) in the same pass —
-mode becomes a flag on the unified runner.
+Remaining cleanup (sequenced under F): drop the env-var dispatch around the
+journey runner (`CORTEX_JOURNEYS_WITH_SEED`, `CORTEX_JOURNEYS_EXECUTE`) when
+the CLI surface collapse lands.
 
 ### E. Migrate every existing eval — quality-assess, integrate (D6)
 
@@ -355,8 +339,9 @@ conversion (largest, most-gated).
    remaining slice; sequenced as its own commit.
 5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
 6. ~~**Drop MCP** (J)~~ — *done in this commit.*
-7. **Unify eval-runner output to `cell_results.jsonl`** (D) — convert
-   mechanic / journey / legacy runners; one PR per runner is fine.
+7. ~~**Unify eval-runner output to `cell_results.jsonl`** (D)~~ — *done in
+   this commit.* All three suites (mechanic, legacy-cognition, journeys)
+   now write through `evalv2.PersistCell`.
 8. **Migrate + quality-assess + integrate every eval** (E) — once D is in,
    walk every scenario: format-migrate, score against the 9 principles
    (pass / improve / retire-with-rationale), confirm `CellResult` output,
@@ -442,6 +427,29 @@ Verified `go build ./...` and `go test ./...` both green.
 `--harness` flag in `cortex eval` (not `eval grid`) still exists — it has
 only one meaningful value now (`cortex`). Removing it is the remaining
 slice of A; left under Cut so the dispatch refactor is its own commit.
+
+### D. Eval-runner output unified to `cell_results.jsonl`
+
+All three suite runners now write `CellResult` rows through the shared
+v2 persister so their output flows through the same sink as v2 +
+SWE-bench / NIAH / LongMemEval / MTEB.
+
+- `runMechanicSuite` (`cmd/cortex/commands/eval_suite.go`) — emits one
+  cell per fixture. Provider=`local`, model=`mock-dag-executor`,
+  strategy=`baseline`.
+- `runLegacyCognitionSuite` — emits one cell per
+  (scenario × mode × test). Skipped (`needs_fixture_seed`) cells go in
+  with `TaskSuccess=false` and the skip reason in `Notes`.
+- `runJourneysSuite` validation-only path and `--with-seed` path both
+  emit one cell per scenario. The `--execute` path already had its own
+  sink. With this commit all three journey modes produce real numbers.
+
+Helper functions `persistMechanicCells`, `persistLegacyCells`,
+`persistJourneyValidationCells` opened-`evalv2.NewPersister()` once per
+suite invocation; persister errors are non-fatal (logged to stderr,
+suite still reports).
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### J. MCP server dropped
 
