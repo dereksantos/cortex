@@ -556,6 +556,30 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 	return store, cortex, nil
 }
 
+// rebindCognitionForModel rebuilds s.store + s.cortex so the shared
+// cognition surface uses a provider bound to the new model. Called by
+// the /model slash command — without this the provider stays bound to
+// the model captured at newREPLState and cortex_search keeps calling
+// the original model for the whole session even after a swap.
+//
+// On success the old store is closed and the new pair is assigned in
+// place. On failure the old pair is preserved (the session keeps
+// working with the prior provider) and the error is returned.
+func (s *replState) rebindCognitionForModel() error {
+	cortexDir := filepath.Join(s.workdir, ".cortex")
+	newStore, newCortex, err := newSessionCognition(cortexDir, s.model, s.apiURL)
+	if err != nil {
+		return err
+	}
+	oldStore := s.store
+	s.store = newStore
+	s.cortex = newCortex
+	if oldStore != nil {
+		_ = oldStore.Close()
+	}
+	return nil
+}
+
 // ensureCaptureClient lazily builds the workdir-rooted Capture once,
 // shared across all turns of a REPL session. We intentionally do NOT
 // use the global ~/.cortex/ store — captures from a REPL session live
@@ -774,8 +798,13 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			fmt.Printf("  current model: %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 			return true, nil
 		}
+		prevModel, prevAPI := s.model, s.apiURL
 		s.model = rest[0]
 		s.apiURL = resolveAPIURL(s.model)
+		if err := s.rebindCognitionForModel(); err != nil {
+			s.model, s.apiURL = prevModel, prevAPI
+			return true, fmt.Errorf("model swap failed (provider rebind): %w", err)
+		}
 		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 		return true, nil
 	case "/diff":
