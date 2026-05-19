@@ -155,8 +155,12 @@ Cuts and consolidations:
 - **Drop entirely**:
   - ~~`process` — back-compat for `ingest && analyze`; both still exposed~~ — *done.*
   - ~~`mcp` — per D9~~ — *done under J.*
-  - `feed`, `analyze` — verify whether these are subsumed by `ingest` /
-    `capture`; if so, drop. Likely yes.
+  - ~~`feed`, `analyze` — verify whether these are subsumed by `ingest` /
+    `capture`; if so, drop. Likely yes.~~ — *verified, NOT subsumed.* `analyze`
+    runs post-hoc LLM analysis on already-stored events (independent of the
+    queue→DB drain that `ingest` does). `feed` does manual knowledge
+    seeding from files/directories (independent of `capture`'s event-based
+    ingest). Keep both.
   - `search-vector` — internal benchmark utility; move under `cortex eval`
     or a hidden `_internal` namespace
   - `dream-debug` — replace with `cortex run --type=dream --debug`
