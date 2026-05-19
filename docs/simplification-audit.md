@@ -56,15 +56,7 @@ This work is done when all three hold:
 
 ## Cut — locked (do now)
 
-### A. Alternative-harness code (D1, D2) — *partial; see Done*
-
-Remaining for full D2 completion:
-
-- `--harness` flag parsing in `cmd/cortex/commands/eval.go:57,72-74` —
-  flag has only one meaningful value (`cortex`) now; collapse the dispatch
-  so the cortex coding harness is the default when `-s` + `-m` are present.
-- "CORTEX HARNESS MODE" comment and gate in `cmd/cortex/commands/eval.go:244-251`
-  follow from that.
+### A. Alternative-harness code (D1, D2) — *done (see Done)*
 
 ### B. Cross-harness comparison infrastructure (D1) — *partial; see Done*
 
@@ -343,9 +335,9 @@ conversion (largest, most-gated).
 3. ~~**Stale-doc archive move** (H, partial)~~ — *done in this commit.*
    Rewrite of still-relevant docs (integration-roadmap, tool-surface,
    learning-harness, product, README) remains pending.
-4. ~~**Aider + OpenCode + pidev deletion** (A, partial)~~ — *done in this
-   commit.* `--harness` flag and dispatch refactor in `eval.go` is the
-   remaining slice; sequenced as its own commit.
+4. ~~**Aider + OpenCode + pidev deletion** (A)~~ — *done.* Includes the
+   follow-on slice that dropped `--harness`, the default-generic flow,
+   and the legacy `Evaluator` type (~1,020 LOC).
 5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
 6. ~~**Drop MCP** (J)~~ — *done in this commit.*
 7. ~~**Unify eval-runner output to `cell_results.jsonl`** (D)~~ — *done in
@@ -457,6 +449,43 @@ Helper functions `persistMechanicCells`, `persistLegacyCells`,
 `persistJourneyValidationCells` opened-`evalv2.NewPersister()` once per
 suite invocation; persister errors are non-fatal (logged to stderr,
 suite still reports).
+
+Verified `go build ./...` and `go test ./...` both green.
+
+### A finish. `--harness` flag + default-generic flow dropped
+
+Per the design call: cortex is implicit when `-s scenario.yaml -m model`
+are present; the `--harness` flag is gone; the default-generic-eval
+flow (a pure-text Q&A eval that bypassed the harness) is gone.
+
+Surface changes in `cmd/cortex/commands/eval.go`:
+
+- Removed flags: `--harness`, `-p/--provider`, `--compare-provider`,
+  `--compare-model`, `--dry-run`.
+- Removed `providerName`, `dryRun`, `harnessName`, `compareProviderName`,
+  `compareModelOverride` variables.
+- New dispatch (in order): `--measure` redirect → `--benchmark` →
+  `--suite` → cortex coding harness (when `-s + -m` set) → helpful
+  usage error.
+- Removed ~340 LOC of STANDARD MODE provider setup, judge wiring,
+  compare-provider wiring, evaluator construction, and post-run legacy
+  aggregation.
+- Removed `canonicalProviderName` (only used by the deleted flow).
+- Help text rewritten to reflect cortex-only dispatch.
+
+Internal cleanup in `internal/eval/v2/`:
+
+- Deleted `eval.go` (682 LOC): the legacy `Evaluator` type, `cliCortex`
+  subprocess wrapper, `buildPrompt`, `parseSearchResults`,
+  `newScenarioCellRunID`, `truncateVerbose`, and the `New(provider)`
+  constructor that powered the dropped STANDARD MODE.
+- Moved `Timestamp()` to `persist.go` (next to its only caller).
+- `Results` / `ScenarioResult` / `TestResult` types stayed (defined in
+  `measure.go`; still used by `Persister.Persist` / `GetLatest` /
+  `GetTrend` which power `--summary` and `--abr-trend`).
+
+Net: ~1,020 LOC removed across `cmd/cortex/commands/eval.go` +
+`internal/eval/v2/eval.go`. tools.json regenerated.
 
 Verified `go build ./...` and `go test ./...` both green.
 

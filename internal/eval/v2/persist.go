@@ -17,6 +17,14 @@ import (
 // CortexVersion is the current version of Cortex.
 const CortexVersion = "0.1.0"
 
+// Timestamp returns the current time in the RFC3339-shaped format used
+// by every eval-time persister (eval_runs, cell_results, agentic_runs
+// historically). Kept here next to the consumers; was previously in the
+// deleted legacy eval.go.
+func Timestamp() string {
+	return time.Now().Format("2006-01-02T15:04:05Z")
+}
+
 // defaultEvalJournalDir is the canonical writer-class directory for
 // eval.cell_result entries (sibling to .cortex/journal/{capture,dream,...}).
 const defaultEvalJournalDir = ".cortex/journal/eval"
