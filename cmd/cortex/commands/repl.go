@@ -661,6 +661,41 @@ func (s *replState) resetModelCatalog() {
 	s.modelCatalogCache = ""
 }
 
+// buildProviderFactoryForREPL constructs an llm.ProviderFactory the
+// REPL chain hands to decide.next. The factory resolves per-call
+// model IDs the LLM emits via attrs.model — bare names route to
+// Ollama, slash-prefixed to OpenRouter (matching the rest of the
+// REPL's routing convention).
+//
+// The session default (used when the LLM doesn't specify) is the
+// REPL's currently-pinned model + endpoint, so a /model swap shifts
+// the default for subsequent turns. Per-call IDs the LLM picks
+// override on a node-by-node basis.
+//
+// An empty/missing OpenRouter key keeps Ollama routing working —
+// slash-prefixed IDs will error, but bare-name lookups succeed.
+func buildProviderFactoryForREPL(cfg *config.Config, model, apiURL string) llm.ProviderFactory {
+	key, _, _ := secret.MustOpenRouterKey() // empty on failure is fine
+	ollamaURL := ""
+	if apiURL == defaultOllamaAPIURL {
+		ollamaURL = apiURL
+	} else {
+		// Default-Ollama endpoint even when the session is currently
+		// routed to OpenRouter — so the LLM can still emit a bare
+		// local model id and have it resolve. Removes a footgun where
+		// the factory silently can't route to Ollama just because the
+		// session happens to be on cloud.
+		ollamaURL = defaultOllamaAPIURL
+	}
+	return llm.NewProviderFactory(llm.FactoryConfig{
+		Cfg:           cfg,
+		OpenRouterKey: key,
+		OllamaAPIURL:  ollamaURL,
+		DefaultModel:  model,
+		DefaultAPIURL: apiURL,
+	})
+}
+
 // buildLLMProviderForREPL constructs an llm.Provider matching the
 // model + apiURL the REPL is currently routed to. Ollama-shaped URLs
 // route through llm.NewLLMClient(BackendOllama); everything else
@@ -1444,15 +1479,23 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 
 	// decide.next — the steering op. Provider + Registry + ModelCatalog
 	// give it everything it needs to compose multi-op DAGs at call
-	// time. Provider nil falls back to a single coding_turn spawn so
-	// the chain always walks.
+	// time. ProviderFactory enables per-call routing: when the LLM
+	// emits a decide.next spawn with `model: "<id>"`, that recursive
+	// classification call uses factory.Get(id) instead of the session
+	// default. Lets the steering layer compose multiple small
+	// specialists (e.g., 3B classifier + 14B re-decider).
+	//
+	// Provider nil falls back to a single coding_turn spawn so the
+	// chain always walks.
 	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
 	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+	nextFactory := buildProviderFactoryForREPL(cfg, s.model, s.apiURL)
 	modelCatalog := s.modelCatalogForREPL()
 	if err := reg.Register(ops.NextSpec(ops.NextConfig{
-		Provider:     nextProvider,
-		Registry:     reg,
-		ModelCatalog: modelCatalog,
+		Provider:        nextProvider,
+		ProviderFactory: nextFactory,
+		Registry:        reg,
+		ModelCatalog:    modelCatalog,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.next: %w", err)
 	}

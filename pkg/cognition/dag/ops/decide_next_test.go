@@ -273,6 +273,123 @@ func TestNext_BudgetExhausted_Fallback(t *testing.T) {
 	}
 }
 
+// fakeFactory routes a fixed model id to a captured Provider so tests
+// can confirm per-call routing fires. Any other id returns the
+// fallback Provider with the matching tag.
+type fakeFactory struct {
+	byID    map[string]llm.Provider
+	def     llm.Provider
+	getErrs map[string]error
+}
+
+func (f *fakeFactory) Get(modelID string) (llm.Provider, error) {
+	if err, ok := f.getErrs[modelID]; ok {
+		return nil, err
+	}
+	if p, ok := f.byID[modelID]; ok {
+		return p, nil
+	}
+	if modelID == "" {
+		return f.def, nil
+	}
+	return nil, errors.New("unknown model: " + modelID)
+}
+func (f *fakeFactory) Default() llm.Provider { return f.def }
+
+// TestNext_PerCallProviderRouting — attrs.model on decide.next routes
+// the classifier call through ProviderFactory.Get(model) rather than
+// cfg.Provider. The chosen provider's response shape determines what
+// gets spawned, confirming the factory hit.
+func TestNext_PerCallProviderRouting(t *testing.T) {
+	defaultCalled, routedCalled := false, false
+	defaultProvider := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			defaultCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-default"}}]}`, nil
+		},
+	}
+	routedProvider := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			routedCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-routed"}}]}`, nil
+		},
+	}
+	factory := &fakeFactory{
+		byID: map[string]llm.Provider{"strong-classifier": routedProvider},
+		def:  defaultProvider,
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{
+		Provider:        defaultProvider,
+		ProviderFactory: factory,
+		Registry:        reg,
+	})
+
+	// Call WITHOUT attrs.model → default provider should fire.
+	if _, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !defaultCalled {
+		t.Errorf("default provider not called on no-model call")
+	}
+	if routedCalled {
+		t.Errorf("routed provider called when no model attr was set")
+	}
+
+	// Reset + call WITH attrs.model → routed provider should fire.
+	defaultCalled, routedCalled = false, false
+	res, err := h(context.Background(),
+		map[string]any{"prompt": "x", "model": "strong-classifier"},
+		mustBudget())
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !routedCalled {
+		t.Errorf("routed provider not called when attrs.model=strong-classifier")
+	}
+	if defaultCalled {
+		t.Errorf("default provider called despite attrs.model override")
+	}
+	// Sanity: the routed provider's response shape leaked through.
+	if len(res.Spawn) != 1 || res.Spawn[0].Attrs["prompt"] != "from-routed" {
+		t.Errorf("routed response not threaded through to spawn; got %+v", res.Spawn)
+	}
+}
+
+// TestNext_PerCallProviderRouting_UnknownModelFallsBackToDefault —
+// when the factory can't resolve the requested model id (typo,
+// uninstalled), the handler falls back to cfg.Provider rather than
+// dropping the call. Keeps the chain walking when the LLM hallucinates
+// a model id that doesn't exist.
+func TestNext_PerCallProviderRouting_UnknownModelFallsBackToDefault(t *testing.T) {
+	defaultCalled := false
+	defaultProvider := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			defaultCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"ok"}}]}`, nil
+		},
+	}
+	factory := &fakeFactory{
+		byID: map[string]llm.Provider{}, // empty: every id is unknown
+		def:  defaultProvider,
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{
+		Provider:        defaultProvider,
+		ProviderFactory: factory,
+		Registry:        reg,
+	})
+	_, err := h(context.Background(),
+		map[string]any{"prompt": "x", "model": "made-up-id"},
+		mustBudget())
+	if err != nil {
+		t.Fatalf("handler should swallow factory miss: %v", err)
+	}
+	if !defaultCalled {
+		t.Errorf("default provider should fire when factory can't resolve the requested id")
+	}
+}
+
 // TestNext_RenderPromptSubstitution — confirm catalogs flow into the
 // rendered system prompt (so the LLM actually sees them).
 func TestNext_RenderPromptSubstitution(t *testing.T) {

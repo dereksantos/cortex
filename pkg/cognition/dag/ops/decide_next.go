@@ -41,9 +41,21 @@ import (
 
 // NextConfig wires NewNextHandler.
 type NextConfig struct {
-	// Provider classifies the next step. Nil → mechanical fallback
-	// (spawn one decide.coding_turn with the user prompt).
+	// Provider is the default classifier Provider. Used when the
+	// per-call attrs.model is empty OR ProviderFactory is nil. Nil →
+	// mechanical fallback (spawn one decide.coding_turn with the
+	// prompt).
 	Provider llm.Provider
+
+	// ProviderFactory, when set, resolves per-call decide.next model
+	// overrides. The LLM can emit a decide.next spawn with
+	// `model: "<id>"` and that recursive classification routes
+	// through factory.Get(id). Nil → attrs.model on decide.next is
+	// ignored and cfg.Provider is used for every call. This is what
+	// lets the steering layer compose multiple specialized small
+	// classifiers (e.g., a fast 3B JSON-disciplined router for most
+	// turns, a 14B model for hard re-decisions).
+	ProviderFactory llm.ProviderFactory
 
 	// Registry is consulted to validate emitted op qualified names AND
 	// to build the {{OPS}} catalog at call time. Nil → skip validation
@@ -206,8 +218,16 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 		historySummary, _ := in["history_summary"].(string)
 		recDepth := readDecideNextDepth(in)
 
-		// Mechanical fallback: no provider or budget-exhausted.
-		if cfg.Provider == nil || !budget.CanAfford(nextCostHint) {
+		// Per-call provider resolution. attrs.model on this decide.next
+		// spawn (set by an emitted-node materializer one level up) lets
+		// the LLM route this classification through a different model
+		// than the session default — the small-model-amplifier path
+		// where, say, a 3B JSON-disciplined classifier handles the
+		// router role while a 14B coder handles the work.
+		provider, providerSrc := resolveNextProvider(cfg, in)
+
+		// Mechanical fallback: no provider available or budget exhausted.
+		if provider == nil || !budget.CanAfford(nextCostHint) {
 			return fallbackSpawn(prompt, "fallback: no provider or budget exhausted", started), nil
 		}
 
@@ -219,9 +239,9 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			opCatalog = FormatOpCatalog(cfg.Registry)
 		}
 		systemPrompt := renderNextPrompt(prompt, opCatalog, cfg.ModelCatalog, historySummary)
-		respText, err := cfg.Provider.GenerateWithSystem(classifyCtx, "Compose the next nodes.", systemPrompt)
+		respText, err := provider.GenerateWithSystem(classifyCtx, "Compose the next nodes.", systemPrompt)
 		if err != nil {
-			return fallbackSpawn(prompt, "fallback: classifier error: "+err.Error(), started), nil
+			return fallbackSpawn(prompt, "fallback: classifier error ("+providerSrc+"): "+err.Error(), started), nil
 		}
 
 		var parsed nextResponse
@@ -284,6 +304,28 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			CostConsumed: dag.Cost{LatencyMS: latency, Tokens: estimateTokens(respText)},
 		}, nil
 	}
+}
+
+// resolveNextProvider chooses the Provider to use for THIS decide.next
+// call. Resolution order:
+//
+//  1. If attrs.model is set AND cfg.ProviderFactory is set, route this
+//     call through factory.Get(model). On factory error, fall through
+//     to step 2 so a typo'd model id doesn't sink the chain.
+//  2. cfg.Provider (the session default).
+//
+// Returns the provider plus a short tag describing where it came from
+// — surfaced in fallback reasoning when classification fails so it's
+// debuggable which model errored out.
+func resolveNextProvider(cfg NextConfig, in map[string]any) (llm.Provider, string) {
+	if cfg.ProviderFactory != nil {
+		if m, _ := in["model"].(string); m != "" {
+			if p, err := cfg.ProviderFactory.Get(m); err == nil && p != nil {
+				return p, "factory:" + m
+			}
+		}
+	}
+	return cfg.Provider, "default"
 }
 
 // readDecideNextDepth pulls the recursion-depth Attr out of the
