@@ -128,3 +128,100 @@ func TestTurnState_ExecutorIntegration(t *testing.T) {
 		t.Errorf("consumer saw Out[value]=%v, want 42", consumerSawOut["value"])
 	}
 }
+
+// TestSequentialExecutor_DFSOrdering — when a parent emits multiple
+// siblings and each sibling has children, the executor must run each
+// sibling's children before the next sibling. This is what makes the
+// REPL's [tool_call, tool_call, ..., synthesize] pattern work — the
+// synthesizer needs to see prior nodes' Outs, which means the act.*
+// children of earlier tool_calls must have completed first.
+//
+// Prior BFS-append ordering ran the synthesizer between siblings'
+// emissions and their children's execution, defeating the
+// prior-output injection. This test pins the DFS-prepend fix.
+func TestSequentialExecutor_DFSOrdering(t *testing.T) {
+	reg := NewRegistry()
+	var execOrder []string
+
+	// parent spawns three sibling "step" nodes; each step spawns one
+	// "leaf". Expected DFS order: step1, leaf1, step2, leaf2, step3,
+	// leaf3, synthesize. NOT BFS (which would give step1, step2,
+	// step3, synthesize, leaf1, leaf2, leaf3).
+	mkRecorder := func(id string) Handler {
+		return func(ctx context.Context, in map[string]any, b Budget) (NodeResult, error) {
+			execOrder = append(execOrder, id)
+			return NodeResult{CostConsumed: Cost{LatencyMS: 1}}, nil
+		}
+	}
+	mkStep := func(id, leafID string) Handler {
+		return func(ctx context.Context, in map[string]any, b Budget) (NodeResult, error) {
+			execOrder = append(execOrder, id)
+			return NodeResult{
+				Spawn: []NodeSpec{{
+					Function: FuncAct, Op: "leaf-" + leafID,
+					ID: leafID,
+				}},
+				CostConsumed: Cost{LatencyMS: 1},
+			}, nil
+		}
+	}
+
+	for _, qn := range []struct {
+		fn, op string
+		h      Handler
+	}{
+		{"decide", "parent", func(ctx context.Context, in map[string]any, b Budget) (NodeResult, error) {
+			execOrder = append(execOrder, "parent")
+			return NodeResult{
+				Spawn: []NodeSpec{
+					{Function: FuncDecide, Op: "step-1", ID: "s1"},
+					{Function: FuncDecide, Op: "step-2", ID: "s2"},
+					{Function: FuncDecide, Op: "step-3", ID: "s3"},
+					{Function: FuncDecide, Op: "synthesize", ID: "syn"},
+				},
+				CostConsumed: Cost{LatencyMS: 1},
+			}, nil
+		}},
+		{"decide", "step-1", mkStep("s1", "l1")},
+		{"decide", "step-2", mkStep("s2", "l2")},
+		{"decide", "step-3", mkStep("s3", "l3")},
+		{"decide", "synthesize", mkRecorder("syn")},
+	} {
+		err := reg.Register(NodeSpec{
+			Function: CortexFunction(qn.fn),
+			Op:       qn.op,
+			Handler:  qn.h,
+		})
+		if err != nil {
+			t.Fatalf("register %s.%s: %v", qn.fn, qn.op, err)
+		}
+	}
+	for _, leafID := range []string{"l1", "l2", "l3"} {
+		err := reg.Register(NodeSpec{
+			Function:     FuncAct,
+			Op:           "leaf-" + leafID,
+			AxisContract: &AxisContract{Mutator: false},
+			Handler:      mkRecorder(leafID),
+		})
+		if err != nil {
+			t.Fatalf("register act.leaf-%s: %v", leafID, err)
+		}
+	}
+
+	ex := NewExecutor(reg, nil)
+	ex.SetSequential(true)
+	seed := []NodeSpec{{Function: FuncDecide, Op: "parent", ID: "p"}}
+	if _, err := ex.Run(context.Background(), "dfs-test", seed, DefaultTurnBudget()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []string{"parent", "s1", "l1", "s2", "l2", "s3", "l3", "syn"}
+	if len(execOrder) != len(want) {
+		t.Fatalf("exec order length: got %d (%v), want %d (%v)", len(execOrder), execOrder, len(want), want)
+	}
+	for i, w := range want {
+		if execOrder[i] != w {
+			t.Errorf("exec order[%d]: got %q, want %q (full=%v)", i, execOrder[i], w, execOrder)
+		}
+	}
+}
