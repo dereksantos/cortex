@@ -142,7 +142,7 @@ Options:
   --dry-run              Use mock provider
   --judge                Enable LLM-as-judge scoring (semantic evaluation)
   --judge-model MODEL    Model for judge (default: same as eval model)
-  --measure              Run Promptability vs quality correlation evals
+  --measure              MOVED: use 'cortex measure --self-eval' instead
   --compare-provider NAME  Frontier provider for MPR comparison (e.g., anthropic)
   --compare-model MODEL    Frontier model override (default: provider default)
   --summary              Show lift trend over recent runs
@@ -381,63 +381,11 @@ Examples:
 	// Track start time for duration measurement
 	startTime := time.Now()
 
-	// MEASURE MODE: Test Promptability vs response quality correlation
+	// --measure mode moved to `cortex measure --self-eval`. Reject the
+	// flag here with a redirect so existing scripts get a clear pointer
+	// instead of a confusing silent fall-through to STANDARD MODE.
 	if measureMode {
-		// Measure evals require a judge
-		measureJudge := judgeProvider
-		if measureJudge == nil {
-			measureJudge = provider // Use same provider as judge if not specified
-		}
-
-		measureEval := evalv2.NewMeasureEvaluator(provider, measureJudge)
-		measureEval.SetVerbose(verbose)
-		measureEval.SetModel(modelName)
-
-		measureDir := scenarioDir + "/measure"
-		if scenarioPath != "" {
-			// Single scenario
-			s, err := evalv2.LoadMeasureScenario(scenarioPath)
-			if err != nil {
-				return fmt.Errorf("failed to load measure scenario: %w", err)
-			}
-			result, err := measureEval.RunScenario(s)
-			if err != nil {
-				return fmt.Errorf("measure eval failed: %w", err)
-			}
-			// Wrap in aggregate results for reporting
-			aggregate := &evalv2.MeasureResults{
-				Provider:           provider.Name(),
-				Model:              modelName,
-				Scenarios:          []evalv2.MeasureScenarioResult{*result},
-				OverallCorrelation: result.Correlation,
-				Pass:               result.Correlation >= 0.7,
-			}
-			switch outputFormat {
-			case "json":
-				return evalv2.ReportMeasureJSON(os.Stdout, aggregate)
-			default:
-				evalv2.ReportMeasure(os.Stdout, aggregate)
-			}
-			return nil
-		}
-
-		// Run all measure scenarios
-		results, err := measureEval.Run(measureDir)
-		if err != nil {
-			return fmt.Errorf("measure eval failed: %w", err)
-		}
-
-		switch outputFormat {
-		case "json":
-			return evalv2.ReportMeasureJSON(os.Stdout, results)
-		default:
-			evalv2.ReportMeasure(os.Stdout, results)
-		}
-
-		if !results.Pass {
-			return fmt.Errorf("measure eval failed: correlation %.2f < 0.7", results.OverallCorrelation)
-		}
-		return nil
+		return fmt.Errorf("`cortex eval --measure` moved to `cortex measure --self-eval` (audit B). Run: cortex measure --self-eval -p <provider> -m <model>")
 	}
 
 	// STANDARD MODE: Use LLM provider

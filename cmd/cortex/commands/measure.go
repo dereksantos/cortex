@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/measure"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -38,6 +39,9 @@ func (c *MeasureCommand) Execute(ctx *Context) error {
 	fromFile := ""
 	fromStdin := false
 	calibrateTokens := 0
+	selfEval := false
+	selfEvalScenario := ""
+	selfEvalDir := "test/evals/v2/measure"
 	var promptParts []string
 
 	for i := 0; i < len(ctx.Args); i++ {
@@ -85,6 +89,18 @@ func (c *MeasureCommand) Execute(ctx *Context) error {
 				calibrateTokens = tokens
 				i++
 			}
+		case "--self-eval":
+			selfEval = true
+		case "-s", "--scenario":
+			if i+1 < len(ctx.Args) {
+				selfEvalScenario = ctx.Args[i+1]
+				i++
+			}
+		case "-d", "--dir":
+			if i+1 < len(ctx.Args) {
+				selfEvalDir = ctx.Args[i+1]
+				i++
+			}
 		case "-v", "--verbose":
 			verbose = true
 		case "-h", "--help":
@@ -101,6 +117,12 @@ Options:
   -w, --window SIZE     Target context window in tokens (default: 8192)
   --fast                Force mechanical-only (skip agentic even if provider set)
   --calibrate TOKENS    Record actual output tokens for tuning (use with prompt)
+  --self-eval           Validate the Promptability scorer: run a corpus of
+                        prompts through the scorer + LLM, check that score
+                        correlates with response quality. Requires -p.
+  -s, --scenario PATH   Single self-eval scenario YAML (used with --self-eval)
+  -d, --dir PATH        Self-eval scenario directory
+                        (default: test/evals/v2/measure)
   -o, --output FORMAT   Output: human, json (default: human)
   -v, --verbose         Verbose output
   -h, --help            Show this help
@@ -120,6 +142,7 @@ Examples:
   cortex measure -f prompt.txt --window 4096
   cortex measure -p ollama "Refactor the database layer"
   cortex measure --calibrate 350 "Add error handling to login"
+  cortex measure --self-eval -p ollama -m qwen2.5-coder:1.5b
   echo "Fix the bug" | cortex measure --stdin`)
 			return nil
 		default:
@@ -127,6 +150,20 @@ Examples:
 				promptParts = append(promptParts, arg)
 			}
 		}
+	}
+
+	// Self-eval mode: validate that Promptability scores correlate with
+	// response quality. Runs scenarios from selfEvalDir / selfEvalScenario
+	// through MeasureEvaluator. Requires a provider.
+	if selfEval {
+		if providerName == "" {
+			return fmt.Errorf("--self-eval requires -p/--provider (the scorer needs an LLM to compare against)")
+		}
+		provider, err := createMeasureProvider(providerName, modelOverride, ctx)
+		if err != nil {
+			return err
+		}
+		return runMeasureSelfEval(provider, modelOverride, selfEvalScenario, selfEvalDir, outputFormat, verbose)
 	}
 
 	// Get prompt text
@@ -278,4 +315,59 @@ func createMeasureProvider(providerName, modelOverride string, ctx *Context) (ll
 	default:
 		return nil, fmt.Errorf("unknown provider: %s (use ollama, anthropic, openrouter, or auto)", providerName)
 	}
+}
+
+// runMeasureSelfEval validates the Promptability scorer by running a corpus
+// of measure-scenarios through both the scorer and a real LLM, then checking
+// score-vs-quality correlation. Was the --measure mode under `cortex eval`;
+// it's a self-test of the measure subsystem, not a coding-harness eval, so
+// it belongs next to the thing it validates.
+func runMeasureSelfEval(provider llm.Provider, modelName, scenarioPath, scenarioDir, outputFormat string, verbose bool) error {
+	// The judge can be the same provider — self-eval doesn't need a
+	// separate frontier judge to find correlation drift.
+	measureEval := evalv2.NewMeasureEvaluator(provider, provider)
+	measureEval.SetVerbose(verbose)
+	if modelName != "" {
+		measureEval.SetModel(modelName)
+	}
+
+	if scenarioPath != "" {
+		s, err := evalv2.LoadMeasureScenario(scenarioPath)
+		if err != nil {
+			return fmt.Errorf("load measure scenario: %w", err)
+		}
+		result, err := measureEval.RunScenario(s)
+		if err != nil {
+			return fmt.Errorf("self-eval: %w", err)
+		}
+		aggregate := &evalv2.MeasureResults{
+			Provider:           provider.Name(),
+			Model:              modelName,
+			Scenarios:          []evalv2.MeasureScenarioResult{*result},
+			OverallCorrelation: result.Correlation,
+			Pass:               result.Correlation >= 0.7,
+		}
+		switch outputFormat {
+		case "json":
+			return evalv2.ReportMeasureJSON(os.Stdout, aggregate)
+		default:
+			evalv2.ReportMeasure(os.Stdout, aggregate)
+			return nil
+		}
+	}
+
+	results, err := measureEval.Run(scenarioDir)
+	if err != nil {
+		return fmt.Errorf("self-eval: %w", err)
+	}
+	switch outputFormat {
+	case "json":
+		return evalv2.ReportMeasureJSON(os.Stdout, results)
+	default:
+		evalv2.ReportMeasure(os.Stdout, results)
+	}
+	if !results.Pass {
+		return fmt.Errorf("self-eval failed: correlation %.2f < 0.7", results.OverallCorrelation)
+	}
+	return nil
 }

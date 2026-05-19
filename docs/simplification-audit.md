@@ -460,6 +460,27 @@ suite still reports).
 
 Verified `go build ./...` and `go test ./...` both green.
 
+### B (slice). `--measure` mode moved → `cortex measure --self-eval`
+
+The Promptability-vs-quality correlation eval was a self-test of the
+measure subsystem, not a coding-harness eval. Moved next to the thing
+it validates:
+
+- Added `--self-eval [-s SCEN] [-d DIR]` to `cortex measure`. Routes to
+  the existing `evalv2.MeasureEvaluator` with the standalone command's
+  provider/model/output plumbing. Requires `-p` (the scorer needs an
+  LLM to compare against).
+- In `cortex eval`, the `--measure` flag now returns a redirect error
+  pointing at `cortex measure --self-eval` so existing scripts get a
+  clear pointer rather than a silent fall-through.
+- Help text updated in both commands.
+- `MeasureEvaluator` and friends stay in `internal/eval/v2/` because
+  they depend on the v2 persister + scenario loaders; moving the
+  package was out of scope.
+
+Verified `go build ./...` and `go test ./...` both green; tools.json
+regenerated.
+
 ### B (partial). `--agentic` mode + AgenticEvaluator dropped
 
 User confirmed cortex is the only harness; Claude-CLI tool-usage
