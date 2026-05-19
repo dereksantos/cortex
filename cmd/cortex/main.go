@@ -129,21 +129,6 @@ func main() {
 			defer store.Close()
 			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
-	case "mcp":
-		if cmd := commands.Get("mcp"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
 	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
 			// --workdir signals an isolated invocation (benchmarks,
@@ -354,7 +339,6 @@ Commands:
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
   measure        Measure prompt quality for small context windows
-  mcp            Start MCP server (for cross-tool access)
 
   session-start  Print session start instructions (for hooks)
   inject-context Inject relevant context into prompt (for hooks)

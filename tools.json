@@ -138,11 +138,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "mcp",
-      "description": "Start MCP server (for cross-tool access)",
-      "version": "0.1.0"
-    },
-    {
       "name": "measure",
       "description": "Measure prompt quality for small context windows",
       "version": "0.1.0"

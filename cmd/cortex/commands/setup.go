@@ -739,14 +739,6 @@ func setupClaudeCode(claudeDir, cortexPath string) error {
 	settings["hooks"] = hooks
 	settings["statusLine"] = statusLine
 
-	// Configure MCP server
-	settings["mcpServers"] = map[string]interface{}{
-		"cortex": map[string]interface{}{
-			"command": cortexPath,
-			"args":    []string{"mcp"},
-		},
-	}
-
 	// Note: Preserves existing permissions and other settings
 
 	// Write settings
@@ -839,13 +831,7 @@ func createPluginJSON(pluginDir string) error {
     {"name": "cortex-decide", "description": "Record an architectural decision"},
     {"name": "cortex-correct", "description": "Record a correction"},
     {"name": "cortex-forget", "description": "Mark context as outdated"}
-  ],
-  "mcpServers": {
-    "cortex": {
-      "command": "cortex",
-      "args": ["mcp"]
-    }
-  }
+  ]
 }`
 
 	pluginPath := filepath.Join(pluginDir, "plugin.json")
@@ -972,14 +958,6 @@ func createClaudeSettings(settingsPath string) error {
 
 	settings["hooks"] = hooks
 	settings["statusLine"] = statusLine
-
-	// Configure MCP server
-	settings["mcpServers"] = map[string]interface{}{
-		"cortex": map[string]interface{}{
-			"command": cortexPath,
-			"args":    []string{"mcp"},
-		},
-	}
 
 	// Write settings
 	newData, err := json.MarshalIndent(settings, "", "  ")

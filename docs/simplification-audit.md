@@ -218,15 +218,7 @@ docs that are still relevant but framed around the old cross-harness grid:
 
 ### I. Test plans tied to removed harnesses — *done (see Done)*
 
-### J. Drop MCP server (D9)
-
-- `internal/mcp/server.go` (310 LOC) and the rest of `internal/mcp/`
-- `cmd/cortex/commands/mcp.go` (1.4K)
-- `mcp` case in `cmd/cortex/main.go`
-- References in `docs/integration-roadmap.md`, `docs/tool-surface.md`, etc.
-- Cross-link in this doc: dimension 10 (extensibility & composition) in the
-  coverage matrix loses its MCP-server route. Revisit when that dimension's
-  proxy work starts.
+### J. Drop MCP server (D9) — *done (see Done)*
 
 ### K. Unify the 5 staged DAG ops (D8)
 
@@ -362,7 +354,7 @@ conversion (largest, most-gated).
    commit.* `--harness` flag and dispatch refactor in `eval.go` is the
    remaining slice; sequenced as its own commit.
 5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
-6. **Drop MCP** (J) — independent of harness deletions.
+6. ~~**Drop MCP** (J)~~ — *done in this commit.*
 7. **Unify eval-runner output to `cell_results.jsonl`** (D) — convert
    mechanic / journey / legacy runners; one PR per runner is fine.
 8. **Migrate + quality-assess + integrate every eval** (E) — once D is in,
@@ -450,6 +442,19 @@ Verified `go build ./...` and `go test ./...` both green.
 `--harness` flag in `cortex eval` (not `eval grid`) still exists — it has
 only one meaningful value now (`cortex`). Removing it is the remaining
 slice of A; left under Cut so the dispatch refactor is its own commit.
+
+### J. MCP server dropped
+
+Per D9 — dimension 10 (extensibility) gets revisited later.
+
+- Deleted `internal/mcp/server.go` and removed the `internal/mcp/` package.
+- Deleted `cmd/cortex/commands/mcp.go` + `mcp_test.go`.
+- Removed `mcp` case from `cmd/cortex/main.go` (request routing + help text).
+- Removed `mcpServers` blocks from `cmd/cortex/commands/setup.go` (3 places:
+  Claude settings, plugin.json, Cursor settings). `cortex install` no longer
+  auto-registers cortex as an MCP server.
+- Regenerated `tools.json` (39 commands, was 40).
+- Verified `go build ./...` and `go test ./...` both green.
 
 ### H (archive). Stale docs moved to `docs/archive/`
 
