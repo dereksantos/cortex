@@ -1,6 +1,6 @@
 //go:build !windows
 
-// Grid runner for the cross-harness × model × strategy eval grid.
+// Grid runner for the model × strategy eval grid (cortex harness only).
 //
 // RunGrid expands the Cartesian product over (scenario × harness ×
 // model × strategy), invokes one cell at a time, and persists each
@@ -8,12 +8,10 @@
 // per-cell, not per-grid). Concurrency is serial — the --parallel knob
 // is deferred to the CLI step.
 //
-// Refinement of the loop spec's RunGrid signature: HarnessSpec /
-// ModelSpec wrap the bare Harness / model-string types so the runner
-// can record the harness/provider/model identifiers that go into each
-// CellResult. Those names aren't recoverable from the Harness
-// interface alone (it has no Name() method, deliberately — the
-// existing Aider and ClaudeCLI harnesses predate this need).
+// HarnessSpec / ModelSpec wrap the bare Harness / model-string types so
+// the runner can record the harness/provider/model identifiers that go
+// into each CellResult. The Harness interface deliberately has no
+// Name() method.
 package eval
 
 import (
@@ -35,8 +33,8 @@ import (
 
 // HarnessSpec pairs a Harness implementation with its identifier.
 //
-// Name should be one of HarnessAider / HarnessOpenCode / HarnessPiDev /
-// HarnessClaudeCLI from cellresult.go — those constants are the
+// Name should be HarnessCortex (or HarnessClaudeCLI for legacy
+// frontier-reference rows) from cellresult.go — those constants are the
 // canonical column values that downstream analysis joins on.
 type HarnessSpec struct {
 	Name    string

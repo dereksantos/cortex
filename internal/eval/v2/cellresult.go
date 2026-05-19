@@ -1,5 +1,5 @@
-// CellResult is the per-cell output schema for the cross-harness eval grid:
-// {Aider | opencode | pi.dev | claude_cli} × {small | medium | large via
+// CellResult is the per-cell output schema for the eval grid:
+// {cortex (+ claude_cli reference)} × {small | medium | large via
 // OpenRouter / Ollama / Anthropic} × {baseline | cortex | frontier}.
 //
 // One CellResult is emitted per (Scenario × Session × Harness × Provider ×
@@ -21,11 +21,10 @@ import (
 // JSON shape. Persisters and downstream rollups branch on this.
 const CellResultSchemaVersion = "1"
 
-// Harness names. Add a constant before adding an implementation.
+// Harness names. Cortex is its own harness; claude_cli is retained as a
+// frontier-reference name used by the agentic comparator (audit B will fold
+// it into a --model knob).
 const (
-	HarnessAider     = "aider"
-	HarnessOpenCode  = "opencode"
-	HarnessPiDev     = "pi_dev"
 	HarnessClaudeCLI = "claude_cli"
 	HarnessCortex    = "cortex" // Cortex's own LLM-driven agent loop (internal/harness)
 )
@@ -142,7 +141,7 @@ func (r *CellResult) Validate() error {
 	}
 
 	switch r.Harness {
-	case HarnessAider, HarnessOpenCode, HarnessPiDev, HarnessClaudeCLI, HarnessCortex:
+	case HarnessClaudeCLI, HarnessCortex:
 	default:
 		return fmt.Errorf("unknown harness: %q", r.Harness)
 	}

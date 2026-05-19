@@ -161,14 +161,13 @@ func truncate(s string, n int) string {
 }
 
 // executeGrid handles `cortex eval grid <flags>`. Builds the grid
-// dimensions, validates that every requested harness binary is present,
-// and drives evalv2.RunGrid.
+// dimensions and drives evalv2.RunGrid against the cortex harness.
 //
-// Supports aider, opencode, and pi_dev as harnesses (Phase 7 wired all
-// three into the grid). Pick the harness via `--harnesses <csv>`.
+// Under the cortex-only direction (simplification-audit D1), the grid no
+// longer takes a --harnesses axis; the cortex harness is always used. The
+// remaining axes are scenarios × models × strategies.
 func executeGrid(args []string) error {
 	scenarioDir := "test/evals/v2"
-	harnessesCSV := evalv2.HarnessAider
 	provider := evalv2.ProviderOpenRouter
 	modelsCSV := ""
 	strategiesCSV := evalv2.StrategyBaseline + "," + evalv2.StrategyCortex
@@ -201,11 +200,6 @@ func executeGrid(args []string) error {
 		case "--scenarios":
 			if i+1 < len(args) {
 				scenarioDir = args[i+1]
-				i++
-			}
-		case "--harnesses":
-			if i+1 < len(args) {
-				harnessesCSV = args[i+1]
 				i++
 			}
 		case "--provider":
@@ -245,11 +239,14 @@ func executeGrid(args []string) error {
 		return fmt.Errorf("eval grid: --models is required (csv of model IDs, e.g. --models openai/gpt-oss-20b:free)")
 	}
 
-	// Resolve harnesses with binary checks up front — fail fast.
-	harnesses, err := buildGridHarnesses(harnessesCSV)
+	// Cortex is the only harness; init once. The model is re-pointed per
+	// cell via SetModel inside the grid runner, so the empty model here
+	// is fine.
+	cortexH, err := evalv2.NewCortexHarness("")
 	if err != nil {
-		return err
+		return fmt.Errorf("eval grid: cortex harness init: %w", err)
 	}
+	harnesses := []evalv2.HarnessSpec{{Name: evalv2.HarnessCortex, Harness: cortexH}}
 
 	models, err := buildGridModels(provider, modelsCSV)
 	if err != nil {
@@ -308,45 +305,6 @@ func executeGrid(args []string) error {
 	return nil
 }
 
-func buildGridHarnesses(csv string) ([]evalv2.HarnessSpec, error) {
-	names := splitCSV(csv)
-	if len(names) == 0 {
-		return nil, fmt.Errorf("eval grid: --harnesses produced empty list")
-	}
-
-	out := make([]evalv2.HarnessSpec, 0, len(names))
-	for _, name := range names {
-		switch name {
-		case evalv2.HarnessAider:
-			// Each NewXxxHarness verifies the binary is on PATH (and
-			// honors its $XXX_BINARY env override). The model is
-			// re-pointed per cell via SetModel; passing "" here is fine.
-			h, err := evalv2.NewAiderHarness("", "")
-			if err != nil {
-				return nil, fmt.Errorf("eval grid: aider harness unavailable: %w", err)
-			}
-			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
-		case evalv2.HarnessOpenCode:
-			h, err := evalv2.NewOpenCodeHarness("", "")
-			if err != nil {
-				return nil, fmt.Errorf("eval grid: opencode harness unavailable: %w", err)
-			}
-			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
-		case evalv2.HarnessPiDev:
-			h, err := evalv2.NewPiDevHarness("", "")
-			if err != nil {
-				return nil, fmt.Errorf("eval grid: pi_dev harness unavailable: %w", err)
-			}
-			out = append(out, evalv2.HarnessSpec{Name: name, Harness: h})
-		case evalv2.HarnessClaudeCLI:
-			return nil, fmt.Errorf("eval grid: harness %q not exposed via grid yet — use the legacy `cortex eval` for claude-cli runs", name)
-		default:
-			return nil, fmt.Errorf("eval grid: unknown harness %q (valid: aider, opencode, pi_dev)", name)
-		}
-	}
-	return out, nil
-}
-
 func buildGridModels(provider, csv string) ([]evalv2.ModelSpec, error) {
 	switch provider {
 	case evalv2.ProviderOpenRouter, evalv2.ProviderOllama, evalv2.ProviderAnthropic, evalv2.ProviderOpenAI, evalv2.ProviderLocal:
@@ -397,21 +355,17 @@ func splitCSV(csv string) []string {
 func printGridHelp() {
 	fmt.Println(`Usage: cortex eval grid [options]
 
-Cross-harness × model × strategy eval grid. Drives one CellResult per
-cell into both .cortex/db/evals_v2.db and .cortex/db/cell_results.jsonl.
+Model × strategy eval grid against the cortex harness. Drives one
+CellResult per cell into both .cortex/db/evals_v2.db and
+.cortex/db/cell_results.jsonl.
 
 Options:
   --scenarios DIR          Scenario directory (default: test/evals/v2)
-  --harnesses LIST         CSV of harness names (default: aider)
-                           Supported: aider, opencode, pi_dev
-                           Each harness's binary must be on PATH (or
-                           pointed at via $AIDER_BINARY, $OPENCODE_BINARY,
-                           $PI_BINARY).
   --provider NAME          Provider for all models in this run
                            (default: openrouter)
                            Valid: openrouter, ollama, anthropic, openai, local
   --models LIST            CSV of model IDs (REQUIRED). Pass verbatim to
-                           the harness/provider, e.g.
+                           the provider, e.g.
                              openai/gpt-oss-20b:free
                              qwen/qwen3-coder
                              anthropic/claude-haiku-4.5
@@ -430,16 +384,12 @@ Options:
   -h, --help               Show this help
 
 Environment:
-  OPEN_ROUTER_API_KEY      Required when --provider=openrouter (note the
-                           underscore — Aider/litellm, opencode, and pi
-                           all expect the canonical OPENROUTER_API_KEY
-                           name; each harness re-exports automatically).
+  OPEN_ROUTER_API_KEY      Required when --provider=openrouter.
 
 Examples:
   cortex eval grid --models openai/gpt-oss-20b:free
   cortex eval grid \
     --scenarios test/evals/v2 \
-    --harnesses aider,opencode,pi_dev \
     --provider openrouter \
     --models openai/gpt-oss-20b:free \
     --strategies baseline`)

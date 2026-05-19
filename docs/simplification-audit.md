@@ -56,22 +56,15 @@ This work is done when all three hold:
 
 ## Cut — locked (do now)
 
-### A. Alternative-harness code (D1, D2)
+### A. Alternative-harness code (D1, D2) — *partial; see Done*
 
-Remove. All under `internal/eval/v2/`:
+Remaining for full D2 completion:
 
-- `library_service_aider_harness.go` (329 LOC) + `_test.go` (435 LOC)
-- `library_service_opencode_harness.go` (397 LOC) + `_test.go` (564 LOC)
-- `library_service_pidev_harness.go` (296 LOC) + `_test.go` (450 LOC)
-- Constants `HarnessAider`, `HarnessOpenCode`, `HarnessPiDev` (or equivalent)
-  in `cellresult.go:26-30`
-- `--harness` / harnesses-CSV plumbing in `cmd/cortex/commands/eval_grid.go:171,208,249`
-  and `cmd/cortex/commands/eval.go:57,74,249`
-- Default `harnessesCSV = evalv2.HarnessAider` in `eval_grid.go:171`
-- `buildGridHarnesses()` in `eval_grid.go:249` — grid keeps model × strategy
-  axes only
-
-Total: ~2,471 LOC plus enum + flag wiring.
+- `--harness` flag parsing in `cmd/cortex/commands/eval.go:57,72-74` —
+  flag has only one meaningful value (`cortex`) now; collapse the dispatch
+  so the cortex coding harness is the default when `-s` + `-m` are present.
+- "CORTEX HARNESS MODE" comment and gate in `cmd/cortex/commands/eval.go:244-251`
+  follow from that.
 
 ### B. Cross-harness comparison infrastructure (D1)
 
@@ -376,9 +369,9 @@ conversion (largest, most-gated).
 3. ~~**Stale-doc archive move** (H, partial)~~ — *done in this commit.*
    Rewrite of still-relevant docs (integration-roadmap, tool-surface,
    learning-harness, product, README) remains pending.
-4. **Aider + OpenCode + pidev deletion** (A) — biggest single cut; lands D1+D2.
-   Update `cellresult.go` enum, `eval.go` + `eval_grid.go` dispatch, delete
-   the six harness files + tests.
+4. ~~**Aider + OpenCode + pidev deletion** (A, partial)~~ — *done in this
+   commit.* `--harness` flag and dispatch refactor in `eval.go` is the
+   remaining slice; sequenced as its own commit.
 5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
 6. **Drop MCP** (J) — independent of harness deletions.
 7. **Unify eval-runner output to `cell_results.jsonl`** (D) — convert
@@ -431,6 +424,28 @@ conversion (largest, most-gated).
   `internal/eval/benchmarks/mteb/`.
 - Verified with `go build ./...` and `go test ./...` both green; no other
   package imported these mains.
+
+### A (partial). Alternative-harness adapters deleted
+
+Deleted ~2,471 LOC of alternative-harness code:
+
+- `internal/eval/v2/library_service_aider_harness.go` + `_test.go`
+- `internal/eval/v2/library_service_opencode_harness.go` + `_test.go`
+- `internal/eval/v2/library_service_pidev_harness.go` + `_test.go`
+- Constants `HarnessAider`, `HarnessOpenCode`, `HarnessPiDev` removed from
+  `internal/eval/v2/cellresult.go`. Validation `switch` and harness-name
+  doc comments updated.
+- `cortex eval grid` no longer takes `--harnesses`; always runs the cortex
+  harness. `buildGridHarnesses()` removed; help text updated.
+- Test fixtures that used `HarnessAider` as a stand-in harness name
+  (cellresult_test, persist_cell_test, grid_test, journal/eval_test,
+  processor_test) now use `HarnessCortex` / `"cortex"`.
+
+Verified `go build ./...` and `go test ./...` both green.
+
+`--harness` flag in `cortex eval` (not `eval grid`) still exists — it has
+only one meaningful value now (`cortex`). Removing it is the remaining
+slice of A; left under Cut so the dispatch refactor is its own commit.
 
 ### H (archive). Stale docs moved to `docs/archive/`
 

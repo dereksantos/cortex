@@ -580,7 +580,7 @@ func TestProcessor_ProjectsEvalCellResult(t *testing.T) {
 		RunID:                "eval-run-1",
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
 		ScenarioID:           "auth-service",
-		Harness:              "aider",
+		Harness:              "cortex",
 		Provider:             "anthropic",
 		Model:                "claude-haiku-4.5",
 		ContextStrategy:      "cortex",
