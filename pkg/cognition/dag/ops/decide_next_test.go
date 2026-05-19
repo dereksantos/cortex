@@ -3,14 +3,16 @@ package ops
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// fakeProvider returns canned responses keyed by the system prompt
-// substring (so we can drive different test scenarios off one mock).
+// fakeProvider returns canned responses for tests. The optional
+// `respond` closure is invoked per-call with prompt + system so tests
+// can drive different scenarios off a single mock instance.
 type fakeProvider struct {
 	respond func(prompt, system string) (string, error)
 }
@@ -32,226 +34,259 @@ func mustBudget() dag.Budget {
 	return dag.Budget{LatencyMS: 30000, Tokens: 5000, Depth: 10}
 }
 
-// TestNext_RuleBasedFallback_Greeting — no provider, short greeting →
-// converse arm (matches isShortConversational).
-func TestNext_RuleBasedFallback_Greeting(t *testing.T) {
+// registryWithCodingTurn returns a registry that has decide.coding_turn
+// and remember.vector_search registered with no-op handlers — enough
+// for materializeEmittedNode validation to succeed.
+func registryWithCodingTurn(t *testing.T) *dag.Registry {
+	t.Helper()
+	reg := dag.NewRegistry()
+	for _, qn := range []struct{ fn, op string }{
+		{"decide", "coding_turn"},
+		{"remember", "vector_search"},
+		{"decide", "next"},
+	} {
+		err := reg.Register(dag.NodeSpec{
+			Function: dag.CortexFunction(qn.fn),
+			Op:       qn.op,
+			Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+				return dag.NodeResult{}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("register %s.%s: %v", qn.fn, qn.op, err)
+		}
+	}
+	return reg
+}
+
+// TestNext_NoProvider_Fallback — nil Provider → single coding_turn
+// spawn so the chain keeps walking.
+func TestNext_NoProvider_Fallback(t *testing.T) {
 	h := NewNextHandler(NextConfig{})
-	res, err := h(context.Background(), map[string]any{"prompt": "hi"}, mustBudget())
+	res, err := h(context.Background(), map[string]any{"prompt": "anything"}, mustBudget())
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	if got := res.Out["next_action"]; got != "converse" {
-		t.Errorf("expected converse; got %v", got)
+	if !res.Out["fallback"].(bool) {
+		t.Errorf("expected fallback=true; got %v", res.Out["fallback"])
 	}
 	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
-		t.Errorf("converse should spawn one coding_turn; got %+v", res.Spawn)
+		t.Errorf("fallback should spawn one coding_turn; got %+v", res.Spawn)
 	}
 }
 
-// TestNext_RuleBasedFallback_LongPrompt — no provider, long prompt →
-// code arm (default).
-func TestNext_RuleBasedFallback_LongPrompt(t *testing.T) {
+// TestNext_MissingPrompt_Errors — handler validates the required input.
+func TestNext_MissingPrompt_Errors(t *testing.T) {
 	h := NewNextHandler(NextConfig{})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "add a method foo to the Bar struct that returns the elapsed time"},
-		mustBudget())
-	if err != nil {
-		t.Fatalf("handler: %v", err)
-	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("expected code; got %v", got)
-	}
-	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
-		t.Errorf("code should spawn one coding_turn; got %+v", res.Spawn)
+	_, err := h(context.Background(), map[string]any{}, mustBudget())
+	if err == nil {
+		t.Errorf("expected error for missing prompt")
 	}
 }
 
-// TestNext_RuleBasedFallback_Empty — empty prompt → done (no spawn).
-// Empty prompt also produces an error (handler validates 'prompt'),
-// so we test via direct ruleBasedNextAction.
-func TestNext_RuleBasedFallback_Empty(t *testing.T) {
-	if got := ruleBasedNextAction("", false); got != NextActionDone {
-		t.Errorf("empty prompt: expected done; got %s", got)
-	}
-}
-
-// TestNext_LLMArm_Code — provider returns code arm; spawn = coding_turn.
-func TestNext_LLMArm_Code(t *testing.T) {
+// TestNext_LLM_SingleSpawn — provider returns a valid one-node plan;
+// handler materializes it.
+func TestNext_LLM_SingleSpawn(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
-			return `{"next_action":"code","reasoning":"user asks for a code change"}`, nil
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"go"}}],"reasoning":"direct"}`, nil
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(), map[string]any{"prompt": "edit main.go"}, mustBudget())
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("expected code; got %v", got)
-	}
 	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
-		t.Errorf("code should spawn coding_turn; got %+v", res.Spawn)
+		t.Errorf("expected one coding_turn spawn; got %+v", res.Spawn)
+	}
+	if res.Spawn[0].Attrs["prompt"] != "go" {
+		t.Errorf("attrs.prompt not threaded; got %v", res.Spawn[0].Attrs)
 	}
 }
 
-// TestNext_LLMArm_Search — provider returns search; spawn =
-// vector_search → decide.next (with already_searched=true).
-func TestNext_LLMArm_Search(t *testing.T) {
+// TestNext_LLM_MultiSpawn_WithModel — multi-node plan with attrs.model
+// threaded through to the resulting NodeSpec.
+func TestNext_LLM_MultiSpawn_WithModel(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
-			return `{"next_action":"search","reasoning":"may exist already"}`, nil
+			return `{"nodes":[
+				{"op":"remember.vector_search","attrs":{"query":"auth"}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"answer"},"model":"qwen2.5:14b"}
+			],"reasoning":"search-then-act"}`, nil
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "how does the auth flow work?"},
-		mustBudget())
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
 		t.Fatalf("handler: %v", err)
-	}
-	if got := res.Out["next_action"]; got != "search" {
-		t.Errorf("expected search; got %v", got)
 	}
 	if len(res.Spawn) != 2 {
-		t.Fatalf("search should spawn 2 (vector_search, decide.next); got %d", len(res.Spawn))
+		t.Fatalf("expected 2 spawns; got %d", len(res.Spawn))
 	}
 	if res.Spawn[0].Op != "vector_search" {
-		t.Errorf("first spawn should be vector_search; got %+v", res.Spawn[0])
+		t.Errorf("first spawn should be vector_search; got %s", res.Spawn[0].Op)
 	}
-	if res.Spawn[1].Op != "next" {
-		t.Errorf("second spawn should be decide.next; got %+v", res.Spawn[1])
+	if res.Spawn[1].Op != "coding_turn" {
+		t.Errorf("second spawn should be coding_turn; got %s", res.Spawn[1].Op)
 	}
-	if v, _ := res.Spawn[1].Attrs["already_searched"].(bool); !v {
-		t.Errorf("follow-up decide.next must carry already_searched=true; attrs=%v", res.Spawn[1].Attrs)
+	if m, _ := res.Spawn[1].Attrs["model"].(string); m != "qwen2.5:14b" {
+		t.Errorf("attrs.model not threaded; got %v", res.Spawn[1].Attrs)
 	}
 }
 
-// TestNext_LLMArm_Converse — provider returns converse; spawn = coding_turn.
-func TestNext_LLMArm_Converse(t *testing.T) {
+// TestNext_UnknownOp_Dropped — emitted op not in registry is dropped
+// with a logged reasoning suffix; other valid ops still spawn.
+func TestNext_UnknownOp_Dropped(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
-			return `{"next_action":"converse","reasoning":"prose answer fits"}`, nil
+			return `{"nodes":[
+				{"op":"made.up","attrs":{}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"go"}}
+			]}`, nil
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "explain what a context broker is"},
-		mustBudget())
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
 		t.Fatalf("handler: %v", err)
-	}
-	if got := res.Out["next_action"]; got != "converse" {
-		t.Errorf("expected converse; got %v", got)
 	}
 	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
-		t.Errorf("converse should spawn coding_turn; got %+v", res.Spawn)
+		t.Errorf("expected only the valid op spawned; got %+v", res.Spawn)
+	}
+	reasoning, _ := res.Out["reasoning"].(string)
+	if !strings.Contains(reasoning, "made.up") || !strings.Contains(reasoning, "unknown-op") {
+		t.Errorf("reasoning should note the dropped op; got %q", reasoning)
 	}
 }
 
-// TestNext_LLMArm_Done — provider returns done; empty spawn.
-func TestNext_LLMArm_Done(t *testing.T) {
+// TestNext_FanoutCap — emitter overshoots MaxFanout; only the cap
+// number of nodes are spawned; the rest are dropped.
+func TestNext_FanoutCap(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
-			return `{"next_action":"done","reasoning":"already addressed"}`, nil
+			return `{"nodes":[
+				{"op":"decide.coding_turn","attrs":{"prompt":"a"}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"b"}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"c"}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"d"}},
+				{"op":"decide.coding_turn","attrs":{"prompt":"e"}}
+			]}`, nil
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "thanks!", "already_searched": true},
-		mustBudget())
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg, MaxFanout: 2})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	if got := res.Out["next_action"]; got != "done" {
-		t.Errorf("expected done; got %v", got)
+	if len(res.Spawn) != 2 {
+		t.Fatalf("expected 2 spawns (cap=2); got %d", len(res.Spawn))
 	}
-	if len(res.Spawn) != 0 {
-		t.Errorf("done should spawn nothing; got %d spawns", len(res.Spawn))
-	}
-}
-
-// TestNext_SuppressSearchWhenAlreadySearched — even if the model
-// picks search, the handler coerces to code when already_searched=true
-// (prevents infinite search loops).
-func TestNext_SuppressSearchWhenAlreadySearched(t *testing.T) {
-	p := &fakeProvider{
-		respond: func(prompt, system string) (string, error) {
-			return `{"next_action":"search","reasoning":"loop me"}`, nil
-		},
-	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "fix the bug", "already_searched": true},
-		mustBudget())
-	if err != nil {
-		t.Fatalf("handler: %v", err)
-	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("expected code (search suppressed); got %v", got)
+	reasoning, _ := res.Out["reasoning"].(string)
+	if !strings.Contains(reasoning, "fanout-cap") {
+		t.Errorf("reasoning should note fanout-cap drops; got %q", reasoning)
 	}
 }
 
-// TestNext_LLMError_FallsBackToRules — provider errors out, handler
-// returns rule-based action (no error returned from the handler).
-func TestNext_LLMError_FallsBackToRules(t *testing.T) {
+// TestNext_LLMError_Fallback — provider errors → fallback spawn,
+// no handler error (chain keeps walking).
+func TestNext_LLMError_Fallback(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
 			return "", errors.New("network down")
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "fix the bug"},
-		mustBudget())
+	h := NewNextHandler(NextConfig{Provider: p, Registry: registryWithCodingTurn(t)})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
-		t.Fatalf("handler should swallow provider err and fall back; got %v", err)
+		t.Fatalf("handler should swallow provider err: %v", err)
 	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("fallback expected code; got %v", got)
+	if !res.Out["fallback"].(bool) {
+		t.Errorf("expected fallback=true; got %+v", res.Out)
+	}
+	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
+		t.Errorf("fallback should spawn coding_turn; got %+v", res.Spawn)
 	}
 }
 
-// TestNext_ParseError_FallsBackToRules — malformed JSON response →
-// rule-based action.
-func TestNext_ParseError_FallsBackToRules(t *testing.T) {
+// TestNext_ParseError_Fallback — malformed JSON → fallback spawn.
+func TestNext_ParseError_Fallback(t *testing.T) {
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
 			return "not json at all", nil
 		},
 	}
-	h := NewNextHandler(NextConfig{Provider: p})
-	res, err := h(context.Background(),
-		map[string]any{"prompt": "fix the bug"},
-		mustBudget())
+	h := NewNextHandler(NextConfig{Provider: p, Registry: registryWithCodingTurn(t)})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
 	if err != nil {
-		t.Fatalf("handler should swallow parse err and fall back; got %v", err)
+		t.Fatalf("handler: %v", err)
 	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("fallback expected code; got %v", got)
+	if !res.Out["fallback"].(bool) {
+		t.Errorf("expected fallback=true; got %+v", res.Out)
 	}
 }
 
-// TestNext_BudgetExhausted_FallsBackToRules — when budget can't
-// afford the cost hint, handler skips the LLM call.
-func TestNext_BudgetExhausted_FallsBackToRules(t *testing.T) {
+// TestNext_FencedJSON_Tolerated — model wraps JSON in ```json ... ```
+// fences; parser strips them.
+func TestNext_FencedJSON_Tolerated(t *testing.T) {
+	p := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			return "```json\n{\"nodes\":[{\"op\":\"decide.coding_turn\",\"attrs\":{\"prompt\":\"x\"}}]}\n```", nil
+		},
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget())
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if len(res.Spawn) != 1 || res.Spawn[0].Op != "coding_turn" {
+		t.Errorf("fenced JSON should still parse; got %+v", res.Spawn)
+	}
+}
+
+// TestNext_BudgetExhausted_Fallback — when budget can't afford the
+// cost hint, skip the LLM call and fall back without consulting it.
+func TestNext_BudgetExhausted_Fallback(t *testing.T) {
 	called := false
 	p := &fakeProvider{
 		respond: func(prompt, system string) (string, error) {
 			called = true
-			return `{"next_action":"code"}`, nil
+			return `{"nodes":[]}`, nil
 		},
 	}
 	h := NewNextHandler(NextConfig{Provider: p})
 	tinyBudget := dag.Budget{LatencyMS: 1, Tokens: 1, Depth: 10}
-	res, err := h(context.Background(), map[string]any{"prompt": "fix the bug"}, tinyBudget)
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, tinyBudget)
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
 	if called {
 		t.Errorf("expected LLM skipped on insufficient budget")
 	}
-	if got := res.Out["next_action"]; got != "code" {
-		t.Errorf("fallback expected code; got %v", got)
+	if !res.Out["fallback"].(bool) {
+		t.Errorf("expected fallback=true; got %+v", res.Out)
+	}
+}
+
+// TestNext_RenderPromptSubstitution — confirm catalogs flow into the
+// rendered system prompt (so the LLM actually sees them).
+func TestNext_RenderPromptSubstitution(t *testing.T) {
+	out := renderNextPrompt("hello", "  remember.vector_search(query) - search\n", "  qwen2.5:14b - local\n", "")
+	if !strings.Contains(out, "hello") {
+		t.Errorf("user prompt missing")
+	}
+	if !strings.Contains(out, "remember.vector_search") {
+		t.Errorf("op catalog missing")
+	}
+	if !strings.Contains(out, "qwen2.5:14b") {
+		t.Errorf("model catalog missing")
+	}
+	if strings.Contains(out, "{{OPS}}") || strings.Contains(out, "{{MODELS}}") || strings.Contains(out, "{{PROMPT}}") || strings.Contains(out, "{{CONTEXT}}") {
+		t.Errorf("unsubstituted placeholders remain in output")
 	}
 }
