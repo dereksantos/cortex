@@ -995,6 +995,9 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		}
 		s.printModels(refresh)
 		return true, nil
+	case "/shell-policy":
+		s.printShellPolicy()
+		return true, nil
 	case "/history":
 		if len(rest) == 0 {
 			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
@@ -1026,6 +1029,7 @@ func printSlashHelp() {
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
   /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
+  /shell-policy      show the user-configured shell allow/deny policy (if any)
   /history [N]       show buffered turn count, or set the conversation-history cap to N
   /quit              exit (also Ctrl-D)`)
 }
@@ -2088,6 +2092,32 @@ type ollamaTagsResponse struct {
 	Models []struct {
 		Name string `json:"name"`
 	} `json:"models"`
+}
+
+// printShellPolicy shows the active run_shell allow/deny policy.
+// Resolution mirrors harness.LoadShellPolicy: per-workdir first, then
+// global, then empty. We re-load here rather than cache because the
+// user may have edited the JSON file mid-session.
+func (s *replState) printShellPolicy() {
+	policy := harness.LoadShellPolicy(s.workdir)
+	if policy.IsEmpty() {
+		fmt.Println("  shell policy: none active (run_shell permits all commands)")
+		fmt.Printf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}\n",
+			filepath.Join(s.workdir, ".cortex", "shell-policy.json"))
+		return
+	}
+	if len(policy.Deny) > 0 {
+		fmt.Println("  deny patterns (any match rejects):")
+		for _, p := range policy.Deny {
+			fmt.Printf("    %s\n", p)
+		}
+	}
+	if len(policy.Allow) > 0 {
+		fmt.Println("  allow patterns (one match required):")
+		for _, p := range policy.Allow {
+			fmt.Printf("    %s\n", p)
+		}
+	}
 }
 
 // printModels handles the /models slash command: fetches Ollama

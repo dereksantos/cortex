@@ -26,6 +26,7 @@ import (
 type runShellTool struct {
 	workdir  string
 	registry *ToolRegistry
+	policy   ShellPolicy
 }
 
 // runShellTimeout bounds each subprocess. 30s catches infinite loops
@@ -42,8 +43,29 @@ type runShellArgs struct {
 }
 
 // NewRunShellTool constructs the tool. workdir must be absolute.
+//
+// A ShellPolicy is loaded eagerly from <workdir>/.cortex/shell-policy.json
+// (falling back to $HOME/.cortex/shell-policy.json, then empty). An
+// empty policy permits everything — that's the default. The policy is
+// captured at construction; reload by re-creating the tool (a REPL
+// /shell-policy reload command can do this in a later slice).
 func NewRunShellTool(workdir string, reg *ToolRegistry) ToolHandler {
-	return &runShellTool{workdir: workdir, registry: reg}
+	return &runShellTool{
+		workdir:  workdir,
+		registry: reg,
+		policy:   LoadShellPolicy(workdir),
+	}
+}
+
+// NewRunShellToolWithPolicy lets callers supply an explicit policy
+// (tests, benchmark runners with synthetic policies). Skips the
+// config-file lookup.
+func NewRunShellToolWithPolicy(workdir string, reg *ToolRegistry, policy ShellPolicy) ToolHandler {
+	return &runShellTool{
+		workdir:  workdir,
+		registry: reg,
+		policy:   policy,
+	}
 }
 
 func (t *runShellTool) Name() string { return "run_shell" }
@@ -75,6 +97,13 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 	}
 	if args.Command == "" {
 		return errorJSON(errors.New("run_shell: command must not be empty")), nil
+	}
+
+	// User-controlled allow/deny guardrail. Empty policy permits
+	// everything; non-empty Deny rejects matches; non-empty Allow
+	// requires a match.
+	if err := t.policy.Check(args.Command); err != nil {
+		return errorJSON(err), nil
 	}
 
 	subCtx, cancel := context.WithTimeout(ctx, runShellTimeout)
