@@ -216,18 +216,7 @@ docs that are still relevant but framed around the old cross-harness grid:
 - `docs/product.md`
 - `README.md` — Aider mention in "Multi-Agent / CI Setup" section is stale
 
-### I. Test plans tied to removed harnesses
-
-- `test/evals/library-service/plans/02-session-runner.md` (Aider-shaped)
-- `test/evals/library-service/plans/02-session-runner-prompt.md`
-- `test/evals/library-service/plans/05-aider-harness-prompt.md`
-- `test/evals/library-service/plans/05-aider-harness.md`
-- `test/evals/library-service/runs/2026-05-04-qwen1.5b-aider-floor.md`
-- `test/evals/library-service/runs/2026-05-04-haiku-vs-sonnet-3way.md` (verify)
-- `test/evals/library-service/runs/2026-05-04-haiku-hooks-active.md` (verify)
-
-Keep `test/evals/library-service/plans/README.md` + `runs/README.md` but
-update to reflect cortex-only running.
+### I. Test plans tied to removed harnesses — *done (see Done)*
 
 ### J. Drop MCP server (D9)
 
@@ -381,7 +370,7 @@ conversion (largest, most-gated).
    (pass / improve / retire-with-rationale), confirm `CellResult` output,
    map to a coverage-matrix dimension. The legacy runners come out in the
    final cleanup PR once nothing references them.
-9. **Test plans tied to removed harnesses** (I) — small cleanup after step 4.
+9. ~~**Test plans tied to removed harnesses** (I)~~ — *done in this commit.*
 10. **CLI surface collapse** (F) — sequence as a few PRs:
     a. Routing test + back-compat-alias deletions (`process`, `mcp` already
        gone after J, `measure --calibrate`).
@@ -424,6 +413,21 @@ conversion (largest, most-gated).
   `internal/eval/benchmarks/mteb/`.
 - Verified with `go build ./...` and `go test ./...` both green; no other
   package imported these mains.
+
+### I. Test plans tied to removed harnesses
+
+Archived 3 aider-only documents to `docs/archive/library-service/`:
+
+- `plans/05-aider-harness.md`
+- `plans/05-aider-harness-prompt.md`
+- `runs/2026-05-04-qwen1.5b-aider-floor.md`
+
+Verified the other docs the audit had flagged are *not* aider-specific:
+
+- `plans/02-session-runner.md` is about Claude-CLI session running, not
+  aider — keep.
+- `runs/2026-05-04-haiku-vs-sonnet-3way.md` and `2026-05-04-haiku-hooks-active.md`
+  use ClaudeCLIHarness with Cortex hooks; cortex-relevant data — keep.
 
 ### A (partial). Alternative-harness adapters deleted
 
