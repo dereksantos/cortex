@@ -6,42 +6,66 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// runShellTool executes one command from the allowlist with a strict
-// argv (no shell interpretation), cwd=workdir, explicit non-network
-// environment, and a 30s wall-clock timeout. Combined output is
-// capped at 8 KiB so a runaway test suite can't fill the context.
+// runShellTool runs a command string through `bash -c` with the
+// REPL's workdir as cwd. Iter-7 (2026-05-19) rewrite: dropped the
+// binary allowlist + metacharacter rejection in favour of real shell
+// semantics. The model can now pipe, redirect, glob, and call any
+// binary on the user's PATH — the trust model is "the user opted in
+// by running cortex; the agent has the keys to the workdir."
+//
+// The previous allowlist was Go-pinned hardcoding masquerading as a
+// security boundary. Real defenses (timeout, output cap, axis-5
+// confirm in DAG mode) still apply.
 type runShellTool struct {
 	workdir  string
 	registry *ToolRegistry
+	policy   ShellPolicy
 }
 
-// runShellTimeout bounds each subprocess. Go builds with no cache on
-// the first call can take ~15s for a small program; 30s leaves
-// headroom while still catching infinite loops.
+// runShellTimeout bounds each subprocess. 30s catches infinite loops
+// while leaving room for a real build/test pass on small projects.
 const runShellTimeout = 30 * time.Second
 
-// runShellOutputCap is the maximum bytes of combined stdout+stderr
-// returned to the model in a single tool result. The remainder is
-// truncated with a sentinel suffix; if the model needs more it can
-// re-run with a filter (e.g. `go test -run TestX`).
+// runShellOutputCap caps combined stdout+stderr returned to the
+// model. The remainder is truncated with a sentinel; if the model
+// needs more it can re-run with `head`, `tail`, or `grep`.
 const runShellOutputCap = 8 * 1024
 
 type runShellArgs struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
+	Command string `json:"command"`
 }
 
 // NewRunShellTool constructs the tool. workdir must be absolute.
+//
+// A ShellPolicy is loaded eagerly from <workdir>/.cortex/shell-policy.json
+// (falling back to $HOME/.cortex/shell-policy.json, then empty). An
+// empty policy permits everything — that's the default. The policy is
+// captured at construction; reload by re-creating the tool (a REPL
+// /shell-policy reload command can do this in a later slice).
 func NewRunShellTool(workdir string, reg *ToolRegistry) ToolHandler {
-	return &runShellTool{workdir: workdir, registry: reg}
+	return &runShellTool{
+		workdir:  workdir,
+		registry: reg,
+		policy:   LoadShellPolicy(workdir),
+	}
+}
+
+// NewRunShellToolWithPolicy lets callers supply an explicit policy
+// (tests, benchmark runners with synthetic policies). Skips the
+// config-file lookup.
+func NewRunShellToolWithPolicy(workdir string, reg *ToolRegistry, policy ShellPolicy) ToolHandler {
+	return &runShellTool{
+		workdir:  workdir,
+		registry: reg,
+		policy:   policy,
+	}
 }
 
 func (t *runShellTool) Name() string { return "run_shell" }
@@ -51,16 +75,16 @@ func (t *runShellTool) Spec() llm.ToolSpec {
 		Type: "function",
 		Function: llm.ToolFunc{
 			Name: t.Name(),
-			Description: "Run an allowlisted command (no shell, no interpolation). Allowed: " +
-				"go, gofmt, ls, cat, head, tail, wc, diff, grep, test. " +
-				"30s timeout; output capped at 8 KiB. Use 'go build', 'go test', 'go run' to iterate.",
+			Description: "Run a shell command via `bash -c` with the workdir as cwd. Full shell " +
+				"semantics: pipes, redirects, glob expansion, env vars all work. Use this to build, " +
+				"test, run, or inspect anything the project needs. 30s timeout; output capped at 8 KiB. " +
+				"Pick the right command for the project's stack (go build, npm test, cargo run, pytest, etc.).",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"command": {"type": "string", "description": "Command name (must be on the allowlist)."},
-					"args":    {"type": "array", "items": {"type": "string"}, "description": "Arguments. No shell metacharacters. No absolute paths."}
+					"command": {"type": "string", "description": "Full shell command, e.g. \"npm test\" or \"go build ./...\" or \"grep -r foo src | head\"."}
 				},
-				"required": ["command", "args"]
+				"required": ["command"]
 			}`),
 		},
 	}
@@ -71,46 +95,26 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 	if msg, ok := parseJSONArgs(rawArgs, &args); !ok {
 		return msg, nil
 	}
-
-	// Tolerate the common LLM mistake of passing `"command": "go test"`
-	// instead of `command=go, args=[test, ...]`. We split on whitespace
-	// and shift the trailing tokens onto args. The allowlist still
-	// gates the first token, so this only relaxes the surface, not the
-	// security boundary.
-	if strings.ContainsAny(args.Command, " \t") {
-		fields := strings.Fields(args.Command)
-		args.Command = fields[0]
-		args.Args = append(append([]string{}, fields[1:]...), args.Args...)
+	if args.Command == "" {
+		return errorJSON(errors.New("run_shell: command must not be empty")), nil
 	}
 
-	absCmd, err := resolveShellCommand(args.Command)
-	if err != nil {
+	// User-controlled allow/deny guardrail. Empty policy permits
+	// everything; non-empty Deny rejects matches; non-empty Allow
+	// requires a match.
+	if err := t.policy.Check(args.Command); err != nil {
 		return errorJSON(err), nil
-	}
-	for _, a := range args.Args {
-		if err := validateShellArg(a); err != nil {
-			return errorJSON(err), nil
-		}
-	}
-
-	// Explicit env (no os.Environ): keeps things deterministic and
-	// blocks tool calls from inheriting an HTTP_PROXY or similar.
-	// The Go cache + module cache point into the workdir so test
-	// runs don't poison the operator's GOPATH.
-	env := []string{
-		"PATH=/usr/bin:/bin:/usr/local/bin",
-		"HOME=" + t.workdir,
-		"GOPATH=" + filepath.Join(t.workdir, ".gopath"),
-		"GOCACHE=" + filepath.Join(t.workdir, ".gocache"),
-		"GOMODCACHE=" + filepath.Join(t.workdir, ".gomodcache"),
 	}
 
 	subCtx, cancel := context.WithTimeout(ctx, runShellTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(subCtx, absCmd, args.Args...)
+	cmd := exec.CommandContext(subCtx, "bash", "-c", args.Command)
 	cmd.Dir = t.workdir
-	cmd.Env = env
+	// Inherit the user's environment — npm needs HOME, virtualenvs
+	// rely on PATH, etc. The earlier minimal-env approach was tuned
+	// for the Go-only iteration and broke every other stack.
+	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -126,7 +130,6 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		if errors.As(runErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			// Non-exit error (context deadline, fork failure, etc).
 			exitCode = -1
 		}
 	}
@@ -141,15 +144,8 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		truncated = true
 	}
 
-	// Hand-build the JSON to keep multi-line output legible: we want
-	// the model to see actual newlines, not "\n" escape sequences.
-	// json.Marshal would emit the escaped form, which is harder for
-	// the model to reason about line-by-line. The risk is that the
-	// model's JSON parser sees a multi-line string field — most
-	// providers handle this fine; the alternative is worse.
 	body, _ := json.Marshal(struct {
 		Command   string `json:"command"`
-		Args      []any  `json:"args"`
 		ExitCode  int    `json:"exit_code"`
 		Truncated bool   `json:"truncated"`
 		ElapsedMs int64  `json:"elapsed_ms"`
@@ -157,7 +153,6 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		Error     string `json:"error,omitempty"`
 	}{
 		Command:   args.Command,
-		Args:      argsToAny(args.Args),
 		ExitCode:  exitCode,
 		Truncated: truncated,
 		ElapsedMs: elapsed.Milliseconds(),
@@ -167,17 +162,9 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 	return string(body), nil
 }
 
-func argsToAny(in []string) []any {
-	out := make([]any, len(in))
-	for i, v := range in {
-		out[i] = v
-	}
-	return out
-}
-
 // runErrorString stringifies the run error, distinguishing context
-// timeout from a simple non-zero exit (which is normal and not
-// reported separately — the exit_code field carries it).
+// timeout from a simple non-zero exit (which is normal and reported
+// via exit_code).
 func runErrorString(err error, ctx context.Context) string {
 	if err == nil {
 		return ""
@@ -187,8 +174,6 @@ func runErrorString(err error, ctx context.Context) string {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		// exit_code carries this; redundant string would just
-		// confuse the model.
 		return ""
 	}
 	return err.Error()

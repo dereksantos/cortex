@@ -65,6 +65,10 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 
 		// Stage 2 mechanical ops.
 		EmbedSpec(EmbedConfig{Embedder: cfg.Embedder}),
+		// vector_search is the only default op the steering layer
+		// (decide.next) surfaces to the LLM. Marked Exposable below
+		// after the spec list is built so the field flips on without
+		// disturbing the existing constructor signatures.
 		VectorSearchSpec(VectorSearchConfig{Storage: cfg.Storage}),
 
 		// Stage 2 LLM-backed ops.
@@ -100,6 +104,18 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 				}, nil
 			},
 		},
+	}
+
+	// Flip Exposable on the small set of defaults the steering layer
+	// should advertise to the LLM. Everything else stays internal
+	// (stubs, dispatcher-only metadata, helpers used inside other ops).
+	exposableNames := map[string]bool{
+		"remember.vector_search": true,
+	}
+	for i := range specs {
+		if exposableNames[specs[i].QualifiedName()] {
+			specs[i].Exposable = true
+		}
 	}
 
 	for _, s := range specs {

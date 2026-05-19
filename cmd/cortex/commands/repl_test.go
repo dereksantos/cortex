@@ -34,42 +34,47 @@ func TestResolveAPIURL(t *testing.T) {
 	}
 }
 
-// TestLoadOrSeedSystemPrompt covers two flows: (a) fresh workdir gets
-// the default prompt written; (b) existing prompt is read verbatim.
-// The 1.5B-tuned default isn't compared byte-for-byte (it'll evolve),
-// but we assert key constraints survive in the seed.
+// TestLoadOrSeedSystemPrompt covers the binary-first contract:
+//
+//  1. No override file → returns the in-binary default content (no
+//     seed file is written to disk).
+//  2. Override file present → returns its content verbatim, letting
+//     the user customize per-workdir.
+//
+// The default isn't compared byte-for-byte (it'll evolve); we assert
+// structural constraints survive.
 func TestLoadOrSeedSystemPrompt(t *testing.T) {
-	t.Run("seeds default when missing", func(t *testing.T) {
+	t.Run("returns binary default when override missing", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "repl-system-prompt.md")
+		path := filepath.Join(dir, "repl-system-prompt.local.md")
 		got, err := loadOrSeedSystemPrompt(path)
 		if err != nil {
 			t.Fatalf("loadOrSeedSystemPrompt: %v", err)
 		}
-		// The seed must mention the tool surface so the model knows
-		// what's callable. Exact wording rotates as we tune for
-		// small-model reliability — assert structure, not phrasing.
-		if !strings.Contains(got, "write_file") {
-			t.Errorf("seed should describe the write_file tool; got: %q", got[:min(120, len(got))])
+		// Default must describe what the worker model can do —
+		// otherwise it's not a usable system prompt. Wording rotates;
+		// "tools" is the structural invariant.
+		if !strings.Contains(got, "tool") {
+			t.Errorf("default should mention tools; got: %q", got[:min(120, len(got))])
 		}
-		// File was written so the user can edit it.
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("seed file not persisted: %v", err)
+		// Binary-first: no seed file should be created on disk.
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("loadOrSeedSystemPrompt must not write a seed file; found %s", path)
 		}
 	})
-	t.Run("reads existing verbatim", func(t *testing.T) {
+	t.Run("reads override verbatim", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "repl-system-prompt.md")
+		path := filepath.Join(dir, "repl-system-prompt.local.md")
 		custom := "you are a turbo-charged Go programmer"
 		if err := os.WriteFile(path, []byte(custom), 0o644); err != nil {
-			t.Fatalf("seed write: %v", err)
+			t.Fatalf("override write: %v", err)
 		}
 		got, err := loadOrSeedSystemPrompt(path)
 		if err != nil {
 			t.Fatalf("loadOrSeedSystemPrompt: %v", err)
 		}
 		if got != custom {
-			t.Errorf("expected verbatim read of existing prompt; got %q", got)
+			t.Errorf("expected verbatim read of override prompt; got %q", got)
 		}
 	})
 }
@@ -346,16 +351,26 @@ func TestPickBestOllamaModel(t *testing.T) {
 			want:      "qwen2.5-coder:1.5b",
 		},
 		{
-			name:      "mistral 7b beats qwen-1.5b",
+			// iter-7 (2026-05-19): mistral:7b is now in knownBad
+			// because live runs showed it emitting prose-shaped fake
+			// tool calls instead of structured tool_calls. The
+			// fallback qwen-1.5b is preferred over it.
+			name:      "mistral 7b demoted — fallback wins",
 			installed: []string{"qwen2.5-coder:1.5b", "mistral:7b"},
 			fallback:  "qwen2.5-coder:1.5b",
-			want:      "mistral:7b",
+			want:      "qwen2.5-coder:1.5b",
 		},
 		{
-			name:      "qwen2.5-coder:7b beats mistral:7b (coder bonus)",
+			name:      "qwen2.5-coder:7b beats mistral:7b decisively",
 			installed: []string{"mistral:7b", "qwen2.5-coder:7b"},
 			fallback:  "qwen2.5-coder:1.5b",
 			want:      "qwen2.5-coder:7b",
+		},
+		{
+			name:      "mistral:latest (= mistral:7b alias) also demoted",
+			installed: []string{"qwen2.5-coder:1.5b", "mistral:latest"},
+			fallback:  "qwen2.5-coder:1.5b",
+			want:      "qwen2.5-coder:1.5b",
 		},
 		{
 			name:      "phi3:mini avoided (no tool support in Ollama)",

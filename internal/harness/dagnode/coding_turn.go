@@ -14,6 +14,7 @@ package dagnode
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,74 @@ import (
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// formatPriorOutputs renders this turn's prior NodeResult.Outs as a
+// compact context block to prepend to a coding_turn's user prompt.
+// This is what makes multi-node plans (read → read → synthesize)
+// compose: the synthesis node sees what earlier act.* / coding_turn
+// nodes produced.
+//
+// Empty turn state (single-node plan, first node, or no executor) →
+// empty string; the caller leaves the prompt untouched.
+//
+// Format: one section per prior node with its qname + relevant Out
+// fields. Heterogeneous Out shapes get a generic "fields" dump — the
+// model is good at parsing JSON-shaped context.
+func formatPriorOutputs(ctx context.Context) string {
+	records := dag.AllPriorOutputs(ctx)
+	if len(records) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("PRIOR STEPS IN THIS TURN (use these as ground truth; do not call tools to re-fetch what's already here):\n")
+	for i, r := range records {
+		fmt.Fprintf(&b, "\n[step %d: %s]\n", i+1, r.QualifiedName)
+		// Heterogeneous Out — pull the common useful fields by name,
+		// fall back to a small JSON dump of unknown keys.
+		emitted := false
+		if v, ok := r.Out["output"].(string); ok && v != "" {
+			fmt.Fprintf(&b, "output:\n%s\n", v)
+			emitted = true
+		}
+		if v, ok := r.Out["response"].(string); ok && v != "" {
+			fmt.Fprintf(&b, "response:\n%s\n", v)
+			emitted = true
+		}
+		if v, ok := r.Out["reasoning"].(string); ok && v != "" {
+			fmt.Fprintf(&b, "reasoning: %s\n", v)
+			emitted = true
+		}
+		if !emitted {
+			// Last-resort dump — drop the bulky/uninteresting bits.
+			for k, v := range r.Out {
+				switch k {
+				case "spawned_children", "stub", "fallback", "tokens_in", "tokens_out", "cost_usd", "turns", "files_changed":
+					continue
+				}
+				fmt.Fprintf(&b, "%s: %v\n", k, v)
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// localOllamaAPIURL is the chat-completions endpoint for a default
+// Ollama install. Duplicated from cmd/cortex/commands/repl.go's
+// `defaultOllamaAPIURL` to keep dagnode independent of the CLI layer.
+const localOllamaAPIURL = "http://localhost:11434/v1/chat/completions"
+
+// apiURLForModel returns the chat-completions endpoint appropriate
+// for a given model id. Mirrors the same slash-vs-bare-name routing
+// the REPL uses elsewhere: slash → OpenRouter (empty = client default),
+// bare name → local Ollama. Used by per-node model override in
+// decide.coding_turn so an LLM-emitted `attrs.model` lands at the
+// right endpoint without the caller having to specify both.
+func apiURLForModel(modelID string) string {
+	if strings.Contains(modelID, "/") {
+		return ""
+	}
+	return localOllamaAPIURL
+}
 
 // CodingTurnConfig wires the handler to a model + workdir at
 // registration time. Model and Workdir may be empty: if Model is
@@ -152,6 +221,22 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			workdir = "."
 		}
 
+		// Per-node model override (Stage 7 dynamic-DAG slice). When
+		// decide.next emits attrs.model="..." on a coding_turn spawn,
+		// retarget the harness at that model + the corresponding
+		// API endpoint BEFORE running the session. The harness
+		// constructs its OpenRouterClient fresh per session reading
+		// h.model + h.apiURL, so SetModel/SetAPIURL takes effect on
+		// the next RunSessionWithResult call.
+		//
+		// The harness is short-lived (one chain execution); no need
+		// to restore the original model after — the next turn builds
+		// a fresh one via HarnessFactory.
+		if model != "" && model != cfg.Model {
+			h.SetModel(model)
+			h.SetAPIURL(apiURLForModel(model))
+		}
+
 		// Spawn-aware dispatch wiring. When ActRegistry is provided,
 		// build a dispatcher closure that:
 		//   1. Looks up act.<tool_name> in the registry.
@@ -167,6 +252,17 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		parentNodeID := dag.NodeIDFromContext(ctx)
 		if cfg.ActRegistry != nil {
 			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, &spawnedChildren))
+		}
+
+		// Inject prior turn-state outputs as a context block prepended
+		// to the user prompt. This is what makes the "decide.next emits
+		// [list_dir, read_file, synthesize-coding_turn]" pattern
+		// actually compose: the synthesis node sees what the prior act.*
+		// calls produced, instead of running blind. Empty turn state
+		// (single-node plan, or first node in a turn) → no injection;
+		// behavior unchanged.
+		if priorCtx := formatPriorOutputs(ctx); priorCtx != "" {
+			prompt = priorCtx + "\n\n---\n\nYour task: " + prompt
 		}
 
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)

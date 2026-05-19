@@ -53,6 +53,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -139,8 +140,10 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
 	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
 	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
-	fullTools := false         // --full-tools: register the full 5-tool surface even when routed to Ollama
+	fullTools := false         // --full-tools: kept as a no-op alias since full surface is the iter-7 default
+	minimalTools := false      // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	// Stage 3.5: every REPL coding turn routes tool calls through
 	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
 	// debug escape hatch only.
@@ -203,8 +206,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			}
 		case "--full-tools":
 			fullTools = true
+		case "--minimal-tools":
+			minimalTools = true
 		case "--keep-on-fail":
 			keepOnFail = true
+		case "--history-turns":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
+				i++
+			}
 		case "--dag":
 			// Backwards-compat no-op; DAG dispatch is the default per
 			// Stage 3.5. Kept so scripts that pass --dag don't fail.
@@ -265,8 +275,14 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCostUSD = maxCostOverride
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
+	state.minimalTools = minimalTools
 	state.keepOnFail = keepOnFail
 	state.useDAG = dagEnabled
+	if historyTurnsOverride >= 0 {
+		state.historyLimit = historyTurnsOverride
+	} else {
+		state.historyLimit = defaultHistoryLimit
+	}
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
 	// default for a language/repo-appropriate prompt (e.g. SWE-bench
@@ -344,9 +360,10 @@ type replState struct {
 	apiURL  string
 	verbose bool
 
-	// systemPrompt is loaded from .cortex/repl-system-prompt.md (created
-	// with a 1.5B-tuned default on first run). Held in memory so /reload
-	// can pick up edits without restarting.
+	// systemPrompt is the worker-model system prompt for coding_turn's
+	// agent loop. Binary-first: defaultREPLSystemPrompt is the source
+	// of truth; .cortex/repl-system-prompt.local.md (when present) is
+	// an opt-in user override. Held in memory across the session.
 	systemPrompt string
 
 	// sessionDir is .cortex/sessions/<ts>/, the per-invocation root for
@@ -363,10 +380,6 @@ type replState struct {
 	// turn, in chronological order. /undo pops the top entry, allowing
 	// chained undo back to session start. Empty before the first turn.
 	snapshotStack []string
-
-	// verifyWarned ensures we warn at most once per session when the
-	// workdir has no recognized verifier.
-	verifyWarned bool
 
 	// captureCfg + captureClient are lazily constructed on first
 	// accepted turn so the capture write doesn't pay setup cost when
@@ -419,14 +432,16 @@ type replState struct {
 	maxTurns            int
 	maxCostUSD          float64
 	maxCumulativeTokens int
-	// fullTools forces the 5-tool registry (read/write/list_dir/
-	// run_shell/cortex_search) even when routed to Ollama. Defaults
-	// to false so interactive ollama use keeps the iter-4 fix that
-	// drops list_dir+cortex_search for tiny models that lose
-	// function-call discipline at 5 tools. Benchmark harnesses that
-	// NEED list_dir (e.g. SWE-bench navigating a 5000-file repo)
-	// set this to true.
+	// fullTools is a no-op alias kept for backward compat — the
+	// default tool surface is now full (iter-7 default flip). Old
+	// scripts that pass --full-tools continue to work without
+	// effect.
 	fullTools bool
+	// minimalTools opts INTO the 3-tool registry (read_file +
+	// write_file + run_shell) for users still running tiny Ollama
+	// models that lose function-call discipline at ≥5 tools. Default
+	// false; only set when the user passes --minimal-tools.
+	minimalTools bool
 	// keepOnFail suppresses runTurn's snapshot rollback when verify
 	// fails. For interactive REPL use the default (rollback) is
 	// right: don't keep half-broken edits. For benchmark harnesses
@@ -445,7 +460,49 @@ type replState struct {
 	// parent_node_id = the per-turn synthetic ID. Default false
 	// preserves V0 inline-dispatch behavior.
 	useDAG bool
+
+	// historyLimit caps the conversation-history block sent to the
+	// model on each turn. Default defaultHistoryLimit; configurable
+	// via --history-turns N at startup or /history N mid-session.
+	// 0 disables history injection entirely (turn 1 behavior).
+	historyLimit int
+	// history is the per-session conversation buffer: one entry per
+	// accepted turn (user prompt + assistant final text), in
+	// chronological order. The tail (most recent historyLimit
+	// entries) becomes the harness's PriorMessages block on the next
+	// turn so the model has working memory beyond what cortex_search
+	// surfaces. /undo pops the last entry alongside the snapshot.
+	history []turnExchange
+
+	// openRouterModelsCache holds the result of the most recent
+	// OpenRouter /api/v1/models fetch for the /models slash command.
+	// nil = never fetched (or last fetch errored — see cacheErr).
+	// Cached per-session because the catalogue is large (~300+
+	// entries) and changes on hour/day timescales, not request-time
+	// timescales. Refreshes only on explicit /models refresh.
+	openRouterModelsCache []llm.OpenRouterModel
+	openRouterModelsErr   error
+
+	// modelCatalogCache holds the formatted model-catalog string
+	// injected into decide.next's prompt at call time. Computed on
+	// first use, reused across turns. Invalidated by /model swap and
+	// /models refresh — the next runREPLChainTurn rebuilds it.
+	modelCatalogCache string
 }
+
+// turnExchange is one accepted turn condensed to just what the model
+// needs to see on the next turn: the user's message and the assistant's
+// final text. No tool-call traces — those are noise and burn tokens.
+type turnExchange struct {
+	User      string
+	Assistant string
+}
+
+// defaultHistoryLimit is the default cap on the conversation-history
+// block injected into each turn. 6 = three user/assistant pairs of
+// recent context, which is enough for "now do the same for X" patterns
+// without burning a large chunk of the context window.
+const defaultHistoryLimit = 6
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
 // session dir, the JSONL writer, and seeds the system prompt file if
@@ -457,7 +514,11 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		return nil, fmt.Errorf("init .cortex/: %w", err)
 	}
 
-	promptPath := filepath.Join(cortexDir, "repl-system-prompt.md")
+	// Binary-first: the in-binary defaultREPLSystemPrompt is the source
+	// of truth. .local.md is an opt-in user override. Earlier versions
+	// seeded .cortex/repl-system-prompt.md on first run; those legacy
+	// files are silently ignored.
+	promptPath := filepath.Join(cortexDir, "repl-system-prompt.local.md")
 	systemPrompt, err := loadOrSeedSystemPrompt(promptPath)
 	if err != nil {
 		return nil, err
@@ -524,27 +585,7 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("storage init: %w", err)
 	}
 
-	// LLM provider for the shared Cortex. Use the new llm.WithBackend
-	// API so Ollama-routed sessions don't need to reinvent the stub-
-	// key + SetAPIURL dance. Cloud-routed sessions still use the
-	// auto-resolved keychain path.
-	var provider llm.Provider
-	if apiURL == defaultOllamaAPIURL {
-		c, _, err := llm.NewLLMClient(cfg,
-			llm.WithBackend(llm.BackendOllama),
-			llm.WithModel(model),
-		)
-		if err == nil {
-			provider = c
-		}
-	} else if key, _, kerr := secret.MustOpenRouterKey(); kerr == nil {
-		client := llm.NewOpenRouterClientWithKey(cfg, key)
-		client.SetModel(model)
-		if apiURL != "" {
-			client.SetAPIURL(apiURL)
-		}
-		provider = client
-	}
+	provider := buildLLMProviderForREPL(cfg, model, apiURL)
 	// provider may still be nil — Cortex tolerates that (Full mode
 	// degrades to Fast with a flagged response).
 
@@ -554,6 +595,196 @@ func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *in
 		return nil, nil, fmt.Errorf("cognition init: %w", err)
 	}
 	return store, cortex, nil
+}
+
+// modelCatalogForREPL returns the formatted model-catalog string for
+// decide.next's prompt. Lazy + cached per-session — first call probes
+// Ollama (fast, local) and OpenRouter (slow, remote, cached on the
+// llm side too); subsequent calls reuse the string. Invalidate via
+// resetModelCatalog when /model swaps or /models refresh.
+//
+// Format: local-first list, then a small curated OpenRouter sample
+// (the full 300+ catalogue would dominate the prompt). The LLM
+// picks per-node models from this list via the attrs.model field;
+// names absent from the list still work because per-node dispatch
+// just sets the harness model and api URL — the catalog is a hint,
+// not an allowlist.
+func (s *replState) modelCatalogForREPL() string {
+	if s.modelCatalogCache != "" {
+		return s.modelCatalogCache
+	}
+	var b strings.Builder
+	b.WriteString("Local (Ollama):\n")
+	ollama, _, _ := listOllamaModels(s.apiURL)
+	ollama = filterChatCapableModels(ollama)
+	if len(ollama) == 0 {
+		b.WriteString("  (none — install via `ollama pull`)\n")
+	} else {
+		sort.Strings(ollama)
+		for _, m := range ollama {
+			fmt.Fprintf(&b, "  %s\n", m)
+		}
+	}
+	b.WriteString("Cloud (OpenRouter — use sparingly, paid):\n")
+	openrouter, err := fetchOpenRouterModels()
+	if err != nil || len(openrouter) == 0 {
+		b.WriteString("  (catalogue unavailable)\n")
+	} else {
+		// Curate a short list of well-known IDs rather than dumping
+		// 300+. The LLM can use IDs outside this list (per-node
+		// dispatch doesn't enforce membership), so we just highlight
+		// reasonable defaults.
+		curatedIDs := []string{
+			"anthropic/claude-haiku-4.5",
+			"anthropic/claude-sonnet-4.5",
+			"anthropic/claude-opus-4.5",
+			"openai/gpt-4o-mini",
+			"openai/gpt-4o",
+		}
+		seen := map[string]bool{}
+		for _, m := range openrouter {
+			seen[m.ID] = true
+		}
+		shown := 0
+		for _, id := range curatedIDs {
+			if !seen[id] {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s\n", id)
+			shown++
+		}
+		if shown == 0 {
+			b.WriteString("  (none of the curated IDs are available)\n")
+		}
+	}
+	s.modelCatalogCache = b.String()
+	return s.modelCatalogCache
+}
+
+// filterChatCapableModels drops embedding-only models from the
+// installed-Ollama list. The model catalogue is injected into
+// decide.next's prompt, where the LLM may emit one as attrs.model on
+// a coding_turn spawn — routing a chat call to an embedding-only
+// model fails with a 400 "does not support chat" from Ollama.
+//
+// Heuristic: names containing "embed", "bge-", "minilm", or "rerank"
+// are treated as embedding/reranker-only. Imperfect — a future
+// chat-capable model named "embedded-foo" would be wrongly dropped —
+// but the alternative (calling /api/show for every model) is slow
+// and the current naming conventions are stable across HF/Ollama.
+func filterChatCapableModels(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		lower := strings.ToLower(n)
+		if strings.Contains(lower, "embed") ||
+			strings.Contains(lower, "bge-") ||
+			strings.Contains(lower, "minilm") ||
+			strings.Contains(lower, "rerank") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// resetModelCatalog invalidates the cached catalog. Called when the
+// REPL swaps models (so the LLM sees the current default reflected
+// in the catalog) or when /models refresh is invoked.
+func (s *replState) resetModelCatalog() {
+	s.modelCatalogCache = ""
+}
+
+// buildProviderFactoryForREPL constructs an llm.ProviderFactory the
+// REPL chain hands to decide.next. The factory resolves per-call
+// model IDs the LLM emits via attrs.model — bare names route to
+// Ollama, slash-prefixed to OpenRouter (matching the rest of the
+// REPL's routing convention).
+//
+// The session default (used when the LLM doesn't specify) is the
+// REPL's currently-pinned model + endpoint, so a /model swap shifts
+// the default for subsequent turns. Per-call IDs the LLM picks
+// override on a node-by-node basis.
+//
+// An empty/missing OpenRouter key keeps Ollama routing working —
+// slash-prefixed IDs will error, but bare-name lookups succeed.
+func buildProviderFactoryForREPL(cfg *config.Config, model, apiURL string) llm.ProviderFactory {
+	key, _, _ := secret.MustOpenRouterKey() // empty on failure is fine
+	ollamaURL := ""
+	if apiURL == defaultOllamaAPIURL {
+		ollamaURL = apiURL
+	} else {
+		// Default-Ollama endpoint even when the session is currently
+		// routed to OpenRouter — so the LLM can still emit a bare
+		// local model id and have it resolve. Removes a footgun where
+		// the factory silently can't route to Ollama just because the
+		// session happens to be on cloud.
+		ollamaURL = defaultOllamaAPIURL
+	}
+	return llm.NewProviderFactory(llm.FactoryConfig{
+		Cfg:           cfg,
+		OpenRouterKey: key,
+		OllamaAPIURL:  ollamaURL,
+		DefaultModel:  model,
+		DefaultAPIURL: apiURL,
+	})
+}
+
+// buildLLMProviderForREPL constructs an llm.Provider matching the
+// model + apiURL the REPL is currently routed to. Ollama-shaped URLs
+// route through llm.NewLLMClient(BackendOllama); everything else
+// routes through OpenRouter with the keychain-resolved key. Returns
+// nil when no provider can be configured (Cortex + decide.next both
+// tolerate nil providers by degrading to mechanical / rule-based
+// paths).
+//
+// Shared between newSessionCognition (the eager build) and the REPL
+// chain's decide.next handler (which wants the same provider to
+// classify the next action without re-doing the construction).
+func buildLLMProviderForREPL(cfg *config.Config, model, apiURL string) llm.Provider {
+	if apiURL == defaultOllamaAPIURL {
+		c, _, err := llm.NewLLMClient(cfg,
+			llm.WithBackend(llm.BackendOllama),
+			llm.WithModel(model),
+		)
+		if err == nil {
+			return c
+		}
+		return nil
+	}
+	key, _, kerr := secret.MustOpenRouterKey()
+	if kerr != nil {
+		return nil
+	}
+	client := llm.NewOpenRouterClientWithKey(cfg, key)
+	client.SetModel(model)
+	if apiURL != "" {
+		client.SetAPIURL(apiURL)
+	}
+	return client
+}
+
+// rebindCognitionForModel rebuilds s.store + s.cortex so the shared
+// cognition surface uses a provider bound to the new model. Called by
+// the /model slash command — without this the provider stays bound to
+// the model captured at newREPLState and cortex_search keeps calling
+// the original model for the whole session even after a swap.
+//
+// On success the old store is closed and the new pair is assigned in
+// place. On failure the old pair is preserved (the session keeps
+// working with the prior provider) and the error is returned.
+func (s *replState) rebindCognitionForModel() error {
+	cortexDir := filepath.Join(s.workdir, ".cortex")
+	newStore, newCortex, err := newSessionCognition(cortexDir, s.model, s.apiURL)
+	if err != nil {
+		return err
+	}
+	oldStore := s.store
+	s.store = newStore
+	s.cortex = newCortex
+	if oldStore != nil {
+		_ = oldStore.Close()
+	}
+	return nil
 }
 
 // ensureCaptureClient lazily builds the workdir-rooted Capture once,
@@ -603,54 +834,66 @@ func resolveAPIURL(model string) string {
 	return "" // empty → harness uses OpenRouter default
 }
 
-// loadOrSeedSystemPrompt reads the per-workdir REPL system prompt or
-// writes a default one. The default is deliberately short and biased
-// toward single-step changes — small models do better when explicitly
-// told not to attempt too much per turn.
+// loadOrSeedSystemPrompt resolves the worker-model system prompt for
+// this REPL session. Binary-first: the const is the source of truth,
+// .cortex/repl-system-prompt.local.md is an opt-in override the user
+// can write to customize per-workdir.
+//
+// Earlier behavior wrote a seed file (.cortex/repl-system-prompt.md)
+// on first run and then read it back every session. That made every
+// binary update silently stale until the user `rm`'d the file. Now:
+//
+//  1. Always start with defaultREPLSystemPrompt (in-binary const).
+//  2. If <workdir>/.cortex/repl-system-prompt.local.md exists, return
+//     its content instead — this is the explicit user override.
+//  3. Never write a seed file. Legacy .cortex/repl-system-prompt.md
+//     files are silently ignored.
+//
+// `path` is kept as a parameter for call-site clarity but is now
+// interpreted as the *override* file path (the .local.md variant).
 func loadOrSeedSystemPrompt(path string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		return string(b), nil
 	}
-	seed := defaultREPLSystemPrompt
-	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
-		return "", fmt.Errorf("seed system prompt at %s: %w", path, err)
-	}
-	return seed, nil
+	return defaultREPLSystemPrompt, nil
 }
 
-// defaultREPLSystemPrompt is the seed content for
-// .cortex/repl-system-prompt.md on a fresh workdir. Tuned for the
-// REPL's 3-tool minimal registry (read_file + write_file + run_shell)
-// — see CortexHarness.SetMinimalTools and the iter-5 coherence fix.
+// defaultREPLSystemPrompt is the worker-model system prompt for the
+// agent loop inside decide.coding_turn. Assumed floor: 7B+ model with
+// reliable function-calling. The user override lives at
+// <workdir>/.cortex/repl-system-prompt.local.md.
 //
-// Tuning lessons baked in:
-//   - Iter-3: verbose meta-instructions about tool-call format
-//     actively HURT small models — they parrot the prose instead of
-//     acting. Keep it short.
-//   - Iter-4: small models lose function-call discipline with ≥5
-//     tools registered; the REPL drops to 3 tools when Ollama-routed.
-//   - Iter-5 (this fix): the seeded system prompt previously listed
-//     5 tools, but the harness only registers 3 in REPL mode. Telling
-//     the model about tools that don't exist is the kind of small
-//     coherence bug that pushes a borderline-competent 1.5B model
-//     over the edge into text-only responses. Prompt now matches
-//     the registered surface area exactly.
-const defaultREPLSystemPrompt = `You are a Go programmer working inside a workdir you fully own.
+// Tuning lessons baked in (history; floor has moved up):
+//   - Iter-3: long meta-instructions about tool-call format HURT small
+//     models. Keep it short.
+//   - Iter-4/5: at the 1.5B floor, register only 3 tools and match the
+//     prompt to the registered surface exactly. No longer the floor.
+//   - Iter-6: "You are a Go programmer" + "use go build to verify"
+//     was over-pinned. Generalize.
+//   - Iter-7 (this version): the "questions → no tools" rule was the
+//     leanjs failure root — model never read README, hallucinated Go
+//     commands from training priors. New framing: when the user asks
+//     about THIS workdir, ground yourself in the actual files first.
+//     The agent loop's tool-call discipline does the rest.
+const defaultREPLSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope.
 
-You have these tools:
-  - read_file(path): read a file
-  - write_file(path, content): create or replace a file
-  - run_shell(command, args): run go build, go test, go run, cat, head, tail, wc, diff, grep, test
+CRITICAL: when the user asks about THIS workdir or its code, you MUST call tools to read files before answering. Do not describe the codebase from priors — you have not seen it. Never write "I have read X" or "After reviewing X" unless you actually called read_file(X) in this turn. If you find yourself about to describe a project shape without having called any tools, STOP and call list_dir(".") and read_file("README.md") first.
 
-Workflow: read_file the relevant file (if any), then write_file your implementation, then run_shell to build. Iterate on errors. When the requested step is done, respond with a short summary and NO further tool calls.
+When to use tools:
+  - User asks about the workdir / its code → call list_dir + read_file FIRST, then answer from what you actually read. Do not infer from the workdir name.
+  - User asks for a code change → read what you need, write the change, then verify with the appropriate build/test command.
+  - User asks a general question with no workdir grounding needed → answer in prose. No tool calls.
 
-Make ONE focused change per user message. Edit one file unless the request explicitly spans files. Do not refactor adjacent code that wasn't asked for.
+Discipline:
+  - Make ONE focused change per user message. Edit one file unless the request explicitly spans files.
+  - Don't narrate what you're about to do; just do it.
+  - When making changes, run the project's build/test command (via run_shell) before declaring done. Read errors, fix, retry.
+  - When the step is done, respond with a short summary and NO further tool calls.
 
 Rules:
   - Paths are relative to the workdir; no absolute paths, no "..".
   - Never write under .git or .cortex.
-  - Use "go build" to verify your work — don't claim success without running it.
-  - When a build fails, read the error, fix the code, and try again.
+  - Don't claim you read a file you didn't read.
 `
 
 // emitOneShotJSON prints a single-line JSON envelope summary of the
@@ -720,15 +963,24 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
       --max-turns N    Per-attempt agent-loop cap (default 8).
       --max-cost-usd X Per-attempt USD budget (default 0.20).
       --max-cumulative-tokens N  Per-attempt token budget (default 300000).
-      --full-tools     Register the full 5-tool surface (read, write,
-                       list_dir, run_shell, cortex_search) even when
-                       routed to Ollama. Default off; small models
-                       lose function-call discipline at >3 tools, so
-                       interactive Ollama drops to 3.
+      --full-tools     No-op alias kept for backward compat. The full
+                       5-tool surface (read/write/list_dir/run_shell/
+                       cortex_search) is now the default — see
+                       --minimal-tools to opt back into the iter-4
+                       3-tool registry.
+      --minimal-tools  Drop list_dir + cortex_search from the registry,
+                       leaving read_file + write_file + run_shell.
+                       Opt-in for users still running tiny (<7B)
+                       Ollama models that lose tool-call discipline
+                       at 5 tools.
       --keep-on-fail   Don't roll back the workdir when the verifier
                        fails. Benchmark default — iterations build
                        on prior work instead of restarting from
                        scratch each attempt.
+      --history-turns N  Cap on the conversation-history block sent to
+                       the model on each turn. Default 6 (last 3
+                       user/assistant pairs). 0 disables history.
+                       Mid-session, /history N changes the cap.
       --no-dag         Debug escape hatch: skip act-op dispatch and
                        suppress per-tool dag.TraceEntry rows. By
                        default (Stage 3.5), every coding turn's
@@ -764,9 +1016,37 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			fmt.Printf("  current model: %s (api: %s)\n", s.model, displayAPI(s.apiURL))
 			return true, nil
 		}
+		prevModel, prevAPI := s.model, s.apiURL
 		s.model = rest[0]
 		s.apiURL = resolveAPIURL(s.model)
+		if err := s.rebindCognitionForModel(); err != nil {
+			s.model, s.apiURL = prevModel, prevAPI
+			return true, fmt.Errorf("model swap failed (provider rebind): %w", err)
+		}
+		s.resetModelCatalog()
 		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
+		return true, nil
+	case "/models":
+		refresh := len(rest) > 0 && rest[0] == "refresh"
+		if refresh {
+			s.resetModelCatalog()
+		}
+		s.printModels(refresh)
+		return true, nil
+	case "/shell-policy":
+		s.printShellPolicy()
+		return true, nil
+	case "/history":
+		if len(rest) == 0 {
+			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
+			return true, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(rest[0], "%d", &n); err != nil || n < 0 {
+			return true, fmt.Errorf("/history N: N must be a non-negative integer")
+		}
+		s.historyLimit = n
+		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
 		return true, nil
 	case "/diff":
 		s.printDiff()
@@ -786,6 +1066,9 @@ func printSlashHelp() {
   /diff              changed files since session start
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
+  /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
+  /shell-policy      show the user-configured shell allow/deny policy (if any)
+  /history [N]       show buffered turn count, or set the conversation-history cap to N
   /quit              exit (also Ctrl-D)`)
 }
 
@@ -966,6 +1249,13 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	if accepted {
 		s.turns = row.Turn
 		s.snapshotStack = append(s.snapshotStack, snapDir)
+		// Append to the conversation buffer so subsequent turns see this
+		// exchange via PriorMessages. Only the user prompt + assistant
+		// final text — no tool-call traces.
+		s.history = append(s.history, turnExchange{
+			User:      row.UserMessage,
+			Assistant: row.FinalText,
+		})
 		printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
 			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
@@ -990,6 +1280,35 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		fmt.Fprintf(os.Stderr, "  WARN: session log write failed: %v\n", err)
 	}
 	return nil
+}
+
+// priorMessagesForHarness assembles the conversation-history block for
+// the next harness call: at most s.historyLimit accepted turns, each
+// flattened into a (user, assistant) ChatMessage pair. Tool-call traces
+// are intentionally omitted — they're noise the model doesn't need to
+// reason about future requests, and they burn tokens fast.
+//
+// Returns an empty slice when historyLimit is 0 or no turns have been
+// accepted yet.
+func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
+	if s.historyLimit <= 0 || len(s.history) == 0 {
+		return nil
+	}
+	start := len(s.history) - s.historyLimit
+	if start < 0 {
+		start = 0
+	}
+	tail := s.history[start:]
+	out := make([]llm.ChatMessage, 0, len(tail)*2)
+	for _, ex := range tail {
+		if ex.User != "" {
+			out = append(out, llm.ChatMessage{Role: "user", Content: ex.User})
+		}
+		if ex.Assistant != "" {
+			out = append(out, llm.ChatMessage{Role: "assistant", Content: ex.Assistant})
+		}
+	}
+	return out
 }
 
 // runHarness wraps evalv2.CortexHarness.RunSessionWithResult. Returns
@@ -1025,21 +1344,24 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if s.systemPrompt != "" {
 		h.SetSystemPrompt(s.systemPrompt)
 	}
+	if prior := s.priorMessagesForHarness(); len(prior) > 0 {
+		h.SetPriorMessages(prior)
+	}
 	if s.apiURL != "" {
 		h.SetAPIURL(s.apiURL)
 	}
-	// Iter-4 fix: when routed to local Ollama, small models lose
-	// function-call discipline with the default 5-tool registry. Drop
-	// list_dir + cortex_search so the model sees a 3-tool surface
-	// (read_file + write_file + run_shell). The probe matrix in
-	// PROGRESS-REPL.md iter 3 showed qwen-1.5b function-calls cleanly
-	// with ≤3 tools but emits text shapes at ≥5.
+	// Iter-4 auto-trigger ("Ollama → drop to 3 tools") was tuned for
+	// qwen2.5-coder:1.5b which lost function-call discipline at ≥5
+	// tools. The current floor is 7B+ (mistral 7b and qwen-coder 7b
+	// both handle the 5-tool surface fine), and the iter-7 leanjs run
+	// surfaced the real cost: dropping list_dir means the model can't
+	// orient in an unfamiliar workdir even when its system prompt
+	// tells it to. Default is now full 5 tools.
 	//
-	// --full-tools overrides this for callers that need list_dir +
-	// cortex_search even on Ollama-routed models (e.g. SWE-bench
-	// against a local 30B coder — list_dir is non-negotiable for
-	// navigating a 5000-file repo).
-	if s.apiURL == defaultOllamaAPIURL && !s.fullTools {
+	// --minimal-tools is the explicit opt-out for users still on
+	// tiny models. --full-tools stays as a no-op alias so existing
+	// scripts/benchmark harnesses don't break.
+	if s.minimalTools {
 		h.SetMinimalTools(true)
 	}
 	// Stream the agent loop into the REPL: one line per tool call so
@@ -1099,15 +1421,22 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	return hr, lr, runErr
 }
 
-// runREPLChainTurn executes one REPL coding turn as a full
-// dag.Executor.Run over the Stage 2 chain. The preconfigured harness
-// flows in via CodingTurnConfig.HarnessFactory (so all REPL state —
-// notifier, system prompt, shared cortex, budget, minimal tools —
-// is preserved). The chain's decide.coding_turn handler invokes
-// h.RunSessionWithResult inside the executor, then ResultCallback
-// captures the full HarnessResult + LoopResult back to local vars
-// for the caller. Trace rows for the full 8-node chain land in
-// .cortex/db/dag_traces.jsonl with real parent_node_id lineage.
+// runREPLChainTurn executes one REPL turn as a dynamic dag.Executor.Run
+// over a minimal seed (sense.prompt → decide.next). decide.next
+// inspects the prompt and grows the tree based on the user's intent:
+// conversational prompts produce a 3-node tree, code prompts produce
+// a coding_turn branch, search-augmented prompts produce a longer
+// chain. Same seed, different shape per prompt — this is the
+// dynamic-DAG slice that replaces the prior fixed 8-node chain.
+//
+// The preconfigured harness flows in via CodingTurnConfig.HarnessFactory
+// so when decide.next spawns decide.coding_turn the chain drives THIS
+// instance (with all REPL state already set: notifier, system prompt,
+// shared cortex, prior messages, budget, minimal tools). The full
+// HarnessResult + LoopResult are captured back via ResultCallback.
+//
+// Executor runs in sequential mode so search → decide.next is
+// guaranteed FIFO (parallel mode would race them).
 //
 // V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
 // path; this function is only on the dag-enabled path.
@@ -1145,14 +1474,23 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	reg := buildTurnRegistryWithConfig(prompt, s.model, s.workdir, traceCB, codingCfg)
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, traceCB)
+	if err != nil {
+		return evalv2.HarnessResult{}, harness.LoopResult{}, err
+	}
 
 	// Warm the registry from the calibration snapshot (Stage 4-C)
-	// so the chain's pre-spawn CanAfford checks reflect observed
-	// reality. Missing snapshot is a cold start; not an error.
+	// so pre-spawn CanAfford checks reflect observed reality. Missing
+	// snapshot is a cold start; not an error.
 	_, _ = dag.LoadCalibrationSnapshot(reg, "")
 
 	ex := dag.NewExecutor(reg, traceCB)
+	// Sequential mode: when decide.next spawns [vector_search,
+	// decide.next] for the search arm, FIFO ordering puts vector_search
+	// before the follow-up decide.next. Parallel mode would race them
+	// and the follow-up wouldn't see search results.
+	ex.SetSequential(true)
+
 	seed := []dag.NodeSpec{{
 		Function: dag.FuncSense,
 		Op:       "prompt",
@@ -1163,6 +1501,141 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
 	}
 	return capturedHR, capturedLR, capturedErr
+}
+
+// buildREPLDynamicRegistry builds the registry for the dynamic-DAG
+// REPL path. decide.next is the steering op — it sees the live op
+// catalog + live model catalog via NextConfig and emits the nodes to
+// spawn. Workflow ops the LLM can compose: decide.coding_turn (with
+// optional attrs.model for per-node routing), decide.next (recurse),
+// remember.vector_search.
+//
+// The registry is captured by reference inside decide.next's handler
+// closure, so subsequent registrations (decide.coding_turn,
+// sense.prompt) are visible when the handler runs.
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) (*dag.Registry, error) {
+	reg := dag.NewRegistry()
+	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
+		return nil, fmt.Errorf("ops defaults: %w", err)
+	}
+
+	// decide.next — the steering op. Provider + Registry + ModelCatalog
+	// give it everything it needs to compose multi-op DAGs at call
+	// time. ProviderFactory enables per-call routing: when the LLM
+	// emits a decide.next spawn with `model: "<id>"`, that recursive
+	// classification call uses factory.Get(id) instead of the session
+	// default. Lets the steering layer compose multiple small
+	// specialists (e.g., 3B classifier + 14B re-decider).
+	//
+	// Provider nil falls back to a single coding_turn spawn so the
+	// chain always walks.
+	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
+	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+	nextFactory := buildProviderFactoryForREPL(cfg, s.model, s.apiURL)
+	modelCatalog := s.modelCatalogForREPL()
+	if err := reg.Register(ops.NextSpec(ops.NextConfig{
+		Provider:        nextProvider,
+		ProviderFactory: nextFactory,
+		Registry:        reg,
+		ModelCatalog:    modelCatalog,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.next: %w", err)
+	}
+
+	// sense.prompt — REPL-flavored: spawns decide.next (instead of
+	// the static chain's represent.embed).
+	if err := reg.Register(dag.NodeSpec{
+		Function:    dag.FuncSense,
+		Op:          "prompt",
+		Description: "ingress: user prompt arrives; spawns decide.next to steer the turn",
+		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p, _ := in["prompt"].(string)
+			if p == "" {
+				p = prompt
+			}
+			return dag.NodeResult{
+				Out: map[string]any{"prompt": p},
+				Spawn: []dag.NodeSpec{{
+					Function: dag.FuncDecide, Op: "next",
+					Attrs: map[string]any{"prompt": p},
+				}},
+				CostConsumed: dag.Cost{LatencyMS: 5},
+			}, nil
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("register sense.prompt: %w", err)
+	}
+
+	// decide.coding_turn — runs the harness's agent loop. Exposable
+	// to decide.next's LLM so it can compose coding_turn calls (with
+	// optional attrs.model per-node) into multi-step workflows.
+	// HarnessFactory + ResultCallback flow through the existing
+	// REPL state; reattempt wrapper handles fetch-op retries.
+	rawCT := dagnode.NewCodingTurnHandler(codingCfg)
+	ctHandler := wrapCodingTurnWithReattempt(rawCT, codingCfg, traceCB)
+	if err := reg.Register(dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "coding_turn",
+		Description: "run one LLM agent-loop turn against the workdir; emits a response and may write/run files; supports attrs.model to route this call to a different model",
+		Inputs: []dag.ParamSpec{
+			{Name: "prompt", Type: "string", Required: true},
+			{Name: "model", Type: "string"},
+		},
+		Outputs: []dag.ParamSpec{
+			{Name: "response", Type: "string"},
+		},
+		Cost:      dag.Cost{LatencyMS: 15000, Tokens: 2000},
+		Exposable: true,
+		Handler:   ctHandler,
+	}); err != nil {
+		return nil, fmt.Errorf("register decide.coding_turn: %w", err)
+	}
+
+	// Real act.* handlers registered on the main registry so the
+	// executor can spawn them directly. decide.tool_call's emitted
+	// `act.<tool>` NodeSpecs land here. Coding_turn still has its
+	// own dispatcher path (via codingCfg.ActRegistry → actReg) — this
+	// surface is purely for DAG-level spawns where the specialist
+	// tool-caller has already produced structured args.
+	actToolReg := harness.NewToolRegistry()
+	readTool := harness.NewReadFileTool(s.workdir)
+	writeTool := harness.NewWriteFileTool(s.workdir, actToolReg)
+	listTool := harness.NewListDirTool(s.workdir)
+	shellTool := harness.NewRunShellTool(s.workdir, actToolReg)
+	actToolReg.Register(readTool)
+	actToolReg.Register(writeTool)
+	actToolReg.Register(listTool)
+	actToolReg.Register(shellTool)
+
+	contracts := dagnode.DefaultActOpContracts()
+	costs := dagnode.DefaultActOpCosts()
+	for _, t := range []harness.ToolHandler{readTool, listTool, writeTool, shellTool} {
+		name := t.Name()
+		spec := dagnode.AdaptToolAsAct(dagnode.ActOpConfig{
+			Handler:  t,
+			Contract: contracts[name],
+			Cost:     costs[name],
+		})
+		spec.Exposable = true
+		if err := reg.Register(spec); err != nil {
+			return nil, fmt.Errorf("register act.%s: %w", name, err)
+		}
+	}
+
+	// decide.tool_call — specialist function-calling node. Routes a
+	// natural-language intent through a small purpose-built model
+	// (default = session model; can be routed per-call via attrs.model
+	// e.g. xlam-1.5b). Spawns the resolved act.<tool>.
+	if err := reg.Register(ops.ToolCallSpec(ops.ToolCallConfig{
+		Provider:        nextProvider,
+		ProviderFactory: nextFactory,
+		Registry:        reg,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.tool_call: %w", err)
+	}
+
+	return reg, nil
 }
 
 // ensureStubOpenRouterKey lets a local-Ollama REPL run even when no
@@ -1196,21 +1669,20 @@ type verifyResult struct {
 	OutputTail string
 }
 
-// runVerifier picks a verifier in priority order:
-//  1. --verifier <cmd>: arbitrary shell command, treated as success on
-//     exit 0. Used by benchmark harnesses (SWE-bench → pytest, etc.).
-//  2. go.mod present: `go build ./...` (v1 default for Go projects).
-//  3. fallback: no verifier, one-time warning, accept the turn.
+// runVerifier returns the gate result for a turn. The REPL no longer
+// auto-picks a verifier by detecting project files (go.mod, package.json,
+// etc.) — that was hardcoded language detection living outside the DAG.
+// The agent loop uses run_shell to build/test itself when appropriate;
+// double-checking from outside the loop is redundant.
+//
+// Two paths remain:
+//  1. --verifier <cmd>: explicit user/benchmark-supplied shell command.
+//     Treated as success on exit 0. SWE-bench-style headless runs use
+//     this to gate the auto-retry loop.
+//  2. fallback: no verifier; accept the turn. Trust the agent loop.
 func (s *replState) runVerifier() verifyResult {
 	if s.customVerifierCmd != "" {
 		return s.runCustomVerifier()
-	}
-	if _, err := os.Stat(filepath.Join(s.workdir, "go.mod")); err == nil {
-		return s.runGoBuild()
-	}
-	if !s.verifyWarned {
-		fmt.Println("  (no verifier: workdir has no go.mod; v1 only auto-verifies Go projects)")
-		s.verifyWarned = true
 	}
 	return verifyResult{Kind: verifierNone, OK: true}
 }
@@ -1231,30 +1703,6 @@ func (s *replState) runCustomVerifier() verifyResult {
 		OK:         err == nil,
 		OutputTail: tailString(string(out), 8192),
 	}
-}
-
-// runGoBuild shells out to `go build ./...`. We cap wall time at 60s
-// to avoid wedging the REPL if a build hangs.
-//
-// Subtle bug guarded against: `go build ./...` exits 0 with a warning
-// when there are no Go files to build (e.g. workdir has only a go.mod).
-// Treating that as "ok" hides the failure mode where the model didn't
-// write any code at all. We catch the "matched no packages" pattern
-// and downgrade to no-verify so the turn doesn't accept silently.
-func (s *replState) runGoBuild() verifyResult {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "build", "./...")
-	cmd.Dir = s.workdir
-	out, err := cmd.CombinedOutput()
-	output := string(out)
-	if strings.Contains(output, "matched no packages") {
-		// No Go files yet — treat as no-verify so a turn that wrote
-		// nothing doesn't get a false accept. The verifier kind stays
-		// "go build" so the JSONL row reflects what we tried.
-		return verifyResult{Kind: verifierGoBuild, OK: false, OutputTail: tailString(output, 4096)}
-	}
-	return verifyResult{Kind: verifierGoBuild, OK: err == nil, OutputTail: tailString(output, 4096)}
 }
 
 // gateDecision is what the user chose at the [r/e/s/q] prompt.
@@ -1348,10 +1796,20 @@ func (s *replState) captureTurn(row turnRow) error {
 	return cap.CaptureEvent(event)
 }
 
-// printTurnSummary emits one human-readable line per accepted turn.
+// printTurnSummary prints the model's final response followed by a
+// one-line metadata footer for an accepted turn. The response was
+// previously captured to JSONL but never surfaced to the user —
+// stats-only output is fine for benchmark mode but unusable when
+// you're asking actual questions and want to see the answer.
+//
 // Derives the verify summary from the row's terminal verify status
 // (covers all three rounds: initial, auto-retry, user-driven).
 func printTurnSummary(row turnRow) {
+	if final := strings.TrimSpace(row.FinalText); final != "" {
+		fmt.Println()
+		fmt.Println(final)
+		fmt.Println()
+	}
 	files := "0"
 	if len(row.FilesChanged) > 0 {
 		files = strings.Join(row.FilesChanged, ", ")
@@ -1580,6 +2038,12 @@ func (s *replState) undoLastTurn() error {
 	fmt.Printf("  undone turn %d (%d more available)\n", s.turns, n-1)
 	s.turns--
 	s.snapshotStack = s.snapshotStack[:n-1]
+	// Pop the corresponding conversation-history entry so the model
+	// doesn't see "I made that change" on the next turn for a change
+	// that's been rolled back.
+	if h := len(s.history); h > 0 {
+		s.history = s.history[:h-1]
+	}
 	return nil
 }
 
@@ -1711,6 +2175,182 @@ type ollamaTagsResponse struct {
 	} `json:"models"`
 }
 
+// printShellPolicy shows the active run_shell allow/deny policy.
+// Resolution mirrors harness.LoadShellPolicy: per-workdir first, then
+// global, then empty. We re-load here rather than cache because the
+// user may have edited the JSON file mid-session.
+func (s *replState) printShellPolicy() {
+	policy := harness.LoadShellPolicy(s.workdir)
+	if policy.IsEmpty() {
+		fmt.Println("  shell policy: none active (run_shell permits all commands)")
+		fmt.Printf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}\n",
+			filepath.Join(s.workdir, ".cortex", "shell-policy.json"))
+		return
+	}
+	if len(policy.Deny) > 0 {
+		fmt.Println("  deny patterns (any match rejects):")
+		for _, p := range policy.Deny {
+			fmt.Printf("    %s\n", p)
+		}
+	}
+	if len(policy.Allow) > 0 {
+		fmt.Println("  allow patterns (one match required):")
+		for _, p := range policy.Allow {
+			fmt.Printf("    %s\n", p)
+		}
+	}
+}
+
+// printModels handles the /models slash command: fetches Ollama
+// (fresh each time, local + fast) and OpenRouter (cached per session
+// unless refresh=true, since the catalogue is ~300+ entries) and
+// renders both as two sections, capped at modelListLimit entries each.
+//
+// Ollama uses the current REPL's apiURL if it's Ollama-shaped, else
+// the default Ollama URL — this lets the user list local models even
+// when currently routed to OpenRouter.
+func (s *replState) printModels(refresh bool) {
+	ollamaProbeURL := s.apiURL
+	if ollamaProbeURL == "" {
+		ollamaProbeURL = defaultOllamaAPIURL
+	}
+	ollamaModels, ollamaAvailable, ollamaErr := listOllamaModels(ollamaProbeURL)
+
+	fmt.Println("  Ollama (local):")
+	switch {
+	case !ollamaAvailable:
+		fmt.Println("    (unreachable — run `ollama serve` to enable)")
+	case ollamaErr != nil:
+		fmt.Printf("    (error: %v)\n", ollamaErr)
+	case len(ollamaModels) == 0:
+		fmt.Println("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
+	default:
+		printModelListOllama(ollamaModels)
+	}
+
+	fmt.Println("  OpenRouter:")
+	if refresh || s.openRouterModelsCache == nil && s.openRouterModelsErr == nil {
+		s.openRouterModelsCache, s.openRouterModelsErr = fetchOpenRouterModels()
+	}
+	switch {
+	case s.openRouterModelsErr != nil:
+		fmt.Printf("    (error: %v)\n", s.openRouterModelsErr)
+	case len(s.openRouterModelsCache) == 0:
+		fmt.Println("    (empty catalogue)")
+	default:
+		printModelListOpenRouter(s.openRouterModelsCache)
+	}
+}
+
+// modelListLimit caps how many models per section /models prints
+// before collapsing the tail into a "+N more" footer. Keeps the
+// REPL surface usable when OpenRouter returns 300+ models.
+const modelListLimit = 20
+
+// fetchOpenRouterModels calls OpenRouterClient.ListModels using a
+// throwaway client constructed for the catalog call only (no
+// session-bound state). Results are sorted by ID for deterministic
+// output. The endpoint is unauthenticated; a missing key doesn't
+// block discovery.
+func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
+	client := llm.NewOpenRouterClient(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	models, err := client.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
+}
+
+func printModelListOllama(names []string) {
+	sort.Strings(names)
+	shown := names
+	if len(shown) > modelListLimit {
+		shown = shown[:modelListLimit]
+	}
+	for _, n := range shown {
+		fmt.Printf("    %s\n", n)
+	}
+	if extra := len(names) - len(shown); extra > 0 {
+		fmt.Printf("    +%d more\n", extra)
+	}
+}
+
+func printModelListOpenRouter(models []llm.OpenRouterModel) {
+	shown := models
+	if len(shown) > modelListLimit {
+		shown = shown[:modelListLimit]
+	}
+	for _, m := range shown {
+		ctx := ""
+		if m.ContextLength > 0 {
+			ctx = fmt.Sprintf(" %s ctx", humanCtx(m.ContextLength))
+		}
+		// Prices in API are USD/token; print per 1M to be human-readable.
+		price := ""
+		if m.PricePromptPerTok > 0 || m.PriceComplPerTok > 0 {
+			price = fmt.Sprintf(" $%.2f/$%.2f per 1M (in/out)",
+				m.PricePromptPerTok*1_000_000, m.PriceComplPerTok*1_000_000)
+		}
+		fmt.Printf("    %s%s%s\n", m.ID, ctx, price)
+	}
+	if extra := len(models) - len(shown); extra > 0 {
+		fmt.Printf("    +%d more — /model <id> to pin a specific one\n", extra)
+	}
+}
+
+// humanCtx formats a token count as k or M for compactness. 8192 → 8k.
+func humanCtx(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// listOllamaModels returns the names of all models installed on the
+// Ollama server reachable at chatAPI's host. Returns (names, available,
+// err): available is false iff Ollama itself is unreachable (so the
+// caller can distinguish "Ollama is down" from "Ollama is up but
+// returned an unexpected body").
+//
+// Extracted from probeOllamaAndPickModel so /models can list without
+// re-implementing the /api/tags fetch.
+func listOllamaModels(chatAPI string) ([]string, bool, error) {
+	tagsURL := ollamaTagsURL(chatAPI)
+	if tagsURL == "" {
+		return nil, true, fmt.Errorf("ollama: cannot derive /api/tags URL from %q", chatAPI)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
+	if err != nil {
+		return nil, true, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("ollama /api/tags: status %d", resp.StatusCode)
+	}
+	var tags ollamaTagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, true, err
+	}
+	out := make([]string, 0, len(tags.Models))
+	for _, m := range tags.Models {
+		out = append(out, m.Name)
+	}
+	return out, true, nil
+}
+
 // probeOllamaAndPickModel asks Ollama what's installed, scores each
 // model for tool-calling fitness, and returns the best choice. The
 // fallback is what we return if (a) Ollama is reachable but our
@@ -1725,31 +2365,12 @@ type ollamaTagsResponse struct {
 //   - note: human-readable explanation when chosen != fallback;
 //     empty when no swap happened
 func probeOllamaAndPickModel(chatAPI, fallback string) (string, bool, string) {
-	tagsURL := ollamaTagsURL(chatAPI)
-	if tagsURL == "" {
-		return fallback, true, ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
-	if err != nil {
-		return fallback, true, ""
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	installed, available, err := listOllamaModels(chatAPI)
+	if !available {
 		return fallback, false, ""
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fallback, false, ""
-	}
-	var tags ollamaTagsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+	if err != nil {
 		return fallback, true, ""
-	}
-	installed := make([]string, 0, len(tags.Models))
-	for _, m := range tags.Models {
-		installed = append(installed, m.Name)
 	}
 	chosen := pickBestOllamaModel(installed, fallback)
 	if chosen == fallback {
@@ -1762,17 +2383,19 @@ func probeOllamaAndPickModel(chatAPI, fallback string) (string, bool, string) {
 // pickBestOllamaModel ranks installed Ollama models by tool-calling
 // fitness for the cortex harness's 5-tool registry. Higher is better.
 //
-// Scoring rubric (tuned against the iter-2 probe matrix in
-// PROGRESS-REPL.md — qwen-1.5b loses discipline with 5 tools, mistral:7b
-// handles it cleanly, gemma2 and qwen:0.5b can't tool-call at all):
+// Scoring rubric (tuned via live REPL runs — last revision 2026-05-19
+// after mistral:7b was caught emitting text-shape fake tool calls on
+// leanjs while qwen2.5-coder:7b emits proper structured tool_calls):
 //
 //	+30 if model family is in the "known good function-callers" list
 //	     (qwen2.5-coder ≥3b, llama3.1/3.2, mistral-nemo, granite-code,
-//	      command-r, mistral 7b+)
+//	      command-r)
 //	+10 if the name contains "coder" or "instruct"
 //	+size-bucket-bonus by parameter count parsed from the name suffix
 //	−50 if the model family is known-broken for our tool registry
-//	     (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm)
+//	     (gemma2, qwen2.5:0.5b, qwen2:0.5b, tinyllama, smollm,
+//	      mistral:7b/8b — see iter-7 note: these emit prose
+//	      describing tool use rather than actual tool_calls)
 //
 // Ties broken by name (alphabetical, deterministic). We only return a
 // non-fallback if the best score beats the fallback's score by at
@@ -1825,7 +2448,7 @@ func scoreOllamaModel(name string) int {
 		"qwen2.5-coder:3", "qwen2.5-coder:7", "qwen2.5-coder:14", "qwen2.5-coder:32",
 		"qwen3-coder",
 		"llama3.1", "llama3.2", "llama3.3",
-		"mistral-nemo", "mistral:7", "mistral:8",
+		"mistral-nemo", // mistral-nemo is distinct from mistral:7b; still scored highly
 		"granite-code", "granite3",
 		"command-r",
 	}
@@ -1841,7 +2464,10 @@ func scoreOllamaModel(name string) int {
 		"qwen2.5:0.5", "qwen2:0.5", "qwen:0.5",
 		"tinyllama", "smollm",
 		"nomic-embed",
-		"phi3:mini", // doesn't support tools in Ollama at all
+		"phi3:mini",  // doesn't support tools in Ollama at all
+		"mistral:7",  // iter-7: emits prose pretending to call tools instead of structured tool_calls
+		"mistral:8",  // same family idiosyncrasy as mistral:7
+		"mistral:la", // matches mistral:latest, which is mistral:7b by default
 	}
 	for _, b := range knownBad {
 		if strings.Contains(lower, b) {

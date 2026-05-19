@@ -100,6 +100,13 @@ type NodeSpec struct {
 	// (executor enforces). Defaults to 10 if zero.
 	MaxFanout int
 
+	// Exposable marks ops that a steering layer (e.g. decide.next) may
+	// surface to an LLM as composable building blocks. Defaults to
+	// false — only ops the steering LLM should know about should set
+	// this. Used by Registry.Exposable() and the ops/catalog formatter
+	// to filter out internal/stub/dispatcher-only ops.
+	Exposable bool
+
 	// Handler (set at registration).
 	Handler Handler
 
@@ -224,6 +231,22 @@ func (r *Registry) All() []NodeSpec {
 	out := make([]NodeSpec, 0, len(r.specs))
 	for _, s := range r.specs {
 		out = append(out, s)
+	}
+	return out
+}
+
+// Exposable returns the subset of registered specs marked
+// Exposable=true. Used by the steering layer (decide.next) to build a
+// catalog the LLM sees as composable building blocks — filters out
+// stubs, dispatcher-only metadata ops, and internal helpers.
+func (r *Registry) Exposable() []NodeSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]NodeSpec, 0, len(r.specs))
+	for _, s := range r.specs {
+		if s.Exposable {
+			out = append(out, s)
+		}
 	}
 	return out
 }
