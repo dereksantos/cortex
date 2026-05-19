@@ -238,3 +238,6 @@ dist/
 
 # Loop scratchpad (live REPL build progress, not source of truth)
 PROGRESS-REPL.md
+
+# Aider session artifacts (when used as a side-by-side tool)
+.aider.*

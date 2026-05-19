@@ -85,15 +85,6 @@ Total: ~2,471 LOC plus enum + flag wiring.
   reference is fine as a `--model` knob on the cortex harness; we don't need
   a separate `AgenticEvaluator` type. Fold or delete.
 
-### C. Probe binaries and one-off CLIs (not in the 10 dimensions)
-
-- `cortex-or-probe` (root, 8.2MB build artifact)
-- `cortex-pidev-probe` (root, 3.3MB; no source under `cmd/`)
-- `cmd/cortex-or-probe/main.go` — OpenRouter shape now internalized in
-  `pkg/llm/openrouter.go`
-- `cmd/library-eval/` — pre-v2 research one-off
-- `cmd/mteb-rerank-smoke/` — superseded by `internal/eval/benchmarks/mteb/`
-
 ### D. Unify eval-runner output to `cell_results.jsonl` (D5)
 
 Three runners currently print results to stdout/JSON instead of writing
@@ -220,18 +211,6 @@ Routing fix:
 
 `measure --calibrate` duplicates the standalone `cortex calibrate` command —
 delete the flag; keep the command.
-
-### G. Root hygiene
-
-- Delete `tests/` directory (single empty `__init__.py`, Python skeleton from
-  pre-Go era).
-- `tools.json` is tracked but is generated output (`cmd/cortex/commands/tools.go`).
-  Either commit it as a frozen snapshot with a note in `CONTRIBUTING.md`, or
-  `git rm` and add to `.gitignore`. Currently it drifts.
-- Add to `.gitignore`: `.aider.chat.history.md`, `.aider.input.history`,
-  `cortex-or-probe`, `cortex-pidev-probe` (root binaries).
-- Investigate `daemon_state.json`, `session.json` at repo root — already
-  gitignored but may not need to live in the working dir at all.
 
 ### H. Stale docs
 
@@ -404,9 +383,8 @@ Verification bar). Cuts ordered to minimize churn: trivial / no-risk first,
 then aider-class deletions, then unification, then the legacy-cognition
 conversion (largest, most-gated).
 
-1. **Root hygiene** (G) — minutes, zero risk.
-2. **Probe binaries and one-off CLIs** (C) — verify with `go list -deps`, then
-   delete.
+1. ~~**Root hygiene** (G)~~ — *done in this commit.*
+2. ~~**Probe binaries and one-off CLIs** (C)~~ — *done in this commit.*
 3. **Stale docs** (H) — `mv` to `docs/archive/`.
 4. **Aider + OpenCode + pidev deletion** (A) — biggest single cut; lands D1+D2.
    Update `cellresult.go` enum, `eval.go` + `eval_grid.go` dispatch, delete
@@ -436,6 +414,33 @@ conversion (largest, most-gated).
 14. **Observability decision** (N) — informs whether `watch` + `internal/tui/` +
     `internal/web/` stay.
 15. **Cursor adapter** (O) — likely follows MCP; verify and cut or keep.
+
+---
+
+## Done
+
+### G. Root hygiene
+
+- Deleted `tests/` directory (single empty `__init__.py`, Python skeleton).
+- Deleted root probe binaries `cortex-or-probe`, `cortex-pidev-probe` from
+  the working tree (already covered by `/cortex-*` in `.gitignore`).
+- Added `.aider.*` to `.gitignore` for aider session artifacts.
+- `tools.json` stays tracked — it's a tested frozen snapshot
+  (`cmd/cortex/commands/manifest_test.go` asserts it matches the generator).
+  The original audit's "it drifts" claim was wrong; the test prevents drift.
+- `daemon_state.json` / `session.json` already gitignored; left in place
+  (they're runtime working files).
+
+### C. Probe binaries and one-off CLIs
+
+- Deleted `cmd/cortex-or-probe/` — OpenRouter shape now internalized in
+  `pkg/llm/openrouter.go`.
+- Deleted `cmd/library-eval/` — pre-v2 research one-off, superseded by
+  v2 + `internal/eval/benchmarks/`.
+- Deleted `cmd/mteb-rerank-smoke/` — superseded by
+  `internal/eval/benchmarks/mteb/`.
+- Verified with `go build ./...` and `go test ./...` both green; no other
+  package imported these mains.
 
 ---
 
