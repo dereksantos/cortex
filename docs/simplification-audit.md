@@ -678,6 +678,15 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
+### K (slice 1). `value.score` wired into `buildTurnChain`
+
+`attend.rerank` now spawns `value.score` on the top reranked
+candidate (n4a); `value.score` spawns `decide.inject` (n5). Score
+failures are non-fatal — the chain always continues to inject.
+
+Manual sanity: `cortex run --type=turn --prompt="hello"` reports
+9 nodes executed (was 8). All tests green.
+
 ### F (manifest). `DescribeFlags` fill-out
 
 `DescribeFlags` now lands on every flag-bearing registered command,

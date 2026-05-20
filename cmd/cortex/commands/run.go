@@ -984,12 +984,13 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		},
 	}
 
-	// attend.rerank — rerank candidates; spawns decide.inject.
+	// attend.rerank — rerank candidates; spawns value.score on the top
+	// candidate (audit K). value.score then spawns decide.inject.
 	rerankInner := get("attend.rerank")
 	rerankSpec := dag.NodeSpec{
 		Function:    dag.FuncAttend,
 		Op:          "rerank",
-		Description: "rerank candidates by relevance; spawns decide.inject",
+		Description: "rerank candidates by relevance; spawns value.score on the top candidate",
 		Cost:        dag.Cost{LatencyMS: 800, Tokens: 250},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
@@ -998,6 +999,66 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 				return res, err
 			}
 			reranked, _ := res.Out["reranked"].([]cognition.Result)
+			topCandidate := ""
+			if len(reranked) > 0 {
+				topCandidate = reranked[0].Content
+			}
+			res.Spawn = []dag.NodeSpec{
+				{
+					Function: dag.FuncValue, Op: "score", ID: "n4a",
+					Attrs: map[string]any{
+						"query":      p,
+						"candidate":  topCandidate,
+						"candidates": reranked,
+						"prompt":     p,
+					},
+				},
+			}
+			return res, nil
+		},
+	}
+
+	// value.score — judge whether the top reranked candidate is
+	// load-bearing for the query. Pure trace contribution: it does
+	// not gate the downstream inject decision; the result is captured
+	// for later analysis and the chain continues to decide.inject.
+	scoreInner := get("value.score")
+	scoreSpec := dag.NodeSpec{
+		Function:    dag.FuncValue,
+		Op:          "score",
+		Description: "judge load-bearing-ness of the top candidate; spawns decide.inject",
+		Cost:        dag.Cost{LatencyMS: 9000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			reranked, _ := in["candidates"].([]cognition.Result)
+			// If we have no candidate text, skip the score call but keep
+			// the chain alive — spawn decide.inject directly.
+			candidate, _ := in["candidate"].(string)
+			if candidate == "" {
+				return dag.NodeResult{
+					Out: map[string]any{
+						"load_bearing": false,
+						"confidence":   0.0,
+						"why":          "no candidate to score",
+						"fallback":     true,
+					},
+					Spawn: []dag.NodeSpec{
+						{
+							Function: dag.FuncDecide, Op: "inject", ID: "n5",
+							Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
+						},
+					},
+					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
+				}, nil
+			}
+			res, err := scoreInner(ctx, in, b)
+			if err != nil {
+				// Score failure is non-fatal — keep the chain alive.
+				res = dag.NodeResult{
+					Out:          map[string]any{"load_bearing": false, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
 			res.Spawn = []dag.NodeSpec{
 				{
 					Function: dag.FuncDecide, Op: "inject", ID: "n5",
@@ -1103,7 +1164,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	}
 
 	return []dag.NodeSpec{
-		senseSpec, embedSpec, searchSpec, rerankSpec,
+		senseSpec, embedSpec, searchSpec, rerankSpec, scoreSpec,
 		injectSpec, codingTurnSpec, insightSpec, captureSpec,
 	}
 }
