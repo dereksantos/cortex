@@ -283,12 +283,9 @@ Dimension 6 (in-flight observability) needs an event-stream CLI surface
 `cortex watch`) feed that proxy. If not, both are optional and `watch` is a
 candidate to drop under F.
 
-### O. Cursor adapter
-
-`integrations/cursor/` has a real adapter + design doc but no end-to-end
-test. Same dimension-10 surface as MCP. User dropped MCP under D9; Cursor
-likely follows but wasn't explicitly named. Default: cut with MCP unless
-there's a near-term non-MCP use.
+### O. Cursor adapter — *done.* Per D12 the entire
+`integrations/cursor/` directory is deleted; cortex is its own
+harness. See Done.
 
 ---
 
@@ -369,7 +366,7 @@ conversion (largest, most-gated).
     legacy via cell-result evals. Final PR deletes `internal/cognition/`.
 14. **Observability decision** (N) — informs whether `watch` + `internal/tui/` +
     `internal/web/` stay.
-15. **Cursor adapter** (O) — likely follows MCP; verify and cut or keep.
+~~15. **Cursor adapter** (O) — likely follows MCP; verify and cut or keep.~~ — *done.*
 
 ---
 
@@ -678,6 +675,15 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### O. Cursor adapter removal
+
+Per D12 `integrations/cursor/` is gone in its entirety (`adapter.go`,
+`adapter_test.go`, `README.md`) — ~700 LOC removed. The cursor import
+was already pruned out of `ingest.go` under F.d, so the directory
+delete needed no other code changes.
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### F.d (slice). `watch` + `internal/tui/` removal
 
