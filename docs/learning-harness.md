@@ -4,7 +4,27 @@
 
 ## Abstract
 
-This paper describes Cortex, a system for **continuous context integration** in service of agents executing tasks. We use *learning harness* as descriptive language for the role this layer plays alongside coding harnesses (Claude Code, Cursor, Aider, Claude Agent SDK [1]) and agent memory systems (Mem0 [2], Letta [3], A-Mem [4], Claude Code Auto-Memory, AWS AgentCore [5]). The framework is grounded in CoALA [6], which formalized cognitive architectures for language agents in 2023; Cortex is one specific instantiation. We engage directly with the cluster of recent work that overlaps most closely — sleep-time compute [7], BudgetMem [8], the reflection loop in Generative Agents [9], skill accumulation in Voyager [10], and memory evolution in A-Mem [4] — and describe two specific architectural commitments in Cortex: (a) an *inverse activity gradient* on background processing, where Think runs at reduced budget during active periods and Dream grows during idle, refining the binary active/idle split common in sleep-time approaches; and (b) a *mechanical foreground with a latency target*, where retrieval on the critical path targets <20ms with agentic processing happening off-path. We position the small-model salience layer as the application being built to test whether continuous integration measurably helps small local models produce well-architected code at a fraction of the cost.
+This paper describes Cortex, a self-contained coding harness with
+**continuous context integration** built in. We use *learning harness*
+as descriptive language for the role the cortex cognitive layer plays
+alongside the coding loop, in contrast to agent memory systems (Mem0
+[2], Letta [3], A-Mem [4], Claude Code Auto-Memory, AWS AgentCore [5])
+which sit beside a separate harness. The framework is grounded in
+CoALA [6], which formalized cognitive architectures for language agents
+in 2023; Cortex is one specific instantiation. We engage directly with
+the cluster of recent work that overlaps most closely — sleep-time
+compute [7], BudgetMem [8], the reflection loop in Generative Agents
+[9], skill accumulation in Voyager [10], and memory evolution in A-Mem
+[4] — and describe two specific architectural commitments in Cortex:
+(a) an *inverse activity gradient* on background processing, where
+Think runs at reduced budget during active periods and Dream grows
+during idle, refining the binary active/idle split common in sleep-time
+approaches; and (b) a *mechanical foreground with a latency target*,
+where retrieval on the critical path targets <20ms with agentic
+processing happening off-path. We position the small-model salience
+layer as the application being built to test whether continuous
+integration measurably helps small local models produce well-architected
+code at a fraction of the cost.
 
 ## 1. What is a learning harness
 
@@ -13,7 +33,7 @@ Modern AI agents in production rely on two well-established classes of infrastru
 - **Coding harnesses** [1] execute the agent's task loop: receive intent, plan, call tools, return responses. Turn-bounded, synchronous, episodic.
 - **Memory systems** [2, 3, 4, 5] persist information across sessions and surface it on demand via retrieval.
 
-A *learning harness* is descriptive language for a third role: a layer that runs continuously alongside these, observing events as they happen, reconciling new information against existing knowledge, and surfacing relevant context proactively rather than only on demand. This role is not a new category — it sits within the framework of cognitive architectures for language agents [6], and is closely related to the sleep-time / background-agent pattern [7] and to memory-evolution approaches [4].
+A *learning harness* is descriptive language for a third role: a layer that runs continuously alongside the coding loop, observing events as they happen, reconciling new information against existing knowledge, and surfacing relevant context proactively rather than only on demand. In Cortex this layer is not a sidecar — it is co-resident with the coding harness, sharing the same process and event log. The role itself is not a new category; it sits within the framework of cognitive architectures for language agents [6], and is closely related to the sleep-time / background-agent pattern [7] and to memory-evolution approaches [4].
 
 We use the term because it is useful to name the role concretely. The defining behavior is the loop:
 
@@ -51,7 +71,10 @@ The discipline that crystallized in 2025-2026 [12] reframed the bottleneck in ag
 
 ## 3. Cortex
 
-Cortex is a single-binary daemon in Go. It captures events from coding harnesses (Claude Code, Cursor, Aider, or any MCP-enabled client) via lightweight hooks, stores them in SQLite with vector embeddings, and runs five cognitive modes:
+Cortex is a single-binary harness in Go. It owns the coding loop
+(`cortex code`, `cortex repl`, `cortex run`) and a long-running daemon
+that consumes the in-process event journal, stores derived state in
+SQLite with vector embeddings, and runs five cognitive modes:
 
 | Mode | Type | Purpose |
 |------|------|---------|
@@ -78,7 +101,7 @@ Think runs during active periods at reduced budget, doing only what spare cycles
 
 ### 3.2 Mechanical foreground with a latency target
 
-Most agent memory systems are LLM-mediated end-to-end. Cortex's design splits the foreground retrieval path away from any LLM call: Reflex performs embedding similarity, tag matching, and recency weighting, with the agentic modes (Reflect, Resolve, Think, Dream) running off-path and feeding Reflex via cached artifacts. The architectural goal is a foreground path with low and predictable latency — <20ms is the target — so quality can compound in the background. This is similar in spirit to RAG-with-rerank patterns and commits explicitly to keeping LLM calls out of the critical path. The latency target is an active engineering goal, not a number Cortex has reliably pinned in real-world use yet; current sessions still see 80–100ms hot-path warnings.
+Most agent memory systems are LLM-mediated end-to-end. Cortex's design splits the foreground retrieval path away from any LLM call: Reflex performs embedding similarity, tag matching, and recency weighting, with the agentic modes (Reflect, Resolve, Think, Dream) running off-path and feeding Reflex via cached artifacts. The architectural goal is a foreground path with low and predictable latency — <20ms is the target — so quality can compound in the background. This is similar in spirit to RAG-with-rerank patterns and commits explicitly to keeping LLM calls out of the critical path. The latency target is an active engineering goal, not a number Cortex has reliably pinned in real-world use yet.
 
 ### 3.3 What Think and Dream produce
 
@@ -97,15 +120,15 @@ A learning harness is worth the engineering only if it produces measurable benef
 
 **Small models writing well-architected code.** Frontier models compensate for thin context with strong priors; smaller local models rely more directly on the context they receive. If continuous context integration can give a 7B-class model the salience layer it needs — the right decisions, the right patterns, the right contradictions, the right entities, at the right moment — to produce code meeting professional architectural standards, the engineering is justified.
 
-The application is being built on top of Aider [13], with a three-tier knowledge model: surface conventions, architectural patterns, and AST-derived structural facts. The third tier is the leverage point and the hardest to extract — it is exactly the kind of bounded, parallelizable, idle-time work that Dream is designed for.
+The application is being built inside the cortex harness itself, with a three-tier knowledge model: surface conventions, architectural patterns, and AST-derived structural facts. The third tier is the leverage point and the hardest to extract — it is exactly the kind of bounded, parallelizable, idle-time work that Dream is designed for.
 
-The Agentic Benefit Ratio (ABR) metric [14] quantifies the gain:
+The Agentic Benefit Ratio (ABR) metric [13] quantifies the gain:
 
 ```
 ABR = quality(Fast + Think) / quality(Full)
 ```
 
-ABR approaching 1.0 means the learning loop has internalized enough of the project's structure that fast mechanical retrieval matches the synchronous agentic pipeline. Initial results from a 1.5B-parameter model show an average ABR of 0.77 with session convergence to 1.0 by the second query [14].
+ABR approaching 1.0 means the learning loop has internalized enough of the project's structure that fast mechanical retrieval matches the synchronous agentic pipeline. Pre-DAG-protocol baselines measured ABR at 0.586 (recorded in `docs/eval-journal.md`); the target is for ABR to compound upward as the DAG ops land and as eval coverage broadens.
 
 ### 4.1 Falsification
 
@@ -113,8 +136,7 @@ If small models with full Cortex context still produce code measurably worse tha
 
 ## 5. Open questions
 
-- **Activity detection.** Current heuristics use query rate and tool-call timing. These may not generalize across developer workflows; better signals likely require deeper coordination with the host harness.
-- **Cross-harness generalization.** Cortex captures from any MCP-enabled client, but the salience layer is shaped by what each harness exposes.
+- **Activity detection.** Current heuristics use query rate and tool-call timing. These may not generalize across developer workflows; better signals are an open engineering question.
 - **Falsification thresholds.** What is the smallest model class for which continuous context integration produces meaningful benefit? Is there a floor below which no amount of integration helps?
 - **Budget tuning.** The inverse-budget model has knobs (MaxBudget, GrowthRate, ActivityWindow) currently set heuristically. Whether these are best learned per-session, per-developer, or per-project is open.
 - **Comparison to sleep-time compute.** Whether the inverse activity gradient produces measurable gains over a binary active/idle split, in this application setting, is an empirical question we have not yet tested directly against [7].
@@ -145,9 +167,7 @@ If small models with full Cortex context still produce code measurably worse tha
 
 [12] *Agentic Context Engineering.* arXiv:2510.04618, 2024.
 
-[13] Aider. aider.chat
-
-[14] *Cortex: A Reference Implementation of Context Evolution.* See [abstract.md](abstract.md).
+[13] *Cortex: A Reference Implementation of Context Evolution.* See [abstract.md](abstract.md).
 
 ---
 

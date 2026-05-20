@@ -199,14 +199,10 @@ prompt→output token pairs for the prompt-quality model in
 
 ### H. Stale-doc rewrite
 
-Archive-move portion is done (see Done). Remaining: update or rewrite the
-docs that are still relevant but framed around the old cross-harness grid:
-
-- `docs/integration-roadmap.md`
-- `docs/tool-surface.md`
-- `docs/learning-harness.md`
-- `docs/product.md`
-- `README.md` — Aider mention in "Multi-Agent / CI Setup" section is stale
+Archive-move portion is done (see Done). ~~Remaining: update or rewrite
+the docs that are still relevant but framed around the old cross-harness
+grid:~~ — *done.* All five docs reframed for cortex-only direction; see
+Done > H (rewrite).
 
 ### I. Test plans tied to removed harnesses — *done (see Done)*
 
@@ -675,6 +671,35 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### H (rewrite). Cortex-only doc reframe
+
+Five docs reframed under the cortex-as-its-own-harness direction:
+
+- `README.md` — Quick Start collapses to `cortex init/daemon/code`;
+  Slash Commands section gone; `Multi-Agent / CI Setup` no longer
+  mentions Claude Code; CLI Commands section rebuilt to point at
+  the new `cortex search --type=…` views; cursor "design-only"
+  limitation removed; project structure tree drops `integrations/`.
+- `docs/product.md` — full rewrite. The "Integration with Claude
+  Code" section, Slash Commands section, and Claude-hook-wiring
+  block all deleted. Commands Reference reflects the post-audit
+  surface (no `recent`/`insights`/`entities`/`graph`/`watch`,
+  no `session-start`/`inject-context`/`stop`/`cli`). Data Flow
+  diagram updated to journal-first.
+- `docs/learning-harness.md` — abstract + section 1 + section 3 +
+  section 4 + section 5 reframed; "captures from any MCP-enabled
+  client" replaced; Aider reference [13] reworked; cross-harness
+  open question removed; ABR figure updated to the 0.586
+  pre-DAG-protocol baseline.
+- `docs/tool-surface.md` — opening paragraph reframed (cortex CLI
+  is the entry point); "Current gaps" updated to point at the
+  audit's `DescribeFlags` slice.
+- `docs/integration-roadmap.md` — section 4 ("What Cortex actually
+  is") reframed; Phase 2 MCP-server item replaced with a "deferred
+  per D9" note; phase summary table updated.
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### O. Cursor adapter removal
 

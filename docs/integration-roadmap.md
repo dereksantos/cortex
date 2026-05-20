@@ -73,16 +73,17 @@ the API.
 
 ## What Cortex actually is (positioning that falls out)
 
-Cortex is the **Sense + Attend** function the host harness (Claude Code,
-Aider, opencode) doesn't have. The interpretive stage that reads the
-user's prompt, scores salience over the journal + project state, and
-surfaces the top-k into context *before* the model's Decide function runs.
+Cortex is a coding harness whose distinctive load-bearing function is
+**Sense + Attend** — the interpretive stage that reads the user's
+prompt, scores salience over the journal + project state, and surfaces
+the top-k into context *before* the model's Decide function runs.
 
 That "memory system" is incidental — the substrate happens to be an
 event-sourced journal, but the *function* is salience over substrate.
 Tool use (`cortex_search`) is Act, not Sense — the model reaching for
 data. Cortex's distinctive contribution is the Attend step that runs
-before any tool call is needed at all.
+before any tool call is needed at all, co-resident with the coding
+loop rather than sidecar-attached to one.
 
 This positioning is the through-line of the roadmap: every phase either
 sharpens the Sense+Attend function, instruments it, or measures it.
@@ -287,9 +288,9 @@ wave in Phase 4. This is `coverage-matrix.md` stage 1 made explicit.
    - Required by τ-bench, MINT (dims 4, 7).
    - May already exist via in-process harness — verify before building.
 
-3. **MCP server registration** via CLI flag.
-   - `cortex code --mcp-server <url>` or equivalent.
-   - Required for dim 10 (Extensibility) proxy.
+3. **Extensibility surface (dim 10) deferred.**
+   - Per D9 the MCP server is dropped; dimension 10 gets revisited
+     later. No CLI work in this phase.
 
 4. **Confirmation-gate flag** for destructive operations.
    - Lets benchmarks test both gated and ungated behavior.
@@ -590,7 +591,7 @@ five scattered claims.
 |---|---|---|---|
 | 0 — Reconciliation | (docs only) | — | Cross-links + cortex-function column |
 | 1 — Tool-surface foundation | G4 (axes 1, 4, 6) | 0 | `tools.json` + envelope + unified telemetry |
-| 2 — CLI surfaces | (unblocks 4) | 1 | Event stream + multi-turn driver + MCP + `--confirm` |
+| 2 — CLI surfaces | (unblocks 4) | 1 | Event stream + multi-turn driver + `--confirm` (MCP deferred per D9) |
 | 3 — Cognitive graph in loop | G3 | 1, 2 | Reflex auto-inject + Value closure + Modulate exposure |
 | 4 — Upstream wave | dims 1, 4, 6, 7, 8, 9, 10 | 2, 3 | τ-bench / MINT / AgentDojo / BFCL + 3 proxies |
 | 5 — DAG protocol + e2e | G1, G2 | all | Node registry + budget model + seed-and-grow executor + Model node + 10-dim e2e (see [`dag-protocol.md`](dag-protocol.md)) |
