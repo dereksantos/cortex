@@ -493,6 +493,17 @@ type replState struct {
 // turnExchange is one accepted turn condensed to just what the model
 // needs to see on the next turn: the user's message and the assistant's
 // final text. No tool-call traces — those are noise and burn tokens.
+//
+// TODO (history drops tool grounding): "tool-call traces are noise" is
+// half-true — the raw trace is noisy, but the discoveries inside it
+// ("read pkg/foo/bar.go and learned func X takes Y") are exactly the
+// context that justifies not re-exploring on the next turn. With only
+// {User, Assistant} the model has to rediscover the workdir each turn.
+// Options: (a) append a compact "observations" line per turn — files
+// read, tests run, key findings — summarized by a cheap reflect.* node
+// at finalize; (b) keep the structured trace and let priorMessagesFor-
+// Harness pick the salient parts per next-prompt similarity. (a) is
+// the smaller slice; (b) is the learning-harness shape.
 type turnExchange struct {
 	User      string
 	Assistant string
@@ -518,6 +529,10 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 	// of truth. .local.md is an opt-in user override. Earlier versions
 	// seeded .cortex/repl-system-prompt.md on first run; those legacy
 	// files are silently ignored.
+	// TODO: prefer AGENTS.md (the emerging cross-tool standard) over a
+	// Cortex-private .local.md override. Look for ./AGENTS.md at the
+	// project root first, fall back to .cortex/repl-system-prompt.local.md
+	// for back-compat.
 	promptPath := filepath.Join(cortexDir, "repl-system-prompt.local.md")
 	systemPrompt, err := loadOrSeedSystemPrompt(promptPath)
 	if err != nil {
@@ -634,6 +649,14 @@ func (s *replState) modelCatalogForREPL() string {
 		// 300+. The LLM can use IDs outside this list (per-node
 		// dispatch doesn't enforce membership), so we just highlight
 		// reasonable defaults.
+		// TODO (hardcoded curated list decays): same shape as
+		// scoreOllamaModel's knownGood — Go literal that goes stale as
+		// new models ship. Source from observed success in the learning
+		// store (top-N by tool-call success rate this project), with
+		// these IDs as a cold-start prior only. Also: rank — generic
+		// Python project, Go project, and dataviz project each want a
+		// different surface presented to decide.next. Same observed-
+		// fitness machinery as the Ollama probe TODOs.
 		curatedIDs := []string{
 			"anthropic/claude-haiku-4.5",
 			"anthropic/claude-sonnet-4.5",
@@ -672,6 +695,14 @@ func (s *replState) modelCatalogForREPL() string {
 // chat-capable model named "embedded-foo" would be wrongly dropped —
 // but the alternative (calling /api/show for every model) is slow
 // and the current naming conventions are stable across HF/Ollama.
+//
+// TODO (ask the backend, don't guess from name): the heuristic is a
+// third hardcoded list adjacent to scoreOllamaModel's knownGood/Bad
+// and modelCatalogForREPL's curatedIDs — same decay problem. Cache
+// /api/show capabilities per (backend, model) at first reference
+// (one slow call, one cache hit forever) and consult the cache. Same
+// pattern works across vLLM / llama.cpp once the backend-registry
+// TODO lands — each backend exposes its own capability probe.
 func filterChatCapableModels(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
@@ -827,6 +858,14 @@ func (s *replState) close() {
 // provider prefix), to OpenRouter otherwise. We treat a slash as the
 // "this is provider/model" signal — matches the convention `cortex code`
 // uses (anthropic/foo, qwen/foo, openai/foo).
+//
+// TODO (two-backend world is too narrow): "ollama or openrouter" is
+// the entire universe today. Real users with their own inference
+// servers — vLLM, llama.cpp, LM Studio, sglang — have no path,
+// neither do direct Anthropic / OpenAI keys. For the small-model
+// amplifier story local inference variety is the point. Generalize
+// to a backend registry (model id pattern → endpoint + auth) with
+// the current ollama/openrouter pair as two preconfigured entries.
 func resolveAPIURL(model string) string {
 	if !strings.Contains(model, "/") {
 		return defaultOllamaAPIURL
@@ -834,6 +873,15 @@ func resolveAPIURL(model string) string {
 	return "" // empty → harness uses OpenRouter default
 }
 
+// TODO (layer, don't replace): the override file is full-replacement
+// today — if a user writes .local.md they lose the iter-7 calibrated
+// guardrails baked into defaultREPLSystemPrompt ("don't hallucinate
+// the codebase", "no absolute paths"). Combined with the AGENTS.md
+// TODO at newREPLState: the right shape is `default + (project
+// addendum from AGENTS.md or .local.md) + (per-model variant if
+// any)`. Keep the calibrated rules always; let projects ADD
+// conventions without losing them.
+//
 // loadOrSeedSystemPrompt resolves the worker-model system prompt for
 // this REPL session. Binary-first: the const is the source of truth,
 // .cortex/repl-system-prompt.local.md is an opt-in override the user
@@ -858,6 +906,16 @@ func loadOrSeedSystemPrompt(path string) (string, error) {
 	return defaultREPLSystemPrompt, nil
 }
 
+// TODO (rules are policy, not enforcement): the "Don't claim you read
+// a file you didn't read" and "Never write under .git or .cortex"
+// rules are model-side asks with nothing enforcing them. A reflect.*
+// node at finalize that cross-checks final_text claims ("I read X",
+// "After reviewing Y") against the turn's act.read_file trace would
+// turn policy into a signal — fans into the learning loop as either
+// a feedback.correction event or a captured "model hallucinated again"
+// metric. This is exactly the salience-layer-for-small-models pattern
+// applied to prompt rules.
+//
 // defaultREPLSystemPrompt is the worker-model system prompt for the
 // agent loop inside decide.coding_turn. Assumed floor: 7B+ model with
 // reliable function-calling. The user override lives at
@@ -1048,6 +1106,10 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		s.historyLimit = n
 		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
 		return true, nil
+	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
+	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
+	// keeping them here just to back a parallel snapshot system isn't
+	// worth the maintenance.
 	case "/diff":
 		s.printDiff()
 		return true, nil
@@ -1094,6 +1156,19 @@ func displayAPI(api string) string {
 // The structured row in session.jsonl carries enough to reconstruct
 // what happened, including the auto-retry round and any user-driven
 // retry hints.
+//
+// TODO: move verification from this hardcoded outer-loop gate into the
+// DAG as an emergent micro-node (e.g. verify.* op family spawned when
+// the coding turn produced edits). The small LLM at that node decides
+// what to run from project context (test file present? Makefile? CI
+// config?) and its output feeds back via a normal DAG edge — same
+// shape as any other decide.* node. Benefits: verification quality
+// becomes a measurable DAG node captured in cell_results.jsonl,
+// evaluable + swappable, and language-agnostic without hardcoded
+// detection. Gate on an emergence eval (docs/emergence-evals.md) for
+// "post-edit → verify-node-spawned" recall before deleting --verifier;
+// keep --verifier as a benchmark-only forcing function while the
+// emergent path matures.
 func (s *replState) runTurn(userPrompt string) error {
 	turnNum := s.turns + 1
 
@@ -1139,6 +1214,18 @@ func (s *replState) runTurn(userPrompt string) error {
 	// consumers; later attempts merge their files-changed into the
 	// row but are not individually broken out (they would land as
 	// extra session.jsonl fields in a follow-up schema bump).
+	//
+	// TODO (retry is monotone): each retry re-runs the SAME model with
+	// the SAME prompt + SAME tool surface, just with verifier output
+	// appended. For small-model amplification the escalation should
+	// have diversity: bump temperature, route attempt 2 through a
+	// stronger decide.next model, decompose into a plan.* node, or
+	// flip --minimal-tools off/on. A retry-policy node ("given attempt
+	// N failed with signal S, pick the diversification move") fits the
+	// micro-decision DAG model and is the place small-model amplifier
+	// behavior actually shows up. Today "try again with the error" is
+	// the only move; that's where the harness leaves capability on the
+	// table.
 	retryBudget := s.maxRetries
 	if retryBudget < 1 {
 		retryBudget = 1
@@ -1244,6 +1331,17 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 // the rollback for benchmark callers that want iteration to build on
 // prior attempts instead of resetting to scratch). Always writes the
 // row.
+//
+// TODO (learning loop is open): captureTurn records user prompts as
+// events, but the OUTCOME signals on `row` — VerifyOK, UserGate (skip/
+// retry/quit), UserRetryHints, RetryVerifyOK, the diff between attempt
+// 1 and attempt 2's FilesChanged — never become durable wisdom anyone
+// retrieves. session.jsonl is structured but read by no one. To make
+// this an actual learning harness, fan outcome rows into the journal
+// (capture/observation/feedback class as appropriate) so cortex_search
+// surfaces "last time you tried X the verifier said Y; the fix was Z"
+// on the next session. Today the inbound wire (shared Storage →
+// cortex_search) exists; the outbound wire doesn't.
 func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	row.Accepted = accepted
 	if accepted {
@@ -1440,6 +1538,19 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 //
 // V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
 // path; this function is only on the dag-enabled path.
+//
+// TODO (DAG state is per-turn, not per-session): registry + executor
+// are rebuilt fresh every turn and the calibration snapshot is loaded
+// cold each time. Observed costs/latencies/success rates from this
+// turn — exactly the signal that would let CanAfford decisions get
+// smarter — are discarded at function return. decide.next's composition
+// shape ("for prompts like this, last time spawning [vector_search,
+// coding_turn] worked, parallel act.read_file did not") is also lost.
+// Hoist the registry onto replState (or a session-scoped Registry
+// pool), persist per-op observed cost back into the calibration store
+// at finalize, and let decide.next see "shapes that worked recently"
+// as part of NextConfig. This is the cross-turn DAG learning the
+// inverse "DAG learns what to spawn" pitch depends on.
 func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
 	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
 
@@ -1643,6 +1754,16 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 // constructor mandates a key via pkg/secret; for local-only use the
 // key is never sent (Ollama ignores Authorization). Stub-only injected
 // when we're definitely pointed at a local URL.
+//
+// TODO (fix the wrong invariant, delete this stub): this function
+// shouldn't need to exist. NewCortexHarness mandates an OpenRouter
+// key in its constructor — that's the wrong invariant when the
+// backend is local-only. Make the auth requirement a property of the
+// backend (OpenRouter requires a key; Ollama doesn't; vLLM optional)
+// rather than a constructor-time hard check. Once that lands, drop
+// the env-poking band-aid here. Same direction as the backend-
+// registry TODO at resolveAPIURL — auth belongs to the backend, not
+// to a top-level constructor.
 func ensureStubOpenRouterKey(apiURL string) error {
 	if apiURL != defaultOllamaAPIURL {
 		return nil
@@ -1804,6 +1925,15 @@ func (s *replState) captureTurn(row turnRow) error {
 //
 // Derives the verify summary from the row's terminal verify status
 // (covers all three rounds: initial, auto-retry, user-driven).
+//
+// TODO (collapses the retry path): the verify summary reduces three
+// rounds of telemetry to "ok" / "FAIL". For an interactive learning
+// harness the path itself is signal worth surfacing: "ok (retry 2
+// +user hint)" tells the user the model needed coaching, "ok
+// (initial)" tells them it landed first try. Both are free wins from
+// data already on the row — no new capture, just a richer formatter
+// that reads RetryVerifyOK/UserRetryVerifyOK/UserRetryHints and emits
+// the path tag.
 func printTurnSummary(row turnRow) {
 	if final := strings.TrimSpace(row.FinalText); final != "" {
 		fmt.Println()
@@ -1836,6 +1966,17 @@ func printTurnSummary(row turnRow) {
 // user-driven [r]/[e] rounds. Each round gets its own VerifyOK +
 // VerifyOutput pair so downstream analysis can distinguish "model
 // got it second try" from "user hint saved the turn."
+//
+// TODO (schema caps at one auto-retry): the dedicated Retry* and
+// UserRetry* fields only represent round 1 of each kind. With
+// --max-retries N>1, attempts 2..N silently merge their files-changed
+// into the row and lose per-attempt telemetry (tokens, latency, verify
+// output) — see the comment in runTurn's auto-retry loop. Once the
+// retry-policy diversification TODO lands (different model/temp/tool
+// surface per round), per-attempt telemetry IS the signal worth
+// keeping. Replace with `attempts: [{round, kind, model, tokens_in,
+// tokens_out, verify_ok, verify_output, ...}]` and write a downgrade
+// shim so existing jq consumers continue to work.
 type turnRow struct {
 	Turn         int    `json:"turn"`
 	SessionID    string `json:"session_id"`
@@ -1901,6 +2042,19 @@ func (s *replState) writeJSONL(row turnRow) error {
 //
 // For GoL-sized workdirs this is microseconds. For large repos we
 // should switch to git-based snapshots — flagged in PROGRESS-REPL.md.
+//
+// TODO (drop the snapshot system entirely, require git): the every-
+// file copy per turn doesn't scale (Django-sized = tens of thousands
+// of files even after the skip-list) AND the parallel snapshot
+// machinery exists mostly to back /diff + /undo, which modern coding
+// harnesses don't provide — Claude Code and Cursor punt to git/IDE;
+// Aider has /undo + /diff but they're git-backed. Direction: require
+// a git repo at session start (fail clearly + offer `git init` if
+// missing, mirroring /ultrareview), delete snapshotWorkdir +
+// restoreFromSnapshot + the snapshotStack field, and delete /diff +
+// /undo from dispatchSlash. runTurn's rollback-on-fail becomes a
+// no-op (keep-on-fail default) — users have `git checkout .` and
+// `git stash` natively.
 func (s *replState) snapshotWorkdir(turn int) (string, error) {
 	snapDir := filepath.Join(s.sessionDir, "snapshots", fmt.Sprintf("turn-%03d", turn))
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
@@ -2351,6 +2505,22 @@ func listOllamaModels(chatAPI string) ([]string, bool, error) {
 	return out, true, nil
 }
 
+// TODO (Ollama-only auto-probe is not portable): this whole path
+// assumes Ollama. There's no equivalent for vLLM / llama.cpp / LM
+// Studio / OpenRouter ("you have key X, here are the catalog entries
+// matching your project's language" etc.). Pair with the resolveAPIURL
+// backend-registry TODO: each registered backend should expose a
+// `ListAvailable() ([]ModelInfo, error)` method so probe is backend-
+// agnostic and the REPL works the same against any local-or-remote
+// inference server.
+//
+// TODO (probe is one-shot at startup): runs once in Execute and never
+// re-evaluates. If the user runs `ollama pull qwen2.5-coder:14b`
+// mid-session, the new model is invisible until restart. /models
+// refresh busts the OpenRouter catalog cache but doesn't re-run the
+// Ollama probe. Either re-probe on /model and /models, or watch
+// `~/.ollama/models` for changes.
+//
 // probeOllamaAndPickModel asks Ollama what's installed, scores each
 // model for tool-calling fitness, and returns the best choice. The
 // fallback is what we return if (a) Ollama is reachable but our
@@ -2439,6 +2609,25 @@ func pickBestOllamaModel(installed []string, fallback string) string {
 //	llama3.2:latest    → (no match → 0)
 var modelSizeRegex = regexp.MustCompile(`(?i):(\d+(?:\.\d+)?)([mb])`)
 
+// TODO (replace hardcoded rubric with learned fitness): every entry
+// in knownGood/knownBad is "iter-X taught us model Y does/doesn't
+// emit structured tool_calls". That knowledge is exactly what the
+// salvage-telemetry TODO measures — observed tool-call success rate
+// per model — so this should be a lookup against the learning store,
+// not a Go literal. First-turn calibration probe + observed-rate
+// score gives a clean, dynamic, project-agnostic alternative: no
+// list to maintain, the REPL adapts as new models arrive, and the
+// scoring is introspectable (surface it in /models so users see WHY
+// a model was picked). Drop the lists once observed-rate has enough
+// signal; keep this as a cold-start prior only.
+//
+// TODO (project-agnostic ≠ project-blind): the rubric weights size
+// + "coder/instruct" suffix uniformly. A Python project on a workdir
+// where the user's last 10 turns were pytest-shaped wants a different
+// preference than a Go project. Once the learning store carries
+// per-project per-model success rates, score should consult them.
+// Generic prior + project-tuned posterior is the shape.
+//
 // scoreOllamaModel applies the rubric in pickBestOllamaModel.
 func scoreOllamaModel(name string) int {
 	lower := strings.ToLower(name)
@@ -2516,6 +2705,32 @@ func scoreOllamaModel(name string) int {
 // the harness expected and executes the tool out-of-band so the turn
 // produces real work. Conservative: only supports write_file (the
 // dominant case) and only when no tool call was registered.
+//
+// TODO (migrate to decide.tool_call, then delete this stack): this
+// whole salvage path is the small-model-amplifier story implemented as
+// defensive regex parsing — a maintenance tax that grows linearly with
+// model variety. The DAG-native answer is the decide.tool_call
+// specialist node already registered in buildREPLDynamicRegistry: it
+// takes natural-language intent + tool catalog and emits structured
+// args via a purpose-built model (xLAM-style). Once that path is the
+// default for models known to fail OpenAI tool_calls (route on model
+// id or on observed salvage rate per TODO below), the entire
+// extractToolCallFromText / extractToolCallByFieldRegex /
+// repairBacktickStrings stack can be deleted.
+//
+// TODO (salvage bypasses the DAG): when salvageTextToolCall fires it
+// runs the tool out-of-band — no act.* node spawn, no dag_traces.jsonl
+// row, no cost or latency recorded. So the cross-turn DAG learning TODO
+// on runREPLChainTurn never sees salvaged work; a session that survives
+// only because of salvage looks like a session that worked first try.
+// Route salvaged calls through the act.* registry instead so the trace
+// is honest and the calibration store learns from them.
+//
+// TODO (add salvage telemetry): no metric tracks how often salvage
+// fires per model. That's the signal worth keeping — a model with
+// >X% salvage rate should auto-route through decide.tool_call (or get
+// surfaced to the user as "this model needs the specialist router").
+// Drop a counter into row + emit a per-session summary at finalize.
 
 // toolCallTextRegex matches a JSON tool-call shape in arbitrary text:
 //
@@ -2785,6 +3000,15 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 // Default mode (no --verbose) shows only tool calls with smart per-tool
 // arg summaries. Verbose adds inner-turn telemetry + tool-result sizes
 // + session-start banner + error stack.
+//
+// TODO (one source of truth, not two): the notifier (stdout side
+// effect) and the DAG trace (.cortex/db/dag_traces.jsonl) emit the
+// same events through parallel paths — every tool call is both a
+// coding.tool_call notifier event AND a dag.TraceEntry. Pick one
+// canonical source (the DAG trace, since it's structured + persisted)
+// and make stdout streaming a subscriber that formats trace rows as
+// they're written. Removes the duplication AND ensures stdout
+// streaming and post-hoc analysis can never diverge.
 
 // makeREPLNotifier returns the callback wired to the harness's Notify
 // hook. The shape mirrors makeCodeNotifier in code.go but the visible
