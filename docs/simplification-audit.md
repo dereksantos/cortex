@@ -181,8 +181,13 @@ Cuts and consolidations:
 
 Routing fix:
 
-- Standardize the `journal`-style subcommand dispatch for `eval` (promote
-  `eval grid|suite|benchmark` from internal switch to real subcommands).
+- ~~Standardize the `journal`-style subcommand dispatch for `eval` (promote
+  `eval grid|suite|benchmark` from internal switch to real subcommands).~~
+  — *done.* `cortex eval` now dispatches `grid` / `suite NAME` /
+  `benchmark NAME` as positional subcommands, mirroring `cortex journal`.
+  The legacy `--suite=NAME` / `--benchmark=NAME` flag forms still
+  resolve (no break for in-flight scripts) but the subcommand form is
+  the documented canonical surface.
 - ~~Add a test that asserts every registered command resolves to a `case` in
   `main.go`~~ — *done; see Done. Both directions checked (registered →
   routed, routed → registered).*
@@ -671,6 +676,22 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### F (routing). `eval` subcommand promotion
+
+`cortex eval` now dispatches three positional subcommands at the top
+of `Execute`, mirroring `cortex journal <sub>`:
+
+- `cortex eval grid <args>` → `executeGrid`
+- `cortex eval suite NAME` → `runSuite`
+- `cortex eval benchmark NAME [opts]` → `runBenchmark`
+
+The deprecated flag forms (`--suite=NAME`, `--benchmark=NAME`) still
+resolve so scripts don't break, but help text leads with the
+subcommand form. tools.json regenerated; routing test stayed green
+throughout.
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### H (rewrite). Cortex-only doc reframe
 

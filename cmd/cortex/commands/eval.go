@@ -25,15 +25,39 @@ type EvalCommand struct{}
 func (c *EvalCommand) Name() string { return "eval" }
 
 // Description returns the command description.
-func (c *EvalCommand) Description() string { return "Run evaluation scenarios" }
+func (c *EvalCommand) Description() string {
+	return "Run evaluation (subcommands: grid | suite | benchmark; or -s scenario -m model)"
+}
 
 // Execute runs the eval command.
+//
+// Dispatch order (positional subcommands take precedence, mirroring the
+// `cortex journal <sub>` pattern):
+//
+//	cortex eval grid <args>            → executeGrid
+//	cortex eval suite <name> [opts]    → runSuite
+//	cortex eval benchmark <name> [opts]→ runBenchmark
+//
+// Any other invocation falls through to the flag-driven path below
+// (scenario file + model, --summary / --abr-trend reports, etc.).
+// The deprecated `--suite NAME` / `--benchmark NAME` flag forms still
+// resolve, but the positional subcommand is the documented path.
 func (c *EvalCommand) Execute(ctx *Context) error {
-	// `cortex eval grid <flags>` dispatches to the cross-harness grid
-	// runner (see eval_grid.go). All other usages fall through to the
-	// existing v2 scenario evaluator below.
-	if len(ctx.Args) > 0 && ctx.Args[0] == "grid" {
-		return executeGrid(ctx.Args[1:])
+	if len(ctx.Args) > 0 {
+		switch ctx.Args[0] {
+		case "grid":
+			return executeGrid(ctx.Args[1:])
+		case "suite":
+			if len(ctx.Args) < 2 {
+				return fmt.Errorf("cortex eval suite: missing suite name (mechanic | legacy-cognition | journeys)")
+			}
+			return runSuite(ctx.Args[1], "test/evals/v2", "human", false)
+		case "benchmark":
+			if len(ctx.Args) < 2 {
+				return fmt.Errorf("cortex eval benchmark: missing name (longmemeval | mteb | swebench | niah)")
+			}
+			return runBenchmark(ctx.Args[1], ctx.Args[2:], false)
+		}
 	}
 
 	// Parse flags
@@ -112,8 +136,10 @@ standard benchmark, or runs a special-purpose suite.
                                           --harness flag needed).
   cortex eval grid ...                    Multi-cell grid runner (see
                                           'cortex eval grid --help').
-  cortex eval --benchmark NAME            Run a wrapped benchmark.
-  cortex eval --suite NAME                Run a special-purpose suite.
+  cortex eval suite NAME                  Special-purpose suite
+                                          (mechanic | legacy-cognition | journeys).
+  cortex eval benchmark NAME [opts]       Wrapped benchmark
+                                          (longmemeval | mteb | swebench | niah).
   cortex eval --summary | --abr-trend     Read-only reports from past runs.
 
 Options:
@@ -151,8 +177,9 @@ Examples:
   cortex eval -s auth.yaml -m ollama/qwen2.5-coder:1.5b --judge --judge-model gemma2:2b
   cortex eval --summary                    # Show lift trend
   cortex eval --abr-trend                  # Show ABR progression
-  cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
-  cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex
+  cortex eval benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
+  cortex eval benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex
+  cortex eval suite mechanic
   cortex eval grid --models openai/gpt-oss-20b:free,anthropic/claude-haiku-4-5 --strategies baseline,cortex`)
 			return nil
 		default:
@@ -226,8 +253,8 @@ Examples:
 	return fmt.Errorf("nothing to run. Use one of:\n" +
 		"  cortex eval -s SCEN.yaml -m MODEL    (cortex coding harness — the default)\n" +
 		"  cortex eval grid ...                 (multi-cell grid; see `cortex eval grid --help`)\n" +
-		"  cortex eval --benchmark NAME ...     (wrapped benchmarks: longmemeval, mteb, swebench, niah)\n" +
-		"  cortex eval --suite NAME             (suites: mechanic, legacy-cognition, journeys)\n" +
+		"  cortex eval suite NAME               (suites: mechanic, legacy-cognition, journeys)\n" +
+		"  cortex eval benchmark NAME ...       (benchmarks: longmemeval, mteb, swebench, niah)\n" +
 		"  cortex eval --summary | --abr-trend  (read-only reports from past runs)")
 }
 

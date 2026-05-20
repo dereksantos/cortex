@@ -175,9 +175,9 @@ Run the evaluation framework:
 
 ```bash
 ./cortex eval -s scenario.yaml -m claude-haiku-4-5-20251001
-./cortex eval --suite=mechanic     # mechanic fixture suite
-./cortex eval --suite=journeys     # journey fixture suite
-./cortex eval --benchmark=swebench # wrapped SWE-bench
+./cortex eval suite mechanic        # mechanic fixture suite
+./cortex eval suite journeys        # journey fixture suite
+./cortex eval benchmark swebench    # wrapped SWE-bench
 ```
 
 ---
@@ -465,10 +465,10 @@ go test ./...
 
 ```bash
 # Mechanic suite (fast)
-./cortex eval --suite=mechanic
+./cortex eval suite mechanic
 
 # Journeys suite
-./cortex eval --suite=journeys
+./cortex eval suite journeys
 
 # Specific scenario
 ./cortex eval -s test/evals/v2/some-scenario.yaml -m claude-haiku-4-5-20251001
