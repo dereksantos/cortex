@@ -1168,25 +1168,62 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		},
 	}
 
-	// maintain.extract_insight — extract insights; spawns maintain.capture.
+	// maintain.extract_insight — extract insights; spawns
+	// decide.should_capture (which gates whether maintain.capture fires).
 	insightInner := get("maintain.extract_insight")
 	insightSpec := dag.NodeSpec{
 		Function:    dag.FuncMaintain,
 		Op:          "extract_insight",
-		Description: "extract insights from the turn output; spawns maintain.capture",
+		Description: "extract insights from the turn output; spawns decide.should_capture",
 		Cost:        dag.Cost{LatencyMS: 900, Tokens: 200},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			res, err := insightInner(ctx, in, b)
 			if err != nil {
-				// Empty content path — extract_insight requires content;
-				// skip downstream insight extraction gracefully.
 				res = dag.NodeResult{
 					Out:          map[string]any{"insights": []ops.Insight{}, "count": 0, "skipped": true},
 					CostConsumed: res.CostConsumed,
 				}
 			}
+			// Pass the response content (or a synthetic placeholder) down
+			// so decide.should_capture has an `event` to evaluate.
+			event, _ := in["content"].(string)
+			if event == "" {
+				event = "(empty turn content)"
+			}
 			res.Spawn = []dag.NodeSpec{
-				{Function: dag.FuncMaintain, Op: "capture", ID: "n8"},
+				{
+					Function: dag.FuncDecide, Op: "should_capture", ID: "n7a",
+					Attrs: map[string]any{"event": event},
+				},
+			}
+			return res, nil
+		},
+	}
+
+	// decide.should_capture — gate maintain.capture on a Y/N journal
+	// decision. capture=false short-circuits the chain (no maintain.capture
+	// spawn); capture=true continues to maintain.capture.
+	shouldCaptureInner := get("decide.should_capture")
+	shouldCaptureSpec := dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "should_capture",
+		Description: "Y/N gate: should this turn be journaled? Conditionally spawns maintain.capture",
+		Cost:        dag.Cost{LatencyMS: 16000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := shouldCaptureInner(ctx, in, b)
+			if err != nil {
+				// On error, default to NOT capturing — safer than
+				// capturing on broken metadata. Chain terminates here.
+				res = dag.NodeResult{
+					Out:          map[string]any{"capture": false, "tag": "none", "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+				return res, nil
+			}
+			if capture, _ := res.Out["capture"].(bool); capture {
+				res.Spawn = []dag.NodeSpec{
+					{Function: dag.FuncMaintain, Op: "capture", ID: "n8"},
+				}
 			}
 			return res, nil
 		},
@@ -1209,7 +1246,8 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	return []dag.NodeSpec{
 		senseSpec, embedSpec, searchSpec, rerankSpec,
 		scoreSpec, contradictionSpec,
-		injectSpec, codingTurnSpec, insightSpec, captureSpec,
+		injectSpec, codingTurnSpec, insightSpec,
+		shouldCaptureSpec, captureSpec,
 	}
 }
 

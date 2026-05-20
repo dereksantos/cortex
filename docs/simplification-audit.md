@@ -678,6 +678,19 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
+### K (slice 3). `decide.should_capture` gating `maintain.capture`
+
+`maintain.extract_insight` now spawns `decide.should_capture` (n7a)
+with the turn content as the `event` payload. `should_capture`
+inspects the event and spawns `maintain.capture` only when
+`capture=true`. capture=false short-circuits the chain (no journal
+write), which matches the audit's "gating" intent.
+
+Manual sanity: `cortex run --type=turn --prompt="hello"` reports
+10 nodes; should_capture (n7a) runs but the gate's fallback decides
+not to capture for placeholder content, so maintain.capture does
+not spawn. All tests green.
+
 ### K (slice 1+2). `value.score` and `value.detect_contradiction` wired
 
 `attend.rerank` now spawns `value.score` (n4a) on the top reranked
