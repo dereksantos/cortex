@@ -46,7 +46,7 @@ func TestABRSessionOptionsValidate(t *testing.T) {
 		{"happy", func(o *ABRSessionOptions) {}, ""},
 		{"empty ScenarioID", func(o *ABRSessionOptions) { o.ScenarioID = "" }, "ScenarioID"},
 		{"empty REPLBinary", func(o *ABRSessionOptions) { o.REPLBinary = "" }, "REPLBinary"},
-		{"empty Model", func(o *ABRSessionOptions) { o.Model = "" }, "Model"},
+		{"empty Model", func(o *ABRSessionOptions) { o.Model = "" }, "model"},
 		{"empty Workdir", func(o *ABRSessionOptions) { o.Workdir = "" }, "workdir"},
 		{"no prompts", func(o *ABRSessionOptions) { o.Prompts = nil }, "prompts"},
 		{"prompt has newline", func(o *ABRSessionOptions) { o.Prompts = []string{"a\nb"} }, "newline"},

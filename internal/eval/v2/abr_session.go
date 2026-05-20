@@ -220,7 +220,7 @@ func (o *ABRSessionOptions) validate() error {
 		return fmt.Errorf("REPLBinary required")
 	}
 	if o.Model == "" {
-		return fmt.Errorf("Model required")
+		return fmt.Errorf("model required")
 	}
 	if o.Workdir == "" {
 		return fmt.Errorf("workdir required")
