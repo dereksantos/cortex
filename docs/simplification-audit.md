@@ -149,8 +149,10 @@ Cuts and consolidations:
   - `test` — verify what it does; if dev-only, move to `scripts/`
 - **Collapse into `search`** via `--type` flag:
   - `recent`, `insights`, `entities`, `graph`
-- **Collapse into `status`**:
-  - `info`, `stats`, `overview`
+- ~~**Collapse into `status`**: `info`, `stats`, `overview`~~ — *done.*
+  Added `--expand` flag that runs a small-LLM generation of a 3-5 line
+  summary, with a richer mechanical fallback when no local model is
+  available.
 - **Collapse into `maintenance` subcommand** (or under `daemon`):
   - `prune`, `reembed`, `embed`
 - **Claude-Code hook commands** — `session-start`, `inject-context`, `stop`,
@@ -441,6 +443,57 @@ suite invocation; persister errors are non-fatal (logged to stderr,
 suite still reports).
 
 Verified `go build ./...` and `go test ./...` both green.
+
+### F.c. `status` collapse + `--expand` LLM summary
+
+Per the design call: `cortex status` is the single inspect-state entry
+point. The three sibling commands collapse into flags; a new
+`--expand` flag asks a small local LLM to render a 3-5 line summary
+with a mechanical fallback.
+
+New surface:
+
+```
+cortex status                  short status-line (default, sub-ms)
+cortex status --format=claude  Claude Code stdin variant (unchanged)
+cortex status --system         was `cortex info`     (system + Ollama + model recs)
+cortex status --memory         was `cortex overview` (memory dashboard)
+cortex status --json           was `cortex stats`    (raw JSON)
+cortex status --expand         small-LLM summary (Ollama, falls back to mechanical render)
+```
+
+Implementation:
+
+- `InfoCommand`, `OverviewCommand`, `StatsCommand` deleted from
+  `cmd/cortex/commands/debug.go`. Their `Execute` bodies became
+  helpers (`displaySystemInfo`, `displayMemoryOverview`,
+  `displayStatsJSON`) called from `StatusCommand.Execute`.
+- `StatusCommand.Execute` now parses the new flags and dispatches;
+  flag mutex rejects combos with a clear error. Default (no flag)
+  preserves the existing fast template render.
+- `--expand` path:
+  - Composes a `statusContext` from system info, Ollama state, project
+    init state, daemon state, storage stats, and recent activity.
+  - Loads `pkg/cognition/prompts/status_summary.tmpl` (new template,
+    version 1, op `status.summary`) and renders the prompt.
+  - Asks an Ollama small model (auto-picks `qwen2.5:0.5b` /
+    `qwen2.5-coder:0.5b` / similar from the installed set; configured
+    `OllamaModel` wins when present) under an 8s timeout.
+  - On LLM unavailable or error: falls through to a mechanical
+    render of the same data. The data is the valuable context
+    regardless of who renders it.
+- Removed `info`, `stats`, `overview` from `cmd/cortex/main.go`'s
+  routing case + help text. Added `cortex status` examples for the new
+  flags.
+- Routing test catches drift; tools.json regenerated (38 → 35 commands).
+
+Verified `go build ./...` and `go test ./...` both green.
+
+Deferred under L (legacy cognition → DAG): the daemon-side variant
+where state changes trigger background small-LLM generation and write
+the one-liner into `daemon_state.json`. That makes the default
+`cortex status` content LLM-generated *without* paying the LLM cost in
+the call path — implemented as a `maintain.status_summary` DAG node.
 
 ### B + M. Injector machinery deleted, Condition collapsed into ContextStrategy
 

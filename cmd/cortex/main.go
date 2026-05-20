@@ -61,12 +61,14 @@ func main() {
 			}
 			runCommand(command, cmd, &commands.Context{Config: cfg, Args: os.Args[2:]})
 		}
-	case "info", "test", "stats", "status", "forget", "overview", "dream-debug":
+	case "test", "status", "forget", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
-				// For info and status, we can proceed without config
-				if command == "info" || command == "status" {
+				// status works without config — it absorbs the old `info`
+				// view (system + Ollama + model recs) which is meaningful
+				// before `cortex init`.
+				if command == "status" {
 					runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 					return
 				}
@@ -317,7 +319,6 @@ Commands:
   install        Install Cortex hooks for Claude Code
   uninstall      Remove Cortex hooks (--purge to also delete .cortex/)
   projects       List registered projects
-  info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 
   capture        Capture event from stdin (used by AI tools)
@@ -332,8 +333,7 @@ Commands:
   insights       Show insights [category] [limit]
   entities       Show entities [type]
   graph          Show knowledge graph for entity
-  stats          Show statistics
-  status         Show status (for status line)
+  status         Show status (default: one line; --system|--memory|--json|--expand)
   watch          Live dashboard of cognitive modes
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
@@ -341,7 +341,6 @@ Commands:
 
   session-start  Print session start instructions (for hooks)
   inject-context Inject relevant context into prompt (for hooks)
-  overview       Show context overview (visual summary)
   cli            Route slash command arguments (for /cortex)
 
   tools          Generate / verify tools.json manifest
@@ -361,8 +360,12 @@ Global flags (accepted on every command):
                     the same effect.
 
 Examples:
-  # Get system info and model recommendations
-  cortex info
+  # Inspect current state
+  cortex status                  # one-line status (status-line use)
+  cortex status --system         # system resources + Ollama + model recs
+  cortex status --memory         # context memory dashboard
+  cortex status --expand         # LLM-generated multi-line summary (small local model)
+  cortex status --json           # raw stats as JSON
 
   # Test LLM analysis quality
   cortex test decision

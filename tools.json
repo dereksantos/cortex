@@ -103,11 +103,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "info",
-      "description": "Show system info and model recommendations",
-      "version": "0.1.0"
-    },
-    {
       "name": "ingest",
       "description": "Move queued events to database",
       "version": "0.1.0"
@@ -140,11 +135,6 @@
     {
       "name": "measure",
       "description": "Measure prompt quality for small context windows",
-      "version": "0.1.0"
-    },
-    {
-      "name": "overview",
-      "description": "Show context overview (visual summary)",
       "version": "0.1.0"
     },
     {
@@ -260,13 +250,8 @@
       "version": "0.1.0"
     },
     {
-      "name": "stats",
-      "description": "Show storage statistics",
-      "version": "0.1.0"
-    },
-    {
       "name": "status",
-      "description": "Show status (for status line)",
+      "description": "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)",
       "version": "0.1.0"
     },
     {
