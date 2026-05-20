@@ -78,6 +78,7 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		InjectSpec(InjectConfig{Provider: cfg.Provider}),
 		ShouldCaptureSpec(ShouldCaptureConfig{Provider: cfg.Provider}),
 		PredictNextSpec(PredictNextConfig{Provider: cfg.Provider}),
+		PlanSpec(PlanConfig{Provider: cfg.Provider}),
 		ExtractInsightSpec(ExtractInsightConfig{Provider: cfg.Provider}),
 
 		// Stage 5/6 fetch ops — value.detect_unfamiliarity +

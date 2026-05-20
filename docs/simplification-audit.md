@@ -678,6 +678,20 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
+### K (slice 5). `decide.plan` early planner stub
+
+`decide.plan` is now registered in `defaults.go` and wired into the
+turn chain immediately after `sense.prompt` (n1a). The plan node
+spawns `represent.embed` regardless of plan quality — even when
+the provider is missing the fallback emits a single
+"complexity=moderate" subtask containing the verbatim prompt, so
+the chain always reaches the rest of the cognitive ops.
+
+Manual sanity: `cortex run --type=turn --prompt="hello"` reports
+≥12 nodes; n1a (decide.plan) appears between sense.prompt and
+represent.embed. All tests green; `defaults_test.go` expectation
+bumped 13 → 14 ops.
+
 ### K (slice 4). `model.predict_next` between inject and coding_turn
 
 `decide.inject` now spawns `model.predict_next` (n5a) which then

@@ -899,11 +899,12 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		return prompt
 	}
 
-	// sense.prompt — captures the trigger prompt; spawns represent.embed.
+	// sense.prompt — captures the trigger prompt; spawns decide.plan as
+	// an early planner stub, which then spawns represent.embed.
 	senseSpec := dag.NodeSpec{
 		Function:    dag.FuncSense,
 		Op:          "prompt",
-		Description: "ingress: user prompt arrives; spawns represent.embed",
+		Description: "ingress: user prompt arrives; spawns decide.plan",
 		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
@@ -911,12 +912,41 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 				Out: map[string]any{"prompt": p},
 				Spawn: []dag.NodeSpec{
 					{
-						Function: dag.FuncRepresent, Op: "embed", ID: "n2",
-						Attrs: map[string]any{"text": p, "prompt": p},
+						Function: dag.FuncDecide, Op: "plan", ID: "n1a",
+						Attrs: map[string]any{"prompt": p},
 					},
 				},
 				CostConsumed: dag.Cost{LatencyMS: 5, Tokens: 0},
 			}, nil
+		},
+	}
+
+	// decide.plan — planner stub: decompose the prompt into ordered
+	// subtasks. Pure trace contribution today; future slices can
+	// surface the plan to the coding-turn handler. Always continues
+	// to represent.embed regardless of plan quality.
+	planInner := get("decide.plan")
+	planSpec := dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "plan",
+		Description: "decompose the prompt into ordered subtasks; spawns represent.embed",
+		Cost:        dag.Cost{LatencyMS: 15000, Tokens: 800},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			res, err := planInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"project_intent": p, "subtasks": nil, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
+			res.Spawn = []dag.NodeSpec{
+				{
+					Function: dag.FuncRepresent, Op: "embed", ID: "n2",
+					Attrs: map[string]any{"text": p, "prompt": p},
+				},
+			}
+			return res, nil
 		},
 	}
 
@@ -1275,7 +1305,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	}
 
 	return []dag.NodeSpec{
-		senseSpec, embedSpec, searchSpec, rerankSpec,
+		senseSpec, planSpec, embedSpec, searchSpec, rerankSpec,
 		scoreSpec, contradictionSpec,
 		injectSpec, predictNextSpec, codingTurnSpec, insightSpec,
 		shouldCaptureSpec, captureSpec,
