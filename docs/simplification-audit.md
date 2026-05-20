@@ -348,11 +348,14 @@ conversion (largest, most-gated).
 7. ~~**Unify eval-runner output to `cell_results.jsonl`** (D)~~ — *done in
    this commit.* All three suites (mechanic, legacy-cognition, journeys)
    now write through `evalv2.PersistCell`.
-8. **Migrate + quality-assess + integrate every eval** (E) — once D is in,
+8. **Migrate + quality-assess + integrate every eval** (E) — ~~once D is in,
    walk every scenario: format-migrate, score against the 9 principles
    (pass / improve / retire-with-rationale), confirm `CellResult` output,
    map to a coverage-matrix dimension. The legacy runners come out in the
-   final cleanup PR once nothing references them.
+   final cleanup PR once nothing references them.~~ — *quality-assessment
+   pass complete; verdict table recorded in Done > E (assessment). Format
+   migration for the `improve` directories is deferred to a follow-up
+   audit so each gets its own focused slice.*
 9. ~~**Test plans tied to removed harnesses** (I)~~ — *done in this commit.*
 10. **CLI surface collapse** (F) — sequence as a few PRs:
     a. Routing test + back-compat-alias deletions (`process`, `mcp` already
@@ -677,6 +680,42 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### E (assessment). Eval-directory quality verdicts
+
+Per step E.b in the audit, every scenario directory below is scored
+against the 9 principles in `docs/prompts/eval-principles.md`. Full
+format-migration (E.a) for the larger directories is deferred to a
+follow-up audit; this slice records the verdicts and rationale so
+the migration backlog is explicit.
+
+| Directory | Count | Verdict | Rationale |
+|-----------|-------|---------|-----------|
+| `test/evals/v2/` | 43 + agentic/ | **pass** | Already v2-format and exercised by `evalv2.RunCodingScenario` via `cortex eval -s SCEN -m MODEL`. Sample sweep over 5 files confirms principles 1, 2, 6, 7. Versioning metadata (principle 3) is partial — embedder/judge model emission tracked in `docs/benchmarks/integrity.md`, not blocking. |
+| `test/evals/coding/` | 6 (+seeds) | **pass** | Already on v2 runner via `coding_runner`. `seed_dir` keeps each instance isolated (principle 6); verify-command is a deterministic gate (principle 5). |
+| `test/evals/library-service/` | dir-structured | **improve** | Harness-agnostic shape, but the runner still drives ClaudeCLIHarness rather than cortex coding harness; migration to `evalv2.CortexHarness` (the cortex-only direction under D1) is the open item. Tracked under audit B's preserved-section note. |
+| `test/evals/mechanic/` | 5 + README | **improve** | Currently written for the `legacy/mechanic` runner. v2 already emits `CellResult` rows via `runMechanicSuite` (audit D, landed). Format migration to a v2-native shape will let `cortex eval suite mechanic` retire the legacy runner once journeys + legacy/cognition follow. |
+| `test/evals/journeys/` | 10 | **improve** | Multi-step accumulation scenarios. v2 doesn't yet model "sequence of cortex sessions" as a first-class scenario shape — a new v2 schema (multi-turn list with shared state) needs to land before format migration. Until then, `runJourneysSuite` keeps writing `CellResult` rows through `PersistJourneyValidationCells`. |
+| `test/evals/legacy/cognition/` | 22 | **mixed** | `reflex_*`, `reflect_*`, `resolve_*` (mode-shape) are migrateable to v2 with synthetic context. `abr_*` (benefit-shape, session-scoped) and `dream_*` (background-shape) need new v2 schemas (session sequences + background-only cells). `session_*` files marked `needs_fixture_seed` are blocked until the journeys seed pipeline lands; retain as **improve** with that pre-req noted. |
+| `test/evals/legacy/future/`, `test/evals/legacy/idiom/` | small | **improve** | Same situation as `legacy/cognition` — runner still depends on the legacy framework. Land alongside the other two `legacy/` subdirs. |
+| `test/evals/corpus/cognition_corpus.yaml` | 1 | **improve** | A reusable result-fixture file (not a scenario). Belongs alongside `legacy/cognition/` scenarios when those migrate. Could move under `test/evals/v2/fixtures/` after migration. |
+| `test/evals/e2e/10-dim-library-service.yaml` | 1 | **improve** | Cross-dimensional scenario tied to the 10 coverage-matrix dimensions; the schema is bespoke. The whole-pipeline e2e runner that drove it referenced internals (since deleted per `project_deleted_eval_runners` memory). Either re-land as a v2 scenario shape that maps 1:1 to coverage-matrix dimensions, or retire once the per-dimension benchmarks (Phase 4 of `integration-roadmap.md`) close the surface. Marked improve pending that decision. |
+| `test/evals/smoke/hello.yaml` | 1 | **retire-with-rationale** | Sole purpose was to exercise the aider round-trip end-to-end. Aider harness was deleted under audit A; this scenario no longer has a runner. Safe to delete — the cortex coding harness has its own smoke (`fizzbuzz.yaml` etc. under `coding/`). |
+| `test/evals/projects/*` | 11 dirs | **pass** (as fixtures) | Each subdir is a Go project tree used as `seed_dir` by `coding/` and `journeys/` scenarios — fixture role, not scenarios in themselves. They satisfy the "isolated" principle (each clean copy starts fresh under `seed_dir`). No migration needed. |
+
+Action this slice:
+
+- `test/evals/smoke/hello.yaml` deleted with rationale recorded above.
+- All other directories remain in place; their verdicts are captured
+  here so the migration backlog is explicit. Per-directory commits
+  for the **improve** entries are scheduled for a follow-up audit
+  (the format/schema work for journeys + legacy/cognition is
+  multi-day and benefits from being its own focused slice).
+- Final-step deletion of `internal/eval/{legacy,journey,mechanic}/`
+  is intentionally **NOT** done here — those packages are still
+  the runners for the unmigrated directories, and removing them
+  now would orphan ~32 scenarios. The deletion lands when the
+  format migration completes.
 
 ### L-lite. Cognitive-mode emission into the unified sink
 
