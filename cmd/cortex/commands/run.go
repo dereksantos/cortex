@@ -1021,19 +1021,30 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	// value.score — judge whether the top reranked candidate is
 	// load-bearing for the query. Pure trace contribution: it does
 	// not gate the downstream inject decision; the result is captured
-	// for later analysis and the chain continues to decide.inject.
+	// for later analysis and the chain continues to
+	// value.detect_contradiction.
 	scoreInner := get("value.score")
 	scoreSpec := dag.NodeSpec{
 		Function:    dag.FuncValue,
 		Op:          "score",
-		Description: "judge load-bearing-ness of the top candidate; spawns decide.inject",
+		Description: "judge load-bearing-ness of the top candidate; spawns value.detect_contradiction",
 		Cost:        dag.Cost{LatencyMS: 9000, Tokens: 350},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
 			reranked, _ := in["candidates"].([]cognition.Result)
-			// If we have no candidate text, skip the score call but keep
-			// the chain alive — spawn decide.inject directly.
 			candidate, _ := in["candidate"].(string)
+			nextSpawn := []dag.NodeSpec{
+				{
+					Function: dag.FuncValue, Op: "detect_contradiction", ID: "n4b",
+					Attrs: map[string]any{
+						"query":      p,
+						"candidate":  candidate,
+						"priors":     reranked,
+						"candidates": reranked,
+						"prompt":     p,
+					},
+				},
+			}
 			if candidate == "" {
 				return dag.NodeResult{
 					Out: map[string]any{
@@ -1042,29 +1053,61 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 						"why":          "no candidate to score",
 						"fallback":     true,
 					},
-					Spawn: []dag.NodeSpec{
-						{
-							Function: dag.FuncDecide, Op: "inject", ID: "n5",
-							Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
-						},
-					},
+					Spawn:        nextSpawn,
 					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
 				}, nil
 			}
 			res, err := scoreInner(ctx, in, b)
 			if err != nil {
-				// Score failure is non-fatal — keep the chain alive.
 				res = dag.NodeResult{
 					Out:          map[string]any{"load_bearing": false, "fallback": true, "error": err.Error()},
 					CostConsumed: res.CostConsumed,
 				}
 			}
-			res.Spawn = []dag.NodeSpec{
+			res.Spawn = nextSpawn
+			return res, nil
+		},
+	}
+
+	// value.detect_contradiction — judge whether the top candidate
+	// conflicts with any of the other reranked priors. Pure trace
+	// contribution: result captured, chain continues to decide.inject.
+	contradictionInner := get("value.detect_contradiction")
+	contradictionSpec := dag.NodeSpec{
+		Function:    dag.FuncValue,
+		Op:          "detect_contradiction",
+		Description: "flag conflicts between the top candidate and priors; spawns decide.inject",
+		Cost:        dag.Cost{LatencyMS: 13000, Tokens: 550},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			reranked, _ := in["candidates"].([]cognition.Result)
+			candidate, _ := in["candidate"].(string)
+			nextSpawn := []dag.NodeSpec{
 				{
 					Function: dag.FuncDecide, Op: "inject", ID: "n5",
 					Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
 				},
 			}
+			if candidate == "" {
+				return dag.NodeResult{
+					Out: map[string]any{
+						"conflicts":      false,
+						"conflicts_with": []string{},
+						"why":            "no candidate to evaluate",
+						"fallback":       true,
+					},
+					Spawn:        nextSpawn,
+					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
+				}, nil
+			}
+			res, err := contradictionInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"conflicts": false, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
+			res.Spawn = nextSpawn
 			return res, nil
 		},
 	}
@@ -1164,7 +1207,8 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	}
 
 	return []dag.NodeSpec{
-		senseSpec, embedSpec, searchSpec, rerankSpec, scoreSpec,
+		senseSpec, embedSpec, searchSpec, rerankSpec,
+		scoreSpec, contradictionSpec,
 		injectSpec, codingTurnSpec, insightSpec, captureSpec,
 	}
 }

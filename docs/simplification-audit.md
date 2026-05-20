@@ -678,14 +678,16 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
-### K (slice 1). `value.score` wired into `buildTurnChain`
+### K (slice 1+2). `value.score` and `value.detect_contradiction` wired
 
-`attend.rerank` now spawns `value.score` on the top reranked
-candidate (n4a); `value.score` spawns `decide.inject` (n5). Score
-failures are non-fatal — the chain always continues to inject.
+`attend.rerank` now spawns `value.score` (n4a) on the top reranked
+candidate; `value.score` spawns `value.detect_contradiction` (n4b)
+on the same candidate against the remaining priors; the contradiction
+node spawns `decide.inject` (n5). Both ops are non-fatal — the chain
+always continues, capturing fallback data in the trace.
 
 Manual sanity: `cortex run --type=turn --prompt="hello"` reports
-9 nodes executed (was 8). All tests green.
+10 nodes executed (was 8). All tests green.
 
 ### F (manifest). `DescribeFlags` fill-out
 
