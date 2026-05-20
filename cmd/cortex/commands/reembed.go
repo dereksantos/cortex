@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 
@@ -22,6 +23,11 @@ func (c *ReembedCommand) Name() string { return "reembed" }
 
 // Description returns the command description.
 func (c *ReembedCommand) Description() string { return "Re-generate embeddings with current model" }
+
+// DescribeFlags surfaces reembed's flag set into tools.json.
+func (c *ReembedCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("dry-run", false, "Show count only, don't re-embed")
+}
 
 // Execute runs the reembed command.
 func (c *ReembedCommand) Execute(ctx *Context) error {

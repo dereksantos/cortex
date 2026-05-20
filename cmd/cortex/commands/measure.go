@@ -3,6 +3,7 @@ package commands
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -26,6 +27,22 @@ func (c *MeasureCommand) Name() string { return "measure" }
 // Description returns the command description.
 func (c *MeasureCommand) Description() string {
 	return "Measure prompt quality for small context windows"
+}
+
+// DescribeFlags surfaces measure's flag set into tools.json.
+func (c *MeasureCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("provider", "", "Provider name (anthropic | ollama | openrouter)")
+	fs.String("model", "", "Model id")
+	fs.Int("window", 8192, "Context window in tokens")
+	fs.String("output", "human", "Output format: human | json")
+	fs.String("file", "", "Read prompt from file")
+	fs.Bool("stdin", false, "Read prompt from stdin")
+	fs.Bool("fast", false, "Fast (mechanical-only) mode")
+	fs.Int("calibrate", 0, "Calibrate the prompt-quality model against a corpus of <N> tokens")
+	fs.Bool("self-eval", false, "Run measure self-eval against test/evals/v2/measure/")
+	fs.String("scenario", "", "Self-eval scenario path")
+	fs.String("dir", "test/evals/v2/measure", "Self-eval scenario directory")
+	fs.Bool("verbose", false, "Verbose output")
 }
 
 // Execute runs the measure command.

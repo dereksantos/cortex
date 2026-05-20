@@ -11,6 +11,7 @@
 package commands
 
 import (
+	"flag"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,6 +30,13 @@ type CalibrateCommand struct{}
 func (c *CalibrateCommand) Name() string { return "calibrate" }
 func (c *CalibrateCommand) Description() string {
 	return "Recompute per-op p50 cost hints from .cortex/db/dag_traces.jsonl"
+}
+
+// DescribeFlags surfaces calibrate's flag set into tools.json.
+func (c *CalibrateCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("trace", "", "Override dag_traces.jsonl path")
+	fs.String("snapshot", "", "Override op_cost_hints.json output path")
+	fs.Int("window", 0, "Number of trailing rows to consider (0 = use file's rolling window)")
 }
 
 func (c *CalibrateCommand) Execute(ctx *Context) error {

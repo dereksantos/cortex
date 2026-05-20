@@ -5,27 +5,176 @@
     {
       "name": "analyze",
       "description": "Run LLM analysis on recent events",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "limit",
+          "type": "int",
+          "default": "10",
+          "description": "Maximum number of recent events to analyze"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex"
+        }
+      ]
     },
     {
       "name": "calibrate",
       "description": "Recompute per-op p50 cost hints from .cortex/db/dag_traces.jsonl",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "snapshot",
+          "type": "string",
+          "description": "Override op_cost_hints.json output path"
+        },
+        {
+          "name": "trace",
+          "type": "string",
+          "description": "Override dag_traces.jsonl path"
+        },
+        {
+          "name": "window",
+          "type": "int",
+          "default": "0",
+          "description": "Number of trailing rows to consider (0 = use file's rolling window)"
+        }
+      ]
     },
     {
       "name": "capture",
       "description": "Capture event from stdin (used by AI tools)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "bulk",
+          "type": "bool",
+          "default": "false",
+          "description": "Bulk mode: read JSONL from stdin and capture each line as an event"
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "description": "Capture content (free text)"
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "description": "Capture type (decision | correction | pattern | ...)"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex"
+        }
+      ]
     },
     {
       "name": "code",
       "description": "Run the Cortex coding harness against a workdir (requires --workdir and --model)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "api-url",
+          "type": "string",
+          "description": "Override the model API endpoint (use --local for default Ollama)"
+        },
+        {
+          "name": "init",
+          "type": "bool",
+          "default": "false",
+          "description": "Bootstrap an empty workdir before running"
+        },
+        {
+          "name": "json",
+          "type": "bool",
+          "default": "false",
+          "description": "Emit a single JSON envelope on stdout"
+        },
+        {
+          "name": "local",
+          "type": "bool",
+          "default": "false",
+          "description": "Shorthand: --api-url=\u003cDefaultOllamaURL\u003e"
+        },
+        {
+          "name": "max-cost",
+          "type": "string",
+          "description": "Cumulative-cost cap (e.g. 0.50)"
+        },
+        {
+          "name": "max-cumulative-tokens",
+          "type": "int",
+          "default": "0",
+          "description": "Cumulative-token cap across turns"
+        },
+        {
+          "name": "max-output-tokens",
+          "type": "int",
+          "default": "0",
+          "description": "Per-turn output-token cap"
+        },
+        {
+          "name": "max-turns",
+          "type": "int",
+          "default": "0",
+          "description": "Cap on agent turns (0 = unbounded)"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id (e.g. anthropic/claude-3-5-haiku, qwen/qwen-2.5-coder-32b-instruct)"
+        },
+        {
+          "name": "no-dag",
+          "type": "bool",
+          "default": "false",
+          "description": "Disable DAG-based tool dispatch (debug only)"
+        },
+        {
+          "name": "no-search",
+          "type": "bool",
+          "default": "false",
+          "description": "Disable Cortex search injection on the turn"
+        },
+        {
+          "name": "quiet",
+          "type": "bool",
+          "default": "false",
+          "description": "Quiet output"
+        },
+        {
+          "name": "system-prompt",
+          "type": "string",
+          "description": "Override the system prompt"
+        },
+        {
+          "name": "verbose",
+          "type": "bool",
+          "default": "false",
+          "description": "Verbose output"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Required: target directory the agent will edit (use --init to bootstrap fresh)"
+        }
+      ]
     },
     {
       "name": "daemon",
       "description": "Run background context processor",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "port",
+          "type": "int",
+          "default": "9090",
+          "description": "HTTP port for the dashboard"
+        }
+      ]
     },
     {
       "name": "dream-debug",
@@ -75,12 +224,78 @@
     {
       "name": "eval",
       "description": "Run evaluation (subcommands: grid | suite | benchmark; or -s scenario -m model)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "abr-trend",
+          "type": "bool",
+          "default": "false",
+          "description": "Show ABR progression across runs"
+        },
+        {
+          "name": "dir",
+          "type": "string",
+          "default": "test/evals/v2",
+          "description": "Scenario directory"
+        },
+        {
+          "name": "judge",
+          "type": "bool",
+          "default": "false",
+          "description": "Enable LLM-as-judge scoring"
+        },
+        {
+          "name": "judge-model",
+          "type": "string",
+          "description": "Model id for the judge"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id (coding-harness run)"
+        },
+        {
+          "name": "output",
+          "type": "string",
+          "default": "human",
+          "description": "Output format: human | json"
+        },
+        {
+          "name": "scenario",
+          "type": "string",
+          "description": "Scenario YAML path (coding-harness run)"
+        },
+        {
+          "name": "summary",
+          "type": "bool",
+          "default": "false",
+          "description": "Show lift trend over recent runs"
+        },
+        {
+          "name": "verbose",
+          "type": "bool",
+          "default": "false",
+          "description": "Verbose output"
+        }
+      ]
     },
     {
       "name": "feed",
       "description": "Seed knowledge from files or directories",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "dir",
+          "type": "string",
+          "description": "Recursively seed every file under \u003cdir\u003e"
+        },
+        {
+          "name": "raw",
+          "type": "bool",
+          "default": "false",
+          "description": "Seed file content verbatim (skip LLM extraction)"
+        }
+      ]
     },
     {
       "name": "forget",
@@ -90,12 +305,27 @@
     {
       "name": "ingest",
       "description": "Move queued events to database",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Open storage rooted at \u003cworkdir\u003e/.cortex"
+        }
+      ]
     },
     {
       "name": "init",
       "description": "Initialize Cortex in the current directory",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "auto",
+          "type": "bool",
+          "default": "false",
+          "description": "Detect local LLM availability and print setup tips"
+        }
+      ]
     },
     {
       "name": "install",
@@ -110,7 +340,77 @@
     {
       "name": "measure",
       "description": "Measure prompt quality for small context windows",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "calibrate",
+          "type": "int",
+          "default": "0",
+          "description": "Calibrate the prompt-quality model against a corpus of \u003cN\u003e tokens"
+        },
+        {
+          "name": "dir",
+          "type": "string",
+          "default": "test/evals/v2/measure",
+          "description": "Self-eval scenario directory"
+        },
+        {
+          "name": "fast",
+          "type": "bool",
+          "default": "false",
+          "description": "Fast (mechanical-only) mode"
+        },
+        {
+          "name": "file",
+          "type": "string",
+          "description": "Read prompt from file"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id"
+        },
+        {
+          "name": "output",
+          "type": "string",
+          "default": "human",
+          "description": "Output format: human | json"
+        },
+        {
+          "name": "provider",
+          "type": "string",
+          "description": "Provider name (anthropic | ollama | openrouter)"
+        },
+        {
+          "name": "scenario",
+          "type": "string",
+          "description": "Self-eval scenario path"
+        },
+        {
+          "name": "self-eval",
+          "type": "bool",
+          "default": "false",
+          "description": "Run measure self-eval against test/evals/v2/measure/"
+        },
+        {
+          "name": "stdin",
+          "type": "bool",
+          "default": "false",
+          "description": "Read prompt from stdin"
+        },
+        {
+          "name": "verbose",
+          "type": "bool",
+          "default": "false",
+          "description": "Verbose output"
+        },
+        {
+          "name": "window",
+          "type": "int",
+          "default": "8192",
+          "description": "Context window in tokens"
+        }
+      ]
     },
     {
       "name": "projects",
@@ -120,12 +420,34 @@
     {
       "name": "prune",
       "description": "Check/manage context size relative to project",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "dry-run",
+          "type": "bool",
+          "default": "false",
+          "description": "Show what would be pruned without doing it"
+        },
+        {
+          "name": "force",
+          "type": "bool",
+          "default": "false",
+          "description": "Prune even if under limit"
+        }
+      ]
     },
     {
       "name": "reembed",
       "description": "Re-generate embeddings with current model",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "dry-run",
+          "type": "bool",
+          "default": "false",
+          "description": "Show count only, don't re-embed"
+        }
+      ]
     },
     {
       "name": "repl",
@@ -135,7 +457,57 @@
     {
       "name": "run",
       "description": "Run a DAG by type (turn|think|dream|capture|eval)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "event",
+          "type": "string",
+          "description": "JSON event payload (--type=capture)"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id"
+        },
+        {
+          "name": "output",
+          "type": "string",
+          "default": "human",
+          "description": "Output format: human | json"
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "description": "User prompt (turn DAG)"
+        },
+        {
+          "name": "scenario",
+          "type": "string",
+          "description": "Path to scenario file (--type=eval)"
+        },
+        {
+          "name": "strategy",
+          "type": "string",
+          "default": "cortex",
+          "description": "Strategy: cortex | baseline (--type=eval)"
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "description": "DAG type: turn | think | dream | capture | eval"
+        },
+        {
+          "name": "verbose",
+          "type": "bool",
+          "default": "false",
+          "description": "Verbose output"
+        },
+        {
+          "name": "workdir",
+          "type": "string",
+          "description": "Target workdir for harness-bound DAGs"
+        }
+      ]
     },
     {
       "name": "search",
@@ -222,7 +594,38 @@
     {
       "name": "status",
       "description": "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "expand",
+          "type": "bool",
+          "default": "false",
+          "description": "Small-LLM-generated multi-line summary of current state"
+        },
+        {
+          "name": "format",
+          "type": "string",
+          "description": "Output format: claude (Claude Code stdin variant of the default one-liner)"
+        },
+        {
+          "name": "json",
+          "type": "bool",
+          "default": "false",
+          "description": "Emit raw storage stats as JSON"
+        },
+        {
+          "name": "memory",
+          "type": "bool",
+          "default": "false",
+          "description": "Context-memory dashboard (events / insights / breakdown)"
+        },
+        {
+          "name": "system",
+          "type": "bool",
+          "default": "false",
+          "description": "System resources + Ollama + model recommendations"
+        }
+      ]
     },
     {
       "name": "test",
@@ -256,7 +659,15 @@
     {
       "name": "uninstall",
       "description": "Remove the current project's .cortex/ data (--purge required to delete)",
-      "version": "0.1.0"
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "purge",
+          "type": "bool",
+          "default": "false",
+          "description": "Remove .cortex/ directory and all captured data"
+        }
+      ]
     }
   ]
 }

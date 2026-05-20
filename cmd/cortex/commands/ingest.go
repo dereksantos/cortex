@@ -15,6 +15,8 @@ import (
 
 	"log"
 
+	"flag"
+
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -83,6 +85,14 @@ func (c *CaptureCommand) Name() string { return "capture" }
 
 // Description returns the command description.
 func (c *CaptureCommand) Description() string { return "Capture event from stdin (used by AI tools)" }
+
+// DescribeFlags surfaces capture's flag set into tools.json.
+func (c *CaptureCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("type", "", "Capture type (decision | correction | pattern | ...)")
+	fs.String("content", "", "Capture content (free text)")
+	fs.Bool("bulk", false, "Bulk mode: read JSONL from stdin and capture each line as an event")
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+}
 
 // Execute runs the capture command.
 func (c *CaptureCommand) Execute(ctx *Context) error {
@@ -194,6 +204,11 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 // Name returns the command name.
 func (c *IngestCommand) Name() string { return "ingest" }
 
+// DescribeFlags surfaces ingest's flag set into tools.json.
+func (c *IngestCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+}
+
 // Description returns the command description.
 func (c *IngestCommand) Description() string { return "Move queued events to database" }
 
@@ -293,6 +308,12 @@ func (c *AnalyzeCommand) Name() string { return "analyze" }
 
 // Description returns the command description.
 func (c *AnalyzeCommand) Description() string { return "Run LLM analysis on recent events" }
+
+// DescribeFlags surfaces analyze's flag set into tools.json.
+func (c *AnalyzeCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+	fs.Int("limit", 10, "Maximum number of recent events to analyze")
+}
 
 // Execute runs the analyze command.
 func (c *AnalyzeCommand) Execute(ctx *Context) error {
@@ -404,6 +425,12 @@ func (c *FeedCommand) Name() string { return "feed" }
 
 // Description returns the command description.
 func (c *FeedCommand) Description() string { return "Seed knowledge from files or directories" }
+
+// DescribeFlags surfaces feed's flag set into tools.json.
+func (c *FeedCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("dir", "", "Recursively seed every file under <dir>")
+	fs.Bool("raw", false, "Seed file content verbatim (skip LLM extraction)")
+}
 
 // Execute runs the feed command.
 func (c *FeedCommand) Execute(ctx *Context) error {

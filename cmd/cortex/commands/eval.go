@@ -3,6 +3,7 @@ package commands
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,21 @@ func (c *EvalCommand) Name() string { return "eval" }
 // Description returns the command description.
 func (c *EvalCommand) Description() string {
 	return "Run evaluation (subcommands: grid | suite | benchmark; or -s scenario -m model)"
+}
+
+// DescribeFlags surfaces eval's flag set into tools.json. Positional
+// subcommands (grid|suite|benchmark) take precedence; the flag set
+// covers the scenario-driven and report-driven dispatches.
+func (c *EvalCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("scenario", "", "Scenario YAML path (coding-harness run)")
+	fs.String("dir", "test/evals/v2", "Scenario directory")
+	fs.String("model", "", "Model id (coding-harness run)")
+	fs.String("output", "human", "Output format: human | json")
+	fs.Bool("verbose", false, "Verbose output")
+	fs.Bool("judge", false, "Enable LLM-as-judge scoring")
+	fs.String("judge-model", "", "Model id for the judge")
+	fs.Bool("summary", false, "Show lift trend over recent runs")
+	fs.Bool("abr-trend", false, "Show ABR progression across runs")
 }
 
 // Execute runs the eval command.

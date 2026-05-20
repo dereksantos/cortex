@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -626,6 +627,15 @@ func (c *StatusCommand) Name() string { return "status" }
 // Description returns the command description.
 func (c *StatusCommand) Description() string {
 	return "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)"
+}
+
+// DescribeFlags surfaces status's flag set into tools.json.
+func (c *StatusCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("system", false, "System resources + Ollama + model recommendations")
+	fs.Bool("memory", false, "Context-memory dashboard (events / insights / breakdown)")
+	fs.Bool("json", false, "Emit raw storage stats as JSON")
+	fs.Bool("expand", false, "Small-LLM-generated multi-line summary of current state")
+	fs.String("format", "", "Output format: claude (Claude Code stdin variant of the default one-liner)")
 }
 
 // Execute parses status flags and dispatches to the chosen view. Flag

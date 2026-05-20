@@ -191,8 +191,9 @@ Routing fix:
 - ~~Add a test that asserts every registered command resolves to a `case` in
   `main.go`~~ — *done; see Done. Both directions checked (registered →
   routed, routed → registered).*
-- Implement `DescribeFlags` on remaining commands so the surface is
-  machine-readable (only 4 of 40 do it today).
+- ~~Implement `DescribeFlags` on remaining commands so the surface is
+  machine-readable (only 4 of 40 do it today).~~ — *done.* Every
+  flag-bearing command now implements `DescribeFlags`. See Done.
 
 ~~`measure --calibrate` duplicates the standalone `cortex calibrate` command —
 delete the flag; keep the command.~~ — *not a duplicate.* The standalone
@@ -676,6 +677,30 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### F (manifest). `DescribeFlags` fill-out
+
+`DescribeFlags` now lands on every flag-bearing registered command,
+so `tools.json` carries the full per-flag surface (name, type,
+default, usage). Implementations added to:
+
+- `analyze`, `capture`, `feed`, `ingest` (in `ingest.go`)
+- `calibrate`
+- `code`
+- `daemon`
+- `eval`
+- `init`, `uninstall` (in `setup.go`)
+- `measure`
+- `prune`
+- `reembed`
+- `run`
+- `status` (in `debug.go`)
+
+`forget`, `projects`, `dream-debug`, `journal`, `repl`, `tools`,
+`test`, `install` either take no flags or already had `DescribeFlags`.
+`tools.json` regenerated; manifest test stays green.
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### F (routing). `eval` subcommand promotion
 

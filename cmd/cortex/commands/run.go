@@ -27,6 +27,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,19 @@ type RunCommand struct{}
 
 func (c *RunCommand) Name() string        { return "run" }
 func (c *RunCommand) Description() string { return "Run a DAG by type (turn|think|dream|capture|eval)" }
+
+// DescribeFlags surfaces run's flag set into tools.json.
+func (c *RunCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("type", "", "DAG type: turn | think | dream | capture | eval")
+	fs.String("prompt", "", "User prompt (turn DAG)")
+	fs.String("model", "", "Model id")
+	fs.String("workdir", "", "Target workdir for harness-bound DAGs")
+	fs.String("scenario", "", "Path to scenario file (--type=eval)")
+	fs.String("strategy", "cortex", "Strategy: cortex | baseline (--type=eval)")
+	fs.String("event", "", "JSON event payload (--type=capture)")
+	fs.String("output", "human", "Output format: human | json")
+	fs.Bool("verbose", false, "Verbose output")
+}
 
 func (c *RunCommand) Execute(ctx *Context) error {
 	dagType := ""

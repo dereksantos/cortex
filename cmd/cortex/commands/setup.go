@@ -2,6 +2,7 @@
 package commands
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,11 @@ func (c *InitCommand) Name() string { return "init" }
 
 // Description returns the command description.
 func (c *InitCommand) Description() string { return "Initialize Cortex in the current directory" }
+
+// DescribeFlags surfaces init's flag set into tools.json.
+func (c *InitCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("auto", false, "Detect local LLM availability and print setup tips")
+}
 
 // Execute runs the init command.
 func (c *InitCommand) Execute(ctx *Context) error {
@@ -213,6 +219,11 @@ func (c *UninstallCommand) Name() string { return "uninstall" }
 // Description returns the command description.
 func (c *UninstallCommand) Description() string {
 	return "Remove the current project's .cortex/ data (--purge required to delete)"
+}
+
+// DescribeFlags surfaces uninstall's flag set into tools.json.
+func (c *UninstallCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("purge", false, "Remove .cortex/ directory and all captured data")
 }
 
 // Execute runs the uninstall command.
