@@ -375,6 +375,68 @@ conversion (largest, most-gated).
 
 ---
 
+## Final summary
+
+Audit run total (commits `bc78872`..HEAD, post lock-in):
+
+- **Commits landed**: 12 in this session, 27 cumulative across the
+  audit (since the start of the simplification work).
+- **LOC delta**: 1,891 insertions / 6,326 deletions = **-4,435 net LOC**
+  (the line accounting includes generated `tools.json` churn; the
+  source-tree net is larger).
+- **CLI surface**: 40 → 26 commands (35 % shrink). Collapsed verbs:
+  `recent`/`insights`/`entities`/`graph` → `search --type=…`;
+  `info`/`stats`/`overview` → `status --system|--memory|--json|--expand`;
+  `session-start`/`inject-context`/`stop`/`cli`/`watch` deleted;
+  `process` deleted; `mcp` deleted; `--harness` flag retired;
+  `--agentic`/`--measure` modes retired; eval positional subcommands
+  promoted.
+- **Packages deleted**: `integrations/claude/`, `integrations/cursor/`,
+  `internal/tui/`, `internal/mcp/` (the latter under audit J before
+  this session).
+- **Tests + manifest gates**: every commit landed under
+  `go build ./...` and `go test ./...` green;
+  `cmd/cortex/main_routing_test.go` catches drift between registered
+  commands and `main.go`'s switch; `manifest_test.go` enforces
+  `tools.json` parity.
+
+Decisions realized in this session:
+
+- D1 — cortex is the only harness ✓ (cursor adapter removed under O)
+- D5 — unified `cell_results.jsonl` sink ✓ (extended in L-lite to
+  cognition modes too)
+- D7 — CLI surface collapse to ~15 commands: in progress (40 → 26
+  this session; further collapses under maintenance / install
+  refactor wait for a follow-up audit)
+- D8 — 5 staged DAG ops in the default chain ✓ (`value.score`,
+  `value.detect_contradiction`, `decide.should_capture`,
+  `model.predict_next`, `decide.plan` all wired into
+  `buildTurnChain`)
+- D11 — Claude-Code slash + hook commands dropped ✓
+- D12 — Cursor adapter dropped ✓
+- D14 — `watch` + `internal/tui/` dropped ✓
+- D15 — L reframed as emit-only ✓ (cognition modes now write to the
+  unified sink without DAG migration)
+- D16 — E quality-assessment per-directory verdicts recorded ✓
+  (format migration deferred per the rationale)
+- D19 — commits stay local until audit complete ✓ (no push yet)
+
+Open items intentionally deferred to a follow-up audit:
+
+- **E format migration** — journeys, legacy/cognition,
+  legacy/future, legacy/idiom, mechanic, corpus, e2e,
+  library-service. Verdicts recorded; per-directory commits land
+  later.
+- **L full DAG migration** — the cognition package stays in place;
+  emit-only is the gate that closed this audit, per D15.
+- **Maintenance subcommand collapse** — `prune` / `reembed` / `embed`
+  could fold under `cortex maintain <sub>`, deferred.
+- **`install`/`uninstall`** could collapse into `init`/`uninstall`
+  now that hooks are gone, but the verbs are still distinct entry
+  points; kept for now.
+
+---
+
 ## Done
 
 ### G. Root hygiene
