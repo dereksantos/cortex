@@ -78,11 +78,6 @@
       ]
     },
     {
-      "name": "entities",
-      "description": "Show knowledge graph entities",
-      "version": "0.1.0"
-    },
-    {
       "name": "eval",
       "description": "Run evaluation scenarios",
       "version": "0.1.0"
@@ -98,11 +93,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "graph",
-      "description": "Show entity relationship graph",
-      "version": "0.1.0"
-    },
-    {
       "name": "ingest",
       "description": "Move queued events to database",
       "version": "0.1.0"
@@ -115,11 +105,6 @@
     {
       "name": "inject-context",
       "description": "Inject relevant context into prompt for hooks",
-      "version": "0.1.0"
-    },
-    {
-      "name": "insights",
-      "description": "Show extracted insights",
       "version": "0.1.0"
     },
     {
@@ -148,11 +133,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "recent",
-      "description": "Show recent captured events",
-      "version": "0.1.0"
-    },
-    {
       "name": "reembed",
       "description": "Re-generate embeddings with current model",
       "version": "0.1.0"
@@ -169,13 +149,13 @@
     },
     {
       "name": "search",
-      "description": "Search context using cognitive retrieval",
+      "description": "Search context (cognitive retrieval); --type=recent|insights|entities|graph for views",
       "version": "0.1.0",
       "args": [
         {
           "name": "query",
-          "description": "Search query (free text; words joined with spaces)",
-          "required": true,
+          "description": "Search query when --type is unset; view-specific args otherwise",
+          "required": false,
           "variadic": true
         }
       ],
@@ -197,6 +177,11 @@
           "type": "string",
           "default": "fast",
           "description": "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)"
+        },
+        {
+          "name": "type",
+          "type": "string",
+          "description": "View type: recent|insights|entities|graph (omit for free-text search)"
         },
         {
           "name": "workdir",

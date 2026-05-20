@@ -41,8 +41,7 @@ func main() {
 	command := os.Args[1]
 
 	/**
-
-		Break down to less commands:
+		TODO(derek.s): Break down to less commands
 
 		Non agentic commands
 
@@ -172,7 +171,7 @@ func main() {
 			defer store.Close()
 			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
-	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
+	case "search", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
 			// --workdir signals an isolated invocation (benchmarks,
 			// tests, multi-tenant tools). Skip the global init dance:
@@ -187,8 +186,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
 			}
-			// Auto-start daemon on search/insights (covers CLI-only multi-agent usage).
-			if command == "search" || command == "insights" {
+			// Auto-start daemon on search (covers CLI-only multi-agent usage).
+			if command == "search" {
 				maybeStartDaemon(cfg)
 			}
 			store, err := storage.New(cfg)
@@ -369,11 +368,7 @@ Commands:
   journal        Journal operations (rebuild/replay/verify/show/tail/migrate/ingest)
   daemon         Start background processor (dashboard at :9090)
 
-  search         Search captured context
-  recent         Show recent events
-  insights       Show insights [category] [limit]
-  entities       Show entities [type]
-  graph          Show knowledge graph for entity
+  search         Search captured context; --type=recent|insights|entities|graph for views
   status         Show status (default: one line; --system|--memory|--json|--expand)
   watch          Live dashboard of cognitive modes
   prune          Manage context size relative to project
@@ -425,19 +420,11 @@ Examples:
   # Search context
   cortex search "authentication decisions"
 
-  # View insights
-  cortex insights decision
-  cortex insights
-
-  # Browse entities
-  cortex entities pattern
-  cortex graph decision "JWT authentication"
-
-  # Slash command (Claude Code)
-  /cortex                        # Show overview
-  /cortex search auth            # Search context
-  /cortex insights               # List insights
-  /cortex how did we handle X    # Smart search
+  # View captured state via --type (replaces standalone recent/insights/entities/graph)
+  cortex search --type=recent              # last 10 events
+  cortex search --type=insights decision   # insights filtered by category
+  cortex search --type=entities pattern    # entities of one type
+  cortex search --type=graph decision "JWT authentication"
 
 For more information: https://github.com/dereksantos/cortex
 `, version)

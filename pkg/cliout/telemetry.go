@@ -282,8 +282,7 @@ func WorkdirFromArgs(args []string) string {
 // 9-function vocabulary.
 func CortexFunctionFor(command string) string {
 	switch command {
-	case "search", "recent", "insights", "entities", "graph",
-		"search-vector":
+	case "search", "search-vector":
 		return "Attend" // salience-over-substrate; surfaces candidates
 	case "capture", "ingest", "feed", "embed", "reembed":
 		return "Sense" // intake / encoding / indexing

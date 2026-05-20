@@ -156,8 +156,12 @@ Cuts and consolidations:
     or a hidden `_internal` namespace
   - `dream-debug` — replace with `cortex run --type=dream --debug`
   - `test` — verify what it does; if dev-only, move to `scripts/`
-- **Collapse into `search`** via `--type` flag:
-  - `recent`, `insights`, `entities`, `graph`
+- ~~**Collapse into `search`** via `--type` flag:
+  - `recent`, `insights`, `entities`, `graph`~~ — *done.*
+  `cortex search --type=recent|insights|entities|graph` now routes to
+  helper functions; the four standalone command structs are gone.
+  Net ~340 LOC delta in `cmd/cortex/commands/query.go` (mostly relocation
+  into helpers + `--type` dispatch); tools.json: 35 → 31 commands.
 - ~~**Collapse into `status`**: `info`, `stats`, `overview`~~ — *done.*
   Added `--expand` flag that runs a small-LLM generation of a 3-5 line
   summary, with a richer mechanical fallback when no local model is
@@ -353,7 +357,7 @@ conversion (largest, most-gated).
 10. **CLI surface collapse** (F) — sequence as a few PRs:
     a. Routing test + back-compat-alias deletions (`process`, `mcp` already
        gone after J, `measure --calibrate`).
-    b. View collapses (`recent`/`insights`/`entities`/`graph` → `search --type`).
+    ~~b. View collapses (`recent`/`insights`/`entities`/`graph` → `search --type`).~~ — *done.*
     c. Status collapses (`info`/`stats`/`overview` → `status`).
     d. Hook commands + `projects` decision (needs user input first — flagged in F).
 11. **Unify staged DAG ops** (K) — one PR per op, each gated on no regression
@@ -673,6 +677,35 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### F.b. View collapses → `cortex search --type`
+
+`recent` / `insights` / `entities` / `graph` are gone as standalone
+commands. The `SearchCommand` now takes `--type=recent|insights|entities|graph`
+and dispatches to four helper functions (`displayRecentView`,
+`displayInsightsView`, `displayEntitiesView`, `displayGraphView`) that
+hold the same display logic the deleted `Execute` bodies did.
+
+- `cmd/cortex/commands/query.go` — `RecentCommand`, `InsightsCommand`,
+  `EntitiesCommand`, `GraphCommand` and their four `Register` calls
+  removed; `SearchCommand.Execute` now dispatches on `--type`.
+  `DescribeFlags` updated with the new flag.
+- `cmd/cortex/main.go` — `recent|insights|entities|graph` removed from
+  the routing case; help text + examples rewritten to point at
+  `cortex search --type=…`.
+- `cmd/cortex/commands/session.go` — the `cli`-subcommand `insights`
+  branch now calls `displayInsightsView` directly (the wrapper struct
+  was the only out-of-package consumer; F.d removes session.go
+  entirely next).
+- `pkg/cliout/telemetry.go` — `Attend` classifier no longer lists the
+  removed verb names.
+- `cmd/cortex/commands/manifest_test.go` — `search` flag-set
+  expectation updated to include `type`.
+- `tools.json` regenerated (35 → 31 commands).
+
+Per D11 no slash-command compat is preserved.
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### H (archive). Stale docs moved to `docs/archive/`
 

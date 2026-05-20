@@ -14,29 +14,30 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 func init() {
 	Register(&SearchCommand{})
-	Register(&RecentCommand{})
-	Register(&InsightsCommand{})
-	Register(&EntitiesCommand{})
-	Register(&GraphCommand{})
 }
 
-// SearchCommand implements context search.
+// SearchCommand implements context search and the collapsed view set
+// (recent / insights / entities / graph) via --type.
 type SearchCommand struct{}
 
 // Name returns the command name.
 func (c *SearchCommand) Name() string { return "search" }
 
 // Description returns the command description.
-func (c *SearchCommand) Description() string { return "Search context using cognitive retrieval" }
+func (c *SearchCommand) Description() string {
+	return "Search context (cognitive retrieval); --type=recent|insights|entities|graph for views"
+}
 
 // DescribeFlags surfaces search's flags into tools.json.
 func (c *SearchCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("type", "", "View type: recent|insights|entities|graph (omit for free-text search)")
 	fs.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
 	fs.Int("limit", 5, "Maximum number of results")
 	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex (overrides default global storage)")
@@ -46,14 +47,15 @@ func (c *SearchCommand) DescribeFlags(fs *flag.FlagSet) {
 // DescribeArgs surfaces search's positional argument.
 func (c *SearchCommand) DescribeArgs() []cliout.ArgSpec {
 	return []cliout.ArgSpec{
-		{Name: "query", Description: "Search query (free text; words joined with spaces)", Required: true, Variadic: true},
+		{Name: "query", Description: "Search query when --type is unset; view-specific args otherwise", Required: false, Variadic: true},
 	}
 }
 
-// Execute runs the search command.
+// Execute runs the search command, dispatching to a view helper when
+// --type is set or running the cognitive-retrieval search otherwise.
 func (c *SearchCommand) Execute(ctx *Context) error {
-	// Parse flags
 	searchFlags := flag.NewFlagSet("search", flag.ExitOnError)
+	typeFlag := searchFlags.String("type", "", "View type: recent|insights|entities|graph")
 	modeFlag := searchFlags.String("mode", "fast", "Retrieval mode: fast (Reflex only) or full (Reflex + Reflect)")
 	limitFlag := searchFlags.Int("limit", 5, "Maximum number of results")
 	workdirFlag := searchFlags.String("workdir", "", "Open storage rooted at <workdir>/.cortex (overrides default global storage)")
@@ -61,21 +63,6 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	searchFlags.Parse(ctx.Args)
 
 	args := searchFlags.Args()
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] [--workdir=DIR] [--json] <query>\n")
-		return fmt.Errorf("missing query argument")
-	}
-
-	query := strings.Join(args, " ")
-
-	// Determine retrieval mode
-	var mode cognition.RetrieveMode
-	switch *modeFlag {
-	case "full":
-		mode = cognition.Full
-	default:
-		mode = cognition.Fast
-	}
 
 	cfg := ctx.Config
 	store := ctx.Storage
@@ -88,9 +75,40 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		defer store.Close()
 	}
 
-	// Initialize LLM provider (required for Full mode, optional for Fast).
-	// Try the unified surface (OpenRouter→Anthropic) first, fall back to
-	// Ollama for users running a fully local stack.
+	switch strings.ToLower(strings.TrimSpace(*typeFlag)) {
+	case "":
+		return runSearchQuery(ctx, cfg, store, args, *modeFlag, *limitFlag, *workdirFlag, *jsonFlag)
+	case "recent":
+		return displayRecentView(store, args, *limitFlag)
+	case "insights":
+		return displayInsightsView(store, args, *limitFlag)
+	case "entities":
+		return displayEntitiesView(store, args)
+	case "graph":
+		return displayGraphView(store, args)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown --type=%q (allowed: recent, insights, entities, graph)\n", *typeFlag)
+		return fmt.Errorf("invalid --type value")
+	}
+}
+
+func runSearchQuery(ctx *Context, cfg *config.Config, store *storage.Storage, args []string, modeFlag string, limit int, workdir string, asJSON bool) error {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: cortex search [--mode=fast|full] [--limit=N] [--workdir=DIR] [--json] <query>\n")
+		fmt.Fprintf(os.Stderr, "       cortex search --type=recent|insights|entities|graph [view-args]\n")
+		return fmt.Errorf("missing query argument")
+	}
+
+	query := strings.Join(args, " ")
+
+	var mode cognition.RetrieveMode
+	switch modeFlag {
+	case "full":
+		mode = cognition.Full
+	default:
+		mode = cognition.Fast
+	}
+
 	var llmProvider llm.Provider
 	if mode == cognition.Full {
 		if p, _, err := llm.NewLLMClient(cfg); err == nil {
@@ -104,24 +122,20 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	// Initialize embedder with fallback: Ollama -> Hugot
 	ollamaClient := llm.NewOllamaClient(cfg)
 	hugotEmbedder := llm.NewHugotEmbedder()
 	embedder := llm.NewFallbackEmbedder(ollamaClient, hugotEmbedder)
 
-	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create cognitive pipeline: %w", err)
 	}
 
-	// Build query
 	q := cognition.Query{
 		Text:  query,
-		Limit: *limitFlag,
+		Limit: limit,
 	}
 
-	// Retrieve using cognitive pipeline
 	start := time.Now()
 	result, err := cortex.Retrieve(context.Background(), q, mode)
 	elapsed := time.Since(start)
@@ -130,7 +144,6 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
-	// Log the query to activity log
 	activityLogger := intcognition.NewActivityLogger(cfg.ContextDir)
 	resultCount := 0
 	if result != nil {
@@ -138,32 +151,24 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	}
 	activityLogger.LogQuery(query, resultCount, elapsed.Milliseconds())
 
-	// Determine mode string for output
 	modeStr := "Fast (Reflex)"
 	if mode == cognition.Full {
 		modeStr = "Full (Reflex + Reflect)"
 	}
 
-	// JSON output: wrap the per-search payload in the canonical
-	// envelope (axis 4 Result). The text fallback below is intentionally
-	// NOT applied — benchmarks need a stable contract over the cognitive
-	// pipeline's output, not an opportunistic SearchEvents rescue.
-	if *jsonFlag {
-		emitter := EmitterFor(ctx, *workdirFlag)
+	if asJSON {
+		emitter := EmitterFor(ctx, workdir)
 		return emitter.Ok(os.Stdout, buildSearchPayload(strings.ToLower(strings.Fields(modeStr)[0]), elapsed, result))
 	}
 
-	// Display results
 	if result == nil || len(result.Results) == 0 {
-		// Fallback: search events directly when Reflex returns nothing.
-		// Extract terms from natural language query for better matching.
 		terms := intcognition.ExtractTerms(query)
 		var eventResults []*events.Event
 		var searchErr error
 		if len(terms) > 0 {
-			eventResults, searchErr = store.SearchEventsMultiTerm(terms, *limitFlag)
+			eventResults, searchErr = store.SearchEventsMultiTerm(terms, limit)
 		} else {
-			eventResults, searchErr = store.SearchEvents(query, *limitFlag)
+			eventResults, searchErr = store.SearchEvents(query, limit)
 		}
 		if searchErr != nil || len(eventResults) == 0 {
 			fmt.Println("No results found")
@@ -185,7 +190,6 @@ func (c *SearchCommand) Execute(ctx *Context) error {
 	}
 	fmt.Printf("Mode: %s | Results: %d | Time: %v\n\n", modeStr, len(result.Results), elapsed.Round(time.Millisecond))
 
-	// Show results
 	for i, r := range result.Results {
 		preview := r.Content
 		if len(preview) > 500 {
@@ -231,31 +235,22 @@ func buildSearchPayload(mode string, elapsed time.Duration, result *cognition.Re
 	return out
 }
 
-// RecentCommand shows recent events.
-type RecentCommand struct{}
-
-// Name returns the command name.
-func (c *RecentCommand) Name() string { return "recent" }
-
-// Description returns the command description.
-func (c *RecentCommand) Description() string { return "Show recent captured events" }
-
-// Execute runs the recent command.
-func (c *RecentCommand) Execute(ctx *Context) error {
-	limit := 10
-	if len(ctx.Args) >= 1 {
-		fmt.Sscanf(ctx.Args[0], "%d", &limit)
+// displayRecentView shows recent events (was: RecentCommand).
+// Args: [limit].
+func displayRecentView(store *storage.Storage, args []string, defaultLimit int) error {
+	limit := defaultLimit
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(args) >= 1 {
+		fmt.Sscanf(args[0], "%d", &limit)
 	}
 
-	store := ctx.Storage
-
-	// Get recent events
 	recentEvents, err := store.GetRecentEvents(limit)
 	if err != nil {
 		return fmt.Errorf("failed to get recent events: %w", err)
 	}
 
-	// Display results
 	if len(recentEvents) == 0 {
 		fmt.Println("No events found")
 		return nil
@@ -286,30 +281,22 @@ func (c *RecentCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// InsightsCommand shows extracted insights.
-type InsightsCommand struct{}
-
-// Name returns the command name.
-func (c *InsightsCommand) Name() string { return "insights" }
-
-// Description returns the command description.
-func (c *InsightsCommand) Description() string { return "Show extracted insights" }
-
-// Execute runs the insights command.
-func (c *InsightsCommand) Execute(ctx *Context) error {
+// displayInsightsView shows extracted insights (was: InsightsCommand).
+// Args: [category] [limit].
+func displayInsightsView(store *storage.Storage, args []string, defaultLimit int) error {
 	category := ""
-	limit := 10
-
-	if len(ctx.Args) >= 1 {
-		category = ctx.Args[0]
-	}
-	if len(ctx.Args) >= 2 {
-		fmt.Sscanf(ctx.Args[1], "%d", &limit)
+	limit := defaultLimit
+	if limit <= 0 {
+		limit = 10
 	}
 
-	store := ctx.Storage
+	if len(args) >= 1 {
+		category = args[0]
+	}
+	if len(args) >= 2 {
+		fmt.Sscanf(args[1], "%d", &limit)
+	}
 
-	// Get insights
 	var insightList []*storage.Insight
 	var err error
 	if category != "" {
@@ -322,7 +309,6 @@ func (c *InsightsCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("failed to get insights: %w", err)
 	}
 
-	// Display results
 	if len(insightList) == 0 {
 		fmt.Println("No insights found")
 		return nil
@@ -351,31 +337,19 @@ func (c *InsightsCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// EntitiesCommand shows knowledge graph entities.
-type EntitiesCommand struct{}
-
-// Name returns the command name.
-func (c *EntitiesCommand) Name() string { return "entities" }
-
-// Description returns the command description.
-func (c *EntitiesCommand) Description() string { return "Show knowledge graph entities" }
-
-// Execute runs the entities command.
-func (c *EntitiesCommand) Execute(ctx *Context) error {
+// displayEntitiesView shows knowledge graph entities (was: EntitiesCommand).
+// Args: [type].
+func displayEntitiesView(store *storage.Storage, args []string) error {
 	entityType := ""
-	if len(ctx.Args) >= 1 {
-		entityType = ctx.Args[0]
+	if len(args) >= 1 {
+		entityType = args[0]
 	}
 
-	store := ctx.Storage
-
-	// Get entities
 	var entityList []*storage.Entity
 	var err error
 	if entityType != "" {
 		entityList, err = store.GetEntitiesByType(entityType)
 	} else {
-		// Get all entity types
 		types := []string{"decision", "pattern", "insight", "strategy"}
 		for _, t := range types {
 			typeEntities, _ := store.GetEntitiesByType(t)
@@ -387,7 +361,6 @@ func (c *EntitiesCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("failed to get entities: %w", err)
 	}
 
-	// Display results
 	if len(entityList) == 0 {
 		fmt.Println("No entities found")
 		return nil
@@ -405,40 +378,27 @@ func (c *EntitiesCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// GraphCommand shows entity relationships.
-type GraphCommand struct{}
-
-// Name returns the command name.
-func (c *GraphCommand) Name() string { return "graph" }
-
-// Description returns the command description.
-func (c *GraphCommand) Description() string { return "Show entity relationship graph" }
-
-// Execute runs the graph command.
-func (c *GraphCommand) Execute(ctx *Context) error {
-	if len(ctx.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: cortex graph <entity_type> <entity_name>\n")
+// displayGraphView shows entity relationships (was: GraphCommand).
+// Args: <entity_type> <entity_name>.
+func displayGraphView(store *storage.Storage, args []string) error {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: cortex search --type=graph <entity_type> <entity_name>\n")
 		return fmt.Errorf("missing arguments")
 	}
 
-	entityType := ctx.Args[0]
-	entityName := ctx.Args[1]
+	entityType := args[0]
+	entityName := args[1]
 
-	store := ctx.Storage
-
-	// Get entity
 	entity, err := store.GetEntity(entityType, entityName)
 	if err != nil {
 		return fmt.Errorf("entity not found: %w", err)
 	}
 
-	// Get relationships
 	relationships, err := store.GetRelationships(entity.ID)
 	if err != nil {
 		return fmt.Errorf("failed to get relationships: %w", err)
 	}
 
-	// Display entity and relationships
 	fmt.Printf("Knowledge Graph for: %s (%s)\n\n", entity.Name, entity.Type)
 	fmt.Printf("First seen: %s\n", entity.FirstSeen.Format("2006-01-02"))
 	fmt.Printf("Last seen: %s\n\n", entity.LastSeen.Format("2006-01-02"))

@@ -327,13 +327,8 @@ func (c *CLICommand) Execute(ctx *Context) error {
 		})
 
 	case "insights":
-		// cortex cli insights
-		insightsCmd := &InsightsCommand{}
-		return insightsCmd.Execute(&Context{
-			Config:  ctx.Config,
-			Storage: ctx.Storage,
-			Args:    []string{},
-		})
+		// cortex cli insights — delegates to the collapsed view helper.
+		return displayInsightsView(ctx.Storage, nil, 10)
 
 	case "status":
 		// cortex cli status - show info
