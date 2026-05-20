@@ -156,21 +156,6 @@ func main() {
 		if cmd := commands.Get("measure"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "watch":
-		if cmd := commands.Get("watch"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
 	case "search", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
 			// --workdir signals an isolated invocation (benchmarks,
@@ -342,7 +327,6 @@ Commands:
 
   search         Search captured context; --type=recent|insights|entities|graph for views
   status         Show status (default: one line; --system|--memory|--json|--expand)
-  watch          Live dashboard of cognitive modes
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
   measure        Measure prompt quality for small context windows

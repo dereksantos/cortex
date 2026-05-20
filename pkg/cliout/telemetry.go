@@ -294,7 +294,7 @@ func CortexFunctionFor(command string) string {
 		return "" // meta-tool over the rest; no single function
 	case "journal", "prune", "forget":
 		return "Maintain"
-	case "watch", "status", "tools":
+	case "status", "tools":
 		return "" // observability / config; no cortex function
 	case "init", "install", "uninstall", "projects", "daemon",
 		"setup", "test":

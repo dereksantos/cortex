@@ -175,9 +175,9 @@ Cuts and consolidations:
   stdin path now expects native `events.FromJSON` only.
 - **Multi-project registry** — `projects`. Keep iff multi-project is still in
   scope; otherwise drop. Flag for explicit user decision.
-- **Watch / TUI** — `watch` + `internal/tui/`. Keep iff dimension 6 (in-flight
-  observability) wants a TUI surface; otherwise it's optional UX. Coupled to
-  N (Investigate).
+- ~~**Watch / TUI** — `watch` + `internal/tui/`~~ — *done.* Per D14
+  both are gone; daemon dashboard at `:9090` plus `cortex status`
+  cover the observability surface.
 
 Routing fix:
 
@@ -678,6 +678,21 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### F.d (slice). `watch` + `internal/tui/` removal
+
+Per D14 the `cortex watch` TUI dashboard goes — the daemon at `:9090`
+plus `cortex status` cover the surface.
+
+- Deleted `cmd/cortex/commands/watch.go`, `watch_state.go`, and their
+  `_test.go` peers — ~1,500 LOC.
+- Deleted `internal/tui/` (`ansi`, `box`, `panels`, `spinner`, `text`,
+  `tui`, `tui_test`) — ~1,000 LOC.
+- `cmd/cortex/main.go` — `watch` case removed; help text trimmed.
+- `pkg/cliout/telemetry.go` — observability classifier drops `watch`.
+- `tools.json` regenerated (27 → 26 commands).
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### F.d (slice). Slash-command + hook teardown
 

@@ -257,11 +257,6 @@
       "name": "uninstall",
       "description": "Remove the current project's .cortex/ data (--purge required to delete)",
       "version": "0.1.0"
-    },
-    {
-      "name": "watch",
-      "description": "Watch cognitive activity in real-time",
-      "version": "0.1.0"
     }
   ]
 }
