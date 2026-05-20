@@ -678,6 +678,16 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
+### K (slice 4). `model.predict_next` between inject and coding_turn
+
+`decide.inject` now spawns `model.predict_next` (n5a) which then
+spawns `decide.coding_turn` (n6). Pure trace contribution today;
+future slices can use the predictions to warm caches before
+`decide.coding_turn` fires.
+
+Manual sanity: `cortex run --type=turn --prompt="hello"` reports
+11 nodes executed. All tests green.
+
 ### K (slice 3). `decide.should_capture` gating `maintain.capture`
 
 `maintain.extract_insight` now spawns `decide.should_capture` (n7a)

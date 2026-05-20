@@ -1112,18 +1112,49 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		},
 	}
 
-	// decide.inject — decide inject/wait/queue; spawns decide.coding_turn.
+	// decide.inject — decide inject/wait/queue; spawns model.predict_next
+	// (which then spawns decide.coding_turn).
 	injectInner := get("decide.inject")
 	injectSpec := dag.NodeSpec{
 		Function:    dag.FuncDecide,
 		Op:          "inject",
-		Description: "decide inject/wait/queue; spawns decide.coding_turn",
+		Description: "decide inject/wait/queue; spawns model.predict_next",
 		Cost:        dag.Cost{LatencyMS: 700, Tokens: 150},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
 			res, err := injectInner(ctx, in, b)
 			if err != nil {
 				return res, err
+			}
+			res.Spawn = []dag.NodeSpec{
+				{
+					Function: dag.FuncModel, Op: "predict_next", ID: "n5a",
+					Attrs: map[string]any{"current": p, "prompt": p},
+				},
+			}
+			return res, nil
+		},
+	}
+
+	// model.predict_next — forward-simulation hint: top-3 likely
+	// follow-up queries given the current prompt. Pure trace
+	// contribution today; future slices can use the predictions to
+	// warm caches before decide.coding_turn runs. Always continues
+	// the chain to decide.coding_turn.
+	predictNextInner := get("model.predict_next")
+	predictNextSpec := dag.NodeSpec{
+		Function:    dag.FuncModel,
+		Op:          "predict_next",
+		Description: "forward-simulate likely follow-ups; spawns decide.coding_turn",
+		Cost:        dag.Cost{LatencyMS: 11000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			res, err := predictNextInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"predictions": []string{}, "count": 0, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
 			}
 			res.Spawn = []dag.NodeSpec{
 				{
@@ -1246,7 +1277,7 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	return []dag.NodeSpec{
 		senseSpec, embedSpec, searchSpec, rerankSpec,
 		scoreSpec, contradictionSpec,
-		injectSpec, codingTurnSpec, insightSpec,
+		injectSpec, predictNextSpec, codingTurnSpec, insightSpec,
 		shouldCaptureSpec, captureSpec,
 	}
 }
