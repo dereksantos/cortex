@@ -198,34 +198,6 @@ func main() {
 			defer store.Close()
 			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
 		}
-	case "session-start", "inject-context", "stop", "cli":
-		if cmd := commands.Get(command); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				// For session commands, log error but don't block user
-				if command == "inject-context" || command == "stop" {
-					fmt.Fprintf(os.Stderr, "cortex %s: config error: %v\n", command, err)
-					os.Exit(0)
-				}
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			// Auto-start daemon on session-start (beginning of every session)
-			if command == "session-start" {
-				maybeStartDaemon(cfg)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				if command == "inject-context" || command == "stop" {
-					fmt.Fprintf(os.Stderr, "cortex %s: storage error: %v\n", command, err)
-					os.Exit(0)
-				}
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
 	case "version":
 		fmt.Printf("cortex version %s\n", version)
 	case "help", "-h", "--help":
@@ -374,10 +346,6 @@ Commands:
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
   measure        Measure prompt quality for small context windows
-
-  session-start  Print session start instructions (for hooks)
-  inject-context Inject relevant context into prompt (for hooks)
-  cli            Route slash command arguments (for /cortex)
 
   tools          Generate / verify tools.json manifest
 

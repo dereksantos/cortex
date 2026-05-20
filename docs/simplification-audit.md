@@ -168,10 +168,11 @@ Cuts and consolidations:
   available.
 - **Collapse into `maintenance` subcommand** (or under `daemon`):
   - `prune`, `reembed`, `embed`
-- **Claude-Code hook commands** — `session-start`, `inject-context`, `stop`,
-  `cli`. With cortex as its own harness, the Claude-Code integration story is
-  no longer the primary path. Keep iff we still want Claude Code to consume
-  cortex memory; otherwise drop. Flag for explicit user decision.
+- ~~**Claude-Code hook commands** — `session-start`, `inject-context`, `stop`,
+  `cli`~~ — *done.* Per D11 the four hook commands plus
+  `integrations/claude/` are gone; `install`/`uninstall` collapse to
+  cortex-only setup (no editor / hook wiring); `cortex capture`'s
+  stdin path now expects native `events.FromJSON` only.
 - **Multi-project registry** — `projects`. Keep iff multi-project is still in
   scope; otherwise drop. Flag for explicit user decision.
 - **Watch / TUI** — `watch` + `internal/tui/`. Keep iff dimension 6 (in-flight
@@ -359,7 +360,7 @@ conversion (largest, most-gated).
        gone after J, `measure --calibrate`).
     ~~b. View collapses (`recent`/`insights`/`entities`/`graph` → `search --type`).~~ — *done.*
     c. Status collapses (`info`/`stats`/`overview` → `status`).
-    d. Hook commands + `projects` decision (needs user input first — flagged in F).
+    ~~d. Hook commands + `projects` decision (needs user input first — flagged in F).~~ — *hook commands done.* `projects` kept under D13.
 11. **Unify staged DAG ops** (K) — one PR per op, each gated on no regression
     in v2 cell results.
 12. ~~**Within-cortex baseline decision** (M)~~ — *resolved alongside B.*
@@ -677,6 +678,40 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
   auto-registers cortex as an MCP server.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
+
+### F.d (slice). Slash-command + hook teardown
+
+Per D11 the Claude-Code slash + hook story is gone. Cortex is its own
+harness; if anyone wants Claude Code to consume cortex memory they
+should call the CLI directly.
+
+- Deleted `cmd/cortex/commands/session.go` (the four hook commands
+  `session-start`, `inject-context`, `stop`, `cli`, plus their
+  helpers `tryLogError`, `isFirstPromptInSession`, `writeRetrievalStats`,
+  `executeOverview`, `executeInfo`) — ~540 LOC.
+- Deleted `integrations/claude/` entirely (`adapter.go` +
+  `adapter_test.go`) — ~440 LOC.
+- `cmd/cortex/commands/setup.go` rewritten end-to-end (~1190 → ~370 LOC).
+  `InstallCommand` is now thin — ensure `.cortex/` exists, register the
+  project, surface LLM availability. `UninstallCommand` only manages
+  `.cortex/` data (purge requires `--purge`). All the Claude-Code-specific
+  helpers (`createClaudeSettings`, `setupClaudeCode`, `createSlashCommand`,
+  `createCortexCommand`, `createPluginJSON`, `removeCortexFromSettings`,
+  `cleanCortexHooks`, `cortexBinPath`, `isDirEmpty`) are gone.
+- `cmd/cortex/commands/ingest.go` (CaptureCommand) drops the
+  `--source claude|cursor` dispatch; stdin payloads are now parsed
+  via native `events.FromJSON` only. The cursor import goes too so
+  O can land cleanly next.
+- `cmd/cortex/main.go` — `session-start|inject-context|stop|cli` case
+  block deleted; help text trimmed.
+- `pkg/cliout/telemetry.go` — lifecycle classifier no longer lists
+  the dropped verbs.
+- `tools.json` regenerated (31 → 27 commands).
+
+Net delta: ~2,800 LOC removed (mostly setup.go gutting + claude adapter
+deletion + session.go deletion).
+
+Verified `go build ./...` and `go test ./...` both green.
 
 ### F.b. View collapses → `cortex search --type`
 

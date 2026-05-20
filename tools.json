@@ -18,11 +18,6 @@
       "version": "0.1.0"
     },
     {
-      "name": "cli",
-      "description": "Route slash command arguments for /cortex",
-      "version": "0.1.0"
-    },
-    {
       "name": "code",
       "description": "Run the Cortex coding harness against a workdir (requires --workdir and --model)",
       "version": "0.1.0"
@@ -103,13 +98,8 @@
       "version": "0.1.0"
     },
     {
-      "name": "inject-context",
-      "description": "Inject relevant context into prompt for hooks",
-      "version": "0.1.0"
-    },
-    {
       "name": "install",
-      "description": "Install Cortex hooks for Claude Code",
+      "description": "Ensure .cortex/ is initialized and report local LLM availability",
       "version": "0.1.0"
     },
     {
@@ -230,18 +220,8 @@
       ]
     },
     {
-      "name": "session-start",
-      "description": "Print session start instructions for hooks",
-      "version": "0.1.0"
-    },
-    {
       "name": "status",
       "description": "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)",
-      "version": "0.1.0"
-    },
-    {
-      "name": "stop",
-      "description": "Handle session stop and capture transcript for hooks",
       "version": "0.1.0"
     },
     {
@@ -275,7 +255,7 @@
     },
     {
       "name": "uninstall",
-      "description": "Remove Cortex hooks from Claude Code",
+      "description": "Remove the current project's .cortex/ data (--purge required to delete)",
       "version": "0.1.0"
     },
     {

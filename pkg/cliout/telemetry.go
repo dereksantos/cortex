@@ -297,8 +297,7 @@ func CortexFunctionFor(command string) string {
 	case "watch", "status", "tools":
 		return "" // observability / config; no cortex function
 	case "init", "install", "uninstall", "projects", "daemon",
-		"setup", "cli", "session-start", "inject-context", "stop",
-		"test":
+		"setup", "test":
 		return "" // lifecycle / harness wiring; no cortex function
 	}
 	return ""

@@ -15,8 +15,6 @@ import (
 
 	"log"
 
-	"github.com/dereksantos/cortex/integrations/claude"
-	"github.com/dereksantos/cortex/integrations/cursor"
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -90,8 +88,9 @@ func (c *CaptureCommand) Description() string { return "Capture event from stdin
 func (c *CaptureCommand) Execute(ctx *Context) error {
 	// Parse flags first — bulk mode resolves its own config from --workdir
 	// and short-circuits the cwd-walking loadCaptureConfig() path used by
-	// the AI-tool-integration flows below.
-	source := "claude" // default
+	// the direct-capture flow below. Stdin input is expected to be a native
+	// cortex event (events.FromJSON); Claude-Code hook adapters were
+	// removed under audit D11.
 	captureType := ""
 	content := ""
 	bulk := false
@@ -100,9 +99,6 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
 		switch {
-		case arg == "--source" && i+1 < len(ctx.Args):
-			source = ctx.Args[i+1]
-			i++
 		case strings.HasPrefix(arg, "--type="):
 			captureType = strings.TrimPrefix(arg, "--type=")
 		case arg == "--type" && i+1 < len(ctx.Args):
@@ -174,33 +170,20 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 		os.Exit(0)
 	}
 
-	// Read stdin
+	// Read stdin — expected to be a native cortex event (events.FromJSON).
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil || len(data) == 0 {
 		os.Exit(0)
 	}
 
-	var event *events.Event
-
-	// Convert based on source
-	switch source {
-	case "claude":
-		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
-	case "cursor":
-		event, err = cursor.ConvertToEvent(data, cfg.ProjectRoot)
-	default:
-		// Try Claude format as fallback
-		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
-	}
-
+	event, err := events.FromJSON(data)
 	if err != nil {
-		// Try direct capture as fallback
-		cap := capture.New(cfg)
-		_ = cap.CaptureFromStdin()
+		// Malformed payload — drop silently to mirror prior fail-quiet
+		// behavior so an upstream caller never sees a noisy capture.
 		os.Exit(0)
 	}
+	event.Context.ProjectPath = cfg.ProjectRoot
 
-	// Capture the converted event
 	cap := capture.New(cfg)
 	_ = cap.CaptureEvent(event)
 
