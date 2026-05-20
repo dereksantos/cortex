@@ -3,6 +3,7 @@ package commands
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"time"
 
@@ -21,6 +22,12 @@ func (c *PruneCommand) Name() string { return "prune" }
 
 // Description returns the command description.
 func (c *PruneCommand) Description() string { return "Check/manage context size relative to project" }
+
+// DescribeFlags surfaces prune's flag set into tools.json.
+func (c *PruneCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("dry-run", false, "Show what would be pruned without doing it")
+	fs.Bool("force", false, "Prune even if under limit")
+}
 
 // Execute runs the prune command.
 func (c *PruneCommand) Execute(ctx *Context) error {

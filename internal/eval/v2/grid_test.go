@@ -75,7 +75,7 @@ func TestRunGrid_8Cells(t *testing.T) {
 		},
 	}
 	harnesses := []HarnessSpec{
-		{Name: HarnessAider, Harness: fake},
+		{Name: HarnessCortex, Harness: fake},
 	}
 	models := []ModelSpec{
 		{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"},
@@ -195,7 +195,7 @@ func TestRunGrid_SetModelFiresPerCell(t *testing.T) {
 
 	_, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		models,
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -215,7 +215,7 @@ func TestRunGrid_EmptyDimensions(t *testing.T) {
 	p := newTestPersister(t)
 	fake := &gridFakeHarness{}
 	scn := []*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}}
-	hs := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	hs := []HarnessSpec{{Name: HarnessCortex, Harness: fake}}
 	mods := []ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}}
 	strat := []ContextStrategy{StrategyBaseline}
 
@@ -248,7 +248,7 @@ func TestRunGrid_EmptyDimensions(t *testing.T) {
 func TestRunGrid_NilPersister(t *testing.T) {
 	_, err := RunGrid(context.Background(), nil,
 		[]*Scenario{{ID: "x"}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "x"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err == nil {
@@ -342,7 +342,7 @@ func TestRunGrid_RunCeilingTripsAfterNCells(t *testing.T) {
 	t.Setenv(EnvNoFreePreference, "1") // don't auto-swap to :free for this test
 
 	fake := &gridFixedCostHarness{cost: 0.30}
-	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	harnesses := []HarnessSpec{{Name: HarnessCortex, Harness: fake}}
 	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}
 	strategies := []ContextStrategy{StrategyBaseline}
 
@@ -388,7 +388,7 @@ func TestRunGrid_LifetimeCeilingPersistsAcrossRuns(t *testing.T) {
 	t.Setenv(EnvNoFreePreference, "1")
 
 	fake := &gridFixedCostHarness{cost: 0.20}
-	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	harnesses := []HarnessSpec{{Name: HarnessCortex, Harness: fake}}
 	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}
 	strategies := []ContextStrategy{StrategyBaseline}
 
@@ -439,7 +439,7 @@ func TestRunGrid_FreeTierPreferenceRoutes(t *testing.T) {
 		fake := &gridFakeHarness{}
 		_, err := RunGrid(context.Background(), p,
 			[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-			[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+			[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 			[]ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}}, // paid input
 			[]ContextStrategy{StrategyBaseline})
 		if err != nil {
@@ -457,7 +457,7 @@ func TestRunGrid_FreeTierPreferenceRoutes(t *testing.T) {
 		fake := &gridFakeHarness{}
 		_, err := RunGrid(context.Background(), p,
 			[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-			[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+			[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 			[]ModelSpec{{Provider: ProviderOpenRouter, Model: "qwen/qwen3-coder"}},
 			[]ContextStrategy{StrategyBaseline})
 		if err != nil {
@@ -481,7 +481,7 @@ func TestRunGrid_FrontierGuardBlocksWithoutEnv(t *testing.T) {
 
 	fake := &gridFakeHarness{}
 	scenarios := []*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}}
-	harnesses := []HarnessSpec{{Name: HarnessAider, Harness: fake}}
+	harnesses := []HarnessSpec{{Name: HarnessCortex, Harness: fake}}
 	models := []ModelSpec{{Provider: ProviderOpenRouter, Model: "anthropic/claude-sonnet-4.6"}}
 	strategies := []ContextStrategy{StrategyBaseline}
 
@@ -538,7 +538,7 @@ func TestRunGrid_CortexInjection_AddsPrefixOnCortexStrategy(t *testing.T) {
 				"Use t.Helper() in helpers",
 			},
 		}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyCortex})
 	if err != nil {
@@ -580,7 +580,7 @@ func TestRunGrid_CortexInjection_BaselineSkipsPrefix(t *testing.T) {
 			Tests:         []Test{{Query: "implement the function"}},
 			CortexContext: []string{"Match existing patterns"},
 		}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -611,7 +611,7 @@ func TestRunGrid_CortexInjection_EmptyContextNoOp(t *testing.T) {
 			Tests: []Test{{Query: "implement the function"}},
 			// no CortexContext
 		}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyCortex})
 	if err != nil {
@@ -652,7 +652,7 @@ func TestRunGrid_SeedDirCopiedIntoWorkdir(t *testing.T) {
 			// Verify checks both the top-level marker and the subdir.
 			Verify: "test -f MARKER.txt && grep -q seed-ok MARKER.txt && test -f sub/child.txt",
 		}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -672,7 +672,7 @@ func TestRunGrid_SeedDirMissing(t *testing.T) {
 
 	_, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, SeedDir: "/nonexistent/seed/dir"}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err == nil {
@@ -733,7 +733,7 @@ func TestRunGrid_RetryRecoversFromTransient429(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -765,7 +765,7 @@ func TestRunGrid_RetryGivesUpAfterMaxAttempts(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -797,7 +797,7 @@ func TestRunGrid_NoRetryOnHardErrors(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: fake}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: fake}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -852,7 +852,7 @@ func TestRunGrid_VerifyExits0_TaskSuccess(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: "true"}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -875,7 +875,7 @@ func TestRunGrid_VerifyExitsNonzero_TaskFails(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: "false"}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -902,7 +902,7 @@ func TestRunGrid_VerifyParsesGoTestCounts(t *testing.T) {
 	verify := `printf -- '--- PASS: TestA (0.00s)\n--- PASS: TestB (0.00s)\n--- FAIL: TestC (0.00s)\n'; exit 1`
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}, Verify: verify}},
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {
@@ -932,7 +932,7 @@ func TestRunGrid_NoVerifyKeepsLegacyBehavior(t *testing.T) {
 
 	results, err := RunGrid(context.Background(), p,
 		[]*Scenario{{ID: "x", Tests: []Test{{Query: "q"}}}}, // no Verify
-		[]HarnessSpec{{Name: HarnessAider, Harness: &gridFakeHarness{}}},
+		[]HarnessSpec{{Name: HarnessCortex, Harness: &gridFakeHarness{}}},
 		[]ModelSpec{{Provider: ProviderOpenRouter, Model: "openai/gpt-oss-20b:free"}},
 		[]ContextStrategy{StrategyBaseline})
 	if err != nil {

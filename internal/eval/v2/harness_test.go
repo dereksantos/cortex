@@ -8,10 +8,10 @@ import (
 )
 
 // Compile-time guard: existing harnesses still satisfy the bare Harness
-// interface. Step 3 must not break ClaudeCLIHarness or AiderHarness.
+// interface.
 var (
 	_ Harness = (*ClaudeCLIHarness)(nil)
-	_ Harness = (*AiderHarness)(nil)
+	_ Harness = (*CortexHarness)(nil)
 )
 
 // bareHarness implements only Harness.

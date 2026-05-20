@@ -3,20 +3,25 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"text/template"
 	"time"
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cognition/prompts"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -24,25 +29,15 @@ import (
 )
 
 func init() {
-	Register(&InfoCommand{})
 	Register(&TestCommand{})
-	Register(&StatsCommand{})
 	Register(&StatusCommand{})
 	Register(&ForgetCommand{})
-	Register(&OverviewCommand{})
 }
 
-// InfoCommand shows system information and model recommendations.
-type InfoCommand struct{}
-
-// Name returns the command name.
-func (c *InfoCommand) Name() string { return "info" }
-
-// Description returns the command description.
-func (c *InfoCommand) Description() string { return "Show system info and model recommendations" }
-
-// Execute runs the info command.
-func (c *InfoCommand) Execute(ctx *Context) error {
+// displaySystemInfo renders system resources, Ollama status, and model
+// recommendations. Was the standalone `cortex info` command; now invoked
+// via `cortex status --system`.
+func displaySystemInfo(ctx *Context) error {
 	fmt.Println("Cortex System Information")
 	fmt.Println("---------------------------------------------------")
 	fmt.Println()
@@ -587,17 +582,10 @@ func calcStats(times []time.Duration) (avg, min, max time.Duration) {
 	return avg, min, max
 }
 
-// StatsCommand shows storage statistics.
-type StatsCommand struct{}
-
-// Name returns the command name.
-func (c *StatsCommand) Name() string { return "stats" }
-
-// Description returns the command description.
-func (c *StatsCommand) Description() string { return "Show storage statistics" }
-
-// Execute runs the stats command.
-func (c *StatsCommand) Execute(ctx *Context) error {
+// displayStatsJSON renders the raw storage stats blob as pretty-printed
+// JSON. Was the standalone `cortex stats` command; now invoked via
+// `cortex status --json`.
+func displayStatsJSON(ctx *Context) error {
 	store := ctx.Storage
 	if store == nil {
 		return fmt.Errorf("storage not available")
@@ -617,24 +605,91 @@ func (c *StatsCommand) Execute(ctx *Context) error {
 }
 
 // StatusCommand shows the current Cortex status.
+//
+// Default (no flag): a short status-line one-liner suitable for
+// Claude Code's status-line use case. Sub-millisecond — no LLM in the
+// hot path.
+//
+// Flags select alternative views (the surfaces that used to live as
+// separate `info` / `overview` / `stats` commands):
+//
+//	--system   System resources + Ollama + model recommendations
+//	--memory   Context-memory dashboard (events / insights / breakdown)
+//	--json     Raw storage stats as JSON
+//	--expand   Small-LLM-generated multi-line summary of current state.
+//	           Falls back to a richer mechanical render if no local LLM.
+//	--format=claude  Claude Code stdin variant of the default one-liner.
 type StatusCommand struct{}
 
 // Name returns the command name.
 func (c *StatusCommand) Name() string { return "status" }
 
 // Description returns the command description.
-func (c *StatusCommand) Description() string { return "Show status (for status line)" }
+func (c *StatusCommand) Description() string {
+	return "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)"
+}
 
-// Execute runs the status command.
+// DescribeFlags surfaces status's flag set into tools.json.
+func (c *StatusCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Bool("system", false, "System resources + Ollama + model recommendations")
+	fs.Bool("memory", false, "Context-memory dashboard (events / insights / breakdown)")
+	fs.Bool("json", false, "Emit raw storage stats as JSON")
+	fs.Bool("expand", false, "Small-LLM-generated multi-line summary of current state")
+	fs.String("format", "", "Output format: claude (Claude Code stdin variant of the default one-liner)")
+}
+
+// Execute parses status flags and dispatches to the chosen view. Flag
+// mutex is enforced: at most one of --system / --memory / --json /
+// --expand may be set.
 func (c *StatusCommand) Execute(ctx *Context) error {
+	var (
+		formatClaude bool
+		showSystem   bool
+		showMemory   bool
+		showJSON     bool
+		showExpand   bool
+	)
 	for _, arg := range ctx.Args {
-		if arg == "--format=claude" {
-			displayStatusClaude(ctx)
-			return nil
+		switch arg {
+		case "--format=claude":
+			formatClaude = true
+		case "--system":
+			showSystem = true
+		case "--memory":
+			showMemory = true
+		case "--json":
+			showJSON = true
+		case "--expand":
+			showExpand = true
 		}
 	}
-	displayStatus(ctx)
-	return nil
+
+	picked := 0
+	for _, b := range []bool{showSystem, showMemory, showJSON, showExpand} {
+		if b {
+			picked++
+		}
+	}
+	if picked > 1 {
+		return fmt.Errorf("cortex status: --system, --memory, --json, --expand are mutually exclusive")
+	}
+
+	switch {
+	case showSystem:
+		return displaySystemInfo(ctx)
+	case showMemory:
+		return displayMemoryOverview(ctx)
+	case showJSON:
+		return displayStatsJSON(ctx)
+	case showExpand:
+		return displayExpandedStatus(ctx)
+	case formatClaude:
+		displayStatusClaude(ctx)
+		return nil
+	default:
+		displayStatus(ctx)
+		return nil
+	}
 }
 
 func displayStatus(ctx *Context) {
@@ -828,6 +883,277 @@ func displayStatusClaude(ctx *Context) {
 	fmt.Print("✓ Ready")
 }
 
+// displayExpandedStatus prints a multi-line summary of Cortex's current
+// state. Composes a prompt from the same data sources `--system`,
+// `--memory`, and the status-line use, then asks a small local LLM
+// (Ollama) to write the summary. Falls back to a richer mechanical
+// render when no LLM is reachable — the data itself is the valuable
+// context regardless of who renders it.
+func displayExpandedStatus(ctx *Context) error {
+	data := collectStatusContext(ctx)
+
+	// Try the small local model first. We deliberately avoid the
+	// unified OpenRouter/Anthropic surface here: `cortex status` is an
+	// operator-facing primitive and should not burn paid tokens or
+	// require an API key to render. If Ollama isn't running or the
+	// configured model isn't pulled, fall back to mechanical render.
+	if summary, ok := generateStatusSummary(ctx, data); ok {
+		fmt.Println(summary)
+		fmt.Println()
+		fmt.Println("---")
+	}
+
+	renderMechanicalSummary(data)
+	return nil
+}
+
+// statusContext is the unified state blob that feeds both the LLM
+// prompt and the mechanical fallback render. Field names match the
+// template variables in pkg/cognition/prompts/status_summary.tmpl.
+type statusContext struct {
+	OS                string
+	Arch              string
+	CPUCores          int
+	TotalRAMGB        float64
+	AvailableRAMGB    float64
+	OllamaRunning     bool
+	OllamaModelCount  int
+	OllamaModels      []string
+	Initialized       bool
+	ProjectRoot       string
+	DaemonStatus      string
+	DatabaseSize      string
+	TotalEvents       int
+	TotalInsights     int
+	RecentEventCount  int
+	CategoryBreakdown string
+	CurrentMode       string
+	ModeDescription   string
+}
+
+func collectStatusContext(ctx *Context) statusContext {
+	sc := statusContext{DaemonStatus: "unknown"}
+
+	if sysInfo, err := system.Detect(); err == nil {
+		sc.OS = sysInfo.FormatOS()
+		sc.Arch = sysInfo.Arch
+		sc.CPUCores = sysInfo.CPUCores
+		sc.TotalRAMGB = sysInfo.TotalRAMGB
+		sc.AvailableRAMGB = sysInfo.AvailableRAMGB
+	}
+	running, models := checkOllama()
+	sc.OllamaRunning = running
+	sc.OllamaModels = models
+	sc.OllamaModelCount = len(models)
+
+	cfg := ctx.Config
+	if cfg != nil {
+		sc.Initialized = true
+		sc.ProjectRoot = cfg.ProjectRoot
+		statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
+		if state, _ := intcognition.ReadDaemonState(statePath); state != nil {
+			sc.CurrentMode = state.Mode
+			sc.ModeDescription = state.Description
+		}
+		dbPath := filepath.Join(cfg.ContextDir, "db", "events.db")
+		if info, err := os.Stat(dbPath); err == nil {
+			kb := float64(info.Size()) / 1024
+			if kb > 1024 {
+				sc.DatabaseSize = fmt.Sprintf("%.1f MB", kb/1024)
+			} else {
+				sc.DatabaseSize = fmt.Sprintf("%.0f KB", kb)
+			}
+		}
+	}
+
+	store := ctx.Storage
+	if store != nil {
+		if stats, err := store.GetStats(); err == nil {
+			if v, ok := stats["total_events"].(int); ok {
+				sc.TotalEvents = v
+			}
+			if v, ok := stats["total_insights"].(int); ok {
+				sc.TotalInsights = v
+			}
+		}
+		recent, _ := store.GetRecentEvents(20)
+		for _, e := range recent {
+			if time.Since(e.Timestamp) < 5*time.Minute {
+				sc.RecentEventCount++
+			}
+		}
+		// Category breakdown from the last 100 insights — same window the
+		// overview view uses.
+		insights, _ := store.GetRecentInsights(100)
+		counts := map[string]int{}
+		for _, ins := range insights {
+			counts[ins.Category]++
+		}
+		if len(counts) > 0 {
+			keys := make([]string, 0, len(counts))
+			for k := range counts {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s=%d", k, counts[k]))
+			}
+			sc.CategoryBreakdown = strings.Join(parts, ", ")
+		}
+		// Daemon health heuristic: any event in the last 5 minutes →
+		// daemon (or hooks) actively writing.
+		if sc.RecentEventCount > 0 {
+			sc.DaemonStatus = "active (recent events)"
+		} else {
+			sc.DaemonStatus = "idle"
+		}
+	}
+
+	return sc
+}
+
+// generateStatusSummary asks a small local model to render the state
+// blob into a 3-5 line plaintext summary. Returns (summary, true) on
+// success, ("", false) when no LLM is reachable or generation fails —
+// callers fall back to the mechanical render.
+func generateStatusSummary(ctx *Context, data statusContext) (string, bool) {
+	cfg := ctx.Config
+	if cfg == nil {
+		// We don't have a config to pick a model from, but Ollama may
+		// still be running with sensible defaults. Use a config shell.
+		cfg = &config.Config{
+			OllamaURL:   "http://localhost:11434",
+			OllamaModel: pickSmallStatusModel(data.OllamaModels),
+		}
+	}
+	if cfg.OllamaModel == "" {
+		cfg.OllamaModel = pickSmallStatusModel(data.OllamaModels)
+	}
+	if cfg.OllamaModel == "" {
+		return "", false
+	}
+
+	client := llm.NewOllamaClient(cfg)
+	if !client.IsAvailable() {
+		return "", false
+	}
+
+	tmplBytes, err := prompts.FS.ReadFile("status_summary.tmpl")
+	if err != nil {
+		return "", false
+	}
+	// Strip the YAML frontmatter so text/template sees only the body.
+	body := stripPromptFrontmatter(tmplBytes)
+	tmpl, err := template.New("status").Parse(body)
+	if err != nil {
+		return "", false
+	}
+	var prompt bytes.Buffer
+	if err := tmpl.Execute(&prompt, data); err != nil {
+		return "", false
+	}
+
+	// 8s soft cap: enough for qwen2.5:0.5b on a laptop, short enough
+	// that `status --expand` still feels interactive if the model is
+	// slow.
+	gctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	resp, err := client.Generate(gctx, prompt.String())
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(resp), true
+}
+
+// pickSmallStatusModel picks the smallest Ollama model from the
+// installed set that looks suitable for a short status-summary
+// generation. Prefers explicit known names; otherwise returns the first
+// model whose tag suggests it's small (≤ 3B). Returns "" if no candidate.
+func pickSmallStatusModel(models []string) string {
+	preferred := []string{
+		"qwen2.5:0.5b", "qwen2.5-coder:0.5b",
+		"qwen2.5:1.5b", "qwen2.5-coder:1.5b",
+		"gemma2:2b", "phi3:mini", "qwen2.5:3b",
+	}
+	have := map[string]bool{}
+	for _, m := range models {
+		have[m] = true
+	}
+	for _, p := range preferred {
+		if have[p] {
+			return p
+		}
+	}
+	// Heuristic: any model whose tag includes 0.5b / 1b / 1.5b / 2b / 3b.
+	for _, m := range models {
+		low := strings.ToLower(m)
+		for _, marker := range []string{":0.5b", ":1b", ":1.5b", ":2b", ":3b"} {
+			if strings.Contains(low, marker) {
+				return m
+			}
+		}
+	}
+	return ""
+}
+
+// stripPromptFrontmatter removes a `---` … `---` YAML header from a
+// prompt template so the remaining body can be parsed as a Go
+// text/template. The DAG op loader normally handles this; the status
+// command renders the template inline so we duplicate the strip here.
+func stripPromptFrontmatter(b []byte) string {
+	s := string(b)
+	if !strings.HasPrefix(s, "---") {
+		return s
+	}
+	rest := s[len("---"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return s
+	}
+	body := rest[end+len("\n---"):]
+	return strings.TrimLeft(body, "\n")
+}
+
+// renderMechanicalSummary prints a compact human-readable rendering of
+// the same state the LLM is summarizing. Always runs — under
+// `--expand` it backs the LLM summary as the "raw data", and when the
+// LLM is unavailable it stands in entirely.
+func renderMechanicalSummary(d statusContext) {
+	fmt.Println("Cortex status")
+	fmt.Println()
+	fmt.Printf("System:   %s (%s) | %d cores | %.1f / %.1f GB RAM\n",
+		d.OS, d.Arch, d.CPUCores, d.AvailableRAMGB, d.TotalRAMGB)
+	if d.OllamaRunning {
+		fmt.Printf("Ollama:   running (%d models)\n", d.OllamaModelCount)
+	} else {
+		fmt.Println("Ollama:   not running")
+	}
+	if d.Initialized {
+		fmt.Printf("Project:  %s\n", d.ProjectRoot)
+	} else {
+		fmt.Println("Project:  not initialized (run `cortex init`)")
+	}
+	fmt.Printf("Daemon:   %s\n", d.DaemonStatus)
+	if d.DatabaseSize != "" {
+		fmt.Printf("Database: %s\n", d.DatabaseSize)
+	}
+	fmt.Printf("Memory:   %d events, %d insights\n", d.TotalEvents, d.TotalInsights)
+	if d.RecentEventCount > 0 {
+		fmt.Printf("Recent:   %d events in last 5 min\n", d.RecentEventCount)
+	}
+	if d.CategoryBreakdown != "" {
+		fmt.Printf("Topics:   %s\n", d.CategoryBreakdown)
+	}
+	if d.CurrentMode != "" && d.CurrentMode != "idle" {
+		if d.ModeDescription != "" {
+			fmt.Printf("Mode:     %s — %s\n", d.CurrentMode, d.ModeDescription)
+		} else {
+			fmt.Printf("Mode:     %s\n", d.CurrentMode)
+		}
+	}
+}
+
 // getClaudeModeOutput returns the compact symbol + word for a cognitive mode.
 func getClaudeModeOutput(mode string) string {
 	switch mode {
@@ -995,17 +1321,11 @@ func emitRetraction(ctx *Context, gradedID, note, reason string) {
 	}
 }
 
-// OverviewCommand shows a visual summary of context.
-type OverviewCommand struct{}
-
-// Name returns the command name.
-func (c *OverviewCommand) Name() string { return "overview" }
-
-// Description returns the command description.
-func (c *OverviewCommand) Description() string { return "Show context overview (visual summary)" }
-
-// Execute runs the overview command.
-func (c *OverviewCommand) Execute(ctx *Context) error {
+// displayMemoryOverview renders the context-memory dashboard: events,
+// insights, category breakdown, daemon heuristic, db size. Was the
+// standalone `cortex overview` command; now invoked via
+// `cortex status --memory`.
+func displayMemoryOverview(ctx *Context) error {
 	cfg := ctx.Config
 	if cfg == nil {
 		fmt.Println("[X] Cortex not initialized")

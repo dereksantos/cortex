@@ -15,8 +15,8 @@ import (
 
 	"log"
 
-	"github.com/dereksantos/cortex/integrations/claude"
-	"github.com/dereksantos/cortex/integrations/cursor"
+	"flag"
+
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/processor"
@@ -70,9 +70,6 @@ type IngestCommand struct{}
 // AnalyzeCommand implements LLM analysis on recent events.
 type AnalyzeCommand struct{}
 
-// ProcessCommand implements combined ingest + analyze (backward compat).
-type ProcessCommand struct{}
-
 // FeedCommand implements manual knowledge seeding from files.
 type FeedCommand struct{}
 
@@ -80,7 +77,6 @@ func init() {
 	Register(&CaptureCommand{})
 	Register(&IngestCommand{})
 	Register(&AnalyzeCommand{})
-	Register(&ProcessCommand{})
 	Register(&FeedCommand{})
 }
 
@@ -90,12 +86,21 @@ func (c *CaptureCommand) Name() string { return "capture" }
 // Description returns the command description.
 func (c *CaptureCommand) Description() string { return "Capture event from stdin (used by AI tools)" }
 
+// DescribeFlags surfaces capture's flag set into tools.json.
+func (c *CaptureCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("type", "", "Capture type (decision | correction | pattern | ...)")
+	fs.String("content", "", "Capture content (free text)")
+	fs.Bool("bulk", false, "Bulk mode: read JSONL from stdin and capture each line as an event")
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+}
+
 // Execute runs the capture command.
 func (c *CaptureCommand) Execute(ctx *Context) error {
 	// Parse flags first — bulk mode resolves its own config from --workdir
 	// and short-circuits the cwd-walking loadCaptureConfig() path used by
-	// the AI-tool-integration flows below.
-	source := "claude" // default
+	// the direct-capture flow below. Stdin input is expected to be a native
+	// cortex event (events.FromJSON); Claude-Code hook adapters were
+	// removed under audit D11.
 	captureType := ""
 	content := ""
 	bulk := false
@@ -104,9 +109,6 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 	for i := 0; i < len(ctx.Args); i++ {
 		arg := ctx.Args[i]
 		switch {
-		case arg == "--source" && i+1 < len(ctx.Args):
-			source = ctx.Args[i+1]
-			i++
 		case strings.HasPrefix(arg, "--type="):
 			captureType = strings.TrimPrefix(arg, "--type=")
 		case arg == "--type" && i+1 < len(ctx.Args):
@@ -178,33 +180,20 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 		os.Exit(0)
 	}
 
-	// Read stdin
+	// Read stdin — expected to be a native cortex event (events.FromJSON).
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil || len(data) == 0 {
 		os.Exit(0)
 	}
 
-	var event *events.Event
-
-	// Convert based on source
-	switch source {
-	case "claude":
-		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
-	case "cursor":
-		event, err = cursor.ConvertToEvent(data, cfg.ProjectRoot)
-	default:
-		// Try Claude format as fallback
-		event, err = claude.ConvertToEvent(data, cfg.ProjectRoot)
-	}
-
+	event, err := events.FromJSON(data)
 	if err != nil {
-		// Try direct capture as fallback
-		cap := capture.New(cfg)
-		_ = cap.CaptureFromStdin()
+		// Malformed payload — drop silently to mirror prior fail-quiet
+		// behavior so an upstream caller never sees a noisy capture.
 		os.Exit(0)
 	}
+	event.Context.ProjectPath = cfg.ProjectRoot
 
-	// Capture the converted event
 	cap := capture.New(cfg)
 	_ = cap.CaptureEvent(event)
 
@@ -214,6 +203,11 @@ func (c *CaptureCommand) Execute(ctx *Context) error {
 
 // Name returns the command name.
 func (c *IngestCommand) Name() string { return "ingest" }
+
+// DescribeFlags surfaces ingest's flag set into tools.json.
+func (c *IngestCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+}
 
 // Description returns the command description.
 func (c *IngestCommand) Description() string { return "Move queued events to database" }
@@ -314,6 +308,12 @@ func (c *AnalyzeCommand) Name() string { return "analyze" }
 
 // Description returns the command description.
 func (c *AnalyzeCommand) Description() string { return "Run LLM analysis on recent events" }
+
+// DescribeFlags surfaces analyze's flag set into tools.json.
+func (c *AnalyzeCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("workdir", "", "Open storage rooted at <workdir>/.cortex")
+	fs.Int("limit", 10, "Maximum number of recent events to analyze")
+}
 
 // Execute runs the analyze command.
 func (c *AnalyzeCommand) Execute(ctx *Context) error {
@@ -421,96 +421,16 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 }
 
 // Name returns the command name.
-func (c *ProcessCommand) Name() string { return "process" }
-
-// Description returns the command description.
-func (c *ProcessCommand) Description() string { return "Process queue + analyze (backward compat)" }
-
-// Execute runs the process command (ingest + analyze).
-func (c *ProcessCommand) Execute(ctx *Context) error {
-	cfg := ctx.Config
-	store := ctx.Storage
-
-	// Load config and storage if not provided
-	if cfg == nil || store == nil {
-		var err error
-		captureCfg, captureErr := loadCaptureConfig()
-		if captureErr != nil {
-			return fmt.Errorf("failed to load config: %w", captureErr)
-		}
-		cfg, err = loadStorageConfig()
-		if err != nil {
-			return fmt.Errorf("failed to load storage config: %w", err)
-		}
-
-		store, err = storage.New(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to open storage: %w", err)
-		}
-		defer store.Close()
-
-		cfg.ContextDir = captureCfg.ContextDir
-	}
-
-	// Drain the journal: project capture.event entries past the cursor.
-	var procOpts []processor.Option
-	if opt, cleanup, err := openEvalProjector(); err == nil {
-		procOpts = append(procOpts, opt)
-		defer cleanup()
-	}
-	proc := processor.New(cfg, store, procOpts...)
-	processed, err := proc.RunBatch()
-	if err != nil {
-		return fmt.Errorf("failed to drain journal: %w", err)
-	}
-
-	fmt.Printf("Processed %d events\n", processed)
-
-	// If events were processed, run analysis immediately
-	if processed > 0 {
-		// Get LLM provider via the unified surface (OpenRouter → Anthropic).
-		var llmProvider llm.Provider
-		if p, _, err := llm.NewLLMClient(cfg); err == nil {
-			llmProvider = p
-		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
-			llmProvider = ollama
-		}
-
-		if llmProvider == nil {
-			fmt.Println("No LLM available for analysis")
-			return nil
-		}
-
-		// Analyze recent events
-		recentEvents, err := store.GetRecentEvents(processed)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to get recent events: %v\n", err)
-			return nil
-		}
-
-		fmt.Printf("Analyzing %d events with LLM...\n", len(recentEvents))
-
-		// Run analysis synchronously for immediate results
-		analyzed := 0
-		for _, event := range recentEvents {
-			if err := AnalyzeEventWithLLM(event, store, llmProvider); err == nil {
-				analyzed++
-			}
-		}
-
-		if analyzed > 0 {
-			fmt.Printf("Analyzed %d events\n", analyzed)
-		}
-	}
-
-	return nil
-}
-
-// Name returns the command name.
 func (c *FeedCommand) Name() string { return "feed" }
 
 // Description returns the command description.
 func (c *FeedCommand) Description() string { return "Seed knowledge from files or directories" }
+
+// DescribeFlags surfaces feed's flag set into tools.json.
+func (c *FeedCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("dir", "", "Recursively seed every file under <dir>")
+	fs.Bool("raw", false, "Seed file content verbatim (skip LLM extraction)")
+}
 
 // Execute runs the feed command.
 func (c *FeedCommand) Execute(ctx *Context) error {

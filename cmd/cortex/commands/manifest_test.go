@@ -60,7 +60,7 @@ func TestGenerateManifestShape(t *testing.T) {
 func TestGenerateManifestFlagsSurface(t *testing.T) {
 	m := GenerateManifest("0.1.0")
 	want := map[string][]string{
-		"search":        {"json", "limit", "mode", "workdir"},
+		"search":        {"json", "limit", "mode", "type", "workdir"},
 		"embed":         {"bulk", "content-type", "doc-id", "store", "text", "workdir"},
 		"search-vector": {"content-type", "text", "threshold", "top-k", "vector", "workdir"},
 		"tools":         {"check", "out", "version"},

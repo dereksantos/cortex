@@ -1,0 +1,40 @@
+---
+version: 1
+op: status.summary
+description: small-model summary of cortex state for `cortex status --expand`
+max_output_tokens: 200
+vars: [OS, Arch, CPUCores, TotalRAMGB, AvailableRAMGB, OllamaRunning, OllamaModelCount, Initialized, ProjectRoot, DaemonStatus, DatabaseSize, TotalEvents, TotalInsights, RecentEventCount, CategoryBreakdown, CurrentMode, ModeDescription]
+---
+You are summarizing the current state of Cortex, a context broker that
+captures development insights and feeds them into AI coding tools.
+
+Produce a 3-5 line plain-text summary that a developer can read at a
+glance. Focus on what is notable right now — recent activity, the most
+active categories, whether the daemon looks healthy, anything that
+stands out. Do not include a header, footer, or markdown formatting.
+Keep lines under 80 characters.
+
+Current state:
+
+System:
+- OS: {{.OS}} ({{.Arch}})
+- CPU: {{.CPUCores}} cores
+- RAM: {{printf "%.1f" .TotalRAMGB}} GB total, {{printf "%.1f" .AvailableRAMGB}} GB available
+- Ollama: {{if .OllamaRunning}}running ({{.OllamaModelCount}} models installed){{else}}not running{{end}}
+
+Project:
+- Initialized: {{if .Initialized}}yes ({{.ProjectRoot}}){{else}}no{{end}}
+- Daemon: {{.DaemonStatus}}
+- Database: {{.DatabaseSize}}
+
+Memory:
+- Events captured: {{.TotalEvents}}
+- Insights extracted: {{.TotalInsights}}
+- Recent activity (last 5 min): {{.RecentEventCount}} events
+{{- if .CategoryBreakdown}}
+- Categories: {{.CategoryBreakdown}}
+{{- end}}
+
+Cognitive mode (if active): {{if .CurrentMode}}{{.CurrentMode}}{{if .ModeDescription}} — {{.ModeDescription}}{{end}}{{else}}idle{{end}}
+
+Summary:

@@ -27,6 +27,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -54,6 +55,19 @@ type RunCommand struct{}
 
 func (c *RunCommand) Name() string        { return "run" }
 func (c *RunCommand) Description() string { return "Run a DAG by type (turn|think|dream|capture|eval)" }
+
+// DescribeFlags surfaces run's flag set into tools.json.
+func (c *RunCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("type", "", "DAG type: turn | think | dream | capture | eval")
+	fs.String("prompt", "", "User prompt (turn DAG)")
+	fs.String("model", "", "Model id")
+	fs.String("workdir", "", "Target workdir for harness-bound DAGs")
+	fs.String("scenario", "", "Path to scenario file (--type=eval)")
+	fs.String("strategy", "cortex", "Strategy: cortex | baseline (--type=eval)")
+	fs.String("event", "", "JSON event payload (--type=capture)")
+	fs.String("output", "human", "Output format: human | json")
+	fs.Bool("verbose", false, "Verbose output")
+}
 
 func (c *RunCommand) Execute(ctx *Context) error {
 	dagType := ""
@@ -885,11 +899,12 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		return prompt
 	}
 
-	// sense.prompt — captures the trigger prompt; spawns represent.embed.
+	// sense.prompt — captures the trigger prompt; spawns decide.plan as
+	// an early planner stub, which then spawns represent.embed.
 	senseSpec := dag.NodeSpec{
 		Function:    dag.FuncSense,
 		Op:          "prompt",
-		Description: "ingress: user prompt arrives; spawns represent.embed",
+		Description: "ingress: user prompt arrives; spawns decide.plan",
 		Cost:        dag.Cost{LatencyMS: 5, Tokens: 0},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
@@ -897,12 +912,41 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 				Out: map[string]any{"prompt": p},
 				Spawn: []dag.NodeSpec{
 					{
-						Function: dag.FuncRepresent, Op: "embed", ID: "n2",
-						Attrs: map[string]any{"text": p, "prompt": p},
+						Function: dag.FuncDecide, Op: "plan", ID: "n1a",
+						Attrs: map[string]any{"prompt": p},
 					},
 				},
 				CostConsumed: dag.Cost{LatencyMS: 5, Tokens: 0},
 			}, nil
+		},
+	}
+
+	// decide.plan — planner stub: decompose the prompt into ordered
+	// subtasks. Pure trace contribution today; future slices can
+	// surface the plan to the coding-turn handler. Always continues
+	// to represent.embed regardless of plan quality.
+	planInner := get("decide.plan")
+	planSpec := dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "plan",
+		Description: "decompose the prompt into ordered subtasks; spawns represent.embed",
+		Cost:        dag.Cost{LatencyMS: 15000, Tokens: 800},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			res, err := planInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"project_intent": p, "subtasks": nil, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
+			res.Spawn = []dag.NodeSpec{
+				{
+					Function: dag.FuncRepresent, Op: "embed", ID: "n2",
+					Attrs: map[string]any{"text": p, "prompt": p},
+				},
+			}
+			return res, nil
 		},
 	}
 
@@ -970,12 +1014,13 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		},
 	}
 
-	// attend.rerank — rerank candidates; spawns decide.inject.
+	// attend.rerank — rerank candidates; spawns value.score on the top
+	// candidate (audit K). value.score then spawns decide.inject.
 	rerankInner := get("attend.rerank")
 	rerankSpec := dag.NodeSpec{
 		Function:    dag.FuncAttend,
 		Op:          "rerank",
-		Description: "rerank candidates by relevance; spawns decide.inject",
+		Description: "rerank candidates by relevance; spawns value.score on the top candidate",
 		Cost:        dag.Cost{LatencyMS: 800, Tokens: 250},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
@@ -984,28 +1029,162 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 				return res, err
 			}
 			reranked, _ := res.Out["reranked"].([]cognition.Result)
+			topCandidate := ""
+			if len(reranked) > 0 {
+				topCandidate = reranked[0].Content
+			}
 			res.Spawn = []dag.NodeSpec{
 				{
-					Function: dag.FuncDecide, Op: "inject", ID: "n5",
-					Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
+					Function: dag.FuncValue, Op: "score", ID: "n4a",
+					Attrs: map[string]any{
+						"query":      p,
+						"candidate":  topCandidate,
+						"candidates": reranked,
+						"prompt":     p,
+					},
 				},
 			}
 			return res, nil
 		},
 	}
 
-	// decide.inject — decide inject/wait/queue; spawns decide.coding_turn.
+	// value.score — judge whether the top reranked candidate is
+	// load-bearing for the query. Pure trace contribution: it does
+	// not gate the downstream inject decision; the result is captured
+	// for later analysis and the chain continues to
+	// value.detect_contradiction.
+	scoreInner := get("value.score")
+	scoreSpec := dag.NodeSpec{
+		Function:    dag.FuncValue,
+		Op:          "score",
+		Description: "judge load-bearing-ness of the top candidate; spawns value.detect_contradiction",
+		Cost:        dag.Cost{LatencyMS: 9000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			reranked, _ := in["candidates"].([]cognition.Result)
+			candidate, _ := in["candidate"].(string)
+			nextSpawn := []dag.NodeSpec{
+				{
+					Function: dag.FuncValue, Op: "detect_contradiction", ID: "n4b",
+					Attrs: map[string]any{
+						"query":      p,
+						"candidate":  candidate,
+						"priors":     reranked,
+						"candidates": reranked,
+						"prompt":     p,
+					},
+				},
+			}
+			if candidate == "" {
+				return dag.NodeResult{
+					Out: map[string]any{
+						"load_bearing": false,
+						"confidence":   0.0,
+						"why":          "no candidate to score",
+						"fallback":     true,
+					},
+					Spawn:        nextSpawn,
+					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
+				}, nil
+			}
+			res, err := scoreInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"load_bearing": false, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
+			res.Spawn = nextSpawn
+			return res, nil
+		},
+	}
+
+	// value.detect_contradiction — judge whether the top candidate
+	// conflicts with any of the other reranked priors. Pure trace
+	// contribution: result captured, chain continues to decide.inject.
+	contradictionInner := get("value.detect_contradiction")
+	contradictionSpec := dag.NodeSpec{
+		Function:    dag.FuncValue,
+		Op:          "detect_contradiction",
+		Description: "flag conflicts between the top candidate and priors; spawns decide.inject",
+		Cost:        dag.Cost{LatencyMS: 13000, Tokens: 550},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			reranked, _ := in["candidates"].([]cognition.Result)
+			candidate, _ := in["candidate"].(string)
+			nextSpawn := []dag.NodeSpec{
+				{
+					Function: dag.FuncDecide, Op: "inject", ID: "n5",
+					Attrs: map[string]any{"query": p, "candidates": reranked, "prompt": p},
+				},
+			}
+			if candidate == "" {
+				return dag.NodeResult{
+					Out: map[string]any{
+						"conflicts":      false,
+						"conflicts_with": []string{},
+						"why":            "no candidate to evaluate",
+						"fallback":       true,
+					},
+					Spawn:        nextSpawn,
+					CostConsumed: dag.Cost{LatencyMS: 1, Tokens: 0},
+				}, nil
+			}
+			res, err := contradictionInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"conflicts": false, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+			}
+			res.Spawn = nextSpawn
+			return res, nil
+		},
+	}
+
+	// decide.inject — decide inject/wait/queue; spawns model.predict_next
+	// (which then spawns decide.coding_turn).
 	injectInner := get("decide.inject")
 	injectSpec := dag.NodeSpec{
 		Function:    dag.FuncDecide,
 		Op:          "inject",
-		Description: "decide inject/wait/queue; spawns decide.coding_turn",
+		Description: "decide inject/wait/queue; spawns model.predict_next",
 		Cost:        dag.Cost{LatencyMS: 700, Tokens: 150},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			p := readPrompt(in)
 			res, err := injectInner(ctx, in, b)
 			if err != nil {
 				return res, err
+			}
+			res.Spawn = []dag.NodeSpec{
+				{
+					Function: dag.FuncModel, Op: "predict_next", ID: "n5a",
+					Attrs: map[string]any{"current": p, "prompt": p},
+				},
+			}
+			return res, nil
+		},
+	}
+
+	// model.predict_next — forward-simulation hint: top-3 likely
+	// follow-up queries given the current prompt. Pure trace
+	// contribution today; future slices can use the predictions to
+	// warm caches before decide.coding_turn runs. Always continues
+	// the chain to decide.coding_turn.
+	predictNextInner := get("model.predict_next")
+	predictNextSpec := dag.NodeSpec{
+		Function:    dag.FuncModel,
+		Op:          "predict_next",
+		Description: "forward-simulate likely follow-ups; spawns decide.coding_turn",
+		Cost:        dag.Cost{LatencyMS: 11000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			p := readPrompt(in)
+			res, err := predictNextInner(ctx, in, b)
+			if err != nil {
+				res = dag.NodeResult{
+					Out:          map[string]any{"predictions": []string{}, "count": 0, "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
 			}
 			res.Spawn = []dag.NodeSpec{
 				{
@@ -1050,25 +1229,62 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 		},
 	}
 
-	// maintain.extract_insight — extract insights; spawns maintain.capture.
+	// maintain.extract_insight — extract insights; spawns
+	// decide.should_capture (which gates whether maintain.capture fires).
 	insightInner := get("maintain.extract_insight")
 	insightSpec := dag.NodeSpec{
 		Function:    dag.FuncMaintain,
 		Op:          "extract_insight",
-		Description: "extract insights from the turn output; spawns maintain.capture",
+		Description: "extract insights from the turn output; spawns decide.should_capture",
 		Cost:        dag.Cost{LatencyMS: 900, Tokens: 200},
 		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
 			res, err := insightInner(ctx, in, b)
 			if err != nil {
-				// Empty content path — extract_insight requires content;
-				// skip downstream insight extraction gracefully.
 				res = dag.NodeResult{
 					Out:          map[string]any{"insights": []ops.Insight{}, "count": 0, "skipped": true},
 					CostConsumed: res.CostConsumed,
 				}
 			}
+			// Pass the response content (or a synthetic placeholder) down
+			// so decide.should_capture has an `event` to evaluate.
+			event, _ := in["content"].(string)
+			if event == "" {
+				event = "(empty turn content)"
+			}
 			res.Spawn = []dag.NodeSpec{
-				{Function: dag.FuncMaintain, Op: "capture", ID: "n8"},
+				{
+					Function: dag.FuncDecide, Op: "should_capture", ID: "n7a",
+					Attrs: map[string]any{"event": event},
+				},
+			}
+			return res, nil
+		},
+	}
+
+	// decide.should_capture — gate maintain.capture on a Y/N journal
+	// decision. capture=false short-circuits the chain (no maintain.capture
+	// spawn); capture=true continues to maintain.capture.
+	shouldCaptureInner := get("decide.should_capture")
+	shouldCaptureSpec := dag.NodeSpec{
+		Function:    dag.FuncDecide,
+		Op:          "should_capture",
+		Description: "Y/N gate: should this turn be journaled? Conditionally spawns maintain.capture",
+		Cost:        dag.Cost{LatencyMS: 16000, Tokens: 350},
+		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
+			res, err := shouldCaptureInner(ctx, in, b)
+			if err != nil {
+				// On error, default to NOT capturing — safer than
+				// capturing on broken metadata. Chain terminates here.
+				res = dag.NodeResult{
+					Out:          map[string]any{"capture": false, "tag": "none", "fallback": true, "error": err.Error()},
+					CostConsumed: res.CostConsumed,
+				}
+				return res, nil
+			}
+			if capture, _ := res.Out["capture"].(bool); capture {
+				res.Spawn = []dag.NodeSpec{
+					{Function: dag.FuncMaintain, Op: "capture", ID: "n8"},
+				}
 			}
 			return res, nil
 		},
@@ -1089,8 +1305,10 @@ func buildTurnChainWithConfig(prompt, model, workdir string, reg *dag.Registry, 
 	}
 
 	return []dag.NodeSpec{
-		senseSpec, embedSpec, searchSpec, rerankSpec,
-		injectSpec, codingTurnSpec, insightSpec, captureSpec,
+		senseSpec, planSpec, embedSpec, searchSpec, rerankSpec,
+		scoreSpec, contradictionSpec,
+		injectSpec, predictNextSpec, codingTurnSpec, insightSpec,
+		shouldCaptureSpec, captureSpec,
 	}
 }
 

@@ -40,11 +40,51 @@ func main() {
 
 	command := os.Args[1]
 
+	/**
+		TODO(derek.s): Break down to less commands
+
+		Non agentic commands
+
+		cortex -> opens REPL
+		cortex version or --version --> shows version
+		cortex help or --help --> shows cli manual
+		cortex install --> optional. creates default settings for cortex
+		cortex daemon --> runs the daemon or returns its status
+
+		Agentic commands
+
+		cortex <command> "optional prompt"
+			if no prompt shows basic stats
+
+		cortex status ["prompt"]
+			with no prompt shows one line stats
+
+		cortex journal "prompt"
+			with no prompt shows one line stats
+
+			e.g.1 cortex journal "learn about the project for the first time"
+				-> emegent dag builds context about the project
+
+			e.g.2 cortex journal "log this session prompt"
+
+			e.g.3 cortex journal "forget about separate commands for "
+
+			e.g.4 cortex journal "calibrate memory and learn from recent dag logs"
+
+		cortex eval "prompt"
+			with no prompt shows online
+			if empty runs all of
+
+		cortex run "prompt"
+			-> Run a general purpose emergent dag
+
+	**/
+
 	switch command {
 	case "repl":
 		runREPL(os.Args[2:])
 		return
-	case "capture", "ingest", "analyze", "process", "feed", "journal":
+	case "capture", "ingest", "analyze", "feed", "journal":
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
@@ -61,12 +101,14 @@ func main() {
 			}
 			runCommand(command, cmd, &commands.Context{Config: cfg, Args: os.Args[2:]})
 		}
-	case "info", "test", "stats", "status", "forget", "overview", "dream-debug":
+	case "test", "status", "forget", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
 			if err != nil {
-				// For info and status, we can proceed without config
-				if command == "info" || command == "status" {
+				// status works without config — it absorbs the old `info`
+				// view (system + Ollama + model recs) which is meaningful
+				// before `cortex init`.
+				if command == "status" {
 					runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 					return
 				}
@@ -114,37 +156,7 @@ func main() {
 		if cmd := commands.Get("measure"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "watch":
-		if cmd := commands.Get("watch"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
-	case "mcp":
-		if cmd := commands.Get("mcp"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
-	case "search", "recent", "insights", "entities", "graph", "prune", "reembed", "embed", "search-vector":
+	case "search", "prune", "reembed", "embed", "search-vector":
 		if cmd := commands.Get(command); cmd != nil {
 			// --workdir signals an isolated invocation (benchmarks,
 			// tests, multi-tenant tools). Skip the global init dance:
@@ -159,40 +171,12 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
 			}
-			// Auto-start daemon on search/insights (covers CLI-only multi-agent usage).
-			if command == "search" || command == "insights" {
+			// Auto-start daemon on search (covers CLI-only multi-agent usage).
+			if command == "search" {
 				maybeStartDaemon(cfg)
 			}
 			store, err := storage.New(cfg)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
-				os.Exit(1)
-			}
-			defer store.Close()
-			runCommand(command, cmd, &commands.Context{Config: cfg, Storage: store, Args: os.Args[2:]})
-		}
-	case "session-start", "inject-context", "stop", "cli":
-		if cmd := commands.Get(command); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				// For session commands, log error but don't block user
-				if command == "inject-context" || command == "stop" {
-					fmt.Fprintf(os.Stderr, "cortex %s: config error: %v\n", command, err)
-					os.Exit(0)
-				}
-				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
-				os.Exit(1)
-			}
-			// Auto-start daemon on session-start (beginning of every session)
-			if command == "session-start" {
-				maybeStartDaemon(cfg)
-			}
-			store, err := storage.New(cfg)
-			if err != nil {
-				if command == "inject-context" || command == "stop" {
-					fmt.Fprintf(os.Stderr, "cortex %s: storage error: %v\n", command, err)
-					os.Exit(0)
-				}
 				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
 				os.Exit(1)
 			}
@@ -332,34 +316,20 @@ Commands:
   install        Install Cortex hooks for Claude Code
   uninstall      Remove Cortex hooks (--purge to also delete .cortex/)
   projects       List registered projects
-  info           Show system info and model recommendations
   test           Test LLM analysis [decision|pattern|insight]
 
   capture        Capture event from stdin (used by AI tools)
   ingest         Move queued events to database
   analyze        Run LLM analysis on recent events [limit]
-  process        Process queue + analyze (backward compat)
   feed           Seed knowledge from files or directories
   journal        Journal operations (rebuild/replay/verify/show/tail/migrate/ingest)
   daemon         Start background processor (dashboard at :9090)
 
-  search         Search captured context
-  recent         Show recent events
-  insights       Show insights [category] [limit]
-  entities       Show entities [type]
-  graph          Show knowledge graph for entity
-  stats          Show statistics
-  status         Show status (for status line)
-  watch          Live dashboard of cognitive modes
+  search         Search captured context; --type=recent|insights|entities|graph for views
+  status         Show status (default: one line; --system|--memory|--json|--expand)
   prune          Manage context size relative to project
   reembed        Re-generate embeddings with current model
   measure        Measure prompt quality for small context windows
-  mcp            Start MCP server (for cross-tool access)
-
-  session-start  Print session start instructions (for hooks)
-  inject-context Inject relevant context into prompt (for hooks)
-  overview       Show context overview (visual summary)
-  cli            Route slash command arguments (for /cortex)
 
   tools          Generate / verify tools.json manifest
 
@@ -378,8 +348,12 @@ Global flags (accepted on every command):
                     the same effect.
 
 Examples:
-  # Get system info and model recommendations
-  cortex info
+  # Inspect current state
+  cortex status                  # one-line status (status-line use)
+  cortex status --system         # system resources + Ollama + model recs
+  cortex status --memory         # context memory dashboard
+  cortex status --expand         # LLM-generated multi-line summary (small local model)
+  cortex status --json           # raw stats as JSON
 
   # Test LLM analysis quality
   cortex test decision
@@ -391,7 +365,6 @@ Examples:
   # Process workflow (manual)
   cortex ingest              # Queue → Database
   cortex analyze 5           # Analyze last 5 events
-  cortex process             # Both steps combined
 
   # Capture from AI tool (in hook)
   echo '{"tool_name":"Edit",...}' | cortex capture
@@ -399,19 +372,11 @@ Examples:
   # Search context
   cortex search "authentication decisions"
 
-  # View insights
-  cortex insights decision
-  cortex insights
-
-  # Browse entities
-  cortex entities pattern
-  cortex graph decision "JWT authentication"
-
-  # Slash command (Claude Code)
-  /cortex                        # Show overview
-  /cortex search auth            # Search context
-  /cortex insights               # List insights
-  /cortex how did we handle X    # Smart search
+  # View captured state via --type (replaces standalone recent/insights/entities/graph)
+  cortex search --type=recent              # last 10 events
+  cortex search --type=insights decision   # insights filtered by category
+  cortex search --type=entities pattern    # entities of one type
+  cortex search --type=graph decision "JWT authentication"
 
 For more information: https://github.com/dereksantos/cortex
 `, version)

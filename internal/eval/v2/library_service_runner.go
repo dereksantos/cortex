@@ -19,20 +19,14 @@ import (
 )
 
 // runSessions copies the seed into a fresh workdir, drives all session
-// prompts via h sequentially (consulting inj before/after each), and
-// Scores the final state. See library_service.go for the public
-// entrypoints.
+// prompts via h sequentially, and Scores the final state. See
+// library_service.go for the public entrypoints.
 //
-// Plan 03 added the injector seam: before each session, inj.Preamble is
-// prepended to the session prompt; after each session, inj.Record is
-// invoked with the SessionResult so Cortex (or whatever inj wraps) can
-// learn from what was just produced.
-func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryServiceCondition, model string, h Harness, inj Injector) (*LibraryServiceRun, error) {
+// Under cortex-only (audit D1) the Injector seam is gone — the harness
+// drives each session directly without preamble injection.
+func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, strategy, model string, h Harness) (*LibraryServiceRun, error) {
 	if h == nil {
 		return nil, errors.New("harness is nil")
-	}
-	if inj == nil {
-		inj = NoOpInjector{}
 	}
 	if e.seedProject == "" {
 		return nil, errors.New("evaluator missing seedProject")
@@ -49,36 +43,23 @@ func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryS
 		return nil, fmt.Errorf("no session prompts under %s", filepath.Join(e.specDir, "sessions"))
 	}
 
-	workdir, err := setupLibraryWorkdir(e.seedProject, e.specDir, cond)
+	workdir, err := setupLibraryWorkdir(e.seedProject, e.specDir, strategy)
 	if err != nil {
 		return nil, fmt.Errorf("setup workdir: %w", err)
 	}
 
 	run := &LibraryServiceRun{
-		Condition: cond,
-		Model:     model,
-		WorkDir:   workdir,
+		Strategy: strategy,
+		Model:    model,
+		WorkDir:  workdir,
 	}
 
-	for idx, p := range prompts {
+	for _, p := range prompts {
 		if err := ctx.Err(); err != nil {
 			return run, err
 		}
 
-		preamble, perr := inj.Preamble(ctx, idx, workdir)
-		if perr != nil {
-			return run, fmt.Errorf("session %s: preamble: %w", p.id, perr)
-		}
-		wrapped := p
-		if preamble != "" {
-			wrapped.body = preamble + "\n" + p.body
-			if e.verbose {
-				fmt.Printf("S%s: prepended preamble (%d bytes)\n--- preamble ---\n%s--- /preamble ---\n",
-					p.id, len(preamble), preamble)
-			}
-		}
-
-		sr, runErr := e.runOneSession(ctx, h, workdir, wrapped)
+		sr, runErr := e.runOneSession(ctx, h, workdir, p)
 		// Always record what we managed to capture before the error so
 		// callers can see how far the run got.
 		if sr.SessionID != "" {
@@ -86,10 +67,6 @@ func (e *LibraryServiceEvaluator) runSessions(ctx context.Context, cond LibraryS
 		}
 		if runErr != nil {
 			return run, fmt.Errorf("session %s: %w", p.id, runErr)
-		}
-
-		if rerr := inj.Record(ctx, idx, workdir, sr); rerr != nil {
-			return run, fmt.Errorf("session %s: record: %w", p.id, rerr)
 		}
 	}
 
@@ -195,7 +172,7 @@ func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
 // The spec copy is part of workdir setup (not a separate step) because the
 // seed is meaningless without it — the model would look for the spec the
 // README mentions, fail to find it, and burn a model run guessing.
-func setupLibraryWorkdir(seedDir, specDir string, cond LibraryServiceCondition) (string, error) {
+func setupLibraryWorkdir(seedDir, specDir, strategy string) (string, error) {
 	if _, err := os.Stat(seedDir); err != nil {
 		return "", fmt.Errorf("seed dir: %w", err)
 	}
@@ -203,8 +180,11 @@ func setupLibraryWorkdir(seedDir, specDir string, cond LibraryServiceCondition) 
 	if _, err := os.Stat(specPath); err != nil {
 		return "", fmt.Errorf("system-spec.md: %w", err)
 	}
+	if strategy == "" {
+		strategy = "run"
+	}
 	ts := time.Now().UTC().Format("20060102T150405")
-	pattern := fmt.Sprintf("cortex-libsvc-%s-%s-*", cond, ts)
+	pattern := fmt.Sprintf("cortex-libsvc-%s-%s-*", strategy, ts)
 	workdir, err := os.MkdirTemp("", pattern)
 	if err != nil {
 		return "", fmt.Errorf("mkdtemp: %w", err)

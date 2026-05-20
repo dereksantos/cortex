@@ -3,6 +3,7 @@ package commands
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -41,6 +42,11 @@ func (c *DaemonCommand) Name() string { return "daemon" }
 
 // Description returns the command description.
 func (c *DaemonCommand) Description() string { return "Run background context processor" }
+
+// DescribeFlags surfaces daemon's flag set into tools.json.
+func (c *DaemonCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.Int("port", 9090, "HTTP port for the dashboard")
+}
 
 // Execute runs the daemon command.
 func (c *DaemonCommand) Execute(ctx *Context) error {

@@ -21,15 +21,153 @@ package commands
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/eval/journey"
 	"github.com/dereksantos/cortex/internal/eval/legacy"
 	"github.com/dereksantos/cortex/internal/eval/mechanic"
+	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 )
+
+// suiteRunID returns a short random run ID for grouping cells from one
+// suite invocation. Hex-encoded 8 bytes is enough to avoid collisions
+// within a session and stays human-readable in CellResult rows.
+func suiteRunID(prefix string) string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(b[:]))
+}
+
+// persistMechanicCells writes one CellResult row per mechanic-suite
+// fixture so the suite's output flows through the same sink as v2 +
+// SWE-bench + the rest. Errors are non-fatal: a persister failure is
+// logged but the suite still reports.
+func persistMechanicCells(ctx context.Context, suiteRes *mechanic.SuiteResult) {
+	persister, err := evalv2.NewPersister()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mechanic: open persister: %v (continuing without cell_results sink)\n", err)
+		return
+	}
+	defer persister.Close()
+	runID := suiteRunID("mech")
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, r := range suiteRes.Results {
+		cell := &evalv2.CellResult{
+			SchemaVersion:        evalv2.CellResultSchemaVersion,
+			RunID:                runID + "-" + r.Fixture,
+			Timestamp:            ts,
+			ScenarioID:           r.Fixture,
+			Harness:              evalv2.HarnessCortex,
+			Provider:             evalv2.ProviderLocal,
+			Model:                "mock-dag-executor",
+			ContextStrategy:      evalv2.StrategyBaseline,
+			TaskSuccess:          r.OK,
+			TaskSuccessCriterion: evalv2.CriterionScenarioAssertion,
+		}
+		if err := persister.PersistCell(ctx, cell); err != nil {
+			fmt.Fprintf(os.Stderr, "mechanic: persist %s: %v\n", r.Fixture, err)
+		}
+	}
+}
+
+// persistLegacyCells writes one CellResult per legacy-cognition test
+// (per-scenario × per-mode × per-test). Skipped tests get a row with
+// TaskSuccess=false and a notes field flagging the skip reason.
+func persistLegacyCells(ctx context.Context, suiteRes *legacy.SuiteResult) {
+	persister, err := evalv2.NewPersister()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "legacy: open persister: %v (continuing without cell_results sink)\n", err)
+		return
+	}
+	defer persister.Close()
+	runID := suiteRunID("legacy")
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, t := range suiteRes.TestResults {
+		notes := t.ErrorMessage
+		if t.ErrorCode != "" {
+			if notes != "" {
+				notes = fmt.Sprintf("[%s] %s", t.ErrorCode, notes)
+			} else {
+				notes = "[" + t.ErrorCode + "]"
+			}
+		}
+		cell := &evalv2.CellResult{
+			SchemaVersion:        evalv2.CellResultSchemaVersion,
+			RunID:                fmt.Sprintf("%s-%s-%s-%s", runID, t.Scenario, t.Mode, t.TestID),
+			Timestamp:            ts,
+			ScenarioID:           t.Scenario,
+			SessionID:            t.TestID,
+			Harness:              evalv2.HarnessCortex,
+			Provider:             evalv2.ProviderLocal,
+			Model:                "legacy-cognition-mode-" + t.Mode,
+			ContextStrategy:      evalv2.StrategyBaseline,
+			LatencyMs:            t.LatencyMs,
+			TaskSuccess:          t.OK,
+			TaskSuccessCriterion: evalv2.CriterionScenarioAssertion,
+			Notes:                notes,
+		}
+		if err := persister.PersistCell(ctx, cell); err != nil {
+			fmt.Fprintf(os.Stderr, "legacy: persist %s/%s/%s: %v\n", t.Scenario, t.Mode, t.TestID, err)
+		}
+	}
+}
+
+// persistJourneyValidationCells writes one CellResult per journey
+// scenario from the validation/seed paths. The execution path already
+// emits cells through the journey executor's sink — this helper covers
+// the gap so all three journey modes write through the unified pipeline.
+func persistJourneyValidationCells(ctx context.Context, suiteRes *journey.SuiteResult, seedReportsByID map[string]journey.SeedReport) {
+	persister, err := evalv2.NewPersister()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "journeys: open persister: %v (continuing without cell_results sink)\n", err)
+		return
+	}
+	defer persister.Close()
+	runID := suiteRunID("journey")
+	ts := time.Now().UTC().Format(time.RFC3339)
+	for _, sc := range suiteRes.Scenarios {
+		// Pending-adapter means validation passed; everything else is a
+		// validation failure (scaffold_missing / invalid).
+		ok := sc.Status == "pending_adapter"
+		notes := sc.Status
+		if sc.Message != "" {
+			notes = sc.Status + ": " + sc.Message
+		}
+		// If we have a seed report, success becomes "validation OK AND
+		// seed succeeded"; failed seed flips the cell to fail.
+		if rep, hasRep := seedReportsByID[sc.ID]; hasRep {
+			ok = ok && rep.SeedOK
+			if rep.ErrorMessage != "" {
+				notes = notes + " | seed: " + rep.ErrorMessage
+			} else if rep.SeedOK {
+				notes = notes + fmt.Sprintf(" | seed: %d events seeded, %d retrievable",
+					rep.EventsSeeded, rep.EventsRetrievable)
+			}
+		}
+		cell := &evalv2.CellResult{
+			SchemaVersion:        evalv2.CellResultSchemaVersion,
+			RunID:                runID + "-" + sc.ID,
+			Timestamp:            ts,
+			ScenarioID:           sc.ID,
+			Harness:              evalv2.HarnessCortex,
+			Provider:             evalv2.ProviderLocal,
+			Model:                "journey-validation",
+			ContextStrategy:      evalv2.StrategyBaseline,
+			TaskSuccess:          ok,
+			TaskSuccessCriterion: evalv2.CriterionScenarioAssertion,
+			Notes:                notes,
+		}
+		if err := persister.PersistCell(ctx, cell); err != nil {
+			fmt.Fprintf(os.Stderr, "journeys: persist %s: %v\n", sc.ID, err)
+		}
+	}
+}
 
 // runSuite is the entrypoint for `cortex eval --suite=<name>`. It
 // dispatches by suite name to the per-suite runner. Suite names that
@@ -77,6 +215,10 @@ func runMechanicSuite(dir, outputFormat string, verbose bool) error {
 		return err
 	}
 
+	// Emit unified CellResult rows so this suite's output flows through
+	// the same sink as v2 / SWE-bench / NIAH / etc. (audit D5).
+	persistMechanicCells(ctx, res)
+
 	if outputFormat == "json" {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -122,6 +264,9 @@ func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
 	if err != nil {
 		return err
 	}
+
+	// Emit unified CellResult rows (audit D5).
+	persistLegacyCells(ctx, res)
 
 	if outputFormat == "json" {
 		b, _ := json.MarshalIndent(res, "", "  ")
@@ -187,6 +332,11 @@ func runJourneysSuite(dir, outputFormat string, verbose bool) error {
 		if err != nil {
 			return err
 		}
+		repByID := make(map[string]journey.SeedReport)
+		for _, r := range reports {
+			repByID[r.ScenarioID] = r
+		}
+		persistJourneyValidationCells(context.Background(), res, repByID)
 		if outputFormat == "json" {
 			out := map[string]any{"suite": res, "seed_reports": reports}
 			b, _ := json.MarshalIndent(out, "", "  ")
@@ -194,10 +344,6 @@ func runJourneysSuite(dir, outputFormat string, verbose bool) error {
 			return nil
 		}
 		fmt.Printf("=== journeys suite (%d scenarios — validation + seed) ===\n\n", res.Total)
-		repByID := make(map[string]journey.SeedReport)
-		for _, r := range reports {
-			repByID[r.ScenarioID] = r
-		}
 		for _, s := range res.Scenarios {
 			statusTag := strings.ToUpper(s.Status)
 			fmt.Printf("  [%s] %s\n", statusTag, s.ID)
@@ -228,6 +374,7 @@ func runJourneysSuite(dir, outputFormat string, verbose bool) error {
 	if err != nil {
 		return err
 	}
+	persistJourneyValidationCells(context.Background(), res, nil)
 	if outputFormat == "json" {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))

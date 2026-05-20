@@ -12,8 +12,8 @@ func TestRegisterDefaults_registersAllOps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if n != 13 {
-		t.Errorf("expected 13 registered (9 Stage-2 ops + sense.prompt + maintain.capture + value.detect_unfamiliarity + remember.fetch_external), got %d", n)
+	if n != 14 {
+		t.Errorf("expected 14 registered (10 Stage-2 ops + sense.prompt + maintain.capture + value.detect_unfamiliarity + remember.fetch_external), got %d", n)
 	}
 
 	expectedOps := []string{
@@ -25,6 +25,7 @@ func TestRegisterDefaults_registersAllOps(t *testing.T) {
 		"value.detect_contradiction",
 		"decide.inject",
 		"decide.should_capture",
+		"decide.plan",
 		"model.predict_next",
 		"maintain.extract_insight",
 		"maintain.capture",

@@ -9,7 +9,7 @@ func TestEvalCellResult_RoundTrip(t *testing.T) {
 		RunID:                "run-abc-123",
 		Timestamp:            "2026-05-12T01:23:45Z",
 		ScenarioID:           "auth-service",
-		Harness:              "aider",
+		Harness:              "cortex",
 		Provider:             "anthropic",
 		Model:                "claude-haiku-4.5",
 		ContextStrategy:      "cortex",

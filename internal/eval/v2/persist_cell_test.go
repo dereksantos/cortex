@@ -26,7 +26,7 @@ func validCellResult() *CellResult {
 		GitBranch:             "feat/eval-harness",
 		ScenarioID:            "library-service",
 		SessionID:             "01-scaffold-and-books",
-		Harness:               HarnessAider,
+		Harness:               HarnessCortex,
 		Provider:              ProviderOpenRouter,
 		Model:                 "openai/gpt-oss-20b:free",
 		ContextStrategy:       StrategyCortex,
@@ -68,8 +68,8 @@ func TestPersistCell_HappyPath_BothBackends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sqlite query: %v", err)
 	}
-	if harness != HarnessAider {
-		t.Errorf("harness=%q want %q", harness, HarnessAider)
+	if harness != HarnessCortex {
+		t.Errorf("harness=%q want %q", harness, HarnessCortex)
 	}
 	if model != "openai/gpt-oss-20b:free" {
 		t.Errorf("model=%q", model)
@@ -199,7 +199,7 @@ func TestPersistCell_OptionalFieldsRoundTrip(t *testing.T) {
 		RunID:                "baseline-no-options",
 		Timestamp:            "2026-05-10T14:00:00Z",
 		ScenarioID:           "smoke",
-		Harness:              HarnessAider,
+		Harness:              HarnessCortex,
 		Provider:             ProviderOpenRouter,
 		Model:                "openai/gpt-oss-20b:free",
 		ContextStrategy:      StrategyBaseline,

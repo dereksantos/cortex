@@ -3,11 +3,11 @@ package commands
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"time"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -26,35 +26,67 @@ type EvalCommand struct{}
 func (c *EvalCommand) Name() string { return "eval" }
 
 // Description returns the command description.
-func (c *EvalCommand) Description() string { return "Run evaluation scenarios" }
+func (c *EvalCommand) Description() string {
+	return "Run evaluation (subcommands: grid | suite | benchmark; or -s scenario -m model)"
+}
+
+// DescribeFlags surfaces eval's flag set into tools.json. Positional
+// subcommands (grid|suite|benchmark) take precedence; the flag set
+// covers the scenario-driven and report-driven dispatches.
+func (c *EvalCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("scenario", "", "Scenario YAML path (coding-harness run)")
+	fs.String("dir", "test/evals/v2", "Scenario directory")
+	fs.String("model", "", "Model id (coding-harness run)")
+	fs.String("output", "human", "Output format: human | json")
+	fs.Bool("verbose", false, "Verbose output")
+	fs.Bool("judge", false, "Enable LLM-as-judge scoring")
+	fs.String("judge-model", "", "Model id for the judge")
+	fs.Bool("summary", false, "Show lift trend over recent runs")
+	fs.Bool("abr-trend", false, "Show ABR progression across runs")
+}
 
 // Execute runs the eval command.
+//
+// Dispatch order (positional subcommands take precedence, mirroring the
+// `cortex journal <sub>` pattern):
+//
+//	cortex eval grid <args>            → executeGrid
+//	cortex eval suite <name> [opts]    → runSuite
+//	cortex eval benchmark <name> [opts]→ runBenchmark
+//
+// Any other invocation falls through to the flag-driven path below
+// (scenario file + model, --summary / --abr-trend reports, etc.).
+// The deprecated `--suite NAME` / `--benchmark NAME` flag forms still
+// resolve, but the positional subcommand is the documented path.
 func (c *EvalCommand) Execute(ctx *Context) error {
-	// `cortex eval grid <flags>` dispatches to the cross-harness grid
-	// runner (see eval_grid.go). All other usages fall through to the
-	// existing v2 scenario evaluator below.
-	if len(ctx.Args) > 0 && ctx.Args[0] == "grid" {
-		return executeGrid(ctx.Args[1:])
+	if len(ctx.Args) > 0 {
+		switch ctx.Args[0] {
+		case "grid":
+			return executeGrid(ctx.Args[1:])
+		case "suite":
+			if len(ctx.Args) < 2 {
+				return fmt.Errorf("cortex eval suite: missing suite name (mechanic | legacy-cognition | journeys)")
+			}
+			return runSuite(ctx.Args[1], "test/evals/v2", "human", false)
+		case "benchmark":
+			if len(ctx.Args) < 2 {
+				return fmt.Errorf("cortex eval benchmark: missing name (longmemeval | mteb | swebench | niah)")
+			}
+			return runBenchmark(ctx.Args[1], ctx.Args[2:], false)
+		}
 	}
 
 	// Parse flags
 	scenarioPath := ""
 	scenarioDir := "test/evals/v2"
-	providerName := "ollama"
 	modelOverride := ""
 	verbose := false
 	outputFormat := "human"
-	dryRun := false
 	useJudge := false
 	judgeModel := ""
-	agenticMode := false
 	measureMode := false
-	claudeBinary := ""
 	showSummary := false
 	showABRTrend := false
-	compareProviderName := ""
-	compareModelOverride := ""
-	harnessName := ""
 	benchmarkName := ""
 	suiteName := ""
 
@@ -63,17 +95,8 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 		switch arg {
 		case "-v", "--verbose":
 			verbose = true
-		case "--dry-run":
-			dryRun = true
-		case "--agentic":
-			agenticMode = true
 		case "--measure":
 			measureMode = true
-		case "--harness":
-			if i+1 < len(ctx.Args) {
-				harnessName = ctx.Args[i+1]
-				i++
-			}
 		case "--benchmark":
 			if i+1 < len(ctx.Args) {
 				benchmarkName = ctx.Args[i+1]
@@ -84,11 +107,6 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 				suiteName = ctx.Args[i+1]
 				i++
 			}
-		case "--claude-binary":
-			if i+1 < len(ctx.Args) {
-				claudeBinary = ctx.Args[i+1]
-				i++
-			}
 		case "-s", "--scenario":
 			if i+1 < len(ctx.Args) {
 				scenarioPath = ctx.Args[i+1]
@@ -97,11 +115,6 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 		case "-d", "--dir":
 			if i+1 < len(ctx.Args) {
 				scenarioDir = ctx.Args[i+1]
-				i++
-			}
-		case "-p", "--provider":
-			if i+1 < len(ctx.Args) {
-				providerName = ctx.Args[i+1]
 				i++
 			}
 		case "-m", "--model":
@@ -126,36 +139,34 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			showSummary = true
 		case "--abr-trend":
 			showABRTrend = true
-		case "--compare-provider":
-			if i+1 < len(ctx.Args) {
-				compareProviderName = ctx.Args[i+1]
-				i++
-			}
-		case "--compare-model":
-			if i+1 < len(ctx.Args) {
-				compareModelOverride = ctx.Args[i+1]
-				i++
-			}
 		case "-h", "--help":
 			fmt.Println(`Usage: cortex eval [options]
 
 Unified eval system comparing baseline vs Cortex-augmented responses.
 
+Cortex eval drives the cortex coding harness against a scenario, or wraps a
+standard benchmark, or runs a special-purpose suite.
+
+  cortex eval -s SCEN.yaml -m MODEL       Run one scenario through the cortex
+                                          coding harness (the default — no
+                                          --harness flag needed).
+  cortex eval grid ...                    Multi-cell grid runner (see
+                                          'cortex eval grid --help').
+  cortex eval suite NAME                  Special-purpose suite
+                                          (mechanic | legacy-cognition | journeys).
+  cortex eval benchmark NAME [opts]       Wrapped benchmark
+                                          (longmemeval | mteb | swebench | niah).
+  cortex eval --summary | --abr-trend     Read-only reports from past runs.
+
 Options:
-  -s, --scenario FILE    Run single scenario
+  -s, --scenario FILE    Scenario YAML (required for coding-harness runs)
   -d, --dir DIR          Scenario directory (default: test/evals/v2)
-  -p, --provider NAME    LLM provider: ollama, anthropic, openrouter (default: ollama)
-  -m, --model NAME       Model override
+  -m, --model NAME       Model id (required for coding-harness runs)
   -o, --output FORMAT    Output: human, json (default: human)
   -v, --verbose          Verbose output
-  --dry-run              Use mock provider
-  --judge                Enable LLM-as-judge scoring (semantic evaluation)
+  --judge                Enable LLM-as-judge scoring on the coding harness
   --judge-model MODEL    Model for judge (default: same as eval model)
-  --agentic              Use Claude CLI for agentic evals (measures tool usage)
-  --measure              Run Promptability vs quality correlation evals
-  --claude-binary PATH   Path to claude binary (default: auto-detect)
-  --compare-provider NAME  Frontier provider for MPR comparison (e.g., anthropic)
-  --compare-model MODEL    Frontier model override (default: provider default)
+  --measure              MOVED: use 'cortex measure --self-eval' instead
   --summary              Show lift trend over recent runs
   --abr-trend            Show ABR progression across runs
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
@@ -178,17 +189,14 @@ Options:
   -h, --help             Show this help
 
 Examples:
-  cortex eval                              # Run all scenarios
-  cortex eval -s auth.yaml                 # Run single scenario
-  cortex eval --judge                      # Use LLM judge for scoring
-  cortex eval --judge --judge-model gemma2:2b  # Use specific judge model
-  cortex eval --agentic                    # Run with Claude CLI (tool tracking)
-  cortex eval --compare-provider anthropic --compare-model claude-haiku-4-5-20251001
+  cortex eval -s auth.yaml -m anthropic/claude-3-5-haiku
+  cortex eval -s auth.yaml -m ollama/qwen2.5-coder:1.5b --judge --judge-model gemma2:2b
   cortex eval --summary                    # Show lift trend
-  cortex eval --summary --agentic          # Show tool call reduction trend
   cortex eval --abr-trend                  # Show ABR progression
-  cortex eval --benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
-  cortex eval --benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex`)
+  cortex eval benchmark longmemeval --subset oracle --limit 5 --strategy baseline,cortex --judge
+  cortex eval benchmark swebench --subset verified --limit 3 --model anthropic/claude-3-5-haiku --strategy baseline,cortex
+  cortex eval suite mechanic
+  cortex eval grid --models openai/gpt-oss-20b:free,anthropic/claude-haiku-4-5 --strategies baseline,cortex`)
 			return nil
 		default:
 			// Support --suite=<name> / --benchmark=<name> joined form
@@ -223,38 +231,23 @@ Examples:
 		}
 		defer persister.Close()
 
-		if agenticMode {
-			// Show agentic tool call reduction trend
-			points, err := persister.GetAgenticTrend(10)
-			if err != nil {
-				return fmt.Errorf("failed to get agentic trend: %w", err)
-			}
-			evalv2.ReportAgenticTrend(os.Stdout, points)
-		} else {
-			// Show standard lift trend
-			abrs, err := persister.GetTrend(10)
-			if err != nil {
-				return fmt.Errorf("failed to get trend: %w", err)
-			}
-			evalv2.ReportTrend(os.Stdout, abrs)
+		abrs, err := persister.GetTrend(10)
+		if err != nil {
+			return fmt.Errorf("failed to get trend: %w", err)
 		}
+		evalv2.ReportTrend(os.Stdout, abrs)
 		return nil
 	}
 
-	// CORTEX HARNESS MODE: agent loop hosted in-process (internal/harness).
-	// Dispatched when `--harness cortex` is set. Requires a single
-	// scenario via -s and a model name via -m. Goes through coding_runner,
-	// which writes CellResults to the standard SQLite + JSONL + journal
-	// fan-out.
-	if harnessName == evalv2.HarnessCortex {
-		return runCortexCodingHarness(scenarioPath, modelOverride, judgeModel, useJudge, verbose)
+	// --measure mode moved to `cortex measure --self-eval`. Reject the
+	// flag with a redirect so existing scripts get a clear pointer.
+	if measureMode {
+		return fmt.Errorf("`cortex eval --measure` moved to `cortex measure --self-eval` (audit B). Run: cortex measure --self-eval -p <provider> -m <model>")
 	}
 
 	// BENCHMARK MODE: dataset-driven eval (LongMemEval, MTEB, SWE-bench,
 	// NIAH). Dispatched when --benchmark is set; the per-benchmark
 	// package owns its loader, scorer, and CLI flag parsing.
-	// CellResults flow through the standard persister fan-out so analysis
-	// pipelines see them alongside scenario-driven results.
 	if benchmarkName != "" {
 		return runBenchmark(benchmarkName, ctx.Args, verbose)
 	}
@@ -265,405 +258,20 @@ Examples:
 		return runSuite(suiteName, scenarioDir, outputFormat, verbose)
 	}
 
-	// Create provider
-	cfg, err := loadEvalConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+	// CORTEX CODING HARNESS (default): when -s scenario and -m model are
+	// both set and no other mode dispatch matched, run the scenario through
+	// the cortex coding harness. Cortex is the only harness (D1), so this
+	// is the implicit eval path — no flag needed.
+	if scenarioPath != "" && modelOverride != "" {
+		return runCortexCodingHarness(scenarioPath, modelOverride, judgeModel, useJudge, verbose)
 	}
 
-	// Apply model override
-	if modelOverride != "" {
-		if providerName == "anthropic" {
-			cfg.AnthropicModel = modelOverride
-		} else {
-			cfg.OllamaModel = modelOverride
-		}
-	}
-
-	var provider llm.Provider
-	if dryRun {
-		provider = llm.NewMockProvider(10) // 10ms delay
-		if verbose {
-			fmt.Println("Using mock provider (dry-run mode)")
-		}
-	} else {
-		switch providerName {
-		case "ollama":
-			ollamaClient := llm.NewOllamaClient(cfg)
-			if !ollamaClient.IsAvailable() {
-				return fmt.Errorf("ollama is not running, start with: ollama serve")
-			}
-			provider = ollamaClient
-		case "anthropic", "openrouter", "auto":
-			// All hosted-LLM aliases route through the unified surface
-			// (OpenRouter primary, Anthropic fallback). "anthropic" /
-			// "openrouter" are kept as user-facing aliases for
-			// back-compat; "auto" is the documented new name.
-			var opts []llm.LLMOption
-			if modelOverride != "" {
-				opts = append(opts, llm.WithModel(modelOverride))
-			}
-			p, _, err := llm.NewLLMClient(cfg, opts...)
-			if err != nil {
-				return fmt.Errorf("no hosted LLM available: %w", err)
-			}
-			provider = p
-		default:
-			return fmt.Errorf("unknown provider: %s (valid: ollama, anthropic, openrouter, auto)", providerName)
-		}
-	}
-
-	// Determine actual model name (used for display + judge model
-	// fallback). The unified surface tracks the model on the concrete
-	// client; llm.ModelOf reads it back without the caller knowing
-	// which backend resolved.
-	var modelName string
-	if modelOverride != "" {
-		modelName = modelOverride
-	} else if providerName == "ollama" {
-		modelName = cfg.OllamaModel
-	} else {
-		modelName = llm.ModelOf(provider)
-	}
-
-	// Create judge provider if enabled
-	var judgeProvider llm.Provider
-	var judgeModelName string
-	if useJudge {
-		// Determine judge model
-		judgeModelName = judgeModel
-		if judgeModelName == "" {
-			judgeModelName = modelName // Use same model as eval
-		}
-
-		if dryRun {
-			judgeProvider = llm.NewMockProvider(10)
-		} else {
-			// Create judge provider (can be different model, same provider type)
-			judgeCfg := *cfg
-			switch providerName {
-			case "anthropic", "openrouter", "auto":
-				p, _, err := llm.NewLLMClient(&judgeCfg, llm.WithModel(judgeModelName))
-				if err != nil {
-					return fmt.Errorf("judge provider: %w", err)
-				}
-				judgeProvider = p
-			default:
-				judgeCfg.OllamaModel = judgeModelName
-				judgeProvider = llm.NewOllamaClient(&judgeCfg)
-			}
-		}
-
-		if verbose {
-			fmt.Printf("Using LLM judge: %s\n", judgeModelName)
-		}
-	}
-
-	// Create compare provider for MPR if requested
-	var compareProvider llm.Provider
-	var compareModelName string
-	if compareProviderName != "" {
-		compareModelName = compareModelOverride
-
-		if dryRun {
-			compareProvider = llm.NewMockProvider(10)
-		} else {
-			compareCfg := *cfg
-			switch compareProviderName {
-			case "anthropic", "openrouter", "auto":
-				var opts []llm.LLMOption
-				if compareModelName != "" {
-					opts = append(opts, llm.WithModel(compareModelName))
-				}
-				p, _, err := llm.NewLLMClient(&compareCfg, opts...)
-				if err != nil {
-					return fmt.Errorf("compare provider: %w", err)
-				}
-				compareProvider = p
-				if compareModelName == "" {
-					compareModelName = llm.ModelOf(compareProvider)
-				}
-			case "ollama":
-				if compareModelName != "" {
-					compareCfg.OllamaModel = compareModelName
-				}
-				if compareModelName == "" {
-					compareModelName = compareCfg.OllamaModel
-				}
-				compareProvider = llm.NewOllamaClient(&compareCfg)
-			default:
-				return fmt.Errorf("unknown compare provider: %s", compareProviderName)
-			}
-		}
-
-		if verbose {
-			fmt.Printf("Using compare provider: %s/%s (for MPR)\n", compareProviderName, compareModelName)
-		}
-	}
-
-	// Track start time for duration measurement
-	startTime := time.Now()
-
-	// AGENTIC MODE: Use Claude CLI for tool usage measurement
-	if agenticMode {
-		if dryRun {
-			return fmt.Errorf("--agentic mode does not support --dry-run")
-		}
-
-		// Build claude CLI args
-		var cliArgs []string
-		if modelOverride != "" {
-			cliArgs = append(cliArgs, "--model", modelOverride)
-		}
-
-		agenticEval, err := evalv2.NewAgenticEvaluator(claudeBinary, cliArgs...)
-		if err != nil {
-			return fmt.Errorf("failed to create agentic evaluator: %w", err)
-		}
-		agenticEval.SetVerbose(verbose)
-
-		if verbose {
-			fmt.Println("Running in agentic mode (Claude CLI with tool tracking)")
-		}
-
-		// Run agentic eval
-		var agenticResults *evalv2.AgenticResults
-		if scenarioPath != "" {
-			scenario, err := evalv2.Load(scenarioPath)
-			if err != nil {
-				return fmt.Errorf("failed to load scenario: %w", err)
-			}
-			scenarioResult, err := agenticEval.RunScenario(scenario)
-			if err != nil {
-				return fmt.Errorf("failed to run scenario: %w", err)
-			}
-			agenticResults = evalv2.CalculateAgenticResults([]evalv2.AgenticScenarioResult{*scenarioResult})
-		} else {
-			agenticResults, err = agenticEval.Run(scenarioDir)
-			if err != nil {
-				return fmt.Errorf("failed to run agentic evals: %w", err)
-			}
-		}
-
-		// Calculate duration
-		agenticDurationMs := time.Since(startTime).Milliseconds()
-
-		// Report agentic results
-		switch outputFormat {
-		case "json":
-			evalv2.ReportAgenticJSON(os.Stdout, agenticResults)
-		default:
-			evalv2.ReportAgentic(os.Stdout, agenticResults)
-		}
-
-		// Persist agentic results
-		persister, err := evalv2.NewPersister()
-		if err != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
-			}
-		} else {
-			defer persister.Close()
-			if err := persister.PersistAgentic(agenticResults, agenticDurationMs); err != nil {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: Failed to persist agentic results: %v\n", err)
-				}
-			}
-		}
-
-		if !agenticResults.Pass {
-			return fmt.Errorf("agentic eval failed")
-		}
-		return nil
-	}
-
-	// MEASURE MODE: Test Promptability vs response quality correlation
-	if measureMode {
-		// Measure evals require a judge
-		measureJudge := judgeProvider
-		if measureJudge == nil {
-			measureJudge = provider // Use same provider as judge if not specified
-		}
-
-		measureEval := evalv2.NewMeasureEvaluator(provider, measureJudge)
-		measureEval.SetVerbose(verbose)
-		measureEval.SetModel(modelName)
-
-		measureDir := scenarioDir + "/measure"
-		if scenarioPath != "" {
-			// Single scenario
-			s, err := evalv2.LoadMeasureScenario(scenarioPath)
-			if err != nil {
-				return fmt.Errorf("failed to load measure scenario: %w", err)
-			}
-			result, err := measureEval.RunScenario(s)
-			if err != nil {
-				return fmt.Errorf("measure eval failed: %w", err)
-			}
-			// Wrap in aggregate results for reporting
-			aggregate := &evalv2.MeasureResults{
-				Provider:           provider.Name(),
-				Model:              modelName,
-				Scenarios:          []evalv2.MeasureScenarioResult{*result},
-				OverallCorrelation: result.Correlation,
-				Pass:               result.Correlation >= 0.7,
-			}
-			switch outputFormat {
-			case "json":
-				return evalv2.ReportMeasureJSON(os.Stdout, aggregate)
-			default:
-				evalv2.ReportMeasure(os.Stdout, aggregate)
-			}
-			return nil
-		}
-
-		// Run all measure scenarios
-		results, err := measureEval.Run(measureDir)
-		if err != nil {
-			return fmt.Errorf("measure eval failed: %w", err)
-		}
-
-		switch outputFormat {
-		case "json":
-			return evalv2.ReportMeasureJSON(os.Stdout, results)
-		default:
-			evalv2.ReportMeasure(os.Stdout, results)
-		}
-
-		if !results.Pass {
-			return fmt.Errorf("measure eval failed: correlation %.2f < 0.7", results.OverallCorrelation)
-		}
-		return nil
-	}
-
-	// STANDARD MODE: Use LLM provider
-	// Create evaluator
-	evaluator := evalv2.New(provider)
-	evaluator.SetVerbose(verbose)
-	evaluator.SetModel(modelName)
-	if judgeProvider != nil {
-		evaluator.SetJudge(judgeProvider, judgeModelName)
-	}
-	if compareProvider != nil {
-		evaluator.SetCompareProvider(compareProvider, compareModelName)
-	}
-
-	// Construct the per-cell persister up front so v2 scenarios emit
-	// CellResult rows alongside the legacy eval_scenario_results
-	// aggregation (eval-principles #7). Failure is non-fatal: the
-	// run still produces the legacy rollup. Skip in dry-run mode —
-	// the mock provider's responses aren't worth archiving.
-	var cellPersister *evalv2.Persister
-	if !dryRun {
-		cp, perr := evalv2.NewPersister()
-		if perr != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: per-cell persister disabled: %v\n", perr)
-			}
-		} else {
-			cellPersister = cp
-			defer cellPersister.Close()
-			providerNameForCell := canonicalProviderName(providerName, provider)
-			evaluator.SetPersister(cellPersister, providerNameForCell)
-		}
-	}
-
-	// Run eval
-	var results *evalv2.Results
-	if scenarioPath != "" {
-		scenario, err := evalv2.Load(scenarioPath)
-		if err != nil {
-			return fmt.Errorf("failed to load scenario: %w", err)
-		}
-		scenarioResult, err := evaluator.RunScenario(scenario)
-		if err != nil {
-			return fmt.Errorf("failed to run scenario: %w", err)
-		}
-		results = evalv2.CalculateResults([]evalv2.ScenarioResult{*scenarioResult}, provider.Name(), modelName)
-	} else {
-		results, err = evaluator.Run(scenarioDir)
-		if err != nil {
-			return fmt.Errorf("failed to run evals: %w", err)
-		}
-	}
-
-	// Calculate duration
-	durationMs := time.Since(startTime).Milliseconds()
-
-	// Report results
-	switch outputFormat {
-	case "json":
-		evalv2.ReportJSON(os.Stdout, results)
-	default:
-		evalv2.Report(os.Stdout, results)
-	}
-
-	// Persist results (legacy aggregation). Reuse the per-cell
-	// persister opened above when present; otherwise open a fresh one
-	// so the legacy rollup still lands in dry-run.
-	persister := cellPersister
-	if persister == nil {
-		p, perr := evalv2.NewPersister()
-		if perr != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", perr)
-			}
-		} else {
-			persister = p
-			defer persister.Close()
-		}
-	}
-	if persister != nil {
-		if err := persister.Persist(results, durationMs); err != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to persist results: %v\n", err)
-			}
-		}
-	}
-
-	// Exit with error if ABR < threshold. Skip in dry-run mode: the mock
-	// provider returns canned responses, so its ABR has no relationship to
-	// real-world Cortex quality. Dry-run is a pipeline-shape smoke test, not
-	// a quality gate.
-	if !results.Pass && !dryRun {
-		return fmt.Errorf("eval failed: ABR below threshold")
-	}
-	return nil
-}
-
-// canonicalProviderName maps the user-facing --provider flag (which
-// accepts back-compat aliases "anthropic" and "openrouter" alongside
-// the canonical "auto") onto the evalv2.Provider* constant required
-// by CellResult.Validate. When the unified surface resolved to
-// OpenRouter (keychain or env) the concrete provider implements
-// Name() == "openrouter"; falling back to that ensures cells written
-// during an "anthropic" CLI invocation but routed through OpenRouter
-// don't fail validation.
-func canonicalProviderName(flag string, p llm.Provider) string {
-	switch flag {
-	case "ollama":
-		return evalv2.ProviderOllama
-	case "anthropic":
-		// May actually resolve to OpenRouter via keychain. Trust the
-		// concrete provider's Name() over the CLI flag.
-		if p != nil && p.Name() == "openrouter" {
-			return evalv2.ProviderOpenRouter
-		}
-		return evalv2.ProviderAnthropic
-	case "openrouter":
-		return evalv2.ProviderOpenRouter
-	}
-	if p != nil {
-		switch p.Name() {
-		case "openrouter":
-			return evalv2.ProviderOpenRouter
-		case "ollama":
-			return evalv2.ProviderOllama
-		case "anthropic":
-			return evalv2.ProviderAnthropic
-		}
-	}
-	return evalv2.ProviderOpenRouter
+	return fmt.Errorf("nothing to run. Use one of:\n" +
+		"  cortex eval -s SCEN.yaml -m MODEL    (cortex coding harness — the default)\n" +
+		"  cortex eval grid ...                 (multi-cell grid; see `cortex eval grid --help`)\n" +
+		"  cortex eval suite NAME               (suites: mechanic, legacy-cognition, journeys)\n" +
+		"  cortex eval benchmark NAME ...       (benchmarks: longmemeval, mteb, swebench, niah)\n" +
+		"  cortex eval --summary | --abr-trend  (read-only reports from past runs)")
 }
 
 // loadEvalConfig loads the config for eval command.

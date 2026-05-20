@@ -14,6 +14,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,25 @@ func (c *CodeCommand) Name() string { return "code" }
 // Description returns the command description.
 func (c *CodeCommand) Description() string {
 	return "Run the Cortex coding harness against a workdir (requires --workdir and --model)"
+}
+
+// DescribeFlags surfaces code's flag set into tools.json.
+func (c *CodeCommand) DescribeFlags(fs *flag.FlagSet) {
+	fs.String("model", "", "Model id (e.g. anthropic/claude-3-5-haiku, qwen/qwen-2.5-coder-32b-instruct)")
+	fs.String("workdir", "", "Required: target directory the agent will edit (use --init to bootstrap fresh)")
+	fs.Bool("init", false, "Bootstrap an empty workdir before running")
+	fs.Int("max-turns", 0, "Cap on agent turns (0 = unbounded)")
+	fs.String("max-cost", "", "Cumulative-cost cap (e.g. 0.50)")
+	fs.Int("max-cumulative-tokens", 0, "Cumulative-token cap across turns")
+	fs.Int("max-output-tokens", 0, "Per-turn output-token cap")
+	fs.String("api-url", "", "Override the model API endpoint (use --local for default Ollama)")
+	fs.Bool("local", false, "Shorthand: --api-url=<DefaultOllamaURL>")
+	fs.Bool("verbose", false, "Verbose output")
+	fs.Bool("quiet", false, "Quiet output")
+	fs.Bool("no-search", false, "Disable Cortex search injection on the turn")
+	fs.Bool("json", false, "Emit a single JSON envelope on stdout")
+	fs.Bool("no-dag", false, "Disable DAG-based tool dispatch (debug only)")
+	fs.String("system-prompt", "", "Override the system prompt")
 }
 
 // Execute parses flags and runs one session.
