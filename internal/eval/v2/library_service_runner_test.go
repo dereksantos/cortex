@@ -79,7 +79,7 @@ func TestRunWithHarness_HappyPath(t *testing.T) {
 		},
 	}
 
-	run, err := ev.RunWithHarness(context.Background(), ConditionBaseline, "fake", fh)
+	run, err := ev.RunWithHarness(context.Background(), StrategyBaseline, "fake", fh)
 	if err != nil {
 		t.Fatalf("RunWithHarness: %v", err)
 	}
@@ -126,8 +126,8 @@ func TestRunWithHarness_HappyPath(t *testing.T) {
 	if run.Score.RefactorDeltaPct != -1 {
 		t.Errorf("RefactorDeltaPct = %.3f, want -1", run.Score.RefactorDeltaPct)
 	}
-	if run.Condition != ConditionBaseline {
-		t.Errorf("Condition = %q, want %q", run.Condition, ConditionBaseline)
+	if run.Strategy != StrategyBaseline {
+		t.Errorf("Strategy = %q, want %q", run.Strategy, StrategyBaseline)
 	}
 	if run.Model != "fake" {
 		t.Errorf("Model = %q, want %q", run.Model, "fake")
@@ -154,7 +154,7 @@ func TestRunWithHarness_BuildFailureRecorded(t *testing.T) {
 		},
 	}
 
-	run, err := ev.RunWithHarness(context.Background(), ConditionBaseline, "fake", fh)
+	run, err := ev.RunWithHarness(context.Background(), StrategyBaseline, "fake", fh)
 	if err != nil {
 		t.Fatalf("RunWithHarness: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestRunWithHarness_HardErrorAborts(t *testing.T) {
 		},
 	}
 
-	run, err := ev.RunWithHarness(context.Background(), ConditionBaseline, "fake", fh)
+	run, err := ev.RunWithHarness(context.Background(), StrategyBaseline, "fake", fh)
 	if err == nil {
 		t.Fatal("expected hard error from harness, got nil")
 	}
@@ -240,7 +240,7 @@ func TestRunWithHarness_ContextCancel(t *testing.T) {
 		},
 	}
 
-	run, err := ev.RunWithHarness(ctx, ConditionBaseline, "fake", fh)
+	run, err := ev.RunWithHarness(ctx, StrategyBaseline, "fake", fh)
 	if err == nil {
 		t.Fatal("expected ctx error, got nil")
 	}
@@ -308,7 +308,7 @@ func TestSetupLibraryWorkdir_GitInit(t *testing.T) {
 	seed := filepath.Join(root, "test", "evals", "projects", "library-service-seed")
 	specDir := filepath.Join(root, "test", "evals", "library-service")
 
-	workdir, err := setupLibraryWorkdir(seed, specDir, ConditionBaseline)
+	workdir, err := setupLibraryWorkdir(seed, specDir, StrategyBaseline)
 	if err != nil {
 		t.Fatalf("setupLibraryWorkdir: %v", err)
 	}

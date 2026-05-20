@@ -4,9 +4,16 @@
 //
 // See test/evals/library-service/SPEC.md for the design.
 //
-// The Run pipeline is still a stub (Plans 02–04). Score is implemented per
-// Plan 01 — handler/test files are discovered in the workdir and scored
-// against the rubric in test/evals/library-service/rubric.md.
+// Score is implemented per Plan 01 — handler/test files are discovered in
+// the workdir and scored against the rubric in
+// test/evals/library-service/rubric.md.
+//
+// The Strategy field on LibraryServiceRun mirrors the v2 ContextStrategy
+// values from cellresult.go ("baseline", "cortex", "frontier"). It's a
+// label on the run, not a dispatch switch: under cortex-only (audit D1),
+// the cross-harness Injector machinery is gone and library-service runs
+// through whatever harness the caller wires in. Migrating library-service
+// to drive CortexHarness directly is a follow-up under audit E.
 package eval
 
 import (
@@ -18,57 +25,30 @@ import (
 	"strings"
 )
 
-// LibraryServiceCondition identifies a comparison condition (baseline, cortex, etc.).
-type LibraryServiceCondition string
-
-const (
-	ConditionBaseline LibraryServiceCondition = "baseline"
-	ConditionCortex   LibraryServiceCondition = "cortex"
-	ConditionFrontier LibraryServiceCondition = "frontier"
-)
-
-// LibraryServiceRun is a single end-to-end run of all sessions for one condition.
+// LibraryServiceRun is a single end-to-end run of all sessions for one
+// strategy (baseline / cortex / frontier). Strategy is a label only — the
+// caller wires whatever harness they want; this struct just records what
+// happened.
 type LibraryServiceRun struct {
-	Condition  LibraryServiceCondition
+	Strategy   string // baseline | cortex | frontier (see ContextStrategy* in cellresult.go)
 	Model      string // e.g., "qwen2.5-coder:1.5b"
 	WorkDir    string // path to a fresh copy of library-service-seed
 	SessionLog []SessionResult
 	Score      LibraryServiceScore
-
-	// CortexStateDir is the isolated cortex global dir used when
-	// Condition == ConditionCortex. Empty for baseline/frontier. Removed
-	// on Cleanup alongside WorkDir.
-	CortexStateDir string
 }
 
-// Cleanup removes the run's workdir (and the cortex state dir, if any).
-// The runner deliberately leaves the workdir intact on success so callers
-// can re-Score it; this is the helper they call once they're done.
+// Cleanup removes the run's workdir. The runner deliberately leaves the
+// workdir intact on success so callers can re-Score it; this is the
+// helper they call once they're done.
 func (r *LibraryServiceRun) Cleanup() error {
-	if r == nil {
+	if r == nil || r.WorkDir == "" {
 		return nil
 	}
-	var firstErr error
-	if r.WorkDir != "" {
-		if err := os.RemoveAll(r.WorkDir); err != nil {
-			firstErr = err
-		}
-	}
-	if r.CortexStateDir != "" {
-		if err := os.RemoveAll(r.CortexStateDir); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return os.RemoveAll(r.WorkDir)
 }
 
 // Harness drives a single session: invoke the model with prompt against
 // workdir, expecting the model to edit files in workdir directly.
-//
-// Implementations:
-//   - ClaudeCLIHarness        — Plan 02 (this file's runner)
-//   - CortexInjectingHarness  — Plan 03 will wrap a base harness to prepend
-//     Cortex-mined patterns before calling through.
 //
 // Hard errors (binary missing, model unreachable, ctx cancellation) MUST
 // be returned. Soft outcomes (build/test broken after the session) are the
@@ -116,119 +96,27 @@ func (e *LibraryServiceEvaluator) SetVerbose(v bool) {
 	e.verbose = v
 }
 
-// Run executes all sessions for the given condition and returns the run with score.
+// Run executes all sessions through ClaudeCLIHarness and returns the run
+// with score. `strategy` is one of the v2 ContextStrategy values
+// (baseline / cortex / frontier) and is recorded on the run as a label.
 //
-// Conditions:
-//   - ConditionBaseline / ConditionFrontier: run sessions with no Cortex
-//     interaction (NoOpInjector). Frontier is "baseline with a bigger
-//     model"; the model dimension is on the caller.
-//   - ConditionCortex: per-run isolated Cortex state dir + CortexInjector
-//     so prompts after S1 carry a "previously-established conventions"
-//     preamble mined from earlier sessions.
-//
-// The cortex condition needs a `cortex` binary. Resolution order:
-//  1. $CORTEX_BINARY env var (absolute path)
-//  2. PATH lookup for `cortex`
-//
-// If neither resolves, Run returns an error before touching the harness.
-func (e *LibraryServiceEvaluator) Run(ctx context.Context, cond LibraryServiceCondition, model string) (*LibraryServiceRun, error) {
-	switch cond {
-	case ConditionBaseline, ConditionFrontier:
-		h, err := NewClaudeCLIHarness("", model)
-		if err != nil {
-			return nil, fmt.Errorf("init claude harness: %w", err)
-		}
-		return e.RunWithInjector(ctx, cond, model, h, NoOpInjector{})
-	case ConditionCortex:
-		h, err := NewClaudeCLIHarness("", model)
-		if err != nil {
-			return nil, fmt.Errorf("init claude harness: %w", err)
-		}
-		binary, err := resolveCortexBinary()
-		if err != nil {
-			return nil, fmt.Errorf("resolve cortex binary: %w", err)
-		}
-		stateDir, err := newCortexStateDir()
-		if err != nil {
-			return nil, fmt.Errorf("create cortex state dir: %w", err)
-		}
-		var opts []CortexInjectorOption
-		if e.verbose {
-			opts = append(opts, WithVerbose(nil))
-		}
-		injector, err := NewCortexInjector(binary, stateDir, opts...)
-		if err != nil {
-			_ = os.RemoveAll(stateDir)
-			return nil, fmt.Errorf("init cortex injector: %w", err)
-		}
-		run, runErr := e.RunWithInjector(ctx, cond, model, h, injector)
-		if run != nil {
-			run.CortexStateDir = stateDir
-		} else {
-			// On failure with no run returned, callers cannot trigger
-			// Cleanup, so reclaim the state dir here.
-			_ = os.RemoveAll(stateDir)
-		}
-		return run, runErr
-	default:
-		return nil, fmt.Errorf("unknown condition %q", cond)
+// Under cortex-only (audit D1) the cross-harness Injector machinery is
+// gone. Every strategy currently runs the same code path; the lift signal
+// will come back once library-service migrates to drive CortexHarness
+// directly (audit E).
+func (e *LibraryServiceEvaluator) Run(ctx context.Context, strategy, model string) (*LibraryServiceRun, error) {
+	h, err := NewClaudeCLIHarness("", model)
+	if err != nil {
+		return nil, fmt.Errorf("init claude harness: %w", err)
 	}
+	return e.RunWithHarness(ctx, strategy, model, h)
 }
 
-// RunWithHarness drives the session loop using the provided harness with
-// no Cortex interaction (NoOpInjector). Kept as a thin wrapper around
-// RunWithInjector so Plan 02's tests and any caller that doesn't care
-// about the injector dimension stays unchanged.
-func (e *LibraryServiceEvaluator) RunWithHarness(ctx context.Context, cond LibraryServiceCondition, model string, h Harness) (*LibraryServiceRun, error) {
-	return e.RunWithInjector(ctx, cond, model, h, NoOpInjector{})
-}
-
-// RunCortexWithHarness drives the cortex condition (isolated cortex state
-// dir + CortexInjector) but lets the caller supply the harness. The
-// existing Run() method is hardcoded to ClaudeCLIHarness; this method
-// exists so Plan 05's AiderHarness (and any future harness) can run the
-// cortex condition without duplicating the injector-setup boilerplate.
-//
-// Mirrors the ConditionCortex branch of Run() exactly — same binary
-// resolution, same isolated state dir, same CortexStateDir bookkeeping.
-func (e *LibraryServiceEvaluator) RunCortexWithHarness(ctx context.Context, model string, h Harness) (*LibraryServiceRun, error) {
-	binary, err := resolveCortexBinary()
-	if err != nil {
-		return nil, fmt.Errorf("resolve cortex binary: %w", err)
-	}
-	stateDir, err := newCortexStateDir()
-	if err != nil {
-		return nil, fmt.Errorf("create cortex state dir: %w", err)
-	}
-	var opts []CortexInjectorOption
-	if e.verbose {
-		opts = append(opts, WithVerbose(nil))
-	}
-	injector, err := NewCortexInjector(binary, stateDir, opts...)
-	if err != nil {
-		_ = os.RemoveAll(stateDir)
-		return nil, fmt.Errorf("init cortex injector: %w", err)
-	}
-	run, runErr := e.RunWithInjector(ctx, ConditionCortex, model, h, injector)
-	if run != nil {
-		run.CortexStateDir = stateDir
-	} else {
-		_ = os.RemoveAll(stateDir)
-	}
-	return run, runErr
-}
-
-// RunWithInjector is the Plan 03 seam: wraps the harness in an injector
-// that prepends a Cortex-mined preamble to each session's prompt and
-// captures the session's output back into Cortex when it finishes.
-//
-// The harness stays Cortex-ignorant — wrapping happens at the runner
-// level, not the harness level.
-func (e *LibraryServiceEvaluator) RunWithInjector(ctx context.Context, cond LibraryServiceCondition, model string, h Harness, inj Injector) (*LibraryServiceRun, error) {
-	if inj == nil {
-		inj = NoOpInjector{}
-	}
-	return e.runSessions(ctx, cond, model, h, inj)
+// RunWithHarness drives the session loop using the provided harness.
+// Tests use this to inject a fake harness; production callers go through
+// Run().
+func (e *LibraryServiceEvaluator) RunWithHarness(ctx context.Context, strategy, model string, h Harness) (*LibraryServiceRun, error) {
+	return e.runSessions(ctx, strategy, model, h)
 }
 
 // Score computes LibraryServiceScore for a completed workdir per rubric.md.
@@ -387,10 +275,10 @@ func CompareRuns(baseline, cortex *LibraryServiceRun, frontier *LibraryServiceRu
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Library-service eval comparison\n\n")
-	fmt.Fprintf(&b, "- baseline: condition=%s model=%s\n", baseline.Condition, baseline.Model)
-	fmt.Fprintf(&b, "- cortex:   condition=%s model=%s\n", cortex.Condition, cortex.Model)
+	fmt.Fprintf(&b, "- baseline: strategy=%s model=%s\n", baseline.Strategy, baseline.Model)
+	fmt.Fprintf(&b, "- cortex:   strategy=%s model=%s\n", cortex.Strategy, cortex.Model)
 	if frontier != nil {
-		fmt.Fprintf(&b, "- frontier: condition=%s model=%s\n", frontier.Condition, frontier.Model)
+		fmt.Fprintf(&b, "- frontier: strategy=%s model=%s\n", frontier.Strategy, frontier.Model)
 	}
 	b.WriteString("\n")
 

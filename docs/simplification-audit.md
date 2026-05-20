@@ -58,16 +58,7 @@ This work is done when all three hold:
 
 ### A. Alternative-harness code (D1, D2) — *done (see Done)*
 
-### B. Cross-harness comparison infrastructure (D1) — *partial; see Done*
-
-Remaining:
-
-- `internal/eval/v2/library_service_inject.go` (329 LOC) + `_test.go` (596 LOC) —
-  purpose is injecting cortex context into a *different* harness's prompt;
-  vestigial once cortex is the only harness. Before deleting, verify no
-  within-cortex memory-on/off A/B uses the `Injector` interface. If it does,
-  keep `NoOpInjector` + `CortexInjector` as a within-cortex toggle and drop
-  multi-harness wiring (see M).
+### B. Cross-harness comparison infrastructure (D1) — *done (see Done)*
 
 ### D. Unify eval-runner output to `cell_results.jsonl` (D5) — *done (see Done)*
 
@@ -261,15 +252,12 @@ implementation is removed.
 
 ## Investigate before cutting
 
-### M. Within-cortex baseline mechanism
+### M. Within-cortex baseline mechanism — *resolved (see Done)*
 
-The 9 eval principles ([`docs/prompts/eval-principles.md`](prompts/eval-principles.md))
-include "separated baselines." Under cortex-only, baseline = cortex without
-memory injection; cortex condition = cortex with memory. Decide whether
-`library_service.go`'s `Condition{Baseline,Cortex,Frontier}` survives as a
-within-cortex memory-on/off toggle (in which case `NoOpInjector` +
-`CortexInjector` stay) or whether baseline/frontier collapse into a `--model`
-axis and the Condition enum is dropped.
+Decision: `ContextStrategy` is the only baseline axis. The `Condition`
+enum, the `Injector` interface, and the multi-harness wrapper machinery
+are gone. Frontier is just "the cortex harness with a frontier-tier
+model" — a `--model` choice, not a separate code path.
 
 ### N. Observability surfaces vs. dimension 6
 
@@ -338,7 +326,9 @@ conversion (largest, most-gated).
 4. ~~**Aider + OpenCode + pidev deletion** (A)~~ — *done.* Includes the
    follow-on slice that dropped `--harness`, the default-generic flow,
    and the legacy `Evaluator` type (~1,020 LOC).
-5. **Cross-harness comparison infra** (B) — depends on step 4 + M decision.
+5. ~~**Cross-harness comparison infra** (B) + **baseline mechanism** (M)~~ —
+   *done.* Collapsed into the ContextStrategy axis; Injector machinery
+   gone (~925 LOC).
 6. ~~**Drop MCP** (J)~~ — *done in this commit.*
 7. ~~**Unify eval-runner output to `cell_results.jsonl`** (D)~~ — *done in
    this commit.* All three suites (mechanic, legacy-cognition, journeys)
@@ -357,7 +347,7 @@ conversion (largest, most-gated).
     d. Hook commands + `projects` decision (needs user input first — flagged in F).
 11. **Unify staged DAG ops** (K) — one PR per op, each gated on no regression
     in v2 cell results.
-12. **Within-cortex baseline decision** (M) — author the ADR; refactor if needed.
+12. ~~**Within-cortex baseline decision** (M)~~ — *resolved alongside B.*
 13. **Convert legacy cognition to DAG types** (L) — six steps (Reflex →
     Reflect → Resolve → Think → Dream → Digest). Each gated on parity vs.
     legacy via cell-result evals. Final PR deletes `internal/cognition/`.
@@ -449,6 +439,51 @@ Helper functions `persistMechanicCells`, `persistLegacyCells`,
 `persistJourneyValidationCells` opened-`evalv2.NewPersister()` once per
 suite invocation; persister errors are non-fatal (logged to stderr,
 suite still reports).
+
+Verified `go build ./...` and `go test ./...` both green.
+
+### B + M. Injector machinery deleted, Condition collapsed into ContextStrategy
+
+Resolved M (the within-cortex baseline question) and completed B in one
+pass.
+
+Decision: under cortex-only (D1), the cross-harness Injector seam
+(`Injector` interface, `NoOpInjector`, `CortexInjector`) is gone. The
+"baseline / cortex / frontier" distinction collapses onto the existing
+`ContextStrategy` axis from `cellresult.go`. Frontier is just "cortex
+harness with a frontier-tier model" — a `--model` choice, not a code
+path.
+
+Removed (~925 LOC):
+
+- `internal/eval/v2/library_service_inject.go` (329 LOC) — `Injector`
+  interface, `NoOpInjector`, `CortexInjector`, `WithVerbose`,
+  `resolveCortexBinary`, `newCortexStateDir`.
+- `internal/eval/v2/library_service_inject_test.go` (596 LOC).
+- `LibraryServiceCondition` type + `ConditionBaseline / Cortex / Frontier`
+  constants in `library_service.go`.
+- `RunWithInjector` and `RunCortexWithHarness` (no longer have a reason
+  to exist).
+- `LibraryServiceRun.CortexStateDir` field (no Injector → no state dir
+  setup).
+
+Renamed:
+
+- `LibraryServiceRun.Condition` → `LibraryServiceRun.Strategy` (string;
+  takes the v2 `Strategy*` constants).
+- Updated `Run()` / `RunWithHarness()` / `runSessions()` /
+  `setupLibraryWorkdir()` signatures to take `strategy string` instead
+  of a Condition value.
+- `CompareRuns` report now prints `strategy=` instead of `condition=`.
+
+Preserved:
+
+- `CompareRuns` tests moved to `library_service_compare_test.go` (the
+  inject_test.go file held them but they aren't injector-specific).
+- `ClaudeCLIHarness` is still the library-service runner's harness for
+  now. Migrating library-service to drive `CortexHarness` directly
+  belongs to audit E (eval migration) and would let the strategy axis
+  actually drive different behavior again.
 
 Verified `go build ./...` and `go test ./...` both green.
 

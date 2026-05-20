@@ -37,7 +37,8 @@ const (
 	ProviderLocal      = "local"
 )
 
-// ContextStrategy values. Maps 1:1 to v2 LibraryServiceCondition.
+// ContextStrategy values. Recorded on each CellResult row and used by
+// library-service runs as a label.
 //
 // `cortex` is the strategy when the harness only exposes Fast mode (the
 // historical default — what every Cortex cell wrote before ABR session
