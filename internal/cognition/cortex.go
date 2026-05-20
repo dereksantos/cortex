@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -213,15 +214,49 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 	c.think.RecordQuery(q)
 
 	// Step 1: Reflex (always runs, must be <10ms)
+	reflexStart := time.Now()
 	candidates, err := c.reflex.Reflex(ctx, q)
+	reflexLatency := time.Since(reflexStart).Milliseconds()
 	if err != nil {
+		_ = cliout.AppendCognitionRow("", cliout.CognitionRow{
+			Mode:           "reflex",
+			Status:         "error",
+			LatencyMs:      reflexLatency,
+			Notes:          err.Error(),
+			CortexFunction: "Attend",
+		})
 		return nil, fmt.Errorf("reflex failed: %w", err)
 	}
+	_ = cliout.AppendCognitionRow("", cliout.CognitionRow{
+		Mode:           "reflex",
+		Status:         "ok",
+		LatencyMs:      reflexLatency,
+		ResultCount:    len(candidates),
+		CortexFunction: "Attend",
+	})
 
 	// Step 2: Reflect (depends on mode)
 	if mode == cognition.Full {
 		// Synchronous Reflect for Full mode
+		reflectStart := time.Now()
 		reflected, err := c.reflect.Reflect(ctx, q, candidates)
+		reflectLatency := time.Since(reflectStart).Milliseconds()
+		status := "ok"
+		notes := ""
+		count := len(reflected)
+		if err != nil {
+			status = "error"
+			notes = err.Error()
+			count = 0
+		}
+		_ = cliout.AppendCognitionRow("", cliout.CognitionRow{
+			Mode:           "reflect",
+			Status:         status,
+			LatencyMs:      reflectLatency,
+			ResultCount:    count,
+			Notes:          notes,
+			CortexFunction: "Attend",
+		})
 		if err == nil {
 			candidates = reflected
 			// Cache for future Fast mode
@@ -268,10 +303,25 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 		Mode:    modeStr,
 		Started: retrievalStart,
 	})
+	resolveLatency := time.Since(resolveStart).Milliseconds()
 	if err != nil {
+		_ = cliout.AppendCognitionRow("", cliout.CognitionRow{
+			Mode:           "resolve",
+			Status:         "error",
+			LatencyMs:      resolveLatency,
+			Notes:          err.Error(),
+			CortexFunction: "Decide",
+		})
 		return nil, fmt.Errorf("resolve failed: %w", err)
 	}
-	result.ResolveMs = time.Since(resolveStart).Milliseconds()
+	result.ResolveMs = resolveLatency
+	_ = cliout.AppendCognitionRow("", cliout.CognitionRow{
+		Mode:           "resolve",
+		Status:         result.Decision.String(),
+		LatencyMs:      resolveLatency,
+		ResultCount:    len(result.Results),
+		CortexFunction: "Decide",
+	})
 
 	// Step 4: Trigger background mode (non-blocking)
 	if c.activity.IsIdle() {
@@ -344,7 +394,25 @@ func (c *Cortex) Resolve(ctx context.Context, q cognition.Query, results []cogni
 
 // MaybeThink attempts background processing.
 func (c *Cortex) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) {
-	return c.think.MaybeThink(ctx)
+	start := time.Now()
+	res, err := c.think.MaybeThink(ctx)
+	latency := time.Since(start).Milliseconds()
+	row := cliout.CognitionRow{
+		Mode:           "think",
+		LatencyMs:      latency,
+		CortexFunction: "Maintain",
+	}
+	switch {
+	case err != nil:
+		row.Status = "error"
+		row.Notes = err.Error()
+	case res != nil:
+		row.Status = res.Status.String()
+	default:
+		row.Status = "skipped"
+	}
+	_ = cliout.AppendCognitionRow("", row)
+	return res, err
 }
 
 // SessionContext returns the current session context.
@@ -359,7 +427,26 @@ func (c *Cortex) RegisterSource(source cognition.DreamSource) {
 
 // MaybeDream attempts idle-time exploration.
 func (c *Cortex) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) {
-	return c.dream.MaybeDream(ctx)
+	start := time.Now()
+	res, err := c.dream.MaybeDream(ctx)
+	latency := time.Since(start).Milliseconds()
+	row := cliout.CognitionRow{
+		Mode:           "dream",
+		LatencyMs:      latency,
+		CortexFunction: "Maintain",
+	}
+	switch {
+	case err != nil:
+		row.Status = "error"
+		row.Notes = err.Error()
+	case res != nil:
+		row.Status = res.Status.String()
+		row.ResultCount = res.Insights
+	default:
+		row.Status = "skipped"
+	}
+	_ = cliout.AppendCognitionRow("", row)
+	return res, err
 }
 
 // Insights returns the Dream insights channel.
@@ -398,7 +485,26 @@ func (c *Cortex) NotifyDreamCompleted() {
 
 // MaybeDigest attempts to consolidate insights after Dream.
 func (c *Cortex) MaybeDigest(ctx context.Context) (*cognition.DigestResult, error) {
-	return c.digest.MaybeDigest(ctx)
+	start := time.Now()
+	res, err := c.digest.MaybeDigest(ctx)
+	latency := time.Since(start).Milliseconds()
+	row := cliout.CognitionRow{
+		Mode:           "digest",
+		LatencyMs:      latency,
+		CortexFunction: "Maintain",
+	}
+	switch {
+	case err != nil:
+		row.Status = "error"
+		row.Notes = err.Error()
+	case res != nil:
+		row.Status = res.Status.String()
+		row.ResultCount = res.Merged
+	default:
+		row.Status = "skipped"
+	}
+	_ = cliout.AppendCognitionRow("", row)
+	return res, err
 }
 
 // DigestInsights performs on-demand deduplication of given insights.

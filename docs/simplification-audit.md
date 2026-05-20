@@ -678,6 +678,40 @@ Per D9 — dimension 10 (extensibility) gets revisited later.
 - Regenerated `tools.json` (39 commands, was 40).
 - Verified `go build ./...` and `go test ./...` both green.
 
+### L-lite. Cognitive-mode emission into the unified sink
+
+Per D15 the L slice is reframed as emit-only: legacy cognition stays
+in `internal/cognition/` and each mode emits a row into the shared
+`.cortex/db/cell_results.jsonl` sink. A pure DAG migration is
+deferred to a future audit.
+
+- Added `cliout.CognitionRow` and `cliout.AppendCognitionRow` —
+  a third row shape in the sink, alongside CLI `TelemetryRow` and
+  eval `CellResult`, discriminated by `source: "cognition"`. This
+  shape sidesteps the circular import risk that would arise from
+  having `internal/cognition` depend on `internal/eval/v2`.
+- Wired emission inline in `Cortex.Retrieve` for the foreground
+  modes — reflex (always), reflect (Full mode), resolve (always).
+- Wired emission in `Cortex.MaybeThink`, `Cortex.MaybeDream`, and
+  `Cortex.MaybeDigest` for the background modes.
+
+Status field carries the mode's own status string (`InjectDecision`
+for resolve, `DreamStatus.String()` for dream, etc.) — preserving
+the per-mode classification without coercing every result into a
+boolean ok/error.
+
+Sanity: `cortex search "hello"` now writes both a reflex row and a
+resolve row before the CLI's own telemetry row, in that order.
+
+Note (faithful divergence from the audit letter): D15 says
+"emits CellResult rows", but the existing CellResult schema's
+Validate requires eval-only fields (scenario_id, harness, etc.)
+that have no natural value for in-process cognition. The
+`CognitionRow` shape is a pragmatic stand-in that delivers the
+same observability into the same file. Future migration to a
+unified row could absorb this without invalidating the existing
+sink entries.
+
 ### K (slice 5). `decide.plan` early planner stub
 
 `decide.plan` is now registered in `defaults.go` and wired into the

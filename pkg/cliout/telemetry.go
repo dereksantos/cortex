@@ -198,6 +198,67 @@ func (inv *Invocation) WriteRow(row TelemetryRow) error {
 	return nil
 }
 
+// CognitionRow is one in-process cognitive-mode invocation: a Reflex /
+// Reflect / Resolve / Think / Dream / Digest pass landing in
+// cell_results.jsonl alongside CLI TelemetryRow and eval CellResult
+// rows. Distinguished by `source: "cognition"`.
+//
+// Audit L-lite: each mode emits one row per invocation so the unified
+// sink covers in-process cognition without requiring eval scaffolding.
+type CognitionRow struct {
+	Source         string `json:"source"` // always "cognition" here
+	Timestamp      string `json:"timestamp"`
+	Mode           string `json:"mode"`   // reflex | reflect | resolve | think | dream | digest
+	Status         string `json:"status"` // ok | skipped | error | <mode-specific>
+	LatencyMs      int64  `json:"latency_ms"`
+	Tokens         int    `json:"tokens,omitempty"`
+	ResultCount    int    `json:"result_count,omitempty"` // mode-specific: candidates, insights, ...
+	Notes          string `json:"notes,omitempty"`
+	CortexFunction string `json:"cortex_function,omitempty"`
+}
+
+// AppendCognitionRow writes one cognition row to the project's
+// cell_results.jsonl sink. Honors the same workdir/cwd resolution as
+// the CLI telemetry path; honors CORTEX_NO_TELEMETRY. Best-effort:
+// errors are returned to the caller but should be treated as advisory
+// (cognition must not crash because telemetry failed).
+func AppendCognitionRow(workdir string, row CognitionRow) error {
+	if os.Getenv(TelemetryDisableEnv) != "" {
+		return nil
+	}
+	dir, ok := resolveTelemetryDir(workdir)
+	if !ok {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	if row.Source == "" {
+		row.Source = "cognition"
+	}
+	if row.Timestamp == "" {
+		row.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	path := filepath.Join(dir, "cell_results.jsonl")
+	line, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("marshal cognition row: %w", err)
+	}
+	line = append(line, '\n')
+
+	jsonlWriteMu.Lock()
+	defer jsonlWriteMu.Unlock()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(line); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
 // resolveTelemetryDir returns the directory whose .cortex/db/ should
 // receive the row. Returns (path, true) when a candidate is found and
 // (path, false) when no initialized cortex tree exists nearby — caller
