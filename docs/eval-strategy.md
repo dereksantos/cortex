@@ -136,6 +136,16 @@ design.
 
 #### 2c. Multi-model cost/quality delta — proves *multi-model leverage*
 
+**Product surface.** This claim has a UX twin: the **onboarding flow**
+described in [`ROADMAP.md`](../ROADMAP.md#onboarding-as-the-thesis-surface)
+("a team of agents and hardware can do a lot of work"). The eval here
+*proves the claim*; the onboarding *makes it visible to the user* on
+first launch by detecting endpoints, recommending a role map, and
+showing the projected per-role cost. Eval and product converge: both
+depend on the model registry, both report cost-quality, both treat the
+small-model amplifier as a first-class story rather than an
+optimization detail.
+
 **Shape.** Paired runs on the same corpus:
 - `small_model alone` vs `small_model + Cortex`
 - `small_model + Cortex` vs `frontier_model alone`
