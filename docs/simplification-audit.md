@@ -51,6 +51,15 @@ This work is done when all three hold:
 | D8  | The 5 staged DAG ops are unified into the default chain (no separate "RegisterStaged"). |
 | D9  | Drop MCP server for now. Dimension 10 (extensibility) gets revisited later. |
 | D10 | Legacy `Cortex.Retrieve()` pipeline converts to DAG types; `internal/cognition/` removed once each mode has parity. |
+| D11 | Claude-Code slash commands and hook commands are dropped. `integrations/claude/` is gutted. Cortex is its own harness. |
+| D12 | Cursor adapter (`integrations/cursor/`) is dropped completely. |
+| D13 | Multi-project registry (`cortex projects` + `~/.cortex/projects.json`) is kept. |
+| D14 | `watch` command + `internal/tui/` are dropped. The daemon dashboard at `:9090` and `cortex status` cover the surface. |
+| D15 | L is reframed as **emit-only**: legacy cognition stays in `internal/cognition/` for now; the gate is that each mode emits `CellResult` rows. Actual DAG-native migration is deferred to a future audit. |
+| D16 | E quality-assessment applies the 9 principles per scenario with rationale recorded in this doc; user reviews the verdict list at the end. |
+| D17 | Dimension-6 event-stream (`cortex code --events NDJSON`) is deferred to coverage-matrix Stage 3. |
+| D18 | `docs/codex-assessment.md` stays tracked (accidental include in `b7a19bd`). |
+| D19 | Commits stay local on `main` until the audit is done; push happens once at the end. |
 
 ---
 
