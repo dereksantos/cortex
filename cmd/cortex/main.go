@@ -40,6 +40,47 @@ func main() {
 
 	command := os.Args[1]
 
+	/**
+
+		Break down to less commands:
+
+		Non agentic commands
+
+		cortex -> opens REPL
+		cortex version or --version --> shows version
+		cortex help or --help --> shows cli manual
+		cortex install --> optional. creates default settings for cortex
+		cortex daemon --> runs the daemon or returns its status
+
+		Agentic commands
+
+		cortex <command> "optional prompt"
+			if no prompt shows basic stats
+
+		cortex status ["prompt"]
+			with no prompt shows one line stats
+
+		cortex journal "prompt"
+			with no prompt shows one line stats
+
+			e.g.1 cortex journal "learn about the project for the first time"
+				-> emegent dag builds context about the project
+
+			e.g.2 cortex journal "log this session prompt"
+
+			e.g.3 cortex journal "forget about separate commands for "
+
+			e.g.4 cortex journal "calibrate memory and learn from recent dag logs"
+
+		cortex eval "prompt"
+			with no prompt shows online
+			if empty runs all of
+
+		cortex run "prompt"
+			-> Run a general purpose emergent dag
+
+	**/
+
 	switch command {
 	case "repl":
 		runREPL(os.Args[2:])
