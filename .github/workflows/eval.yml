@@ -46,10 +46,14 @@ jobs:
     - name: Build cortex
       run: go build -o cortex ./cmd/cortex
 
-    - name: Run eval (dry-run)
+    - name: Run eval (mechanic suite — deterministic, no external LLM)
+      # The mechanic suite (5 DAG fixtures) replaces the legacy
+      # `--dry-run` flag that was retired under audit A-finish. It
+      # exercises the full eval persister + DAG executor with mock
+      # nodes, so a CI runner without API keys can still smoke the
+      # eval framework. See docs/simplification-audit.md.
       run: |
-        ./cortex eval --dry-run --output json > eval-results.json 2>&1 || true
-        ./cortex eval --dry-run --verbose
+        ./cortex eval suite mechanic 2>&1 | tee eval-results.json
 
     - name: Upload eval results
       uses: actions/upload-artifact@v7
@@ -91,10 +95,14 @@ jobs:
         ollama list
 
     - name: Run full eval
+      # Drives the cortex coding harness against the v2 smoke scenario.
+      # The --model selector is the workflow input. Audit A-finish
+      # retired the bare `cortex eval --model X` form; the v2 surface
+      # requires `-s SCEN.yaml -m MODEL` (or a positional subcommand).
       run: |
         MODEL="${{ github.event.inputs.model }}"
-        ./cortex eval --model "$MODEL" --output json > eval-results.json
-        ./cortex eval --model "$MODEL" --verbose
+        ./cortex eval -s test/evals/coding/fizzbuzz.yaml -m "$MODEL" --output json > eval-results.json
+        ./cortex eval -s test/evals/coding/fizzbuzz.yaml -m "$MODEL" --verbose
 
     - name: Upload eval results
       uses: actions/upload-artifact@v7
