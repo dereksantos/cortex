@@ -212,7 +212,7 @@ Key metrics from cognitive evaluation:
 ### Known Limitations
 
 - **Embedding bootstrap is brittle.** `cortex reembed` requires existing embeddings; events captured before `nomic-embed-text` is pulled don't get backfilled on daemon restart. Pull the embedding model before the first capture.
-- **Daemon fails silently on missing models.** If the configured `ollama_model` isn't pulled, the daemon processes events out of the queue but produces zero insights and zero embeddings. Check `cortex info` and `.cortex/logs/daemon.log` if insights aren't appearing.
+- **Daemon fails silently on missing models.** If the configured `ollama_model` isn't pulled, the daemon processes events out of the queue but produces zero insights and zero embeddings. Check `cortex status --system` and `.cortex/logs/daemon.log` if insights aren't appearing.
 - **Provider selection is env-driven, not config-driven.** The daemon must inherit `ANTHROPIC_API_KEY` in its environment to use Anthropic; restart it after exporting the key.
 - **Cursor integration is design-only.** The `integrations/cursor/` adapter exists, but no IDE extension ships yet.
 - **MCP server is unvalidated.** Wired up but not exercised against external clients beyond Claude Code.

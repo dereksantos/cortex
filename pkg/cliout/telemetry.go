@@ -283,7 +283,7 @@ func WorkdirFromArgs(args []string) string {
 func CortexFunctionFor(command string) string {
 	switch command {
 	case "search", "recent", "insights", "entities", "graph",
-		"search-vector", "overview":
+		"search-vector":
 		return "Attend" // salience-over-substrate; surfaces candidates
 	case "capture", "ingest", "feed", "embed", "reembed":
 		return "Sense" // intake / encoding / indexing
@@ -295,11 +295,11 @@ func CortexFunctionFor(command string) string {
 		return "" // meta-tool over the rest; no single function
 	case "journal", "prune", "forget":
 		return "Maintain"
-	case "watch", "status", "stats", "info", "tools":
+	case "watch", "status", "tools":
 		return "" // observability / config; no cortex function
 	case "init", "install", "uninstall", "projects", "daemon",
 		"setup", "cli", "session-start", "inject-context", "stop",
-		"mcp", "test":
+		"test":
 		return "" // lifecycle / harness wiring; no cortex function
 	}
 	return ""

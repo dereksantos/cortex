@@ -186,7 +186,7 @@ ps aux | grep "cortex daemon"
 **Check**:
 ```bash
 # Are events being analyzed?
-./cortex stats
+./cortex status --json
 
 # Should show total_insights > 0
 
@@ -218,7 +218,7 @@ curl http://localhost:11434/api/generate -d '{
 **Debug**:
 ```bash
 # Are there events in database?
-./cortex stats
+./cortex status --json
 
 # Check recent events
 ./cortex recent 10
@@ -425,10 +425,10 @@ tail -f .cortex/logs/debug.log
 
 ```bash
 # System info
-./cortex info
+./cortex status --system
 
 # Stats
-./cortex stats
+./cortex status --json
 
 # Recent events
 ./cortex recent 5

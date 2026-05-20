@@ -95,7 +95,7 @@ That's it. Cortex is now running.
 | `cortex recent [N]` | Show N most recent events (default: 10) |
 | `cortex entities [type]` | Browse knowledge graph entities |
 | `cortex graph <type> <name>` | Show entity relationships |
-| `cortex overview` | Summary of all captured context |
+| `cortex status --memory` | Summary of all captured context |
 
 ### Manual Capture
 
@@ -112,15 +112,15 @@ That's it. Cortex is now running.
 |---------|-------------|
 | `cortex ingest` | Move queued events to database (no LLM) |
 | `cortex analyze [N]` | Run LLM analysis on N recent events |
-| `cortex process` | Ingest + analyze (backward compatibility) |
 
 ### Development Commands
 
 | Command | Description |
 |---------|-------------|
 | `cortex init [--auto]` | Initialize in current project |
-| `cortex info` | System information and diagnostics |
-| `cortex stats` | Database statistics (JSON) |
+| `cortex status --system` | System information and diagnostics |
+| `cortex status --json` | Database statistics (JSON) |
+| `cortex status --expand` | Small-LLM-generated multi-line summary |
 | `cortex test [type]` | Test LLM analysis |
 | `cortex eval [options]` | Run evaluation framework |
 | `cortex version` | Show version |
@@ -518,12 +518,15 @@ killall cortex
 
 ```bash
 # System info and LLM status
-./cortex info
+./cortex status --system
 
-# Database statistics
-./cortex stats
+# Database statistics (raw JSON)
+./cortex status --json
 
-# Check daemon state
+# Small-LLM-generated state summary (Ollama; mechanical fallback)
+./cortex status --expand
+
+# Check daemon state file directly
 cat .cortex/daemon_state.json
 
 # Watch cognitive modes live

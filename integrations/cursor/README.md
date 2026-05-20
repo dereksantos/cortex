@@ -192,7 +192,7 @@ This will:
 
 ### Events not appearing
 - Check Cortex daemon is running: `cortex daemon`
-- View queue status: `cortex stats`
+- View queue status: `cortex status --json`
 - Check logs in `.cortex/logs/`
 
 ### Performance issues
