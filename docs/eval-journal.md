@@ -2,6 +2,12 @@
 
 A human-readable log of eval runs — what we ran, why, what we noticed. The structured record lives in `.cortex/journal/eval/` (`eval.cell_result` JSONL) and is the canonical source for analysis. This file is the lab notebook around those numbers.
 
+> **Rolloff.** This file currently holds ~2000 lines of entries (~160K).
+> When it crosses ~3000 lines, segment by quarter into
+> `docs/archive/eval-journal/<YYYY-Q>.md` and leave only the current
+> quarter in-tree. Keep the most-recent entry referenced from
+> `eval-strategy.md` so readers can find the current cadence quickly.
+
 Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Operational checklist: [`docs/benchmarks/integrity.md`](benchmarks/integrity.md). **Consolidated time-stamped baseline snapshot:** [`docs/eval-baseline.md`](eval-baseline.md) — the "before" picture Phase 6 of the integration roadmap will diff against.
 
 ## How to use this journal

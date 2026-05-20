@@ -1,5 +1,17 @@
 # Cortex Evaluation Framework
 
+> **Superseded by [`eval-strategy.md`](eval-strategy.md)** for scope,
+> tier definitions, and metric of record. This doc remains as the
+> original framing artifact — its problem-statement, agentic-processor
+> taxonomy, and detailed metric definitions are useful for orientation,
+> but conflicts resolve in favor of `eval-strategy.md`.
+>
+> The "ABR" metric described below has been retired as a ratio and
+> reframed as the budget-quality curve (Tier 2b in the strategy doc).
+> Three-way comparison (Cortex / native memory / no-context) remains a
+> sound method; its result is now reported under multi-model
+> cost/quality delta (Tier 2c).
+
 ## Problem Statement
 
 First we must measure the problem. Then we must measure the solution.

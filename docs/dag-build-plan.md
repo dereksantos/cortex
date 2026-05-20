@@ -2,10 +2,10 @@
 
 > **Purpose.** Implementation plan for the DAG protocol from
 > [`dag-protocol.md`](dag-protocol.md). Begins after
-> [`eval-prep-epic.md`](eval-prep-epic.md) is complete — without the
+> [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md) is complete — without the
 > eval prep in place, verification is impossible.
 >
-> **Order.** [`eval-prep-epic.md`](eval-prep-epic.md) → this doc →
+> **Order.** [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md) → this doc →
 > implement.
 >
 > **Discipline.** **v0 first.** One DAG type, four ops, end-to-end,
@@ -34,7 +34,7 @@ adjustment, the rewrite is small.
 
 | Prerequisite | Status check |
 |---|---|
-| Eval prep epic complete | All 6 phases of `eval-prep-epic.md` checked |
+| Eval prep epic complete | All 6 phases of `archive/eval-prep-epic.md` checked |
 | Phase 0 + 1 of integration-roadmap | Tool-surface foundation done; unified `cell_results.jsonl` for ad-hoc CLI invocations |
 | Phase 2 of integration-roadmap | CLI surfaces (event stream, multi-turn driver, MCP flag, `--confirm`) |
 | `cortex run` CLI scaffold | `cortex run --type=<x>` exists as a stub command in `cmd/cortex/commands/run.go` that prints "not implemented" |
@@ -86,7 +86,7 @@ protocol against reality.
 
 ### Test gates (must pass before v0 is "done")
 
-- ☑ All 5 mechanic evals from `eval-prep-epic.md` Phase C pass green
+- ☑ All 5 mechanic evals from `archive/eval-prep-epic.md` Phase C pass green
   (`cortex eval --suite=mechanic` → 5/5 PASS as of 2026-05-17, commit
   `4abbf96`).
 - ☑ `cortex run --type=turn --prompt "..."` returns a sensible response
@@ -373,7 +373,7 @@ If a feature has no CLI surface, it's not in this build plan.
 
 | Doc | Relationship |
 |---|---|
-| [`eval-prep-epic.md`](eval-prep-epic.md) | Must complete before this; provides the 5 mechanic evals + baseline |
+| [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md) | Must complete before this; provides the 5 mechanic evals + baseline |
 | [`dag-protocol.md`](dag-protocol.md) | The protocol this builds |
 | [`integration-roadmap.md`](integration-roadmap.md) | Phase 5 + Phase 6 framing |
 | [`tool-surface.md`](tool-surface.md) | Phase 1 prerequisites for axis contracts on `act` ops |

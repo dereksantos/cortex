@@ -3,20 +3,26 @@
 // Suites are eval families that operate outside the standard v2 /
 // benchmark / harness paths:
 //
-//   - mechanic         : deterministic fixtures verifying DAG executor
+//   - mechanic : deterministic fixtures verifying DAG executor
 //     invariants (budget decay, depth cap, tree
 //     reconstruction, exhaustion graceful-degrade,
-//     tree-shape variation). All fail today until
-//     Phase 5 v0 lands the executor.
-//   - legacy-cognition : per-node scenarios under test/evals/legacy/
-//     cognition/ — stub awaiting Phase B runner.
-//   - journeys         : multi-session e2e scenarios under
-//     test/evals/journeys/ — stub awaiting Phase D
-//     runner.
+//     tree-shape variation).
+//   - journeys : multi-session scenarios under test/evals/journeys/
+//     and substrate for the learning-curve eval (Tier 2a,
+//     see docs/eval-strategy.md). Three depths: validation
+//     (RunSuite), seed-only (RunSuiteWithSeed), and full
+//     execution (RunSuiteWithExecution, requires OpenRouter
+//     key).
 //
 // Each suite is its own dispatcher function; the top-level runSuite
 // chooses by name. Adding a suite is a function + a switch arm; no
 // flag parsing changes needed beyond the suite name itself.
+//
+// The legacy-cognition suite (per-mode scenarios against
+// internal/cognition.{Reflex,Reflect,Resolve,Think,Dream}) was retired
+// as part of the eval-strategy reframe — the cognitive-mode abstraction
+// is superseded by the DAG executor, which the mechanic suite tests
+// directly.
 package commands
 
 import (
@@ -30,7 +36,6 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/eval/journey"
-	"github.com/dereksantos/cortex/internal/eval/legacy"
 	"github.com/dereksantos/cortex/internal/eval/mechanic"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 )
@@ -72,48 +77,6 @@ func persistMechanicCells(ctx context.Context, suiteRes *mechanic.SuiteResult) {
 		}
 		if err := persister.PersistCell(ctx, cell); err != nil {
 			fmt.Fprintf(os.Stderr, "mechanic: persist %s: %v\n", r.Fixture, err)
-		}
-	}
-}
-
-// persistLegacyCells writes one CellResult per legacy-cognition test
-// (per-scenario × per-mode × per-test). Skipped tests get a row with
-// TaskSuccess=false and a notes field flagging the skip reason.
-func persistLegacyCells(ctx context.Context, suiteRes *legacy.SuiteResult) {
-	persister, err := evalv2.NewPersister()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "legacy: open persister: %v (continuing without cell_results sink)\n", err)
-		return
-	}
-	defer persister.Close()
-	runID := suiteRunID("legacy")
-	ts := time.Now().UTC().Format(time.RFC3339)
-	for _, t := range suiteRes.TestResults {
-		notes := t.ErrorMessage
-		if t.ErrorCode != "" {
-			if notes != "" {
-				notes = fmt.Sprintf("[%s] %s", t.ErrorCode, notes)
-			} else {
-				notes = "[" + t.ErrorCode + "]"
-			}
-		}
-		cell := &evalv2.CellResult{
-			SchemaVersion:        evalv2.CellResultSchemaVersion,
-			RunID:                fmt.Sprintf("%s-%s-%s-%s", runID, t.Scenario, t.Mode, t.TestID),
-			Timestamp:            ts,
-			ScenarioID:           t.Scenario,
-			SessionID:            t.TestID,
-			Harness:              evalv2.HarnessCortex,
-			Provider:             evalv2.ProviderLocal,
-			Model:                "legacy-cognition-mode-" + t.Mode,
-			ContextStrategy:      evalv2.StrategyBaseline,
-			LatencyMs:            t.LatencyMs,
-			TaskSuccess:          t.OK,
-			TaskSuccessCriterion: evalv2.CriterionScenarioAssertion,
-			Notes:                notes,
-		}
-		if err := persister.PersistCell(ctx, cell); err != nil {
-			fmt.Fprintf(os.Stderr, "legacy: persist %s/%s/%s: %v\n", t.Scenario, t.Mode, t.TestID, err)
 		}
 	}
 }
@@ -182,20 +145,16 @@ func runSuite(suite, baseDir, outputFormat string, verbose bool) error {
 			dir = "test/evals/mechanic"
 		}
 		return runMechanicSuite(dir, outputFormat, verbose)
-	case "legacy-cognition":
-		dir := baseDir
-		if dir == "" || dir == "test/evals/v2" {
-			dir = "test/evals/legacy/cognition"
-		}
-		return runLegacyCognitionSuite(dir, outputFormat, verbose)
 	case "journeys":
 		dir := baseDir
 		if dir == "" || dir == "test/evals/v2" {
 			dir = "test/evals/journeys"
 		}
 		return runJourneysSuite(dir, outputFormat, verbose)
+	case "legacy-cognition":
+		return fmt.Errorf("suite %q has been retired (the cognitive-mode abstraction is superseded by the DAG executor; use --suite=mechanic for DAG-executor invariant checks)", suite)
 	default:
-		return fmt.Errorf("unknown suite %q (known: mechanic, legacy-cognition, journeys)", suite)
+		return fmt.Errorf("unknown suite %q (known: mechanic, journeys)", suite)
 	}
 }
 
@@ -246,59 +205,6 @@ func runMechanicSuite(dir, outputFormat string, verbose bool) error {
 		fmt.Println()
 	}
 	fmt.Printf("Total: %d  Passed: %d  Failed: %d\n", res.Total, res.Passed, res.Failed)
-	if res.Failed > 0 {
-		os.Exit(1)
-	}
-	return nil
-}
-
-// runLegacyCognitionSuite dispatches the 22 scenarios under
-// test/evals/legacy/cognition/ to internal/eval/legacy.RunSuite.
-// Self-contained resolve-mode scenarios run end-to-end; storage-
-// dependent modes (reflex / reflect / think / dream / router) are
-// reported as skipped with error_code=needs_fixture_seed until the
-// canonical fixture-seed helper lands as a follow-up.
-func runLegacyCognitionSuite(dir, outputFormat string, verbose bool) error {
-	ctx := context.Background()
-	res, err := legacy.RunSuite(ctx, dir)
-	if err != nil {
-		return err
-	}
-
-	// Emit unified CellResult rows (audit D5).
-	persistLegacyCells(ctx, res)
-
-	if outputFormat == "json" {
-		b, _ := json.MarshalIndent(res, "", "  ")
-		fmt.Println(string(b))
-		if res.Failed > 0 {
-			os.Exit(1)
-		}
-		return nil
-	}
-
-	fmt.Printf("=== legacy-cognition suite (%d tests across scenarios) ===\n\n", res.Total)
-	for _, t := range res.TestResults {
-		var statusTag string
-		switch {
-		case t.OK:
-			statusTag = "PASS"
-		case t.ErrorCode == "needs_fixture_seed":
-			statusTag = "SKIP"
-		default:
-			statusTag = "FAIL"
-		}
-		fmt.Printf("  [%s] %s / %s (mode=%s, %dms)\n", statusTag, t.Scenario, t.TestID, t.Mode, t.LatencyMs)
-		if !t.OK && verbose && t.ErrorMessage != "" {
-			fmt.Printf("         %s\n", t.ErrorMessage)
-		}
-	}
-	fmt.Printf("\nTotal: %d  Passed: %d  Failed: %d  Skipped: %d\n",
-		res.Total, res.Passed, res.Failed, res.Skipped)
-	if res.Skipped > 0 {
-		fmt.Println("Skipped tests need the canonical fixture-seed helper")
-		fmt.Println("(planned follow-up — see Phase B + D audit entry in docs/eval-journal.md).")
-	}
 	if res.Failed > 0 {
 		os.Exit(1)
 	}

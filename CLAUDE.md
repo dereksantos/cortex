@@ -1,18 +1,21 @@
 # Cortex
 
-A context broker that captures development insights and injects them into AI coding assistants.
+A general-purpose coding harness that leverages multiple models, learns over time, and has bounded emergence.
 
-## Problem
+> The eval strategy doc is the authoritative scope and metric definition:
+> [`docs/eval-strategy.md`](docs/eval-strategy.md). Three thesis claims —
+> multi-model leverage, learning over time, bounded emergence — drive
+> every eval and every roadmap phase.
 
-Native AI memory (e.g., Claude Code Auto-Memory) handles basic single-tool recall. Cortex addresses what native memory cannot:
+## Three claims
 
-- **Token waste**: Sessions re-discover decisions, re-read files, and re-establish context -- compounding costs over time
-- **Scale**: Semantic retrieval via embeddings when insights grow to hundreds (vs flat-file context stuffing)
-- **Cross-tool**: Portable context across Claude Code, Cursor, Copilot via MCP server
-- **Measurability**: ABR metric + eval framework to quantify context quality
-- **Budget-bounded intelligence**: Activity-aware Think/Dream modes with inverse budget models; local models preferred for background tasks
+1. **Multi-model leverage.** Small model + Cortex matches or exceeds a bigger model alone, at lower cost. The metric is quality normalized by model size or dollars spent, never absolute pass-rate.
+2. **Learning over time.** Same harness, same model, sequential workload — quality on later sessions exceeds earlier ones. The metric is the slope of the learning curve.
+3. **Bounded emergence.** DAG seed+grow+decay produces task-appropriate complexity: cheap tasks → small graphs, complex tasks → larger graphs, with quality flattening at a knee. The metric is the budget–quality curve.
 
-## Solution: The Context Pipeline
+Everything else (intent-ingress, observability, safety, presentation) is *table stakes for being a coding harness* — necessary, not differentiating.
+
+## Capture pipeline
 
 ```
 Capture → Filter → Store → Retrieve → Inject
@@ -21,7 +24,7 @@ Capture → Filter → Store → Retrieve → Inject
   hooks    vs noise  + vec    + rerank   for LLM
 ```
 
-**Capture**: Hook into AI tools (Claude Code, Cursor), record events without blocking (<20ms target, <50ms acceptable)
+**Capture**: Record events from the Cortex REPL/agent loop and from optional host integrations (Claude Code, Cursor as deployment modes), <20ms target, <50ms acceptable.
 
 **Filter**: Extract durable context - decisions, corrections, patterns. Ignore noise.
 
@@ -29,14 +32,16 @@ Capture → Filter → Store → Retrieve → Inject
 
 **Retrieve**: Fast mechanical lookup (embeddings) + optional LLM reranking
 
-**Inject**: Format context for consumption by AI tools
+**Inject**: Format context for the active model
 
-## Quick Start with Claude Code
+## Quick Start (Claude Code as host)
+
+Cortex can also drive Claude Code as one of its host integrations. To wire it up:
 
 1. Build: `go build ./cmd/cortex`
 2. Install: `./cortex install`
 3. Start daemon: `./cortex daemon &`
-4. Use Claude Code normally - context is captured automatically
+4. Use Claude Code normally — events are captured automatically
 
 ### Slash Commands
 
@@ -118,6 +123,14 @@ Invariants:
 - **Closed segments are gzippable**: `journal.CompactClosedSegments` shrinks closed segments ~10×; the reader handles both `.jsonl` and `.jsonl.gz` transparently.
 
 ## Cognitive Architecture
+
+> **Note on framing.** The five cognitive modes below describe the
+> historical mode-based abstraction. The current direction is to view
+> these as compositions of DAG nodes (see [`docs/dag-protocol.md`](docs/dag-protocol.md)
+> and [`docs/eval-strategy.md`](docs/eval-strategy.md) for the
+> bounded-emergence claim). Code in `internal/cognition/` still
+> implements the modes; the DAG executor in `pkg/cognition/dag/`
+> supersedes the standalone-mode framing for new work.
 
 Cortex uses five cognitive modes, inspired by how humans process information:
 

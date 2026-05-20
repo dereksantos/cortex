@@ -1,21 +1,34 @@
-// Package journey loads the 10 e2e scenarios under test/evals/
-// journeys/ and reports per-scenario runnability status.
+// Package journey loads the multi-session scenarios under test/evals/
+// journeys/ and runs them through three depths of execution.
 //
-// Phase D scope split:
+// Under the three-tier eval strategy (docs/eval-strategy.md), this
+// package is the substrate for the **learning-curve eval (Tier 2a)** —
+// the "learns over time" thesis claim. Each scenario describes a
+// multi-session arc with accumulated decisions, corrections, and
+// supersession; running them sequentially with shared memory produces
+// the pass-rate-vs-session-index curve that the learning-curve eval
+// plots.
+//
+// Three execution depths, each a separate entrypoint:
 //
 //  1. **Validator** (RunSuite): loads each scenario, verifies scaffold +
 //     structure, emits per-scenario status. No execution.
 //
 //  2. **Seed adapter** (RunSuiteWithSeed): for each scenario, converts
 //     the multi-session events into Cortex insights, seeds them into a
-//     per-scenario temp storage (same JSONL-write pattern as Phase B),
-//     and verifies the events are retrievable post-seed. This proves
-//     the journey → Cortex-context pipeline works end-to-end.
+//     per-scenario temp storage, and verifies the events are
+//     retrievable post-seed. Proves the journey → Cortex-context
+//     pipeline works end-to-end.
 //
-//  3. **Full execution adapter** (NOT YET IMPLEMENTED): drives a
-//     coding agent through each session's scaffold after seeding;
-//     scores against expected behavior. Bulk of Phase D's remaining
-//     work; reuses cortex code harness pattern. Filed as follow-up.
+//  3. **Full execution** (RunSuiteWithExecution, in executor.go):
+//     drives a CortexHarness against each session's coding task after
+//     seeding; scores acceptance (tests pass + pattern matches) and
+//     emits cell_result rows. Requires an OpenRouter API key.
+//
+// The remaining gap toward a full learning-curve eval is a
+// session-ordering driver that enforces per-run memory isolation and
+// reports the across-session slope explicitly. See docs/eval-strategy.md
+// Phase 4 for the build sequence.
 package journey
 
 import (
