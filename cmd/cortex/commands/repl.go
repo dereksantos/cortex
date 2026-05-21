@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/bootstrap"
 	"github.com/dereksantos/cortex/internal/capture"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
@@ -319,6 +320,14 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 
 	printREPLBanner(state)
 
+	// First-run bootstrap: if .cortex/bootstrap_state.json is absent
+	// or incomplete, kick off the project-bootstrap DAG in a
+	// goroutine. The REPL accepts input immediately; the bootstrap
+	// surfaces progress as banners between user prompts. Disable via
+	// CORTEX_SKIP_BOOTSTRAP=1 (used by tests + benchmark harnesses
+	// that don't want the noise).
+	maybeStartBootstrap(state)
+
 	// Revalidate the saved role map (if any) so the user sees stale
 	// entries before the first turn. Cheap probe (2s per endpoint
 	// max); never blocks. Skipped in headless mode where benchmark
@@ -419,6 +428,12 @@ type replState struct {
 	// exitRequested is set by the /quit gate-response path so runTurn
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
+
+	// bootstrapCancel cancels the auto-spawned bootstrap goroutine on
+	// REPL exit. Nil when bootstrap was skipped (already complete, env
+	// override, or detection error). Always called from close(); safe
+	// to call multiple times because the underlying CancelFunc is.
+	bootstrapCancel context.CancelFunc
 
 	// Headless-mode config (zero values preserve interactive behavior):
 	//   customVerifierCmd: shell command to run instead of `go build`.
@@ -887,11 +902,95 @@ func (s *replState) ensureCaptureClient() (*capture.Capture, error) {
 	return s.captureClient, nil
 }
 
+// bootstrapBoundariesLine returns a single dash-prefixed line for
+// SystemBoundaries when the project-bootstrap DAG has completed. It
+// reports insight count + both coverage signals so decide.next knows
+// the bootstrap is queryable via remember.vector_search rather than
+// needing to read README itself.
+//
+// Returns "" when the state file is absent, unreadable, malformed, or
+// CompletedAt is nil. Best-effort: a stale or missing file degrades
+// to "no boundary info" silently.
+func bootstrapBoundariesLine(workdir string) string {
+	cortexDir := filepath.Join(workdir, ".cortex")
+	st, err := bootstrap.LoadState(bootstrap.StatePath(cortexDir))
+	if err != nil || st == nil || st.CompletedAt == nil {
+		return ""
+	}
+	effFrac := 0.0
+	if st.EffTotalLines > 0 {
+		effFrac = float64(st.CoveredEffLines) / float64(st.EffTotalLines)
+	}
+	fileFrac := 0.0
+	if st.TotalFiles > 0 {
+		fileFrac = float64(st.CoveredFiles) / float64(st.TotalFiles)
+	}
+	return fmt.Sprintf(
+		"- Project bootstrap: complete (%d insights, %.0f%% effective-LOC, %.0f%% file-coverage; query via remember.vector_search).\n",
+		st.InsightsEmitted, 100*effFrac, 100*fileFrac,
+	)
+}
+
+// maybeStartBootstrap is the REPL's first-run hook: if
+// .cortex/bootstrap_state.json is absent or incomplete (and the user
+// hasn't set CORTEX_SKIP_BOOTSTRAP=1), spawn the project-bootstrap
+// controller in a goroutine. The REPL keeps accepting input
+// immediately; bootstrap surfaces progress as banners between user
+// prompts. Cancel-on-exit is wired via state.bootstrapCancel, which
+// state.close() invokes during defer.
+func maybeStartBootstrap(state *replState) {
+	if os.Getenv("CORTEX_SKIP_BOOTSTRAP") == "1" {
+		return
+	}
+	cortexDir := filepath.Join(state.workdir, ".cortex")
+	run, reason := bootstrap.ShouldRunBootstrap(cortexDir)
+	if !run {
+		return
+	}
+	fmt.Printf("cortex: bootstrap starting (%s) — progress will surface as banners (CORTEX_SKIP_BOOTSTRAP=1 to disable)\n", reason)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	state.bootstrapCancel = cancel
+
+	// Build the provider the same way newSessionCognition did, so
+	// bootstrap inherits the REPL's currently-pinned model/endpoint.
+	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: state.workdir}
+	provider := buildLLMProviderForREPL(cfg, state.model, state.apiURL)
+
+	cc := bootstrap.ControllerConfig{
+		Config: bootstrap.Config{
+			ProjectRoot:    state.workdir,
+			ContextDir:     cortexDir,
+			Provider:       provider,
+			TargetCoverage: 0.80,
+			BudgetMax:      200,
+			BatchSize:      4,
+			WindowLines:    bootstrap.DefaultWindowLines,
+			WindowOverlap:  bootstrap.DefaultWindowOverlap,
+			ExtractOp:      bootstrap.ExtractOpAuto,
+			Banner: func(line string) {
+				// Print on a fresh line so banners don't garble the
+				// REPL prompt. The user's typed-but-unsubmitted input
+				// stays in the terminal's line buffer; their next
+				// Enter delivers it as expected.
+				fmt.Printf("\n[bootstrap] %s\n~ ", line)
+			},
+		},
+		ExtractInsightFn:  wrapInsightFn(provider),
+		ExtractOverviewFn: wrapOverviewFn(provider),
+	}
+	go bootstrap.RunInBackground(ctx, cc)
+}
+
 // close flushes and closes the session JSONL plus any shared cognition
 // state. The Storage close flushes its append-mode JSONL handles so
 // the events.jsonl on disk matches the in-memory indexes at the
 // moment of session end.
 func (s *replState) close() {
+	if s.bootstrapCancel != nil {
+		s.bootstrapCancel()
+		s.bootstrapCancel = nil
+	}
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
 	}
@@ -1964,6 +2063,12 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		"- Model: %s (capability class: %s)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
 		s.model, class, cap,
 	)
+	// Phase 3 Slice 3 dovetail: when the project-bootstrap DAG has
+	// completed, surface a one-liner so decide.next plans against
+	// stored insights rather than fanning out to re-read README.
+	if line := bootstrapBoundariesLine(s.workdir); line != "" {
+		systemBoundaries += line
+	}
 	if err := reg.Register(ops.NextSpec(ops.NextConfig{
 		Provider:         nextProvider,
 		ProviderFactory:  nextFactory,

@@ -8,6 +8,12 @@
 > retired, or an eval moves between tiers. Run-level findings stay in
 > [`eval-journal.md`](eval-journal.md), not here. This doc tracks *what we
 > measure and why*, not *what the latest numbers are*.
+>
+> **Related**: [`bootstrap-dag-plan.md`](bootstrap-dag-plan.md) defines the
+> project-bootstrap DAG's coverage signals (effective LOC + file
+> coverage) and §A/B requires recording the extract-op decision here in
+> [`eval-journal.md`](eval-journal.md) before the controller commits to
+> one op as default.
 
 ---
 

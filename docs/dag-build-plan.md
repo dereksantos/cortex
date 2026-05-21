@@ -17,6 +17,10 @@
 > consumer and becomes a thin wrapper. Other DAG types
 > (think / dream / capture / eval) are additional `cortex run`
 > subcommands.
+>
+> **Related.** The project-bootstrap DAG is a composition built on top
+> of this protocol — see [`bootstrap-dag-plan.md`](bootstrap-dag-plan.md)
+> for its hierarchical sampler + extract-overview op + REPL first-run hook.
 
 ---
 

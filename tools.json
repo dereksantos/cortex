@@ -21,6 +21,77 @@
       ]
     },
     {
+      "name": "bootstrap",
+      "description": "Scan the project and seed dream.insight entries via the bootstrap DAG",
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "batch",
+          "type": "int",
+          "default": "4",
+          "description": "Chunks per iteration"
+        },
+        {
+          "name": "budget",
+          "type": "int",
+          "default": "200",
+          "description": "Max iterations (each iteration = BatchSize chunks)"
+        },
+        {
+          "name": "dry-run",
+          "type": "bool",
+          "default": "false",
+          "description": "Sampler + analyzer only; skip LLM + journal writes"
+        },
+        {
+          "name": "extract-op",
+          "type": "string",
+          "default": "auto",
+          "description": "auto | extract_insight | extract_overview"
+        },
+        {
+          "name": "force",
+          "type": "bool",
+          "default": "false",
+          "description": "Re-run even if bootstrap_state.json indicates completed"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id (provider-specific; falls back to provider default)"
+        },
+        {
+          "name": "provider",
+          "type": "string",
+          "default": "ollama",
+          "description": "LLM provider: ollama | openrouter"
+        },
+        {
+          "name": "salt",
+          "type": "string",
+          "description": "Optional RNG salt for variation across runs"
+        },
+        {
+          "name": "target-coverage",
+          "type": "float64",
+          "default": "0.8",
+          "description": "Halt when both signals (effective LOC + file coverage) reach target"
+        },
+        {
+          "name": "window-lines",
+          "type": "int",
+          "default": "400",
+          "description": "Chunk window size in lines"
+        },
+        {
+          "name": "window-overlap",
+          "type": "int",
+          "default": "40",
+          "description": "Adjacent-chunk overlap in lines"
+        }
+      ]
+    },
+    {
       "name": "calibrate",
       "description": "Recompute per-op p50 cost hints from .cortex/db/dag_traces.jsonl",
       "version": "0.1.0",

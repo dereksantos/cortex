@@ -88,7 +88,7 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "init", "install", "uninstall", "projects":
+	case "init", "install", "uninstall", "projects", "bootstrap":
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}

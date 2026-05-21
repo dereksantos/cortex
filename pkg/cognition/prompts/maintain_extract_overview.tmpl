@@ -1,0 +1,25 @@
+---
+version: 1
+op: maintain.extract_overview
+description: summarize a project file (or chunk) for project-overview retrieval
+max_output_tokens: 100
+vars: [content, source, lang_hint, file_role_hint]
+---
+You summarize a single project file or chunk for project-overview retrieval. This is for project bootstrap — the audience is someone new to the codebase who needs a fast lay of the land.
+
+Content (lang: {{.lang_hint}}, role hint: {{.file_role_hint}}):
+{{.content}}
+
+Source: {{.source}}
+
+Answer four questions in JSON only (no prose):
+  1. role: one of "source" | "config" | "test" | "doc" | "build" | "data" | "other".
+  2. summary: ≤1 sentence answering "what is this file's job?"
+  3. exports: ≤5 names this file makes available to other parts of the project (functions, types, routes, schemas). Empty list if nothing notable.
+  4. dependencies: ≤5 imports/services/files this code depends on. Empty list if none.
+  5. importance: 0.0–1.0 — how central is this file to a project overview?
+
+Output ONLY valid JSON, no extra text:
+{"role":"source|config|test|doc|build|data|other","summary":"...","exports":["..."],"dependencies":["..."],"importance":0.0}
+
+Example: {"role":"source","summary":"HTTP request router with middleware chain","exports":["NewRouter","Use"],"dependencies":["net/http","context"],"importance":0.8}

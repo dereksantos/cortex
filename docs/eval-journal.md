@@ -2000,3 +2000,35 @@ Per-cell records in `.cortex/db/cell_results.jsonl` (62 rows) and `.cortex/journ
 - Phase 1 of `docs/integration-roadmap.md` (unified `cell_results.jsonl` for ad-hoc CLI invocations) is the prerequisite. Until it lands, all 40 v2 scenarios will fail principle 6 (Structured) the same way; skipping the full sweep for now.
 - Independent Phase-A item to file: extend the v2 runner to emit Fast vs Full as distinct rows so principle 8 (Separated baselines) can be honored even after the telemetry sink lands.
 - The legacy run is retained in `eval_scenario_results` for reference; do **not** treat it as the Phase A v2 baseline.
+
+### 2026-05-21 — Bootstrap A/B (extract_insight vs extract_overview) / PENDING REAL RUN
+
+**Command**:
+```
+CORTEX_RUN_AB=1 CORTEX_AB_ENDPOINT=http://localhost:11434/v1 \
+  CORTEX_AB_MODEL=qwen2.5-coder:1.5b \
+  go test -v ./internal/bootstrap -run TestExtractAB -panel testdata/extract_ab_panel.json
+```
+**Versions**: scaffold landed v0.1, panel **not yet populated**, no scoring run executed.
+**Result**: SCAFFOLD READY; FULL A/B PENDING.
+
+**Why this entry**: docs/bootstrap-dag-plan.md §A/B requires the eval gate before step 8 (controller integration) commits to one extract op as default. Recording the pre-run state so the eventual run has a place to land + so the controller default is defensible without the run.
+
+**Default routing in absence of A/B (internal/bootstrap/extract_router.go)**:
+- Source-like (.go, .py, .js, .ts, .rs, .java, .c family, .cs, .swift, .kt, .scala, .rb, .sh, .lua, .sql, .hs) → `maintain.extract_overview`.
+- Config-like (.toml, .yaml, .ini, .tf) → `maintain.extract_overview`.
+- Prose / unknown (.md, .txt, .rst, no-ext) → `maintain.extract_insight`.
+- Rationale: extract_overview prompt is tuned for "what is this file's job + what does it expose" (good fit for source/config); extract_insight prompt is tuned for "what durable insight is in this text" (good fit for prose).
+- `--extract-op=auto` is the default in `cortex bootstrap`; explicit `--extract-op=extract_insight` or `--extract-op=extract_overview` overrides per-language routing.
+
+**What the eventual A/B run needs**:
+- 12-chunk panel JSON at `internal/bootstrap/testdata/extract_ab_panel.json`: 4 Cortex (Go) + 4 Python project + 4 TS project, mixed source/config/test/doc roles.
+- A live LLM provider (Ollama local or OpenRouter Haiku).
+- Manual scoring per (entry × op): 0=irrelevant, 1=partial, 2=full → fill in below table.
+
+**Follow-ups**:
+- Populate `internal/bootstrap/testdata/extract_ab_panel.json` from a fresh scan of Cortex + a python/ts fixture project.
+- Run the A/B with at least one of {qwen2.5-coder:1.5b (Ollama local), anthropic/claude-haiku-4.5 (OpenRouter)} to ground the per-language routing decision in real model behavior.
+- If the A/B shows a clear winner across all language families, simplify `ChooseExtractOp` to return that op unconditionally (saves the per-extension table).
+- If the A/B confirms the current `auto` routing, append a "CONFIRMED" entry here referencing the run.
+

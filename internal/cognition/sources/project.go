@@ -18,6 +18,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/cognition/fractal"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/projectscan"
 	"github.com/dereksantos/cortex/pkg/cognition"
 )
 
@@ -28,11 +29,16 @@ import (
 // weeks. For each chosen file ProjectSource emits one or more region
 // windows (offset+length) rather than the whole file, so Dream can
 // explore arbitrary points inside large files.
+//
+// The .gitignore parser and sensitive-file deny list live in the
+// internal/projectscan package and are shared with the project-bootstrap
+// DAG. ProjectSource composes an IgnoreSet rather than carrying its own
+// filtering state.
 type ProjectSource struct {
-	projectRoot    string
-	rng            *rand.Rand
-	gitignoreRules []gitignoreRule
-	observer       *Observer
+	projectRoot string
+	ignore      *projectscan.IgnoreSet
+	rng         *rand.Rand
+	observer    *Observer
 
 	churnMu     sync.Mutex
 	churnCache  map[string]int
@@ -67,21 +73,15 @@ func (p *ProjectSource) observeFile(fc fileCandidate) {
 	)
 }
 
-// gitignoreRule represents a single .gitignore pattern.
-type gitignoreRule struct {
-	pattern  string
-	negation bool // lines starting with !
-	dirOnly  bool // lines ending with /
-}
-
-// NewProjectSource creates a new ProjectSource.
+// NewProjectSource creates a new ProjectSource. The IgnoreSet is built
+// once at construction time; callers should re-construct after touching
+// .gitignore if they want updated rules.
 func NewProjectSource(projectRoot string) *ProjectSource {
-	ps := &ProjectSource{
+	return &ProjectSource{
 		projectRoot: projectRoot,
+		ignore:      projectscan.LoadIgnoreSet(projectRoot),
 		rng:         rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
-	ps.gitignoreRules = ps.loadGitignore()
-	return ps
 }
 
 // Name returns the source identifier.
@@ -193,16 +193,12 @@ func (p *ProjectSource) walkCandidates() ([]fileCandidate, error) {
 			return nil
 		}
 		if d.IsDir() {
-			name := d.Name()
-			if p.isHardExcludedDir(name) {
-				return filepath.SkipDir
-			}
-			if p.isGitignored(path, true) {
+			if p.ignore.IsDirExcluded(path, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if p.isExcluded(path, false) {
+		if p.ignore.IsFileExcluded(path) {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -373,301 +369,4 @@ func regionItemID(relPath string, offset int64) string {
 		return "project:" + relPath
 	}
 	return "project:" + relPath + "#offset=" + strconv.FormatInt(offset, 10)
-}
-
-// isExcluded returns true if a file should never be sampled.
-// Checks hard exclusions first, then gitignore rules.
-func (p *ProjectSource) isExcluded(path string, isDir bool) bool {
-	if p.isHardExcludedFile(path) {
-		return true
-	}
-	if p.shouldSkipByExtension(path) {
-		return true
-	}
-	return p.isGitignored(path, isDir)
-}
-
-// isHardExcludedDir returns true for directories that must never be entered.
-func (p *ProjectSource) isHardExcludedDir(name string) bool {
-	// Git internals
-	if name == ".git" {
-		return true
-	}
-
-	// Dependencies
-	hardExcludedDirs := map[string]bool{
-		"node_modules":  true,
-		"vendor":        true,
-		".venv":         true,
-		"venv":          true,
-		"__pycache__":   true,
-		".mypy_cache":   true,
-		".pytest_cache": true,
-
-		// Build artifacts
-		"dist":    true,
-		"build":   true,
-		"target":  true,
-		".next":   true,
-		".nuxt":   true,
-		".output": true,
-
-		// IDE/editor
-		".idea": true,
-
-		// Cortex's own state (but NOT knowledge/)
-		// Handled separately in isHardExcludedFile for finer control
-	}
-
-	return hardExcludedDirs[name]
-}
-
-// isHardExcludedFile returns true for files that must never be sampled,
-// regardless of gitignore. These are security-sensitive or noise files.
-func (p *ProjectSource) isHardExcludedFile(path string) bool {
-	rel, _ := filepath.Rel(p.projectRoot, path)
-	base := filepath.Base(path)
-	lower := strings.ToLower(base)
-
-	// === SECRETS / CREDENTIALS ===
-	// .env files (but allow .env.example, .env.sample, .env.template)
-	if strings.HasPrefix(lower, ".env") {
-		if lower == ".env.example" || lower == ".env.sample" || lower == ".env.template" {
-			return false
-		}
-		return true
-	}
-
-	// Key/certificate files
-	secretExts := map[string]bool{
-		".key": true, ".pem": true, ".p12": true, ".pfx": true,
-		".keystore": true, ".jks": true, ".p8": true,
-	}
-	if secretExts[strings.ToLower(filepath.Ext(path))] {
-		return true
-	}
-
-	// Named secret files
-	secretFiles := map[string]bool{
-		"id_rsa": true, "id_ed25519": true, "id_ecdsa": true, "id_dsa": true,
-		"credentials.json": true, "service-account.json": true,
-		"secrets.yaml": true, "secrets.yml": true, "secrets.json": true,
-		".npmrc": true, ".pypirc": true, ".netrc": true,
-		".docker/config.json": true,
-		"htpasswd":            true, ".htpasswd": true,
-	}
-	if secretFiles[lower] || secretFiles[rel] {
-		return true
-	}
-
-	// === CORTEX OWN STATE ===
-	// Never read our own queue, db, logs, or runtime state
-	if strings.HasPrefix(rel, ".cortex/") || strings.HasPrefix(rel, ".cortex\\") {
-		// Allow knowledge/ (that's committed team context)
-		if strings.HasPrefix(rel, ".cortex/knowledge/") || strings.HasPrefix(rel, ".cortex\\knowledge\\") {
-			return false
-		}
-		return true
-	}
-
-	// === OS JUNK ===
-	osJunk := map[string]bool{
-		".ds_store": true, "thumbs.db": true, "desktop.ini": true,
-	}
-	return osJunk[lower]
-}
-
-// shouldSkipByExtension returns true for binary, generated, and low-signal files.
-func (p *ProjectSource) shouldSkipByExtension(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-
-	skipExts := map[string]bool{
-		// Binary/compiled
-		".exe": true, ".dll": true, ".so": true, ".dylib": true,
-		".o": true, ".obj": true, ".a": true, ".lib": true,
-		".class": true, ".pyc": true, ".pyo": true,
-
-		// Images/media
-		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-		".ico": true, ".svg": true, ".webp": true, ".bmp": true,
-		".mp3": true, ".mp4": true, ".wav": true, ".avi": true,
-		".mov": true, ".webm": true, ".ttf": true, ".woff": true,
-		".woff2": true, ".eot": true, ".otf": true,
-
-		// Archives
-		".zip": true, ".tar": true, ".gz": true, ".bz2": true,
-		".rar": true, ".7z": true, ".xz": true,
-
-		// Documents (low signal for code context)
-		".pdf": true, ".doc": true, ".docx": true, ".xls": true,
-		".xlsx": true, ".pptx": true,
-
-		// Lock files (huge, low signal)
-		".lock": true, ".sum": true,
-
-		// Minified
-		".min.js": true, ".min.css": true,
-
-		// Database files
-		".db": true, ".sqlite": true, ".sqlite3": true,
-
-		// Map files
-		".map": true,
-	}
-
-	if skipExts[ext] {
-		return true
-	}
-
-	// Check compound extensions
-	base := filepath.Base(path)
-	if strings.HasSuffix(base, ".min.js") || strings.HasSuffix(base, ".min.css") {
-		return true
-	}
-
-	// Lock files by name
-	lockFiles := map[string]bool{
-		"package-lock.json": true, "yarn.lock": true, "pnpm-lock.yaml": true,
-		"go.sum": true, "gemfile.lock": true, "poetry.lock": true,
-		"composer.lock": true, "cargo.lock": true, "flake.lock": true,
-	}
-	return lockFiles[strings.ToLower(base)]
-}
-
-// loadGitignore parses .gitignore from the project root.
-func (p *ProjectSource) loadGitignore() []gitignoreRule {
-	gitignorePath := filepath.Join(p.projectRoot, ".gitignore")
-	f, err := os.Open(gitignorePath)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-
-	var rules []gitignoreRule
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		rule := gitignoreRule{}
-
-		// Negation
-		if strings.HasPrefix(line, "!") {
-			rule.negation = true
-			line = line[1:]
-		}
-
-		// Directory-only pattern
-		if strings.HasSuffix(line, "/") {
-			rule.dirOnly = true
-			line = strings.TrimSuffix(line, "/")
-		}
-
-		rule.pattern = line
-		rules = append(rules, rule)
-	}
-
-	return rules
-}
-
-// isGitignored checks if a path matches any gitignore rule.
-func (p *ProjectSource) isGitignored(path string, isDir bool) bool {
-	if len(p.gitignoreRules) == 0 {
-		return false
-	}
-
-	rel, err := filepath.Rel(p.projectRoot, path)
-	if err != nil {
-		return false
-	}
-
-	// Normalize to forward slashes for matching
-	rel = filepath.ToSlash(rel)
-
-	ignored := false
-	for _, rule := range p.gitignoreRules {
-		if rule.dirOnly && !isDir {
-			continue
-		}
-
-		if matchGitignore(rule.pattern, rel) {
-			if rule.negation {
-				ignored = false
-			} else {
-				ignored = true
-			}
-		}
-	}
-
-	return ignored
-}
-
-// matchGitignore performs simplified gitignore pattern matching.
-// Supports: *, **, ?, and path-based matching.
-func matchGitignore(pattern, path string) bool {
-	// If pattern contains no slash, match against basename only
-	if !strings.Contains(pattern, "/") {
-		base := filepath.Base(path)
-		return matchGlob(pattern, base)
-	}
-
-	// Pattern with slash — match against full relative path
-	pattern = strings.TrimPrefix(pattern, "/")
-
-	// Handle ** (match any number of directories)
-	if strings.Contains(pattern, "**") {
-		parts := strings.SplitN(pattern, "**", 2)
-		prefix := strings.TrimSuffix(parts[0], "/")
-		suffix := strings.TrimPrefix(parts[1], "/")
-
-		if prefix == "" && suffix == "" {
-			return true
-		}
-
-		if prefix != "" && !strings.HasPrefix(path, prefix) {
-			return false
-		}
-
-		if suffix == "" {
-			return true
-		}
-
-		// Check if any suffix of path matches the pattern suffix
-		pathParts := strings.Split(path, "/")
-		for i := range pathParts {
-			subpath := strings.Join(pathParts[i:], "/")
-			if matchGlob(suffix, subpath) {
-				return true
-			}
-		}
-		return false
-	}
-
-	return matchGlob(pattern, path)
-}
-
-// matchGlob performs simple glob matching with * and ? support.
-func matchGlob(pattern, name string) bool {
-	// Use filepath.Match for simple glob patterns
-	matched, err := filepath.Match(pattern, name)
-	if err == nil && matched {
-		return true
-	}
-
-	// Also check if pattern matches any path component
-	// e.g., pattern "build" should match "src/build" and "build/output"
-	if !strings.Contains(pattern, "/") {
-		parts := strings.Split(name, "/")
-		for _, part := range parts {
-			if m, _ := filepath.Match(pattern, part); m {
-				return true
-			}
-		}
-	}
-
-	return false
 }
