@@ -73,6 +73,8 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 				return fmt.Errorf("cortex eval benchmark: missing name (longmemeval | mteb | swebench | niah)")
 			}
 			return runBenchmark(ctx.Args[1], ctx.Args[2:], false)
+		case "paired":
+			return executePaired(ctx.Args[1:])
 		}
 	}
 
@@ -156,6 +158,8 @@ standard benchmark, or runs a special-purpose suite.
                                           (mechanic | journeys).
   cortex eval benchmark NAME [opts]       Wrapped benchmark
                                           (longmemeval | mteb | swebench | niah).
+  cortex eval paired [opts]               Paired multi-model run
+                                          (Tier 2c cost-quality JSONL).
   cortex eval --summary | --abr-trend     Read-only reports from past runs.
 
 Options:
@@ -271,6 +275,7 @@ Examples:
 		"  cortex eval grid ...                 (multi-cell grid; see `cortex eval grid --help`)\n" +
 		"  cortex eval suite NAME               (suites: mechanic, journeys)\n" +
 		"  cortex eval benchmark NAME ...       (benchmarks: longmemeval, mteb, swebench, niah)\n" +
+		"  cortex eval paired ...               (paired multi-model run; see `cortex eval paired --scenario … --small-model … --frontier-model …`)\n" +
 		"  cortex eval --summary | --abr-trend  (read-only reports from past runs)")
 }
 
