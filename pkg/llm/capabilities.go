@@ -227,9 +227,15 @@ func InferContextClass(modelID string, ctxWindow int) ContextClass {
 // loop's compressed transcript fits comfortably inside the class's
 // typical context window with room for system prompt + reasoning.
 //
-// Phase 3 Slice 1 defaults — calibration loop replaces these with
-// observed budget-quality curves in a later slice.
+// When a calibration snapshot has been applied via
+// SetSalienceCapOverride (Phase 3 Slice 5), the override wins —
+// callers see the calibrated value. Falls back to the static
+// 200/500/1500 defaults from Phase 3 Slice 1 when no override is
+// configured.
 func SalienceCapForClass(c ContextClass) int {
+	if v, ok := lookupSalienceOverride(c); ok {
+		return v
+	}
 	switch c {
 	case ContextSmall:
 		return 200
@@ -238,4 +244,46 @@ func SalienceCapForClass(c ContextClass) int {
 	default:
 		return 500
 	}
+}
+
+// salienceCapOverride holds the per-class caps loaded from the
+// salience calibration snapshot. Nil means "no override; use the
+// static defaults". Mutated by SetSalienceCapOverride at process
+// startup (the REPL loads .cortex/calibration/salience.json once
+// per session) and read by SalienceCapForClass on every lookup.
+//
+// Package-level state is justified here because the calibration is
+// a process-wide knob (every REPL turn, every harness call, every
+// trace row should see the same cap) and the alternative would be
+// threading a *SalienceCalibration through dozens of call sites
+// that already don't take any state.
+var salienceCapOverride map[ContextClass]int
+
+// SetSalienceCapOverride configures the per-class cap overrides
+// SalienceCapForClass returns. Pass a nil or empty map to clear and
+// revert to the static defaults. Used by the REPL at session start
+// after loading .cortex/calibration/salience.json.
+//
+// Not safe for concurrent use with SalienceCapForClass — call this
+// at startup before any tool calls go out.
+func SetSalienceCapOverride(perClass map[ContextClass]int) {
+	if len(perClass) == 0 {
+		salienceCapOverride = nil
+		return
+	}
+	cp := make(map[ContextClass]int, len(perClass))
+	for k, v := range perClass {
+		if v > 0 {
+			cp[k] = v
+		}
+	}
+	salienceCapOverride = cp
+}
+
+func lookupSalienceOverride(c ContextClass) (int, bool) {
+	if salienceCapOverride == nil {
+		return 0, false
+	}
+	v, ok := salienceCapOverride[c]
+	return v, ok
 }

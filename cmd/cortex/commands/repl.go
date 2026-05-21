@@ -587,6 +587,11 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		fmt.Fprintf(os.Stderr, "warn: cortex auto-capture disabled (%v)\n", cogErr)
 	}
 
+	// Phase 3 Slice 5: pull the calibrated per-class salience cap
+	// override if a snapshot exists. Missing file is fine — the
+	// static SalienceCapForClass defaults stay in force.
+	applySalienceCalibration(cortexDir, verbose)
+
 	return &replState{
 		workdir:      workdir,
 		model:        model,
@@ -1001,6 +1006,39 @@ func (s *replState) close() {
 	}
 	if s.store != nil {
 		_ = s.store.Close()
+	}
+}
+
+// applySalienceCalibration reads .cortex/calibration/salience.json
+// (Phase 3 Slice 5) and pushes the snapshot's GlobalCap into
+// llm.SetSalienceCapOverride so SalienceCapForClass returns the
+// calibrated value across every class. Missing file or missing
+// GlobalCap is silent — the static class defaults stay in force.
+//
+// Per-class differentiation isn't possible from the trace shape
+// today (rows don't carry the running session's ContextClass), so a
+// single class-agnostic cap is the most we can say with the data.
+// When the trace schema grows a class column, this function gains a
+// per-class breakdown.
+func applySalienceCalibration(cortexDir string, verbose bool) {
+	path := filepath.Join(cortexDir, "calibration", "salience.json")
+	snap, err := dag.LoadSalienceCalibration(path)
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "warn: salience calibration load failed (%v)\n", err)
+		}
+		return
+	}
+	if snap == nil || snap.GlobalCap <= 0 {
+		return
+	}
+	llm.SetSalienceCapOverride(map[llm.ContextClass]int{
+		llm.ContextSmall:  snap.GlobalCap,
+		llm.ContextMedium: snap.GlobalCap,
+		llm.ContextLarge:  snap.GlobalCap,
+	})
+	if verbose {
+		fmt.Fprintf(os.Stderr, "salience: calibrated cap=%d (samples=%d)\n", snap.GlobalCap, snap.Samples)
 	}
 }
 
