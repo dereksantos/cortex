@@ -42,6 +42,37 @@ func TestFileDeferredQueue_AppendReadRoundtrip(t *testing.T) {
 	}
 }
 
+// TestNodeSpec_SalienceJSONRoundtrip — a SalienceContract set by a
+// parent at spawn time must survive the deferred-queue projection so a
+// rolled-over spawn keeps its compression contract.
+func TestNodeSpec_SalienceJSONRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	q := NewFileDeferredQueue(filepath.Join(dir, "deferred.jsonl"), time.Hour)
+
+	ds := DeferredSpawn{
+		TurnID:       "turn-2",
+		ParentNodeID: "n3",
+		Child: NodeSpec{
+			Function: FuncAct, Op: "read_file",
+			Salience: &SalienceContract{MaxOutputTokens: 200, Intent: "find TODOs"},
+		},
+		Reason: "latency_ms",
+	}
+	if err := q.Append(ds); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, err := q.ReadAndConsume()
+	if err != nil {
+		t.Fatalf("ReadAndConsume: %v", err)
+	}
+	if len(got) != 1 || got[0].Child.Salience == nil {
+		t.Fatalf("expected Salience to survive roundtrip, got %+v", got)
+	}
+	if got[0].Child.Salience.MaxOutputTokens != 200 || got[0].Child.Salience.Intent != "find TODOs" {
+		t.Errorf("Salience fields lost: %+v", got[0].Child.Salience)
+	}
+}
+
 // TestFileDeferredQueue_StaleDropped — entries older than MaxAge
 // are dropped on read.
 func TestFileDeferredQueue_StaleDropped(t *testing.T) {

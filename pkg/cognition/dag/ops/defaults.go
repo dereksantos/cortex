@@ -71,6 +71,10 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		// disturbing the existing constructor signatures.
 		VectorSearchSpec(VectorSearchConfig{Storage: cfg.Storage}),
 
+		// Salience-budget compressor (docs/salience-budgets.md). Phase 1
+		// passthrough stub — wiring lives, LLM call comes in Phase 2.
+		CompressSpec(),
+
 		// Stage 2 LLM-backed ops.
 		RerankSpec(RerankConfig{Provider: cfg.Provider}),
 		ScoreSpec(ScoreConfig{Provider: cfg.Provider}),

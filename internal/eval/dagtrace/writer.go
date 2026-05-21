@@ -41,16 +41,29 @@ type Row struct {
 	ErrorMessage    string         `json:"error_message,omitempty"`
 	CostLatencyMS   int            `json:"cost_latency_ms"`
 	CostTokens      int            `json:"cost_tokens"`
+	CostOutputTok   int            `json:"cost_output_tokens,omitempty"`
 	BudgetAfterLat  int            `json:"budget_after_latency_ms"`
 	BudgetAfterTok  int            `json:"budget_after_tokens"`
 	BudgetAfterDep  int            `json:"budget_after_depth"`
+	BudgetAfterOut  int            `json:"budget_after_output_tokens,omitempty"`
 	SpawnedChildren []string       `json:"spawned_children,omitempty"`
 	WallStartUnix   int64          `json:"wall_start_unix_ns"`
 	WallEndUnix     int64          `json:"wall_end_unix_ns"`
 	Out             map[string]any `json:"out,omitempty"`
+
+	// Salience columns, populated when the parent attached a contract
+	// at spawn time (docs/salience-budgets.md). The calibration loop
+	// fits per-intent budget-quality curves off these.
+	SalienceMaxOutTok int    `json:"salience_max_output_tokens,omitempty"`
+	SalienceIntent    string `json:"salience_intent,omitempty"`
 }
 
-const schemaVersion = "1"
+// schemaVersion bumped to "2" with the addition of cost_output_tokens,
+// budget_after_output_tokens, salience_max_output_tokens, and
+// salience_intent columns. Phase-1 schema change per
+// docs/salience-budgets.md — all new fields are omitempty so a v1
+// reader sees them as missing rather than as a parse failure.
+const schemaVersion = "2"
 
 // Writer appends DAG trace rows to a JSONL file. Construct one per
 // process via NewWriter; mounts under .cortex/db/dag_traces.jsonl
@@ -89,13 +102,19 @@ func (w *Writer) Append(turnID string, e dag.TraceEntry) error {
 		ErrorMessage:    e.ErrorMessage,
 		CostLatencyMS:   e.CostConsumed.LatencyMS,
 		CostTokens:      e.CostConsumed.Tokens,
+		CostOutputTok:   e.CostConsumed.OutputTokens,
 		BudgetAfterLat:  e.BudgetAfter.LatencyMS,
 		BudgetAfterTok:  e.BudgetAfter.Tokens,
 		BudgetAfterDep:  e.BudgetAfter.Depth,
+		BudgetAfterOut:  e.BudgetAfter.OutputTokens,
 		SpawnedChildren: e.SpawnedChildren,
 		WallStartUnix:   e.WallStart.UnixNano(),
 		WallEndUnix:     e.WallEnd.UnixNano(),
 		Out:             e.Out,
+	}
+	if e.Salience != nil {
+		row.SalienceMaxOutTok = e.Salience.MaxOutputTokens
+		row.SalienceIntent = e.Salience.Intent
 	}
 	data, err := json.Marshal(row)
 	if err != nil {

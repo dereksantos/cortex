@@ -38,6 +38,13 @@ type TraceEntry struct {
 	SpawnedChildren []string // node IDs of children spawned by this node
 	WallStart       time.Time
 	WallEnd         time.Time
+
+	// Salience, when non-nil, is the SalienceContract the parent
+	// attached to this node at spawn time (docs/salience-budgets.md).
+	// Copied from NodeSpec so the trace row carries the contract
+	// without forcing the analysis layer to rejoin against the
+	// registry.
+	Salience *SalienceContract
 }
 
 // Trace is the executor's post-hoc artifact for one turn.
@@ -388,6 +395,7 @@ func (e *Executor) invokeOne(ctx context.Context, item pendingItem, budgetSnapsh
 		ParentID:      item.spec.Parent,
 		QualifiedName: item.spec.QualifiedName(),
 		WallStart:     time.Now(),
+		Salience:      item.spec.Salience,
 	}
 
 	spec, err := e.registry.Get(item.spec.QualifiedName())
