@@ -52,6 +52,15 @@ type ToolCallConfig struct {
 	// generous enough for the first call and irrelevant once the
 	// model is warm.
 	MaxLatencyMS int
+
+	// ToolOutputSalienceCap is the per-tool-call output-token cap
+	// attached as a SalienceContract to every act.* node spawned by
+	// this op. Zero means "no contract" — pre-salience-budgets
+	// behavior. When > 0, the executor compresses any oversized act.*
+	// output before depositing into turn state, so the synthesizer
+	// downstream sees compact context rather than the raw file
+	// payload. See docs/salience-budgets.md.
+	ToolOutputSalienceCap int
 }
 
 // ToolCallSpec returns the NodeSpec for decide.tool_call.
@@ -188,6 +197,18 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 				},
 				CostConsumed: dag.Cost{LatencyMS: latency, Tokens: estimateTokens(respText)},
 			}, nil
+		}
+
+		// Attach a SalienceContract so the executor's post-handler
+		// hook compresses oversized act.* outputs before deposit.
+		// Intent flows from the user's intent string into the
+		// compression prompt — the upstream synthesizer sees a
+		// salience-extracted version rather than the raw file blob.
+		if cfg.ToolOutputSalienceCap > 0 {
+			spec.Salience = &dag.SalienceContract{
+				MaxOutputTokens: cfg.ToolOutputSalienceCap,
+				Intent:          intent,
+			}
 		}
 
 		return dag.NodeResult{

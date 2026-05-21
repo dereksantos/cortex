@@ -3,27 +3,45 @@ package ops
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// CompressSpec returns the NodeSpec for attend.compress — the salience-
-// budget enforcement op from docs/salience-budgets.md.
+// CompressConfig wires CompressSpec to a provider. Nil Provider falls
+// back to the truncate-stub path (Phase 1 behavior) so call sites that
+// haven't been upgraded still work.
+type CompressConfig struct {
+	Provider llm.Provider
+}
+
+// compressCostHint — a small-model salience-extraction call. The
+// prompt is short, the model only needs to read the source and emit a
+// compressed version; no JSON parsing or tool semantics. Budget for
+// ~4s wall (room for a 1B local model with a few KB of source) and
+// 300 tokens (the rendered prompt + an output that fits the requested
+// max_tokens). Self-modulates: when budget can't afford this, falls
+// back to the truncate-stub immediately.
+var compressCostHint = dag.Cost{LatencyMS: 4000, Tokens: 300}
+
+// CompressSpec returns the NodeSpec for attend.compress — the
+// salience-budget enforcement op from docs/salience-budgets.md.
 //
-// Phase 1 is a passthrough stub: if the raw input fits the
-// max_tokens budget the op returns it verbatim; if not, it truncates
-// to fit and appends a "[...]" marker. No LLM call yet — the goal of
-// the stub is to prove the wiring (trace columns, executor post-handler
-// hook, calibration logging) before the compressor quality matters.
+// When a Provider is wired (Phase 2), the handler renders the
+// attend_compress.tmpl prompt and asks a small model to extract
+// intent-relevant content under the requested token budget.
 //
-// Phase 2 replaces this handler with a real small-model Reflect-style
-// compression call. The signature stays the same so the executor's
-// post-handler hook doesn't need to change.
-//
-// Token accounting: Phase 1 uses a 4-char-per-token approximation. Good
-// enough for stub behavior; Phase 2 will tokenize properly via the
-// provider's tokenizer.
-func CompressSpec() dag.NodeSpec {
+// When no Provider is wired or the budget can't afford the LLM call
+// (Phase 1 fallback), the handler truncates to fit and appends a
+// "[…compressed-stub: <intent>]" marker. The fallback is lossy but
+// deterministic — the dispatcher path keeps working in tests + at
+// startup before a provider is configured.
+func CompressSpec(opts ...CompressConfig) dag.NodeSpec {
+	var cfg CompressConfig
+	if len(opts) > 0 {
+		cfg = opts[0]
+	}
 	return dag.NodeSpec{
 		Function:    dag.FuncAttend,
 		Op:          "compress",
@@ -38,54 +56,123 @@ func CompressSpec() dag.NodeSpec {
 			{Name: "original_tokens", Type: "int"},
 			{Name: "kept_tokens", Type: "int"},
 			{Name: "lossy", Type: "bool"},
+			{Name: "fallback", Type: "bool"},
 		},
-		// Stub costs are tiny because no LLM call runs. Phase 2 will
-		// raise these to match real compressor latency/tokens, at which
-		// point pre-spawn CanAfford checks start governing whether a
-		// compression is affordable on a near-exhausted budget.
-		Cost:      dag.Cost{LatencyMS: 5, Tokens: 0},
+		Cost:      compressCostHint,
 		Exposable: false,
-		Handler: func(ctx context.Context, in map[string]any, b dag.Budget) (dag.NodeResult, error) {
-			raw := readString(in, "raw")
-			maxTokens := readInt(in, "max_tokens", 0)
-			origTok := approxTokens(raw)
+		Handler:   newCompressHandler(cfg),
+	}
+}
 
-			// max_tokens=0 means "no cap" — passthrough untouched.
-			if maxTokens <= 0 || origTok <= maxTokens {
-				return dag.NodeResult{
-					Out: map[string]any{
-						"compressed":      raw,
-						"original_tokens": origTok,
-						"kept_tokens":     origTok,
-						"lossy":           false,
-					},
-					CostConsumed: dag.Cost{LatencyMS: 5, OutputTokens: origTok},
-				}, nil
-			}
+// newCompressHandler builds the attend.compress handler. Path
+// selection per call:
+//
+//   - Under budget (raw ≤ max_tokens) → passthrough; no LLM call.
+//   - Provider available + budget headroom → LLM compression via
+//     attend_compress.tmpl; reports `fallback: false`.
+//   - No provider OR low budget OR LLM error → truncate-stub with
+//     intent-tagged marker; reports `fallback: true`. The dispatcher
+//     path keeps working even when the small model is unreachable.
+func newCompressHandler(cfg CompressConfig) dag.Handler {
+	return func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
+		started := time.Now()
+		raw := readString(in, "raw")
+		maxTokens := readInt(in, "max_tokens", 0)
+		intent := readString(in, "intent")
+		origTok := approxTokens(raw)
 
-			// Truncation marker carries a hint that this is a stub
-			// compression, not real salience extraction. Phase 2 swaps
-			// this for an LLM-driven Reflect-style summary keyed off
-			// the intent string.
-			marker := " […compressed-stub: " + readString(in, "intent") + "]"
-			markerTok := approxTokens(marker)
-			budget := maxTokens - markerTok
-			if budget < 1 {
-				budget = 1
-			}
-			kept := truncateToTokens(raw, budget) + marker
-
+		// Passthrough when under budget. No LLM, no truncation.
+		if maxTokens <= 0 || origTok <= maxTokens {
 			return dag.NodeResult{
 				Out: map[string]any{
-					"compressed":      kept,
+					"compressed":      raw,
 					"original_tokens": origTok,
-					"kept_tokens":     approxTokens(kept),
-					"lossy":           true,
+					"kept_tokens":     origTok,
+					"lossy":           false,
+					"fallback":        false,
 				},
-				CostConsumed: dag.Cost{LatencyMS: 5, OutputTokens: approxTokens(kept)},
+				CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds()), OutputTokens: origTok},
 			}, nil
-		},
+		}
+
+		// LLM compression path. Provider unavailable or budget too
+		// tight → fall through to the deterministic truncate-stub.
+		if cfg.Provider != nil && cfg.Provider.IsAvailable() && budget.LatencyMS >= fallbackBelowLatencyMS {
+			if out, ok := llmCompress(ctx, cfg.Provider, raw, intent, maxTokens, started); ok {
+				return out, nil
+			}
+			// LLM path errored — fall through to truncate-stub.
+		}
+
+		// Truncate-stub fallback. Deterministic, no LLM cost.
+		marker := " […compressed-stub: " + intent + "]"
+		markerTok := approxTokens(marker)
+		bytesBudget := maxTokens - markerTok
+		if bytesBudget < 1 {
+			bytesBudget = 1
+		}
+		kept := truncateToTokens(raw, bytesBudget) + marker
+		return dag.NodeResult{
+			Out: map[string]any{
+				"compressed":      kept,
+				"original_tokens": origTok,
+				"kept_tokens":     approxTokens(kept),
+				"lossy":           true,
+				"fallback":        true,
+			},
+			CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds()), OutputTokens: approxTokens(kept)},
+		}, nil
 	}
+}
+
+// llmCompress invokes the salience compressor via Provider and the
+// attend_compress.tmpl prompt. Returns (result, true) on success;
+// (zero, false) on any error so the caller can fall through to the
+// truncate-stub. The post-call validation pass clamps the result to
+// the requested budget — defensive against models that ignore the
+// "AT MOST N tokens" instruction.
+func llmCompress(ctx context.Context, p llm.Provider, raw, intent string, maxTokens int, started time.Time) (dag.NodeResult, bool) {
+	pt, terr := LoadTemplate("attend_compress")
+	if terr != nil {
+		return dag.NodeResult{}, false
+	}
+	prompt, rerr := pt.Render(map[string]any{
+		"raw":        raw,
+		"intent":     intent,
+		"max_tokens": maxTokens,
+	})
+	if rerr != nil {
+		return dag.NodeResult{}, false
+	}
+	resp, stats, gerr := p.GenerateWithStats(ctx, prompt)
+	if gerr != nil {
+		return dag.NodeResult{}, false
+	}
+	compressed := strings.TrimSpace(resp)
+	if compressed == "" {
+		return dag.NodeResult{}, false
+	}
+	// Defensive clamp: a model that ignored the budget gets truncated
+	// here. We keep the LLM's salience-driven prefix and drop the
+	// overflow — the calibration loop will see consistently-high
+	// kept_tokens for this intent class and surface the model as
+	// budget-blind.
+	keptTok := approxTokens(compressed)
+	if keptTok > maxTokens {
+		compressed = truncateToTokens(compressed, maxTokens)
+		keptTok = approxTokens(compressed)
+	}
+	latency := int(time.Since(started).Milliseconds())
+	return dag.NodeResult{
+		Out: map[string]any{
+			"compressed":      compressed,
+			"original_tokens": approxTokens(raw),
+			"kept_tokens":     keptTok,
+			"lossy":           true,
+			"fallback":        false,
+		},
+		CostConsumed: dag.Cost{LatencyMS: latency, Tokens: stats.TotalTokens(), OutputTokens: keptTok},
+	}, true
 }
 
 // approxTokens returns a coarse token count for s using a 4-char rule.
@@ -106,7 +193,8 @@ func approxTokens(s string) int {
 // truncateToTokens cuts s at the byte length corresponding to maxTok
 // tokens (under approxTokens), respecting UTF-8 boundaries by
 // trimming any trailing partial rune. The intent is "fast and
-// deterministic"; real salience-aware truncation comes in Phase 2.
+// deterministic"; real salience-aware truncation comes via the
+// LLM path above.
 func truncateToTokens(s string, maxTok int) string {
 	if maxTok <= 0 {
 		return ""

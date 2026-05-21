@@ -333,7 +333,7 @@ func buildCodeActDispatcher(h *evalv2.CortexHarness, workdir string) (*dag.Regis
 		ActRegistry: actReg,
 		TraceCB:     traceCB,
 	}
-	dispatcher := dagnode.NewActDispatcher(cfg, parentID, &spawned)
+	dispatcher := dagnode.NewActDispatcher(cfg, parentID, "", &spawned)
 	h.SetDispatcher(dispatcher)
 	return actReg, traceCB, nil
 }

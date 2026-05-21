@@ -85,6 +85,17 @@ const (
 	// 1.5B model spinning on tool calls is expensive without ceiling.
 	defaultMaxTurns = 8
 
+	// defaultToolOutputSalienceCap is the per-tool-call output-token
+	// cap the dispatcher applies to act.* outputs before they enter
+	// the agent loop's transcript (docs/salience-budgets.md). With a
+	// 16k ctx window and ~700 tokens of system prompt / tool defs
+	// overhead, 500 tokens × 8 turns = 4000 tokens of tool-output
+	// transcript headroom — leaves ~11k for the model's own
+	// reasoning + the final synthesis. Zero would disable; we keep
+	// the cap on by default since the inner-loop tax is the dominant
+	// driver of context exhaustion in long sessions.
+	defaultToolOutputSalienceCap = 500
+
 	// snapshotMaxFileBytes skips files above this when snapshotting
 	// for /undo. Big binaries shouldn't round-trip through .cortex.
 	snapshotMaxFileBytes = 1 << 20 // 1 MiB
@@ -1614,7 +1625,12 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	traceCB = makeREPLDAGTracer(traceCB)
 
 	actReg := dag.NewRegistry()
-	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+	// Build a shared provider for the salience compressor so per-tool
+	// compression runs through a real Reflect-style small-model pass
+	// rather than the truncate-stub fallback. Same provider the
+	// REPL's dynamic registry uses for the other LLM-backed ops.
+	compressProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
+	if _, err := dagnode.RegisterDefaultActOpMetadataWithCompressor(actReg, compressProvider); err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
 	}
 
@@ -1624,10 +1640,11 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		capturedErr error
 	)
 	codingCfg := dagnode.CodingTurnConfig{
-		Model:       s.model,
-		Workdir:     s.workdir,
-		ActRegistry: actReg,
-		TraceCB:     traceCB,
+		Model:                 s.model,
+		Workdir:               s.workdir,
+		ActRegistry:           actReg,
+		TraceCB:               traceCB,
+		ToolOutputSalienceCap: defaultToolOutputSalienceCap,
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
@@ -1792,9 +1809,10 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// (default = session model; can be routed per-call via attrs.model
 	// e.g. xlam-1.5b). Spawns the resolved act.<tool>.
 	if err := reg.Register(ops.ToolCallSpec(ops.ToolCallConfig{
-		Provider:        nextProvider,
-		ProviderFactory: nextFactory,
-		Registry:        reg,
+		Provider:              nextProvider,
+		ProviderFactory:       nextFactory,
+		Registry:              reg,
+		ToolOutputSalienceCap: defaultToolOutputSalienceCap,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.tool_call: %w", err)
 	}

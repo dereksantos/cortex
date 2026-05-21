@@ -38,7 +38,7 @@ func TestNewActDispatcher_delegatesToHarnessRegistry(t *testing.T) {
 		ActRegistry: actReg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := NewActDispatcher(cfg, "coding_turn_id", &spawned)
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", "", &spawned)
 
 	out, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
 		ID:       "call_1",
@@ -87,7 +87,7 @@ func TestNewActDispatcher_missEmitsUnknownNodeTraceButStillDispatches(t *testing
 		ActRegistry: actReg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := NewActDispatcher(cfg, "coding_turn_id", &spawned)
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", "", &spawned)
 
 	out, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
 		Function: llm.ToolCallFunction{Name: "no_such_tool", Arguments: "{}"},
@@ -116,7 +116,7 @@ func TestNewActDispatcher_normalizesToolName(t *testing.T) {
 
 	var spawned []string
 	cfg := CodingTurnConfig{ActRegistry: actReg}
-	dispatch := NewActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", "", &spawned)
 
 	_, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
 		Function: llm.ToolCallFunction{Name: "read_file<|channel|>commentary", Arguments: "{}"},
@@ -140,7 +140,7 @@ func TestNewActDispatcher_multipleCallsAccumulateChildren(t *testing.T) {
 		ActRegistry: actReg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := NewActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", "", &spawned)
 
 	for i := 0; i < 3; i++ {
 		_, _ = dispatch(context.Background(), harnessReg, llm.ToolCall{
@@ -177,7 +177,7 @@ func TestNewActDispatcher_emitsCostHintForCalibration(t *testing.T) {
 		ActRegistry: actReg,
 		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
 	}
-	dispatch := NewActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", "", &spawned)
 	_, _ = dispatch(context.Background(), harnessReg, llm.ToolCall{
 		Function: llm.ToolCallFunction{Name: "read_file", Arguments: "{}"},
 	})
@@ -213,7 +213,7 @@ func TestNewActDispatcher_preservesHarnessAccountingForFilesWritten(t *testing.T
 
 	var spawned []string
 	cfg := CodingTurnConfig{ActRegistry: actReg}
-	dispatch := NewActDispatcher(cfg, "p", &spawned)
+	dispatch := NewActDispatcher(cfg, "p", "", &spawned)
 
 	_, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
 		Function: llm.ToolCallFunction{
@@ -228,6 +228,101 @@ func TestNewActDispatcher_preservesHarnessAccountingForFilesWritten(t *testing.T
 	written := harnessReg.FilesWritten()
 	if len(written) != 1 || written[0] != "hello.txt" {
 		t.Errorf("dispatcher must preserve harness FilesWritten accounting; got %v", written)
+	}
+}
+
+// TestNewActDispatcher_SalienceCompressesOversizedToolOutput pins the
+// Phase-2 dispatcher behavior from docs/salience-budgets.md: when
+// ToolOutputSalienceCap is set, tool outputs above the cap get
+// compressed (via attend.compress in the act registry) before being
+// returned to the agent loop. The act.* trace row carries the
+// SalienceContract; a synthetic attend.compress row is emitted with
+// parent_node_id = the act.* call.
+func TestNewActDispatcher_SalienceCompressesOversizedToolOutput(t *testing.T) {
+	actReg := dag.NewRegistry()
+	if _, err := RegisterDefaultActOpMetadata(actReg); err != nil {
+		t.Fatalf("register default metadata: %v", err)
+	}
+	bigOut := strings.Repeat("abcd", 500) // 2000 chars ~ 500 tokens
+	harnessReg, _ := newTestHarnessRegistry("read_file", bigOut, nil)
+
+	var captured []dag.TraceEntry
+	var spawned []string
+	cfg := CodingTurnConfig{
+		ActRegistry:           actReg,
+		TraceCB:               func(e dag.TraceEntry) { captured = append(captured, e) },
+		ToolOutputSalienceCap: 40,
+	}
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", "find TODOs", &spawned)
+
+	out, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.ToolCallFunction{Name: "read_file", Arguments: `{"path":"x"}`},
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(out) >= len(bigOut) {
+		t.Errorf("compressed output should be shorter than raw; got %d vs raw %d", len(out), len(bigOut))
+	}
+	if !strings.Contains(out, "find TODOs") {
+		t.Errorf("compression marker should carry intent; got %q", out)
+	}
+
+	if len(captured) != 2 {
+		t.Fatalf("expected 2 trace entries (act.read_file + attend.compress), got %d", len(captured))
+	}
+	act, compress := captured[0], captured[1]
+	if act.QualifiedName != "act.read_file" {
+		t.Fatalf("first row should be act.read_file, got %s", act.QualifiedName)
+	}
+	if act.Salience == nil || act.Salience.MaxOutputTokens != 40 || act.Salience.Intent != "find TODOs" {
+		t.Errorf("act row missing/wrong SalienceContract: %+v", act.Salience)
+	}
+	if compress.QualifiedName != "attend.compress" || compress.ParentID != act.NodeID {
+		t.Errorf("compress row shape wrong: %+v", compress)
+	}
+	if !compress.OK {
+		t.Errorf("compress should be OK, got: %s", compress.ErrorMessage)
+	}
+	// The act row's SpawnedChildren must surface the compress child.
+	if len(act.SpawnedChildren) == 0 || act.SpawnedChildren[0] != compress.NodeID {
+		t.Errorf("act.SpawnedChildren should include compress %s, got %v",
+			compress.NodeID, act.SpawnedChildren)
+	}
+}
+
+// TestNewActDispatcher_SalienceSkippedUnderCap pins the under-cap
+// passthrough: tool outputs below ToolOutputSalienceCap stay unchanged
+// and no synthetic compress trace fires. Guards against the dispatcher
+// burning cycles on already-tiny outputs.
+func TestNewActDispatcher_SalienceSkippedUnderCap(t *testing.T) {
+	actReg := dag.NewRegistry()
+	if _, err := RegisterDefaultActOpMetadata(actReg); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	harnessReg, _ := newTestHarnessRegistry("read_file", "hello", nil)
+
+	var captured []dag.TraceEntry
+	var spawned []string
+	cfg := CodingTurnConfig{
+		ActRegistry:           actReg,
+		TraceCB:               func(e dag.TraceEntry) { captured = append(captured, e) },
+		ToolOutputSalienceCap: 100,
+	}
+	dispatch := NewActDispatcher(cfg, "p", "any intent", &spawned)
+
+	out, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
+		Function: llm.ToolCallFunction{Name: "read_file", Arguments: `{"path":"x"}`},
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if out != "hello" {
+		t.Errorf("under-cap output should pass through unchanged, got %q", out)
+	}
+	if len(captured) != 1 {
+		t.Errorf("expected 1 trace entry (no compress), got %d", len(captured))
 	}
 }
 
@@ -252,8 +347,8 @@ func TestRegisterDefaultActOpMetadata_registersAllFive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if n != 5 {
-		t.Errorf("expected 5 registrations (incl cortex_search), got %d", n)
+	if n != 6 {
+		t.Errorf("expected 6 registrations (5 act.* + attend.compress for salience budgets), got %d", n)
 	}
 	for _, name := range []string{"act.read_file", "act.list_dir", "act.write_file", "act.run_shell", "act.cortex_search"} {
 		spec, err := reg.Get(name)
@@ -264,6 +359,9 @@ func TestRegisterDefaultActOpMetadata_registersAllFive(t *testing.T) {
 		if spec.AxisContract == nil {
 			t.Errorf("%s missing AxisContract", name)
 		}
+	}
+	if _, err := reg.Get("attend.compress"); err != nil {
+		t.Errorf("attend.compress should be registered alongside act.* metadata: %v", err)
 	}
 }
 

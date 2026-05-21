@@ -247,6 +247,20 @@ func (e *Executor) runSequential(
 			continue
 		}
 
+		// Salience-budget enforcement (docs/salience-budgets.md).
+		// Runs before Consume so the parent's CostConsumed reflects
+		// the full work (handler + any compression) when the budget
+		// is debited below.
+		var compressionEntry *TraceEntry
+		if entry.OK {
+			compressionEntry = e.applySalienceCompression(ctx, item, &result, nextChildID)
+			// Re-sync the parent entry with any post-compression
+			// mutation: result.Out got swapped, CostConsumed got
+			// padded with the compressor's spend.
+			entry.Out = result.Out
+			entry.CostConsumed = result.CostConsumed
+		}
+
 		budget.Consume(result.CostConsumed)
 		entry.BudgetAfter = *budget
 
@@ -256,6 +270,12 @@ func (e *Executor) runSequential(
 			state.deposit(item.spec.ID, item.spec.QualifiedName(), result.Out)
 			children, refusals := e.scheduleChildren(trace.TurnID, item, spec, result.Spawn, *budget, initial, nextChildID)
 			entry.SpawnedChildren = childIDs(children)
+			// When a synthetic compression child ran, surface it in
+			// the parent's spawned_children so the tree shape in
+			// dag_traces.jsonl makes the relationship visible.
+			if compressionEntry != nil {
+				entry.SpawnedChildren = append(entry.SpawnedChildren, compressionEntry.NodeID)
+			}
 			// DFS-prepend: a node's children run BEFORE its next
 			// sibling. This is what makes multi-step plans like
 			// [tool_call, tool_call, tool_call, synthesize] work —
@@ -274,6 +294,15 @@ func (e *Executor) runSequential(
 		trace.TotalExecuted++
 		if e.traceCB != nil {
 			e.traceCB(entry)
+		}
+		// Synthetic compression child emits AFTER the parent so the
+		// trace order is parent → child (matches DFS conventions).
+		if compressionEntry != nil {
+			trace.Entries = append(trace.Entries, *compressionEntry)
+			trace.TotalExecuted++
+			if e.traceCB != nil {
+				e.traceCB(*compressionEntry)
+			}
 		}
 	}
 
@@ -358,16 +387,32 @@ func (e *Executor) runParallel(
 				}
 				continue
 			}
-			budget.Consume(r.result.CostConsumed)
+
+			// Salience-budget enforcement runs serialized (with the
+			// budget mutex held effectively, since we are out of the
+			// goroutine join). Mirrors runSequential: compression
+			// child appended after the parent in trace order.
+			var compressionEntry *TraceEntry
+			result := r.result
+			if r.entry.OK {
+				compressionEntry = e.applySalienceCompression(ctx, r.item, &result, nextChildID)
+			}
+
+			budget.Consume(result.CostConsumed)
 			entry := r.entry
+			entry.Out = result.Out
+			entry.CostConsumed = result.CostConsumed
 			entry.BudgetAfter = *budget
 
 			if entry.OK {
 				// Deposit Out into turn state so subsequent batches'
 				// handlers can read it via dag.PriorOut / PriorOutByName.
-				state.deposit(r.item.spec.ID, r.item.spec.QualifiedName(), r.result.Out)
-				children, refusals := e.scheduleChildren(trace.TurnID, r.item, r.spec, r.result.Spawn, *budget, initial, nextChildID)
+				state.deposit(r.item.spec.ID, r.item.spec.QualifiedName(), result.Out)
+				children, refusals := e.scheduleChildren(trace.TurnID, r.item, r.spec, result.Spawn, *budget, initial, nextChildID)
 				entry.SpawnedChildren = childIDs(children)
+				if compressionEntry != nil {
+					entry.SpawnedChildren = append(entry.SpawnedChildren, compressionEntry.NodeID)
+				}
 				pending = append(pending, children...)
 				trace.SpawnRefusals = append(trace.SpawnRefusals, refusals...)
 			}
@@ -376,6 +421,13 @@ func (e *Executor) runParallel(
 			trace.TotalExecuted++
 			if e.traceCB != nil {
 				e.traceCB(entry)
+			}
+			if compressionEntry != nil {
+				trace.Entries = append(trace.Entries, *compressionEntry)
+				trace.TotalExecuted++
+				if e.traceCB != nil {
+					e.traceCB(*compressionEntry)
+				}
 			}
 		}
 	}

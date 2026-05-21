@@ -1,0 +1,21 @@
+---
+version: 1
+op: attend.compress
+description: compress a tool-result payload to a salience budget, preserving content relevant to intent
+max_output_tokens: 600
+vars: [raw, intent, max_tokens]
+---
+Compress the source below to AT MOST {{.max_tokens}} tokens, preserving content directly relevant to:
+
+Intent: {{.intent}}
+
+Source:
+```
+{{.raw}}
+```
+
+Rules:
+- Preserve concrete facts the intent depends on: identifiers (function/class/file names), numbers, paths, error messages, decision-bearing sentences. Drop boilerplate, license headers, blank lines, navigation prose.
+- Compress aggressively. Bullet points and abbreviated phrases beat full sentences. If a section is irrelevant to the intent, omit it entirely — do not summarize it.
+- Do NOT invent facts. If the source does not mention something the intent asks about, say so plainly ("(no X found)") rather than guessing.
+- Output the compressed content as plain text. No prose framing, no markdown fences, no "Here is the compressed version:" preamble. Start with the first piece of useful content.

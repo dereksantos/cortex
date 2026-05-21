@@ -128,12 +128,6 @@
           "description": "Model id (e.g. anthropic/claude-3-5-haiku, qwen/qwen-2.5-coder-32b-instruct)"
         },
         {
-          "name": "no-dag",
-          "type": "bool",
-          "default": "false",
-          "description": "Disable DAG-based tool dispatch (debug only)"
-        },
-        {
           "name": "no-search",
           "type": "bool",
           "default": "false",
@@ -411,6 +405,11 @@
           "description": "Context window in tokens"
         }
       ]
+    },
+    {
+      "name": "models",
+      "description": "Detect available models across configured endpoints + Ollama; show recommended role map",
+      "version": "0.1.0"
     },
     {
       "name": "projects",
