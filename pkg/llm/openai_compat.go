@@ -173,9 +173,53 @@ type compatUsage struct {
 }
 
 type compatErr struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code"`
+	Message string         `json:"message"`
+	Type    string         `json:"type"`
+	Code    string         `json:"code"`
+	Details *compatErrDeep `json:"details,omitempty"`
+}
+
+// compatErrDeep is the nested error envelope lemonade-server wraps
+// underlying llama-server failures in. The wire shape is:
+//
+//	{"error": {
+//	   "message": "llama-server request failed",     // wrapper
+//	   "details": {"response": {"error": {"message": "request (4921 tokens) exceeds the available context size (4096 tokens) ..."}}}
+//	 }}
+//
+// The wrapper message is useless on its own ("llama-server request failed"
+// tells the user nothing actionable). Unwrap returns the deepest available
+// message so the REPL surfaces what actually went wrong.
+type compatErrDeep struct {
+	Response *struct {
+		Error *struct {
+			Message string `json:"message"`
+			Code    int    `json:"code"`
+			Type    string `json:"type"`
+		} `json:"error,omitempty"`
+	} `json:"response,omitempty"`
+	StatusCode int `json:"status_code,omitempty"`
+}
+
+// fullMessage returns the most actionable error string available: the
+// nested llama-server message when present, otherwise the wrapper
+// message. Keeps both visible when distinct so the user sees the
+// wrapper-AND-cause pair (e.g. "llama-server request failed: request
+// (4921 tokens) exceeds the available context size (4096 tokens)").
+func (e *compatErr) fullMessage() string {
+	if e == nil {
+		return ""
+	}
+	if e.Details != nil && e.Details.Response != nil && e.Details.Response.Error != nil {
+		inner := e.Details.Response.Error.Message
+		if inner != "" && inner != e.Message {
+			if e.Message == "" {
+				return inner
+			}
+			return e.Message + ": " + inner
+		}
+	}
+	return e.Message
 }
 
 func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string) (string, GenerationStats, error) {
@@ -205,7 +249,7 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 		return "", GenerationStats{}, fmt.Errorf("%s: decode response: %w", c.name, err)
 	}
 	if apiResp.Error != nil {
-		return "", GenerationStats{}, fmt.Errorf("%s: server error: %s", c.name, apiResp.Error.Message)
+		return "", GenerationStats{}, fmt.Errorf("%s: server error: %s", c.name, apiResp.Error.fullMessage())
 	}
 	if len(apiResp.Choices) == 0 {
 		return "", GenerationStats{}, fmt.Errorf("%s: response had no choices", c.name)
@@ -263,7 +307,7 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 	if resp.StatusCode != http.StatusOK {
 		var er compatResponse
 		if json.Unmarshal(bb, &er) == nil && er.Error != nil {
-			return nil, fmt.Errorf("%s (%d): %s", c.name, resp.StatusCode, er.Error.Message)
+			return nil, fmt.Errorf("%s (%d): %s", c.name, resp.StatusCode, er.Error.fullMessage())
 		}
 		return nil, fmt.Errorf("%s status %d: %s", c.name, resp.StatusCode, string(bb))
 	}

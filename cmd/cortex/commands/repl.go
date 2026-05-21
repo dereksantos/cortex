@@ -1607,6 +1607,11 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	if tw != nil {
 		traceCB = tw.Callback(turnID)
 	}
+	// Always wrap with the stdout streamer so the user sees the DAG
+	// shape emerge live. The wrapper invokes the underlying writer
+	// callback (when present) after each print so dag_traces.jsonl
+	// still captures every entry.
+	traceCB = makeREPLDAGTracer(traceCB)
 
 	actReg := dag.NewRegistry()
 	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
@@ -3074,7 +3079,16 @@ func makeREPLNotifier(verbose bool) func(string, any) {
 				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"]))
 		case "coding.error":
 			p := mapOf(payload)
-			fmt.Printf("  ⚠ provider error: %v\n", p["error"])
+			msg := fmt.Sprintf("%v", p["error"])
+			fmt.Printf("  ⚠ provider error: %s\n", msg)
+			// llama-server (chatterbox / LM Studio / vLLM running llama.cpp)
+			// returns this exact phrasing when the prompt + tools blow past
+			// n_ctx. The fix is server-side — bump n_ctx on the model launch
+			// — so surface it explicitly instead of leaving the user to
+			// decode the error.
+			if strings.Contains(msg, "exceeds the available context size") {
+				fmt.Println("    hint: the local model was loaded with a small n_ctx; restart it with a larger context (e.g. --ctx-size 16384) on the server side.")
+			}
 		}
 	}
 }
@@ -3145,6 +3159,70 @@ func truncateHead(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// makeREPLDAGTracer returns a dag.TraceCallback that prints one line per
+// completed node so the user sees the DAG emerge live in the REPL.
+//
+// Format per line: `  ▪ <function.op> [<NodeID>] · ok|err · <latency>`,
+// followed by an arrow-prefixed list of spawned child IDs when this node
+// grew the tree, or a `· cause: …` tail when it failed.
+//
+// The executor runs in sequential DFS-prepend mode (see runREPLChainTurn),
+// so completion order IS the natural left-to-right tree walk — child
+// lines appear immediately under their parent. No explicit indentation
+// is needed; the structure is preserved by ordering alone.
+//
+// next, when non-nil, is invoked after the print so the existing
+// dag_traces.jsonl writer still gets every entry.
+func makeREPLDAGTracer(next dag.TraceCallback) dag.TraceCallback {
+	return func(e dag.TraceEntry) {
+		name := e.QualifiedName
+		if name == "" {
+			name = "?"
+		}
+		status := "ok"
+		if !e.OK {
+			status = "err"
+		}
+		latency := e.WallEnd.Sub(e.WallStart)
+		tail := ""
+		if len(e.SpawnedChildren) > 0 {
+			tail = " → spawned " + strings.Join(e.SpawnedChildren, ", ")
+		}
+		if !e.OK {
+			cause := e.ErrorMessage
+			if cause == "" {
+				cause = e.ErrorCode
+			}
+			if cause != "" {
+				tail = " · cause: " + truncateHead(cause, 120) + tail
+			}
+		}
+		fmt.Printf("  ▪ %-22s [%s] · %s · %s%s\n",
+			name, e.NodeID, status, formatDAGLatency(latency), tail)
+		if next != nil {
+			next(e)
+		}
+	}
+}
+
+// formatDAGLatency renders a wall-clock duration in REPL-friendly units.
+// Sub-millisecond → "0ms"; sub-second → "Nms"; sub-minute → "N.Ns";
+// otherwise → "NmNs". The compact form keeps lines aligned.
+func formatDAGLatency(d time.Duration) string {
+	switch {
+	case d < time.Millisecond:
+		return "0ms"
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d/time.Millisecond)
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	default:
+		m := int(d / time.Minute)
+		s := int((d % time.Minute) / time.Second)
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
 }
 
 // Compile-time guard: ensure REPLCommand satisfies the Command interface.

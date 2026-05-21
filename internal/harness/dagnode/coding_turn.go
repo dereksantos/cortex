@@ -268,6 +268,15 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)
 		latency := int(time.Since(started).Milliseconds())
 		lr := h.LastLoopResult()
+		// loop.Run swallows provider errors into LoopResult.Err and
+		// returns (res, nil). Without lifting that back into runErr the
+		// DAG executor records this node as OK even when the agent loop
+		// failed mid-turn — the trace then lies (`decide.coding_turn ·
+		// ok`) while the REPL has just printed `⚠ provider error: ...`.
+		// Surface the loop's stored error so the node is marked failed.
+		if runErr == nil && lr.Err != nil {
+			runErr = lr.Err
+		}
 		if cfg.ResultCallback != nil {
 			cfg.ResultCallback(h, hr, lr, runErr)
 		}

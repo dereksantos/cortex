@@ -88,7 +88,7 @@ func (c *OpenAICompatClient) GenerateWithTools(ctx context.Context, msgs []ChatM
 		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: decode tools response: %w", c.name, err)
 	}
 	if resp.Error != nil {
-		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: server error: %s", c.name, resp.Error.Message)
+		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: server error: %s", c.name, resp.Error.fullMessage())
 	}
 	if len(resp.Choices) == 0 {
 		return ChatResult{}, GenerationStats{}, fmt.Errorf("%s: response had no choices", c.name)

@@ -140,6 +140,32 @@ func TestOpenAICompatNonOKBodySurfaces(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatNestedLemonadeError pins the unwrap path that
+// surfaces lemonade-server's actual llama-server message instead of the
+// useless "llama-server request failed" wrapper. Lemonade returns the
+// real reason nested at error.details.response.error.message, with the
+// outer HTTP status set to 200 even though the inner code is 400.
+func TestOpenAICompatNestedLemonadeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"error":{"message":"llama-server request failed","type":"backend_error","details":{"status_code":400,"response":{"error":{"code":400,"message":"request (4921 tokens) exceeds the available context size (4096 tokens), try increasing it","type":"exceed_context_size_error"}}}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewOpenAICompatClient(EndpointConfig{Name: "chatterbox", BaseURL: srv.URL + "/v1"})
+	c.SetModel("m")
+	_, err := c.Generate(context.Background(), "p")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "llama-server request failed") {
+		t.Errorf("expected wrapper message preserved, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds the available context size") {
+		t.Errorf("expected nested cause surfaced, got %v", err)
+	}
+}
+
 func TestOpenAICompatBaseURLTrailingSlashTrimmed(t *testing.T) {
 	c := NewOpenAICompatClient(EndpointConfig{Name: "t", BaseURL: "http://example.invalid/v1/"})
 	if c.BaseURL() != "http://example.invalid/v1" {
