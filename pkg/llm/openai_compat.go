@@ -102,6 +102,13 @@ func (c *OpenAICompatClient) SetMaxTokens(n int) { c.maxTokens = n }
 // BaseURL returns the configured root URL (for telemetry/debug).
 func (c *OpenAICompatClient) BaseURL() string { return c.baseURL }
 
+// LastCostUSD is always 0 for OpenAI-compatible endpoints. Local
+// inference (chatterbox, LM Studio, vLLM) doesn't bill per token;
+// hosted proxies that do can be wrapped with their own cost-tracking
+// provider type. Satisfies the harness.LoopProvider interface so the
+// agent loop can ignore cost accounting on local-only sessions.
+func (c *OpenAICompatClient) LastCostUSD() float64 { return 0 }
+
 // Generate produces a response for the given prompt.
 func (c *OpenAICompatClient) Generate(ctx context.Context, prompt string) (string, error) {
 	out, _, err := c.generate(ctx, prompt, "")

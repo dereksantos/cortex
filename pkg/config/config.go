@@ -35,9 +35,134 @@ type Config struct {
 	// Cognitive mode tuning
 	Modes *ModeConfig `json:"modes,omitempty"`
 
+	// Multi-endpoint LLM registry (Phase 4 model-registry).
+	// Endpoints lists OpenAI-compatible servers Cortex should probe and
+	// route through; Models pins per-role model assignments. Both
+	// optional — when empty, the legacy slash-routes-to-OpenRouter +
+	// bare-name-routes-to-Ollama behavior is preserved.
+	Endpoints []EndpointDef `json:"endpoints,omitempty"`
+	Models    *ModelsMap    `json:"models,omitempty"`
+
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
 	EnableVector bool `json:"enable_vector"`
+}
+
+// EndpointDef is one user-configured OpenAI-compatible endpoint.
+// Name is a short stable identifier ("chatterbox", "lm-studio") used
+// both in telemetry and as the routing prefix in model IDs
+// (e.g. "chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF"). BaseURL is
+// the endpoint's OpenAI root (e.g. "http://localhost:13305/v1").
+//
+// APIKey can be set inline (insecure but convenient for dev), via
+// APIKeyEnv (preferred — names an env var to read at runtime), or
+// omitted entirely (many local endpoints accept any value or no auth).
+type EndpointDef struct {
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
+// ResolveAPIKey returns the API key for this endpoint. APIKeyEnv wins
+// over APIKey when both are set (lets users keep the value out of
+// committed config). Empty string is a valid return — endpoints
+// without auth still work.
+func (e EndpointDef) ResolveAPIKey() string {
+	if e.APIKeyEnv != "" {
+		if v := os.Getenv(e.APIKeyEnv); v != "" {
+			return v
+		}
+	}
+	return e.APIKey
+}
+
+// ModelsMap pins per-role model assignments. Each role names a
+// (endpoint, model) pair the REPL / harness uses for that purpose.
+// Endpoint name must match an EndpointDef.Name in Config.Endpoints.
+// All fields optional — nil role falls back to the slash-routing
+// heuristic.
+type ModelsMap struct {
+	Code   *RoleAssignment `json:"code,omitempty"`
+	Reason *RoleAssignment `json:"reason,omitempty"`
+	Fast   *RoleAssignment `json:"fast,omitempty"`
+	Embed  *RoleAssignment `json:"embed,omitempty"`
+	Rerank *RoleAssignment `json:"rerank,omitempty"`
+}
+
+// RoleAssignment binds a role to a specific endpoint+model pair.
+type RoleAssignment struct {
+	Endpoint string `json:"endpoint"`
+	Model    string `json:"model"`
+}
+
+// FindEndpoint returns the EndpointDef matching name, or nil if no
+// such endpoint is configured. O(N) but the list is short by design
+// (most users have 2-5 endpoints).
+func (c *Config) FindEndpoint(name string) *EndpointDef {
+	for i := range c.Endpoints {
+		if c.Endpoints[i].Name == name {
+			return &c.Endpoints[i]
+		}
+	}
+	return nil
+}
+
+// ResolveModelRoute parses a model string into an endpoint + model
+// pair using the configured endpoint registry. Three resolution paths:
+//
+//  1. "endpoint-name/model-id" → looks up endpoint-name in
+//     Config.Endpoints; if found, returns (endpoint, "model-id", true).
+//     This is the explicit form — what /model command uses.
+//  2. Bare model id that matches a role-map entry → returns the
+//     pinned (endpoint, model) for that role. Lets the REPL pass
+//     bare names through without ambiguity.
+//  3. Anything else → returns (nil, "", false). Caller falls back to
+//     the legacy slash-routing (OpenRouter for slashed, Ollama for
+//     bare).
+//
+// The function is intentionally permissive: it never errors on
+// unknown prefixes (those just fall to case 3), because the same
+// slash convention is also used by OpenRouter for its own provider
+// prefixes ("anthropic/...", "openai/..."). Custom endpoints take
+// priority via FindEndpoint; everything else falls through to
+// existing behavior.
+func (c *Config) ResolveModelRoute(model string) (*EndpointDef, string, bool) {
+	if c == nil {
+		return nil, "", false
+	}
+	// Case 1: explicit endpoint/model form.
+	if idx := indexSlash(model); idx > 0 {
+		prefix := model[:idx]
+		rest := model[idx+1:]
+		if ep := c.FindEndpoint(prefix); ep != nil {
+			return ep, rest, true
+		}
+	}
+	// Case 2: bare name matches a role-map model — only when the
+	// role-map's model is bare too (no slash collision with case 1).
+	if c.Models != nil {
+		for _, a := range []*RoleAssignment{c.Models.Code, c.Models.Reason, c.Models.Fast, c.Models.Embed, c.Models.Rerank} {
+			if a == nil || a.Model != model {
+				continue
+			}
+			if ep := c.FindEndpoint(a.Endpoint); ep != nil {
+				return ep, a.Model, true
+			}
+		}
+	}
+	return nil, "", false
+}
+
+// indexSlash returns the position of the first '/' in s, or -1.
+// Local helper to avoid importing strings in this hot-path resolver.
+func indexSlash(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return i
+		}
+	}
+	return -1
 }
 
 // ModeConfig provides per-mode tuning knobs.

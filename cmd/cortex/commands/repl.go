@@ -144,10 +144,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	minimalTools := false      // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
 	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
-	// Stage 3.5: every REPL coding turn routes tool calls through
-	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
-	// debug escape hatch only.
-	dagEnabled := true
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -215,12 +211,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
 				i++
 			}
-		case "--dag":
-			// Backwards-compat no-op; DAG dispatch is the default per
-			// Stage 3.5. Kept so scripts that pass --dag don't fail.
-			dagEnabled = true
-		case "--no-dag":
-			dagEnabled = false
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -277,7 +267,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.fullTools = fullTools
 	state.minimalTools = minimalTools
 	state.keepOnFail = keepOnFail
-	state.useDAG = dagEnabled
 	if historyTurnsOverride >= 0 {
 		state.historyLimit = historyTurnsOverride
 	} else {
@@ -451,15 +440,6 @@ type replState struct {
 	// agent's file writes persist across retries and the final
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
-	// useDAG controls Stage 3.5 act-op dispatch. Defaults to true
-	// (--no-dag disables for debugging). When set, runHarness
-	// installs a ToolDispatcher on the CortexHarness that routes each
-	// tool call through act.<name> ops registered on a private
-	// per-session dag.Registry, then emits one synthetic
-	// dag.TraceEntry per call to .cortex/db/dag_traces.jsonl with
-	// parent_node_id = the per-turn synthetic ID. Default false
-	// preserves V0 inline-dispatch behavior.
-	useDAG bool
 
 	// historyLimit caps the conversation-history block sent to the
 	// model on each turn. Default defaultHistoryLimit; configurable
@@ -584,6 +564,31 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 	}, nil
 }
 
+// loadREPLConfig loads the user's config from <cortexDir>/config.json
+// when present, falling back to a minimal in-memory config bound to
+// the project paths. Tolerant: a missing or unreadable file is not an
+// error — the REPL keeps working without endpoint registry features.
+//
+// Phase 4: this is the seam where Endpoints + Models reach the REPL.
+// When the file isn't there, ResolveModelRoute returns no matches and
+// routing falls back to the legacy slash heuristic — i.e. existing
+// users see no behavior change until they author a config.json.
+func loadREPLConfig(cortexDir string) *config.Config {
+	configPath := filepath.Join(cortexDir, "config.json")
+	if cfg, err := config.Load(configPath); err == nil && cfg != nil {
+		// Load may return a partial config — make sure the paths are
+		// populated even if the file omitted them.
+		if cfg.ContextDir == "" {
+			cfg.ContextDir = cortexDir
+		}
+		if cfg.ProjectRoot == "" {
+			cfg.ProjectRoot = filepath.Dir(cortexDir)
+		}
+		return cfg
+	}
+	return &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
+}
+
 // newSessionCognition builds the shared Storage + Cortex pair for one
 // REPL session. The Cortex carries an LLM provider so cortex_search's
 // Full mode (synchronous Reflect) can actually call out. For Ollama
@@ -594,7 +599,7 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 // Returns (nil, nil, err) on any setup failure — caller decides
 // whether to abort the session or continue without auto-capture.
 func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *intcognition.Cortex, error) {
-	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
+	cfg := loadREPLConfig(cortexDir)
 	store, err := storage.New(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("storage init: %w", err)
@@ -761,17 +766,40 @@ func buildProviderFactoryForREPL(cfg *config.Config, model, apiURL string) llm.P
 }
 
 // buildLLMProviderForREPL constructs an llm.Provider matching the
-// model + apiURL the REPL is currently routed to. Ollama-shaped URLs
-// route through llm.NewLLMClient(BackendOllama); everything else
-// routes through OpenRouter with the keychain-resolved key. Returns
-// nil when no provider can be configured (Cortex + decide.next both
-// tolerate nil providers by degrading to mechanical / rule-based
+// model + apiURL the REPL is currently routed to.
+//
+// Resolution order:
+//
+//  1. cfg.ResolveModelRoute — if the user has configured an endpoint
+//     (Phase 4 model registry) and the model id matches by prefix or
+//     role-map, construct an OpenAICompatClient bound to that endpoint.
+//     This is what lets "chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF"
+//     route to a local Lemonade server instead of falling through to
+//     the slash heuristic.
+//  2. Ollama-shaped apiURL → llm.NewLLMClient(BackendOllama).
+//  3. Everything else → OpenRouter with the keychain-resolved key.
+//
+// Returns nil when no provider can be configured (Cortex + decide.next
+// both tolerate nil providers by degrading to mechanical / rule-based
 // paths).
 //
 // Shared between newSessionCognition (the eager build) and the REPL
 // chain's decide.next handler (which wants the same provider to
 // classify the next action without re-doing the construction).
 func buildLLMProviderForREPL(cfg *config.Config, model, apiURL string) llm.Provider {
+	// Phase 4: configured-endpoint resolution wins over legacy slash
+	// heuristic. Lets "chatterbox/Qwen3-Coder-30B-..." route to the
+	// user's local Lemonade endpoint rather than OpenRouter.
+	if ep, modelID, ok := cfg.ResolveModelRoute(model); ok {
+		client := llm.NewOpenAICompatClient(llm.EndpointConfig{
+			Name:    ep.Name,
+			BaseURL: ep.BaseURL,
+			APIKey:  ep.ResolveAPIKey(),
+		})
+		client.SetModel(modelID)
+		return client
+	}
+
 	if apiURL == defaultOllamaAPIURL {
 		c, _, err := llm.NewLLMClient(cfg,
 			llm.WithBackend(llm.BackendOllama),
@@ -1039,11 +1067,6 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        the model on each turn. Default 6 (last 3
                        user/assistant pairs). 0 disables history.
                        Mid-session, /history N changes the cap.
-      --no-dag         Debug escape hatch: skip act-op dispatch and
-                       suppress per-tool dag.TraceEntry rows. By
-                       default (Stage 3.5), every coding turn's
-                       tool calls flow through the DAG runtime.
-
 In the REPL:
   /help                Show slash-command help.
   /diff                Show files changed since session start.
@@ -1417,20 +1440,30 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 // "previous attempt failed with this build/test error" tail so the
 // model has the failure in context on a retry.
 func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, error) {
-	if err := ensureStubOpenRouterKey(s.apiURL); err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, err
-	}
+	// Phase 4: endpoint resolution. When the model id resolves to a
+	// configured OpenAI-compatible endpoint (e.g. "chatterbox/..."),
+	// bind the harness to that endpoint and strip the prefix before
+	// the call to the LLM.
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	ep, bareModel, useEndpoint := cfg.ResolveModelRoute(s.model)
+
 	h, err := evalv2.NewCortexHarness(s.model)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
+	if useEndpoint {
+		h.SetEndpoint(&llm.EndpointConfig{
+			Name:    ep.Name,
+			BaseURL: ep.BaseURL,
+			APIKey:  ep.ResolveAPIKey(),
+		})
+		h.SetModel(bareModel)
+	}
 
-	// Stage 5/6 (chain unification): act-op dispatch is wired by the
-	// chain's decide.coding_turn handler via CodingTurnConfig.ActRegistry,
-	// not by a separate buildCodeActDispatcher call. The chain path
-	// gives parent_node_id real lineage (the executor's coding_turn
-	// node ID) instead of the synthetic "code-<pid>-coding_turn"
-	// placeholder. Only the --no-dag escape skips both layers.
+	// Act-op dispatch is wired by the chain's decide.coding_turn
+	// handler via CodingTurnConfig.ActRegistry. The chain path gives
+	// parent_node_id real lineage (the executor's coding_turn node
+	// ID).
 
 	// Share the REPL's Cortex with the cortex_search tool so captures
 	// from earlier turns in this session are findable. Nil cortex is
@@ -1488,26 +1521,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		prompt = userPrompt + "\n\nPREVIOUS ATTEMPT FAILED. Verifier output:\n" + retryContext + "\n\nFix this, then stop."
 	}
 
-	// Stage 5/6 (REPL chain unification): every REPL turn IS a
-	// dag.Executor.Run over the Stage 2 chain instead of a direct
-	// h.RunSessionWithResult call. The preconfigured harness flows
-	// through CodingTurnConfig.HarnessFactory so the chain's
-	// decide.coding_turn node drives this same instance (with all
-	// REPL state already set above) rather than constructing a fresh
-	// one. The full HarnessResult + LoopResult are captured back via
-	// ResultCallback. --no-dag (s.useDAG=false) reverts to the V0
-	// direct-harness path for debugging.
-	var (
-		hr     evalv2.HarnessResult
-		lr     harness.LoopResult
-		runErr error
-	)
-	if s.useDAG {
-		hr, lr, runErr = runREPLChainTurn(s, h, prompt)
-	} else {
-		hr, runErr = h.RunSessionWithResult(context.Background(), prompt, s.workdir)
-		lr = h.LastLoopResult()
-	}
+	// Every REPL turn is a dag.Executor.Run over the dynamic-DAG seed.
+	// The preconfigured harness flows in via CodingTurnConfig.HarnessFactory
+	// so the chain's decide.coding_turn node drives this same instance
+	// (with all REPL state already set above). The full HarnessResult
+	// + LoopResult come back via ResultCallback.
+	hr, lr, runErr := runREPLChainTurn(s, h, prompt)
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -1535,9 +1554,6 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 //
 // Executor runs in sequential mode so search → decide.next is
 // guaranteed FIFO (parallel mode would race them).
-//
-// V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
-// path; this function is only on the dag-enabled path.
 //
 // TODO (DAG state is per-turn, not per-session): registry + executor
 // are rebuilt fresh every turn and the calibration snapshot is loaded
@@ -1640,7 +1656,7 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	//
 	// Provider nil falls back to a single coding_turn spawn so the
 	// chain always walks.
-	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
 	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
 	nextFactory := buildProviderFactoryForREPL(cfg, s.model, s.apiURL)
 	modelCatalog := s.modelCatalogForREPL()
@@ -1747,34 +1763,6 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	}
 
 	return reg, nil
-}
-
-// ensureStubOpenRouterKey lets a local-Ollama REPL run even when no
-// OpenRouter key is configured. The harness's NewCortexHarness
-// constructor mandates a key via pkg/secret; for local-only use the
-// key is never sent (Ollama ignores Authorization). Stub-only injected
-// when we're definitely pointed at a local URL.
-//
-// TODO (fix the wrong invariant, delete this stub): this function
-// shouldn't need to exist. NewCortexHarness mandates an OpenRouter
-// key in its constructor — that's the wrong invariant when the
-// backend is local-only. Make the auth requirement a property of the
-// backend (OpenRouter requires a key; Ollama doesn't; vLLM optional)
-// rather than a constructor-time hard check. Once that lands, drop
-// the env-poking band-aid here. Same direction as the backend-
-// registry TODO at resolveAPIURL — auth belongs to the backend, not
-// to a top-level constructor.
-func ensureStubOpenRouterKey(apiURL string) error {
-	if apiURL != defaultOllamaAPIURL {
-		return nil
-	}
-	if os.Getenv("OPEN_ROUTER_API_KEY") != "" {
-		return nil
-	}
-	if err := os.Setenv("OPEN_ROUTER_API_KEY", "ollama-local-stub"); err != nil {
-		return fmt.Errorf("stub key set: %w", err)
-	}
-	return nil
 }
 
 // verifier kinds — small enum, easy to extend.
