@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -222,6 +223,10 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 	}
 
 	url := c.baseURL + path
+	if os.Getenv("CORTEX_LLM_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[%s] POST %s\n", c.name, url)
+		fmt.Fprintf(os.Stderr, "[%s] >>> %s\n", c.name, string(raw))
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("%s: new request: %w", c.name, err)
@@ -240,6 +245,10 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 	bb, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("%s: read response: %w", c.name, err)
+	}
+
+	if os.Getenv("CORTEX_LLM_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "[%s] <<< (%d) %s\n", c.name, resp.StatusCode, string(bb))
 	}
 
 	if resp.StatusCode != http.StatusOK {

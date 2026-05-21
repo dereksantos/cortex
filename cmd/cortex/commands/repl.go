@@ -1008,8 +1008,16 @@ func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
 }
 
 // printREPLBanner prints the welcome line. One line, no ASCII art.
+// The backend label honors endpoint resolution: a model id matching a
+// configured endpoint shows that endpoint's name (e.g. "chatterbox"),
+// otherwise falls back to apiURL or "openrouter (default)".
 func printREPLBanner(s *replState) {
 	api := s.apiURL
+	if cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex")); cfg != nil {
+		if ep, _, ok := cfg.ResolveModelRoute(s.model); ok {
+			api = fmt.Sprintf("%s (%s)", ep.Name, ep.BaseURL)
+		}
+	}
 	if api == "" {
 		api = "openrouter (default)"
 	}
