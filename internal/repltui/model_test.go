@@ -3,6 +3,8 @@ package repltui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // drive runs a slice of messages through a freshly-constructed
@@ -150,6 +152,46 @@ func TestRenderDagTraceLine_ErrorIncludesCause(t *testing.T) {
 	}
 	if !strings.Contains(out, "cause: model returned malformed JSON") {
 		t.Errorf("cause missing: %q", out)
+	}
+}
+
+func TestUpdate_LeftMousePressEntersSelectMode(t *testing.T) {
+	m := New(NewTUISink(false), "status one")
+	mm, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	})
+	m = mm.(Model)
+	if !m.selectMode {
+		t.Fatalf("selectMode should be true after left-mouse press")
+	}
+	if m.savedStatusLine != "status one" {
+		t.Errorf("savedStatusLine: got %q, want %q", m.savedStatusLine, "status one")
+	}
+	if !strings.Contains(stripANSI(m.statusLine), "text-select") {
+		t.Errorf("statusLine should show select-mode hint; got %q", stripANSI(m.statusLine))
+	}
+
+	// Any keystroke exits select mode and restores the status line.
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = mm.(Model)
+	if m.selectMode {
+		t.Errorf("selectMode should clear on keystroke")
+	}
+	if m.statusLine != "status one" {
+		t.Errorf("statusLine should be restored; got %q", m.statusLine)
+	}
+}
+
+func TestUpdate_MouseWheelDoesNotEnterSelectMode(t *testing.T) {
+	m := New(NewTUISink(false), "status")
+	mm, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelUp,
+	})
+	m = mm.(Model)
+	if m.selectMode {
+		t.Errorf("wheel events must not trigger select mode")
 	}
 }
 

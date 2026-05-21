@@ -83,6 +83,16 @@ type Model struct {
 	// the divider and the main status line. Used today by
 	// bootstrap progress; empty hides the row.
 	ambientRow string
+
+	// selectMode is true while mouse reporting is temporarily
+	// disabled so the terminal can handle native click-drag text
+	// selection. Triggered by a left-mouse press and cleared by
+	// the next keystroke, which re-enables mouse capture.
+	selectMode bool
+
+	// savedStatusLine preserves the status line text while
+	// selectMode is active (the hint overwrites the status row).
+	savedStatusLine string
 }
 
 // New constructs a Model with reasonable defaults. The width/height
@@ -144,7 +154,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.quitting = true
 			return m, tea.Quit
-
+		}
+		if m.selectMode {
+			// Any keystroke exits select mode and re-enables mouse
+			// capture, then proceeds as a normal input keypress so
+			// the user doesn't need a separate "resume" gesture.
+			m.selectMode = false
+			m.statusLine = m.savedStatusLine
+			m.savedStatusLine = ""
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, tea.Batch(tea.EnableMouseCellMotion, cmd)
+		}
+		switch msg.Type {
 		case tea.KeyEnter:
 			line := m.input.Value()
 			m.input.SetValue("")
@@ -175,6 +197,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.MouseMsg:
+		// A left-button press (drag intent) switches off mouse
+		// reporting so the terminal handles native click-drag text
+		// selection. The next keystroke restores mouse capture. We
+		// leave wheel and other buttons routed to the viewport so
+		// scrolling still works.
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && !m.selectMode {
+			m.selectMode = true
+			m.savedStatusLine = m.statusLine
+			m.statusLine = selectModeStyle.Render("✂ text-select — drag to select; press any key to resume mouse")
+			return m, tea.DisableMouse
+		}
 		// Wheel events scroll the transcript. tea.WithMouseCellMotion
 		// at program construction enables the underlying stream; here
 		// we delegate to viewport.Update which knows how to interpret

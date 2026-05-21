@@ -29,6 +29,10 @@ var (
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // dim grey
 	statusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // grey
 	ambientStyle = lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("245"))
+	// selectModeStyle highlights the status row while mouse capture
+	// is paused for native text selection. Bright enough to read at
+	// a glance so the user knows they're in a transient state.
+	selectModeStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
 
 	// Per-cortex-function event colors. Routed via styleForFunction
 	// from the qualified_name's prefix; renderDagTraceLine + the
