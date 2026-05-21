@@ -154,14 +154,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxRetries := 1
 	jsonOutput := false
 	workdirOverride := ""
-	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
-	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
-	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
-	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
-	fullTools := false         // --full-tools: kept as a no-op alias since full surface is the iter-7 default
-	minimalTools := false      // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
-	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
-	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
+	systemPromptOverride := ""   // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	maxTurnsOverride := 0        // --max-turns N: override the per-attempt agent-loop cap (default 8)
+	maxCostOverride := 0.0       // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
+	maxCumulativeOverride := 0   // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
+	fullTools := false           // --full-tools: kept as a no-op alias since full surface is the iter-7 default
+	minimalTools := false        // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
+	keepOnFail := false          // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	historyTurnsOverride := -1   // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
+	priorSummariesOverride := -1 // --prior-summaries N: cap on prior-session summaries (-1 = use default, 0 = disabled)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -229,6 +230,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
 				i++
 			}
+		case "--prior-summaries":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &priorSummariesOverride)
+				i++
+			}
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -289,6 +295,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		state.historyLimit = historyTurnsOverride
 	} else {
 		state.historyLimit = defaultHistoryLimit
+	}
+	if priorSummariesOverride >= 0 {
+		state.priorSessionsCap = priorSummariesOverride
+	} else {
+		state.priorSessionsCap = defaultPriorSessionsCap
 	}
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
@@ -484,6 +495,13 @@ type replState struct {
 	// via --history-turns N at startup or /history N mid-session.
 	// 0 disables history injection entirely (turn 1 behavior).
 	historyLimit int
+
+	// priorSessionsCap bounds the count of think.session_summary
+	// entries from PRIOR sessions injected into the harness's prior-
+	// messages block. Defaults to defaultPriorSessionsCap; 0 disables
+	// cross-session injection entirely (the pre-Item-4 behavior).
+	// Configurable via --prior-summaries N.
+	priorSessionsCap int
 	// history is the per-session conversation buffer: one entry per
 	// accepted turn (user prompt + assistant final text), in
 	// chronological order. The tail (most recent historyLimit
@@ -532,6 +550,16 @@ type turnExchange struct {
 // recent context, which is enough for "now do the same for X" patterns
 // without burning a large chunk of the context window.
 const defaultHistoryLimit = 6
+
+// defaultPriorSessionsCap bounds how many think.session_summary
+// entries from PRIOR sessions are injected on REPL start. Phase 3
+// Slice 4 stored them per-session; Item 4 (the cross-session memory
+// follow-up) lifted the filter so they flow in. The cap is small
+// because cross-session bleed is high-leverage context per token but
+// also the easiest way to drown the prompt in stale "back in
+// January we decided X" lines. Override at startup via
+// --prior-summaries N (0 disables).
+const defaultPriorSessionsCap = 3
 
 // newREPLState performs auto-init: creates .cortex/ if missing, the
 // session dir, the JSONL writer, and seeds the system prompt file if
@@ -1272,6 +1300,11 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        the model on each turn. Default 6 (last 3
                        user/assistant pairs). 0 disables history.
                        Mid-session, /history N changes the cap.
+      --prior-summaries N  Cap on cross-session think.session_summary
+                       entries injected at REPL start. Default 3.
+                       0 disables cross-session memory (the pre-
+                       Item-4 behavior). Mid-session,
+                       /prior-summaries N changes the cap.
 In the REPL:
   /help                Show slash-command help.
   /diff                Show files changed since session start.
@@ -1334,6 +1367,18 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		s.historyLimit = n
 		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
 		return true, nil
+	case "/prior-summaries":
+		if len(rest) == 0 {
+			fmt.Printf("  prior-session summaries: cap=%d\n", s.priorSessionsCap)
+			return true, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(rest[0], "%d", &n); err != nil || n < 0 {
+			return true, fmt.Errorf("/prior-summaries N: N must be a non-negative integer")
+		}
+		s.priorSessionsCap = n
+		fmt.Printf("  prior-session summary cap → %d\n", s.priorSessionsCap)
+		return true, nil
 	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
 	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
 	// keeping them here just to back a parallel snapshot system isn't
@@ -1359,6 +1404,7 @@ func printSlashHelp() {
   /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
   /shell-policy      show the user-configured shell allow/deny policy (if any)
   /history [N]       show buffered turn count, or set the conversation-history cap to N
+  /prior-summaries [N]  show or set the cap on cross-session summary injection
   /quit              exit (also Ctrl-D)`)
 }
 
@@ -1747,18 +1793,20 @@ func composeSessionSummaryDraft(row turnRow) string {
 // salience cap the per-turn flow uses. Cumulative prior-context size
 // flattens; long sessions stay viable.
 //
+// Item 4 (cross-session memory): the SessionID filter is now off —
+// prior-session summaries flow in on REPL start so the model resumes
+// with context from earlier work. priorSessionsCap bounds the
+// cross-session count separately from historyLimit (current session).
+//
 // Behavior:
-//   - historyLimit ≤ 0 → no prior messages (turn 1 behavior).
+//   - historyLimit ≤ 0 AND priorSessionsCap ≤ 0 → no prior messages.
 //   - Journal read failure or zero matching summaries → fall back to
-//     the verbatim s.history slice. Preserves pre-Slice-4 behavior on
-//     fresh sessions or when the journal isn't readable.
-//   - Filters to the current session's summaries. Cross-session reads
-//     are a one-line filter change away once we want them.
+//     the verbatim s.history slice (pre-Slice-4 behavior).
 func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
-	if s.historyLimit <= 0 {
+	if s.historyLimit <= 0 && s.priorSessionsCap <= 0 {
 		return nil
 	}
-	summaries := s.readRecentSessionSummaries(s.historyLimit)
+	summaries := s.readRecentSessionSummaries(s.historyLimit, s.priorSessionsCap)
 	if len(summaries) > 0 {
 		return summariesAsChatMessages(summaries)
 	}
@@ -1787,11 +1835,17 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 }
 
 // readRecentSessionSummaries scans the workdir's think journal for
-// the most recent N session-summary entries belonging to the current
-// session, in turn order. Returns an empty slice on any error or when
-// no entries exist (the caller decides whether to fall back).
-func (s *replState) readRecentSessionSummaries(n int) []journal.ThinkSessionSummaryPayload {
-	if n <= 0 || s.workdir == "" || s.sessionID == "" {
+// recent session-summary entries and returns them in chronological
+// order (oldest first). currentCap bounds the count of entries from
+// the current session; priorCap bounds the count of entries from
+// every other session combined. Prior-session entries come first in
+// the returned slice so the most-recent (current-session) summaries
+// remain the last context the model sees.
+//
+// Returns an empty slice on any error or when no entries exist (the
+// caller decides whether to fall back).
+func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journal.ThinkSessionSummaryPayload {
+	if (currentCap <= 0 && priorCap <= 0) || s.workdir == "" || s.sessionID == "" {
 		return nil
 	}
 	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
@@ -1800,7 +1854,7 @@ func (s *replState) readRecentSessionSummaries(n int) []journal.ThinkSessionSumm
 		return nil
 	}
 	defer r.Close()
-	var all []journal.ThinkSessionSummaryPayload
+	var current, prior []journal.ThinkSessionSummaryPayload
 	for {
 		e, err := r.Next()
 		if err != nil {
@@ -1813,15 +1867,31 @@ func (s *replState) readRecentSessionSummaries(n int) []journal.ThinkSessionSumm
 		if perr != nil {
 			continue
 		}
-		if p.SessionID != s.sessionID {
-			continue
+		if p.SessionID == s.sessionID {
+			current = append(current, *p)
+		} else {
+			prior = append(prior, *p)
 		}
-		all = append(all, *p)
 	}
-	if len(all) <= n {
-		return all
+	current = tailN(current, currentCap)
+	prior = tailN(prior, priorCap)
+	out := make([]journal.ThinkSessionSummaryPayload, 0, len(prior)+len(current))
+	out = append(out, prior...)
+	out = append(out, current...)
+	return out
+}
+
+// tailN returns the last n elements of s. n ≤ 0 returns nil; n ≥
+// len(s) returns s verbatim. Used to cap the current/prior summary
+// slices independently before they're merged.
+func tailN(s []journal.ThinkSessionSummaryPayload, n int) []journal.ThinkSessionSummaryPayload {
+	if n <= 0 || len(s) == 0 {
+		return nil
 	}
-	return all[len(all)-n:]
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // summariesAsChatMessages converts a slice of session summaries into
@@ -1830,14 +1900,32 @@ func (s *replState) readRecentSessionSummaries(n int) []journal.ThinkSessionSumm
 // "background on what's already happened" without confusing it for an
 // actual turn the user took. One message keeps the transcript shape
 // flat and predictable for the inner loop.
+//
+// Item 4: prior-session entries are surfaced with a "[prior session]"
+// tag so the model can distinguish older context from the current
+// session's turn-by-turn history. Both share a single block; the
+// boundary is visual, not structural.
 func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []llm.ChatMessage {
 	if len(summaries) == 0 {
 		return nil
 	}
+	// currentSessionID is implicit in the slice — the readRecent
+	// function appends prior entries first, then current. We carry
+	// it forward by looking at the last entry's session id when
+	// available; ties to a single id when only one session is in
+	// play.
+	var currentID string
+	if len(summaries) > 0 {
+		currentID = summaries[len(summaries)-1].SessionID
+	}
 	var b strings.Builder
 	b.WriteString("CONVERSATION SO FAR (summary of prior turns; not user input):\n")
 	for _, p := range summaries {
-		fmt.Fprintf(&b, "\n[turn %d] %s\n", p.Turn, strings.TrimSpace(p.Summary))
+		tag := ""
+		if p.SessionID != currentID {
+			tag = "[prior session] "
+		}
+		fmt.Fprintf(&b, "\n%s[turn %d] %s\n", tag, p.Turn, strings.TrimSpace(p.Summary))
 	}
 	return []llm.ChatMessage{
 		{Role: "user", Content: b.String()},
