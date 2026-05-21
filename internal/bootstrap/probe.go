@@ -47,6 +47,22 @@ func ProbeKey(modelID, endpoint string) string {
 	return modelID + "@" + endpoint
 }
 
+// LookupCached returns the cached probe for (modelID, endpoint)
+// without paying the network cost of a fresh probe. Callers that
+// want fast startup (e.g. the harness, which has its own
+// catch-and-retry safety net) use this to read n_ctx if we have it,
+// and fall back to retry-on-error otherwise.
+//
+// Returns (zero, false) when no cache entry exists OR when the
+// cache file is missing/unreadable — both treated as "not cached"
+// so the caller falls through.
+func LookupCached(contextDir, modelID, endpoint string) (ModelProbe, bool) {
+	if contextDir == "" {
+		return ModelProbe{}, false
+	}
+	return readProbe(probeCachePath(contextDir), ProbeKey(modelID, endpoint))
+}
+
 // Probe returns a ModelProbe for the configured provider, hitting the
 // cache when possible and falling back to a fresh probe otherwise.
 //

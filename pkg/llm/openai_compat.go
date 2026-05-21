@@ -201,6 +201,19 @@ type compatErrDeep struct {
 	StatusCode int `json:"status_code,omitempty"`
 }
 
+// wrapServerError returns a typed ContextOverflowError when the
+// server message carries the overflow signature, and a plain
+// fmt.Errorf'd string otherwise. The typed-error path lets the
+// harness loop catch overflows via errors.As and retry; the plain
+// path preserves the pre-existing string for everything else.
+func wrapServerError(prefix, msg string) error {
+	if overflow, ok := ParseContextOverflow(msg); ok {
+		overflow.Message = prefix + ": server error: " + msg
+		return overflow
+	}
+	return fmt.Errorf("%s: server error: %s", prefix, msg)
+}
+
 // fullMessage returns the most actionable error string available: the
 // nested llama-server message when present, otherwise the wrapper
 // message. Keeps both visible when distinct so the user sees the
@@ -249,7 +262,7 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 		return "", GenerationStats{}, fmt.Errorf("%s: decode response: %w", c.name, err)
 	}
 	if apiResp.Error != nil {
-		return "", GenerationStats{}, fmt.Errorf("%s: server error: %s", c.name, apiResp.Error.fullMessage())
+		return "", GenerationStats{}, wrapServerError(c.name, apiResp.Error.fullMessage())
 	}
 	if len(apiResp.Choices) == 0 {
 		return "", GenerationStats{}, fmt.Errorf("%s: response had no choices", c.name)
@@ -307,7 +320,7 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 	if resp.StatusCode != http.StatusOK {
 		var er compatResponse
 		if json.Unmarshal(bb, &er) == nil && er.Error != nil {
-			return nil, fmt.Errorf("%s (%d): %s", c.name, resp.StatusCode, er.Error.fullMessage())
+			return nil, wrapServerError(fmt.Sprintf("%s (%d)", c.name, resp.StatusCode), er.Error.fullMessage())
 		}
 		return nil, fmt.Errorf("%s status %d: %s", c.name, resp.StatusCode, string(bb))
 	}

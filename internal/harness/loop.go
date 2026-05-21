@@ -141,6 +141,19 @@ type Loop struct {
 	// trimming is the caller's job too; the Loop forwards as-is.
 	PriorMessages []llm.ChatMessage
 
+	// ContextWindowTokens is the model server's n_ctx, when known.
+	// Used for two things:
+	//   1. Proactive budgeting — before each call, the loop
+	//      estimates msgs token count; if over a safety threshold
+	//      it trims the oldest PriorMessages.
+	//   2. Setting an upper bound for the catch-and-retry path
+	//      below (the safe-retry target is ~70% of this value).
+	//
+	// 0 disables proactive budgeting; the retry path still works
+	// because it learns n_ctx from the server's error response and
+	// updates this field for the rest of the session.
+	ContextWindowTokens int
+
 	// Stats accumulated as the loop runs.
 	tokensIn  int
 	tokensOut int
@@ -279,6 +292,14 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 	}
 	msgs = append(msgs, llm.ChatMessage{Role: "user", Content: userPrompt})
 
+	// keepHead protects the system prompt from being trimmed; the
+	// loop's TrimChatHistory targets only the PriorMessages /
+	// mid-session sections between head and tail.
+	keepHead := 0
+	if l.System != "" {
+		keepHead = 1
+	}
+
 	specs := l.Registry.Specs()
 	l.note("coding.session_start", map[string]any{
 		"model":                 l.Provider.Model(),
@@ -299,7 +320,41 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 			break
 		}
 
+		// Proactive budget — if we know n_ctx, trim PriorMessages
+		// when the estimated prompt size approaches the cap. The 85%
+		// threshold leaves headroom for response tokens + estimator
+		// drift. keepTail=1 protects the current user message.
+		if l.ContextWindowTokens > 0 {
+			threshold := (l.ContextWindowTokens * 85) / 100
+			if dropped := trimAndNotify(l, &msgs, threshold, keepHead, 1, "proactive"); dropped > 0 {
+				// PriorMessages effectively shrank by `dropped`; the
+				// loop's local msgs is the source of truth from here.
+			}
+		}
+
 		callRes, stats, err := l.Provider.GenerateWithTools(ctx, msgs, specs, "auto")
+		// Catch-and-retry: when the server reports an overflow, learn
+		// n_ctx from the error, trim aggressively to ~70% of n_ctx,
+		// and retry exactly once. Subsequent turns in this session
+		// benefit from the learned ContextWindowTokens via the
+		// proactive branch above.
+		if overflow, ok := llm.AsContextOverflow(err); ok {
+			if overflow.AvailableTokens > 0 {
+				l.ContextWindowTokens = overflow.AvailableTokens
+			}
+			target := l.ContextWindowTokens
+			if target > 0 {
+				target = (target * 70) / 100
+			}
+			dropped := trimAndNotify(l, &msgs, target, keepHead, 1, "overflow_retry")
+			l.note("coding.context_overflow_retry", map[string]any{
+				"turn":             turn,
+				"available_tokens": overflow.AvailableTokens,
+				"requested_tokens": overflow.RequestedTokens,
+				"dropped_messages": dropped,
+			})
+			callRes, stats, err = l.Provider.GenerateWithTools(ctx, msgs, specs, "auto")
+		}
 		if err != nil {
 			res.Reason = ReasonError
 			res.Err = fmt.Errorf("turn %d: %w", turn, err)
@@ -417,4 +472,32 @@ func (l *Loop) note(kind string, payload any) {
 		return
 	}
 	_ = l.Transcript.WriteEntry(kind, payload)
+}
+
+// trimAndNotify trims msgs in-place to fit maxTokens, emitting a
+// coding.history_trimmed event when any messages were dropped.
+// reason is "proactive" (pre-call budget) or "overflow_retry"
+// (server reported overflow); used in the event payload so the
+// transcript distinguishes the two paths.
+//
+// Returns the number of messages dropped. 0 when no trim was needed
+// or when the budget already fits.
+func trimAndNotify(l *Loop, msgs *[]llm.ChatMessage, maxTokens, keepHead, keepTail int, reason string) int {
+	if maxTokens <= 0 {
+		return 0
+	}
+	before := llm.EstimateChatTokens(*msgs)
+	trimmed, dropped := llm.TrimChatHistory(*msgs, maxTokens, keepHead, keepTail)
+	if dropped == 0 {
+		return 0
+	}
+	*msgs = trimmed
+	l.note("coding.history_trimmed", map[string]any{
+		"reason":           reason,
+		"dropped_messages": dropped,
+		"estimated_before": before,
+		"estimated_after":  llm.EstimateChatTokens(trimmed),
+		"max_tokens":       maxTokens,
+	})
+	return dropped
 }

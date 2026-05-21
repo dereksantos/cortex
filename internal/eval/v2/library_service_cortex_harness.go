@@ -7,9 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/bootstrap"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -334,16 +336,28 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 		sys = defaultSystemPrompt
 	}
 
+	// n_ctx from the probe cache (if any). Cheap read; the harness
+	// has its own catch-and-retry safety net for cache misses, so
+	// this is best-effort. Endpoint key matches what
+	// internal/bootstrap.Probe uses on write.
+	var ctxWindow int
+	if h.endpoint != nil {
+		if p, ok := bootstrap.LookupCached(filepath.Join(workdir, ".cortex"), h.model, h.endpoint.Name); ok {
+			ctxWindow = p.CtxWindowTokens
+		}
+	}
+
 	loop := &harness.Loop{
-		Provider:      loopProvider,
-		Registry:      registry,
-		System:        sys,
-		MaxTurns:      h.maxTurns,
-		Budget:        h.budget,
-		Transcript:    transcript,
-		Notify:        h.notify,
-		Dispatcher:    h.dispatcher,
-		PriorMessages: h.priorMessages,
+		Provider:            loopProvider,
+		Registry:            registry,
+		System:              sys,
+		MaxTurns:            h.maxTurns,
+		Budget:              h.budget,
+		Transcript:          transcript,
+		Notify:              h.notify,
+		Dispatcher:          h.dispatcher,
+		PriorMessages:       h.priorMessages,
+		ContextWindowTokens: ctxWindow,
 	}
 
 	start := time.Now()
