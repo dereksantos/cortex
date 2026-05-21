@@ -132,3 +132,110 @@ func HasCapability(m CompatModel, cap string) bool {
 	}
 	return false
 }
+
+// ContextClass is a coarse capability bucket the harness uses to
+// allocate salience budgets: tighter caps + more fan-out for small
+// models that can't synthesize big chunks; looser caps + fewer nodes
+// for large models that hold more in working memory. See
+// docs/salience-budgets.md Phase-3 Slice 1.
+type ContextClass int
+
+const (
+	// ContextSmall fits ≤7B parameter models OR endpoints with
+	// max_context_window ≤ 8192. These need narrow tool surfaces and
+	// per-call outputs <= ~250 tokens to maintain coherence.
+	ContextSmall ContextClass = iota
+	// ContextMedium covers 7-30B models and 16-32k contexts. Default
+	// when no signal — most local serves land here.
+	ContextMedium
+	// ContextLarge covers 30B+ local + frontier hosted models with
+	// 32k+ contexts. These tolerate (and benefit from) larger chunks
+	// per node so a synthesis turn sees rich, uncompressed evidence.
+	ContextLarge
+)
+
+// String renders the class for log lines / prompts.
+func (c ContextClass) String() string {
+	switch c {
+	case ContextSmall:
+		return "small"
+	case ContextLarge:
+		return "large"
+	default:
+		return "medium"
+	}
+}
+
+// InferContextClass picks a coarse capability bucket for a model id
+// based on naming conventions + the optional endpoint-provided context
+// window. Priority order:
+//
+//  1. Frontier hosted families (claude / gpt-4+ / o-series / sonnet /
+//     opus) → ContextLarge.
+//  2. Explicit parameter-count tag (e.g. "qwen2.5-coder:1.5b",
+//     "qwen3-coder-30b-a3b") → bucketed by size.
+//  3. ctxWindow hint (when > 0): ≥32k → Large, ≥16k → Medium, else
+//     Small.
+//  4. Fallback → ContextMedium.
+//
+// Inference is conservative: an unknown id with no ctxWindow signal
+// returns ContextMedium rather than guessing wrong on either edge.
+func InferContextClass(modelID string, ctxWindow int) ContextClass {
+	id := normalizeModelID(modelID)
+
+	// Frontier hosted models — assume large regardless of size tag.
+	switch {
+	case strings.Contains(id, "claude"),
+		strings.Contains(id, "sonnet"),
+		strings.Contains(id, "opus"),
+		strings.Contains(id, "gpt-4"),
+		strings.Contains(id, "gpt-5"),
+		strings.Contains(id, "o1"),
+		strings.Contains(id, "o3"),
+		strings.Contains(id, "o4"):
+		return ContextLarge
+	}
+
+	// Parameter-count tag inference. parseParamCount is called on the
+	// RAW id so Ollama's tag suffix (qwen2.5-coder:1.5b) is preserved
+	// — the normalized form already stripped it. Lossy on the
+	// sub-billion edge but adequate for the small/medium/large split.
+	if size := parseParamCount(modelID); size > 0 {
+		switch {
+		case size <= 7:
+			return ContextSmall
+		case size >= 30:
+			return ContextLarge
+		default:
+			return ContextMedium
+		}
+	}
+
+	// Endpoint-provided context-window hint as a secondary signal.
+	switch {
+	case ctxWindow >= 32768:
+		return ContextLarge
+	case ctxWindow > 0 && ctxWindow < 8192:
+		return ContextSmall
+	}
+
+	return ContextMedium
+}
+
+// SalienceCapForClass returns the recommended per-tool-call salience
+// cap for a model in this context class. Sized so an 8-turn agent
+// loop's compressed transcript fits comfortably inside the class's
+// typical context window with room for system prompt + reasoning.
+//
+// Phase 3 Slice 1 defaults — calibration loop replaces these with
+// observed budget-quality curves in a later slice.
+func SalienceCapForClass(c ContextClass) int {
+	switch c {
+	case ContextSmall:
+		return 200
+	case ContextLarge:
+		return 1500
+	default:
+		return 500
+	}
+}

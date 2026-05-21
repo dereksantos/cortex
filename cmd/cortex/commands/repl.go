@@ -85,15 +85,14 @@ const (
 	// 1.5B model spinning on tool calls is expensive without ceiling.
 	defaultMaxTurns = 8
 
-	// defaultToolOutputSalienceCap is the per-tool-call output-token
-	// cap the dispatcher applies to act.* outputs before they enter
-	// the agent loop's transcript (docs/salience-budgets.md). With a
-	// 16k ctx window and ~700 tokens of system prompt / tool defs
-	// overhead, 500 tokens × 8 turns = 4000 tokens of tool-output
-	// transcript headroom — leaves ~11k for the model's own
-	// reasoning + the final synthesis. Zero would disable; we keep
-	// the cap on by default since the inner-loop tax is the dominant
-	// driver of context exhaustion in long sessions.
+	// defaultToolOutputSalienceCap is the FALLBACK per-tool-call
+	// output-token cap when capability inference can't pick a class
+	// for the running model. The active cap is normally chosen by
+	// salienceCapForModel from the model id + endpoint's
+	// max_context_window (Phase 3 Slice 1) — smaller for weaker
+	// models, larger for stronger ones. Zero would disable
+	// compression entirely; we keep this medium cap as a safe
+	// floor.
 	defaultToolOutputSalienceCap = 500
 
 	// snapshotMaxFileBytes skips files above this when snapshotting
@@ -900,6 +899,26 @@ func (s *replState) close() {
 	}
 }
 
+// salienceCapForSession returns the per-tool-call output-token cap to
+// use for this REPL turn, derived from the model id + the endpoint's
+// advertised context window (when available). Phase 3 Slice 1: weaker
+// models get a tighter cap (favoring fan-out into many small reads);
+// stronger models get a looser cap (so a synthesis turn sees rich
+// uncompressed evidence). Falls back to defaultToolOutputSalienceCap
+// when the inference can't pick a class.
+//
+// ctxWindow defaults to 0 (unknown). The REPL passes the endpoint's
+// max_context_window when it has one — Lemonade exposes it; raw Ollama
+// doesn't.
+func salienceCapForSession(model string, ctxWindow int) (int, llm.ContextClass) {
+	class := llm.InferContextClass(model, ctxWindow)
+	cap := llm.SalienceCapForClass(class)
+	if cap <= 0 {
+		cap = defaultToolOutputSalienceCap
+	}
+	return cap, class
+}
+
 // resolveAPIURL routes to Ollama when the model id looks local (no
 // provider prefix), to OpenRouter otherwise. We treat a slash as the
 // "this is provider/model" signal — matches the convention `cortex code`
@@ -1634,6 +1653,17 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
 	}
 
+	// Phase 3 Slice 1: capability-aware salience cap. Weaker models
+	// get a tighter cap (favoring fan-out into many small reads);
+	// stronger models get a looser cap (so a synthesis turn sees rich
+	// uncompressed evidence). ctxWindow=0 means "use the model id
+	// alone"; future iteration will probe the endpoint's /v1/models
+	// for max_context_window.
+	salienceCap, ctxClass := salienceCapForSession(s.model, 0)
+	if s.verbose {
+		fmt.Fprintf(os.Stderr, "  · salience cap=%d (model class=%s)\n", salienceCap, ctxClass)
+	}
+
 	var (
 		capturedHR  evalv2.HarnessResult
 		capturedLR  harness.LoopResult
@@ -1644,7 +1674,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		Workdir:               s.workdir,
 		ActRegistry:           actReg,
 		TraceCB:               traceCB,
-		ToolOutputSalienceCap: defaultToolOutputSalienceCap,
+		ToolOutputSalienceCap: salienceCap,
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
@@ -1714,11 +1744,23 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
 	nextFactory := buildProviderFactoryForREPL(cfg, s.model, s.apiURL)
 	modelCatalog := s.modelCatalogForREPL()
+	// Phase 3 Slice 2: surface this turn's capability class + salience
+	// cap to decide.next so the planner sees its physical-system
+	// boundaries when choosing fanout shape (small/tight → many
+	// narrow nodes; large/loose → fewer bigger nodes). Empty-friendly
+	// fallback for zero codingCfg is handled inside formatBoundariesBlock.
+	cap := codingCfg.ToolOutputSalienceCap
+	class := llm.InferContextClass(s.model, 0)
+	systemBoundaries := fmt.Sprintf(
+		"- Model: %s (capability class: %s)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
+		s.model, class, cap,
+	)
 	if err := reg.Register(ops.NextSpec(ops.NextConfig{
-		Provider:        nextProvider,
-		ProviderFactory: nextFactory,
-		Registry:        reg,
-		ModelCatalog:    modelCatalog,
+		Provider:         nextProvider,
+		ProviderFactory:  nextFactory,
+		Registry:         reg,
+		ModelCatalog:     modelCatalog,
+		SystemBoundaries: systemBoundaries,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.next: %w", err)
 	}
@@ -1812,7 +1854,7 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		Provider:              nextProvider,
 		ProviderFactory:       nextFactory,
 		Registry:              reg,
-		ToolOutputSalienceCap: defaultToolOutputSalienceCap,
+		ToolOutputSalienceCap: codingCfg.ToolOutputSalienceCap,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.tool_call: %w", err)
 	}

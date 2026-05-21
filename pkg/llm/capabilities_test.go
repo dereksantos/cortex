@@ -122,6 +122,54 @@ func TestInferCapabilitiesVisionTag(t *testing.T) {
 	}
 }
 
+// TestInferContextClass pins the Phase-3 Slice 1 capability bucketing.
+// Frontier hosted families dominate over size tags; explicit size tags
+// dominate over ctxWindow hints; ctxWindow is the secondary signal;
+// unknown defaults to medium.
+func TestInferContextClass(t *testing.T) {
+	tests := []struct {
+		id        string
+		ctxWindow int
+		want      ContextClass
+	}{
+		// Frontier hosted families → Large regardless of suffix.
+		{"anthropic/claude-haiku-4.5", 0, ContextLarge},
+		{"claude-sonnet-4.5", 0, ContextLarge},
+		{"openai/gpt-5-mini", 0, ContextLarge},
+		{"o4-mini", 0, ContextLarge},
+		// Parameter-count tag dominates ctxWindow hint.
+		{"qwen2.5-coder:1.5b", 262144, ContextSmall},
+		{"qwen2.5-coder:7b", 262144, ContextSmall},
+		{"qwen3-coder-30b-a3b", 0, ContextLarge},
+		{"llama3.1:13b", 0, ContextMedium},
+		{"llama3.1:70b", 0, ContextLarge},
+		// ctxWindow signal when no size tag.
+		{"unnamed-experimental-model", 32768, ContextLarge},
+		{"unnamed-experimental-model", 16384, ContextMedium},
+		{"tiny-3000-token-thing", 3000, ContextSmall},
+		// Fallback — neither signal → Medium.
+		{"unknown-model", 0, ContextMedium},
+	}
+	for _, tc := range tests {
+		got := InferContextClass(tc.id, tc.ctxWindow)
+		if got != tc.want {
+			t.Errorf("%s (ctx=%d): got %s, want %s", tc.id, tc.ctxWindow, got, tc.want)
+		}
+	}
+}
+
+// TestSalienceCapForClass pins the default caps the REPL uses to size
+// per-tool-call output budgets. Small → tight (favoring fan-out);
+// large → loose (one big synthesis chunk fits).
+func TestSalienceCapForClass(t *testing.T) {
+	if SalienceCapForClass(ContextSmall) >= SalienceCapForClass(ContextMedium) {
+		t.Error("small cap should be tighter than medium")
+	}
+	if SalienceCapForClass(ContextLarge) <= SalienceCapForClass(ContextMedium) {
+		t.Error("large cap should be looser than medium")
+	}
+}
+
 func TestInferCapabilitiesUnknownReturnsEmpty(t *testing.T) {
 	got := InferCapabilities("some-random-experimental-model-xyz")
 	if len(got) != 0 {
