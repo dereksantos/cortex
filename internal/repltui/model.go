@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Layout, top→bottom:
@@ -26,10 +27,12 @@ import (
 const (
 	// statusRows + dividerRows + inputRows = bottom-chrome reserved
 	// rows. Subtract from window height to get viewport height.
-	statusRows   = 1
-	dividerRows  = 1
-	inputRows    = 1
-	bottomChrome = statusRows + dividerRows + inputRows
+	// ambientRow adds one more row when the model has a non-empty
+	// ambientRow value (bootstrap in progress, …); see View.
+	statusRows       = 1
+	dividerRows      = 1
+	inputRows        = 1
+	bottomChromeBase = statusRows + dividerRows + inputRows
 )
 
 // Model is the Bubble Tea Model for the REPL TUI.
@@ -70,6 +73,16 @@ type Model struct {
 	// View renders a final "session saving…" line before tea.Quit
 	// drops the program.
 	quitting bool
+
+	// verbose mirrors the sink's verbose flag. Bumped by
+	// verbosityMsg (the /verbose slash command). Used by
+	// renderEventLine to decide which kinds to render.
+	verbose bool
+
+	// ambientRow is the optional one-line tag that sits between
+	// the divider and the main status line. Used today by
+	// bootstrap progress; empty hides the row.
+	ambientRow string
 }
 
 // New constructs a Model with reasonable defaults. The width/height
@@ -85,6 +98,10 @@ func New(sink *TUISink, initialStatus string) Model {
 	vp := viewport.New(80, 20)
 	vp.SetContent("")
 
+	verbose := false
+	if sink != nil {
+		verbose = sink.verbose
+	}
 	return Model{
 		sink:       sink,
 		viewport:   vp,
@@ -93,6 +110,7 @@ func New(sink *TUISink, initialStatus string) Model {
 		promptText: "~ ",
 		width:      80,
 		height:     24,
+		verbose:    verbose,
 	}
 }
 
@@ -106,7 +124,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = msg.Width
-		m.viewport.Height = max(1, msg.Height-bottomChrome)
+		m.viewport.Height = max(1, msg.Height-m.bottomChrome())
 		m.input.Width = max(1, msg.Width-len(m.input.Prompt)-1)
 		m.viewport.SetContent(strings.Join(m.transcript, "\n"))
 		m.viewport.GotoBottom()
@@ -143,9 +161,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case tea.KeyPgUp, tea.KeyPgDown, tea.KeyUp, tea.KeyDown,
-			tea.KeyHome, tea.KeyEnd:
-			// Scroll keys go to the viewport.
+		case tea.KeyPgUp, tea.KeyPgDown, tea.KeyHome, tea.KeyEnd:
+			// Page / Home / End route to the viewport. Up/Down keys
+			// stay with the input so prompt-history navigation (when
+			// it lands) doesn't fight scrolling; explicit Ctrl+Up /
+			// Ctrl+Down can be added later if scroll-by-line is
+			// wanted without leaving the input.
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
@@ -153,6 +174,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Anything else (printable, backspace, …) goes to the input.
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+
+	case tea.MouseMsg:
+		// Wheel events scroll the transcript. tea.WithMouseCellMotion
+		// at program construction enables the underlying stream; here
+		// we delegate to viewport.Update which knows how to interpret
+		// MouseButtonWheelUp / Down.
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
 
 	case infoMsg:
@@ -180,9 +210,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case eventMsg:
-		line := renderEventLine(msg.kind, msg.payload, m.sink != nil && m.sink.verbose)
+		line := renderEventLine(msg.kind, msg.payload, m.verbose)
 		if line != "" {
 			m.append(line)
+		}
+		return m, nil
+
+	case verbosityMsg:
+		m.verbose = msg.verbose
+		state := "off"
+		if m.verbose {
+			state = "on"
+		}
+		m.append(infoStyle.Render("  verbose → " + state))
+		return m, nil
+
+	case dagTraceMsg:
+		line := renderDagTraceLine(msg)
+		m.append(line)
+		return m, nil
+
+	case bootstrapProgressMsg:
+		if msg.Done {
+			m.ambientRow = ""
+		} else {
+			m.ambientRow = msg.Line
 		}
 		return m, nil
 
@@ -194,18 +246,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
+//
+// The transcript pane is wrapped in a lipgloss block with a pinned
+// height so a short transcript doesn't let the input float up the
+// screen. Without this, viewport.View() returns only the consumed
+// rows; the input renders right after them and the bottom of the
+// terminal is empty space. With it, the input always lives on the
+// bottom-most row regardless of content length.
+//
+// When ambientRow is non-empty (bootstrap in progress, etc.) a
+// dedicated row sits between the divider and the status line so
+// progress chatter doesn't pollute the transcript scroll.
 func (m Model) View() string {
 	if m.quitting {
 		return "session saved.\n"
 	}
+	vpHeight := max(1, m.height-m.bottomChrome())
+	vpBlock := lipgloss.NewStyle().
+		Width(max(1, m.width)).
+		Height(vpHeight).
+		Render(m.viewport.View())
 	divider := dividerStyle.Render(strings.Repeat("─", max(1, m.width)))
 	status := statusStyle.Render(m.statusLine)
-	return strings.Join([]string{
-		m.viewport.View(),
-		divider,
-		status,
-		m.input.View(),
-	}, "\n")
+	parts := []string{vpBlock, divider}
+	if m.ambientRow != "" {
+		parts = append(parts, ambientStyle.Render(m.ambientRow))
+	}
+	parts = append(parts, status, m.input.View())
+	return strings.Join(parts, "\n")
+}
+
+// bottomChrome returns the count of rows reserved below the
+// viewport. Includes the ambient row when it's populated so the
+// viewport shrinks by one to make room.
+func (m Model) bottomChrome() int {
+	n := bottomChromeBase
+	if m.ambientRow != "" {
+		n++
+	}
+	return n
 }
 
 // append adds a rendered line to the transcript and re-anchors the
@@ -215,6 +294,49 @@ func (m *Model) append(line string) {
 	m.transcript = append(m.transcript, line)
 	m.viewport.SetContent(strings.Join(m.transcript, "\n"))
 	m.viewport.GotoBottom()
+}
+
+// renderDagTraceLine formats one dag.trace event for the
+// transcript. Same shape as makeREPLDAGTracer's stdout output but
+// colored by cortex function — the "what is the DAG doing" pane
+// that makes Cortex's emergent behavior visible.
+func renderDagTraceLine(t dagTraceMsg) string {
+	status := "ok"
+	if !t.OK {
+		status = "err"
+	}
+	tail := ""
+	if len(t.Spawned) > 0 {
+		tail = " → spawned " + strings.Join(t.Spawned, ", ")
+	}
+	if !t.OK && t.ErrCause != "" {
+		cause := t.ErrCause
+		if len(cause) > 120 {
+			cause = cause[:120] + "…"
+		}
+		tail = " · cause: " + cause + tail
+	}
+	line := fmt.Sprintf("  ▪ %-22s [%s] · %s · %s%s",
+		t.QualifiedName, t.NodeID, status, formatLatencyMs(t.LatencyMs), tail)
+	return styleForFunction(t.QualifiedName).Render(line)
+}
+
+// formatLatencyMs renders a millisecond integer in REPL-friendly
+// units. Mirrors the formatter in repl.go's makeREPLDAGTracer so
+// the two surfaces print the same shape.
+func formatLatencyMs(ms int) string {
+	switch {
+	case ms < 1:
+		return "0ms"
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60_000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	default:
+		m := ms / 60_000
+		s := (ms % 60_000) / 1000
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
 }
 
 // renderEventLine formats one Event message for the transcript.

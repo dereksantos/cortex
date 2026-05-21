@@ -56,3 +56,31 @@ type promptRequestedMsg struct{ prompt string }
 // quitMsg signals the program to exit cleanly (Ctrl-D, /quit). The
 // Update handler returns tea.Quit on receipt.
 type quitMsg struct{}
+
+// verbosityMsg flips the model's verbose flag mid-session. Routed
+// through the Bubble Tea send pipeline so it observes the message
+// order rather than racing in-flight Event renders.
+type verbosityMsg struct{ verbose bool }
+
+// dagTraceMsg is delivered by Sink.Event with kind="dag.trace".
+// Carries the structured shape the DAG tracer emits so the
+// per-cortex-function color routing can fire on
+// qualified_name's prefix.
+type dagTraceMsg struct {
+	QualifiedName string
+	NodeID        string
+	OK            bool
+	LatencyMs     int
+	Spawned       []string
+	ErrCause      string
+}
+
+// bootstrapProgressMsg is delivered by Sink.Event with
+// kind="bootstrap.progress". Updates the ambient status row that
+// sits above the regular status line while bootstrap is running.
+type bootstrapProgressMsg struct {
+	Line string
+	// Done flips true on the terminal bootstrap line so the Update
+	// handler can clear the ambient row.
+	Done bool
+}

@@ -72,4 +72,10 @@ type Sink interface {
 	Event(kind string, payload any)
 	Banner(text string)
 	ReadLine(prompt string) (string, error)
+
+	// SetVerbose changes the verbose-rendering gate mid-session.
+	// Used by the /verbose slash command. Implementations must
+	// reflect the change on subsequent Event() calls so the user
+	// sees per-turn tokens / tool_result detail flip immediately.
+	SetVerbose(v bool)
 }

@@ -1028,11 +1028,22 @@ func maybeStartBootstrap(state *replState) {
 			WindowOverlap:  bootstrap.DefaultWindowOverlap,
 			ExtractOp:      bootstrap.ExtractOpAuto,
 			Banner: func(line string) {
-				// Route through the session sink so the TUI sink can
-				// place bootstrap progress lines wherever it wants
-				// (transcript or pinned status row) without colliding
-				// with the input prompt the user is typing into.
-				state.ui.Info(fmt.Sprintf("[bootstrap] %s", line))
+				// Structured event so the TUI can pin progress to
+				// the ambient row (between divider and status) and
+				// drop it when bootstrap finishes. StdoutSink's
+				// renderer prints the legacy "[bootstrap] foo"
+				// inline form. We can't detect "done" from inside
+				// the bootstrap controller's banner callback today;
+				// state.close()'s bootstrapCancel runs on session
+				// exit which is a fine clear-trigger but we'd want
+				// the controller to emit one final done=true line
+				// at coverage-met. That's a follow-up — for now
+				// the row clears on session end via the cancel
+				// hook + a final empty event below.
+				state.ui.Event("bootstrap.progress", map[string]any{
+					"line": line,
+					"done": false,
+				})
 			},
 		},
 		ExtractInsightFn:  wrapInsightFn(provider),
@@ -1404,6 +1415,31 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		s.priorSessionsCap = n
 		s.ui.Info(fmt.Sprintf("  prior-session summary cap → %d", s.priorSessionsCap))
 		return true, nil
+	case "/verbose":
+		// Mid-session toggle of the verbose flag. With no argument
+		// it flips; "on" / "off" pin the value explicitly. Surfaces
+		// via the sink so both StdoutSink and TUISink update their
+		// Event rendering gate on the next coding.turn /
+		// coding.tool_result.
+		if len(rest) == 0 {
+			s.verbose = !s.verbose
+		} else {
+			switch strings.ToLower(rest[0]) {
+			case "on", "true", "1", "yes":
+				s.verbose = true
+			case "off", "false", "0", "no":
+				s.verbose = false
+			default:
+				return true, fmt.Errorf("/verbose [on|off]: argument must be on|off (got %q)", rest[0])
+			}
+		}
+		s.ui.SetVerbose(s.verbose)
+		state := "off"
+		if s.verbose {
+			state = "on"
+		}
+		s.ui.Info(fmt.Sprintf("  verbose → %s", state))
+		return true, nil
 	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
 	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
 	// keeping them here just to back a parallel snapshot system isn't
@@ -1430,6 +1466,7 @@ func (s *replState) printSlashHelp() {
   /shell-policy      show the user-configured shell allow/deny policy (if any)
   /history [N]       show buffered turn count, or set the conversation-history cap to N
   /prior-summaries [N]  show or set the cap on cross-session summary injection
+  /verbose [on|off]  toggle (or set) verbose event rendering mid-session
   /quit              exit (also Ctrl-D)`)
 }
 
@@ -3717,47 +3754,29 @@ func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback
 		if name == "" {
 			name = "?"
 		}
-		status := "ok"
-		if !e.OK {
-			status = "err"
-		}
 		latency := e.WallEnd.Sub(e.WallStart)
-		tail := ""
-		if len(e.SpawnedChildren) > 0 {
-			tail = " → spawned " + strings.Join(e.SpawnedChildren, ", ")
-		}
+		cause := ""
 		if !e.OK {
-			cause := e.ErrorMessage
+			cause = e.ErrorMessage
 			if cause == "" {
 				cause = e.ErrorCode
 			}
-			if cause != "" {
-				tail = " · cause: " + truncateHead(cause, 120) + tail
-			}
 		}
-		ui.Info(fmt.Sprintf("  ▪ %-22s [%s] · %s · %s%s",
-			name, e.NodeID, status, formatDAGLatency(latency), tail))
+		// Route as a structured Event so the TUI sink can color
+		// the line by cortex function (sense/attend/decide/act/…)
+		// instead of treating it as plain Info. StdoutSink's Event
+		// renderer prints the same shape.
+		ui.Event("dag.trace", map[string]any{
+			"qualified_name": name,
+			"node_id":        e.NodeID,
+			"ok":             e.OK,
+			"latency_ms":     int(latency / time.Millisecond),
+			"spawned":        e.SpawnedChildren,
+			"err_cause":      cause,
+		})
 		if next != nil {
 			next(e)
 		}
-	}
-}
-
-// formatDAGLatency renders a wall-clock duration in REPL-friendly units.
-// Sub-millisecond → "0ms"; sub-second → "Nms"; sub-minute → "N.Ns";
-// otherwise → "NmNs". The compact form keeps lines aligned.
-func formatDAGLatency(d time.Duration) string {
-	switch {
-	case d < time.Millisecond:
-		return "0ms"
-	case d < time.Second:
-		return fmt.Sprintf("%dms", d/time.Millisecond)
-	case d < time.Minute:
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	default:
-		m := int(d / time.Minute)
-		s := int((d % time.Minute) / time.Second)
-		return fmt.Sprintf("%dm%02ds", m, s)
 	}
 }
 

@@ -28,17 +28,54 @@ var (
 	userEchoSty  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // grey
 	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // dim grey
 	statusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // grey
+	ambientStyle = lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("245"))
 
-	// Per-cortex-function event colors. Only the kinds currently
-	// routed through eventMsg (sense / remember / act / final) need
-	// styles right now; attend / decide / value / model / maintain
-	// will join when their tracer lines start flowing as eventMsg
-	// instead of plain Info — v2 cleanup.
-	senseEvtSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("51")) // cyan
-	rememberEvtSty = lipgloss.NewStyle().Foreground(lipgloss.Color("51")) // cyan
-	actEvtSty      = lipgloss.NewStyle().Foreground(lipgloss.Color("46")) // green
+	// Per-cortex-function event colors. Routed via styleForFunction
+	// from the qualified_name's prefix; renderDagTraceLine + the
+	// tool_call branch in renderEventLine both consult it.
+	senseEvtSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))  // cyan
+	rememberEvtSty = lipgloss.NewStyle().Foreground(lipgloss.Color("51"))  // cyan
+	attendEvtSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // yellow
+	decideEvtSty   = lipgloss.NewStyle().Foreground(lipgloss.Color("207")) // magenta
+	actEvtSty      = lipgloss.NewStyle().Foreground(lipgloss.Color("46"))  // green
+	valueEvtSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))  // blue
+	modelEvtSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("255")) // white
+	maintainEvtSty = lipgloss.NewStyle().Foreground(lipgloss.Color("245")) // grey
 	finalEvtSty    = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 )
+
+// styleForFunction returns the per-cortex-function color for a
+// qualified op name like "decide.next" or "act.read_file". The
+// prefix before the first dot picks the style; unknown families
+// fall back to the plain infoStyle so the line still renders.
+func styleForFunction(qualifiedName string) lipgloss.Style {
+	prefix := qualifiedName
+	for i, r := range qualifiedName {
+		if r == '.' {
+			prefix = qualifiedName[:i]
+			break
+		}
+	}
+	switch prefix {
+	case "sense":
+		return senseEvtSty
+	case "remember":
+		return rememberEvtSty
+	case "attend":
+		return attendEvtSty
+	case "decide":
+		return decideEvtSty
+	case "act":
+		return actEvtSty
+	case "value":
+		return valueEvtSty
+	case "model":
+		return modelEvtSty
+	case "maintain":
+		return maintainEvtSty
+	}
+	return infoStyle
+}
 
 // styleForEventKind returns the appropriate style for one event
 // payload kind. The kind shape is "coding.<sub>" for harness

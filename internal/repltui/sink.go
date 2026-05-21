@@ -68,6 +68,20 @@ func NewTUISink(verbose bool) *TUISink {
 // (only useful in tests).
 func (s *TUISink) SetProgram(p *tea.Program) { s.program.Store(p) }
 
+// SetVerbose flips the verbose-rendering flag at runtime. The
+// Update handler reads this on the next Event message to decide
+// whether to show verbose-gated kinds (coding.turn,
+// coding.tool_result, coding.session_start).
+//
+// Calls are serialized by the same Bubble Tea send pipeline as
+// other state changes — we push a verbosityMsg so the Model
+// observes the flip in its message order rather than racing the
+// next Event read.
+func (s *TUISink) SetVerbose(v bool) {
+	s.verbose = v
+	s.send(verbosityMsg{verbose: v})
+}
+
 // send is the shared helper that drops the message when the
 // program isn't wired yet. Avoids panics in test setups that
 // build the sink but never start a program.
@@ -93,8 +107,68 @@ func (s *TUISink) Error(err error) {
 
 // Event implements cliout.Sink. The payload type matches the
 // harness Notify hook; the Update handler casts based on `kind`.
+//
+// Two kinds get special-case routing into typed messages so the
+// Update handler can react without re-parsing a generic any:
+//
+//   - "dag.trace"        → dagTraceMsg (per-node DAG trace line)
+//   - "bootstrap.progress" → bootstrapProgressMsg (ambient row)
+//
+// Everything else flows as a generic eventMsg and the renderEventLine
+// switch decides how to display it.
 func (s *TUISink) Event(kind string, payload any) {
+	switch kind {
+	case "dag.trace":
+		if t, ok := toDagTraceMsg(payload); ok {
+			s.send(t)
+			return
+		}
+	case "bootstrap.progress":
+		if t, ok := toBootstrapProgressMsg(payload); ok {
+			s.send(t)
+			return
+		}
+	}
 	s.send(eventMsg{kind: kind, payload: payload})
+}
+
+// toDagTraceMsg coerces the loosely-typed payload map the
+// makeREPLDAGTracer adapter emits into the typed message shape.
+// Returns (msg, true) on a clean parse; (zero, false) when the
+// payload isn't the expected shape so the caller can fall through
+// to the generic eventMsg path.
+func toDagTraceMsg(payload any) (dagTraceMsg, bool) {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return dagTraceMsg{}, false
+	}
+	q, _ := m["qualified_name"].(string)
+	id, _ := m["node_id"].(string)
+	okFlag, _ := m["ok"].(bool)
+	latency, _ := m["latency_ms"].(int)
+	cause, _ := m["err_cause"].(string)
+	var spawned []string
+	if sp, ok := m["spawned"].([]string); ok {
+		spawned = sp
+	}
+	return dagTraceMsg{
+		QualifiedName: q,
+		NodeID:        id,
+		OK:            okFlag,
+		LatencyMs:     latency,
+		Spawned:       spawned,
+		ErrCause:      cause,
+	}, true
+}
+
+func toBootstrapProgressMsg(payload any) (bootstrapProgressMsg, bool) {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return bootstrapProgressMsg{}, false
+	}
+	line, _ := m["line"].(string)
+	done, _ := m["done"].(bool)
+	return bootstrapProgressMsg{Line: line, Done: done}, true
 }
 
 // Banner implements cliout.Sink.

@@ -170,6 +170,43 @@ func (s *StdoutSink) ReadLine(prompt string) (string, error) {
 func renderEvent(w io.Writer, kind string, payload any, verbose bool) {
 	m, _ := payload.(map[string]any)
 	switch kind {
+	case "dag.trace":
+		// Structured DAG trace from makeREPLDAGTracer. Reconstruct
+		// the same "  ▪ <op> [nodeID] · ok · 24ms" shape the
+		// pre-Sink REPL printed; the TUI sink renders this colored
+		// by cortex function, the stdout sink keeps it monochrome.
+		name, _ := m["qualified_name"].(string)
+		nodeID, _ := m["node_id"].(string)
+		okFlag, _ := m["ok"].(bool)
+		latency, _ := m["latency_ms"].(int)
+		status := "ok"
+		if !okFlag {
+			status = "err"
+		}
+		tail := ""
+		if sp, ok := m["spawned"].([]string); ok && len(sp) > 0 {
+			tail = " → spawned " + strings.Join(sp, ", ")
+		}
+		if !okFlag {
+			if cause, _ := m["err_cause"].(string); cause != "" {
+				if len(cause) > 120 {
+					cause = cause[:120] + "…"
+				}
+				tail = " · cause: " + cause + tail
+			}
+		}
+		fmt.Fprintf(w, "  ▪ %-22s [%s] · %s · %s%s\n",
+			name, nodeID, status, formatLatencyMsStdout(latency), tail)
+		return
+
+	case "bootstrap.progress":
+		// Bootstrap progress: the stdout path keeps the pre-TUI
+		// "[bootstrap] foo" inline shape; the TUI sink redirects
+		// this kind into the ambient row.
+		if line, _ := m["line"].(string); line != "" {
+			fmt.Fprintf(w, "[bootstrap] %s\n", line)
+		}
+		return
 	case "coding.session_start":
 		// Banner is printed elsewhere; the session-start event is
 		// metadata — surface only in verbose.
@@ -219,6 +256,23 @@ func renderEvent(w io.Writer, kind string, payload any, verbose bool) {
 		if verbose {
 			fmt.Fprintf(w, "  · %s: %v\n", kind, payload)
 		}
+	}
+}
+
+// formatLatencyMsStdout mirrors the TUI's formatLatencyMs so the
+// two surfaces print identical strings for the same value.
+func formatLatencyMsStdout(ms int) string {
+	switch {
+	case ms < 1:
+		return "0ms"
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60_000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	default:
+		m := ms / 60_000
+		s := (ms % 60_000) / 1000
+		return fmt.Sprintf("%dm%02ds", m, s)
 	}
 }
 
