@@ -447,6 +447,9 @@ func TestBudget_Exhausted(t *testing.T) {
 		{"tokens 0", Budget{LatencyMS: 100, Tokens: 0, Depth: 5}, true, "tokens"},
 		{"depth 0", Budget{LatencyMS: 100, Tokens: 100, Depth: 0}, true, "depth"},
 		{"latency negative", Budget{LatencyMS: -10, Tokens: 100, Depth: 5}, true, "latency_ms"},
+		// OutputTokens is opt-in: zero means "not in play", not exhausted.
+		// Pre-salience-budgets callers must not regress.
+		{"output_tokens zero is unlimited", Budget{LatencyMS: 100, Tokens: 100, Depth: 5, OutputTokens: 0}, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -455,5 +458,29 @@ func TestBudget_Exhausted(t *testing.T) {
 				t.Errorf("got (%v, %q), want (%v, %q)", exh, axis, tt.wantExh, tt.wantAxis)
 			}
 		})
+	}
+}
+
+// TestBudget_OutputTokensAxis pins the salience-budget axis behavior:
+// Consume subtracts the output dimension; CanAfford gates spawns that
+// would deposit more than remaining output budget; cost-with-no-output
+// is exempt from the output check (steering nodes that produce no
+// deposit must still schedule under tight output budgets).
+func TestBudget_OutputTokensAxis(t *testing.T) {
+	b := Budget{LatencyMS: 1000, Tokens: 1000, Depth: 5, OutputTokens: 500}
+
+	b.Consume(Cost{LatencyMS: 100, Tokens: 50, OutputTokens: 200})
+	if b.OutputTokens != 300 {
+		t.Fatalf("Consume should subtract OutputTokens: got %d, want 300", b.OutputTokens)
+	}
+
+	if !b.CanAfford(Cost{OutputTokens: 200}) {
+		t.Errorf("CanAfford should allow 200 against 300 remaining")
+	}
+	if b.CanAfford(Cost{OutputTokens: 400}) {
+		t.Errorf("CanAfford should reject 400 against 300 remaining")
+	}
+	if !b.CanAfford(Cost{LatencyMS: 100, Tokens: 100}) {
+		t.Errorf("CanAfford should ignore output axis when cost.OutputTokens is 0")
 	}
 }

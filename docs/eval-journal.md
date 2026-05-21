@@ -2,6 +2,12 @@
 
 A human-readable log of eval runs — what we ran, why, what we noticed. The structured record lives in `.cortex/journal/eval/` (`eval.cell_result` JSONL) and is the canonical source for analysis. This file is the lab notebook around those numbers.
 
+> **Rolloff.** This file currently holds ~2000 lines of entries (~160K).
+> When it crosses ~3000 lines, segment by quarter into
+> `docs/archive/eval-journal/<YYYY-Q>.md` and leave only the current
+> quarter in-tree. Keep the most-recent entry referenced from
+> `eval-strategy.md` so readers can find the current cadence quickly.
+
 Principles: [`docs/prompts/eval-principles.md`](prompts/eval-principles.md). Operational checklist: [`docs/benchmarks/integrity.md`](benchmarks/integrity.md). **Consolidated time-stamped baseline snapshot:** [`docs/eval-baseline.md`](eval-baseline.md) — the "before" picture Phase 6 of the integration roadmap will diff against.
 
 ## How to use this journal
@@ -1994,3 +2000,60 @@ Per-cell records in `.cortex/db/cell_results.jsonl` (62 rows) and `.cortex/journ
 - Phase 1 of `docs/integration-roadmap.md` (unified `cell_results.jsonl` for ad-hoc CLI invocations) is the prerequisite. Until it lands, all 40 v2 scenarios will fail principle 6 (Structured) the same way; skipping the full sweep for now.
 - Independent Phase-A item to file: extend the v2 runner to emit Fast vs Full as distinct rows so principle 8 (Separated baselines) can be honored even after the telemetry sink lands.
 - The legacy run is retained in `eval_scenario_results` for reference; do **not** treat it as the Phase A v2 baseline.
+
+### 2026-05-21 — Bootstrap A/B (extract_insight vs extract_overview) / DECIDED: overview
+
+**Command**:
+```
+CORTEX_RUN_AB=1 \
+  CORTEX_AB_ENDPOINT=http://localhost:13305/v1 \
+  CORTEX_AB_MODEL=Qwen3-Coder-30B-A3B-Instruct-GGUF \
+  go test -timeout 30m ./internal/bootstrap -run TestExtractAB \
+    -panel internal/bootstrap/testdata/extract_ab_panel.json
+```
+**Versions**: scaffold v0.1, panel v0.1 (12 entries: 4 Cortex + 4 Python + 4 TS, mixed source/config/test/doc), Qwen3-Coder-30B-A3B-Instruct via Lemonade/chatterbox local endpoint. Wall: 109s for 24 LLM calls (12 entries × 2 ops).
+**Result**: **DEFAULT = `maintain.extract_overview` for every language family.** Insight kept registered for `--extract-op=extract_insight` override.
+
+**Why this run**: docs/bootstrap-dag-plan.md §A/B is the hard gate before step 8 (controller integration) commits to one extract op as default. The insight prompt was calibrated for session-event extraction; bootstrap asks "what is this file's job", which is a different shape.
+
+**Scoring rubric**: relevance to "what is this file?" — 0=irrelevant, 1=partial, 2=full. Token cost + latency captured automatically. Stability not re-run (single-shot signal was conclusive).
+
+**Per-chunk scores**:
+
+| # | File                                       | Role   | Insight | Overview | Cost ratio (Ov/Ins) |
+|---|--------------------------------------------|--------|---------|----------|---------------------|
+| 1 | py README.md                               | doc    | 1       | 2        | 1.17                |
+| 2 | ts README.md                               | doc    | 1       | 2        | 1.15                |
+| 3 | py app/handlers.py                         | source | 1       | 2        | 1.18                |
+| 4 | cortex docs/bootstrap-dag-plan.md          | doc    | 1       | 2        | 1.13                |
+| 5 | cortex go.mod                              | config | 0       | 2        | 1.26                |
+| 6 | cortex internal/bootstrap/sampler_hier.go  | source | 1       | 2        | 1.10                |
+| 7 | cortex sampler_hierarchical_test.go        | test   | 1       | 2        | 1.12                |
+| 8 | ts package.json                            | config | 1       | 2        | 1.08                |
+| 9 | py pyproject.toml                          | config | 1       | 2        | 1.19                |
+| 10| ts ArticleList.test.tsx                    | test   | 1       | 2        | 1.15                |
+| 11| ts ArticleList.tsx                         | source | 1       | 2        | 1.13                |
+| 12| py tests/test_handlers.py                  | test   | 1       | 2        | 1.20                |
+
+**Aggregates**:
+- Insight: **11/24 (45.8%)** relevance. Insight emits "patterns" — sub-points extracted FROM file content — rather than answering "what IS this file."
+- Overview: **24/24 (100%)** relevance. Direct role + summary + exports + dependencies + importance.
+- Cost: insight 7077 tokens total, overview 8136 tokens (1.15× — under the 1.2× threshold the decision rule allows).
+- Latency: overview is incidentally **faster** (avg 4083ms vs 4742ms) — JSON envelope is more compact than insight's two-entry array.
+- Strongest signal: cortex go.mod (#5). Insight invented an architectural recommendation ("Use modernc.org/sqlite for embedded SQLite operations with Go 1.26 compatibility") from a plain dependency declaration — a hallucination. Overview produced "Go module configuration file defining project dependencies and Go version requirements" + a structured deps list. The prompt-shape mismatch is most visible on terse declarative files.
+
+**Decision rule check**: "Overview wins or ties on quality at ≤1.2× cost → default = extract_overview." Quality 24/24 vs 11/24 (clear win), cost 1.15× (under threshold). Decision: **default = extract_overview unconditionally**.
+
+**Changes landed**:
+- `internal/bootstrap/extract_router.go` — `ChooseExtractOp(auto, *)` now returns `extract_overview` for every language. The `lang` parameter is preserved for future per-language routing should a follow-up A/B re-introduce it.
+- `internal/bootstrap/extract_router_test.go` — collapsed the per-language case table into a single assertion across all languages.
+- `internal/bootstrap/controller_test.go` — `TestController_Run_HitsTarget` updated to assert insight is NEVER called under auto mode (it would have been called for Markdown files under the old routing).
+- `internal/bootstrap/testdata/extract_ab_panel.json` — 12-chunk panel committed.
+- `internal/bootstrap/testdata/extract_ab_panel.json.results.json` — full raw outputs committed for reference (not regenerated in CI).
+- `extract_ab_test.go` — `emitTable` now dumps full results JSON alongside the panel.
+
+**Follow-ups**:
+- If a future prompt rewrite changes insight's contract to "answer what this file is", re-run the A/B and revisit. Until then, insight stays a manual `--extract-op=extract_insight` opt-in for users who want decision/correction extraction over architectural summary.
+- Consider tightening overview's `importance` rubric — the Python README scored importance=0.1 (incorrect; READMEs are high-value for project overview) and the ts README scored 0.9 on the same role. Prompt has room for clearer guidance on what importance means for `doc` role.
+- The current overview prompt occasionally hallucinates non-existent dependencies (cortex docs/bootstrap-dag-plan.md scored `dependencies: ["cortex:docs/bootstrap-dag-plan.md"]` — a self-reference). Minor; consider a "for `doc` role, dependencies should be empty unless the doc literally lists files/services it depends on" clause in v2.
+

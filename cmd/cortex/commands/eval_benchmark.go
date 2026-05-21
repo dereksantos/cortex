@@ -16,9 +16,9 @@ import (
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/niah"
 	_ "github.com/dereksantos/cortex/internal/eval/benchmarks/swebench"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
-	"github.com/dereksantos/cortex/pkg/secret"
 )
 
 // runBenchmark is the dispatch path for `cortex eval --benchmark <name>`.
@@ -241,16 +241,16 @@ func parseBenchmarkArgs(args []string) (benchmarks.LoadOpts, error) {
 	return opts, nil
 }
 
-// newOpenRouterJudgeForBenchmark builds a judge provider rooted at
-// OpenRouter (keychain key, model passed in). Returns an error if the
-// key is missing — the caller treats that as "judge disabled" rather
-// than failing the whole run.
+// newOpenRouterJudgeForBenchmark builds a judge provider for the
+// benchmark harness. Model id is the routing key — slash-prefixed
+// (e.g. "anthropic/claude-haiku-4.5") routes to OpenRouter via the
+// keychain; matching a Phase 4 model_route routes to that endpoint;
+// bare ids route to local (Ollama). Returns an error so the caller
+// can treat it as "judge disabled" rather than failing the whole run.
 func newOpenRouterJudgeForBenchmark(model string) (llm.Provider, error) {
-	key, _, err := secret.MustOpenRouterKey()
-	if err != nil {
-		return nil, fmt.Errorf("openrouter key: %w", err)
+	p := intllm.BuildProvider(&config.Config{}, model)
+	if p == nil {
+		return nil, fmt.Errorf("judge provider unavailable for model %q", model)
 	}
-	cl := llm.NewOpenRouterClientWithKey(&config.Config{}, key)
-	cl.SetModel(model)
-	return cl, nil
+	return p, nil
 }

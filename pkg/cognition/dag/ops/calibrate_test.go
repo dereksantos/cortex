@@ -20,9 +20,7 @@
 //	  go test -tags=calibrate ./pkg/cognition/dag/ops/ -run TestCalibrate -v
 //
 // Requires Ollama running on localhost:11434 with the model pulled.
-// No API key needed — a stub is set to satisfy the OpenRouter
-// client's IsAvailable check (matches the pattern in
-// cmd/cortex/commands/repl.go ensureStubOpenRouterKey).
+// No API key needed.
 
 package ops
 

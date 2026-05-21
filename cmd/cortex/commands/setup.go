@@ -331,6 +331,10 @@ func (c *ProjectsCommand) Execute(ctx *Context) error {
 
 // runAutoSetup is the `cortex init --auto` tail: probe local LLM state
 // and print install tips. The Claude-Code branch was dropped under D11.
+//
+// allowlist:llm.NewOllamaClient — first-run probe is intentionally
+// Ollama-only ("does Ollama exist on this machine?"); not a runtime
+// provider selection. The provider-resolution guard test exempts this.
 func runAutoSetup(_ string) {
 	fmt.Println("\nChecking Ollama...")
 	client := llm.NewOllamaClient(config.Default())

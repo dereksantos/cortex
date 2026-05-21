@@ -114,6 +114,31 @@ type NodeSpec struct {
 	ID     string         // unique within the turn tree
 	Parent string         // parent node id; empty for seed nodes
 	Attrs  map[string]any // call-time options
+
+	// Salience (per-invocation; set by the spawning parent when it
+	// wants to cap how many tokens this child may deposit into turn
+	// state). Nil means "no contract" — pre-salience-budgets behavior.
+	// See docs/salience-budgets.md for the protocol.
+	Salience *SalienceContract
+}
+
+// SalienceContract is the per-spawn agreement between a parent and its
+// child: "your output may not exceed MaxOutputTokens; if you must
+// compress to fit, preserve content relevant to Intent." When the
+// child's Out exceeds the cap, the executor synthesizes a
+// reflect.compress node to bring it under budget before depositing into
+// turn state. See docs/salience-budgets.md.
+type SalienceContract struct {
+	// MaxOutputTokens caps tokens deposited into turn state. Zero
+	// means "no cap" — the contract was attached but not enforced
+	// (Phase 1 default for many spawns until decide.next learns to
+	// allocate budgets).
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+
+	// Intent is the short string used as the compressor's salience
+	// prompt: what should be preserved for the upstream consumer.
+	// Empty means "preserve most salient content for general use."
+	Intent string `json:"intent,omitempty"`
 }
 
 // ParamSpec declares one input or output parameter for a node.
@@ -135,16 +160,19 @@ func (n NodeSpec) QualifiedName() string {
 // qualified name on replay. Used by JSON marshalling so DeferredSpawn
 // records can roundtrip through the file-backed queue.
 type nodeSpecPersist struct {
-	Function CortexFunction `json:"function"`
-	Op       string         `json:"op"`
-	ID       string         `json:"id,omitempty"`
-	Parent   string         `json:"parent,omitempty"`
-	Attrs    map[string]any `json:"attrs,omitempty"`
+	Function CortexFunction    `json:"function"`
+	Op       string            `json:"op"`
+	ID       string            `json:"id,omitempty"`
+	Parent   string            `json:"parent,omitempty"`
+	Attrs    map[string]any    `json:"attrs,omitempty"`
+	Salience *SalienceContract `json:"salience,omitempty"`
 }
 
 // MarshalJSON projects NodeSpec down to its persistable identity for
 // the DeferredSpawn queue. Non-persistable fields (Handler, cost
 // hints, schema) are dropped — the executor looks them up on replay.
+// Salience is identity-shaped (it was set by a parent at spawn time,
+// not at registration) so it rides along.
 func (n NodeSpec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(nodeSpecPersist{
 		Function: n.Function,
@@ -152,6 +180,7 @@ func (n NodeSpec) MarshalJSON() ([]byte, error) {
 		ID:       n.ID,
 		Parent:   n.Parent,
 		Attrs:    n.Attrs,
+		Salience: n.Salience,
 	})
 }
 
@@ -168,6 +197,7 @@ func (n *NodeSpec) UnmarshalJSON(data []byte) error {
 	n.ID = p.ID
 	n.Parent = p.Parent
 	n.Attrs = p.Attrs
+	n.Salience = p.Salience
 	return nil
 }
 

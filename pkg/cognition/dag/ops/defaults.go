@@ -71,6 +71,17 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		// disturbing the existing constructor signatures.
 		VectorSearchSpec(VectorSearchConfig{Storage: cfg.Storage}),
 
+		// Salience-budget compressor (docs/salience-budgets.md). When
+		// the same Provider used for reranking is wired here, the
+		// compressor runs as an LLM-driven Reflect-style pass. Nil
+		// Provider falls back to a deterministic truncate-stub so the
+		// dispatcher path keeps working without a configured model.
+		CompressSpec(CompressConfig{Provider: cfg.Provider}),
+		// Emergence-shaped two-pass variant. Same input/output contract
+		// as attend.compress; selectively invoked via ShouldDistill on
+		// high-fallback-rate intents (per calibration data).
+		DistillSpec(DistillConfig{Provider: cfg.Provider}),
+
 		// Stage 2 LLM-backed ops.
 		RerankSpec(RerankConfig{Provider: cfg.Provider}),
 		ScoreSpec(ScoreConfig{Provider: cfg.Provider}),

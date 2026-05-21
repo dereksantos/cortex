@@ -1,9 +1,18 @@
 # Cortex Integration Roadmap
 
+> **Strategy authority moved to [`eval-strategy.md`](eval-strategy.md).**
+> The three-tier framework (Baseline / Thesis / Regression) and the
+> three thesis claims (multi-model, learning, bounded emergence) are
+> authoritative for *why* and *what to measure*. This doc remains
+> useful for *how the pieces fit together* and *integration sequencing*,
+> but ABR-driven phase definitions below are superseded — ABR-as-ratio
+> is retired; its underlying question survives as the budget-quality
+> curve (Tier 2b in the strategy doc).
+>
 > **Purpose.** A unified plan for bringing Cortex's cognitive architecture,
 > UX eval coverage, and tool-surface contract into one well-integrated coding
 > harness. This doc is the synthesis above four more specific docs:
-> [`ROADMAP.md`](../ROADMAP.md) (ABR-driven phases),
+> [`ROADMAP.md`](../ROADMAP.md) (phase sequencing),
 > [`docs/benchmarks/coverage-matrix.md`](benchmarks/coverage-matrix.md)
 > (10 UX dimensions), [`docs/tool-surface.md`](tool-surface.md) (6 per-call
 > axes), and [`docs/dag-protocol.md`](dag-protocol.md) (the runtime protocol
@@ -409,9 +418,9 @@ DAG protocol — **seed + grow + decay**, no upfront emission, no
 separate planner. The full design lives in
 [`dag-protocol.md`](dag-protocol.md); the stage-by-stage build sits
 in [`dag-build-plan.md`](dag-build-plan.md); the eval prep that
-gates the build is in [`eval-prep-epic.md`](eval-prep-epic.md).
+gates the build is in [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md).
 
-**Build sequence:** [`eval-prep-epic.md`](eval-prep-epic.md) →
+**Build sequence:** [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md) →
 [`dag-build-plan.md`](dag-build-plan.md) → implement. The eval prep
 is the verification floor — without it, every claim "this got better"
 is unmeasurable.
@@ -615,7 +624,7 @@ boundary shifts.
 | [`coverage-matrix.md`](benchmarks/coverage-matrix.md) | 10 dimensions, per-dim status | When a benchmark wraps or a CLI gap closes |
 | [`tool-surface.md`](tool-surface.md) | 6 per-call axes, per-axis gaps | When an axis-level engineering change lands |
 | [`dag-protocol.md`](dag-protocol.md) | Per-turn DAG runtime protocol (Phase 5 target) | When the protocol shape changes or a new node type lands |
-| [`eval-prep-epic.md`](eval-prep-epic.md) | Eval infrastructure prep that gates the Phase 5 build | When a phase status changes or a new mechanic eval is added |
+| [`archive/eval-prep-epic.md`](archive/eval-prep-epic.md) | Eval infrastructure prep that gates the Phase 5 build | When a phase status changes or a new mechanic eval is added |
 | [`dag-build-plan.md`](dag-build-plan.md) | Stage-by-stage implementation plan for Phase 5 (v0 first, CLI-first) | When a stage completes, an ADR lands, or scope changes |
 | [`eval-principles.md`](prompts/eval-principles.md) | 9 principles every benchmark must satisfy | Rarely — principles are stable |
 

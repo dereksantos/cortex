@@ -108,6 +108,12 @@ func (c *OpenRouterClient) SetMaxTokens(n int) { c.maxTokens = n }
 // SetAPIURL replaces the OpenRouter endpoint. Test-only.
 func (c *OpenRouterClient) SetAPIURL(u string) { c.apiURL = u }
 
+// APIURL returns the currently configured chat-completions endpoint.
+// Symmetric with OpenAICompatClient.BaseURL() — lets the unified
+// resolver helpers (internal/llm.BuildProvider) and telemetry attribute
+// a call to the right backend without inspecting unexported fields.
+func (c *OpenRouterClient) APIURL() string { return c.apiURL }
+
 // LastCostUSD returns the per-call USD cost reported by OpenRouter for
 // the most recent successful call. Zero on free models, zero before the
 // first call, zero on calls where usage.cost was absent.

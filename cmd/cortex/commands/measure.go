@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/measure"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -313,9 +314,13 @@ func createMeasureProvider(providerName, modelOverride string, ctx *Context) (ll
 
 	switch providerName {
 	case "ollama":
-		client := llm.NewOllamaClient(cfg)
-		if !client.IsAvailable() {
-			return nil, fmt.Errorf("ollama is not running; start with: ollama serve")
+		// Route by model id — a user with Phase 4 model_routes can have
+		// the "ollama" alias hit their configured local endpoint
+		// (chatterbox/lemonade/lm-studio) instead of being pinned to
+		// Ollama. The alias name is retained for back-compat.
+		client := intllm.BuildProvider(cfg, cfg.OllamaModel)
+		if client == nil || !client.IsAvailable() {
+			return nil, fmt.Errorf("local LLM is not running; start with: ollama serve (or your model_routes endpoint)")
 		}
 		return client, nil
 	case "anthropic", "openrouter", "auto":

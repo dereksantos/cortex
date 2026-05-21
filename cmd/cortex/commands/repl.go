@@ -27,12 +27,13 @@
 package commands
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -44,12 +45,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/bootstrap"
 	"github.com/dereksantos/cortex/internal/capture"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
+	"github.com/dereksantos/cortex/internal/journal"
+	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/repltui"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
@@ -80,9 +85,24 @@ const (
 	// enough to write a full file in one go (Game-of-Life-sized).
 	defaultMaxOutputTokens = 4000
 
-	// defaultMaxTurns caps the inner agent loop per user message. A
-	// 1.5B model spinning on tool calls is expensive without ceiling.
-	defaultMaxTurns = 8
+	// defaultMaxTurns is the REPL's safety ceiling, NOT the binding
+	// stop. Post-Phase-3 the agent loop's no-progress signal (see
+	// internal/harness.noProgressWindow) raises ReasonNoProgress when
+	// recent turns showed no write_file/run_shell work or read in a
+	// circle. Budget caps cost. The integer cap here exists only so
+	// truly pathological loops (provider drift, dispatcher bugs) stop
+	// in bounded time; everyday exploration runs well under it.
+	defaultMaxTurns = 50
+
+	// defaultToolOutputSalienceCap is the FALLBACK per-tool-call
+	// output-token cap when capability inference can't pick a class
+	// for the running model. The active cap is normally chosen by
+	// salienceCapForModel from the model id + endpoint's
+	// max_context_window (Phase 3 Slice 1) — smaller for weaker
+	// models, larger for stronger ones. Zero would disable
+	// compression entirely; we keep this medium cap as a safe
+	// floor.
+	defaultToolOutputSalienceCap = 500
 
 	// snapshotMaxFileBytes skips files above this when snapshotting
 	// for /undo. Big binaries shouldn't round-trip through .cortex.
@@ -136,18 +156,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxRetries := 1
 	jsonOutput := false
 	workdirOverride := ""
-	systemPromptOverride := "" // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
-	maxTurnsOverride := 0      // --max-turns N: override the per-attempt agent-loop cap (default 8)
-	maxCostOverride := 0.0     // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
-	maxCumulativeOverride := 0 // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
-	fullTools := false         // --full-tools: kept as a no-op alias since full surface is the iter-7 default
-	minimalTools := false      // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
-	keepOnFail := false        // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
-	historyTurnsOverride := -1 // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
-	// Stage 3.5: every REPL coding turn routes tool calls through
-	// act.* DAG ops + emits per-tool trace rows. --no-dag is the
-	// debug escape hatch only.
-	dagEnabled := true
+	systemPromptOverride := ""   // --system-prompt FILE: path to a system prompt that overrides the auto-seeded one
+	maxTurnsOverride := 0        // --max-turns N: override the per-attempt agent-loop cap (default 8)
+	maxCostOverride := 0.0       // --max-cost-usd X: override the per-attempt USD budget (default 0.20)
+	maxCumulativeOverride := 0   // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
+	fullTools := false           // --full-tools: kept as a no-op alias since full surface is the iter-7 default
+	minimalTools := false        // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
+	keepOnFail := false          // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
+	historyTurnsOverride := -1   // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
+	priorSummariesOverride := -1 // --prior-summaries N: cap on prior-session summaries (-1 = use default, 0 = disabled)
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -215,12 +232,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
 				i++
 			}
-		case "--dag":
-			// Backwards-compat no-op; DAG dispatch is the default per
-			// Stage 3.5. Kept so scripts that pass --dag don't fail.
-			dagEnabled = true
-		case "--no-dag":
-			dagEnabled = false
+		case "--prior-summaries":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%d", &priorSummariesOverride)
+				i++
+			}
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -242,6 +258,36 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		workdir = abs
 	}
 
+	// Per-project default model: if neither CORTEX_REPL_MODEL nor
+	// --model was passed and the project's .cortex/config.json
+	// declares a DefaultModel, use that. Treats config-set models as
+	// effectively pinned (skips the Ollama auto-pick probe below)
+	// because if the operator wrote it down, they meant it. Falls
+	// through to the compile-time defaultREPLModel when no config
+	// override is set.
+	if !userPinned {
+		if cfg := loadREPLConfig(filepath.Join(workdir, ".cortex")); cfg != nil && cfg.DefaultModel != "" {
+			model = cfg.DefaultModel
+			userPinned = true
+		}
+	}
+
+	// One Sink per session — owns every Info/Warn/Error/Banner/Event
+	// and ReadLine call site downstream. The interactive REPL always
+	// uses the bubbletea-backed TUI sink; the headless --prompt path
+	// stays on stdout so benchmark harnesses and pipe-based callers
+	// see the legacy line-by-line output they expect.
+	var (
+		ui     cliout.Sink
+		tuiSnk *repltui.TUISink
+	)
+	if oneShotPrompt == "" {
+		tuiSnk = repltui.NewTUISink(verbose)
+		ui = tuiSnk
+	} else {
+		ui = cliout.New(verbose)
+	}
+
 	// Fix A: when the user hasn't pinned a model AND we're routing to
 	// Ollama, probe `/api/tags` and prefer a better function-caller if
 	// one is installed. Falls back silently to the default if Ollama
@@ -254,14 +300,14 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		if chosen, ok, note := probeOllamaAndPickModel(apiURL, model); ok {
 			if chosen != model {
 				model = chosen
-				fmt.Println(note)
+				ui.Info(note)
 			}
 		} else {
-			fmt.Println("cortex: warning — Ollama unreachable at " + apiURL + " (model calls will fail until it's started)")
+			ui.Warn("Ollama unreachable at " + apiURL + " (model calls will fail until it's started)")
 		}
 	}
 
-	state, err := newREPLState(workdir, model, verbose)
+	state, err := newREPLState(workdir, model, verbose, ui)
 	if err != nil {
 		return err
 	}
@@ -277,11 +323,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.fullTools = fullTools
 	state.minimalTools = minimalTools
 	state.keepOnFail = keepOnFail
-	state.useDAG = dagEnabled
 	if historyTurnsOverride >= 0 {
 		state.historyLimit = historyTurnsOverride
 	} else {
 		state.historyLimit = defaultHistoryLimit
+	}
+	if priorSummariesOverride >= 0 {
+		state.priorSessionsCap = priorSummariesOverride
+	} else {
+		state.priorSessionsCap = defaultPriorSessionsCap
 	}
 	// Override the auto-seeded system prompt when the caller pinned
 	// one. Benchmark harnesses use this to swap the Go-flavored
@@ -306,50 +356,66 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		}
 		turnErr := state.runTurn(oneShotPrompt)
 		if turnErr != nil && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "  turn error: %v\n", turnErr)
+			state.ui.Error(fmt.Errorf("turn: %w", turnErr))
 		}
 		if jsonOutput {
 			emitOneShotJSON(ctx, state, turnErr)
 		} else {
-			fmt.Printf("\nsession saved → %s\n", state.sessionPath)
+			state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
 		}
 		return nil
 	}
 
-	printREPLBanner(state)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	// Default Scanner buffer is 64 KiB; bump so paste-in prompts work.
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
-
-	for {
-		fmt.Print("~ ")
-		if !scanner.Scan() {
-			break
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "/") {
-			cont, err := state.dispatchSlash(line)
+	// mainLoop is the heart of the interactive REPL — read a line,
+	// dispatch slash or runTurn, repeat. Factored out so both the
+	// stdout path (run directly) and the TUI path (run inside
+	// repltui.Run's worker goroutine) share the same body.
+	mainLoop := func() error {
+		printREPLBanner(state)
+		maybeStartBootstrap(state)
+		revalidateAndWarn(state.workdir, state.ui)
+		for {
+			line, err := state.ui.ReadLine("~ ")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  error: %v\n", err)
-			}
-			if !cont {
+				if !errors.Is(err, io.EOF) {
+					state.ui.Error(err)
+				}
 				break
 			}
-			continue
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, "/") {
+				cont, err := state.dispatchSlash(line)
+				if err != nil {
+					state.ui.Error(err)
+				}
+				if !cont {
+					break
+				}
+				continue
+			}
+			if err := state.runTurn(line); err != nil {
+				state.ui.Error(fmt.Errorf("turn: %w", err))
+			}
+			if state.exitRequested {
+				break
+			}
 		}
-		if err := state.runTurn(line); err != nil {
-			fmt.Fprintf(os.Stderr, "  turn error: %v\n", err)
-		}
-		if state.exitRequested {
-			break
-		}
+		state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
+		return nil
 	}
-	fmt.Printf("\nsession saved → %s\n", state.sessionPath)
-	return nil
+
+	if tuiSnk != nil {
+		// TUI path. repltui.Run starts the bubbletea program on this
+		// goroutine and runs mainLoop in a worker goroutine; sink
+		// messages route between them. The initial status line
+		// mirrors the printREPLBanner content.
+		initialStatus := fmt.Sprintf("cortex · %s · %s", state.workdir, state.model)
+		return repltui.Run(tuiSnk, initialStatus, mainLoop)
+	}
+	return mainLoop()
 }
 
 // replState bundles per-session mutable state: model + workdir + the
@@ -413,6 +479,12 @@ type replState struct {
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
 
+	// bootstrapCancel cancels the auto-spawned bootstrap goroutine on
+	// REPL exit. Nil when bootstrap was skipped (already complete, env
+	// override, or detection error). Always called from close(); safe
+	// to call multiple times because the underlying CancelFunc is.
+	bootstrapCancel context.CancelFunc
+
 	// Headless-mode config (zero values preserve interactive behavior):
 	//   customVerifierCmd: shell command to run instead of `go build`.
 	//   headless:          skip promptGate; treat unresolved verify-fail
@@ -451,21 +523,27 @@ type replState struct {
 	// agent's file writes persist across retries and the final
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
-	// useDAG controls Stage 3.5 act-op dispatch. Defaults to true
-	// (--no-dag disables for debugging). When set, runHarness
-	// installs a ToolDispatcher on the CortexHarness that routes each
-	// tool call through act.<name> ops registered on a private
-	// per-session dag.Registry, then emits one synthetic
-	// dag.TraceEntry per call to .cortex/db/dag_traces.jsonl with
-	// parent_node_id = the per-turn synthetic ID. Default false
-	// preserves V0 inline-dispatch behavior.
-	useDAG bool
+
+	// ui is the I/O sink for everything the REPL displays or asks for.
+	// All Info/Warn/Error/Banner/Event/ReadLine call sites route
+	// through this so the rendering (stdout today, Bubble Tea TUI
+	// later) is swappable from a single point. Always non-nil after
+	// newREPLState — defaults to cliout.StdoutSink when the caller
+	// doesn't inject another.
+	ui cliout.Sink
 
 	// historyLimit caps the conversation-history block sent to the
 	// model on each turn. Default defaultHistoryLimit; configurable
 	// via --history-turns N at startup or /history N mid-session.
 	// 0 disables history injection entirely (turn 1 behavior).
 	historyLimit int
+
+	// priorSessionsCap bounds the count of think.session_summary
+	// entries from PRIOR sessions injected into the harness's prior-
+	// messages block. Defaults to defaultPriorSessionsCap; 0 disables
+	// cross-session injection entirely (the pre-Item-4 behavior).
+	// Configurable via --prior-summaries N.
+	priorSessionsCap int
 	// history is the per-session conversation buffer: one entry per
 	// accepted turn (user prompt + assistant final text), in
 	// chronological order. The tail (most recent historyLimit
@@ -493,6 +571,17 @@ type replState struct {
 // turnExchange is one accepted turn condensed to just what the model
 // needs to see on the next turn: the user's message and the assistant's
 // final text. No tool-call traces — those are noise and burn tokens.
+//
+// TODO (history drops tool grounding): "tool-call traces are noise" is
+// half-true — the raw trace is noisy, but the discoveries inside it
+// ("read pkg/foo/bar.go and learned func X takes Y") are exactly the
+// context that justifies not re-exploring on the next turn. With only
+// {User, Assistant} the model has to rediscover the workdir each turn.
+// Options: (a) append a compact "observations" line per turn — files
+// read, tests run, key findings — summarized by a cheap reflect.* node
+// at finalize; (b) keep the structured trace and let priorMessagesFor-
+// Harness pick the salient parts per next-prompt similarity. (a) is
+// the smaller slice; (b) is the learning-harness shape.
 type turnExchange struct {
 	User      string
 	Assistant string
@@ -504,11 +593,25 @@ type turnExchange struct {
 // without burning a large chunk of the context window.
 const defaultHistoryLimit = 6
 
+// defaultPriorSessionsCap bounds how many think.session_summary
+// entries from PRIOR sessions are injected on REPL start. Phase 3
+// Slice 4 stored them per-session; Item 4 (the cross-session memory
+// follow-up) lifted the filter so they flow in. The cap is small
+// because cross-session bleed is high-leverage context per token but
+// also the easiest way to drown the prompt in stale "back in
+// January we decided X" lines. Override at startup via
+// --prior-summaries N (0 disables).
+const defaultPriorSessionsCap = 3
+
 // newREPLState performs auto-init: creates .cortex/ if missing, the
 // session dir, the JSONL writer, and seeds the system prompt file if
 // absent. Returns an error if any of these fail — we'd rather refuse
 // to start than run in an inconsistent state.
-func newREPLState(workdir, model string, verbose bool) (*replState, error) {
+//
+// ui may be nil; the state falls back to cliout.New(verbose) which
+// is the stdout-bound implementation. Callers wanting a TUI or test
+// double inject their own here.
+func newREPLState(workdir, model string, verbose bool, ui cliout.Sink) (*replState, error) {
 	cortexDir := filepath.Join(workdir, ".cortex")
 	if err := os.MkdirAll(cortexDir, 0o755); err != nil {
 		return nil, fmt.Errorf("init .cortex/: %w", err)
@@ -518,6 +621,10 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 	// of truth. .local.md is an opt-in user override. Earlier versions
 	// seeded .cortex/repl-system-prompt.md on first run; those legacy
 	// files are silently ignored.
+	// TODO: prefer AGENTS.md (the emerging cross-tool standard) over a
+	// Cortex-private .local.md override. Look for ./AGENTS.md at the
+	// project root first, fall back to .cortex/repl-system-prompt.local.md
+	// for back-compat.
 	promptPath := filepath.Join(cortexDir, "repl-system-prompt.local.md")
 	systemPrompt, err := loadOrSeedSystemPrompt(promptPath)
 	if err != nil {
@@ -551,14 +658,23 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 	// attached and falls back to journal-only persistence.
 	store, cortex, cogErr := newSessionCognition(cortexDir, model, apiURL)
 	if cogErr != nil && verbose {
-		fmt.Fprintf(os.Stderr, "warn: cortex auto-capture disabled (%v)\n", cogErr)
+		ui.Warn(fmt.Sprintf("cortex auto-capture disabled (%v)", cogErr))
 	}
 
+	// Phase 3 Slice 5: pull the calibrated per-class salience cap
+	// override if a snapshot exists. Missing file is fine — the
+	// static SalienceCapForClass defaults stay in force.
+	applySalienceCalibration(cortexDir, verbose, ui)
+
+	if ui == nil {
+		ui = cliout.New(verbose)
+	}
 	return &replState{
 		workdir:      workdir,
 		model:        model,
 		apiURL:       apiURL,
 		verbose:      verbose,
+		ui:           ui,
 		systemPrompt: systemPrompt,
 		sessionDir:   sessionDir,
 		sessionPath:  sessionPath,
@@ -567,6 +683,31 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 		store:        store,
 		cortex:       cortex,
 	}, nil
+}
+
+// loadREPLConfig loads the user's config from <cortexDir>/config.json
+// when present, falling back to a minimal in-memory config bound to
+// the project paths. Tolerant: a missing or unreadable file is not an
+// error — the REPL keeps working without endpoint registry features.
+//
+// Phase 4: this is the seam where Endpoints + Models reach the REPL.
+// When the file isn't there, ResolveModelRoute returns no matches and
+// routing falls back to the legacy slash heuristic — i.e. existing
+// users see no behavior change until they author a config.json.
+func loadREPLConfig(cortexDir string) *config.Config {
+	configPath := filepath.Join(cortexDir, "config.json")
+	if cfg, err := config.Load(configPath); err == nil && cfg != nil {
+		// Load may return a partial config — make sure the paths are
+		// populated even if the file omitted them.
+		if cfg.ContextDir == "" {
+			cfg.ContextDir = cortexDir
+		}
+		if cfg.ProjectRoot == "" {
+			cfg.ProjectRoot = filepath.Dir(cortexDir)
+		}
+		return cfg
+	}
+	return &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
 }
 
 // newSessionCognition builds the shared Storage + Cortex pair for one
@@ -579,7 +720,7 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 // Returns (nil, nil, err) on any setup failure — caller decides
 // whether to abort the session or continue without auto-capture.
 func newSessionCognition(cortexDir, model, apiURL string) (*storage.Storage, *intcognition.Cortex, error) {
-	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: filepath.Dir(cortexDir)}
+	cfg := loadREPLConfig(cortexDir)
 	store, err := storage.New(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("storage init: %w", err)
@@ -634,6 +775,14 @@ func (s *replState) modelCatalogForREPL() string {
 		// 300+. The LLM can use IDs outside this list (per-node
 		// dispatch doesn't enforce membership), so we just highlight
 		// reasonable defaults.
+		// TODO (hardcoded curated list decays): same shape as
+		// scoreOllamaModel's knownGood — Go literal that goes stale as
+		// new models ship. Source from observed success in the learning
+		// store (top-N by tool-call success rate this project), with
+		// these IDs as a cold-start prior only. Also: rank — generic
+		// Python project, Go project, and dataviz project each want a
+		// different surface presented to decide.next. Same observed-
+		// fitness machinery as the Ollama probe TODOs.
 		curatedIDs := []string{
 			"anthropic/claude-haiku-4.5",
 			"anthropic/claude-sonnet-4.5",
@@ -672,6 +821,14 @@ func (s *replState) modelCatalogForREPL() string {
 // chat-capable model named "embedded-foo" would be wrongly dropped —
 // but the alternative (calling /api/show for every model) is slow
 // and the current naming conventions are stable across HF/Ollama.
+//
+// TODO (ask the backend, don't guess from name): the heuristic is a
+// third hardcoded list adjacent to scoreOllamaModel's knownGood/Bad
+// and modelCatalogForREPL's curatedIDs — same decay problem. Cache
+// /api/show capabilities per (backend, model) at first reference
+// (one slow call, one cache hit forever) and consult the cache. Same
+// pattern works across vLLM / llama.cpp once the backend-registry
+// TODO lands — each backend exposes its own capability probe.
 func filterChatCapableModels(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
@@ -730,37 +887,34 @@ func buildProviderFactoryForREPL(cfg *config.Config, model, apiURL string) llm.P
 }
 
 // buildLLMProviderForREPL constructs an llm.Provider matching the
-// model + apiURL the REPL is currently routed to. Ollama-shaped URLs
-// route through llm.NewLLMClient(BackendOllama); everything else
-// routes through OpenRouter with the keychain-resolved key. Returns
-// nil when no provider can be configured (Cortex + decide.next both
-// tolerate nil providers by degrading to mechanical / rule-based
+// model + apiURL the REPL is currently routed to.
+//
+// Resolution order:
+//
+//  1. cfg.ResolveModelRoute — if the user has configured an endpoint
+//     (Phase 4 model registry) and the model id matches by prefix or
+//     role-map, construct an OpenAICompatClient bound to that endpoint.
+//     This is what lets "chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF"
+//     route to a local Lemonade server instead of falling through to
+//     the slash heuristic.
+//  2. Ollama-shaped apiURL → llm.NewLLMClient(BackendOllama).
+//  3. Everything else → OpenRouter with the keychain-resolved key.
+//
+// Returns nil when no provider can be configured (Cortex + decide.next
+// both tolerate nil providers by degrading to mechanical / rule-based
 // paths).
 //
 // Shared between newSessionCognition (the eager build) and the REPL
 // chain's decide.next handler (which wants the same provider to
 // classify the next action without re-doing the construction).
+//
+// Now delegates to internal/llm.BuildProvider — the unified resolver
+// every cmd/cortex/commands/ caller shares. WithAPIURL preserves the
+// REPL's legacy "non-default apiURL routes to OpenRouter" behavior so
+// existing /model + /endpoint flows don't change shape. See
+// docs/provider-resolution-refactor.md.
 func buildLLMProviderForREPL(cfg *config.Config, model, apiURL string) llm.Provider {
-	if apiURL == defaultOllamaAPIURL {
-		c, _, err := llm.NewLLMClient(cfg,
-			llm.WithBackend(llm.BackendOllama),
-			llm.WithModel(model),
-		)
-		if err == nil {
-			return c
-		}
-		return nil
-	}
-	key, _, kerr := secret.MustOpenRouterKey()
-	if kerr != nil {
-		return nil
-	}
-	client := llm.NewOpenRouterClientWithKey(cfg, key)
-	client.SetModel(model)
-	if apiURL != "" {
-		client.SetAPIURL(apiURL)
-	}
-	return client
+	return intllm.BuildProvider(cfg, model, intllm.WithAPIURL(apiURL))
 }
 
 // rebindCognitionForModel rebuilds s.store + s.cortex so the shared
@@ -810,11 +964,106 @@ func (s *replState) ensureCaptureClient() (*capture.Capture, error) {
 	return s.captureClient, nil
 }
 
+// bootstrapBoundariesLine returns a single dash-prefixed line for
+// SystemBoundaries when the project-bootstrap DAG has completed. It
+// reports insight count + both coverage signals so decide.next knows
+// the bootstrap is queryable via remember.vector_search rather than
+// needing to read README itself.
+//
+// Returns "" when the state file is absent, unreadable, malformed, or
+// CompletedAt is nil. Best-effort: a stale or missing file degrades
+// to "no boundary info" silently.
+func bootstrapBoundariesLine(workdir string) string {
+	cortexDir := filepath.Join(workdir, ".cortex")
+	st, err := bootstrap.LoadState(bootstrap.StatePath(cortexDir))
+	if err != nil || st == nil || st.CompletedAt == nil {
+		return ""
+	}
+	effFrac := 0.0
+	if st.EffTotalLines > 0 {
+		effFrac = float64(st.CoveredEffLines) / float64(st.EffTotalLines)
+	}
+	fileFrac := 0.0
+	if st.TotalFiles > 0 {
+		fileFrac = float64(st.CoveredFiles) / float64(st.TotalFiles)
+	}
+	return fmt.Sprintf(
+		"- Project bootstrap: complete (%d insights, %.0f%% effective-LOC, %.0f%% file-coverage; query via remember.vector_search).\n",
+		st.InsightsEmitted, 100*effFrac, 100*fileFrac,
+	)
+}
+
+// maybeStartBootstrap is the REPL's first-run hook: if
+// .cortex/bootstrap_state.json is absent or incomplete (and the user
+// hasn't set CORTEX_SKIP_BOOTSTRAP=1), spawn the project-bootstrap
+// controller in a goroutine. The REPL keeps accepting input
+// immediately; bootstrap surfaces progress as banners between user
+// prompts. Cancel-on-exit is wired via state.bootstrapCancel, which
+// state.close() invokes during defer.
+func maybeStartBootstrap(state *replState) {
+	if os.Getenv("CORTEX_SKIP_BOOTSTRAP") == "1" {
+		return
+	}
+	cortexDir := filepath.Join(state.workdir, ".cortex")
+	run, reason := bootstrap.ShouldRunBootstrap(cortexDir)
+	if !run {
+		return
+	}
+	state.ui.Info(fmt.Sprintf("cortex: bootstrap starting (%s) — progress will surface as banners (CORTEX_SKIP_BOOTSTRAP=1 to disable)", reason))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	state.bootstrapCancel = cancel
+
+	// Build the provider the same way newSessionCognition did, so
+	// bootstrap inherits the REPL's currently-pinned model/endpoint.
+	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: state.workdir}
+	provider := buildLLMProviderForREPL(cfg, state.model, state.apiURL)
+
+	cc := bootstrap.ControllerConfig{
+		Config: bootstrap.Config{
+			ProjectRoot:    state.workdir,
+			ContextDir:     cortexDir,
+			Provider:       provider,
+			TargetCoverage: 0.80,
+			BudgetMax:      200,
+			BatchSize:      4,
+			WindowLines:    bootstrap.DefaultWindowLines,
+			WindowOverlap:  bootstrap.DefaultWindowOverlap,
+			ExtractOp:      bootstrap.ExtractOpAuto,
+			Banner: func(line string) {
+				// Structured event so the TUI can pin progress to
+				// the ambient row (between divider and status) and
+				// drop it when bootstrap finishes. StdoutSink's
+				// renderer prints the legacy "[bootstrap] foo"
+				// inline form. We can't detect "done" from inside
+				// the bootstrap controller's banner callback today;
+				// state.close()'s bootstrapCancel runs on session
+				// exit which is a fine clear-trigger but we'd want
+				// the controller to emit one final done=true line
+				// at coverage-met. That's a follow-up — for now
+				// the row clears on session end via the cancel
+				// hook + a final empty event below.
+				state.ui.Event("bootstrap.progress", map[string]any{
+					"line": line,
+					"done": false,
+				})
+			},
+		},
+		ExtractInsightFn:  wrapInsightFn(provider),
+		ExtractOverviewFn: wrapOverviewFn(provider),
+	}
+	go bootstrap.RunInBackground(ctx, cc)
+}
+
 // close flushes and closes the session JSONL plus any shared cognition
 // state. The Storage close flushes its append-mode JSONL handles so
 // the events.jsonl on disk matches the in-memory indexes at the
 // moment of session end.
 func (s *replState) close() {
+	if s.bootstrapCancel != nil {
+		s.bootstrapCancel()
+		s.bootstrapCancel = nil
+	}
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
 	}
@@ -823,10 +1072,71 @@ func (s *replState) close() {
 	}
 }
 
+// applySalienceCalibration reads .cortex/calibration/salience.json
+// (Phase 3 Slice 5) and pushes the snapshot's GlobalCap into
+// llm.SetSalienceCapOverride so SalienceCapForClass returns the
+// calibrated value across every class. Missing file or missing
+// GlobalCap is silent — the static class defaults stay in force.
+//
+// Per-class differentiation isn't possible from the trace shape
+// today (rows don't carry the running session's ContextClass), so a
+// single class-agnostic cap is the most we can say with the data.
+// When the trace schema grows a class column, this function gains a
+// per-class breakdown.
+func applySalienceCalibration(cortexDir string, verbose bool, ui cliout.Sink) {
+	path := filepath.Join(cortexDir, "calibration", "salience.json")
+	snap, err := dag.LoadSalienceCalibration(path)
+	if err != nil {
+		if verbose && ui != nil {
+			ui.Warn(fmt.Sprintf("salience calibration load failed (%v)", err))
+		}
+		return
+	}
+	if snap == nil || snap.GlobalCap <= 0 {
+		return
+	}
+	llm.SetSalienceCapOverride(map[llm.ContextClass]int{
+		llm.ContextSmall:  snap.GlobalCap,
+		llm.ContextMedium: snap.GlobalCap,
+		llm.ContextLarge:  snap.GlobalCap,
+	})
+	if verbose && ui != nil {
+		ui.Info(fmt.Sprintf("salience: calibrated cap=%d (samples=%d)", snap.GlobalCap, snap.Samples))
+	}
+}
+
+// salienceCapForSession returns the per-tool-call output-token cap to
+// use for this REPL turn, derived from the model id + the endpoint's
+// advertised context window (when available). Phase 3 Slice 1: weaker
+// models get a tighter cap (favoring fan-out into many small reads);
+// stronger models get a looser cap (so a synthesis turn sees rich
+// uncompressed evidence). Falls back to defaultToolOutputSalienceCap
+// when the inference can't pick a class.
+//
+// ctxWindow defaults to 0 (unknown). The REPL passes the endpoint's
+// max_context_window when it has one — Lemonade exposes it; raw Ollama
+// doesn't.
+func salienceCapForSession(model string, ctxWindow int) (int, llm.ContextClass) {
+	class := llm.InferContextClass(model, ctxWindow)
+	cap := llm.SalienceCapForClass(class)
+	if cap <= 0 {
+		cap = defaultToolOutputSalienceCap
+	}
+	return cap, class
+}
+
 // resolveAPIURL routes to Ollama when the model id looks local (no
 // provider prefix), to OpenRouter otherwise. We treat a slash as the
 // "this is provider/model" signal — matches the convention `cortex code`
 // uses (anthropic/foo, qwen/foo, openai/foo).
+//
+// TODO (two-backend world is too narrow): "ollama or openrouter" is
+// the entire universe today. Real users with their own inference
+// servers — vLLM, llama.cpp, LM Studio, sglang — have no path,
+// neither do direct Anthropic / OpenAI keys. For the small-model
+// amplifier story local inference variety is the point. Generalize
+// to a backend registry (model id pattern → endpoint + auth) with
+// the current ollama/openrouter pair as two preconfigured entries.
 func resolveAPIURL(model string) string {
 	if !strings.Contains(model, "/") {
 		return defaultOllamaAPIURL
@@ -834,6 +1144,15 @@ func resolveAPIURL(model string) string {
 	return "" // empty → harness uses OpenRouter default
 }
 
+// TODO (layer, don't replace): the override file is full-replacement
+// today — if a user writes .local.md they lose the iter-7 calibrated
+// guardrails baked into defaultREPLSystemPrompt ("don't hallucinate
+// the codebase", "no absolute paths"). Combined with the AGENTS.md
+// TODO at newREPLState: the right shape is `default + (project
+// addendum from AGENTS.md or .local.md) + (per-model variant if
+// any)`. Keep the calibrated rules always; let projects ADD
+// conventions without losing them.
+//
 // loadOrSeedSystemPrompt resolves the worker-model system prompt for
 // this REPL session. Binary-first: the const is the source of truth,
 // .cortex/repl-system-prompt.local.md is an opt-in override the user
@@ -858,6 +1177,16 @@ func loadOrSeedSystemPrompt(path string) (string, error) {
 	return defaultREPLSystemPrompt, nil
 }
 
+// TODO (rules are policy, not enforcement): the "Don't claim you read
+// a file you didn't read" and "Never write under .git or .cortex"
+// rules are model-side asks with nothing enforcing them. A reflect.*
+// node at finalize that cross-checks final_text claims ("I read X",
+// "After reviewing Y") against the turn's act.read_file trace would
+// turn policy into a signal — fans into the learning loop as either
+// a feedback.correction event or a captured "model hallucinated again"
+// metric. This is exactly the salience-layer-for-small-models pattern
+// applied to prompt rules.
+//
 // defaultREPLSystemPrompt is the worker-model system prompt for the
 // agent loop inside decide.coding_turn. Assumed floor: 7B+ model with
 // reliable function-calling. The user override lives at
@@ -921,13 +1250,38 @@ func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
 	_ = emitter.Ok(os.Stdout, data)
 }
 
+// revalidateAndWarn runs the Phase 4 Slice E role-map revalidation
+// against <workdir>/.cortex/config.json and prints a one-line warning
+// per stale assignment. Stale doesn't block the REPL — the routing
+// layer will surface the actual error if a user invokes a broken
+// role — but surfacing it up front lets the user fix it before
+// hitting it mid-session.
+func revalidateAndWarn(workdir string, ui cliout.Sink) {
+	cfg := loadREPLConfig(filepath.Join(workdir, ".cortex"))
+	if cfg == nil || cfg.Models == nil {
+		return
+	}
+	stale := intllm.RevalidateRoleMap(cfg)
+	for _, s := range stale {
+		ui.Warn(fmt.Sprintf("role %s pinned to %s/%s — %s", s.Role, s.Endpoint, s.Model, s.Reason))
+	}
+}
+
 // printREPLBanner prints the welcome line. One line, no ASCII art.
+// The backend label honors endpoint resolution: a model id matching a
+// configured endpoint shows that endpoint's name (e.g. "chatterbox"),
+// otherwise falls back to apiURL or "openrouter (default)".
 func printREPLBanner(s *replState) {
 	api := s.apiURL
+	if cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex")); cfg != nil {
+		if ep, _, ok := cfg.ResolveModelRoute(s.model); ok {
+			api = fmt.Sprintf("%s (%s)", ep.Name, ep.BaseURL)
+		}
+	}
 	if api == "" {
 		api = "openrouter (default)"
 	}
-	fmt.Printf("cortex · %s · %s · %s · /help\n", s.workdir, s.model, api)
+	s.ui.Banner(fmt.Sprintf("cortex · %s · %s · %s · /help", s.workdir, s.model, api))
 }
 
 // printREPLHelp dumps the bare `cortex --help` text. Mirrors slash /help.
@@ -981,11 +1335,11 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        the model on each turn. Default 6 (last 3
                        user/assistant pairs). 0 disables history.
                        Mid-session, /history N changes the cap.
-      --no-dag         Debug escape hatch: skip act-op dispatch and
-                       suppress per-tool dag.TraceEntry rows. By
-                       default (Stage 3.5), every coding turn's
-                       tool calls flow through the DAG runtime.
-
+      --prior-summaries N  Cap on cross-session think.session_summary
+                       entries injected at REPL start. Default 3.
+                       0 disables cross-session memory (the pre-
+                       Item-4 behavior). Mid-session,
+                       /prior-summaries N changes the cap.
 In the REPL:
   /help                Show slash-command help.
   /diff                Show files changed since session start.
@@ -1007,13 +1361,13 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 	rest := parts[1:]
 	switch cmd {
 	case "/help", "/?":
-		printSlashHelp()
+		s.printSlashHelp()
 		return true, nil
 	case "/quit", "/exit":
 		return false, nil
 	case "/model":
 		if len(rest) == 0 {
-			fmt.Printf("  current model: %s (api: %s)\n", s.model, displayAPI(s.apiURL))
+			s.ui.Info(fmt.Sprintf("  current model: %s (api: %s)", s.model, displayAPI(s.apiURL)))
 			return true, nil
 		}
 		prevModel, prevAPI := s.model, s.apiURL
@@ -1024,7 +1378,7 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			return true, fmt.Errorf("model swap failed (provider rebind): %w", err)
 		}
 		s.resetModelCatalog()
-		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
+		s.ui.Info(fmt.Sprintf("  model → %s (api: %s)", s.model, displayAPI(s.apiURL)))
 		return true, nil
 	case "/models":
 		refresh := len(rest) > 0 && rest[0] == "refresh"
@@ -1038,7 +1392,7 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		return true, nil
 	case "/history":
 		if len(rest) == 0 {
-			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
+			s.ui.Info(fmt.Sprintf("  history: cap=%d turns, buffered=%d turns", s.historyLimit, len(s.history)))
 			return true, nil
 		}
 		var n int
@@ -1046,8 +1400,49 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			return true, fmt.Errorf("/history N: N must be a non-negative integer")
 		}
 		s.historyLimit = n
-		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
+		s.ui.Info(fmt.Sprintf("  history cap → %d turns (buffered=%d)", s.historyLimit, len(s.history)))
 		return true, nil
+	case "/prior-summaries":
+		if len(rest) == 0 {
+			s.ui.Info(fmt.Sprintf("  prior-session summaries: cap=%d", s.priorSessionsCap))
+			return true, nil
+		}
+		var n int
+		if _, err := fmt.Sscanf(rest[0], "%d", &n); err != nil || n < 0 {
+			return true, fmt.Errorf("/prior-summaries N: N must be a non-negative integer")
+		}
+		s.priorSessionsCap = n
+		s.ui.Info(fmt.Sprintf("  prior-session summary cap → %d", s.priorSessionsCap))
+		return true, nil
+	case "/verbose":
+		// Mid-session toggle of the verbose flag. With no argument
+		// it flips; "on" / "off" pin the value explicitly. Surfaces
+		// via the sink so both StdoutSink and TUISink update their
+		// Event rendering gate on the next coding.turn /
+		// coding.tool_result.
+		if len(rest) == 0 {
+			s.verbose = !s.verbose
+		} else {
+			switch strings.ToLower(rest[0]) {
+			case "on", "true", "1", "yes":
+				s.verbose = true
+			case "off", "false", "0", "no":
+				s.verbose = false
+			default:
+				return true, fmt.Errorf("/verbose [on|off]: argument must be on|off (got %q)", rest[0])
+			}
+		}
+		s.ui.SetVerbose(s.verbose)
+		state := "off"
+		if s.verbose {
+			state = "on"
+		}
+		s.ui.Info(fmt.Sprintf("  verbose → %s", state))
+		return true, nil
+	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
+	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
+	// keeping them here just to back a parallel snapshot system isn't
+	// worth the maintenance.
 	case "/diff":
 		s.printDiff()
 		return true, nil
@@ -1061,14 +1456,16 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 	}
 }
 
-func printSlashHelp() {
-	fmt.Println(`  /help              this message
+func (s *replState) printSlashHelp() {
+	s.ui.Info(`  /help              this message
   /diff              changed files since session start
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
   /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
   /shell-policy      show the user-configured shell allow/deny policy (if any)
   /history [N]       show buffered turn count, or set the conversation-history cap to N
+  /prior-summaries [N]  show or set the cap on cross-session summary injection
+  /verbose [on|off]  toggle (or set) verbose event rendering mid-session
   /quit              exit (also Ctrl-D)`)
 }
 
@@ -1094,6 +1491,19 @@ func displayAPI(api string) string {
 // The structured row in session.jsonl carries enough to reconstruct
 // what happened, including the auto-retry round and any user-driven
 // retry hints.
+//
+// TODO: move verification from this hardcoded outer-loop gate into the
+// DAG as an emergent micro-node (e.g. verify.* op family spawned when
+// the coding turn produced edits). The small LLM at that node decides
+// what to run from project context (test file present? Makefile? CI
+// config?) and its output feeds back via a normal DAG edge — same
+// shape as any other decide.* node. Benefits: verification quality
+// becomes a measurable DAG node captured in cell_results.jsonl,
+// evaluable + swappable, and language-agnostic without hardcoded
+// detection. Gate on an emergence eval (docs/emergence-evals.md) for
+// "post-edit → verify-node-spawned" recall before deleting --verifier;
+// keep --verifier as a benchmark-only forcing function while the
+// emergent path matures.
 func (s *replState) runTurn(userPrompt string) error {
 	turnNum := s.turns + 1
 
@@ -1139,6 +1549,18 @@ func (s *replState) runTurn(userPrompt string) error {
 	// consumers; later attempts merge their files-changed into the
 	// row but are not individually broken out (they would land as
 	// extra session.jsonl fields in a follow-up schema bump).
+	//
+	// TODO (retry is monotone): each retry re-runs the SAME model with
+	// the SAME prompt + SAME tool surface, just with verifier output
+	// appended. For small-model amplification the escalation should
+	// have diversity: bump temperature, route attempt 2 through a
+	// stronger decide.next model, decompose into a plan.* node, or
+	// flip --minimal-tools off/on. A retry-policy node ("given attempt
+	// N failed with signal S, pick the diversification move") fits the
+	// micro-decision DAG model and is the place small-model amplifier
+	// behavior actually shows up. Today "try again with the error" is
+	// the only move; that's where the harness leaves capability on the
+	// table.
 	retryBudget := s.maxRetries
 	if retryBudget < 1 {
 		retryBudget = 1
@@ -1147,9 +1569,9 @@ func (s *replState) runTurn(userPrompt string) error {
 	for autoAttempt < retryBudget && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		autoAttempt++
 		if autoAttempt == 1 {
-			fmt.Printf("  verify failed (%s), auto-retrying with error context (1/%d)...\n", verifyRes.Kind, retryBudget)
+			s.ui.Info(fmt.Sprintf("  verify failed (%s), auto-retrying with error context (1/%d)...", verifyRes.Kind, retryBudget))
 		} else {
-			fmt.Printf("  verify still failing, auto-retry %d/%d...\n", autoAttempt, retryBudget)
+			s.ui.Info(fmt.Sprintf("  verify still failing, auto-retry %d/%d...", autoAttempt, retryBudget))
 		}
 		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
 		if autoAttempt == 1 {
@@ -1178,7 +1600,7 @@ func (s *replState) runTurn(userPrompt string) error {
 	for !s.headless && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		attempts++
 		if attempts > userGateMaxAttempts {
-			fmt.Printf("  reached %d user-retry attempts; rolling back\n", userGateMaxAttempts)
+			s.ui.Info(fmt.Sprintf("  reached %d user-retry attempts; rolling back", userGateMaxAttempts))
 			break
 		}
 		decision := s.promptGate(verifyRes)
@@ -1211,8 +1633,7 @@ func (s *replState) runTurn(userPrompt string) error {
 		case gateEdit:
 			row.UserGate = "edit"
 			row.UserRetryAttempts++
-			fmt.Println("  edit any files in the workdir, then press enter to re-verify")
-			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+			_, _ = s.ui.ReadLine("  edit any files in the workdir, then press enter to re-verify\n")
 			verifyRes = s.runVerifier()
 			row.UserRetryVerifyOK = verifyRes.OK
 			row.UserRetryVerifyOutput = verifyRes.OutputTail
@@ -1244,6 +1665,17 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 // the rollback for benchmark callers that want iteration to build on
 // prior attempts instead of resetting to scratch). Always writes the
 // row.
+//
+// TODO (learning loop is open): captureTurn records user prompts as
+// events, but the OUTCOME signals on `row` — VerifyOK, UserGate (skip/
+// retry/quit), UserRetryHints, RetryVerifyOK, the diff between attempt
+// 1 and attempt 2's FilesChanged — never become durable wisdom anyone
+// retrieves. session.jsonl is structured but read by no one. To make
+// this an actual learning harness, fan outcome rows into the journal
+// (capture/observation/feedback class as appropriate) so cortex_search
+// surfaces "last time you tried X the verifier said Y; the fix was Z"
+// on the next session. Today the inbound wire (shared Storage →
+// cortex_search) exists; the outbound wire doesn't.
 func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	row.Accepted = accepted
 	if accepted {
@@ -1256,11 +1688,18 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 			User:      row.UserMessage,
 			Assistant: row.FinalText,
 		})
-		printTurnSummary(row)
+		// Phase 3 Slice 4: emit a compressed per-turn summary so the
+		// next turn can pull the rolling-summary view from the journal
+		// instead of replaying full transcripts. Best-effort; failures
+		// don't block the turn (logged in verbose mode).
+		if err := s.emitSessionSummary(row); err != nil && s.verbose {
+			s.ui.Warn(fmt.Sprintf("(session summary failed: %v)", err))
+		}
+		s.printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
-			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
+			s.ui.Warn(fmt.Sprintf("(capture failed: %v)", err))
 		} else if s.verbose {
-			fmt.Println("  (captured)")
+			s.ui.Info("  (captured)")
 		}
 	} else if s.keepOnFail {
 		// Benchmark mode: preserve the agent's attempt so the next
@@ -1269,29 +1708,173 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		// the work the agent did get done. Snapshot still lives on
 		// disk; `/undo` could surface it if needed.
 		if s.verbose {
-			fmt.Println("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
+			s.ui.Info("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
 		}
 	} else {
 		if err := s.restoreFromSnapshot(snapDir); err != nil {
-			fmt.Fprintf(os.Stderr, "  WARN: rollback failed: %v\n", err)
+			s.ui.Warn(fmt.Sprintf("rollback failed: %v", err))
 		}
 	}
 	if err := s.writeJSONL(row); err != nil {
-		fmt.Fprintf(os.Stderr, "  WARN: session log write failed: %v\n", err)
+		s.ui.Warn(fmt.Sprintf("session log write failed: %v", err))
 	}
 	return nil
 }
 
-// priorMessagesForHarness assembles the conversation-history block for
-// the next harness call: at most s.historyLimit accepted turns, each
-// flattened into a (user, assistant) ChatMessage pair. Tool-call traces
-// are intentionally omitted — they're noise the model doesn't need to
-// reason about future requests, and they burn tokens fast.
+// emitSessionSummary writes a compressed per-turn summary to the
+// journal's think class so subsequent turns can pull the rolling-
+// summary view instead of replaying full prior transcripts
+// (docs/salience-budgets.md "Cross-turn context (per-session)").
 //
-// Returns an empty slice when historyLimit is 0 or no turns have been
-// accepted yet.
+// Path:
+//
+//  1. Compose a draft string from the turn's signals — user prompt,
+//     final response, files changed, verifier result.
+//  2. Run it through attend.compress under intent="session-summary"
+//     with the same capability-aware salience cap the dispatcher
+//     used for this turn. Stronger model → more verbose summary;
+//     weaker model → tighter one.
+//  3. Write a ThinkSessionSummaryPayload entry to
+//     <workdir>/.cortex/journal/think/.
+//
+// Best-effort: any failure is returned but the caller logs+continues.
+// Compressor unavailable (no provider) → passthrough on the draft.
+func (s *replState) emitSessionSummary(row turnRow) error {
+	if s.workdir == "" {
+		return nil
+	}
+	draft := composeSessionSummaryDraft(row)
+	if strings.TrimSpace(draft) == "" {
+		return nil
+	}
+
+	cap, _ := salienceCapForSession(s.model, 0)
+	intent := "session-summary: what the user asked, what was done, files changed, key takeaways. Preserve facts, drop pleasantries."
+
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	provider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+
+	// Tight timeout: summary writes are best-effort; we don't want a
+	// hung LLM call to block the REPL prompt from returning. 15s is
+	// generous for a small-model salience-extraction pass; misses
+	// fall through to passthrough/truncate-stub.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := ops.CompressSpec(ops.CompressConfig{Provider: provider}).Handler(ctx,
+		map[string]any{"raw": draft, "max_tokens": cap, "intent": intent},
+		dag.Budget{LatencyMS: 15000, Tokens: 2000, Depth: 1})
+	if err != nil {
+		return fmt.Errorf("attend.compress: %w", err)
+	}
+
+	compressed, _ := res.Out["compressed"].(string)
+	if strings.TrimSpace(compressed) == "" {
+		compressed = draft
+	}
+	origTok, _ := res.Out["original_tokens"].(int)
+	keptTok, _ := res.Out["kept_tokens"].(int)
+	fallback, _ := res.Out["fallback"].(bool)
+	compressOp := "attend.compress"
+	if fallback {
+		compressOp = "fallback"
+	}
+
+	payload := journal.ThinkSessionSummaryPayload{
+		SessionID:    s.sessionID,
+		Turn:         row.Turn,
+		UserPrompt:   row.UserMessage,
+		Summary:      compressed,
+		FilesChanged: row.FilesChanged,
+		VerifyKind:   row.VerifyKind,
+		VerifyOK:     row.VerifyOK,
+		OrigTokens:   origTok,
+		KeptTokens:   keptTok,
+		CompressOp:   compressOp,
+	}
+	entry, err := journal.NewThinkSessionSummaryEntry(payload)
+	if err != nil {
+		return fmt.Errorf("build entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return fmt.Errorf("open writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append: %w", err)
+	}
+	return nil
+}
+
+// composeSessionSummaryDraft builds the raw text the salience
+// compressor will work on. Pulls the highest-signal fields from a
+// finalized turnRow into a compact prose block. The compressor is
+// what makes this fit a budget; the draft just gathers everything
+// worth considering.
+func composeSessionSummaryDraft(row turnRow) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Turn %d.\n\nUser prompt:\n%s\n\n", row.Turn, row.UserMessage)
+	if row.FinalText != "" {
+		fmt.Fprintf(&b, "Assistant final response:\n%s\n\n", row.FinalText)
+	}
+	if len(row.FilesChanged) > 0 {
+		fmt.Fprintf(&b, "Files changed: %s\n", strings.Join(row.FilesChanged, ", "))
+	}
+	if row.VerifyKind != "" && row.VerifyKind != "none" {
+		fmt.Fprintf(&b, "Verifier (%s): ok=%v\n", row.VerifyKind, row.VerifyOK)
+		if row.VerifyOutput != "" {
+			fmt.Fprintf(&b, "Verifier output:\n%s\n", row.VerifyOutput)
+		}
+	}
+	if row.RetryFinalText != "" {
+		fmt.Fprintf(&b, "Retry attempt final:\n%s\n", row.RetryFinalText)
+	}
+	if row.UserGate != "" {
+		fmt.Fprintf(&b, "User gate: %s\n", row.UserGate)
+	}
+	return b.String()
+}
+
+// priorMessagesForHarness assembles the conversation-history block for
+// the next harness call.
+//
+// Phase 3 Slice 4: this is the cross-turn rolling-summary read path.
+// Instead of replaying the raw (user, assistant) text of the last K
+// turns — which scales linearly in transcript length and quadratically
+// in cumulative tokens — we pull the most recent K
+// think.session_summary entries from the journal and inject them as a
+// single condensed system message. Each summary is the compressed
+// artifact emitted at finalize() under the same capability-aware
+// salience cap the per-turn flow uses. Cumulative prior-context size
+// flattens; long sessions stay viable.
+//
+// Item 4 (cross-session memory): the SessionID filter is now off —
+// prior-session summaries flow in on REPL start so the model resumes
+// with context from earlier work. priorSessionsCap bounds the
+// cross-session count separately from historyLimit (current session).
+//
+// Behavior:
+//   - historyLimit ≤ 0 AND priorSessionsCap ≤ 0 → no prior messages.
+//   - Journal read failure or zero matching summaries → fall back to
+//     the verbatim s.history slice (pre-Slice-4 behavior).
 func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
-	if s.historyLimit <= 0 || len(s.history) == 0 {
+	if s.historyLimit <= 0 && s.priorSessionsCap <= 0 {
+		return nil
+	}
+	summaries := s.readRecentSessionSummaries(s.historyLimit, s.priorSessionsCap)
+	if len(summaries) > 0 {
+		return summariesAsChatMessages(summaries)
+	}
+	// Fallback: verbatim history (pre-Slice-4 behavior). Triggers when
+	// the journal has no summary entries for this session yet (turn 1
+	// after a fresh start before finalize has run) or a journal read
+	// errored. Keeps the REPL functional regardless of journal state.
+	if len(s.history) == 0 {
 		return nil
 	}
 	start := len(s.history) - s.historyLimit
@@ -1311,6 +1894,105 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 	return out
 }
 
+// readRecentSessionSummaries scans the workdir's think journal for
+// recent session-summary entries and returns them in chronological
+// order (oldest first). currentCap bounds the count of entries from
+// the current session; priorCap bounds the count of entries from
+// every other session combined. Prior-session entries come first in
+// the returned slice so the most-recent (current-session) summaries
+// remain the last context the model sees.
+//
+// Returns an empty slice on any error or when no entries exist (the
+// caller decides whether to fall back).
+func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journal.ThinkSessionSummaryPayload {
+	if (currentCap <= 0 && priorCap <= 0) || s.workdir == "" || s.sessionID == "" {
+		return nil
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	var current, prior []journal.ThinkSessionSummaryPayload
+	for {
+		e, err := r.Next()
+		if err != nil {
+			break // io.EOF or read error — return what we got
+		}
+		if e.Type != journal.TypeThinkSessionSummary {
+			continue
+		}
+		p, perr := journal.ParseThinkSessionSummary(e)
+		if perr != nil {
+			continue
+		}
+		if p.SessionID == s.sessionID {
+			current = append(current, *p)
+		} else {
+			prior = append(prior, *p)
+		}
+	}
+	current = tailN(current, currentCap)
+	prior = tailN(prior, priorCap)
+	out := make([]journal.ThinkSessionSummaryPayload, 0, len(prior)+len(current))
+	out = append(out, prior...)
+	out = append(out, current...)
+	return out
+}
+
+// tailN returns the last n elements of s. n ≤ 0 returns nil; n ≥
+// len(s) returns s verbatim. Used to cap the current/prior summary
+// slices independently before they're merged.
+func tailN(s []journal.ThinkSessionSummaryPayload, n int) []journal.ThinkSessionSummaryPayload {
+	if n <= 0 || len(s) == 0 {
+		return nil
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
+// summariesAsChatMessages converts a slice of session summaries into
+// the harness's prior-messages slot. We emit a single user-role
+// message containing all summaries — the model treats it as
+// "background on what's already happened" without confusing it for an
+// actual turn the user took. One message keeps the transcript shape
+// flat and predictable for the inner loop.
+//
+// Item 4: prior-session entries are surfaced with a "[prior session]"
+// tag so the model can distinguish older context from the current
+// session's turn-by-turn history. Both share a single block; the
+// boundary is visual, not structural.
+func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []llm.ChatMessage {
+	if len(summaries) == 0 {
+		return nil
+	}
+	// currentSessionID is implicit in the slice — the readRecent
+	// function appends prior entries first, then current. We carry
+	// it forward by looking at the last entry's session id when
+	// available; ties to a single id when only one session is in
+	// play.
+	var currentID string
+	if len(summaries) > 0 {
+		currentID = summaries[len(summaries)-1].SessionID
+	}
+	var b strings.Builder
+	b.WriteString("CONVERSATION SO FAR (summary of prior turns; not user input):\n")
+	for _, p := range summaries {
+		tag := ""
+		if p.SessionID != currentID {
+			tag = "[prior session] "
+		}
+		fmt.Fprintf(&b, "\n%s[turn %d] %s\n", tag, p.Turn, strings.TrimSpace(p.Summary))
+	}
+	return []llm.ChatMessage{
+		{Role: "user", Content: b.String()},
+		{Role: "assistant", Content: "Understood — I'll treat that as context, not as new user input."},
+	}
+}
+
 // runHarness wraps evalv2.CortexHarness.RunSessionWithResult. Returns
 // zero values when the underlying construction fails (e.g. Ollama not
 // reachable) — caller surfaces via HarnessError.
@@ -1319,20 +2001,30 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 // "previous attempt failed with this build/test error" tail so the
 // model has the failure in context on a retry.
 func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, error) {
-	if err := ensureStubOpenRouterKey(s.apiURL); err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, err
-	}
+	// Phase 4: endpoint resolution. When the model id resolves to a
+	// configured OpenAI-compatible endpoint (e.g. "chatterbox/..."),
+	// bind the harness to that endpoint and strip the prefix before
+	// the call to the LLM.
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	ep, bareModel, useEndpoint := cfg.ResolveModelRoute(s.model)
+
 	h, err := evalv2.NewCortexHarness(s.model)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
 	}
+	if useEndpoint {
+		h.SetEndpoint(&llm.EndpointConfig{
+			Name:    ep.Name,
+			BaseURL: ep.BaseURL,
+			APIKey:  ep.ResolveAPIKey(),
+		})
+		h.SetModel(bareModel)
+	}
 
-	// Stage 5/6 (chain unification): act-op dispatch is wired by the
-	// chain's decide.coding_turn handler via CodingTurnConfig.ActRegistry,
-	// not by a separate buildCodeActDispatcher call. The chain path
-	// gives parent_node_id real lineage (the executor's coding_turn
-	// node ID) instead of the synthetic "code-<pid>-coding_turn"
-	// placeholder. Only the --no-dag escape skips both layers.
+	// Act-op dispatch is wired by the chain's decide.coding_turn
+	// handler via CodingTurnConfig.ActRegistry. The chain path gives
+	// parent_node_id real lineage (the executor's coding_turn node
+	// ID).
 
 	// Share the REPL's Cortex with the cortex_search tool so captures
 	// from earlier turns in this session are findable. Nil cortex is
@@ -1368,7 +2060,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// the human sees what's happening during long turns (gpt-oss-20b
 	// takes 20-30s per turn; without this it's a silent stare). Token
 	// + per-turn telemetry is gated behind --verbose.
-	h.SetNotify(makeREPLNotifier(s.verbose))
+	h.SetNotify(makeREPLNotifier(s.ui, s.verbose))
 	turns := defaultMaxTurns
 	if s.maxTurns > 0 {
 		turns = s.maxTurns
@@ -1390,26 +2082,12 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 		prompt = userPrompt + "\n\nPREVIOUS ATTEMPT FAILED. Verifier output:\n" + retryContext + "\n\nFix this, then stop."
 	}
 
-	// Stage 5/6 (REPL chain unification): every REPL turn IS a
-	// dag.Executor.Run over the Stage 2 chain instead of a direct
-	// h.RunSessionWithResult call. The preconfigured harness flows
-	// through CodingTurnConfig.HarnessFactory so the chain's
-	// decide.coding_turn node drives this same instance (with all
-	// REPL state already set above) rather than constructing a fresh
-	// one. The full HarnessResult + LoopResult are captured back via
-	// ResultCallback. --no-dag (s.useDAG=false) reverts to the V0
-	// direct-harness path for debugging.
-	var (
-		hr     evalv2.HarnessResult
-		lr     harness.LoopResult
-		runErr error
-	)
-	if s.useDAG {
-		hr, lr, runErr = runREPLChainTurn(s, h, prompt)
-	} else {
-		hr, runErr = h.RunSessionWithResult(context.Background(), prompt, s.workdir)
-		lr = h.LastLoopResult()
-	}
+	// Every REPL turn is a dag.Executor.Run over the dynamic-DAG seed.
+	// The preconfigured harness flows in via CodingTurnConfig.HarnessFactory
+	// so the chain's decide.coding_turn node drives this same instance
+	// (with all REPL state already set above). The full HarnessResult
+	// + LoopResult come back via ResultCallback.
+	hr, lr, runErr := runREPLChainTurn(s, h, prompt)
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -1438,8 +2116,18 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 // Executor runs in sequential mode so search → decide.next is
 // guaranteed FIFO (parallel mode would race them).
 //
-// V0 escape (--no-dag) preserves the direct h.RunSessionWithResult
-// path; this function is only on the dag-enabled path.
+// TODO (DAG state is per-turn, not per-session): registry + executor
+// are rebuilt fresh every turn and the calibration snapshot is loaded
+// cold each time. Observed costs/latencies/success rates from this
+// turn — exactly the signal that would let CanAfford decisions get
+// smarter — are discarded at function return. decide.next's composition
+// shape ("for prompts like this, last time spawning [vector_search,
+// coding_turn] worked, parallel act.read_file did not") is also lost.
+// Hoist the registry onto replState (or a session-scoped Registry
+// pool), persist per-op observed cost back into the calibration store
+// at finalize, and let decide.next see "shapes that worked recently"
+// as part of NextConfig. This is the cross-turn DAG learning the
+// inverse "DAG learns what to spawn" pitch depends on.
 func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
 	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
 
@@ -1448,10 +2136,31 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	if tw != nil {
 		traceCB = tw.Callback(turnID)
 	}
+	// Always wrap with the stdout streamer so the user sees the DAG
+	// shape emerge live. The wrapper invokes the underlying writer
+	// callback (when present) after each print so dag_traces.jsonl
+	// still captures every entry.
+	traceCB = makeREPLDAGTracer(s.ui, traceCB)
 
 	actReg := dag.NewRegistry()
-	if _, err := dagnode.RegisterDefaultActOpMetadata(actReg); err != nil {
+	// Build a shared provider for the salience compressor so per-tool
+	// compression runs through a real Reflect-style small-model pass
+	// rather than the truncate-stub fallback. Same provider the
+	// REPL's dynamic registry uses for the other LLM-backed ops.
+	compressProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
+	if _, err := dagnode.RegisterDefaultActOpMetadataWithCompressor(actReg, compressProvider); err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
+	}
+
+	// Phase 3 Slice 1: capability-aware salience cap. Weaker models
+	// get a tighter cap (favoring fan-out into many small reads);
+	// stronger models get a looser cap (so a synthesis turn sees rich
+	// uncompressed evidence). ctxWindow=0 means "use the model id
+	// alone"; future iteration will probe the endpoint's /v1/models
+	// for max_context_window.
+	salienceCap, ctxClass := salienceCapForSession(s.model, 0)
+	if s.verbose {
+		s.ui.Info(fmt.Sprintf("  · salience cap=%d (model class=%s)", salienceCap, ctxClass))
 	}
 
 	var (
@@ -1460,10 +2169,11 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		capturedErr error
 	)
 	codingCfg := dagnode.CodingTurnConfig{
-		Model:       s.model,
-		Workdir:     s.workdir,
-		ActRegistry: actReg,
-		TraceCB:     traceCB,
+		Model:                 s.model,
+		Workdir:               s.workdir,
+		ActRegistry:           actReg,
+		TraceCB:               traceCB,
+		ToolOutputSalienceCap: salienceCap,
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
@@ -1474,7 +2184,15 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, traceCB)
+	// Passthrough's reply lands in the same LoopResult.Final the REPL
+	// prints + journals — keeps the trivial-intent path indistinguishable
+	// from a coding_turn response from the renderer's point of view.
+	passthroughOnResponse := func(reply string) {
+		capturedLR.Final = reply
+		capturedHR.OutputText = reply
+	}
+
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, passthroughOnResponse, traceCB)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, err
 	}
@@ -1491,16 +2209,81 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// and the follow-up wouldn't see search results.
 	ex.SetSequential(true)
 
-	seed := []dag.NodeSpec{{
+	// Intent ingestion: classify the prompt before seeding the DAG.
+	// Drives per-intent budget (dag.BudgetForIntent) AND seed shape —
+	// trivial intents bypass the sense.prompt → decide.next → coding_turn
+	// chain in favor of cheaper terminal nodes (act.passthrough for
+	// greetings). Failure modes return intent=code with confidence=0 so
+	// the seed falls back to today's full chain.
+	intent, intentConf := classifyIntentForTurn(reg, prompt)
+	turnBudget := dag.BudgetForIntent(intent)
+	seed := seedForIntent(intent, intentConf, prompt)
+	if s.verbose {
+		s.ui.Info(fmt.Sprintf("  · intent=%s (conf=%.2f), budget=%s, seed=%s",
+			intent, intentConf, turnBudget, seed[0].QualifiedName()))
+	}
+	if _, err := ex.Run(context.Background(), turnID, seed, turnBudget); err != nil {
+		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+	}
+	return capturedHR, capturedLR, capturedErr
+}
+
+// classifyIntentForTurn runs the sense.classify_intent handler
+// directly (outside the DAG executor) so the result is known at
+// seed-time and can drive both budget selection and seed shape.
+// Returns ("code", 0) on any failure — safe default routes to the
+// existing full pipeline so misclassifications never block a turn.
+//
+// TODO: the classifier call is invisible in the dag trace because it
+// runs outside the executor. Synthesize a trace row from the handler
+// result so the routing decision is preserved alongside the seed.
+func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
+	spec, err := reg.Get("sense.classify_intent")
+	if err != nil {
+		return ops.IntentCode, 0
+	}
+	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, dag.DefaultTurnBudget())
+	if herr != nil {
+		return ops.IntentCode, 0
+	}
+	intent, _ := res.Out["intent"].(string)
+	if intent == "" {
+		intent = ops.IntentCode
+	}
+	confidence, _ := res.Out["confidence"].(float64)
+	return intent, confidence
+}
+
+// intentPassthroughThreshold gates the trivial-intent short-circuit.
+// Below this confidence we route through the full chain — better to
+// pay the coding_turn cost than to give a canned "Hi" to someone who
+// actually wanted help.
+const intentPassthroughThreshold = 0.7
+
+// seedForIntent picks the per-turn seed spec list based on the
+// classified intent. greeting (with high confidence) bypasses the
+// agent loop via act.passthrough; everything else uses today's
+// sense.prompt → decide.next → coding_turn chain.
+//
+// Recall / clarify will get their own dedicated seeds in follow-up
+// slices (Slices 2 + 4 of the integration plan); today they share
+// the default chain but run under their tighter BudgetForIntent
+// budgets, so a misroute still can't balloon the turn.
+func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeSpec {
+	if intent == "greeting" && confidence >= intentPassthroughThreshold {
+		return []dag.NodeSpec{{
+			Function: dag.FuncAct,
+			Op:       "passthrough",
+			ID:       "n1",
+			Attrs:    map[string]any{"prompt": prompt},
+		}}
+	}
+	return []dag.NodeSpec{{
 		Function: dag.FuncSense,
 		Op:       "prompt",
 		ID:       "n1",
 		Attrs:    map[string]any{"prompt": prompt},
 	}}
-	if _, err := ex.Run(context.Background(), turnID, seed, dag.DefaultTurnBudget()); err != nil {
-		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
-	}
-	return capturedHR, capturedLR, capturedErr
 }
 
 // buildREPLDynamicRegistry builds the registry for the dynamic-DAG
@@ -1513,10 +2296,31 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 // The registry is captured by reference inside decide.next's handler
 // closure, so subsequent registrations (decide.coding_turn,
 // sense.prompt) are visible when the handler runs.
-func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) (*dag.Registry, error) {
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, passthroughOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
 	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		return nil, fmt.Errorf("ops defaults: %w", err)
+	}
+
+	// sense.classify_intent — routes each turn to a per-intent budget
+	// + seed shape (see classifyIntentForTurn + seedForIntent in
+	// runREPLChainTurn). Registered Exposable so decide.next can
+	// re-invoke it if its plan needs to re-classify mid-chain.
+	classifyProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
+	if err := reg.Register(ops.ClassifyIntentSpec(ops.ClassifyIntentConfig{
+		Provider: classifyProvider,
+	})); err != nil {
+		return nil, fmt.Errorf("register sense.classify_intent: %w", err)
+	}
+
+	// act.passthrough — mechanical zero-LLM terminal for trivial
+	// conversational turns. OnResponse threads the chosen reply back
+	// into the captured LoopResult so the standard render + journal
+	// path is unchanged.
+	if err := reg.Register(ops.PassthroughSpec(ops.PassthroughConfig{
+		OnResponse: passthroughOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register act.passthrough: %w", err)
 	}
 
 	// decide.next — the steering op. Provider + Registry + ModelCatalog
@@ -1529,15 +2333,33 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	//
 	// Provider nil falls back to a single coding_turn spawn so the
 	// chain always walks.
-	cfg := &config.Config{ContextDir: filepath.Join(s.workdir, ".cortex"), ProjectRoot: s.workdir}
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
 	nextProvider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
 	nextFactory := buildProviderFactoryForREPL(cfg, s.model, s.apiURL)
 	modelCatalog := s.modelCatalogForREPL()
+	// Phase 3 Slice 2: surface this turn's capability class + salience
+	// cap to decide.next so the planner sees its physical-system
+	// boundaries when choosing fanout shape (small/tight → many
+	// narrow nodes; large/loose → fewer bigger nodes). Empty-friendly
+	// fallback for zero codingCfg is handled inside formatBoundariesBlock.
+	cap := codingCfg.ToolOutputSalienceCap
+	class := llm.InferContextClass(s.model, 0)
+	systemBoundaries := fmt.Sprintf(
+		"- Model: %s (capability class: %s)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
+		s.model, class, cap,
+	)
+	// Phase 3 Slice 3 dovetail: when the project-bootstrap DAG has
+	// completed, surface a one-liner so decide.next plans against
+	// stored insights rather than fanning out to re-read README.
+	if line := bootstrapBoundariesLine(s.workdir); line != "" {
+		systemBoundaries += line
+	}
 	if err := reg.Register(ops.NextSpec(ops.NextConfig{
-		Provider:        nextProvider,
-		ProviderFactory: nextFactory,
-		Registry:        reg,
-		ModelCatalog:    modelCatalog,
+		Provider:         nextProvider,
+		ProviderFactory:  nextFactory,
+		Registry:         reg,
+		ModelCatalog:     modelCatalog,
+		SystemBoundaries: systemBoundaries,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.next: %w", err)
 	}
@@ -1628,32 +2450,15 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// (default = session model; can be routed per-call via attrs.model
 	// e.g. xlam-1.5b). Spawns the resolved act.<tool>.
 	if err := reg.Register(ops.ToolCallSpec(ops.ToolCallConfig{
-		Provider:        nextProvider,
-		ProviderFactory: nextFactory,
-		Registry:        reg,
+		Provider:              nextProvider,
+		ProviderFactory:       nextFactory,
+		Registry:              reg,
+		ToolOutputSalienceCap: codingCfg.ToolOutputSalienceCap,
 	})); err != nil {
 		return nil, fmt.Errorf("register decide.tool_call: %w", err)
 	}
 
 	return reg, nil
-}
-
-// ensureStubOpenRouterKey lets a local-Ollama REPL run even when no
-// OpenRouter key is configured. The harness's NewCortexHarness
-// constructor mandates a key via pkg/secret; for local-only use the
-// key is never sent (Ollama ignores Authorization). Stub-only injected
-// when we're definitely pointed at a local URL.
-func ensureStubOpenRouterKey(apiURL string) error {
-	if apiURL != defaultOllamaAPIURL {
-		return nil
-	}
-	if os.Getenv("OPEN_ROUTER_API_KEY") != "" {
-		return nil
-	}
-	if err := os.Setenv("OPEN_ROUTER_API_KEY", "ollama-local-stub"); err != nil {
-		return fmt.Errorf("stub key set: %w", err)
-	}
-	return nil
 }
 
 // verifier kinds — small enum, easy to extend.
@@ -1726,16 +2531,14 @@ const (
 // Defaults (empty input) to skip — safest choice when the user is
 // piping or got distracted.
 func (s *replState) promptGate(v verifyResult) gateDecision {
-	fmt.Printf("  verify still failing (%s).\n  [r]etry / [e]dit / [s]kip / [q]uit: ", v.Kind)
-	reader := bufio.NewReader(os.Stdin)
-	resp, err := reader.ReadString('\n')
+	s.ui.Info(fmt.Sprintf("  verify still failing (%s).", v.Kind))
+	resp, err := s.ui.ReadLine("  [r]etry / [e]dit / [s]kip / [q]uit: ")
 	if err != nil {
 		return gateDecision{kind: gateSkip}
 	}
 	switch strings.TrimSpace(strings.ToLower(resp)) {
 	case "r", "retry":
-		fmt.Print("  hint for the model (enter for none): ")
-		hint, _ := reader.ReadString('\n')
+		hint, _ := s.ui.ReadLine("  hint for the model (enter for none): ")
 		return gateDecision{kind: gateRetry, hint: strings.TrimSpace(hint)}
 	case "e", "edit":
 		return gateDecision{kind: gateEdit}
@@ -1804,11 +2607,20 @@ func (s *replState) captureTurn(row turnRow) error {
 //
 // Derives the verify summary from the row's terminal verify status
 // (covers all three rounds: initial, auto-retry, user-driven).
-func printTurnSummary(row turnRow) {
+//
+// TODO (collapses the retry path): the verify summary reduces three
+// rounds of telemetry to "ok" / "FAIL". For an interactive learning
+// harness the path itself is signal worth surfacing: "ok (retry 2
+// +user hint)" tells the user the model needed coaching, "ok
+// (initial)" tells them it landed first try. Both are free wins from
+// data already on the row — no new capture, just a richer formatter
+// that reads RetryVerifyOK/UserRetryVerifyOK/UserRetryHints and emits
+// the path tag.
+func (s *replState) printTurnSummary(row turnRow) {
 	if final := strings.TrimSpace(row.FinalText); final != "" {
-		fmt.Println()
-		fmt.Println(final)
-		fmt.Println()
+		s.ui.Info("")
+		s.ui.Markdown(final)
+		s.ui.Info("")
 	}
 	files := "0"
 	if len(row.FilesChanged) > 0 {
@@ -1823,8 +2635,8 @@ func printTurnSummary(row turnRow) {
 			verify = row.VerifyKind + " FAIL"
 		}
 	}
-	fmt.Printf("  ✓ turn %d · files: %s · verify: %s · tokens: %d/%d · %dms\n",
-		row.Turn, files, verify, row.TokensIn, row.TokensOut, row.LatencyMs)
+	s.ui.Info(fmt.Sprintf("  ✓ turn %d · files: %s · verify: %s · tokens: %d/%d · %dms",
+		row.Turn, files, verify, row.TokensIn, row.TokensOut, row.LatencyMs))
 }
 
 // turnRow is the structured JSONL row written per turn. Fields are
@@ -1836,6 +2648,17 @@ func printTurnSummary(row turnRow) {
 // user-driven [r]/[e] rounds. Each round gets its own VerifyOK +
 // VerifyOutput pair so downstream analysis can distinguish "model
 // got it second try" from "user hint saved the turn."
+//
+// TODO (schema caps at one auto-retry): the dedicated Retry* and
+// UserRetry* fields only represent round 1 of each kind. With
+// --max-retries N>1, attempts 2..N silently merge their files-changed
+// into the row and lose per-attempt telemetry (tokens, latency, verify
+// output) — see the comment in runTurn's auto-retry loop. Once the
+// retry-policy diversification TODO lands (different model/temp/tool
+// surface per round), per-attempt telemetry IS the signal worth
+// keeping. Replace with `attempts: [{round, kind, model, tokens_in,
+// tokens_out, verify_ok, verify_output, ...}]` and write a downgrade
+// shim so existing jq consumers continue to work.
 type turnRow struct {
 	Turn         int    `json:"turn"`
 	SessionID    string `json:"session_id"`
@@ -1901,6 +2724,19 @@ func (s *replState) writeJSONL(row turnRow) error {
 //
 // For GoL-sized workdirs this is microseconds. For large repos we
 // should switch to git-based snapshots — flagged in PROGRESS-REPL.md.
+//
+// TODO (drop the snapshot system entirely, require git): the every-
+// file copy per turn doesn't scale (Django-sized = tens of thousands
+// of files even after the skip-list) AND the parallel snapshot
+// machinery exists mostly to back /diff + /undo, which modern coding
+// harnesses don't provide — Claude Code and Cursor punt to git/IDE;
+// Aider has /undo + /diff but they're git-backed. Direction: require
+// a git repo at session start (fail clearly + offer `git init` if
+// missing, mirroring /ultrareview), delete snapshotWorkdir +
+// restoreFromSnapshot + the snapshotStack field, and delete /diff +
+// /undo from dispatchSlash. runTurn's rollback-on-fail becomes a
+// no-op (keep-on-fail default) — users have `git checkout .` and
+// `git stash` natively.
 func (s *replState) snapshotWorkdir(turn int) (string, error) {
 	snapDir := filepath.Join(s.sessionDir, "snapshots", fmt.Sprintf("turn-%03d", turn))
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
@@ -2035,7 +2871,7 @@ func (s *replState) undoLastTurn() error {
 	if err := s.restoreFromSnapshot(top); err != nil {
 		return err
 	}
-	fmt.Printf("  undone turn %d (%d more available)\n", s.turns, n-1)
+	s.ui.Info(fmt.Sprintf("  undone turn %d (%d more available)", s.turns, n-1))
 	s.turns--
 	s.snapshotStack = s.snapshotStack[:n-1]
 	// Pop the corresponding conversation-history entry so the model
@@ -2053,18 +2889,18 @@ func (s *replState) undoLastTurn() error {
 func (s *replState) printDiff() {
 	n := len(s.snapshotStack)
 	if n == 0 {
-		fmt.Println("  no accepted turns yet")
+		s.ui.Info("  no accepted turns yet")
 		return
 	}
 	top := s.snapshotStack[n-1]
 	mb, err := os.ReadFile(filepath.Join(top, ".manifest.json"))
 	if err != nil {
-		fmt.Printf("  diff unavailable (manifest read: %v)\n", err)
+		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest read: %v)", err))
 		return
 	}
 	var manifest map[string]string
 	if err := json.Unmarshal(mb, &manifest); err != nil {
-		fmt.Printf("  diff unavailable (manifest parse: %v)\n", err)
+		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest parse: %v)", err))
 		return
 	}
 	var changed, added, removed []string
@@ -2102,18 +2938,18 @@ func (s *replState) printDiff() {
 	sort.Strings(added)
 	sort.Strings(removed)
 	if len(changed)+len(added)+len(removed) == 0 {
-		fmt.Println("  no changes since pre-last-turn snapshot")
+		s.ui.Info("  no changes since pre-last-turn snapshot")
 		return
 	}
-	fmt.Printf("  changes since pre-last-turn snapshot (turn %d):\n", s.turns)
+	s.ui.Info(fmt.Sprintf("  changes since pre-last-turn snapshot (turn %d):", s.turns))
 	for _, p := range added {
-		fmt.Printf("    + %s\n", p)
+		s.ui.Info(fmt.Sprintf("    + %s", p))
 	}
 	for _, p := range changed {
-		fmt.Printf("    ~ %s\n", p)
+		s.ui.Info(fmt.Sprintf("    ~ %s", p))
 	}
 	for _, p := range removed {
-		fmt.Printf("    - %s\n", p)
+		s.ui.Info(fmt.Sprintf("    - %s", p))
 	}
 }
 
@@ -2182,21 +3018,21 @@ type ollamaTagsResponse struct {
 func (s *replState) printShellPolicy() {
 	policy := harness.LoadShellPolicy(s.workdir)
 	if policy.IsEmpty() {
-		fmt.Println("  shell policy: none active (run_shell permits all commands)")
-		fmt.Printf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}\n",
-			filepath.Join(s.workdir, ".cortex", "shell-policy.json"))
+		s.ui.Info("  shell policy: none active (run_shell permits all commands)")
+		s.ui.Info(fmt.Sprintf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}",
+			filepath.Join(s.workdir, ".cortex", "shell-policy.json")))
 		return
 	}
 	if len(policy.Deny) > 0 {
-		fmt.Println("  deny patterns (any match rejects):")
+		s.ui.Info("  deny patterns (any match rejects):")
 		for _, p := range policy.Deny {
-			fmt.Printf("    %s\n", p)
+			s.ui.Info(fmt.Sprintf("    %s", p))
 		}
 	}
 	if len(policy.Allow) > 0 {
-		fmt.Println("  allow patterns (one match required):")
+		s.ui.Info("  allow patterns (one match required):")
 		for _, p := range policy.Allow {
-			fmt.Printf("    %s\n", p)
+			s.ui.Info(fmt.Sprintf("    %s", p))
 		}
 	}
 }
@@ -2216,29 +3052,29 @@ func (s *replState) printModels(refresh bool) {
 	}
 	ollamaModels, ollamaAvailable, ollamaErr := listOllamaModels(ollamaProbeURL)
 
-	fmt.Println("  Ollama (local):")
+	s.ui.Info("  Ollama (local):")
 	switch {
 	case !ollamaAvailable:
-		fmt.Println("    (unreachable — run `ollama serve` to enable)")
+		s.ui.Info("    (unreachable — run `ollama serve` to enable)")
 	case ollamaErr != nil:
-		fmt.Printf("    (error: %v)\n", ollamaErr)
+		s.ui.Info(fmt.Sprintf("    (error: %v)", ollamaErr))
 	case len(ollamaModels) == 0:
-		fmt.Println("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
+		s.ui.Info("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
 	default:
-		printModelListOllama(ollamaModels)
+		printModelListOllama(s.ui, ollamaModels)
 	}
 
-	fmt.Println("  OpenRouter:")
+	s.ui.Info("  OpenRouter:")
 	if refresh || s.openRouterModelsCache == nil && s.openRouterModelsErr == nil {
 		s.openRouterModelsCache, s.openRouterModelsErr = fetchOpenRouterModels()
 	}
 	switch {
 	case s.openRouterModelsErr != nil:
-		fmt.Printf("    (error: %v)\n", s.openRouterModelsErr)
+		s.ui.Info(fmt.Sprintf("    (error: %v)", s.openRouterModelsErr))
 	case len(s.openRouterModelsCache) == 0:
-		fmt.Println("    (empty catalogue)")
+		s.ui.Info("    (empty catalogue)")
 	default:
-		printModelListOpenRouter(s.openRouterModelsCache)
+		printModelListOpenRouter(s.ui, s.openRouterModelsCache)
 	}
 }
 
@@ -2252,6 +3088,10 @@ const modelListLimit = 20
 // session-bound state). Results are sorted by ID for deterministic
 // output. The endpoint is unauthenticated; a missing key doesn't
 // block discovery.
+//
+// allowlist:llm.NewOpenRouterClient — catalog discovery, not a runtime
+// provider for generation/embedding. The provider-resolution guard
+// test exempts this site.
 func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
 	client := llm.NewOpenRouterClient(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -2264,21 +3104,21 @@ func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
 	return models, nil
 }
 
-func printModelListOllama(names []string) {
+func printModelListOllama(ui cliout.Sink, names []string) {
 	sort.Strings(names)
 	shown := names
 	if len(shown) > modelListLimit {
 		shown = shown[:modelListLimit]
 	}
 	for _, n := range shown {
-		fmt.Printf("    %s\n", n)
+		ui.Info(fmt.Sprintf("    %s", n))
 	}
 	if extra := len(names) - len(shown); extra > 0 {
-		fmt.Printf("    +%d more\n", extra)
+		ui.Info(fmt.Sprintf("    +%d more", extra))
 	}
 }
 
-func printModelListOpenRouter(models []llm.OpenRouterModel) {
+func printModelListOpenRouter(ui cliout.Sink, models []llm.OpenRouterModel) {
 	shown := models
 	if len(shown) > modelListLimit {
 		shown = shown[:modelListLimit]
@@ -2294,10 +3134,10 @@ func printModelListOpenRouter(models []llm.OpenRouterModel) {
 			price = fmt.Sprintf(" $%.2f/$%.2f per 1M (in/out)",
 				m.PricePromptPerTok*1_000_000, m.PriceComplPerTok*1_000_000)
 		}
-		fmt.Printf("    %s%s%s\n", m.ID, ctx, price)
+		ui.Info(fmt.Sprintf("    %s%s%s", m.ID, ctx, price))
 	}
 	if extra := len(models) - len(shown); extra > 0 {
-		fmt.Printf("    +%d more — /model <id> to pin a specific one\n", extra)
+		ui.Info(fmt.Sprintf("    +%d more — /model <id> to pin a specific one", extra))
 	}
 }
 
@@ -2351,6 +3191,22 @@ func listOllamaModels(chatAPI string) ([]string, bool, error) {
 	return out, true, nil
 }
 
+// TODO (Ollama-only auto-probe is not portable): this whole path
+// assumes Ollama. There's no equivalent for vLLM / llama.cpp / LM
+// Studio / OpenRouter ("you have key X, here are the catalog entries
+// matching your project's language" etc.). Pair with the resolveAPIURL
+// backend-registry TODO: each registered backend should expose a
+// `ListAvailable() ([]ModelInfo, error)` method so probe is backend-
+// agnostic and the REPL works the same against any local-or-remote
+// inference server.
+//
+// TODO (probe is one-shot at startup): runs once in Execute and never
+// re-evaluates. If the user runs `ollama pull qwen2.5-coder:14b`
+// mid-session, the new model is invisible until restart. /models
+// refresh busts the OpenRouter catalog cache but doesn't re-run the
+// Ollama probe. Either re-probe on /model and /models, or watch
+// `~/.ollama/models` for changes.
+//
 // probeOllamaAndPickModel asks Ollama what's installed, scores each
 // model for tool-calling fitness, and returns the best choice. The
 // fallback is what we return if (a) Ollama is reachable but our
@@ -2439,6 +3295,25 @@ func pickBestOllamaModel(installed []string, fallback string) string {
 //	llama3.2:latest    → (no match → 0)
 var modelSizeRegex = regexp.MustCompile(`(?i):(\d+(?:\.\d+)?)([mb])`)
 
+// TODO (replace hardcoded rubric with learned fitness): every entry
+// in knownGood/knownBad is "iter-X taught us model Y does/doesn't
+// emit structured tool_calls". That knowledge is exactly what the
+// salvage-telemetry TODO measures — observed tool-call success rate
+// per model — so this should be a lookup against the learning store,
+// not a Go literal. First-turn calibration probe + observed-rate
+// score gives a clean, dynamic, project-agnostic alternative: no
+// list to maintain, the REPL adapts as new models arrive, and the
+// scoring is introspectable (surface it in /models so users see WHY
+// a model was picked). Drop the lists once observed-rate has enough
+// signal; keep this as a cold-start prior only.
+//
+// TODO (project-agnostic ≠ project-blind): the rubric weights size
+// + "coder/instruct" suffix uniformly. A Python project on a workdir
+// where the user's last 10 turns were pytest-shaped wants a different
+// preference than a Go project. Once the learning store carries
+// per-project per-model success rates, score should consult them.
+// Generic prior + project-tuned posterior is the shape.
+//
 // scoreOllamaModel applies the rubric in pickBestOllamaModel.
 func scoreOllamaModel(name string) int {
 	lower := strings.ToLower(name)
@@ -2516,6 +3391,32 @@ func scoreOllamaModel(name string) int {
 // the harness expected and executes the tool out-of-band so the turn
 // produces real work. Conservative: only supports write_file (the
 // dominant case) and only when no tool call was registered.
+//
+// TODO (migrate to decide.tool_call, then delete this stack): this
+// whole salvage path is the small-model-amplifier story implemented as
+// defensive regex parsing — a maintenance tax that grows linearly with
+// model variety. The DAG-native answer is the decide.tool_call
+// specialist node already registered in buildREPLDynamicRegistry: it
+// takes natural-language intent + tool catalog and emits structured
+// args via a purpose-built model (xLAM-style). Once that path is the
+// default for models known to fail OpenAI tool_calls (route on model
+// id or on observed salvage rate per TODO below), the entire
+// extractToolCallFromText / extractToolCallByFieldRegex /
+// repairBacktickStrings stack can be deleted.
+//
+// TODO (salvage bypasses the DAG): when salvageTextToolCall fires it
+// runs the tool out-of-band — no act.* node spawn, no dag_traces.jsonl
+// row, no cost or latency recorded. So the cross-turn DAG learning TODO
+// on runREPLChainTurn never sees salvaged work; a session that survives
+// only because of salvage looks like a session that worked first try.
+// Route salvaged calls through the act.* registry instead so the trace
+// is honest and the calibration store learns from them.
+//
+// TODO (add salvage telemetry): no metric tracks how often salvage
+// fires per model. That's the signal worth keeping — a model with
+// >X% salvage rate should auto-route through decide.tool_call (or get
+// surfaced to the user as "this model needs the specialist router").
+// Drop a counter into row + emit a per-session summary at finalize.
 
 // toolCallTextRegex matches a JSON tool-call shape in arbitrary text:
 //
@@ -2754,18 +3655,18 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 		path, err := salvageWriteFile(s.workdir, call.Args)
 		if err != nil {
 			if s.verbose {
-				fmt.Fprintf(os.Stderr, "  (salvage write_file failed: %v)\n", err)
+				s.ui.Warn(fmt.Sprintf("(salvage write_file failed: %v)", err))
 			}
 			return nil, ""
 		}
 		note := fmt.Sprintf("salvaged write_file:%s from text content", path)
 		if s.verbose {
-			fmt.Println("  " + note)
+			s.ui.Info("  " + note)
 		}
 		return []string{path}, note
 	default:
 		if s.verbose {
-			fmt.Fprintf(os.Stderr, "  (text contained %s tool call; only write_file is salvaged in v1)\n", call.Name)
+			s.ui.Warn(fmt.Sprintf("(text contained %s tool call; only write_file is salvaged in v1)", call.Name))
 		}
 		return nil, ""
 	}
@@ -2785,13 +3686,27 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 // Default mode (no --verbose) shows only tool calls with smart per-tool
 // arg summaries. Verbose adds inner-turn telemetry + tool-result sizes
 // + session-start banner + error stack.
+//
+// TODO (one source of truth, not two): the notifier (stdout side
+// effect) and the DAG trace (.cortex/db/dag_traces.jsonl) emit the
+// same events through parallel paths — every tool call is both a
+// coding.tool_call notifier event AND a dag.TraceEntry. Pick one
+// canonical source (the DAG trace, since it's structured + persisted)
+// and make stdout streaming a subscriber that formats trace rows as
+// they're written. Removes the duplication AND ensures stdout
+// streaming and post-hoc analysis can never diverge.
 
 // makeREPLNotifier returns the callback wired to the harness's Notify
 // hook. The shape mirrors makeCodeNotifier in code.go but the visible
 // surface is narrower — the REPL prints its own per-user-turn summary,
 // so we don't echo the agent loop's internal turn/final events at
 // default verbosity.
-func makeREPLNotifier(verbose bool) func(string, any) {
+//
+// Routes everything through the supplied Sink rather than fmt.Printf.
+// That lets a TUI sink format the same events differently (color by
+// function, group under the user's prompt line) without the REPL
+// needing to know which presentation is in play.
+func makeREPLNotifier(ui cliout.Sink, verbose bool) func(string, any) {
 	return func(kind string, payload any) {
 		switch kind {
 		case "coding.tool_call":
@@ -2799,38 +3714,47 @@ func makeREPLNotifier(verbose bool) func(string, any) {
 			name, _ := p["name"].(string)
 			argsStr, _ := p["args"].(string)
 			summary := summarizeToolArgs(name, argsStr, verbose)
-			fmt.Printf("  → %s%s\n", name, summary)
+			ui.Info(fmt.Sprintf("  → %s%s", name, summary))
 		case "coding.tool_result":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("    (result: %v chars)\n", p["output_chars"])
+			ui.Info(fmt.Sprintf("    (result: %v chars)", p["output_chars"]))
 		case "coding.turn":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("  · agent turn %v · finish=%v · tokens=%v/%v · calls=%v\n",
+			ui.Info(fmt.Sprintf("  · agent turn %v · finish=%v · tokens=%v/%v · calls=%v",
 				p["turn"], p["finish_reason"],
 				p["tokens_in"], p["tokens_out"],
-				p["tool_calls"])
+				p["tool_calls"]))
 		case "coding.session_start":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("  · session_start · max_turns=%v · num_tools=%v\n",
-				p["max_turns"], p["num_tools"])
+			ui.Info(fmt.Sprintf("  · session_start · max_turns=%v · num_tools=%v",
+				p["max_turns"], p["num_tools"]))
 		case "coding.turn_limit":
-			fmt.Printf("  ⚠ agent turn limit hit\n")
+			ui.Info("  ⚠ agent turn limit hit")
 		case "coding.budget_exceeded":
 			p := mapOf(payload)
-			fmt.Printf("  ⚠ budget exceeded · cumulative_tokens=%v/%v · cost=$%.4f\n",
-				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"]))
+			ui.Info(fmt.Sprintf("  ⚠ budget exceeded · cumulative_tokens=%v/%v · cost=$%.4f",
+				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"])))
 		case "coding.error":
 			p := mapOf(payload)
-			fmt.Printf("  ⚠ provider error: %v\n", p["error"])
+			msg := fmt.Sprintf("%v", p["error"])
+			ui.Info(fmt.Sprintf("  ⚠ provider error: %s", msg))
+			// llama-server (chatterbox / LM Studio / vLLM running llama.cpp)
+			// returns this exact phrasing when the prompt + tools blow past
+			// n_ctx. The fix is server-side — bump n_ctx on the model launch
+			// — so surface it explicitly instead of leaving the user to
+			// decode the error.
+			if strings.Contains(msg, "exceeds the available context size") {
+				ui.Info("    hint: the local model was loaded with a small n_ctx; restart it with a larger context (e.g. --ctx-size 16384) on the server side.")
+			}
 		}
 	}
 }
@@ -2901,6 +3825,52 @@ func truncateHead(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// makeREPLDAGTracer returns a dag.TraceCallback that prints one line per
+// completed node so the user sees the DAG emerge live in the REPL.
+//
+// Format per line: `  ▪ <function.op> [<NodeID>] · ok|err · <latency>`,
+// followed by an arrow-prefixed list of spawned child IDs when this node
+// grew the tree, or a `· cause: …` tail when it failed.
+//
+// The executor runs in sequential DFS-prepend mode (see runREPLChainTurn),
+// so completion order IS the natural left-to-right tree walk — child
+// lines appear immediately under their parent. No explicit indentation
+// is needed; the structure is preserved by ordering alone.
+//
+// next, when non-nil, is invoked after the print so the existing
+// dag_traces.jsonl writer still gets every entry.
+func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback {
+	return func(e dag.TraceEntry) {
+		name := e.QualifiedName
+		if name == "" {
+			name = "?"
+		}
+		latency := e.WallEnd.Sub(e.WallStart)
+		cause := ""
+		if !e.OK {
+			cause = e.ErrorMessage
+			if cause == "" {
+				cause = e.ErrorCode
+			}
+		}
+		// Route as a structured Event so the TUI sink can color
+		// the line by cortex function (sense/attend/decide/act/…)
+		// instead of treating it as plain Info. StdoutSink's Event
+		// renderer prints the same shape.
+		ui.Event("dag.trace", map[string]any{
+			"qualified_name": name,
+			"node_id":        e.NodeID,
+			"ok":             e.OK,
+			"latency_ms":     int(latency / time.Millisecond),
+			"spawned":        e.SpawnedChildren,
+			"err_cause":      cause,
+		})
+		if next != nil {
+			next(e)
+		}
+	}
 }
 
 // Compile-time guard: ensure REPLCommand satisfies the Command interface.

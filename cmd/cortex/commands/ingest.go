@@ -19,6 +19,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -278,9 +279,9 @@ func (c *IngestCommand) Execute(ctx *Context) error {
 
 	// Generate embeddings if vector search is enabled
 	if cfg.EnableVector && processed > 0 {
-		ollamaClient := llm.NewOllamaClient(cfg)
+		ollamaEmbedder := intllm.BuildEmbedder(cfg)
 		hugotEmbedder := llm.NewHugotEmbedder()
-		embedder := llm.NewFallbackEmbedder(ollamaClient, hugotEmbedder)
+		embedder := llm.NewFallbackEmbedder(ollamaEmbedder, hugotEmbedder)
 		if embedder.IsEmbeddingAvailable() {
 			bgCtx := context.Background()
 			events, _ := store.GetRecentEvents(processed)
@@ -390,12 +391,13 @@ func (c *AnalyzeCommand) Execute(ctx *Context) error {
 
 	fmt.Printf("Analyzing %d events with LLM...\n", len(recentEvents))
 
-	// Use LLM directly for analysis (cognition modes handle this normally)
+	// Use LLM directly for analysis (cognition modes handle this normally).
+	// Local-generation fallback routes by model id via BuildProvider.
 	var llmProvider llm.Provider
 	if p, _, err := llm.NewLLMClient(cfg); err == nil {
 		llmProvider = p
-	} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
-		llmProvider = ollama
+	} else if local := intllm.BuildProvider(cfg, cfg.OllamaModel); local != nil && local.IsAvailable() {
+		llmProvider = local
 	}
 
 	if llmProvider == nil {
@@ -495,13 +497,14 @@ func (c *FeedCommand) Execute(ctx *Context) error {
 	}
 
 	// Get LLM provider (only needed for non-raw mode). Unified surface
-	// first, Ollama as a local fallback.
+	// first; local-generation fallback flows through BuildProvider so
+	// Phase 4 model_routes are honored.
 	var llmProvider llm.Provider
 	if !raw {
 		if p, _, err := llm.NewLLMClient(cfg); err == nil {
 			llmProvider = p
-		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
-			llmProvider = ollama
+		} else if local := intllm.BuildProvider(cfg, cfg.OllamaModel); local != nil && local.IsAvailable() {
+			llmProvider = local
 		}
 		if llmProvider == nil {
 			fmt.Println("No LLM available. Use --raw to store without analysis, or set OPEN_ROUTER_API_KEY / ANTHROPIC_API_KEY / start Ollama.")

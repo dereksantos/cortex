@@ -5,6 +5,12 @@
 > roadmap lands. Update the status table when a benchmark wraps, a CLI surface
 > ships, or a proxy is built. Record run-level findings in
 > [`docs/eval-journal.md`](../eval-journal.md), not here.
+>
+> **Strategy authority.** [`docs/eval-strategy.md`](../eval-strategy.md) is
+> authoritative for *which tier each eval serves* (Baseline / Thesis /
+> Regression) and *which of the three claims it tests*. This doc is the
+> *coverage* side — which benchmarks are wrapped, which CLI surfaces are
+> missing. When the two conflict, the strategy doc wins.
 
 This doc decomposes "what makes a chat-REPL coding harness really good" into
 10 mutually-exclusive dimensions, maps each to the best available upstream
@@ -50,6 +56,37 @@ prompts) are distinct. Dimension 10 is the meta-axis.
 
 ---
 
+## Tier mapping (where each dimension lives in the strategy)
+
+Under the three-tier strategy
+([`docs/eval-strategy.md`](../eval-strategy.md)), each dimension's
+evaluation lives in one or more tiers, and most dimensions are
+differentially served by one of the three thesis claims (multi-model,
+learning, bounded emergence). Tier 3 owns the dimensions where Cortex's
+architecture doesn't differentially help — those need regression
+guardrails so they don't silently break, not optimization.
+
+| # | Dimension | Tier | Differentially served by |
+|---|---|---|---|
+| 1 | Intent ingress | 1 + 3 | Multi-model leverage (route ambiguous → stronger clarifier) |
+| 2 | Grounding | 1 + 2 | Learning over time (memory matures retrieval) |
+| 3 | Memory & continuity | 1 + 2 | Learning over time (core thesis) |
+| 4 | Planning & alignment | 1 + 2 | Bounded emergence (DAG is the planner) |
+| 5 | Execution | 1 | Multi-model leverage (per-tool model selection); table stakes otherwise |
+| 6 | In-flight observability | 3 | Bounded emergence (DAG nodes streaming as natural in-flight view) |
+| 7 | Steering & interrupt | 1 + 3 | Bounded emergence (mid-flight DAG editing); table stakes otherwise |
+| 8 | Reversibility & safety | 1 + 3 | Bounded emergence (DAG nodes declare effects/budgets); table stakes otherwise |
+| 9 | Result presentation & verification | 3 | Not differentially served — pure regression guardrail |
+| 10 | Extensibility & composition | 3 | Bounded emergence (tools as DAG nodes is inherent) |
+
+**Tier reading.** Tier 1 = wrapped or wrappable standard benchmark, used
+to prove competence. Tier 2 = thesis evals (learning-curve,
+budget-quality curve, multi-model cost/quality delta) — these subsume
+specific dimensions where the architecture should show measurable lift.
+Tier 3 = regression guardrails, cheap and pass/fail, run weekly.
+
+---
+
 ## Coverage matrix (cells)
 
 Coverage strength: ✓ direct, ~ partial / substrate, ✗ none.
@@ -70,10 +107,15 @@ Coverage strength: ✓ direct, ~ partial / substrate, ✗ none.
 **Score today (wrapped + working):** 3 of 10 dimensions with direct coverage
 (2, 3, 5), 1 partial (9 verification half).
 
-**Score after upstream-integration roadmap:** 7-8 of 10 (adds 4, 7, 8, 10).
+**Score after Tier 1 expansion (Phase 6 in [`ROADMAP.md`](../../ROADMAP.md)):**
+7-8 of 10 (adds 4, 7, 8, 10 via τ-bench, MINT, AgentDojo, BFCL).
 
-**Score after gap-closing proxies:** 10 of 10. Two dimensions (1, 6) have no
-upstream benchmark we can reuse — these require a thin Cortex-built proxy.
+**Score after Tier 3 regression guardrails (Phase 5):** 10 of 10. Two
+dimensions (1, 6) have no upstream benchmark we can reuse — these
+require Cortex-built proxies. Note: 10/10 coverage is *not the goal*;
+the goal is each dimension having at minimum a Tier 3 guardrail and the
+differentiated dimensions (2, 3, 4) having Tier 2 evals that prove the
+thesis claims.
 
 ---
 

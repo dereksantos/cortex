@@ -58,9 +58,20 @@ func (p *PromptTemplate) Render(vars map[string]any) (string, error) {
 	return buf.String(), nil
 }
 
-// MaxOutputBudget is the per-op output token cap honored by handlers.
-// Stage 2 invariant: 100. The loader enforces ≤ this value.
+// MaxOutputBudget is the per-op output token cap honored by handlers
+// for micro-LLM ops (decide.*, value.*, model.*). Stage 2 invariant:
+// 100 — the small-model amplifier story relies on every planning /
+// scoring call being a narrow micro-call.
 const MaxOutputBudget = 100
+
+// MaxCompressionOutputBudget is the per-op output token cap for
+// salience-compression ops (attend.compress, attend.distill, …).
+// These ops legitimately need to emit a compressed payload that
+// exceeds the micro-LLM cap — the *output is the compressed view*,
+// not a planning decision. 2000 covers the small / medium / large
+// SalienceCapForClass tiers (200 / 500 / 1500) with headroom for the
+// p90-with-headroom calibrated values.
+const MaxCompressionOutputBudget = 2000
 
 // templateCache memoizes parsed templates so each op doesn't re-parse
 // on every handler call.
@@ -156,8 +167,15 @@ func validateMeta(name string, m TemplateMeta) error {
 	if m.MaxOutputTokens <= 0 {
 		return fmt.Errorf("template %s: max_output_tokens must be >= 1, got %d", name, m.MaxOutputTokens)
 	}
-	if m.MaxOutputTokens > MaxOutputBudget {
-		return fmt.Errorf("template %s: max_output_tokens=%d exceeds Stage-2 cap of %d (small-model amplifier invariant)", name, m.MaxOutputTokens, MaxOutputBudget)
+	// Compression ops (attend.*) get a higher ceiling — their output
+	// IS the compressed payload, not a planning decision. Other ops
+	// stay under the small-model amplifier invariant.
+	budget := MaxOutputBudget
+	if strings.HasPrefix(m.Op, "attend.") {
+		budget = MaxCompressionOutputBudget
+	}
+	if m.MaxOutputTokens > budget {
+		return fmt.Errorf("template %s: max_output_tokens=%d exceeds cap of %d", name, m.MaxOutputTokens, budget)
 	}
 	// Cross-check filename ⇄ op: "function_op.tmpl" should match "function.op".
 	expectedOp := strings.Replace(name, "_", ".", 1)

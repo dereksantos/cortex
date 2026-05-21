@@ -393,7 +393,7 @@ func TestNext_PerCallProviderRouting_UnknownModelFallsBackToDefault(t *testing.T
 // TestNext_RenderPromptSubstitution — confirm catalogs flow into the
 // rendered system prompt (so the LLM actually sees them).
 func TestNext_RenderPromptSubstitution(t *testing.T) {
-	out := renderNextPrompt("hello", "  remember.vector_search(query) - search\n", "  qwen2.5:14b - local\n", "")
+	out := renderNextPrompt("hello", "  remember.vector_search(query) - search\n", "  qwen2.5:14b - local\n", "", "", dag.Budget{})
 	if !strings.Contains(out, "hello") {
 		t.Errorf("user prompt missing")
 	}
@@ -405,5 +405,50 @@ func TestNext_RenderPromptSubstitution(t *testing.T) {
 	}
 	if strings.Contains(out, "{{OPS}}") || strings.Contains(out, "{{MODELS}}") || strings.Contains(out, "{{PROMPT}}") || strings.Contains(out, "{{CONTEXT}}") {
 		t.Errorf("unsubstituted placeholders remain in output")
+	}
+	if strings.Contains(out, "{{BOUNDARIES}}") {
+		t.Errorf("BOUNDARIES placeholder not substituted")
+	}
+	// With empty boundaries + zero budget, the boundaries block should
+	// collapse to "" rather than emitting an awkward empty header.
+	if strings.Contains(out, "Physical-system limits") {
+		t.Errorf("boundaries block should be absent when boundaries+budget are empty")
+	}
+}
+
+// TestNext_RenderPromptIncludesBoundariesAndBudget pins the Phase-3
+// Slice 2 self-awareness wiring: a non-empty boundaries fact-sheet
+// flows verbatim into the prompt AND the remaining budget surfaces as
+// a line item the planner can read.
+func TestNext_RenderPromptIncludesBoundariesAndBudget(t *testing.T) {
+	boundaries := "- Model class: small (qwen2.5-coder:1.5b)\n- Per-tool-call salience cap: 200 tokens\n"
+	budget := dag.Budget{LatencyMS: 120000, Tokens: 8000, Depth: 8, OutputTokens: 6000}
+	out := renderNextPrompt("explore", "  decide.coding_turn(prompt) - run agent loop\n", "  default\n", "", boundaries, budget)
+
+	for _, want := range []string{
+		"Physical-system limits",
+		"Model class: small",
+		"salience cap: 200",
+		"latency=120000ms",
+		"output_tokens=6000",
+		"favor fan-out",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("boundaries block missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestNext_RenderPromptOmitsBoundariesWhenAllZero — pre-Phase-3
+// callers passing empty boundaries + zero budget must not see the
+// fact-sheet block (back-compat: a quiet-config call still renders the
+// same prompt shape it always did).
+func TestNext_RenderPromptOmitsBoundariesWhenAllZero(t *testing.T) {
+	out := renderNextPrompt("hi", "", "", "", "", dag.Budget{})
+	if strings.Contains(out, "Physical-system limits") {
+		t.Errorf("boundaries block should be absent for zero-config render; got:\n%s", out)
+	}
+	if strings.Contains(out, "Planning guidance") {
+		t.Errorf("planning guidance should not appear without boundaries")
 	}
 }

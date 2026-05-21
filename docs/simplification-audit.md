@@ -2,6 +2,11 @@
 
 > Living doc. Move items between sections as decisions land or scans return
 > new evidence. This is a punch list, not a design doc.
+>
+> **Strategy authority:** [`eval-strategy.md`](eval-strategy.md). When
+> the cut criterion below conflicts with the three-tier framework or the
+> three thesis claims, the strategy doc wins. This audit is the
+> execution-level companion to that doc.
 
 ## North star
 

@@ -1,0 +1,687 @@
+[
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "README.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Articles\n\nA tiny FastAPI service that demonstrates a CRUD pattern with SQLAlchemy + Alembic + Pydantic v2.\n\n## Why this exists\n\nUse this as the seed for any internal HTTP service that needs:\n\n- request/response schemas separate from ORM models;\n- declarative auth via FastAPI's `Depends`;\n- a migration story (Alembic) from day one;\n- structured logging with `structlog`.\n\n## Quick start\n\n```bash\npip install -e .[dev]\nalembic upgrade head\nuvicorn app.main:app --reload\n```\n\nNavigate to \u003chttp://localhost:8000/docs\u003e for the OpenAPI explorer.\n\n## Layout\n\n```\napp/\n  main.py        — FastAPI app + router wiring\n  db.py          — Session factory + Depends provider\n  models.py      — ORM classes\n  schemas.py     — Pydantic input/output schemas\n  handlers.py    — Endpoint handlers\ntests/\n  test_handlers.py\nalembic/\n  versions/\n```\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use Pydantic v2 for request/response schemas to separate them from ORM models and enable declarative auth with FastAPI's Depends.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Implement Alembic migrations from day one to manage database schema changes systematically.",
+          "category": "constraint",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 483,
+    "latency_ms": 4544
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "README.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Articles UI\n\nA minimal React + TypeScript + Vite front-end for the Articles API.\n\n## Quick start\n\n```bash\nnpm install\nnpm run dev\n```\n\nNavigate to \u003chttp://localhost:5173\u003e. The dev server proxies `/api/*` to \u003chttp://localhost:8000\u003e.\n\n## Stack\n\n- React 18 (function components + hooks)\n- React Router v6 for routing\n- TanStack Query for server state caching\n- Zod for runtime schema validation at the API boundary\n- Vitest + Testing Library for tests\n\n## Layout\n\n```\nsrc/\n  components/   — UI primitives + feature components\n  pages/        — Top-level routed pages\n  lib/          — API client + shared types (api.ts)\n  styles/       — CSS modules\n```\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use TanStack Query for server state caching to handle API data fetching and caching efficiently.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Implement Zod for runtime schema validation at the API boundary to ensure data integrity.",
+          "category": "pattern",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 433,
+    "latency_ms": 4109
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "README.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Articles\n\nA tiny FastAPI service that demonstrates a CRUD pattern with SQLAlchemy + Alembic + Pydantic v2.\n\n## Why this exists\n\nUse this as the seed for any internal HTTP service that needs:\n\n- request/response schemas separate from ORM models;\n- declarative auth via FastAPI's `Depends`;\n- a migration story (Alembic) from day one;\n- structured logging with `structlog`.\n\n## Quick start\n\n```bash\npip install -e .[dev]\nalembic upgrade head\nuvicorn app.main:app --reload\n```\n\nNavigate to \u003chttp://localhost:8000/docs\u003e for the OpenAPI explorer.\n\n## Layout\n\n```\napp/\n  main.py        — FastAPI app + router wiring\n  db.py          — Session factory + Depends provider\n  models.py      — ORM classes\n  schemas.py     — Pydantic input/output schemas\n  handlers.py    — Endpoint handlers\ntests/\n  test_handlers.py\nalembic/\n  versions/\n```\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "doc",
+        "summary": "README file that documents the purpose, setup, and structure of a FastAPI service demonstrating CRUD operations with SQLAlchemy and Alembic.",
+        "exports": [],
+        "dependencies": [],
+        "importance": 0.1
+      }
+    },
+    "fallback": false,
+    "tokens_used": 563,
+    "latency_ms": 3772
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "README.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Articles UI\n\nA minimal React + TypeScript + Vite front-end for the Articles API.\n\n## Quick start\n\n```bash\nnpm install\nnpm run dev\n```\n\nNavigate to \u003chttp://localhost:5173\u003e. The dev server proxies `/api/*` to \u003chttp://localhost:8000\u003e.\n\n## Stack\n\n- React 18 (function components + hooks)\n- React Router v6 for routing\n- TanStack Query for server state caching\n- Zod for runtime schema validation at the API boundary\n- Vitest + Testing Library for tests\n\n## Layout\n\n```\nsrc/\n  components/   — UI primitives + feature components\n  pages/        — Top-level routed pages\n  lib/          — API client + shared types (api.ts)\n  styles/       — CSS modules\n```\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "doc",
+        "summary": "Project README explaining the Articles UI frontend stack, setup instructions, and directory structure.",
+        "exports": [],
+        "dependencies": [],
+        "importance": 0.9
+      }
+    },
+    "fallback": false,
+    "tokens_used": 498,
+    "latency_ms": 2780
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "app/handlers.py",
+      "lang": "py",
+      "role": "source",
+      "content": "from fastapi import APIRouter, HTTPException, Depends\nfrom sqlalchemy.orm import Session\nfrom .db import get_session\nfrom .models import User, Article\nfrom .schemas import ArticleCreate, ArticleOut\n\nrouter = APIRouter(prefix=\"/articles\", tags=[\"articles\"])\n\n\n@router.get(\"/{article_id}\", response_model=ArticleOut)\ndef get_article(article_id: int, db: Session = Depends(get_session)) -\u003e ArticleOut:\n    article = db.query(Article).filter(Article.id == article_id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    return article\n\n\n@router.post(\"/\", response_model=ArticleOut, status_code=201)\ndef create_article(\n    payload: ArticleCreate,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -\u003e ArticleOut:\n    article = Article(\n        title=payload.title,\n        body=payload.body,\n        author_id=user.id,\n    )\n    db.add(article)\n    db.commit()\n    db.refresh(article)\n    return article\n\n\n@router.delete(\"/{article_id}\", status_code=204)\ndef delete_article(\n    article_id: int,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -\u003e None:\n    article = db.query(Article).filter(Article.id == article_id, Article.author_id == user.id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    db.delete(article)\n    db.commit()\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Implement proper authorization checks to ensure users can only delete articles they own.",
+          "category": "constraint",
+          "importance": 0.9
+        },
+        {
+          "content": "Use dedicated Pydantic schemas for request/response models to enforce data validation and serialization.",
+          "category": "pattern",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 596,
+    "latency_ms": 4782
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "app/handlers.py",
+      "lang": "py",
+      "role": "source",
+      "content": "from fastapi import APIRouter, HTTPException, Depends\nfrom sqlalchemy.orm import Session\nfrom .db import get_session\nfrom .models import User, Article\nfrom .schemas import ArticleCreate, ArticleOut\n\nrouter = APIRouter(prefix=\"/articles\", tags=[\"articles\"])\n\n\n@router.get(\"/{article_id}\", response_model=ArticleOut)\ndef get_article(article_id: int, db: Session = Depends(get_session)) -\u003e ArticleOut:\n    article = db.query(Article).filter(Article.id == article_id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    return article\n\n\n@router.post(\"/\", response_model=ArticleOut, status_code=201)\ndef create_article(\n    payload: ArticleCreate,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -\u003e ArticleOut:\n    article = Article(\n        title=payload.title,\n        body=payload.body,\n        author_id=user.id,\n    )\n    db.add(article)\n    db.commit()\n    db.refresh(article)\n    return article\n\n\n@router.delete(\"/{article_id}\", status_code=204)\ndef delete_article(\n    article_id: int,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -\u003e None:\n    article = db.query(Article).filter(Article.id == article_id, Article.author_id == user.id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    db.delete(article)\n    db.commit()\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "source",
+        "summary": "Handles HTTP requests for article-related operations including retrieval, creation, and deletion.",
+        "exports": [
+          "router",
+          "get_article",
+          "create_article",
+          "delete_article"
+        ],
+        "dependencies": [
+          "fastapi",
+          "sqlalchemy.orm",
+          "./db",
+          "./models",
+          "./schemas"
+        ],
+        "importance": 0.7
+      }
+    },
+    "fallback": false,
+    "tokens_used": 703,
+    "latency_ms": 4806
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "docs/bootstrap-dag-plan.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Project-Bootstrap DAG (`cortex bootstrap`)\n\n## Context\n\nCortex's `dream.insight` pipeline is reactive — it only fires when the daemon catches idle time, and only on whatever `DreamSource` happens to sample next. A fresh project that has never been \"dreamed about\" arrives at the REPL with zero indexed context, so turn 1 has nothing useful to retrieve.\n\nThis change adds a **project-bootstrap DAG** that runs once on first REPL invocation (and via a standalone `cortex bootstrap` command). It scans the project under principled security rules, samples chunks via a hierarchical fractal sampler, feeds each chunk through an LLM op (A/B between `maintain.extract_insight` and a new `maintain.extract_overview`), and writes `dream.insight` entries to the journal — looping until both coverage signals satisfy the target or the iteration budget is exhausted.\n\nThe bootstrap is **language-agnostic by default** (Tier 1: filesystem adjacency + fixed-window line chunking). A `BoundaryAnalyzer` interface leaves room for Tier 2 (regex import detection per language) and Tier 3 (`go/ast`, tree-sitter) without disturbing the controller, sampler, or DAG ops.\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Implement a project-bootstrap DAG to initialize dream.insight entries for new projects, running once on first REPL invocation or via standalone cortex bootstrap command",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Design language-agnostic bootstrap with hierarchical fractal sampling and LLM ops, while preserving extensibility for language-specific analyzers via BoundaryAnalyzer interface",
+          "category": "constraint",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 531,
+    "latency_ms": 5016
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "docs/bootstrap-dag-plan.md",
+      "lang": "md",
+      "role": "doc",
+      "content": "# Project-Bootstrap DAG (`cortex bootstrap`)\n\n## Context\n\nCortex's `dream.insight` pipeline is reactive — it only fires when the daemon catches idle time, and only on whatever `DreamSource` happens to sample next. A fresh project that has never been \"dreamed about\" arrives at the REPL with zero indexed context, so turn 1 has nothing useful to retrieve.\n\nThis change adds a **project-bootstrap DAG** that runs once on first REPL invocation (and via a standalone `cortex bootstrap` command). It scans the project under principled security rules, samples chunks via a hierarchical fractal sampler, feeds each chunk through an LLM op (A/B between `maintain.extract_insight` and a new `maintain.extract_overview`), and writes `dream.insight` entries to the journal — looping until both coverage signals satisfy the target or the iteration budget is exhausted.\n\nThe bootstrap is **language-agnostic by default** (Tier 1: filesystem adjacency + fixed-window line chunking). A `BoundaryAnalyzer` interface leaves room for Tier 2 (regex import detection per language) and Tier 3 (`go/ast`, tree-sitter) without disturbing the controller, sampler, or DAG ops.\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "doc",
+        "summary": "Documents the design and implementation plan for the project-bootstrap DAG in Cortex, which initializes project context via LLM analysis of source code.",
+        "exports": [],
+        "dependencies": [
+          "cortex:docs/bootstrap-dag-plan.md"
+        ],
+        "importance": 0.7
+      }
+    },
+    "fallback": false,
+    "tokens_used": 602,
+    "latency_ms": 3823
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "go.mod",
+      "lang": "unknown",
+      "role": "config",
+      "content": "module github.com/dereksantos/cortex\n\ngo 1.26.0\n\nrequire (\n\tgithub.com/gofrs/flock v0.13.0\n\tgithub.com/knights-analytics/hugot v0.7.2\n\tgithub.com/viterin/vek v0.4.3\n\tgolang.org/x/term v0.43.0\n\tgopkg.in/yaml.v3 v3.0.1\n\tmodernc.org/sqlite v1.50.1\n)\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use modernc.org/sqlite for embedded SQLite database operations with Go 1.26 compatibility",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Implement file locking with github.com/gofrs/flock to prevent concurrent access issues",
+          "category": "constraint",
+          "importance": 0.7
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 386,
+    "latency_ms": 4291
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "go.mod",
+      "lang": "unknown",
+      "role": "config",
+      "content": "module github.com/dereksantos/cortex\n\ngo 1.26.0\n\nrequire (\n\tgithub.com/gofrs/flock v0.13.0\n\tgithub.com/knights-analytics/hugot v0.7.2\n\tgithub.com/viterin/vek v0.4.3\n\tgolang.org/x/term v0.43.0\n\tgopkg.in/yaml.v3 v3.0.1\n\tmodernc.org/sqlite v1.50.1\n)\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "config",
+        "summary": "Go module configuration file defining project dependencies and Go version requirements",
+        "exports": [],
+        "dependencies": [
+          "github.com/gofrs/flock",
+          "github.com/knights-analytics/hugot",
+          "github.com/viterin/vek",
+          "golang.org/x/term",
+          "gopkg.in/yaml.v3"
+        ],
+        "importance": 0.3
+      }
+    },
+    "fallback": false,
+    "tokens_used": 487,
+    "latency_ms": 4300
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "internal/bootstrap/sampler_hierarchical.go",
+      "lang": "go",
+      "role": "source",
+      "content": "// HierarchicalSampler is the day-one Sampler: recursive weighted draw\n// over the project's module tree with an anti-coverage bias. Fractal\n// by construction — the same weighted-subdivision rule applies at\n// every depth.\ntype HierarchicalSampler struct {\n\tAntiCoverageWeight float64\n\tSizeWeightExp      float64\n}\n\nfunc (h *HierarchicalSampler) Name() string { return \"hierarchical-v1\" }\n\nfunc (h *HierarchicalSampler) Next(out *BoundaryOutput, covered map[string]bool, k int, rng *rand.Rand) []string {\n\tif k \u003c= 0 || out == nil || len(out.Chunks) == 0 {\n\t\treturn nil\n\t}\n\taw := h.AntiCoverageWeight\n\tif aw \u003c= 0 {\n\t\taw = 3.0\n\t}\n\tsw := h.SizeWeightExp\n\tif sw \u003c= 0 {\n\t\tsw = 0.5\n\t}\n\tmoduleChunks := make(map[string][]Chunk, len(out.Modules))\n\tfor _, c := range out.Chunks {\n\t\tmoduleChunks[c.ModuleID] = append(moduleChunks[c.ModuleID], c)\n\t}\n\tmoduleIDs := make([]string, 0, len(moduleChunks))\n\tfor id, chs := range moduleChunks {\n\t\tsort.Slice(chs, func(i, j int) bool { return chs[i].ID \u003c chs[j].ID })\n\t\tmoduleChunks[id] = chs\n\t\tmoduleIDs = append(moduleIDs, id)\n\t}\n\tsort.Strings(moduleIDs)\n\tdrawn := make(map[string]bool)\n\tpicked := make([]string, 0, k)\n\tfor i := 0; i \u003c k; i++ {\n\t\tweights := make([]float64, len(moduleIDs))\n\t\ttotal := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tuncoveredEff := 0\n\t\t\tuncoveredChunks := 0\n\t\t\ttotalChunks := 0\n\t\t\tfor _, c := range moduleChunks[mid] {\n\t\t\t\ttotalChunks++\n\t\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tuncoveredEff += c.EffLines\n\t\t\t\tuncoveredChunks++\n\t\t\t}\n\t\t\tif uncoveredChunks == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tfrac := float64(uncoveredChunks) / float64(totalChunks)\n\t\t\tsizeTerm := math.Pow(float64(uncoveredEff), sw)\n\t\t\tif uncoveredEff == 0 {\n\t\t\t\tsizeTerm = 1.0\n\t\t\t}\n\t\t\tw := sizeTerm * (1.0 + aw*frac)\n\t\t\tweights[mi] = w\n\t\t\ttotal += w\n\t\t}\n\t\tif total \u003c= 0 {\n\t\t\tbreak\n\t\t}\n\t\tu := rng.Float64() * total\n\t\tchosen := \"\"\n\t\tcum := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tif weights[mi] == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tcum += weights[mi]\n\t\t\tif u \u003c cum {\n\t\t\t\tchosen = mid\n\t\t\t\tbreak\n\t\t\t}\n\t\t}\n\t\tif chosen == \"\" {\n\t\t\tbreak\n\t\t}\n\t\tavail := make([]string, 0, len(moduleChunks[chosen]))\n\t\tfor _, c := range moduleChunks[chosen] {\n\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tavail = append(avail, c.ID)\n\t\t}\n\t\tif len(avail) == 0 {\n\t\t\tcontinue\n\t\t}\n\t\tidx := rng.Intn(len(avail))\n\t\tdrawn[avail[idx]] = true\n\t\tpicked = append(picked, avail[idx])\n\t}\n\treturn picked\n}\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use hierarchical weighted sampling with anti-coverage bias to prioritize uncovered code chunks during test generation.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Apply fractal-weighted subdivision rules recursively across module tree depths for consistent coverage distribution.",
+          "category": "pattern",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 1046,
+    "latency_ms": 2999
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "internal/bootstrap/sampler_hierarchical.go",
+      "lang": "go",
+      "role": "source",
+      "content": "// HierarchicalSampler is the day-one Sampler: recursive weighted draw\n// over the project's module tree with an anti-coverage bias. Fractal\n// by construction — the same weighted-subdivision rule applies at\n// every depth.\ntype HierarchicalSampler struct {\n\tAntiCoverageWeight float64\n\tSizeWeightExp      float64\n}\n\nfunc (h *HierarchicalSampler) Name() string { return \"hierarchical-v1\" }\n\nfunc (h *HierarchicalSampler) Next(out *BoundaryOutput, covered map[string]bool, k int, rng *rand.Rand) []string {\n\tif k \u003c= 0 || out == nil || len(out.Chunks) == 0 {\n\t\treturn nil\n\t}\n\taw := h.AntiCoverageWeight\n\tif aw \u003c= 0 {\n\t\taw = 3.0\n\t}\n\tsw := h.SizeWeightExp\n\tif sw \u003c= 0 {\n\t\tsw = 0.5\n\t}\n\tmoduleChunks := make(map[string][]Chunk, len(out.Modules))\n\tfor _, c := range out.Chunks {\n\t\tmoduleChunks[c.ModuleID] = append(moduleChunks[c.ModuleID], c)\n\t}\n\tmoduleIDs := make([]string, 0, len(moduleChunks))\n\tfor id, chs := range moduleChunks {\n\t\tsort.Slice(chs, func(i, j int) bool { return chs[i].ID \u003c chs[j].ID })\n\t\tmoduleChunks[id] = chs\n\t\tmoduleIDs = append(moduleIDs, id)\n\t}\n\tsort.Strings(moduleIDs)\n\tdrawn := make(map[string]bool)\n\tpicked := make([]string, 0, k)\n\tfor i := 0; i \u003c k; i++ {\n\t\tweights := make([]float64, len(moduleIDs))\n\t\ttotal := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tuncoveredEff := 0\n\t\t\tuncoveredChunks := 0\n\t\t\ttotalChunks := 0\n\t\t\tfor _, c := range moduleChunks[mid] {\n\t\t\t\ttotalChunks++\n\t\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tuncoveredEff += c.EffLines\n\t\t\t\tuncoveredChunks++\n\t\t\t}\n\t\t\tif uncoveredChunks == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tfrac := float64(uncoveredChunks) / float64(totalChunks)\n\t\t\tsizeTerm := math.Pow(float64(uncoveredEff), sw)\n\t\t\tif uncoveredEff == 0 {\n\t\t\t\tsizeTerm = 1.0\n\t\t\t}\n\t\t\tw := sizeTerm * (1.0 + aw*frac)\n\t\t\tweights[mi] = w\n\t\t\ttotal += w\n\t\t}\n\t\tif total \u003c= 0 {\n\t\t\tbreak\n\t\t}\n\t\tu := rng.Float64() * total\n\t\tchosen := \"\"\n\t\tcum := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tif weights[mi] == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tcum += weights[mi]\n\t\t\tif u \u003c cum {\n\t\t\t\tchosen = mid\n\t\t\t\tbreak\n\t\t\t}\n\t\t}\n\t\tif chosen == \"\" {\n\t\t\tbreak\n\t\t}\n\t\tavail := make([]string, 0, len(moduleChunks[chosen]))\n\t\tfor _, c := range moduleChunks[chosen] {\n\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tavail = append(avail, c.ID)\n\t\t}\n\t\tif len(avail) == 0 {\n\t\t\tcontinue\n\t\t}\n\t\tidx := rng.Intn(len(avail))\n\t\tdrawn[avail[idx]] = true\n\t\tpicked = append(picked, avail[idx])\n\t}\n\treturn picked\n}\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "source",
+        "summary": "Implements a hierarchical sampling algorithm for selecting code chunks based on coverage and size, used in project bootstrapping.",
+        "exports": [
+          "HierarchicalSampler",
+          "HierarchicalSampler.Next",
+          "HierarchicalSampler.Name"
+        ],
+        "dependencies": [
+          "math",
+          "sort",
+          "math/rand"
+        ],
+        "importance": 0.7
+      }
+    },
+    "fallback": false,
+    "tokens_used": 1151,
+    "latency_ms": 6349
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "internal/bootstrap/sampler_hierarchical_test.go",
+      "lang": "go",
+      "role": "test",
+      "content": "func TestSampler_DeterministicSequence(t *testing.T) {\n\tout := synthBoundary(5, 10, 20)\n\tcovered := map[string]bool{}\n\ts := \u0026HierarchicalSampler{}\n\tvar seq1, seq2 []string\n\trng1 := rand.New(rand.NewSource(42))\n\tfor i := 0; i \u003c 10; i++ {\n\t\tseq1 = append(seq1, s.Next(out, covered, 4, rng1)...)\n\t}\n\trng2 := rand.New(rand.NewSource(42))\n\tfor i := 0; i \u003c 10; i++ {\n\t\tseq2 = append(seq2, s.Next(out, covered, 4, rng2)...)\n\t}\n\tif len(seq1) != len(seq2) {\n\t\tt.Fatalf(\"sequences differ in length: %d vs %d\", len(seq1), len(seq2))\n\t}\n\tfor i := range seq1 {\n\t\tif seq1[i] != seq2[i] {\n\t\t\tt.Errorf(\"sequence drift at %d: %q vs %q\", i, seq1[i], seq2[i])\n\t\t}\n\t}\n}\n\nfunc TestSampler_RespectsCovered(t *testing.T) {\n\tout := synthBoundary(3, 4, 10)\n\tcovered := map[string]bool{}\n\tfor _, c := range out.Chunks {\n\t\tif c.ModuleID == \"mod-0\" {\n\t\t\tcovered[c.ID] = true\n\t\t}\n\t}\n\ts := \u0026HierarchicalSampler{}\n\trng := rand.New(rand.NewSource(1))\n\tfor i := 0; i \u003c 50; i++ {\n\t\tpicks := s.Next(out, covered, 4, rng)\n\t\tfor _, id := range picks {\n\t\t\tif strings.HasPrefix(id, \"mod-0-chunk-\") {\n\t\t\t\tt.Errorf(\"covered module-0 chunk drawn: %s\", id)\n\t\t\t}\n\t\t}\n\t}\n}\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "HierarchicalSampler must produce deterministic sequences when given the same random seed to ensure reproducible test results.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "HierarchicalSampler should never draw chunks from modules marked as covered in the covered map during sampling.",
+          "category": "constraint",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 680,
+    "latency_ms": 5226
+  },
+  {
+    "entry": {
+      "source": "cortex",
+      "rel_path": "internal/bootstrap/sampler_hierarchical_test.go",
+      "lang": "go",
+      "role": "test",
+      "content": "func TestSampler_DeterministicSequence(t *testing.T) {\n\tout := synthBoundary(5, 10, 20)\n\tcovered := map[string]bool{}\n\ts := \u0026HierarchicalSampler{}\n\tvar seq1, seq2 []string\n\trng1 := rand.New(rand.NewSource(42))\n\tfor i := 0; i \u003c 10; i++ {\n\t\tseq1 = append(seq1, s.Next(out, covered, 4, rng1)...)\n\t}\n\trng2 := rand.New(rand.NewSource(42))\n\tfor i := 0; i \u003c 10; i++ {\n\t\tseq2 = append(seq2, s.Next(out, covered, 4, rng2)...)\n\t}\n\tif len(seq1) != len(seq2) {\n\t\tt.Fatalf(\"sequences differ in length: %d vs %d\", len(seq1), len(seq2))\n\t}\n\tfor i := range seq1 {\n\t\tif seq1[i] != seq2[i] {\n\t\t\tt.Errorf(\"sequence drift at %d: %q vs %q\", i, seq1[i], seq2[i])\n\t\t}\n\t}\n}\n\nfunc TestSampler_RespectsCovered(t *testing.T) {\n\tout := synthBoundary(3, 4, 10)\n\tcovered := map[string]bool{}\n\tfor _, c := range out.Chunks {\n\t\tif c.ModuleID == \"mod-0\" {\n\t\t\tcovered[c.ID] = true\n\t\t}\n\t}\n\ts := \u0026HierarchicalSampler{}\n\trng := rand.New(rand.NewSource(1))\n\tfor i := 0; i \u003c 50; i++ {\n\t\tpicks := s.Next(out, covered, 4, rng)\n\t\tfor _, id := range picks {\n\t\t\tif strings.HasPrefix(id, \"mod-0-chunk-\") {\n\t\t\t\tt.Errorf(\"covered module-0 chunk drawn: %s\", id)\n\t\t\t}\n\t\t}\n\t}\n}\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "test",
+        "summary": "Tests the deterministic behavior and coverage enforcement of the HierarchicalSampler component.",
+        "exports": [],
+        "dependencies": [
+          "testing",
+          "math/rand",
+          "strings"
+        ],
+        "importance": 0.1
+      }
+    },
+    "fallback": false,
+    "tokens_used": 760,
+    "latency_ms": 4198
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "package.json",
+      "lang": "unknown",
+      "role": "config",
+      "content": "{\n  \"name\": \"articles-ui\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc -b \u0026\u0026 vite build\",\n    \"preview\": \"vite preview\",\n    \"test\": \"vitest\",\n    \"lint\": \"eslint src --max-warnings 0\"\n  },\n  \"dependencies\": {\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\",\n    \"react-router-dom\": \"^6.26.0\",\n    \"@tanstack/react-query\": \"^5.59.0\",\n    \"zod\": \"^3.23.0\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"~5.5.0\",\n    \"vite\": \"^5.4.0\",\n    \"@vitejs/plugin-react\": \"^4.3.0\",\n    \"vitest\": \"^2.1.0\",\n    \"@testing-library/react\": \"^16.0.0\",\n    \"eslint\": \"^9.10.0\"\n  }\n}\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Project uses React 18.3.1 with React Router DOM 6.26.0 and TanStack React Query 5.59.0 for state management and routing.",
+          "category": "decision",
+          "importance": 0.9
+        },
+        {
+          "content": "TypeScript 5.5.0 with Vite 5.4.0 and Vitest 2.1.0 for development, testing, and building with ESLint for linting.",
+          "category": "pattern",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 558,
+    "latency_ms": 6184
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "package.json",
+      "lang": "unknown",
+      "role": "config",
+      "content": "{\n  \"name\": \"articles-ui\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc -b \u0026\u0026 vite build\",\n    \"preview\": \"vite preview\",\n    \"test\": \"vitest\",\n    \"lint\": \"eslint src --max-warnings 0\"\n  },\n  \"dependencies\": {\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\",\n    \"react-router-dom\": \"^6.26.0\",\n    \"@tanstack/react-query\": \"^5.59.0\",\n    \"zod\": \"^3.23.0\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"~5.5.0\",\n    \"vite\": \"^5.4.0\",\n    \"@vitejs/plugin-react\": \"^4.3.0\",\n    \"vitest\": \"^2.1.0\",\n    \"@testing-library/react\": \"^16.0.0\",\n    \"eslint\": \"^9.10.0\"\n  }\n}\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "config",
+        "summary": "Configuration file for a React-based UI project using Vite, TypeScript, and React Router, defining scripts, dependencies, and build settings.",
+        "exports": [],
+        "dependencies": [
+          "react",
+          "react-dom",
+          "react-router-dom",
+          "@tanstack/react-query",
+          "zod"
+        ],
+        "importance": 0.9
+      }
+    },
+    "fallback": false,
+    "tokens_used": 601,
+    "latency_ms": 3953
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "pyproject.toml",
+      "lang": "toml",
+      "role": "config",
+      "content": "[project]\nname = \"articles\"\nversion = \"0.1.0\"\ndescription = \"FastAPI articles service\"\nrequires-python = \"\u003e=3.11\"\ndependencies = [\n    \"fastapi\u003e=0.115.0\",\n    \"sqlalchemy\u003e=2.0\",\n    \"pydantic\u003e=2.6\",\n    \"uvicorn[standard]\u003e=0.32\",\n    \"alembic\u003e=1.13\",\n]\n\n[project.optional-dependencies]\ndev = [\n    \"pytest\u003e=8.0\",\n    \"httpx\u003e=0.27\",\n    \"ruff\u003e=0.7\",\n    \"mypy\u003e=1.13\",\n]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.ruff]\nline-length = 100\ntarget-version = \"py311\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\naddopts = \"--strict-markers\"\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use FastAPI with SQLAlchemy for building type-safe REST APIs with database integration",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Configure Ruff with 100 character line length and Python 3.11 target for consistent code formatting",
+          "category": "constraint",
+          "importance": 0.7
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 479,
+    "latency_ms": 4669
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "pyproject.toml",
+      "lang": "toml",
+      "role": "config",
+      "content": "[project]\nname = \"articles\"\nversion = \"0.1.0\"\ndescription = \"FastAPI articles service\"\nrequires-python = \"\u003e=3.11\"\ndependencies = [\n    \"fastapi\u003e=0.115.0\",\n    \"sqlalchemy\u003e=2.0\",\n    \"pydantic\u003e=2.6\",\n    \"uvicorn[standard]\u003e=0.32\",\n    \"alembic\u003e=1.13\",\n]\n\n[project.optional-dependencies]\ndev = [\n    \"pytest\u003e=8.0\",\n    \"httpx\u003e=0.27\",\n    \"ruff\u003e=0.7\",\n    \"mypy\u003e=1.13\",\n]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.ruff]\nline-length = 100\ntarget-version = \"py311\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\naddopts = \"--strict-markers\"\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "config",
+        "summary": "Configuration file defining project metadata, dependencies, and build settings for the FastAPI articles service.",
+        "exports": [],
+        "dependencies": [
+          "fastapi",
+          "sqlalchemy",
+          "pydantic",
+          "uvicorn",
+          "alembic"
+        ],
+        "importance": 0.9
+      }
+    },
+    "fallback": false,
+    "tokens_used": 572,
+    "latency_ms": 3934
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "src/components/ArticleList.test.tsx",
+      "lang": "ts",
+      "role": "test",
+      "content": "import { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { render, screen, waitFor, fireEvent } from '@testing-library/react';\nimport { ArticleList } from './ArticleList';\nimport * as api from '../lib/api';\n\nvi.mock('../lib/api');\nconst mockedFetch = vi.mocked(api.fetchArticles);\nconst mockedDelete = vi.mocked(api.deleteArticle);\n\nbeforeEach(() =\u003e {\n  vi.resetAllMocks();\n});\n\ndescribe('ArticleList', () =\u003e {\n  it('renders articles after load', async () =\u003e {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'Hello', snippet: 'world', authorId: 5 },\n    ]);\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e expect(screen.getByText('Hello')).toBeInTheDocument());\n  });\n\n  it('shows an error on fetch failure', async () =\u003e {\n    mockedFetch.mockRejectedValueOnce(new Error('boom'));\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e expect(screen.getByText(/Failed to load articles/)).toBeInTheDocument());\n  });\n\n  it('confirms deletion before removing', async () =\u003e {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'A', snippet: 's', authorId: 1 },\n    ]);\n    mockedDelete.mockResolvedValueOnce(undefined);\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e screen.getByText('A'));\n    fireEvent.click(screen.getByText('Delete'));\n    fireEvent.click(screen.getByText('OK'));\n    await waitFor(() =\u003e expect(mockedDelete).toHaveBeenCalledWith(1));\n  });\n});\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Use mocked API functions in tests to isolate component behavior from external dependencies.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Implement user confirmation flows for destructive actions like deletion to prevent accidental data loss.",
+          "category": "pattern",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 595,
+    "latency_ms": 4979
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "src/components/ArticleList.test.tsx",
+      "lang": "ts",
+      "role": "test",
+      "content": "import { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { render, screen, waitFor, fireEvent } from '@testing-library/react';\nimport { ArticleList } from './ArticleList';\nimport * as api from '../lib/api';\n\nvi.mock('../lib/api');\nconst mockedFetch = vi.mocked(api.fetchArticles);\nconst mockedDelete = vi.mocked(api.deleteArticle);\n\nbeforeEach(() =\u003e {\n  vi.resetAllMocks();\n});\n\ndescribe('ArticleList', () =\u003e {\n  it('renders articles after load', async () =\u003e {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'Hello', snippet: 'world', authorId: 5 },\n    ]);\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e expect(screen.getByText('Hello')).toBeInTheDocument());\n  });\n\n  it('shows an error on fetch failure', async () =\u003e {\n    mockedFetch.mockRejectedValueOnce(new Error('boom'));\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e expect(screen.getByText(/Failed to load articles/)).toBeInTheDocument());\n  });\n\n  it('confirms deletion before removing', async () =\u003e {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'A', snippet: 's', authorId: 1 },\n    ]);\n    mockedDelete.mockResolvedValueOnce(undefined);\n    render(\u003cArticleList /\u003e);\n    await waitFor(() =\u003e screen.getByText('A'));\n    fireEvent.click(screen.getByText('Delete'));\n    fireEvent.click(screen.getByText('OK'));\n    await waitFor(() =\u003e expect(mockedDelete).toHaveBeenCalledWith(1));\n  });\n});\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "test",
+        "summary": "Tests the ArticleList component's rendering, error handling, and deletion functionality.",
+        "exports": [],
+        "dependencies": [
+          "vitest",
+          "@testing-library/react",
+          "../lib/api"
+        ],
+        "importance": 0.2
+      }
+    },
+    "fallback": false,
+    "tokens_used": 685,
+    "latency_ms": 4134
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "src/components/ArticleList.tsx",
+      "lang": "ts",
+      "role": "source",
+      "content": "import { useEffect, useState } from 'react';\nimport { Article, fetchArticles, deleteArticle } from '../lib/api';\nimport { Spinner } from './Spinner';\nimport { ConfirmDialog } from './ConfirmDialog';\n\nexport interface ArticleListProps {\n  authorId?: number;\n  onSelect?: (article: Article) =\u003e void;\n}\n\nexport function ArticleList({ authorId, onSelect }: ArticleListProps) {\n  const [articles, setArticles] = useState\u003cArticle[]\u003e([]);\n  const [loading, setLoading] = useState(true);\n  const [error, setError] = useState\u003cstring | null\u003e(null);\n  const [pendingDelete, setPendingDelete] = useState\u003cArticle | null\u003e(null);\n\n  useEffect(() =\u003e {\n    let cancelled = false;\n    setLoading(true);\n    fetchArticles({ authorId })\n      .then((items) =\u003e {\n        if (cancelled) return;\n        setArticles(items);\n        setError(null);\n      })\n      .catch((err) =\u003e {\n        if (cancelled) return;\n        setError(err.message ?? 'unknown error');\n      })\n      .finally(() =\u003e {\n        if (!cancelled) setLoading(false);\n      });\n    return () =\u003e {\n      cancelled = true;\n    };\n  }, [authorId]);\n\n  if (loading) return \u003cSpinner /\u003e;\n  if (error) return \u003cdiv className=\"error\"\u003eFailed to load articles: {error}\u003c/div\u003e;\n\n  return (\n    \u003cul className=\"article-list\"\u003e\n      {articles.map((a) =\u003e (\n        \u003cli key={a.id} onClick={() =\u003e onSelect?.(a)}\u003e\n          \u003ch3\u003e{a.title}\u003c/h3\u003e\n          \u003cp\u003e{a.snippet}\u003c/p\u003e\n          \u003cbutton onClick={() =\u003e setPendingDelete(a)}\u003eDelete\u003c/button\u003e\n        \u003c/li\u003e\n      ))}\n      {pendingDelete \u0026\u0026 (\n        \u003cConfirmDialog\n          message={`Delete “${pendingDelete.title}”?`}\n          onConfirm={async () =\u003e {\n            await deleteArticle(pendingDelete.id);\n            setArticles((cur) =\u003e cur.filter((x) =\u003e x.id !== pendingDelete.id));\n            setPendingDelete(null);\n          }}\n          onCancel={() =\u003e setPendingDelete(null)}\n        /\u003e\n      )}\n    \u003c/ul\u003e\n  );\n}\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "Implement cleanup logic to prevent state updates on unmounted components using a cancellation flag.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Use a confirm dialog for destructive actions like article deletion to prevent accidental data loss.",
+          "category": "decision",
+          "importance": 0.8
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 715,
+    "latency_ms": 5120
+  },
+  {
+    "entry": {
+      "source": "ts",
+      "rel_path": "src/components/ArticleList.tsx",
+      "lang": "ts",
+      "role": "source",
+      "content": "import { useEffect, useState } from 'react';\nimport { Article, fetchArticles, deleteArticle } from '../lib/api';\nimport { Spinner } from './Spinner';\nimport { ConfirmDialog } from './ConfirmDialog';\n\nexport interface ArticleListProps {\n  authorId?: number;\n  onSelect?: (article: Article) =\u003e void;\n}\n\nexport function ArticleList({ authorId, onSelect }: ArticleListProps) {\n  const [articles, setArticles] = useState\u003cArticle[]\u003e([]);\n  const [loading, setLoading] = useState(true);\n  const [error, setError] = useState\u003cstring | null\u003e(null);\n  const [pendingDelete, setPendingDelete] = useState\u003cArticle | null\u003e(null);\n\n  useEffect(() =\u003e {\n    let cancelled = false;\n    setLoading(true);\n    fetchArticles({ authorId })\n      .then((items) =\u003e {\n        if (cancelled) return;\n        setArticles(items);\n        setError(null);\n      })\n      .catch((err) =\u003e {\n        if (cancelled) return;\n        setError(err.message ?? 'unknown error');\n      })\n      .finally(() =\u003e {\n        if (!cancelled) setLoading(false);\n      });\n    return () =\u003e {\n      cancelled = true;\n    };\n  }, [authorId]);\n\n  if (loading) return \u003cSpinner /\u003e;\n  if (error) return \u003cdiv className=\"error\"\u003eFailed to load articles: {error}\u003c/div\u003e;\n\n  return (\n    \u003cul className=\"article-list\"\u003e\n      {articles.map((a) =\u003e (\n        \u003cli key={a.id} onClick={() =\u003e onSelect?.(a)}\u003e\n          \u003ch3\u003e{a.title}\u003c/h3\u003e\n          \u003cp\u003e{a.snippet}\u003c/p\u003e\n          \u003cbutton onClick={() =\u003e setPendingDelete(a)}\u003eDelete\u003c/button\u003e\n        \u003c/li\u003e\n      ))}\n      {pendingDelete \u0026\u0026 (\n        \u003cConfirmDialog\n          message={`Delete “${pendingDelete.title}”?`}\n          onConfirm={async () =\u003e {\n            await deleteArticle(pendingDelete.id);\n            setArticles((cur) =\u003e cur.filter((x) =\u003e x.id !== pendingDelete.id));\n            setPendingDelete(null);\n          }}\n          onCancel={() =\u003e setPendingDelete(null)}\n        /\u003e\n      )}\n    \u003c/ul\u003e\n  );\n}\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "source",
+        "summary": "Displays a list of articles, allows selection and deletion with confirmation.",
+        "exports": [
+          "ArticleList",
+          "ArticleListProps"
+        ],
+        "dependencies": [
+          "react",
+          "../lib/api",
+          "./Spinner",
+          "./ConfirmDialog"
+        ],
+        "importance": 0.6
+      }
+    },
+    "fallback": false,
+    "tokens_used": 809,
+    "latency_ms": 4812
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "tests/test_handlers.py",
+      "lang": "py",
+      "role": "test",
+      "content": "import pytest\nfrom fastapi.testclient import TestClient\nfrom app.main import app\nfrom app.db import get_session\nfrom tests.conftest import override_session, make_user, make_article\n\n\nclient = TestClient(app)\napp.dependency_overrides[get_session] = override_session\n\n\ndef test_get_article_not_found():\n    response = client.get(\"/articles/9999\")\n    assert response.status_code == 404\n    assert response.json()[\"detail\"] == \"article not found\"\n\n\ndef test_create_article_requires_auth():\n    response = client.post(\"/articles/\", json={\"title\": \"t\", \"body\": \"b\"})\n    assert response.status_code == 401\n\n\ndef test_create_article_persists(session):\n    user = make_user(session, email=\"a@b.c\")\n    with auth_as(user):\n        response = client.post(\"/articles/\", json={\"title\": \"Hello\", \"body\": \"World\"})\n    assert response.status_code == 201\n    data = response.json()\n    assert data[\"title\"] == \"Hello\"\n    assert data[\"author_id\"] == user.id\n\n\ndef test_delete_article_requires_ownership(session):\n    owner = make_user(session, email=\"owner@x.io\")\n    other = make_user(session, email=\"other@x.io\")\n    article = make_article(session, author=owner)\n    with auth_as(other):\n        response = client.delete(f\"/articles/{article.id}\")\n    assert response.status_code == 404\n"
+    },
+    "op": "extract_insight",
+    "output": {
+      "count": 2,
+      "fallback": false,
+      "insights": [
+        {
+          "content": "API endpoints requiring authentication should return 401 status code for unauthorized requests.",
+          "category": "pattern",
+          "importance": 0.9
+        },
+        {
+          "content": "Article deletion requires ownership verification and returns 404 for unauthorized attempts.",
+          "category": "constraint",
+          "importance": 0.85
+        }
+      ]
+    },
+    "fallback": false,
+    "tokens_used": 575,
+    "latency_ms": 4915
+  },
+  {
+    "entry": {
+      "source": "python",
+      "rel_path": "tests/test_handlers.py",
+      "lang": "py",
+      "role": "test",
+      "content": "import pytest\nfrom fastapi.testclient import TestClient\nfrom app.main import app\nfrom app.db import get_session\nfrom tests.conftest import override_session, make_user, make_article\n\n\nclient = TestClient(app)\napp.dependency_overrides[get_session] = override_session\n\n\ndef test_get_article_not_found():\n    response = client.get(\"/articles/9999\")\n    assert response.status_code == 404\n    assert response.json()[\"detail\"] == \"article not found\"\n\n\ndef test_create_article_requires_auth():\n    response = client.post(\"/articles/\", json={\"title\": \"t\", \"body\": \"b\"})\n    assert response.status_code == 401\n\n\ndef test_create_article_persists(session):\n    user = make_user(session, email=\"a@b.c\")\n    with auth_as(user):\n        response = client.post(\"/articles/\", json={\"title\": \"Hello\", \"body\": \"World\"})\n    assert response.status_code == 201\n    data = response.json()\n    assert data[\"title\"] == \"Hello\"\n    assert data[\"author_id\"] == user.id\n\n\ndef test_delete_article_requires_ownership(session):\n    owner = make_user(session, email=\"owner@x.io\")\n    other = make_user(session, email=\"other@x.io\")\n    article = make_article(session, author=owner)\n    with auth_as(other):\n        response = client.delete(f\"/articles/{article.id}\")\n    assert response.status_code == 404\n"
+    },
+    "op": "extract_overview",
+    "output": {
+      "fallback": false,
+      "overview": {
+        "role": "test",
+        "summary": "Tests the article creation, retrieval, and deletion endpoints including authentication and authorization logic.",
+        "exports": [],
+        "dependencies": [
+          "fastapi.testclient.TestClient",
+          "app.main.app",
+          "app.db.get_session",
+          "tests.conftest.override_session",
+          "tests.conftest.make_user"
+        ],
+        "importance": 0.7
+      }
+    },
+    "fallback": false,
+    "tokens_used": 693,
+    "latency_ms": 4791
+  }
+]

@@ -10,18 +10,25 @@ package dag
 import "fmt"
 
 // Budget tracks the remaining resources a turn DAG can consume.
-// Three axes; all decay on each node call.
+// Four axes; all decay on each node call. OutputTokens governs the
+// total tokens nodes may deposit into turn state — the salience-budget
+// axis from docs/salience-budgets.md. Zero means "no contract on the
+// output axis"; pre-salience-budgets behavior.
 type Budget struct {
-	LatencyMS int // milliseconds of wall time remaining
-	Tokens    int // LLM token budget remaining
-	Depth     int // max remaining spawn depth (decrement per spawn)
+	LatencyMS    int // milliseconds of wall time remaining
+	Tokens       int // LLM token budget remaining
+	Depth        int // max remaining spawn depth (decrement per spawn)
+	OutputTokens int // tokens nodes may still deposit into turn state
 }
 
 // Cost is what a single node call reports as consumed. The executor
-// subtracts this from the running budget.
+// subtracts this from the running budget. OutputTokens tracks what the
+// node *left behind* in turn state (deposited into Out) — distinct
+// from Tokens, which tracks LLM tokens spent producing it.
 type Cost struct {
-	LatencyMS int
-	Tokens    int
+	LatencyMS    int
+	Tokens       int
+	OutputTokens int
 }
 
 // Consume subtracts c from b. Does not clamp at zero — the caller
@@ -29,6 +36,7 @@ type Cost struct {
 func (b *Budget) Consume(c Cost) {
 	b.LatencyMS -= c.LatencyMS
 	b.Tokens -= c.Tokens
+	b.OutputTokens -= c.OutputTokens
 }
 
 // ConsumeDepth decrements depth by one (used per spawn).
@@ -37,8 +45,13 @@ func (b *Budget) ConsumeDepth() {
 }
 
 // Exhausted returns true if any axis has dropped to zero or below.
-// Returns the axis name (latency_ms / tokens / depth) of the first
-// axis that exhausted; empty if not exhausted.
+// Returns the axis name (latency_ms / tokens / depth / output_tokens)
+// of the first axis that exhausted; empty if not exhausted.
+//
+// OutputTokens is checked only when the seed budget enabled it
+// (initial value > 0). A zero seed means salience budgets are not in
+// play for this turn and the axis is treated as unlimited — keeps
+// pre-salience-budgets callers behaving exactly as before.
 func (b Budget) Exhausted() (bool, string) {
 	if b.LatencyMS <= 0 {
 		return true, "latency_ms"
@@ -49,6 +62,10 @@ func (b Budget) Exhausted() (bool, string) {
 	if b.Depth <= 0 {
 		return true, "depth"
 	}
+	// OutputTokens is opt-in: the axis only enforces when the seed
+	// budget set it. Treating "0 means unlimited" rather than "0
+	// means exhausted" keeps callers that don't yet allocate this
+	// axis from spuriously exhausting on turn one.
 	return false, ""
 }
 
@@ -56,6 +73,10 @@ func (b Budget) Exhausted() (bool, string) {
 // the given cost hint. Used by the executor before scheduling a
 // spawned child. Soft check — handlers can also self-modulate based
 // on remaining budget.
+//
+// The OutputTokens dimension is checked only when the cost actually
+// claims output. A node that doesn't deposit (e.g. a no-op steering
+// call) doesn't have to fit under the output budget.
 func (b Budget) CanAfford(c Cost) bool {
 	if c.LatencyMS > b.LatencyMS {
 		return false
@@ -63,11 +84,15 @@ func (b Budget) CanAfford(c Cost) bool {
 	if c.Tokens > b.Tokens {
 		return false
 	}
+	if c.OutputTokens > 0 && c.OutputTokens > b.OutputTokens {
+		return false
+	}
 	return true
 }
 
 func (b Budget) String() string {
-	return fmt.Sprintf("Budget{lat=%dms tok=%d depth=%d}", b.LatencyMS, b.Tokens, b.Depth)
+	return fmt.Sprintf("Budget{lat=%dms tok=%d depth=%d out=%d}",
+		b.LatencyMS, b.Tokens, b.Depth, b.OutputTokens)
 }
 
 // DefaultTurnBudget is the seed budget for a turn-type DAG.
@@ -97,9 +122,10 @@ func (b Budget) String() string {
 // pkg/config will override per project.
 func DefaultTurnBudget() Budget {
 	return Budget{
-		LatencyMS: 150000,
-		Tokens:    10000,
-		Depth:     10,
+		LatencyMS:    150000,
+		Tokens:       10000,
+		Depth:        10,
+		OutputTokens: 8000, // ~half a 16k ctx window — see docs/salience-budgets.md
 	}
 }
 
@@ -138,5 +164,52 @@ func DefaultCaptureBudget() Budget {
 		LatencyMS: 100,
 		Tokens:    500,
 		Depth:     3,
+	}
+}
+
+// BudgetForIntent returns the per-intent seed budget the REPL applies
+// once sense.classify_intent has decided the SHAPE of the turn. Cheap
+// shapes (greeting / clarify) get a small budget so a misroute can't
+// blow the turn open; recall gets a middling budget for search +
+// synthesis; code / review / meta stay at the calibrated full budget.
+// Unknown intents fall back to DefaultTurnBudget — fail safe, never
+// under-budget.
+//
+// Defense-in-depth: greeting / clarify budgets are intentionally too
+// small to spawn decide.coding_turn (calibrated at 15s / 2000 tok).
+// If the classifier mis-routes a code request as a greeting, the
+// budget gate refuses the spawn rather than letting the trivial-intent
+// turn balloon.
+//
+// Sized 2026-05-21 against the Haiku 4.5 calibration that drives
+// DefaultTurnBudget (sense.scan_project_boundaries 2s; LLM ops 15-18s
+// each at ~300-400 tok):
+//   - greeting: act.passthrough is mechanical (~10ms / 0 tok). 2000ms
+//     / 300 tok leaves enough headroom for the classifier itself plus
+//     one cheap follow-up if needed; well under coding_turn cost.
+//   - clarify: similar floor — one short LLM round to compose the
+//     question; no tools.
+//   - recall: vector_search + a small synthesis turn fits under 20s
+//     / 3k tok with room for one re-decide.
+//   - review: read-heavy; allow several tool_call reads + one
+//     synthesis pass.
+//   - meta: REPL/config queries — a small synthesis call.
+//   - code: full DefaultTurnBudget; today's behavior.
+func BudgetForIntent(intent string) Budget {
+	switch intent {
+	case "greeting":
+		return Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500}
+	case "clarify":
+		return Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}
+	case "recall":
+		return Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
+	case "review":
+		return Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}
+	case "meta":
+		return Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
+	case "code":
+		return DefaultTurnBudget()
+	default:
+		return DefaultTurnBudget()
 	}
 }

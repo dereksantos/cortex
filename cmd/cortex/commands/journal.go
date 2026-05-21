@@ -78,6 +78,8 @@ func (c *JournalCommand) Execute(ctx *Context) error {
 		return c.runTail(ctx)
 	case "migrate":
 		return c.runMigrate(ctx)
+	case "prune":
+		return c.runPrune(ctx)
 	case "help", "-h", "--help":
 		fmt.Print(journalUsage())
 		return nil
@@ -874,6 +876,9 @@ Subcommands:
   tail        Stream entries as they're appended.                (slice I1)
   migrate     Pack .cortex/queue/processed/*.json into segments.
               Pass --force to append when the journal already has entries.
+  prune       Delete closed segments older than a retention horizon
+              (default 90d). --max-bytes caps total per-class size.
+              --dry-run reports without deleting. --class to scope.
 
 See docs/journal.md for the architecture and docs/journal-implementation-plan.md
 for the full slice plan.

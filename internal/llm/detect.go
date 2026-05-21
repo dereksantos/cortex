@@ -2,13 +2,17 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // LLMStatus represents the detected LLM configuration
@@ -96,6 +100,60 @@ func DetectLLM() LLMStatus {
 	// 7. Ollama installed and running but no models
 	status.RecommendedModel = "qwen2.5:3b"
 	return status
+}
+
+// EndpointResult is the outcome of probing one OpenAI-compatible
+// endpoint. Reachable=false + Error explains why; Reachable=true +
+// Models is the catalog the endpoint exposed.
+type EndpointResult struct {
+	Name      string
+	BaseURL   string
+	Reachable bool
+	Models    []llm.CompatModel
+	Error     string
+}
+
+// DetectOpenAICompatEndpoints probes each configured OpenAI-compatible
+// endpoint in parallel (chatterbox / LM Studio / vLLM / Lemonade /
+// hosted proxies — anything speaking the OpenAI shape). Each probe
+// times out independently; the function returns when all probes are
+// done. Unreachable endpoints get an EndpointResult with Reachable=false
+// and a short error message — no individual failure aborts the others.
+//
+// Phase 4 model-registry substrate. Onboarding (Slice D) consumes this
+// to recommend a role map; the REPL (Slice B) consumes it to validate
+// the saved map on launch.
+func DetectOpenAICompatEndpoints(ctx context.Context, endpoints []llm.EndpointConfig) []EndpointResult {
+	results := make([]EndpointResult, len(endpoints))
+	var wg sync.WaitGroup
+	for i, ep := range endpoints {
+		wg.Add(1)
+		go func(i int, ep llm.EndpointConfig) {
+			defer wg.Done()
+			results[i] = probeEndpoint(ctx, ep)
+		}(i, ep)
+	}
+	wg.Wait()
+	return results
+}
+
+// probeEndpoint runs one endpoint probe synchronously. Internal helper
+// for DetectOpenAICompatEndpoints — exported tests construct the
+// EndpointResult directly rather than calling this.
+func probeEndpoint(ctx context.Context, ep llm.EndpointConfig) EndpointResult {
+	r := EndpointResult{Name: ep.Name, BaseURL: ep.BaseURL}
+	c := llm.NewOpenAICompatClient(ep)
+	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	models, err := c.ListModels(pctx)
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	r.Reachable = true
+	r.Models = models
+	return r
 }
 
 // isOllamaRunning checks if Ollama service is running

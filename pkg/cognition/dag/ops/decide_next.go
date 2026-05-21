@@ -93,6 +93,15 @@ type NextConfig struct {
 	// dedicated classifier models (3B+ Phi/Llama) or running on
 	// faster hardware.
 	MaxLatencyMS int
+
+	// SystemBoundaries, when non-empty, is rendered into the prompt's
+	// {{BOUNDARIES}} block. The caller supplies a short fact-sheet
+	// describing the running model's capability class + the
+	// per-tool-call salience cap, so decide.next plans within its
+	// physical-system bounds (Phase 3 Slice 2): tight cap + small
+	// model → favor fan-out; loose cap + large model → fewer larger
+	// nodes are OK. Empty → no boundary block; pre-Phase-3 behavior.
+	SystemBoundaries string
 }
 
 // recursionDepthAttr is the Attr key used to track decide.next →
@@ -132,7 +141,7 @@ Available ops (function.op(params) - what it does):
 {{OPS}}
 Available models (route a node by setting attrs.model; omit to use the session default):
 {{MODELS}}
-The user said:
+{{BOUNDARIES}}The user said:
 """
 {{PROMPT}}
 """
@@ -253,7 +262,7 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 		if cfg.Registry != nil {
 			opCatalog = FormatOpCatalog(cfg.Registry)
 		}
-		systemPrompt := renderNextPrompt(prompt, opCatalog, cfg.ModelCatalog, historySummary)
+		systemPrompt := renderNextPrompt(prompt, opCatalog, cfg.ModelCatalog, historySummary, cfg.SystemBoundaries, budget)
 		respText, err := provider.GenerateWithSystem(classifyCtx, "Compose the next nodes.", systemPrompt)
 		if err != nil {
 			return fallbackSpawn(prompt, "fallback: classifier error ("+providerSrc+"): "+err.Error(), started), nil
@@ -364,7 +373,13 @@ func readDecideNextDepth(in map[string]any) int {
 // into the static template. Empty catalogs simply leave the section
 // header in place — the LLM still sees "Available ops:" with no
 // content, which is intentional (signals "operate from priors").
-func renderNextPrompt(prompt, opCatalog, modelCatalog, historySummary string) string {
+//
+// boundaries is the caller-supplied capability fact-sheet (Phase 3
+// Slice 2). budget is the live remaining turn budget — the renderer
+// summarizes both into a {{BOUNDARIES}} block so the LLM plans
+// within its physical-system limits. Empty boundaries + zero budget
+// → no block; pre-Phase-3 behavior preserved.
+func renderNextPrompt(prompt, opCatalog, modelCatalog, historySummary, boundaries string, budget dag.Budget) string {
 	out := nextPrompt
 	out = strings.ReplaceAll(out, "{{PROMPT}}", prompt)
 	out = strings.ReplaceAll(out, "{{OPS}}", opCatalog)
@@ -375,7 +390,44 @@ func renderNextPrompt(prompt, opCatalog, modelCatalog, historySummary string) st
 		contextBlock = "Recent context: " + historySummary + "\n"
 	}
 	out = strings.ReplaceAll(out, "{{CONTEXT}}", contextBlock)
+	out = strings.ReplaceAll(out, "{{BOUNDARIES}}", formatBoundariesBlock(boundaries, budget))
 	return out
+}
+
+// formatBoundariesBlock renders the self-awareness section of
+// decide.next's prompt — the caller-supplied capability fact-sheet
+// plus the live remaining-budget summary. Returns "" when neither
+// signal is present so the slot collapses cleanly.
+//
+// Phase 3 Slice 2: the LLM sees its own physical-system limits at
+// plan time and chooses fanout shape accordingly — small model + tight
+// budget → many narrow nodes; large model + loose budget → fewer
+// larger nodes. The fact-sheet is opaque to this op so the REPL can
+// evolve what it surfaces (capability class today; pre-ingest summary
+// pointer in a later phase) without touching the prompt template.
+func formatBoundariesBlock(boundaries string, budget dag.Budget) string {
+	hasBoundaries := strings.TrimSpace(boundaries) != ""
+	hasBudget := budget.LatencyMS > 0 || budget.Tokens > 0 || budget.OutputTokens > 0
+	if !hasBoundaries && !hasBudget {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Physical-system limits for THIS turn (plan within them):\n")
+	if hasBoundaries {
+		b.WriteString(boundaries)
+		if !strings.HasSuffix(boundaries, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	if hasBudget {
+		fmt.Fprintf(&b, "- Remaining budget: latency=%dms, tokens=%d, depth=%d, output_tokens=%d\n",
+			budget.LatencyMS, budget.Tokens, budget.Depth, budget.OutputTokens)
+	}
+	b.WriteString("\nPlanning guidance:\n")
+	b.WriteString("- Tight output budget or small model → favor fan-out: many narrow decide.tool_call nodes, each producing a compressed deposit. Avoid one big decide.coding_turn that tries to hold everything in its working set.\n")
+	b.WriteString("- Loose output budget or large model → fewer larger nodes are fine; a single decide.coding_turn that reads several files in its agent loop is OK.\n")
+	b.WriteByte('\n')
+	return b.String()
 }
 
 // materializeEmittedNode converts one emittedNode into a dag.NodeSpec

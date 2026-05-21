@@ -88,9 +88,17 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "init", "install", "uninstall", "projects":
+	case "init", "install", "uninstall", "projects", "bootstrap", "study":
 		if cmd := commands.Get(command); cmd != nil {
-			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+			// Study reads cfg.DefaultGenerationModel() when --model is
+			// blank; load config best-effort (nil-safe if absent).
+			c := &commands.Context{Args: os.Args[2:]}
+			if command == "study" {
+				if cfg, err := loadConfig(); err == nil {
+					c.Config = cfg
+				}
+			}
+			runCommand(command, cmd, c)
 		}
 	case "daemon":
 		if cmd := commands.Get("daemon"); cmd != nil {
@@ -131,6 +139,14 @@ func main() {
 		// `cortex code` is the ad-hoc coding harness: no config or
 		// storage needed (the harness opens its own per-workdir store).
 		if cmd := commands.Get("code"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
+	case "models":
+		// `cortex models` probes configured endpoints + Ollama and
+		// prints a recommended role map. No config/storage needed —
+		// the command opens its own workdir-rooted .cortex/config.json
+		// for endpoint definitions.
+		if cmd := commands.Get("models"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
 	case "run":

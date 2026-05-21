@@ -66,6 +66,14 @@ type CortexHarness struct {
 	// any other OpenAI-compatible server.
 	apiURL string
 
+	// endpoint, when non-nil, takes precedence over apiURL/apiKey:
+	// the harness constructs an OpenAICompatClient bound to this
+	// endpoint instead of an OpenRouter client. This is the Phase 4
+	// model-registry hook that lets the REPL route "chatterbox/..."
+	// model ids to a local Lemonade / LM Studio / vLLM server
+	// without going through OpenRouter's cloud gateway.
+	endpoint *llm.EndpointConfig
+
 	// disableCortexSearch omits the cortex_search tool from the
 	// per-session registry. Used by benchmarks that need a baseline
 	// run with no Cortex augmentation (SWE-bench --strategy baseline).
@@ -111,20 +119,28 @@ type CortexHarness struct {
 // trace rows).
 func (h *CortexHarness) SetDispatcher(d harness.ToolDispatcher) { h.dispatcher = d }
 
-// NewCortexHarness resolves the OpenRouter API key (keychain first, env
-// fallback via pkg/secret) and returns a configured harness. A missing
-// key is a hard error — the harness cannot run without it.
+// NewCortexHarness returns a configured harness. The OpenRouter API
+// key is resolved opportunistically (keychain first, env fallback) —
+// a missing key is NOT an error here. Auth is a property of the
+// backend chosen at RunSession time: configured endpoints (SetEndpoint)
+// use their own auth (often none); the OpenRouter cloud path errors
+// at the actual call if no key is available. This lets users run
+// against a local Lemonade / LM Studio / Ollama server without ever
+// having an OpenRouter key configured.
 //
-// model is required and is passed verbatim to OpenRouter (e.g.
-// "anthropic/claude-3-5-haiku", "qwen/qwen-2.5-coder-32b-instruct").
+// model is required and is sent verbatim to whichever backend the
+// session routes to. Callers using SetEndpoint typically pass the
+// post-prefix bare model id ("Qwen3-Coder-30B-A3B-Instruct-GGUF");
+// callers using OpenRouter pass the provider-prefixed id
+// ("anthropic/claude-3-5-haiku").
 func NewCortexHarness(model string) (*CortexHarness, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("cortex harness: model is required")
 	}
-	key, src, err := secret.MustOpenRouterKey()
-	if err != nil {
-		return nil, fmt.Errorf("cortex harness: %w", err)
-	}
+	// Best-effort key resolution. Empty key is fine — the OpenRouter
+	// branch in RunSessionWithResult will surface a clear error if
+	// the call actually goes out without one.
+	key, src, _ := secret.MustOpenRouterKey()
 	return &CortexHarness{
 		model:  model,
 		apiKey: key,
@@ -161,6 +177,17 @@ func (h *CortexHarness) SetMaxOutputTokens(n int) { h.maxOutputTokens = n }
 // (`http://localhost:11434/v1/chat/completions`) or any other
 // OpenAI-compatible server. Empty -> default OpenRouter endpoint.
 func (h *CortexHarness) SetAPIURL(url string) { h.apiURL = url }
+
+// SetEndpoint binds the harness to a specific OpenAI-compatible
+// endpoint, bypassing OpenRouter. When set, subsequent RunSession*
+// calls construct an OpenAICompatClient (with this endpoint's BaseURL
+// + optional APIKey) instead of an OpenRouter client. The model id
+// passed to SetModel is sent verbatim — no provider-prefix mangling.
+//
+// Pass nil to clear and revert to OpenRouter-backed behavior. This
+// is the Phase 4 model-registry hook used by the REPL when the
+// configured endpoint resolves a model id (e.g. "chatterbox/...").
+func (h *CortexHarness) SetEndpoint(ep *llm.EndpointConfig) { h.endpoint = ep }
 
 // SetCortexSearchEnabled toggles registration of the cortex_search
 // tool in subsequent RunSession* calls. Defaults to enabled. Pass
@@ -233,14 +260,6 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 		return HarnessResult{}, fmt.Errorf("cortex harness: prompt is required")
 	}
 
-	// Fresh OpenRouter client per session: avoids leaking
-	// LastCostUSD / LastProvider from a prior cell.
-	client := llm.NewOpenRouterClientWithKey(nil, h.apiKey)
-	client.SetModel(h.model)
-	if h.apiURL != "" {
-		client.SetAPIURL(h.apiURL)
-	}
-
 	// Per-turn output cap: derive from the model id unless the
 	// caller overrode it via SetMaxOutputTokens. The cap bounds a
 	// single response, not cumulative spend (that's Budget).
@@ -248,7 +267,37 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	if maxOut <= 0 {
 		maxOut = harness.ModelMaxOutputTokens(h.model)
 	}
-	client.SetMaxTokens(maxOut)
+
+	// Provider construction: Phase 4 endpoint-aware routing. When
+	// SetEndpoint pinned a specific OpenAI-compatible server (e.g.
+	// chatterbox / LM Studio), use the generic OpenAICompatClient;
+	// otherwise fall back to the OpenRouter cloud path. The harness
+	// loop needs LoopProvider (GenerateWithTools); the cortex_search
+	// tool needs llm.Provider (Generate/GenerateWithSystem). Both
+	// client types satisfy both interfaces, so we hold one variable
+	// per role.
+	var (
+		loopProvider harness.LoopProvider
+		chatProvider llm.Provider
+	)
+	if h.endpoint != nil {
+		compat := llm.NewOpenAICompatClient(*h.endpoint)
+		compat.SetModel(h.model)
+		compat.SetMaxTokens(maxOut)
+		loopProvider = compat
+		chatProvider = compat
+	} else {
+		// Fresh OpenRouter client per session: avoids leaking
+		// LastCostUSD / LastProvider from a prior cell.
+		client := llm.NewOpenRouterClientWithKey(nil, h.apiKey)
+		client.SetModel(h.model)
+		if h.apiURL != "" {
+			client.SetAPIURL(h.apiURL)
+		}
+		client.SetMaxTokens(maxOut)
+		loopProvider = client
+		chatProvider = client
+	}
 
 	registry := harness.NewToolRegistry()
 	registry.Register(harness.NewReadFileTool(workdir))
@@ -263,9 +312,9 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 			err          error
 		)
 		if h.sharedCortex != nil {
-			cortexSearch, err = harness.NewCortexSearchToolFromCortex(workdir, h.sharedCortex, client)
+			cortexSearch, err = harness.NewCortexSearchToolFromCortex(workdir, h.sharedCortex, chatProvider)
 		} else {
-			cortexSearch, err = harness.NewCortexSearchTool(workdir, client)
+			cortexSearch, err = harness.NewCortexSearchTool(workdir, chatProvider)
 		}
 		if err != nil {
 			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
@@ -286,7 +335,7 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	}
 
 	loop := &harness.Loop{
-		Provider:      client,
+		Provider:      loopProvider,
 		Registry:      registry,
 		System:        sys,
 		MaxTurns:      h.maxTurns,

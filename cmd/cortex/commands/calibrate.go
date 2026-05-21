@@ -40,6 +40,14 @@ func (c *CalibrateCommand) DescribeFlags(fs *flag.FlagSet) {
 }
 
 func (c *CalibrateCommand) Execute(ctx *Context) error {
+	// Subcommand dispatch: `cortex calibrate salience` reads
+	// attend.compress rows and writes the per-intent salience cap
+	// snapshot. The bare `cortex calibrate` form keeps its original
+	// op-cost calibration behavior so existing tooling is unaffected.
+	if len(ctx.Args) > 0 && ctx.Args[0] == "salience" {
+		return executeCalibrateSalience(ctx.Args[1:])
+	}
+
 	tracePath := ""
 	snapshotPath := ""
 	window := 0
@@ -109,12 +117,16 @@ func (c *CalibrateCommand) Execute(ctx *Context) error {
 
 func printCalibrateHelp() {
 	fmt.Println("Usage: cortex calibrate [--trace PATH] [--snapshot PATH] [--window N]")
+	fmt.Println("       cortex calibrate salience [flags]")
 	fmt.Println()
 	fmt.Println("Recompute per-op p50 cost hints from a dag_traces.jsonl rolling window.")
 	fmt.Println("Persists the result to .cortex/db/op_cost_hints.json (the next")
 	fmt.Println("cortex run / REPL turn loads it at executor construction).")
 	fmt.Println()
-	fmt.Println("Flags:")
+	fmt.Println("Subcommands:")
+	fmt.Println("  salience          Fit per-intent salience caps from attend.compress rows")
+	fmt.Println()
+	fmt.Println("Flags (default form):")
 	fmt.Println("  --trace PATH      Source dag_traces.jsonl (default .cortex/db/dag_traces.jsonl)")
 	fmt.Println("  --snapshot PATH   Output op_cost_hints.json (default .cortex/db/op_cost_hints.json)")
 	fmt.Println("  --window N        Rolling-window row count (default 100)")

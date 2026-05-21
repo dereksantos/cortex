@@ -20,6 +20,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/cognition/sources"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/web"
@@ -126,21 +127,26 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	}
 
 	// Initialize LLM provider for cognitive modes via the unified surface
-	// (OpenRouter then Anthropic). Ollama as a local fallback.
+	// (OpenRouter then Anthropic). Local-generation fallback flows
+	// through intllm.BuildProvider so a user with Phase 4 model_routes
+	// can have Think/Dream/Reflect hit their configured local endpoint
+	// (chatterbox / lemonade / lm-studio) instead of being pinned to
+	// Ollama. See docs/provider-resolution-refactor.md.
 	var llmProvider llm.Provider
 	if p, _, err := llm.NewLLMClient(cfg); err == nil {
 		llmProvider = p
 	}
-	ollama := llm.NewOllamaClient(cfg)
-	if llmProvider == nil && ollama.IsAvailable() {
-		llmProvider = ollama
+	localProvider := intllm.BuildProvider(cfg, cfg.OllamaModel)
+	if llmProvider == nil && localProvider != nil && localProvider.IsAvailable() {
+		llmProvider = localProvider
 	}
 
 	// Initialize embedder with fallback: Ollama (768-dim) -> Hugot (384-dim)
 	// Note: Different dimensions are handled by storage, but using a single
 	// embedder consistently per database is recommended for best results.
+	ollamaEmbedder := intllm.BuildEmbedder(cfg)
 	hugotEmbedder := llm.NewHugotEmbedder()
-	embedder := llm.NewFallbackEmbedder(ollama, hugotEmbedder)
+	embedder := llm.NewFallbackEmbedder(ollamaEmbedder, hugotEmbedder)
 
 	// Create Cortex cognitive pipeline
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)

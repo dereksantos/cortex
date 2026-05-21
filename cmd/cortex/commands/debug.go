@@ -20,6 +20,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition/prompts"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -258,14 +259,11 @@ func (c *TestCommand) Execute(ctx *Context) error {
 	passed := 0
 	failed := 0
 
-	// Get LLM provider
-	var llmProvider llm.Provider
-	ollama := llm.NewOllamaClient(cfg)
-	if ollama.IsAvailable() {
-		llmProvider = ollama
-	}
-
-	if llmProvider == nil {
+	// Get LLM provider — route by model id so users with Phase 4
+	// model_routes can run debug-tests against their configured
+	// local endpoint, not just Ollama.
+	llmProvider := intllm.BuildProvider(cfg, cfg.OllamaModel)
+	if llmProvider == nil || !llmProvider.IsAvailable() {
 		fmt.Println("[X] No LLM available for testing")
 		return fmt.Errorf("no LLM available")
 	}
@@ -1034,8 +1032,8 @@ func generateStatusSummary(ctx *Context, data statusContext) (string, bool) {
 		return "", false
 	}
 
-	client := llm.NewOllamaClient(cfg)
-	if !client.IsAvailable() {
+	client := intllm.BuildProvider(cfg, cfg.OllamaModel)
+	if client == nil || !client.IsAvailable() {
 		return "", false
 	}
 
@@ -1443,7 +1441,11 @@ func displayMemoryOverview(ctx *Context) error {
 
 // --- Helper functions ---
 
-// checkOllama checks if Ollama is running and returns installed models
+// checkOllama checks if Ollama is running and returns installed models.
+//
+// allowlist:llm.NewOllamaClient — this is an intentional Ollama-only
+// probe for status display; not a runtime provider selection. The
+// provider-resolution guard test exempts this site.
 func checkOllama() (bool, []string) {
 	ollamaClient := llm.NewOllamaClient(&config.Config{
 		OllamaURL:   "http://localhost:11434",

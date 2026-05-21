@@ -11,6 +11,7 @@ import (
 	"time"
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -113,8 +114,8 @@ func runSearchQuery(ctx *Context, cfg *config.Config, store *storage.Storage, ar
 	if mode == cognition.Full {
 		if p, _, err := llm.NewLLMClient(cfg); err == nil {
 			llmProvider = p
-		} else if ollama := llm.NewOllamaClient(cfg); ollama.IsAvailable() {
-			llmProvider = ollama
+		} else if local := intllm.BuildProvider(cfg, cfg.OllamaModel); local != nil && local.IsAvailable() {
+			llmProvider = local
 		}
 		if llmProvider == nil {
 			fmt.Fprintf(os.Stderr, "Warning: No LLM provider available, falling back to fast mode\n")
@@ -122,9 +123,9 @@ func runSearchQuery(ctx *Context, cfg *config.Config, store *storage.Storage, ar
 		}
 	}
 
-	ollamaClient := llm.NewOllamaClient(cfg)
+	ollamaEmbedder := intllm.BuildEmbedder(cfg)
 	hugotEmbedder := llm.NewHugotEmbedder()
-	embedder := llm.NewFallbackEmbedder(ollamaClient, hugotEmbedder)
+	embedder := llm.NewFallbackEmbedder(ollamaEmbedder, hugotEmbedder)
 
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {

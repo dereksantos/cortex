@@ -21,6 +21,7 @@ import (
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -141,6 +142,19 @@ type CodingTurnConfig struct {
 	// reconstructing them from coding_turn's Out map (which only
 	// carries a subset).
 	ResultCallback func(*evalv2.CortexHarness, evalv2.HarnessResult, harness.LoopResult, error)
+
+	// ToolOutputSalienceCap is the per-tool-call output-token cap the
+	// dispatcher applies to act.* outputs before they re-enter the
+	// inner agent loop's transcript. Zero means "no cap" — the legacy
+	// uncompressed path. When > 0, the dispatcher invokes
+	// attend.compress (looked up in ActRegistry) on any tool output
+	// whose approx-token count exceeds the cap, and emits a synthetic
+	// compression trace row with parent_node_id = the act.* call.
+	//
+	// Set by the REPL (and other callers) to keep cumulative input
+	// tokens flat across many tool-calling agent turns — see
+	// docs/salience-budgets.md "Inner agent loop (per-turn)".
+	ToolOutputSalienceCap int
 }
 
 // NewCodingTurnHandler returns a dag.Handler for decide.coding_turn.
@@ -251,7 +265,7 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		var spawnedChildren []string
 		parentNodeID := dag.NodeIDFromContext(ctx)
 		if cfg.ActRegistry != nil {
-			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, &spawnedChildren))
+			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, prompt, &spawnedChildren))
 		}
 
 		// Inject prior turn-state outputs as a context block prepended
@@ -268,6 +282,15 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)
 		latency := int(time.Since(started).Milliseconds())
 		lr := h.LastLoopResult()
+		// loop.Run swallows provider errors into LoopResult.Err and
+		// returns (res, nil). Without lifting that back into runErr the
+		// DAG executor records this node as OK even when the agent loop
+		// failed mid-turn — the trace then lies (`decide.coding_turn ·
+		// ok`) while the REPL has just printed `⚠ provider error: ...`.
+		// Surface the loop's stored error so the node is marked failed.
+		if runErr == nil && lr.Err != nil {
+			runErr = lr.Err
+		}
 		if cfg.ResultCallback != nil {
 			cfg.ResultCallback(h, hr, lr, runErr)
 		}
@@ -324,7 +347,7 @@ var actChildIDCounter int64
 // reg.Dispatch so the agent loop keeps working, but emits an
 // unknown_node trace row so the operator sees the gap. Practical
 // impact zero when RegisterActOpMetadata covers all known tools.
-func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren *[]string) harness.ToolDispatcher {
+func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, spawnedChildren *[]string) harness.ToolDispatcher {
 	return func(ctx context.Context, reg *harness.ToolRegistry, call llm.ToolCall) (string, error) {
 		qname := "act." + normalizeToolName(call.Function.Name)
 		started := time.Now()
@@ -359,6 +382,21 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren
 		out, dispErr := reg.Dispatch(ctx, call)
 		latency := int(time.Since(started).Milliseconds())
 
+		// Salience-budget enforcement on the way back to the agent
+		// loop's transcript. When the caller set ToolOutputSalienceCap,
+		// we compress oversized tool outputs in place and emit a
+		// synthetic attend.compress trace row with parent = this act.*
+		// call. The compressed `out` is what flows into the LLM's
+		// next-turn prompt; the original lives in the journal.
+		var compressTrace *dag.TraceEntry
+		if dispErr == nil && cfg.ToolOutputSalienceCap > 0 {
+			compressed, ct := compressToolOutput(ctx, cfg.ActRegistry, out, cfg.ToolOutputSalienceCap, intent, childID)
+			if ct != nil {
+				out = compressed
+				compressTrace = ct
+			}
+		}
+
 		// Compose trace entry.
 		entry := dag.TraceEntry{
 			NodeID:        childID,
@@ -369,6 +407,12 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren
 			Out:           map[string]any{"output": out},
 			WallStart:     started,
 			WallEnd:       time.Now(),
+		}
+		if cfg.ToolOutputSalienceCap > 0 {
+			entry.Salience = &dag.SalienceContract{
+				MaxOutputTokens: cfg.ToolOutputSalienceCap,
+				Intent:          intent,
+			}
 		}
 		// Surface the cost hint in Out for the operator to compare
 		// against observed latency (calibration feedback channel).
@@ -382,14 +426,95 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, spawnedChildren
 			entry.ErrorCode = "handler_error"
 			entry.ErrorMessage = dispErr.Error()
 		}
+		if compressTrace != nil {
+			entry.SpawnedChildren = append(entry.SpawnedChildren, compressTrace.NodeID)
+		}
 
 		if cfg.TraceCB != nil {
 			cfg.TraceCB(entry)
+			if compressTrace != nil {
+				cfg.TraceCB(*compressTrace)
+			}
 		}
 		*spawnedChildren = append(*spawnedChildren, childID)
 
 		return out, dispErr
 	}
+}
+
+// compressToolOutput runs the dispatcher's salience hook against a
+// single tool output. When the output's approx-token count exceeds
+// maxTokens, it invokes attend.compress through reg (the DAG act
+// registry, which now also holds attend.compress per Phase 2), returns
+// the compressed string + a synthetic trace entry for the compression
+// call (parent = parentNodeID). Returns ("", nil) when no compression
+// happens — caller passes the original through.
+func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxTokens int, intent, parentNodeID string) (string, *dag.TraceEntry) {
+	if raw == "" || maxTokens <= 0 {
+		return raw, nil
+	}
+	if approxTokens(raw) <= maxTokens {
+		return raw, nil
+	}
+	spec, err := reg.Get("attend.compress")
+	if err != nil {
+		// Compressor not registered in the actReg — caller forgot to
+		// register it. Fall through; pre-salience-budgets behavior
+		// preserved. Telemetry will catch this when downstream context
+		// exhausts.
+		return raw, nil
+	}
+	started := time.Now()
+	compRes, compErr := spec.Handler(ctx, map[string]any{
+		"raw":        raw,
+		"max_tokens": maxTokens,
+		"intent":     intent,
+	}, dag.Budget{LatencyMS: 60000, Tokens: 4000, Depth: 1})
+	ended := time.Now()
+
+	childID := fmt.Sprintf("compress-%d", atomic.AddInt64(&actChildIDCounter, 1))
+	entry := &dag.TraceEntry{
+		NodeID:        childID,
+		ParentID:      parentNodeID,
+		QualifiedName: "attend.compress",
+		WallStart:     started,
+		WallEnd:       ended,
+		CostConsumed:  compRes.CostConsumed,
+		Out:           compRes.Out,
+		Salience: &dag.SalienceContract{
+			MaxOutputTokens: maxTokens,
+			Intent:          intent,
+		},
+	}
+	if compErr != nil {
+		entry.OK = false
+		entry.ErrorCode = "handler_error"
+		entry.ErrorMessage = compErr.Error()
+		return raw, entry
+	}
+	compressed, ok := compRes.Out["compressed"].(string)
+	if !ok {
+		entry.OK = false
+		entry.ErrorCode = "handler_error"
+		entry.ErrorMessage = "attend.compress returned no 'compressed' string"
+		return raw, entry
+	}
+	entry.OK = true
+	return compressed, entry
+}
+
+// approxTokens — local 4-char-per-token heuristic. Keeps the dagnode
+// package free of an ops dependency; both packages agree on the same
+// rule of thumb until Phase 2's real compressor wires a tokenizer.
+func approxTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := len(s) / 4
+	if n == 0 {
+		return 1
+	}
+	return n
 }
 
 // RegisterActOpMetadata registers an act.<name> NodeSpec in reg with
@@ -424,8 +549,30 @@ func RegisterActOpMetadata(reg *dag.Registry, name string, contract dag.AxisCont
 // RegisterDefaultActOpMetadata is the batch convenience wrapper:
 // registers all 5 canonical tools (read_file, list_dir, write_file,
 // run_shell, cortex_search) with their DefaultActOpContracts +
-// DefaultActOpCosts. Returns the count registered.
+// DefaultActOpCosts, plus the attend.compress op the dispatcher uses
+// to enforce per-tool-call salience budgets (docs/salience-budgets.md).
+//
+// The compress op is registered without a Provider — it falls back to
+// the deterministic truncate-stub. Callers that want the LLM-driven
+// Reflect-style compressor should use
+// RegisterDefaultActOpMetadataWithCompressor instead.
+//
+// Returns the count registered.
 func RegisterDefaultActOpMetadata(reg *dag.Registry) (int, error) {
+	return RegisterDefaultActOpMetadataWithCompressor(reg, nil)
+}
+
+// RegisterDefaultActOpMetadataWithCompressor is the
+// RegisterDefaultActOpMetadata variant that wires a Provider into the
+// attend.compress op, so per-tool-call compression goes through a
+// real small-model salience pass rather than the truncate-stub
+// fallback.
+//
+// The provider is shared with the dispatcher's read of attend.compress
+// from this registry — every act.* call that exceeds its salience
+// budget triggers a Provider.GenerateWithStats call under the
+// attend_compress.tmpl prompt. See docs/salience-budgets.md.
+func RegisterDefaultActOpMetadataWithCompressor(reg *dag.Registry, provider llm.Provider) (int, error) {
 	contracts := DefaultActOpContracts()
 	costs := DefaultActOpCosts()
 	names := []string{"read_file", "list_dir", "write_file", "run_shell", "cortex_search"}
@@ -434,7 +581,10 @@ func RegisterDefaultActOpMetadata(reg *dag.Registry) (int, error) {
 			return 0, fmt.Errorf("register act.%s: %w", n, err)
 		}
 	}
-	return len(names), nil
+	if err := reg.Register(ops.CompressSpec(ops.CompressConfig{Provider: provider})); err != nil {
+		return 0, fmt.Errorf("register attend.compress: %w", err)
+	}
+	return len(names) + 1, nil
 }
 
 // normalizeToolName mirrors harness.normalizeToolName (which is

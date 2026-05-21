@@ -1,212 +1,305 @@
 # Cortex Roadmap
 
-**Last Updated:** 2026-05-17
-**Status:** Experimental. Core pipeline working; ABR optimization ongoing.
-**North Stars:** ABR ≥ 0.9 | Token Cost Reduction over time
+**Last Updated:** 2026-05-20
+**Status:** Experimental. Core pipeline working; harness reframe in progress.
+**North Stars:** the three thesis claims in [`docs/eval-strategy.md`](docs/eval-strategy.md) —
+multi-model leverage, learning over time, bounded emergence.
+
+---
+
+## Scope (locked)
+
+Cortex is **a general-purpose coding harness that leverages multiple
+models, learns over time, and has bounded emergence.** See
+[`docs/eval-strategy.md`](docs/eval-strategy.md) for the full scope
+definition and the three-tier eval framework that drives this roadmap.
+
+The prior "context broker that plugs into Claude Code / Cursor" framing
+is superseded. Cortex *is* the harness now, not a layer on top of one.
+
+---
+
+## Onboarding as the thesis surface
+
+> "A team of agents and hardware can do a lot of work."
+
+The first-launch onboarding flow is *not* a setup chore — it's the
+product moment where the **multi-model leverage** thesis claim becomes
+visible to the user. When Cortex starts for the first time it should:
+
+1. **Detect available endpoints** in parallel — local Ollama, any
+   OpenAI-compatible HTTP endpoint the user names (chatterbox /
+   Lemonade / LM Studio / vLLM), cloud keys (Anthropic, OpenRouter).
+2. **Catalog each endpoint's models** with capability tags (coding,
+   tool-calling, embedding, reranking, reasoning) — using whatever
+   labels the endpoint exposes (Lemonade does this natively).
+3. **Recommend a role map** — `code`, `reason`, `fast`, `embed`,
+   `rerank` → specific `endpoint/model` pairs — biased toward keeping
+   work on the user's *strongest local* model unless cloud is cheaper.
+4. **Show the routing decision and projected cost** before the user
+   accepts. This is where the thesis becomes legible: "Coder-30B on
+   chatterbox for code (free), qwen2.5:3b on local Ollama for fast
+   tasks (free), Claude Haiku for ambiguous-intent clarification ($X
+   per session)."
+5. **Persist the map** to `~/.cortex/config.json` and re-validate at
+   each REPL launch (tunnels go down, models get unloaded, machines
+   power off).
+
+Why this matters strategically: a working team of small-and-mid-sized
+models orchestrated well is the visible counter-example to "use the
+biggest frontier model for everything." Setup-time UX is the place
+where that argument is made to the user. It also doubles as the
+prerequisite substrate for the **multi-model cost/quality delta eval
+(Tier 2c)** — the paired-run harness needs a routable model registry.
+
+This belongs in [`docs/eval-strategy.md`](docs/eval-strategy.md) Tier 2c
+as the product surface, and in Phase 4 as the prerequisite engineering
+item. Implementation lands in Phase 4 below.
 
 ---
 
 ## What's Working
 
-- Capture → store → retrieve → inject pipeline (used daily in development of Cortex itself)
-- All five cognitive modes implemented (Reflex, Reflect, Resolve, Think, Dream)
+- Capture → store → retrieve → inject pipeline (used daily in
+  development of Cortex itself)
+- DAG executor + mechanic eval substrate (seed+grow+decay model)
 - Multi-project support via global daemon and shared `~/.cortex/`
-- Eval framework with SQLite persistence: 40 v2 scenarios plus the `library-service/` multi-session eval (sessions, scorer, injection, end-to-end probe)
-- Claude Code integration (hooks, slash commands, status line)
-- MCP server skeleton (untested at scale)
+- Baseline eval suite wrapped: SWE-bench, LongMemEval, NIAH, MTEB
+- v2 coding-scenario suite (40 scenarios) + library-service
+  multi-session corpus
+- Claude Code integration (hooks, slash commands, status line) —
+  retained as one host the harness can drive
 
 ## What's Early or Aspirational
 
-- **Cursor integration:** design-only; no shipping extension yet
-- **MCP server:** wired up but not validated against real external clients
-- **Slash-command UX:** functional but rough; some output is stubby
-- **Eval LLM mix:** Haiku runs landed but the 3-way comparison (Cortex / native memory / no-context) is still settling — see `docs/archive/`
-- **ABR:** 0.586 run-level (43-scenario v2 sweep, 2026-05-17) against a target of 0.9
-
-## Current Eval Results
-
-| Metric | Current | Target |
-|--------|---------|--------|
-| Semantic Lift | +35% | >0% |
-| Win Rate | 44% (8/18) | >50% |
-| ABR | 0.586 | ≥0.9 |
-
-Most recent runs use Claude Haiku 4.5 with hooks-active; archived under `docs/archive/`. qwen 1.5B was retired (below task floor — see commit `bb309ce`).
-
-**ABR baseline rebaselined 2026-05-17** under `anthropic/claude-haiku-4.5` (via OpenRouter) on the 43-scenario v2 full sweep — run-level avg from `eval_runs.avg_abr`, recorded in `docs/eval-journal.md`. The prior 0.77 was measured 2025-12-30 under the `--cognition` runner (since deleted in commit `1628173`, which removed ~11k lines including `internal/eval/cognition.go` and moved its scenarios to `test/evals/legacy/`); that figure is unreproducible because the code path no longer exists. The 0.586 figure has known run-to-run variance — a same-day re-run scored 0.492 (see Phase A entry).
-
-**Canonical pre-DAG baseline snapshot:** [`docs/eval-baseline.md`](docs/eval-baseline.md) — time-stamped consolidation of all Phase A baselines, pinned to git SHA `387468f`. Phase 6 of the integration roadmap will diff post-DAG numbers against this snapshot.
+- **Learning-curve eval (Tier 2a):** scenario corpus exists
+  (library-service, journeys); sequential-run driver + memory-isolation
+  primitive not yet built
+- **Budget–quality curve (Tier 2b):** DAG trace infrastructure landed;
+  curve-plotting tooling not yet built
+- **Multi-model cost/quality delta (Tier 2c):** paired-run harness not
+  yet built. Model registry + role-map + endpoint-aware routing
+  substrate landed (Phase 4 Slices A–E); paired-run harness now
+  unblocked.
+- **Regression guardrails (Tier 3):** none wrapped yet; intent-ingress,
+  in-flight observability, presentation, MCP-extensibility proxies all
+  on the build list
+- **MCP server:** wired up but not validated against real external
+  clients
+- **Cursor integration:** design-only
 
 ---
 
-## Core Metric: ABR (Agentic Benefit Ratio)
+## Eval strategy (single source of truth)
 
-ABR measures how well background processing (Think) makes Fast mode perform like Full mode:
+All eval work lives under the three-tier framework in
+[`docs/eval-strategy.md`](docs/eval-strategy.md):
 
-```
-ABR = quality(Fast + Think) / quality(Full)
-Goal: ABR → 1.0 as session progresses
-```
+| Tier | Job | Metric of record |
+|---|---|---|
+| 1. Baseline | Prove competence on standard benchmarks | Pass-rate normalized by model size, dollars, wall-clock |
+| 2. Thesis | Prove the three claims (multi-model, learning, bounded emergence) | Curves and deltas, not single numbers |
+| 3. Regression | Catch silent UX-dimension degradation | Pass/fail thresholds, cheap, run weekly |
 
-| ABR | Meaning |
-|-----|---------|
-| ≥ 0.95 | Excellent |
-| 0.85-0.95 | Good |
-| 0.70-0.85 | Needs work |
-| < 0.70 | Failing |
+**ABR-as-ratio is retired.** The underlying question survives as the
+budget–quality curve (Tier 2b). See the eval-strategy doc for the
+reasoning.
 
-**Current: 0.586 (Failing per the rubric; rebaselined 2026-05-17 — see Current Eval Results above for provenance.)**
-
-ABR validates Cortex's core innovation: bounded intelligence through background processing. Alongside ABR, **token cost reduction** measures the practical payoff -- fewer tokens spent re-discovering context across sessions.
-
----
-
-## Roadmap
-
-### Phase 1: Consolidate Eval System ✅ DONE
-
-**Goal:** Reduce complexity, single source of truth
-
-- [x] Merge 23 eval files → 5 files (commit befe426)
-- [x] Remove all mocks, use CLICortex everywhere
-- [x] SQLite-only persistence (drop JSONL)
-
-**Achieved structure:**
-```
-internal/eval/v2/
-├── eval.go       # 286 lines (runner + types)
-├── scenario.go   # 104 lines (YAML loading)
-├── persist.go    # 155 lines (SQLite only)
-├── measure.go    # 218 lines (scoring)
-└── report.go     # 163 lines (output formatting)
-
-Total: 926 lines (down from ~11,000)
-```
+Per-benchmark coverage tracking remains in
+[`docs/benchmarks/coverage-matrix.md`](docs/benchmarks/coverage-matrix.md);
+the matrix is now organized around which tier each dimension serves.
 
 ---
 
-### Phase 2: Simplify Scenarios ✅ DONE
+## Phases
 
-**Goal:** Adding an eval = adding a YAML file only
+Phase numbering carries forward from the historical roadmap; phases
+1–2 are done.
 
-- [x] Single YAML format: `context` + `tests`
-- [x] Remove legacy scenario types
-- [x] Every scenario just establishes context and runs tests
-- [x] Unified runner for all scenarios
+### Phase 1: Consolidate Eval System DONE
 
-**Active scenarios:** 40 in `test/evals/v2/`, organized as:
-- baseline patterns: auth, db, error, logging, naming, testing
-- abstention, adversarial, extraction, reasoning, temporal, updates families
-- locomo benchmark scenarios (commonsense, multihop, event-causality)
+Eval files merged, mocks removed, SQLite persistence.
 
-**Format:**
-```yaml
-id: auth-middleware
-context:
-  - type: decision
-    content: "We use JWT, not sessions"
-tests:
-  - id: auth-approach
-    query: "How do we handle authentication?"
-    expect:
-      includes: ["JWT"]
-      excludes: ["session"]
-```
+### Phase 2: Simplify Scenarios DONE
+
+Single YAML format: `context` + `tests`. 40 active scenarios in
+`test/evals/v2/`.
+
+### Phase 3: Eval reframe to three-tier strategy DONE
+
+- [x] Author `docs/eval-strategy.md` (the three-tier framework)
+- [x] Reframe CLAUDE.md and ROADMAP.md to locked scope
+- [x] Update `docs/benchmarks/coverage-matrix.md` to map each dimension
+      to a tier
+- [x] Retire `internal/eval/legacy/` + `test/evals/legacy/` (superseded
+      cognitive-mode abstraction)
+- [x] Repurpose `internal/eval/journey/` for the learning-curve eval
+      (substrate; the half-built executor is now the seed for the
+      sequential-session runner in Phase 4)
+- [x] Archive `docs/eval-prep-epic.md` (all 6 phases complete per its
+      own closing note) — moved to `docs/archive/`
+- [x] Triage `docs/eval.md`, `docs/integration-roadmap.md` — added
+      "superseded by eval-strategy.md" headers
+- [x] Triage `docs/archive/`, `docs/eval-journal.md`,
+      `docs/simplification-audit.md` (archive README added,
+      eval-journal rolloff policy added)
+
+### Phase 4: Build Tier 2 (thesis evals) IN PROGRESS
+
+- [x] **Model registry + multi-endpoint detection (PREREQUISITE).**
+      Shipped in commits 4f28109, eef617b, 3af4346, 738b515, aaebe8b,
+      40215ca (Slices A through E). End-to-end verified against the
+      chatterbox Lemonade server + local Ollama: 8 models discovered,
+      role map proposed with local-bias + size-aware picks, REPL routes
+      `<endpoint>/<model>` ids through the openai_compat provider, no
+      OpenRouter key required for local-only sessions.
+  - [x] Extend `internal/llm/detect.go` to probe a configurable list of
+        OpenAI-compatible endpoints in parallel (chatterbox / LM Studio /
+        vLLM / Lemonade), alongside the existing Ollama + Anthropic
+        probes. *(Slice A)*
+  - [x] Add a generic `pkg/llm/openai_compat.go` provider (clone of
+        `openrouter.go` parameterized by `base_url` + optional API
+        key). Used by all OpenAI-compatible local endpoints. *(Slice A)*
+  - [x] Tag each detected model with capabilities (coding,
+        tool-calling, embedding, reranking, reasoning) from the
+        endpoint's metadata when available; fall back to ID-pattern
+        inference (`pkg/llm/capabilities.go`) for endpoints that don't
+        expose labels. *(Slice C)*
+  - [x] Add a `Models` role map to `pkg/config/config.go` —
+        `code / reason / fast / embed / rerank → endpoint/model_id`.
+        Persisted to `.cortex/config.json`. *(Slice B)*
+  - [x] Onboarding flow as `cortex models` command: detect → recommend
+        role map → show per-role rationale → `--save` to persist. The
+        **thesis surface** is now a one-command flow. Per-role cost
+        projection deferred — needs endpoint pricing metadata that
+        Lemonade doesn't expose. *(Slice D)*
+  - [x] Re-validate the saved map at each REPL launch (endpoints
+        reachable, models still in catalog) and surface stale entries
+        as one-line warnings before the prompt. *(Slice E)*
+  - [x] Swap-aware routing **substrate** (`pkg/llm/swap.go`
+        `SwapTracker`). Records last-loaded-per-endpoint on every call;
+        `WouldSwap(endpoint, model)` is available. The recommender +
+        routing layers don't yet consult it — that's deferred to a
+        Phase 4 follow-up once we have real-world data on whether
+        swap-cost actually dominates routing decisions in practice.
+        *(Slice E)*
+- [ ] **Learning-curve runner** — sequential session execution with
+      per-run memory isolation. Substrate: existing library-service +
+      v2 corpora. Output: pass-rate-vs-session-index curve.
+- [ ] **Budget–quality curve plotter** — runs the same task at varying
+      DAG budgets, plots quality vs budget. Substrate: mechanic +
+      dagtrace.
+- [ ] **Multi-model paired-run harness** — `small alone` vs
+      `small + Cortex` vs `frontier alone` vs `multi-model + Cortex`.
+      Reports cost-quality Pareto frontier. Now unblocked by the model
+      registry above.
+
+### Phase 5: Build Tier 3 (regression guardrails)
+
+- [ ] Intent-ingress proxy (ambiguous-prompt corpus + LLM-judge)
+- [ ] In-flight observability proxy (event-stream cadence/density/coverage) —
+      depends on CLI `--events` surface landing first
+- [ ] Presentation-judge proxy (end-of-turn summary vs actual diff)
+- [ ] Coding-specific destructive-op corpus (Tier-3 safety)
+- [ ] MCP-extensibility proxy (custom MCP server with un-memorized
+      tools)
+
+### Phase 6: Tier 1 expansion
+
+- [ ] BFCL wrapper (execution breadth, tool-calling)
+- [ ] τ-bench wrapper (planning, policy adherence)
+- [ ] MINT wrapper (steering & interrupt — shares plumbing with τ-bench)
+- [ ] AgentDojo wrapper (safety / prompt-injection)
+
+CLI prerequisites (multi-turn session driver, MCP-server registration,
+confirmation-gate flag) tracked in
+[`docs/benchmarks/coverage-matrix.md`](docs/benchmarks/coverage-matrix.md)
+Stage 1.
+
+### Phase 7: End-to-end scenario
+
+Single multi-session scenario touching all 10 dimensions, per-step
+scored. Cannot start until Phases 4–6 land the substrate.
 
 ---
 
-### Phase 3: ABR Dashboard 🔄 IN PROGRESS
+## Known issues / Phase 4 follow-ups
 
-**Goal:** Track ABR over time, make progress visible
+These came out of the Phase 4 build but are scoped as follow-ups
+rather than gating the next phase:
 
-- [x] SQLite persistence for eval results (`evals_v2.db`)
-- [ ] CLI: `cortex eval --summary` shows ABR trend
-- [ ] Historical comparison: "ABR improved from 0.77 to 0.85"
-- [ ] Pass criteria enforcement: ABR ≥ 0.9
-
----
-
-### Phase 4: ABR Optimization 📋 NEXT
-
-**Goal:** Improve ABR from 0.586 → 0.9
-
-Landscape-informed priorities (Mar 2026 review):
-- [ ] Replace brute-force vector search with sqlite-vec (indexed search)
-- [ ] Retrieval tuning (top-k, similarity threshold)
-- [ ] Context formatting for LLM consumption
-- [~] Eval LLM upgrade landed (Haiku 4.5); 3-way comparison harness in flight
-- [ ] Re-embedding migration after future model upgrades
-- [ ] Local model optimization: prefer small models (Ollama) for Think/Dream background tasks
-
----
-
-### Phase 5: Cross-Tool & Ecosystem 📋 FUTURE
-
-**Goal:** Make Cortex tool-agnostic and ecosystem-ready
-
-- [ ] MCP server (`cortex_search`, `cortex_recall`, `cortex_record` tools)
-- [ ] MEMORY.md as DreamSource (complement Claude Code Auto-Memory)
-- [ ] Expanded hook coverage (PreToolUse, Notification, SubagentComplete)
-- [ ] HTTP hook handler for direct daemon delivery
-- [ ] Plugin manifest conforming to current Claude Code spec
-- [ ] Multi-agent / factory pattern support: shared context pool via MCP for parallel agents
-- [ ] Token cost analytics: track and report token savings over time
-
----
-
-## Blocked Until ABR ≥ 0.9
-
-| Feature | Reason Blocked |
-|---------|----------------|
-| Git Dream source | Core evals must pass first |
-| Entity relationships | Polish feature, not priority |
-| Cross-session learning | Need single-session working first |
-| MCP server expansion | Skeleton exists; broader tool surface blocked on retrieval quality |
-| Team-shared context | Requires stable single-user first |
-
----
-
-## Design Documents
-
-- `docs/prompts/cli-focus.md` - CLICortex design and rationale
-- `docs/prompts/eval-abr-focus.md` - ABR-focused eval philosophy
+- **Qwen3-Coder tool-call format.** Qwen3-Coder emits tool calls in
+  its native `<function=name><parameter=path>...</parameter></function>`
+  text format rather than OpenAI's `tool_calls` JSON field. The
+  harness's `salvageTextToolCall` helper handles fenced-JSON
+  write_file calls but not Qwen's XML-style format. Hits when running
+  Qwen3-Coder as the `code` role through the agent loop. Fix:
+  extend `salvageTextToolCall` to recognize the `<function=>` shape,
+  or add a Qwen-aware response parser.
+- **Anthropic / OpenAI endpoint shapes in detection.** Detection
+  currently knows Ollama + arbitrary OpenAI-compatible endpoints.
+  Native Anthropic API (non-OpenAI shape) and OpenAI's first-party
+  API aren't auto-detected by `cortex models`. Either add native
+  detectors or document that users should add them as
+  endpoint-of-record manually.
+- **Per-role cost projection.** `cortex models` currently shows
+  recommended pairings but not projected per-session cost. Needs
+  endpoint pricing metadata (Lemonade doesn't expose it; OpenRouter
+  does via /v1/models). Defer until paired-run harness lands so we
+  have real cost data to plug in.
+- **Swap-aware routing decisions.** SwapTracker substrate landed
+  (Slice E) but the recommender + routing layers don't yet consult
+  it. The decision rule — "prefer no-swap when quality is comparable"
+  — needs real data to define "comparable." Defer until paired-run
+  harness produces that data.
+- **REPL/code paths to Cortex's own DAG planner.** When routed to a
+  small local model, the `decide.next` planning step's prompt+catalog
+  block is large; some local models (qwen2.5-coder:1.5b) silently
+  no-op without producing the expected JSON shape. Either a tighter
+  decide.next prompt or a `--no-plan` escape for tiny-model sessions.
 
 ---
 
 ## Recently Completed
 
-- [x] **Library-service multi-session eval** — scaffold, session runner, scorer, Cortex injection, end-to-end probe (Plans 01–05)
-- [x] **First Haiku eval runs archived** with hooks-active correction; 3-way comparison harness landed
-- [x] **Multi-project support** via single global daemon and shared `~/.cortex/`
+- [x] **Phase 4 model registry** — generic OpenAI-compatible provider,
+      multi-endpoint detection, capability inference, role-map config,
+      `cortex models` onboarding command, REPL-launch revalidation,
+      swap tracker substrate. End-to-end verified against chatterbox
+      Lemonade server + local Ollama (commits 4f28109 → 40215ca).
+- [x] **Library-service multi-session eval** — scaffold, session
+      runner, scorer, end-to-end probe (Plans 01–05)
+- [x] **DAG protocol substrate** — mechanic runner + dagtrace
+- [x] **Multi-project support** via single global daemon and shared
+      `~/.cortex/`
 - [x] **Composable status line** with compact format
 - [x] **Per-mode cognitive tuning** via config
-- [x] **Dream improvements**: fractal region sampling, novelty cache, follow-up queue
-- [x] **Semantic search with embeddings** - nomic-embed-text, +35% lift
-- [x] **Eval consolidation** - 23 files → 5 files (926 lines)
-- [x] **Unified scenario format** - single YAML pattern
-- [x] Cognition evals: 44% → 90% (19/21 passing)
-- [x] E2E evals: 50% → 70%
-- [x] CLICortex for true E2E testing via CLI commands
-- [x] Idiom extraction and evals
-- [x] Nuance extraction through pipeline
-- [x] Core cognitive architecture (Reflex, Reflect, Resolve, Think, Dream)
-- [x] Activity-based budget models
-- [x] ABR metric baseline (0.77)
-- [x] Claude Code integration
+- [x] **Dream improvements**: fractal region sampling, novelty cache,
+      follow-up queue
+- [x] **Semantic search with embeddings** — nomic-embed-text
+- [x] **Eval consolidation** — 23 files → 5 files
+- [x] **Unified scenario format** — single YAML pattern
+- [x] **CLICortex** for true E2E testing via CLI commands
+- [x] **Claude Code integration** (hooks, slash commands, status line)
 
 ---
 
-## Success Criteria
+## Historical metric notes (for archival reasoning)
 
-| Phase | Status | Key Metric |
-|-------|--------|------------|
-| Phase 1: Consolidate | ✅ Done | 926 lines (was 11k) |
-| Phase 2: Scenarios | ✅ Done | 7 active scenarios |
-| Phase 3: Dashboard | 🔄 In Progress | `--summary` flag |
-| Phase 4: Optimize | 📋 Next | ABR ≥ 0.9 |
+The prior ABR ≥ 0.9 north star produced a 0.586 baseline (43-scenario
+v2 sweep, 2026-05-17) against a 0.77 figure measured 2025-12-30 under
+the since-deleted `--cognition` runner (commit `1628173`). The 0.586
+figure had known run-to-run variance (a same-day re-run scored 0.492).
+That unreproducibility — plus the structural concerns documented in
+[`docs/eval-strategy.md`](docs/eval-strategy.md) — is what motivated
+the move from ABR-as-ratio to budget-quality-as-curve.
 
-**Mandate complete when:** ABR ≥ 0.9 sustained over 3 consecutive runs.
+The canonical pre-DAG baseline snapshot in
+[`docs/eval-baseline.md`](docs/eval-baseline.md) (pinned to SHA
+`387468f`) remains valid as a historical reference, but isn't a target
+under the new strategy.
 
 ---
 
-*This roadmap is a living document. North stars: ABR ≥ 0.9, token cost reduction over time.*
+*Living document. North stars: the three thesis claims in
+[`docs/eval-strategy.md`](docs/eval-strategy.md).*

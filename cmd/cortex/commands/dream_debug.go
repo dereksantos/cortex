@@ -9,6 +9,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/cognition/sources"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -41,21 +42,26 @@ func (c *DreamDebugCommand) Execute(ctx *Context) error {
 
 	// Build LLM provider via the unified surface (OpenRouter primary,
 	// Anthropic fallback). Graceful: nil is allowed — analysis will
-	// short-circuit and we still see source emissions. Ollama remains
-	// a separate local fallback below.
+	// short-circuit and we still see source emissions. Local-generation
+	// fallback goes through intllm.BuildProvider so a user with Phase 4
+	// model_routes can have Dream's analyzeItem hit chatterbox/etc.
+	// instead of Ollama (per docs/provider-resolution-refactor.md).
 	var llmProvider llm.Provider
 	if p, _, err := llm.NewLLMClient(cfg); err == nil {
 		llmProvider = p
 	}
-	ollama := llm.NewOllamaClient(cfg)
-	if llmProvider == nil && ollama.IsAvailable() {
-		llmProvider = ollama
+	localProvider := intllm.BuildProvider(cfg, cfg.OllamaModel)
+	if llmProvider == nil && localProvider != nil && localProvider.IsAvailable() {
+		llmProvider = localProvider
 	}
 
 	// Build embedder (Reflex/Reflect don't run in this command, but
-	// Cortex.New requires the constructor to succeed).
+	// Cortex.New requires the constructor to succeed). Embedding stays
+	// pinned to Ollama nomic-embed via BuildEmbedder — the generation
+	// path's routing key is intentionally not threaded here.
+	ollamaEmbedder := intllm.BuildEmbedder(cfg)
 	hugotEmbedder := llm.NewHugotEmbedder()
-	embedder := llm.NewFallbackEmbedder(ollama, hugotEmbedder)
+	embedder := llm.NewFallbackEmbedder(ollamaEmbedder, hugotEmbedder)
 
 	cortex, err := intcognition.New(store, llmProvider, embedder, cfg)
 	if err != nil {

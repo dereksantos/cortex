@@ -61,7 +61,6 @@ func (c *CodeCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.Bool("quiet", false, "Quiet output")
 	fs.Bool("no-search", false, "Disable Cortex search injection on the turn")
 	fs.Bool("json", false, "Emit a single JSON envelope on stdout")
-	fs.Bool("no-dag", false, "Disable DAG-based tool dispatch (debug only)")
 	fs.String("system-prompt", "", "Override the system prompt")
 }
 
@@ -80,10 +79,6 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	noSearch := false
 	jsonOut := false
 	systemPrompt := ""
-	// Stage 3.5: every coding turn routes tool calls through act.* ops
-	// + emits per-tool dag.TraceEntry rows. The --no-dag escape hatch
-	// exists for debugging only (forces the V0 inline tool dispatch).
-	dagEnabled := true
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -151,13 +146,6 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			noSearch = true
 		case "--json":
 			jsonOut = true
-		case "--dag":
-			// Backwards-compat no-op; DAG dispatch is the default
-			// per Stage 3.5. Kept so scripts that pass --dag don't
-			// fail.
-			dagEnabled = true
-		case "--no-dag":
-			dagEnabled = false
 		case "--system-prompt":
 			if i+1 < len(args) {
 				systemPrompt = args[i+1]
@@ -191,7 +179,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 			"--api-url", "--system-prompt":
 			skipNext = true
 			continue
-		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "--dag", "--no-dag", "-h", "--help", "--local":
+		case "--init", "-v", "--verbose", "-q", "--quiet", "--no-search", "--json", "-h", "--help", "--local":
 			continue
 		case "--":
 			continue
@@ -230,20 +218,17 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		return fmt.Errorf("init harness: %w", err)
 	}
 
-	// Stage 3.5: every coding turn routes tool calls through act.* DAG
-	// ops registered on a per-session dag.Registry (axis-5 gate
-	// enforced) AND emits one synthetic dag.TraceEntry per call to
+	// Every coding turn routes tool calls through act.* DAG ops
+	// registered on a per-session dag.Registry (axis-5 gate enforced)
+	// AND emits one synthetic dag.TraceEntry per call to
 	// .cortex/db/dag_traces.jsonl with parent_node_id =
-	// "code-<pid>-coding_turn". The --no-dag escape hatch preserves
-	// the V0 inline path for debugging.
-	if dagEnabled {
-		actReg, traceCB, dispatchErr := buildCodeActDispatcher(h, resolvedWorkdir)
-		if dispatchErr != nil {
-			return fmt.Errorf("act-op dispatcher: %w", dispatchErr)
-		}
-		_ = actReg // retained for potential future inspection / testing
-		_ = traceCB
+	// "code-<pid>-coding_turn".
+	actReg, traceCB, dispatchErr := buildCodeActDispatcher(h, resolvedWorkdir)
+	if dispatchErr != nil {
+		return fmt.Errorf("act-op dispatcher: %w", dispatchErr)
 	}
+	_ = actReg // retained for potential future inspection / testing
+	_ = traceCB
 
 	if maxTurns > 0 {
 		h.SetMaxTurns(maxTurns)
@@ -306,7 +291,7 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 	return nil
 }
 
-// buildCodeActDispatcher wires the --dag opt-in for cortex code +
+// buildCodeActDispatcher wires the DAG act-op dispatch for cortex code +
 // REPL. Registers act-op METADATA (not parallel tool instances) in a
 // per-session dag.Registry, then installs a ToolDispatcher on the
 // harness that delegates actual execution back to the harness's own
@@ -316,10 +301,9 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 // ToolRegistry inside RunSession* with the workdir + shared Cortex
 // context wired correctly (including cortex_search). Constructing a
 // parallel set of tools would lose that wiring AND silently break
-// the harness's FilesWritten / ShellNonZeroExits accounting
-// (principles 5 + 7 — same prompt, different reported field values
-// depending on --dag flag). The dispatcher delegates to the harness
-// registry so accounting flows through to HarnessResult unchanged.
+// the harness's FilesWritten / ShellNonZeroExits accounting. The
+// dispatcher delegates to the harness registry so accounting flows
+// through to HarnessResult unchanged.
 //
 // Trace shape: each tool call produces one row with
 // parent_node_id = "code-<pid>-coding_turn". The "coding_turn"
@@ -349,7 +333,7 @@ func buildCodeActDispatcher(h *evalv2.CortexHarness, workdir string) (*dag.Regis
 		ActRegistry: actReg,
 		TraceCB:     traceCB,
 	}
-	dispatcher := dagnode.NewActDispatcher(cfg, parentID, &spawned)
+	dispatcher := dagnode.NewActDispatcher(cfg, parentID, "", &spawned)
 	h.SetDispatcher(dispatcher)
 	return actReg, traceCB, nil
 }
@@ -567,19 +551,6 @@ Optional:
                                   turns, tokens, cost, latency, files_changed,
                                   final, reason — enough to populate a
                                   CellResult from a subprocess call.
-  --no-dag                        Debug escape: skip the act-op dispatch and
-                                  emit no per-tool dag.TraceEntry rows. Default
-                                  off — Stage 3.5 made DAG the production path.
-  --dag                           No-op (DAG is now the default). Kept for
-                                  backward compatibility with scripts.
-                                  Original Stage 3 semantics: route every tool call through
-                                  the DAG executor as an act.<tool_name> op
-                                  (axis-5 gate enforced for destructive ops).
-                                  Emits one row per call to
-                                  .cortex/db/dag_traces.jsonl with
-                                  parent_node_id grouped under a synthetic
-                                  per-session parent. Behavior is otherwise
-                                  identical to the default path.
   -v, --verbose                   Print tool arguments and result sizes.
   -q, --quiet                     No live stream; only final summary.
 

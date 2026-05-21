@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
-	"github.com/dereksantos/cortex/pkg/secret"
 )
 
 func init() {
@@ -65,7 +65,7 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			return executeGrid(ctx.Args[1:])
 		case "suite":
 			if len(ctx.Args) < 2 {
-				return fmt.Errorf("cortex eval suite: missing suite name (mechanic | legacy-cognition | journeys)")
+				return fmt.Errorf("cortex eval suite: missing suite name (mechanic | journeys)")
 			}
 			return runSuite(ctx.Args[1], "test/evals/v2", "human", false)
 		case "benchmark":
@@ -73,6 +73,8 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 				return fmt.Errorf("cortex eval benchmark: missing name (longmemeval | mteb | swebench | niah)")
 			}
 			return runBenchmark(ctx.Args[1], ctx.Args[2:], false)
+		case "paired":
+			return executePaired(ctx.Args[1:])
 		}
 	}
 
@@ -153,9 +155,11 @@ standard benchmark, or runs a special-purpose suite.
   cortex eval grid ...                    Multi-cell grid runner (see
                                           'cortex eval grid --help').
   cortex eval suite NAME                  Special-purpose suite
-                                          (mechanic | legacy-cognition | journeys).
+                                          (mechanic | journeys).
   cortex eval benchmark NAME [opts]       Wrapped benchmark
                                           (longmemeval | mteb | swebench | niah).
+  cortex eval paired [opts]               Paired multi-model run
+                                          (Tier 2c cost-quality JSONL).
   cortex eval --summary | --abr-trend     Read-only reports from past runs.
 
 Options:
@@ -170,7 +174,7 @@ Options:
   --summary              Show lift trend over recent runs
   --abr-trend            Show ABR progression across runs
   --benchmark NAME       Run a dataset-driven benchmark (longmemeval, mteb, swebench, niah)
-  --suite NAME           Run a special-purpose suite: mechanic | legacy-cognition | journeys
+  --suite NAME           Run a special-purpose suite: mechanic | journeys
   --subset NAME          Benchmark subset (e.g. oracle | verified | NFCorpus)
   --limit N              Cap number of benchmark instances (for mteb: caps queries scored)
   --length N             NIAH only: haystack token count (8k|16k|32k|64k|4000…); repeatable
@@ -252,8 +256,8 @@ Examples:
 		return runBenchmark(benchmarkName, ctx.Args, verbose)
 	}
 
-	// SUITE MODE: special-purpose eval families (mechanic / legacy-cognition
-	// / journeys). Dispatched when --suite is set. See eval_suite.go.
+	// SUITE MODE: special-purpose eval families (mechanic / journeys).
+	// Dispatched when --suite is set. See eval_suite.go.
 	if suiteName != "" {
 		return runSuite(suiteName, scenarioDir, outputFormat, verbose)
 	}
@@ -269,8 +273,9 @@ Examples:
 	return fmt.Errorf("nothing to run. Use one of:\n" +
 		"  cortex eval -s SCEN.yaml -m MODEL    (cortex coding harness — the default)\n" +
 		"  cortex eval grid ...                 (multi-cell grid; see `cortex eval grid --help`)\n" +
-		"  cortex eval suite NAME               (suites: mechanic, legacy-cognition, journeys)\n" +
+		"  cortex eval suite NAME               (suites: mechanic, journeys)\n" +
 		"  cortex eval benchmark NAME ...       (benchmarks: longmemeval, mteb, swebench, niah)\n" +
+		"  cortex eval paired ...               (paired multi-model run; see `cortex eval paired --scenario … --small-model … --frontier-model …`)\n" +
 		"  cortex eval --summary | --abr-trend  (read-only reports from past runs)")
 }
 
@@ -349,21 +354,17 @@ func runCortexCodingHarness(scenarioPath, model, judgeModel string, useJudge, ve
 	return nil
 }
 
-// newOpenRouterJudgeForCoding builds an OpenRouter client wired with
-// the keychain-resolved API key, with model pinned. Used as the LLM
-// judge for the coding harness's qualitative-correctness scoring.
-//
-// Lives here (not in pkg/llm) because resolving the keychain key
-// would invert layering — pkg/secret is layered above pkg/llm only
-// here at the command boundary.
+// newOpenRouterJudgeForCoding builds a judge provider for the coding
+// harness's qualitative-correctness scoring. The model id is the
+// routing key: slash-prefixed (e.g. "anthropic/claude-haiku-4.5")
+// routes to OpenRouter via the keychain; bare ids route to local
+// (Ollama / Phase 4 endpoint). See docs/provider-resolution-refactor.md.
 func newOpenRouterJudgeForCoding(model string) (llm.Provider, error) {
-	key, _, err := secret.MustOpenRouterKey()
-	if err != nil {
-		return nil, err
+	p := intllm.BuildProvider(nil, model)
+	if p == nil {
+		return nil, fmt.Errorf("judge provider unavailable for model %q (check OpenRouter key or Ollama)", model)
 	}
-	c := llm.NewOpenRouterClientWithKey(nil, key)
-	c.SetModel(model)
-	return c, nil
+	return p, nil
 }
 
 // reportCodingRun prints a human-readable summary of a CodingRunResult.
