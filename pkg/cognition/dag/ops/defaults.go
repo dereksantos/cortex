@@ -77,6 +77,10 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		// Provider falls back to a deterministic truncate-stub so the
 		// dispatcher path keeps working without a configured model.
 		CompressSpec(CompressConfig{Provider: cfg.Provider}),
+		// Emergence-shaped two-pass variant. Same input/output contract
+		// as attend.compress; selectively invoked via ShouldDistill on
+		// high-fallback-rate intents (per calibration data).
+		DistillSpec(DistillConfig{Provider: cfg.Provider}),
 
 		// Stage 2 LLM-backed ops.
 		RerankSpec(RerankConfig{Provider: cfg.Provider}),
