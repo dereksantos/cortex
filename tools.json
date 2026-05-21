@@ -44,6 +44,11 @@
           "description": "Sampler + analyzer only; skip LLM + journal writes"
         },
         {
+          "name": "endpoint",
+          "type": "string",
+          "description": "OpenAI-compat base URL (e.g. http://localhost:13305/v1). When set, provider is forced to openai-compat."
+        },
+        {
           "name": "extract-op",
           "type": "string",
           "default": "auto",
@@ -64,7 +69,7 @@
           "name": "provider",
           "type": "string",
           "default": "ollama",
-          "description": "LLM provider: ollama | openrouter"
+          "description": "LLM provider: ollama | openrouter | openai-compat"
         },
         {
           "name": "salt",
