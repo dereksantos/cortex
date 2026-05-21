@@ -54,6 +54,7 @@ import (
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/repltui"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
@@ -164,6 +165,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	keepOnFail := false          // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 	historyTurnsOverride := -1   // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	priorSummariesOverride := -1 // --prior-summaries N: cap on prior-session summaries (-1 = use default, 0 = disabled)
+	tuiMode := false             // --tui: opt into the bubbletea TUI; default stays on the readline-style StdoutSink for now
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -236,6 +238,8 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &priorSummariesOverride)
 				i++
 			}
+		case "--tui":
+			tuiMode = true
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -260,8 +264,26 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	// One Sink per session — owns every Info/Warn/Error/Banner/Event
 	// and ReadLine call site downstream. Constructed before any
 	// output (the Ollama-unreachable warning would otherwise miss
-	// it). Future TUI mode swaps the constructor here behind a flag.
-	ui := cliout.New(verbose)
+	// it). --tui swaps in the bubbletea-backed sink; the default
+	// stays on the readline-style stdout sink so benchmark harnesses
+	// and pipe-based callers behave identically to pre-Stage-3.
+	//
+	// The TUI program isn't started here — that happens further down
+	// once the worker closure is composed. The sink works in both
+	// halves (Info / Warn calls before program start are queued by
+	// the no-op send when program is nil, then re-broadcast … no,
+	// they're dropped. So construct + start the program before any
+	// output goes through it).
+	var (
+		ui     cliout.Sink
+		tuiSnk *repltui.TUISink
+	)
+	if tuiMode && oneShotPrompt == "" {
+		tuiSnk = repltui.NewTUISink(verbose)
+		ui = tuiSnk
+	} else {
+		ui = cliout.New(verbose)
+	}
 
 	// Fix A: when the user hasn't pinned a model AND we're routing to
 	// Ollama, probe `/api/tags` and prefer a better function-caller if
@@ -341,55 +363,56 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		return nil
 	}
 
-	printREPLBanner(state)
-
-	// First-run bootstrap: if .cortex/bootstrap_state.json is absent
-	// or incomplete, kick off the project-bootstrap DAG in a
-	// goroutine. The REPL accepts input immediately; the bootstrap
-	// surfaces progress as banners between user prompts. Disable via
-	// CORTEX_SKIP_BOOTSTRAP=1 (used by tests + benchmark harnesses
-	// that don't want the noise).
-	maybeStartBootstrap(state)
-
-	// Revalidate the saved role map (if any) so the user sees stale
-	// entries before the first turn. Cheap probe (2s per endpoint
-	// max); never blocks. Skipped in headless mode where benchmark
-	// callers don't want the noise.
-	revalidateAndWarn(state.workdir, state.ui)
-
-	for {
-		line, err := state.ui.ReadLine("~ ")
-		if err != nil {
-			// io.EOF (Ctrl-D) is a clean exit; surface other read
-			// errors so a broken terminal doesn't spin silently.
-			if !errors.Is(err, io.EOF) {
-				state.ui.Error(err)
-			}
-			break
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "/") {
-			cont, err := state.dispatchSlash(line)
+	// mainLoop is the heart of the interactive REPL — read a line,
+	// dispatch slash or runTurn, repeat. Factored out so both the
+	// stdout path (run directly) and the TUI path (run inside
+	// repltui.Run's worker goroutine) share the same body.
+	mainLoop := func() error {
+		printREPLBanner(state)
+		maybeStartBootstrap(state)
+		revalidateAndWarn(state.workdir, state.ui)
+		for {
+			line, err := state.ui.ReadLine("~ ")
 			if err != nil {
-				state.ui.Error(err)
-			}
-			if !cont {
+				if !errors.Is(err, io.EOF) {
+					state.ui.Error(err)
+				}
 				break
 			}
-			continue
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, "/") {
+				cont, err := state.dispatchSlash(line)
+				if err != nil {
+					state.ui.Error(err)
+				}
+				if !cont {
+					break
+				}
+				continue
+			}
+			if err := state.runTurn(line); err != nil {
+				state.ui.Error(fmt.Errorf("turn: %w", err))
+			}
+			if state.exitRequested {
+				break
+			}
 		}
-		if err := state.runTurn(line); err != nil {
-			state.ui.Error(fmt.Errorf("turn: %w", err))
-		}
-		if state.exitRequested {
-			break
-		}
+		state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
+		return nil
 	}
-	state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
-	return nil
+
+	if tuiSnk != nil {
+		// TUI path. repltui.Run starts the bubbletea program on this
+		// goroutine and runs mainLoop in a worker goroutine; sink
+		// messages route between them. The initial status line
+		// mirrors the printREPLBanner content.
+		initialStatus := fmt.Sprintf("cortex · %s · %s", state.workdir, state.model)
+		return repltui.Run(tuiSnk, initialStatus, mainLoop)
+	}
+	return mainLoop()
 }
 
 // replState bundles per-session mutable state: model + workdir + the
@@ -1303,6 +1326,10 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        0 disables cross-session memory (the pre-
                        Item-4 behavior). Mid-session,
                        /prior-summaries N changes the cap.
+      --tui            Use the bubbletea-driven TUI (persistent
+                       bottom input, status line, color-coded DAG
+                       activity). Default is the readline-style
+                       stdout REPL.
 In the REPL:
   /help                Show slash-command help.
   /diff                Show files changed since session start.
