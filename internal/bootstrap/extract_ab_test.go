@@ -151,6 +151,17 @@ func emitTable(t *testing.T, results []ABResult) {
 		t.Logf("[%-7s] %-30s op=%-18s tokens=%-4d latency=%-5dms fallback=%v",
 			r.Entry.Lang, r.Entry.RelPath, r.Op, r.TokensUsed, r.LatencyMS, r.Fallback)
 	}
+
+	// Persist the full result set (with each op's actual Output JSON)
+	// to disk so the scoring step can read content, not just metrics.
+	// Path defaults to <panelPath>.results.json so each panel keeps
+	// its companion result file in lockstep.
+	resultsPath := *abPanelPath + ".results.json"
+	if b, err := json.MarshalIndent(results, "", "  "); err == nil {
+		_ = os.WriteFile(resultsPath, b, 0o644)
+		t.Logf("results dumped → %s", resultsPath)
+	}
+
 	t.Log("(Score each (entry × op) manually: 0=irrelevant, 1=partial, 2=full. " +
 		"Record decision in docs/eval-journal.md per docs/bootstrap-dag-plan.md §A/B.)")
 }

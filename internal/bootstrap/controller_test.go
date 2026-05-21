@@ -116,13 +116,12 @@ func TestController_Run_HitsTarget(t *testing.T) {
 		t.Errorf("state file missing: %v", err)
 	}
 
-	// Auto routing should call overview for Go (source) and insight
-	// for Markdown (prose).
+	// Auto routing post-A/B sends every language family to overview.
 	if mockOverview.calls == 0 {
-		t.Errorf("overview never called (Go files should route to it)")
+		t.Errorf("overview never called (auto mode should route every chunk to it)")
 	}
-	if mockInsight.calls == 0 {
-		t.Errorf("insight never called (Markdown files should route to it)")
+	if mockInsight.calls != 0 {
+		t.Errorf("insight called %d times under auto routing; want 0 (overview wins everywhere per A/B)", mockInsight.calls)
 	}
 }
 

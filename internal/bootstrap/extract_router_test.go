@@ -20,53 +20,37 @@ func TestChooseExtractOp_Explicit(t *testing.T) {
 	}
 }
 
+// TestChooseExtractOp_Auto pins the post-A/B routing decision: every
+// language family routes to extract_overview. See the 2026-05-21 entry
+// in docs/eval-journal.md and ChooseExtractOp's docstring for the
+// scoring rationale.
 func TestChooseExtractOp_Auto(t *testing.T) {
-	cases := []struct {
-		lang, want string
-	}{
-		// Source-like → overview
-		{"go", "maintain.extract_overview"},
-		{"py", "maintain.extract_overview"},
-		{"js", "maintain.extract_overview"},
-		{"ts", "maintain.extract_overview"},
-		{"rs", "maintain.extract_overview"},
-		{"java", "maintain.extract_overview"},
-		{"c", "maintain.extract_overview"},
-		{"sql", "maintain.extract_overview"},
-
-		// Config-like → overview
-		{"toml", "maintain.extract_overview"},
-		{"yaml", "maintain.extract_overview"},
-		{"ini", "maintain.extract_overview"},
-
-		// Prose / unknown → insight
-		{"md", "maintain.extract_insight"},
-		{"txt", "maintain.extract_insight"},
-		{"rst", "maintain.extract_insight"},
-		{"unknown", "maintain.extract_insight"},
-		{"", "maintain.extract_insight"},
+	cases := []string{
+		// Source-like
+		"go", "py", "js", "ts", "rs", "java", "c", "cs", "swift", "kt", "scala",
+		"rb", "sh", "lua", "sql", "hs",
+		// Config-like
+		"toml", "yaml", "ini", "tf",
+		// Prose / unknown
+		"md", "txt", "rst", "unknown", "",
 	}
-	for _, tc := range cases {
-		t.Run("auto/"+tc.lang, func(t *testing.T) {
-			if got := ChooseExtractOp(ExtractOpAuto, tc.lang); got != tc.want {
-				t.Errorf("ChooseExtractOp(auto,%q) = %q, want %q", tc.lang, got, tc.want)
+	for _, lang := range cases {
+		t.Run("auto/"+lang, func(t *testing.T) {
+			got := ChooseExtractOp(ExtractOpAuto, lang)
+			if got != "maintain.extract_overview" {
+				t.Errorf("ChooseExtractOp(auto,%q) = %q, want maintain.extract_overview", lang, got)
 			}
 		})
 	}
 }
 
 func TestChooseExtractOp_EmptyCfgFallsBackToAuto(t *testing.T) {
-	// cfg="" should behave the same as cfg="auto"
-	cases := []struct {
-		lang, want string
-	}{
-		{"go", "maintain.extract_overview"},
-		{"md", "maintain.extract_insight"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.lang, func(t *testing.T) {
-			if got := ChooseExtractOp("", tc.lang); got != tc.want {
-				t.Errorf("empty cfg, lang=%q: got %q, want %q", tc.lang, got, tc.want)
+	// cfg="" should behave the same as cfg="auto" — overview for all.
+	for _, lang := range []string{"go", "md", "py", "ts"} {
+		t.Run(lang, func(t *testing.T) {
+			got := ChooseExtractOp("", lang)
+			if got != "maintain.extract_overview" {
+				t.Errorf("empty cfg, lang=%q: got %q, want maintain.extract_overview", lang, got)
 			}
 		})
 	}

@@ -1,0 +1,86 @@
+[
+  {
+    "source": "cortex",
+    "rel_path": "internal/bootstrap/sampler_hierarchical.go",
+    "lang": "go",
+    "role": "source",
+    "content": "// HierarchicalSampler is the day-one Sampler: recursive weighted draw\n// over the project's module tree with an anti-coverage bias. Fractal\n// by construction — the same weighted-subdivision rule applies at\n// every depth.\ntype HierarchicalSampler struct {\n\tAntiCoverageWeight float64\n\tSizeWeightExp      float64\n}\n\nfunc (h *HierarchicalSampler) Name() string { return \"hierarchical-v1\" }\n\nfunc (h *HierarchicalSampler) Next(out *BoundaryOutput, covered map[string]bool, k int, rng *rand.Rand) []string {\n\tif k <= 0 || out == nil || len(out.Chunks) == 0 {\n\t\treturn nil\n\t}\n\taw := h.AntiCoverageWeight\n\tif aw <= 0 {\n\t\taw = 3.0\n\t}\n\tsw := h.SizeWeightExp\n\tif sw <= 0 {\n\t\tsw = 0.5\n\t}\n\tmoduleChunks := make(map[string][]Chunk, len(out.Modules))\n\tfor _, c := range out.Chunks {\n\t\tmoduleChunks[c.ModuleID] = append(moduleChunks[c.ModuleID], c)\n\t}\n\tmoduleIDs := make([]string, 0, len(moduleChunks))\n\tfor id, chs := range moduleChunks {\n\t\tsort.Slice(chs, func(i, j int) bool { return chs[i].ID < chs[j].ID })\n\t\tmoduleChunks[id] = chs\n\t\tmoduleIDs = append(moduleIDs, id)\n\t}\n\tsort.Strings(moduleIDs)\n\tdrawn := make(map[string]bool)\n\tpicked := make([]string, 0, k)\n\tfor i := 0; i < k; i++ {\n\t\tweights := make([]float64, len(moduleIDs))\n\t\ttotal := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tuncoveredEff := 0\n\t\t\tuncoveredChunks := 0\n\t\t\ttotalChunks := 0\n\t\t\tfor _, c := range moduleChunks[mid] {\n\t\t\t\ttotalChunks++\n\t\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t\tuncoveredEff += c.EffLines\n\t\t\t\tuncoveredChunks++\n\t\t\t}\n\t\t\tif uncoveredChunks == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tfrac := float64(uncoveredChunks) / float64(totalChunks)\n\t\t\tsizeTerm := math.Pow(float64(uncoveredEff), sw)\n\t\t\tif uncoveredEff == 0 {\n\t\t\t\tsizeTerm = 1.0\n\t\t\t}\n\t\t\tw := sizeTerm * (1.0 + aw*frac)\n\t\t\tweights[mi] = w\n\t\t\ttotal += w\n\t\t}\n\t\tif total <= 0 {\n\t\t\tbreak\n\t\t}\n\t\tu := rng.Float64() * total\n\t\tchosen := \"\"\n\t\tcum := 0.0\n\t\tfor mi, mid := range moduleIDs {\n\t\t\tif weights[mi] == 0 {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tcum += weights[mi]\n\t\t\tif u < cum {\n\t\t\t\tchosen = mid\n\t\t\t\tbreak\n\t\t\t}\n\t\t}\n\t\tif chosen == \"\" {\n\t\t\tbreak\n\t\t}\n\t\tavail := make([]string, 0, len(moduleChunks[chosen]))\n\t\tfor _, c := range moduleChunks[chosen] {\n\t\t\tif covered[c.ID] || drawn[c.ID] {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\tavail = append(avail, c.ID)\n\t\t}\n\t\tif len(avail) == 0 {\n\t\t\tcontinue\n\t\t}\n\t\tidx := rng.Intn(len(avail))\n\t\tdrawn[avail[idx]] = true\n\t\tpicked = append(picked, avail[idx])\n\t}\n\treturn picked\n}\n"
+  },
+  {
+    "source": "cortex",
+    "rel_path": "go.mod",
+    "lang": "unknown",
+    "role": "config",
+    "content": "module github.com/dereksantos/cortex\n\ngo 1.26.0\n\nrequire (\n\tgithub.com/gofrs/flock v0.13.0\n\tgithub.com/knights-analytics/hugot v0.7.2\n\tgithub.com/viterin/vek v0.4.3\n\tgolang.org/x/term v0.43.0\n\tgopkg.in/yaml.v3 v3.0.1\n\tmodernc.org/sqlite v1.50.1\n)\n"
+  },
+  {
+    "source": "cortex",
+    "rel_path": "internal/bootstrap/sampler_hierarchical_test.go",
+    "lang": "go",
+    "role": "test",
+    "content": "func TestSampler_DeterministicSequence(t *testing.T) {\n\tout := synthBoundary(5, 10, 20)\n\tcovered := map[string]bool{}\n\ts := &HierarchicalSampler{}\n\tvar seq1, seq2 []string\n\trng1 := rand.New(rand.NewSource(42))\n\tfor i := 0; i < 10; i++ {\n\t\tseq1 = append(seq1, s.Next(out, covered, 4, rng1)...)\n\t}\n\trng2 := rand.New(rand.NewSource(42))\n\tfor i := 0; i < 10; i++ {\n\t\tseq2 = append(seq2, s.Next(out, covered, 4, rng2)...)\n\t}\n\tif len(seq1) != len(seq2) {\n\t\tt.Fatalf(\"sequences differ in length: %d vs %d\", len(seq1), len(seq2))\n\t}\n\tfor i := range seq1 {\n\t\tif seq1[i] != seq2[i] {\n\t\t\tt.Errorf(\"sequence drift at %d: %q vs %q\", i, seq1[i], seq2[i])\n\t\t}\n\t}\n}\n\nfunc TestSampler_RespectsCovered(t *testing.T) {\n\tout := synthBoundary(3, 4, 10)\n\tcovered := map[string]bool{}\n\tfor _, c := range out.Chunks {\n\t\tif c.ModuleID == \"mod-0\" {\n\t\t\tcovered[c.ID] = true\n\t\t}\n\t}\n\ts := &HierarchicalSampler{}\n\trng := rand.New(rand.NewSource(1))\n\tfor i := 0; i < 50; i++ {\n\t\tpicks := s.Next(out, covered, 4, rng)\n\t\tfor _, id := range picks {\n\t\t\tif strings.HasPrefix(id, \"mod-0-chunk-\") {\n\t\t\t\tt.Errorf(\"covered module-0 chunk drawn: %s\", id)\n\t\t\t}\n\t\t}\n\t}\n}\n"
+  },
+  {
+    "source": "cortex",
+    "rel_path": "docs/bootstrap-dag-plan.md",
+    "lang": "md",
+    "role": "doc",
+    "content": "# Project-Bootstrap DAG (`cortex bootstrap`)\n\n## Context\n\nCortex's `dream.insight` pipeline is reactive — it only fires when the daemon catches idle time, and only on whatever `DreamSource` happens to sample next. A fresh project that has never been \"dreamed about\" arrives at the REPL with zero indexed context, so turn 1 has nothing useful to retrieve.\n\nThis change adds a **project-bootstrap DAG** that runs once on first REPL invocation (and via a standalone `cortex bootstrap` command). It scans the project under principled security rules, samples chunks via a hierarchical fractal sampler, feeds each chunk through an LLM op (A/B between `maintain.extract_insight` and a new `maintain.extract_overview`), and writes `dream.insight` entries to the journal — looping until both coverage signals satisfy the target or the iteration budget is exhausted.\n\nThe bootstrap is **language-agnostic by default** (Tier 1: filesystem adjacency + fixed-window line chunking). A `BoundaryAnalyzer` interface leaves room for Tier 2 (regex import detection per language) and Tier 3 (`go/ast`, tree-sitter) without disturbing the controller, sampler, or DAG ops.\n"
+  },
+  {
+    "source": "python",
+    "rel_path": "app/handlers.py",
+    "lang": "py",
+    "role": "source",
+    "content": "from fastapi import APIRouter, HTTPException, Depends\nfrom sqlalchemy.orm import Session\nfrom .db import get_session\nfrom .models import User, Article\nfrom .schemas import ArticleCreate, ArticleOut\n\nrouter = APIRouter(prefix=\"/articles\", tags=[\"articles\"])\n\n\n@router.get(\"/{article_id}\", response_model=ArticleOut)\ndef get_article(article_id: int, db: Session = Depends(get_session)) -> ArticleOut:\n    article = db.query(Article).filter(Article.id == article_id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    return article\n\n\n@router.post(\"/\", response_model=ArticleOut, status_code=201)\ndef create_article(\n    payload: ArticleCreate,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -> ArticleOut:\n    article = Article(\n        title=payload.title,\n        body=payload.body,\n        author_id=user.id,\n    )\n    db.add(article)\n    db.commit()\n    db.refresh(article)\n    return article\n\n\n@router.delete(\"/{article_id}\", status_code=204)\ndef delete_article(\n    article_id: int,\n    db: Session = Depends(get_session),\n    user: User = Depends(current_user),\n) -> None:\n    article = db.query(Article).filter(Article.id == article_id, Article.author_id == user.id).first()\n    if not article:\n        raise HTTPException(status_code=404, detail=\"article not found\")\n    db.delete(article)\n    db.commit()\n"
+  },
+  {
+    "source": "python",
+    "rel_path": "pyproject.toml",
+    "lang": "toml",
+    "role": "config",
+    "content": "[project]\nname = \"articles\"\nversion = \"0.1.0\"\ndescription = \"FastAPI articles service\"\nrequires-python = \">=3.11\"\ndependencies = [\n    \"fastapi>=0.115.0\",\n    \"sqlalchemy>=2.0\",\n    \"pydantic>=2.6\",\n    \"uvicorn[standard]>=0.32\",\n    \"alembic>=1.13\",\n]\n\n[project.optional-dependencies]\ndev = [\n    \"pytest>=8.0\",\n    \"httpx>=0.27\",\n    \"ruff>=0.7\",\n    \"mypy>=1.13\",\n]\n\n[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n\n[tool.ruff]\nline-length = 100\ntarget-version = \"py311\"\n\n[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\naddopts = \"--strict-markers\"\n"
+  },
+  {
+    "source": "python",
+    "rel_path": "tests/test_handlers.py",
+    "lang": "py",
+    "role": "test",
+    "content": "import pytest\nfrom fastapi.testclient import TestClient\nfrom app.main import app\nfrom app.db import get_session\nfrom tests.conftest import override_session, make_user, make_article\n\n\nclient = TestClient(app)\napp.dependency_overrides[get_session] = override_session\n\n\ndef test_get_article_not_found():\n    response = client.get(\"/articles/9999\")\n    assert response.status_code == 404\n    assert response.json()[\"detail\"] == \"article not found\"\n\n\ndef test_create_article_requires_auth():\n    response = client.post(\"/articles/\", json={\"title\": \"t\", \"body\": \"b\"})\n    assert response.status_code == 401\n\n\ndef test_create_article_persists(session):\n    user = make_user(session, email=\"a@b.c\")\n    with auth_as(user):\n        response = client.post(\"/articles/\", json={\"title\": \"Hello\", \"body\": \"World\"})\n    assert response.status_code == 201\n    data = response.json()\n    assert data[\"title\"] == \"Hello\"\n    assert data[\"author_id\"] == user.id\n\n\ndef test_delete_article_requires_ownership(session):\n    owner = make_user(session, email=\"owner@x.io\")\n    other = make_user(session, email=\"other@x.io\")\n    article = make_article(session, author=owner)\n    with auth_as(other):\n        response = client.delete(f\"/articles/{article.id}\")\n    assert response.status_code == 404\n"
+  },
+  {
+    "source": "python",
+    "rel_path": "README.md",
+    "lang": "md",
+    "role": "doc",
+    "content": "# Articles\n\nA tiny FastAPI service that demonstrates a CRUD pattern with SQLAlchemy + Alembic + Pydantic v2.\n\n## Why this exists\n\nUse this as the seed for any internal HTTP service that needs:\n\n- request/response schemas separate from ORM models;\n- declarative auth via FastAPI's `Depends`;\n- a migration story (Alembic) from day one;\n- structured logging with `structlog`.\n\n## Quick start\n\n```bash\npip install -e .[dev]\nalembic upgrade head\nuvicorn app.main:app --reload\n```\n\nNavigate to <http://localhost:8000/docs> for the OpenAPI explorer.\n\n## Layout\n\n```\napp/\n  main.py        — FastAPI app + router wiring\n  db.py          — Session factory + Depends provider\n  models.py      — ORM classes\n  schemas.py     — Pydantic input/output schemas\n  handlers.py    — Endpoint handlers\ntests/\n  test_handlers.py\nalembic/\n  versions/\n```\n"
+  },
+  {
+    "source": "ts",
+    "rel_path": "src/components/ArticleList.tsx",
+    "lang": "ts",
+    "role": "source",
+    "content": "import { useEffect, useState } from 'react';\nimport { Article, fetchArticles, deleteArticle } from '../lib/api';\nimport { Spinner } from './Spinner';\nimport { ConfirmDialog } from './ConfirmDialog';\n\nexport interface ArticleListProps {\n  authorId?: number;\n  onSelect?: (article: Article) => void;\n}\n\nexport function ArticleList({ authorId, onSelect }: ArticleListProps) {\n  const [articles, setArticles] = useState<Article[]>([]);\n  const [loading, setLoading] = useState(true);\n  const [error, setError] = useState<string | null>(null);\n  const [pendingDelete, setPendingDelete] = useState<Article | null>(null);\n\n  useEffect(() => {\n    let cancelled = false;\n    setLoading(true);\n    fetchArticles({ authorId })\n      .then((items) => {\n        if (cancelled) return;\n        setArticles(items);\n        setError(null);\n      })\n      .catch((err) => {\n        if (cancelled) return;\n        setError(err.message ?? 'unknown error');\n      })\n      .finally(() => {\n        if (!cancelled) setLoading(false);\n      });\n    return () => {\n      cancelled = true;\n    };\n  }, [authorId]);\n\n  if (loading) return <Spinner />;\n  if (error) return <div className=\"error\">Failed to load articles: {error}</div>;\n\n  return (\n    <ul className=\"article-list\">\n      {articles.map((a) => (\n        <li key={a.id} onClick={() => onSelect?.(a)}>\n          <h3>{a.title}</h3>\n          <p>{a.snippet}</p>\n          <button onClick={() => setPendingDelete(a)}>Delete</button>\n        </li>\n      ))}\n      {pendingDelete && (\n        <ConfirmDialog\n          message={`Delete “${pendingDelete.title}”?`}\n          onConfirm={async () => {\n            await deleteArticle(pendingDelete.id);\n            setArticles((cur) => cur.filter((x) => x.id !== pendingDelete.id));\n            setPendingDelete(null);\n          }}\n          onCancel={() => setPendingDelete(null)}\n        />\n      )}\n    </ul>\n  );\n}\n"
+  },
+  {
+    "source": "ts",
+    "rel_path": "package.json",
+    "lang": "unknown",
+    "role": "config",
+    "content": "{\n  \"name\": \"articles-ui\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc -b && vite build\",\n    \"preview\": \"vite preview\",\n    \"test\": \"vitest\",\n    \"lint\": \"eslint src --max-warnings 0\"\n  },\n  \"dependencies\": {\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\",\n    \"react-router-dom\": \"^6.26.0\",\n    \"@tanstack/react-query\": \"^5.59.0\",\n    \"zod\": \"^3.23.0\"\n  },\n  \"devDependencies\": {\n    \"typescript\": \"~5.5.0\",\n    \"vite\": \"^5.4.0\",\n    \"@vitejs/plugin-react\": \"^4.3.0\",\n    \"vitest\": \"^2.1.0\",\n    \"@testing-library/react\": \"^16.0.0\",\n    \"eslint\": \"^9.10.0\"\n  }\n}\n"
+  },
+  {
+    "source": "ts",
+    "rel_path": "src/components/ArticleList.test.tsx",
+    "lang": "ts",
+    "role": "test",
+    "content": "import { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { render, screen, waitFor, fireEvent } from '@testing-library/react';\nimport { ArticleList } from './ArticleList';\nimport * as api from '../lib/api';\n\nvi.mock('../lib/api');\nconst mockedFetch = vi.mocked(api.fetchArticles);\nconst mockedDelete = vi.mocked(api.deleteArticle);\n\nbeforeEach(() => {\n  vi.resetAllMocks();\n});\n\ndescribe('ArticleList', () => {\n  it('renders articles after load', async () => {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'Hello', snippet: 'world', authorId: 5 },\n    ]);\n    render(<ArticleList />);\n    await waitFor(() => expect(screen.getByText('Hello')).toBeInTheDocument());\n  });\n\n  it('shows an error on fetch failure', async () => {\n    mockedFetch.mockRejectedValueOnce(new Error('boom'));\n    render(<ArticleList />);\n    await waitFor(() => expect(screen.getByText(/Failed to load articles/)).toBeInTheDocument());\n  });\n\n  it('confirms deletion before removing', async () => {\n    mockedFetch.mockResolvedValueOnce([\n      { id: 1, title: 'A', snippet: 's', authorId: 1 },\n    ]);\n    mockedDelete.mockResolvedValueOnce(undefined);\n    render(<ArticleList />);\n    await waitFor(() => screen.getByText('A'));\n    fireEvent.click(screen.getByText('Delete'));\n    fireEvent.click(screen.getByText('OK'));\n    await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith(1));\n  });\n});\n"
+  },
+  {
+    "source": "ts",
+    "rel_path": "README.md",
+    "lang": "md",
+    "role": "doc",
+    "content": "# Articles UI\n\nA minimal React + TypeScript + Vite front-end for the Articles API.\n\n## Quick start\n\n```bash\nnpm install\nnpm run dev\n```\n\nNavigate to <http://localhost:5173>. The dev server proxies `/api/*` to <http://localhost:8000>.\n\n## Stack\n\n- React 18 (function components + hooks)\n- React Router v6 for routing\n- TanStack Query for server state caching\n- Zod for runtime schema validation at the API boundary\n- Vitest + Testing Library for tests\n\n## Layout\n\n```\nsrc/\n  components/   — UI primitives + feature components\n  pages/        — Top-level routed pages\n  lib/          — API client + shared types (api.ts)\n  styles/       — CSS modules\n```\n"
+  }
+]

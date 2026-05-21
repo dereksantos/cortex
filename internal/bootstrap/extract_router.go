@@ -15,35 +15,31 @@ const (
 //
 // When cfgExtractOp is "extract_insight" or "extract_overview", that
 // choice wins unconditionally. When it's "auto" (the default), the
-// router maps per-language:
+// router returns extract_overview for every language family.
 //
-//   - source-like (.go, .py, .js, .ts, .rs, .java, .c family, .cs, .swift,
-//     .kt, .scala, .rb, .sh, .lua, .sql) → extract_overview, since the
-//     prompt is tuned for "what is this file's job + what does it expose".
-//   - config-like (.toml, .yaml, .ini, .tf) → extract_overview.
-//   - prose (.md, .txt, .rst, unknown / no-extension) → extract_insight,
-//     since the prompt is tuned for "what durable insight is here".
+// Rationale: the 12-chunk A/B against Qwen3-Coder-30B (recorded in
+// docs/eval-journal.md, 2026-05-21) scored overview 24/24 vs insight
+// 11/24 across the full panel (Go/Python/TS × source/config/test/doc),
+// at 1.15× token cost (under the 1.2× threshold). The insight prompt
+// is calibrated for session-event extraction ("durable, actionable,
+// teachable" decisions/corrections) — on source files it surfaces
+// tangential patterns instead of the "what is this file's job" answer
+// bootstrap needs. The go.mod case was the strongest signal: insight
+// invented an architectural recommendation from a plain dependency
+// declaration, overview produced a structured config summary.
+//
+// The lang parameter is kept (rather than removed) so future evals
+// with revised prompts can re-introduce per-language routing without
+// touching the call sites.
 //
 // Default-when-empty: the empty string maps to "auto" so callers that
 // forget to set ExtractOp don't get a degenerate result.
-//
-// The mapping is a v1 default. Step 7 of docs/bootstrap-dag-plan.md
-// runs a 12-chunk A/B that may revise it; the revision lands here as
-// table edits (single-file change).
 func ChooseExtractOp(cfgExtractOp, lang string) string {
 	switch cfgExtractOp {
 	case ExtractOpInsight, ExtractOpOverview:
 		return "maintain." + cfgExtractOp
 	}
-	// auto (or unset) — route per language family.
-	switch lang {
-	case "go", "py", "js", "ts", "rs", "java", "c", "cs", "swift", "kt", "scala",
-		"rb", "sh", "lua", "sql", "hs",
-		"toml", "yaml", "ini", "tf":
-		return "maintain." + ExtractOpOverview
-	case "md", "txt", "rst", "unknown", "":
-		return "maintain." + ExtractOpInsight
-	}
+	_ = lang // reserved for future per-language routing; see A/B journal entry.
 	return "maintain." + ExtractOpOverview
 }
 
