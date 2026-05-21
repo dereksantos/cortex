@@ -83,9 +83,14 @@ const (
 	// enough to write a full file in one go (Game-of-Life-sized).
 	defaultMaxOutputTokens = 4000
 
-	// defaultMaxTurns caps the inner agent loop per user message. A
-	// 1.5B model spinning on tool calls is expensive without ceiling.
-	defaultMaxTurns = 8
+	// defaultMaxTurns is the REPL's safety ceiling, NOT the binding
+	// stop. Post-Phase-3 the agent loop's no-progress signal (see
+	// internal/harness.noProgressWindow) raises ReasonNoProgress when
+	// recent turns showed no write_file/run_shell work or read in a
+	// circle. Budget caps cost. The integer cap here exists only so
+	// truly pathological loops (provider drift, dispatcher bugs) stop
+	// in bounded time; everyday exploration runs well under it.
+	defaultMaxTurns = 50
 
 	// defaultToolOutputSalienceCap is the FALLBACK per-tool-call
 	// output-token cap when capability inference can't pick a class

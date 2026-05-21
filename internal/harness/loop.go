@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -47,7 +49,25 @@ const (
 	ReasonBudget      LoopReason = "budget"       // tokens or cost budget exhausted
 	ReasonContextDone LoopReason = "context_done" // ctx cancelled or timed out
 	ReasonError       LoopReason = "error"        // provider call failed; check Err
+	ReasonNoProgress  LoopReason = "no_progress"  // sliding window of recent turns showed no side-effecting work
 )
+
+// noProgressWindow is the count of consecutive recent turns the
+// loop watches for "no productive work" before stopping with
+// ReasonNoProgress. The two conditions that count as no progress in
+// a window of this size are:
+//
+//  1. Zero write_file / run_shell calls — pure exploration that
+//     never lands a change is the dominant agent-loop pathology on
+//     small models.
+//  2. Identical read_file / list_dir targets across every turn —
+//     the model re-reading the same files in a circle.
+//
+// 5 turns is generous enough that legitimate exploration (search →
+// read → search → think → write) clears the bar, but tight enough
+// that the binding constraint replaces the old 8-turn hard cap
+// without making sessions unbounded.
+const noProgressWindow = 5
 
 // LoopResult is returned after Run() completes.
 type LoopResult struct {
@@ -127,13 +147,88 @@ type Loop struct {
 	costUSD   float64
 }
 
-// Loop defaults. Conservative for iteration 1: a small model that
-// can't drive 25 productive turns will hit the budget cap instead of
-// the turn cap, which is fine — both signal "the harness held the
-// rails closed, the model couldn't finish".
+// defaultMaxTurns is a safety ceiling, not the binding constraint.
+// After Phase 3 the no-progress signal stops the loop when the model
+// spins on exploration; before that, Budget catches runaway cost.
+// 50 turns is enough headroom that productive long sessions don't
+// trip it, and is high enough that hitting it indicates a bug in
+// the agent's tool discipline rather than legitimate work.
 const (
-	defaultMaxTurns = 25
+	defaultMaxTurns = 50
 )
+
+// progressTracker tracks a sliding window of recent turns' tool
+// shapes so the loop can stop early when the model spins without
+// producing side-effecting work. See noProgressWindow doc for the
+// two conditions that fire ReasonNoProgress.
+//
+// turnShapes records one entry per turn that DID issue tool calls.
+// A turn the model spent only writing assistant text (no tool calls)
+// is the model-done case and is handled separately — it does not
+// enter the tracker. This keeps the tracker focused on the
+// "tool-calling-but-not-progressing" pathology.
+type progressTracker struct {
+	turnShapes []turnShape
+}
+
+type turnShape struct {
+	hadWriteOrShell bool
+	readTargets     string // sorted-joined read_file/list_dir args; empty if none
+}
+
+func (p *progressTracker) recordTurn(calls []llm.ToolCall) {
+	var reads []string
+	hadWrite := false
+	for _, c := range calls {
+		switch c.Function.Name {
+		case "write_file", "run_shell":
+			hadWrite = true
+		case "read_file", "list_dir":
+			reads = append(reads, c.Function.Arguments)
+		}
+	}
+	sort.Strings(reads)
+	p.turnShapes = append(p.turnShapes, turnShape{
+		hadWriteOrShell: hadWrite,
+		readTargets:     strings.Join(reads, "|"),
+	})
+	if len(p.turnShapes) > noProgressWindow {
+		p.turnShapes = p.turnShapes[len(p.turnShapes)-noProgressWindow:]
+	}
+}
+
+// noProgress reports whether the recent window suggests the loop
+// is spinning. Returns false until the window is full so early
+// exploration isn't punished.
+func (p *progressTracker) noProgress() bool {
+	if len(p.turnShapes) < noProgressWindow {
+		return false
+	}
+	// Condition 1: zero write_file/run_shell calls in the entire window.
+	anyWrite := false
+	for _, s := range p.turnShapes {
+		if s.hadWriteOrShell {
+			anyWrite = true
+			break
+		}
+	}
+	if !anyWrite {
+		return true
+	}
+	// Condition 2: every turn in the window re-reads the same set of
+	// targets (and that set is non-empty). The model is reading in a
+	// circle without writing.
+	first := p.turnShapes[0].readTargets
+	if first == "" {
+		return false
+	}
+	for _, s := range p.turnShapes[1:] {
+		if s.readTargets != first {
+			return false
+		}
+	}
+	return true
+}
 
 // defaultBudget bounds cumulative spend for a typical coding
 // session. Set generously enough that the COST cap is the brake
@@ -192,7 +287,10 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		"max_cost":              budget.MaxCostUSD,
 		"num_tools":             len(specs),
 		"user_prompt":           userPrompt,
+		"no_progress_window":    noProgressWindow,
 	})
+
+	progress := &progressTracker{}
 
 	for turn := 0; turn < maxTurns; turn++ {
 		if err := ctx.Err(); err != nil {
@@ -263,6 +361,21 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 				"name":         call.Function.Name,
 				"output_chars": len(out),
 			})
+		}
+
+		// Record the turn's tool shape and stop if the recent window
+		// shows no productive work. This is the binding constraint
+		// post-Phase-3 — before it, the integer MaxTurns was what
+		// stopped exploratory sessions too early. Budget still wins
+		// when cost or tokens cross their caps.
+		progress.recordTurn(callRes.ToolCalls)
+		if progress.noProgress() {
+			res.Reason = ReasonNoProgress
+			l.note("coding.no_progress", map[string]any{
+				"turn":   turn,
+				"window": noProgressWindow,
+			})
+			break
 		}
 
 		// Check budget after dispatching so the last turn's spending is counted.
