@@ -58,7 +58,16 @@ type OpenAICompatClient struct {
 	model      string
 	maxTokens  int
 	httpClient *http.Client
+
+	// swapTracker, when set, gets a Note(endpoint, model) after every
+	// successful request — feeds the Phase 4 Slice E swap-aware
+	// routing substrate. Nil is fine (no tracking).
+	swapTracker *SwapTracker
 }
+
+// SetSwapTracker wires a shared tracker so this client reports its
+// model-per-endpoint usage. Nil clears the wiring.
+func (c *OpenAICompatClient) SetSwapTracker(t *SwapTracker) { c.swapTracker = t }
 
 // NewOpenAICompatClient constructs a client bound to one endpoint.
 // Pass the endpoint's OpenAI root URL (no trailing /chat/completions);
@@ -257,6 +266,13 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 			return nil, fmt.Errorf("%s (%d): %s", c.name, resp.StatusCode, er.Error.Message)
 		}
 		return nil, fmt.Errorf("%s status %d: %s", c.name, resp.StatusCode, string(bb))
+	}
+
+	// Note the model that just served on this endpoint. Both plaintext
+	// and tool-call paths route through doRaw so this catches every
+	// model-use event in one place.
+	if c.swapTracker != nil && c.model != "" {
+		c.swapTracker.Note(c.name, c.model)
 	}
 	return bb, nil
 }

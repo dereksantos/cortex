@@ -50,6 +50,7 @@ import (
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
@@ -306,6 +307,12 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	}
 
 	printREPLBanner(state)
+
+	// Revalidate the saved role map (if any) so the user sees stale
+	// entries before the first turn. Cheap probe (2s per endpoint
+	// max); never blocks. Skipped in headless mode where benchmark
+	// callers don't want the noise.
+	revalidateAndWarn(state.workdir)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	// Default Scanner buffer is 64 KiB; bump so paste-in prompts work.
@@ -1005,6 +1012,23 @@ func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
 		return
 	}
 	_ = emitter.Ok(os.Stdout, data)
+}
+
+// revalidateAndWarn runs the Phase 4 Slice E role-map revalidation
+// against <workdir>/.cortex/config.json and prints a one-line warning
+// per stale assignment. Stale doesn't block the REPL — the routing
+// layer will surface the actual error if a user invokes a broken
+// role — but surfacing it up front lets the user fix it before
+// hitting it mid-session.
+func revalidateAndWarn(workdir string) {
+	cfg := loadREPLConfig(filepath.Join(workdir, ".cortex"))
+	if cfg == nil || cfg.Models == nil {
+		return
+	}
+	stale := intllm.RevalidateRoleMap(cfg)
+	for _, s := range stale {
+		fmt.Printf("  warn: role %s pinned to %s/%s — %s\n", s.Role, s.Endpoint, s.Model, s.Reason)
+	}
 }
 
 // printREPLBanner prints the welcome line. One line, no ASCII art.
