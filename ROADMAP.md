@@ -78,7 +78,9 @@ item. Implementation lands in Phase 4 below.
 - **Budget–quality curve (Tier 2b):** DAG trace infrastructure landed;
   curve-plotting tooling not yet built
 - **Multi-model cost/quality delta (Tier 2c):** paired-run harness not
-  yet built; routing-policy ablation surface needs design
+  yet built. Model registry + role-map + endpoint-aware routing
+  substrate landed (Phase 4 Slices A–E); paired-run harness now
+  unblocked.
 - **Regression guardrails (Tier 3):** none wrapped yet; intent-ingress,
   in-flight observability, presentation, MCP-extensibility proxies all
   on the build list
@@ -142,36 +144,45 @@ Single YAML format: `context` + `tests`. 40 active scenarios in
       `docs/simplification-audit.md` (archive README added,
       eval-journal rolloff policy added)
 
-### Phase 4: Build Tier 2 (thesis evals) NEXT
+### Phase 4: Build Tier 2 (thesis evals) IN PROGRESS
 
-- [ ] **Model registry + multi-endpoint detection (PREREQUISITE).**
-      Gates the multi-model paired-run harness below. Detailed sub-items:
-  - [ ] Extend `internal/llm/detect.go` to probe a configurable list of
+- [x] **Model registry + multi-endpoint detection (PREREQUISITE).**
+      Shipped in commits 4f28109, eef617b, 3af4346, 738b515, aaebe8b,
+      40215ca (Slices A through E). End-to-end verified against the
+      chatterbox Lemonade server + local Ollama: 8 models discovered,
+      role map proposed with local-bias + size-aware picks, REPL routes
+      `<endpoint>/<model>` ids through the openai_compat provider, no
+      OpenRouter key required for local-only sessions.
+  - [x] Extend `internal/llm/detect.go` to probe a configurable list of
         OpenAI-compatible endpoints in parallel (chatterbox / LM Studio /
         vLLM / Lemonade), alongside the existing Ollama + Anthropic
-        probes.
-  - [ ] Add a generic `pkg/llm/openai_compat.go` provider (clone of
+        probes. *(Slice A)*
+  - [x] Add a generic `pkg/llm/openai_compat.go` provider (clone of
         `openrouter.go` parameterized by `base_url` + optional API
-        key). Used by all OpenAI-compatible local endpoints.
-  - [ ] Tag each detected model with capabilities (coding,
+        key). Used by all OpenAI-compatible local endpoints. *(Slice A)*
+  - [x] Tag each detected model with capabilities (coding,
         tool-calling, embedding, reranking, reasoning) from the
-        endpoint's metadata when available; fall back to a static
-        capability table in `pkg/models/` for endpoints that don't
-        expose labels.
-  - [ ] Add a `Models` role map to `pkg/config/config.go` —
+        endpoint's metadata when available; fall back to ID-pattern
+        inference (`pkg/llm/capabilities.go`) for endpoints that don't
+        expose labels. *(Slice C)*
+  - [x] Add a `Models` role map to `pkg/config/config.go` —
         `code / reason / fast / embed / rerank → endpoint/model_id`.
-        Persisted to `~/.cortex/config.json`.
-  - [ ] Onboarding flow in `cortex install` / REPL first-launch:
-        detect → recommend role map → show projected per-role costs →
-        prompt to accept/edit → save. This is the **thesis surface**
-        described above; it's UX work, not just plumbing.
-  - [ ] Re-validate the saved map at each REPL launch (tunnel up,
-        model resident, key still valid) and surface stale entries
-        with a one-line "refresh?" prompt.
-  - [ ] Swap-aware routing helper: given the role-map and the
-        currently-loaded model on each endpoint, prefer routing that
-        avoids a model swap when quality is comparable. Materializes
-        the "batch by model" guidance from chatterbox doc §4.
+        Persisted to `.cortex/config.json`. *(Slice B)*
+  - [x] Onboarding flow as `cortex models` command: detect → recommend
+        role map → show per-role rationale → `--save` to persist. The
+        **thesis surface** is now a one-command flow. Per-role cost
+        projection deferred — needs endpoint pricing metadata that
+        Lemonade doesn't expose. *(Slice D)*
+  - [x] Re-validate the saved map at each REPL launch (endpoints
+        reachable, models still in catalog) and surface stale entries
+        as one-line warnings before the prompt. *(Slice E)*
+  - [x] Swap-aware routing **substrate** (`pkg/llm/swap.go`
+        `SwapTracker`). Records last-loaded-per-endpoint on every call;
+        `WouldSwap(endpoint, model)` is available. The recommender +
+        routing layers don't yet consult it — that's deferred to a
+        Phase 4 follow-up once we have real-world data on whether
+        swap-cost actually dominates routing decisions in practice.
+        *(Slice E)*
 - [ ] **Learning-curve runner** — sequential session execution with
       per-run memory isolation. Substrate: existing library-service +
       v2 corpora. Output: pass-rate-vs-session-index curve.
@@ -180,7 +191,7 @@ Single YAML format: `context` + `tests`. 40 active scenarios in
       dagtrace.
 - [ ] **Multi-model paired-run harness** — `small alone` vs
       `small + Cortex` vs `frontier alone` vs `multi-model + Cortex`.
-      Reports cost-quality Pareto frontier. Depends on the model
+      Reports cost-quality Pareto frontier. Now unblocked by the model
       registry above.
 
 ### Phase 5: Build Tier 3 (regression guardrails)
@@ -212,8 +223,50 @@ scored. Cannot start until Phases 4–6 land the substrate.
 
 ---
 
+## Known issues / Phase 4 follow-ups
+
+These came out of the Phase 4 build but are scoped as follow-ups
+rather than gating the next phase:
+
+- **Qwen3-Coder tool-call format.** Qwen3-Coder emits tool calls in
+  its native `<function=name><parameter=path>...</parameter></function>`
+  text format rather than OpenAI's `tool_calls` JSON field. The
+  harness's `salvageTextToolCall` helper handles fenced-JSON
+  write_file calls but not Qwen's XML-style format. Hits when running
+  Qwen3-Coder as the `code` role through the agent loop. Fix:
+  extend `salvageTextToolCall` to recognize the `<function=>` shape,
+  or add a Qwen-aware response parser.
+- **Anthropic / OpenAI endpoint shapes in detection.** Detection
+  currently knows Ollama + arbitrary OpenAI-compatible endpoints.
+  Native Anthropic API (non-OpenAI shape) and OpenAI's first-party
+  API aren't auto-detected by `cortex models`. Either add native
+  detectors or document that users should add them as
+  endpoint-of-record manually.
+- **Per-role cost projection.** `cortex models` currently shows
+  recommended pairings but not projected per-session cost. Needs
+  endpoint pricing metadata (Lemonade doesn't expose it; OpenRouter
+  does via /v1/models). Defer until paired-run harness lands so we
+  have real cost data to plug in.
+- **Swap-aware routing decisions.** SwapTracker substrate landed
+  (Slice E) but the recommender + routing layers don't yet consult
+  it. The decision rule — "prefer no-swap when quality is comparable"
+  — needs real data to define "comparable." Defer until paired-run
+  harness produces that data.
+- **REPL/code paths to Cortex's own DAG planner.** When routed to a
+  small local model, the `decide.next` planning step's prompt+catalog
+  block is large; some local models (qwen2.5-coder:1.5b) silently
+  no-op without producing the expected JSON shape. Either a tighter
+  decide.next prompt or a `--no-plan` escape for tiny-model sessions.
+
+---
+
 ## Recently Completed
 
+- [x] **Phase 4 model registry** — generic OpenAI-compatible provider,
+      multi-endpoint detection, capability inference, role-map config,
+      `cortex models` onboarding command, REPL-launch revalidation,
+      swap tracker substrate. End-to-end verified against chatterbox
+      Lemonade server + local Ollama (commits 4f28109 → 40215ca).
 - [x] **Library-service multi-session eval** — scaffold, session
       runner, scorer, end-to-end probe (Plans 01–05)
 - [x] **DAG protocol substrate** — mechanic runner + dagtrace
