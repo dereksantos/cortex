@@ -30,12 +30,42 @@ func TestSeedForIntent_greetingBelowThresholdFallsThrough(t *testing.T) {
 	}
 }
 
-func TestSeedForIntent_nonGreetingIntentsAlwaysFallThrough(t *testing.T) {
-	for _, intent := range []string{"code", "review", "meta", "recall", "clarify", "unknown"} {
+func TestSeedForIntent_clarifyAboveThresholdRoutesToDecideClarify(t *testing.T) {
+	seed := seedForIntent("clarify", 0.9, "do the thing")
+	if seed[0].QualifiedName() != "decide.clarify" {
+		t.Errorf("clarify (high conf) must route to decide.clarify, got %q", seed[0].QualifiedName())
+	}
+}
+
+func TestSeedForIntent_recallAboveThresholdRoutesToRecallSummary(t *testing.T) {
+	seed := seedForIntent("recall", 0.9, "what did we decide about postgres?")
+	if seed[0].QualifiedName() != "decide.recall_summary" {
+		t.Errorf("recall (high conf) must route to decide.recall_summary, got %q", seed[0].QualifiedName())
+	}
+}
+
+func TestSeedForIntent_lowConfidenceAlwaysFallsThrough(t *testing.T) {
+	// Below the confidence threshold every intent falls through to
+	// sense.prompt — the trivial-intent short-circuits would do the
+	// wrong thing without confidence backing them.
+	for _, intent := range []string{"greeting", "clarify", "recall", "code", "review", "meta"} {
+		t.Run(intent, func(t *testing.T) {
+			seed := seedForIntent(intent, 0.5, "do the thing")
+			if seed[0].QualifiedName() != "sense.prompt" {
+				t.Errorf("intent=%q at low confidence must seed sense.prompt, got %q", intent, seed[0].QualifiedName())
+			}
+		})
+	}
+}
+
+func TestSeedForIntent_nonShortCircuitIntentsAlwaysFallThrough(t *testing.T) {
+	// code / review / meta / unknown have no dedicated terminal node —
+	// they always seed sense.prompt regardless of confidence.
+	for _, intent := range []string{"code", "review", "meta", "unknown"} {
 		t.Run(intent, func(t *testing.T) {
 			seed := seedForIntent(intent, 0.95, "do the thing")
 			if seed[0].QualifiedName() != "sense.prompt" {
-				t.Errorf("intent=%q must seed sense.prompt (the trivial-intent short-circuit is greeting-only today), got %q",
+				t.Errorf("intent=%q has no dedicated terminal — must seed sense.prompt, got %q",
 					intent, seed[0].QualifiedName())
 			}
 		})

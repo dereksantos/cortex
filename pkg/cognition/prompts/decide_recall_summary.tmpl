@@ -1,0 +1,27 @@
+---
+version: 1
+op: decide.recall_summary
+description: summarize prior project context relevant to the user's recall question
+max_output_tokens: 100
+vars: [prompt, context]
+---
+The user is asking about something we've already done or decided. Answer briefly using the prior context below. Be specific — name files, decisions, or dates where the context supports it. If the context doesn't actually answer the question, say so clearly rather than padding with adjacent facts.
+
+User prompt:
+"""
+{{.prompt}}
+"""
+
+Prior context (most-relevant excerpts from the journal / storage):
+"""
+{{.context}}
+"""
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"answer": "≤80 words, plain prose, no bullets", "grounded": true|false, "why": "≤8 words"}
+
+`grounded` is true when the answer is supported by the prior context; false when the context didn't actually contain enough to answer and you're being upfront about that.
+
+Examples:
+{"answer":"You decided to use pgx instead of database/sql for the postgres layer; the rationale was the same-quarter sqlx perf review.","grounded":true,"why":"decision present in context"}
+{"answer":"Nothing in prior context covers this — best to ask again once the relevant turn lands in the journal.","grounded":false,"why":"context did not match"}

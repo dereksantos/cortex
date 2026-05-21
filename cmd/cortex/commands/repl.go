@@ -2184,15 +2184,17 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	// Passthrough's reply lands in the same LoopResult.Final the REPL
-	// prints + journals — keeps the trivial-intent path indistinguishable
-	// from a coding_turn response from the renderer's point of view.
-	passthroughOnResponse := func(reply string) {
+	// Shared OnResponse for every intent-aware terminal node
+	// (act.passthrough, decide.clarify, decide.recall_summary). Lands
+	// the reply in the same LoopResult.Final the REPL prints + journals
+	// so trivial-intent paths are indistinguishable from a coding_turn
+	// response from the renderer's point of view.
+	intentTerminalOnResponse := func(reply string) {
 		capturedLR.Final = reply
 		capturedHR.OutputText = reply
 	}
 
-	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, passthroughOnResponse, traceCB)
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, intentTerminalOnResponse, traceCB)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, err
 	}
@@ -2254,29 +2256,52 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 	return intent, confidence
 }
 
-// intentPassthroughThreshold gates the trivial-intent short-circuit.
-// Below this confidence we route through the full chain — better to
-// pay the coding_turn cost than to give a canned "Hi" to someone who
-// actually wanted help.
-const intentPassthroughThreshold = 0.7
+// intentShortCircuitThreshold gates intent-aware short-circuits.
+// Below this confidence every intent routes through the full chain —
+// better to pay the coding_turn cost than to give a canned greeting,
+// a wrong clarifying question, or an unrelated recall to someone who
+// actually wanted real work done.
+const intentShortCircuitThreshold = 0.7
 
 // seedForIntent picks the per-turn seed spec list based on the
-// classified intent. greeting (with high confidence) bypasses the
-// agent loop via act.passthrough; everything else uses today's
-// sense.prompt → decide.next → coding_turn chain.
+// classified intent. High-confidence trivial intents bypass the
+// sense.prompt → decide.next → coding_turn chain in favor of a
+// dedicated terminal node:
 //
-// Recall / clarify will get their own dedicated seeds in follow-up
-// slices (Slices 2 + 4 of the integration plan); today they share
-// the default chain but run under their tighter BudgetForIntent
-// budgets, so a misroute still can't balloon the turn.
+//   greeting → act.passthrough        (mechanical, zero LLM)
+//   clarify  → decide.clarify         (one short LLM call, one question, end turn)
+//   recall   → decide.recall_summary  (search storage, synthesize prose)
+//
+// Everything else (code / review / meta, or any low-confidence
+// classification) falls through to the existing sense.prompt seed.
+// Per-intent budgets from dag.BudgetForIntent give defense-in-depth:
+// even when the seed falls through, a misclassified trivial intent
+// runs under a budget too tight for decide.coding_turn to spawn.
 func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeSpec {
-	if intent == "greeting" && confidence >= intentPassthroughThreshold {
-		return []dag.NodeSpec{{
-			Function: dag.FuncAct,
-			Op:       "passthrough",
-			ID:       "n1",
-			Attrs:    map[string]any{"prompt": prompt},
-		}}
+	if confidence >= intentShortCircuitThreshold {
+		switch intent {
+		case "greeting":
+			return []dag.NodeSpec{{
+				Function: dag.FuncAct,
+				Op:       "passthrough",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		case "clarify":
+			return []dag.NodeSpec{{
+				Function: dag.FuncDecide,
+				Op:       "clarify",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		case "recall":
+			return []dag.NodeSpec{{
+				Function: dag.FuncDecide,
+				Op:       "recall_summary",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		}
 	}
 	return []dag.NodeSpec{{
 		Function: dag.FuncSense,
@@ -2296,7 +2321,7 @@ func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeS
 // The registry is captured by reference inside decide.next's handler
 // closure, so subsequent registrations (decide.coding_turn,
 // sense.prompt) are visible when the handler runs.
-func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, passthroughOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, intentTerminalOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
 	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		return nil, fmt.Errorf("ops defaults: %w", err)
@@ -2318,9 +2343,34 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// into the captured LoopResult so the standard render + journal
 	// path is unchanged.
 	if err := reg.Register(ops.PassthroughSpec(ops.PassthroughConfig{
-		OnResponse: passthroughOnResponse,
+		OnResponse: intentTerminalOnResponse,
 	})); err != nil {
 		return nil, fmt.Errorf("register act.passthrough: %w", err)
+	}
+
+	// decide.clarify — small-LLM terminal that asks ONE focused
+	// question for ambiguous prompts and ends the turn. Reuses
+	// classifyProvider (same model used for the upstream classifier;
+	// the work is similarly narrow JSON-output).
+	if err := reg.Register(ops.ClarifySpec(ops.ClarifyConfig{
+		Provider:   classifyProvider,
+		OnResponse: intentTerminalOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.clarify: %w", err)
+	}
+
+	// decide.recall_summary — terminal node for the `recall` intent.
+	// Searches s.store via text search (no embedder required; the
+	// REPL session today doesn't wire one through newSessionCognition),
+	// then asks the small model to synthesize a prose answer grounded
+	// in the matches. s.store may be nil on cold start — the op
+	// degrades to a `grounded=false` synthesis from the prompt alone.
+	if err := reg.Register(ops.RecallSummarySpec(ops.RecallSummaryConfig{
+		Provider:   classifyProvider,
+		Storage:    s.store,
+		OnResponse: intentTerminalOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.recall_summary: %w", err)
 	}
 
 	// decide.next — the steering op. Provider + Registry + ModelCatalog
