@@ -46,7 +46,7 @@
         {
           "name": "endpoint",
           "type": "string",
-          "description": "OpenAI-compat base URL (e.g. http://localhost:13305/v1). When set, provider is forced to openai-compat."
+          "description": "OpenAI-compat base URL transient override (e.g. http://localhost:13305/v1). Bypasses model_routes; for one-off invocations."
         },
         {
           "name": "extract-op",
@@ -63,13 +63,7 @@
         {
           "name": "model",
           "type": "string",
-          "description": "Model id (provider-specific; falls back to provider default)"
-        },
-        {
-          "name": "provider",
-          "type": "string",
-          "default": "ollama",
-          "description": "LLM provider: ollama | openrouter | openai-compat"
+          "description": "Model id — routing key. Slash-prefixed (anthropic/...) → OpenRouter; matches model_routes → configured endpoint; bare → Ollama."
         },
         {
           "name": "salt",

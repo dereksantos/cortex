@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cognition/fractal"
@@ -55,7 +53,6 @@ type BootstrapController struct {
 	writer     *journal.Writer
 	rng        *rand.Rand
 	pid        *PIDLock
-	mu         sync.Mutex
 	lastBanner float64 // last coverage fraction at which a banner fired
 }
 
@@ -594,12 +591,4 @@ func contains(haystack []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-// fileExistsHelper is a thin os.Stat wrapper used in tests. Not
-// exported — `os.Stat` from the standard library is the production
-// entry.
-func fileExistsHelper(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }
