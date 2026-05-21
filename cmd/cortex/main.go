@@ -133,6 +133,14 @@ func main() {
 		if cmd := commands.Get("code"); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
+	case "models":
+		// `cortex models` probes configured endpoints + Ollama and
+		// prints a recommended role map. No config/storage needed —
+		// the command opens its own workdir-rooted .cortex/config.json
+		// for endpoint definitions.
+		if cmd := commands.Get("models"); cmd != nil {
+			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+		}
 	case "run":
 		// `cortex run --type=<dag-type>` invokes the DAG executor
 		// per docs/dag-build-plan.md Stage 1 v0. No config or storage
