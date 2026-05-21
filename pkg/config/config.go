@@ -43,6 +43,15 @@ type Config struct {
 	Endpoints []EndpointDef `json:"endpoints,omitempty"`
 	Models    *ModelsMap    `json:"models,omitempty"`
 
+	// DefaultModel pins the REPL's per-session default model when the
+	// user hasn't set CORTEX_REPL_MODEL or passed --model. Resolved
+	// through the same Endpoints / Ollama / OpenRouter routing that
+	// any --model value goes through — `chatterbox/Qwen3-Coder-30B-...`
+	// here works the same as passing it on the command line. Empty
+	// preserves the compile-time fallback (currently
+	// qwen2.5-coder:1.5b via Ollama).
+	DefaultModel string `json:"default_model,omitempty"`
+
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
 	EnableVector bool `json:"enable_vector"`

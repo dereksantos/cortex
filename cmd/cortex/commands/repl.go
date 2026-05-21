@@ -258,6 +258,20 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		workdir = abs
 	}
 
+	// Per-project default model: if neither CORTEX_REPL_MODEL nor
+	// --model was passed and the project's .cortex/config.json
+	// declares a DefaultModel, use that. Treats config-set models as
+	// effectively pinned (skips the Ollama auto-pick probe below)
+	// because if the operator wrote it down, they meant it. Falls
+	// through to the compile-time defaultREPLModel when no config
+	// override is set.
+	if !userPinned {
+		if cfg := loadREPLConfig(filepath.Join(workdir, ".cortex")); cfg != nil && cfg.DefaultModel != "" {
+			model = cfg.DefaultModel
+			userPinned = true
+		}
+	}
+
 	// One Sink per session — owns every Info/Warn/Error/Banner/Event
 	// and ReadLine call site downstream. The interactive REPL always
 	// uses the bubbletea-backed TUI sink; the headless --prompt path
