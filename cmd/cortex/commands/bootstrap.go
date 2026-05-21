@@ -54,7 +54,8 @@ func (c *BootstrapCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.String("extract-op", bootstrap.ExtractOpAuto, "auto | extract_insight | extract_overview")
 	fs.String("salt", "", "Optional RNG salt for variation across runs")
 	fs.Bool("dry-run", false, "Sampler + analyzer only; skip LLM + journal writes")
-	fs.String("provider", "ollama", "LLM provider: ollama | openrouter")
+	fs.String("provider", "ollama", "LLM provider: ollama | openrouter | openai-compat")
+	fs.String("endpoint", "", "OpenAI-compat base URL (e.g. http://localhost:13305/v1). When set, provider is forced to openai-compat.")
 	fs.String("model", "", "Model id (provider-specific; falls back to provider default)")
 }
 
@@ -71,6 +72,7 @@ func (c *BootstrapCommand) Execute(ctx *Context) error {
 	salt := ""
 	dryRun := false
 	providerName := "ollama"
+	endpoint := ""
 	modelID := ""
 
 	for i := 0; i < len(args); i++ {
@@ -143,6 +145,11 @@ func (c *BootstrapCommand) Execute(ctx *Context) error {
 				providerName = strings.TrimSpace(args[i+1])
 				i++
 			}
+		case "--endpoint":
+			if i+1 < len(args) {
+				endpoint = strings.TrimSpace(args[i+1])
+				i++
+			}
 		case "--model", "-m":
 			if i+1 < len(args) {
 				modelID = args[i+1]
@@ -173,7 +180,10 @@ func (c *BootstrapCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	provider := buildBootstrapProvider(providerName, modelID)
+	if endpoint != "" {
+		providerName = "openai-compat"
+	}
+	provider := buildBootstrapProvider(providerName, endpoint, modelID)
 	if provider == nil && !dryRun {
 		fmt.Fprintf(os.Stderr, "warning: no LLM provider configured (provider=%s); falling back to mechanical extract\n", providerName)
 	}
@@ -256,7 +266,8 @@ func printBootstrapHelp() {
 	fmt.Println("  --extract-op X         auto | extract_insight | extract_overview")
 	fmt.Println("  --salt S               RNG salt for run variation")
 	fmt.Println("  --dry-run              Skip LLM + journal writes")
-	fmt.Println("  --provider P           ollama | openrouter (default ollama)")
+	fmt.Println("  --provider P           ollama | openrouter | openai-compat (default ollama)")
+	fmt.Println("  --endpoint URL         OpenAI-compat base URL (forces provider=openai-compat)")
 	fmt.Println("  --model M              Provider-specific model id")
 	fmt.Println("  -h, --help             Show this help message")
 	fmt.Println("\nCost projection (rough, default knobs, ~50K-LOC repo):")
@@ -267,17 +278,28 @@ func printBootstrapHelp() {
 
 // buildBootstrapProvider constructs an LLM provider for the bootstrap
 // extract ops. Defaults to Ollama (local); --provider=openrouter uses
-// the keychain key (managed by the existing secret package).
+// the keychain key; --provider=openai-compat (or any non-empty
+// --endpoint) targets a generic OpenAI-compatible endpoint such as
+// Lemonade, LM Studio, or vLLM.
 //
 // Returns nil when the requested provider can't be built — the caller
 // degrades to the mechanical fallback inside each extract op.
-func buildBootstrapProvider(providerName, modelID string) llm.Provider {
+func buildBootstrapProvider(providerName, endpoint, modelID string) llm.Provider {
 	cfg := &config.Config{}
 	switch strings.ToLower(providerName) {
+	case "openai-compat":
+		if endpoint == "" {
+			return nil
+		}
+		client := llm.NewOpenAICompatClient(llm.EndpointConfig{
+			Name:    "cortex-bootstrap",
+			BaseURL: endpoint,
+		})
+		if modelID != "" {
+			client.SetModel(modelID)
+		}
+		return client
 	case "openrouter":
-		// Lazy import secret to avoid pulling keychain into tests
-		// that don't need it; here we rely on the same construction
-		// path the REPL uses.
 		client, _, err := llm.NewLLMClient(cfg,
 			llm.WithBackend(llm.BackendOpenRouter),
 			llm.WithModel(modelID),
