@@ -50,6 +50,7 @@ import (
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
+	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cliout"
@@ -1439,6 +1440,13 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 			User:      row.UserMessage,
 			Assistant: row.FinalText,
 		})
+		// Phase 3 Slice 4: emit a compressed per-turn summary so the
+		// next turn can pull the rolling-summary view from the journal
+		// instead of replaying full transcripts. Best-effort; failures
+		// don't block the turn (logged in verbose mode).
+		if err := s.emitSessionSummary(row); err != nil && s.verbose {
+			fmt.Fprintf(os.Stderr, "  (session summary failed: %v)\n", err)
+		}
 		printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
 			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
@@ -1465,16 +1473,158 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 	return nil
 }
 
-// priorMessagesForHarness assembles the conversation-history block for
-// the next harness call: at most s.historyLimit accepted turns, each
-// flattened into a (user, assistant) ChatMessage pair. Tool-call traces
-// are intentionally omitted — they're noise the model doesn't need to
-// reason about future requests, and they burn tokens fast.
+// emitSessionSummary writes a compressed per-turn summary to the
+// journal's think class so subsequent turns can pull the rolling-
+// summary view instead of replaying full prior transcripts
+// (docs/salience-budgets.md "Cross-turn context (per-session)").
 //
-// Returns an empty slice when historyLimit is 0 or no turns have been
-// accepted yet.
+// Path:
+//
+//  1. Compose a draft string from the turn's signals — user prompt,
+//     final response, files changed, verifier result.
+//  2. Run it through attend.compress under intent="session-summary"
+//     with the same capability-aware salience cap the dispatcher
+//     used for this turn. Stronger model → more verbose summary;
+//     weaker model → tighter one.
+//  3. Write a ThinkSessionSummaryPayload entry to
+//     <workdir>/.cortex/journal/think/.
+//
+// Best-effort: any failure is returned but the caller logs+continues.
+// Compressor unavailable (no provider) → passthrough on the draft.
+func (s *replState) emitSessionSummary(row turnRow) error {
+	if s.workdir == "" {
+		return nil
+	}
+	draft := composeSessionSummaryDraft(row)
+	if strings.TrimSpace(draft) == "" {
+		return nil
+	}
+
+	cap, _ := salienceCapForSession(s.model, 0)
+	intent := "session-summary: what the user asked, what was done, files changed, key takeaways. Preserve facts, drop pleasantries."
+
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	provider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+
+	// Tight timeout: summary writes are best-effort; we don't want a
+	// hung LLM call to block the REPL prompt from returning. 15s is
+	// generous for a small-model salience-extraction pass; misses
+	// fall through to passthrough/truncate-stub.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	res, err := ops.CompressSpec(ops.CompressConfig{Provider: provider}).Handler(ctx,
+		map[string]any{"raw": draft, "max_tokens": cap, "intent": intent},
+		dag.Budget{LatencyMS: 15000, Tokens: 2000, Depth: 1})
+	if err != nil {
+		return fmt.Errorf("attend.compress: %w", err)
+	}
+
+	compressed, _ := res.Out["compressed"].(string)
+	if strings.TrimSpace(compressed) == "" {
+		compressed = draft
+	}
+	origTok, _ := res.Out["original_tokens"].(int)
+	keptTok, _ := res.Out["kept_tokens"].(int)
+	fallback, _ := res.Out["fallback"].(bool)
+	compressOp := "attend.compress"
+	if fallback {
+		compressOp = "fallback"
+	}
+
+	payload := journal.ThinkSessionSummaryPayload{
+		SessionID:    s.sessionID,
+		Turn:         row.Turn,
+		UserPrompt:   row.UserMessage,
+		Summary:      compressed,
+		FilesChanged: row.FilesChanged,
+		VerifyKind:   row.VerifyKind,
+		VerifyOK:     row.VerifyOK,
+		OrigTokens:   origTok,
+		KeptTokens:   keptTok,
+		CompressOp:   compressOp,
+	}
+	entry, err := journal.NewThinkSessionSummaryEntry(payload)
+	if err != nil {
+		return fmt.Errorf("build entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return fmt.Errorf("open writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append: %w", err)
+	}
+	return nil
+}
+
+// composeSessionSummaryDraft builds the raw text the salience
+// compressor will work on. Pulls the highest-signal fields from a
+// finalized turnRow into a compact prose block. The compressor is
+// what makes this fit a budget; the draft just gathers everything
+// worth considering.
+func composeSessionSummaryDraft(row turnRow) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Turn %d.\n\nUser prompt:\n%s\n\n", row.Turn, row.UserMessage)
+	if row.FinalText != "" {
+		fmt.Fprintf(&b, "Assistant final response:\n%s\n\n", row.FinalText)
+	}
+	if len(row.FilesChanged) > 0 {
+		fmt.Fprintf(&b, "Files changed: %s\n", strings.Join(row.FilesChanged, ", "))
+	}
+	if row.VerifyKind != "" && row.VerifyKind != "none" {
+		fmt.Fprintf(&b, "Verifier (%s): ok=%v\n", row.VerifyKind, row.VerifyOK)
+		if row.VerifyOutput != "" {
+			fmt.Fprintf(&b, "Verifier output:\n%s\n", row.VerifyOutput)
+		}
+	}
+	if row.RetryFinalText != "" {
+		fmt.Fprintf(&b, "Retry attempt final:\n%s\n", row.RetryFinalText)
+	}
+	if row.UserGate != "" {
+		fmt.Fprintf(&b, "User gate: %s\n", row.UserGate)
+	}
+	return b.String()
+}
+
+// priorMessagesForHarness assembles the conversation-history block for
+// the next harness call.
+//
+// Phase 3 Slice 4: this is the cross-turn rolling-summary read path.
+// Instead of replaying the raw (user, assistant) text of the last K
+// turns — which scales linearly in transcript length and quadratically
+// in cumulative tokens — we pull the most recent K
+// think.session_summary entries from the journal and inject them as a
+// single condensed system message. Each summary is the compressed
+// artifact emitted at finalize() under the same capability-aware
+// salience cap the per-turn flow uses. Cumulative prior-context size
+// flattens; long sessions stay viable.
+//
+// Behavior:
+//   - historyLimit ≤ 0 → no prior messages (turn 1 behavior).
+//   - Journal read failure or zero matching summaries → fall back to
+//     the verbatim s.history slice. Preserves pre-Slice-4 behavior on
+//     fresh sessions or when the journal isn't readable.
+//   - Filters to the current session's summaries. Cross-session reads
+//     are a one-line filter change away once we want them.
 func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
-	if s.historyLimit <= 0 || len(s.history) == 0 {
+	if s.historyLimit <= 0 {
+		return nil
+	}
+	summaries := s.readRecentSessionSummaries(s.historyLimit)
+	if len(summaries) > 0 {
+		return summariesAsChatMessages(summaries)
+	}
+	// Fallback: verbatim history (pre-Slice-4 behavior). Triggers when
+	// the journal has no summary entries for this session yet (turn 1
+	// after a fresh start before finalize has run) or a journal read
+	// errored. Keeps the REPL functional regardless of journal state.
+	if len(s.history) == 0 {
 		return nil
 	}
 	start := len(s.history) - s.historyLimit
@@ -1492,6 +1642,65 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 		}
 	}
 	return out
+}
+
+// readRecentSessionSummaries scans the workdir's think journal for
+// the most recent N session-summary entries belonging to the current
+// session, in turn order. Returns an empty slice on any error or when
+// no entries exist (the caller decides whether to fall back).
+func (s *replState) readRecentSessionSummaries(n int) []journal.ThinkSessionSummaryPayload {
+	if n <= 0 || s.workdir == "" || s.sessionID == "" {
+		return nil
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	var all []journal.ThinkSessionSummaryPayload
+	for {
+		e, err := r.Next()
+		if err != nil {
+			break // io.EOF or read error — return what we got
+		}
+		if e.Type != journal.TypeThinkSessionSummary {
+			continue
+		}
+		p, perr := journal.ParseThinkSessionSummary(e)
+		if perr != nil {
+			continue
+		}
+		if p.SessionID != s.sessionID {
+			continue
+		}
+		all = append(all, *p)
+	}
+	if len(all) <= n {
+		return all
+	}
+	return all[len(all)-n:]
+}
+
+// summariesAsChatMessages converts a slice of session summaries into
+// the harness's prior-messages slot. We emit a single user-role
+// message containing all summaries — the model treats it as
+// "background on what's already happened" without confusing it for an
+// actual turn the user took. One message keeps the transcript shape
+// flat and predictable for the inner loop.
+func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []llm.ChatMessage {
+	if len(summaries) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("CONVERSATION SO FAR (summary of prior turns; not user input):\n")
+	for _, p := range summaries {
+		fmt.Fprintf(&b, "\n[turn %d] %s\n", p.Turn, strings.TrimSpace(p.Summary))
+	}
+	return []llm.ChatMessage{
+		{Role: "user", Content: b.String()},
+		{Role: "assistant", Content: "Understood — I'll treat that as context, not as new user input."},
+	}
 }
 
 // runHarness wraps evalv2.CortexHarness.RunSessionWithResult. Returns

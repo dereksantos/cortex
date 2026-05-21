@@ -96,6 +96,7 @@ func New(cfg *config.Config, store *storage.Storage, opts ...Option) *Processor 
 	p.registry.Register(journal.TypeResolveRetrieval, 1, p.projectResolveRetrieval)
 	p.registry.Register(journal.TypeThinkSessionContext, 1, p.projectThinkSessionContext)
 	p.registry.Register(journal.TypeThinkTopicWeight, 1, p.projectThinkTopicWeight)
+	p.registry.Register(journal.TypeThinkSessionSummary, 1, p.projectThinkSessionSummary)
 	for _, typ := range []string{
 		journal.TypeFeedbackCorrection,
 		journal.TypeFeedbackConfirmation,
@@ -191,6 +192,19 @@ func (p *Processor) projectFeedback(e *journal.Entry) error {
 func (p *Processor) projectThinkTopicWeight(e *journal.Entry) error {
 	if _, err := journal.ParseThinkTopicWeight(e); err != nil {
 		return fmt.Errorf("parse think.topic_weight at offset %d: %w", e.Offset, err)
+	}
+	return nil
+}
+
+// projectThinkSessionSummary is a placeholder projector for per-turn
+// rolling summaries. The summary text is consumed directly by the REPL
+// via journal scans (priorMessagesForHarness) rather than via a storage
+// index, so this projector validates the payload but does not write to
+// storage. A future per-session "last K summaries" index can hook in
+// here without re-emitting entries. See docs/salience-budgets.md.
+func (p *Processor) projectThinkSessionSummary(e *journal.Entry) error {
+	if _, err := journal.ParseThinkSessionSummary(e); err != nil {
+		return fmt.Errorf("parse think.session_summary at offset %d: %w", e.Offset, err)
 	}
 	return nil
 }

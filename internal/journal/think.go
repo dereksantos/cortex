@@ -9,6 +9,13 @@ import (
 const (
 	TypeThinkTopicWeight    = "think.topic_weight"
 	TypeThinkSessionContext = "think.session_context"
+	// TypeThinkSessionSummary is one compressed turn summary the REPL
+	// emits at finalize. Designed as the durable substitute for raw
+	// (user, assistant) prior-message pairs — subsequent turns inject
+	// a "summary of last K turns" string built from these entries
+	// instead of replaying full transcripts. See
+	// docs/salience-budgets.md "Cross-turn context (per-session)".
+	TypeThinkSessionSummary = "think.session_summary"
 )
 
 // ThinkTopicWeightPayload records an update to a single topic weight in
@@ -75,6 +82,53 @@ func ParseThinkSessionContext(e *Entry) (*ThinkSessionContextPayload, error) {
 	var p ThinkSessionContextPayload
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
 		return nil, fmt.Errorf("journal: parse think.session_context: %w", err)
+	}
+	return &p, nil
+}
+
+// ThinkSessionSummaryPayload is one per-turn compressed summary. The
+// REPL emits one of these at finalize on every accepted turn; the
+// next turn's prior-messages slot pulls the most recent N to inject
+// as compressed context instead of the raw (user, assistant)
+// transcript. See docs/salience-budgets.md.
+//
+// Fields are intentionally a flat shape — the calibration loop reads
+// them without recursive JSON parsing.
+type ThinkSessionSummaryPayload struct {
+	SessionID    string   `json:"session_id"`
+	Turn         int      `json:"turn"`
+	UserPrompt   string   `json:"user_prompt"`
+	Summary      string   `json:"summary"` // compressed prose (1-3 sentences typically)
+	FilesChanged []string `json:"files_changed,omitempty"`
+	VerifyKind   string   `json:"verify_kind,omitempty"` // mirrors session JSONL field
+	VerifyOK     bool     `json:"verify_ok"`
+	OrigTokens   int      `json:"orig_tokens,omitempty"` // pre-compression size (approx)
+	KeptTokens   int      `json:"kept_tokens,omitempty"` // post-compression size (approx)
+	CompressOp   string   `json:"compress_op,omitempty"` // "attend.compress" / "passthrough" / "fallback"
+}
+
+// NewThinkSessionSummaryEntry builds an entry for a per-turn rolling
+// summary. SessionID + Turn together uniquely identify the entry — a
+// reader can dedupe by (session_id, turn) when replaying.
+func NewThinkSessionSummaryEntry(p ThinkSessionSummaryPayload) (*Entry, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("journal: think.session_summary requires SessionID")
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		return nil, fmt.Errorf("journal: marshal think.session_summary: %w", err)
+	}
+	return &Entry{Type: TypeThinkSessionSummary, V: 1, Payload: data}, nil
+}
+
+// ParseThinkSessionSummary decodes a think.session_summary entry.
+func ParseThinkSessionSummary(e *Entry) (*ThinkSessionSummaryPayload, error) {
+	if e.Type != TypeThinkSessionSummary {
+		return nil, fmt.Errorf("journal: entry type %q is not %s", e.Type, TypeThinkSessionSummary)
+	}
+	var p ThinkSessionSummaryPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return nil, fmt.Errorf("journal: parse think.session_summary: %w", err)
 	}
 	return &p, nil
 }
