@@ -165,7 +165,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	keepOnFail := false          // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 	historyTurnsOverride := -1   // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	priorSummariesOverride := -1 // --prior-summaries N: cap on prior-session summaries (-1 = use default, 0 = disabled)
-	tuiMode := false             // --tui: opt into the bubbletea TUI; default stays on the readline-style StdoutSink for now
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -238,8 +237,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 				fmt.Sscanf(args[i+1], "%d", &priorSummariesOverride)
 				i++
 			}
-		case "--tui":
-			tuiMode = true
 		case "-h", "--help":
 			printREPLHelp()
 			return nil
@@ -262,23 +259,15 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	}
 
 	// One Sink per session — owns every Info/Warn/Error/Banner/Event
-	// and ReadLine call site downstream. Constructed before any
-	// output (the Ollama-unreachable warning would otherwise miss
-	// it). --tui swaps in the bubbletea-backed sink; the default
-	// stays on the readline-style stdout sink so benchmark harnesses
-	// and pipe-based callers behave identically to pre-Stage-3.
-	//
-	// The TUI program isn't started here — that happens further down
-	// once the worker closure is composed. The sink works in both
-	// halves (Info / Warn calls before program start are queued by
-	// the no-op send when program is nil, then re-broadcast … no,
-	// they're dropped. So construct + start the program before any
-	// output goes through it).
+	// and ReadLine call site downstream. The interactive REPL always
+	// uses the bubbletea-backed TUI sink; the headless --prompt path
+	// stays on stdout so benchmark harnesses and pipe-based callers
+	// see the legacy line-by-line output they expect.
 	var (
 		ui     cliout.Sink
 		tuiSnk *repltui.TUISink
 	)
-	if tuiMode && oneShotPrompt == "" {
+	if oneShotPrompt == "" {
 		tuiSnk = repltui.NewTUISink(verbose)
 		ui = tuiSnk
 	} else {
@@ -1337,10 +1326,6 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        0 disables cross-session memory (the pre-
                        Item-4 behavior). Mid-session,
                        /prior-summaries N changes the cap.
-      --tui            Use the bubbletea-driven TUI (persistent
-                       bottom input, status line, color-coded DAG
-                       activity). Default is the readline-style
-                       stdout REPL.
 In the REPL:
   /help                Show slash-command help.
   /diff                Show files changed since session start.
