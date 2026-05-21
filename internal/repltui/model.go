@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -93,6 +94,13 @@ type Model struct {
 	// savedStatusLine preserves the status line text while
 	// selectMode is active (the hint overwrites the status row).
 	savedStatusLine string
+
+	// md renders agent responses (coding.final) as markdown — code
+	// blocks, tables, lists, headings. Rebuilt on resize so the
+	// word-wrap width tracks the viewport. nil falls back to plain
+	// text.
+	md      *glamour.TermRenderer
+	mdWidth int
 }
 
 // New constructs a Model with reasonable defaults. The width/height
@@ -136,6 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.Width = msg.Width
 		m.viewport.Height = max(1, msg.Height-m.bottomChrome())
 		m.input.Width = max(1, msg.Width-len(m.input.Prompt)-1)
+		m.ensureMarkdown(msg.Width)
 		m.viewport.SetContent(strings.Join(m.transcript, "\n"))
 		m.viewport.GotoBottom()
 		return m, nil
@@ -220,6 +229,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(infoStyle.Render(msg.text))
 		return m, nil
 
+	case markdownMsg:
+		m.append(m.renderMarkdown(msg.text))
+		return m, nil
+
 	case warnMsg:
 		m.append(warnStyle.Render("warn: " + msg.text))
 		return m, nil
@@ -241,6 +254,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case eventMsg:
+		if msg.kind == "coding.final" {
+			if payload, ok := msg.payload.(map[string]any); ok {
+				if content, ok := payload["content"].(string); ok {
+					m.append(m.renderMarkdown(content))
+					return m, nil
+				}
+			}
+		}
 		line := renderEventLine(msg.kind, msg.payload, m.verbose)
 		if line != "" {
 			m.append(line)
@@ -327,6 +348,47 @@ func (m *Model) append(line string) {
 	m.viewport.GotoBottom()
 }
 
+// ensureMarkdown builds (or rebuilds on resize) the glamour
+// renderer so word-wrap width matches the current viewport. Errors
+// leave m.md nil; renderMarkdown then falls back to plain text.
+func (m *Model) ensureMarkdown(width int) {
+	if width < 1 {
+		width = 80
+	}
+	if m.md != nil && m.mdWidth == width {
+		return
+	}
+	// WithStandardStyle("dark") — never WithAutoStyle. Auto sends
+	// OSC 10/11 escape queries to the terminal at construction time;
+	// the terminal's reply ("\033]11;rgb:…\033\\") gets swallowed by
+	// Bubble Tea's stdin reader and pasted into the input field.
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		m.md = nil
+		return
+	}
+	m.md = r
+	m.mdWidth = width
+}
+
+// renderMarkdown turns an agent's response into ANSI-styled output.
+// Tables, code blocks, lists, headings — all handled by glamour.
+// Plain text passes through largely unchanged. Trailing newlines are
+// trimmed so the transcript doesn't accumulate blank rows.
+func (m *Model) renderMarkdown(content string) string {
+	if m.md == nil {
+		return finalEvtSty.Render("\n" + content + "\n")
+	}
+	out, err := m.md.Render(content)
+	if err != nil {
+		return finalEvtSty.Render("\n" + content + "\n")
+	}
+	return strings.TrimRight(out, "\n")
+}
+
 // renderDagTraceLine formats one dag.trace event for the
 // transcript. Same shape as makeREPLDAGTracer's stdout output but
 // colored by cortex function — the "what is the DAG doing" pane
@@ -398,6 +460,8 @@ func renderEventLine(kind string, payload any, verbose bool) string {
 		return style.Render(fmt.Sprintf("  · session_start · max_turns=%v · num_tools=%v",
 			m["max_turns"], m["num_tools"]))
 	case "coding.final":
+		// Rendered with glamour in the eventMsg branch of Update —
+		// keep a fallback here for non-string payloads / direct calls.
 		return style.Render(fmt.Sprintf("\n%v\n", m["content"]))
 	case "coding.no_progress":
 		return style.Render(fmt.Sprintf("  · stopped (no progress in last %v turns)", m["window"]))

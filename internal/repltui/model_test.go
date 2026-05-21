@@ -195,6 +195,45 @@ func TestUpdate_MouseWheelDoesNotEnterSelectMode(t *testing.T) {
 	}
 }
 
+func TestUpdate_CodingFinalRendersMarkdown(t *testing.T) {
+	m := drive(
+		tea.WindowSizeMsg{Width: 80, Height: 24},
+		eventMsg{
+			kind: "coding.final",
+			payload: map[string]any{
+				"content": "# Heading\n\n| col1 | col2 |\n|------|------|\n| a    | b    |\n",
+			},
+		},
+	)
+	if len(m.transcript) != 1 {
+		t.Fatalf("transcript len: got %d, want 1", len(m.transcript))
+	}
+	stripped := stripANSI(m.transcript[0])
+	// Glamour renders headings (with prefix), table content, etc.
+	// We don't assert exact bytes (style-dependent) — just that the
+	// table cells survive the round-trip.
+	for _, want := range []string{"Heading", "col1", "col2", "a", "b"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("markdown render missing %q: %q", want, stripped)
+		}
+	}
+}
+
+func TestUpdate_CodingFinalFallsBackWithoutResize(t *testing.T) {
+	// No WindowSizeMsg → no renderer initialized; ensure plain-text
+	// fallback still gets the content into the transcript.
+	m := drive(eventMsg{
+		kind:    "coding.final",
+		payload: map[string]any{"content": "plain answer"},
+	})
+	if len(m.transcript) != 1 {
+		t.Fatalf("transcript len: got %d, want 1", len(m.transcript))
+	}
+	if !strings.Contains(stripANSI(m.transcript[0]), "plain answer") {
+		t.Errorf("fallback rendering missing content: %q", stripANSI(m.transcript[0]))
+	}
+}
+
 func TestFormatLatencyMs_Ranges(t *testing.T) {
 	cases := []struct {
 		ms   int

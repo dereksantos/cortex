@@ -73,6 +73,13 @@ type Sink interface {
 	Banner(text string)
 	ReadLine(prompt string) (string, error)
 
+	// Markdown is for content that may contain markdown formatting
+	// — agent final responses, slash-command output that wants
+	// tables or code blocks. TUI sinks render with glamour;
+	// StdoutSink falls through to Info so plain terminals still
+	// show the content (just unstyled).
+	Markdown(text string)
+
 	// SetVerbose changes the verbose-rendering gate mid-session.
 	// Used by the /verbose slash command. Implementations must
 	// reflect the change on subsequent Event() calls so the user

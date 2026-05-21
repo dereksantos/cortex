@@ -94,6 +94,10 @@ func (s *TUISink) send(m tea.Msg) {
 // Info implements cliout.Sink.
 func (s *TUISink) Info(msg string) { s.send(infoMsg{text: msg}) }
 
+// Markdown implements cliout.Sink. Routes through markdownMsg so
+// the Update handler can render via glamour.
+func (s *TUISink) Markdown(text string) { s.send(markdownMsg{text: text}) }
+
 // Warn implements cliout.Sink.
 func (s *TUISink) Warn(msg string) { s.send(warnMsg{text: msg}) }
 

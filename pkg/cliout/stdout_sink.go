@@ -87,6 +87,15 @@ func (s *StdoutSink) Info(msg string) {
 	fmt.Fprintln(s.out, msg)
 }
 
+// Markdown writes the (potentially-markdown) text to stdout
+// unchanged. Plain terminals don't word-wrap or style; the TUI sink
+// is where glamour rendering happens.
+func (s *StdoutSink) Markdown(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintln(s.out, text)
+}
+
 // Warn writes "warn: msg" to stderr. Distinct prefix so a user
 // scanning the transcript can spot non-fatal anomalies without
 // reading the routing.

@@ -26,6 +26,12 @@ package repltui
 // that should append to the transcript.
 type infoMsg struct{ text string }
 
+// markdownMsg is delivered by Sink.Markdown — content (agent
+// responses, slash-command output) that should flow through the
+// markdown renderer so tables, code blocks, headings, lists land
+// styled in the transcript.
+type markdownMsg struct{ text string }
+
 // warnMsg is delivered by Sink.Warn — a non-fatal anomaly the user
 // should notice. Renders with the warn style.
 type warnMsg struct{ text string }

@@ -2525,7 +2525,7 @@ func (s *replState) captureTurn(row turnRow) error {
 func (s *replState) printTurnSummary(row turnRow) {
 	if final := strings.TrimSpace(row.FinalText); final != "" {
 		s.ui.Info("")
-		s.ui.Info(final)
+		s.ui.Markdown(final)
 		s.ui.Info("")
 	}
 	files := "0"
