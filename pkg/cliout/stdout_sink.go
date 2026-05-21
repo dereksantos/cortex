@@ -44,6 +44,21 @@ func New(verbose bool) *StdoutSink {
 	return NewWith(os.Stdout, os.Stderr, os.Stdin, verbose)
 }
 
+// Discard returns a Sink that throws away everything. Useful in
+// tests that exercise replState methods without caring about
+// rendering — every Info/Warn/Error/Event/Banner call is silently
+// dropped, ReadLine returns ("", io.EOF) immediately.
+func Discard() Sink {
+	return NewWith(io.Discard, io.Discard, &emptyReader{}, false)
+}
+
+// emptyReader is a zero-byte io.Reader for Discard's ReadLine path.
+// Returns io.EOF on every Read so callers immediately see "no
+// input." Avoids pulling in strings.Reader for one use.
+type emptyReader struct{}
+
+func (*emptyReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
 // NewWith returns a StdoutSink with injectable streams. Tests pass
 // bytes.Buffers / strings.Readers; production callers use New.
 func NewWith(out, errW io.Writer, in io.Reader, verbose bool) *StdoutSink {

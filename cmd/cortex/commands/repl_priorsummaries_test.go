@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 // writeSummary appends one think.session_summary entry under the
@@ -58,7 +59,7 @@ func TestReadRecentSessionSummaries_LiftsCrossSessionFilter(t *testing.T) {
 		})
 	}
 
-	s := &replState{workdir: workdir, sessionID: "current"}
+	s := &replState{workdir: workdir, sessionID: "current", ui: cliout.Discard()}
 
 	t.Run("default-both-caps_includes_prior_and_current", func(t *testing.T) {
 		got := s.readRecentSessionSummaries(3, 2) // 3 current, 2 prior

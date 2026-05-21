@@ -27,12 +27,13 @@
 package commands
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -256,6 +257,12 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		workdir = abs
 	}
 
+	// One Sink per session — owns every Info/Warn/Error/Banner/Event
+	// and ReadLine call site downstream. Constructed before any
+	// output (the Ollama-unreachable warning would otherwise miss
+	// it). Future TUI mode swaps the constructor here behind a flag.
+	ui := cliout.New(verbose)
+
 	// Fix A: when the user hasn't pinned a model AND we're routing to
 	// Ollama, probe `/api/tags` and prefer a better function-caller if
 	// one is installed. Falls back silently to the default if Ollama
@@ -268,14 +275,14 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		if chosen, ok, note := probeOllamaAndPickModel(apiURL, model); ok {
 			if chosen != model {
 				model = chosen
-				fmt.Println(note)
+				ui.Info(note)
 			}
 		} else {
-			fmt.Println("cortex: warning — Ollama unreachable at " + apiURL + " (model calls will fail until it's started)")
+			ui.Warn("Ollama unreachable at " + apiURL + " (model calls will fail until it's started)")
 		}
 	}
 
-	state, err := newREPLState(workdir, model, verbose)
+	state, err := newREPLState(workdir, model, verbose, ui)
 	if err != nil {
 		return err
 	}
@@ -324,12 +331,12 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 		}
 		turnErr := state.runTurn(oneShotPrompt)
 		if turnErr != nil && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "  turn error: %v\n", turnErr)
+			state.ui.Error(fmt.Errorf("turn: %w", turnErr))
 		}
 		if jsonOutput {
 			emitOneShotJSON(ctx, state, turnErr)
 		} else {
-			fmt.Printf("\nsession saved → %s\n", state.sessionPath)
+			state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
 		}
 		return nil
 	}
@@ -348,25 +355,26 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	// entries before the first turn. Cheap probe (2s per endpoint
 	// max); never blocks. Skipped in headless mode where benchmark
 	// callers don't want the noise.
-	revalidateAndWarn(state.workdir)
-
-	scanner := bufio.NewScanner(os.Stdin)
-	// Default Scanner buffer is 64 KiB; bump so paste-in prompts work.
-	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	revalidateAndWarn(state.workdir, state.ui)
 
 	for {
-		fmt.Print("~ ")
-		if !scanner.Scan() {
+		line, err := state.ui.ReadLine("~ ")
+		if err != nil {
+			// io.EOF (Ctrl-D) is a clean exit; surface other read
+			// errors so a broken terminal doesn't spin silently.
+			if !errors.Is(err, io.EOF) {
+				state.ui.Error(err)
+			}
 			break
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
 			cont, err := state.dispatchSlash(line)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "  error: %v\n", err)
+				state.ui.Error(err)
 			}
 			if !cont {
 				break
@@ -374,13 +382,13 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			continue
 		}
 		if err := state.runTurn(line); err != nil {
-			fmt.Fprintf(os.Stderr, "  turn error: %v\n", err)
+			state.ui.Error(fmt.Errorf("turn: %w", err))
 		}
 		if state.exitRequested {
 			break
 		}
 	}
-	fmt.Printf("\nsession saved → %s\n", state.sessionPath)
+	state.ui.Info(fmt.Sprintf("\nsession saved → %s", state.sessionPath))
 	return nil
 }
 
@@ -490,6 +498,14 @@ type replState struct {
 	// scorer sees the actual attempt rather than an empty diff.
 	keepOnFail bool
 
+	// ui is the I/O sink for everything the REPL displays or asks for.
+	// All Info/Warn/Error/Banner/Event/ReadLine call sites route
+	// through this so the rendering (stdout today, Bubble Tea TUI
+	// later) is swappable from a single point. Always non-nil after
+	// newREPLState — defaults to cliout.StdoutSink when the caller
+	// doesn't inject another.
+	ui cliout.Sink
+
 	// historyLimit caps the conversation-history block sent to the
 	// model on each turn. Default defaultHistoryLimit; configurable
 	// via --history-turns N at startup or /history N mid-session.
@@ -565,7 +581,11 @@ const defaultPriorSessionsCap = 3
 // session dir, the JSONL writer, and seeds the system prompt file if
 // absent. Returns an error if any of these fail — we'd rather refuse
 // to start than run in an inconsistent state.
-func newREPLState(workdir, model string, verbose bool) (*replState, error) {
+//
+// ui may be nil; the state falls back to cliout.New(verbose) which
+// is the stdout-bound implementation. Callers wanting a TUI or test
+// double inject their own here.
+func newREPLState(workdir, model string, verbose bool, ui cliout.Sink) (*replState, error) {
 	cortexDir := filepath.Join(workdir, ".cortex")
 	if err := os.MkdirAll(cortexDir, 0o755); err != nil {
 		return nil, fmt.Errorf("init .cortex/: %w", err)
@@ -612,19 +632,23 @@ func newREPLState(workdir, model string, verbose bool) (*replState, error) {
 	// attached and falls back to journal-only persistence.
 	store, cortex, cogErr := newSessionCognition(cortexDir, model, apiURL)
 	if cogErr != nil && verbose {
-		fmt.Fprintf(os.Stderr, "warn: cortex auto-capture disabled (%v)\n", cogErr)
+		ui.Warn(fmt.Sprintf("cortex auto-capture disabled (%v)", cogErr))
 	}
 
 	// Phase 3 Slice 5: pull the calibrated per-class salience cap
 	// override if a snapshot exists. Missing file is fine — the
 	// static SalienceCapForClass defaults stay in force.
-	applySalienceCalibration(cortexDir, verbose)
+	applySalienceCalibration(cortexDir, verbose, ui)
 
+	if ui == nil {
+		ui = cliout.New(verbose)
+	}
 	return &replState{
 		workdir:      workdir,
 		model:        model,
 		apiURL:       apiURL,
 		verbose:      verbose,
+		ui:           ui,
 		systemPrompt: systemPrompt,
 		sessionDir:   sessionDir,
 		sessionPath:  sessionPath,
@@ -959,7 +983,7 @@ func maybeStartBootstrap(state *replState) {
 	if !run {
 		return
 	}
-	fmt.Printf("cortex: bootstrap starting (%s) — progress will surface as banners (CORTEX_SKIP_BOOTSTRAP=1 to disable)\n", reason)
+	state.ui.Info(fmt.Sprintf("cortex: bootstrap starting (%s) — progress will surface as banners (CORTEX_SKIP_BOOTSTRAP=1 to disable)", reason))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	state.bootstrapCancel = cancel
@@ -981,11 +1005,11 @@ func maybeStartBootstrap(state *replState) {
 			WindowOverlap:  bootstrap.DefaultWindowOverlap,
 			ExtractOp:      bootstrap.ExtractOpAuto,
 			Banner: func(line string) {
-				// Print on a fresh line so banners don't garble the
-				// REPL prompt. The user's typed-but-unsubmitted input
-				// stays in the terminal's line buffer; their next
-				// Enter delivers it as expected.
-				fmt.Printf("\n[bootstrap] %s\n~ ", line)
+				// Route through the session sink so the TUI sink can
+				// place bootstrap progress lines wherever it wants
+				// (transcript or pinned status row) without colliding
+				// with the input prompt the user is typing into.
+				state.ui.Info(fmt.Sprintf("[bootstrap] %s", line))
 			},
 		},
 		ExtractInsightFn:  wrapInsightFn(provider),
@@ -1022,12 +1046,12 @@ func (s *replState) close() {
 // single class-agnostic cap is the most we can say with the data.
 // When the trace schema grows a class column, this function gains a
 // per-class breakdown.
-func applySalienceCalibration(cortexDir string, verbose bool) {
+func applySalienceCalibration(cortexDir string, verbose bool, ui cliout.Sink) {
 	path := filepath.Join(cortexDir, "calibration", "salience.json")
 	snap, err := dag.LoadSalienceCalibration(path)
 	if err != nil {
-		if verbose {
-			fmt.Fprintf(os.Stderr, "warn: salience calibration load failed (%v)\n", err)
+		if verbose && ui != nil {
+			ui.Warn(fmt.Sprintf("salience calibration load failed (%v)", err))
 		}
 		return
 	}
@@ -1039,8 +1063,8 @@ func applySalienceCalibration(cortexDir string, verbose bool) {
 		llm.ContextMedium: snap.GlobalCap,
 		llm.ContextLarge:  snap.GlobalCap,
 	})
-	if verbose {
-		fmt.Fprintf(os.Stderr, "salience: calibrated cap=%d (samples=%d)\n", snap.GlobalCap, snap.Samples)
+	if verbose && ui != nil {
+		ui.Info(fmt.Sprintf("salience: calibrated cap=%d (samples=%d)", snap.GlobalCap, snap.Samples))
 	}
 }
 
@@ -1195,14 +1219,14 @@ func emitOneShotJSON(ctx *Context, s *replState, turnErr error) {
 // layer will surface the actual error if a user invokes a broken
 // role — but surfacing it up front lets the user fix it before
 // hitting it mid-session.
-func revalidateAndWarn(workdir string) {
+func revalidateAndWarn(workdir string, ui cliout.Sink) {
 	cfg := loadREPLConfig(filepath.Join(workdir, ".cortex"))
 	if cfg == nil || cfg.Models == nil {
 		return
 	}
 	stale := intllm.RevalidateRoleMap(cfg)
 	for _, s := range stale {
-		fmt.Printf("  warn: role %s pinned to %s/%s — %s\n", s.Role, s.Endpoint, s.Model, s.Reason)
+		ui.Warn(fmt.Sprintf("role %s pinned to %s/%s — %s", s.Role, s.Endpoint, s.Model, s.Reason))
 	}
 }
 
@@ -1220,7 +1244,7 @@ func printREPLBanner(s *replState) {
 	if api == "" {
 		api = "openrouter (default)"
 	}
-	fmt.Printf("cortex · %s · %s · %s · /help\n", s.workdir, s.model, api)
+	s.ui.Banner(fmt.Sprintf("cortex · %s · %s · %s · /help", s.workdir, s.model, api))
 }
 
 // printREPLHelp dumps the bare `cortex --help` text. Mirrors slash /help.
@@ -1300,13 +1324,13 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 	rest := parts[1:]
 	switch cmd {
 	case "/help", "/?":
-		printSlashHelp()
+		s.printSlashHelp()
 		return true, nil
 	case "/quit", "/exit":
 		return false, nil
 	case "/model":
 		if len(rest) == 0 {
-			fmt.Printf("  current model: %s (api: %s)\n", s.model, displayAPI(s.apiURL))
+			s.ui.Info(fmt.Sprintf("  current model: %s (api: %s)", s.model, displayAPI(s.apiURL)))
 			return true, nil
 		}
 		prevModel, prevAPI := s.model, s.apiURL
@@ -1317,7 +1341,7 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			return true, fmt.Errorf("model swap failed (provider rebind): %w", err)
 		}
 		s.resetModelCatalog()
-		fmt.Printf("  model → %s (api: %s)\n", s.model, displayAPI(s.apiURL))
+		s.ui.Info(fmt.Sprintf("  model → %s (api: %s)", s.model, displayAPI(s.apiURL)))
 		return true, nil
 	case "/models":
 		refresh := len(rest) > 0 && rest[0] == "refresh"
@@ -1331,7 +1355,7 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		return true, nil
 	case "/history":
 		if len(rest) == 0 {
-			fmt.Printf("  history: cap=%d turns, buffered=%d turns\n", s.historyLimit, len(s.history))
+			s.ui.Info(fmt.Sprintf("  history: cap=%d turns, buffered=%d turns", s.historyLimit, len(s.history)))
 			return true, nil
 		}
 		var n int
@@ -1339,11 +1363,11 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			return true, fmt.Errorf("/history N: N must be a non-negative integer")
 		}
 		s.historyLimit = n
-		fmt.Printf("  history cap → %d turns (buffered=%d)\n", s.historyLimit, len(s.history))
+		s.ui.Info(fmt.Sprintf("  history cap → %d turns (buffered=%d)", s.historyLimit, len(s.history)))
 		return true, nil
 	case "/prior-summaries":
 		if len(rest) == 0 {
-			fmt.Printf("  prior-session summaries: cap=%d\n", s.priorSessionsCap)
+			s.ui.Info(fmt.Sprintf("  prior-session summaries: cap=%d", s.priorSessionsCap))
 			return true, nil
 		}
 		var n int
@@ -1351,7 +1375,7 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 			return true, fmt.Errorf("/prior-summaries N: N must be a non-negative integer")
 		}
 		s.priorSessionsCap = n
-		fmt.Printf("  prior-session summary cap → %d\n", s.priorSessionsCap)
+		s.ui.Info(fmt.Sprintf("  prior-session summary cap → %d", s.priorSessionsCap))
 		return true, nil
 	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
 	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
@@ -1370,8 +1394,8 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 	}
 }
 
-func printSlashHelp() {
-	fmt.Println(`  /help              this message
+func (s *replState) printSlashHelp() {
+	s.ui.Info(`  /help              this message
   /diff              changed files since session start
   /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
@@ -1482,9 +1506,9 @@ func (s *replState) runTurn(userPrompt string) error {
 	for autoAttempt < retryBudget && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		autoAttempt++
 		if autoAttempt == 1 {
-			fmt.Printf("  verify failed (%s), auto-retrying with error context (1/%d)...\n", verifyRes.Kind, retryBudget)
+			s.ui.Info(fmt.Sprintf("  verify failed (%s), auto-retrying with error context (1/%d)...", verifyRes.Kind, retryBudget))
 		} else {
-			fmt.Printf("  verify still failing, auto-retry %d/%d...\n", autoAttempt, retryBudget)
+			s.ui.Info(fmt.Sprintf("  verify still failing, auto-retry %d/%d...", autoAttempt, retryBudget))
 		}
 		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
 		if autoAttempt == 1 {
@@ -1513,7 +1537,7 @@ func (s *replState) runTurn(userPrompt string) error {
 	for !s.headless && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		attempts++
 		if attempts > userGateMaxAttempts {
-			fmt.Printf("  reached %d user-retry attempts; rolling back\n", userGateMaxAttempts)
+			s.ui.Info(fmt.Sprintf("  reached %d user-retry attempts; rolling back", userGateMaxAttempts))
 			break
 		}
 		decision := s.promptGate(verifyRes)
@@ -1546,8 +1570,7 @@ func (s *replState) runTurn(userPrompt string) error {
 		case gateEdit:
 			row.UserGate = "edit"
 			row.UserRetryAttempts++
-			fmt.Println("  edit any files in the workdir, then press enter to re-verify")
-			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+			_, _ = s.ui.ReadLine("  edit any files in the workdir, then press enter to re-verify\n")
 			verifyRes = s.runVerifier()
 			row.UserRetryVerifyOK = verifyRes.OK
 			row.UserRetryVerifyOutput = verifyRes.OutputTail
@@ -1607,13 +1630,13 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		// instead of replaying full transcripts. Best-effort; failures
 		// don't block the turn (logged in verbose mode).
 		if err := s.emitSessionSummary(row); err != nil && s.verbose {
-			fmt.Fprintf(os.Stderr, "  (session summary failed: %v)\n", err)
+			s.ui.Warn(fmt.Sprintf("(session summary failed: %v)", err))
 		}
-		printTurnSummary(row)
+		s.printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
-			fmt.Fprintf(os.Stderr, "  (capture failed: %v)\n", err)
+			s.ui.Warn(fmt.Sprintf("(capture failed: %v)", err))
 		} else if s.verbose {
-			fmt.Println("  (captured)")
+			s.ui.Info("  (captured)")
 		}
 	} else if s.keepOnFail {
 		// Benchmark mode: preserve the agent's attempt so the next
@@ -1622,15 +1645,15 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		// the work the agent did get done. Snapshot still lives on
 		// disk; `/undo` could surface it if needed.
 		if s.verbose {
-			fmt.Println("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
+			s.ui.Info("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
 		}
 	} else {
 		if err := s.restoreFromSnapshot(snapDir); err != nil {
-			fmt.Fprintf(os.Stderr, "  WARN: rollback failed: %v\n", err)
+			s.ui.Warn(fmt.Sprintf("rollback failed: %v", err))
 		}
 	}
 	if err := s.writeJSONL(row); err != nil {
-		fmt.Fprintf(os.Stderr, "  WARN: session log write failed: %v\n", err)
+		s.ui.Warn(fmt.Sprintf("session log write failed: %v", err))
 	}
 	return nil
 }
@@ -1974,7 +1997,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// the human sees what's happening during long turns (gpt-oss-20b
 	// takes 20-30s per turn; without this it's a silent stare). Token
 	// + per-turn telemetry is gated behind --verbose.
-	h.SetNotify(makeREPLNotifier(s.verbose))
+	h.SetNotify(makeREPLNotifier(s.ui, s.verbose))
 	turns := defaultMaxTurns
 	if s.maxTurns > 0 {
 		turns = s.maxTurns
@@ -2054,7 +2077,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// shape emerge live. The wrapper invokes the underlying writer
 	// callback (when present) after each print so dag_traces.jsonl
 	// still captures every entry.
-	traceCB = makeREPLDAGTracer(traceCB)
+	traceCB = makeREPLDAGTracer(s.ui, traceCB)
 
 	actReg := dag.NewRegistry()
 	// Build a shared provider for the salience compressor so per-tool
@@ -2074,7 +2097,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// for max_context_window.
 	salienceCap, ctxClass := salienceCapForSession(s.model, 0)
 	if s.verbose {
-		fmt.Fprintf(os.Stderr, "  · salience cap=%d (model class=%s)\n", salienceCap, ctxClass)
+		s.ui.Info(fmt.Sprintf("  · salience cap=%d (model class=%s)", salienceCap, ctxClass))
 	}
 
 	var (
@@ -2351,16 +2374,14 @@ const (
 // Defaults (empty input) to skip — safest choice when the user is
 // piping or got distracted.
 func (s *replState) promptGate(v verifyResult) gateDecision {
-	fmt.Printf("  verify still failing (%s).\n  [r]etry / [e]dit / [s]kip / [q]uit: ", v.Kind)
-	reader := bufio.NewReader(os.Stdin)
-	resp, err := reader.ReadString('\n')
+	s.ui.Info(fmt.Sprintf("  verify still failing (%s).", v.Kind))
+	resp, err := s.ui.ReadLine("  [r]etry / [e]dit / [s]kip / [q]uit: ")
 	if err != nil {
 		return gateDecision{kind: gateSkip}
 	}
 	switch strings.TrimSpace(strings.ToLower(resp)) {
 	case "r", "retry":
-		fmt.Print("  hint for the model (enter for none): ")
-		hint, _ := reader.ReadString('\n')
+		hint, _ := s.ui.ReadLine("  hint for the model (enter for none): ")
 		return gateDecision{kind: gateRetry, hint: strings.TrimSpace(hint)}
 	case "e", "edit":
 		return gateDecision{kind: gateEdit}
@@ -2438,11 +2459,11 @@ func (s *replState) captureTurn(row turnRow) error {
 // data already on the row — no new capture, just a richer formatter
 // that reads RetryVerifyOK/UserRetryVerifyOK/UserRetryHints and emits
 // the path tag.
-func printTurnSummary(row turnRow) {
+func (s *replState) printTurnSummary(row turnRow) {
 	if final := strings.TrimSpace(row.FinalText); final != "" {
-		fmt.Println()
-		fmt.Println(final)
-		fmt.Println()
+		s.ui.Info("")
+		s.ui.Info(final)
+		s.ui.Info("")
 	}
 	files := "0"
 	if len(row.FilesChanged) > 0 {
@@ -2457,8 +2478,8 @@ func printTurnSummary(row turnRow) {
 			verify = row.VerifyKind + " FAIL"
 		}
 	}
-	fmt.Printf("  ✓ turn %d · files: %s · verify: %s · tokens: %d/%d · %dms\n",
-		row.Turn, files, verify, row.TokensIn, row.TokensOut, row.LatencyMs)
+	s.ui.Info(fmt.Sprintf("  ✓ turn %d · files: %s · verify: %s · tokens: %d/%d · %dms",
+		row.Turn, files, verify, row.TokensIn, row.TokensOut, row.LatencyMs))
 }
 
 // turnRow is the structured JSONL row written per turn. Fields are
@@ -2693,7 +2714,7 @@ func (s *replState) undoLastTurn() error {
 	if err := s.restoreFromSnapshot(top); err != nil {
 		return err
 	}
-	fmt.Printf("  undone turn %d (%d more available)\n", s.turns, n-1)
+	s.ui.Info(fmt.Sprintf("  undone turn %d (%d more available)", s.turns, n-1))
 	s.turns--
 	s.snapshotStack = s.snapshotStack[:n-1]
 	// Pop the corresponding conversation-history entry so the model
@@ -2711,18 +2732,18 @@ func (s *replState) undoLastTurn() error {
 func (s *replState) printDiff() {
 	n := len(s.snapshotStack)
 	if n == 0 {
-		fmt.Println("  no accepted turns yet")
+		s.ui.Info("  no accepted turns yet")
 		return
 	}
 	top := s.snapshotStack[n-1]
 	mb, err := os.ReadFile(filepath.Join(top, ".manifest.json"))
 	if err != nil {
-		fmt.Printf("  diff unavailable (manifest read: %v)\n", err)
+		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest read: %v)", err))
 		return
 	}
 	var manifest map[string]string
 	if err := json.Unmarshal(mb, &manifest); err != nil {
-		fmt.Printf("  diff unavailable (manifest parse: %v)\n", err)
+		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest parse: %v)", err))
 		return
 	}
 	var changed, added, removed []string
@@ -2760,18 +2781,18 @@ func (s *replState) printDiff() {
 	sort.Strings(added)
 	sort.Strings(removed)
 	if len(changed)+len(added)+len(removed) == 0 {
-		fmt.Println("  no changes since pre-last-turn snapshot")
+		s.ui.Info("  no changes since pre-last-turn snapshot")
 		return
 	}
-	fmt.Printf("  changes since pre-last-turn snapshot (turn %d):\n", s.turns)
+	s.ui.Info(fmt.Sprintf("  changes since pre-last-turn snapshot (turn %d):", s.turns))
 	for _, p := range added {
-		fmt.Printf("    + %s\n", p)
+		s.ui.Info(fmt.Sprintf("    + %s", p))
 	}
 	for _, p := range changed {
-		fmt.Printf("    ~ %s\n", p)
+		s.ui.Info(fmt.Sprintf("    ~ %s", p))
 	}
 	for _, p := range removed {
-		fmt.Printf("    - %s\n", p)
+		s.ui.Info(fmt.Sprintf("    - %s", p))
 	}
 }
 
@@ -2840,21 +2861,21 @@ type ollamaTagsResponse struct {
 func (s *replState) printShellPolicy() {
 	policy := harness.LoadShellPolicy(s.workdir)
 	if policy.IsEmpty() {
-		fmt.Println("  shell policy: none active (run_shell permits all commands)")
-		fmt.Printf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}\n",
-			filepath.Join(s.workdir, ".cortex", "shell-policy.json"))
+		s.ui.Info("  shell policy: none active (run_shell permits all commands)")
+		s.ui.Info(fmt.Sprintf("  to configure, create %s with {\"allow\":[...],\"deny\":[...]}",
+			filepath.Join(s.workdir, ".cortex", "shell-policy.json")))
 		return
 	}
 	if len(policy.Deny) > 0 {
-		fmt.Println("  deny patterns (any match rejects):")
+		s.ui.Info("  deny patterns (any match rejects):")
 		for _, p := range policy.Deny {
-			fmt.Printf("    %s\n", p)
+			s.ui.Info(fmt.Sprintf("    %s", p))
 		}
 	}
 	if len(policy.Allow) > 0 {
-		fmt.Println("  allow patterns (one match required):")
+		s.ui.Info("  allow patterns (one match required):")
 		for _, p := range policy.Allow {
-			fmt.Printf("    %s\n", p)
+			s.ui.Info(fmt.Sprintf("    %s", p))
 		}
 	}
 }
@@ -2874,29 +2895,29 @@ func (s *replState) printModels(refresh bool) {
 	}
 	ollamaModels, ollamaAvailable, ollamaErr := listOllamaModels(ollamaProbeURL)
 
-	fmt.Println("  Ollama (local):")
+	s.ui.Info("  Ollama (local):")
 	switch {
 	case !ollamaAvailable:
-		fmt.Println("    (unreachable — run `ollama serve` to enable)")
+		s.ui.Info("    (unreachable — run `ollama serve` to enable)")
 	case ollamaErr != nil:
-		fmt.Printf("    (error: %v)\n", ollamaErr)
+		s.ui.Info(fmt.Sprintf("    (error: %v)", ollamaErr))
 	case len(ollamaModels) == 0:
-		fmt.Println("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
+		s.ui.Info("    (none installed — try `ollama pull qwen2.5-coder:1.5b`)")
 	default:
-		printModelListOllama(ollamaModels)
+		printModelListOllama(s.ui, ollamaModels)
 	}
 
-	fmt.Println("  OpenRouter:")
+	s.ui.Info("  OpenRouter:")
 	if refresh || s.openRouterModelsCache == nil && s.openRouterModelsErr == nil {
 		s.openRouterModelsCache, s.openRouterModelsErr = fetchOpenRouterModels()
 	}
 	switch {
 	case s.openRouterModelsErr != nil:
-		fmt.Printf("    (error: %v)\n", s.openRouterModelsErr)
+		s.ui.Info(fmt.Sprintf("    (error: %v)", s.openRouterModelsErr))
 	case len(s.openRouterModelsCache) == 0:
-		fmt.Println("    (empty catalogue)")
+		s.ui.Info("    (empty catalogue)")
 	default:
-		printModelListOpenRouter(s.openRouterModelsCache)
+		printModelListOpenRouter(s.ui, s.openRouterModelsCache)
 	}
 }
 
@@ -2926,21 +2947,21 @@ func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
 	return models, nil
 }
 
-func printModelListOllama(names []string) {
+func printModelListOllama(ui cliout.Sink, names []string) {
 	sort.Strings(names)
 	shown := names
 	if len(shown) > modelListLimit {
 		shown = shown[:modelListLimit]
 	}
 	for _, n := range shown {
-		fmt.Printf("    %s\n", n)
+		ui.Info(fmt.Sprintf("    %s", n))
 	}
 	if extra := len(names) - len(shown); extra > 0 {
-		fmt.Printf("    +%d more\n", extra)
+		ui.Info(fmt.Sprintf("    +%d more", extra))
 	}
 }
 
-func printModelListOpenRouter(models []llm.OpenRouterModel) {
+func printModelListOpenRouter(ui cliout.Sink, models []llm.OpenRouterModel) {
 	shown := models
 	if len(shown) > modelListLimit {
 		shown = shown[:modelListLimit]
@@ -2956,10 +2977,10 @@ func printModelListOpenRouter(models []llm.OpenRouterModel) {
 			price = fmt.Sprintf(" $%.2f/$%.2f per 1M (in/out)",
 				m.PricePromptPerTok*1_000_000, m.PriceComplPerTok*1_000_000)
 		}
-		fmt.Printf("    %s%s%s\n", m.ID, ctx, price)
+		ui.Info(fmt.Sprintf("    %s%s%s", m.ID, ctx, price))
 	}
 	if extra := len(models) - len(shown); extra > 0 {
-		fmt.Printf("    +%d more — /model <id> to pin a specific one\n", extra)
+		ui.Info(fmt.Sprintf("    +%d more — /model <id> to pin a specific one", extra))
 	}
 }
 
@@ -3477,18 +3498,18 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 		path, err := salvageWriteFile(s.workdir, call.Args)
 		if err != nil {
 			if s.verbose {
-				fmt.Fprintf(os.Stderr, "  (salvage write_file failed: %v)\n", err)
+				s.ui.Warn(fmt.Sprintf("(salvage write_file failed: %v)", err))
 			}
 			return nil, ""
 		}
 		note := fmt.Sprintf("salvaged write_file:%s from text content", path)
 		if s.verbose {
-			fmt.Println("  " + note)
+			s.ui.Info("  " + note)
 		}
 		return []string{path}, note
 	default:
 		if s.verbose {
-			fmt.Fprintf(os.Stderr, "  (text contained %s tool call; only write_file is salvaged in v1)\n", call.Name)
+			s.ui.Warn(fmt.Sprintf("(text contained %s tool call; only write_file is salvaged in v1)", call.Name))
 		}
 		return nil, ""
 	}
@@ -3523,7 +3544,12 @@ func (s *replState) salvageTextToolCall(hres evalv2.HarnessResult, lres harness.
 // surface is narrower — the REPL prints its own per-user-turn summary,
 // so we don't echo the agent loop's internal turn/final events at
 // default verbosity.
-func makeREPLNotifier(verbose bool) func(string, any) {
+//
+// Routes everything through the supplied Sink rather than fmt.Printf.
+// That lets a TUI sink format the same events differently (color by
+// function, group under the user's prompt line) without the REPL
+// needing to know which presentation is in play.
+func makeREPLNotifier(ui cliout.Sink, verbose bool) func(string, any) {
 	return func(kind string, payload any) {
 		switch kind {
 		case "coding.tool_call":
@@ -3531,46 +3557,46 @@ func makeREPLNotifier(verbose bool) func(string, any) {
 			name, _ := p["name"].(string)
 			argsStr, _ := p["args"].(string)
 			summary := summarizeToolArgs(name, argsStr, verbose)
-			fmt.Printf("  → %s%s\n", name, summary)
+			ui.Info(fmt.Sprintf("  → %s%s", name, summary))
 		case "coding.tool_result":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("    (result: %v chars)\n", p["output_chars"])
+			ui.Info(fmt.Sprintf("    (result: %v chars)", p["output_chars"]))
 		case "coding.turn":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("  · agent turn %v · finish=%v · tokens=%v/%v · calls=%v\n",
+			ui.Info(fmt.Sprintf("  · agent turn %v · finish=%v · tokens=%v/%v · calls=%v",
 				p["turn"], p["finish_reason"],
 				p["tokens_in"], p["tokens_out"],
-				p["tool_calls"])
+				p["tool_calls"]))
 		case "coding.session_start":
 			if !verbose {
 				return
 			}
 			p := mapOf(payload)
-			fmt.Printf("  · session_start · max_turns=%v · num_tools=%v\n",
-				p["max_turns"], p["num_tools"])
+			ui.Info(fmt.Sprintf("  · session_start · max_turns=%v · num_tools=%v",
+				p["max_turns"], p["num_tools"]))
 		case "coding.turn_limit":
-			fmt.Printf("  ⚠ agent turn limit hit\n")
+			ui.Info("  ⚠ agent turn limit hit")
 		case "coding.budget_exceeded":
 			p := mapOf(payload)
-			fmt.Printf("  ⚠ budget exceeded · cumulative_tokens=%v/%v · cost=$%.4f\n",
-				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"]))
+			ui.Info(fmt.Sprintf("  ⚠ budget exceeded · cumulative_tokens=%v/%v · cost=$%.4f",
+				p["cumulative_tokens"], p["cap_tokens"], asFloat(p["cost_usd"])))
 		case "coding.error":
 			p := mapOf(payload)
 			msg := fmt.Sprintf("%v", p["error"])
-			fmt.Printf("  ⚠ provider error: %s\n", msg)
+			ui.Info(fmt.Sprintf("  ⚠ provider error: %s", msg))
 			// llama-server (chatterbox / LM Studio / vLLM running llama.cpp)
 			// returns this exact phrasing when the prompt + tools blow past
 			// n_ctx. The fix is server-side — bump n_ctx on the model launch
 			// — so surface it explicitly instead of leaving the user to
 			// decode the error.
 			if strings.Contains(msg, "exceeds the available context size") {
-				fmt.Println("    hint: the local model was loaded with a small n_ctx; restart it with a larger context (e.g. --ctx-size 16384) on the server side.")
+				ui.Info("    hint: the local model was loaded with a small n_ctx; restart it with a larger context (e.g. --ctx-size 16384) on the server side.")
 			}
 		}
 	}
@@ -3658,7 +3684,7 @@ func truncateHead(s string, max int) string {
 //
 // next, when non-nil, is invoked after the print so the existing
 // dag_traces.jsonl writer still gets every entry.
-func makeREPLDAGTracer(next dag.TraceCallback) dag.TraceCallback {
+func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback {
 	return func(e dag.TraceEntry) {
 		name := e.QualifiedName
 		if name == "" {
@@ -3682,8 +3708,8 @@ func makeREPLDAGTracer(next dag.TraceCallback) dag.TraceCallback {
 				tail = " · cause: " + truncateHead(cause, 120) + tail
 			}
 		}
-		fmt.Printf("  ▪ %-22s [%s] · %s · %s%s\n",
-			name, e.NodeID, status, formatDAGLatency(latency), tail)
+		ui.Info(fmt.Sprintf("  ▪ %-22s [%s] · %s · %s%s",
+			name, e.NodeID, status, formatDAGLatency(latency), tail))
 		if next != nil {
 			next(e)
 		}

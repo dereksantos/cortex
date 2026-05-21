@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/cliout"
 )
 
 // TestResolveAPIURL covers the Ollama-vs-OpenRouter routing rule:
@@ -91,7 +93,7 @@ func TestUndoStackChained(t *testing.T) {
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("session dir: %v", err)
 	}
-	s := &replState{workdir: workdir, sessionDir: sessionDir}
+	s := &replState{workdir: workdir, sessionDir: sessionDir, ui: cliout.Discard()}
 
 	// Simulate three accepted turns. Each turn snapshots the pre-state,
 	// then mutates step.txt, then pushes the snap onto the stack.
@@ -138,7 +140,7 @@ func TestCaptureTurnWritesJournalEntry(t *testing.T) {
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("session dir: %v", err)
 	}
-	s := &replState{workdir: workdir, sessionDir: sessionDir, sessionID: "test-sess"}
+	s := &replState{workdir: workdir, sessionDir: sessionDir, sessionID: "test-sess", ui: cliout.Discard()}
 
 	row := turnRow{
 		Turn:         1,
@@ -177,7 +179,7 @@ func TestCaptureTurnWritesJournalEntry(t *testing.T) {
 // the capture journal — only accepted state is durable context.
 func TestCaptureTurnSkipsOnReject(t *testing.T) {
 	workdir := t.TempDir()
-	s := &replState{workdir: workdir, sessionID: "test"}
+	s := &replState{workdir: workdir, sessionID: "test", ui: cliout.Discard()}
 	row := turnRow{Turn: 1, Accepted: false, UserMessage: "noop"}
 	if err := s.captureTurn(row); err != nil {
 		t.Fatalf("captureTurn on rejected: %v", err)
@@ -202,6 +204,7 @@ func TestSnapshotAndRestore(t *testing.T) {
 	s := &replState{
 		workdir:    workdir,
 		sessionDir: filepath.Join(workdir, ".cortex", "sessions", "test"),
+		ui:         cliout.Discard(),
 	}
 	if err := os.MkdirAll(s.sessionDir, 0o755); err != nil {
 		t.Fatalf("session dir: %v", err)
@@ -259,6 +262,7 @@ func TestDispatchSlash(t *testing.T) {
 		sessionDir: filepath.Join(dir, "sess"),
 		model:      "qwen2.5-coder:1.5b",
 		apiURL:     defaultOllamaAPIURL,
+		ui:         cliout.Discard(),
 	}
 	if err := os.MkdirAll(s.sessionDir, 0o755); err != nil {
 		t.Fatalf("session dir: %v", err)
