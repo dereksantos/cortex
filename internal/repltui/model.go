@@ -132,20 +132,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlD:
-			// Ctrl-D quits — deliver EOF so the REPL's ReadLine
-			// returns and its loop exits.
+		case tea.KeyCtrlC, tea.KeyCtrlD:
+			// Both Ctrl-C and Ctrl-D quit. Most terminal programs
+			// treat Ctrl-C as "exit now"; honoring that muscle memory
+			// matters more than the readline-style "Ctrl-C clears the
+			// line, twice quits" pattern. In-flight turn cancellation
+			// (the roadmap item) will land as a separate signal once
+			// the harness exposes a ctx hook.
 			if m.sink != nil {
 				m.sink.deliverInput("", io.EOF)
 			}
 			m.quitting = true
 			return m, tea.Quit
-
-		case tea.KeyCtrlC:
-			// v1: Ctrl-C just clears the current input. v2 will hook
-			// into a context cancellation for in-flight turns.
-			m.input.SetValue("")
-			return m, nil
 
 		case tea.KeyEnter:
 			line := m.input.Value()
