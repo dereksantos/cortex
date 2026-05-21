@@ -2184,7 +2184,15 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, traceCB)
+	// Passthrough's reply lands in the same LoopResult.Final the REPL
+	// prints + journals — keeps the trivial-intent path indistinguishable
+	// from a coding_turn response from the renderer's point of view.
+	passthroughOnResponse := func(reply string) {
+		capturedLR.Final = reply
+		capturedHR.OutputText = reply
+	}
+
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, passthroughOnResponse, traceCB)
 	if err != nil {
 		return evalv2.HarnessResult{}, harness.LoopResult{}, err
 	}
@@ -2201,16 +2209,81 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// and the follow-up wouldn't see search results.
 	ex.SetSequential(true)
 
-	seed := []dag.NodeSpec{{
+	// Intent ingestion: classify the prompt before seeding the DAG.
+	// Drives per-intent budget (dag.BudgetForIntent) AND seed shape —
+	// trivial intents bypass the sense.prompt → decide.next → coding_turn
+	// chain in favor of cheaper terminal nodes (act.passthrough for
+	// greetings). Failure modes return intent=code with confidence=0 so
+	// the seed falls back to today's full chain.
+	intent, intentConf := classifyIntentForTurn(reg, prompt)
+	turnBudget := dag.BudgetForIntent(intent)
+	seed := seedForIntent(intent, intentConf, prompt)
+	if s.verbose {
+		s.ui.Info(fmt.Sprintf("  · intent=%s (conf=%.2f), budget=%s, seed=%s",
+			intent, intentConf, turnBudget, seed[0].QualifiedName()))
+	}
+	if _, err := ex.Run(context.Background(), turnID, seed, turnBudget); err != nil {
+		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+	}
+	return capturedHR, capturedLR, capturedErr
+}
+
+// classifyIntentForTurn runs the sense.classify_intent handler
+// directly (outside the DAG executor) so the result is known at
+// seed-time and can drive both budget selection and seed shape.
+// Returns ("code", 0) on any failure — safe default routes to the
+// existing full pipeline so misclassifications never block a turn.
+//
+// TODO: the classifier call is invisible in the dag trace because it
+// runs outside the executor. Synthesize a trace row from the handler
+// result so the routing decision is preserved alongside the seed.
+func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
+	spec, err := reg.Get("sense.classify_intent")
+	if err != nil {
+		return ops.IntentCode, 0
+	}
+	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, dag.DefaultTurnBudget())
+	if herr != nil {
+		return ops.IntentCode, 0
+	}
+	intent, _ := res.Out["intent"].(string)
+	if intent == "" {
+		intent = ops.IntentCode
+	}
+	confidence, _ := res.Out["confidence"].(float64)
+	return intent, confidence
+}
+
+// intentPassthroughThreshold gates the trivial-intent short-circuit.
+// Below this confidence we route through the full chain — better to
+// pay the coding_turn cost than to give a canned "Hi" to someone who
+// actually wanted help.
+const intentPassthroughThreshold = 0.7
+
+// seedForIntent picks the per-turn seed spec list based on the
+// classified intent. greeting (with high confidence) bypasses the
+// agent loop via act.passthrough; everything else uses today's
+// sense.prompt → decide.next → coding_turn chain.
+//
+// Recall / clarify will get their own dedicated seeds in follow-up
+// slices (Slices 2 + 4 of the integration plan); today they share
+// the default chain but run under their tighter BudgetForIntent
+// budgets, so a misroute still can't balloon the turn.
+func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeSpec {
+	if intent == "greeting" && confidence >= intentPassthroughThreshold {
+		return []dag.NodeSpec{{
+			Function: dag.FuncAct,
+			Op:       "passthrough",
+			ID:       "n1",
+			Attrs:    map[string]any{"prompt": prompt},
+		}}
+	}
+	return []dag.NodeSpec{{
 		Function: dag.FuncSense,
 		Op:       "prompt",
 		ID:       "n1",
 		Attrs:    map[string]any{"prompt": prompt},
 	}}
-	if _, err := ex.Run(context.Background(), turnID, seed, dag.DefaultTurnBudget()); err != nil {
-		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
-	}
-	return capturedHR, capturedLR, capturedErr
 }
 
 // buildREPLDynamicRegistry builds the registry for the dynamic-DAG
@@ -2223,10 +2296,31 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 // The registry is captured by reference inside decide.next's handler
 // closure, so subsequent registrations (decide.coding_turn,
 // sense.prompt) are visible when the handler runs.
-func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, traceCB dag.TraceCallback) (*dag.Registry, error) {
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, passthroughOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
 	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		return nil, fmt.Errorf("ops defaults: %w", err)
+	}
+
+	// sense.classify_intent — routes each turn to a per-intent budget
+	// + seed shape (see classifyIntentForTurn + seedForIntent in
+	// runREPLChainTurn). Registered Exposable so decide.next can
+	// re-invoke it if its plan needs to re-classify mid-chain.
+	classifyProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
+	if err := reg.Register(ops.ClassifyIntentSpec(ops.ClassifyIntentConfig{
+		Provider: classifyProvider,
+	})); err != nil {
+		return nil, fmt.Errorf("register sense.classify_intent: %w", err)
+	}
+
+	// act.passthrough — mechanical zero-LLM terminal for trivial
+	// conversational turns. OnResponse threads the chosen reply back
+	// into the captured LoopResult so the standard render + journal
+	// path is unchanged.
+	if err := reg.Register(ops.PassthroughSpec(ops.PassthroughConfig{
+		OnResponse: passthroughOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register act.passthrough: %w", err)
 	}
 
 	// decide.next — the steering op. Provider + Registry + ModelCatalog

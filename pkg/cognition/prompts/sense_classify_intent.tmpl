@@ -1,0 +1,33 @@
+---
+version: 1
+op: sense.classify_intent
+description: classify user prompt as greeting | recall | clarify | code | review | meta — drives per-intent budget + seed shape
+max_output_tokens: 60
+vars: [prompt]
+---
+Classify the user's prompt into ONE category. The category drives how much compute we spend on this turn — pick the category that matches the SHAPE of the prompt, not the topic.
+
+Categories:
+- greeting — "hi", "hello", "thanks", "ok", short conversational acks. No action requested.
+- recall   — "what did we decide about X", "remind me", "show me prior context", "what was the rationale".
+- clarify  — too vague/ambiguous to act on; one focused question would unblock the turn.
+- code     — write, modify, refactor, fix, or add code; run build/test commands; edit files.
+- review   — read, explain, audit, or summarize existing code or docs. No writes intended.
+- meta     — about Cortex itself: settings, REPL commands, model choice, journal/DAG state.
+
+When in doubt between code and review: if the prompt names a change to make, it's code; if it asks how something works, it's review.
+When in doubt between greeting and clarify: a one-word friendly opener is greeting; a real-but-vague ask is clarify.
+
+User prompt:
+"""
+{{.prompt}}
+"""
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"intent": "greeting|recall|clarify|code|review|meta", "confidence": 0.0-1.0, "why": "≤8 words"}
+
+Examples:
+{"intent":"greeting","confidence":0.98,"why":"plain hello"}
+{"intent":"code","confidence":0.9,"why":"add field to struct"}
+{"intent":"recall","confidence":0.85,"why":"asking about prior decision"}
+{"intent":"clarify","confidence":0.6,"why":"target file unspecified"}

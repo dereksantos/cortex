@@ -166,3 +166,50 @@ func DefaultCaptureBudget() Budget {
 		Depth:     3,
 	}
 }
+
+// BudgetForIntent returns the per-intent seed budget the REPL applies
+// once sense.classify_intent has decided the SHAPE of the turn. Cheap
+// shapes (greeting / clarify) get a small budget so a misroute can't
+// blow the turn open; recall gets a middling budget for search +
+// synthesis; code / review / meta stay at the calibrated full budget.
+// Unknown intents fall back to DefaultTurnBudget — fail safe, never
+// under-budget.
+//
+// Defense-in-depth: greeting / clarify budgets are intentionally too
+// small to spawn decide.coding_turn (calibrated at 15s / 2000 tok).
+// If the classifier mis-routes a code request as a greeting, the
+// budget gate refuses the spawn rather than letting the trivial-intent
+// turn balloon.
+//
+// Sized 2026-05-21 against the Haiku 4.5 calibration that drives
+// DefaultTurnBudget (sense.scan_project_boundaries 2s; LLM ops 15-18s
+// each at ~300-400 tok):
+//   - greeting: act.passthrough is mechanical (~10ms / 0 tok). 2000ms
+//     / 300 tok leaves enough headroom for the classifier itself plus
+//     one cheap follow-up if needed; well under coding_turn cost.
+//   - clarify: similar floor — one short LLM round to compose the
+//     question; no tools.
+//   - recall: vector_search + a small synthesis turn fits under 20s
+//     / 3k tok with room for one re-decide.
+//   - review: read-heavy; allow several tool_call reads + one
+//     synthesis pass.
+//   - meta: REPL/config queries — a small synthesis call.
+//   - code: full DefaultTurnBudget; today's behavior.
+func BudgetForIntent(intent string) Budget {
+	switch intent {
+	case "greeting":
+		return Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500}
+	case "clarify":
+		return Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}
+	case "recall":
+		return Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
+	case "review":
+		return Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}
+	case "meta":
+		return Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
+	case "code":
+		return DefaultTurnBudget()
+	default:
+		return DefaultTurnBudget()
+	}
+}
