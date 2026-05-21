@@ -88,9 +88,17 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "init", "install", "uninstall", "projects", "bootstrap":
+	case "init", "install", "uninstall", "projects", "bootstrap", "study":
 		if cmd := commands.Get(command); cmd != nil {
-			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
+			// Study reads cfg.DefaultGenerationModel() when --model is
+			// blank; load config best-effort (nil-safe if absent).
+			c := &commands.Context{Args: os.Args[2:]}
+			if command == "study" {
+				if cfg, err := loadConfig(); err == nil {
+					c.Config = cfg
+				}
+			}
+			runCommand(command, cmd, c)
 		}
 	case "daemon":
 		if cmd := commands.Get("daemon"); cmd != nil {

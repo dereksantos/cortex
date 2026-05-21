@@ -115,6 +115,13 @@ type Config struct {
 	Salt           string  // optional, mixed into RNG seed
 	DryRun         bool    // skip LLM + journal writes
 	Banner         func(string)
+
+	// RunID + RunShorthand are set by `cortex study` and (optionally)
+	// other callers that want emitted dream.insight entries tagged for
+	// later comparison. When non-empty, both appear in every emitted
+	// insight's Tags slice and in the meta-insight that opens the run.
+	RunID        string
+	RunShorthand string
 }
 
 // BootstrapState is the persisted controller state. It's written to

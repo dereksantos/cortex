@@ -399,6 +399,12 @@ func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) e
 		cat = "pattern"
 	}
 	tags := append([]string{"bootstrap"}, ins.Tags...)
+	if c.cfg.RunID != "" {
+		tags = append(tags, c.cfg.RunID)
+	}
+	if c.cfg.RunShorthand != "" {
+		tags = append(tags, c.cfg.RunShorthand)
+	}
 	sort.Strings(tags)
 	insightID := fmt.Sprintf("bootstrap:%s:%s", ch.RelPath, ch.ID)
 	payload := journal.DreamInsightPayload{
@@ -436,14 +442,30 @@ func (c *BootstrapController) emitMetaInsight() {
 		c.cfg.ExtractOp,
 		c.boundaries.RNGSeed,
 	)
+	metaID := fmt.Sprintf("bootstrap:meta:%s", c.boundaries.StateHash[:16])
+	if c.cfg.RunID != "" {
+		metaID = "study:meta:" + c.cfg.RunID
+	}
+	metaTags := []string{"bootstrap", "meta"}
+	if c.cfg.RunID != "" {
+		metaTags = append(metaTags, "study", c.cfg.RunID)
+	}
+	if c.cfg.RunShorthand != "" {
+		metaTags = append(metaTags, c.cfg.RunShorthand)
+	}
+	sort.Strings(metaTags)
+	sourceName := "bootstrap"
+	if c.cfg.RunID != "" {
+		sourceName = "study"
+	}
 	payload := journal.DreamInsightPayload{
-		InsightID:    fmt.Sprintf("bootstrap:meta:%s", c.boundaries.StateHash[:16]),
+		InsightID:    metaID,
 		Category:     "pattern",
 		Content:      content,
 		Importance:   3,
-		Tags:         []string{"bootstrap", "meta"},
-		SourceItemID: "bootstrap:meta",
-		SourceName:   "bootstrap",
+		Tags:         metaTags,
+		SourceItemID: metaID,
+		SourceName:   sourceName,
 	}
 	entry, err := journal.NewDreamInsightEntry(payload)
 	if err != nil {

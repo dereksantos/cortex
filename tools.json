@@ -697,6 +697,53 @@
       ]
     },
     {
+      "name": "study",
+      "description": "Spend N seconds/minutes/hours learning the project via the bootstrap DAG",
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "dry-run",
+          "type": "bool",
+          "default": "false",
+          "description": "Plan only — print derivation, don't call LLM"
+        },
+        {
+          "name": "endpoint",
+          "type": "string",
+          "description": "OpenAI-compat base URL transient override (bypasses model_routes)"
+        },
+        {
+          "name": "extract-op",
+          "type": "string",
+          "default": "auto",
+          "description": "auto | extract_insight | extract_overview"
+        },
+        {
+          "name": "fill",
+          "type": "float64",
+          "default": "0",
+          "description": "Target context-window fill fraction (advanced; default 0.5)"
+        },
+        {
+          "name": "force",
+          "type": "bool",
+          "default": "false",
+          "description": "Re-run even if previously completed"
+        },
+        {
+          "name": "model",
+          "type": "string",
+          "description": "Model id (default cfg.OllamaModel)"
+        },
+        {
+          "name": "verbose",
+          "type": "bool",
+          "default": "false",
+          "description": "Print derivation trace + per-iteration banners"
+        }
+      ]
+    },
+    {
       "name": "test",
       "description": "Test LLM analysis quality",
       "version": "0.1.0"

@@ -329,3 +329,90 @@ func TestShouldRunBootstrap(t *testing.T) {
 func mustNow() (t time.Time) {
 	return time.Now().UTC()
 }
+
+// TestController_Run_RunIDInTags asserts that when Config.RunID and
+// RunShorthand are set, both appear on every emitted dream.insight
+// AND on the meta insight. This is the contract `cortex study` relies
+// on for run-tagged comparison ("study-5m" vs "study-30m").
+func TestController_Run_RunIDInTags(t *testing.T) {
+	root := buildFixture(t)
+	cortexDir := filepath.Join(root, ".cortex")
+	mock := &mockExtract{category: "overview:source", tag: "overview"}
+
+	c, err := NewController(ControllerConfig{
+		Config: Config{
+			ProjectRoot:    root,
+			ContextDir:     cortexDir,
+			TargetCoverage: 0.30,
+			BudgetMax:      5,
+			BatchSize:      2,
+			ExtractOp:      ExtractOpAuto,
+			RunID:          "study-20260521T143000Z-abc123",
+			RunShorthand:   "study-5m",
+		},
+		ExtractInsightFn:  mock.Fn,
+		ExtractOverviewFn: mock.Fn,
+	})
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+	if err := c.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dreamDir := filepath.Join(cortexDir, "journal", "dream")
+	r, err := journal.NewReader(dreamDir)
+	if err != nil {
+		t.Fatalf("NewReader: %v", err)
+	}
+	defer r.Close()
+
+	var (
+		regularInsights int
+		metaSeen        bool
+	)
+	for {
+		e, err := r.Next()
+		if err != nil {
+			break
+		}
+		if e.Type != journal.TypeDreamInsight {
+			continue
+		}
+		pp, err := journal.ParseDreamInsight(e)
+		if err != nil {
+			t.Fatalf("ParseDreamInsight: %v", err)
+		}
+		p := *pp
+		hasRun := false
+		hasShort := false
+		for _, tag := range p.Tags {
+			if tag == "study-20260521T143000Z-abc123" {
+				hasRun = true
+			}
+			if tag == "study-5m" {
+				hasShort = true
+			}
+		}
+		if !hasRun {
+			t.Errorf("insight %q missing run_id tag: tags=%v", p.InsightID, p.Tags)
+		}
+		if !hasShort {
+			t.Errorf("insight %q missing shorthand tag: tags=%v", p.InsightID, p.Tags)
+		}
+		if strings.HasPrefix(p.InsightID, "study:meta:") {
+			metaSeen = true
+			if p.SourceName != "study" {
+				t.Errorf("meta insight SourceName=%q, want study", p.SourceName)
+			}
+		} else {
+			regularInsights++
+		}
+	}
+	if !metaSeen {
+		t.Error("meta insight not found with study: prefix")
+	}
+	if regularInsights == 0 {
+		t.Error("no regular insights emitted")
+	}
+}
