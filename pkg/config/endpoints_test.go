@@ -104,3 +104,31 @@ func TestFindEndpoint(t *testing.T) {
 		t.Errorf("FindEndpoint(missing) should be nil, got %v", ep)
 	}
 }
+
+func TestDefaultGenerationModelOllamaWins(t *testing.T) {
+	cfg := &Config{OllamaModel: "qwen2.5-coder:1.5b", AnthropicModel: "anthropic/claude-haiku-4.5"}
+	if got := cfg.DefaultGenerationModel(); got != "qwen2.5-coder:1.5b" {
+		t.Errorf("DefaultGenerationModel = %q, want qwen2.5-coder:1.5b", got)
+	}
+}
+
+func TestDefaultGenerationModelFallsBackToAnthropic(t *testing.T) {
+	cfg := &Config{AnthropicModel: "anthropic/claude-haiku-4.5"}
+	if got := cfg.DefaultGenerationModel(); got != "anthropic/claude-haiku-4.5" {
+		t.Errorf("DefaultGenerationModel = %q, want anthropic/claude-haiku-4.5", got)
+	}
+}
+
+func TestDefaultGenerationModelEmpty(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.DefaultGenerationModel(); got != "" {
+		t.Errorf("DefaultGenerationModel = %q, want empty", got)
+	}
+}
+
+func TestDefaultGenerationModelNilSafe(t *testing.T) {
+	var cfg *Config
+	if got := cfg.DefaultGenerationModel(); got != "" {
+		t.Errorf("nil cfg DefaultGenerationModel = %q, want empty", got)
+	}
+}

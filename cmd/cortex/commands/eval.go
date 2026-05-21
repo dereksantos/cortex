@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	evalv2 "github.com/dereksantos/cortex/internal/eval/v2"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
-	"github.com/dereksantos/cortex/pkg/secret"
 )
 
 func init() {
@@ -354,21 +354,17 @@ func runCortexCodingHarness(scenarioPath, model, judgeModel string, useJudge, ve
 	return nil
 }
 
-// newOpenRouterJudgeForCoding builds an OpenRouter client wired with
-// the keychain-resolved API key, with model pinned. Used as the LLM
-// judge for the coding harness's qualitative-correctness scoring.
-//
-// Lives here (not in pkg/llm) because resolving the keychain key
-// would invert layering — pkg/secret is layered above pkg/llm only
-// here at the command boundary.
+// newOpenRouterJudgeForCoding builds a judge provider for the coding
+// harness's qualitative-correctness scoring. The model id is the
+// routing key: slash-prefixed (e.g. "anthropic/claude-haiku-4.5")
+// routes to OpenRouter via the keychain; bare ids route to local
+// (Ollama / Phase 4 endpoint). See docs/provider-resolution-refactor.md.
 func newOpenRouterJudgeForCoding(model string) (llm.Provider, error) {
-	key, _, err := secret.MustOpenRouterKey()
-	if err != nil {
-		return nil, err
+	p := intllm.BuildProvider(nil, model)
+	if p == nil {
+		return nil, fmt.Errorf("judge provider unavailable for model %q (check OpenRouter key or Ollama)", model)
 	}
-	c := llm.NewOpenRouterClientWithKey(nil, key)
-	c.SetModel(model)
-	return c, nil
+	return p, nil
 }
 
 // reportCodingRun prints a human-readable summary of a CodingRunResult.

@@ -8,6 +8,7 @@ import (
 
 	"strconv"
 
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -68,7 +69,7 @@ func (c *ReembedCommand) Execute(ctx *Context) error {
 
 	// Create embedder
 	embedder := llm.NewFallbackEmbedder(
-		llm.NewOllamaClient(ctx.Config),
+		intllm.BuildEmbedder(ctx.Config),
 		llm.NewHugotEmbedder(),
 	)
 

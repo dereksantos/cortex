@@ -10,6 +10,7 @@ import (
 
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -228,7 +229,14 @@ func buildOverrideLLM(base *config.Config, o ConfigOverrides) (llm.Provider, err
 		if o.Model != "" {
 			cfg.OllamaModel = o.Model
 		}
-		return llm.NewOllamaClient(&cfg), nil
+		// Route by model id so a user with Phase 4 model_routes can have
+		// the "ollama" alias hit chatterbox / lemonade / lm-studio
+		// instead of being pinned to Ollama. Alias kept for back-compat.
+		p := intllm.BuildProvider(&cfg, cfg.OllamaModel)
+		if p == nil {
+			return nil, fmt.Errorf("local LLM unavailable for model %q", cfg.OllamaModel)
+		}
+		return p, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q (allowed: anthropic, openrouter, auto, ollama)", provider)
 	}

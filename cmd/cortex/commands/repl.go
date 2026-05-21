@@ -857,40 +857,14 @@ func buildProviderFactoryForREPL(cfg *config.Config, model, apiURL string) llm.P
 // Shared between newSessionCognition (the eager build) and the REPL
 // chain's decide.next handler (which wants the same provider to
 // classify the next action without re-doing the construction).
+//
+// Now delegates to internal/llm.BuildProvider — the unified resolver
+// every cmd/cortex/commands/ caller shares. WithAPIURL preserves the
+// REPL's legacy "non-default apiURL routes to OpenRouter" behavior so
+// existing /model + /endpoint flows don't change shape. See
+// docs/provider-resolution-refactor.md.
 func buildLLMProviderForREPL(cfg *config.Config, model, apiURL string) llm.Provider {
-	// Phase 4: configured-endpoint resolution wins over legacy slash
-	// heuristic. Lets "chatterbox/Qwen3-Coder-30B-..." route to the
-	// user's local Lemonade endpoint rather than OpenRouter.
-	if ep, modelID, ok := cfg.ResolveModelRoute(model); ok {
-		client := llm.NewOpenAICompatClient(llm.EndpointConfig{
-			Name:    ep.Name,
-			BaseURL: ep.BaseURL,
-			APIKey:  ep.ResolveAPIKey(),
-		})
-		client.SetModel(modelID)
-		return client
-	}
-
-	if apiURL == defaultOllamaAPIURL {
-		c, _, err := llm.NewLLMClient(cfg,
-			llm.WithBackend(llm.BackendOllama),
-			llm.WithModel(model),
-		)
-		if err == nil {
-			return c
-		}
-		return nil
-	}
-	key, _, kerr := secret.MustOpenRouterKey()
-	if kerr != nil {
-		return nil
-	}
-	client := llm.NewOpenRouterClientWithKey(cfg, key)
-	client.SetModel(model)
-	if apiURL != "" {
-		client.SetAPIURL(apiURL)
-	}
-	return client
+	return intllm.BuildProvider(cfg, model, intllm.WithAPIURL(apiURL))
 }
 
 // rebindCognitionForModel rebuilds s.store + s.cortex so the shared
@@ -2936,6 +2910,10 @@ const modelListLimit = 20
 // session-bound state). Results are sorted by ID for deterministic
 // output. The endpoint is unauthenticated; a missing key doesn't
 // block discovery.
+//
+// allowlist:llm.NewOpenRouterClient — catalog discovery, not a runtime
+// provider for generation/embedding. The provider-resolution guard
+// test exempts this site.
 func fetchOpenRouterModels() ([]llm.OpenRouterModel, error) {
 	client := llm.NewOpenRouterClient(nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

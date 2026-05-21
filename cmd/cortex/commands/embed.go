@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 
+	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -238,7 +239,7 @@ func resolveEmbedder(cfg *config.Config) (llm.Embedder, string, string) {
 	if cfg == nil {
 		cfg = config.Default()
 	}
-	if ollama := llm.NewOllamaClient(cfg); ollama.IsEmbeddingAvailable() {
+	if ollama := intllm.BuildEmbedder(cfg); ollama != nil && ollama.IsEmbeddingAvailable() {
 		return ollama, cfg.OllamaEmbeddingModel, "ollama"
 	}
 	if hugot := llm.NewHugotEmbedder(); hugot.IsEmbeddingAvailable() {

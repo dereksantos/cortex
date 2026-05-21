@@ -154,6 +154,31 @@ func (c *Config) ResolveModelRoute(model string) (*EndpointDef, string, bool) {
 	return nil, "", false
 }
 
+// DefaultGenerationModel returns the model id callers should treat as
+// the implicit default when none is supplied.
+//
+// Used by internal/llm.BuildProvider when invoked with an empty
+// modelID — the helper centralizes the "what should we route to?"
+// answer instead of scattering `cfg.OllamaModel` references across
+// every command. Order:
+//
+//  1. OllamaModel (local default — covers the common Cortex setup).
+//  2. AnthropicModel (typically a slash-prefixed OpenRouter form when
+//     the user wants hosted-by-default; bare anthropic-direct ids stay
+//     supported but route to Ollama unless the user updates them).
+//  3. "" — caller falls back to mechanical / fail-soft.
+//
+// nil-receiver returns "" so callers don't have to defend against it.
+func (c *Config) DefaultGenerationModel() string {
+	if c == nil {
+		return ""
+	}
+	if c.OllamaModel != "" {
+		return c.OllamaModel
+	}
+	return c.AnthropicModel
+}
+
 // indexSlash returns the position of the first '/' in s, or -1.
 // Local helper to avoid importing strings in this hot-path resolver.
 func indexSlash(s string) int {
