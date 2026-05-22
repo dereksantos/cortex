@@ -30,9 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/study"
 )
 
 func init() {

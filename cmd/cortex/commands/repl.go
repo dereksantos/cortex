@@ -45,7 +45,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/internal/capture"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
@@ -56,6 +55,7 @@ import (
 	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/repltui"
 	"github.com/dereksantos/cortex/internal/storage"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"

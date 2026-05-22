@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/internal/projectscan"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
