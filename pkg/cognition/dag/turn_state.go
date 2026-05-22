@@ -200,3 +200,45 @@ func PriorOutsByName(ctx context.Context, qname string) []map[string]any {
 	}
 	return s.allByName(qname)
 }
+
+// WithTestTurnState attaches a turn state to ctx pre-seeded with the
+// given (nodeID, qualifiedName, out) records — exposed so tests in
+// sibling packages (e.g. ops) can exercise turn-state-reading
+// handlers without spinning a real executor. Records are deposited
+// in order; if you need a specific "latest" assertion (PriorOutByName
+// / LatestAccumulatorSnapshot) put the desired record last.
+//
+// Not meant for production use — handlers reach turn state via the
+// executor's natural attachment.
+func WithTestTurnState(ctx context.Context, records []TestDeposit) context.Context {
+	s := newTurnState()
+	for _, r := range records {
+		s.deposit(r.NodeID, r.QualifiedName, r.Out)
+	}
+	return withTurnState(ctx, s)
+}
+
+// TestDeposit is one seeded entry for WithTestTurnState.
+type TestDeposit struct {
+	NodeID        string
+	QualifiedName string
+	Out           map[string]any
+}
+
+// LatestAccumulatorSnapshot returns the most recent attend.accumulate
+// snapshot deposited in turn state, or "" when no accumulator has
+// run this turn yet.
+//
+// This is the bridge that lets later nodes (decide.next, the final
+// decide.coding_turn) read the bounded working memory the
+// accumulator chain has been building. Returns the snapshot string
+// only; callers who want the token count or fallback flag can fetch
+// the full Out map via PriorOutByName("attend.accumulate").
+func LatestAccumulatorSnapshot(ctx context.Context) string {
+	out := PriorOutByName(ctx, "attend.accumulate")
+	if out == nil {
+		return ""
+	}
+	snap, _ := out["snapshot"].(string)
+	return snap
+}

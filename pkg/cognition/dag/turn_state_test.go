@@ -225,3 +225,30 @@ func TestSequentialExecutor_DFSOrdering(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestAccumulatorSnapshot_ReturnsLatestSnapshot(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+
+	s.deposit("n1", "attend.accumulate", map[string]any{"snapshot": "snap-1"})
+	s.deposit("n2", "act.read_file", map[string]any{"output": "ignored"})
+	s.deposit("n3", "attend.accumulate", map[string]any{"snapshot": "snap-2"})
+
+	if got := LatestAccumulatorSnapshot(ctx); got != "snap-2" {
+		t.Errorf("LatestAccumulatorSnapshot: got %q, want %q", got, "snap-2")
+	}
+}
+
+func TestLatestAccumulatorSnapshot_EmptyWhenNoneRun(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+	if got := LatestAccumulatorSnapshot(ctx); got != "" {
+		t.Errorf("LatestAccumulatorSnapshot: got %q, want empty", got)
+	}
+}
+
+func TestLatestAccumulatorSnapshot_EmptyWithoutTurnState(t *testing.T) {
+	if got := LatestAccumulatorSnapshot(context.Background()); got != "" {
+		t.Errorf("LatestAccumulatorSnapshot without turn state: got %q, want empty", got)
+	}
+}

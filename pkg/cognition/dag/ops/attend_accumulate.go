@@ -83,8 +83,13 @@ func AccumulateSpec(opts ...AccumulateConfig) dag.NodeSpec {
 			{Name: "observation_tokens", Type: "int"},
 			{Name: "fallback", Type: "bool"},
 		},
-		Cost:      accumulateCostHint,
-		Exposable: false,
+		Cost: accumulateCostHint,
+		// Exposable to decide.next: when an LLM-emitted plan reads
+		// raw tool outputs ahead of a synthesis step, it can insert
+		// attend.accumulate nodes to keep the accumulator's working
+		// memory current. This is what makes bounded-context plans
+		// emergent rather than hard-coded.
+		Exposable: true,
 		Handler:   newAccumulateHandler(cfg),
 	}
 }
