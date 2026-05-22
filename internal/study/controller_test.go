@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"context"
@@ -205,7 +205,7 @@ func TestController_Run_Resumes(t *testing.T) {
 	cortexDir := filepath.Join(root, ".cortex")
 	mock := &mockExtract{category: "pattern", tag: "test"}
 
-	mkController := func(target float64, budget int) (*BootstrapController, error) {
+	mkController := func(target float64, budget int) (*Controller, error) {
 		return NewController(ControllerConfig{
 			Config: Config{
 				ProjectRoot:    root,
@@ -228,22 +228,14 @@ func TestController_Run_Resumes(t *testing.T) {
 	if err := c1.Run(context.Background()); err != nil {
 		t.Fatalf("Run 1: %v", err)
 	}
-	covered1 := len(c1.State().CoveredChunkIDs)
+	covered1 := countCoveredChunks(c1.State().CoveredFiles)
 	if covered1 == 0 {
 		t.Fatal("pass 1 covered no chunks")
 	}
 
-	// Force CompletedAt back to nil so pass 2 is treated as resume.
-	st, err := LoadState(StatePath(cortexDir))
-	if err != nil || st == nil {
-		t.Fatalf("LoadState: %v / nil=%v", err, st == nil)
-	}
-	st.CompletedAt = nil
-	if err := SaveState(StatePath(cortexDir), st); err != nil {
-		t.Fatalf("SaveState: %v", err)
-	}
-
 	// Pass 2: resume, bigger budget. Should pick up where pass 1 left off.
+	// CompletedAt may or may not be set; drift-aware resume keys on the
+	// per-file ContentHash, not on CompletedAt.
 	c2, err := mkController(0.99, 10)
 	if err != nil {
 		t.Fatalf("NewController 2: %v", err)
@@ -251,10 +243,21 @@ func TestController_Run_Resumes(t *testing.T) {
 	if err := c2.Run(context.Background()); err != nil {
 		t.Fatalf("Run 2: %v", err)
 	}
-	covered2 := len(c2.State().CoveredChunkIDs)
+	covered2 := countCoveredChunks(c2.State().CoveredFiles)
 	if covered2 <= covered1 {
 		t.Errorf("resume did not add coverage: %d → %d", covered1, covered2)
 	}
+}
+
+// countCoveredChunks sums ChunkIDs across the per-file coverage map.
+// Replaces the legacy len(CoveredChunkIDs) check now that the map is
+// the source of truth.
+func countCoveredChunks(m map[string]FileCoverage) int {
+	n := 0
+	for _, fc := range m {
+		n += len(fc.ChunkIDs)
+	}
+	return n
 }
 
 func TestController_Run_PidLockSkipsSecond(t *testing.T) {
@@ -299,30 +302,34 @@ func TestController_Run_PidLockSkipsSecond(t *testing.T) {
 	}
 }
 
-func TestShouldRunBootstrap(t *testing.T) {
+func TestShouldRun(t *testing.T) {
 	cortexDir := t.TempDir()
 
-	if run, reason := ShouldRunBootstrap(cortexDir); !run || reason != "never_run" {
+	if run, reason := ShouldRun(cortexDir); !run || reason != "never_run" {
 		t.Errorf("missing state: run=%v reason=%q (want true, never_run)", run, reason)
 	}
 
 	// Write an incomplete state.
-	s := &BootstrapState{ProjectRoot: "/x", StateHash: "abc"}
+	s := &State{ProjectRoot: "/x", StateHash: "abc"}
 	if err := SaveState(StatePath(cortexDir), s); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
-	if run, reason := ShouldRunBootstrap(cortexDir); !run || reason != "incomplete" {
+	if run, reason := ShouldRun(cortexDir); !run || reason != "incomplete" {
 		t.Errorf("incomplete state: run=%v reason=%q (want true, incomplete)", run, reason)
 	}
 
-	// Mark complete.
+	// Mark complete. With auto-accumulation the gate is no longer a
+	// one-shot "completed" bit — the controller always spawns and
+	// short-circuits internally if no drift. ShouldRun returns
+	// run=true with reason="drift_possible" so callers know to invoke
+	// the controller's own cheap drift check.
 	now := mustNow()
 	s.CompletedAt = &now
 	if err := SaveState(StatePath(cortexDir), s); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
-	if run, reason := ShouldRunBootstrap(cortexDir); run || reason != "" {
-		t.Errorf("complete state: run=%v reason=%q (want false, '')", run, reason)
+	if run, reason := ShouldRun(cortexDir); !run || reason != "drift_possible" {
+		t.Errorf("complete state: run=%v reason=%q (want true, drift_possible)", run, reason)
 	}
 }
 

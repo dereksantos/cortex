@@ -31,7 +31,7 @@ import (
 // explore arbitrary points inside large files.
 //
 // The .gitignore parser and sensitive-file deny list live in the
-// internal/projectscan package and are shared with the project-bootstrap
+// internal/projectscan package and are shared with the project-study
 // DAG. ProjectSource composes an IgnoreSet rather than carrying its own
 // filtering state.
 type ProjectSource struct {

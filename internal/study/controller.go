@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"context"
@@ -17,9 +17,9 @@ import (
 
 // ExtractedInsight is the controller-side view of one insight produced
 // by either maintain.extract_insight or maintain.extract_overview.
-// Callers (the cortex bootstrap subcommand) adapt their op handler
+// Callers (the `cortex study` subcommand) adapt their op handler
 // outputs into this shape so the controller stays decoupled from the
-// LLM/op package (and avoids the bootstrap ↔ ops import cycle).
+// LLM/op package (and avoids the study ↔ ops import cycle).
 type ExtractedInsight struct {
 	Content    string
 	Category   string
@@ -36,11 +36,11 @@ type ExtractedInsight struct {
 // when the mechanical fallback ran).
 type ExtractFunc func(ctx context.Context, content, source, langHint, fileRoleHint string) (insights []ExtractedInsight, fallback bool, err error)
 
-// BootstrapController owns the iterate-until-coverage loop. Construct
+// Controller owns the iterate-until-coverage loop. Construct
 // via NewController; drive via Run.
-type BootstrapController struct {
+type Controller struct {
 	cfg        Config
-	state      *BootstrapState
+	state      *State
 	statePath  string
 	ignore     *projectscan.IgnoreSet
 	analyzer   BoundaryAnalyzer
@@ -74,7 +74,7 @@ type ControllerConfig struct {
 
 // NewController validates the config, applies defaults, loads any
 // prior state, and returns a controller ready for Run.
-func NewController(cc ControllerConfig) (*BootstrapController, error) {
+func NewController(cc ControllerConfig) (*Controller, error) {
 	if cc.ProjectRoot == "" {
 		return nil, fmt.Errorf("controller: ProjectRoot is required")
 	}
@@ -126,7 +126,7 @@ func NewController(cc ControllerConfig) (*BootstrapController, error) {
 		state = nil
 	}
 
-	c := &BootstrapController{
+	c := &Controller{
 		cfg:             cc.Config,
 		state:           state,
 		statePath:       statePath,
@@ -139,7 +139,7 @@ func NewController(cc ControllerConfig) (*BootstrapController, error) {
 	return c, nil
 }
 
-// Run executes the bootstrap loop. Returns nil when:
+// Run executes the study loop. Returns nil when:
 //   - the lock is held by another process (logs + skips);
 //   - coverage hits target (state Halted="target");
 //   - budget exhausts (state Halted="budget_loc" or "budget_files");
@@ -148,7 +148,7 @@ func NewController(cc ControllerConfig) (*BootstrapController, error) {
 // Returns a non-nil error only for setup-class failures (analyzer
 // crash, journal writer init, etc.). Per-chunk LLM errors fall
 // through to the mechanical fallback inside the ExtractFunc.
-func (c *BootstrapController) Run(ctx context.Context) error {
+func (c *Controller) Run(ctx context.Context) error {
 	// Acquire the pid lock first. A second invocation sees the lock
 	// and skips — not an error.
 	pid, ok, err := AcquirePIDLock(c.cfg.ContextDir)
@@ -157,7 +157,7 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 	}
 	if !ok {
 		holder := PIDLockHolderPID(c.cfg.ContextDir)
-		c.banner(fmt.Sprintf("bootstrap already running (pid %d); skipping", holder))
+		c.banner(fmt.Sprintf("study already running (pid %d); skipping", holder))
 		return nil
 	}
 	c.pid = pid
@@ -184,13 +184,12 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 	c.writer = w
 	defer w.Close()
 
-	// Initialize state, either from disk (resume) or fresh.
-	if c.state == nil ||
-		c.state.StateHash != out.StateHash ||
-		c.state.ProjectRoot != c.cfg.ProjectRoot {
-		// Fresh run: previous state belonged to a different snapshot
-		// of the project (or there was no previous state).
-		c.state = &BootstrapState{
+	// Initialize state. Two paths:
+	//   - No prior state (or different project root) → fresh.
+	//   - Prior state → drift-aware resume. Per-file ContentHash decides
+	//     which previously-covered chunks survive into this snapshot.
+	if c.state == nil || c.state.ProjectRoot != c.cfg.ProjectRoot {
+		c.state = &State{
 			Version:        StateVersion,
 			ProjectRoot:    c.cfg.ProjectRoot,
 			StateHash:      out.StateHash,
@@ -202,17 +201,38 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 			EffTotalLines:  out.EffTotalLines,
 			TotalFiles:     out.TotalFiles,
 			ExtractOpUsed:  map[string]int{},
+			CoveredFiles:   map[string]FileCoverage{},
 		}
 	} else {
-		// Resume: keep covered set + counters. Refresh denominators
-		// in case they drifted (shouldn't, since StateHash matches).
+		// Resume against the current snapshot. Denominators always
+		// reflect *now*. StateHash on state becomes informational; it
+		// no longer gates whether to wipe the covered set.
+		c.state.StateHash = out.StateHash
+		c.state.RNGSeed = out.RNGSeed
 		c.state.EffTotalLines = out.EffTotalLines
 		c.state.TotalFiles = out.TotalFiles
 		if c.state.ExtractOpUsed == nil {
 			c.state.ExtractOpUsed = map[string]int{}
 		}
+		// One-time v1 migration: legacy state has CoveredChunkIDs but
+		// no CoveredFiles. Group v1 covered chunks by their file (using
+		// BoundaryOutput) and adopt the current ContentHash as the
+		// stamp — best-effort assumption that the file hasn't drifted
+		// since v1 last ran. Drift detected on a subsequent run will
+		// still invalidate stale entries when content actually changes.
+		if c.state.CoveredFiles == nil {
+			c.state.CoveredFiles = c.migrateV1Coverage(out)
+		}
+		// Apply drift to in-memory state: drop file coverage entries
+		// whose ContentHash no longer matches the snapshot, and drop
+		// entries whose file is gone entirely.
+		c.pruneDrift(out)
 	}
 	c.rng = rand.New(rand.NewSource(out.RNGSeed))
+
+	// Recompute primary-signal counters from the (possibly pruned)
+	// CoveredFiles map so the rest of the loop sees the truth.
+	c.recomputeCoverageCounters()
 
 	// Pre-iteration meta insight: so the journal alone is replay-
 	// sufficient (the resulting dream.insight describes the run).
@@ -221,8 +241,30 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 	}
 
 	// Track which files have at least one emitted insight (secondary
-	// coverage signal). Reconstruct from covered chunk IDs at start.
-	coveredFiles := c.coveredFileSetFromState(out)
+	// coverage signal). Seed from drift-pruned CoveredFiles.
+	coveredFiles := make(map[string]bool, len(c.state.CoveredFiles))
+	for rel := range c.state.CoveredFiles {
+		coveredFiles[rel] = true
+	}
+
+	// No-drift short-circuit. If the current snapshot already meets
+	// target on both signals, halt without spending any LLM budget.
+	// This is what makes study auto-accumulating: callers (REPL,
+	// cortex study, cortex study) can fire it any time and it's
+	// cheap when nothing has changed.
+	if halt, reason := c.shouldHaltSecondary(coveredFiles); halt && reason == "target" {
+		c.state.Halted = "no_drift"
+		c.banner(fmt.Sprintf("no drift: eff_loc=%.0f%% files=%.0f%% (target=%.0f%%); skipping extraction",
+			100*c.coveredFracEffLines(),
+			100*c.coveredFracFiles(coveredFiles),
+			100*c.cfg.TargetCoverage,
+		))
+		now := time.Now().UTC()
+		c.state.CompletedAt = &now
+		c.state.CoveredFileN = len(coveredFiles)
+		_ = SaveState(c.statePath, c.state)
+		return nil
+	}
 
 	// Main loop.
 	for {
@@ -255,9 +297,15 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 		c.maybeBanner()
 	}
 
-	now := time.Now().UTC()
-	c.state.CompletedAt = &now
-	c.state.CoveredFiles = len(coveredFiles)
+	// CompletedAt is "last time we hit target," not "last time we
+	// stopped." Budget exhaustion / cancellation leaves the prior
+	// CompletedAt (possibly nil) intact, so callers can still tell
+	// "have we ever finished a full pass?"
+	if c.state.Halted == "target" || c.state.Halted == "no_drift" {
+		now := time.Now().UTC()
+		c.state.CompletedAt = &now
+	}
+	c.state.CoveredFileN = len(coveredFiles)
 	if err := SaveState(c.statePath, c.state); err != nil {
 		c.banner(fmt.Sprintf("warning: final state persist failed: %v", err))
 	}
@@ -276,7 +324,7 @@ func (c *BootstrapController) Run(ctx context.Context) error {
 
 // processChunkBatch reads each chunk, calls the appropriate extract
 // op, emits dream.insight entries, and updates coverage state.
-func (c *BootstrapController) processChunkBatch(
+func (c *Controller) processChunkBatch(
 	ctx context.Context,
 	out *BoundaryOutput,
 	ids []string,
@@ -319,9 +367,9 @@ func (c *BootstrapController) processChunkBatch(
 // routed by lang/role when ExtractOp="auto"), records which op ran,
 // and returns the produced insights. Returns an empty slice when both
 // the LLM call and its mechanical fallback produce nothing.
-func (c *BootstrapController) extractFor(ctx context.Context, ch Chunk, body string) []ExtractedInsight {
+func (c *Controller) extractFor(ctx context.Context, ch Chunk, body string) []ExtractedInsight {
 	opName := ChooseExtractOp(c.cfg.ExtractOp, ch.Lang)
-	source := fmt.Sprintf("bootstrap:%s:%s", ch.RelPath, ch.ID)
+	source := fmt.Sprintf("study:%s:%s", ch.RelPath, ch.ID)
 	var (
 		insights []ExtractedInsight
 		err      error
@@ -372,11 +420,31 @@ func fileRoleFromLang(lang string) string {
 // produced — this is what makes the file count toward the secondary
 // coverage signal (so "skipped because empty body" doesn't inflate
 // file coverage).
-func (c *BootstrapController) markCovered(ch Chunk, coveredFiles map[string]bool, emittedInsight bool) {
-	if !contains(c.state.CoveredChunkIDs, ch.ID) {
-		c.state.CoveredChunkIDs = append(c.state.CoveredChunkIDs, ch.ID)
+//
+// The persistent state lives in c.state.CoveredFiles[ch.RelPath]; the
+// in-memory coveredFiles map is a cheap secondary-signal view for the
+// halt check.
+func (c *Controller) markCovered(ch Chunk, coveredFiles map[string]bool, emittedInsight bool) {
+	if c.state.CoveredFiles == nil {
+		c.state.CoveredFiles = map[string]FileCoverage{}
+	}
+	hash := ""
+	if c.boundaries != nil && c.boundaries.FileHashes != nil {
+		hash = c.boundaries.FileHashes[ch.RelPath]
+	}
+	fc, ok := c.state.CoveredFiles[ch.RelPath]
+	if !ok || fc.ContentHash != hash {
+		// Either first time we see this file, or the file changed
+		// since we last covered it — start a fresh coverage entry.
+		fc = FileCoverage{ContentHash: hash, CoveredAt: time.Now().UTC()}
+	}
+	if !contains(fc.ChunkIDs, ch.ID) {
+		fc.ChunkIDs = append(fc.ChunkIDs, ch.ID)
+		fc.EffLines += ch.EffLines
+		fc.CoveredAt = time.Now().UTC()
 		c.state.CoveredEffLines += ch.EffLines
 	}
+	c.state.CoveredFiles[ch.RelPath] = fc
 	if emittedInsight {
 		if _, ok := coveredFiles[ch.RelPath]; !ok {
 			coveredFiles[ch.RelPath] = true
@@ -384,9 +452,79 @@ func (c *BootstrapController) markCovered(ch Chunk, coveredFiles map[string]bool
 	}
 }
 
+// migrateV1Coverage adopts legacy CoveredChunkIDs into the per-file
+// CoveredFiles map. Called once when state was last written by a v1
+// binary. The current ContentHash of each file is assumed correct —
+// any subsequent edit will be picked up by pruneDrift on a later run.
+//
+// Returns a fresh CoveredFiles map. Caller assigns it to c.state.
+func (c *Controller) migrateV1Coverage(out *BoundaryOutput) map[string]FileCoverage {
+	covered := map[string]FileCoverage{}
+	if len(c.state.CoveredChunkIDs) == 0 {
+		return covered
+	}
+	covSet := make(map[string]bool, len(c.state.CoveredChunkIDs))
+	for _, id := range c.state.CoveredChunkIDs {
+		covSet[id] = true
+	}
+	// Group by file.
+	now := time.Now().UTC()
+	for _, ch := range out.Chunks {
+		if !covSet[ch.ID] {
+			continue
+		}
+		fc := covered[ch.RelPath]
+		fc.ContentHash = out.FileHashes[ch.RelPath]
+		if fc.CoveredAt.IsZero() {
+			fc.CoveredAt = now
+		}
+		if !contains(fc.ChunkIDs, ch.ID) {
+			fc.ChunkIDs = append(fc.ChunkIDs, ch.ID)
+			fc.EffLines += ch.EffLines
+		}
+		covered[ch.RelPath] = fc
+	}
+	// Migration is one-shot — drop the legacy flat list so the next
+	// save isn't fat.
+	c.state.CoveredChunkIDs = nil
+	return covered
+}
+
+// pruneDrift removes file-coverage entries whose ContentHash no longer
+// matches the current snapshot (file was edited) or whose file is gone
+// from the snapshot entirely (file was deleted or now ignored).
+//
+// The result: c.state.CoveredFiles reflects only files that are still
+// validly covered in the current snapshot. Stale entries are dropped
+// silently; their chunks become uncovered for this run.
+func (c *Controller) pruneDrift(out *BoundaryOutput) {
+	if c.state.CoveredFiles == nil {
+		return
+	}
+	for rel, fc := range c.state.CoveredFiles {
+		cur, ok := out.FileHashes[rel]
+		if !ok || cur != fc.ContentHash {
+			delete(c.state.CoveredFiles, rel)
+		}
+	}
+}
+
+// recomputeCoverageCounters refreshes CoveredEffLines + CoveredFileN
+// from the (drift-pruned) CoveredFiles map. Called once at the top of
+// Run after migration + drift detection; the loop then increments
+// CoveredEffLines as new chunks are marked covered.
+func (c *Controller) recomputeCoverageCounters() {
+	eff := 0
+	for _, fc := range c.state.CoveredFiles {
+		eff += fc.EffLines
+	}
+	c.state.CoveredEffLines = eff
+	c.state.CoveredFileN = len(c.state.CoveredFiles)
+}
+
 // emitDreamInsight builds a DreamInsightPayload from the extracted
 // insight + chunk provenance and appends to the dream journal.
-func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) error {
+func (c *Controller) emitDreamInsight(ch Chunk, ins ExtractedInsight) error {
 	imp := int(ins.Importance * 10)
 	if imp < 0 {
 		imp = 0
@@ -398,7 +536,7 @@ func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) e
 	if cat == "" {
 		cat = "pattern"
 	}
-	tags := append([]string{"bootstrap"}, ins.Tags...)
+	tags := append([]string{"study"}, ins.Tags...)
 	if c.cfg.RunID != "" {
 		tags = append(tags, c.cfg.RunID)
 	}
@@ -406,7 +544,7 @@ func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) e
 		tags = append(tags, c.cfg.RunShorthand)
 	}
 	sort.Strings(tags)
-	insightID := fmt.Sprintf("bootstrap:%s:%s", ch.RelPath, ch.ID)
+	insightID := fmt.Sprintf("study:%s:%s", ch.RelPath, ch.ID)
 	payload := journal.DreamInsightPayload{
 		InsightID:    insightID,
 		Category:     cat,
@@ -415,7 +553,7 @@ func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) e
 		Tags:         tags,
 		Reasoning:    ins.Reasoning,
 		SourceItemID: insightID,
-		SourceName:   "bootstrap",
+		SourceName:   "study",
 	}
 	entry, err := journal.NewDreamInsightEntry(payload)
 	if err != nil {
@@ -426,9 +564,9 @@ func (c *BootstrapController) emitDreamInsight(ch Chunk, ins ExtractedInsight) e
 }
 
 // emitMetaInsight writes a single dream.insight describing the
-// bootstrap run as a whole, so the journal alone reconstructs the
+// study run as a whole, so the journal alone reconstructs the
 // context (seed, sampler, window knobs, totals, op choice).
-func (c *BootstrapController) emitMetaInsight() {
+func (c *Controller) emitMetaInsight() {
 	if c.cfg.DryRun {
 		return
 	}
@@ -442,11 +580,11 @@ func (c *BootstrapController) emitMetaInsight() {
 		c.cfg.ExtractOp,
 		c.boundaries.RNGSeed,
 	)
-	metaID := fmt.Sprintf("bootstrap:meta:%s", c.boundaries.StateHash[:16])
+	metaID := fmt.Sprintf("study:meta:%s", c.boundaries.StateHash[:16])
 	if c.cfg.RunID != "" {
 		metaID = "study:meta:" + c.cfg.RunID
 	}
-	metaTags := []string{"bootstrap", "meta"}
+	metaTags := []string{"study", "meta"}
 	if c.cfg.RunID != "" {
 		metaTags = append(metaTags, "study", c.cfg.RunID)
 	}
@@ -454,10 +592,7 @@ func (c *BootstrapController) emitMetaInsight() {
 		metaTags = append(metaTags, c.cfg.RunShorthand)
 	}
 	sort.Strings(metaTags)
-	sourceName := "bootstrap"
-	if c.cfg.RunID != "" {
-		sourceName = "study"
-	}
+	sourceName := "study"
 	payload := journal.DreamInsightPayload{
 		InsightID:    metaID,
 		Category:     "pattern",
@@ -479,7 +614,7 @@ func (c *BootstrapController) emitMetaInsight() {
 //   - "target"        — both signals ≥ TargetCoverage
 //   - "budget_loc"    — budget exhausted, eff-LOC further from target
 //   - "budget_files"  — budget exhausted, file coverage further from target
-func (c *BootstrapController) shouldHaltSecondary(coveredFiles map[string]bool) (bool, string) {
+func (c *Controller) shouldHaltSecondary(coveredFiles map[string]bool) (bool, string) {
 	if c.state.Iteration >= c.cfg.BudgetMax {
 		locFrac := c.coveredFracEffLines()
 		fileFrac := c.coveredFracFiles(coveredFiles)
@@ -496,34 +631,22 @@ func (c *BootstrapController) shouldHaltSecondary(coveredFiles map[string]bool) 
 	return false, ""
 }
 
-// coveredChunkSet is a constant-time-lookup view over state.CoveredChunkIDs.
-func (c *BootstrapController) coveredChunkSet() map[string]bool {
-	m := make(map[string]bool, len(c.state.CoveredChunkIDs))
-	for _, id := range c.state.CoveredChunkIDs {
-		m[id] = true
+// coveredChunkSet is a constant-time-lookup view over the chunks the
+// sampler should treat as covered. Derived from CoveredFiles (already
+// drift-pruned by Run), so a file whose hash changed produces zero
+// covered chunks here even if v1 state stored its old chunk IDs.
+func (c *Controller) coveredChunkSet() map[string]bool {
+	m := make(map[string]bool)
+	for _, fc := range c.state.CoveredFiles {
+		for _, id := range fc.ChunkIDs {
+			m[id] = true
+		}
 	}
 	return m
 }
 
-// coveredFileSetFromState reconstructs the per-file covered set from
-// the persisted chunk IDs (file is "covered" if any of its chunks
-// are covered). Used on resume to seed coveredFiles.
-func (c *BootstrapController) coveredFileSetFromState(out *BoundaryOutput) map[string]bool {
-	chunkByID := make(map[string]Chunk, len(out.Chunks))
-	for _, ch := range out.Chunks {
-		chunkByID[ch.ID] = ch
-	}
-	files := make(map[string]bool)
-	for _, id := range c.state.CoveredChunkIDs {
-		if ch, ok := chunkByID[id]; ok {
-			files[ch.RelPath] = true
-		}
-	}
-	return files
-}
-
 // coveredFracEffLines returns covered_eff_lines / eff_total_lines.
-func (c *BootstrapController) coveredFracEffLines() float64 {
+func (c *Controller) coveredFracEffLines() float64 {
 	if c.state.EffTotalLines <= 0 {
 		return 1.0 // vacuous: empty project halts immediately
 	}
@@ -531,7 +654,7 @@ func (c *BootstrapController) coveredFracEffLines() float64 {
 }
 
 // coveredFracFiles returns covered_files / total_files.
-func (c *BootstrapController) coveredFracFiles(coveredFiles map[string]bool) float64 {
+func (c *Controller) coveredFracFiles(coveredFiles map[string]bool) float64 {
 	if c.state.TotalFiles <= 0 {
 		return 1.0
 	}
@@ -540,7 +663,7 @@ func (c *BootstrapController) coveredFracFiles(coveredFiles map[string]bool) flo
 
 // banner forwards a one-line status update to the configured banner
 // callback. No-op when callback is nil.
-func (c *BootstrapController) banner(line string) {
+func (c *Controller) banner(line string) {
 	if c.cfg.Banner == nil {
 		return
 	}
@@ -550,7 +673,7 @@ func (c *BootstrapController) banner(line string) {
 // maybeBanner emits a banner when coverage has crossed a 10% threshold
 // since the last banner. Prevents flooding the REPL with per-chunk
 // updates.
-func (c *BootstrapController) maybeBanner() {
+func (c *Controller) maybeBanner() {
 	frac := c.coveredFracEffLines()
 	floor := math.Floor(frac*10) / 10
 	if floor > c.lastBanner {
@@ -563,7 +686,7 @@ func (c *BootstrapController) maybeBanner() {
 // finalize releases the pidlock and (best effort) removes the pid
 // file. Called from defer in Run so the lock is released even on
 // panic.
-func (c *BootstrapController) finalize() {
+func (c *Controller) finalize() {
 	if c.pid != nil {
 		c.pid.Release()
 		c.pid = nil
@@ -577,31 +700,31 @@ func (c *BootstrapController) finalize() {
 // responsibility via cc.Banner.
 //
 // Errors during Run are routed to cc.Banner as a warning line. The
-// function does not return them — the bootstrap is best-effort
+// function does not return them — the study is best-effort
 // background work and should not crash the caller.
 func RunInBackground(ctx context.Context, cc ControllerConfig) {
 	c, err := NewController(cc)
 	if err != nil {
 		if cc.Banner != nil {
-			cc.Banner("bootstrap setup failed: " + err.Error())
+			cc.Banner("study setup failed: " + err.Error())
 		}
 		return
 	}
 	if err := c.Run(ctx); err != nil {
 		if cc.Banner != nil {
-			cc.Banner("bootstrap run failed: " + err.Error())
+			cc.Banner("study run failed: " + err.Error())
 		}
 	}
 }
 
 // State returns a read-only view of the controller's current state.
 // Tests + callers use this to inspect run results.
-func (c *BootstrapController) State() *BootstrapState { return c.state }
+func (c *Controller) State() *State { return c.state }
 
 // Boundaries returns the BoundaryOutput from the most-recent Analyze
 // call. May be nil if Run has not been invoked or the analyzer
 // errored.
-func (c *BootstrapController) Boundaries() *BoundaryOutput { return c.boundaries }
+func (c *Controller) Boundaries() *BoundaryOutput { return c.boundaries }
 
 // contains is a linear search over a small sorted slice — covered
 // chunk IDs grow over a single run, so the slice stays bounded by

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
@@ -37,7 +37,7 @@ func TestScanBoundaries_Handler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
-	bo, ok := res.Out["boundary_output"].(*bootstrap.BoundaryOutput)
+	bo, ok := res.Out["boundary_output"].(*study.BoundaryOutput)
 	if !ok || bo == nil {
 		t.Fatal("boundary_output missing")
 	}

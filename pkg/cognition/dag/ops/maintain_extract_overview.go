@@ -29,14 +29,14 @@ type ExtractOverviewConfig struct {
 }
 
 // ExtractOverviewSpec returns the NodeSpec for maintain.extract_overview.
-// LLM-backed op tuned for project-bootstrap intent (architectural
+// LLM-backed op tuned for project-study intent (architectural
 // summary, not session-event extraction). Deterministic fallback when
 // provider is unavailable or budget too thin.
 func ExtractOverviewSpec(cfg ExtractOverviewConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncMaintain,
 		Op:          "extract_overview",
-		Description: "summarize a file/chunk for project-overview retrieval (bootstrap-targeted)",
+		Description: "summarize a file/chunk for project-overview retrieval (study-targeted)",
 		Inputs: []dag.ParamSpec{
 			{Name: "content", Type: "string", Required: true},
 			{Name: "source", Type: "string", Required: false},
@@ -61,7 +61,7 @@ var extractOverviewCostHint = dag.Cost{LatencyMS: 18000, Tokens: 400}
 //
 // Inputs:
 //   - content (string)        — required; the file/chunk body
-//   - source (string)         — optional; provenance tag (e.g. "bootstrap:pkg/foo.go:abc")
+//   - source (string)         — optional; provenance tag (e.g. "study:pkg/foo.go:abc")
 //   - lang_hint (string)      — optional; "go" / "py" / "md" / ...
 //   - file_role_hint (string) — optional; "source"/"config"/"test"/"doc"
 //

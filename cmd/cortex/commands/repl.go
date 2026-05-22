@@ -45,7 +45,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/internal/capture"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/eval/dagtrace"
@@ -372,7 +372,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	// repltui.Run's worker goroutine) share the same body.
 	mainLoop := func() error {
 		printREPLBanner(state)
-		maybeStartBootstrap(state)
+		maybeStartStudy(state)
 		revalidateAndWarn(state.workdir, state.ui)
 		for {
 			line, err := state.ui.ReadLine("~ ")
@@ -479,11 +479,11 @@ type replState struct {
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
 
-	// bootstrapCancel cancels the auto-spawned bootstrap goroutine on
-	// REPL exit. Nil when bootstrap was skipped (already complete, env
+	// studyCancel cancels the auto-spawned study goroutine on
+	// REPL exit. Nil when study was skipped (already complete, env
 	// override, or detection error). Always called from close(); safe
 	// to call multiple times because the underlying CancelFunc is.
-	bootstrapCancel context.CancelFunc
+	studyCancel context.CancelFunc
 
 	// Headless-mode config (zero values preserve interactive behavior):
 	//   customVerifierCmd: shell command to run instead of `go build`.
@@ -964,86 +964,89 @@ func (s *replState) ensureCaptureClient() (*capture.Capture, error) {
 	return s.captureClient, nil
 }
 
-// bootstrapBoundariesLine returns a single dash-prefixed line for
-// SystemBoundaries when the project-bootstrap DAG has completed. It
-// reports insight count + both coverage signals so decide.next knows
-// the bootstrap is queryable via remember.vector_search rather than
-// needing to read README itself.
+// studyBoundariesLine returns a single dash-prefixed line for
+// SystemBoundaries describing the project's study coverage. With
+// auto-accumulation, "complete" no longer means "done forever" — the
+// number reported is the last persisted snapshot. If the controller
+// is mid-run, it'll refresh on next save.
 //
-// Returns "" when the state file is absent, unreadable, malformed, or
-// CompletedAt is nil. Best-effort: a stale or missing file degrades
-// to "no boundary info" silently.
-func bootstrapBoundariesLine(workdir string) string {
+// Returns "" when no state has been written yet. Best-effort: a stale
+// or missing file degrades to "no boundary info" silently.
+func studyBoundariesLine(workdir string) string {
 	cortexDir := filepath.Join(workdir, ".cortex")
-	st, err := bootstrap.LoadState(bootstrap.StatePath(cortexDir))
-	if err != nil || st == nil || st.CompletedAt == nil {
+	sum := study.LoadDeficitSummary(cortexDir)
+	if !sum.HasState {
 		return ""
 	}
-	effFrac := 0.0
-	if st.EffTotalLines > 0 {
-		effFrac = float64(st.CoveredEffLines) / float64(st.EffTotalLines)
-	}
-	fileFrac := 0.0
-	if st.TotalFiles > 0 {
-		fileFrac = float64(st.CoveredFiles) / float64(st.TotalFiles)
+	status := "in progress"
+	if sum.LastCompletedAt != nil {
+		status = "at target"
 	}
 	return fmt.Sprintf(
-		"- Project bootstrap: complete (%d insights, %.0f%% effective-LOC, %.0f%% file-coverage; query via remember.vector_search).\n",
-		st.InsightsEmitted, 100*effFrac, 100*fileFrac,
+		"- Project study: %s (%d insights, %.0f%% effective-LOC, %.0f%% file-coverage; query via remember.vector_search).\n",
+		status, sum.InsightsEmitted, 100*sum.LastCoveredEff, 100*sum.LastCoveredFile,
 	)
 }
 
-// maybeStartBootstrap is the REPL's first-run hook: if
-// .cortex/bootstrap_state.json is absent or incomplete (and the user
-// hasn't set CORTEX_SKIP_BOOTSTRAP=1), spawn the project-bootstrap
-// controller in a goroutine. The REPL keeps accepting input
-// immediately; bootstrap surfaces progress as banners between user
-// prompts. Cancel-on-exit is wired via state.bootstrapCancel, which
-// state.close() invokes during defer.
-func maybeStartBootstrap(state *replState) {
-	if os.Getenv("CORTEX_SKIP_BOOTSTRAP") == "1" {
+// maybeStartStudy is the REPL's per-session study hook. With
+// auto-accumulation, this fires on every REPL startup (unless
+// CORTEX_SKIP_STUDY=1): the controller does a cheap boundary scan,
+// detects drift since the last study, and either extracts insights for
+// the changed/new files or halts immediately with reason="no_drift".
+//
+// The REPL keeps accepting input immediately; the controller surfaces
+// progress (or "no drift, halting") as banners between user prompts.
+// Cancel-on-exit is wired via state.studyCancel, which state.close()
+// invokes during defer.
+//
+// CORTEX_SKIP_BOOTSTRAP is accepted as a deprecated alias for the same
+// disable signal so users who set the old name don't suddenly start
+// auto-studying after upgrading.
+func maybeStartStudy(state *replState) {
+	if os.Getenv("CORTEX_SKIP_STUDY") == "1" || os.Getenv("CORTEX_SKIP_BOOTSTRAP") == "1" {
 		return
 	}
 	cortexDir := filepath.Join(state.workdir, ".cortex")
-	run, reason := bootstrap.ShouldRunBootstrap(cortexDir)
+	run, reason := study.ShouldRun(cortexDir)
 	if !run {
+		// Today this branch is unreachable — ShouldRun always returns
+		// run=true in the drift-aware model. Kept defensively so a
+		// future "explicit-disable" reason can short-circuit here.
 		return
 	}
-	state.ui.Info(fmt.Sprintf("cortex: bootstrap starting (%s) — progress will surface as banners (CORTEX_SKIP_BOOTSTRAP=1 to disable)", reason))
+	state.ui.Info(fmt.Sprintf("cortex: study checking project drift (%s) — progress will surface as banners (CORTEX_SKIP_STUDY=1 to disable)", reason))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	state.bootstrapCancel = cancel
+	state.studyCancel = cancel
 
 	// Build the provider the same way newSessionCognition did, so
-	// bootstrap inherits the REPL's currently-pinned model/endpoint.
+	// study inherits the REPL's currently-pinned model/endpoint.
 	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: state.workdir}
 	provider := buildLLMProviderForREPL(cfg, state.model, state.apiURL)
 
-	cc := bootstrap.ControllerConfig{
-		Config: bootstrap.Config{
+	cc := study.ControllerConfig{
+		Config: study.Config{
 			ProjectRoot:    state.workdir,
 			ContextDir:     cortexDir,
 			Provider:       provider,
 			TargetCoverage: 0.80,
 			BudgetMax:      200,
 			BatchSize:      4,
-			WindowLines:    bootstrap.DefaultWindowLines,
-			WindowOverlap:  bootstrap.DefaultWindowOverlap,
-			ExtractOp:      bootstrap.ExtractOpAuto,
+			WindowLines:    study.DefaultWindowLines,
+			WindowOverlap:  study.DefaultWindowOverlap,
+			ExtractOp:      study.ExtractOpAuto,
 			Banner: func(line string) {
-				// Structured event so the TUI can pin progress to
-				// the ambient row (between divider and status) and
-				// drop it when bootstrap finishes. StdoutSink's
-				// renderer prints the legacy "[bootstrap] foo"
-				// inline form. We can't detect "done" from inside
-				// the bootstrap controller's banner callback today;
-				// state.close()'s bootstrapCancel runs on session
-				// exit which is a fine clear-trigger but we'd want
-				// the controller to emit one final done=true line
-				// at coverage-met. That's a follow-up — for now
-				// the row clears on session end via the cancel
-				// hook + a final empty event below.
-				state.ui.Event("bootstrap.progress", map[string]any{
+				// Structured event so the TUI can pin progress to the
+				// ambient row (between divider and status) and drop it
+				// when study finishes. StdoutSink's renderer prints
+				// the legacy "[study] foo" inline form. We can't
+				// detect "done" from inside the controller's banner
+				// callback today; state.close()'s studyCancel runs on
+				// session exit, which is a fine clear-trigger but we'd
+				// want the controller to emit one final done=true line
+				// at coverage-met. Follow-up — for now the row clears
+				// on session end via the cancel hook.
+				state.ui.Event("study.progress", map[string]any{
 					"line": line,
 					"done": false,
 				})
@@ -1052,7 +1055,7 @@ func maybeStartBootstrap(state *replState) {
 		ExtractInsightFn:  wrapInsightFn(provider),
 		ExtractOverviewFn: wrapOverviewFn(provider),
 	}
-	go bootstrap.RunInBackground(ctx, cc)
+	go study.RunInBackground(ctx, cc)
 }
 
 // close flushes and closes the session JSONL plus any shared cognition
@@ -1060,9 +1063,9 @@ func maybeStartBootstrap(state *replState) {
 // the events.jsonl on disk matches the in-memory indexes at the
 // moment of session end.
 func (s *replState) close() {
-	if s.bootstrapCancel != nil {
-		s.bootstrapCancel()
-		s.bootstrapCancel = nil
+	if s.studyCancel != nil {
+		s.studyCancel()
+		s.studyCancel = nil
 	}
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
@@ -2348,10 +2351,10 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		"- Model: %s (capability class: %s)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
 		s.model, class, cap,
 	)
-	// Phase 3 Slice 3 dovetail: when the project-bootstrap DAG has
+	// Phase 3 Slice 3 dovetail: when the project-study DAG has
 	// completed, surface a one-liner so decide.next plans against
 	// stored insights rather than fanning out to re-read README.
-	if line := bootstrapBoundariesLine(s.workdir); line != "" {
+	if line := studyBoundariesLine(s.workdir); line != "" {
 		systemBoundaries += line
 	}
 	if err := reg.Register(ops.NextSpec(ops.NextConfig{

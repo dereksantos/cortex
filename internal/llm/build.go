@@ -14,7 +14,7 @@
 // BuildProvider/BuildEmbedder collapse those three opinions into one
 // with **model id as the routing key** — the same convention the REPL
 // already used correctly. Bootstrap's --endpoint survives as a
-// transient override; bootstrap's --provider does not (the routing
+// transient override; study's --provider does not (the routing
 // key carries that information).
 //
 // See docs/provider-resolution-refactor.md for the migration plan.
@@ -161,7 +161,7 @@ type buildOpts struct {
 
 // WithEndpointOverride forces OpenAI-compat against the given URL,
 // bypassing model_routes and the slash-prefix heuristic. Used by
-// `cortex bootstrap --endpoint` for one-off ad-hoc invocations.
+// `cortex study --endpoint` for one-off ad-hoc invocations.
 // The persistent answer is `model_routes` in `.cortex/config.json`;
 // this flag is the transient escape hatch.
 func WithEndpointOverride(url string) Option {

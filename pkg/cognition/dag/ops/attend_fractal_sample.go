@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
@@ -14,7 +14,7 @@ import (
 // Sampler. The default ships as a HierarchicalSampler; a future Lévy
 // or RWR sampler can replace it without touching the controller.
 type FractalSampleConfig struct {
-	DefaultSampler bootstrap.Sampler
+	DefaultSampler study.Sampler
 }
 
 // FractalSampleSpec returns the NodeSpec for attend.fractal_sample.
@@ -26,14 +26,14 @@ func FractalSampleSpec(cfg FractalSampleConfig) dag.NodeSpec {
 		Op:          "fractal_sample",
 		Description: "hierarchical/fractal chunk sampler over a BoundaryOutput (Tier 1: hierarchical)",
 		Inputs: []dag.ParamSpec{
-			{Name: "boundary_output", Type: "*bootstrap.BoundaryOutput", Required: true},
+			{Name: "boundary_output", Type: "*study.BoundaryOutput", Required: true},
 			{Name: "covered", Type: "map[string]bool", Required: false},
 			{Name: "k", Type: "int", Required: false},
 			{Name: "rng_seed", Type: "int64", Required: false},
 		},
 		Outputs: []dag.ParamSpec{
 			{Name: "chunk_ids", Type: "[]string"},
-			{Name: "chunks", Type: "[]bootstrap.Chunk"},
+			{Name: "chunks", Type: "[]study.Chunk"},
 			{Name: "sampler", Type: "string"},
 		},
 		Cost:    dag.Cost{LatencyMS: 50, Tokens: 0},
@@ -44,23 +44,23 @@ func FractalSampleSpec(cfg FractalSampleConfig) dag.NodeSpec {
 // NewFractalSampleHandler returns the handler for attend.fractal_sample.
 //
 // Inputs:
-//   - boundary_output (*bootstrap.BoundaryOutput) — required
+//   - boundary_output (*study.BoundaryOutput) — required
 //   - covered (map[string]bool)                   — default empty
 //   - k (int)                                     — default 4
 //   - rng_seed (int64)                            — default boundary_output.RNGSeed
 //
 // Outputs:
 //   - chunk_ids ([]string)         — up to k IDs
-//   - chunks ([]bootstrap.Chunk)   — hydrated chunks in chunk_ids order
+//   - chunks ([]study.Chunk)   — hydrated chunks in chunk_ids order
 //   - sampler (string)             — Name() of the sampler that ran
 func NewFractalSampleHandler(cfg FractalSampleConfig) dag.Handler {
 	return func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
 		started := time.Now()
-		out, ok := in["boundary_output"].(*bootstrap.BoundaryOutput)
+		out, ok := in["boundary_output"].(*study.BoundaryOutput)
 		if !ok || out == nil {
 			return dag.NodeResult{
 				CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds())},
-			}, fmt.Errorf("attend.fractal_sample: 'boundary_output' (*bootstrap.BoundaryOutput) is required")
+			}, fmt.Errorf("attend.fractal_sample: 'boundary_output' (*study.BoundaryOutput) is required")
 		}
 
 		covered := readCoveredSet(in, "covered")
@@ -72,7 +72,7 @@ func NewFractalSampleHandler(cfg FractalSampleConfig) dag.Handler {
 
 		sampler := cfg.DefaultSampler
 		if sampler == nil {
-			sampler = &bootstrap.HierarchicalSampler{}
+			sampler = &study.HierarchicalSampler{}
 		}
 
 		rng := rand.New(rand.NewSource(seed))
@@ -80,11 +80,11 @@ func NewFractalSampleHandler(cfg FractalSampleConfig) dag.Handler {
 
 		// Hydrate chunks ordered to match ids (rather than the
 		// BoundaryOutput's sorted-by-rel order).
-		chunkByID := make(map[string]bootstrap.Chunk, len(out.Chunks))
+		chunkByID := make(map[string]study.Chunk, len(out.Chunks))
 		for _, c := range out.Chunks {
 			chunkByID[c.ID] = c
 		}
-		ordered := make([]bootstrap.Chunk, 0, len(ids))
+		ordered := make([]study.Chunk, 0, len(ids))
 		for _, id := range ids {
 			if c, ok := chunkByID[id]; ok {
 				ordered = append(ordered, c)

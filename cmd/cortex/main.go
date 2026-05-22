@@ -88,7 +88,7 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "init", "install", "uninstall", "projects", "bootstrap", "study":
+	case "init", "install", "uninstall", "projects", "study":
 		if cmd := commands.Get(command); cmd != nil {
 			// Study reads cfg.DefaultGenerationModel() when --model is
 			// blank; load config best-effort (nil-safe if absent).
@@ -213,7 +213,7 @@ func main() {
 // runREPL invokes the bare-`cortex` REPL command. Bare invocation and
 // explicit `cortex repl` both land here. No config / storage init
 // happens here — the REPL state code in commands/repl.go does its own
-// per-workdir .cortex/ bootstrap, since the user may be in a fresh
+// per-workdir .cortex/ setup, since the user may be in a fresh
 // directory that's never been touched by cortex before.
 func runREPL(args []string) {
 	cmd := commands.Get("repl")

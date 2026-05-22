@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"context"
@@ -134,7 +134,7 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap: walk: %w", err)
+		return nil, fmt.Errorf("study: walk: %w", err)
 	}
 
 	// Sort files lexically by rel path (defensive — WalkDir already
@@ -160,6 +160,7 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 		ProjectRoot: projectRoot,
 		StateHash:   stateHash,
 		RNGSeed:     rngSeed,
+		FileHashes:  make(map[string]string, len(files)),
 	}
 	moduleIndex := make(map[string]*Module) // moduleID → Module
 	totalFiles := 0
@@ -186,6 +187,12 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 		if len(chunks) == 0 {
 			continue
 		}
+
+		// Per-file content hash — the drift-detection key. Edits to a
+		// file invalidate exactly its chunks; untouched files keep their
+		// covered set across studies.
+		fh := sha256.Sum256(data)
+		out.FileHashes[f.rel] = hex.EncodeToString(fh[:])
 
 		mod, ok := moduleIndex[assign.id]
 		if !ok {

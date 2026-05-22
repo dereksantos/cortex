@@ -34,7 +34,7 @@ func TestExtractOverview_HappyPath(t *testing.T) {
 	res, err := spec.Handler(context.Background(),
 		map[string]any{
 			"content":        "package main\n\nfunc NewRouter() {}\n",
-			"source":         "bootstrap:test:abc",
+			"source":         "study:test:abc",
 			"lang_hint":      "go",
 			"file_role_hint": "source",
 		},
@@ -68,7 +68,7 @@ func TestExtractOverview_MechanicalFallback_NilProvider(t *testing.T) {
 	res, err := spec.Handler(context.Background(),
 		map[string]any{
 			"content":   "# project\n\nA tiny example.\n",
-			"source":    "bootstrap:README.md:xyz",
+			"source":    "study:README.md:xyz",
 			"lang_hint": "md",
 		},
 		dag.Budget{LatencyMS: 60000, Tokens: 1000})

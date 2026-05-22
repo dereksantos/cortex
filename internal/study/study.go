@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"crypto/sha256"
@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-// StudyPlan is what the planner derives from a duration + model
+// Plan is what the planner derives from a duration + model
 // capability + observed latency. Pure data — no I/O, no side effects.
 //
 // All knobs the controller cares about (WindowLines, WindowOverlap,
 // BatchSize, TargetCoverage, BudgetMax) can be lifted directly into
 // ControllerConfig. RunID + Shorthand flow through Config so every
 // emitted dream.insight is tagged for later comparison.
-type StudyPlan struct {
+type Plan struct {
 	Duration        time.Duration
 	WindowLines     int     // derived from model ctx window
 	WindowOverlap   int     // proportional to WindowLines
@@ -31,7 +31,7 @@ type StudyPlan struct {
 	ProjectEffLOC   int
 }
 
-// PlanStudy derivation constants. Inline-documented so the algorithm
+// MakePlan derivation constants. Inline-documented so the algorithm
 // is self-explanatory at the call site.
 const (
 	studyPromptOverheadTokens = 800  // extract_overview prompt + system
@@ -48,7 +48,7 @@ const (
 	studyCharsPerLine         = 50   // rough average line width
 )
 
-// PlanStudy derives a StudyPlan from a requested duration, the model's
+// MakePlan derives a Plan from a requested duration, the model's
 // context window in tokens, the calibrated per-call latency in ms, and
 // the project's effective LOC. All inputs come from cheap probes; no
 // LLM calls.
@@ -59,7 +59,7 @@ const (
 // The derivation is intentionally simple — every step is a single
 // arithmetic transform, documented inline so the Reasoning trace can
 // reproduce it verbatim for the meta insight.
-func PlanStudy(d time.Duration, ctxWindowTokens, latencyMS, projectEffLOC int, targetFill float64) StudyPlan {
+func MakePlan(d time.Duration, ctxWindowTokens, latencyMS, projectEffLOC int, targetFill float64) Plan {
 	if ctxWindowTokens <= 0 {
 		ctxWindowTokens = studyDefaultCtxWindow
 	}
@@ -126,7 +126,7 @@ func PlanStudy(d time.Duration, ctxWindowTokens, latencyMS, projectEffLOC int, t
 	}
 
 	runID, shorthand := newRunID(d)
-	plan := StudyPlan{
+	plan := Plan{
 		Duration:        d,
 		WindowLines:     windowLines,
 		WindowOverlap:   windowOverlap,
@@ -147,7 +147,7 @@ func PlanStudy(d time.Duration, ctxWindowTokens, latencyMS, projectEffLOC int, t
 // renderReasoning produces a single human-readable line describing
 // how the plan's knobs came out. Echoed to stdout + inlined into the
 // meta insight so post-hoc analysis can see the derivation.
-func renderReasoning(p StudyPlan) string {
+func renderReasoning(p Plan) string {
 	return fmt.Sprintf(
 		"duration=%s ctx_window=%d tokens latency=%dms target_fill=%.2f → window_lines=%d overlap=%d max_calls=%d target_coverage=%.2f run_id=%s",
 		p.Duration, p.CtxWindowTokens, p.LatencyMS, p.TargetFill,
