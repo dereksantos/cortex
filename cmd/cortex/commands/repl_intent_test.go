@@ -80,6 +80,98 @@ func TestSeedForIntent_nonShortCircuitIntentsAlwaysFallThrough(t *testing.T) {
 	}
 }
 
+func TestAggregateByIntent_empty(t *testing.T) {
+	if got := aggregateByIntent(nil); got != nil {
+		t.Errorf("empty input → nil output, got %+v", got)
+	}
+}
+
+func TestAggregateByIntent_groupsCountsAndSums(t *testing.T) {
+	rows := []turnRow{
+		{Intent: "code", LatencyMs: 100, TokensIn: 50, TokensOut: 30, CostUSD: 0.01},
+		{Intent: "code", LatencyMs: 200, TokensIn: 60, TokensOut: 40, CostUSD: 0.02},
+		{Intent: "code", LatencyMs: 300, TokensIn: 70, TokensOut: 50, CostUSD: 0.03},
+		{Intent: "greeting", LatencyMs: 10, TokensIn: 0, TokensOut: 5, CostUSD: 0},
+		{Intent: "recall", LatencyMs: 5000, TokensIn: 200, TokensOut: 100, CostUSD: 0.05},
+	}
+	out := aggregateByIntent(rows)
+	if len(out) != 3 {
+		t.Fatalf("expected 3 intents, got %d", len(out))
+	}
+	// Sorted by Count desc: code(3), greeting(1), recall(1) — secondary
+	// alphabetical for ties.
+	if out[0].Intent != "code" || out[0].Count != 3 {
+		t.Errorf("first bucket = (%q, %d), want (code, 3)", out[0].Intent, out[0].Count)
+	}
+	if out[0].TotalTokensIn != 180 || out[0].TotalTokensOut != 120 {
+		t.Errorf("code tokens not summed: in=%d out=%d", out[0].TotalTokensIn, out[0].TotalTokensOut)
+	}
+	if out[0].P50LatencyMs != 200 {
+		t.Errorf("code P50 = %d, want 200", out[0].P50LatencyMs)
+	}
+	if out[0].P95LatencyMs != 300 {
+		t.Errorf("code P95 = %d, want 300", out[0].P95LatencyMs)
+	}
+	// Ties: greeting and recall both Count=1; alphabetical secondary
+	// puts greeting first.
+	if out[1].Intent != "greeting" {
+		t.Errorf("tie-break order wrong: out[1]=%q (expected greeting)", out[1].Intent)
+	}
+}
+
+func TestAggregateByIntent_foldsEmptyIntentIntoNoneBucket(t *testing.T) {
+	// Legacy turnRows (written before Slice 3) have empty Intent. They
+	// must show up in a "(none)" bucket so analysis sees them rather
+	// than silently dropping them.
+	rows := []turnRow{
+		{Intent: "", LatencyMs: 100},
+		{Intent: "", LatencyMs: 200},
+		{Intent: "code", LatencyMs: 50},
+	}
+	out := aggregateByIntent(rows)
+	if len(out) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(out))
+	}
+	found := false
+	for _, r := range out {
+		if r.Intent == "(none)" && r.Count == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected (none) bucket with Count=2, got %+v", out)
+	}
+}
+
+func TestAggregateByIntent_singleRowP50EqualsP95(t *testing.T) {
+	rows := []turnRow{{Intent: "code", LatencyMs: 777}}
+	out := aggregateByIntent(rows)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 bucket, got %d", len(out))
+	}
+	if out[0].P50LatencyMs != 777 || out[0].P95LatencyMs != 777 {
+		t.Errorf("single-row p50/p95 must both equal the value, got p50=%d p95=%d",
+			out[0].P50LatencyMs, out[0].P95LatencyMs)
+	}
+}
+
+func TestPercentile_edgeCases(t *testing.T) {
+	if percentile(nil, 0.5) != 0 {
+		t.Error("empty slice must return 0")
+	}
+	if percentile([]int64{42}, 0.99) != 42 {
+		t.Error("single element must return that element")
+	}
+	// p=0 → smallest, p=1 → largest.
+	sorted := []int64{1, 2, 3, 4, 5}
+	if percentile(sorted, 0) != 1 {
+		t.Errorf("p=0 should be smallest, got %d", percentile(sorted, 0))
+	}
+	if percentile(sorted, 1.0) != 5 {
+		t.Errorf("p=1.0 should be largest, got %d", percentile(sorted, 1.0))
+	}
+}
+
 func TestDetectFeedbackCue_correction(t *testing.T) {
 	corrections := []string{
 		"no, do it differently",
@@ -280,12 +372,91 @@ func TestClassifyIntentForTurn_missingRegistrationFallsBackToCode(t *testing.T) 
 	// A registry without sense.classify_intent must yield the safe
 	// default — never block the turn on a missing op registration.
 	reg := dag.NewRegistry()
-	intent, conf := classifyIntentForTurn(reg, "hello")
+	intent, conf := classifyIntentForTurn(reg, "hello", nil)
 	if intent != ops.IntentCode {
 		t.Errorf("expected fallback intent=%q, got %q", ops.IntentCode, intent)
 	}
 	if conf != 0 {
 		t.Errorf("expected fallback confidence=0, got %v", conf)
+	}
+}
+
+func TestClassifyIntentForTurn_emitsTraceEntryWhenCallbackProvided(t *testing.T) {
+	// Slice 6: the classifier runs outside the DAG executor, so we
+	// synthesize a TraceEntry and invoke the same callback the
+	// executor uses. The entry must show up with the right
+	// QualifiedName, spawn the seed node, and carry the classification
+	// result in Out so dag_traces.jsonl / dag-color visualizers can
+	// surface it like any other DAG node.
+	reg := dag.NewRegistry()
+	if err := reg.Register(ops.ClassifyIntentSpec(ops.ClassifyIntentConfig{Provider: nil})); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	var emitted []dag.TraceEntry
+	cb := func(e dag.TraceEntry) { emitted = append(emitted, e) }
+
+	classifyIntentForTurn(reg, "hello", cb)
+
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 trace entry, got %d", len(emitted))
+	}
+	e := emitted[0]
+	if e.QualifiedName != "sense.classify_intent" {
+		t.Errorf("qualified name = %q, want sense.classify_intent", e.QualifiedName)
+	}
+	if e.NodeID == "" {
+		t.Error("NodeID must be set")
+	}
+	if e.ParentID != "" {
+		t.Errorf("ParentID must be empty (classifier is entry-point), got %q", e.ParentID)
+	}
+	if len(e.SpawnedChildren) != 1 {
+		t.Errorf("expected 1 spawned child (the seed node), got %d", len(e.SpawnedChildren))
+	}
+	if intent, _ := e.Out["intent"].(string); intent != ops.IntentCode {
+		t.Errorf("Out[intent] = %v, want %q", e.Out["intent"], ops.IntentCode)
+	}
+	if fb, _ := e.Out["fallback"].(bool); !fb {
+		t.Error("Out[fallback] must be true for nil-provider path")
+	}
+	if e.WallEnd.Before(e.WallStart) {
+		t.Error("WallEnd must be ≥ WallStart")
+	}
+}
+
+func TestClassifyIntentForTurn_nilCallbackIsNoOp(t *testing.T) {
+	// Production safety: passing nil traceCB must not panic and must
+	// not affect the returned classification result.
+	reg := dag.NewRegistry()
+	intent, conf := classifyIntentForTurn(reg, "hello", nil)
+	if intent != ops.IntentCode || conf != 0 {
+		t.Errorf("nil callback must still return safe defaults, got (%q, %v)", intent, conf)
+	}
+}
+
+func TestClassifyIntentForTurn_registryMissEmitsErrorTrace(t *testing.T) {
+	// When sense.classify_intent isn't registered, the classifier still
+	// emits a trace entry with the failure recorded — that's the
+	// observability win. Without the entry, "why did we route to the
+	// fallback?" would be invisible to debuggers.
+	reg := dag.NewRegistry() // empty — no ops registered
+	var emitted []dag.TraceEntry
+	cb := func(e dag.TraceEntry) { emitted = append(emitted, e) }
+
+	intent, _ := classifyIntentForTurn(reg, "hello", cb)
+
+	if intent != ops.IntentCode {
+		t.Errorf("registry miss must still return safe default")
+	}
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 trace entry on registry miss, got %d", len(emitted))
+	}
+	e := emitted[0]
+	if e.OK {
+		t.Error("trace entry must report OK=false on registry miss")
+	}
+	if e.ErrorCode == "" {
+		t.Error("ErrorCode must be populated on failure")
 	}
 }
 
@@ -422,7 +593,7 @@ func TestClassifyIntentForTurn_registeredHandlerReturnsResult(t *testing.T) {
 	if err := reg.Register(ops.ClassifyIntentSpec(ops.ClassifyIntentConfig{Provider: nil})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	intent, conf := classifyIntentForTurn(reg, "hello")
+	intent, conf := classifyIntentForTurn(reg, "hello", nil)
 	if intent != ops.IntentCode {
 		t.Errorf("nil-provider fallback should yield intent=%q, got %q", ops.IntentCode, intent)
 	}

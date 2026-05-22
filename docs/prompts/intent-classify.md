@@ -86,12 +86,19 @@ Hydration (`priorMessagesForHarness`) now prefers the digest over raw history:
 
 Net effect: a 100-turn session injects `[digest of first 90 turns] + [last 10 summaries]` instead of `[10 most recent of 100 summaries, older 90 forgotten]`. Long sessions get logarithmic-ish memory growth rather than linear forgetting.
 
+## Observability (Slice 6)
+
+The classifier runs *outside* the DAG executor (we need its result at seed-time to pick a budget + seed shape, before the executor exists). To keep the routing decision visible alongside the seed nodes it produces, `classifyIntentForTurn` accepts a `dag.TraceCallback` and synthesizes a `dag.TraceEntry` for itself: `QualifiedName="sense.classify_intent"`, `ParentID=""` (entry-point), `SpawnedChildren=[seedID]`, `Out={intent, confidence, fallback, why}`, real `WallStart`/`WallEnd`/`CostConsumed`. The REPL hands it the same callback that drives `dag_traces.jsonl` + the stdout streamer, so the row appears in every observability surface the executor's rows do. Nil callback → no-op (tests + headless paths).
+
+`aggregateByIntent([]turnRow) []IntentRollup` rolls a session's turns into per-intent stats: Count, P50/P95 latency (nearest-rank), token totals, cost totals. Sorted by Count desc (most-frequent intent first) with alphabetical tie-break. Empty intent (legacy turnRows pre-Slice-3) folds into a `(none)` bucket so analysis sees them rather than dropping them. The helper lives in `cmd/cortex/commands/repl.go`; surfaces it in a `cortex repl stats` command (or eval summary) when there's a concrete use case.
+
 ## Open follow-ups (from the integration TODO)
 
 - ~~**Slice 2**: dedicated seeds for `recall` (text-search + small synthesis) and `clarify` (one-question `decide.clarify`).~~ Shipped.
 - ~~**Slice 3**: add `Intent` field to `think.session_summary` payload so journal recall can filter by intent.~~ Shipped.
 - ~~**Slice 4**: clarify follow-up stitching + feedback writer-class auto-emit.~~ Shipped.
 - ~~**Slice 5**: `dream.session_digest` via `attend.compact`; hydration prefers digest + post-digest summaries.~~ Shipped.
+- ~~**Slice 6**: classifier trace row + per-intent rollup helper.~~ Shipped.
 - **Slice 2 follow-up**: `decide.recall_summary` uses text search (`Storage.SearchEventsMultiTerm`) today because the REPL session doesn't wire an embedder through `newSessionCognition`. Add an embedder + switch recall to vector search when it lands.
 - **Slice 5 follow-up — digest invalidation**: a `feedback.retraction` inside the digest's covered window should mark the digest stale so the next finalize re-runs `maybeWriteSessionDigest`. Today the digest stays in place until naturally superseded by the threshold crossing.
-- **Slice 6 / observability**: the classifier currently runs *outside* the DAG executor, so it doesn't appear in `dag_traces.jsonl`. Synthesize a trace row from the handler result so the routing decision is preserved alongside the seed.
+- **Slice 6 follow-up — surface the rollup**: `aggregateByIntent` ships as a helper. A `cortex repl stats <session.jsonl>` command (or an end-of-session summary line) would put it in front of users without requiring jq.

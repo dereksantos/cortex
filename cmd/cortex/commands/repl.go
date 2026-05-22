@@ -2383,7 +2383,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// chain in favor of cheaper terminal nodes (act.passthrough for
 	// greetings). Failure modes return intent=code with confidence=0 so
 	// the seed falls back to today's full chain.
-	intent, intentConf := classifyIntentForTurn(reg, prompt)
+	intent, intentConf := classifyIntentForTurn(reg, prompt, traceCB)
 	// Cold-journal escalation: decide.recall_summary has nothing useful
 	// to say when storage holds no events matching the prompt. Better
 	// to let the agent actually investigate (read README, list dirs)
@@ -2433,16 +2433,26 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 // Returns ("code", 0) on any failure — safe default routes to the
 // existing full pipeline so misclassifications never block a turn.
 //
-// TODO: the classifier call is invisible in the dag trace because it
-// runs outside the executor. Synthesize a trace row from the handler
-// result so the routing decision is preserved alongside the seed.
-func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
+// Slice 6: synthesizes a dag.TraceEntry for the classifier call and
+// invokes traceCB with it before returning. Lets the routing
+// decision appear in dag_traces.jsonl + the stdout streamer
+// alongside the seed it produced, even though the executor never
+// touched it. traceCB may be nil — tests pass nil to skip the
+// emission.
+func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCallback) (string, float64) {
+	started := time.Now()
+	const (
+		classifyNodeID = "n0-intent"
+		classifySeedID = "n1"
+	)
 	spec, err := reg.Get("sense.classify_intent")
 	if err != nil {
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "spec_not_registered", err.Error(), nil, started)
 		return ops.IntentCode, 0
 	}
 	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, dag.DefaultTurnBudget())
 	if herr != nil {
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "handler_error", herr.Error(), nil, started)
 		return ops.IntentCode, 0
 	}
 	intent, _ := res.Out["intent"].(string)
@@ -2450,7 +2460,52 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 		intent = ops.IntentCode
 	}
 	confidence, _ := res.Out["confidence"].(float64)
+	emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, intent, confidence, "", "", &res, started)
 	return intent, confidence
+}
+
+// emitClassifyTraceEntry synthesizes a dag.TraceEntry for the
+// out-of-executor classifier call and invokes traceCB with it. Nil
+// traceCB → no-op so tests and headless paths work without
+// instrumentation. Includes the cost the handler reported (when
+// available) so downstream analyzers see the classifier's cost
+// alongside the rest of the turn.
+func emitClassifyTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, intent string, confidence float64, errCode, errMsg string, res *dag.NodeResult, started time.Time) {
+	if traceCB == nil {
+		return
+	}
+	end := time.Now()
+	entry := dag.TraceEntry{
+		NodeID:          nodeID,
+		ParentID:        "", // entry-point — runs before the seed
+		QualifiedName:   "sense.classify_intent",
+		OK:              errCode == "",
+		ErrorCode:       errCode,
+		ErrorMessage:    errMsg,
+		SpawnedChildren: []string{seedID},
+		WallStart:       started,
+		WallEnd:         end,
+		Out: map[string]any{
+			"intent":     intent,
+			"confidence": confidence,
+		},
+	}
+	if res != nil {
+		entry.CostConsumed = res.CostConsumed
+		// Surface fallback + why too so the trace tells the full story
+		// (LLM result vs safe-default route).
+		if fb, ok := res.Out["fallback"].(bool); ok {
+			entry.Out["fallback"] = fb
+		}
+		if why, ok := res.Out["why"].(string); ok && why != "" {
+			entry.Out["why"] = why
+		}
+	} else {
+		// No result (registry miss / handler error). Bill a tiny wall-
+		// time so the row's duration isn't 0ms which would skew p50s.
+		entry.CostConsumed = dag.Cost{LatencyMS: int(end.Sub(started).Milliseconds())}
+	}
+	traceCB(entry)
 }
 
 // sessionDigestThreshold is the number of think.session_summary
@@ -2636,6 +2691,104 @@ func (s *replState) readSummariesForDigest() ([]journal.ThinkSessionSummaryPaylo
 		}
 	}
 	return summaries, covers, nil
+}
+
+// IntentRollup is one aggregated row in a per-intent breakdown of a
+// session's turnRows. Slice 6 ships the aggregator standalone; future
+// surfaces (cortex repl stats / dashboards / eval summaries) can
+// import it without re-implementing the math.
+type IntentRollup struct {
+	Intent         string
+	Count          int
+	P50LatencyMs   int64
+	P95LatencyMs   int64
+	TotalTokensIn  int
+	TotalTokensOut int
+	TotalCostUSD   float64
+}
+
+// aggregateByIntent groups turnRows by their Intent field and returns
+// one IntentRollup per distinct intent, sorted by Count descending
+// (most-frequent intents first). Empty intent rows are folded into
+// the "(none)" bucket so legacy turnRows from before Slice 3 still
+// show up rather than being silently dropped.
+//
+// Empty input → empty output, no error. Suitable for stats commands
+// that just want to print "0 turns" rather than special-case.
+func aggregateByIntent(rows []turnRow) []IntentRollup {
+	if len(rows) == 0 {
+		return nil
+	}
+	buckets := map[string][]turnRow{}
+	for _, r := range rows {
+		key := r.Intent
+		if key == "" {
+			key = "(none)"
+		}
+		buckets[key] = append(buckets[key], r)
+	}
+	out := make([]IntentRollup, 0, len(buckets))
+	for intent, rs := range buckets {
+		out = append(out, intentRollupFor(intent, rs))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Intent < out[j].Intent // stable secondary sort
+	})
+	return out
+}
+
+// intentRollupFor builds one IntentRollup from a per-intent slice of
+// rows. P50 / P95 are computed in-place over a copy of the latency
+// values; tokens / cost are summed directly. Single-row buckets
+// yield P50=P95=that row's latency.
+func intentRollupFor(intent string, rows []turnRow) IntentRollup {
+	r := IntentRollup{Intent: intent, Count: len(rows)}
+	latencies := make([]int64, len(rows))
+	for i, row := range rows {
+		latencies[i] = row.LatencyMs
+		r.TotalTokensIn += row.TokensIn
+		r.TotalTokensOut += row.TokensOut
+		r.TotalCostUSD += row.CostUSD
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	r.P50LatencyMs = percentile(latencies, 0.50)
+	r.P95LatencyMs = percentile(latencies, 0.95)
+	return r
+}
+
+// percentile returns the p-th percentile (0.0 <= p <= 1.0) from a
+// pre-sorted slice using the nearest-rank method (ceil(N*p) - 1).
+// This places p=0 at the smallest value, p=1 at the largest, and
+// p=0.95 on N=3 at the third value rather than the second — which
+// matches what humans expect when reading "p95 latency" on small
+// samples. Empty slice → 0; single element → that element.
+//
+// Not a stats-grade implementation. Fine for REPL session sizes
+// (tens to hundreds of turns).
+func percentile(sorted []int64, p float64) int64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if len(sorted) == 1 {
+		return sorted[0]
+	}
+	// ceil(N*p) - 1: math.Ceil avoided by adding (N - 1) before
+	// integer division.
+	n := len(sorted)
+	idx := (int(float64(n)*p*1000) + 999) / 1000
+	if idx > 0 {
+		idx--
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	return sorted[idx]
 }
 
 // detectFeedbackCue mechanically classifies a user prompt as
