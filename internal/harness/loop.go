@@ -324,12 +324,11 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		// when the estimated prompt size approaches the cap. The 85%
 		// threshold leaves headroom for response tokens + estimator
 		// drift. keepTail=1 protects the current user message.
+		// trimAndNotify is a no-op when nothing exceeds the threshold,
+		// so the loop's local msgs stays the source of truth either way.
 		if l.ContextWindowTokens > 0 {
 			threshold := (l.ContextWindowTokens * 85) / 100
-			if dropped := trimAndNotify(l, &msgs, threshold, keepHead, 1, "proactive"); dropped > 0 {
-				// PriorMessages effectively shrank by `dropped`; the
-				// loop's local msgs is the source of truth from here.
-			}
+			trimAndNotify(l, &msgs, threshold, keepHead, 1, "proactive")
 		}
 
 		callRes, stats, err := l.Provider.GenerateWithTools(ctx, msgs, specs, "auto")
