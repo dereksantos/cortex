@@ -2392,6 +2392,19 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// through to the full chain under DefaultTurnBudget.
 	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
 	turnBudget := dag.BudgetForIntent(intent)
+	// Layer the model's n_ctx onto the seed budget so handlers
+	// (attend.accumulate, decide.next, attend.compact) can size
+	// their own prompts via budget.PromptBudget(). Probe-cache miss
+	// → MaxContextTokens stays 0 (unknown); handlers fall back to
+	// calibrated defaults and the harness loop's catch-and-retry
+	// path still learns n_ctx from any overflow.
+	if cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex")); cfg != nil {
+		if ep, bareModel, useEp := cfg.ResolveModelRoute(s.model); useEp {
+			if p, ok := bootstrap.LookupCached(filepath.Join(s.workdir, ".cortex"), bareModel, ep.Name); ok && p.CtxWindowTokens > 0 {
+				turnBudget = turnBudget.WithMaxContextTokens(p.CtxWindowTokens)
+			}
+		}
+	}
 	seed := seedForIntent(intent, intentConf, prompt)
 	// Slice 4: stash the original prompt when we're about to clarify
 	// so the NEXT turn's stitchClarifyFollowUp can combine it with
