@@ -155,6 +155,31 @@ type CodingTurnConfig struct {
 	// tokens flat across many tool-calling agent turns — see
 	// docs/salience-budgets.md "Inner agent loop (per-turn)".
 	ToolOutputSalienceCap int
+
+	// AccumulatorProvider, when non-nil, makes the dispatcher fold
+	// each act.* output (post-compression) through attend.accumulate
+	// and deposit the resulting snapshot into the executor's turn
+	// state. Subsequent decide.next / decide.coding_turn calls in
+	// the same turn see the working memory via
+	// dag.LatestAccumulatorSnapshot(ctx) — bounded-context wiring
+	// without the LLM having to emit attend.accumulate explicitly.
+	//
+	// Nil → no accumulator wiring; pre-bounded-context behavior.
+	AccumulatorProvider llm.Provider
+
+	// AccumulatorMaxTokens is the per-snapshot budget the
+	// accumulator runs against. 0 disables the dispatcher path even
+	// when AccumulatorProvider is set (defense-in-depth: an
+	// unconfigured budget would mean "unbounded snapshot" which
+	// defeats the point).
+	AccumulatorMaxTokens int
+
+	// AccumulatorIntent threads into the accumulator's prompt so
+	// the compressor knows what facts to keep. Typically the user's
+	// classified intent for the current turn ("code" / "review" /
+	// etc.) — same one passed via NewActDispatcher's intent arg, but
+	// kept distinct so callers can override.
+	AccumulatorIntent string
 }
 
 // NewCodingTurnHandler returns a dag.Handler for decide.coding_turn.
@@ -397,6 +422,19 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, 
 			}
 		}
 
+		// Accumulator folding. When the caller wired
+		// AccumulatorProvider + AccumulatorMaxTokens, run each
+		// (possibly-compressed) tool output through attend.accumulate
+		// and deposit the new snapshot into turn state so later nodes
+		// (decide.next, the synthesis decide.coding_turn) see it via
+		// dag.LatestAccumulatorSnapshot. The deposit ID is recorded on
+		// this act.* call's trace so the lineage is recoverable.
+		var accumulatorTrace *dag.TraceEntry
+		var accumulatorDepositID string
+		if dispErr == nil && cfg.AccumulatorProvider != nil && cfg.AccumulatorMaxTokens > 0 && out != "" {
+			accumulatorTrace, accumulatorDepositID = foldIntoAccumulator(ctx, cfg, out, childID)
+		}
+
 		// Compose trace entry.
 		entry := dag.TraceEntry{
 			NodeID:        childID,
@@ -429,17 +467,70 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, 
 		if compressTrace != nil {
 			entry.SpawnedChildren = append(entry.SpawnedChildren, compressTrace.NodeID)
 		}
+		if accumulatorDepositID != "" {
+			entry.SpawnedChildren = append(entry.SpawnedChildren, accumulatorDepositID)
+		}
 
 		if cfg.TraceCB != nil {
 			cfg.TraceCB(entry)
 			if compressTrace != nil {
 				cfg.TraceCB(*compressTrace)
 			}
+			if accumulatorTrace != nil {
+				cfg.TraceCB(*accumulatorTrace)
+			}
 		}
 		*spawnedChildren = append(*spawnedChildren, childID)
 
 		return out, dispErr
 	}
+}
+
+// foldIntoAccumulator runs the dispatcher's accumulator hook: invokes
+// attend.accumulate with (latest snapshot, new tool output), deposits
+// the resulting snapshot into dag turn state, and returns a synthetic
+// trace entry capturing the step (parent_node_id = the act.* call).
+//
+// Returns (nil, "") when the accumulator op isn't registered or the
+// snapshot is empty — fail-safe: the dispatcher keeps working
+// without the accumulator wiring even if the registry is incomplete.
+func foldIntoAccumulator(ctx context.Context, cfg CodingTurnConfig, observation, parentNodeID string) (*dag.TraceEntry, string) {
+	spec, err := cfg.ActRegistry.Get("attend.accumulate")
+	if err != nil {
+		return nil, ""
+	}
+	prev := dag.LatestAccumulatorSnapshot(ctx)
+	started := time.Now()
+	res, herr := spec.Handler(ctx, map[string]any{
+		"prev_snapshot": prev,
+		"observation":   observation,
+		"max_tokens":    cfg.AccumulatorMaxTokens,
+		"intent":        cfg.AccumulatorIntent,
+	}, dag.DefaultTurnBudget())
+	if herr != nil {
+		return nil, ""
+	}
+	snap, _ := res.Out["snapshot"].(string)
+	tok, _ := res.Out["snapshot_tokens"].(int)
+	fallback, _ := res.Out["fallback"].(bool)
+	if snap == "" {
+		return nil, ""
+	}
+	depositID := dag.DepositAccumulatorSnapshot(ctx, snap, tok, fallback)
+	entry := &dag.TraceEntry{
+		NodeID:        depositID,
+		ParentID:      parentNodeID,
+		QualifiedName: "attend.accumulate",
+		OK:            true,
+		CostConsumed:  res.CostConsumed,
+		WallStart:     started,
+		WallEnd:       time.Now(),
+		Out: map[string]any{
+			"snapshot_tokens": tok,
+			"fallback":        fallback,
+		},
+	}
+	return entry, depositID
 }
 
 // compressToolOutput runs the dispatcher's salience hook against a
@@ -584,7 +675,19 @@ func RegisterDefaultActOpMetadataWithCompressor(reg *dag.Registry, provider llm.
 	if err := reg.Register(ops.CompressSpec(ops.CompressConfig{Provider: provider})); err != nil {
 		return 0, fmt.Errorf("register attend.compress: %w", err)
 	}
-	return len(names) + 1, nil
+	// attend.accumulate + attend.compact ride the same provider —
+	// they're the working-memory engine the dispatcher folds into
+	// when CodingTurnConfig.AccumulatorProvider is set. Registering
+	// them here means callers don't have to know about the
+	// bounded-context wiring to benefit from it; setting a single
+	// AccumulatorProvider on CodingTurnConfig flips the path on.
+	if err := reg.Register(ops.AccumulateSpec(ops.AccumulateConfig{Provider: provider})); err != nil {
+		return 0, fmt.Errorf("register attend.accumulate: %w", err)
+	}
+	if err := reg.Register(ops.CompactSpec(ops.CompactConfig{Provider: provider})); err != nil {
+		return 0, fmt.Errorf("register attend.compact: %w", err)
+	}
+	return len(names) + 3, nil
 }
 
 // normalizeToolName mirrors harness.normalizeToolName (which is
