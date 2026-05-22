@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"fmt"
@@ -9,21 +9,21 @@ import (
 	"syscall"
 )
 
-// PIDLockFileName is the basename of the bootstrap lock file. Lives
+// PIDLockFileName is the basename of the study lock file. Lives
 // under Config.ContextDir.
-const PIDLockFileName = "bootstrap.pid"
+const PIDLockFileName = "study.pid"
 
-// PIDLock holds an exclusive non-blocking flock on .cortex/bootstrap.pid
+// PIDLock holds an exclusive non-blocking flock on .cortex/study.pid
 // while a controller is running. Second invocations in the same project
 // see the lock and skip (controller.Run reports "already running" and
 // returns nil — concurrent invocation is an expected case when REPL
-// auto-spawn meets a manual cortex bootstrap).
+// auto-spawn meets a manual cortex study).
 type PIDLock struct {
 	path string
 	f    *os.File
 }
 
-// AcquirePIDLock takes an exclusive non-blocking flock on the bootstrap
+// AcquirePIDLock takes an exclusive non-blocking flock on the study
 // pid file. On success the caller owns the lock and must call Release
 // before exit (or the lock will leak until the OS closes the fd).
 //

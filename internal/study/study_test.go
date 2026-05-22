@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"strings"
@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-func TestPlanStudy_Qwen30B_5m(t *testing.T) {
+func TestMakePlan_Qwen30B_5m(t *testing.T) {
 	// Qwen3-Coder-30B (262K ctx, ~5000ms/call) + Cortex (~94K eff_loc).
 	// capacity = 59 * 4000 = 236K > eff_loc → caps at default 0.80.
-	p := PlanStudy(5*time.Minute, 262144, 5000, 94000, 0)
+	p := MakePlan(5*time.Minute, 262144, 5000, 94000, 0)
 	if p.WindowLines != studyMaxWindowLines {
 		t.Errorf("big ctx → window_lines should clamp to %d, got %d", studyMaxWindowLines, p.WindowLines)
 	}
@@ -31,10 +31,10 @@ func TestPlanStudy_Qwen30B_5m(t *testing.T) {
 	}
 }
 
-func TestPlanStudy_TightBudget_CapsByReach(t *testing.T) {
+func TestMakePlan_TightBudget_CapsByReach(t *testing.T) {
 	// 30s on a 94K-LOC project with a small model: capacity is well
 	// under eff_loc → target_coverage drops below the default cap.
-	p := PlanStudy(30*time.Second, 8192, 3000, 94000, 0)
+	p := MakePlan(30*time.Second, 8192, 3000, 94000, 0)
 	// window_lines ≈ (8192*0.5 - 900) * 4 / 50 = 256
 	// max_calls = (30000 - 1500) / 3000 = 9
 	// capacity = 9 * ~256 = ~2300; ratio = 2300 / 94000 ≈ 0.025 → floor 0.05
@@ -43,9 +43,9 @@ func TestPlanStudy_TightBudget_CapsByReach(t *testing.T) {
 	}
 }
 
-func TestPlanStudy_Ollama7B_5m(t *testing.T) {
+func TestMakePlan_Ollama7B_5m(t *testing.T) {
 	// Ollama qwen2.5-coder:7b (32K ctx, ~2000ms/call) + Cortex.
-	p := PlanStudy(5*time.Minute, 32768, 2000, 94000, 0)
+	p := MakePlan(5*time.Minute, 32768, 2000, 94000, 0)
 	// usable_tokens ≈ 32768*0.5 - 800 - 100 = 15484
 	// usable_chars ≈ 61936 → window_lines ≈ 1238
 	if p.WindowLines < 1100 || p.WindowLines > 1400 {
@@ -60,9 +60,9 @@ func TestPlanStudy_Ollama7B_5m(t *testing.T) {
 	}
 }
 
-func TestPlanStudy_TinyModel_30s(t *testing.T) {
+func TestMakePlan_TinyModel_30s(t *testing.T) {
 	// Tiny model — 4K ctx, 1000ms/call, on a 1K-LOC project.
-	p := PlanStudy(30*time.Second, 4096, 1000, 1000, 0)
+	p := MakePlan(30*time.Second, 4096, 1000, 1000, 0)
 	if p.WindowLines < studyMinWindowLines {
 		t.Errorf("window_lines = %d, want >= %d", p.WindowLines, studyMinWindowLines)
 	}
@@ -74,17 +74,17 @@ func TestPlanStudy_TinyModel_30s(t *testing.T) {
 	}
 }
 
-func TestPlanStudy_HugeBudget_CapsAtDefault(t *testing.T) {
+func TestMakePlan_HugeBudget_CapsAtDefault(t *testing.T) {
 	// 1h on a small project — max_calls is plentiful, target should
 	// cap at the controller's default 0.80.
-	p := PlanStudy(time.Hour, 200000, 1000, 5000, 0)
+	p := MakePlan(time.Hour, 200000, 1000, 5000, 0)
 	if p.TargetCoverage != studyDefaultMaxCoverage {
 		t.Errorf("target_coverage = %.3f, want %.3f (cap)", p.TargetCoverage, studyDefaultMaxCoverage)
 	}
 }
 
-func TestPlanStudy_ZeroDuration_NoCalls(t *testing.T) {
-	p := PlanStudy(0, 32768, 1000, 5000, 0)
+func TestMakePlan_ZeroDuration_NoCalls(t *testing.T) {
+	p := MakePlan(0, 32768, 1000, 5000, 0)
 	if p.MaxCalls != 0 {
 		t.Errorf("D=0 → max_calls = %d, want 0", p.MaxCalls)
 	}
@@ -94,16 +94,16 @@ func TestPlanStudy_ZeroDuration_NoCalls(t *testing.T) {
 	}
 }
 
-func TestPlanStudy_ZeroCtxWindow_FallsBack(t *testing.T) {
+func TestMakePlan_ZeroCtxWindow_FallsBack(t *testing.T) {
 	// Probe couldn't determine ctx; expect the conservative fallback.
-	p := PlanStudy(5*time.Minute, 0, 1000, 5000, 0)
+	p := MakePlan(5*time.Minute, 0, 1000, 5000, 0)
 	if p.CtxWindowTokens != studyDefaultCtxWindow {
 		t.Errorf("ctx_window = %d, want fallback %d", p.CtxWindowTokens, studyDefaultCtxWindow)
 	}
 }
 
-func TestPlanStudy_ZeroLatency_FallsBack(t *testing.T) {
-	p := PlanStudy(5*time.Minute, 32768, 0, 5000, 0)
+func TestMakePlan_ZeroLatency_FallsBack(t *testing.T) {
+	p := MakePlan(5*time.Minute, 32768, 0, 5000, 0)
 	if p.LatencyMS != studyDefaultLatencyMS {
 		t.Errorf("latency = %d, want fallback %d", p.LatencyMS, studyDefaultLatencyMS)
 	}

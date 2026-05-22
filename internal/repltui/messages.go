@@ -81,12 +81,12 @@ type dagTraceMsg struct {
 	ErrCause      string
 }
 
-// bootstrapProgressMsg is delivered by Sink.Event with
-// kind="bootstrap.progress". Updates the ambient status row that
-// sits above the regular status line while bootstrap is running.
-type bootstrapProgressMsg struct {
+// studyProgressMsg is delivered by Sink.Event with
+// kind="study.progress". Updates the ambient status row that
+// sits above the regular status line while study is running.
+type studyProgressMsg struct {
 	Line string
-	// Done flips true on the terminal bootstrap line so the Update
+	// Done flips true on the terminal study line so the Update
 	// handler can clear the ambient row.
 	Done bool
 }

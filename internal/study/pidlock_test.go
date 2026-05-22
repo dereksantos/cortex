@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"os"
@@ -66,7 +66,7 @@ func TestPIDLock_HolderPIDRecorded(t *testing.T) {
 // TestPIDLock_RaceProtection spawns two goroutines that both try to
 // acquire the same lock concurrently. Exactly one must succeed, and
 // the other must get ok=false (no error). Verifies the race-protection
-// contract described in docs/bootstrap-dag-plan.md §Race protection.
+// contract described in docs/study-dag-plan.md §Race protection.
 func TestPIDLock_RaceProtection(t *testing.T) {
 	dir := t.TempDir()
 	// Pre-create the dir so AcquirePIDLock's MkdirAll doesn't race.

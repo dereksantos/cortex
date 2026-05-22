@@ -1,9 +1,9 @@
-// Package bootstrap implements the project-bootstrap DAG: a one-shot
+// Package study implements the project-study DAG: a one-shot
 // scan of a project's source files that samples chunks via a
 // hierarchical fractal sampler and emits dream.insight journal entries
 // until coverage hits a target threshold.
 //
-// See docs/bootstrap-dag-plan.md for the architecture and step-by-step
+// See docs/study-dag-plan.md for the architecture and step-by-step
 // rationale. The package is designed so the controller, analyzer, and
 // sampler are independently testable: the Sampler interface lets a
 // future Lévy / RWR sampler drop in without touching the controller,
@@ -17,7 +17,7 @@
 //   - bufio.Scanner default ScanLines for line counting
 //   - filepath.WalkDir results are re-sorted lexically before any
 //     output (defensive)
-package bootstrap
+package study
 
 import (
 	"context"
@@ -78,7 +78,8 @@ type BoundaryOutput struct {
 	EffTotalLines int    // primary-signal denominator
 	TotalFiles    int    // secondary-signal denominator (files with ≥1 chunk)
 	RNGSeed       int64
-	StateHash     string // sha256(sorted "relpath:size:mtime_unix")
+	StateHash     string            // sha256(sorted "relpath:size:mtime_unix") — diagnostic only
+	FileHashes    map[string]string // relpath → sha256(content); drift-detection key
 }
 
 // BoundaryAnalyzer carves a project into modules + chunks + edges. The
@@ -124,27 +125,53 @@ type Config struct {
 	RunShorthand string
 }
 
-// BootstrapState is the persisted controller state. It's written to
-// .cortex/bootstrap_state.json atomically (temp + rename) and read on
-// process start to detect "first run." A non-nil CompletedAt means
-// "done"; absence or nil CompletedAt means "needs to (re)run."
-type BootstrapState struct {
-	Version         int            `json:"v"`
-	ProjectRoot     string         `json:"project_root"`
-	StateHash       string         `json:"state_hash"`
-	RNGSeed         int64          `json:"rng_seed"`
-	TargetCoverage  float64        `json:"target_coverage"`
-	BudgetMax       int            `json:"budget_max"`
-	BatchSize       int            `json:"batch_size"`
-	StartedAt       time.Time      `json:"started_at"`
-	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
-	Iteration       int            `json:"iteration"`
-	CoveredChunkIDs []string       `json:"covered_chunk_ids"` // sorted on disk
-	CoveredEffLines int            `json:"covered_eff_lines"`
-	EffTotalLines   int            `json:"eff_total_lines"`
-	CoveredFiles    int            `json:"covered_files"`
-	TotalFiles      int            `json:"total_files"`
-	InsightsEmitted int            `json:"insights_emitted"`
-	ExtractOpUsed   map[string]int `json:"extract_op_used,omitempty"`
-	Halted          string         `json:"halted,omitempty"` // "" | "target" | "budget_loc" | "budget_files" | "canceled" | "error"
+// FileCoverage is the per-file unit of study state. Drift detection
+// keys on ContentHash: a file's stored ChunkIDs remain covered for as
+// long as the file's content sha256 matches what was studied. The
+// moment the file changes, its hash changes, the controller treats
+// every chunk as uncovered again on the next run.
+//
+// EffLines is the sum of EffLines across ChunkIDs at the time of
+// extraction. Stored so we can recompute coverage fractions without
+// needing the BoundaryOutput in hand.
+type FileCoverage struct {
+	ContentHash string    `json:"content_hash"`
+	CoveredAt   time.Time `json:"covered_at"`
+	ChunkIDs    []string  `json:"chunk_ids"` // sorted; the chunks of this file that produced an insight
+	EffLines    int       `json:"eff_lines"` // sum across ChunkIDs
+}
+
+// State is the persisted controller state. It's written to
+// .cortex/study_state.json atomically (temp + rename) and read on
+// process start.
+//
+// Per-file coverage (CoveredFiles) is the source of truth from v2 on:
+// a file is "covered" iff its current content hash matches the stored
+// ContentHash. CompletedAt is informational ("we hit target at least
+// once") and is no longer the gate — the gate is current-snapshot
+// coverage vs TargetCoverage, recomputed each run.
+//
+// CoveredChunkIDs is retained as the v1 migration source; on the first
+// v2 run the controller folds it into CoveredFiles using BoundaryOutput
+// to recover per-file groupings.
+type State struct {
+	Version         int                     `json:"v"`
+	ProjectRoot     string                  `json:"project_root"`
+	StateHash       string                  `json:"state_hash"` // diagnostic only from v2
+	RNGSeed         int64                   `json:"rng_seed"`
+	TargetCoverage  float64                 `json:"target_coverage"`
+	BudgetMax       int                     `json:"budget_max"`
+	BatchSize       int                     `json:"batch_size"`
+	StartedAt       time.Time               `json:"started_at"`
+	CompletedAt     *time.Time              `json:"completed_at,omitempty"`
+	Iteration       int                     `json:"iteration"`
+	CoveredChunkIDs []string                `json:"covered_chunk_ids,omitempty"` // legacy v1; kept for migration
+	CoveredFiles    map[string]FileCoverage `json:"covered_files_v2,omitempty"`  // v2 source of truth (relpath → coverage)
+	CoveredEffLines int                     `json:"covered_eff_lines"`           // recomputed each run from CoveredFiles
+	EffTotalLines   int                     `json:"eff_total_lines"`
+	CoveredFileN    int                     `json:"covered_file_count"` // count of files in CoveredFiles intersected with current snapshot
+	TotalFiles      int                     `json:"total_files"`
+	InsightsEmitted int                     `json:"insights_emitted"`
+	ExtractOpUsed   map[string]int          `json:"extract_op_used,omitempty"`
+	Halted          string                  `json:"halted,omitempty"` // "" | "target" | "no_drift" | "budget_loc" | "budget_files" | "canceled" | "error"
 }

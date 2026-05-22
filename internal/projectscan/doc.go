@@ -1,6 +1,6 @@
 // Package projectscan provides filesystem-scanning primitives shared
 // between Cortex's Dream sources (cognition/sources) and the
-// project-bootstrap DAG (internal/bootstrap).
+// project-study DAG (internal/study).
 //
 // The package centers on IgnoreSet, which combines three layers of
 // path-filtering logic:

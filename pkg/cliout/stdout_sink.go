@@ -146,7 +146,7 @@ func (s *StdoutSink) Event(kind string, payload any) {
 // writer can't print into the middle of the prompt — that would
 // look like:
 //
-//	[bootstrap] discovered foo.go
+//	[study] discovered foo.go
 //	~ ▮     ← prompt was here; output bumped it down
 //
 // Releasing the lock after reading lets writers flush behind the
@@ -208,12 +208,12 @@ func renderEvent(w io.Writer, kind string, payload any, verbose bool) {
 			name, nodeID, status, formatLatencyMsStdout(latency), tail)
 		return
 
-	case "bootstrap.progress":
-		// Bootstrap progress: the stdout path keeps the pre-TUI
-		// "[bootstrap] foo" inline shape; the TUI sink redirects
-		// this kind into the ambient row.
+	case "study.progress":
+		// Study progress: the stdout path keeps the pre-TUI
+		// "[study] foo" inline shape; the TUI sink redirects this
+		// kind into the ambient row.
 		if line, _ := m["line"].(string); line != "" {
-			fmt.Fprintf(w, "[bootstrap] %s\n", line)
+			fmt.Fprintf(w, "[study] %s\n", line)
 		}
 		return
 	case "coding.session_start":

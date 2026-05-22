@@ -5,20 +5,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
 	"github.com/dereksantos/cortex/internal/projectscan"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
 // ScanBoundariesConfig wires the sense.scan_project_boundaries op to
 // its analyzer + cache dir. If Analyzer is nil, the handler builds a
-// fresh bootstrap.UniversalAnalyzer per call using the input knobs.
+// fresh study.UniversalAnalyzer per call using the input knobs.
 //
 // CacheDir is reserved for a future memoization layer (step 11 of the
 // plan) — the handler currently always re-runs the analyzer and
 // reports cached=false.
 type ScanBoundariesConfig struct {
-	Analyzer bootstrap.BoundaryAnalyzer
+	Analyzer study.BoundaryAnalyzer
 	CacheDir string
 }
 
@@ -37,7 +37,7 @@ func ScanBoundariesSpec(cfg ScanBoundariesConfig) dag.NodeSpec {
 			{Name: "salt", Type: "string", Required: false},
 		},
 		Outputs: []dag.ParamSpec{
-			{Name: "boundary_output", Type: "*bootstrap.BoundaryOutput"},
+			{Name: "boundary_output", Type: "*study.BoundaryOutput"},
 			{Name: "total_lines", Type: "int"},
 			{Name: "eff_total_lines", Type: "int"},
 			{Name: "chunk_count", Type: "int"},
@@ -56,12 +56,12 @@ func ScanBoundariesSpec(cfg ScanBoundariesConfig) dag.NodeSpec {
 //
 // Inputs:
 //   - project_root (string)        — required; absolute path
-//   - window_lines (int)           — default bootstrap.DefaultWindowLines
-//   - window_overlap (int)         — default bootstrap.DefaultWindowOverlap
+//   - window_lines (int)           — default study.DefaultWindowLines
+//   - window_overlap (int)         — default study.DefaultWindowOverlap
 //   - salt (string)                — optional, mixed into RNG seed
 //
 // Outputs:
-//   - boundary_output (*bootstrap.BoundaryOutput)
+//   - boundary_output (*study.BoundaryOutput)
 //   - total_lines (int)            — raw line count, diagnostic
 //   - eff_total_lines (int)        — primary coverage denominator
 //   - chunk_count (int)            — len(BoundaryOutput.Chunks)
@@ -78,15 +78,15 @@ func NewScanBoundariesHandler(cfg ScanBoundariesConfig) dag.Handler {
 				CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds())},
 			}, fmt.Errorf("sense.scan_project_boundaries: 'project_root' (string) is required")
 		}
-		windowLines := readInt(in, "window_lines", bootstrap.DefaultWindowLines)
-		overlap := readInt(in, "window_overlap", bootstrap.DefaultWindowOverlap)
+		windowLines := readInt(in, "window_lines", study.DefaultWindowLines)
+		overlap := readInt(in, "window_overlap", study.DefaultWindowOverlap)
 		salt := readString(in, "salt")
 
-		var analyzer bootstrap.BoundaryAnalyzer
+		var analyzer study.BoundaryAnalyzer
 		if cfg.Analyzer != nil {
 			analyzer = cfg.Analyzer
 		} else {
-			analyzer = bootstrap.UniversalAnalyzer{
+			analyzer = study.UniversalAnalyzer{
 				WindowLines:   windowLines,
 				WindowOverlap: overlap,
 				Salt:          salt,

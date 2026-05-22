@@ -29,7 +29,7 @@ const (
 	// statusRows + dividerRows + inputRows = bottom-chrome reserved
 	// rows. Subtract from window height to get viewport height.
 	// ambientRow adds one more row when the model has a non-empty
-	// ambientRow value (bootstrap in progress, …); see View.
+	// ambientRow value (study in progress, …); see View.
 	statusRows       = 1
 	dividerRows      = 1
 	inputRows        = 1
@@ -82,7 +82,7 @@ type Model struct {
 
 	// ambientRow is the optional one-line tag that sits between
 	// the divider and the main status line. Used today by
-	// bootstrap progress; empty hides the row.
+	// study progress; empty hides the row.
 	ambientRow string
 
 	// selectMode is true while mouse reporting is temporarily
@@ -282,7 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(line)
 		return m, nil
 
-	case bootstrapProgressMsg:
+	case studyProgressMsg:
 		if msg.Done {
 			m.ambientRow = ""
 		} else {
@@ -306,7 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // terminal is empty space. With it, the input always lives on the
 // bottom-most row regardless of content length.
 //
-// When ambientRow is non-empty (bootstrap in progress, etc.) a
+// When ambientRow is non-empty (study in progress, etc.) a
 // dedicated row sits between the divider and the status line so
 // progress chatter doesn't pollute the transcript scroll.
 func (m Model) View() string {

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
+	"github.com/dereksantos/cortex/internal/study"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/harness"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -339,10 +339,10 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	// n_ctx from the probe cache (if any). Cheap read; the harness
 	// has its own catch-and-retry safety net for cache misses, so
 	// this is best-effort. Endpoint key matches what
-	// internal/bootstrap.Probe uses on write.
+	// internal/study.Probe uses on write.
 	var ctxWindow int
 	if h.endpoint != nil {
-		if p, ok := bootstrap.LookupCached(filepath.Join(workdir, ".cortex"), h.model, h.endpoint.Name); ok {
+		if p, ok := study.LookupCached(filepath.Join(workdir, ".cortex"), h.model, h.endpoint.Name); ok {
 			ctxWindow = p.CtxWindowTokens
 		}
 	}
