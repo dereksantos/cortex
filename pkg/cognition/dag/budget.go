@@ -10,15 +10,29 @@ package dag
 import "fmt"
 
 // Budget tracks the remaining resources a turn DAG can consume.
-// Four axes; all decay on each node call. OutputTokens governs the
-// total tokens nodes may deposit into turn state — the salience-budget
-// axis from docs/salience-budgets.md. Zero means "no contract on the
-// output axis"; pre-salience-budgets behavior.
+// Four axes (latency_ms, tokens, depth, output_tokens) decay as work
+// happens. MaxContextTokens is a fifth field that DOES NOT decay —
+// it's the active model's context window, the same value for every
+// node in the turn. Handlers read it to size their own prompts
+// (e.g., attend.accumulate uses it to derive a per-snapshot cap;
+// decide.next uses it to bias toward narrower spawns when small).
+//
+// Zero on MaxContextTokens means "unknown / unbounded" — handlers
+// keep their pre-MaxContextTokens behavior (e.g., calibrated
+// defaults). Set by the seed budget when the harness knows the
+// model's n_ctx (either from the probe cache or learned-from-
+// overflow via internal/harness/loop.go).
 type Budget struct {
 	LatencyMS    int // milliseconds of wall time remaining
 	Tokens       int // LLM token budget remaining
 	Depth        int // max remaining spawn depth (decrement per spawn)
 	OutputTokens int // tokens nodes may still deposit into turn state
+
+	// MaxContextTokens is the model's n_ctx — the cap on a single
+	// node's prompt size, NOT a consumable. Same value across the
+	// turn; handlers consult it when deciding how much context to
+	// build / fold / include. 0 = unknown; treat as unbounded.
+	MaxContextTokens int
 }
 
 // Cost is what a single node call reports as consumed. The executor
@@ -91,8 +105,41 @@ func (b Budget) CanAfford(c Cost) bool {
 }
 
 func (b Budget) String() string {
-	return fmt.Sprintf("Budget{lat=%dms tok=%d depth=%d out=%d}",
-		b.LatencyMS, b.Tokens, b.Depth, b.OutputTokens)
+	return fmt.Sprintf("Budget{lat=%dms tok=%d depth=%d out=%d ctx=%d}",
+		b.LatencyMS, b.Tokens, b.Depth, b.OutputTokens, b.MaxContextTokens)
+}
+
+// WithMaxContextTokens returns a copy of b with MaxContextTokens
+// set. Lets callers layer the model's n_ctx onto a per-intent seed
+// budget without re-typing the rest:
+//
+//	budget := dag.BudgetForIntent(intent).WithMaxContextTokens(nctx)
+//
+// 0 keeps the field "unknown"; handlers fall back to their
+// pre-MaxContextTokens behavior.
+func (b Budget) WithMaxContextTokens(n int) Budget {
+	if n < 0 {
+		n = 0
+	}
+	b.MaxContextTokens = n
+	return b
+}
+
+// PromptBudget returns a recommended per-node prompt-token cap
+// derived from MaxContextTokens. The 70% factor leaves headroom
+// for: the system prompt + the response tokens (e.g. up to
+// MaxOutputBudget for micro-LLMs) + tokenizer drift (the 4-char
+// estimator is off by ~10–25%). Handlers use this as the default
+// cap for their own prompt-building when MaxContextTokens is set.
+//
+// Returns 0 when MaxContextTokens is unknown — caller falls back to
+// its calibrated default (e.g., attend.accumulate's max_tokens
+// input).
+func (b Budget) PromptBudget() int {
+	if b.MaxContextTokens <= 0 {
+		return 0
+	}
+	return (b.MaxContextTokens * 70) / 100
 }
 
 // DefaultTurnBudget is the seed budget for a turn-type DAG.
