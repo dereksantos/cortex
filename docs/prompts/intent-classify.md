@@ -74,11 +74,24 @@ When the prior turn routed to `decide.clarify`, `runREPLChainTurn` stashes the o
 
 `detectFeedbackCue` runs at the top of `runTurn` against the raw user prompt. When it fires (`correction` from `"no, "`, `"wrong"`, `"actually"`, `"that's not"`, `"don't"`, `"instead"`, … / `confirmation` from `"perfect"`, `"thanks"`, `"got it"`, `"yes that"`, `"exactly"`, `"that works"`, `"nice"`, …), `emitFeedbackEntry` writes a `feedback.correction` or `feedback.confirmation` entry to `.cortex/journal/feedback/` linked to the prior turn via `GradedID="repl-<sessionID>-turn-<N>"`. Word boundaries keep false positives in check — `"no problem"` doesn't trigger correction. Best-effort: failures log + continue; turn 1 emits are skipped (no prior turn to grade).
 
+## Forever-session digest (Slice 5)
+
+`maybeWriteSessionDigest` runs at the end of every accepted turn. When the journal accumulates more than `sessionDigestThreshold = 15` `think.session_summary` entries since the most recent `dream.session_digest` (or since session start), it folds the head of the summary history into a single consolidated narrative via `attend.compact` with a session-digest-specific intent string, then writes a `dream.session_digest` entry.
+
+Hydration (`priorMessagesForHarness`) now prefers the digest over raw history:
+
+- `readLatestSessionDigest` returns the most recent digest payload (nil when none).
+- `readRecentSessionSummaries` skips the first `digest.SummaryCountIn` summaries (the ones already folded in) and applies the existing `historyLimit` / `priorSessionsCap` to the remainder.
+- `digestAndSummariesAsChatMessages` renders the combined block — digest narrative as a labeled `[digest covering N earlier turn(s)] …` chunk, then post-digest summaries with their `[intent=…]` tags. When no digest exists, behaves identically to the pre-Slice-5 path.
+
+Net effect: a 100-turn session injects `[digest of first 90 turns] + [last 10 summaries]` instead of `[10 most recent of 100 summaries, older 90 forgotten]`. Long sessions get logarithmic-ish memory growth rather than linear forgetting.
+
 ## Open follow-ups (from the integration TODO)
 
 - ~~**Slice 2**: dedicated seeds for `recall` (text-search + small synthesis) and `clarify` (one-question `decide.clarify`).~~ Shipped.
 - ~~**Slice 3**: add `Intent` field to `think.session_summary` payload so journal recall can filter by intent.~~ Shipped.
 - ~~**Slice 4**: clarify follow-up stitching + feedback writer-class auto-emit.~~ Shipped.
+- ~~**Slice 5**: `dream.session_digest` via `attend.compact`; hydration prefers digest + post-digest summaries.~~ Shipped.
 - **Slice 2 follow-up**: `decide.recall_summary` uses text search (`Storage.SearchEventsMultiTerm`) today because the REPL session doesn't wire an embedder through `newSessionCognition`. Add an embedder + switch recall to vector search when it lands.
-- **Slice 5**: `dream.session_digest` background op that rolls K recent summaries into one consolidated narrative once a threshold trips, keeping injected prior-context bounded as turns accumulate.
+- **Slice 5 follow-up — digest invalidation**: a `feedback.retraction` inside the digest's covered window should mark the digest stale so the next finalize re-runs `maybeWriteSessionDigest`. Today the digest stays in place until naturally superseded by the threshold crossing.
 - **Slice 6 / observability**: the classifier currently runs *outside* the DAG executor, so it doesn't appear in `dag_traces.jsonl`. Synthesize a trace row from the handler result so the routing decision is preserved alongside the seed.

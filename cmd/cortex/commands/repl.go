@@ -1728,6 +1728,15 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		if err := s.emitSessionSummary(row); err != nil && s.verbose {
 			s.ui.Warn(fmt.Sprintf("(session summary failed: %v)", err))
 		}
+		// Slice 5: when the per-turn summary count crosses the
+		// digest threshold (15 summaries since the last digest), fold
+		// the head of the summary history into a single dream.session_digest
+		// entry. Synchronous because the REPL doesn't have a background
+		// scheduler — pays ~6s of latency at threshold crossings only,
+		// then 0 until the next threshold. Best-effort.
+		if err := s.maybeWriteSessionDigest(); err != nil && s.verbose {
+			s.ui.Warn(fmt.Sprintf("(session digest failed: %v)", err))
+		}
 		s.printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
 			s.ui.Warn(fmt.Sprintf("(capture failed: %v)", err))
@@ -1909,9 +1918,16 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 	if s.historyLimit <= 0 && s.priorSessionsCap <= 0 {
 		return nil
 	}
+	// Slice 5: when a dream.session_digest exists, prefer it for the
+	// older history — readRecentSessionSummaries skips the summaries
+	// the digest already folded in, and readLatestSessionDigest returns
+	// the digest narrative to prepend as a single labeled block. The
+	// effective prior-context block is then [digest] + [recent
+	// post-digest summaries], not [all summaries up to cap].
+	digest := s.readLatestSessionDigest()
 	summaries := s.readRecentSessionSummaries(s.historyLimit, s.priorSessionsCap)
-	if len(summaries) > 0 {
-		return summariesAsChatMessages(summaries)
+	if digest != nil || len(summaries) > 0 {
+		return digestAndSummariesAsChatMessages(digest, summaries)
 	}
 	// Fallback: verbatim history (pre-Slice-4 behavior). Triggers when
 	// the journal has no summary entries for this session yet (turn 1
@@ -1957,6 +1973,13 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 		return nil
 	}
 	defer r.Close()
+	// Slice 5: skip summaries already folded into the latest digest.
+	// Digests cover the chronological prefix, so the first
+	// SummaryCountIn entries we encounter (in iteration order) are
+	// the ones to skip. Zero when no digest exists yet — the loop is
+	// the same as pre-Slice-5 behavior.
+	skip := s.digestCoveredCount()
+	skipped := 0
 	var current, prior []journal.ThinkSessionSummaryPayload
 	for {
 		e, err := r.Next()
@@ -1968,6 +1991,10 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 		}
 		p, perr := journal.ParseThinkSessionSummary(e)
 		if perr != nil {
+			continue
+		}
+		if skipped < skip {
+			skipped++
 			continue
 		}
 		if p.SessionID == s.sessionID {
@@ -1982,6 +2009,89 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 	out = append(out, prior...)
 	out = append(out, current...)
 	return out
+}
+
+// readLatestSessionDigest returns the most recent
+// dream.session_digest payload from the workdir's journal, or nil
+// when no digest exists yet. Iteration order is chronological, so
+// the LAST entry observed is the latest one. Read failures yield
+// nil — the caller falls back to the raw-summary path.
+func (s *replState) readLatestSessionDigest() *journal.DreamSessionDigestPayload {
+	if s.workdir == "" {
+		return nil
+	}
+	r, err := journal.NewReader(filepath.Join(s.workdir, ".cortex", "journal", "dream"))
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	var latest *journal.DreamSessionDigestPayload
+	for {
+		e, rerr := r.Next()
+		if rerr != nil {
+			break
+		}
+		if e.Type != journal.TypeDreamSessionDigest {
+			continue
+		}
+		p, perr := journal.ParseDreamSessionDigest(e)
+		if perr != nil {
+			continue
+		}
+		latest = p
+	}
+	return latest
+}
+
+// digestCoveredCount returns the SummaryCountIn from the most recent
+// dream.session_digest, or 0 if no digest exists. Used by
+// readRecentSessionSummaries to skip the summaries already folded
+// in — avoids double-injection of older history.
+func (s *replState) digestCoveredCount() int {
+	if d := s.readLatestSessionDigest(); d != nil {
+		return d.SummaryCountIn
+	}
+	return 0
+}
+
+// digestAndSummariesAsChatMessages renders the combined prior-context
+// block: digest narrative first (when present) as a single labeled
+// chunk, then the recent post-digest summaries via the existing
+// summariesAsChatMessages path. When no digest exists, behaves
+// identically to a direct summariesAsChatMessages call.
+func digestAndSummariesAsChatMessages(digest *journal.DreamSessionDigestPayload, summaries []journal.ThinkSessionSummaryPayload) []llm.ChatMessage {
+	if digest == nil {
+		return summariesAsChatMessages(summaries)
+	}
+	if len(summaries) == 0 && digest == nil {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("CONVERSATION SO FAR (summary of prior turns; not user input):\n\n")
+	b.WriteString("[digest covering ")
+	fmt.Fprintf(&b, "%d earlier turn(s)] ", digest.SummaryCountIn)
+	b.WriteString(strings.TrimSpace(digest.Narrative))
+	b.WriteByte('\n')
+
+	currentID := ""
+	if len(summaries) > 0 {
+		currentID = summaries[len(summaries)-1].SessionID
+	}
+	for _, p := range summaries {
+		tag := ""
+		if p.SessionID != currentID {
+			tag = "[prior session] "
+		}
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		fmt.Fprintf(&b, "\n%s%s[turn %d] %s\n", tag, intentTag, p.Turn, strings.TrimSpace(p.Summary))
+	}
+	return []llm.ChatMessage{
+		{Role: "user", Content: b.String()},
+		{Role: "assistant", Content: "Understood — I'll treat that as context, not as new user input."},
+	}
 }
 
 // tailN returns the last n elements of s. n ≤ 0 returns nil; n ≥
@@ -2328,6 +2438,191 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 	}
 	confidence, _ := res.Out["confidence"].(float64)
 	return intent, confidence
+}
+
+// sessionDigestThreshold is the number of think.session_summary
+// entries that must accumulate before maybeWriteSessionDigest will
+// fire. Sized so first-time users don't pay the digest cost in their
+// first short session; long-running users pay it once per ~15 turns
+// of accumulated history.
+const sessionDigestThreshold = 15
+
+// sessionDigestMaxTokens is the target output budget for the digest
+// narrative. Sized to comfortably fit alongside the active prior-
+// message block (6 recent summaries × ~200 tokens) plus the system
+// prompt without dominating the context window. Below the
+// attend.compact template's 800-token cap; the cap wins if they
+// diverge.
+const sessionDigestMaxTokens = 800
+
+// sessionDigestIntent is the salience-preservation hint passed to
+// attend.compact when re-summarizing K session summaries into the
+// durable narrative. Tells the compactor which facts matter when it
+// has to choose between competing content.
+const sessionDigestIntent = "session-digest: preserve DURABLE decisions, constraints, cross-cutting work, and open threads. Group thematically, not by turn number. Drop pleasantries, routine edits, and verifier passes that didn't fail."
+
+// maybeWriteSessionDigest checks whether the journal has accumulated
+// enough new think.session_summary entries since the most recent
+// dream.session_digest to warrant a fresh digest. When the threshold
+// is crossed, it folds those summaries into a single consolidated
+// narrative via attend.compact and writes the result as a
+// dream.session_digest entry. Best-effort: any failure is returned
+// but the caller logs+continues — a missing digest doesn't break
+// the REPL, it just leaves more raw summaries in the prior-context
+// block until the next opportunity.
+//
+// No-op when the threshold isn't crossed, when there's no provider
+// available, or when s.workdir is empty.
+func (s *replState) maybeWriteSessionDigest() error {
+	if s.workdir == "" {
+		return nil
+	}
+	summaries, lastDigestCovers, err := s.readSummariesForDigest()
+	if err != nil {
+		return fmt.Errorf("read summaries: %w", err)
+	}
+	newSinceLast := len(summaries) - lastDigestCovers
+	if newSinceLast < sessionDigestThreshold {
+		return nil
+	}
+
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	provider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+	if provider == nil || !provider.IsAvailable() {
+		return nil // can't compose; skip silently — try again next turn
+	}
+
+	// Build the snapshots input — one string per summary, chronological.
+	snapshots := make([]string, len(summaries))
+	for i, p := range summaries {
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		snapshots[i] = fmt.Sprintf("[session=%s turn=%d] %s%s", p.SessionID, p.Turn, intentTag, strings.TrimSpace(p.Summary))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, herr := ops.CompactSpec(ops.CompactConfig{Provider: provider}).Handler(ctx,
+		map[string]any{
+			"snapshots":  snapshots,
+			"max_tokens": sessionDigestMaxTokens,
+			"intent":     sessionDigestIntent,
+		},
+		dag.Budget{LatencyMS: 30000, Tokens: 6000, Depth: 1, OutputTokens: sessionDigestMaxTokens * 2})
+	if herr != nil {
+		return fmt.Errorf("attend.compact: %w", herr)
+	}
+	narrative, _ := res.Out["snapshot"].(string)
+	if strings.TrimSpace(narrative) == "" {
+		return fmt.Errorf("attend.compact returned empty narrative")
+	}
+	snapTokens, _ := res.Out["snapshot_tokens"].(int)
+	fallback, _ := res.Out["fallback"].(bool)
+	compressOp := "attend.compact"
+	if fallback {
+		compressOp = "fallback"
+	}
+
+	// Build the journal payload. CoversSessionIDs lets a future
+	// invalidation pass scope retraction effects to digests that
+	// covered the retracted session.
+	sessionSet := map[string]bool{}
+	for _, p := range summaries {
+		sessionSet[p.SessionID] = true
+	}
+	covers := make([]string, 0, len(sessionSet))
+	for id := range sessionSet {
+		covers = append(covers, id)
+	}
+	sort.Strings(covers)
+
+	origTotal := 0
+	for _, sn := range snapshots {
+		origTotal += len(sn) / 4
+	}
+
+	entry, err := journal.NewDreamSessionDigestEntry(journal.DreamSessionDigestPayload{
+		Narrative:        strings.TrimSpace(narrative),
+		SummaryCountIn:   len(summaries),
+		CoversSessionIDs: covers,
+		OrigTokens:       origTotal,
+		KeptTokens:       snapTokens,
+		CompressOp:       compressOp,
+	})
+	if err != nil {
+		return fmt.Errorf("build entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "dream")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("open writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append entry: %w", err)
+	}
+	return nil
+}
+
+// readSummariesForDigest scans the workdir journal and returns the
+// full chronological list of think.session_summary payloads plus the
+// SummaryCountIn from the most recent dream.session_digest (0 when
+// no digest exists yet). The diff between len(summaries) and the
+// covers count is the "new since last digest" pressure that triggers
+// the next digest.
+func (s *replState) readSummariesForDigest() ([]journal.ThinkSessionSummaryPayload, int, error) {
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		return nil, 0, nil // no think dir → nothing to digest, no error
+	}
+	defer r.Close()
+	var summaries []journal.ThinkSessionSummaryPayload
+	for {
+		e, rerr := r.Next()
+		if rerr != nil {
+			break
+		}
+		if e.Type != journal.TypeThinkSessionSummary {
+			continue
+		}
+		p, perr := journal.ParseThinkSessionSummary(e)
+		if perr != nil {
+			continue
+		}
+		summaries = append(summaries, *p)
+	}
+
+	// Latest digest's SummaryCountIn — captures how many summaries
+	// from the head of `summaries` are already folded into the most
+	// recent digest. Reads the dream class; absence is fine (0).
+	covers := 0
+	dr, derr := journal.NewReader(filepath.Join(s.workdir, ".cortex", "journal", "dream"))
+	if derr == nil {
+		defer dr.Close()
+		for {
+			e, rerr := dr.Next()
+			if rerr != nil {
+				break
+			}
+			if e.Type != journal.TypeDreamSessionDigest {
+				continue
+			}
+			d, perr := journal.ParseDreamSessionDigest(e)
+			if perr != nil {
+				continue
+			}
+			// Take the LAST one (highest covers) since iteration is
+			// chronological and digests only ever grow their cover set.
+			covers = d.SummaryCountIn
+		}
+	}
+	return summaries, covers, nil
 }
 
 // detectFeedbackCue mechanically classifies a user prompt as
