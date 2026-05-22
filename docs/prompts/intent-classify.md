@@ -22,7 +22,8 @@ Op: [`pkg/cognition/dag/ops/sense_classify_intent.go`](../../pkg/cognition/dag/o
 ## Disambiguation rules (in the prompt)
 
 - **code vs review**: if the prompt names a change to make → `code`; if it asks how something works → `review`.
-- **greeting vs clarify**: a one-word friendly opener → `greeting`; a real-but-vague ask → `clarify`.
+- **review vs clarify** (Slice 3.5 fix): if the prompt is a verb the agent can act on (`research`, `explore`, `audit`, `explain`, `find`, `list`) without a specific target → `review`. The agent has tools to find the target. Only pick `clarify` when there are literally two unrelated interpretations the agent can't choose between. "Research the project" is `review`, not `clarify`.
+- **greeting vs anything**: a one-word friendly opener with no other content → `greeting`. "Hi, fix the auth bug" is `code`, not `greeting`.
 
 ## Output contract
 
@@ -50,6 +51,12 @@ All failure paths return `intent="code"` with `confidence=0`:
 - Unknown intent label (model emitted "random-label") → normalized to `code`, confidence reset to 0
 
 The safe-default routes downstream to today's full pipeline — misclassification can never block a turn.
+
+## Cold-journal recall escalation (Slice 3.5)
+
+After classification, the REPL applies `downgradeRecallIfNoContext` (in `cmd/cortex/commands/repl.go`): if `intent == "recall"` and a probe against `Storage.SearchEventsMultiTerm` returns zero hits, the intent is downgraded to `code` so the seed falls through to the full chain under `DefaultTurnBudget`. The agent investigates (list dirs, read README) instead of replying "no prior context indexed".
+
+The probe tokenizes the prompt into content words (≥4 chars, stopwords stripped) before searching — full-string substring matching against natural-language recall questions practically never hits. With nil storage or an all-stopwords prompt, the downgrade also fires.
 
 ## Defense-in-depth (budget × intent)
 

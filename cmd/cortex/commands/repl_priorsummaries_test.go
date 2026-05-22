@@ -136,6 +136,35 @@ func TestSummariesAsChatMessages_TagsPriorSessions(t *testing.T) {
 	}
 }
 
+func TestSummariesAsChatMessages_TagsIntent(t *testing.T) {
+	// Slice 3: each prior summary surfaces its classified intent in
+	// the prior-message block so the next turn's model can passively
+	// weight relevance. Legacy entries with no Intent set must render
+	// without the tag (back-compat).
+	summaries := []journal.ThinkSessionSummaryPayload{
+		{SessionID: "s1", Turn: 1, Summary: "asked about postgres", Intent: "recall"},
+		{SessionID: "s1", Turn: 2, Summary: "added a field", Intent: "code"},
+		{SessionID: "s1", Turn: 3, Summary: "legacy entry, no intent"},
+	}
+	msgs := summariesAsChatMessages(summaries)
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one message")
+	}
+	body := msgs[0].Content
+	if !strings.Contains(body, "[intent=recall] [turn 1] asked about postgres") {
+		t.Errorf("recall intent tag missing; body:\n%s", body)
+	}
+	if !strings.Contains(body, "[intent=code] [turn 2] added a field") {
+		t.Errorf("code intent tag missing; body:\n%s", body)
+	}
+	if strings.Contains(body, "[intent=] ") || strings.Contains(body, "[intent= ]") {
+		t.Errorf("legacy entry must NOT render an empty intent tag; body:\n%s", body)
+	}
+	if !strings.Contains(body, "[turn 3] legacy entry, no intent") {
+		t.Errorf("legacy entry must still render with no intent tag; body:\n%s", body)
+	}
+}
+
 func TestTailN_BoundedSlice(t *testing.T) {
 	in := []journal.ThinkSessionSummaryPayload{
 		{Turn: 1}, {Turn: 2}, {Turn: 3}, {Turn: 4},

@@ -68,16 +68,18 @@ func TestParseThink_RejectsWrongType(t *testing.T) {
 // without loss.
 func TestThinkSessionSummary_RoundTrip(t *testing.T) {
 	p := ThinkSessionSummaryPayload{
-		SessionID:    "20260521T123456Z",
-		Turn:         3,
-		UserPrompt:   "tell me about this codebase",
-		Summary:      "User asked for codebase overview. Listed root, read README + main.go. Answer: Go DAG-based learning harness.",
-		FilesChanged: nil,
-		VerifyKind:   "none",
-		VerifyOK:     true,
-		OrigTokens:   2400,
-		KeptTokens:   240,
-		CompressOp:   "attend.compress",
+		SessionID:        "20260521T123456Z",
+		Turn:             3,
+		UserPrompt:       "tell me about this codebase",
+		Summary:          "User asked for codebase overview. Listed root, read README + main.go. Answer: Go DAG-based learning harness.",
+		FilesChanged:     nil,
+		VerifyKind:       "none",
+		VerifyOK:         true,
+		OrigTokens:       2400,
+		KeptTokens:       240,
+		CompressOp:       "attend.compress",
+		Intent:           "review",
+		IntentConfidence: 0.88,
 	}
 	e, err := NewThinkSessionSummaryEntry(p)
 	if err != nil {
@@ -99,4 +101,83 @@ func TestThinkSessionSummary_RoundTrip(t *testing.T) {
 	if got.KeptTokens != 240 || got.CompressOp != "attend.compress" {
 		t.Errorf("compression metadata lost: %+v", got)
 	}
+	if got.Intent != "review" {
+		t.Errorf("intent lost: %q", got.Intent)
+	}
+	if got.IntentConfidence != 0.88 {
+		t.Errorf("intent_confidence lost: %v", got.IntentConfidence)
+	}
+}
+
+// TestThinkSessionSummary_LegacyPayloadParses guarantees backward
+// compatibility — a payload written before Intent / IntentConfidence
+// existed must still parse cleanly, with the new fields defaulting to
+// their zero values. The journal is append-only and replayed from
+// disk, so old entries will be around for the life of every project.
+func TestThinkSessionSummary_LegacyPayloadParses(t *testing.T) {
+	// Hand-rolled JSON without intent / intent_confidence — exactly
+	// what a pre-Slice-3 writer emitted.
+	legacy := []byte(`{
+		"session_id": "20260101T000000Z",
+		"turn": 1,
+		"user_prompt": "add a print to main.go",
+		"summary": "Added fmt.Println to main; build succeeded.",
+		"files_changed": ["main.go"],
+		"verify_kind": "go build",
+		"verify_ok": true,
+		"orig_tokens": 1200,
+		"kept_tokens": 180,
+		"compress_op": "attend.compress"
+	}`)
+	e := &Entry{Type: TypeThinkSessionSummary, V: 1, Payload: legacy}
+	got, err := ParseThinkSessionSummary(e)
+	if err != nil {
+		t.Fatalf("legacy payload must parse: %v", err)
+	}
+	if got.Intent != "" {
+		t.Errorf("legacy entry must yield empty Intent, got %q", got.Intent)
+	}
+	if got.IntentConfidence != 0 {
+		t.Errorf("legacy entry must yield zero IntentConfidence, got %v", got.IntentConfidence)
+	}
+	if got.Summary == "" {
+		t.Error("legacy summary content lost during parse")
+	}
+}
+
+// TestThinkSessionSummary_EmptyIntentOmittedFromJSON pins the
+// omitempty contract — when Intent isn't set, the marshalled JSON
+// omits the field entirely so older readers see exactly the shape
+// they did before this slice landed.
+func TestThinkSessionSummary_EmptyIntentOmittedFromJSON(t *testing.T) {
+	p := ThinkSessionSummaryPayload{
+		SessionID:  "s",
+		Turn:       1,
+		UserPrompt: "x",
+		Summary:    "y",
+	}
+	e, err := NewThinkSessionSummaryEntry(p)
+	if err != nil {
+		t.Fatalf("NewThinkSessionSummaryEntry: %v", err)
+	}
+	if got := string(e.Payload); !contains(got, `"summary":"y"`) {
+		t.Errorf("payload missing summary: %s", got)
+	}
+	if contains(string(e.Payload), `"intent"`) {
+		t.Errorf("empty Intent must be omitted from JSON, got: %s", string(e.Payload))
+	}
+	if contains(string(e.Payload), `"intent_confidence"`) {
+		t.Errorf("zero IntentConfidence must be omitted from JSON, got: %s", string(e.Payload))
+	}
+}
+
+// contains is a tiny strings.Contains alias kept local to avoid the
+// strings import for one call site.
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }

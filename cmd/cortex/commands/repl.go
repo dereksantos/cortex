@@ -1523,8 +1523,11 @@ func (s *replState) runTurn(userPrompt string) error {
 		SnapshotDir:  snapDir,
 	}
 
-	// Attempt 1: fresh model call with just the user prompt.
-	hres, lres, runErr := s.runHarness(userPrompt, "")
+	// Attempt 1: fresh model call with just the user prompt. The
+	// intent classification from this first call defines the turn's
+	// intent for journaling purposes; retries reuse it (the user's
+	// ask hasn't changed, only the verifier feedback has).
+	hres, lres, intent, intentConf, runErr := s.runHarness(userPrompt, "")
 	row.HarnessError = errString(runErr)
 	row.AgentTurns = hres.AgentTurnsTotal
 	row.TokensIn = hres.TokensIn
@@ -1534,6 +1537,8 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.LatencyMs = hres.LatencyMs
 	row.FilesChanged = hres.FilesChanged
 	row.FinalText = lres.Final
+	row.Intent = intent
+	row.IntentConfidence = intentConf
 
 	verifyRes := s.runVerifier()
 	row.VerifyKind = verifyRes.Kind
@@ -1573,7 +1578,7 @@ func (s *replState) runTurn(userPrompt string) error {
 		} else {
 			s.ui.Info(fmt.Sprintf("  verify still failing, auto-retry %d/%d...", autoAttempt, retryBudget))
 		}
-		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
+		hres2, lres2, _, _, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
 		if autoAttempt == 1 {
 			row.RetryAgentTurns = hres2.AgentTurnsTotal
 			row.RetryTokensIn = hres2.TokensIn
@@ -1622,7 +1627,7 @@ func (s *replState) runTurn(userPrompt string) error {
 			row.UserGate = "retry"
 			userHints = append(userHints, decision.hint)
 			combined := verifyRes.OutputTail + "\n\nUSER HINT: " + decision.hint
-			hres3, lres3, runErr3 := s.runHarness(userPrompt, combined)
+			hres3, lres3, _, _, runErr3 := s.runHarness(userPrompt, combined)
 			row.UserRetryAttempts++
 			row.UserRetryHarnessError = errString(runErr3)
 			row.UserRetryFinalText = lres3.Final
@@ -1781,16 +1786,18 @@ func (s *replState) emitSessionSummary(row turnRow) error {
 	}
 
 	payload := journal.ThinkSessionSummaryPayload{
-		SessionID:    s.sessionID,
-		Turn:         row.Turn,
-		UserPrompt:   row.UserMessage,
-		Summary:      compressed,
-		FilesChanged: row.FilesChanged,
-		VerifyKind:   row.VerifyKind,
-		VerifyOK:     row.VerifyOK,
-		OrigTokens:   origTok,
-		KeptTokens:   keptTok,
-		CompressOp:   compressOp,
+		SessionID:        s.sessionID,
+		Turn:             row.Turn,
+		UserPrompt:       row.UserMessage,
+		Summary:          compressed,
+		FilesChanged:     row.FilesChanged,
+		VerifyKind:       row.VerifyKind,
+		VerifyOK:         row.VerifyOK,
+		OrigTokens:       origTok,
+		KeptTokens:       keptTok,
+		CompressOp:       compressOp,
+		Intent:           row.Intent,
+		IntentConfidence: row.IntentConfidence,
 	}
 	entry, err := journal.NewThinkSessionSummaryEntry(payload)
 	if err != nil {
@@ -1818,7 +1825,15 @@ func (s *replState) emitSessionSummary(row turnRow) error {
 // worth considering.
 func composeSessionSummaryDraft(row turnRow) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Turn %d.\n\nUser prompt:\n%s\n\n", row.Turn, row.UserMessage)
+	fmt.Fprintf(&b, "Turn %d.\n", row.Turn)
+	// Intent line preserves the classifier's routing decision in the
+	// prose the salience compressor sees; the compressed summary is
+	// more useful to future turns when it carries this dimension.
+	// Omitted entirely when intent wasn't captured (legacy / failure).
+	if row.Intent != "" {
+		fmt.Fprintf(&b, "Intent: %s (confidence %.2f)\n", row.Intent, row.IntentConfidence)
+	}
+	fmt.Fprintf(&b, "\nUser prompt:\n%s\n\n", row.UserMessage)
 	if row.FinalText != "" {
 		fmt.Fprintf(&b, "Assistant final response:\n%s\n\n", row.FinalText)
 	}
@@ -1985,7 +2000,17 @@ func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []l
 		if p.SessionID != currentID {
 			tag = "[prior session] "
 		}
-		fmt.Fprintf(&b, "\n%s[turn %d] %s\n", tag, p.Turn, strings.TrimSpace(p.Summary))
+		// Slice 3: surface the per-turn intent in the prior-message
+		// block so the model can passively weight relevance to the
+		// current turn. The tag is informational — readers (the LLM)
+		// decide whether to lean on a [intent=recall] turn for a
+		// recall question without the harness having to filter ahead
+		// of time. Omitted when the legacy entry had no intent.
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		fmt.Fprintf(&b, "\n%s%s[turn %d] %s\n", tag, intentTag, p.Turn, strings.TrimSpace(p.Summary))
 	}
 	return []llm.ChatMessage{
 		{Role: "user", Content: b.String()},
@@ -2000,7 +2025,10 @@ func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []l
 // retryContext, when non-empty, is appended to the user prompt as a
 // "previous attempt failed with this build/test error" tail so the
 // model has the failure in context on a retry.
-func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, error) {
+// Returns the classified intent + confidence alongside the harness
+// result so callers can persist it on turnRow (first attempt only;
+// retries reuse the original classification rather than re-running it).
+func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, string, float64, error) {
 	// Phase 4: endpoint resolution. When the model id resolves to a
 	// configured OpenAI-compatible endpoint (e.g. "chatterbox/..."),
 	// bind the harness to that endpoint and strip the prefix before
@@ -2010,7 +2038,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 
 	h, err := evalv2.NewCortexHarness(s.model)
 	if err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, fmt.Errorf("init harness: %w", err)
 	}
 	if useEndpoint {
 		h.SetEndpoint(&llm.EndpointConfig{
@@ -2087,7 +2115,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// so the chain's decide.coding_turn node drives this same instance
 	// (with all REPL state already set above). The full HarnessResult
 	// + LoopResult come back via ResultCallback.
-	hr, lr, runErr := runREPLChainTurn(s, h, prompt)
+	hr, lr, intent, intentConf, runErr := runREPLChainTurn(s, h, prompt)
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -2096,7 +2124,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if salvaged, _ := s.salvageTextToolCall(hr, lr); len(salvaged) > 0 {
 		hr.FilesChanged = mergeFiles(hr.FilesChanged, salvaged)
 	}
-	return hr, lr, runErr
+	return hr, lr, intent, intentConf, runErr
 }
 
 // runREPLChainTurn executes one REPL turn as a dynamic dag.Executor.Run
@@ -2128,7 +2156,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 // at finalize, and let decide.next see "shapes that worked recently"
 // as part of NextConfig. This is the cross-turn DAG learning the
 // inverse "DAG learns what to spawn" pitch depends on.
-func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
+func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, string, float64, error) {
 	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
 
 	tw, _ := dagtrace.NewWriter("")
@@ -2149,7 +2177,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// REPL's dynamic registry uses for the other LLM-backed ops.
 	compressProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
 	if _, err := dagnode.RegisterDefaultActOpMetadataWithCompressor(actReg, compressProvider); err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, fmt.Errorf("act-op metadata: %w", err)
 	}
 
 	// Phase 3 Slice 1: capability-aware salience cap. Weaker models
@@ -2196,7 +2224,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 
 	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, intentTerminalOnResponse, traceCB)
 	if err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, err
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, err
 	}
 
 	// Warm the registry from the calibration snapshot (Stage 4-C)
@@ -2218,6 +2246,13 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// greetings). Failure modes return intent=code with confidence=0 so
 	// the seed falls back to today's full chain.
 	intent, intentConf := classifyIntentForTurn(reg, prompt)
+	// Cold-journal escalation: decide.recall_summary has nothing useful
+	// to say when storage holds no events matching the prompt. Better
+	// to let the agent actually investigate (read README, list dirs)
+	// than reply "no prior context indexed". The downgrade returns
+	// intent="code" with the original confidence so the seed falls
+	// through to the full chain under DefaultTurnBudget.
+	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
 	turnBudget := dag.BudgetForIntent(intent)
 	seed := seedForIntent(intent, intentConf, prompt)
 	if s.verbose {
@@ -2225,9 +2260,9 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 			intent, intentConf, turnBudget, seed[0].QualifiedName()))
 	}
 	if _, err := ex.Run(context.Background(), turnID, seed, turnBudget); err != nil {
-		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+		return capturedHR, capturedLR, intent, intentConf, fmt.Errorf("repl chain executor: %w", err)
 	}
-	return capturedHR, capturedLR, capturedErr
+	return capturedHR, capturedLR, intent, intentConf, capturedErr
 }
 
 // classifyIntentForTurn runs the sense.classify_intent handler
@@ -2254,6 +2289,96 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 	}
 	confidence, _ := res.Out["confidence"].(float64)
 	return intent, confidence
+}
+
+// downgradeRecallIfNoContext returns intent unchanged unless it's
+// "recall" AND the storage probe finds nothing relevant to the
+// prompt. In that case it downgrades to "code" so the seed becomes
+// the full sense.prompt chain under DefaultTurnBudget — the agent
+// can investigate (list dirs, read files) instead of replying "no
+// prior context indexed" on a cold journal.
+//
+// Nil storage → downgrade. A recall question we can't answer from
+// storage is better served by the agent than by an apology.
+//
+// The probe tokenizes the prompt into content words and asks storage
+// for any event matching ANY word. Full-string substring matching
+// (what SearchEvents does) practically never hits on natural-language
+// recall questions — "what did we decide about postgres?" won't be a
+// substring of any stored event. Per-word OR matching catches the
+// realistic case: at least one content word from the question
+// (postgres, auth, pgx, …) appears in some prior tool-result or
+// tool-input.
+func downgradeRecallIfNoContext(intent, prompt string, store *storage.Storage) string {
+	if intent != "recall" {
+		return intent
+	}
+	if store == nil {
+		return ops.IntentCode
+	}
+	terms := recallProbeTerms(prompt)
+	if len(terms) == 0 {
+		return ops.IntentCode
+	}
+	matches, err := store.SearchEventsMultiTerm(terms, 1)
+	if err != nil || len(matches) == 0 {
+		return ops.IntentCode
+	}
+	return intent
+}
+
+// recallProbeTerms extracts content words from a recall prompt: lower
+// case, ≥4 characters, not in the small stopword set. The threshold
+// is deliberately generous — false positives (downgrade=false when
+// downgrade=true would have been kinder) cost the user a recall_summary
+// that says "no context"; false negatives cost a full coding-turn
+// when a recall would have been cheaper. Both are recoverable; the
+// false-positive case is worse so we err toward keeping recall when
+// any plausible word might match.
+func recallProbeTerms(prompt string) []string {
+	stop := map[string]bool{
+		"what": true, "when": true, "where": true, "which": true, "who": true,
+		"why": true, "how": true, "that": true, "this": true, "with": true,
+		"about": true, "from": true, "into": true, "have": true, "were": true,
+		"been": true, "they": true, "them": true, "their": true, "there": true,
+		"will": true, "would": true, "could": true, "should": true,
+		"again": true, "just": true, "your": true, "ours": true, "decide": true,
+		"decided": true, "settled": true, "remind": true,
+	}
+	var out []string
+	seen := map[string]bool{}
+	// Split on non-letter runs so "postgres?" → "postgres" without a
+	// regex dependency. ASCII-only; non-ASCII content words won't be
+	// indexed for the probe but storage's substring match handles
+	// them downstream if SearchEventsMultiTerm gets routed differently
+	// later.
+	cur := make([]byte, 0, 16)
+	flush := func() {
+		if len(cur) < 4 {
+			cur = cur[:0]
+			return
+		}
+		w := string(cur)
+		cur = cur[:0]
+		if stop[w] || seen[w] {
+			return
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			cur = append(cur, c+32)
+		case c >= 'a' && c <= 'z':
+			cur = append(cur, c)
+		default:
+			flush()
+		}
+	}
+	flush()
+	return out
 }
 
 // intentShortCircuitThreshold gates intent-aware short-circuits.
@@ -2718,6 +2843,14 @@ type turnRow struct {
 	APIURL       string `json:"api_url,omitempty"`
 	SystemPrompt string `json:"system_prompt"`
 	SnapshotDir  string `json:"snapshot_dir"`
+
+	// Intent ingestion result (sense.classify_intent) from the FIRST
+	// runHarness call. Retries reuse the same intent — the user's
+	// underlying ask hasn't changed, only verifier feedback has.
+	// Empty / zero on entries written before the field existed; readers
+	// tolerate the absence.
+	Intent           string  `json:"intent,omitempty"`
+	IntentConfidence float64 `json:"intent_confidence,omitempty"`
 
 	// Initial attempt (no error context).
 	HarnessError          string   `json:"harness_error,omitempty"`
