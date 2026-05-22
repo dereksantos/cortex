@@ -4,21 +4,21 @@ import (
 	"context"
 	"testing"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 )
 
 // synthOutput builds a small BoundaryOutput for handler tests.
-func synthOutput() *bootstrap.BoundaryOutput {
-	out := &bootstrap.BoundaryOutput{
+func synthOutput() *study.BoundaryOutput {
+	out := &study.BoundaryOutput{
 		ProjectRoot: "/x",
 		RNGSeed:     1234,
 		StateHash:   "synth",
 	}
 	for m := 0; m < 3; m++ {
-		mod := bootstrap.Module{ID: "m" + itoaOps(m)}
+		mod := study.Module{ID: "m" + itoaOps(m)}
 		for c := 0; c < 5; c++ {
-			ch := bootstrap.Chunk{
+			ch := study.Chunk{
 				ID:        mod.ID + "-c" + itoaOps(c),
 				RelPath:   mod.ID + "/f" + itoaOps(c) + ".go",
 				LineStart: 1,
@@ -68,7 +68,7 @@ func TestFractalSample_Handler(t *testing.T) {
 	if len(ids) != 3 {
 		t.Errorf("chunk_ids len = %d, want 3", len(ids))
 	}
-	chunks, ok := res.Out["chunks"].([]bootstrap.Chunk)
+	chunks, ok := res.Out["chunks"].([]study.Chunk)
 	if !ok {
 		t.Fatal("chunks missing")
 	}

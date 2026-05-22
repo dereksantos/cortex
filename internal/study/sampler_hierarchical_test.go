@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"math/rand"

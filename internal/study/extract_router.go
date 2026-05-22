@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import "strings"
 
@@ -24,7 +24,7 @@ const (
 // is calibrated for session-event extraction ("durable, actionable,
 // teachable" decisions/corrections) — on source files it surfaces
 // tangential patterns instead of the "what is this file's job" answer
-// bootstrap needs. The go.mod case was the strongest signal: insight
+// study needs. The go.mod case was the strongest signal: insight
 // invented an architectural recommendation from a plain dependency
 // declaration, overview produced a structured config summary.
 //

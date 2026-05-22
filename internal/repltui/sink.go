@@ -116,7 +116,7 @@ func (s *TUISink) Error(err error) {
 // Update handler can react without re-parsing a generic any:
 //
 //   - "dag.trace"        → dagTraceMsg (per-node DAG trace line)
-//   - "bootstrap.progress" → bootstrapProgressMsg (ambient row)
+//   - "study.progress" → studyProgressMsg (ambient row)
 //
 // Everything else flows as a generic eventMsg and the renderEventLine
 // switch decides how to display it.
@@ -127,8 +127,8 @@ func (s *TUISink) Event(kind string, payload any) {
 			s.send(t)
 			return
 		}
-	case "bootstrap.progress":
-		if t, ok := toBootstrapProgressMsg(payload); ok {
+	case "study.progress":
+		if t, ok := toStudyProgressMsg(payload); ok {
 			s.send(t)
 			return
 		}
@@ -165,14 +165,14 @@ func toDagTraceMsg(payload any) (dagTraceMsg, bool) {
 	}, true
 }
 
-func toBootstrapProgressMsg(payload any) (bootstrapProgressMsg, bool) {
+func toStudyProgressMsg(payload any) (studyProgressMsg, bool) {
 	m, ok := payload.(map[string]any)
 	if !ok {
-		return bootstrapProgressMsg{}, false
+		return studyProgressMsg{}, false
 	}
 	line, _ := m["line"].(string)
 	done, _ := m["done"].(bool)
-	return bootstrapProgressMsg{Line: line, Done: done}, true
+	return studyProgressMsg{Line: line, Done: done}, true
 }
 
 // Banner implements cliout.Sink.

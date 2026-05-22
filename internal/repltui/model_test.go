@@ -118,7 +118,7 @@ func TestUpdate_DAGTraceColoredByFunction(t *testing.T) {
 }
 
 func TestUpdate_BootstrapProgressManagesAmbientRow(t *testing.T) {
-	m := drive(bootstrapProgressMsg{Line: "extracting insights (3/12)", Done: false})
+	m := drive(studyProgressMsg{Line: "extracting insights (3/12)", Done: false})
 	if m.ambientRow != "extracting insights (3/12)" {
 		t.Errorf("ambientRow: got %q, want set", m.ambientRow)
 	}
@@ -129,7 +129,7 @@ func TestUpdate_BootstrapProgressManagesAmbientRow(t *testing.T) {
 	}
 
 	// Done=true clears the row.
-	mm, _ := m.Update(bootstrapProgressMsg{Done: true})
+	mm, _ := m.Update(studyProgressMsg{Done: true})
 	m = mm.(Model)
 	if m.ambientRow != "" {
 		t.Errorf("ambientRow should clear on Done=true, got %q", m.ambientRow)

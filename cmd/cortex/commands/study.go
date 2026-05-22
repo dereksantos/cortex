@@ -1,19 +1,23 @@
 // Package commands — `cortex study DURATION`.
 //
-// Spends a wall-clock duration learning the project via the bootstrap
-// DAG. The duration is the single user-facing knob; chunk size + chunk
-// count are derived from the model's context window and observed
-// per-call latency (probed once per model, cached for 7 days). Hard
-// cap: when DURATION elapses, study halts immediately (in-flight call
-// is context-canceled via context.WithDeadline).
+// Spends a wall-clock duration learning the project via the study DAG.
+// DURATION is the primary user-facing knob; chunk size + chunk count
+// are derived from the model's context window and observed per-call
+// latency (probed once per model, cached for 7 days). Hard cap: when
+// DURATION elapses, study halts immediately (in-flight call is
+// context-canceled via context.WithDeadline).
+//
+// Power-user overrides (--target-coverage, --budget, --window-lines,
+// --window-overlap, --batch, --salt) win over the duration-derived
+// plan — this replaces the older `cortex study` knob surface.
 //
 // Every run is tagged with a unique run_id and a duration shorthand
 // ("study-5m") so multiple studies stay comparable in the journal —
-// the comparison workflow described in docs/cortex-study-plan.md.
+// see docs/cortex-study-plan.md.
 //
-// Engineering: this command reuses the same controller as
-// `cortex bootstrap` (no parallel surface). The duration → controller
-// knobs translation lives in internal/bootstrap.PlanStudy.
+// Engineering: the duration → controller-knobs translation lives in
+// internal/study.MakePlan. Auto-accumulation is per-file (see
+// study.Controller); the gate is drift, not a one-shot completion bit.
 package commands
 
 import (
@@ -26,9 +30,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/bootstrap"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/study"
 )
 
 func init() {
@@ -43,18 +47,26 @@ func (c *StudyCommand) Name() string { return "study" }
 
 // Description returns the command description.
 func (c *StudyCommand) Description() string {
-	return "Spend N seconds/minutes/hours learning the project via the bootstrap DAG"
+	return "Spend N seconds/minutes/hours learning the project via the study DAG"
 }
 
-// DescribeFlags surfaces study's flag set into tools.json.
+// DescribeFlags surfaces study's flag set into tools.json. Knob
+// overrides default to sentinel values (negative / empty) so the
+// Execute path can tell "user didn't pass this" from "user passed zero."
 func (c *StudyCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.String("model", "", "Model id (default cfg.OllamaModel)")
 	fs.String("endpoint", "", "OpenAI-compat base URL transient override (bypasses model_routes)")
-	fs.Bool("force", false, "Re-run even if previously completed")
-	fs.String("extract-op", bootstrap.ExtractOpAuto, "auto | extract_insight | extract_overview")
+	fs.Bool("force", false, "Wipe per-file coverage before running (re-extract everything)")
+	fs.String("extract-op", study.ExtractOpAuto, "auto | extract_insight | extract_overview")
 	fs.Bool("dry-run", false, "Plan only — print derivation, don't call LLM")
 	fs.Bool("verbose", false, "Print derivation trace + per-iteration banners")
 	fs.Float64("fill", 0, "Target context-window fill fraction (advanced; default 0.5)")
+	fs.Float64("target-coverage", -1, "Override the derived halt-target (eff_loc AND files ≥ this)")
+	fs.Int("budget", -1, "Override the derived iteration cap")
+	fs.Int("batch", -1, "Override the derived chunks-per-iteration count")
+	fs.Int("window-lines", -1, "Override the derived chunk window size in lines")
+	fs.Int("window-overlap", -1, "Override the derived adjacent-chunk overlap in lines")
+	fs.String("salt", "", "Override the RNG salt (default: run_id)")
 }
 
 // Execute runs the study subcommand. Positional arg: DURATION.
@@ -63,10 +75,17 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	modelID := ""
 	endpoint := ""
 	force := false
-	extractOp := bootstrap.ExtractOpAuto
+	extractOp := study.ExtractOpAuto
 	dryRun := false
 	verbose := false
 	fill := 0.0
+	// Power-user overrides. -1 / "" = "not set; use plan default."
+	overrideTarget := -1.0
+	overrideBudget := -1
+	overrideBatch := -1
+	overrideWindow := -1
+	overrideOverlap := -1
+	overrideSalt := ""
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -105,6 +124,56 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 				fill = v
 				i++
 			}
+		case "--target-coverage":
+			if i+1 < len(args) {
+				v, err := strconv.ParseFloat(args[i+1], 64)
+				if err != nil {
+					return fmt.Errorf("--target-coverage: %w", err)
+				}
+				overrideTarget = v
+				i++
+			}
+		case "--budget":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--budget: %w", err)
+				}
+				overrideBudget = v
+				i++
+			}
+		case "--batch":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--batch: %w", err)
+				}
+				overrideBatch = v
+				i++
+			}
+		case "--window-lines":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--window-lines: %w", err)
+				}
+				overrideWindow = v
+				i++
+			}
+		case "--window-overlap":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--window-overlap: %w", err)
+				}
+				overrideOverlap = v
+				i++
+			}
+		case "--salt":
+			if i+1 < len(args) {
+				overrideSalt = args[i+1]
+				i++
+			}
 		default:
 			if strings.HasPrefix(arg, "-") {
 				fmt.Fprintf(os.Stderr, "warning: unknown flag %q\n", arg)
@@ -129,7 +198,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	if d <= 0 {
 		return fmt.Errorf("duration must be > 0, got %s", d)
 	}
-	if !bootstrap.IsValidExtractOp(extractOp) {
+	if !study.IsValidExtractOp(extractOp) {
 		return fmt.Errorf("--extract-op: %q is not one of auto|extract_insight|extract_overview", extractOp)
 	}
 
@@ -140,7 +209,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	cortexDir := filepath.Join(projectRoot, ".cortex")
 
 	// Resolve provider (model id = routing key; --endpoint transient
-	// override). Same wiring as `cortex bootstrap`.
+	// override). Same wiring as `cortex study`.
 	provider := intllm.BuildProvider(ctx.Config, modelID, intllm.WithEndpointOverride(endpoint))
 	if provider == nil && !dryRun {
 		fmt.Fprintln(os.Stderr, "warning: no LLM provider configured; falling back to mechanical extract")
@@ -154,7 +223,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	// Probe + cache. A 7-day TTL means the second study run within a
 	// week pays zero startup cost.
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 45*time.Second)
-	probe, err := bootstrap.Probe(probeCtx, provider, resolvedModel, endpoint, cortexDir, bootstrap.DefaultProbeTTL)
+	probe, err := study.Probe(probeCtx, provider, resolvedModel, endpoint, cortexDir, study.DefaultProbeTTL)
 	probeCancel()
 	if err != nil {
 		// Probe cache write failures are non-fatal — the in-memory
@@ -170,7 +239,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	// let the planner fall back to the 0.80 default. The controller's
 	// BudgetMax = plan.MaxCalls is the operative cap; ctx.WithDeadline
 	// enforces the wall-clock hard stop.
-	plan := bootstrap.PlanStudy(d, probe.CtxWindowTokens, probe.LatencyMS, 0, fill)
+	plan := study.MakePlan(d, probe.CtxWindowTokens, probe.LatencyMS, 0, fill)
 
 	fmt.Println("[study] " + plan.Reasoning)
 
@@ -179,14 +248,24 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		return nil
 	}
 
-	// First-run check (unless --force). Study uses the same state file
-	// as bootstrap.
-	if !force {
-		if run, reason := bootstrap.ShouldRunBootstrap(cortexDir); !run {
-			fmt.Println("[study] bootstrap state present (completed); use --force to re-run.")
-			return nil
-		} else if reason != "never_run" && verbose {
-			fmt.Printf("[study] state present (%s); resuming.\n", reason)
+	// With auto-accumulation, study is always runnable: the controller
+	// detects drift on its own (per-file content hashes against
+	// CoveredFiles) and short-circuits with reason="no_drift" if there
+	// is nothing new to study. --force is the escape hatch: wipe the
+	// covered set entirely so every file is re-extracted from scratch.
+	if force {
+		if err := study.WipeCoverage(cortexDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: --force wipe failed: %v\n", err)
+		} else if verbose {
+			fmt.Println("[study] --force: cleared per-file coverage; re-extracting from scratch.")
+		}
+	} else if verbose {
+		sum := study.LoadDeficitSummary(cortexDir)
+		if sum.HasState {
+			fmt.Printf("[study] resuming: last coverage eff_loc=%.0f%% files=%.0f%% (drift checked on scan)\n",
+				100*sum.LastCoveredEff, 100*sum.LastCoveredFile)
+		} else {
+			fmt.Println("[study] first run: no prior state.")
 		}
 	}
 
@@ -199,18 +278,47 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	cc := bootstrap.ControllerConfig{
-		Config: bootstrap.Config{
+	// Apply power-user overrides on top of the plan. Any explicit knob
+	// the user passed (--target-coverage / --budget / --batch /
+	// --window-lines / --window-overlap / --salt) wins over the
+	// duration-derived value.
+	target := plan.TargetCoverage
+	if overrideTarget >= 0 {
+		target = overrideTarget
+	}
+	budget := plan.MaxCalls
+	if overrideBudget >= 0 {
+		budget = overrideBudget
+	}
+	batch := plan.BatchSize
+	if overrideBatch >= 0 {
+		batch = overrideBatch
+	}
+	windowLines := plan.WindowLines
+	if overrideWindow >= 0 {
+		windowLines = overrideWindow
+	}
+	windowOverlap := plan.WindowOverlap
+	if overrideOverlap >= 0 {
+		windowOverlap = overrideOverlap
+	}
+	salt := plan.RunID
+	if overrideSalt != "" {
+		salt = overrideSalt
+	}
+
+	cc := study.ControllerConfig{
+		Config: study.Config{
 			ProjectRoot:    projectRoot,
 			ContextDir:     cortexDir,
 			Provider:       provider,
-			TargetCoverage: plan.TargetCoverage,
-			BudgetMax:      plan.MaxCalls,
-			BatchSize:      plan.BatchSize,
-			WindowLines:    plan.WindowLines,
-			WindowOverlap:  plan.WindowOverlap,
+			TargetCoverage: target,
+			BudgetMax:      budget,
+			BatchSize:      batch,
+			WindowLines:    windowLines,
+			WindowOverlap:  windowOverlap,
 			ExtractOp:      extractOp,
-			Salt:           plan.RunID, // unique RNG variation per run
+			Salt:           salt,
 			Banner:         bannerFn,
 			RunID:          plan.RunID,
 			RunShorthand:   plan.Shorthand,
@@ -218,7 +326,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		ExtractInsightFn:  insightFn,
 		ExtractOverviewFn: overviewFn,
 	}
-	controller, err := bootstrap.NewController(cc)
+	controller, err := study.NewController(cc)
 	if err != nil {
 		return fmt.Errorf("controller: %w", err)
 	}
@@ -248,7 +356,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	// not user Ctrl-C" distinction.
 	if st.Halted == "canceled" {
 		st.Halted = "study_duration_elapsed"
-		_ = bootstrap.SaveState(bootstrap.StatePath(cortexDir), st)
+		_ = study.SaveState(study.StatePath(cortexDir), st)
 	}
 
 	covEff := 0.0
@@ -258,7 +366,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 			covEff = float64(st.CoveredEffLines) / float64(out.EffTotalLines)
 		}
 		if out.TotalFiles > 0 {
-			covFiles = float64(st.CoveredFiles) / float64(out.TotalFiles)
+			covFiles = float64(st.CoveredFileN) / float64(out.TotalFiles)
 		}
 	}
 
@@ -279,7 +387,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	} else {
 		fmt.Printf("  probe                  : %s (ctx=%d, latency=%dms)\n", probe.Source, probe.CtxWindowTokens, probe.LatencyMS)
 	}
-	fmt.Printf("  state file             : %s\n", bootstrap.StatePath(cortexDir))
+	fmt.Printf("  state file             : %s\n", study.StatePath(cortexDir))
 	return nil
 }
 
@@ -287,7 +395,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 // journal summarizing the run. Kept out of the controller because the
 // controller's writer closes inside Run() — we open a fresh writer
 // post-run for this single entry.
-func emitStudyClosingInsight(cortexDir string, plan bootstrap.StudyPlan, st *bootstrap.BootstrapState, out *bootstrap.BoundaryOutput, elapsed time.Duration) error {
+func emitStudyClosingInsight(cortexDir string, plan study.Plan, st *study.State, out *study.BoundaryOutput, elapsed time.Duration) error {
 	dreamDir := filepath.Join(cortexDir, "journal", "dream")
 	w, err := journal.NewWriter(journal.WriterOpts{
 		ClassDir: dreamDir,
@@ -310,7 +418,7 @@ func emitStudyClosingInsight(cortexDir string, plan bootstrap.StudyPlan, st *boo
 	}
 	filePct := 0.0
 	if totalFiles > 0 {
-		filePct = 100 * float64(st.CoveredFiles) / float64(totalFiles)
+		filePct = 100 * float64(st.CoveredFileN) / float64(totalFiles)
 	}
 	content := fmt.Sprintf(
 		"Study halted: reason=%s, elapsed=%s, iterations=%d, insights=%d, eff_loc_covered=%.1f%%, file_coverage=%.1f%%, ctx=%d, latency=%dms",
@@ -318,7 +426,7 @@ func emitStudyClosingInsight(cortexDir string, plan bootstrap.StudyPlan, st *boo
 		covPct, filePct, plan.CtxWindowTokens, plan.LatencyMS,
 	)
 
-	tags := []string{"bootstrap", "meta", "study", plan.RunID, plan.Shorthand, "halt:" + st.Halted}
+	tags := []string{"study", "meta", plan.RunID, plan.Shorthand, "halt:" + st.Halted}
 	insightID := "study:done:" + plan.RunID
 	payload := journal.DreamInsightPayload{
 		InsightID:    insightID,
@@ -357,12 +465,20 @@ func printStudyHelp() {
 	fmt.Println("  cortex study 30m --model X --force")
 	fmt.Println("")
 	fmt.Println("Flags:")
-	fmt.Println("  --model M         Model id (default cfg.OllamaModel)")
-	fmt.Println("  --endpoint URL    OpenAI-compat base URL (one-off; prefer model_routes)")
-	fmt.Println("  --force           Re-run even if previously completed")
-	fmt.Println("  --extract-op X    auto | extract_insight | extract_overview")
-	fmt.Println("  --dry-run         Plan only — print the derivation, don't call the LLM")
-	fmt.Println("  --verbose         Print each iteration's banner + probe details")
-	fmt.Println("  --fill F          Target context-window fill fraction (default 0.5)")
-	fmt.Println("  -h, --help        Show this help message")
+	fmt.Println("  --model M             Model id (default cfg.OllamaModel)")
+	fmt.Println("  --endpoint URL        OpenAI-compat base URL (one-off; prefer model_routes)")
+	fmt.Println("  --force               Wipe per-file coverage before running (re-extract everything)")
+	fmt.Println("  --extract-op X        auto | extract_insight | extract_overview")
+	fmt.Println("  --dry-run             Plan only — print the derivation, don't call the LLM")
+	fmt.Println("  --verbose             Print each iteration's banner + probe details")
+	fmt.Println("  --fill F              Target context-window fill fraction (default 0.5)")
+	fmt.Println("")
+	fmt.Println("Power-user overrides (win over the duration-derived plan):")
+	fmt.Println("  --target-coverage F   Halt when both signals ≥ F")
+	fmt.Println("  --budget N            Max iterations")
+	fmt.Println("  --batch N             Chunks per iteration")
+	fmt.Println("  --window-lines N      Chunk window size in lines")
+	fmt.Println("  --window-overlap N    Adjacent-chunk overlap in lines")
+	fmt.Println("  --salt S              RNG salt for variation across runs")
+	fmt.Println("  -h, --help            Show this help message")
 }

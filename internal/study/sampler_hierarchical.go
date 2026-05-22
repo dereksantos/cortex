@@ -1,4 +1,4 @@
-package bootstrap
+package study
 
 import (
 	"math"
@@ -26,7 +26,7 @@ type HierarchicalSampler struct {
 	SizeWeightExp      float64
 }
 
-// Name identifies the sampler in bootstrap metadata / journal entries.
+// Name identifies the sampler in study metadata / journal entries.
 func (h *HierarchicalSampler) Name() string { return "hierarchical-v1" }
 
 // Next returns up to k chunk IDs drawn from out, never repeating an

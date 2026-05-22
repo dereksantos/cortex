@@ -1,4 +1,4 @@
-package bootstrap_test
+package study_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 )
 
 // The A/B eval is the hard gate before the controller commits to one
-// extract op as default (see docs/bootstrap-dag-plan.md §A/B).
+// extract op as default (see docs/study-dag-plan.md §A/B).
 // It runs both maintain.extract_insight and maintain.extract_overview
 // on a 12-chunk panel (4 Go + 4 Python + 4 TS; mixed source/config/
 // test/doc) and produces a scoring table.
@@ -27,7 +27,7 @@ import (
 //
 // Flow:
 //
-//	CORTEX_RUN_AB=1 go test -v ./internal/bootstrap -run TestExtractAB \
+//	CORTEX_RUN_AB=1 go test -v ./internal/study -run TestExtractAB \
 //	  -panel testdata/extract_ab_panel.json
 //
 // `-update` regenerates the panel from a fresh scan (useful when the
@@ -163,7 +163,7 @@ func emitTable(t *testing.T, results []ABResult) {
 	}
 
 	t.Log("(Score each (entry × op) manually: 0=irrelevant, 1=partial, 2=full. " +
-		"Record decision in docs/eval-journal.md per docs/bootstrap-dag-plan.md §A/B.)")
+		"Record decision in docs/eval-journal.md per docs/study-dag-plan.md §A/B.)")
 }
 
 // buildABProvider returns a real LLM provider when CORTEX_RUN_AB=1.
