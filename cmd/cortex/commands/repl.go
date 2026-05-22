@@ -2334,12 +2334,37 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		capturedLR  harness.LoopResult
 		capturedErr error
 	)
+	// Accumulator budget: 2x the per-tool salience cap leaves room
+	// for several folded observations before attend.compact rolls
+	// the older ones up. salienceCap is already calibrated per
+	// model-context-class (200 small / 500 medium / 1500 large) so
+	// the accumulator scales with model capability automatically.
+	accumulatorMaxTokens := salienceCap * 2
+	if accumulatorMaxTokens <= 0 {
+		accumulatorMaxTokens = 1000
+	}
 	codingCfg := dagnode.CodingTurnConfig{
 		Model:                 s.model,
 		Workdir:               s.workdir,
 		ActRegistry:           actReg,
 		TraceCB:               traceCB,
 		ToolOutputSalienceCap: salienceCap,
+		// Bounded working memory: each act.* output gets folded
+		// through attend.accumulate so the synthesis decide.coding_turn
+		// (and any decide.next that re-decides mid-plan) sees the
+		// distilled snapshot via dag.LatestAccumulatorSnapshot instead
+		// of re-fetching from raw tool transcripts. Shares the same
+		// LLM provider as the salience compressor — one small model
+		// driving both compression paths.
+		AccumulatorProvider:  compressProvider,
+		AccumulatorMaxTokens: accumulatorMaxTokens,
+		// AccumulatorIntent stays empty here: intent isn't known until
+		// after sense.classify_intent runs (below), which is after this
+		// cfg is captured by the dynamic registry. The accumulator
+		// prompt tolerates empty intent (renders as "Intent: " — the
+		// model treats the user's surrounding instructions as the
+		// effective intent). Threading per-turn intent into the
+		// dispatcher is a follow-up if the empty path drifts.
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
