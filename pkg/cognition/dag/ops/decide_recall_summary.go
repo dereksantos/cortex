@@ -125,7 +125,7 @@ func NewRecallSummaryHandler(cfg RecallSummaryConfig) dag.Handler {
 		// the answer ungrounded so the user knows it isn't drawing on
 		// history.
 		var (
-			matches []*events.Event
+			matches  []*events.Event
 			ctxBlock string
 		)
 		if cfg.Storage != nil {

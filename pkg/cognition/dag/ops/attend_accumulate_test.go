@@ -56,8 +56,8 @@ func TestAccumulate_FallbackWhenNoProvider_BudgetEnforced(t *testing.T) {
 	// Snapshot + observation exceed budget AND no LLM is wired.
 	// Deterministic truncate-and-merge fallback must produce a
 	// snapshot under budget that preserves the newer observation.
-	prev := strings.Repeat("OLD ", 200) // ~200 tokens
-	obs := strings.Repeat("NEW ", 50)   // ~50 tokens
+	prev := strings.Repeat("OLD ", 200)           // ~200 tokens
+	obs := strings.Repeat("NEW ", 50)             // ~50 tokens
 	h := newAccumulateHandler(AccumulateConfig{}) // nil provider
 	got, err := h(context.Background(), map[string]any{
 		"prev_snapshot": prev,

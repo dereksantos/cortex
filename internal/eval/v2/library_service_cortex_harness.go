@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/study"
 	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/harness"
+	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/llm"
 	"github.com/dereksantos/cortex/pkg/secret"
 )

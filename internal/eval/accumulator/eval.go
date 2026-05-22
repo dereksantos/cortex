@@ -88,10 +88,10 @@ func DefaultScenario() Scenario {
 		{10, "The logout endpoint lives at POST /v1/auth/logout in handlers/auth.go.", filler},
 	}
 	return Scenario{
-		Name:   "auth-schema-synthesis",
-		Intent: "Identify the schema + endpoint a logout feature must touch.",
+		Name:         "auth-schema-synthesis",
+		Intent:       "Identify the schema + endpoint a logout feature must touch.",
 		Observations: obs,
-		Question: "List every database column and the HTTP endpoint a logout feature must read or write to revoke a session token. Be specific: name the columns, name the endpoint path.",
+		Question:     "List every database column and the HTTP endpoint a logout feature must read or write to revoke a session token. Be specific: name the columns, name the endpoint path.",
 		RequiredFacts: []string{
 			"session_tokens",
 			"revoked_at_utc",
@@ -113,7 +113,7 @@ type Result struct {
 	FinalAnswer          string
 	FactsFound           []string
 	FactsMissing         []string
-	OverflowedNCtx       bool // PromptTokens > NCtxBudget
+	OverflowedNCtx       bool  // PromptTokens > NCtxBudget
 	AccumulatorTrajectoy []int // snapshot_tokens at each step (accumulator path only)
 }
 

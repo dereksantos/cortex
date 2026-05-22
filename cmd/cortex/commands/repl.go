@@ -3040,9 +3040,9 @@ const intentShortCircuitThreshold = 0.7
 // sense.prompt → decide.next → coding_turn chain in favor of a
 // dedicated terminal node:
 //
-//   greeting → act.passthrough        (mechanical, zero LLM)
-//   clarify  → decide.clarify         (one short LLM call, one question, end turn)
-//   recall   → decide.recall_summary  (search storage, synthesize prose)
+//	greeting → act.passthrough        (mechanical, zero LLM)
+//	clarify  → decide.clarify         (one short LLM call, one question, end turn)
+//	recall   → decide.recall_summary  (search storage, synthesize prose)
 //
 // Everything else (code / review / meta, or any low-confidence
 // classification) falls through to the existing sense.prompt seed.

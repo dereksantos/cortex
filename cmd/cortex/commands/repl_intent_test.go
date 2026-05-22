@@ -233,9 +233,9 @@ func TestDetectFeedbackCue_falsePositiveGuards(t *testing.T) {
 	// problem" should fall through to no cue (or confirmation, but
 	// not correction).
 	cases := map[string]string{
-		"no problem":  "",
-		"no idea":     "",
-		"no worries":  "",
+		"no problem":                 "",
+		"no idea":                    "",
+		"no worries":                 "",
 		"no, this is wrong actually": "correction", // both fire; correction wins
 	}
 	for prompt, want := range cases {

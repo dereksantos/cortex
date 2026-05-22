@@ -98,14 +98,14 @@ func ParseThinkAccumulatorUpdate(e *Entry) (*ThinkAccumulatorUpdatePayload, erro
 // CompactedCount + InputSnapshotIDs let a reader trace which prior
 // accumulator_update entries got folded into this compaction.
 type ThinkAccumulatorCompactPayload struct {
-	SessionID         string   `json:"session_id"`
-	Step              int      `json:"step"`
-	Snapshot          string   `json:"snapshot"`
-	SnapshotTokens    int      `json:"snapshot_tokens"`
-	MaxTokens         int      `json:"max_tokens"`
-	CompactedCount    int      `json:"compacted_count"`
-	InputSnapshotIDs  []string `json:"input_snapshot_ids,omitempty"`
-	Fallback          bool     `json:"fallback,omitempty"`
+	SessionID        string   `json:"session_id"`
+	Step             int      `json:"step"`
+	Snapshot         string   `json:"snapshot"`
+	SnapshotTokens   int      `json:"snapshot_tokens"`
+	MaxTokens        int      `json:"max_tokens"`
+	CompactedCount   int      `json:"compacted_count"`
+	InputSnapshotIDs []string `json:"input_snapshot_ids,omitempty"`
+	Fallback         bool     `json:"fallback,omitempty"`
 }
 
 // NewThinkAccumulatorCompactEntry builds an entry for one rolling

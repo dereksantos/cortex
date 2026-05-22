@@ -87,8 +87,8 @@ func ParseDreamInsight(e *Entry) (*DreamInsightPayload, error) {
 // future invalidation path where a feedback.retraction inside the
 // covered window marks the digest stale.
 type DreamSessionDigestPayload struct {
-	Narrative        string   `json:"narrative"`         // consolidated prose, ~2-3k tokens
-	SummaryCountIn   int      `json:"summary_count_in"`  // how many session_summary entries were folded in
+	Narrative        string   `json:"narrative"`        // consolidated prose, ~2-3k tokens
+	SummaryCountIn   int      `json:"summary_count_in"` // how many session_summary entries were folded in
 	CoversSessionIDs []string `json:"covers_session_ids,omitempty"`
 	OrigTokens       int      `json:"orig_tokens,omitempty"` // pre-compression total across folded summaries
 	KeptTokens       int      `json:"kept_tokens,omitempty"` // post-compression size of Narrative

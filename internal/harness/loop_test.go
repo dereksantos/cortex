@@ -231,7 +231,7 @@ func TestLoop_ContextOverflow_RetriesOnceAndLearnsNctx(t *testing.T) {
 	loop := &Loop{
 		Provider: &scriptedProvider{
 			responses: []llm.ChatResult{
-				{},                                    // first call: error returned
+				{},                                      // first call: error returned
 				{Content: "done", FinishReason: "stop"}, // retry: succeeds
 			},
 			errors: []error{overflow, nil},
