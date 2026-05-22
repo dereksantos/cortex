@@ -62,3 +62,41 @@ func TestParseThinkAccumulatorUpdate_RejectsWrongType(t *testing.T) {
 		t.Fatal("expected type-mismatch error")
 	}
 }
+
+func TestNewThinkAccumulatorCompactEntry_RoundTrip(t *testing.T) {
+	in := ThinkAccumulatorCompactPayload{
+		SessionID:        "sess1",
+		Step:             7,
+		Snapshot:         "merged fact A; merged fact B",
+		SnapshotTokens:   60,
+		MaxTokens:        300,
+		CompactedCount:   4,
+		InputSnapshotIDs: []string{"sess1#3", "sess1#4", "sess1#5", "sess1#6"},
+	}
+	e, err := NewThinkAccumulatorCompactEntry(in)
+	if err != nil {
+		t.Fatalf("NewThinkAccumulatorCompactEntry: %v", err)
+	}
+	if e.Type != TypeThinkAccumulatorCompact {
+		t.Errorf("Type = %q, want %q", e.Type, TypeThinkAccumulatorCompact)
+	}
+	out, err := ParseThinkAccumulatorCompact(e)
+	if err != nil {
+		t.Fatalf("ParseThinkAccumulatorCompact: %v", err)
+	}
+	if out.CompactedCount != 4 || len(out.InputSnapshotIDs) != 4 {
+		t.Errorf("round-trip lost CompactedCount/InputSnapshotIDs: %+v", out)
+	}
+	if out.Snapshot != in.Snapshot {
+		t.Errorf("snapshot round-trip mismatch: got %q want %q", out.Snapshot, in.Snapshot)
+	}
+}
+
+func TestNewThinkAccumulatorCompactEntry_RequiresSessionAndSnapshot(t *testing.T) {
+	if _, err := NewThinkAccumulatorCompactEntry(ThinkAccumulatorCompactPayload{Snapshot: "x"}); err == nil {
+		t.Error("expected error for missing SessionID")
+	}
+	if _, err := NewThinkAccumulatorCompactEntry(ThinkAccumulatorCompactPayload{SessionID: "s"}); err == nil {
+		t.Error("expected error for missing Snapshot")
+	}
+}
