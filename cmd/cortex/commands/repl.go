@@ -479,6 +479,14 @@ type replState struct {
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
 
+	// lastClarifyPrompt is the original ambiguous user prompt from the
+	// most recent turn that routed to decide.clarify. The next turn's
+	// stitchClarifyFollowUp combines it with the user's answer so the
+	// classifier sees the disambiguated request instead of a fragment
+	// like "in main.go". Cleared after consumption — only the
+	// immediately-following turn benefits from the stitch.
+	lastClarifyPrompt string
+
 	// bootstrapCancel cancels the auto-spawned bootstrap goroutine on
 	// REPL exit. Nil when bootstrap was skipped (already complete, env
 	// override, or detection error). Always called from close(); safe
@@ -1507,6 +1515,26 @@ func displayAPI(api string) string {
 func (s *replState) runTurn(userPrompt string) error {
 	turnNum := s.turns + 1
 
+	// Slice 4: auto-emit feedback if the user's prompt opens with a
+	// correction/confirmation cue (e.g. "no, do X instead" / "perfect,
+	// thanks"). The graded target is the immediately-prior turn —
+	// skipped silently on turn 1 since there's nothing to grade.
+	// Best-effort: any journal write failure is logged + ignored.
+	if cue := detectFeedbackCue(userPrompt); cue != "" {
+		if ferr := s.emitFeedbackEntry(cue, userPrompt); ferr != nil {
+			s.ui.Info(fmt.Sprintf("  · feedback emit failed (%s): %v", cue, ferr))
+		} else if s.verbose {
+			s.ui.Info(fmt.Sprintf("  · feedback emitted: %s → prior turn", cue))
+		}
+	}
+
+	// Slice 4: clarify follow-up stitching. When the prior turn routed
+	// to decide.clarify and stashed its original ambiguous prompt, we
+	// combine it with the user's answer so the classifier sees the
+	// disambiguated request rather than a bare fragment. No-op when
+	// the prior turn wasn't a clarify (lastClarifyPrompt empty).
+	turnPrompt := s.stitchClarifyFollowUp(userPrompt)
+
 	snapDir, err := s.snapshotWorkdir(turnNum)
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
@@ -1516,18 +1544,18 @@ func (s *replState) runTurn(userPrompt string) error {
 		Turn:         turnNum,
 		SessionID:    s.sessionID,
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		UserMessage:  userPrompt,
+		UserMessage:  userPrompt, // original, not the stitched version — preserves what the user actually typed
 		Model:        s.model,
 		APIURL:       s.apiURL,
 		SystemPrompt: s.systemPrompt,
 		SnapshotDir:  snapDir,
 	}
 
-	// Attempt 1: fresh model call with just the user prompt. The
-	// intent classification from this first call defines the turn's
-	// intent for journaling purposes; retries reuse it (the user's
-	// ask hasn't changed, only the verifier feedback has).
-	hres, lres, intent, intentConf, runErr := s.runHarness(userPrompt, "")
+	// Attempt 1: fresh model call. The intent classification from this
+	// first call defines the turn's intent for journaling purposes;
+	// retries reuse it (the user's ask hasn't changed, only the
+	// verifier feedback has).
+	hres, lres, intent, intentConf, runErr := s.runHarness(turnPrompt, "")
 	row.HarnessError = errString(runErr)
 	row.AgentTurns = hres.AgentTurnsTotal
 	row.TokensIn = hres.TokensIn
@@ -1578,7 +1606,7 @@ func (s *replState) runTurn(userPrompt string) error {
 		} else {
 			s.ui.Info(fmt.Sprintf("  verify still failing, auto-retry %d/%d...", autoAttempt, retryBudget))
 		}
-		hres2, lres2, _, _, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
+		hres2, lres2, _, _, runErr2 := s.runHarness(turnPrompt, verifyRes.OutputTail)
 		if autoAttempt == 1 {
 			row.RetryAgentTurns = hres2.AgentTurnsTotal
 			row.RetryTokensIn = hres2.TokensIn
@@ -1627,7 +1655,7 @@ func (s *replState) runTurn(userPrompt string) error {
 			row.UserGate = "retry"
 			userHints = append(userHints, decision.hint)
 			combined := verifyRes.OutputTail + "\n\nUSER HINT: " + decision.hint
-			hres3, lres3, _, _, runErr3 := s.runHarness(userPrompt, combined)
+			hres3, lres3, _, _, runErr3 := s.runHarness(turnPrompt, combined)
 			row.UserRetryAttempts++
 			row.UserRetryHarnessError = errString(runErr3)
 			row.UserRetryFinalText = lres3.Final
@@ -2255,6 +2283,17 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
 	turnBudget := dag.BudgetForIntent(intent)
 	seed := seedForIntent(intent, intentConf, prompt)
+	// Slice 4: stash the original prompt when we're about to clarify
+	// so the NEXT turn's stitchClarifyFollowUp can combine it with
+	// the user's answer before re-classifying. Cleared on consumption
+	// (one-shot) or replaced when this turn re-clarifies. Non-clarify
+	// seeds clear the stash so a stale clarify doesn't follow the
+	// user across an unrelated turn.
+	if seed[0].QualifiedName() == "decide.clarify" {
+		s.lastClarifyPrompt = prompt
+	} else {
+		s.lastClarifyPrompt = ""
+	}
 	if s.verbose {
 		s.ui.Info(fmt.Sprintf("  · intent=%s (conf=%.2f), budget=%s, seed=%s",
 			intent, intentConf, turnBudget, seed[0].QualifiedName()))
@@ -2289,6 +2328,125 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 	}
 	confidence, _ := res.Out["confidence"].(float64)
 	return intent, confidence
+}
+
+// detectFeedbackCue mechanically classifies a user prompt as
+// "correction", "confirmation", or "" (none). The detector is a
+// small keyword pass — not an LLM call — so the per-turn cost is
+// negligible. False positives cost a misclassified feedback entry
+// the user can /cortex-forget; false negatives just mean we miss
+// the signal on a particular turn. Both are recoverable.
+//
+// Correction trumps confirmation when both fire (the user changing
+// course is the load-bearing signal). Word boundaries matter — "no
+// problem" must NOT trigger correction, "no, that's wrong" must.
+func detectFeedbackCue(prompt string) string {
+	p := " " + strings.ToLower(strings.TrimSpace(prompt)) + " "
+	for _, marker := range correctionMarkers {
+		if strings.Contains(p, marker) {
+			return "correction"
+		}
+	}
+	for _, marker := range confirmationMarkers {
+		if strings.Contains(p, marker) {
+			return "confirmation"
+		}
+	}
+	return ""
+}
+
+// correctionMarkers are space-padded so they only match on word
+// boundaries. "no problem" deliberately doesn't appear here so it
+// can't masquerade as "no" — the pad guarantees we look for "no"
+// followed by punctuation/whitespace + a contrastive continuation,
+// expressed below as the specific patterns we actually want to
+// catch.
+var correctionMarkers = []string{
+	"no, ", "no. ", "nope, ", "nope. ",
+	" wrong ", " incorrect ", " incorrectly ",
+	" actually ", " instead ", " not what ",
+	" that's not ", " that isn't ", " that is not ",
+	" don't ", " dont ", " stop doing ",
+}
+
+// confirmationMarkers — similarly space-padded. Generous on
+// "thanks" / "perfect" / "exactly" since those are unambiguous
+// positive cues that rarely appear inside corrections.
+var confirmationMarkers = []string{
+	" perfect ", " perfect.", " perfect!",
+	" thanks ", " thanks.", " thanks!", " thank you ",
+	" exactly ", " exactly.", " exactly!",
+	" got it ", " got it.", " got it!", " got it,",
+	" yes that ", " yes, that ", " yep, that ",
+	" that worked ", " that works ",
+	" nice ", " nice.", " nice!",
+}
+
+// emitFeedbackEntry writes a feedback.{correction,confirmation}
+// journal entry linked to the prior turn via GradedID. Best-effort:
+// any failure is returned but the caller logs+continues — the user's
+// turn must not block on a feedback emit.
+//
+// The GradedID format mirrors what the eventual capture entry for
+// the prior turn produces (repl-<sessionID>-turn-<N>) so a future
+// projector can join feedback to its target row by string key. When
+// the cue fires on turn 1 (s.turns == 0), there's no prior turn to
+// grade — skip silently.
+func (s *replState) emitFeedbackEntry(cue, prompt string) error {
+	if s.workdir == "" || s.turns == 0 {
+		return nil
+	}
+	var typ string
+	switch cue {
+	case "correction":
+		typ = journal.TypeFeedbackCorrection
+	case "confirmation":
+		typ = journal.TypeFeedbackConfirmation
+	default:
+		return nil
+	}
+	gradedID := fmt.Sprintf("repl-%s-turn-%d", s.sessionID, s.turns)
+	payload := journal.FeedbackPayload{
+		GradedID:  gradedID,
+		Note:      strings.TrimSpace(prompt),
+		SessionID: s.sessionID,
+	}
+	entry, err := journal.NewFeedbackEntry(typ, payload)
+	if err != nil {
+		return fmt.Errorf("build feedback entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "feedback")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("open feedback writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append feedback: %w", err)
+	}
+	return nil
+}
+
+// stitchClarifyFollowUp returns the combined prompt when the prior
+// turn routed to decide.clarify and stashed its original ambiguous
+// prompt. Resets the stash so only the immediately-following turn
+// benefits. Returns the input prompt unchanged otherwise.
+//
+// Format: the classifier sees both the prior ambiguous prompt and
+// the current answer in one block — "delete it" + "the migrations
+// table" → "delete the migrations table" semantics — so it can
+// pick the disambiguated intent (likely code) instead of
+// re-classifying the bare answer.
+func (s *replState) stitchClarifyFollowUp(prompt string) string {
+	if s.lastClarifyPrompt == "" {
+		return prompt
+	}
+	prior := s.lastClarifyPrompt
+	s.lastClarifyPrompt = ""
+	return fmt.Sprintf("Original (ambiguous) request: %s\nUser's clarification: %s", prior, prompt)
 }
 
 // downgradeRecallIfNoContext returns intent unchanged unless it's

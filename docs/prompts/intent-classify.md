@@ -66,10 +66,19 @@ The probe tokenizes the prompt into content words (≥4 chars, stopwords strippe
 
 Initial cost hint: `2s / 200 tok` (lighter than `decide.should_capture`'s `16s / 350 tok` because the prompt is shorter and the output is fixed-shape ~30 tokens). Tighten after the first real-LLM calibration pass against the same provider used elsewhere in `cmd/cortex/commands/repl.go:buildLLMProviderForREPL`.
 
+## Clarify follow-up stitching (Slice 4)
+
+When the prior turn routed to `decide.clarify`, `runREPLChainTurn` stashes the original ambiguous prompt on `replState.lastClarifyPrompt`. The next turn's `stitchClarifyFollowUp` combines the prior prompt with the user's answer before re-classification — `"delete it"` + `"the migrations table"` becomes a single combined prompt the classifier picks up as `code` rather than another fragment. Stash is one-shot: cleared after consumption, replaced when the new turn also clarifies, wiped on any non-clarify seed so a stale clarify doesn't follow the user across an unrelated turn.
+
+## Feedback auto-emit (Slice 4)
+
+`detectFeedbackCue` runs at the top of `runTurn` against the raw user prompt. When it fires (`correction` from `"no, "`, `"wrong"`, `"actually"`, `"that's not"`, `"don't"`, `"instead"`, … / `confirmation` from `"perfect"`, `"thanks"`, `"got it"`, `"yes that"`, `"exactly"`, `"that works"`, `"nice"`, …), `emitFeedbackEntry` writes a `feedback.correction` or `feedback.confirmation` entry to `.cortex/journal/feedback/` linked to the prior turn via `GradedID="repl-<sessionID>-turn-<N>"`. Word boundaries keep false positives in check — `"no problem"` doesn't trigger correction. Best-effort: failures log + continue; turn 1 emits are skipped (no prior turn to grade).
+
 ## Open follow-ups (from the integration TODO)
 
-- ~~**Slice 2**: dedicated seeds for `recall` (text-search + small synthesis) and `clarify` (one-question `decide.clarify`).~~ Shipped — `decide.recall_summary` and `decide.clarify` are wired in `seedForIntent`.
-- **Slice 2 follow-up**: `decide.recall_summary` uses text search (`Storage.SearchEvents`) today because the REPL session doesn't wire an embedder through `newSessionCognition`. Add an embedder + switch recall to vector search when it lands.
-- **Slice 3**: add `Intent` field to `think.session_summary` payload so journal recall can filter by intent.
-- **Slice 4**: clarify follow-up stitching — the next user turn after `decide.clarify` is an answer to the question; carry the prior turn's intent forward so the answer doesn't get re-classified as a fresh ambiguous turn.
+- ~~**Slice 2**: dedicated seeds for `recall` (text-search + small synthesis) and `clarify` (one-question `decide.clarify`).~~ Shipped.
+- ~~**Slice 3**: add `Intent` field to `think.session_summary` payload so journal recall can filter by intent.~~ Shipped.
+- ~~**Slice 4**: clarify follow-up stitching + feedback writer-class auto-emit.~~ Shipped.
+- **Slice 2 follow-up**: `decide.recall_summary` uses text search (`Storage.SearchEventsMultiTerm`) today because the REPL session doesn't wire an embedder through `newSessionCognition`. Add an embedder + switch recall to vector search when it lands.
+- **Slice 5**: `dream.session_digest` background op that rolls K recent summaries into one consolidated narrative once a threshold trips, keeping injected prior-context bounded as turns accumulate.
 - **Slice 6 / observability**: the classifier currently runs *outside* the DAG executor, so it doesn't appear in `dag_traces.jsonl`. Synthesize a trace row from the handler result so the routing decision is preserved alongside the seed.

@@ -3,9 +3,11 @@ package commands
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
@@ -75,6 +77,202 @@ func TestSeedForIntent_nonShortCircuitIntentsAlwaysFallThrough(t *testing.T) {
 					intent, seed[0].QualifiedName())
 			}
 		})
+	}
+}
+
+func TestDetectFeedbackCue_correction(t *testing.T) {
+	corrections := []string{
+		"no, do it differently",
+		"wrong file, try main.go",
+		"actually use pgx not database/sql",
+		"that's not what I meant",
+		"don't use redis",
+		"NOPE. start over",
+		"Use foo instead",
+	}
+	for _, p := range corrections {
+		t.Run(p, func(t *testing.T) {
+			if got := detectFeedbackCue(p); got != "correction" {
+				t.Errorf("expected correction for %q, got %q", p, got)
+			}
+		})
+	}
+}
+
+func TestDetectFeedbackCue_confirmation(t *testing.T) {
+	confirms := []string{
+		"perfect, thanks",
+		"thanks!",
+		"yes that worked",
+		"exactly what I wanted",
+		"got it, moving on",
+		"that works",
+		"nice",
+	}
+	for _, p := range confirms {
+		t.Run(p, func(t *testing.T) {
+			if got := detectFeedbackCue(p); got != "confirmation" {
+				t.Errorf("expected confirmation for %q, got %q", p, got)
+			}
+		})
+	}
+}
+
+func TestDetectFeedbackCue_neither(t *testing.T) {
+	noCue := []string{
+		"add a print to main.go",
+		"how does auth work?",
+		"what files are in this directory?",
+		"hi",
+		"", // empty
+	}
+	for _, p := range noCue {
+		t.Run(p, func(t *testing.T) {
+			if got := detectFeedbackCue(p); got != "" {
+				t.Errorf("expected no cue for %q, got %q", p, got)
+			}
+		})
+	}
+}
+
+func TestDetectFeedbackCue_falsePositiveGuards(t *testing.T) {
+	// "no problem" and friends must NOT trip the correction marker.
+	// The space-padded marker "no, " requires a comma; bare "no
+	// problem" should fall through to no cue (or confirmation, but
+	// not correction).
+	cases := map[string]string{
+		"no problem":  "",
+		"no idea":     "",
+		"no worries":  "",
+		"no, this is wrong actually": "correction", // both fire; correction wins
+	}
+	for prompt, want := range cases {
+		t.Run(prompt, func(t *testing.T) {
+			if got := detectFeedbackCue(prompt); got != want {
+				t.Errorf("prompt=%q: got %q, want %q", prompt, got, want)
+			}
+		})
+	}
+}
+
+func TestEmitFeedbackEntry_skipsOnTurnZero(t *testing.T) {
+	// Turn 1 has no prior turn to grade. Auto-emit must skip silently
+	// without erroring or writing a bogus entry.
+	tempDir, err := os.MkdirTemp("", "cortex-feedback-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	s := &replState{workdir: tempDir, sessionID: "test", turns: 0}
+	if err := s.emitFeedbackEntry("correction", "no, do it differently"); err != nil {
+		t.Fatalf("emitFeedbackEntry on turn 0 must not error: %v", err)
+	}
+	// No feedback dir should have been created.
+	if _, err := os.Stat(filepath.Join(tempDir, ".cortex", "journal", "feedback")); !os.IsNotExist(err) {
+		t.Errorf("turn-0 emit must not create feedback dir: stat err = %v", err)
+	}
+}
+
+func TestEmitFeedbackEntry_writesCorrectionToJournal(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-feedback-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	s := &replState{workdir: tempDir, sessionID: "session-abc", turns: 3}
+
+	if err := s.emitFeedbackEntry("correction", "no, use pgx instead"); err != nil {
+		t.Fatalf("emitFeedbackEntry: %v", err)
+	}
+	classDir := filepath.Join(tempDir, ".cortex", "journal", "feedback")
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	defer r.Close()
+	e, err := r.Next()
+	if err != nil {
+		t.Fatalf("read entry: %v", err)
+	}
+	if e.Type != journal.TypeFeedbackCorrection {
+		t.Errorf("type = %q, want %q", e.Type, journal.TypeFeedbackCorrection)
+	}
+	p, err := journal.ParseFeedback(e)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.GradedID != "repl-session-abc-turn-3" {
+		t.Errorf("GradedID = %q, want repl-session-abc-turn-3", p.GradedID)
+	}
+	if !strings.Contains(p.Note, "pgx") {
+		t.Errorf("Note should preserve user prompt content, got %q", p.Note)
+	}
+	if p.SessionID != "session-abc" {
+		t.Errorf("SessionID = %q, want session-abc", p.SessionID)
+	}
+}
+
+func TestEmitFeedbackEntry_writesConfirmation(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-feedback-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	s := &replState{workdir: tempDir, sessionID: "s1", turns: 5}
+
+	if err := s.emitFeedbackEntry("confirmation", "perfect, thanks"); err != nil {
+		t.Fatalf("emitFeedbackEntry: %v", err)
+	}
+	r, _ := journal.NewReader(filepath.Join(tempDir, ".cortex", "journal", "feedback"))
+	defer r.Close()
+	e, _ := r.Next()
+	if e.Type != journal.TypeFeedbackConfirmation {
+		t.Errorf("type = %q, want %q", e.Type, journal.TypeFeedbackConfirmation)
+	}
+}
+
+func TestEmitFeedbackEntry_unknownCueIsNoOp(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "cortex-feedback-test-*")
+	if err != nil {
+		t.Fatalf("mktemp: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+	s := &replState{workdir: tempDir, sessionID: "s", turns: 1}
+	if err := s.emitFeedbackEntry("", "anything"); err != nil {
+		t.Errorf("empty cue must not error: %v", err)
+	}
+	if err := s.emitFeedbackEntry("nonsense", "anything"); err != nil {
+		t.Errorf("unknown cue must not error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, ".cortex", "journal", "feedback")); !os.IsNotExist(err) {
+		t.Errorf("unknown/empty cue must not create feedback dir")
+	}
+}
+
+func TestStitchClarifyFollowUp_noPriorClarifyIsPassThrough(t *testing.T) {
+	s := &replState{}
+	got := s.stitchClarifyFollowUp("fix the bug")
+	if got != "fix the bug" {
+		t.Errorf("expected passthrough when lastClarifyPrompt empty, got %q", got)
+	}
+}
+
+func TestStitchClarifyFollowUp_combinesAndResets(t *testing.T) {
+	s := &replState{lastClarifyPrompt: "delete it"}
+	got := s.stitchClarifyFollowUp("the migrations table")
+	if !strings.Contains(got, "delete it") {
+		t.Errorf("stitched prompt missing original: %q", got)
+	}
+	if !strings.Contains(got, "the migrations table") {
+		t.Errorf("stitched prompt missing user answer: %q", got)
+	}
+	// One-shot: next call must NOT stitch again.
+	if s.lastClarifyPrompt != "" {
+		t.Errorf("lastClarifyPrompt must reset after consumption, got %q", s.lastClarifyPrompt)
+	}
+	second := s.stitchClarifyFollowUp("another prompt")
+	if second != "another prompt" {
+		t.Errorf("second call should be passthrough, got %q", second)
 	}
 }
 
