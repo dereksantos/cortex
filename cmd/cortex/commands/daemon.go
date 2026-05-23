@@ -174,8 +174,6 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 	// Create state writer for real-time cognitive mode status
 	stateWriter := intcognition.NewStateWriter(globalDir)
 	if cortex != nil {
-		cortex.SetStateWriter(stateWriter)
-
 		// Route events through cognition pipeline when processor handles them
 		proc.SetEventCallback(func(evts []*events.Event) {
 			cortex.IngestBatch(context.Background(), evts)
@@ -244,7 +242,6 @@ func (c *DaemonCommand) Execute(ctx *Context) error {
 
 	// Create pruner for context size management
 	pruner := intcognition.NewPruner(store, cfg)
-	pruner.SetStateWriter(stateWriter)
 
 	// Start web dashboard
 	webServer := web.New(cfg, store, webPort)

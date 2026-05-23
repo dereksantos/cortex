@@ -109,7 +109,7 @@ is reviewable.
     passes; manual smoke: idle the REPL for 10+ minutes, confirm a
     `dream.insight` journal entry appears.
 
-- [ ] **2.4** Drop `SetStateWriter` plumbing.
+- [x] **2.4** Drop `SetStateWriter` plumbing.
   - Remove the `SetStateWriter` calls now that no daemon-state file is
     written. Don't delete the `SetStateWriter` methods themselves yet
     — Phase 3 handles that.
