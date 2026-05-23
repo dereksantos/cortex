@@ -615,7 +615,7 @@ func rewriteHistoryWithSnapshot(msgs *[]llm.ChatMessage, snapshot string, keep i
 	wmContent := workingMemorySentinel + "\n\nWorking memory (synthesized from prior tool outputs in this turn — use as ground truth; do not re-fetch what's here):\n\n" + snapshot
 
 	// Find or insert the working-memory message right after userIdx.
-	wmIdx := -1
+	var wmIdx int
 	if userIdx+1 < len(ms) && ms[userIdx+1].Role == "user" && strings.HasPrefix(ms[userIdx+1].Content, workingMemorySentinel) {
 		wmIdx = userIdx + 1
 		ms[wmIdx].Content = wmContent
