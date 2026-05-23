@@ -160,7 +160,7 @@ Now that nothing depends on it.
     (the file is gone after 3.1, but verify no stragglers).
   - Acceptance: `grep -rn 'IsDaemonRunning\|StartDaemonBackground\|StopDaemon' cmd/ internal/ pkg/` returns nothing.
 
-- [ ] **3.5** Full-suite green.
+- [x] **3.5** Full-suite green.
   - Run `go test ./... && go vet ./...`.
   - Acceptance: zero failures.
 
