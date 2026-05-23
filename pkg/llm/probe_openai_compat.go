@@ -51,8 +51,18 @@ func (p *openAICompatProbe) Probe(ctx context.Context) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(models))
 	for _, m := range models {
+		// Prefix the model id with the endpoint name so it matches the
+		// routing convention consumers use (e.g.
+		// "chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF"). Without the
+		// prefix, registry.Get() misses on user-pinned ids that include
+		// the endpoint and downstream size/cap math falls back to the
+		// "unknown" path.
+		fullID := m.ID
+		if p.cfg.Endpoint.Name != "" {
+			fullID = p.cfg.Endpoint.Name + "/" + m.ID
+		}
 		out = append(out, ModelInfo{
-			ID:                     m.ID,
+			ID:                     fullID,
 			Endpoint:               p.cfg.Endpoint.Name,
 			BaseURL:                p.cfg.Endpoint.BaseURL,
 			IsLocal:                p.cfg.IsLocal,

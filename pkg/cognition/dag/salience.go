@@ -14,6 +14,8 @@ package dag
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,6 +56,14 @@ func (e *Executor) applySalienceCompression(
 	}
 	if approxOutputTokens(raw) <= item.spec.Salience.MaxOutputTokens {
 		return nil
+	}
+	// Deterministic chunking path — when the contract opts in,
+	// mechanically split by line boundary and emit a synthetic
+	// attend.chunk entry. No LLM in the read path: the calling model
+	// gets the actual content with location headers it can re-fetch
+	// from.
+	if item.spec.Salience.ChunkOnOversize {
+		return applyDeterministicChunking(item, result, field, raw, nextChildID)
 	}
 	compSpec, err := e.registry.Get("attend.compress")
 	if err != nil {
@@ -156,4 +166,148 @@ func approxOutputTokens(s string) int {
 		return 1
 	}
 	return n
+}
+
+// applyDeterministicChunking handles the ChunkOnOversize=true branch.
+// Splits raw by line boundary into N chunks each ≤ MaxOutputTokens,
+// joins them with "[chunk i/N, lines a-b]" headers into one deposit,
+// and returns a synthetic attend.chunk trace entry. No LLM call.
+//
+// The total output is bounded by 8 × MaxOutputTokens — beyond that the
+// content is truncated with a final "[truncated — N more lines]"
+// marker. Callers that need ALL of a very large file should issue
+// follow-up reads with explicit line ranges (e.g. via run_shell sed).
+func applyDeterministicChunking(
+	item pendingItem,
+	result *NodeResult,
+	field, raw string,
+	nextChildID func() string,
+) *TraceEntry {
+	const maxChunks = 8
+	cap := item.spec.Salience.MaxOutputTokens
+	started := time.Now()
+	lines := splitLines(raw)
+	chunks := buildChunksByLine(lines, cap)
+	totalChunks := len(chunks)
+	truncated := false
+	if totalChunks > maxChunks {
+		chunks = chunks[:maxChunks]
+		truncated = true
+	}
+	joined := joinChunks(chunks, totalChunks)
+	if truncated {
+		extra := 0
+		for _, c := range buildChunksByLine(lines, cap)[maxChunks:] {
+			extra += c.endLine - c.startLine + 1
+		}
+		joined += fmt.Sprintf("\n\n[truncated — %d more lines beyond chunk %d; re-fetch with explicit line range]\n", extra, maxChunks)
+	}
+	ended := time.Now()
+
+	childID := nextChildID()
+	entry := &TraceEntry{
+		NodeID:        childID,
+		ParentID:      item.spec.ID,
+		QualifiedName: "attend.chunk",
+		WallStart:     started,
+		WallEnd:       ended,
+		OK:            true,
+		CostConsumed:  Cost{LatencyMS: int(ended.Sub(started).Milliseconds())},
+		Out: map[string]any{
+			"chunks":       totalChunks,
+			"emitted":      len(chunks),
+			"chunked":      joined,
+			"max_tokens":   cap,
+			"intent":       item.spec.Salience.Intent,
+		},
+		Salience: item.spec.Salience,
+	}
+	result.Out[field] = joined
+	result.CostConsumed.LatencyMS += entry.CostConsumed.LatencyMS
+	return entry
+}
+
+// chunkRange records the line-bounds and content of one mechanically-
+// split chunk. startLine and endLine are 1-indexed inclusive.
+type chunkRange struct {
+	startLine, endLine int
+	content            string
+}
+
+// splitLines splits raw into lines preserving newlines on each entry
+// except possibly the last. Mirrors strings.Split(raw, "\n") but
+// preserves the trailing newline so re-joining round-trips byte-for-byte.
+func splitLines(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	out := make([]string, 0, 64)
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\n' {
+			out = append(out, raw[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(raw) {
+		out = append(out, raw[start:])
+	}
+	return out
+}
+
+// buildChunksByLine groups consecutive lines into chunks whose
+// approximate token count stays under capTokens. A chunk always
+// contains at least one line, even if that line alone exceeds the
+// cap — splitting mid-line would corrupt source code.
+func buildChunksByLine(lines []string, capTokens int) []chunkRange {
+	if len(lines) == 0 {
+		return nil
+	}
+	if capTokens <= 0 {
+		capTokens = 500 // safety floor
+	}
+	chunks := make([]chunkRange, 0, 8)
+	curStart := 1
+	curContent := ""
+	curTokens := 0
+	for i, ln := range lines {
+		lineTok := approxOutputTokens(ln)
+		// Flush when adding this line would overflow, unless the
+		// current chunk is empty (single oversized line stays alone).
+		if curTokens > 0 && curTokens+lineTok > capTokens {
+			chunks = append(chunks, chunkRange{
+				startLine: curStart,
+				endLine:   i, // i is the index of the NEXT line; last included was i-1, 1-indexed = i
+				content:   curContent,
+			})
+			curStart = i + 1
+			curContent = ""
+			curTokens = 0
+		}
+		curContent += ln
+		curTokens += lineTok
+	}
+	if curContent != "" {
+		chunks = append(chunks, chunkRange{
+			startLine: curStart,
+			endLine:   len(lines),
+			content:   curContent,
+		})
+	}
+	return chunks
+}
+
+// joinChunks formats the chunk list into one string with location
+// headers. totalChunks is the unbounded count (so headers can say
+// "1/12" even when only 8 are emitted).
+func joinChunks(chunks []chunkRange, totalChunks int) string {
+	var b strings.Builder
+	for i, c := range chunks {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "[chunk %d/%d, lines %d-%d]\n", i+1, totalChunks, c.startLine, c.endLine)
+		b.WriteString(c.content)
+	}
+	return b.String()
 }
