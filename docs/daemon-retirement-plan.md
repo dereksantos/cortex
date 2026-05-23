@@ -198,7 +198,7 @@ Strip daemon references from docs that still describe it as live.
     (b) an unrelated docker daemon mention, or (c) explicitly
     annotated as superseded.
 
-- [ ] **4.6** Memory update — add a project memory pointing at this plan
+- [x] **4.6** Memory update — add a project memory pointing at this plan
   and the commit that completed daemon retirement, so future
   conversations don't re-derive what we just decided.
   - Use the project memory type. Short one-liner pointing at the plan.
