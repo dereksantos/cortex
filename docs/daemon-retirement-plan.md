@@ -170,7 +170,7 @@ Now that nothing depends on it.
 
 Strip daemon references from docs that still describe it as live.
 
-- [ ] **4.1** Strip daemon paragraphs from `README.md`.
+- [x] **4.1** Strip daemon paragraphs from `README.md`.
   - Lines roughly 75, 109, 156–165, 234, 258–259 (verify line numbers
     before editing — file may have shifted).
   - Replace "start the daemon" guidance with "start the REPL with `cortex repl`".

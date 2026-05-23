@@ -25,10 +25,11 @@ query time and receive pre-computed context.
 Cortex performs **continuous context integration** as part of its own
 coding loop — observing events as they happen, reconciling new
 information against existing knowledge, and surfacing relevant context
-on the next turn. It runs as a single binary plus a background daemon,
-storing decisions, patterns, and corrections through fast mechanical
-retrieval (Reflex) backed by an asynchronous agentic loop (Reflect,
-Resolve, Think, Dream).
+on the next turn. It runs as a single binary; the REPL hosts the
+long-lived process and drives the background cognition (Think, Dream)
+on its idle hook. Decisions, patterns, and corrections are stored
+through fast mechanical retrieval (Reflex) backed by an asynchronous
+agentic loop (Reflect, Resolve, Think, Dream).
 
 The role sits within the framework of cognitive architectures for
 language agents (CoALA) and is closely related to sleep-time /
@@ -97,9 +98,8 @@ Capture → Filter → Store → Retrieve → Inject
 ```bash
 go build -o bin/cortex ./cmd/cortex
 ./bin/cortex init                # one-time per project: creates .cortex/, registers project
-./bin/cortex daemon &            # background processor; dashboard at :9090
+./bin/cortex repl                # interactive coding loop; hosts the background ingest + Think/Dream
 ./bin/cortex code "..."          # one-shot coding turn rooted in the cwd
-./bin/cortex repl                # interactive coding loop
 ```
 
 `cortex install` exists as a compatibility verb (it now just ensures
@@ -171,7 +171,6 @@ Think and Dream use activity-based budgets:
 cortex init              # Initialize .cortex/ in current project
 cortex install           # Ensure .cortex/ exists + report LLM availability
 cortex uninstall         # Remove .cortex/ data (--purge required to delete)
-cortex daemon            # Start background processor + :9090 dashboard
 cortex status            # One-line status; --system | --memory | --json | --expand
 ```
 
@@ -236,7 +235,7 @@ Cortex stores data in `~/.cortex/` (global, project registry) and
 `.cortex/` (per-project, captured events + embeddings + queue).
 
 LLM providers — selection is via the `ANTHROPIC_API_KEY` env var (set → Anthropic; unset → Ollama):
-- **Ollama**: local inference at `http://localhost:11434`. Free. Recommended models: `llama3.1:8b` for analysis and `nomic-embed-text` for embeddings. Smaller models have measured below the task floor; the configured `ollama_model` in `.cortex/config.json` must actually be pulled or the daemon will silently produce zero insights.
+- **Ollama**: local inference at `http://localhost:11434`. Free. Recommended models: `llama3.1:8b` for analysis and `nomic-embed-text` for embeddings. Smaller models have measured below the task floor; the configured `ollama_model` in `.cortex/config.json` must actually be pulled or the REPL's background cognition will silently produce zero insights.
 - **Anthropic**: set `ANTHROPIC_API_KEY`. Uses `claude-haiku-4-5` for analysis. Embeddings still go through Ollama (`nomic-embed-text`); there is no Anthropic embedding fallback.
 - **No LLM**: capture and search still work; Reflect/Dream and insight extraction are skipped.
 
@@ -254,9 +253,9 @@ Key metrics from cognitive evaluation:
 
 ### Known Limitations
 
-- **Embedding bootstrap is brittle.** `cortex reembed` requires existing embeddings; events captured before `nomic-embed-text` is pulled don't get backfilled on daemon restart. Pull the embedding model before the first capture.
-- **Daemon fails silently on missing models.** If the configured `ollama_model` isn't pulled, the daemon processes events out of the queue but produces zero insights and zero embeddings. Check `cortex status --system` and `.cortex/logs/daemon.log` if insights aren't appearing.
-- **Provider selection is env-driven, not config-driven.** The daemon must inherit `ANTHROPIC_API_KEY` in its environment to use Anthropic; restart it after exporting the key.
+- **Embedding bootstrap is brittle.** `cortex reembed` requires existing embeddings; events captured before `nomic-embed-text` is pulled don't get backfilled. Pull the embedding model before the first capture.
+- **Background cognition fails silently on missing models.** If the configured `ollama_model` isn't pulled, the REPL's ingest goroutine still drains events but Think/Dream produce zero insights and zero embeddings. Check `cortex status --system` if insights aren't appearing.
+- **Provider selection is env-driven, not config-driven.** The REPL must inherit `ANTHROPIC_API_KEY` in its environment to use Anthropic; restart it after exporting the key.
 
 ## Documentation
 
