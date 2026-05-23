@@ -172,36 +172,15 @@ func approxOutputTokens(s string) int {
 // Splits raw by line boundary into N chunks each ≤ MaxOutputTokens,
 // joins them with "[chunk i/N, lines a-b]" headers into one deposit,
 // and returns a synthetic attend.chunk trace entry. No LLM call.
-//
-// The total output is bounded by 8 × MaxOutputTokens — beyond that the
-// content is truncated with a final "[truncated — N more lines]"
-// marker. Callers that need ALL of a very large file should issue
-// follow-up reads with explicit line ranges (e.g. via run_shell sed).
 func applyDeterministicChunking(
 	item pendingItem,
 	result *NodeResult,
 	field, raw string,
 	nextChildID func() string,
 ) *TraceEntry {
-	const maxChunks = 8
 	cap := item.spec.Salience.MaxOutputTokens
 	started := time.Now()
-	lines := splitLines(raw)
-	chunks := buildChunksByLine(lines, cap)
-	totalChunks := len(chunks)
-	truncated := false
-	if totalChunks > maxChunks {
-		chunks = chunks[:maxChunks]
-		truncated = true
-	}
-	joined := joinChunks(chunks, totalChunks)
-	if truncated {
-		extra := 0
-		for _, c := range buildChunksByLine(lines, cap)[maxChunks:] {
-			extra += c.endLine - c.startLine + 1
-		}
-		joined += fmt.Sprintf("\n\n[truncated — %d more lines beyond chunk %d; re-fetch with explicit line range]\n", extra, maxChunks)
-	}
+	joined, totalChunks, emitted := ChunkOversize(raw, cap)
 	ended := time.Now()
 
 	childID := nextChildID()
@@ -214,17 +193,57 @@ func applyDeterministicChunking(
 		OK:            true,
 		CostConsumed:  Cost{LatencyMS: int(ended.Sub(started).Milliseconds())},
 		Out: map[string]any{
-			"chunks":       totalChunks,
-			"emitted":      len(chunks),
-			"chunked":      joined,
-			"max_tokens":   cap,
-			"intent":       item.spec.Salience.Intent,
+			"chunks":     totalChunks,
+			"emitted":    emitted,
+			"chunked":    joined,
+			"max_tokens": cap,
+			"intent":     item.spec.Salience.Intent,
 		},
 		Salience: item.spec.Salience,
 	}
 	result.Out[field] = joined
 	result.CostConsumed.LatencyMS += entry.CostConsumed.LatencyMS
 	return entry
+}
+
+// MaxEmittedChunks bounds how many deterministic chunks ChunkOversize
+// emits before truncating. 8 chunks at typical cap sizes (1K-8K
+// tokens) covers most real files without flooding the accumulator;
+// beyond this, the calling model should re-fetch specific ranges
+// rather than slurp the whole file.
+const MaxEmittedChunks = 8
+
+// ChunkOversize splits raw by line boundary into chunks each ≤ cap
+// tokens, joins them into one string with "[chunk i/N, lines a-b]"
+// headers, and returns (joined, totalChunks, emittedChunks). When
+// totalChunks > MaxEmittedChunks the output is truncated with a
+// "[truncated — N more lines …]" marker pointing the calling model
+// at the missing tail.
+//
+// Used by the executor's salience hook (ChunkOnOversize=true) and by
+// internal/harness/dagnode's inner-agent-loop compress path so the two
+// share one definition of "chunked the same way."
+func ChunkOversize(raw string, cap int) (joined string, totalChunks, emittedChunks int) {
+	if cap <= 0 {
+		cap = 500
+	}
+	lines := splitLines(raw)
+	all := buildChunksByLine(lines, cap)
+	totalChunks = len(all)
+	emit := all
+	if totalChunks > MaxEmittedChunks {
+		emit = all[:MaxEmittedChunks]
+	}
+	emittedChunks = len(emit)
+	joined = joinChunks(emit, totalChunks)
+	if totalChunks > MaxEmittedChunks {
+		extra := 0
+		for _, c := range all[MaxEmittedChunks:] {
+			extra += c.endLine - c.startLine + 1
+		}
+		joined += fmt.Sprintf("\n\n[truncated — %d more lines beyond chunk %d; re-fetch with explicit line range]\n", extra, MaxEmittedChunks)
+	}
+	return joined, totalChunks, emittedChunks
 }
 
 // chunkRange records the line-bounds and content of one mechanically-
