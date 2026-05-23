@@ -471,13 +471,6 @@ func (c *Cortex) ResetForTesting() {
 	c.dream.ResetForTesting()
 }
 
-// SetStateWriter sets the state writer for all cognitive modes.
-func (c *Cortex) SetStateWriter(sw *StateWriter) {
-	c.think.SetStateWriter(sw)
-	c.dream.SetStateWriter(sw)
-	c.digest.SetStateWriter(sw)
-}
-
 // NotifyDreamCompleted signals that Dream just finished.
 func (c *Cortex) NotifyDreamCompleted() {
 	c.digest.NotifyDreamCompleted()

@@ -69,8 +69,7 @@ type Pruner struct {
 	lastCheck   time.Time
 
 	// State
-	running     bool
-	stateWriter *StateWriter
+	running bool
 }
 
 // NewPruner creates a new Pruner instance.
@@ -80,13 +79,6 @@ func NewPruner(store *storage.Storage, cfg *config.Config) *Pruner {
 		config:      DefaultPruneConfig(),
 		projectRoot: cfg.ProjectRoot,
 	}
-}
-
-// SetStateWriter sets the state writer for daemon status updates.
-func (p *Pruner) SetStateWriter(sw *StateWriter) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stateWriter = sw
 }
 
 // SetConfig updates the pruner configuration.
@@ -251,7 +243,6 @@ func (p *Pruner) MaybePrune(ctx context.Context) (*PruneResult, error) {
 		return &PruneResult{Skipped: true, SkipReason: "already running"}, nil
 	}
 	p.running = true
-	stateWriter := p.stateWriter
 	p.mu.Unlock()
 
 	defer func() {
@@ -281,29 +272,17 @@ func (p *Pruner) MaybePrune(ctx context.Context) (*PruneResult, error) {
 		}, nil
 	}
 
-	// Update state
-	if stateWriter != nil {
-		stateWriter.WriteMode("prune", fmt.Sprintf("Context %.1fx project size, pruning...", ratio))
-	}
-
 	start := time.Now()
 
 	// Perform pruning
 	pruned, err := p.pruneInsights(ctx)
 	if err != nil {
-		if stateWriter != nil {
-			stateWriter.WriteMode("idle", "")
-		}
 		return nil, fmt.Errorf("prune failed: %w", err)
 	}
 
 	// Get new size
 	newSize, _ := p.GetCortexSize()
 	newRatio := float64(newSize) / float64(projectSize)
-
-	if stateWriter != nil {
-		stateWriter.WriteMode("idle", "")
-	}
 
 	log.Printf("Prune: removed %d insights (%.1fx -> %.1fx project size)", pruned, ratio, newRatio)
 

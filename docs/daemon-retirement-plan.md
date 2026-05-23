@@ -143,12 +143,12 @@ Now that nothing depends on it.
   - Acceptance: `go build ./...` passes; `cortex --help` does not list
     `daemon`.
 
-- [ ] **3.2** Delete `internal/cognition/daemon_state.go` + test.
+- [x] **3.2** Delete `internal/cognition/daemon_state.go` + test.
   - Files: `internal/cognition/daemon_state.go`, `internal/cognition/daemon_state_test.go`.
   - Acceptance: `go build ./...` passes; `go test ./internal/cognition/...`
     passes.
 
-- [ ] **3.3** Delete `SetStateWriter` methods from Think/Dream/Digest/Cortex.
+- [x] **3.3** Delete `SetStateWriter` methods from Think/Dream/Digest/Cortex.
   - Files: `internal/cognition/think.go`, `dream.go`, `digest.go`, `cortex.go:474-478`.
   - Drop the `stateWriter` field on each type too.
   - Acceptance: `go build ./...` passes; `go test ./internal/cognition/...`

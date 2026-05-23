@@ -92,8 +92,6 @@ type Dream struct {
 	sessionInsights int
 
 	queuedTranscripts []QueuedTranscript
-
-	stateWriter *StateWriter
 }
 
 // SetJournalDir wires the project's <ContextDir>/journal/ root. When set,
@@ -177,13 +175,6 @@ func (d *Dream) RegisterSource(source cognition.DreamSource) {
 	d.sources = append(d.sources, source)
 }
 
-// SetStateWriter sets the state writer for daemon status updates.
-func (d *Dream) SetStateWriter(sw *StateWriter) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.stateWriter = sw
-}
-
 // MaybeDream attempts exploration if the system is idle.
 func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) {
 	d.mu.Lock()
@@ -205,13 +196,8 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 	}
 
 	d.running = true
-	stateWriter := d.stateWriter
 	sources := append([]cognition.DreamSource(nil), d.sources...)
 	d.mu.Unlock()
-
-	if stateWriter != nil {
-		stateWriter.WriteMode("dream", "Dreaming about the codebase...")
-	}
 
 	start := time.Now()
 	minDisplay := d.config.MinDisplayDuration
@@ -225,9 +211,6 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 		d.running = false
 		d.lastDream = time.Now()
 		d.mu.Unlock()
-		if stateWriter != nil {
-			stateWriter.WriteMode("idle", "")
-		}
 	}()
 
 	budget := d.activity.DreamBudget(d.config.MinBudget, d.config.MaxBudget, d.config.GrowthDuration)
@@ -255,7 +238,7 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 		if !ok {
 			continue
 		}
-		gotInsight, skipped := d.processItem(ctx, item, stateWriter, fu.Depth)
+		gotInsight, skipped := d.processItem(ctx, item, fu.Depth)
 		if skipped {
 			noveltySkips++
 			continue
@@ -313,7 +296,7 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 			if ops >= budget {
 				break
 			}
-			gotInsight, skipped := d.processItem(ctx, item, stateWriter, 0)
+			gotInsight, skipped := d.processItem(ctx, item, 0)
 			if skipped {
 				noveltySkips++
 				continue
@@ -348,19 +331,13 @@ func (d *Dream) MaybeDream(ctx context.Context) (*cognition.DreamResult, error) 
 
 // processItem runs one item through novelty → analyze → record → enqueue.
 // Returns (gotInsight, skipped). skipped=true means the item was deduped.
-func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *StateWriter, parentDepth int) (bool, bool) {
+func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, parentDepth int) (bool, bool) {
 	contentHash := d.novelty.HashContent(item.Content)
 	if d.novelty.Seen(item.ID, contentHash) {
 		return false, true
 	}
 
-	if sw != nil {
-		if truncPath := TruncatePath(item.Path, 30); truncPath != "" {
-			sw.WriteMode("dream", fmt.Sprintf("Exploring %s...", truncPath))
-		}
-	}
-
-	insight, err := d.analyzeItem(ctx, item, sw)
+	insight, err := d.analyzeItem(ctx, item)
 	if err != nil || insight == nil {
 		d.novelty.RecordSeen(item.ID, contentHash, false)
 		return false, false
@@ -383,18 +360,13 @@ func (d *Dream) processItem(ctx context.Context, item cognition.DreamItem, sw *S
 	default:
 	}
 
-	if sw != nil {
-		sw.WriteMode("insight", fmt.Sprintf("Discovered %s", TruncateInsight(insight.Content, 35)))
-		time.Sleep(2 * time.Second)
-	}
-
 	d.enqueueNeighbors(item, parentDepth)
 
 	if insight.Score >= 0.8 {
 		d.mu.Lock()
 		d.proactiveQueue = append(d.proactiveQueue, *insight)
 		d.mu.Unlock()
-		d.extractAndStoreNuances(ctx, *insight, item, sw)
+		d.extractAndStoreNuances(ctx, *insight, item)
 	}
 
 	d.mu.Lock()
@@ -480,10 +452,7 @@ func buildFollowUpItem(fu fractal.FollowUp) (cognition.DreamItem, bool) {
 
 // extractAndStoreNuances handles the nuance-extraction side-effect that
 // previously lived inline in MaybeDream. Behavior preserved.
-func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Result, item cognition.DreamItem, sw *StateWriter) {
-	if sw != nil {
-		sw.WriteMode("dream", "Extracting implementation nuances...")
-	}
+func (d *Dream) extractAndStoreNuances(ctx context.Context, insight cognition.Result, item cognition.DreamItem) {
 	nuances, err := ExtractNuances(ctx, d.llm, insight.Content)
 	if err != nil || len(nuances) == 0 {
 		return
@@ -539,15 +508,9 @@ func (d *Dream) ResetForTesting() {
 }
 
 // analyzeItem uses LLM to extract insights from a sampled item.
-func (d *Dream) analyzeItem(ctx context.Context, item cognition.DreamItem, stateWriter *StateWriter) (*cognition.Result, error) {
+func (d *Dream) analyzeItem(ctx context.Context, item cognition.DreamItem) (*cognition.Result, error) {
 	if d.llm == nil || !d.llm.IsAvailable() {
 		return nil, nil
-	}
-
-	if stateWriter != nil {
-		if truncPath := TruncatePath(item.Path, 25); truncPath != "" {
-			stateWriter.WriteMode("dream", fmt.Sprintf("Analyzing %s for patterns...", truncPath))
-		}
 	}
 
 	content := item.Content
