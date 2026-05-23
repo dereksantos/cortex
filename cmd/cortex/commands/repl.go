@@ -1082,9 +1082,14 @@ func maybeStartStudy(state *replState) {
 const journalIngestInterval = 30 * time.Second
 
 // maybeStartJournalIngest spawns a goroutine that drains the project's
-// capture/observation/dream/etc. journals into Storage on a ticker.
-// Replaces the auto-started daemon's processor loop (daemon-retirement
-// Phase 2.1).
+// capture/observation/dream/etc. journals into Storage and fires the
+// background cognitive modes (Think, eventually Dream) on a ticker.
+// Replaces the auto-started daemon's processor + cognitive loops
+// (daemon-retirement Phase 2.1, 2.2).
+//
+// MaybeThink internally enforces the ActivityLevel budget — Think
+// runs only when the REPL is quiet, same contract the daemon
+// enforced via its 10s cognitive ticker.
 //
 // No-ops when state.store is nil — sessions that opted out of the
 // shared cognition surface have nothing to ingest into.
@@ -1109,6 +1114,11 @@ func maybeStartJournalIngest(state *replState) {
 			case <-ticker.C:
 				if _, err := proc.RunBatch(); err != nil && state.verbose {
 					state.ui.Warn(fmt.Sprintf("(journal ingest: %v)", err))
+				}
+				if state.cortex != nil && state.cortex.IsModeEnabled("think") {
+					if _, err := state.cortex.MaybeThink(ctx); err != nil && state.verbose {
+						state.ui.Warn(fmt.Sprintf("(think: %v)", err))
+					}
 				}
 			}
 		}

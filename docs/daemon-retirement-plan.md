@@ -90,7 +90,7 @@ is reviewable.
     followed by a 60s REPL session causes a storage-side index update
     visible via `cortex search 'test'`. `go build ./...` passes.
 
-- [ ] **2.2** Move Think dispatch to the REPL idle hook.
+- [x] **2.2** Move Think dispatch to the REPL idle hook.
   - Source: `cmd/cortex/commands/daemon.go` Think dispatch site (search
     for `MaybeThink(`).
   - Wire the same call into the REPL's idle goroutine, respecting the
