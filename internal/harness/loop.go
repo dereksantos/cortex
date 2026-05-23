@@ -154,6 +154,37 @@ type Loop struct {
 	// updates this field for the rest of the session.
 	ContextWindowTokens int
 
+	// AccumulatorSnapshot, when non-nil, is invoked before each
+	// provider call after the first turn. The returned string (if
+	// non-empty) is the bounded working memory that subsumes prior
+	// tool outputs. The loop injects it as a synthetic user message
+	// right after the original user prompt (refreshed each turn) and
+	// stubs the Content of tool-role messages outside the
+	// KeepRecentTurns window — the snapshot is the new source of
+	// truth for what those tools produced.
+	//
+	// Wired by callers (decide.coding_turn dispatcher) that fold
+	// every tool output through attend.accumulate and deposit
+	// snapshots into the DAG executor's turn state. The loop's
+	// per-turn input then stays bounded by
+	// snapshot_max_tokens + KeepRecentTurns × max_tool_output rather
+	// than growing linearly with turn count. See
+	// internal/eval/accumulator/eval.go for the bounded-emergence
+	// invariant this implements at the inner-loop layer.
+	//
+	// nil → behavior unchanged (history grows linearly with tool
+	// outputs, the pre-bounded-context default).
+	AccumulatorSnapshot func(context.Context) string
+
+	// KeepRecentTurns is how many recent (assistant tool_call,
+	// tool_result(s)) pairs the rewrite keeps verbatim. Older tool
+	// results get their Content replaced with a stub; the assistant
+	// tool_call messages are always preserved so tool_call_id
+	// matching stays intact. Defaults to 1 when AccumulatorSnapshot
+	// is set — the immediately prior turn stays full-fidelity, older
+	// turns live in the snapshot.
+	KeepRecentTurns int
+
 	// Stats accumulated as the loop runs.
 	tokensIn  int
 	tokensOut int
@@ -318,6 +349,33 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 			res.Reason = ReasonContextDone
 			res.Err = err
 			break
+		}
+
+		// Bounded-context rewrite: when the caller wired an accumulator
+		// (decide.coding_turn's dispatcher folds every tool output
+		// through attend.accumulate and deposits a snapshot), drink
+		// from the latest snapshot before each provider call after
+		// turn 0. The snapshot subsumes older tool outputs; the rewrite
+		// stubs their Content so the per-turn input plateaus instead of
+		// growing linearly. Turn 0 has no prior outputs to fold.
+		if turn > 0 && l.AccumulatorSnapshot != nil {
+			snap := l.AccumulatorSnapshot(ctx)
+			if snap != "" {
+				keep := l.KeepRecentTurns
+				if keep < 1 {
+					keep = 1
+				}
+				before := llm.EstimateChatTokens(msgs)
+				if rewrote, _ := rewriteHistoryWithSnapshot(&msgs, snap, keep); rewrote {
+					l.note("coding.context_rewrite", map[string]any{
+						"turn":              turn,
+						"snapshot_tokens":   len(snap) / 4,
+						"keep_recent_turns": keep,
+						"estimated_before":  before,
+						"estimated_after":   llm.EstimateChatTokens(msgs),
+					})
+				}
+			}
 		}
 
 		// Proactive budget — if we know n_ctx, trim PriorMessages
@@ -499,4 +557,99 @@ func trimAndNotify(l *Loop, msgs *[]llm.ChatMessage, maxTokens, keepHead, keepTa
 		"max_tokens":       maxTokens,
 	})
 	return dropped
+}
+
+// Sentinels used by the accumulator-snapshot rewrite path. The
+// working-memory message is identified by its Content prefix so the
+// loop can find and refresh it across turns without tracking an
+// index (TrimChatHistory may shift positions). The tool-result stub
+// replaces the Content of older tool messages once their information
+// is folded into the snapshot.
+const (
+	workingMemorySentinel = "[CORTEX_WORKING_MEMORY]"
+	toolResultStub        = "[folded into working memory above]"
+)
+
+// rewriteHistoryWithSnapshot injects/refreshes a synthetic
+// working-memory user message right after the original user prompt
+// and replaces the Content of tool-role messages outside the
+// last `keep` (assistant_tool_call, tool_result*) pairs with a stub.
+//
+// Bounded-context invariant: each call's input becomes
+// (system + priorMessages + user + working_memory + last_K_turns)
+// rather than (system + priorMessages + user + all_tool_outputs).
+// Per-turn input size plateaus instead of growing with turn count.
+// See internal/eval/accumulator/eval.go for the proof-of-concept
+// pattern this implements at the inner-loop layer.
+//
+// In-place mutation. Returns (true, newLen) if the rewrite ran
+// (snapshot non-empty + at least the original user prompt present),
+// (false, len(msgs)) when there was nothing to do.
+//
+// keep < 1 is normalized to 1: the immediately prior turn is always
+// kept verbatim so the model has direct context for what it just did.
+func rewriteHistoryWithSnapshot(msgs *[]llm.ChatMessage, snapshot string, keep int) (bool, int) {
+	if snapshot == "" {
+		return false, len(*msgs)
+	}
+	if keep < 1 {
+		keep = 1
+	}
+
+	// Locate the original user prompt: the LAST role=user message
+	// whose Content does NOT start with the working-memory sentinel.
+	// "Last" so REPL PriorMessages (alternating user/assistant) before
+	// the current prompt aren't mistaken for it.
+	ms := *msgs
+	userIdx := -1
+	for i := len(ms) - 1; i >= 0; i-- {
+		if ms[i].Role == "user" && !strings.HasPrefix(ms[i].Content, workingMemorySentinel) {
+			userIdx = i
+			break
+		}
+	}
+	if userIdx < 0 {
+		return false, len(ms)
+	}
+
+	wmContent := workingMemorySentinel + "\n\nWorking memory (synthesized from prior tool outputs in this turn — use as ground truth; do not re-fetch what's here):\n\n" + snapshot
+
+	// Find or insert the working-memory message right after userIdx.
+	wmIdx := -1
+	if userIdx+1 < len(ms) && ms[userIdx+1].Role == "user" && strings.HasPrefix(ms[userIdx+1].Content, workingMemorySentinel) {
+		wmIdx = userIdx + 1
+		ms[wmIdx].Content = wmContent
+	} else {
+		insertIdx := userIdx + 1
+		ms = append(ms, llm.ChatMessage{})
+		copy(ms[insertIdx+1:], ms[insertIdx:])
+		ms[insertIdx] = llm.ChatMessage{Role: "user", Content: wmContent}
+		wmIdx = insertIdx
+	}
+
+	// Walk back from end, count assistant tool-call turns until we
+	// hit `keep` of them. The boundary is the index of the oldest
+	// kept assistant turn; tool messages between wmIdx+1 and
+	// boundary-1 get stubbed.
+	boundary := -1
+	seen := 0
+	for i := len(ms) - 1; i > wmIdx; i-- {
+		if ms[i].Role == "assistant" && len(ms[i].ToolCalls) > 0 {
+			seen++
+			if seen == keep {
+				boundary = i
+				break
+			}
+		}
+	}
+	if boundary > wmIdx+1 {
+		for i := wmIdx + 1; i < boundary; i++ {
+			if ms[i].Role == "tool" && ms[i].Content != toolResultStub {
+				ms[i].Content = toolResultStub
+			}
+		}
+	}
+
+	*msgs = ms
+	return true, len(ms)
 }

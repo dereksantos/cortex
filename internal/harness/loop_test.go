@@ -353,3 +353,226 @@ func TestLoop_ProactiveTrimWhenNctxKnown(t *testing.T) {
 		t.Errorf("trim did not shrink msgs (saw %d, untrimmed would be %d)", got, len(bulky)+2)
 	}
 }
+
+// rewriteHistoryWithSnapshot — pure-function unit tests for the
+// in-place msgs rewrite the accumulator-bounded loop drives each turn.
+
+func TestRewriteHistoryWithSnapshot_NoSnapshot_NoOp(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "task"},
+	}
+	got, n := rewriteHistoryWithSnapshot(&msgs, "", 1)
+	if got {
+		t.Errorf("rewrote=true on empty snapshot; want false")
+	}
+	if n != 2 || len(msgs) != 2 {
+		t.Errorf("msgs len changed: got %d / %d, want 2", n, len(msgs))
+	}
+}
+
+func TestRewriteHistoryWithSnapshot_InsertsWorkingMemoryAfterUser(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "do the thing"},
+	}
+	rewrote, _ := rewriteHistoryWithSnapshot(&msgs, "memory contents", 1)
+	if !rewrote {
+		t.Fatal("rewrote=false; want true")
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("len=%d; want 3 (system+user+working_memory)", len(msgs))
+	}
+	if msgs[2].Role != "user" || !strings.HasPrefix(msgs[2].Content, workingMemorySentinel) {
+		t.Errorf("msgs[2] role=%q content=%q; want user + sentinel", msgs[2].Role, msgs[2].Content)
+	}
+	if !strings.Contains(msgs[2].Content, "memory contents") {
+		t.Errorf("working memory content missing snapshot body; got %q", msgs[2].Content)
+	}
+}
+
+func TestRewriteHistoryWithSnapshot_RefreshesExistingWorkingMemory(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "task"},
+		{Role: "user", Content: workingMemorySentinel + "\n\nold memory"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{readCall("r0", "main.go")}},
+		{Role: "tool", ToolCallID: "r0", Name: "read_file", Content: "file contents"},
+	}
+	rewrote, _ := rewriteHistoryWithSnapshot(&msgs, "fresh memory", 1)
+	if !rewrote {
+		t.Fatal("rewrote=false; want true")
+	}
+	if len(msgs) != 5 {
+		t.Errorf("len=%d; want 5 (refresh in place, no insert)", len(msgs))
+	}
+	if !strings.Contains(msgs[2].Content, "fresh memory") {
+		t.Errorf("working memory not refreshed; got %q", msgs[2].Content)
+	}
+	if strings.Contains(msgs[2].Content, "old memory") {
+		t.Errorf("old memory still present; got %q", msgs[2].Content)
+	}
+}
+
+func TestRewriteHistoryWithSnapshot_KeepsLastKToolResults_StubsOlder(t *testing.T) {
+	// 3 (assistant tool_call, tool_result) pairs, keep=1 → only the
+	// most recent tool_result keeps its content; the other two get
+	// stubbed.
+	msgs := []llm.ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "task"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{readCall("r0", "a")}},
+		{Role: "tool", ToolCallID: "r0", Name: "read_file", Content: "AAA"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{readCall("r1", "b")}},
+		{Role: "tool", ToolCallID: "r1", Name: "read_file", Content: "BBB"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{readCall("r2", "c")}},
+		{Role: "tool", ToolCallID: "r2", Name: "read_file", Content: "CCC"},
+	}
+	if rewrote, _ := rewriteHistoryWithSnapshot(&msgs, "snap", 1); !rewrote {
+		t.Fatal("rewrote=false; want true")
+	}
+	// New layout: system, user, working_memory, then 3 (assistant,
+	// tool) pairs. Indices: [0]=system, [1]=user, [2]=wm, [3]=asst,
+	// [4]=tool(AAA→stub), [5]=asst, [6]=tool(BBB→stub), [7]=asst,
+	// [8]=tool(CCC; kept).
+	if len(msgs) != 9 {
+		t.Fatalf("len=%d; want 9", len(msgs))
+	}
+	if msgs[4].Content != toolResultStub {
+		t.Errorf("msgs[4] not stubbed; got %q", msgs[4].Content)
+	}
+	if msgs[6].Content != toolResultStub {
+		t.Errorf("msgs[6] not stubbed; got %q", msgs[6].Content)
+	}
+	if msgs[8].Content != "CCC" {
+		t.Errorf("msgs[8] (latest) modified; got %q want CCC", msgs[8].Content)
+	}
+	// Assistant tool_call messages should be preserved verbatim — the
+	// tool_call_id matching protocol requires it.
+	for _, i := range []int{3, 5, 7} {
+		if len(msgs[i].ToolCalls) == 0 {
+			t.Errorf("msgs[%d] lost its tool_calls; want preserved", i)
+		}
+	}
+}
+
+func TestRewriteHistoryWithSnapshot_KeepKHigherThanHistory_NoStub(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "task"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{readCall("r0", "a")}},
+		{Role: "tool", ToolCallID: "r0", Name: "read_file", Content: "AAA"},
+	}
+	rewrote, _ := rewriteHistoryWithSnapshot(&msgs, "snap", 5)
+	if !rewrote {
+		t.Fatal("rewrote=false")
+	}
+	if msgs[4].Content != "AAA" {
+		t.Errorf("msgs[4] stubbed despite keep=5 > 1 turn of history; got %q", msgs[4].Content)
+	}
+}
+
+// End-to-end: Loop with AccumulatorSnapshot wired runs a 3-turn
+// session. Verify the SECOND call's msgs has the working-memory
+// message inserted and the THIRD call's msgs has the first turn's
+// tool_result stubbed while the most recent is kept.
+func TestLoop_AccumulatorSnapshot_RewritesEachTurn(t *testing.T) {
+	reg := newRegistry(t)
+	snap := "the working memory describes everything"
+	loop := &Loop{
+		Provider: &scriptedProvider{responses: []llm.ChatResult{
+			{ToolCalls: []llm.ToolCall{readCall("r0", "a.go")}, FinishReason: "tool_calls"},
+			{ToolCalls: []llm.ToolCall{readCall("r1", "b.go")}, FinishReason: "tool_calls"},
+			{ToolCalls: []llm.ToolCall{writeCall("w0", "out.go")}, FinishReason: "tool_calls"},
+			{Content: "done", FinishReason: "stop"},
+		}},
+		Registry:            reg,
+		System:              "test",
+		AccumulatorSnapshot: func(_ context.Context) string { return snap },
+		KeepRecentTurns:     1,
+	}
+	_, err := loop.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sp := loop.Provider.(*scriptedProvider)
+	if len(sp.observedMsgs) < 3 {
+		t.Fatalf("observedMsgs=%d; want >=3", len(sp.observedMsgs))
+	}
+
+	// Call 0: no rewrite (turn==0 short-circuits).
+	for _, m := range sp.observedMsgs[0] {
+		if strings.HasPrefix(m.Content, workingMemorySentinel) {
+			t.Errorf("call 0 has working memory; should not on turn 0")
+		}
+	}
+
+	// Call 1: working memory injected once.
+	wmCount := 0
+	for _, m := range sp.observedMsgs[1] {
+		if strings.HasPrefix(m.Content, workingMemorySentinel) {
+			wmCount++
+			if !strings.Contains(m.Content, snap) {
+				t.Errorf("call 1 working memory missing snapshot body; got %q", m.Content)
+			}
+		}
+	}
+	if wmCount != 1 {
+		t.Errorf("call 1 working-memory count=%d; want 1", wmCount)
+	}
+
+	// Call 2: still exactly one working-memory msg (refreshed in place,
+	// not duplicated); the first tool_result (r0) should be stubbed.
+	call2 := sp.observedMsgs[2]
+	wmCount = 0
+	for _, m := range call2 {
+		if strings.HasPrefix(m.Content, workingMemorySentinel) {
+			wmCount++
+		}
+	}
+	if wmCount != 1 {
+		t.Errorf("call 2 working-memory count=%d; want 1 (refresh, not dup)", wmCount)
+	}
+	var firstStubbed, secondKept bool
+	for _, m := range call2 {
+		if m.Role == "tool" && m.ToolCallID == "r0" {
+			firstStubbed = m.Content == toolResultStub
+		}
+		if m.Role == "tool" && m.ToolCallID == "r1" {
+			secondKept = m.Content != toolResultStub
+		}
+	}
+	if !firstStubbed {
+		t.Errorf("call 2 first tool_result (r0) not stubbed")
+	}
+	if !secondKept {
+		t.Errorf("call 2 most recent tool_result (r1) was stubbed; should be kept verbatim")
+	}
+}
+
+// TurnZero never invokes AccumulatorSnapshot: there's no prior output
+// to fold, so calling out to the snapshot would be wasted work and
+// could spuriously inject empty working memory.
+func TestLoop_AccumulatorSnapshot_SkippedOnTurnZero(t *testing.T) {
+	reg := newRegistry(t)
+	called := 0
+	loop := &Loop{
+		Provider: &scriptedProvider{responses: []llm.ChatResult{
+			{Content: "immediate answer", FinishReason: "stop"},
+		}},
+		Registry: reg,
+		System:   "test",
+		AccumulatorSnapshot: func(_ context.Context) string {
+			called++
+			return "would be memory"
+		},
+	}
+	_, err := loop.Run(context.Background(), "no tools needed")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called != 0 {
+		t.Errorf("AccumulatorSnapshot called %d times on turn-0-only session; want 0", called)
+	}
+}

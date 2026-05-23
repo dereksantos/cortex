@@ -293,6 +293,24 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, prompt, &spawnedChildren))
 		}
 
+		// Inner-loop accumulator wiring. When the dispatcher is folding
+		// tool outputs through attend.accumulate (AccumulatorProvider +
+		// AccumulatorMaxTokens both set), give the agent loop a hook
+		// that reads the latest deposited snapshot via
+		// dag.LatestAccumulatorSnapshot(ctx). The loop then rewrites
+		// each turn's msgs as (system + user + snapshot + last K
+		// pairs), bounding per-turn input by the snapshot size rather
+		// than letting tool-output history grow linearly. The same
+		// snapshots already power decide.next / synthesis coding_turn
+		// composition; this wiring just lets the *current* coding_turn's
+		// own inner loop drink from them too — the missing piece
+		// between the accumulator eval and the live REPL.
+		if cfg.AccumulatorProvider != nil && cfg.AccumulatorMaxTokens > 0 {
+			h.SetAccumulatorSnapshot(func(c context.Context) string {
+				return dag.LatestAccumulatorSnapshot(c)
+			}, 1)
+		}
+
 		// Inject prior turn-state outputs as a context block prepended
 		// to the user prompt. This is what makes the "decide.next emits
 		// [list_dir, read_file, synthesize-coding_turn]" pattern
