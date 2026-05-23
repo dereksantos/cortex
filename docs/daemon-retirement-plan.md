@@ -43,7 +43,7 @@ No behavior change. Removing files nothing reads.
 - [x] **0.2** Remove the `cortex daemon` advisory from `scripts/install.sh:34`.
   - Acceptance: `grep -n 'cortex daemon' scripts/install.sh` returns nothing.
 
-- [ ] **0.3** Remove the daemon entry from `.claude/settings.local.json`.
+- [x] **0.3** Remove the daemon entry from `.claude/settings.local.json`.
   - Target: the `Bash(timeout 2 ./cortex daemon:*)` allowlist line (~line 56).
   - Acceptance: `grep -n 'cortex daemon' .claude/settings.local.json` returns nothing.
 
