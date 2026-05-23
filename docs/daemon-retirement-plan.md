@@ -182,7 +182,7 @@ Strip daemon references from docs that still describe it as live.
     references; keep the slash-commands listing since those still work.
   - Acceptance: `grep -ni 'daemon' CLAUDE.md` returns nothing load-bearing.
 
-- [ ] **4.3** Strip daemon paragraphs from `docs/product.md`.
+- [x] **4.3** Strip daemon paragraphs from `docs/product.md`.
   - Lines roughly 75, 109, 156–165.
   - Acceptance: `grep -ni 'daemon' docs/product.md` returns nothing load-bearing.
 
