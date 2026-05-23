@@ -583,6 +583,15 @@ type replState struct {
 	// first use, reused across turns. Invalidated by /model swap and
 	// /models refresh — the next runREPLChainTurn rebuilds it.
 	modelCatalogCache string
+
+	// registry is the unified ModelRegistry over this session's
+	// configured backends (Ollama + any compat endpoints in
+	// .cortex/config.json + OpenRouter when a key is present). Built
+	// once at newREPLState and reused by every consumer that needs
+	// to know "what models exist" — modelCatalogForREPL, the Ollama
+	// auto-pick probe, and (Phase B) act.read_file's size-vs-window
+	// decision.
+	registry llm.ModelRegistry
 }
 
 // turnExchange is one accepted turn condensed to just what the model
@@ -686,6 +695,7 @@ func newREPLState(workdir, model string, verbose bool, ui cliout.Sink) (*replSta
 	if ui == nil {
 		ui = cliout.New(verbose)
 	}
+	registry := buildREPLRegistry(cortexDir, apiURL, ui, verbose)
 	return &replState{
 		workdir:      workdir,
 		model:        model,
@@ -699,7 +709,77 @@ func newREPLState(workdir, model string, verbose bool, ui cliout.Sink) (*replSta
 		sessionID:    ts,
 		store:        store,
 		cortex:       cortex,
+		registry:     registry,
 	}, nil
+}
+
+// buildREPLRegistry composes the per-session ModelRegistry from the
+// configured backends: Ollama at apiURL (when it looks Ollama-shaped),
+// each OpenAI-compat endpoint declared in .cortex/config.json, and
+// OpenRouter (when the keychain has a key). Errors from individual
+// probes don't fail the build — they just shrink the catalogue and
+// surface via ui.Warn when verbose.
+//
+// 5-minute TTL is generous enough for the per-turn catalog injection
+// to never re-probe under typical use, and short enough that a fresh
+// `ollama pull` surfaces within the same session without manual
+// refresh.
+func buildREPLRegistry(cortexDir, apiURL string, ui cliout.Sink, verbose bool) llm.ModelRegistry {
+	cfg := loadREPLConfig(cortexDir)
+	probes := []llm.Probe{}
+
+	// Ollama probe — always include for the local-default path. The
+	// apiURL may point at a non-default host (CORTEX_OLLAMA_URL or
+	// /endpoint override), so derive the base from there.
+	probes = append(probes, llm.NewOllamaProbe(llm.OllamaProbeConfig{
+		BaseURL: trimOllamaChatSuffix(apiURL),
+	}))
+
+	// OpenAI-compat endpoints — one probe per configured entry.
+	if cfg != nil {
+		for _, ep := range cfg.Endpoints {
+			probes = append(probes, llm.NewOpenAICompatProbe(llm.OpenAICompatProbeConfig{
+				Endpoint: llm.EndpointConfig{
+					Name:    ep.Name,
+					BaseURL: ep.BaseURL,
+					APIKey:  ep.APIKey,
+				},
+				IsLocal: true, // configured endpoints are assumed local/LAN today
+			}))
+		}
+	}
+
+	// OpenRouter — only when a key is resolvable.
+	if key, _, err := secret.MustOpenRouterKey(); err == nil && key != "" {
+		probes = append(probes, llm.NewOpenRouterProbe(llm.OpenRouterProbeConfig{
+			APIKey: key,
+			Cfg:    cfg,
+		}))
+	}
+
+	onError := llm.ErrorReporter(nil)
+	if verbose {
+		onError = func(name string, err error) {
+			ui.Warn(fmt.Sprintf("registry probe %s: %v", name, err))
+		}
+	}
+	return llm.NewCompositeRegistry(llm.RegistryConfig{
+		Probes:       probes,
+		TTL:          5 * time.Minute,
+		ProbeTimeout: 5 * time.Second,
+		OnError:      onError,
+	})
+}
+
+// trimOllamaChatSuffix returns the Ollama root URL given either a root
+// or a /v1/chat/completions URL. Used to derive the /api/tags base for
+// the OllamaProbe from the REPL's apiURL.
+func trimOllamaChatSuffix(u string) string {
+	const suffix = "/v1/chat/completions"
+	if n := len(u) - len(suffix); n >= 0 && u[n:] == suffix {
+		return u[:n]
+	}
+	return u
 }
 
 // loadREPLConfig loads the user's config from <cortexDir>/config.json
@@ -771,94 +851,56 @@ func (s *replState) modelCatalogForREPL() string {
 	if s.modelCatalogCache != "" {
 		return s.modelCatalogCache
 	}
+	models := s.registry.Filter(context.Background(), func(m llm.ModelInfo) bool {
+		// Drop embeddings/rerankers — they fail with "does not support
+		// chat" when routed to a chat call. Capability tags are sourced
+		// from endpoint labels (Lemonade) or id-pattern inference
+		// (Ollama), so this single filter replaces the old per-list
+		// embed-marker heuristic.
+		if m.HasCapability(llm.CapEmbedding) || m.HasCapability(llm.CapReranking) {
+			return false
+		}
+		return true
+	})
+	// Group by (Local, Endpoint) for display: local backends first so
+	// the LLM sees "what's on this machine" before scrolling to cloud
+	// options. Within a group, sort by id for stability.
+	sort.SliceStable(models, func(i, j int) bool {
+		if models[i].IsLocal != models[j].IsLocal {
+			return models[i].IsLocal // locals first
+		}
+		if models[i].Endpoint != models[j].Endpoint {
+			return models[i].Endpoint < models[j].Endpoint
+		}
+		return models[i].ID < models[j].ID
+	})
 	var b strings.Builder
-	b.WriteString("Local (Ollama):\n")
-	ollama, _, _ := listOllamaModels(s.apiURL)
-	ollama = filterChatCapableModels(ollama)
-	if len(ollama) == 0 {
-		b.WriteString("  (none — install via `ollama pull`)\n")
-	} else {
-		sort.Strings(ollama)
-		for _, m := range ollama {
-			fmt.Fprintf(&b, "  %s\n", m)
+	currentGroup := ""
+	for _, m := range models {
+		group := m.Endpoint
+		if !m.IsLocal {
+			group += " (cloud)"
+		}
+		if group != currentGroup {
+			if currentGroup != "" {
+				b.WriteString("\n")
+			}
+			fmt.Fprintf(&b, "%s:\n", group)
+			currentGroup = group
+		}
+		// Surface context window when known so the LLM can pick a
+		// model with enough room for the task.
+		if m.EffectiveContextWindow > 0 {
+			fmt.Fprintf(&b, "  %s (ctx=%d)\n", m.ID, m.EffectiveContextWindow)
+		} else {
+			fmt.Fprintf(&b, "  %s\n", m.ID)
 		}
 	}
-	b.WriteString("Cloud (OpenRouter — use sparingly, paid):\n")
-	openrouter, err := fetchOpenRouterModels()
-	if err != nil || len(openrouter) == 0 {
-		b.WriteString("  (catalogue unavailable)\n")
-	} else {
-		// Curate a short list of well-known IDs rather than dumping
-		// 300+. The LLM can use IDs outside this list (per-node
-		// dispatch doesn't enforce membership), so we just highlight
-		// reasonable defaults.
-		// TODO (hardcoded curated list decays): same shape as
-		// scoreOllamaModel's knownGood — Go literal that goes stale as
-		// new models ship. Source from observed success in the learning
-		// store (top-N by tool-call success rate this project), with
-		// these IDs as a cold-start prior only. Also: rank — generic
-		// Python project, Go project, and dataviz project each want a
-		// different surface presented to decide.next. Same observed-
-		// fitness machinery as the Ollama probe TODOs.
-		curatedIDs := []string{
-			"anthropic/claude-haiku-4.5",
-			"anthropic/claude-sonnet-4.5",
-			"anthropic/claude-opus-4.5",
-			"openai/gpt-4o-mini",
-			"openai/gpt-4o",
-		}
-		seen := map[string]bool{}
-		for _, m := range openrouter {
-			seen[m.ID] = true
-		}
-		shown := 0
-		for _, id := range curatedIDs {
-			if !seen[id] {
-				continue
-			}
-			fmt.Fprintf(&b, "  %s\n", id)
-			shown++
-		}
-		if shown == 0 {
-			b.WriteString("  (none of the curated IDs are available)\n")
-		}
+	if b.Len() == 0 {
+		b.WriteString("(no models discoverable — Ollama down and no compat endpoints configured)\n")
 	}
 	s.modelCatalogCache = b.String()
 	return s.modelCatalogCache
-}
-
-// filterChatCapableModels drops embedding-only models from the
-// installed-Ollama list. The model catalogue is injected into
-// decide.next's prompt, where the LLM may emit one as attrs.model on
-// a coding_turn spawn — routing a chat call to an embedding-only
-// model fails with a 400 "does not support chat" from Ollama.
-//
-// Heuristic: names containing "embed", "bge-", "minilm", or "rerank"
-// are treated as embedding/reranker-only. Imperfect — a future
-// chat-capable model named "embedded-foo" would be wrongly dropped —
-// but the alternative (calling /api/show for every model) is slow
-// and the current naming conventions are stable across HF/Ollama.
-//
-// TODO (ask the backend, don't guess from name): the heuristic is a
-// third hardcoded list adjacent to scoreOllamaModel's knownGood/Bad
-// and modelCatalogForREPL's curatedIDs — same decay problem. Cache
-// /api/show capabilities per (backend, model) at first reference
-// (one slow call, one cache hit forever) and consult the cache. Same
-// pattern works across vLLM / llama.cpp once the backend-registry
-// TODO lands — each backend exposes its own capability probe.
-func filterChatCapableModels(names []string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		lower := strings.ToLower(n)
-		if strings.Contains(lower, "embed") ||
-			strings.Contains(lower, "bge-") ||
-			strings.Contains(lower, "minilm") ||
-			strings.Contains(lower, "rerank") {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
 }
 
 // resetModelCatalog invalidates the cached catalog. Called when the
@@ -4228,23 +4270,32 @@ var modelSizeRegex = regexp.MustCompile(`(?i):(\d+(?:\.\d+)?)([mb])`)
 // Generic prior + project-tuned posterior is the shape.
 //
 // scoreOllamaModel applies the rubric in pickBestOllamaModel.
+//
+// Capability-based scoring (CapToolCalling, CapCoding) uses
+// llm.InferCapabilities — the same id-pattern inference the
+// ModelRegistry's Ollama probe runs. So a model that's "good" by this
+// scorer is also tagged with the right capabilities in the registry's
+// ModelInfo, and vice versa: there's one place these patterns live.
+//
+// knownBad survives as a cold-start backstop until observed-rate
+// (per the salvage-telemetry TODO) replaces it — these are concrete
+// iter-7 failures (mistral:7 emits prose pretending to call tools,
+// phi3:mini doesn't support tools in Ollama at all) that capability
+// inference can't see from the id alone.
 func scoreOllamaModel(name string) int {
 	lower := strings.ToLower(name)
 	score := 0
 
-	knownGood := []string{
-		"qwen2.5-coder:3", "qwen2.5-coder:7", "qwen2.5-coder:14", "qwen2.5-coder:32",
-		"qwen3-coder",
-		"llama3.1", "llama3.2", "llama3.3",
-		"mistral-nemo", // mistral-nemo is distinct from mistral:7b; still scored highly
-		"granite-code", "granite3",
-		"command-r",
+	// Capability-driven positive scoring — same source the registry
+	// uses for ModelInfo.Capabilities. Tool-calling is the strongest
+	// signal because the REPL agent loop requires it; coding is a
+	// secondary preference.
+	caps := llm.InferCapabilities(name)
+	if hasCap(caps, llm.CapToolCalling) {
+		score += 25
 	}
-	for _, g := range knownGood {
-		if strings.Contains(lower, g) {
-			score += 30
-			break
-		}
+	if hasCap(caps, llm.CapCoding) {
+		score += 15
 	}
 
 	knownBad := []string{
@@ -4262,10 +4313,6 @@ func scoreOllamaModel(name string) int {
 			score -= 50
 			break
 		}
-	}
-
-	if strings.Contains(lower, "coder") || strings.Contains(lower, "instruct") {
-		score += 10
 	}
 
 	// Parameter-size bucket bonus.
@@ -4291,6 +4338,18 @@ func scoreOllamaModel(name string) int {
 	}
 
 	return score
+}
+
+// hasCap returns true when c is present in caps. Small local helper
+// since the registry's HasCapability is a method on ModelInfo, and the
+// scorer works in []string directly.
+func hasCap(caps []string, c string) bool {
+	for _, x := range caps {
+		if x == c {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================
