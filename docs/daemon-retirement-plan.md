@@ -40,7 +40,7 @@ No behavior change. Removing files nothing reads.
   - Files: `/daemon_state.json` (repo root), `.cortex/daemon_state.json`.
   - Acceptance: both gone; `go build ./...` still passes.
 
-- [ ] **0.2** Remove the `cortex daemon` advisory from `scripts/install.sh:34`.
+- [x] **0.2** Remove the `cortex daemon` advisory from `scripts/install.sh:34`.
   - Acceptance: `grep -n 'cortex daemon' scripts/install.sh` returns nothing.
 
 - [ ] **0.3** Remove the daemon entry from `.claude/settings.local.json`.
