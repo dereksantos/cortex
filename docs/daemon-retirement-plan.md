@@ -58,7 +58,7 @@ unless the user runs `cortex daemon` by hand.
   - File: `cmd/cortex/main.go:311-322` (the function); search for `maybeStartDaemon(` to find call sites.
   - Acceptance: `grep -n 'maybeStartDaemon' cmd/cortex/` returns nothing; `go build ./...` passes.
 
-- [ ] **1.2** Replace daemon-state read in `renderStatusLine`.
+- [x] **1.2** Replace daemon-state read in `renderStatusLine`.
   - File: `cmd/cortex/commands/debug.go:700-800`.
   - Drop the `ReadDaemonState()` call and any Dream/Think mode-from-state-file logic.
   - Keep the storage-stats fallback (events + insights counts) — it's already the path the function uses when the state file is stale.
