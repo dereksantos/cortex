@@ -316,6 +316,24 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		if runErr == nil && lr.Err != nil {
 			runErr = lr.Err
 		}
+		// Cap-hit guard: loop.Run can return (Reason=turn_limit |
+		// budget | no_progress, Err=nil, Final="") — the agent was
+		// still in tool-calling mode when the loop bailed at a cap.
+		// Without this guard the node reports ok=true with response=""
+		// and the REPL prints nothing, indistinguishable from a hang.
+		// Lift the structured Reason into runErr so the trace is
+		// honest and the REPL surfaces a visible failure.
+		//
+		// ReasonModelDone with empty Final is left alone: a model that
+		// legitimately emits an empty assistant turn with no tool calls
+		// is a different (UX) problem, not a loop failure.
+		if runErr == nil && strings.TrimSpace(lr.Final) == "" {
+			switch lr.Reason {
+			case harness.ReasonTurnLimit, harness.ReasonBudget, harness.ReasonNoProgress:
+				runErr = fmt.Errorf("agent loop hit %s with no final response (turns=%d, tokens=%d in / %d out)",
+					lr.Reason, hr.AgentTurnsTotal, hr.TokensIn, hr.TokensOut)
+			}
+		}
 		if cfg.ResultCallback != nil {
 			cfg.ResultCallback(h, hr, lr, runErr)
 		}
