@@ -176,7 +176,7 @@ Strip daemon references from docs that still describe it as live.
   - Replace "start the daemon" guidance with "start the REPL with `cortex repl`".
   - Acceptance: `grep -ni 'daemon' README.md` returns at most historical mentions (e.g. "the legacy daemon was retired in <commit>").
 
-- [ ] **4.2** Strip daemon paragraphs from `CLAUDE.md`.
+- [x] **4.2** Strip daemon paragraphs from `CLAUDE.md`.
   - Lines roughly 43, 60, 65, 73, 90, 92.
   - Remove the "Quick Start (Claude Code as host)" section's daemon
     references; keep the slash-commands listing since those still work.

@@ -36,12 +36,13 @@ Capture → Filter → Store → Retrieve → Inject
 
 ## Quick Start (Claude Code as host)
 
-Cortex can also drive Claude Code as one of its host integrations. To wire it up:
+Cortex can also drive Claude Code as one of its host integrations. The
+slash commands + hooks shell out to the CLI directly, so no separate
+background process is needed.
 
 1. Build: `go build ./cmd/cortex`
 2. Install: `./cortex install`
-3. Start daemon: `./cortex daemon &`
-4. Use Claude Code normally — events are captured automatically
+3. Use Claude Code normally — events are captured automatically
 
 ### Slash Commands
 
@@ -57,12 +58,12 @@ Cortex can also drive Claude Code as one of its host integrations. To wire it up
 cortex search "authentication"   # Search for context
 cortex insights                  # View extracted insights
 cortex recent                    # Show recent events
-cortex status                    # Check daemon status
+cortex status                    # One-line cognition + storage status
 ```
 
 ## Multi-Agent / CI Setup
 
-For projects with multiple AI agents (e.g., sprite.dev, parallel Claude Code sessions), use Cortex as a shared context layer without hooks or daemon:
+For projects with multiple AI agents (e.g., sprite.dev, parallel Claude Code sessions), use Cortex as a shared context layer without hooks or a long-lived background process:
 
 1. Build: `go build -o bin/cortex ./cmd/cortex`
 2. Init: `./bin/cortex init`
@@ -70,7 +71,7 @@ For projects with multiple AI agents (e.g., sprite.dev, parallel Claude Code ses
 
 All agents share the same `.cortex/` directory — one agent's captured decisions are searchable by all others.
 
-### Capture and search only (no hooks, no daemon)
+### Capture and search only (no hooks, no host process)
 
 ```bash
 # Record a decision or insight
@@ -87,9 +88,9 @@ All agents share the same `.cortex/` directory — one agent's captured decision
 
 - **Binary path**: Check the binary into the repo (e.g., `bin/cortex`) or install to a fixed path so all agents find it
 - **Shared `.cortex/`**: The journal (`.cortex/journal/<class>/`) uses per-segment flock for cross-process capture safety. Storage (read side) hydrates from JSONL projection files
-- **No daemon needed**: Capture and search work standalone. The daemon adds background processing (Dream/Think) and the web dashboard, but is optional
+- **No host process needed**: Capture and search work standalone. The Cortex REPL hosts the long-lived background cognition (Dream/Think + journal-ingest) when it's running, but isn't required for capture/search to work
 - **No `~/.claude/` required**: `cortex init` and CLI commands work without Claude Code installed. Only `cortex install` requires it (sets up hooks)
-- **Ingest after capture**: Run `./bin/cortex ingest` (or `./bin/cortex journal ingest` — lower-level, no embedding) to project journal entries into storage. Without the daemon, entries stay in the journal until ingest runs
+- **Ingest after capture**: Run `./bin/cortex ingest` (or `./bin/cortex journal ingest` — lower-level, no embedding) to project journal entries into storage when no REPL session is open. While a REPL session is running, its idle goroutine drains journals on a 30s ticker
 
 ## Journal — source of truth
 
