@@ -71,14 +71,14 @@ unless the user runs `cortex daemon` by hand.
 This is the only real engineering work. Sized into small tasks so each
 is reviewable.
 
-- [ ] **2.0** PAUSE for design review.
+- [x] **2.0** PAUSE for design review.
   - Before any 2.x task runs, the human must look at this plan, the
     current REPL idle-hook surface (commits `7c23954`, `8b71431`,
     `e71b737` are the recent idle-hook additions — start there), and
     confirm the cadence choice.
   - Tick this box manually to unblock the loop.
 
-- [ ] **2.1** Add a journal-ingest goroutine to the REPL.
+- [x] **2.1** Add a journal-ingest goroutine to the REPL.
   - The REPL already has an idle hook (see `cmd/cortex/commands/repl.go`
     around the "forever-session digest via attend.compact" wiring).
   - Add a ticker (default 30s) that calls the existing journal-drain
@@ -126,6 +126,10 @@ is reviewable.
     goroutines on exit.
   - Acceptance: clean exit, no `goroutine` leak warning in `pprof`
     if you want to be thorough.
+
+- [ ] **2.6** REPL visibility
+  - Make sure the REPL shows think and dream happening as written lines in the REPL, much like when prompts are executed
+  - Acceptance: think and dream steps visible to the user in the REPL
 
 ---
 
