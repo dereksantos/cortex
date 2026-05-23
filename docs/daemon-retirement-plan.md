@@ -137,7 +137,7 @@ is reviewable.
 
 Now that nothing depends on it.
 
-- [ ] **3.1** Delete `cmd/cortex/commands/daemon.go` entirely.
+- [x] **3.1** Delete `cmd/cortex/commands/daemon.go` entirely.
   - Remove the file. Find and remove the daemon command registration
     in `cmd/cortex/commands/commands.go` (or wherever the registry is).
   - Acceptance: `go build ./...` passes; `cortex --help` does not list

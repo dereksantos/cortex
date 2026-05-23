@@ -100,15 +100,6 @@ func main() {
 			}
 			runCommand(command, cmd, c)
 		}
-	case "daemon":
-		if cmd := commands.Get("daemon"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				// Daemon can run without a per-project config
-				cfg = config.Default()
-			}
-			runCommand(command, cmd, &commands.Context{Config: cfg, Args: os.Args[2:]})
-		}
 	case "test", "status", "forget", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
