@@ -1,5 +1,13 @@
 # DAG Build — Stage 5: Additional DAG Types
 
+> **Historical note:** This loop-prompt describes scheduling `think`
+> and `dream` from a long-lived `cortex daemon`. The daemon was
+> retired in May 2026 (see
+> [../daemon-retirement-plan.md](../daemon-retirement-plan.md)); the
+> REPL idle hook now hosts the scheduler that fires `cortex.MaybeThink`
+> and `cortex.MaybeDream`. Daemon mentions below describe the
+> architecture at the time of writing.
+
 After Stage 4, `cortex run --type=turn` is fully production: parallel
 execution, budget rollover, calibrated costs. Stage 5 brings the
 other DAG types online: **think**, **dream**, **capture**, **eval**

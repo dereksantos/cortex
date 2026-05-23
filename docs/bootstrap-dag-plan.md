@@ -2,7 +2,7 @@
 
 ## Context
 
-Cortex's `dream.insight` pipeline is reactive — it only fires when the daemon catches idle time, and only on whatever `DreamSource` happens to sample next. A fresh project that has never been "dreamed about" arrives at the REPL with zero indexed context, so turn 1 has nothing useful to retrieve.
+Cortex's `dream.insight` pipeline is reactive — it only fires when the REPL idle hook catches idle time (was: the daemon, retired May 2026 — see [daemon-retirement-plan.md](./daemon-retirement-plan.md)), and only on whatever `DreamSource` happens to sample next. A fresh project that has never been "dreamed about" arrives at the REPL with zero indexed context, so turn 1 has nothing useful to retrieve.
 
 This change adds a **project-bootstrap DAG** that runs once on first REPL invocation (and via a standalone `cortex bootstrap` command). It scans the project under principled security rules, samples chunks via a hierarchical fractal sampler, feeds each chunk through an LLM op (A/B between `maintain.extract_insight` and a new `maintain.extract_overview` — see §A/B), and writes `dream.insight` entries to the journal — looping until both coverage signals satisfy the target or the iteration budget is exhausted.
 

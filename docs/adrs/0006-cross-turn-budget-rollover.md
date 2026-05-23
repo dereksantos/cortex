@@ -48,9 +48,13 @@ enforces this projection.
 ## Cross-process safety
 
 The queue file is mutated by potentially multiple processes
-simultaneously — a `cortex daemon` background loop and a foreground
-`cortex code` invocation can both refuse spawns into the same
-project's queue. The implementation uses POSIX advisory locking
+simultaneously — historically a `cortex daemon` background loop
+(retired May 2026 — see
+[../daemon-retirement-plan.md](../daemon-retirement-plan.md)) and a
+foreground `cortex code` invocation; today, the REPL's background
+goroutine and any foreground `cortex code`. Both refuse spawns into
+the same project's queue. The implementation uses POSIX advisory
+locking
 (`syscall.Flock`) on the fd, matching the existing
 `internal/journal/lock_unix.go` pattern. Windows is a no-op; the
 queue tolerates a corrupted line from interleaved writes.

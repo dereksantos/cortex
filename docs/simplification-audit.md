@@ -1,5 +1,11 @@
 # Simplification Audit — Align to the Cortex Harness
 
+> **Historical note:** Daemon references in this audit (the `:9090`
+> dashboard, `cortex daemon`, daemon idle/active triggers) predate the
+> May 2026 daemon retirement (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)). The REPL
+> idle hook now owns background cognition; the dashboard is dropped.
+
 > Living doc. Move items between sections as decisions land or scans return
 > new evidence. This is a punch list, not a design doc.
 >

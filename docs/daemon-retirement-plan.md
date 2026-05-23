@@ -191,7 +191,7 @@ Strip daemon references from docs that still describe it as live.
   - Either delete or annotate "superseded by REPL-as-host (May 2026)".
   - Acceptance: ROADMAP no longer presents the daemon as a current/future feature.
 
-- [ ] **4.5** Final daemon-reference sweep.
+- [x] **4.5** Final daemon-reference sweep.
   - Run: `grep -rni 'daemon' docs/ README.md CLAUDE.md CONTRIBUTING.md ROADMAP.md`.
   - Resolve every remaining hit: delete, rewrite, or annotate as historical.
   - Acceptance: every remaining hit is either (a) historical context,

@@ -1,5 +1,13 @@
 # Cortex ↔ Claude Code Integration
 
+> **Historical note:** This prompt-doc describes the pre-retirement
+> architecture in which background processing lived in a separate
+> `cortex daemon` process. The daemon was retired in May 2026 (see
+> [../daemon-retirement-plan.md](../daemon-retirement-plan.md));
+> background cognition now runs in the REPL idle hook, and slash
+> commands still work because they shell out to the CLI. Daemon
+> mentions below describe the architecture at the time of writing.
+
 ## Overview
 
 Cortex integrates with Claude Code via hooks, status line, and slash commands to provide persistent context across sessions.

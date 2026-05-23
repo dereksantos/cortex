@@ -155,8 +155,11 @@ manual-testing rounds (#5) so feedback lands on a fair surface.
 - **Embedded terminal pane.** Run a shell inside the TUI for
   out-of-band commands without leaving the REPL.
 - **Remote-driven mode.** TUI sink that connects to a remote
-  Cortex daemon over a socket so a thin local frontend talks to
-  a hosted backend.
+  Cortex backend over a socket so a thin local frontend talks to
+  a hosted backend. (Originally described as a daemon-over-socket
+  setup; the local daemon was retired May 2026 — see
+  [daemon-retirement-plan.md](./daemon-retirement-plan.md). Any
+  remote-driven mode would now ride a small dedicated binary.)
 
 ## Done
 

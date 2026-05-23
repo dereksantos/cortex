@@ -72,9 +72,12 @@ The discipline that crystallized in 2025-2026 [12] reframed the bottleneck in ag
 ## 3. Cortex
 
 Cortex is a single-binary harness in Go. It owns the coding loop
-(`cortex code`, `cortex repl`, `cortex run`) and a long-running daemon
-that consumes the in-process event journal, stores derived state in
-SQLite with vector embeddings, and runs five cognitive modes:
+(`cortex code`, `cortex repl`, `cortex run`); the REPL hosts the
+long-lived ingest goroutine + Think/Dream on its idle hook (originally
+a separate `cortex daemon` process, retired May 2026 — see
+[daemon-retirement-plan.md](./daemon-retirement-plan.md)). It consumes
+the in-process event journal, stores derived state in SQLite with
+vector embeddings, and runs five cognitive modes:
 
 | Mode | Type | Purpose |
 |------|------|---------|

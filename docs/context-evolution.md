@@ -214,7 +214,7 @@ If context evolution is viable:
 
 ## 10. A Reference Implementation
 
-Cortex [A] implements context evolution as a single-binary CLI daemon. It separates Reflex (mechanical, <20ms target) from Reflect/Resolve (agentic, 200ms+), uses activity-based Think/Dream budgets, and measures ABR across sessions.
+Cortex [A] implements context evolution as a single-binary CLI tool. (Originally shipped as a CLI daemon — that long-lived process was retired in May 2026, see [daemon-retirement-plan.md](./daemon-retirement-plan.md); the REPL idle hook now hosts the background cognition.) It separates Reflex (mechanical, <20ms target) from Reflect/Resolve (agentic, 200ms+), uses activity-based Think/Dream budgets, and measures ABR across sessions.
 
 Initial evaluations show:
 - 87% pass rate across cognitive mode evaluations

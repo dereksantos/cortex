@@ -123,7 +123,11 @@ genuinely contains signal. This makes the eval-principles 4
   directory** to the install location. One executable, all prompts
   bundled.
 - **Tests don't need a working-directory dance** — `embed.FS` is the
-  same path in `go test` and in the daemon.
+  same path in `go test` and in the binary at runtime. (Originally
+  written when the binary included a long-lived `cortex daemon`
+  process; the daemon was retired May 2026 — see
+  [../daemon-retirement-plan.md](../daemon-retirement-plan.md) — but
+  the embed.FS property is unchanged.)
 - **Vendoring is implicit** — pinning a Cortex version pins prompts
   too. No drift between binary and template.
 
