@@ -127,7 +127,7 @@ is reviewable.
   - Acceptance: clean exit, no `goroutine` leak warning in `pprof`
     if you want to be thorough.
 
-- [ ] **2.6** REPL visibility
+- [x] **2.6** REPL visibility
   - Make sure the REPL shows think and dream happening as written lines in the REPL, much like when prompts are executed
   - Acceptance: think and dream steps visible to the user in the REPL
 

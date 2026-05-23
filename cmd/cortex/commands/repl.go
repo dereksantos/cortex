@@ -58,6 +58,7 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cliout"
+	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -1119,13 +1120,23 @@ func maybeStartJournalIngest(state *replState) {
 					state.ui.Warn(fmt.Sprintf("(journal ingest: %v)", err))
 				}
 				if state.cortex != nil && state.cortex.IsModeEnabled("think") {
-					if _, err := state.cortex.MaybeThink(ctx); err != nil && state.verbose {
+					res, err := state.cortex.MaybeThink(ctx)
+					switch {
+					case err != nil && state.verbose:
 						state.ui.Warn(fmt.Sprintf("(think: %v)", err))
+					case res != nil && res.Status == cognition.ThinkRan:
+						state.ui.Info(fmt.Sprintf("[think] processed %d operations (%dms)",
+							res.Operations, res.Duration.Milliseconds()))
 					}
 				}
 				if state.cortex != nil && state.cortex.IsModeEnabled("dream") {
-					if _, err := state.cortex.MaybeDream(ctx); err != nil && state.verbose {
+					res, err := state.cortex.MaybeDream(ctx)
+					switch {
+					case err != nil && state.verbose:
 						state.ui.Warn(fmt.Sprintf("(dream: %v)", err))
+					case res != nil && res.Status == cognition.DreamRan:
+						state.ui.Info(fmt.Sprintf("[dream] explored %d items, %d insights (%dms)",
+							res.Operations, res.Insights, res.Duration.Milliseconds()))
 					}
 				}
 			}
