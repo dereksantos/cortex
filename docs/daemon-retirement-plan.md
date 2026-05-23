@@ -54,7 +54,7 @@ No behavior change. Removing files nothing reads.
 The only "live" coupling left. After this, nothing spawns the daemon
 unless the user runs `cortex daemon` by hand.
 
-- [ ] **1.1** Delete `maybeStartDaemon` and its callsites.
+- [x] **1.1** Delete `maybeStartDaemon` and its callsites.
   - File: `cmd/cortex/main.go:311-322` (the function); search for `maybeStartDaemon(` to find call sites.
   - Acceptance: `grep -n 'maybeStartDaemon' cmd/cortex/` returns nothing; `go build ./...` passes.
 
