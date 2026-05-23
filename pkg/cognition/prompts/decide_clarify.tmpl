@@ -1,0 +1,21 @@
+---
+version: 1
+op: decide.clarify
+description: ask ONE focused clarifying question for an ambiguous prompt
+max_output_tokens: 60
+vars: [prompt]
+---
+The user's prompt is too ambiguous to act on. Ask ONE focused clarifying question that, once answered, would let you proceed. Pick the single most load-bearing unknown — not "tell me more about what you want" but a specific question about scope, target, or constraint.
+
+User prompt:
+"""
+{{.prompt}}
+"""
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"question": "≤25 words, ending with ?", "why": "≤8 words on what's unclear"}
+
+Examples:
+{"question":"Which file should the new endpoint live in?","why":"target file unspecified"}
+{"question":"Do you want a soft delete or a hard delete?","why":"delete semantics unclear"}
+{"question":"Should this run on every commit or only on main?","why":"trigger scope ambiguous"}

@@ -1,0 +1,23 @@
+---
+version: 1
+op: attend.compact
+description: re-summarize K recent working-memory snapshots into a single tighter snapshot under a target budget
+max_output_tokens: 800
+vars: [snapshots, max_tokens, intent]
+---
+You are RE-COMPRESSING working memory. The K snapshots below are previous bounded summaries the session has been accumulating. Together they're approaching the budget for individual snapshots, so your job is to merge them into ONE tighter snapshot that fits in {{.max_tokens}} tokens.
+
+Rules:
+- The output snapshot must fit in at most {{.max_tokens}} tokens. Be ruthless.
+- The K input snapshots are listed in chronological order (oldest first). When facts in newer snapshots supersede facts in older ones (e.g. a value was corrected, a path was updated), keep the NEWER version and discard the older.
+- Preserve concrete facts the intent depends on: identifiers, file paths, decisions, numbers, error messages, named entities. Drop ceremony, restated framing, conjunctions of "and then we discovered…".
+- It is FINE if the output is shorter than {{.max_tokens}}; quality of the merged facts beats filling the budget.
+- Do NOT invent facts. If a fact appears in only one snapshot, it stays — don't drop it just because it lacks corroboration.
+
+Intent (what we are ultimately trying to do):
+{{.intent}}
+
+Snapshots to merge (chronological, oldest first):
+{{.snapshots}}
+
+Output ONLY the merged snapshot as plain text. No preamble, no markdown fence, no "Here is the merged snapshot:" — start with the first useful fact.

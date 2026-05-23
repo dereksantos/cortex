@@ -105,6 +105,17 @@ type ThinkSessionSummaryPayload struct {
 	OrigTokens   int      `json:"orig_tokens,omitempty"` // pre-compression size (approx)
 	KeptTokens   int      `json:"kept_tokens,omitempty"` // post-compression size (approx)
 	CompressOp   string   `json:"compress_op,omitempty"` // "attend.compress" / "passthrough" / "fallback"
+
+	// Intent is the per-turn classification picked by
+	// sense.classify_intent at seed time (greeting | recall | clarify |
+	// code | review | meta). Drives per-turn budget + seed shape and
+	// — once persisted here — lets cross-session memory weight prior
+	// summaries by intent. Empty on entries written before the field
+	// existed; readers tolerate the absence rather than failing the
+	// parse. IntentConfidence is the classifier's self-reported
+	// probability; 0 when the classifier wasn't consulted or fell back.
+	Intent           string  `json:"intent,omitempty"`
+	IntentConfidence float64 `json:"intent_confidence,omitempty"`
 }
 
 // NewThinkSessionSummaryEntry builds an entry for a per-turn rolling

@@ -1,0 +1,31 @@
+---
+version: 1
+op: attend.accumulate
+description: fold a new observation into a bounded working-memory snapshot; output the post-update snapshot
+max_output_tokens: 600
+vars: [prev_snapshot, observation, max_tokens, intent]
+---
+You are maintaining a bounded WORKING MEMORY for an ongoing session. Your job: fold the new observation into the existing snapshot, then emit the updated snapshot.
+
+Constraints:
+- The output snapshot MUST fit in at most {{.max_tokens}} tokens. Be ruthless about pruning.
+- Preserve facts that downstream nodes will need to answer the user's underlying intent: identifiers, file paths, decisions, numbers, error messages, named entities. Drop ceremony, prose framing, restatements.
+- When the new observation supersedes something in the prior snapshot (e.g. a corrected value, an updated path), REPLACE the old; do not keep both.
+- When the new observation is irrelevant to the intent, you may drop it entirely — explain nothing.
+- Compress aggressively: bullet points, abbreviated phrases, structured key-value lines. Full sentences only when they add clarity per token spent.
+- Do NOT invent facts. If the new observation contradicts the snapshot, prefer the new observation and note it.
+
+Intent (what we are ultimately trying to do):
+{{.intent}}
+
+Prior snapshot (the working memory so far — may be empty on step 0):
+"""
+{{.prev_snapshot}}
+"""
+
+New observation:
+"""
+{{.observation}}
+"""
+
+Output ONLY the updated snapshot as plain text. No preamble, no markdown fence, no "Here is the updated snapshot:" — start with the first useful fact.

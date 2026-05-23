@@ -16,7 +16,9 @@ package dag
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // turnState is the per-turn shared output map. Construct one per
@@ -199,4 +201,80 @@ func PriorOutsByName(ctx context.Context, qname string) []map[string]any {
 		return nil
 	}
 	return s.allByName(qname)
+}
+
+// WithTestTurnState attaches a turn state to ctx pre-seeded with the
+// given (nodeID, qualifiedName, out) records — exposed so tests in
+// sibling packages (e.g. ops) can exercise turn-state-reading
+// handlers without spinning a real executor. Records are deposited
+// in order; if you need a specific "latest" assertion (PriorOutByName
+// / LatestAccumulatorSnapshot) put the desired record last.
+//
+// Not meant for production use — handlers reach turn state via the
+// executor's natural attachment.
+func WithTestTurnState(ctx context.Context, records []TestDeposit) context.Context {
+	s := newTurnState()
+	for _, r := range records {
+		s.deposit(r.NodeID, r.QualifiedName, r.Out)
+	}
+	return withTurnState(ctx, s)
+}
+
+// TestDeposit is one seeded entry for WithTestTurnState.
+type TestDeposit struct {
+	NodeID        string
+	QualifiedName string
+	Out           map[string]any
+}
+
+// DepositAccumulatorSnapshot stamps a new accumulator update into
+// turn state from outside an executor handler. Used by tool
+// dispatchers (e.g. decide.coding_turn's NewActDispatcher) that
+// want to fold each act.* output through attend.accumulate
+// mid-loop so subsequent decide.next calls within the same turn
+// see the working memory grow.
+//
+// Returns the deposited node ID so callers can record it in their
+// own trace entries / journal links. No-op (returns "") when no
+// turn state is attached — e.g. a handler is running in isolation
+// in a test.
+//
+// Node ID is auto-assigned with a monotonic suffix so multiple
+// deposits within one turn don't collide.
+func DepositAccumulatorSnapshot(ctx context.Context, snapshot string, tokens int, fallback bool) string {
+	s := turnStateFromContext(ctx)
+	if s == nil {
+		return ""
+	}
+	id := fmt.Sprintf("acc-%d", atomic.AddInt64(&depositCounter, 1))
+	s.deposit(id, "attend.accumulate", map[string]any{
+		"snapshot":        snapshot,
+		"snapshot_tokens": tokens,
+		"fallback":        fallback,
+	})
+	return id
+}
+
+// depositCounter ensures auto-assigned accumulator node IDs are
+// monotonic across the process so multiple in-flight turns can't
+// collide. Process-scoped — not turn-scoped — because the only
+// invariant that matters is uniqueness, not ordering across turns.
+var depositCounter int64
+
+// LatestAccumulatorSnapshot returns the most recent attend.accumulate
+// snapshot deposited in turn state, or "" when no accumulator has
+// run this turn yet.
+//
+// This is the bridge that lets later nodes (decide.next, the final
+// decide.coding_turn) read the bounded working memory the
+// accumulator chain has been building. Returns the snapshot string
+// only; callers who want the token count or fallback flag can fetch
+// the full Out map via PriorOutByName("attend.accumulate").
+func LatestAccumulatorSnapshot(ctx context.Context) string {
+	out := PriorOutByName(ctx, "attend.accumulate")
+	if out == nil {
+		return ""
+	}
+	snap, _ := out["snapshot"].(string)
+	return snap
 }

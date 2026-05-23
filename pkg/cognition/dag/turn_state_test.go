@@ -225,3 +225,60 @@ func TestSequentialExecutor_DFSOrdering(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestAccumulatorSnapshot_ReturnsLatestSnapshot(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+
+	s.deposit("n1", "attend.accumulate", map[string]any{"snapshot": "snap-1"})
+	s.deposit("n2", "act.read_file", map[string]any{"output": "ignored"})
+	s.deposit("n3", "attend.accumulate", map[string]any{"snapshot": "snap-2"})
+
+	if got := LatestAccumulatorSnapshot(ctx); got != "snap-2" {
+		t.Errorf("LatestAccumulatorSnapshot: got %q, want %q", got, "snap-2")
+	}
+}
+
+func TestLatestAccumulatorSnapshot_EmptyWhenNoneRun(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+	if got := LatestAccumulatorSnapshot(ctx); got != "" {
+		t.Errorf("LatestAccumulatorSnapshot: got %q, want empty", got)
+	}
+}
+
+func TestLatestAccumulatorSnapshot_EmptyWithoutTurnState(t *testing.T) {
+	if got := LatestAccumulatorSnapshot(context.Background()); got != "" {
+		t.Errorf("LatestAccumulatorSnapshot without turn state: got %q, want empty", got)
+	}
+}
+
+func TestDepositAccumulatorSnapshot_VisibleViaLatest(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+	id := DepositAccumulatorSnapshot(ctx, "fact A", 12, false)
+	if id == "" {
+		t.Fatal("DepositAccumulatorSnapshot should return a non-empty ID when turn state is attached")
+	}
+	if got := LatestAccumulatorSnapshot(ctx); got != "fact A" {
+		t.Errorf("LatestAccumulatorSnapshot after deposit: got %q, want %q", got, "fact A")
+	}
+}
+
+func TestDepositAccumulatorSnapshot_LatestWinsAcrossMultipleDeposits(t *testing.T) {
+	s := newTurnState()
+	ctx := withTurnState(context.Background(), s)
+	DepositAccumulatorSnapshot(ctx, "first", 10, false)
+	DepositAccumulatorSnapshot(ctx, "second", 12, false)
+	DepositAccumulatorSnapshot(ctx, "third", 14, true)
+	if got := LatestAccumulatorSnapshot(ctx); got != "third" {
+		t.Errorf("LatestAccumulatorSnapshot: got %q, want %q (most recent deposit)", got, "third")
+	}
+}
+
+func TestDepositAccumulatorSnapshot_NoOpWithoutTurnState(t *testing.T) {
+	id := DepositAccumulatorSnapshot(context.Background(), "anything", 1, false)
+	if id != "" {
+		t.Errorf("DepositAccumulatorSnapshot without turn state: got %q, want empty (no-op)", id)
+	}
+}

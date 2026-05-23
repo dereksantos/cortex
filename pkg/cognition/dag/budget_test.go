@@ -63,3 +63,39 @@ func TestBudgetForIntent_recallCanAffordVectorSearch(t *testing.T) {
 		t.Error("BudgetForIntent(\"recall\") must afford a small synthesis turn")
 	}
 }
+
+func TestBudget_WithMaxContextTokens(t *testing.T) {
+	b := DefaultTurnBudget().WithMaxContextTokens(32768)
+	if b.MaxContextTokens != 32768 {
+		t.Errorf("MaxContextTokens = %d, want 32768", b.MaxContextTokens)
+	}
+	// Other axes survive.
+	if b.LatencyMS != 150000 || b.Tokens != 10000 {
+		t.Errorf("axes corrupted by WithMaxContextTokens: %+v", b)
+	}
+	// Negative clamps to 0 (unknown).
+	if got := b.WithMaxContextTokens(-1).MaxContextTokens; got != 0 {
+		t.Errorf("negative should clamp to 0; got %d", got)
+	}
+}
+
+func TestBudget_PromptBudget_Returns70Percent(t *testing.T) {
+	b := Budget{MaxContextTokens: 32768}
+	if got, want := b.PromptBudget(), 22937; got != want {
+		t.Errorf("PromptBudget = %d, want %d (70%% of 32768)", got, want)
+	}
+	if got := (Budget{}).PromptBudget(); got != 0 {
+		t.Errorf("unknown MaxContextTokens should yield 0; got %d", got)
+	}
+}
+
+func TestBudget_Consume_LeavesMaxContextTokens(t *testing.T) {
+	// MaxContextTokens is a cap, not a consumable — Consume must
+	// not touch it even when the cost has no MaxContextTokens-shaped
+	// field. Pin this in a test so future contributors don't try.
+	b := Budget{LatencyMS: 1000, Tokens: 100, Depth: 5, OutputTokens: 100, MaxContextTokens: 4096}
+	b.Consume(Cost{LatencyMS: 100, Tokens: 10, OutputTokens: 10})
+	if b.MaxContextTokens != 4096 {
+		t.Errorf("Consume must not decay MaxContextTokens; got %d, want 4096", b.MaxContextTokens)
+	}
+}

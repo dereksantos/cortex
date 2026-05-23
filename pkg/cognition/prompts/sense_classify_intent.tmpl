@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 op: sense.classify_intent
 description: classify user prompt as greeting | recall | clarify | code | review | meta — drives per-intent budget + seed shape
 max_output_tokens: 60
@@ -7,16 +7,20 @@ vars: [prompt]
 ---
 Classify the user's prompt into ONE category. The category drives how much compute we spend on this turn — pick the category that matches the SHAPE of the prompt, not the topic.
 
+The agent has tools: it can list directories, read files, run shell commands, and search the project. A prompt that's "vague to a human reading it cold" is often perfectly actionable for the agent — it can investigate. Bias toward letting the agent do the work; only pick `clarify` when the agent literally cannot pick between two valid interpretations.
+
 Categories:
 - greeting — "hi", "hello", "thanks", "ok", short conversational acks. No action requested.
-- recall   — "what did we decide about X", "remind me", "show me prior context", "what was the rationale".
-- clarify  — too vague/ambiguous to act on; one focused question would unblock the turn.
+- recall   — "what did we decide about X", "remind me", "show me prior context", "what was the rationale". Specifically about things we've already done together.
+- clarify  — TWO unrelated interpretations the agent cannot choose between. Not "vague" — actually ambiguous. "Delete it" with no antecedent. "Fix the bug" in a project with three open bugs. Never pick clarify just because a filename is missing — the agent can find files.
 - code     — write, modify, refactor, fix, or add code; run build/test commands; edit files.
-- review   — read, explain, audit, or summarize existing code or docs. No writes intended.
+- review   — read, explain, audit, summarize, explore, or research existing code or docs. Includes "research the project", "explain how X works", "what does this codebase do" — the agent investigates without writing. Default to review (NOT clarify) when the prompt asks for exploration without naming a target; the agent has tools to find the target.
 - meta     — about Cortex itself: settings, REPL commands, model choice, journal/DAG state.
 
-When in doubt between code and review: if the prompt names a change to make, it's code; if it asks how something works, it's review.
-When in doubt between greeting and clarify: a one-word friendly opener is greeting; a real-but-vague ask is clarify.
+Disambiguation rules:
+- code vs review: if the prompt names a change to make → code; if it asks how something works → review.
+- review vs clarify: if the prompt is a verb the agent can act on (research, explore, audit, explain, find, list) WITHOUT a specific target → review. The agent will figure out the target. Only pick clarify when there are literally two unrelated possible interpretations.
+- greeting vs anything: a one-word friendly opener with no other content → greeting. "Hi, fix the auth bug" is NOT greeting — it's code.
 
 User prompt:
 """
@@ -30,4 +34,6 @@ Examples:
 {"intent":"greeting","confidence":0.98,"why":"plain hello"}
 {"intent":"code","confidence":0.9,"why":"add field to struct"}
 {"intent":"recall","confidence":0.85,"why":"asking about prior decision"}
-{"intent":"clarify","confidence":0.6,"why":"target file unspecified"}
+{"intent":"review","confidence":0.9,"why":"research the project — agent can explore"}
+{"intent":"review","confidence":0.85,"why":"explain how auth works — agent can read code"}
+{"intent":"clarify","confidence":0.7,"why":"delete it — antecedent unresolvable"}

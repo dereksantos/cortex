@@ -479,6 +479,14 @@ type replState struct {
 	// can signal Execute to break the loop cleanly.
 	exitRequested bool
 
+	// lastClarifyPrompt is the original ambiguous user prompt from the
+	// most recent turn that routed to decide.clarify. The next turn's
+	// stitchClarifyFollowUp combines it with the user's answer so the
+	// classifier sees the disambiguated request instead of a fragment
+	// like "in main.go". Cleared after consumption — only the
+	// immediately-following turn benefits from the stitch.
+	lastClarifyPrompt string
+
 	// studyCancel cancels the auto-spawned study goroutine on
 	// REPL exit. Nil when study was skipped (already complete, env
 	// override, or detection error). Always called from close(); safe
@@ -1510,6 +1518,26 @@ func displayAPI(api string) string {
 func (s *replState) runTurn(userPrompt string) error {
 	turnNum := s.turns + 1
 
+	// Slice 4: auto-emit feedback if the user's prompt opens with a
+	// correction/confirmation cue (e.g. "no, do X instead" / "perfect,
+	// thanks"). The graded target is the immediately-prior turn —
+	// skipped silently on turn 1 since there's nothing to grade.
+	// Best-effort: any journal write failure is logged + ignored.
+	if cue := detectFeedbackCue(userPrompt); cue != "" {
+		if ferr := s.emitFeedbackEntry(cue, userPrompt); ferr != nil {
+			s.ui.Info(fmt.Sprintf("  · feedback emit failed (%s): %v", cue, ferr))
+		} else if s.verbose {
+			s.ui.Info(fmt.Sprintf("  · feedback emitted: %s → prior turn", cue))
+		}
+	}
+
+	// Slice 4: clarify follow-up stitching. When the prior turn routed
+	// to decide.clarify and stashed its original ambiguous prompt, we
+	// combine it with the user's answer so the classifier sees the
+	// disambiguated request rather than a bare fragment. No-op when
+	// the prior turn wasn't a clarify (lastClarifyPrompt empty).
+	turnPrompt := s.stitchClarifyFollowUp(userPrompt)
+
 	snapDir, err := s.snapshotWorkdir(turnNum)
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
@@ -1519,15 +1547,18 @@ func (s *replState) runTurn(userPrompt string) error {
 		Turn:         turnNum,
 		SessionID:    s.sessionID,
 		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		UserMessage:  userPrompt,
+		UserMessage:  userPrompt, // original, not the stitched version — preserves what the user actually typed
 		Model:        s.model,
 		APIURL:       s.apiURL,
 		SystemPrompt: s.systemPrompt,
 		SnapshotDir:  snapDir,
 	}
 
-	// Attempt 1: fresh model call with just the user prompt.
-	hres, lres, runErr := s.runHarness(userPrompt, "")
+	// Attempt 1: fresh model call. The intent classification from this
+	// first call defines the turn's intent for journaling purposes;
+	// retries reuse it (the user's ask hasn't changed, only the
+	// verifier feedback has).
+	hres, lres, intent, intentConf, runErr := s.runHarness(turnPrompt, "")
 	row.HarnessError = errString(runErr)
 	row.AgentTurns = hres.AgentTurnsTotal
 	row.TokensIn = hres.TokensIn
@@ -1537,6 +1568,8 @@ func (s *replState) runTurn(userPrompt string) error {
 	row.LatencyMs = hres.LatencyMs
 	row.FilesChanged = hres.FilesChanged
 	row.FinalText = lres.Final
+	row.Intent = intent
+	row.IntentConfidence = intentConf
 
 	verifyRes := s.runVerifier()
 	row.VerifyKind = verifyRes.Kind
@@ -1576,7 +1609,7 @@ func (s *replState) runTurn(userPrompt string) error {
 		} else {
 			s.ui.Info(fmt.Sprintf("  verify still failing, auto-retry %d/%d...", autoAttempt, retryBudget))
 		}
-		hres2, lres2, runErr2 := s.runHarness(userPrompt, verifyRes.OutputTail)
+		hres2, lres2, _, _, runErr2 := s.runHarness(turnPrompt, verifyRes.OutputTail)
 		if autoAttempt == 1 {
 			row.RetryAgentTurns = hres2.AgentTurnsTotal
 			row.RetryTokensIn = hres2.TokensIn
@@ -1625,7 +1658,7 @@ func (s *replState) runTurn(userPrompt string) error {
 			row.UserGate = "retry"
 			userHints = append(userHints, decision.hint)
 			combined := verifyRes.OutputTail + "\n\nUSER HINT: " + decision.hint
-			hres3, lres3, runErr3 := s.runHarness(userPrompt, combined)
+			hres3, lres3, _, _, runErr3 := s.runHarness(turnPrompt, combined)
 			row.UserRetryAttempts++
 			row.UserRetryHarnessError = errString(runErr3)
 			row.UserRetryFinalText = lres3.Final
@@ -1697,6 +1730,15 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 		// don't block the turn (logged in verbose mode).
 		if err := s.emitSessionSummary(row); err != nil && s.verbose {
 			s.ui.Warn(fmt.Sprintf("(session summary failed: %v)", err))
+		}
+		// Slice 5: when the per-turn summary count crosses the
+		// digest threshold (15 summaries since the last digest), fold
+		// the head of the summary history into a single dream.session_digest
+		// entry. Synchronous because the REPL doesn't have a background
+		// scheduler — pays ~6s of latency at threshold crossings only,
+		// then 0 until the next threshold. Best-effort.
+		if err := s.maybeWriteSessionDigest(); err != nil && s.verbose {
+			s.ui.Warn(fmt.Sprintf("(session digest failed: %v)", err))
 		}
 		s.printTurnSummary(row)
 		if err := s.captureTurn(row); err != nil && s.verbose {
@@ -1784,16 +1826,18 @@ func (s *replState) emitSessionSummary(row turnRow) error {
 	}
 
 	payload := journal.ThinkSessionSummaryPayload{
-		SessionID:    s.sessionID,
-		Turn:         row.Turn,
-		UserPrompt:   row.UserMessage,
-		Summary:      compressed,
-		FilesChanged: row.FilesChanged,
-		VerifyKind:   row.VerifyKind,
-		VerifyOK:     row.VerifyOK,
-		OrigTokens:   origTok,
-		KeptTokens:   keptTok,
-		CompressOp:   compressOp,
+		SessionID:        s.sessionID,
+		Turn:             row.Turn,
+		UserPrompt:       row.UserMessage,
+		Summary:          compressed,
+		FilesChanged:     row.FilesChanged,
+		VerifyKind:       row.VerifyKind,
+		VerifyOK:         row.VerifyOK,
+		OrigTokens:       origTok,
+		KeptTokens:       keptTok,
+		CompressOp:       compressOp,
+		Intent:           row.Intent,
+		IntentConfidence: row.IntentConfidence,
 	}
 	entry, err := journal.NewThinkSessionSummaryEntry(payload)
 	if err != nil {
@@ -1821,7 +1865,15 @@ func (s *replState) emitSessionSummary(row turnRow) error {
 // worth considering.
 func composeSessionSummaryDraft(row turnRow) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Turn %d.\n\nUser prompt:\n%s\n\n", row.Turn, row.UserMessage)
+	fmt.Fprintf(&b, "Turn %d.\n", row.Turn)
+	// Intent line preserves the classifier's routing decision in the
+	// prose the salience compressor sees; the compressed summary is
+	// more useful to future turns when it carries this dimension.
+	// Omitted entirely when intent wasn't captured (legacy / failure).
+	if row.Intent != "" {
+		fmt.Fprintf(&b, "Intent: %s (confidence %.2f)\n", row.Intent, row.IntentConfidence)
+	}
+	fmt.Fprintf(&b, "\nUser prompt:\n%s\n\n", row.UserMessage)
 	if row.FinalText != "" {
 		fmt.Fprintf(&b, "Assistant final response:\n%s\n\n", row.FinalText)
 	}
@@ -1869,9 +1921,16 @@ func (s *replState) priorMessagesForHarness() []llm.ChatMessage {
 	if s.historyLimit <= 0 && s.priorSessionsCap <= 0 {
 		return nil
 	}
+	// Slice 5: when a dream.session_digest exists, prefer it for the
+	// older history — readRecentSessionSummaries skips the summaries
+	// the digest already folded in, and readLatestSessionDigest returns
+	// the digest narrative to prepend as a single labeled block. The
+	// effective prior-context block is then [digest] + [recent
+	// post-digest summaries], not [all summaries up to cap].
+	digest := s.readLatestSessionDigest()
 	summaries := s.readRecentSessionSummaries(s.historyLimit, s.priorSessionsCap)
-	if len(summaries) > 0 {
-		return summariesAsChatMessages(summaries)
+	if digest != nil || len(summaries) > 0 {
+		return digestAndSummariesAsChatMessages(digest, summaries)
 	}
 	// Fallback: verbatim history (pre-Slice-4 behavior). Triggers when
 	// the journal has no summary entries for this session yet (turn 1
@@ -1917,6 +1976,13 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 		return nil
 	}
 	defer r.Close()
+	// Slice 5: skip summaries already folded into the latest digest.
+	// Digests cover the chronological prefix, so the first
+	// SummaryCountIn entries we encounter (in iteration order) are
+	// the ones to skip. Zero when no digest exists yet — the loop is
+	// the same as pre-Slice-5 behavior.
+	skip := s.digestCoveredCount()
+	skipped := 0
 	var current, prior []journal.ThinkSessionSummaryPayload
 	for {
 		e, err := r.Next()
@@ -1928,6 +1994,10 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 		}
 		p, perr := journal.ParseThinkSessionSummary(e)
 		if perr != nil {
+			continue
+		}
+		if skipped < skip {
+			skipped++
 			continue
 		}
 		if p.SessionID == s.sessionID {
@@ -1942,6 +2012,89 @@ func (s *replState) readRecentSessionSummaries(currentCap, priorCap int) []journ
 	out = append(out, prior...)
 	out = append(out, current...)
 	return out
+}
+
+// readLatestSessionDigest returns the most recent
+// dream.session_digest payload from the workdir's journal, or nil
+// when no digest exists yet. Iteration order is chronological, so
+// the LAST entry observed is the latest one. Read failures yield
+// nil — the caller falls back to the raw-summary path.
+func (s *replState) readLatestSessionDigest() *journal.DreamSessionDigestPayload {
+	if s.workdir == "" {
+		return nil
+	}
+	r, err := journal.NewReader(filepath.Join(s.workdir, ".cortex", "journal", "dream"))
+	if err != nil {
+		return nil
+	}
+	defer r.Close()
+	var latest *journal.DreamSessionDigestPayload
+	for {
+		e, rerr := r.Next()
+		if rerr != nil {
+			break
+		}
+		if e.Type != journal.TypeDreamSessionDigest {
+			continue
+		}
+		p, perr := journal.ParseDreamSessionDigest(e)
+		if perr != nil {
+			continue
+		}
+		latest = p
+	}
+	return latest
+}
+
+// digestCoveredCount returns the SummaryCountIn from the most recent
+// dream.session_digest, or 0 if no digest exists. Used by
+// readRecentSessionSummaries to skip the summaries already folded
+// in — avoids double-injection of older history.
+func (s *replState) digestCoveredCount() int {
+	if d := s.readLatestSessionDigest(); d != nil {
+		return d.SummaryCountIn
+	}
+	return 0
+}
+
+// digestAndSummariesAsChatMessages renders the combined prior-context
+// block: digest narrative first (when present) as a single labeled
+// chunk, then the recent post-digest summaries via the existing
+// summariesAsChatMessages path. When no digest exists, behaves
+// identically to a direct summariesAsChatMessages call.
+func digestAndSummariesAsChatMessages(digest *journal.DreamSessionDigestPayload, summaries []journal.ThinkSessionSummaryPayload) []llm.ChatMessage {
+	if digest == nil {
+		return summariesAsChatMessages(summaries)
+	}
+	if len(summaries) == 0 && digest == nil {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("CONVERSATION SO FAR (summary of prior turns; not user input):\n\n")
+	b.WriteString("[digest covering ")
+	fmt.Fprintf(&b, "%d earlier turn(s)] ", digest.SummaryCountIn)
+	b.WriteString(strings.TrimSpace(digest.Narrative))
+	b.WriteByte('\n')
+
+	currentID := ""
+	if len(summaries) > 0 {
+		currentID = summaries[len(summaries)-1].SessionID
+	}
+	for _, p := range summaries {
+		tag := ""
+		if p.SessionID != currentID {
+			tag = "[prior session] "
+		}
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		fmt.Fprintf(&b, "\n%s%s[turn %d] %s\n", tag, intentTag, p.Turn, strings.TrimSpace(p.Summary))
+	}
+	return []llm.ChatMessage{
+		{Role: "user", Content: b.String()},
+		{Role: "assistant", Content: "Understood — I'll treat that as context, not as new user input."},
+	}
 }
 
 // tailN returns the last n elements of s. n ≤ 0 returns nil; n ≥
@@ -1988,7 +2141,17 @@ func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []l
 		if p.SessionID != currentID {
 			tag = "[prior session] "
 		}
-		fmt.Fprintf(&b, "\n%s[turn %d] %s\n", tag, p.Turn, strings.TrimSpace(p.Summary))
+		// Slice 3: surface the per-turn intent in the prior-message
+		// block so the model can passively weight relevance to the
+		// current turn. The tag is informational — readers (the LLM)
+		// decide whether to lean on a [intent=recall] turn for a
+		// recall question without the harness having to filter ahead
+		// of time. Omitted when the legacy entry had no intent.
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		fmt.Fprintf(&b, "\n%s%s[turn %d] %s\n", tag, intentTag, p.Turn, strings.TrimSpace(p.Summary))
 	}
 	return []llm.ChatMessage{
 		{Role: "user", Content: b.String()},
@@ -2003,7 +2166,10 @@ func summariesAsChatMessages(summaries []journal.ThinkSessionSummaryPayload) []l
 // retryContext, when non-empty, is appended to the user prompt as a
 // "previous attempt failed with this build/test error" tail so the
 // model has the failure in context on a retry.
-func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, error) {
+// Returns the classified intent + confidence alongside the harness
+// result so callers can persist it on turnRow (first attempt only;
+// retries reuse the original classification rather than re-running it).
+func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessResult, harness.LoopResult, string, float64, error) {
 	// Phase 4: endpoint resolution. When the model id resolves to a
 	// configured OpenAI-compatible endpoint (e.g. "chatterbox/..."),
 	// bind the harness to that endpoint and strip the prefix before
@@ -2013,7 +2179,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 
 	h, err := evalv2.NewCortexHarness(s.model)
 	if err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("init harness: %w", err)
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, fmt.Errorf("init harness: %w", err)
 	}
 	if useEndpoint {
 		h.SetEndpoint(&llm.EndpointConfig{
@@ -2090,7 +2256,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	// so the chain's decide.coding_turn node drives this same instance
 	// (with all REPL state already set above). The full HarnessResult
 	// + LoopResult come back via ResultCallback.
-	hr, lr, runErr := runREPLChainTurn(s, h, prompt)
+	hr, lr, intent, intentConf, runErr := runREPLChainTurn(s, h, prompt)
 
 	// Fix B: if the model emitted a tool call as fenced JSON in the
 	// response text instead of via the OpenAI tool_calls field, salvage
@@ -2099,7 +2265,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 	if salvaged, _ := s.salvageTextToolCall(hr, lr); len(salvaged) > 0 {
 		hr.FilesChanged = mergeFiles(hr.FilesChanged, salvaged)
 	}
-	return hr, lr, runErr
+	return hr, lr, intent, intentConf, runErr
 }
 
 // runREPLChainTurn executes one REPL turn as a dynamic dag.Executor.Run
@@ -2131,7 +2297,7 @@ func (s *replState) runHarness(userPrompt, retryContext string) (evalv2.HarnessR
 // at finalize, and let decide.next see "shapes that worked recently"
 // as part of NextConfig. This is the cross-turn DAG learning the
 // inverse "DAG learns what to spawn" pitch depends on.
-func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, error) {
+func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (evalv2.HarnessResult, harness.LoopResult, string, float64, error) {
 	turnID := fmt.Sprintf("repl-%d", time.Now().UnixNano())
 
 	tw, _ := dagtrace.NewWriter("")
@@ -2152,7 +2318,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// REPL's dynamic registry uses for the other LLM-backed ops.
 	compressProvider := buildLLMProviderForREPL(loadREPLConfig(filepath.Join(s.workdir, ".cortex")), s.model, s.apiURL)
 	if _, err := dagnode.RegisterDefaultActOpMetadataWithCompressor(actReg, compressProvider); err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, fmt.Errorf("act-op metadata: %w", err)
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, fmt.Errorf("act-op metadata: %w", err)
 	}
 
 	// Phase 3 Slice 1: capability-aware salience cap. Weaker models
@@ -2171,12 +2337,37 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		capturedLR  harness.LoopResult
 		capturedErr error
 	)
+	// Accumulator budget: 2x the per-tool salience cap leaves room
+	// for several folded observations before attend.compact rolls
+	// the older ones up. salienceCap is already calibrated per
+	// model-context-class (200 small / 500 medium / 1500 large) so
+	// the accumulator scales with model capability automatically.
+	accumulatorMaxTokens := salienceCap * 2
+	if accumulatorMaxTokens <= 0 {
+		accumulatorMaxTokens = 1000
+	}
 	codingCfg := dagnode.CodingTurnConfig{
 		Model:                 s.model,
 		Workdir:               s.workdir,
 		ActRegistry:           actReg,
 		TraceCB:               traceCB,
 		ToolOutputSalienceCap: salienceCap,
+		// Bounded working memory: each act.* output gets folded
+		// through attend.accumulate so the synthesis decide.coding_turn
+		// (and any decide.next that re-decides mid-plan) sees the
+		// distilled snapshot via dag.LatestAccumulatorSnapshot instead
+		// of re-fetching from raw tool transcripts. Shares the same
+		// LLM provider as the salience compressor — one small model
+		// driving both compression paths.
+		AccumulatorProvider:  compressProvider,
+		AccumulatorMaxTokens: accumulatorMaxTokens,
+		// AccumulatorIntent stays empty here: intent isn't known until
+		// after sense.classify_intent runs (below), which is after this
+		// cfg is captured by the dynamic registry. The accumulator
+		// prompt tolerates empty intent (renders as "Intent: " — the
+		// model treats the user's surrounding instructions as the
+		// effective intent). Threading per-turn intent into the
+		// dispatcher is a follow-up if the empty path drifts.
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
@@ -2187,17 +2378,19 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		},
 	}
 
-	// Passthrough's reply lands in the same LoopResult.Final the REPL
-	// prints + journals — keeps the trivial-intent path indistinguishable
-	// from a coding_turn response from the renderer's point of view.
-	passthroughOnResponse := func(reply string) {
+	// Shared OnResponse for every intent-aware terminal node
+	// (act.passthrough, decide.clarify, decide.recall_summary). Lands
+	// the reply in the same LoopResult.Final the REPL prints + journals
+	// so trivial-intent paths are indistinguishable from a coding_turn
+	// response from the renderer's point of view.
+	intentTerminalOnResponse := func(reply string) {
 		capturedLR.Final = reply
 		capturedHR.OutputText = reply
 	}
 
-	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, passthroughOnResponse, traceCB)
+	reg, err := buildREPLDynamicRegistry(s, prompt, codingCfg, intentTerminalOnResponse, traceCB)
 	if err != nil {
-		return evalv2.HarnessResult{}, harness.LoopResult{}, err
+		return evalv2.HarnessResult{}, harness.LoopResult{}, "", 0, err
 	}
 
 	// Warm the registry from the calibration snapshot (Stage 4-C)
@@ -2218,17 +2411,48 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// chain in favor of cheaper terminal nodes (act.passthrough for
 	// greetings). Failure modes return intent=code with confidence=0 so
 	// the seed falls back to today's full chain.
-	intent, intentConf := classifyIntentForTurn(reg, prompt)
+	intent, intentConf := classifyIntentForTurn(reg, prompt, traceCB)
+	// Cold-journal escalation: decide.recall_summary has nothing useful
+	// to say when storage holds no events matching the prompt. Better
+	// to let the agent actually investigate (read README, list dirs)
+	// than reply "no prior context indexed". The downgrade returns
+	// intent="code" with the original confidence so the seed falls
+	// through to the full chain under DefaultTurnBudget.
+	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
 	turnBudget := dag.BudgetForIntent(intent)
+	// Layer the model's n_ctx onto the seed budget so handlers
+	// (attend.accumulate, decide.next, attend.compact) can size
+	// their own prompts via budget.PromptBudget(). Probe-cache miss
+	// → MaxContextTokens stays 0 (unknown); handlers fall back to
+	// calibrated defaults and the harness loop's catch-and-retry
+	// path still learns n_ctx from any overflow.
+	if cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex")); cfg != nil {
+		if ep, bareModel, useEp := cfg.ResolveModelRoute(s.model); useEp {
+			if p, ok := study.LookupCached(filepath.Join(s.workdir, ".cortex"), bareModel, ep.Name); ok && p.CtxWindowTokens > 0 {
+				turnBudget = turnBudget.WithMaxContextTokens(p.CtxWindowTokens)
+			}
+		}
+	}
 	seed := seedForIntent(intent, intentConf, prompt)
+	// Slice 4: stash the original prompt when we're about to clarify
+	// so the NEXT turn's stitchClarifyFollowUp can combine it with
+	// the user's answer before re-classifying. Cleared on consumption
+	// (one-shot) or replaced when this turn re-clarifies. Non-clarify
+	// seeds clear the stash so a stale clarify doesn't follow the
+	// user across an unrelated turn.
+	if seed[0].QualifiedName() == "decide.clarify" {
+		s.lastClarifyPrompt = prompt
+	} else {
+		s.lastClarifyPrompt = ""
+	}
 	if s.verbose {
 		s.ui.Info(fmt.Sprintf("  · intent=%s (conf=%.2f), budget=%s, seed=%s",
 			intent, intentConf, turnBudget, seed[0].QualifiedName()))
 	}
 	if _, err := ex.Run(context.Background(), turnID, seed, turnBudget); err != nil {
-		return capturedHR, capturedLR, fmt.Errorf("repl chain executor: %w", err)
+		return capturedHR, capturedLR, intent, intentConf, fmt.Errorf("repl chain executor: %w", err)
 	}
-	return capturedHR, capturedLR, capturedErr
+	return capturedHR, capturedLR, intent, intentConf, capturedErr
 }
 
 // classifyIntentForTurn runs the sense.classify_intent handler
@@ -2237,16 +2461,26 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 // Returns ("code", 0) on any failure — safe default routes to the
 // existing full pipeline so misclassifications never block a turn.
 //
-// TODO: the classifier call is invisible in the dag trace because it
-// runs outside the executor. Synthesize a trace row from the handler
-// result so the routing decision is preserved alongside the seed.
-func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
+// Slice 6: synthesizes a dag.TraceEntry for the classifier call and
+// invokes traceCB with it before returning. Lets the routing
+// decision appear in dag_traces.jsonl + the stdout streamer
+// alongside the seed it produced, even though the executor never
+// touched it. traceCB may be nil — tests pass nil to skip the
+// emission.
+func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCallback) (string, float64) {
+	started := time.Now()
+	const (
+		classifyNodeID = "n0-intent"
+		classifySeedID = "n1"
+	)
 	spec, err := reg.Get("sense.classify_intent")
 	if err != nil {
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "spec_not_registered", err.Error(), nil, started)
 		return ops.IntentCode, 0
 	}
 	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, dag.DefaultTurnBudget())
 	if herr != nil {
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "handler_error", herr.Error(), nil, started)
 		return ops.IntentCode, 0
 	}
 	intent, _ := res.Out["intent"].(string)
@@ -2254,32 +2488,592 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string) (string, float64) {
 		intent = ops.IntentCode
 	}
 	confidence, _ := res.Out["confidence"].(float64)
+	emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, intent, confidence, "", "", &res, started)
 	return intent, confidence
 }
 
-// intentPassthroughThreshold gates the trivial-intent short-circuit.
-// Below this confidence we route through the full chain — better to
-// pay the coding_turn cost than to give a canned "Hi" to someone who
-// actually wanted help.
-const intentPassthroughThreshold = 0.7
+// emitClassifyTraceEntry synthesizes a dag.TraceEntry for the
+// out-of-executor classifier call and invokes traceCB with it. Nil
+// traceCB → no-op so tests and headless paths work without
+// instrumentation. Includes the cost the handler reported (when
+// available) so downstream analyzers see the classifier's cost
+// alongside the rest of the turn.
+func emitClassifyTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, intent string, confidence float64, errCode, errMsg string, res *dag.NodeResult, started time.Time) {
+	if traceCB == nil {
+		return
+	}
+	end := time.Now()
+	entry := dag.TraceEntry{
+		NodeID:          nodeID,
+		ParentID:        "", // entry-point — runs before the seed
+		QualifiedName:   "sense.classify_intent",
+		OK:              errCode == "",
+		ErrorCode:       errCode,
+		ErrorMessage:    errMsg,
+		SpawnedChildren: []string{seedID},
+		WallStart:       started,
+		WallEnd:         end,
+		Out: map[string]any{
+			"intent":     intent,
+			"confidence": confidence,
+		},
+	}
+	if res != nil {
+		entry.CostConsumed = res.CostConsumed
+		// Surface fallback + why too so the trace tells the full story
+		// (LLM result vs safe-default route).
+		if fb, ok := res.Out["fallback"].(bool); ok {
+			entry.Out["fallback"] = fb
+		}
+		if why, ok := res.Out["why"].(string); ok && why != "" {
+			entry.Out["why"] = why
+		}
+	} else {
+		// No result (registry miss / handler error). Bill a tiny wall-
+		// time so the row's duration isn't 0ms which would skew p50s.
+		entry.CostConsumed = dag.Cost{LatencyMS: int(end.Sub(started).Milliseconds())}
+	}
+	traceCB(entry)
+}
+
+// sessionDigestThreshold is the number of think.session_summary
+// entries that must accumulate before maybeWriteSessionDigest will
+// fire. Sized so first-time users don't pay the digest cost in their
+// first short session; long-running users pay it once per ~15 turns
+// of accumulated history.
+const sessionDigestThreshold = 15
+
+// sessionDigestMaxTokens is the target output budget for the digest
+// narrative. Sized to comfortably fit alongside the active prior-
+// message block (6 recent summaries × ~200 tokens) plus the system
+// prompt without dominating the context window. Below the
+// attend.compact template's 800-token cap; the cap wins if they
+// diverge.
+const sessionDigestMaxTokens = 800
+
+// sessionDigestIntent is the salience-preservation hint passed to
+// attend.compact when re-summarizing K session summaries into the
+// durable narrative. Tells the compactor which facts matter when it
+// has to choose between competing content.
+const sessionDigestIntent = "session-digest: preserve DURABLE decisions, constraints, cross-cutting work, and open threads. Group thematically, not by turn number. Drop pleasantries, routine edits, and verifier passes that didn't fail."
+
+// maybeWriteSessionDigest checks whether the journal has accumulated
+// enough new think.session_summary entries since the most recent
+// dream.session_digest to warrant a fresh digest. When the threshold
+// is crossed, it folds those summaries into a single consolidated
+// narrative via attend.compact and writes the result as a
+// dream.session_digest entry. Best-effort: any failure is returned
+// but the caller logs+continues — a missing digest doesn't break
+// the REPL, it just leaves more raw summaries in the prior-context
+// block until the next opportunity.
+//
+// No-op when the threshold isn't crossed, when there's no provider
+// available, or when s.workdir is empty.
+func (s *replState) maybeWriteSessionDigest() error {
+	if s.workdir == "" {
+		return nil
+	}
+	summaries, lastDigestCovers, err := s.readSummariesForDigest()
+	if err != nil {
+		return fmt.Errorf("read summaries: %w", err)
+	}
+	newSinceLast := len(summaries) - lastDigestCovers
+	if newSinceLast < sessionDigestThreshold {
+		return nil
+	}
+
+	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	provider := buildLLMProviderForREPL(cfg, s.model, s.apiURL)
+	if provider == nil || !provider.IsAvailable() {
+		return nil // can't compose; skip silently — try again next turn
+	}
+
+	// Build the snapshots input — one string per summary, chronological.
+	snapshots := make([]string, len(summaries))
+	for i, p := range summaries {
+		intentTag := ""
+		if p.Intent != "" {
+			intentTag = "[intent=" + p.Intent + "] "
+		}
+		snapshots[i] = fmt.Sprintf("[session=%s turn=%d] %s%s", p.SessionID, p.Turn, intentTag, strings.TrimSpace(p.Summary))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, herr := ops.CompactSpec(ops.CompactConfig{Provider: provider}).Handler(ctx,
+		map[string]any{
+			"snapshots":  snapshots,
+			"max_tokens": sessionDigestMaxTokens,
+			"intent":     sessionDigestIntent,
+		},
+		dag.Budget{LatencyMS: 30000, Tokens: 6000, Depth: 1, OutputTokens: sessionDigestMaxTokens * 2})
+	if herr != nil {
+		return fmt.Errorf("attend.compact: %w", herr)
+	}
+	narrative, _ := res.Out["snapshot"].(string)
+	if strings.TrimSpace(narrative) == "" {
+		return fmt.Errorf("attend.compact returned empty narrative")
+	}
+	snapTokens, _ := res.Out["snapshot_tokens"].(int)
+	fallback, _ := res.Out["fallback"].(bool)
+	compressOp := "attend.compact"
+	if fallback {
+		compressOp = "fallback"
+	}
+
+	// Build the journal payload. CoversSessionIDs lets a future
+	// invalidation pass scope retraction effects to digests that
+	// covered the retracted session.
+	sessionSet := map[string]bool{}
+	for _, p := range summaries {
+		sessionSet[p.SessionID] = true
+	}
+	covers := make([]string, 0, len(sessionSet))
+	for id := range sessionSet {
+		covers = append(covers, id)
+	}
+	sort.Strings(covers)
+
+	origTotal := 0
+	for _, sn := range snapshots {
+		origTotal += len(sn) / 4
+	}
+
+	entry, err := journal.NewDreamSessionDigestEntry(journal.DreamSessionDigestPayload{
+		Narrative:        strings.TrimSpace(narrative),
+		SummaryCountIn:   len(summaries),
+		CoversSessionIDs: covers,
+		OrigTokens:       origTotal,
+		KeptTokens:       snapTokens,
+		CompressOp:       compressOp,
+	})
+	if err != nil {
+		return fmt.Errorf("build entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "dream")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("open writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append entry: %w", err)
+	}
+	return nil
+}
+
+// readSummariesForDigest scans the workdir journal and returns the
+// full chronological list of think.session_summary payloads plus the
+// SummaryCountIn from the most recent dream.session_digest (0 when
+// no digest exists yet). The diff between len(summaries) and the
+// covers count is the "new since last digest" pressure that triggers
+// the next digest.
+func (s *replState) readSummariesForDigest() ([]journal.ThinkSessionSummaryPayload, int, error) {
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "think")
+	r, err := journal.NewReader(classDir)
+	if err != nil {
+		return nil, 0, nil // no think dir → nothing to digest, no error
+	}
+	defer r.Close()
+	var summaries []journal.ThinkSessionSummaryPayload
+	for {
+		e, rerr := r.Next()
+		if rerr != nil {
+			break
+		}
+		if e.Type != journal.TypeThinkSessionSummary {
+			continue
+		}
+		p, perr := journal.ParseThinkSessionSummary(e)
+		if perr != nil {
+			continue
+		}
+		summaries = append(summaries, *p)
+	}
+
+	// Latest digest's SummaryCountIn — captures how many summaries
+	// from the head of `summaries` are already folded into the most
+	// recent digest. Reads the dream class; absence is fine (0).
+	covers := 0
+	dr, derr := journal.NewReader(filepath.Join(s.workdir, ".cortex", "journal", "dream"))
+	if derr == nil {
+		defer dr.Close()
+		for {
+			e, rerr := dr.Next()
+			if rerr != nil {
+				break
+			}
+			if e.Type != journal.TypeDreamSessionDigest {
+				continue
+			}
+			d, perr := journal.ParseDreamSessionDigest(e)
+			if perr != nil {
+				continue
+			}
+			// Take the LAST one (highest covers) since iteration is
+			// chronological and digests only ever grow their cover set.
+			covers = d.SummaryCountIn
+		}
+	}
+	return summaries, covers, nil
+}
+
+// IntentRollup is one aggregated row in a per-intent breakdown of a
+// session's turnRows. Slice 6 ships the aggregator standalone; future
+// surfaces (cortex repl stats / dashboards / eval summaries) can
+// import it without re-implementing the math.
+type IntentRollup struct {
+	Intent         string
+	Count          int
+	P50LatencyMs   int64
+	P95LatencyMs   int64
+	TotalTokensIn  int
+	TotalTokensOut int
+	TotalCostUSD   float64
+}
+
+// aggregateByIntent groups turnRows by their Intent field and returns
+// one IntentRollup per distinct intent, sorted by Count descending
+// (most-frequent intents first). Empty intent rows are folded into
+// the "(none)" bucket so legacy turnRows from before Slice 3 still
+// show up rather than being silently dropped.
+//
+// Empty input → empty output, no error. Suitable for stats commands
+// that just want to print "0 turns" rather than special-case.
+func aggregateByIntent(rows []turnRow) []IntentRollup {
+	if len(rows) == 0 {
+		return nil
+	}
+	buckets := map[string][]turnRow{}
+	for _, r := range rows {
+		key := r.Intent
+		if key == "" {
+			key = "(none)"
+		}
+		buckets[key] = append(buckets[key], r)
+	}
+	out := make([]IntentRollup, 0, len(buckets))
+	for intent, rs := range buckets {
+		out = append(out, intentRollupFor(intent, rs))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Intent < out[j].Intent // stable secondary sort
+	})
+	return out
+}
+
+// intentRollupFor builds one IntentRollup from a per-intent slice of
+// rows. P50 / P95 are computed in-place over a copy of the latency
+// values; tokens / cost are summed directly. Single-row buckets
+// yield P50=P95=that row's latency.
+func intentRollupFor(intent string, rows []turnRow) IntentRollup {
+	r := IntentRollup{Intent: intent, Count: len(rows)}
+	latencies := make([]int64, len(rows))
+	for i, row := range rows {
+		latencies[i] = row.LatencyMs
+		r.TotalTokensIn += row.TokensIn
+		r.TotalTokensOut += row.TokensOut
+		r.TotalCostUSD += row.CostUSD
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	r.P50LatencyMs = percentile(latencies, 0.50)
+	r.P95LatencyMs = percentile(latencies, 0.95)
+	return r
+}
+
+// percentile returns the p-th percentile (0.0 <= p <= 1.0) from a
+// pre-sorted slice using the nearest-rank method (ceil(N*p) - 1).
+// This places p=0 at the smallest value, p=1 at the largest, and
+// p=0.95 on N=3 at the third value rather than the second — which
+// matches what humans expect when reading "p95 latency" on small
+// samples. Empty slice → 0; single element → that element.
+//
+// Not a stats-grade implementation. Fine for REPL session sizes
+// (tens to hundreds of turns).
+func percentile(sorted []int64, p float64) int64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if len(sorted) == 1 {
+		return sorted[0]
+	}
+	// ceil(N*p) - 1: math.Ceil avoided by adding (N - 1) before
+	// integer division.
+	n := len(sorted)
+	idx := (int(float64(n)*p*1000) + 999) / 1000
+	if idx > 0 {
+		idx--
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	return sorted[idx]
+}
+
+// detectFeedbackCue mechanically classifies a user prompt as
+// "correction", "confirmation", or "" (none). The detector is a
+// small keyword pass — not an LLM call — so the per-turn cost is
+// negligible. False positives cost a misclassified feedback entry
+// the user can /cortex-forget; false negatives just mean we miss
+// the signal on a particular turn. Both are recoverable.
+//
+// Correction trumps confirmation when both fire (the user changing
+// course is the load-bearing signal). Word boundaries matter — "no
+// problem" must NOT trigger correction, "no, that's wrong" must.
+func detectFeedbackCue(prompt string) string {
+	p := " " + strings.ToLower(strings.TrimSpace(prompt)) + " "
+	for _, marker := range correctionMarkers {
+		if strings.Contains(p, marker) {
+			return "correction"
+		}
+	}
+	for _, marker := range confirmationMarkers {
+		if strings.Contains(p, marker) {
+			return "confirmation"
+		}
+	}
+	return ""
+}
+
+// correctionMarkers are space-padded so they only match on word
+// boundaries. "no problem" deliberately doesn't appear here so it
+// can't masquerade as "no" — the pad guarantees we look for "no"
+// followed by punctuation/whitespace + a contrastive continuation,
+// expressed below as the specific patterns we actually want to
+// catch.
+var correctionMarkers = []string{
+	"no, ", "no. ", "nope, ", "nope. ",
+	" wrong ", " incorrect ", " incorrectly ",
+	" actually ", " instead ", " not what ",
+	" that's not ", " that isn't ", " that is not ",
+	" don't ", " dont ", " stop doing ",
+}
+
+// confirmationMarkers — similarly space-padded. Generous on
+// "thanks" / "perfect" / "exactly" since those are unambiguous
+// positive cues that rarely appear inside corrections.
+var confirmationMarkers = []string{
+	" perfect ", " perfect.", " perfect!",
+	" thanks ", " thanks.", " thanks!", " thank you ",
+	" exactly ", " exactly.", " exactly!",
+	" got it ", " got it.", " got it!", " got it,",
+	" yes that ", " yes, that ", " yep, that ",
+	" that worked ", " that works ",
+	" nice ", " nice.", " nice!",
+}
+
+// emitFeedbackEntry writes a feedback.{correction,confirmation}
+// journal entry linked to the prior turn via GradedID. Best-effort:
+// any failure is returned but the caller logs+continues — the user's
+// turn must not block on a feedback emit.
+//
+// The GradedID format mirrors what the eventual capture entry for
+// the prior turn produces (repl-<sessionID>-turn-<N>) so a future
+// projector can join feedback to its target row by string key. When
+// the cue fires on turn 1 (s.turns == 0), there's no prior turn to
+// grade — skip silently.
+func (s *replState) emitFeedbackEntry(cue, prompt string) error {
+	if s.workdir == "" || s.turns == 0 {
+		return nil
+	}
+	var typ string
+	switch cue {
+	case "correction":
+		typ = journal.TypeFeedbackCorrection
+	case "confirmation":
+		typ = journal.TypeFeedbackConfirmation
+	default:
+		return nil
+	}
+	gradedID := fmt.Sprintf("repl-%s-turn-%d", s.sessionID, s.turns)
+	payload := journal.FeedbackPayload{
+		GradedID:  gradedID,
+		Note:      strings.TrimSpace(prompt),
+		SessionID: s.sessionID,
+	}
+	entry, err := journal.NewFeedbackEntry(typ, payload)
+	if err != nil {
+		return fmt.Errorf("build feedback entry: %w", err)
+	}
+	classDir := filepath.Join(s.workdir, ".cortex", "journal", "feedback")
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: classDir,
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		return fmt.Errorf("open feedback writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("append feedback: %w", err)
+	}
+	return nil
+}
+
+// stitchClarifyFollowUp returns the combined prompt when the prior
+// turn routed to decide.clarify and stashed its original ambiguous
+// prompt. Resets the stash so only the immediately-following turn
+// benefits. Returns the input prompt unchanged otherwise.
+//
+// Format: the classifier sees both the prior ambiguous prompt and
+// the current answer in one block — "delete it" + "the migrations
+// table" → "delete the migrations table" semantics — so it can
+// pick the disambiguated intent (likely code) instead of
+// re-classifying the bare answer.
+func (s *replState) stitchClarifyFollowUp(prompt string) string {
+	if s.lastClarifyPrompt == "" {
+		return prompt
+	}
+	prior := s.lastClarifyPrompt
+	s.lastClarifyPrompt = ""
+	return fmt.Sprintf("Original (ambiguous) request: %s\nUser's clarification: %s", prior, prompt)
+}
+
+// downgradeRecallIfNoContext returns intent unchanged unless it's
+// "recall" AND the storage probe finds nothing relevant to the
+// prompt. In that case it downgrades to "code" so the seed becomes
+// the full sense.prompt chain under DefaultTurnBudget — the agent
+// can investigate (list dirs, read files) instead of replying "no
+// prior context indexed" on a cold journal.
+//
+// Nil storage → downgrade. A recall question we can't answer from
+// storage is better served by the agent than by an apology.
+//
+// The probe tokenizes the prompt into content words and asks storage
+// for any event matching ANY word. Full-string substring matching
+// (what SearchEvents does) practically never hits on natural-language
+// recall questions — "what did we decide about postgres?" won't be a
+// substring of any stored event. Per-word OR matching catches the
+// realistic case: at least one content word from the question
+// (postgres, auth, pgx, …) appears in some prior tool-result or
+// tool-input.
+func downgradeRecallIfNoContext(intent, prompt string, store *storage.Storage) string {
+	if intent != "recall" {
+		return intent
+	}
+	if store == nil {
+		return ops.IntentCode
+	}
+	terms := recallProbeTerms(prompt)
+	if len(terms) == 0 {
+		return ops.IntentCode
+	}
+	matches, err := store.SearchEventsMultiTerm(terms, 1)
+	if err != nil || len(matches) == 0 {
+		return ops.IntentCode
+	}
+	return intent
+}
+
+// recallProbeTerms extracts content words from a recall prompt: lower
+// case, ≥4 characters, not in the small stopword set. The threshold
+// is deliberately generous — false positives (downgrade=false when
+// downgrade=true would have been kinder) cost the user a recall_summary
+// that says "no context"; false negatives cost a full coding-turn
+// when a recall would have been cheaper. Both are recoverable; the
+// false-positive case is worse so we err toward keeping recall when
+// any plausible word might match.
+func recallProbeTerms(prompt string) []string {
+	stop := map[string]bool{
+		"what": true, "when": true, "where": true, "which": true, "who": true,
+		"why": true, "how": true, "that": true, "this": true, "with": true,
+		"about": true, "from": true, "into": true, "have": true, "were": true,
+		"been": true, "they": true, "them": true, "their": true, "there": true,
+		"will": true, "would": true, "could": true, "should": true,
+		"again": true, "just": true, "your": true, "ours": true, "decide": true,
+		"decided": true, "settled": true, "remind": true,
+	}
+	var out []string
+	seen := map[string]bool{}
+	// Split on non-letter runs so "postgres?" → "postgres" without a
+	// regex dependency. ASCII-only; non-ASCII content words won't be
+	// indexed for the probe but storage's substring match handles
+	// them downstream if SearchEventsMultiTerm gets routed differently
+	// later.
+	cur := make([]byte, 0, 16)
+	flush := func() {
+		if len(cur) < 4 {
+			cur = cur[:0]
+			return
+		}
+		w := string(cur)
+		cur = cur[:0]
+		if stop[w] || seen[w] {
+			return
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			cur = append(cur, c+32)
+		case c >= 'a' && c <= 'z':
+			cur = append(cur, c)
+		default:
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+// intentShortCircuitThreshold gates intent-aware short-circuits.
+// Below this confidence every intent routes through the full chain —
+// better to pay the coding_turn cost than to give a canned greeting,
+// a wrong clarifying question, or an unrelated recall to someone who
+// actually wanted real work done.
+const intentShortCircuitThreshold = 0.7
 
 // seedForIntent picks the per-turn seed spec list based on the
-// classified intent. greeting (with high confidence) bypasses the
-// agent loop via act.passthrough; everything else uses today's
-// sense.prompt → decide.next → coding_turn chain.
+// classified intent. High-confidence trivial intents bypass the
+// sense.prompt → decide.next → coding_turn chain in favor of a
+// dedicated terminal node:
 //
-// Recall / clarify will get their own dedicated seeds in follow-up
-// slices (Slices 2 + 4 of the integration plan); today they share
-// the default chain but run under their tighter BudgetForIntent
-// budgets, so a misroute still can't balloon the turn.
+//	greeting → act.passthrough        (mechanical, zero LLM)
+//	clarify  → decide.clarify         (one short LLM call, one question, end turn)
+//	recall   → decide.recall_summary  (search storage, synthesize prose)
+//
+// Everything else (code / review / meta, or any low-confidence
+// classification) falls through to the existing sense.prompt seed.
+// Per-intent budgets from dag.BudgetForIntent give defense-in-depth:
+// even when the seed falls through, a misclassified trivial intent
+// runs under a budget too tight for decide.coding_turn to spawn.
 func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeSpec {
-	if intent == "greeting" && confidence >= intentPassthroughThreshold {
-		return []dag.NodeSpec{{
-			Function: dag.FuncAct,
-			Op:       "passthrough",
-			ID:       "n1",
-			Attrs:    map[string]any{"prompt": prompt},
-		}}
+	if confidence >= intentShortCircuitThreshold {
+		switch intent {
+		case "greeting":
+			return []dag.NodeSpec{{
+				Function: dag.FuncAct,
+				Op:       "passthrough",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		case "clarify":
+			return []dag.NodeSpec{{
+				Function: dag.FuncDecide,
+				Op:       "clarify",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		case "recall":
+			return []dag.NodeSpec{{
+				Function: dag.FuncDecide,
+				Op:       "recall_summary",
+				ID:       "n1",
+				Attrs:    map[string]any{"prompt": prompt},
+			}}
+		}
 	}
 	return []dag.NodeSpec{{
 		Function: dag.FuncSense,
@@ -2299,7 +3093,7 @@ func seedForIntent(intent string, confidence float64, prompt string) []dag.NodeS
 // The registry is captured by reference inside decide.next's handler
 // closure, so subsequent registrations (decide.coding_turn,
 // sense.prompt) are visible when the handler runs.
-func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, passthroughOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
+func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.CodingTurnConfig, intentTerminalOnResponse func(string), traceCB dag.TraceCallback) (*dag.Registry, error) {
 	reg := dag.NewRegistry()
 	if _, err := ops.RegisterDefaults(reg, ops.DefaultsConfig{}); err != nil {
 		return nil, fmt.Errorf("ops defaults: %w", err)
@@ -2321,9 +3115,34 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// into the captured LoopResult so the standard render + journal
 	// path is unchanged.
 	if err := reg.Register(ops.PassthroughSpec(ops.PassthroughConfig{
-		OnResponse: passthroughOnResponse,
+		OnResponse: intentTerminalOnResponse,
 	})); err != nil {
 		return nil, fmt.Errorf("register act.passthrough: %w", err)
+	}
+
+	// decide.clarify — small-LLM terminal that asks ONE focused
+	// question for ambiguous prompts and ends the turn. Reuses
+	// classifyProvider (same model used for the upstream classifier;
+	// the work is similarly narrow JSON-output).
+	if err := reg.Register(ops.ClarifySpec(ops.ClarifyConfig{
+		Provider:   classifyProvider,
+		OnResponse: intentTerminalOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.clarify: %w", err)
+	}
+
+	// decide.recall_summary — terminal node for the `recall` intent.
+	// Searches s.store via text search (no embedder required; the
+	// REPL session today doesn't wire one through newSessionCognition),
+	// then asks the small model to synthesize a prose answer grounded
+	// in the matches. s.store may be nil on cold start — the op
+	// degrades to a `grounded=false` synthesis from the prompt alone.
+	if err := reg.Register(ops.RecallSummarySpec(ops.RecallSummaryConfig{
+		Provider:   classifyProvider,
+		Storage:    s.store,
+		OnResponse: intentTerminalOnResponse,
+	})); err != nil {
+		return nil, fmt.Errorf("register decide.recall_summary: %w", err)
 	}
 
 	// decide.next — the steering op. Provider + Registry + ModelCatalog
@@ -2671,6 +3490,14 @@ type turnRow struct {
 	APIURL       string `json:"api_url,omitempty"`
 	SystemPrompt string `json:"system_prompt"`
 	SnapshotDir  string `json:"snapshot_dir"`
+
+	// Intent ingestion result (sense.classify_intent) from the FIRST
+	// runHarness call. Retries reuse the same intent — the user's
+	// underlying ask hasn't changed, only verifier feedback has.
+	// Empty / zero on entries written before the field existed; readers
+	// tolerate the absence.
+	Intent           string  `json:"intent,omitempty"`
+	IntentConfidence float64 `json:"intent_confidence,omitempty"`
 
 	// Initial attempt (no error context).
 	HarnessError          string   `json:"harness_error,omitempty"`

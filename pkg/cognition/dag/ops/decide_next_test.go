@@ -452,3 +452,66 @@ func TestNext_RenderPromptOmitsBoundariesWhenAllZero(t *testing.T) {
 		t.Errorf("planning guidance should not appear without boundaries")
 	}
 }
+
+// TestNext_ReadsAccumulatorSnapshot — when no history_summary is
+// passed explicitly, decide.next falls back to the latest
+// attend.accumulate snapshot from turn state and renders it into
+// the working-memory block of its prompt.
+func TestNext_ReadsAccumulatorSnapshot(t *testing.T) {
+	var capturedSystem string
+	p := &fakeProvider{
+		respond: func(_, system string) (string, error) {
+			capturedSystem = system
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"go"}}],"reasoning":"ok"}`, nil
+		},
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+
+	ctx := dag.WithTestTurnState(context.Background(), []dag.TestDeposit{
+		{NodeID: "n1", QualifiedName: "attend.accumulate",
+			Out: map[string]any{"snapshot": "user wants logout; uses session_tokens table"}},
+	})
+	if _, err := h(ctx, map[string]any{"prompt": "now apply it"}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !strings.Contains(capturedSystem, "Working memory so far") {
+		t.Errorf("system prompt should label the snapshot as working memory; got %q", capturedSystem)
+	}
+	if !strings.Contains(capturedSystem, "session_tokens table") {
+		t.Errorf("system prompt should include the accumulator snapshot; got %q", capturedSystem)
+	}
+}
+
+// TestNext_ExplicitHistorySummaryWinsOverAccumulator — when the
+// caller passes an explicit history_summary, it should win over the
+// accumulator's snapshot. This is the path callers use to inject
+// cross-turn context (e.g. compressed prior-turn summaries).
+func TestNext_ExplicitHistorySummaryWinsOverAccumulator(t *testing.T) {
+	var capturedSystem string
+	p := &fakeProvider{
+		respond: func(_, system string) (string, error) {
+			capturedSystem = system
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"go"}}],"reasoning":"ok"}`, nil
+		},
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: p, Registry: reg})
+
+	ctx := dag.WithTestTurnState(context.Background(), []dag.TestDeposit{
+		{NodeID: "n1", QualifiedName: "attend.accumulate",
+			Out: map[string]any{"snapshot": "STALE accumulator snapshot"}},
+	})
+	if _, err := h(ctx, map[string]any{
+		"prompt":          "now apply it",
+		"history_summary": "FRESH explicit summary from caller",
+	}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !strings.Contains(capturedSystem, "FRESH explicit summary") {
+		t.Errorf("explicit history_summary should win; got %q", capturedSystem)
+	}
+	if strings.Contains(capturedSystem, "STALE accumulator snapshot") {
+		t.Errorf("accumulator snapshot should be suppressed when explicit summary set; got %q", capturedSystem)
+	}
+}

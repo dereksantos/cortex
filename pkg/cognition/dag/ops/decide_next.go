@@ -240,6 +240,15 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			}, fmt.Errorf("decide.next: 'prompt' (string) is required")
 		}
 		historySummary, _ := in["history_summary"].(string)
+		// When the caller didn't pass an explicit history_summary,
+		// fall back to the latest attend.accumulate snapshot from
+		// turn state — the bounded working memory built by earlier
+		// nodes in this turn. Caller-passed history_summary wins so
+		// callers can still inject cross-turn context (compressed
+		// session summaries) at the chain root.
+		if historySummary == "" {
+			historySummary = dag.LatestAccumulatorSnapshot(ctx)
+		}
 		recDepth := readDecideNextDepth(in)
 
 		// Per-call provider resolution. attrs.model on this decide.next
@@ -387,7 +396,11 @@ func renderNextPrompt(prompt, opCatalog, modelCatalog, historySummary, boundarie
 
 	contextBlock := ""
 	if historySummary != "" {
-		contextBlock = "Recent context: " + historySummary + "\n"
+		// Labelled as "working memory" so the LLM treats the
+		// content as authoritative (already-compressed bounded
+		// state from prior nodes in this turn), not just "recent
+		// chatter". This is the bridge to attend.accumulate.
+		contextBlock = "Working memory so far (already-compressed; use directly, do NOT re-fetch what's here):\n\"\"\"\n" + historySummary + "\n\"\"\"\n"
 	}
 	out = strings.ReplaceAll(out, "{{CONTEXT}}", contextBlock)
 	out = strings.ReplaceAll(out, "{{BOUNDARIES}}", formatBoundariesBlock(boundaries, budget))
