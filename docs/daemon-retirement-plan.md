@@ -186,7 +186,7 @@ Strip daemon references from docs that still describe it as live.
   - Lines roughly 75, 109, 156–165.
   - Acceptance: `grep -ni 'daemon' docs/product.md` returns nothing load-bearing.
 
-- [ ] **4.4** Mark ROADMAP.md daemon entries as superseded.
+- [x] **4.4** Mark ROADMAP.md daemon entries as superseded.
   - Lines roughly 66, 273 ("single global daemon" / multi-project).
   - Either delete or annotate "superseded by REPL-as-host (May 2026)".
   - Acceptance: ROADMAP no longer presents the daemon as a current/future feature.
