@@ -100,7 +100,7 @@ is reviewable.
     passes; manual smoke: idle the REPL for 60s, confirm a `think.*`
     journal entry appears.
 
-- [ ] **2.3** Move Dream dispatch to the REPL idle hook.
+- [x] **2.3** Move Dream dispatch to the REPL idle hook.
   - Source: `cmd/cortex/commands/daemon.go` Dream dispatch site (search
     for `MaybeDream(`).
   - Same pattern as Think. Dream's `MaxBudget` / `GrowthDuration`

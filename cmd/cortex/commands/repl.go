@@ -1083,13 +1083,15 @@ const journalIngestInterval = 30 * time.Second
 
 // maybeStartJournalIngest spawns a goroutine that drains the project's
 // capture/observation/dream/etc. journals into Storage and fires the
-// background cognitive modes (Think, eventually Dream) on a ticker.
-// Replaces the auto-started daemon's processor + cognitive loops
-// (daemon-retirement Phase 2.1, 2.2).
+// background cognitive modes (Think + Dream) on a ticker. Replaces
+// the auto-started daemon's processor + cognitive loops
+// (daemon-retirement Phase 2.1, 2.2, 2.3).
 //
-// MaybeThink internally enforces the ActivityLevel budget — Think
-// runs only when the REPL is quiet, same contract the daemon
-// enforced via its 10s cognitive ticker.
+// MaybeThink/MaybeDream each internally enforce their budget contracts
+// (Think's budget decays with activity; Dream's budget grows with
+// idle time and is capped at MaxBudget). Firing them every tick is
+// the same shape the daemon's 10s cognitive ticker used — the inner
+// budget gates whether anything actually happens.
 //
 // No-ops when state.store is nil — sessions that opted out of the
 // shared cognition surface have nothing to ingest into.
@@ -1118,6 +1120,11 @@ func maybeStartJournalIngest(state *replState) {
 				if state.cortex != nil && state.cortex.IsModeEnabled("think") {
 					if _, err := state.cortex.MaybeThink(ctx); err != nil && state.verbose {
 						state.ui.Warn(fmt.Sprintf("(think: %v)", err))
+					}
+				}
+				if state.cortex != nil && state.cortex.IsModeEnabled("dream") {
+					if _, err := state.cortex.MaybeDream(ctx); err != nil && state.verbose {
+						state.ui.Warn(fmt.Sprintf("(dream: %v)", err))
 					}
 				}
 			}
