@@ -119,7 +119,7 @@ is reviewable.
     only definitions in `internal/cognition/`, no call sites outside
     `cmd/cortex/commands/daemon.go`.
 
-- [ ] **2.5** REPL smoke test.
+- [x] **2.5** REPL smoke test.
   - Start the REPL, issue 2-3 prompts, idle 60s, exit.
   - Verify: no panics, ingest goroutine drained captures (check
     `.cortex/journal/capture/` against storage state), no orphan

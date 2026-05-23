@@ -1078,8 +1078,9 @@ func maybeStartStudy(state *replState) {
 // journal-ingest goroutine. The retired daemon used a 5s tick at the
 // processor level; the REPL pays for fewer wake-ups because capture
 // latency is already absorbed at write time and search can fall back
-// to the journal directly if the index lags.
-const journalIngestInterval = 30 * time.Second
+// to the journal directly if the index lags. var (not const) so the
+// 2.5 smoke test can shorten it.
+var journalIngestInterval = 30 * time.Second
 
 // maybeStartJournalIngest spawns a goroutine that drains the project's
 // capture/observation/dream/etc. journals into Storage and fires the
@@ -1296,6 +1297,7 @@ When to use tools:
 
 Discipline:
   - Make ONE focused change per user message. Edit one file unless the request explicitly spans files.
+  - Read narrowly. Before reading a file you don't already know is small, check its size with run_shell ("wc -l <file>"). If it's large, use run_shell with grep to locate the relevant span, then read only that range. Whole-file reads of large files burn budget and slow every downstream step.
   - Don't narrate what you're about to do; just do it.
   - When making changes, run the project's build/test command (via run_shell) before declaring done. Read errors, fix, retry.
   - When the step is done, respond with a short summary and NO further tool calls.
