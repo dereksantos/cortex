@@ -1242,22 +1242,72 @@ func applySalienceCalibration(cortexDir string, verbose bool, ui cliout.Sink) {
 
 // salienceCapForSession returns the per-tool-call output-token cap to
 // use for this REPL turn, derived from the model id + the endpoint's
-// advertised context window (when available). Phase 3 Slice 1: weaker
-// models get a tighter cap (favoring fan-out into many small reads);
-// stronger models get a looser cap (so a synthesis turn sees rich
-// uncompressed evidence). Falls back to defaultToolOutputSalienceCap
-// when the inference can't pick a class.
+// effective context window. Two regimes:
 //
-// ctxWindow defaults to 0 (unknown). The REPL passes the endpoint's
-// max_context_window when it has one — Lemonade exposes it; raw Ollama
-// doesn't.
+//   - When ctxWindow > 0 (the registry knows the runtime window), the
+//     cap is sized as a fraction of the window — windowFractionForCap
+//     (currently 1/8). Reads/tool outputs smaller than the cap pass
+//     through with no LLM compression; bigger outputs still compress
+//     but to a cap that scales with the model so a 64K-window model
+//     compresses to ~8K instead of the static 1500-token class default.
+//     This is the size-aware-tool-results path.
+//
+//   - When ctxWindow == 0 (unknown — pre-registry behavior), falls back
+//     to the static SalienceCapForClass bucket (200/500/1500 per
+//     small/medium/large). The pre-registry call sites keep working
+//     unchanged.
+//
+// Callers should plumb the registry-sourced EffectiveContextWindow
+// through via replState.effectiveContextWindow() — a llama-server
+// booted at --ctx-size 65536 reports 65536 here, not the 262144 the
+// model's theoretical max would suggest.
 func salienceCapForSession(model string, ctxWindow int) (int, llm.ContextClass) {
 	class := llm.InferContextClass(model, ctxWindow)
+	if ctxWindow > 0 {
+		// Scale the cap with the runtime window: a generous fraction
+		// big enough that reads which comfortably fit pass through
+		// without LLM-mediated salience compression. 1/8th leaves room
+		// for ~8 accumulator entries of this size plus the prompt.
+		cap := ctxWindow / windowFractionForCap
+		if cap < defaultToolOutputSalienceCap {
+			cap = defaultToolOutputSalienceCap
+		}
+		return cap, class
+	}
 	cap := llm.SalienceCapForClass(class)
 	if cap <= 0 {
 		cap = defaultToolOutputSalienceCap
 	}
 	return cap, class
+}
+
+// windowFractionForCap is the divisor applied to the calling model's
+// effective context window when deriving the per-tool-call salience
+// cap. 1/8th = ~12.5% of the window per deposit, leaving room for
+// ~8 such deposits in the accumulator plus the prompt. Empirically
+// tuned for the small-model amplifier path: smaller fractions waste
+// the model's window on too-aggressive compression; larger fractions
+// risk one big read crowding out everything else in the accumulator.
+const windowFractionForCap = 8
+
+// effectiveContextWindow returns the calling model's runtime context
+// window from the registry. Zero when the model isn't in the registry
+// (e.g. the user pinned a model that hasn't been probed, or the
+// registry is empty because every backend is down) — callers should
+// treat zero as "unknown, fall back to id-pattern inference."
+//
+// Used by every site that needs the size-vs-window decision today
+// (Salience cap inference) and by Phase B's deterministic-chunking
+// path tomorrow.
+func (s *replState) effectiveContextWindow() int {
+	if s.registry == nil {
+		return 0
+	}
+	info, ok := s.registry.Get(context.Background(), s.model)
+	if !ok {
+		return 0
+	}
+	return info.EffectiveContextWindow
 }
 
 // resolveAPIURL routes to Ollama when the model id looks local (no
@@ -1918,7 +1968,7 @@ func (s *replState) emitSessionSummary(row turnRow) error {
 		return nil
 	}
 
-	cap, _ := salienceCapForSession(s.model, 0)
+	cap, _ := salienceCapForSession(s.model, s.effectiveContextWindow())
 	intent := "session-summary: what the user asked, what was done, files changed, key takeaways. Preserve facts, drop pleasantries."
 
 	cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
@@ -2452,7 +2502,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// uncompressed evidence). ctxWindow=0 means "use the model id
 	// alone"; future iteration will probe the endpoint's /v1/models
 	// for max_context_window.
-	salienceCap, ctxClass := salienceCapForSession(s.model, 0)
+	salienceCap, ctxClass := salienceCapForSession(s.model, s.effectiveContextWindow())
 	if s.verbose {
 		s.ui.Info(fmt.Sprintf("  · salience cap=%d (model class=%s)", salienceCap, ctxClass))
 	}
@@ -3290,10 +3340,11 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// narrow nodes; large/loose → fewer bigger nodes). Empty-friendly
 	// fallback for zero codingCfg is handled inside formatBoundariesBlock.
 	cap := codingCfg.ToolOutputSalienceCap
-	class := llm.InferContextClass(s.model, 0)
+	ctxWindow := s.effectiveContextWindow()
+	class := llm.InferContextClass(s.model, ctxWindow)
 	systemBoundaries := fmt.Sprintf(
-		"- Model: %s (capability class: %s)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
-		s.model, class, cap,
+		"- Model: %s (capability class: %s, ctx=%d)\n- Per-tool-call salience cap: %d tokens (oversized outputs auto-compress)\n",
+		s.model, class, ctxWindow, cap,
 	)
 	// Phase 3 Slice 3 dovetail: when the project-study DAG has
 	// completed, surface a one-liner so decide.next plans against
