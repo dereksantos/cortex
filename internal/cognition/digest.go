@@ -31,9 +31,6 @@ type Digest struct {
 	running       bool
 	lastDigest    time.Time
 	lastDreamTime time.Time // Set by Dream when it completes
-
-	// State writer for daemon status updates
-	stateWriter *StateWriter
 }
 
 // NewDigest creates a new Digest instance.
@@ -50,13 +47,6 @@ func (d *Digest) SetConfig(cfg cognition.DigestConfig) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.config = cfg
-}
-
-// SetStateWriter sets the state writer for daemon status updates.
-func (d *Digest) SetStateWriter(sw *StateWriter) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.stateWriter = sw
 }
 
 // NotifyDreamCompleted is called by Dream to signal digest should run.
@@ -83,13 +73,7 @@ func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, erro
 	}
 
 	d.running = true
-	stateWriter := d.stateWriter
 	d.mu.Unlock()
-
-	// Write state on start
-	if stateWriter != nil {
-		stateWriter.WriteMode("digest", "Consolidating insights...")
-	}
 
 	start := time.Now()
 	minDisplay := d.config.MinDisplayDuration
@@ -105,10 +89,6 @@ func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, erro
 		d.running = false
 		d.lastDigest = time.Now()
 		d.mu.Unlock()
-
-		if stateWriter != nil {
-			stateWriter.WriteMode("idle", "")
-		}
 	}()
 
 	// Fetch recent insights
@@ -159,10 +139,6 @@ func (d *Digest) MaybeDigest(ctx context.Context) (*cognition.DigestResult, erro
 
 	// Write high-quality insights to knowledge/ as committable files
 	knowledgeWritten := d.writeKnowledgeFiles(digested)
-
-	if stateWriter != nil && groups > 0 {
-		stateWriter.WriteMode("digest", fmt.Sprintf("Compacted %d duplicates from %d groups", merged, groups))
-	}
 
 	log.Printf("Digest: completed (%d insights -> %d unique, %d groups, %d merged, %d knowledge files, %v)",
 		len(insights), len(digested), groups, merged, knowledgeWritten, time.Since(start))

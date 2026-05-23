@@ -71,11 +71,12 @@ go build -o cortex ./cmd/cortex
 # Initialize in a project
 ./cortex init
 
-# Start background processor
-./cortex daemon &
-
 # Use the coding harness
 ./cortex code "Add a function that returns the Fibonacci sequence."
+
+# Or open the interactive REPL, which hosts the background
+# Think/Dream + journal-ingest on its idle hook
+./cortex repl
 ```
 
 `./cortex install` exists as a compatibility verb that ensures
@@ -106,7 +107,6 @@ longer wires anything into an external editor.
 | `cortex init [--auto]` | Initialize Cortex in current directory |
 | `cortex install` | Ensure `.cortex/` exists + report LLM availability |
 | `cortex uninstall [--purge]` | Remove `.cortex/` data (requires `--purge` to delete) |
-| `cortex daemon` | Run the background processor (dashboard at `:9090`) |
 | `cortex status [--system|--memory|--json|--expand]` | Status / dashboards |
 | `cortex projects` | List registered projects in `~/.cortex/projects.json` |
 
@@ -152,22 +152,6 @@ longer wires anything into an external editor.
 | `cortex embed` | One-off embedding helper |
 
 ### Command Details
-
-#### `cortex daemon`
-
-Runs the background processor:
-
-```bash
-./cortex daemon &   # background
-./cortex daemon     # foreground (see logs)
-```
-
-The daemon:
-- Polls the queue every 5 seconds
-- Runs LLM analysis on captured events
-- Executes cognitive modes (Think, Dream) opportunistically
-- Writes state to `.cortex/daemon_state.json` for the status line
-- Serves a dashboard at `http://localhost:9090`
 
 #### `cortex eval`
 
@@ -231,10 +215,6 @@ Cortex stores per-project state under `.cortex/`:
 ```
 .cortex/
 ├── config.json              # Project config
-├── daemon_state.json        # Daemon state for status line
-├── queue/                   # File-based event queue
-│   ├── pending/             # Awaiting daemon pickup
-│   └── processed/           # Drained (gzip-rotated)
 ├── journal/                 # Append-only event log per writer-class
 │   ├── capture/
 │   ├── observation/
@@ -278,8 +258,8 @@ cortex code / repl / run (foreground)
         ↓ events emitted in-process
 Journal (.cortex/journal/<class>/*.jsonl)
         │
-        ↓ Daemon picks up
-cortex daemon
+        ↓ REPL idle hook drains (or `cortex journal ingest` one-shot
+        │   when no REPL is running)
         │
         ├─→ Store in SQLite (events table)
         │
@@ -360,17 +340,17 @@ echo '{"event_type":"tool_use","tool_name":"Test"}' | ./cortex capture
 ls .cortex/journal/capture/
 ```
 
-#### "Daemon not running"
+#### "Background cognition isn't running"
+
+The REPL hosts the long-lived ingest + Think/Dream goroutine. If
+nothing's draining your journal, open a REPL session:
 
 ```bash
-# Check if running
-ps aux | grep "cortex daemon"
+# Drain once without a running session
+./cortex journal ingest
 
-# Start daemon
-./cortex daemon &
-
-# Check status
-./cortex status
+# Open the REPL so the idle goroutine runs continuously
+./cortex repl
 ```
 
 #### "Database locked"
@@ -378,9 +358,6 @@ ps aux | grep "cortex daemon"
 ```bash
 # Stop all Cortex processes
 killall cortex
-
-# Restart daemon
-./cortex daemon &
 ```
 
 ### Diagnostics
@@ -394,12 +371,6 @@ killall cortex
 
 # Small-LLM-generated state summary (Ollama; mechanical fallback)
 ./cortex status --expand
-
-# Check daemon state file directly
-cat .cortex/daemon_state.json
-
-# Open the dashboard
-open http://localhost:9090
 ```
 
 ### Reset Everything
@@ -411,7 +382,6 @@ cp -r .cortex .cortex.backup
 # Remove all data and reinitialize
 ./cortex uninstall --purge
 ./cortex init
-./cortex daemon &
 ```
 
 ---
@@ -482,7 +452,7 @@ cortex/
 ├── internal/            # Private implementation
 │   ├── capture/         # Fast event capture
 │   ├── cognition/       # Cognitive mode implementations
-│   ├── processor/       # Background daemon
+│   ├── processor/       # Journal → Storage projector (driven by REPL idle hook or `cortex journal ingest`)
 │   ├── journal/         # Append-only event log (source of truth)
 │   ├── storage/         # SQLite-backed derived state
 │   ├── harness/         # Coding harness wiring

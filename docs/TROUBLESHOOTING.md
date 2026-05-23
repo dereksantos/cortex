@@ -137,36 +137,34 @@ cat .cortex/logs/capture.log
 
 ## Processing Issues
 
-### Daemon not processing events
+### Journal entries not draining into storage
 
-**Problem**: Events pile up in `queue/pending/`, never processed
+**Problem**: `.cortex/journal/capture/` keeps growing but `cortex search`
+doesn't see the new events.
 
-**Debug**:
-```bash
-# Is daemon running?
-ps aux | grep "cortex daemon"
-
-# Check daemon logs (if you started with logging)
-# cortex daemon > .cortex/logs/daemon.log 2>&1
-```
+**Background**: The Cortex REPL hosts the long-lived ingest goroutine
+that drains journals into storage on a 30s ticker (daemon-retirement
+May 2026 — see [`daemon-retirement-plan.md`](./daemon-retirement-plan.md)).
+When no REPL session is running, journals stay on disk until a one-shot
+drain runs.
 
 **Solution**:
 ```bash
-# Start daemon
-./cortex daemon
+# Drain once without opening a REPL session
+./cortex journal ingest
 
-# Or process queue manually once
-./cortex process
+# Or open the REPL so the idle hook drains continuously
+./cortex repl
 ```
 
-### Daemon crashes
+### REPL crashes
 
-**Problem**: Daemon exits unexpectedly
+**Problem**: REPL exits unexpectedly mid-session
 
 **Debug**:
 ```bash
-# Run with verbose logging
-./cortex daemon 2>&1 | tee .cortex/logs/daemon.log
+# Re-run with verbose
+./cortex repl --verbose 2>&1 | tee .cortex/logs/repl.log
 
 # Check for:
 # - Database errors
@@ -175,9 +173,9 @@ ps aux | grep "cortex daemon"
 ```
 
 **Solutions**:
-- **Database locked**: Stop duplicate daemons
+- **Database locked**: Stop duplicate Cortex processes (`killall cortex`)
 - **Ollama down**: Start Ollama
-- **Out of memory**: Reduce parallel workers (edit processor.go)
+- **Out of memory**: Drop the model size or reduce parallel workers
 
 ### No insights generated
 
@@ -190,8 +188,7 @@ ps aux | grep "cortex daemon"
 
 # Should show total_insights > 0
 
-# Check if Ollama is analyzing
-# Watch daemon output for "Analyzed event..." messages
+# Watch the REPL for "[dream] explored N items, M insights" lines
 ```
 
 **Solutions**:
@@ -288,7 +285,7 @@ echo "How should I implement auth?" | ./cortex inject-context
 
 ### High CPU usage
 
-**Problem**: cortex daemon using >50% CPU
+**Problem**: cortex REPL using >50% CPU during idle ticks
 
 **Causes**:
 - Analyzing many events simultaneously
@@ -344,8 +341,8 @@ sqlite3 .cortex/db/events.db "VACUUM;"
 # Stop all cortex processes
 killall cortex
 
-# Restart daemon
-./cortex daemon
+# Re-open the REPL so the ingest goroutine resumes
+./cortex repl
 ```
 
 ### Corrupted database
@@ -414,8 +411,8 @@ cp .claude/settings.local.json .claude/settings.local.json.backup
 ### Enable Debug Logging
 
 ```bash
-# Run daemon with logging
-./cortex daemon 2>&1 | tee .cortex/logs/debug.log
+# Run the REPL with verbose tracing
+./cortex repl --verbose 2>&1 | tee .cortex/logs/debug.log
 
 # Check logs
 tail -f .cortex/logs/debug.log

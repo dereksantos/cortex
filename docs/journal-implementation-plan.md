@@ -2,6 +2,11 @@
 
 **Status**: pre-committed for loop execution. See [`journal.md`](./journal.md) for the architecture and the ten principles.
 
+> **Historical note:** Daemon mentions below (W2, T1, T2, T4 etc.)
+> predate the May 2026 daemon retirement (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)). The REPL
+> idle hook now owns the ingest path the daemon used to.
+
 This document is the stable, executable counterpart to the architecture. It contains:
 
 1. The I/O/C/M/C prompt for the implementation agent.

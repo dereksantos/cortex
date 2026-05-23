@@ -112,6 +112,18 @@ type CortexHarness struct {
 	// history from earlier accepted turns so the model has working
 	// memory beyond what cortex_search surfaces.
 	priorMessages []llm.ChatMessage
+
+	// accumulatorSnapshot, when non-nil, is forwarded to the
+	// constructed harness.Loop's AccumulatorSnapshot field. Wired by
+	// decide.coding_turn (when the dispatcher folds tool outputs
+	// through attend.accumulate) so the inner agent loop's per-turn
+	// input is bounded by a snapshot rather than the linear sum of
+	// tool outputs. See harness.Loop.AccumulatorSnapshot doc.
+	accumulatorSnapshot func(context.Context) string
+
+	// keepRecentTurns is forwarded to Loop.KeepRecentTurns. 0 lets
+	// the loop apply its own default (1).
+	keepRecentTurns int
 }
 
 // SetDispatcher overrides the per-tool dispatcher for subsequent
@@ -214,6 +226,20 @@ func (h *CortexHarness) SetSharedCortex(cx *intcognition.Cortex) { h.sharedCorte
 // working memory of prior accepted turns (user prompt + assistant
 // final text only — no tool-call traces).
 func (h *CortexHarness) SetPriorMessages(m []llm.ChatMessage) { h.priorMessages = m }
+
+// SetAccumulatorSnapshot wires a working-memory provider into the
+// inner agent loop. Subsequent RunSession* calls forward the
+// callback to Loop.AccumulatorSnapshot; the loop invokes it before
+// each provider call after turn 0 and rewrites msgs so per-turn
+// input plateaus at (system + user + snapshot + last K turns)
+// instead of growing with tool-call count.
+//
+// keepRecentTurns < 1 lets the loop apply its default (1). Pass nil
+// to clear the wiring (reverts to history-grows-linearly behavior).
+func (h *CortexHarness) SetAccumulatorSnapshot(fn func(context.Context) string, keepRecentTurns int) {
+	h.accumulatorSnapshot = fn
+	h.keepRecentTurns = keepRecentTurns
+}
 
 // defaultSystemPrompt is the fallback agent contract used only when a
 // caller doesn't override via SetSystemPrompt (the REPL always
@@ -358,6 +384,8 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 		Dispatcher:          h.dispatcher,
 		PriorMessages:       h.priorMessages,
 		ContextWindowTokens: ctxWindow,
+		AccumulatorSnapshot: h.accumulatorSnapshot,
+		KeepRecentTurns:     h.keepRecentTurns,
 	}
 
 	start := time.Now()

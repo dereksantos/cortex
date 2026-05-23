@@ -1,5 +1,9 @@
 # Journal — Implementation Design Log
 
+> **Historical note:** Daemon mentions below predate the May 2026
+> daemon retirement (see [daemon-retirement-plan.md](./daemon-retirement-plan.md)).
+> The REPL idle hook now owns what the daemon used to.
+
 Decisions and discoveries made during the 33-slice implementation on
 `feat/journal`. Read [`journal.md`](./journal.md) first for the
 architecture and [`journal-implementation-plan.md`](./journal-implementation-plan.md)

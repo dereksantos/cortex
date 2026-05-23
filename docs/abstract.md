@@ -2,6 +2,13 @@
 
 **Draft v0.2** — *Results from initial evaluation run (Dec 2024)*
 
+> **Historical note:** This abstract describes the pre-retirement
+> architecture in which Cortex shipped a long-lived `cortex daemon`.
+> The daemon was retired in May 2026 (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)); background
+> cognition now runs inside the REPL's idle hook. Daemon mentions below
+> refer to the architecture at the time of evaluation.
+
 ## Abstract
 
 We present Cortex, a reference implementation of context evolution [0] for AI coding assistants that reduces token costs over time through a shared context cognition pipeline. Cortex implements the mechanical-agentic separation as a single-binary CLI daemon with five cognitive modes: Reflex (<20ms mechanical retrieval), Reflect (LLM reranking), Resolve (injection decisions), Think (active-period learning), and Dream (idle-period exploration). By shifting compute to cheap background processing with local models and injecting pre-computed context at query time, Cortex reduces the tokens frontier models need to re-discover decisions, re-read files, and re-establish context across sessions. We contribute a comprehensive evaluation framework including the Agentic Benefit Ratio (ABR) metric, session accumulation tests, and conflict detection scenarios. Initial evaluations show 87% pass rate across cognitive mode tests, sub-millisecond Reflex latency in controlled settings, and average ABR of 0.77. Session evaluations demonstrate Fast mode converging to Full mode quality by the second query. Cortex is open source and integrates with Claude Code via lifecycle hooks.

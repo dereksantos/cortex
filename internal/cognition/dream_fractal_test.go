@@ -109,7 +109,7 @@ func TestDream_NoveltyDedupesIdenticalRegions(t *testing.T) {
 			"file_size":     int64(11),
 		},
 	}
-	gotInsight, skipped := d.processItem(t.Context(), item, nil, 0)
+	gotInsight, skipped := d.processItem(t.Context(), item, 0)
 	if gotInsight {
 		t.Errorf("with nil LLM no insight is possible")
 	}
@@ -118,14 +118,14 @@ func TestDream_NoveltyDedupesIdenticalRegions(t *testing.T) {
 	}
 
 	// Second call with identical content must be skipped.
-	_, skipped2 := d.processItem(t.Context(), item, nil, 0)
+	_, skipped2 := d.processItem(t.Context(), item, 0)
 	if !skipped2 {
 		t.Errorf("identical content must be deduped on second call")
 	}
 
 	// Mutating the content should defeat the dedupe.
 	item.Content = "package foo\n// edited\n"
-	_, skipped3 := d.processItem(t.Context(), item, nil, 0)
+	_, skipped3 := d.processItem(t.Context(), item, 0)
 	if skipped3 {
 		t.Errorf("changed content must not be deduped")
 	}

@@ -2,6 +2,12 @@
 
 A human-readable log of eval runs — what we ran, why, what we noticed. The structured record lives in `.cortex/journal/eval/` (`eval.cell_result` JSONL) and is the canonical source for analysis. This file is the lab notebook around those numbers.
 
+> **Historical note:** The Cortex daemon was retired in May 2026 (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)); entries
+> below mentioning daemon-scheduler integration / daemon timers
+> describe the pre-retirement architecture. Docker-daemon mentions
+> remain accurate (those refer to the SWE-bench scoring infra).
+
 > **Rolloff.** This file currently holds ~2000 lines of entries (~160K).
 > When it crosses ~3000 lines, segment by quarter into
 > `docs/archive/eval-journal/<YYYY-Q>.md` and leave only the current

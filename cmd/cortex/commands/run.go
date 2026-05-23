@@ -684,19 +684,6 @@ func runDreamDAGSilent(ctx context.Context) (*dag.Trace, error) {
 		dag.DefaultDreamBudget())
 }
 
-// RunThinkDAGSilent is the exported daemon-facing wrapper for
-// runThinkDAGSilent. Same shape; exported so daemon.go can call it
-// without an underscore-prefixed name.
-func RunThinkDAGSilent(ctx context.Context) (*dag.Trace, error) {
-	return runThinkDAGSilent(ctx)
-}
-
-// RunDreamDAGSilent is the exported daemon-facing wrapper for
-// runDreamDAGSilent.
-func RunDreamDAGSilent(ctx context.Context) (*dag.Trace, error) {
-	return runDreamDAGSilent(ctx)
-}
-
 // emitBackgroundSummary prints a small summary for the think/dream
 // DAG types. Human format mirrors capture/turn; JSON envelope is
 // compact since callers are daemon scheduler hooks not humans.

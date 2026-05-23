@@ -40,9 +40,6 @@ type Think struct {
 	cacheHits   int
 	cacheMisses int
 
-	// State writer for daemon status updates
-	stateWriter *StateWriter
-
 	// Journal output (slice T1). When set, Think emits
 	// think.session_context entries to <journalDir>/think/ at the end
 	// of each MaybeThink cycle.
@@ -101,13 +98,6 @@ func (t *Think) SetStorage(store *storage.Storage) {
 	t.storage = store
 }
 
-// SetStateWriter sets the state writer for daemon status updates.
-func (t *Think) SetStateWriter(sw *StateWriter) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.stateWriter = sw
-}
-
 // MaybeThink attempts background processing if spare capacity exists.
 func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) {
 	// Check preconditions
@@ -121,13 +111,7 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 		return &cognition.ThinkResult{Status: cognition.ThinkSkippedIdle}, nil
 	}
 	t.running = true
-	stateWriter := t.stateWriter
 	t.mu.Unlock()
-
-	// Write state on start with natural language
-	if stateWriter != nil {
-		stateWriter.WriteMode("think", "Thinking about session patterns...")
-	}
 
 	start := time.Now()
 	minDisplay := t.config.MinDisplayDuration
@@ -142,44 +126,27 @@ func (t *Think) MaybeThink(ctx context.Context) (*cognition.ThinkResult, error) 
 		t.mu.Lock()
 		t.running = false
 		t.mu.Unlock()
-
-		// Write idle state on completion
-		if stateWriter != nil {
-			stateWriter.WriteMode("idle", "")
-		}
 	}()
 	budget := t.activity.ThinkBudget(t.config.MinBudget, t.config.MaxBudget)
 	log.Printf("Think: starting (budget: %d)", budget)
 	ops := 0
 
 	// Operation 1: Update topic weights from recent queries
-	if stateWriter != nil {
-		stateWriter.WriteMode("think", "Learning from recent queries...")
-	}
 	t.updateTopicWeights()
 	ops++
 
 	// Operation 2: Cache Reflect results for recent queries
 	if ops < budget && len(t.sessionCtx.RecentQueries) > 0 {
-		if stateWriter != nil {
-			stateWriter.WriteMode("think", "Caching results for faster lookups...")
-		}
 		ops += t.cacheReflectResults(ctx, budget-ops)
 	}
 
 	// Operation 3: Pre-resolve contradictions
 	if ops < budget {
-		if stateWriter != nil {
-			stateWriter.WriteMode("think", "Sorting out contradictions...")
-		}
 		ops += t.resolveContradictions()
 	}
 
 	// Operation 4: Extract nuances from high-importance patterns
 	if ops < budget {
-		if stateWriter != nil {
-			stateWriter.WriteMode("think", "Extracting implementation nuances...")
-		}
 		ops += t.extractRecentNuances(ctx, budget-ops)
 	}
 

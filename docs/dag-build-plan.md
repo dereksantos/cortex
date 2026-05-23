@@ -289,7 +289,7 @@ via `cortex run --type=<x>`.
 
 | Type | Seed | Trigger surface |
 |---|---|---|
-| `think` | `{think.session_check}` | Scheduled (daemon) or `cortex run --type=think` |
+| `think` | `{think.session_check}` | REPL idle hook (was: daemon, retired May 2026 — see [daemon-retirement-plan.md](./daemon-retirement-plan.md)) or `cortex run --type=think` |
 | `dream` | `{maintain.idle_probe}` | Idle-time scheduled or `cortex run --type=dream` |
 | `capture` | `{sense.hook_event}` | Hook handoff → `cortex run --type=capture --event=...` |
 | `eval` | `{sense.cli_invocation}` | `cortex run --type=eval --scenario=<path>` |

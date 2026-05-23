@@ -18,7 +18,6 @@ import (
 	"text/template"
 	"time"
 
-	intcognition "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
@@ -705,31 +704,6 @@ func displayStatus(ctx *Context) {
 		return
 	}
 
-	// Check for daemon state file first (real-time cognitive mode status)
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	daemonState, _ := intcognition.ReadDaemonState(statePath)
-
-	// If we have fresh daemon state, use it
-	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
-		spinner := getModeSpinner(daemonState.Mode)
-		desc := daemonState.Description
-		if desc == "" {
-			desc = getDefaultModeDescription(daemonState.Mode)
-		}
-		// Natural language format: "{spinner} {description}" - no "Mode:" prefix
-		fmt.Printf("%s %s", spinner, desc)
-		return
-	}
-
-	// Check if daemon is offline (state file exists but is stale)
-	daemonOffline := false
-	if _, err := os.Stat(statePath); err == nil {
-		// State file exists - if daemonState is nil, it means it's stale (daemon stopped)
-		if daemonState == nil {
-			daemonOffline = true
-		}
-	}
-
 	store := ctx.Storage
 	if store == nil {
 		fmt.Print("o No data")
@@ -751,12 +725,6 @@ func displayStatus(ctx *Context) {
 	totalInsights := 0
 	if val, ok := stats["total_insights"].(int); ok {
 		totalInsights = val
-	}
-
-	// If daemon state has stats, prefer those (more recent)
-	if daemonState != nil && (daemonState.Stats.Events > 0 || daemonState.Stats.Insights > 0) {
-		totalEvents = daemonState.Stats.Events
-		totalInsights = daemonState.Stats.Insights
 	}
 
 	// Determine current mode based on activity
@@ -785,15 +753,7 @@ func displayStatus(ctx *Context) {
 	}
 
 	// Format output: natural language sentences (no colons)
-	_ = mode // suppress unused warning - mode determines spinner
-	if daemonOffline {
-		// Daemon is not running - show stopped status
-		if totalEvents > 0 || totalInsights > 0 {
-			fmt.Printf("|| Stopped: %d events, %d insights", totalEvents, totalInsights)
-		} else {
-			fmt.Print("|| Daemon not running")
-		}
-	} else if totalEvents > 0 || totalInsights > 0 {
+	if totalEvents > 0 || totalInsights > 0 {
 		fmt.Printf("%s Ready with %d events and %d insights", spinner, totalEvents, totalInsights)
 	} else if mode == "Cold start" {
 		fmt.Printf("%s Waiting for first activity...", spinner)
@@ -806,32 +766,8 @@ func displayStatusClaude(ctx *Context) {
 	// Drain stdin to avoid broken pipe errors
 	_, _ = io.ReadAll(os.Stdin)
 
-	cfg := ctx.Config
-	if cfg == nil {
+	if ctx.Config == nil {
 		fmt.Print("◌ Init")
-		return
-	}
-
-	// Check for daemon state file (real-time cognitive mode status)
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	daemonState, _ := intcognition.ReadDaemonState(statePath)
-
-	// If we have fresh daemon state with an active mode, show it
-	if daemonState != nil && daemonState.Mode != "" && daemonState.Mode != "idle" {
-		fmt.Print(getClaudeModeOutput(daemonState.Mode))
-		return
-	}
-
-	// Check if daemon is offline (state file exists but stale)
-	daemonOffline := false
-	if _, err := os.Stat(statePath); err == nil {
-		if daemonState == nil {
-			daemonOffline = true
-		}
-	}
-
-	if daemonOffline {
-		fmt.Print("⏸ Stopped")
 		return
 	}
 
@@ -856,11 +792,6 @@ func displayStatusClaude(ctx *Context) {
 	totalInsights := 0
 	if val, ok := stats["total_insights"].(int); ok {
 		totalInsights = val
-	}
-
-	if daemonState != nil && (daemonState.Stats.Events > 0 || daemonState.Stats.Insights > 0) {
-		totalEvents = daemonState.Stats.Events
-		totalInsights = daemonState.Stats.Insights
 	}
 
 	if totalEvents == 0 && totalInsights == 0 {
@@ -948,11 +879,6 @@ func collectStatusContext(ctx *Context) statusContext {
 	if cfg != nil {
 		sc.Initialized = true
 		sc.ProjectRoot = cfg.ProjectRoot
-		statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-		if state, _ := intcognition.ReadDaemonState(statePath); state != nil {
-			sc.CurrentMode = state.Mode
-			sc.ModeDescription = state.Description
-		}
 		dbPath := filepath.Join(cfg.ContextDir, "db", "events.db")
 		if info, err := os.Stat(dbPath); err == nil {
 			kb := float64(info.Size()) / 1024
@@ -1149,71 +1075,6 @@ func renderMechanicalSummary(d statusContext) {
 		} else {
 			fmt.Printf("Mode:     %s\n", d.CurrentMode)
 		}
-	}
-}
-
-// getClaudeModeOutput returns the compact symbol + word for a cognitive mode.
-func getClaudeModeOutput(mode string) string {
-	switch mode {
-	case "think":
-		return "◐ Think"
-	case "dream":
-		return "☁ Dream"
-	case "reflex":
-		return "⚡ Reflex"
-	case "reflect":
-		return "◑ Reflect"
-	case "resolve":
-		return "▸ Resolve"
-	case "insight":
-		return "✦ Insight"
-	case "digest":
-		return "~ Digest"
-	default:
-		return "✓ Ready"
-	}
-}
-
-// getModeSpinner returns the appropriate spinner for a cognitive mode.
-func getModeSpinner(mode string) string {
-	switch mode {
-	case "think":
-		return "o-" // Half-filled circle represents processing/learning
-	case "dream":
-		return "~" // Cloud represents wandering, exploratory thinking
-	case "reflex":
-		return "*" // Lightning represents fast, mechanical search
-	case "reflect":
-		return "-o" // Opposite half-filled circle represents evaluation
-	case "resolve":
-		return ">" // Play/forward triangle represents deciding/choosing
-	case "insight":
-		return "+" // Star represents discovery
-	case "digest":
-		return "~" // Tilde represents consolidation/compression
-	default:
-		return "*"
-	}
-}
-
-// getDefaultModeDescription returns a natural language description for a mode.
-// These are complete sentences without colons.
-func getDefaultModeDescription(mode string) string {
-	switch mode {
-	case "think":
-		return "Thinking about session patterns..."
-	case "dream":
-		return "Dreaming about the codebase..."
-	case "reflex":
-		return "Searching for relevant context..."
-	case "reflect":
-		return "Reflecting on search results..."
-	case "resolve":
-		return "Deciding what to inject..."
-	case "digest":
-		return "Consolidating insights..."
-	default:
-		return ""
 	}
 }
 

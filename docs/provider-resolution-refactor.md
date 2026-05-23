@@ -1,5 +1,11 @@
 # Provider Resolution Refactor
 
+> **Historical note:** `daemon` mentions in the caller inventory below
+> predate the May 2026 daemon retirement (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)). The
+> `cmd/cortex/commands/daemon.go` row no longer applies — the file is
+> deleted and its background work moved to the REPL idle hook.
+
 ## Context
 
 Cortex currently has **three** opinions about how to construct an LLM provider in the same binary:

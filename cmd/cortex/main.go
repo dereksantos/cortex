@@ -100,15 +100,6 @@ func main() {
 			}
 			runCommand(command, cmd, c)
 		}
-	case "daemon":
-		if cmd := commands.Get("daemon"); cmd != nil {
-			cfg, err := loadConfig()
-			if err != nil {
-				// Daemon can run without a per-project config
-				cfg = config.Default()
-			}
-			runCommand(command, cmd, &commands.Context{Config: cfg, Args: os.Args[2:]})
-		}
 	case "test", "status", "forget", "dream-debug":
 		if cmd := commands.Get(command); cmd != nil {
 			cfg, err := loadConfig()
@@ -187,10 +178,6 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Cortex not initialized. Run 'cortex init' first.\n")
 				os.Exit(1)
 			}
-			// Auto-start daemon on search (covers CLI-only multi-agent usage).
-			if command == "search" {
-				maybeStartDaemon(cfg)
-			}
 			store, err := storage.New(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Failed to open storage: %v\n", err)
@@ -257,12 +244,9 @@ func loadConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-// maybeStartDaemon auto-starts the global daemon if it's not running.
-// Fire-and-forget: never blocks the caller, never fails the caller.
-// Writes to stderr only so it doesn't pollute hook stdout.
 // hasWorkdirFlag returns true if args carries --workdir or --workdir=...
-// — used to suppress global side effects (auto-daemon, ~/.cortex
-// touches) on isolated benchmark invocations.
+// — used to suppress global side effects (~/.cortex touches) on
+// isolated benchmark invocations.
 func hasWorkdirFlag(args []string) bool {
 	for _, a := range args {
 		if a == "--workdir" || strings.HasPrefix(a, "--workdir=") {
@@ -306,19 +290,6 @@ func runCommand(command string, cmd commands.Command, ctx *commands.Context) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-func maybeStartDaemon(_ *config.Config) {
-	globalDir := registry.GlobalDir()
-	if commands.IsDaemonRunning(globalDir) {
-		return
-	}
-	pid, err := commands.StartDaemonBackground(globalDir)
-	if err != nil {
-		// Already running or can't start — either way, not our problem
-		return
-	}
-	fmt.Fprintf(os.Stderr, "cortex: auto-started daemon (pid %d)\n", pid)
 }
 
 func printUsage() {

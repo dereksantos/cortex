@@ -63,7 +63,9 @@ item. Implementation lands in Phase 4 below.
 - Capture → store → retrieve → inject pipeline (used daily in
   development of Cortex itself)
 - DAG executor + mechanic eval substrate (seed+grow+decay model)
-- Multi-project support via global daemon and shared `~/.cortex/`
+- Multi-project support via shared `~/.cortex/` (the global daemon
+  was retired May 2026; see `docs/daemon-retirement-plan.md` — the
+  REPL idle hook hosts background cognition now, per-project)
 - Baseline eval suite wrapped: SWE-bench, LongMemEval, NIAH, MTEB
 - v2 coding-scenario suite (40 scenarios) + library-service
   multi-session corpus
@@ -270,8 +272,9 @@ rather than gating the next phase:
 - [x] **Library-service multi-session eval** — scaffold, session
       runner, scorer, end-to-end probe (Plans 01–05)
 - [x] **DAG protocol substrate** — mechanic runner + dagtrace
-- [x] **Multi-project support** via single global daemon and shared
-      `~/.cortex/`
+- [x] **Multi-project support** via shared `~/.cortex/` (originally
+      via a single global daemon; daemon retired May 2026, REPL-as-host
+      now drives background cognition per-project)
 - [x] **Composable status line** with compact format
 - [x] **Per-mode cognitive tuning** via config
 - [x] **Dream improvements**: fractal region sampling, novelty cache,

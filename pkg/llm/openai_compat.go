@@ -23,7 +23,25 @@ import (
 	"time"
 )
 
-const compatTimeoutSec = 120
+// defaultCompatTimeoutSec caps the HTTP request to an OpenAI-compat
+// endpoint. Local inference servers behind this client (Lemonade,
+// llama.cpp, vLLM) can take a long time on large-context calls —
+// 30B-class models in particular routinely exceed a one-minute ceiling
+// for a single forward pass over ~10K input tokens. Override via the
+// CORTEX_COMPAT_TIMEOUT_SEC env var for slower hardware.
+const defaultCompatTimeoutSec = 300
+
+// compatTimeout returns the per-request HTTP timeout, honoring
+// CORTEX_COMPAT_TIMEOUT_SEC when set to a positive integer.
+func compatTimeout() time.Duration {
+	if v := os.Getenv("CORTEX_COMPAT_TIMEOUT_SEC"); v != "" {
+		var secs int
+		if _, err := fmt.Sscanf(v, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return defaultCompatTimeoutSec * time.Second
+}
 
 // EndpointConfig identifies one OpenAI-compatible endpoint. Name is a
 // short stable identifier ("chatterbox", "lm-studio-local") used in
@@ -83,7 +101,7 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 		apiKey:    ep.APIKey,
 		maxTokens: defaultMaxTokens,
 		httpClient: &http.Client{
-			Timeout: compatTimeoutSec * time.Second,
+			Timeout: compatTimeout(),
 		},
 	}
 }

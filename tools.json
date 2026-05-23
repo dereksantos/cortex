@@ -158,19 +158,6 @@
       ]
     },
     {
-      "name": "daemon",
-      "description": "Run background context processor",
-      "version": "0.1.0",
-      "flags": [
-        {
-          "name": "port",
-          "type": "int",
-          "default": "9090",
-          "description": "HTTP port for the dashboard"
-        }
-      ]
-    },
-    {
       "name": "dream-debug",
       "description": "Run Dream cycles synchronously and dump regions + fractal metadata",
       "version": "0.1.0"

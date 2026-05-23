@@ -53,10 +53,12 @@ import (
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/processor"
 	"github.com/dereksantos/cortex/internal/repltui"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cliout"
+	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
 	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -373,6 +375,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	mainLoop := func() error {
 		printREPLBanner(state)
 		maybeStartStudy(state)
+		maybeStartJournalIngest(state)
 		revalidateAndWarn(state.workdir, state.ui)
 		for {
 			line, err := state.ui.ReadLine("~ ")
@@ -492,6 +495,12 @@ type replState struct {
 	// override, or detection error). Always called from close(); safe
 	// to call multiple times because the underlying CancelFunc is.
 	studyCancel context.CancelFunc
+
+	// ingestCancel cancels the journal-ingest goroutine that drains
+	// .cortex/journal/<class>/ segments into Storage on a ticker. The
+	// daemon used to own this; now the REPL does (daemon retirement
+	// Phase 2.1). Nil when ingest didn't start (no store, etc.).
+	ingestCancel context.CancelFunc
 
 	// Headless-mode config (zero values preserve interactive behavior):
 	//   customVerifierCmd: shell command to run instead of `go build`.
@@ -1066,6 +1075,75 @@ func maybeStartStudy(state *replState) {
 	go study.RunInBackground(ctx, cc)
 }
 
+// journalIngestInterval is the ticker cadence for the REPL's
+// journal-ingest goroutine. The retired daemon used a 5s tick at the
+// processor level; the REPL pays for fewer wake-ups because capture
+// latency is already absorbed at write time and search can fall back
+// to the journal directly if the index lags. var (not const) so the
+// 2.5 smoke test can shorten it.
+var journalIngestInterval = 30 * time.Second
+
+// maybeStartJournalIngest spawns a goroutine that drains the project's
+// capture/observation/dream/etc. journals into Storage and fires the
+// background cognitive modes (Think + Dream) on a ticker. Replaces
+// the auto-started daemon's processor + cognitive loops
+// (daemon-retirement Phase 2.1, 2.2, 2.3).
+//
+// MaybeThink/MaybeDream each internally enforce their budget contracts
+// (Think's budget decays with activity; Dream's budget grows with
+// idle time and is capped at MaxBudget). Firing them every tick is
+// the same shape the daemon's 10s cognitive ticker used — the inner
+// budget gates whether anything actually happens.
+//
+// No-ops when state.store is nil — sessions that opted out of the
+// shared cognition surface have nothing to ingest into.
+func maybeStartJournalIngest(state *replState) {
+	if state == nil || state.store == nil {
+		return
+	}
+	cortexDir := filepath.Join(state.workdir, ".cortex")
+	cfg := &config.Config{ContextDir: cortexDir, ProjectRoot: state.workdir}
+	proc := processor.New(cfg, state.store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	state.ingestCancel = cancel
+
+	go func() {
+		ticker := time.NewTicker(journalIngestInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := proc.RunBatch(); err != nil && state.verbose {
+					state.ui.Warn(fmt.Sprintf("(journal ingest: %v)", err))
+				}
+				if state.cortex != nil && state.cortex.IsModeEnabled("think") {
+					res, err := state.cortex.MaybeThink(ctx)
+					switch {
+					case err != nil && state.verbose:
+						state.ui.Warn(fmt.Sprintf("(think: %v)", err))
+					case res != nil && res.Status == cognition.ThinkRan:
+						state.ui.Info(fmt.Sprintf("[think] processed %d operations (%dms)",
+							res.Operations, res.Duration.Milliseconds()))
+					}
+				}
+				if state.cortex != nil && state.cortex.IsModeEnabled("dream") {
+					res, err := state.cortex.MaybeDream(ctx)
+					switch {
+					case err != nil && state.verbose:
+						state.ui.Warn(fmt.Sprintf("(dream: %v)", err))
+					case res != nil && res.Status == cognition.DreamRan:
+						state.ui.Info(fmt.Sprintf("[dream] explored %d items, %d insights (%dms)",
+							res.Operations, res.Insights, res.Duration.Milliseconds()))
+					}
+				}
+			}
+		}
+	}()
+}
+
 // close flushes and closes the session JSONL plus any shared cognition
 // state. The Storage close flushes its append-mode JSONL handles so
 // the events.jsonl on disk matches the in-memory indexes at the
@@ -1074,6 +1152,10 @@ func (s *replState) close() {
 	if s.studyCancel != nil {
 		s.studyCancel()
 		s.studyCancel = nil
+	}
+	if s.ingestCancel != nil {
+		s.ingestCancel()
+		s.ingestCancel = nil
 	}
 	if s.jsonl != nil {
 		_ = s.jsonl.Close()
@@ -1226,6 +1308,7 @@ When to use tools:
 
 Discipline:
   - Make ONE focused change per user message. Edit one file unless the request explicitly spans files.
+  - Read narrowly. Before reading a file you don't already know is small, check its size with run_shell ("wc -l <file>"). If it's large, use run_shell with grep to locate the relevant span, then read only that range. Whole-file reads of large files burn budget and slow every downstream step.
   - Don't narrate what you're about to do; just do it.
   - When making changes, run the project's build/test command (via run_shell) before declaring done. Read errors, fix, retry.
   - When the step is done, respond with a short summary and NO further tool calls.

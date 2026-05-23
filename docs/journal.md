@@ -2,6 +2,15 @@
 
 **Draft v0.2** — *Cortex's commitment to event-sourcing*
 
+> **Historical note:** Daemon mentions below ("indexer runs in-daemon",
+> "capture is daemon-independent", `.cortex/daemon_state.json`, etc.)
+> predate the May 2026 daemon retirement (see
+> [daemon-retirement-plan.md](./daemon-retirement-plan.md)). The
+> indexer now runs in the REPL idle hook and as `cortex journal
+> ingest` one-shot; capture is "host-process-independent" rather than
+> "daemon-independent", and the design properties (single-writer
+> per class, no broker, segment-per-writer-class) are unchanged.
+
 > **Implementation status (2026-05-12)**: v0.1 of the journal architecture is implemented on branch `feat/journal`. All 33 slices in [`journal-implementation-plan.md`](./journal-implementation-plan.md) landed across 12 buckets. See [`journal-design-log.md`](./journal-design-log.md) for the deltas discovered during implementation — most notably, Cortex's "read side" is **not SQLite** but **JSONL-with-in-memory-indexes** in `internal/storage`. The CQRS commitment is unchanged; the engine on the read side just happens to be a different file format.
 
 ## Thesis

@@ -64,15 +64,9 @@ func BuildDashboardData(cfg *config.Config, store *storage.Storage) *DashboardDa
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
-	// Daemon state
-	statePath := intcognition.GetDaemonStatePath(cfg.ContextDir)
-	if state, err := intcognition.ReadDaemonState(statePath); err == nil && state != nil {
-		d.DaemonRunning = true
-		d.Mode = state.Mode
-		d.ModeDesc = state.Description
-		d.Events = state.Stats.Events
-		d.Insights = state.Stats.Insights
-	}
+	// Daemon retired (May 2026 — see docs/daemon-retirement-plan.md).
+	// DaemonRunning stays false; mode/description/stats fall back to
+	// storage below.
 
 	// Background metrics
 	if metrics, err := intcognition.ReadBackgroundMetrics(cfg.ContextDir); err == nil && metrics != nil {
