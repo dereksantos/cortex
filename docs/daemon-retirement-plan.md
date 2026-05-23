@@ -154,7 +154,7 @@ Now that nothing depends on it.
   - Acceptance: `go build ./...` passes; `go test ./internal/cognition/...`
     passes; `grep -rn 'StateWriter' internal/cognition/` returns nothing.
 
-- [ ] **3.4** Delete remaining daemon exports.
+- [x] **3.4** Delete remaining daemon exports.
   - Targets: `IsDaemonRunning`, `StartDaemonBackground`, `StopDaemon`,
     `GetDaemonPIDPath`, `GetDaemonLockPath` from the commands package
     (the file is gone after 3.1, but verify no stragglers).
