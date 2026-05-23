@@ -36,7 +36,7 @@ auto-execute. Human ticks them off after reviewing the prior phase.
 
 No behavior change. Removing files nothing reads.
 
-- [ ] **0.1** Delete the stale `daemon_state.json` files.
+- [x] **0.1** Delete the stale `daemon_state.json` files.
   - Files: `/daemon_state.json` (repo root), `.cortex/daemon_state.json`.
   - Acceptance: both gone; `go build ./...` still passes.
 
