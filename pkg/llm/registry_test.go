@@ -148,6 +148,163 @@ func TestCompositeRegistry_RefreshForcesReprobe(t *testing.T) {
 	}
 }
 
+// pickRegistry is a small builder for PickForCapabilities tests: one
+// fakeProbe holding a known model set, no TTL pressure, deterministic
+// dedupe order. Returns a registry whose cache is the given models.
+func pickRegistry(t *testing.T, models []ModelInfo) ModelRegistry {
+	t.Helper()
+	probe := &fakeProbe{name: "test", models: models}
+	reg := NewCompositeRegistry(RegistryConfig{
+		Probes: []Probe{probe},
+		TTL:    time.Hour,
+	})
+	// Warm the cache so PickForCapabilities operates on the canned set.
+	_ = reg.List(context.Background())
+	return reg
+}
+
+func TestPickForCapabilities_EmptyRequiresReturnsFalse(t *testing.T) {
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "any-model", Capabilities: []string{CapToolCalling}, IsLocal: true},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), nil)
+	if ok {
+		t.Errorf("empty requires should return false, got %+v", got)
+	}
+}
+
+func TestPickForCapabilities_NoMatchReturnsFalse(t *testing.T) {
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "embedder", Capabilities: []string{CapEmbedding}, IsLocal: true},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapCoding, CapToolCalling})
+	if ok {
+		t.Errorf("no matching cap should return false, got %+v", got)
+	}
+}
+
+func TestPickForCapabilities_ChainFallsThroughToBase(t *testing.T) {
+	// Specialist not present, base is. Picker should fall through the
+	// chain and return the base candidate.
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "qwen-coder-30b", Capabilities: []string{CapCoding, CapToolCalling}, IsLocal: true, SizeBillion: 30},
+	})
+	got, ok := reg.PickForCapabilities(
+		context.Background(),
+		[]string{CapToolCallingSpecialist, CapToolCalling},
+	)
+	if !ok {
+		t.Fatal("expected fallback to CapToolCalling, got no match")
+	}
+	if got.ID != "qwen-coder-30b" {
+		t.Errorf("expected qwen-coder-30b on fallback, got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_SpecialistPrefersSmaller(t *testing.T) {
+	// Two specialists: 1.5B and 7B. Picker should prefer the smaller
+	// (specialists are valued for speed + reliability per task, not
+	// size).
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "xlam-7b", Capabilities: []string{CapToolCalling, CapToolCallingSpecialist}, IsLocal: true, SizeBillion: 7},
+		{ID: "xlam-1.5b", Capabilities: []string{CapToolCalling, CapToolCallingSpecialist}, IsLocal: true, SizeBillion: 1.5},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapToolCallingSpecialist})
+	if !ok {
+		t.Fatal("expected a specialist match")
+	}
+	if got.ID != "xlam-1.5b" {
+		t.Errorf("specialist should prefer smaller, got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_GeneralistPrefersLarger(t *testing.T) {
+	// Two non-specialist tool-callers. Picker should prefer the larger
+	// (more capable model when no specialty signal narrows the choice).
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "llama3-8b", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 8},
+		{ID: "llama3-70b", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 70},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapToolCalling})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if got.ID != "llama3-70b" {
+		t.Errorf("generalist should prefer larger, got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_LocalBeatsCloud(t *testing.T) {
+	// Local + small specialist vs cloud + large specialist. Local wins
+	// regardless of the smaller-preferring tiebreaker — locality is the
+	// outer sort key.
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "cloud-xlam-1.5b", Capabilities: []string{CapToolCalling, CapToolCallingSpecialist}, IsLocal: false, SizeBillion: 1.5},
+		{ID: "local-xlam-7b", Capabilities: []string{CapToolCalling, CapToolCallingSpecialist}, IsLocal: true, SizeBillion: 7},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapToolCallingSpecialist})
+	if !ok {
+		t.Fatal("expected a specialist match")
+	}
+	if got.ID != "local-xlam-7b" {
+		t.Errorf("local should beat cloud even when cloud is smaller, got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_ChainStopsAtFirstMatch(t *testing.T) {
+	// Both specialist and base candidates available. Chain visits
+	// specialist first; picker must return that and not continue to
+	// the base.
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "xlam-1.5b", Capabilities: []string{CapToolCalling, CapToolCallingSpecialist}, IsLocal: true, SizeBillion: 1.5},
+		{ID: "llama3-70b", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 70},
+	})
+	got, ok := reg.PickForCapabilities(
+		context.Background(),
+		[]string{CapToolCallingSpecialist, CapToolCalling},
+	)
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if got.ID != "xlam-1.5b" {
+		t.Errorf("chain should stop at first match (specialist), got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_DeterministicByIdOnTies(t *testing.T) {
+	// Same locality, same size — picker must fall through to a
+	// deterministic id sort so traces stay reproducible across runs.
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "model-b", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 7},
+		{ID: "model-a", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 7},
+		{ID: "model-c", Capabilities: []string{CapToolCalling}, IsLocal: true, SizeBillion: 7},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapToolCalling})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if got.ID != "model-a" {
+		t.Errorf("tie should sort by id ascending, got %s", got.ID)
+	}
+}
+
+func TestPickForCapabilities_FallsBackToContextWindowSize(t *testing.T) {
+	// When SizeBillion is missing, EffectiveContextWindow is the
+	// secondary size signal. Two unsized models, one with a larger
+	// context — the generalist preference picks the larger window.
+	reg := pickRegistry(t, []ModelInfo{
+		{ID: "unsized-small-ctx", Capabilities: []string{CapToolCalling}, IsLocal: true, EffectiveContextWindow: 8192},
+		{ID: "unsized-large-ctx", Capabilities: []string{CapToolCalling}, IsLocal: true, EffectiveContextWindow: 131072},
+	})
+	got, ok := reg.PickForCapabilities(context.Background(), []string{CapToolCalling})
+	if !ok {
+		t.Fatal("expected a match")
+	}
+	if got.ID != "unsized-large-ctx" {
+		t.Errorf("generalist should prefer larger ctx when sizes unknown, got %s", got.ID)
+	}
+}
+
 func TestTrimChatSuffix(t *testing.T) {
 	tests := map[string]string{
 		"http://localhost:11434/v1/chat/completions": "http://localhost:11434",
