@@ -215,6 +215,114 @@ func TestToolCall_PerCallProviderRouting(t *testing.T) {
 	}
 }
 
+// TestToolCall_BudgetProviderWinsOverCfg — when the executor's Router
+// has pre-resolved a provider into Budget.Provider, the handler must
+// use it instead of cfg.Provider. This is the slice-4 migration:
+// per-node routing lands here first because decide.tool_call is the
+// reliability win at the heart of docs/per-node-routing-plan.md.
+func TestToolCall_BudgetProviderWinsOverCfg(t *testing.T) {
+	cfgCalled, budgetCalled := false, false
+	cfgP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			cfgCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"a"}}`, nil
+		},
+	}
+	budgetP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			budgetCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"b"}}`, nil
+		},
+	}
+	h := NewToolCallHandler(ToolCallConfig{Provider: cfgP, Registry: registryWithAct(t)})
+
+	b := mustBudget()
+	b.Provider = budgetP
+	if _, err := h(context.Background(), map[string]any{"intent": "x"}, b); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !budgetCalled {
+		t.Errorf("Budget.Provider should be called (router-resolved path)")
+	}
+	if cfgCalled {
+		t.Errorf("cfg.Provider should NOT be called when Budget.Provider is set")
+	}
+}
+
+// TestToolCall_BudgetProviderTrumpsAttrsModel — when both Budget.Provider
+// and legacy attrs.model are present, Budget.Provider wins. The Router
+// already considered attrs.model when it populated Budget.Provider, so
+// the handler doesn't re-check it — preventing double-application of
+// the override or a stale legacy path racing the new one.
+func TestToolCall_BudgetProviderTrumpsAttrsModel(t *testing.T) {
+	factoryCalled, budgetCalled := false, false
+	factoryP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			factoryCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"a"}}`, nil
+		},
+	}
+	budgetP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			budgetCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"b"}}`, nil
+		},
+	}
+	factory := &fakeFactory{byID: map[string]llm.Provider{"xlam-1.5b": factoryP}}
+	h := NewToolCallHandler(ToolCallConfig{ProviderFactory: factory, Registry: registryWithAct(t)})
+
+	b := mustBudget()
+	b.Provider = budgetP
+	if _, err := h(context.Background(), map[string]any{"intent": "x", "model": "xlam-1.5b"}, b); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !budgetCalled {
+		t.Errorf("Budget.Provider should win over attrs.model+factory")
+	}
+	if factoryCalled {
+		t.Errorf("factory.Get(model) should NOT be re-invoked when Router pre-resolved")
+	}
+}
+
+// TestToolCall_LegacyFallbackWhenNoBudgetProvider — without a Router
+// wired (Budget.Provider nil), the handler uses the existing attrs.model
+// + factory chain. This pins backwards-compat: callers that haven't
+// adopted the new per-node routing keep the pre-slice-3 behavior.
+func TestToolCall_LegacyFallbackWhenNoBudgetProvider(t *testing.T) {
+	cfgCalled, factoryCalled := false, false
+	cfgP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			cfgCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"a"}}`, nil
+		},
+	}
+	factoryP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			factoryCalled = true
+			return `{"tool_name":"act.read_file","args":{"path":"b"}}`, nil
+		},
+	}
+	factory := &fakeFactory{byID: map[string]llm.Provider{"xlam-1.5b": factoryP}}
+	h := NewToolCallHandler(ToolCallConfig{Provider: cfgP, ProviderFactory: factory, Registry: registryWithAct(t)})
+
+	// No Budget.Provider, no attrs.model → cfg.Provider.
+	if _, err := h(context.Background(), map[string]any{"intent": "x"}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !cfgCalled || factoryCalled {
+		t.Errorf("expected cfg.Provider; got cfg=%v factory=%v", cfgCalled, factoryCalled)
+	}
+
+	// No Budget.Provider, attrs.model set → factory.Get(model).
+	cfgCalled, factoryCalled = false, false
+	if _, err := h(context.Background(), map[string]any{"intent": "x", "model": "xlam-1.5b"}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if cfgCalled || !factoryCalled {
+		t.Errorf("expected factory; got cfg=%v factory=%v", cfgCalled, factoryCalled)
+	}
+}
+
 // TestToolCall_ToolsSubsetScopesChoice — caller passes a `tools`
 // subset; only those qualified names appear in the prompt context.
 // (Indirect — we exercise via formatActToolsCatalog directly since

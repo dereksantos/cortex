@@ -64,6 +64,13 @@ type ToolCallConfig struct {
 }
 
 // ToolCallSpec returns the NodeSpec for decide.tool_call.
+//
+// Requires declares the capability preference chain the executor's
+// Router uses to pick the per-node provider: a tool-calling specialist
+// (xLAM / phi-3-mini-tools / hermes-tool / functionary) when one is
+// available, falling back to any tool-calling-capable model. Per
+// docs/per-node-routing-plan.md — this is the canonical specialist
+// use case and the reliability fix at the heart of the plan.
 func ToolCallSpec(cfg ToolCallConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncDecide,
@@ -80,6 +87,7 @@ func ToolCallSpec(cfg ToolCallConfig) dag.NodeSpec {
 		},
 		Cost:      toolCallCostHint,
 		Exposable: true,
+		Requires:  []string{llm.CapToolCallingSpecialist, llm.CapToolCalling},
 		Handler:   NewToolCallHandler(cfg),
 	}
 }
@@ -147,7 +155,7 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 			}, fmt.Errorf("decide.tool_call: 'intent' (string) is required")
 		}
 
-		provider, providerSrc := resolveToolCallProvider(cfg, in)
+		provider, providerSrc := resolveToolCallProvider(cfg, in, budget)
 		if provider == nil || !budget.CanAfford(toolCallCostHint) {
 			return dag.NodeResult{
 				Out: map[string]any{
@@ -232,9 +240,21 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 	}
 }
 
-// resolveToolCallProvider mirrors decide.next's resolveNextProvider —
-// attrs.model + factory takes precedence, else cfg.Provider.
-func resolveToolCallProvider(cfg ToolCallConfig, in map[string]any) (llm.Provider, string) {
+// resolveToolCallProvider picks the provider for this call, in order:
+//
+//  1. Budget.Provider — set by the Executor's Router when the new
+//     per-node routing is wired (docs/per-node-routing-plan.md slice 3).
+//     The Router already applied Attrs["model"] override + Requires
+//     chain, so the handler doesn't re-check those when Budget.Provider
+//     is present.
+//  2. Legacy attrs.model + factory — the pre-routing per-call override
+//     path. Preserved so handlers without a wired Router behave exactly
+//     as before.
+//  3. cfg.Provider — the handler's configured default.
+func resolveToolCallProvider(cfg ToolCallConfig, in map[string]any, budget dag.Budget) (llm.Provider, string) {
+	if budget.Provider != nil {
+		return budget.Provider, "budget:" + budget.Provider.Name()
+	}
 	if cfg.ProviderFactory != nil {
 		if m, _ := in["model"].(string); m != "" {
 			if p, err := cfg.ProviderFactory.Get(m); err == nil && p != nil {
