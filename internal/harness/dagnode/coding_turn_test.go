@@ -231,19 +231,25 @@ func TestNewActDispatcher_preservesHarnessAccountingForFilesWritten(t *testing.T
 	}
 }
 
-// TestNewActDispatcher_SalienceCompressesOversizedToolOutput pins the
-// Phase-2 dispatcher behavior from docs/salience-budgets.md: when
-// ToolOutputSalienceCap is set, tool outputs above the cap get
-// compressed (via attend.compress in the act registry) before being
-// returned to the agent loop. The act.* trace row carries the
-// SalienceContract; a synthetic attend.compress row is emitted with
-// parent_node_id = the act.* call.
-func TestNewActDispatcher_SalienceCompressesOversizedToolOutput(t *testing.T) {
+// TestNewActDispatcher_SalienceChunksOversizedReadOutput pins the
+// Phase-B behavior: when act.read_file output exceeds
+// ToolOutputSalienceCap, the dispatcher splits it deterministically by
+// line boundary, joins with "[chunk i/N, lines a-b]" headers, and
+// emits a synthetic attend.chunk trace entry — NOT attend.compress.
+// The calling model sees the raw bytes with location headers and can
+// re-fetch specific ranges if needed.
+func TestNewActDispatcher_SalienceChunksOversizedReadOutput(t *testing.T) {
 	actReg := dag.NewRegistry()
 	if _, err := RegisterDefaultActOpMetadata(actReg); err != nil {
 		t.Fatalf("register default metadata: %v", err)
 	}
-	bigOut := strings.Repeat("abcd", 500) // 2000 chars ~ 500 tokens
+	// 100 lines of 40-char content = ~1K tokens total. Cap=40 forces
+	// ~25 chunks; the dispatcher truncates beyond MaxEmittedChunks (8).
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = strings.Repeat("abcd", 10) + "\n"
+	}
+	bigOut := strings.Join(lines, "")
 	harnessReg, _ := newTestHarnessRegistry("read_file", bigOut, nil)
 
 	var captured []dag.TraceEntry
@@ -262,34 +268,44 @@ func TestNewActDispatcher_SalienceCompressesOversizedToolOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	if len(out) >= len(bigOut) {
-		t.Errorf("compressed output should be shorter than raw; got %d vs raw %d", len(out), len(bigOut))
+	if !strings.Contains(out, "[chunk 1/") {
+		t.Errorf("chunked output should carry location header; got %q", out[:min(200, len(out))])
 	}
-	if !strings.Contains(out, "find TODOs") {
-		t.Errorf("compression marker should carry intent; got %q", out)
+	if !strings.Contains(out, "[truncated") {
+		t.Errorf("expected truncation marker when chunks > MaxEmittedChunks; got %q", out[:min(400, len(out))])
 	}
 
 	if len(captured) != 2 {
-		t.Fatalf("expected 2 trace entries (act.read_file + attend.compress), got %d", len(captured))
+		t.Fatalf("expected 2 trace entries (act.read_file + attend.chunk), got %d", len(captured))
 	}
-	act, compress := captured[0], captured[1]
+	act, chunk := captured[0], captured[1]
 	if act.QualifiedName != "act.read_file" {
 		t.Fatalf("first row should be act.read_file, got %s", act.QualifiedName)
 	}
 	if act.Salience == nil || act.Salience.MaxOutputTokens != 40 || act.Salience.Intent != "find TODOs" {
 		t.Errorf("act row missing/wrong SalienceContract: %+v", act.Salience)
 	}
-	if compress.QualifiedName != "attend.compress" || compress.ParentID != act.NodeID {
-		t.Errorf("compress row shape wrong: %+v", compress)
+	if chunk.QualifiedName != "attend.chunk" || chunk.ParentID != act.NodeID {
+		t.Errorf("chunk row shape wrong: qname=%s parent=%s want attend.chunk parent=%s",
+			chunk.QualifiedName, chunk.ParentID, act.NodeID)
 	}
-	if !compress.OK {
-		t.Errorf("compress should be OK, got: %s", compress.ErrorMessage)
+	if !chunk.OK {
+		t.Errorf("chunk should be OK, got: %s", chunk.ErrorMessage)
 	}
-	// The act row's SpawnedChildren must surface the compress child.
-	if len(act.SpawnedChildren) == 0 || act.SpawnedChildren[0] != compress.NodeID {
-		t.Errorf("act.SpawnedChildren should include compress %s, got %v",
-			compress.NodeID, act.SpawnedChildren)
+	if chunk.Salience == nil || !chunk.Salience.ChunkOnOversize {
+		t.Errorf("chunk row should carry ChunkOnOversize=true salience contract")
 	}
+	if len(act.SpawnedChildren) == 0 || act.SpawnedChildren[0] != chunk.NodeID {
+		t.Errorf("act.SpawnedChildren should include chunk %s, got %v",
+			chunk.NodeID, act.SpawnedChildren)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // TestNewActDispatcher_SalienceSkippedUnderCap pins the under-cap

@@ -139,6 +139,20 @@ type SalienceContract struct {
 	// prompt: what should be preserved for the upstream consumer.
 	// Empty means "preserve most salient content for general use."
 	Intent string `json:"intent,omitempty"`
+
+	// ChunkOnOversize switches the oversize-handling strategy from
+	// LLM-mediated attend.compress (default) to deterministic line-
+	// based chunking. When true and the output exceeds MaxOutputTokens,
+	// the executor splits the content by line boundary into N pieces
+	// each ≤ MaxOutputTokens, joins them into a single deposit with
+	// "[chunk i/N, lines a-b]" headers, and emits a synthetic
+	// attend.chunk trace entry instead of attend.compress.
+	//
+	// Use for tools (act.read_file, act.run_shell) where the calling
+	// model can act on raw labeled content and an LLM-summarized version
+	// would lose information. Leave false for nodes where salience
+	// extraction is genuinely valuable (e.g. distilling search results).
+	ChunkOnOversize bool `json:"chunk_on_oversize,omitempty"`
 }
 
 // ParamSpec declares one input or output parameter for a node.

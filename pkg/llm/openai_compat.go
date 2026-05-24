@@ -219,17 +219,39 @@ type compatErrDeep struct {
 	StatusCode int `json:"status_code,omitempty"`
 }
 
-// wrapServerError returns a typed ContextOverflowError when the
-// server message carries the overflow signature, and a plain
-// fmt.Errorf'd string otherwise. The typed-error path lets the
-// harness loop catch overflows via errors.As and retry; the plain
-// path preserves the pre-existing string for everything else.
+// wrapServerError converts an OpenAI-compat server-side error payload
+// into a Go error. Three cases:
+//
+//   - Context overflow (request exceeds the model's window) → typed
+//     ContextOverflowError so the harness loop can catch via errors.As
+//     and retry with a smaller payload.
+//   - Backend-unreachable (lemonade returns "Network error: CURL error:
+//     Could not connect to server" when llama-server is down/restarting)
+//     → a clean single-line message naming the actual cause. The default
+//     wrapper produced "<endpoint>: server error: Network error: CURL
+//     error: Could not connect to server" — three error words from
+//     three layers, none actionable.
+//   - Anything else → "<endpoint>: server error: <msg>" preserved.
 func wrapServerError(prefix, msg string) error {
 	if overflow, ok := ParseContextOverflow(msg); ok {
 		overflow.Message = prefix + ": server error: " + msg
 		return overflow
 	}
+	if isBackendUnreachableMessage(msg) {
+		return fmt.Errorf("%s: inference backend unreachable (server is up but its model backend isn't responding — try restarting the inference server)", prefix)
+	}
 	return fmt.Errorf("%s: server error: %s", prefix, msg)
+}
+
+// isBackendUnreachableMessage matches the wire-shape lemonade emits
+// when its underlying llama-server (or other backend) is down. The
+// frontend itself responds 200 OK with this error body, so we detect
+// it from the message contents.
+func isBackendUnreachableMessage(msg string) bool {
+	low := strings.ToLower(msg)
+	return strings.Contains(low, "could not connect to server") ||
+		strings.Contains(low, "connection refused") ||
+		(strings.Contains(low, "network error") && strings.Contains(low, "curl error"))
 }
 
 // fullMessage returns the most actionable error string available: the

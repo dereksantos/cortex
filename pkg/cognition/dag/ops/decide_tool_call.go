@@ -200,14 +200,23 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 		}
 
 		// Attach a SalienceContract so the executor's post-handler
-		// hook compresses oversized act.* outputs before deposit.
-		// Intent flows from the user's intent string into the
-		// compression prompt — the upstream synthesizer sees a
-		// salience-extracted version rather than the raw file blob.
+		// hook handles oversized act.* outputs before deposit. The
+		// strategy depends on the tool:
+		//
+		//   - act.read_file / act.run_shell → deterministic line-based
+		//     chunking (ChunkOnOversize=true). The calling model sees
+		//     the actual bytes with "[chunk i/N, lines a-b]" headers;
+		//     no LLM is in the read path. Preserves ground truth and
+		//     lets the model re-fetch specific ranges if needed.
+		//
+		//   - Other act.* tools → LLM-mediated attend.compress, sized
+		//     by Intent. Appropriate where genuine salience extraction
+		//     is wanted (e.g. cortex_search results).
 		if cfg.ToolOutputSalienceCap > 0 {
 			spec.Salience = &dag.SalienceContract{
 				MaxOutputTokens: cfg.ToolOutputSalienceCap,
 				Intent:          intent,
+				ChunkOnOversize: shouldChunkOnOversize(parsed.ToolName),
 			}
 		}
 
@@ -281,6 +290,22 @@ func formatActToolsCatalog(reg *dag.Registry, in map[string]any) string {
 		return "  (no exposable act.* tools registered)"
 	}
 	return b.String()
+}
+
+// shouldChunkOnOversize reports whether oversized output from this
+// tool should be split into deterministic line-based chunks rather
+// than passed through attend.compress. True for tools whose value is
+// the raw bytes (read_file, run_shell — calling model can act on the
+// content directly with location headers); false for tools where the
+// caller wants LLM-mediated salience (e.g. cortex_search returning
+// many results worth ranking).
+func shouldChunkOnOversize(toolName string) bool {
+	switch toolName {
+	case "act.read_file", "act.run_shell":
+		return true
+	default:
+		return false
+	}
 }
 
 // materializeActSpawn validates the specialist-emitted tool_name +

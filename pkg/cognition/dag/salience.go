@@ -14,6 +14,8 @@ package dag
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -54,6 +56,14 @@ func (e *Executor) applySalienceCompression(
 	}
 	if approxOutputTokens(raw) <= item.spec.Salience.MaxOutputTokens {
 		return nil
+	}
+	// Deterministic chunking path — when the contract opts in,
+	// mechanically split by line boundary and emit a synthetic
+	// attend.chunk entry. No LLM in the read path: the calling model
+	// gets the actual content with location headers it can re-fetch
+	// from.
+	if item.spec.Salience.ChunkOnOversize {
+		return applyDeterministicChunking(item, result, field, raw, nextChildID)
 	}
 	compSpec, err := e.registry.Get("attend.compress")
 	if err != nil {
@@ -156,4 +166,207 @@ func approxOutputTokens(s string) int {
 		return 1
 	}
 	return n
+}
+
+// applyDeterministicChunking handles the ChunkOnOversize=true branch.
+// Splits raw by line boundary into N chunks each ≤ MaxOutputTokens,
+// joins them with "[chunk i/N, lines a-b]" headers into one deposit,
+// and returns a synthetic attend.chunk trace entry. No LLM call.
+func applyDeterministicChunking(
+	item pendingItem,
+	result *NodeResult,
+	field, raw string,
+	nextChildID func() string,
+) *TraceEntry {
+	cap := item.spec.Salience.MaxOutputTokens
+	started := time.Now()
+	joined, totalChunks, emitted := ChunkOversize(raw, cap)
+	ended := time.Now()
+
+	childID := nextChildID()
+	entry := &TraceEntry{
+		NodeID:        childID,
+		ParentID:      item.spec.ID,
+		QualifiedName: "attend.chunk",
+		WallStart:     started,
+		WallEnd:       ended,
+		OK:            true,
+		CostConsumed:  Cost{LatencyMS: int(ended.Sub(started).Milliseconds())},
+		Out: map[string]any{
+			"chunks":     totalChunks,
+			"emitted":    emitted,
+			"chunked":    joined,
+			"max_tokens": cap,
+			"intent":     item.spec.Salience.Intent,
+		},
+		Salience: item.spec.Salience,
+	}
+	result.Out[field] = joined
+	result.CostConsumed.LatencyMS += entry.CostConsumed.LatencyMS
+	return entry
+}
+
+// MaxEmittedChunks bounds how many deterministic chunks ChunkOversize
+// emits before truncating. 8 chunks at typical cap sizes (1K-8K
+// tokens) covers most real files without flooding the accumulator;
+// beyond this, the calling model should re-fetch specific ranges
+// rather than slurp the whole file.
+const MaxEmittedChunks = 8
+
+// ChunkOversize splits raw by line boundary into chunks each ≤ cap
+// tokens, joins them into one string with "[chunk i/N, lines a-b]"
+// headers, and returns (joined, totalChunks, emittedChunks). When
+// totalChunks > MaxEmittedChunks the output is truncated with a
+// "[truncated — N more lines …]" marker pointing the calling model
+// at the missing tail.
+//
+// Used by the executor's salience hook (ChunkOnOversize=true) and by
+// internal/harness/dagnode's inner-agent-loop compress path so the two
+// share one definition of "chunked the same way."
+func ChunkOversize(raw string, cap int) (joined string, totalChunks, emittedChunks int) {
+	if cap <= 0 {
+		cap = 500
+	}
+	lines := splitLines(raw)
+	all := buildChunksByLine(lines, cap)
+	totalChunks = len(all)
+	emit := all
+	if totalChunks > MaxEmittedChunks {
+		emit = all[:MaxEmittedChunks]
+	}
+	emittedChunks = len(emit)
+	joined = joinChunks(emit, totalChunks)
+	if totalChunks > MaxEmittedChunks {
+		extra := 0
+		for _, c := range all[MaxEmittedChunks:] {
+			extra += c.endLine - c.startLine + 1
+		}
+		joined += fmt.Sprintf("\n\n[truncated — %d more lines beyond chunk %d; re-fetch with explicit line range]\n", extra, MaxEmittedChunks)
+	}
+	return joined, totalChunks, emittedChunks
+}
+
+// chunkRange records the line-bounds and content of one mechanically-
+// split chunk. startLine and endLine are 1-indexed inclusive.
+type chunkRange struct {
+	startLine, endLine int
+	content            string
+}
+
+// splitLines splits raw into lines preserving newlines on each entry
+// except possibly the last. Mirrors strings.Split(raw, "\n") but
+// preserves the trailing newline so re-joining round-trips byte-for-byte.
+func splitLines(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	out := make([]string, 0, 64)
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\n' {
+			out = append(out, raw[start:i+1])
+			start = i + 1
+		}
+	}
+	if start < len(raw) {
+		out = append(out, raw[start:])
+	}
+	return out
+}
+
+// buildChunksByLine groups consecutive lines into chunks whose
+// approximate token count stays under capTokens. A chunk always
+// contains at least one line, even if that line alone exceeds the
+// cap — splitting mid-line would corrupt source code.
+//
+// When the input is dominated by a single oversized line (the common
+// case for JSON-wrapped tool outputs where newlines are escaped to
+// "\\n" character pairs), the function falls back to byte-based
+// chunking so the result is genuinely split. The startLine/endLine
+// fields are still populated (1-indexed) but reflect byte ranges
+// rather than text lines — calling models that need a specific
+// substring should re-fetch with run_shell sed/dd.
+func buildChunksByLine(lines []string, capTokens int) []chunkRange {
+	if len(lines) == 0 {
+		return nil
+	}
+	if capTokens <= 0 {
+		capTokens = 500 // safety floor
+	}
+	// Detect the "single huge blob" case (e.g. JSON tool output with
+	// escaped newlines) and chunk by bytes instead so split actually
+	// happens. Threshold: one line whose tokens exceed the cap.
+	if len(lines) == 1 && approxOutputTokens(lines[0]) > capTokens {
+		return buildChunksByByte(lines[0], capTokens)
+	}
+	chunks := make([]chunkRange, 0, 8)
+	curStart := 1
+	curContent := ""
+	curTokens := 0
+	for i, ln := range lines {
+		lineTok := approxOutputTokens(ln)
+		// Flush when adding this line would overflow, unless the
+		// current chunk is empty (single oversized line stays alone).
+		if curTokens > 0 && curTokens+lineTok > capTokens {
+			chunks = append(chunks, chunkRange{
+				startLine: curStart,
+				endLine:   i, // i is the index of the NEXT line; last included was i-1, 1-indexed = i
+				content:   curContent,
+			})
+			curStart = i + 1
+			curContent = ""
+			curTokens = 0
+		}
+		curContent += ln
+		curTokens += lineTok
+	}
+	if curContent != "" {
+		chunks = append(chunks, chunkRange{
+			startLine: curStart,
+			endLine:   len(lines),
+			content:   curContent,
+		})
+	}
+	return chunks
+}
+
+// buildChunksByByte splits a single oversized blob into byte-sized
+// chunks of ≤ capTokens. Used when line-based chunking would degenerate
+// to one giant chunk (e.g. JSON tool outputs where the file's newlines
+// are escaped). startLine/endLine fields encode the byte-offset range
+// (1-indexed inclusive) so the chunk headers stay informative.
+func buildChunksByByte(raw string, capTokens int) []chunkRange {
+	// 4 chars per token approximation, mirroring approxOutputTokens.
+	capBytes := capTokens * 4
+	if capBytes <= 0 {
+		capBytes = 2000
+	}
+	chunks := make([]chunkRange, 0, 8)
+	for off := 0; off < len(raw); off += capBytes {
+		end := off + capBytes
+		if end > len(raw) {
+			end = len(raw)
+		}
+		chunks = append(chunks, chunkRange{
+			startLine: off + 1, // bytes 1-indexed
+			endLine:   end,
+			content:   raw[off:end],
+		})
+	}
+	return chunks
+}
+
+// joinChunks formats the chunk list into one string with location
+// headers. totalChunks is the unbounded count (so headers can say
+// "1/12" even when only 8 are emitted).
+func joinChunks(chunks []chunkRange, totalChunks int) string {
+	var b strings.Builder
+	for i, c := range chunks {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "[chunk %d/%d, lines %d-%d]\n", i+1, totalChunks, c.startLine, c.endLine)
+		b.WriteString(c.content)
+	}
+	return b.String()
 }

@@ -71,6 +71,16 @@ type EndpointDef struct {
 	BaseURL   string `json:"base_url"`
 	APIKey    string `json:"api_key,omitempty"`
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+
+	// MaxContextOverride pins the effective context window for every
+	// model on this endpoint, in tokens. Set this when the endpoint's
+	// /v1/models response advertises the model's *theoretical* max
+	// (e.g. lemonade returns 262144 for Qwen3-Coder-30B because that's
+	// the model's max, even when llama-server was booted with
+	// --ctx-size 65536). Cortex's size-vs-window math (`act.read_file`
+	// chunking, salience cap) must respect the runtime deployment, not
+	// the model card. Zero (default) trusts /v1/models's value.
+	MaxContextOverride int `json:"max_context_override,omitempty"`
 }
 
 // ResolveAPIKey returns the API key for this endpoint. APIKeyEnv wins

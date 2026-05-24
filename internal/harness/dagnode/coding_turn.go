@@ -451,7 +451,7 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, 
 		// next-turn prompt; the original lives in the journal.
 		var compressTrace *dag.TraceEntry
 		if dispErr == nil && cfg.ToolOutputSalienceCap > 0 {
-			compressed, ct := compressToolOutput(ctx, cfg.ActRegistry, out, cfg.ToolOutputSalienceCap, intent, childID)
+			compressed, ct := compressToolOutput(ctx, cfg.ActRegistry, out, cfg.ToolOutputSalienceCap, intent, childID, qname)
 			if ct != nil {
 				out = compressed
 				compressTrace = ct
@@ -571,17 +571,54 @@ func foldIntoAccumulator(ctx context.Context, cfg CodingTurnConfig, observation,
 
 // compressToolOutput runs the dispatcher's salience hook against a
 // single tool output. When the output's approx-token count exceeds
-// maxTokens, it invokes attend.compress through reg (the DAG act
-// registry, which now also holds attend.compress per Phase 2), returns
-// the compressed string + a synthetic trace entry for the compression
-// call (parent = parentNodeID). Returns ("", nil) when no compression
-// happens — caller passes the original through.
-func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxTokens int, intent, parentNodeID string) (string, *dag.TraceEntry) {
+// maxTokens, it either:
+//
+//   - Chunks deterministically (qname in {act.read_file, act.run_shell}):
+//     splits by line boundary, joins with "[chunk i/N, lines a-b]"
+//     headers, emits an attend.chunk trace entry. No LLM call. The
+//     calling model sees raw bytes with location headers.
+//
+//   - Compresses via LLM (other qnames): invokes attend.compress through
+//     reg with the intent string for salience extraction. Emits an
+//     attend.compress trace entry.
+//
+// Returns (raw, nil) when no oversize handling was needed.
+func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxTokens int, intent, parentNodeID, qname string) (string, *dag.TraceEntry) {
 	if raw == "" || maxTokens <= 0 {
 		return raw, nil
 	}
 	if approxTokens(raw) <= maxTokens {
 		return raw, nil
+	}
+	// Deterministic chunking path — no LLM. Used for read_file and
+	// run_shell where the calling model can act on raw bytes directly
+	// and an LLM-summarized version would lose information.
+	if qname == "act.read_file" || qname == "act.run_shell" {
+		started := time.Now()
+		joined, totalChunks, emitted := dag.ChunkOversize(raw, maxTokens)
+		ended := time.Now()
+		childID := fmt.Sprintf("chunk-%d", atomic.AddInt64(&actChildIDCounter, 1))
+		entry := &dag.TraceEntry{
+			NodeID:        childID,
+			ParentID:      parentNodeID,
+			QualifiedName: "attend.chunk",
+			WallStart:     started,
+			WallEnd:       ended,
+			OK:            true,
+			CostConsumed:  dag.Cost{LatencyMS: int(ended.Sub(started).Milliseconds())},
+			Out: map[string]any{
+				"chunks":     totalChunks,
+				"emitted":    emitted,
+				"max_tokens": maxTokens,
+				"intent":     intent,
+			},
+			Salience: &dag.SalienceContract{
+				MaxOutputTokens: maxTokens,
+				Intent:          intent,
+				ChunkOnOversize: true,
+			},
+		}
+		return joined, entry
 	}
 	spec, err := reg.Get("attend.compress")
 	if err != nil {

@@ -91,13 +91,14 @@ func (c *OllamaClient) GenerateWithStats(ctx context.Context, prompt string) (st
 	return c.generateWithStats(prompt)
 }
 
-// ModelsResponse represents the response from /api/tags
-type ModelsResponse struct {
-	Models []ModelInfo `json:"models"`
+// tagsResponse is the /api/tags wire shape. Internal JSON DTO only —
+// the registry-facing model record is pkg/llm.ModelInfo (registry.go).
+type tagsResponse struct {
+	Models []tagsEntry `json:"models"`
 }
 
-// ModelInfo represents information about a model
-type ModelInfo struct {
+// tagsEntry is one row in Ollama's /api/tags response.
+type tagsEntry struct {
 	Name string `json:"name"`
 }
 
@@ -113,7 +114,7 @@ func (c *OllamaClient) IsModelAvailable() bool {
 		return false
 	}
 
-	var modelsResp ModelsResponse
+	var modelsResp tagsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
 		return false
 	}
@@ -258,7 +259,7 @@ func (c *OllamaClient) IsEmbeddingModelAvailable() bool {
 		return false
 	}
 
-	var modelsResp ModelsResponse
+	var modelsResp tagsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
 		return false
 	}
