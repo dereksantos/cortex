@@ -16,13 +16,29 @@ import "strings"
 // Capability labels are the union of what real endpoints emit (Lemonade
 // uses these) and what the recommender consumes. Listed here as
 // constants so consumers don't depend on stringly-typed magic.
+//
+// Specialty tags (`<base>:specialist`) mark a model as *trained
+// primarily* for the named task — xLAM-1.5B for tool-calling,
+// DeepSeek-Coder for code, o-series for reasoning. The convention:
+// a specialty tag always implies the base tag, enforced when labels
+// are assigned (here) and when an endpoint advertises them
+// (passthrough in EffectiveLabels). Per-node routing
+// (docs/per-node-routing-plan.md) relies on the distinction:
+// `Requires: []string{CapToolCallingSpecialist, CapToolCalling}` means
+// "prefer a specialist; accept any tool-caller as fallback."
 const (
-	CapCoding      = "coding"
-	CapToolCalling = "tool-calling"
-	CapReasoning   = "reasoning"
-	CapEmbedding   = "embeddings"
-	CapReranking   = "reranking"
-	CapVision      = "vision"
+	CapCoding           = "coding"
+	CapCodingSpecialist = "coding:specialist"
+
+	CapToolCalling           = "tool-calling"
+	CapToolCallingSpecialist = "tool-calling:specialist"
+
+	CapReasoning           = "reasoning"
+	CapReasoningSpecialist = "reasoning:specialist"
+
+	CapEmbedding = "embeddings"
+	CapReranking = "reranking"
+	CapVision    = "vision"
 )
 
 // EffectiveLabels returns a model's capability tags, preferring labels
@@ -62,20 +78,52 @@ func InferCapabilities(modelID string) []string {
 		return labels
 	}
 
-	// Coding-specialized families.
+	// Tool-calling specialists — models trained primarily for
+	// function-call JSON emission. These are reliable JSON emitters
+	// at small sizes and are the engine per-node routing leans on for
+	// `decide.tool_call` / `decide.next`. Additive: a "xlam-coder"
+	// hybrid (hypothetical) would correctly pick up both specialty
+	// tags via the coder check below.
+	//
+	// Two layers of recognition:
+	//   - Family names (xlam, phi-3-mini-tools, hermes-tool/function,
+	//     functionary) — the canonical purpose-built tool callers.
+	//   - Community suffix conventions (-tool-use, -function-calling,
+	//     -fc, -tools) — Llama tool-use forks, Hugging Face quants,
+	//     etc. Conservative: matches require a leading hyphen so a
+	//     model called "instructool" doesn't false-positive.
+	if strings.Contains(id, "xlam") ||
+		strings.Contains(id, "phi-3-mini-tools") || strings.Contains(id, "phi3-mini-tools") ||
+		strings.Contains(id, "hermes-tool") || strings.Contains(id, "hermes-function") ||
+		strings.Contains(id, "functionary") ||
+		strings.Contains(id, "-tool-use") || strings.Contains(id, "-function-calling") ||
+		strings.HasSuffix(id, "-fc") || strings.Contains(id, "-fc-") ||
+		strings.HasSuffix(id, "-tools") {
+		labels = append(labels, CapToolCalling, CapToolCallingSpecialist)
+	}
+
+	// Coding-specialized families. Coder-trained models are coding
+	// specialists by virtue of training intent. They're also generally
+	// tool-capable, but NOT tool-calling specialists — purpose-built
+	// JSON emitters (above) beat them on `decide.tool_call`.
 	if strings.Contains(id, "coder") || strings.Contains(id, "codestral") || strings.Contains(id, "codegemma") || strings.Contains(id, "deepseek-coder") {
-		labels = append(labels, CapCoding, CapToolCalling)
+		labels = append(labels, CapCoding, CapCodingSpecialist, CapToolCalling)
 	}
 
 	// Reasoning families. Some overlap with coding (Qwen3-14B for
-	// example is reasoning but not coder-specialized).
+	// example is reasoning but not coder-specialized). The o-series
+	// is split out as a reasoning *specialist* — OpenAI's chain-of-
+	// thought-trained line; gpt-4/5 are generally capable but not
+	// specialty reasoners.
 	switch {
 	case strings.Contains(id, "qwen3") && !hasLabel(labels, CapCoding):
 		labels = append(labels, CapReasoning, CapToolCalling)
 	case strings.Contains(id, "claude"):
 		// Frontier chat; supports reasoning + tool-calling broadly.
 		labels = append(labels, CapReasoning, CapToolCalling)
-	case strings.Contains(id, "gpt-4") || strings.Contains(id, "gpt-5") || strings.Contains(id, "o1") || strings.Contains(id, "o3") || strings.Contains(id, "o4"):
+	case strings.Contains(id, "o1") || strings.Contains(id, "o3") || strings.Contains(id, "o4"):
+		labels = append(labels, CapReasoning, CapReasoningSpecialist, CapToolCalling)
+	case strings.Contains(id, "gpt-4") || strings.Contains(id, "gpt-5"):
 		labels = append(labels, CapReasoning, CapToolCalling)
 	case strings.Contains(id, "llama-3") || strings.Contains(id, "llama3"):
 		// Llama 3.1+ supports tool-calling per Meta's spec.
@@ -93,7 +141,29 @@ func InferCapabilities(modelID string) []string {
 		labels = append(labels, CapVision)
 	}
 
-	return labels
+	return dedupeLabels(labels)
+}
+
+// dedupeLabels returns a copy of labels with duplicates removed,
+// preserving first-seen order. Needed because separate inference
+// passes (tool-call specialists + reasoning families) can both
+// independently add CapToolCalling for the same model — e.g. a
+// `llama-3.1-8b-function-calling` matches both the suffix-based
+// specialist check and the llama-3 reasoning case.
+func dedupeLabels(labels []string) []string {
+	if len(labels) <= 1 {
+		return labels
+	}
+	seen := make(map[string]struct{}, len(labels))
+	out := labels[:0]
+	for _, l := range labels {
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	return out
 }
 
 // normalizeModelID lowercases and strips common registry prefixes +

@@ -2581,13 +2581,42 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// and the follow-up wouldn't see search results.
 	ex.SetSequential(true)
 
+	// Per-node routing — docs/per-node-routing-plan.md slices 8 + 9.
+	// The Router resolves Budget.Provider per spawn from:
+	//   1. Attrs["model"] override
+	//   2. cfg.Routing[qname] operator pin (slice 9)
+	//   3. NodeSpec.Requires chain via session's ModelRegistry
+	//   4. compressProvider as session default
+	// compressProvider is reused (already built above for the salience
+	// compressor — same session model). Trace lines now show the
+	// picked model id instead of the legacy `model=(default)`.
+	//
+	// router is held in a local so classifyIntentForTurn (which runs
+	// the handler outside the executor to set the per-intent budget
+	// before seed-time) can consult the same resolution policy.
+	// Without this, sense.classify_intent silently runs on its
+	// cfg.Provider and the routing config has no effect on intent.
+	routingCfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	sessionFactory := buildProviderFactoryForREPL(routingCfg, s.model, s.apiURL)
+	routingByQname := map[string]string(nil)
+	if routingCfg != nil {
+		routingByQname = routingCfg.Routing
+	}
+	router := dag.NewDefaultRouter(dag.RouterDeps{
+		Registry:        s.registry,
+		ProviderFactory: sessionFactory,
+		Default:         compressProvider,
+		RoutingByQname:  routingByQname,
+	})
+	ex.SetRouter(router)
+
 	// Intent ingestion: classify the prompt before seeding the DAG.
 	// Drives per-intent budget (dag.BudgetForIntent) AND seed shape —
 	// trivial intents bypass the sense.prompt → decide.next → coding_turn
 	// chain in favor of cheaper terminal nodes (act.passthrough for
 	// greetings). Failure modes return intent=code with confidence=0 so
 	// the seed falls back to today's full chain.
-	intent, intentConf := classifyIntentForTurn(reg, prompt, traceCB)
+	intent, intentConf := classifyIntentForTurn(reg, router, prompt, traceCB)
 	// Cold-journal escalation: decide.recall_summary has nothing useful
 	// to say when storage holds no events matching the prompt. Better
 	// to let the agent actually investigate (read README, list dirs)
@@ -2637,13 +2666,17 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 // Returns ("code", 0) on any failure — safe default routes to the
 // existing full pipeline so misclassifications never block a turn.
 //
-// Slice 6: synthesizes a dag.TraceEntry for the classifier call and
-// invokes traceCB with it before returning. Lets the routing
-// decision appear in dag_traces.jsonl + the stdout streamer
-// alongside the seed it produced, even though the executor never
-// touched it. traceCB may be nil — tests pass nil to skip the
-// emission.
-func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCallback) (string, float64) {
+// router, when non-nil, applies the per-node routing resolution
+// (docs/per-node-routing-plan.md) before the handler runs — without
+// this, sense.classify_intent silently runs on its cfg.Provider and
+// the routing config has no effect on intent. The picked model + reason
+// are stamped onto the synthesized trace entry so dag_traces.jsonl
+// rows are consistent with executor-routed nodes.
+//
+// Synthesizes a dag.TraceEntry for the classifier call and invokes
+// traceCB with it before returning. traceCB may be nil — tests pass
+// nil to skip the emission.
+func classifyIntentForTurn(reg *dag.Registry, router dag.Router, prompt string, traceCB dag.TraceCallback) (string, float64) {
 	started := time.Now()
 	const (
 		classifyNodeID = "n0-intent"
@@ -2651,12 +2684,24 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCa
 	)
 	spec, err := reg.Get("sense.classify_intent")
 	if err != nil {
-		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "spec_not_registered", err.Error(), nil, started)
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "spec_not_registered", err.Error(), nil, "", "", started)
 		return ops.IntentCode, 0
 	}
-	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, dag.DefaultTurnBudget())
+
+	budget := dag.DefaultTurnBudget()
+	pickedModel, pickedReason := "", ""
+	if router != nil {
+		provider, modelID, reason := router.Resolve(context.Background(), spec)
+		if provider != nil {
+			budget.Provider = provider
+		}
+		pickedModel = modelID
+		pickedReason = reason
+	}
+
+	res, herr := spec.Handler(context.Background(), map[string]any{"prompt": prompt}, budget)
 	if herr != nil {
-		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "handler_error", herr.Error(), nil, started)
+		emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, ops.IntentCode, 0, "handler_error", herr.Error(), nil, pickedModel, pickedReason, started)
 		return ops.IntentCode, 0
 	}
 	intent, _ := res.Out["intent"].(string)
@@ -2664,7 +2709,7 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCa
 		intent = ops.IntentCode
 	}
 	confidence, _ := res.Out["confidence"].(float64)
-	emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, intent, confidence, "", "", &res, started)
+	emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, intent, confidence, "", "", &res, pickedModel, pickedReason, started)
 	return intent, confidence
 }
 
@@ -2674,7 +2719,11 @@ func classifyIntentForTurn(reg *dag.Registry, prompt string, traceCB dag.TraceCa
 // instrumentation. Includes the cost the handler reported (when
 // available) so downstream analyzers see the classifier's cost
 // alongside the rest of the turn.
-func emitClassifyTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, intent string, confidence float64, errCode, errMsg string, res *dag.NodeResult, started time.Time) {
+//
+// pickedModel + pickedReason are surfaced on the entry so out-of-
+// executor classification rows in dag_traces.jsonl read the same as
+// executor-routed rows.
+func emitClassifyTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, intent string, confidence float64, errCode, errMsg string, res *dag.NodeResult, pickedModel, pickedReason string, started time.Time) {
 	if traceCB == nil {
 		return
 	}
@@ -2689,6 +2738,8 @@ func emitClassifyTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, intent st
 		SpawnedChildren: []string{seedID},
 		WallStart:       started,
 		WallEnd:         end,
+		PickedModel:     pickedModel,
+		PickedReason:    pickedReason,
 		Out: map[string]any{
 			"intent":     intent,
 			"confidence": confidence,
@@ -4883,6 +4934,10 @@ func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback
 		// the line by cortex function (sense/attend/decide/act/…)
 		// instead of treating it as plain Info. StdoutSink's Event
 		// renderer prints the same shape.
+		//
+		// picked_model + picked_reason expose the per-node routing
+		// decision (docs/per-node-routing-plan.md slice 8). Empty
+		// when no Router is wired or when a node has no Requires.
 		ui.Event("dag.trace", map[string]any{
 			"qualified_name": name,
 			"node_id":        e.NodeID,
@@ -4890,6 +4945,8 @@ func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback
 			"latency_ms":     int(latency / time.Millisecond),
 			"spawned":        e.SpawnedChildren,
 			"err_cause":      cause,
+			"picked_model":   e.PickedModel,
+			"picked_reason":  e.PickedReason,
 		})
 		if next != nil {
 			next(e)

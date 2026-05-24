@@ -196,6 +196,20 @@ func renderEvent(w io.Writer, kind string, payload any, verbose bool) {
 		if sp, ok := m["spawned"].([]string); ok && len(sp) > 0 {
 			tail = " → spawned " + strings.Join(sp, ", ")
 		}
+		// Per-node routing surface: when the executor's Router resolved
+		// a specific provider for this node, surface the model id +
+		// reason. Replaces the legacy `model=(default)` blind spot
+		// from docs/per-node-routing-plan.md.
+		picked, _ := m["picked_model"].(string)
+		pickedReason, _ := m["picked_reason"].(string)
+		if picked != "" {
+			tail = " · model=" + picked + tail
+		} else if pickedReason != "" && pickedReason != "no-match" {
+			// Reason set but no specific model — usually "default";
+			// show that explicitly so traces don't look like routing
+			// was silently skipped.
+			tail = " · model=" + pickedReason + tail
+		}
 		if !okFlag {
 			if cause, _ := m["err_cause"].(string); cause != "" {
 				if len(cause) > 120 {

@@ -116,9 +116,16 @@ func newDistillHandler(cfg DistillConfig) dag.Handler {
 			}, nil
 		}
 
-		// Two-pass LLM path. Both calls share `cfg.Provider`.
-		if cfg.Provider != nil && cfg.Provider.IsAvailable() && budget.LatencyMS >= minDistillLatencyMS {
-			if out, ok := llmDistill(ctx, cfg.Provider, raw, intent, maxTokens, started); ok {
+		// Two-pass LLM path. Prefer the executor-resolved provider
+		// (Router populated Budget.Provider — see
+		// docs/per-node-routing-plan.md slice 3), falling back to
+		// cfg.Provider on the synthetic / no-Router path.
+		provider := budget.Provider
+		if provider == nil {
+			provider = cfg.Provider
+		}
+		if provider != nil && provider.IsAvailable() && budget.LatencyMS >= minDistillLatencyMS {
+			if out, ok := llmDistill(ctx, provider, raw, intent, maxTokens, started); ok {
 				return out, nil
 			}
 		}

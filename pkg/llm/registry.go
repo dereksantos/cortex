@@ -22,6 +22,8 @@ package llm
 
 import (
 	"context"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -123,6 +125,25 @@ type ModelRegistry interface {
 	// via the ErrorReporter but don't shortcut). Useful after a model
 	// install / removal (the `cortex models pull X` flow).
 	Refresh(ctx context.Context) error
+
+	// PickForCapabilities walks an ordered capability preference chain
+	// and returns the best available model. For each cap in requires:
+	//
+	//   - Filters cached models to those with that cap (HasCapability)
+	//   - Sorts: local before cloud; if cap ends in ":specialist",
+	//     smaller before larger; otherwise larger before smaller;
+	//     stable by ID on ties
+	//   - Returns the top candidate on first non-empty filter
+	//
+	// Empty `requires` or no-match-anywhere returns `(zero, false)` —
+	// the caller falls back to the session default. Never returns an
+	// error: registry probe failures are absorbed into the cached
+	// snapshot, and the picker operates on what's currently visible.
+	//
+	// The chain expresses preference, not requirement: a specialist
+	// cap falls through to its base when no specialist is available.
+	// See docs/per-node-routing-plan.md for the routing protocol.
+	PickForCapabilities(ctx context.Context, requires []string) (ModelInfo, bool)
 }
 
 // ErrorReporter is the channel through which per-backend probe
@@ -220,6 +241,67 @@ func (r *compositeRegistry) Filter(ctx context.Context, predicate func(ModelInfo
 
 func (r *compositeRegistry) Refresh(ctx context.Context) error {
 	return r.reprobe(ctx)
+}
+
+func (r *compositeRegistry) PickForCapabilities(ctx context.Context, requires []string) (ModelInfo, bool) {
+	if len(requires) == 0 {
+		return ModelInfo{}, false
+	}
+	r.ensureFresh(ctx)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, cap := range requires {
+		var candidates []ModelInfo
+		for _, m := range r.cache {
+			if m.HasCapability(cap) {
+				candidates = append(candidates, m)
+			}
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		preferSmaller := strings.HasSuffix(cap, ":specialist")
+		sort.SliceStable(candidates, func(i, j int) bool {
+			// Local always wins over cloud.
+			if candidates[i].IsLocal != candidates[j].IsLocal {
+				return candidates[i].IsLocal
+			}
+			// Size tiebreaker. SizeBillion is primary; fall back to
+			// effective context window (scaled to ~comparable units)
+			// when size is unknown — same fallback shape used by the
+			// recommender's modelSize.
+			si := pickSizeScore(candidates[i])
+			sj := pickSizeScore(candidates[j])
+			if si != sj {
+				if preferSmaller {
+					return si < sj
+				}
+				return si > sj
+			}
+			// Deterministic id sort so traces stay reproducible.
+			return candidates[i].ID < candidates[j].ID
+		})
+		return candidates[0], true
+	}
+	return ModelInfo{}, false
+}
+
+// pickSizeScore returns a comparable "size" estimate for picker
+// tiebreakers. Uses SizeBillion when known; falls back to effective
+// context window scaled into a roughly-comparable range when not.
+// Returns 0 when both signals are absent — those models sort to the
+// end of a smaller-preferring tier and to the front of a larger-
+// preferring tier, which is the right behavior in both cases (we'd
+// rather pick a known-size model than an unknown one when the
+// preference is clear).
+func pickSizeScore(m ModelInfo) float64 {
+	if m.SizeBillion > 0 {
+		return m.SizeBillion
+	}
+	if m.EffectiveContextWindow > 0 {
+		return float64(m.EffectiveContextWindow) / 1000.0
+	}
+	return 0
 }
 
 // ensureFresh re-probes when the cache is empty or older than TTL.

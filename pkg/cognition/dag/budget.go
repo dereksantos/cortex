@@ -7,7 +7,11 @@
 // docs/dag-protocol.md "Budget model".
 package dag
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/dereksantos/cortex/pkg/llm"
+)
 
 // Budget tracks the remaining resources a turn DAG can consume.
 // Four axes (latency_ms, tokens, depth, output_tokens) decay as work
@@ -33,6 +37,15 @@ type Budget struct {
 	// turn; handlers consult it when deciding how much context to
 	// build / fold / include. 0 = unknown; treat as unbounded.
 	MaxContextTokens int
+
+	// Provider is the per-node LLM provider the executor's Router
+	// resolved at spawn time (from NodeSpec.Attrs["model"] override,
+	// then NodeSpec.Requires chain via Registry.PickForCapabilities,
+	// then session default). Nil when no router is wired or when no
+	// resolution path produced a provider — handlers fall back to
+	// their own configured provider (cfg.Provider). Per
+	// docs/per-node-routing-plan.md "Executor wiring (Option A)".
+	Provider llm.Provider
 }
 
 // Cost is what a single node call reports as consumed. The executor

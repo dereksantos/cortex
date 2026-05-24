@@ -7,10 +7,10 @@ import (
 
 func TestSplitLines(t *testing.T) {
 	tests := map[string]int{
-		"":                      0,
-		"a\nb\nc":               3,
-		"a\nb\nc\n":             3,
-		"\n":                    1,
+		"":                       0,
+		"a\nb\nc":                3,
+		"a\nb\nc\n":              3,
+		"\n":                     1,
 		"single line no newline": 1,
 	}
 	for input, wantCount := range tests {

@@ -45,6 +45,19 @@ type TraceEntry struct {
 	// without forcing the analysis layer to rejoin against the
 	// registry.
 	Salience *SalienceContract
+
+	// PickedModel is the model id the Router resolved for this node's
+	// LLM call (when a Router is wired). Empty when no router is set,
+	// when the router returned no provider, or when the router
+	// returned a default-provider with no specific id. Surfaced in
+	// the trace so `model=...` lines replace the legacy
+	// `model=(default)` blind spot from docs/per-node-routing-plan.md.
+	PickedModel string
+
+	// PickedReason is the Router's short reason label
+	// ("override" | "requires:<modelID>" | "default" | "no-match").
+	// Reads alongside PickedModel for trace post-processing.
+	PickedReason string
 }
 
 // Trace is the executor's post-hoc artifact for one turn.
@@ -75,6 +88,7 @@ type Executor struct {
 	traceCB    TraceCallback
 	sequential bool          // when true, run nodes one at a time (Stage 1-3 behavior)
 	deferred   DeferredQueue // optional; when set, budget_exceeded refusals are queued for rollover and prior fresh deferrals are prepended to the seed
+	router     Router        // optional; when set, executor resolves per-node provider before each handler call
 }
 
 // TraceCallback is invoked after each node executes — callers wire
@@ -127,6 +141,17 @@ func (e *Executor) Sequential() bool { return e.sequential }
 // Pass nil to disable rollover. Tests typically leave this unset.
 func (e *Executor) SetDeferredQueue(q DeferredQueue) {
 	e.deferred = q
+}
+
+// SetRouter wires per-node provider resolution. When set, the executor
+// calls Router.Resolve before each handler invocation, populates
+// Budget.Provider with the result, and records PickedModel +
+// PickedReason on the trace entry. Pass nil to disable (legacy
+// behavior: handlers always read their own cfg.Provider).
+//
+// See docs/per-node-routing-plan.md for the resolution protocol.
+func (e *Executor) SetRouter(r Router) {
+	e.router = r
 }
 
 // pendingItem is one node waiting to execute.
@@ -471,6 +496,19 @@ func (e *Executor) invokeOne(ctx context.Context, item pendingItem, budgetSnapsh
 	invocation.ID = item.spec.ID
 	invocation.Parent = item.spec.Parent
 	invocation.Attrs = item.spec.Attrs
+
+	// Pre-resolve the per-node provider (router is optional — without
+	// one, handlers behave exactly as before by reading their own
+	// cfg.Provider). Mutating budgetSnapshot in-place is safe: it was
+	// passed by value, so this only affects this invocation.
+	if e.router != nil {
+		provider, modelID, reason := e.router.Resolve(ctx, invocation)
+		if provider != nil {
+			budgetSnapshot.Provider = provider
+		}
+		entry.PickedModel = modelID
+		entry.PickedReason = reason
+	}
 
 	ctxForHandler := context.WithValue(ctx, nodeIDContextKey{}, invocation.ID)
 	result, herr := invocation.Handler(ctxForHandler, invocation.Attrs, budgetSnapshot)

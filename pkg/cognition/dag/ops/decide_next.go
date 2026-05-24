@@ -111,6 +111,13 @@ type NextConfig struct {
 const recursionDepthAttr = "_dnext_depth"
 
 // NextSpec returns the dag.NodeSpec for decide.next.
+//
+// Requires declares the capability preference chain the executor's
+// Router uses to pick the per-node provider. decide.next emits a JSON
+// nodes-list — the same structured-emission task decide.tool_call
+// does — so it leans on the same tool-calling specialist for
+// reliability, falling back to any tool-calling-capable model when
+// no specialist is available.
 func NextSpec(cfg NextConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncDecide,
@@ -126,6 +133,7 @@ func NextSpec(cfg NextConfig) dag.NodeSpec {
 		},
 		Cost:      nextCostHint,
 		Exposable: true, // the LLM can recurse into decide.next
+		Requires:  []string{llm.CapToolCallingSpecialist, llm.CapToolCalling},
 		Handler:   NewNextHandler(cfg),
 	}
 }
@@ -251,13 +259,13 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 		}
 		recDepth := readDecideNextDepth(in)
 
-		// Per-call provider resolution. attrs.model on this decide.next
-		// spawn (set by an emitted-node materializer one level up) lets
-		// the LLM route this classification through a different model
-		// than the session default — the small-model-amplifier path
-		// where, say, a 3B JSON-disciplined classifier handles the
-		// router role while a 14B coder handles the work.
-		provider, providerSrc := resolveNextProvider(cfg, in)
+		// Per-call provider resolution. Budget.Provider (set by the
+		// executor's Router under the new per-node routing — see
+		// docs/per-node-routing-plan.md slice 3) wins; the legacy
+		// attrs.model + factory path is preserved as fallback so the
+		// LLM-emitted per-call model override keeps working for callers
+		// that haven't adopted the Router yet.
+		provider, providerSrc := resolveNextProvider(cfg, in, budget)
 
 		// Mechanical fallback: no provider available or budget exhausted.
 		if provider == nil || !budget.CanAfford(nextCostHint) {
@@ -342,15 +350,23 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 // resolveNextProvider chooses the Provider to use for THIS decide.next
 // call. Resolution order:
 //
-//  1. If attrs.model is set AND cfg.ProviderFactory is set, route this
-//     call through factory.Get(model). On factory error, fall through
-//     to step 2 so a typo'd model id doesn't sink the chain.
-//  2. cfg.Provider (the session default).
+//  1. Budget.Provider — set by the executor's Router when the new
+//     per-node routing is wired (docs/per-node-routing-plan.md slice 3).
+//     The Router already applied Attrs["model"] override + Requires
+//     chain, so the handler doesn't re-check those when Budget.Provider
+//     is present.
+//  2. Legacy attrs.model + factory — the LLM-emitted per-call override
+//     path. On factory error, falls through to step 3 so a typo'd
+//     model id doesn't sink the chain.
+//  3. cfg.Provider (the session default).
 //
 // Returns the provider plus a short tag describing where it came from
 // — surfaced in fallback reasoning when classification fails so it's
 // debuggable which model errored out.
-func resolveNextProvider(cfg NextConfig, in map[string]any) (llm.Provider, string) {
+func resolveNextProvider(cfg NextConfig, in map[string]any, budget dag.Budget) (llm.Provider, string) {
+	if budget.Provider != nil {
+		return budget.Provider, "budget:" + budget.Provider.Name()
+	}
 	if cfg.ProviderFactory != nil {
 		if m, _ := in["model"].(string); m != "" {
 			if p, err := cfg.ProviderFactory.Get(m); err == nil && p != nil {

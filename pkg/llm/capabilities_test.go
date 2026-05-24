@@ -11,12 +11,12 @@ func TestInferCapabilitiesCoderFamilies(t *testing.T) {
 		id   string
 		want []string
 	}{
-		{"qwen2.5-coder:7b", []string{CapCoding, CapToolCalling}},
-		{"qwen/qwen-2.5-coder-32b", []string{CapCoding, CapToolCalling}},
-		{"mistralai/codestral-22b", []string{CapCoding, CapToolCalling}},
-		{"google/codegemma-7b", []string{CapCoding, CapToolCalling}},
-		{"deepseek/deepseek-coder-v2", []string{CapCoding, CapToolCalling}},
-		{"Qwen3-Coder-30B-A3B-Instruct-GGUF", []string{CapCoding, CapToolCalling}},
+		{"qwen2.5-coder:7b", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
+		{"qwen/qwen-2.5-coder-32b", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
+		{"mistralai/codestral-22b", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
+		{"google/codegemma-7b", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
+		{"deepseek/deepseek-coder-v2", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
+		{"Qwen3-Coder-30B-A3B-Instruct-GGUF", []string{CapCoding, CapCodingSpecialist, CapToolCalling}},
 	}
 	for _, tc := range cases {
 		got := InferCapabilities(tc.id)
@@ -24,6 +24,92 @@ func TestInferCapabilitiesCoderFamilies(t *testing.T) {
 		sort.Strings(tc.want)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestInferCapabilitiesToolCallingSpecialists pins the small specialist
+// families that per-node routing leans on. xLAM / phi-3-mini-tools /
+// hermes-tool / functionary are purpose-built for function-call JSON
+// emission — they get CapToolCallingSpecialist (which implies
+// CapToolCalling). Community-suffix variants (-tool-use,
+// -function-calling, -fc, -tools) also qualify — these are the
+// Llama tool-use forks and quants distributed under conventional
+// naming. No other capabilities — these are narrow specialists, not
+// general-purpose models.
+func TestInferCapabilitiesToolCallingSpecialists(t *testing.T) {
+	cases := []struct {
+		id   string
+		want []string
+	}{
+		{"salesforce/xlam-1.5b-fc-r", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"xlam-7b-r", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"phi-3-mini-tools", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"phi3-mini-tools-q4", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"nous/hermes-tool-7b", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"hermes-function-calling-v3", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"meetkai/functionary-small-v2.5", []string{CapToolCalling, CapToolCallingSpecialist}},
+		// Community-suffix recognition — the Llama tool-use forks
+		// distribute under these conventions.
+		{"groq/llama-3-8b-tool-use", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"llama-3.1-8b-function-calling", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"qwen-2.5-7b-instruct-fc", []string{CapToolCalling, CapToolCallingSpecialist}},
+	}
+	for _, tc := range cases {
+		got := InferCapabilities(tc.id)
+		sort.Strings(got)
+		sort.Strings(tc.want)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: got %v want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestInferCapabilitiesDoesNotFalsePositiveOnSubstrings pins that the
+// suffix conventions (-tools, -fc) require word boundaries — a model
+// called "codertools" or "abcfc" should NOT get the specialist tag.
+func TestInferCapabilitiesDoesNotFalsePositiveOnSubstrings(t *testing.T) {
+	// These IDs contain "tools" or "fc" as substrings but not as the
+	// declared community suffix. They must NOT get
+	// CapToolCallingSpecialist.
+	negatives := []string{
+		"qwen3-14b",     // no tools/fc substring
+		"llama-3-70b",   // no tools/fc substring
+		"mistral-large", // no tools/fc substring
+	}
+	for _, id := range negatives {
+		got := InferCapabilities(id)
+		if hasLabel(got, CapToolCallingSpecialist) {
+			t.Errorf("%s should NOT have specialist tag; got %v", id, got)
+		}
+	}
+}
+
+// TestSpecialistImpliesBase pins the invariant that any `:specialist`
+// tag is always accompanied by its base capability. Per-node routing's
+// fallback chain depends on this — `Requires: [CapToolCallingSpecialist,
+// CapToolCalling]` only behaves correctly if every specialist also
+// matches the base.
+func TestSpecialistImpliesBase(t *testing.T) {
+	specialistToBase := map[string]string{
+		CapCodingSpecialist:      CapCoding,
+		CapToolCallingSpecialist: CapToolCalling,
+		CapReasoningSpecialist:   CapReasoning,
+	}
+	ids := []string{
+		"salesforce/xlam-1.5b-fc-r",
+		"deepseek/deepseek-coder-v2",
+		"openai/o3-mini",
+		"o4-mini",
+		"phi-3-mini-tools",
+		"mistralai/codestral-22b",
+	}
+	for _, id := range ids {
+		got := InferCapabilities(id)
+		for specialist, base := range specialistToBase {
+			if hasLabel(got, specialist) && !hasLabel(got, base) {
+				t.Errorf("%s: has %s without base %s; got %v", id, specialist, base, got)
+			}
 		}
 	}
 }
@@ -66,7 +152,12 @@ func TestInferCapabilitiesReasoningFamilies(t *testing.T) {
 		{"anthropic/claude-haiku-4.5", []string{CapReasoning, CapToolCalling}},
 		{"claude-3-5-sonnet", []string{CapReasoning, CapToolCalling}},
 		{"openai/gpt-4o", []string{CapReasoning, CapToolCalling}},
-		{"openai/o3-mini", []string{CapReasoning, CapToolCalling}},
+		// o-series is purpose-built for chain-of-thought reasoning →
+		// reasoning specialist (gpt-4/5 are generally capable, not
+		// specialty reasoners).
+		{"openai/o3-mini", []string{CapReasoning, CapReasoningSpecialist, CapToolCalling}},
+		{"o1-preview", []string{CapReasoning, CapReasoningSpecialist, CapToolCalling}},
+		{"o4-mini", []string{CapReasoning, CapReasoningSpecialist, CapToolCalling}},
 		{"Qwen3-14B-GGUF", []string{CapReasoning, CapToolCalling}},
 	}
 	for _, tc := range cases {
@@ -195,7 +286,7 @@ func TestEffectiveLabelsFallsBackToInference(t *testing.T) {
 	m := CompatModel{ID: "qwen2.5-coder:7b"}
 	got := EffectiveLabels(m)
 	sort.Strings(got)
-	want := []string{CapCoding, CapToolCalling}
+	want := []string{CapCoding, CapCodingSpecialist, CapToolCalling}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("inference fallback: got %v want %v", got, want)

@@ -107,6 +107,19 @@ type NodeSpec struct {
 	// to filter out internal/stub/dispatcher-only ops.
 	Exposable bool
 
+	// Requires is the ordered capability preference chain the picker
+	// walks at spawn time to pick the model for this node. Tags come
+	// from pkg/llm.Cap* constants, including `:specialist` variants.
+	// Empty means "any model — use the session default."
+	//
+	// The chain expresses preference, not requirement: the picker tries
+	// the first cap, falls back to the next on no match, and ultimately
+	// to the session default when the chain exhausts. Per
+	// docs/per-node-routing-plan.md. Registration-time — not persisted
+	// in nodeSpecPersist; reconstituted from the registry by qualified
+	// name on replay, alongside Cost / Inputs / Outputs / Handler.
+	Requires []string
+
 	// Handler (set at registration).
 	Handler Handler
 

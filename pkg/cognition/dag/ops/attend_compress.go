@@ -97,8 +97,19 @@ func newCompressHandler(cfg CompressConfig) dag.Handler {
 
 		// LLM compression path. Provider unavailable or budget too
 		// tight → fall through to the deterministic truncate-stub.
-		if cfg.Provider != nil && cfg.Provider.IsAvailable() && budget.LatencyMS >= fallbackBelowLatencyMS {
-			if out, ok := llmCompress(ctx, cfg.Provider, raw, intent, maxTokens, started); ok {
+		//
+		// Prefer the executor-resolved provider (Router populated
+		// Budget.Provider — see docs/per-node-routing-plan.md slice 3).
+		// Fall back to cfg.Provider when no Router is wired OR when
+		// invoked synthetically by applySalienceCompression in
+		// salience.go, which deliberately passes a clean Budget so
+		// the configured compressor model stays in force on that path.
+		provider := budget.Provider
+		if provider == nil {
+			provider = cfg.Provider
+		}
+		if provider != nil && provider.IsAvailable() && budget.LatencyMS >= fallbackBelowLatencyMS {
+			if out, ok := llmCompress(ctx, provider, raw, intent, maxTokens, started); ok {
 				return out, nil
 			}
 			// LLM path errored — fall through to truncate-stub.

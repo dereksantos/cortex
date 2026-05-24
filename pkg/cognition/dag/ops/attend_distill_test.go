@@ -183,6 +183,71 @@ func TestDistill_LowBudget_SkipsLLMPath(t *testing.T) {
 	}
 }
 
+// TestDistill_BudgetProviderWinsOverCfg — slice 7 of
+// docs/per-node-routing-plan.md: when Budget.Provider is set by the
+// executor's Router (the LLM-spawned path), the handler uses it
+// instead of cfg.Provider. Differentiated providers tell the test
+// which one fired via the compressed output.
+func TestDistill_BudgetProviderWinsOverCfg(t *testing.T) {
+	cfgP := &scriptedDistillProvider{
+		facts:      "1 - from cfg",
+		compressed: "CFG-COMPRESSED",
+		available:  true,
+	}
+	budgetP := &scriptedDistillProvider{
+		facts:      "1 - from budget",
+		compressed: "BUDGET-COMPRESSED",
+		available:  true,
+	}
+	spec := DistillSpec(DistillConfig{Provider: cfgP})
+
+	bigRaw := strings.Repeat("padding text here ", 100)
+	b := dag.Budget{LatencyMS: 30000, Tokens: 5000, Depth: 5}
+	b.Provider = budgetP
+	res, err := spec.Handler(context.Background(), map[string]any{
+		"raw":        bigRaw,
+		"max_tokens": 60,
+		"intent":     "find writers",
+	}, b)
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	got, _ := res.Out["compressed"].(string)
+	if !strings.Contains(got, "BUDGET-COMPRESSED") {
+		t.Errorf("expected Budget.Provider response, got %q", got)
+	}
+	// cfgP should never have been called.
+	if len(cfgP.calls) != 0 {
+		t.Errorf("cfg.Provider should NOT fire when Budget.Provider is set; got %d calls", len(cfgP.calls))
+	}
+}
+
+// TestDistill_LegacyFallbackWhenNoBudgetProvider — nil Budget.Provider
+// keeps cfg.Provider in force (preserves the synthetic /
+// pre-routing-Router behavior).
+func TestDistill_LegacyFallbackWhenNoBudgetProvider(t *testing.T) {
+	cfgP := &scriptedDistillProvider{
+		facts:      "1 - from cfg",
+		compressed: "CFG-COMPRESSED",
+		available:  true,
+	}
+	spec := DistillSpec(DistillConfig{Provider: cfgP})
+
+	bigRaw := strings.Repeat("padding text here ", 100)
+	res, err := spec.Handler(context.Background(), map[string]any{
+		"raw":        bigRaw,
+		"max_tokens": 60,
+		"intent":     "find writers",
+	}, dag.Budget{LatencyMS: 30000, Tokens: 5000, Depth: 5})
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	got, _ := res.Out["compressed"].(string)
+	if !strings.Contains(got, "CFG-COMPRESSED") {
+		t.Errorf("cfg.Provider must drive distillation without a Router; got %q", got)
+	}
+}
+
 func TestDistill_RegisteredInDefaults(t *testing.T) {
 	reg := dag.NewRegistry()
 	if _, err := RegisterDefaults(reg, DefaultsConfig{}); err != nil {
