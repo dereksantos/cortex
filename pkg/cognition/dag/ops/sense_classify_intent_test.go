@@ -141,10 +141,12 @@ func TestClassifyIntent_spec(t *testing.T) {
 		t.Error("Cost.LatencyMS should be non-zero")
 	}
 	// Per-node routing substrate: Requires drives the executor's Router
-	// to pick a tool-calling-capable model. No specialist tag —
-	// classification doesn't need one.
-	if len(spec.Requires) != 1 || spec.Requires[0] != "tool-calling" {
-		t.Errorf("Requires should be [tool-calling], got %v", spec.Requires)
+	// to prefer a tool-calling specialist (the picker's "generalist
+	// prefers larger" rule otherwise sends classification to whatever
+	// big tool-callable model is around, which is wasted compute).
+	wantReq := []string{"tool-calling:specialist", "tool-calling"}
+	if len(spec.Requires) != 2 || spec.Requires[0] != wantReq[0] || spec.Requires[1] != wantReq[1] {
+		t.Errorf("Requires: got %v want %v", spec.Requires, wantReq)
 	}
 }
 

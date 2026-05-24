@@ -41,10 +41,10 @@ type classifyIntentResponse struct {
 //
 // Requires declares the capability preference chain the executor's
 // Router uses to pick the per-node provider. Intent classification is
-// well within any tool-calling-capable chat model's range, so this
-// node asks for CapToolCalling without a specialist preference — the
-// picker's "generalist prefers larger" tiebreaker picks the most
-// capable available model, matching today's session-default behavior.
+// a structured-output task (six fixed buckets) — the tool-calling
+// specialist beats a larger generalist on reliability AND speed for
+// this shape. Chain: prefer a specialist when available, accept any
+// tool-callable model as fallback.
 func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncSense,
@@ -61,7 +61,7 @@ func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 		},
 		Cost:      classifyIntentCostHint,
 		Exposable: true,
-		Requires:  []string{llm.CapToolCalling},
+		Requires:  []string{llm.CapToolCallingSpecialist, llm.CapToolCalling},
 		Handler:   NewClassifyIntentHandler(cfg),
 	}
 }

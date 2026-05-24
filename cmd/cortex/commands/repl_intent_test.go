@@ -372,7 +372,7 @@ func TestClassifyIntentForTurn_missingRegistrationFallsBackToCode(t *testing.T) 
 	// A registry without sense.classify_intent must yield the safe
 	// default — never block the turn on a missing op registration.
 	reg := dag.NewRegistry()
-	intent, conf := classifyIntentForTurn(reg, "hello", nil)
+	intent, conf := classifyIntentForTurn(reg, nil, "hello", nil)
 	if intent != ops.IntentCode {
 		t.Errorf("expected fallback intent=%q, got %q", ops.IntentCode, intent)
 	}
@@ -395,7 +395,7 @@ func TestClassifyIntentForTurn_emitsTraceEntryWhenCallbackProvided(t *testing.T)
 	var emitted []dag.TraceEntry
 	cb := func(e dag.TraceEntry) { emitted = append(emitted, e) }
 
-	classifyIntentForTurn(reg, "hello", cb)
+	classifyIntentForTurn(reg, nil, "hello", cb)
 
 	if len(emitted) != 1 {
 		t.Fatalf("expected 1 trace entry, got %d", len(emitted))
@@ -428,7 +428,7 @@ func TestClassifyIntentForTurn_nilCallbackIsNoOp(t *testing.T) {
 	// Production safety: passing nil traceCB must not panic and must
 	// not affect the returned classification result.
 	reg := dag.NewRegistry()
-	intent, conf := classifyIntentForTurn(reg, "hello", nil)
+	intent, conf := classifyIntentForTurn(reg, nil, "hello", nil)
 	if intent != ops.IntentCode || conf != 0 {
 		t.Errorf("nil callback must still return safe defaults, got (%q, %v)", intent, conf)
 	}
@@ -443,7 +443,7 @@ func TestClassifyIntentForTurn_registryMissEmitsErrorTrace(t *testing.T) {
 	var emitted []dag.TraceEntry
 	cb := func(e dag.TraceEntry) { emitted = append(emitted, e) }
 
-	intent, _ := classifyIntentForTurn(reg, "hello", cb)
+	intent, _ := classifyIntentForTurn(reg, nil, "hello", cb)
 
 	if intent != ops.IntentCode {
 		t.Errorf("registry miss must still return safe default")
@@ -593,7 +593,7 @@ func TestClassifyIntentForTurn_registeredHandlerReturnsResult(t *testing.T) {
 	if err := reg.Register(ops.ClassifyIntentSpec(ops.ClassifyIntentConfig{Provider: nil})); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	intent, conf := classifyIntentForTurn(reg, "hello", nil)
+	intent, conf := classifyIntentForTurn(reg, nil, "hello", nil)
 	if intent != ops.IntentCode {
 		t.Errorf("nil-provider fallback should yield intent=%q, got %q", ops.IntentCode, intent)
 	}
