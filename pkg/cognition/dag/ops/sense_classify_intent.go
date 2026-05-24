@@ -38,6 +38,13 @@ type classifyIntentResponse struct {
 }
 
 // ClassifyIntentSpec returns the NodeSpec for sense.classify_intent.
+//
+// Requires declares the capability preference chain the executor's
+// Router uses to pick the per-node provider. Intent classification is
+// well within any tool-calling-capable chat model's range, so this
+// node asks for CapToolCalling without a specialist preference — the
+// picker's "generalist prefers larger" tiebreaker picks the most
+// capable available model, matching today's session-default behavior.
 func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncSense,
@@ -54,6 +61,7 @@ func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 		},
 		Cost:      classifyIntentCostHint,
 		Exposable: true,
+		Requires:  []string{llm.CapToolCalling},
 		Handler:   NewClassifyIntentHandler(cfg),
 	}
 }
@@ -107,7 +115,15 @@ func NewClassifyIntentHandler(cfg ClassifyIntentConfig) dag.Handler {
 			}, fmt.Errorf("sense.classify_intent: 'prompt' (string) is required")
 		}
 
-		if cfg.Provider == nil || !cfg.Provider.IsAvailable() || !budget.CanAfford(classifyIntentCostHint) {
+		// Prefer the executor-resolved provider (Router populated
+		// Budget.Provider from this node's Requires chain — see
+		// docs/per-node-routing-plan.md slice 3). Fall back to
+		// cfg.Provider when no Router is wired.
+		provider := budget.Provider
+		if provider == nil {
+			provider = cfg.Provider
+		}
+		if provider == nil || !provider.IsAvailable() || !budget.CanAfford(classifyIntentCostHint) {
 			return classifyIntentFallback(started, "provider unavailable or budget exhausted"), nil
 		}
 
@@ -122,7 +138,7 @@ func NewClassifyIntentHandler(cfg ClassifyIntentConfig) dag.Handler {
 			}, fmt.Errorf("sense.classify_intent: render: %w", rerr)
 		}
 
-		resp, stats, gerr := cfg.Provider.GenerateWithStats(ctx, rendered)
+		resp, stats, gerr := provider.GenerateWithStats(ctx, rendered)
 		latency := int(time.Since(started).Milliseconds())
 		if gerr != nil {
 			return classifyIntentFallback(started, fmt.Sprintf("llm error: %v", gerr)), nil

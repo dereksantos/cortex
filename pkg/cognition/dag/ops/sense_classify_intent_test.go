@@ -140,4 +140,59 @@ func TestClassifyIntent_spec(t *testing.T) {
 	if spec.Cost.LatencyMS == 0 {
 		t.Error("Cost.LatencyMS should be non-zero")
 	}
+	// Per-node routing substrate: Requires drives the executor's Router
+	// to pick a tool-calling-capable model. No specialist tag —
+	// classification doesn't need one.
+	if len(spec.Requires) != 1 || spec.Requires[0] != "tool-calling" {
+		t.Errorf("Requires should be [tool-calling], got %v", spec.Requires)
+	}
+}
+
+// TestClassifyIntent_BudgetProviderWinsOverCfg — when the executor's
+// Router has pre-resolved a provider into Budget.Provider, the handler
+// must use it instead of cfg.Provider. Slice 6 of
+// docs/per-node-routing-plan.md — verifies the migration pattern works
+// for non-decide nodes too.
+func TestClassifyIntent_BudgetProviderWinsOverCfg(t *testing.T) {
+	cfgP := &scriptedProvider{
+		response:  `{"intent":"code","confidence":0.5,"why":"cfg fired"}`,
+		available: true,
+	}
+	budgetP := &scriptedProvider{
+		response:  `{"intent":"greeting","confidence":0.95,"why":"budget fired"}`,
+		available: true,
+	}
+	h := NewClassifyIntentHandler(ClassifyIntentConfig{Provider: cfgP})
+
+	b := dag.DefaultTurnBudget()
+	b.Provider = budgetP
+	got, err := h(context.Background(), map[string]any{"prompt": "hello"}, b)
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	// budgetP's response should drive the output.
+	if intent, _ := got.Out["intent"].(string); intent != "greeting" {
+		t.Errorf("Budget.Provider should drive output (greeting), got %v", got.Out["intent"])
+	}
+	if why, _ := got.Out["why"].(string); why != "budget fired" {
+		t.Errorf("expected why from Budget.Provider, got %q", why)
+	}
+}
+
+// TestClassifyIntent_LegacyFallbackWhenNoBudgetProvider — without a
+// Router wired (Budget.Provider nil), cfg.Provider is still used.
+// Pins backwards-compat for callers that haven't adopted the Router.
+func TestClassifyIntent_LegacyFallbackWhenNoBudgetProvider(t *testing.T) {
+	cfgP := &scriptedProvider{
+		response:  `{"intent":"recall","confidence":0.9,"why":"cfg fired"}`,
+		available: true,
+	}
+	h := NewClassifyIntentHandler(ClassifyIntentConfig{Provider: cfgP})
+	got, err := h(context.Background(), map[string]any{"prompt": "what did i say earlier"}, dag.DefaultTurnBudget())
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if intent, _ := got.Out["intent"].(string); intent != "recall" {
+		t.Errorf("cfg.Provider should drive output without Router, got %v", got.Out["intent"])
+	}
 }
