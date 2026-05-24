@@ -56,6 +56,14 @@ type Row struct {
 	// fits per-intent budget-quality curves off these.
 	SalienceMaxOutTok int    `json:"salience_max_output_tokens,omitempty"`
 	SalienceIntent    string `json:"salience_intent,omitempty"`
+
+	// Per-node routing decision (docs/per-node-routing-plan.md). When
+	// the executor has a Router wired, every spawn carries the picked
+	// model id and a short reason label (`override` | `requires:<id>`
+	// | `config:<id>` | `default` | `no-match`). Empty pre-slice-3 or
+	// when no Router is wired.
+	PickedModel  string `json:"picked_model,omitempty"`
+	PickedReason string `json:"picked_reason,omitempty"`
 }
 
 // schemaVersion bumped to "2" with the addition of cost_output_tokens,
@@ -116,6 +124,8 @@ func (w *Writer) Append(turnID string, e dag.TraceEntry) error {
 		row.SalienceMaxOutTok = e.Salience.MaxOutputTokens
 		row.SalienceIntent = e.Salience.Intent
 	}
+	row.PickedModel = e.PickedModel
+	row.PickedReason = e.PickedReason
 	data, err := json.Marshal(row)
 	if err != nil {
 		return fmt.Errorf("marshal row: %w", err)
