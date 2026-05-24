@@ -2581,6 +2581,25 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// and the follow-up wouldn't see search results.
 	ex.SetSequential(true)
 
+	// Per-node routing — docs/per-node-routing-plan.md slice 8 ("lights
+	// on"). The Router resolves Budget.Provider per spawn from each
+	// node's NodeSpec.Requires chain via the session's ModelRegistry,
+	// then through buildProviderFactoryForREPL to construct the actual
+	// Provider. compressProvider is reused as the session default
+	// (same session model; built once above for the salience
+	// compressor). Nodes without Requires (attend.compress, etc.)
+	// fall through to that default; trace lines now show the picked
+	// model id instead of the legacy `model=(default)`.
+	sessionFactory := buildProviderFactoryForREPL(
+		loadREPLConfig(filepath.Join(s.workdir, ".cortex")),
+		s.model, s.apiURL,
+	)
+	ex.SetRouter(dag.NewDefaultRouter(dag.RouterDeps{
+		Registry:        s.registry,
+		ProviderFactory: sessionFactory,
+		Default:         compressProvider,
+	}))
+
 	// Intent ingestion: classify the prompt before seeding the DAG.
 	// Drives per-intent budget (dag.BudgetForIntent) AND seed shape —
 	// trivial intents bypass the sense.prompt → decide.next → coding_turn
@@ -4883,6 +4902,10 @@ func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback
 		// the line by cortex function (sense/attend/decide/act/…)
 		// instead of treating it as plain Info. StdoutSink's Event
 		// renderer prints the same shape.
+		//
+		// picked_model + picked_reason expose the per-node routing
+		// decision (docs/per-node-routing-plan.md slice 8). Empty
+		// when no Router is wired or when a node has no Requires.
 		ui.Event("dag.trace", map[string]any{
 			"qualified_name": name,
 			"node_id":        e.NodeID,
@@ -4890,6 +4913,8 @@ func makeREPLDAGTracer(ui cliout.Sink, next dag.TraceCallback) dag.TraceCallback
 			"latency_ms":     int(latency / time.Millisecond),
 			"spawned":        e.SpawnedChildren,
 			"err_cause":      cause,
+			"picked_model":   e.PickedModel,
+			"picked_reason":  e.PickedReason,
 		})
 		if next != nil {
 			next(e)
