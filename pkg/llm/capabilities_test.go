@@ -73,9 +73,9 @@ func TestInferCapabilitiesDoesNotFalsePositiveOnSubstrings(t *testing.T) {
 	// declared community suffix. They must NOT get
 	// CapToolCallingSpecialist.
 	negatives := []string{
-		"qwen3-14b",       // no tools/fc substring
-		"llama-3-70b",     // no tools/fc substring
-		"mistral-large",   // no tools/fc substring
+		"qwen3-14b",     // no tools/fc substring
+		"llama-3-70b",   // no tools/fc substring
+		"mistral-large", // no tools/fc substring
 	}
 	for _, id := range negatives {
 		got := InferCapabilities(id)
