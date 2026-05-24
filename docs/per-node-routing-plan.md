@@ -142,10 +142,13 @@ chain IS the preference; what's written is what runs.
 
 ### Resolution at spawn time
 
-1. `NodeSpec.Attrs["model"]` set explicitly → use it. Override wins.
-2. `NodeSpec.Requires` non-empty → `registry.PickForCapabilities(requires)` → ModelInfo.
-3. Build provider via `ProviderFactory.Get(modelInfo.ID)`.
-4. No match anywhere → fall back to session default (legacy behavior preserved, never fails the session).
+1. `NodeSpec.Attrs["model"]` set explicitly → per-spawn override wins.
+2. `.cortex/config.json` routing pin (slice 9) → operator-declared per-node-type model. Reason `config:<modelID>`.
+3. `NodeSpec.Requires` non-empty → `registry.PickForCapabilities(requires)` → ModelInfo. Reason `requires:<modelID>`.
+4. Build provider via `ProviderFactory.Get(modelInfo.ID)`.
+5. No match anywhere → fall back to session default (reason `default`); never fails the session.
+
+A stale model id at any step (typo, uninstalled) silently falls through to the next — keeps the harness usable when an override drifts out of date.
 
 ### Executor wiring (Option A from earlier draft)
 

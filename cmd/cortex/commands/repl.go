@@ -2581,23 +2581,26 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// and the follow-up wouldn't see search results.
 	ex.SetSequential(true)
 
-	// Per-node routing — docs/per-node-routing-plan.md slice 8 ("lights
-	// on"). The Router resolves Budget.Provider per spawn from each
-	// node's NodeSpec.Requires chain via the session's ModelRegistry,
-	// then through buildProviderFactoryForREPL to construct the actual
-	// Provider. compressProvider is reused as the session default
-	// (same session model; built once above for the salience
-	// compressor). Nodes without Requires (attend.compress, etc.)
-	// fall through to that default; trace lines now show the picked
-	// model id instead of the legacy `model=(default)`.
-	sessionFactory := buildProviderFactoryForREPL(
-		loadREPLConfig(filepath.Join(s.workdir, ".cortex")),
-		s.model, s.apiURL,
-	)
+	// Per-node routing — docs/per-node-routing-plan.md slices 8 + 9.
+	// The Router resolves Budget.Provider per spawn from:
+	//   1. Attrs["model"] override
+	//   2. cfg.Routing[qname] operator pin (slice 9)
+	//   3. NodeSpec.Requires chain via session's ModelRegistry
+	//   4. compressProvider as session default
+	// compressProvider is reused (already built above for the salience
+	// compressor — same session model). Trace lines now show the
+	// picked model id instead of the legacy `model=(default)`.
+	routingCfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+	sessionFactory := buildProviderFactoryForREPL(routingCfg, s.model, s.apiURL)
+	routingByQname := map[string]string(nil)
+	if routingCfg != nil {
+		routingByQname = routingCfg.Routing
+	}
 	ex.SetRouter(dag.NewDefaultRouter(dag.RouterDeps{
 		Registry:        s.registry,
 		ProviderFactory: sessionFactory,
 		Default:         compressProvider,
+		RoutingByQname:  routingByQname,
 	}))
 
 	// Intent ingestion: classify the prompt before seeding the DAG.

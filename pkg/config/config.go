@@ -52,6 +52,26 @@ type Config struct {
 	// qwen2.5-coder:1.5b via Ollama).
 	DefaultModel string `json:"default_model,omitempty"`
 
+	// Routing pins per-node-type model overrides for the executor's
+	// Router (docs/per-node-routing-plan.md slice 9). Maps a
+	// qualified node name ("decide.tool_call") to a model id any
+	// ProviderFactory can resolve. Takes precedence over the node's
+	// auto-detected Requires chain but loses to per-spawn
+	// Attrs["model"]. Operator escape hatch — first time the
+	// auto-pick is wrong, pin it here without editing code.
+	//
+	// Example:
+	//   "routing": {
+	//     "decide.tool_call":      "qwen3-1.7b-FLM",
+	//     "sense.classify_intent": "qwen3-1.7b-FLM",
+	//     "attend.compress":       "qwen3-4b-Instruct-2507-GGUF"
+	//   }
+	//
+	// Missing model ids fall through to the Requires chain rather
+	// than blocking the spawn — same graceful-degrade pattern as a
+	// stale Attrs["model"] override.
+	Routing map[string]string `json:"routing,omitempty"`
+
 	// Feature flags
 	EnableGraph  bool `json:"enable_graph"`
 	EnableVector bool `json:"enable_vector"`

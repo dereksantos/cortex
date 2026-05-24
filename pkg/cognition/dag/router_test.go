@@ -179,6 +179,102 @@ func TestDefaultRouter_OverrideErrorFallsThrough(t *testing.T) {
 	}
 }
 
+// TestDefaultRouter_ConfigPinBeatsRequires — slice 9 of
+// docs/per-node-routing-plan.md. RoutingByQname["decide.tool_call"]
+// pins a specific model; the Router must use it instead of walking
+// the Requires chain. The operator's whole reason for setting the
+// pin is "the auto-pick is wrong; ignore it."
+func TestDefaultRouter_ConfigPinBeatsRequires(t *testing.T) {
+	pinnedP := llm.NewMockProvider(0)
+	requiresP := llm.NewMockProvider(0)
+	defaultP := llm.NewMockProvider(0)
+	reg := &fakeRegistry{pick: llm.ModelInfo{ID: "auto-picked"}, ok: true}
+	fac := &fakeFactory{byID: map[string]llm.Provider{
+		"qwen3-1.7b-FLM": pinnedP,
+		"auto-picked":    requiresP,
+	}}
+
+	r := NewDefaultRouter(RouterDeps{
+		Registry:        reg,
+		ProviderFactory: fac,
+		Default:         defaultP,
+		RoutingByQname:  map[string]string{"decide.tool_call": "qwen3-1.7b-FLM"},
+	})
+	spec := NodeSpec{
+		Function: FuncDecide, Op: "tool_call",
+		Requires: []string{llm.CapToolCallingSpecialist},
+	}
+	got, id, reason := r.Resolve(context.Background(), spec)
+	if got != pinnedP {
+		t.Errorf("config pin should win over Requires, got %v", got)
+	}
+	if id != "qwen3-1.7b-FLM" || reason != "config:qwen3-1.7b-FLM" {
+		t.Errorf("trace fields: got id=%q reason=%q, want qwen3-1.7b-FLM/config:qwen3-1.7b-FLM", id, reason)
+	}
+	if reg.gotCalls != 0 {
+		t.Errorf("registry must NOT be consulted when config pin resolves, got %d calls", reg.gotCalls)
+	}
+}
+
+// TestDefaultRouter_AttrsModelStillBeatsConfigPin — per-spawn override
+// is rare and deliberate (LLM-emitted, test-pinned). It must trump
+// the operator's config pin so a one-off can ride over the broad
+// configuration. This is the inverse hierarchy: spawn > config >
+// auto-pick > default.
+func TestDefaultRouter_AttrsModelStillBeatsConfigPin(t *testing.T) {
+	overrideP := llm.NewMockProvider(0)
+	pinnedP := llm.NewMockProvider(0)
+	fac := &fakeFactory{byID: map[string]llm.Provider{
+		"per-spawn-model": overrideP,
+		"config-model":    pinnedP,
+	}}
+	r := NewDefaultRouter(RouterDeps{
+		ProviderFactory: fac,
+		RoutingByQname:  map[string]string{"decide.tool_call": "config-model"},
+	})
+	spec := NodeSpec{
+		Function: FuncDecide, Op: "tool_call",
+		Attrs: map[string]any{"model": "per-spawn-model"},
+	}
+	got, id, reason := r.Resolve(context.Background(), spec)
+	if got != overrideP {
+		t.Errorf("attrs.model should beat config pin, got %v", got)
+	}
+	if id != "per-spawn-model" || reason != "override" {
+		t.Errorf("trace fields: got id=%q reason=%q, want per-spawn-model/override", id, reason)
+	}
+}
+
+// TestDefaultRouter_StaleConfigPinFallsThroughToRequires — when the
+// pinned model id doesn't resolve (typo, uninstalled), the Router
+// must NOT block the spawn. Falls through to the Requires chain so
+// the harness stays usable. Operator sees `model=requires:<id>` in
+// the trace and knows their pin didn't bind.
+func TestDefaultRouter_StaleConfigPinFallsThroughToRequires(t *testing.T) {
+	reqP := llm.NewMockProvider(0)
+	reg := &fakeRegistry{pick: llm.ModelInfo{ID: "from-requires"}, ok: true}
+	fac := &fakeFactory{
+		byID:   map[string]llm.Provider{"from-requires": reqP},
+		errFor: map[string]error{"missing-pinned": errors.New("no such model")},
+	}
+	r := NewDefaultRouter(RouterDeps{
+		Registry:        reg,
+		ProviderFactory: fac,
+		RoutingByQname:  map[string]string{"decide.tool_call": "missing-pinned"},
+	})
+	spec := NodeSpec{
+		Function: FuncDecide, Op: "tool_call",
+		Requires: []string{llm.CapToolCalling},
+	}
+	got, id, reason := r.Resolve(context.Background(), spec)
+	if got != reqP {
+		t.Errorf("stale config pin should fall through to Requires, got %v", got)
+	}
+	if id != "from-requires" || reason != "requires:from-requires" {
+		t.Errorf("trace fields: got id=%q reason=%q", id, reason)
+	}
+}
+
 func TestDefaultRouter_NoProviderNoMatch(t *testing.T) {
 	// No router deps configured beyond the empty struct — Resolve
 	// returns nil + "no-match" so callers (handlers) know to keep
