@@ -61,6 +61,47 @@ func TestResolveModelRouteRoleMapBareName(t *testing.T) {
 	}
 }
 
+// TestResolveModelRouteEndpointModelsList — case 3 of
+// ResolveModelRoute. A bare name that appears in an endpoint's
+// declared Models list routes to that endpoint; first endpoint wins
+// on collision.
+func TestResolveModelRouteEndpointModelsList(t *testing.T) {
+	cfg := &Config{
+		Endpoints: []EndpointDef{
+			{
+				Name:    "chatterbox",
+				BaseURL: "http://localhost:4000",
+				Models:  []string{"coder", "reasoner", "xlam-1b-fc-r"},
+			},
+		},
+	}
+	for _, want := range []string{"coder", "reasoner", "xlam-1b-fc-r"} {
+		ep, model, ok := cfg.ResolveModelRoute(want)
+		if !ok || ep == nil || ep.Name != "chatterbox" || model != want {
+			t.Errorf("%s: ep=%v model=%q ok=%v", want, ep, model, ok)
+		}
+	}
+	// Unlisted bare name falls through.
+	if _, _, ok := cfg.ResolveModelRoute("unlisted-model"); ok {
+		t.Errorf("unlisted bare name should not resolve via case 3")
+	}
+}
+
+// TestResolveModelRouteFirstEndpointWinsOnCollision pins the
+// declaration-order tie-break for case 3.
+func TestResolveModelRouteFirstEndpointWinsOnCollision(t *testing.T) {
+	cfg := &Config{
+		Endpoints: []EndpointDef{
+			{Name: "primary", BaseURL: "http://primary:4000", Models: []string{"shared"}},
+			{Name: "secondary", BaseURL: "http://secondary:4000", Models: []string{"shared"}},
+		},
+	}
+	ep, _, ok := cfg.ResolveModelRoute("shared")
+	if !ok || ep == nil || ep.Name != "primary" {
+		t.Errorf("expected primary endpoint to win on collision, got %v", ep)
+	}
+}
+
 func TestResolveModelRouteNilConfigSafe(t *testing.T) {
 	var cfg *Config
 	if ep, _, ok := cfg.ResolveModelRoute("anything"); ok || ep != nil {

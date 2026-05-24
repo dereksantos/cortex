@@ -101,6 +101,16 @@ type EndpointDef struct {
 	// chunking, salience cap) must respect the runtime deployment, not
 	// the model card. Zero (default) trusts /v1/models's value.
 	MaxContextOverride int `json:"max_context_override,omitempty"`
+
+	// Models lists the bare model ids this endpoint serves. Used by
+	// ResolveModelRoute to resolve bare names (e.g. "coder",
+	// "xlam-1b-fc-r") without forcing every name into the role-map's
+	// five fixed slots. The OpenAI-compat client built for such a
+	// bare-name route binds to this endpoint's BaseURL with the
+	// declared model id passed through unchanged. Empty (default) =
+	// no bare-name routing for this endpoint; bare names fall through
+	// to Ollama (legacy behavior preserved).
+	Models []string `json:"models,omitempty"`
 }
 
 // ResolveAPIKey returns the API key for this endpoint. APIKeyEnv wins
@@ -148,7 +158,7 @@ func (c *Config) FindEndpoint(name string) *EndpointDef {
 }
 
 // ResolveModelRoute parses a model string into an endpoint + model
-// pair using the configured endpoint registry. Three resolution paths:
+// pair using the configured endpoint registry. Four resolution paths:
 //
 //  1. "endpoint-name/model-id" → looks up endpoint-name in
 //     Config.Endpoints; if found, returns (endpoint, "model-id", true).
@@ -156,7 +166,11 @@ func (c *Config) FindEndpoint(name string) *EndpointDef {
 //  2. Bare model id that matches a role-map entry → returns the
 //     pinned (endpoint, model) for that role. Lets the REPL pass
 //     bare names through without ambiguity.
-//  3. Anything else → returns (nil, "", false). Caller falls back to
+//  3. Bare model id that appears in any endpoint's declared Models
+//     list → returns that endpoint. Scales beyond the role-map's
+//     five slots; first endpoint in declaration order wins on
+//     collision.
+//  4. Anything else → returns (nil, "", false). Caller falls back to
 //     the legacy slash-routing (OpenRouter for slashed, Ollama for
 //     bare).
 //
@@ -187,6 +201,18 @@ func (c *Config) ResolveModelRoute(model string) (*EndpointDef, string, bool) {
 			}
 			if ep := c.FindEndpoint(a.Endpoint); ep != nil {
 				return ep, a.Model, true
+			}
+		}
+	}
+	// Case 3: bare name matches any endpoint's declared Models list.
+	// Scales beyond the role-map's five slots — operators can list as
+	// many models as their endpoint serves and bare names route there
+	// automatically. First endpoint wins on collision (declaration
+	// order in cfg.Endpoints is intentional).
+	for i := range c.Endpoints {
+		for _, m := range c.Endpoints[i].Models {
+			if m == model {
+				return &c.Endpoints[i], model, true
 			}
 		}
 	}

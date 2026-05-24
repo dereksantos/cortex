@@ -139,11 +139,34 @@ func (f *defaultProviderFactory) Get(modelID string) (Provider, error) {
 	return p, nil
 }
 
-// build constructs the right Provider type for a given model ID. The
-// slash-vs-bare-name convention matches what the REPL already uses
-// elsewhere (resolveAPIURL in cmd/cortex/commands/repl.go).
+// build constructs the right Provider type for a given model ID.
+// Resolution order:
+//
+//  1. cfg.ResolveModelRoute(modelID) — Phase 4 endpoint registry.
+//     Hits for both "endpoint/model" explicit form and bare names
+//     declared in an endpoint's Models list (Case 3). Builds an
+//     OpenAI-compat client bound to the matched endpoint.
+//  2. Slash-prefixed modelID with no Phase 4 match → OpenRouter.
+//  3. Bare modelID → Ollama via the unified LLMClient.
+//
+// Mirrors internal/llm.BuildProvider's logic but kept inline so
+// pkg/llm doesn't depend on internal/. The two paths produce
+// indistinguishable Provider clients for the same modelID.
 func (f *defaultProviderFactory) build(modelID, apiURL string) (Provider, error) {
+	// 1. Phase 4 endpoint registry — matches "endpoint/model" and
+	// bare names declared in an endpoint's Models list.
+	if ep, routedModel, ok := f.cfg.ResolveModelRoute(modelID); ok {
+		client := NewOpenAICompatClient(EndpointConfig{
+			Name:    ep.Name,
+			BaseURL: ep.BaseURL,
+			APIKey:  ep.ResolveAPIKey(),
+		})
+		client.SetModel(routedModel)
+		return client, nil
+	}
+
 	if strings.Contains(modelID, "/") {
+		// 2. Slash-prefixed with no Phase 4 hit → OpenRouter.
 		if f.openRouterKey == "" {
 			return nil, fmt.Errorf("provider factory: cannot route %q (OpenRouter key not configured)", modelID)
 		}
@@ -154,7 +177,7 @@ func (f *defaultProviderFactory) build(modelID, apiURL string) (Provider, error)
 		}
 		return client, nil
 	}
-	// Bare model name → Ollama via the unified LLMClient.
+	// 3. Bare model name with no Phase 4 hit → Ollama.
 	c, _, err := NewLLMClient(f.cfg,
 		WithBackend(BackendOllama),
 		WithModel(modelID),
