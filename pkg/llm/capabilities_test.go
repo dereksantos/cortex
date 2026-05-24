@@ -32,8 +32,11 @@ func TestInferCapabilitiesCoderFamilies(t *testing.T) {
 // families that per-node routing leans on. xLAM / phi-3-mini-tools /
 // hermes-tool / functionary are purpose-built for function-call JSON
 // emission — they get CapToolCallingSpecialist (which implies
-// CapToolCalling). No other capabilities — these are narrow specialists,
-// not general-purpose models.
+// CapToolCalling). Community-suffix variants (-tool-use,
+// -function-calling, -fc, -tools) also qualify — these are the
+// Llama tool-use forks and quants distributed under conventional
+// naming. No other capabilities — these are narrow specialists, not
+// general-purpose models.
 func TestInferCapabilitiesToolCallingSpecialists(t *testing.T) {
 	cases := []struct {
 		id   string
@@ -46,6 +49,11 @@ func TestInferCapabilitiesToolCallingSpecialists(t *testing.T) {
 		{"nous/hermes-tool-7b", []string{CapToolCalling, CapToolCallingSpecialist}},
 		{"hermes-function-calling-v3", []string{CapToolCalling, CapToolCallingSpecialist}},
 		{"meetkai/functionary-small-v2.5", []string{CapToolCalling, CapToolCallingSpecialist}},
+		// Community-suffix recognition — the Llama tool-use forks
+		// distribute under these conventions.
+		{"groq/llama-3-8b-tool-use", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"llama-3.1-8b-function-calling", []string{CapToolCalling, CapToolCallingSpecialist}},
+		{"qwen-2.5-7b-instruct-fc", []string{CapToolCalling, CapToolCallingSpecialist}},
 	}
 	for _, tc := range cases {
 		got := InferCapabilities(tc.id)
@@ -53,6 +61,26 @@ func TestInferCapabilitiesToolCallingSpecialists(t *testing.T) {
 		sort.Strings(tc.want)
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: got %v want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestInferCapabilitiesDoesNotFalsePositiveOnSubstrings pins that the
+// suffix conventions (-tools, -fc) require word boundaries — a model
+// called "codertools" or "abcfc" should NOT get the specialist tag.
+func TestInferCapabilitiesDoesNotFalsePositiveOnSubstrings(t *testing.T) {
+	// These IDs contain "tools" or "fc" as substrings but not as the
+	// declared community suffix. They must NOT get
+	// CapToolCallingSpecialist.
+	negatives := []string{
+		"qwen3-14b",       // no tools/fc substring
+		"llama-3-70b",     // no tools/fc substring
+		"mistral-large",   // no tools/fc substring
+	}
+	for _, id := range negatives {
+		got := InferCapabilities(id)
+		if hasLabel(got, CapToolCallingSpecialist) {
+			t.Errorf("%s should NOT have specialist tag; got %v", id, got)
 		}
 	}
 }

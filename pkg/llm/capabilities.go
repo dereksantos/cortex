@@ -84,10 +84,21 @@ func InferCapabilities(modelID string) []string {
 	// `decide.tool_call` / `decide.next`. Additive: a "xlam-coder"
 	// hybrid (hypothetical) would correctly pick up both specialty
 	// tags via the coder check below.
+	//
+	// Two layers of recognition:
+	//   - Family names (xlam, phi-3-mini-tools, hermes-tool/function,
+	//     functionary) — the canonical purpose-built tool callers.
+	//   - Community suffix conventions (-tool-use, -function-calling,
+	//     -fc, -tools) — Llama tool-use forks, Hugging Face quants,
+	//     etc. Conservative: matches require a leading hyphen so a
+	//     model called "instructool" doesn't false-positive.
 	if strings.Contains(id, "xlam") ||
 		strings.Contains(id, "phi-3-mini-tools") || strings.Contains(id, "phi3-mini-tools") ||
 		strings.Contains(id, "hermes-tool") || strings.Contains(id, "hermes-function") ||
-		strings.Contains(id, "functionary") {
+		strings.Contains(id, "functionary") ||
+		strings.Contains(id, "-tool-use") || strings.Contains(id, "-function-calling") ||
+		strings.HasSuffix(id, "-fc") || strings.Contains(id, "-fc-") ||
+		strings.HasSuffix(id, "-tools") {
 		labels = append(labels, CapToolCalling, CapToolCallingSpecialist)
 	}
 
@@ -130,7 +141,29 @@ func InferCapabilities(modelID string) []string {
 		labels = append(labels, CapVision)
 	}
 
-	return labels
+	return dedupeLabels(labels)
+}
+
+// dedupeLabels returns a copy of labels with duplicates removed,
+// preserving first-seen order. Needed because separate inference
+// passes (tool-call specialists + reasoning families) can both
+// independently add CapToolCalling for the same model — e.g. a
+// `llama-3.1-8b-function-calling` matches both the suffix-based
+// specialist check and the llama-3 reasoning case.
+func dedupeLabels(labels []string) []string {
+	if len(labels) <= 1 {
+		return labels
+	}
+	seen := make(map[string]struct{}, len(labels))
+	out := labels[:0]
+	for _, l := range labels {
+		if _, dup := seen[l]; dup {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	return out
 }
 
 // normalizeModelID lowercases and strips common registry prefixes +
