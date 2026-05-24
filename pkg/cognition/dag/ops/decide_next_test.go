@@ -390,6 +390,125 @@ func TestNext_PerCallProviderRouting_UnknownModelFallsBackToDefault(t *testing.T
 	}
 }
 
+// TestNext_BudgetProviderWinsOverCfg — when the executor's Router has
+// pre-resolved a provider into Budget.Provider, the handler must use
+// it instead of cfg.Provider. Slice 5 of docs/per-node-routing-plan.md
+// — decide.next gets the same specialist routing as decide.tool_call
+// because both emit structured JSON.
+func TestNext_BudgetProviderWinsOverCfg(t *testing.T) {
+	cfgCalled, budgetCalled := false, false
+	cfgP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			cfgCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-cfg"}}]}`, nil
+		},
+	}
+	budgetP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			budgetCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-budget"}}]}`, nil
+		},
+	}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: cfgP, Registry: reg})
+
+	b := mustBudget()
+	b.Provider = budgetP
+	res, err := h(context.Background(), map[string]any{"prompt": "x"}, b)
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !budgetCalled {
+		t.Errorf("Budget.Provider should fire (router-resolved path)")
+	}
+	if cfgCalled {
+		t.Errorf("cfg.Provider should NOT fire when Budget.Provider is set")
+	}
+	// Sanity: routed response leaked through.
+	if len(res.Spawn) != 1 || res.Spawn[0].Attrs["prompt"] != "from-budget" {
+		t.Errorf("Budget.Provider response not threaded through; got %+v", res.Spawn)
+	}
+}
+
+// TestNext_BudgetProviderTrumpsAttrsModel — Budget.Provider beats the
+// legacy attrs.model+factory path. Router already considered attrs.model
+// when populating Budget.Provider, so the handler doesn't double-apply.
+func TestNext_BudgetProviderTrumpsAttrsModel(t *testing.T) {
+	factoryCalled, budgetCalled := false, false
+	factoryP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			factoryCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-factory"}}]}`, nil
+		},
+	}
+	budgetP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			budgetCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-budget"}}]}`, nil
+		},
+	}
+	factory := &fakeFactory{byID: map[string]llm.Provider{"strong-classifier": factoryP}}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{ProviderFactory: factory, Registry: reg})
+
+	b := mustBudget()
+	b.Provider = budgetP
+	if _, err := h(context.Background(),
+		map[string]any{"prompt": "x", "model": "strong-classifier"},
+		b); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !budgetCalled {
+		t.Errorf("Budget.Provider should beat attrs.model+factory")
+	}
+	if factoryCalled {
+		t.Errorf("factory.Get(model) should NOT be re-invoked when Router pre-resolved")
+	}
+}
+
+// TestNext_LegacyFallbackWhenNoBudgetProvider — no Router wired
+// (Budget.Provider nil) → existing attrs.model + factory chain still
+// drives per-call routing, and cfg.Provider remains the final
+// fallback. Pins backwards-compat for callers that haven't adopted
+// the Router yet.
+func TestNext_LegacyFallbackWhenNoBudgetProvider(t *testing.T) {
+	cfgCalled, factoryCalled := false, false
+	cfgP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			cfgCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-cfg"}}]}`, nil
+		},
+	}
+	factoryP := &fakeProvider{
+		respond: func(prompt, system string) (string, error) {
+			factoryCalled = true
+			return `{"nodes":[{"op":"decide.coding_turn","attrs":{"prompt":"from-factory"}}]}`, nil
+		},
+	}
+	factory := &fakeFactory{byID: map[string]llm.Provider{"strong-classifier": factoryP}}
+	reg := registryWithCodingTurn(t)
+	h := NewNextHandler(NextConfig{Provider: cfgP, ProviderFactory: factory, Registry: reg})
+
+	// No Budget.Provider, no attrs.model → cfg.Provider.
+	if _, err := h(context.Background(), map[string]any{"prompt": "x"}, mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if !cfgCalled || factoryCalled {
+		t.Errorf("expected cfg.Provider; got cfg=%v factory=%v", cfgCalled, factoryCalled)
+	}
+
+	// No Budget.Provider, attrs.model set → factory.Get(model).
+	cfgCalled, factoryCalled = false, false
+	if _, err := h(context.Background(),
+		map[string]any{"prompt": "x", "model": "strong-classifier"},
+		mustBudget()); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if cfgCalled || !factoryCalled {
+		t.Errorf("expected factory; got cfg=%v factory=%v", cfgCalled, factoryCalled)
+	}
+}
+
 // TestNext_RenderPromptSubstitution — confirm catalogs flow into the
 // rendered system prompt (so the LLM actually sees them).
 func TestNext_RenderPromptSubstitution(t *testing.T) {
