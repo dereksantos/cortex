@@ -23,6 +23,15 @@ type OpenAICompatProbeConfig struct {
 	// LAN. Propagates into ModelInfo.IsLocal so consumers can prefer
 	// local routing without re-inferring from BaseURL.
 	IsLocal bool
+
+	// MaxContextOverride, when > 0, replaces the per-model context
+	// length advertised by /v1/models. Use when the endpoint reports
+	// the model's theoretical max instead of the runtime deployment
+	// size — lemonade does this (advertises 262144 for Qwen3-Coder-30B
+	// even when llama-server is booted at --ctx-size 65536). Cortex's
+	// size-vs-window math must respect the deployment, so the operator
+	// can pin the runtime size here.
+	MaxContextOverride int
 }
 
 // NewOpenAICompatProbe builds a Probe over one configured OpenAI-compat
@@ -61,12 +70,16 @@ func (p *openAICompatProbe) Probe(ctx context.Context) ([]ModelInfo, error) {
 		if p.cfg.Endpoint.Name != "" {
 			fullID = p.cfg.Endpoint.Name + "/" + m.ID
 		}
+		ctxWindow := m.ContextLength
+		if p.cfg.MaxContextOverride > 0 {
+			ctxWindow = p.cfg.MaxContextOverride
+		}
 		out = append(out, ModelInfo{
 			ID:                     fullID,
 			Endpoint:               p.cfg.Endpoint.Name,
 			BaseURL:                p.cfg.Endpoint.BaseURL,
 			IsLocal:                p.cfg.IsLocal,
-			EffectiveContextWindow: m.ContextLength,
+			EffectiveContextWindow: ctxWindow,
 			SizeBillion:            float64(parseParamCount(m.ID)),
 			Capabilities:           EffectiveLabels(m),
 		})

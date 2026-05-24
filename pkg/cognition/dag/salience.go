@@ -278,12 +278,26 @@ func splitLines(raw string) []string {
 // approximate token count stays under capTokens. A chunk always
 // contains at least one line, even if that line alone exceeds the
 // cap — splitting mid-line would corrupt source code.
+//
+// When the input is dominated by a single oversized line (the common
+// case for JSON-wrapped tool outputs where newlines are escaped to
+// "\\n" character pairs), the function falls back to byte-based
+// chunking so the result is genuinely split. The startLine/endLine
+// fields are still populated (1-indexed) but reflect byte ranges
+// rather than text lines — calling models that need a specific
+// substring should re-fetch with run_shell sed/dd.
 func buildChunksByLine(lines []string, capTokens int) []chunkRange {
 	if len(lines) == 0 {
 		return nil
 	}
 	if capTokens <= 0 {
 		capTokens = 500 // safety floor
+	}
+	// Detect the "single huge blob" case (e.g. JSON tool output with
+	// escaped newlines) and chunk by bytes instead so split actually
+	// happens. Threshold: one line whose tokens exceed the cap.
+	if len(lines) == 1 && approxOutputTokens(lines[0]) > capTokens {
+		return buildChunksByByte(lines[0], capTokens)
 	}
 	chunks := make([]chunkRange, 0, 8)
 	curStart := 1
@@ -311,6 +325,32 @@ func buildChunksByLine(lines []string, capTokens int) []chunkRange {
 			startLine: curStart,
 			endLine:   len(lines),
 			content:   curContent,
+		})
+	}
+	return chunks
+}
+
+// buildChunksByByte splits a single oversized blob into byte-sized
+// chunks of ≤ capTokens. Used when line-based chunking would degenerate
+// to one giant chunk (e.g. JSON tool outputs where the file's newlines
+// are escaped). startLine/endLine fields encode the byte-offset range
+// (1-indexed inclusive) so the chunk headers stay informative.
+func buildChunksByByte(raw string, capTokens int) []chunkRange {
+	// 4 chars per token approximation, mirroring approxOutputTokens.
+	capBytes := capTokens * 4
+	if capBytes <= 0 {
+		capBytes = 2000
+	}
+	chunks := make([]chunkRange, 0, 8)
+	for off := 0; off < len(raw); off += capBytes {
+		end := off + capBytes
+		if end > len(raw) {
+			end = len(raw)
+		}
+		chunks = append(chunks, chunkRange{
+			startLine: off + 1, // bytes 1-indexed
+			endLine:   end,
+			content:   raw[off:end],
 		})
 	}
 	return chunks
