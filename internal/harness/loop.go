@@ -282,14 +282,26 @@ func (p *progressTracker) noProgress(intent string) bool {
 			return true
 		}
 	}
-	// Condition 2: every turn in the window re-reads the same set of
-	// targets (and that set is non-empty). The model is reading in a
-	// circle — true spinning, fires regardless of intent.
-	first := p.turnShapes[0].readTargets
+	// Condition 2: the trailing K turns all read the same set of
+	// targets (and that set is non-empty). Trailing-K rather than
+	// whole-window catches the "model previously did productive
+	// work but is NOW stuck re-reading the same file" failure mode
+	// — when earlier diverse reads keep a whole-window equality
+	// check from ever firing even though the model has clearly
+	// entered a circle.
+	//
+	// K=4 is conservative: 3 consecutive identical reads can be
+	// legitimate (mining a long file for multiple symbols); 4 is
+	// hard to explain as anything but a loop. The buffer cap stays
+	// noProgressWindow (5), so K=4 leaves one slot of historical
+	// diversity before this condition can fire.
+	const trailingIdenticalK = 4
+	tail := p.turnShapes[len(p.turnShapes)-trailingIdenticalK:]
+	first := tail[0].readTargets
 	if first == "" {
 		return false
 	}
-	for _, s := range p.turnShapes[1:] {
+	for _, s := range tail[1:] {
 		if s.readTargets != first {
 			return false
 		}

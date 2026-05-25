@@ -154,6 +154,46 @@ func TestProgressTracker_SameFileReadInCircle_TriggersStop(t *testing.T) {
 	}
 }
 
+// TestProgressTracker_TrailingIdentical_TriggersStop_EvenWithVariedLead —
+// the failure mode caught from a live session: model does productive
+// work for the first turn of the window, then gets stuck re-reading
+// the same file for the trailing 4 turns. Whole-window equality check
+// would NOT fire (turn 0 differs), but trailing-K does. Fires for
+// review intent because the read-in-circle is spinning even when
+// reading is the expected work.
+func TestProgressTracker_TrailingIdentical_TriggersStop_EvenWithVariedLead(t *testing.T) {
+	p := &progressTracker{}
+	// Window: [main.go, repl.go, repl.go, repl.go, repl.go]
+	p.recordTurn([]llm.ToolCall{readCall("r0", "main.go")})
+	for i := 1; i < noProgressWindow; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "repl.go")})
+	}
+	for _, intent := range []string{"code", "review", "recall"} {
+		if !p.noProgress(intent) {
+			t.Errorf("noProgress(%q) = false; want true — trailing-4 identical reads is spinning", intent)
+		}
+	}
+}
+
+// TestProgressTracker_ThreeTrailingIdentical_DoesNotTrigger_ForReview —
+// K=4 boundary: only 3 consecutive identical reads doesn't trip
+// trailing-K. Legitimate "mine this file for multiple things" pattern
+// shouldn't get killed by an aggressive heuristic.
+func TestProgressTracker_ThreeTrailingIdentical_DoesNotTrigger_ForReview(t *testing.T) {
+	p := &progressTracker{}
+	// Window: [main.go, util.go, repl.go, repl.go, repl.go]
+	// Trailing 4: [util.go, repl.go, repl.go, repl.go] — first differs
+	// from the rest, so K=4 doesn't fire.
+	p.recordTurn([]llm.ToolCall{readCall("r0", "main.go")})
+	p.recordTurn([]llm.ToolCall{readCall("r1", "util.go")})
+	for i := 2; i < noProgressWindow; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "repl.go")})
+	}
+	if p.noProgress("review") {
+		t.Errorf("noProgress(review) = true; want false — only 3 trailing identical reads, K=4 boundary")
+	}
+}
+
 func TestProgressTracker_TurnOrderIndependent(t *testing.T) {
 	// Two reads in the same turn should hash to the same readTargets
 	// regardless of arrival order.
