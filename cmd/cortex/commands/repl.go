@@ -2552,6 +2552,27 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 			capturedLR = lr
 			capturedErr = runErr
 		},
+		// Per-call model overrides (when decide.next emits
+		// attrs.model="chatterbox/coder" on a coding_turn spawn) need
+		// Phase 4 endpoint resolution — the prefixed form is for
+		// routing only; the request body must carry the bare model id.
+		// Without this, LiteLLM/Lemonade 400s on "Invalid model name
+		// passed in model=chatterbox/coder".
+		ModelRouteResolver: func(modelID string) (*llm.EndpointConfig, string, bool) {
+			cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+			if cfg == nil {
+				return nil, "", false
+			}
+			ep, bareModel, ok := cfg.ResolveModelRoute(modelID)
+			if !ok {
+				return nil, "", false
+			}
+			return &llm.EndpointConfig{
+				Name:    ep.Name,
+				BaseURL: ep.BaseURL,
+				APIKey:  ep.ResolveAPIKey(),
+			}, bareModel, true
+		},
 	}
 
 	// Shared OnResponse for every intent-aware terminal node
