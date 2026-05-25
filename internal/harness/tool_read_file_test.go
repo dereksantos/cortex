@@ -206,12 +206,12 @@ func TestSliceByLine_OneIndexedInclusive(t *testing.T) {
 		startLine, endLine int
 		want               string
 	}{
-		{1, 1, "L1\n"},          // single line
-		{1, 5, content},         // full range
-		{0, 0, content},         // both zero = whole file
-		{0, 2, "L1\nL2\n"},      // open start
-		{4, 0, "L4\nL5\n"},      // open end
-		{2, 4, "L2\nL3\nL4\n"},  // middle slice
+		{1, 1, "L1\n"},           // single line
+		{1, 5, content},          // full range
+		{0, 0, content},          // both zero = whole file
+		{0, 2, "L1\nL2\n"},       // open start
+		{4, 0, "L4\nL5\n"},       // open end
+		{2, 4, "L2\nL3\nL4\n"},   // middle slice
 		{3, 100, "L3\nL4\nL5\n"}, // clipped tail
 	}
 	for _, tc := range tests {
