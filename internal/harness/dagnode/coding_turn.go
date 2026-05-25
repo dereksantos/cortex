@@ -156,6 +156,19 @@ type CodingTurnConfig struct {
 	// docs/salience-budgets.md "Inner agent loop (per-turn)".
 	ToolOutputSalienceCap int
 
+	// ToolOutputEmittedTokens caps the TOTAL tokens emitted across all
+	// deterministic chunks produced from a single act.read_file /
+	// act.run_shell output (i.e. the chunker's truncation budget,
+	// distinct from ToolOutputSalienceCap which is the per-chunk
+	// size). Zero falls back to the legacy MaxEmittedChunks=8 chunk-
+	// count cap.
+	//
+	// Set by NewCodingTurnHandler from budget.EmittedTokensCap() at
+	// per-invocation time so the value reflects the classified session
+	// intent (code → 4K, review/recall/meta → 16K) and the active
+	// model's context window. See docs/handoff-2026-05-25.md.
+	ToolOutputEmittedTokens int
+
 	// AccumulatorProvider, when non-nil, makes the dispatcher fold
 	// each act.* output (post-compression) through attend.accumulate
 	// and deposit the resulting snapshot into the executor's turn
@@ -321,8 +334,18 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		// keeps working.
 		var spawnedChildren []string
 		parentNodeID := dag.NodeIDFromContext(ctx)
+		// Per-invocation cfg override: derive the chunker's emission
+		// budget from the current turn's Budget (intent + n_ctx). The
+		// dispatcher captures cfg by value, so we mutate a local copy
+		// rather than the long-lived registration-time cfg — keeps
+		// callers that haven't wired Budget.Intent (e.g. eval suites)
+		// on the legacy MaxEmittedChunks=8 path.
+		dispatchCfg := cfg
+		if emittedCap := budget.EmittedTokensCap(); emittedCap > 0 && dispatchCfg.ToolOutputEmittedTokens == 0 {
+			dispatchCfg.ToolOutputEmittedTokens = emittedCap
+		}
 		if cfg.ActRegistry != nil {
-			h.SetDispatcher(NewActDispatcher(cfg, parentNodeID, prompt, &spawnedChildren))
+			h.SetDispatcher(NewActDispatcher(dispatchCfg, parentNodeID, prompt, &spawnedChildren))
 		}
 
 		// Inner-loop accumulator wiring. When the dispatcher is folding
@@ -483,7 +506,7 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, 
 		// next-turn prompt; the original lives in the journal.
 		var compressTrace *dag.TraceEntry
 		if dispErr == nil && cfg.ToolOutputSalienceCap > 0 {
-			compressed, ct := compressToolOutput(ctx, cfg.ActRegistry, out, cfg.ToolOutputSalienceCap, intent, childID, qname)
+			compressed, ct := compressToolOutput(ctx, cfg.ActRegistry, out, cfg.ToolOutputSalienceCap, cfg.ToolOutputEmittedTokens, intent, childID, qname)
 			if ct != nil {
 				out = compressed
 				compressTrace = ct
@@ -516,8 +539,9 @@ func NewActDispatcher(cfg CodingTurnConfig, parentNodeID string, intent string, 
 		}
 		if cfg.ToolOutputSalienceCap > 0 {
 			entry.Salience = &dag.SalienceContract{
-				MaxOutputTokens: cfg.ToolOutputSalienceCap,
-				Intent:          intent,
+				MaxOutputTokens:  cfg.ToolOutputSalienceCap,
+				MaxEmittedTokens: cfg.ToolOutputEmittedTokens,
+				Intent:           intent,
 			}
 		}
 		// Surface the cost hint in Out for the operator to compare
@@ -609,13 +633,15 @@ func foldIntoAccumulator(ctx context.Context, cfg CodingTurnConfig, observation,
 //     splits by line boundary, joins with "[chunk i/N, lines a-b]"
 //     headers, emits an attend.chunk trace entry. No LLM call. The
 //     calling model sees raw bytes with location headers.
+//     maxEmittedTokens caps the TOTAL tokens across emitted chunks —
+//     0 falls back to the legacy MaxEmittedChunks=8 chunk-count cap.
 //
 //   - Compresses via LLM (other qnames): invokes attend.compress through
 //     reg with the intent string for salience extraction. Emits an
 //     attend.compress trace entry.
 //
 // Returns (raw, nil) when no oversize handling was needed.
-func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxTokens int, intent, parentNodeID, qname string) (string, *dag.TraceEntry) {
+func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxTokens, maxEmittedTokens int, intent, parentNodeID, qname string) (string, *dag.TraceEntry) {
 	if raw == "" || maxTokens <= 0 {
 		return raw, nil
 	}
@@ -627,7 +653,7 @@ func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxT
 	// and an LLM-summarized version would lose information.
 	if qname == "act.read_file" || qname == "act.run_shell" {
 		started := time.Now()
-		joined, totalChunks, emitted := dag.ChunkOversize(raw, maxTokens)
+		joined, totalChunks, emitted := dag.ChunkOversize(raw, maxTokens, maxEmittedTokens)
 		ended := time.Now()
 		childID := fmt.Sprintf("chunk-%d", atomic.AddInt64(&actChildIDCounter, 1))
 		entry := &dag.TraceEntry{
@@ -639,15 +665,17 @@ func compressToolOutput(ctx context.Context, reg *dag.Registry, raw string, maxT
 			OK:            true,
 			CostConsumed:  dag.Cost{LatencyMS: int(ended.Sub(started).Milliseconds())},
 			Out: map[string]any{
-				"chunks":     totalChunks,
-				"emitted":    emitted,
-				"max_tokens": maxTokens,
-				"intent":     intent,
+				"chunks":             totalChunks,
+				"emitted":            emitted,
+				"max_tokens":         maxTokens,
+				"max_emitted_tokens": maxEmittedTokens,
+				"intent":             intent,
 			},
 			Salience: &dag.SalienceContract{
-				MaxOutputTokens: maxTokens,
-				Intent:          intent,
-				ChunkOnOversize: true,
+				MaxOutputTokens:  maxTokens,
+				Intent:           intent,
+				ChunkOnOversize:  true,
+				MaxEmittedTokens: maxEmittedTokens,
 			},
 		}
 		return joined, entry

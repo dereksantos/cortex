@@ -222,9 +222,10 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 		//     is wanted (e.g. cortex_search results).
 		if cfg.ToolOutputSalienceCap > 0 {
 			spec.Salience = &dag.SalienceContract{
-				MaxOutputTokens: cfg.ToolOutputSalienceCap,
-				Intent:          intent,
-				ChunkOnOversize: shouldChunkOnOversize(parsed.ToolName),
+				MaxOutputTokens:  cfg.ToolOutputSalienceCap,
+				Intent:           intent,
+				ChunkOnOversize:  shouldChunkOnOversize(parsed.ToolName),
+				MaxEmittedTokens: budget.EmittedTokensCap(),
 			}
 		}
 

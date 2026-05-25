@@ -166,6 +166,22 @@ type SalienceContract struct {
 	// would lose information. Leave false for nodes where salience
 	// extraction is genuinely valuable (e.g. distilling search results).
 	ChunkOnOversize bool `json:"chunk_on_oversize,omitempty"`
+
+	// MaxEmittedTokens caps the TOTAL tokens emitted across all chunks
+	// when ChunkOnOversize is true. Zero falls back to the legacy
+	// MaxEmittedChunks=8 chunk-count cap (preserves pre-2026-05-25
+	// behavior for callers that haven't been migrated). When > 0, the
+	// chunker walks chunks accumulating their per-chunk token cost and
+	// truncates as soon as adding the next would exceed this budget.
+	//
+	// Sized by Budget.EmittedTokensCap() at spawn time — 4K for code
+	// intent, 16K for review/recall/meta, capped at 30% of the model's
+	// context window. The old chunk-count cap was sized for older
+	// per-chunk caps (1K-8K); at today's 500-token per-chunk cap, 8
+	// chunks meant ~22% of repl.go was emitted before truncation, and
+	// the calling model had no way to ask for the rest. Token budget
+	// makes the cap independent of the per-chunk size.
+	MaxEmittedTokens int `json:"max_emitted_tokens,omitempty"`
 }
 
 // ParamSpec declares one input or output parameter for a node.

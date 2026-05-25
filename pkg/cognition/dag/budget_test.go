@@ -7,11 +7,11 @@ func TestBudgetForIntent_knownIntents(t *testing.T) {
 		intent string
 		want   Budget
 	}{
-		{"greeting", Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500}},
-		{"clarify", Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}},
-		{"recall", Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}},
-		{"review", Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}},
-		{"meta", Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}},
+		{"greeting", Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500, Intent: "greeting"}},
+		{"clarify", Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600, Intent: "clarify"}},
+		{"recall", Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000, Intent: "recall"}},
+		{"review", Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000, Intent: "review"}},
+		{"meta", Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500, Intent: "meta"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.intent, func(t *testing.T) {
@@ -23,16 +23,20 @@ func TestBudgetForIntent_knownIntents(t *testing.T) {
 }
 
 func TestBudgetForIntent_codeIsDefault(t *testing.T) {
-	if got, want := BudgetForIntent("code"), DefaultTurnBudget(); got != want {
-		t.Errorf("BudgetForIntent(\"code\") = %+v, want DefaultTurnBudget = %+v", got, want)
+	want := DefaultTurnBudget()
+	want.Intent = "code"
+	if got := BudgetForIntent("code"); got != want {
+		t.Errorf("BudgetForIntent(\"code\") = %+v, want DefaultTurnBudget+Intent=code = %+v", got, want)
 	}
 }
 
 func TestBudgetForIntent_unknownAndEmptyAreDefault(t *testing.T) {
 	def := DefaultTurnBudget()
 	for _, intent := range []string{"unknown-label", "", "GREETING", "Code"} {
-		if got := BudgetForIntent(intent); got != def {
-			t.Errorf("BudgetForIntent(%q) = %+v, want DefaultTurnBudget = %+v (case-sensitive: only lowercase known labels match)", intent, got, def)
+		want := def
+		want.Intent = intent
+		if got := BudgetForIntent(intent); got != want {
+			t.Errorf("BudgetForIntent(%q) = %+v, want DefaultTurnBudget+Intent=%q = %+v (case-sensitive: only lowercase known labels match)", intent, got, intent, want)
 		}
 	}
 }

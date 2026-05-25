@@ -179,8 +179,9 @@ func applyDeterministicChunking(
 	nextChildID func() string,
 ) *TraceEntry {
 	cap := item.spec.Salience.MaxOutputTokens
+	emittedCap := item.spec.Salience.MaxEmittedTokens
 	started := time.Now()
-	joined, totalChunks, emitted := ChunkOversize(raw, cap)
+	joined, totalChunks, emitted := ChunkOversize(raw, cap, emittedCap)
 	ended := time.Now()
 
 	childID := nextChildID()
@@ -207,43 +208,89 @@ func applyDeterministicChunking(
 }
 
 // MaxEmittedChunks bounds how many deterministic chunks ChunkOversize
-// emits before truncating. 8 chunks at typical cap sizes (1K-8K
-// tokens) covers most real files without flooding the accumulator;
-// beyond this, the calling model should re-fetch specific ranges
-// rather than slurp the whole file.
+// emits when no token-budget cap is supplied. The legacy fallback —
+// preserved for callers that haven't been migrated to the token-budget
+// shape. 8 chunks at the old 1K-8K per-chunk caps covered most real
+// files; at today's 500-token per-chunk cap it pathologically truncates
+// to ~22% of a moderately-sized file (see docs/handoff-2026-05-25.md).
+// New callers should pass maxEmittedTokens > 0 from
+// Budget.EmittedTokensCap() instead.
 const MaxEmittedChunks = 8
 
 // ChunkOversize splits raw by line boundary into chunks each ≤ cap
 // tokens, joins them into one string with "[chunk i/N, lines a-b]"
-// headers, and returns (joined, totalChunks, emittedChunks). When
-// totalChunks > MaxEmittedChunks the output is truncated with a
-// "[truncated — N more lines …]" marker pointing the calling model
-// at the missing tail.
+// headers, and returns (joined, totalChunks, emittedChunks).
+//
+// Truncation policy:
+//   - maxEmittedTokens > 0 (token budget): walk chunks accumulating
+//     their per-chunk token cost; stop as soon as adding the next chunk
+//     would exceed the budget. At least one chunk is always emitted.
+//   - maxEmittedTokens == 0 (legacy chunk-count cap): truncate at
+//     MaxEmittedChunks. Backward-compat for callers that haven't been
+//     migrated.
+//
+// In both modes the trailing "[truncated — N more lines …]" marker
+// points the calling model at the missing tail. The marker's "re-fetch
+// with explicit line range" advice depends on act.read_file's surface
+// supporting start_line / end_line — that's Piece 2 of the
+// handoff-2026-05-25 plan; until it lands, raising the emission budget
+// is the lever that makes the harness usable on bigger files.
 //
 // Used by the executor's salience hook (ChunkOnOversize=true) and by
 // internal/harness/dagnode's inner-agent-loop compress path so the two
 // share one definition of "chunked the same way."
-func ChunkOversize(raw string, cap int) (joined string, totalChunks, emittedChunks int) {
+func ChunkOversize(raw string, cap, maxEmittedTokens int) (joined string, totalChunks, emittedChunks int) {
 	if cap <= 0 {
 		cap = 500
 	}
 	lines := splitLines(raw)
 	all := buildChunksByLine(lines, cap)
 	totalChunks = len(all)
-	emit := all
-	if totalChunks > MaxEmittedChunks {
-		emit = all[:MaxEmittedChunks]
-	}
-	emittedChunks = len(emit)
+
+	emitCount := emittedChunkCount(all, maxEmittedTokens)
+	emit := all[:emitCount]
+	emittedChunks = emitCount
 	joined = joinChunks(emit, totalChunks)
-	if totalChunks > MaxEmittedChunks {
+	if emitCount < totalChunks {
 		extra := 0
-		for _, c := range all[MaxEmittedChunks:] {
+		for _, c := range all[emitCount:] {
 			extra += c.endLine - c.startLine + 1
 		}
-		joined += fmt.Sprintf("\n\n[truncated — %d more lines beyond chunk %d; re-fetch with explicit line range]\n", extra, MaxEmittedChunks)
+		nextStart := all[emitCount].startLine
+		lastLine := all[len(all)-1].endLine
+		joined += fmt.Sprintf(
+			"\n\n[truncated — %d more lines beyond chunk %d; re-fetch with start_line=%d, end_line=%d to paginate]\n",
+			extra, emitCount, nextStart, lastLine,
+		)
 	}
 	return joined, totalChunks, emittedChunks
+}
+
+// emittedChunkCount picks how many chunks to emit under either the
+// token-budget (when maxEmittedTokens > 0) or legacy chunk-count
+// (MaxEmittedChunks) policy. Always returns ≥ 1 when there's at least
+// one chunk — emitting nothing would deprive the calling model of any
+// content at all, which is strictly worse than emitting an oversized
+// first chunk it can inspect.
+func emittedChunkCount(all []chunkRange, maxEmittedTokens int) int {
+	if len(all) == 0 {
+		return 0
+	}
+	if maxEmittedTokens <= 0 {
+		if len(all) > MaxEmittedChunks {
+			return MaxEmittedChunks
+		}
+		return len(all)
+	}
+	used := 0
+	for i, c := range all {
+		cost := approxOutputTokens(c.content)
+		if i > 0 && used+cost > maxEmittedTokens {
+			return i
+		}
+		used += cost
+	}
+	return len(all)
 }
 
 // chunkRange records the line-bounds and content of one mechanically-
