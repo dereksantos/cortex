@@ -308,6 +308,72 @@ func min(a, b int) int {
 	return b
 }
 
+// TestNewActDispatcher_TokenBudgetEmitsMoreChunks pins Piece 1 of the
+// chunker fix: with cfg.ToolOutputEmittedTokens > 0, the dispatcher
+// uses a token-budget cap instead of the legacy 8-chunk cap. A budget
+// generous enough to cover the whole file should emit ALL chunks and
+// drop the "[truncated …]" marker — closing the loop pathology where
+// the model re-reads the same 22% slice every turn.
+func TestNewActDispatcher_TokenBudgetEmitsMoreChunks(t *testing.T) {
+	actReg := dag.NewRegistry()
+	if _, err := RegisterDefaultActOpMetadata(actReg); err != nil {
+		t.Fatalf("register default metadata: %v", err)
+	}
+	// 100 lines × 40 chars ≈ 1K tokens. Per-chunk cap 40 forces ~25
+	// chunks. With ToolOutputEmittedTokens=4000 (review/recall budget),
+	// every chunk should emit.
+	lines := make([]string, 100)
+	for i := range lines {
+		lines[i] = strings.Repeat("abcd", 10) + "\n"
+	}
+	bigOut := strings.Join(lines, "")
+	harnessReg, _ := newTestHarnessRegistry("read_file", bigOut, nil)
+
+	var captured []dag.TraceEntry
+	var spawned []string
+	cfg := CodingTurnConfig{
+		ActRegistry:             actReg,
+		TraceCB:                 func(e dag.TraceEntry) { captured = append(captured, e) },
+		ToolOutputSalienceCap:   40,
+		ToolOutputEmittedTokens: 4000,
+	}
+	dispatch := NewActDispatcher(cfg, "coding_turn_id", "explain this file", &spawned)
+
+	out, err := dispatch(context.Background(), harnessReg, llm.ToolCall{
+		ID:       "call_1",
+		Function: llm.ToolCallFunction{Name: "read_file", Arguments: `{"path":"x"}`},
+	})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if strings.Contains(out, "[truncated") {
+		t.Errorf("token budget 4000 ≫ content (~1K tokens) — no truncation marker expected; got %q",
+			out[max(0, len(out)-200):])
+	}
+	if len(captured) != 2 {
+		t.Fatalf("expected 2 trace entries (act.read_file + attend.chunk), got %d", len(captured))
+	}
+	chunk := captured[1]
+	if chunk.Salience == nil || chunk.Salience.MaxEmittedTokens != 4000 {
+		t.Errorf("chunk trace should carry MaxEmittedTokens=4000; got %+v", chunk.Salience)
+	}
+	emitted, _ := chunk.Out["emitted"].(int)
+	total, _ := chunk.Out["chunks"].(int)
+	if emitted != total {
+		t.Errorf("emitted=%d != total=%d — budget should have covered everything", emitted, total)
+	}
+	if emitted <= dag.MaxEmittedChunks {
+		t.Errorf("emitted=%d should exceed legacy MaxEmittedChunks=%d to prove the token-budget path fired", emitted, dag.MaxEmittedChunks)
+	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // TestNewActDispatcher_SalienceSkippedUnderCap pins the under-cap
 // passthrough: tool outputs below ToolOutputSalienceCap stay unchanged
 // and no synthetic compress trace fires. Guards against the dispatcher

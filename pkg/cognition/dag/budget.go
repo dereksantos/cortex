@@ -46,6 +46,15 @@ type Budget struct {
 	// their own configured provider (cfg.Provider). Per
 	// docs/per-node-routing-plan.md "Executor wiring (Option A)".
 	Provider llm.Provider
+
+	// Intent is the classified session intent ("code" / "review" /
+	// "recall" / "meta" / "greeting" / "clarify") set by the REPL after
+	// sense.classify_intent runs. Handlers that need to shape work by
+	// intent (e.g. the per-deposit emission budget for chunked tool
+	// outputs via EmittedTokensCap) read it here. Empty preserves
+	// pre-intent behavior — callers without classification keep today's
+	// shape.
+	Intent string
 }
 
 // Cost is what a single node call reports as consumed. The executor
@@ -136,6 +145,40 @@ func (b Budget) WithMaxContextTokens(n int) Budget {
 	}
 	b.MaxContextTokens = n
 	return b
+}
+
+// EmittedTokensCap returns the per-deposit emission budget for chunked
+// tool output, sized by classified intent and clamped to a fraction of
+// the model's context window.
+//
+//   - code (or empty / unknown): 4000 tokens. Focused on the immediate
+//     edit context — small enough that the accumulator can carry
+//     several reads side-by-side without the synthesizer's prompt
+//     blowing past the window.
+//   - review / recall / meta: 16000 tokens. Read-heavy intents need
+//     to see whole files; 16K covers ~90% of real source files end-to-
+//     end so the agent doesn't loop on the first-N-chunks slice.
+//
+// Hard ceiling: 30% of MaxContextTokens (when known). Even on a small-
+// context model, no single deposit may claim more than ~⅓ of the
+// window — that leaves room for the system prompt, prior accumulator
+// snapshots, and the response. Returns 0 when no policy applies
+// (callers fall back to the legacy MaxEmittedChunks=8 cap).
+func (b Budget) EmittedTokensCap() int {
+	var cap int
+	switch b.Intent {
+	case "review", "recall", "meta":
+		cap = 16000
+	default:
+		cap = 4000
+	}
+	if b.MaxContextTokens > 0 {
+		ceiling := (b.MaxContextTokens * 30) / 100
+		if ceiling > 0 && cap > ceiling {
+			cap = ceiling
+		}
+	}
+	return cap
 }
 
 // PromptBudget returns a recommended per-node prompt-token cap
@@ -256,20 +299,23 @@ func DefaultCaptureBudget() Budget {
 //   - meta: REPL/config queries — a small synthesis call.
 //   - code: full DefaultTurnBudget; today's behavior.
 func BudgetForIntent(intent string) Budget {
+	var b Budget
 	switch intent {
 	case "greeting":
-		return Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500}
+		b = Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500}
 	case "clarify":
-		return Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}
+		b = Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}
 	case "recall":
-		return Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
+		b = Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
 	case "review":
-		return Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}
+		b = Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}
 	case "meta":
-		return Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
+		b = Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
 	case "code":
-		return DefaultTurnBudget()
+		b = DefaultTurnBudget()
 	default:
-		return DefaultTurnBudget()
+		b = DefaultTurnBudget()
 	}
+	b.Intent = intent
+	return b
 }
