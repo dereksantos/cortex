@@ -2645,6 +2645,13 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// intent="code" with the original confidence so the seed falls
 	// through to the full chain under DefaultTurnBudget.
 	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
+	// Forward the classified intent to the session harness so its
+	// inner agent loop's no_progress heuristic knows whether to treat
+	// read-only windows as pathological (code intent) or as the
+	// expected work shape (review/recall/meta). h is the same
+	// harness HarnessFactory captures for decide.coding_turn, so the
+	// setter takes effect on the next RunSessionWithResult call.
+	h.SetIntent(intent)
 	turnBudget := dag.BudgetForIntent(intent)
 	// Layer the model's n_ctx onto the seed budget so handlers
 	// (attend.accumulate, decide.next, attend.compact) can size

@@ -82,22 +82,45 @@ func TestProgressTracker_NotEnoughTurnsYet(t *testing.T) {
 	for i := 0; i < noProgressWindow-1; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), "a.go")})
 	}
-	if p.noProgress() {
+	if p.noProgress("code") {
 		t.Errorf("noProgress() = true before window full; want false")
 	}
 }
 
-func TestProgressTracker_AllReadsNoWrite_TriggersStop(t *testing.T) {
+func TestProgressTracker_AllReadsNoWrite_TriggersStop_ForCodeIntent(t *testing.T) {
 	p := &progressTracker{}
-	// Window of pure-read turns; varying paths so the "same files"
-	// condition does NOT fire — this isolates the "no write_file/
-	// run_shell" condition.
+	// Window of pure-read turns with varying paths. For code intent
+	// the "no write_file/run_shell" condition fires — an editing
+	// session that's only read after 5 turns is the agent-loop
+	// pathology the heuristic catches.
 	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
 	for i := 0; i < noProgressWindow; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), paths[i%len(paths)])})
 	}
-	if !p.noProgress() {
-		t.Errorf("noProgress() = false; want true after %d read-only turns", noProgressWindow)
+	if !p.noProgress("code") {
+		t.Errorf("noProgress(code) = false; want true after %d read-only turns", noProgressWindow)
+	}
+	// Empty intent preserves pre-intent behavior — backwards compat
+	// for non-REPL callers (eval suites) that don't classify.
+	if !p.noProgress("") {
+		t.Errorf("noProgress(\"\") = false; want true (backwards compat)")
+	}
+}
+
+func TestProgressTracker_AllReadsNoWrite_DoesNotTrigger_ForReviewIntent(t *testing.T) {
+	p := &progressTracker{}
+	// Same shape as the code-intent test — but for review/recall the
+	// read-only window IS the work, not a pathology. condition 1
+	// must be suppressed; condition 2 doesn't fire because reads
+	// differ across turns.
+	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	for i := 0; i < noProgressWindow; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), paths[i%len(paths)])})
+	}
+	for _, intent := range []string{"review", "recall", "meta", "clarify"} {
+		if p.noProgress(intent) {
+			t.Errorf("noProgress(%q) = true; want false — read-only is expected for this intent", intent)
+		}
 	}
 }
 
@@ -111,21 +134,23 @@ func TestProgressTracker_OneWriteResets_DoesNotStop(t *testing.T) {
 	for i := 0; i < noProgressWindow-1; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), paths[i])})
 	}
-	if p.noProgress() {
-		t.Errorf("noProgress() = true; want false when window contains a write")
+	if p.noProgress("code") {
+		t.Errorf("noProgress(code) = true; want false when window contains a write")
 	}
 }
 
 func TestProgressTracker_SameFileReadInCircle_TriggersStop(t *testing.T) {
 	p := &progressTracker{}
-	// Every turn in the window reads exactly the same file. Both
-	// conditions fire here (no writes + identical read targets) —
-	// the test pins the same-file-in-a-circle pathology.
+	// Every turn in the window reads exactly the same file. Condition
+	// 2 (re-reading targets in a circle) is true spinning regardless
+	// of intent — must fire for both code AND review.
 	for i := 0; i < noProgressWindow; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "main.go")})
 	}
-	if !p.noProgress() {
-		t.Errorf("noProgress() = false; want true after window of identical reads")
+	for _, intent := range []string{"code", "review", "recall", ""} {
+		if !p.noProgress(intent) {
+			t.Errorf("noProgress(%q) = false; want true — same-file-in-circle is spinning regardless of intent", intent)
+		}
 	}
 }
 
@@ -163,6 +188,7 @@ func TestLoop_NoProgress_StopsLoop_RespectsBudgetCeiling(t *testing.T) {
 		Provider: &scriptedProvider{responses: resps},
 		Registry: reg,
 		System:   "test",
+		Intent:   "code", // condition 1 only fires for edit-intended sessions
 	}
 	res, err := loop.Run(context.Background(), "explore the repo")
 	if err != nil {
@@ -173,6 +199,47 @@ func TestLoop_NoProgress_StopsLoop_RespectsBudgetCeiling(t *testing.T) {
 	}
 	if res.Turns != noProgressWindow {
 		t.Errorf("Turns=%d; want %d (stop fires after the window fills)", res.Turns, noProgressWindow)
+	}
+}
+
+// TestLoop_ReviewIntent_ReadOnlyWindow_DoesNotTriggerNoProgress —
+// pins that explanation/review sessions can read several files
+// without writing and STILL reach a model-done final answer. Before
+// the Intent field, a 5-read window terminated with ReasonNoProgress
+// regardless of intent, killing read-heavy explanations one turn
+// before the model could synthesize.
+func TestLoop_ReviewIntent_ReadOnlyWindow_DoesNotTriggerNoProgress(t *testing.T) {
+	reg := newRegistry(t)
+	// 5 distinct-file reads, then a final text message. With code
+	// intent this would fire ReasonNoProgress; with review intent
+	// condition 1 is suppressed so the loop runs the final turn.
+	resps := []llm.ChatResult{}
+	for i := 0; i < noProgressWindow; i++ {
+		resps = append(resps, llm.ChatResult{
+			ToolCalls: []llm.ToolCall{readCall(
+				fmt.Sprintf("r%d", i),
+				fmt.Sprintf("file%d.go", i),
+			)},
+			FinishReason: "tool_calls",
+		})
+	}
+	resps = append(resps, llm.ChatResult{Content: "here is the explanation", FinishReason: "stop"})
+
+	loop := &Loop{
+		Provider: &scriptedProvider{responses: resps},
+		Registry: reg,
+		System:   "test",
+		Intent:   "review",
+	}
+	res, err := loop.Run(context.Background(), "explain the core files")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reason != ReasonModelDone {
+		t.Errorf("Reason=%q; want %q — review intent must complete after read-only exploration", res.Reason, ReasonModelDone)
+	}
+	if res.Final != "here is the explanation" {
+		t.Errorf("Final=%q; want final synthesis text", res.Final)
 	}
 }
 
