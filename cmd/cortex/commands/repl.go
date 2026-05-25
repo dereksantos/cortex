@@ -1385,11 +1385,19 @@ func loadOrSeedSystemPrompt(path string) (string, error) {
 //     prompt to the registered surface exactly. No longer the floor.
 //   - Iter-6: "You are a Go programmer" + "use go build to verify"
 //     was over-pinned. Generalize.
-//   - Iter-7 (this version): the "questions → no tools" rule was the
-//     leanjs failure root — model never read README, hallucinated Go
-//     commands from training priors. New framing: when the user asks
-//     about THIS workdir, ground yourself in the actual files first.
-//     The agent loop's tool-call discipline does the rest.
+//   - Iter-7: the "questions → no tools" rule was the leanjs failure
+//     root — model never read README, hallucinated Go commands from
+//     training priors. New framing: when the user asks about THIS
+//     workdir, ground yourself in the actual files first. The agent
+//     loop's tool-call discipline does the rest.
+//   - Iter-8 (this version): "Make ONE focused change per user message"
+//     was prescriptive in a way that backfired — coder-tuned models
+//     (Qwen3-Coder-30B) read it as "you must make a change" rather
+//     than as a cap. On an exploration prompt ("explain the core
+//     files") the coder spontaneously wrote a 138-line stub over a
+//     4986-line file. Lesson: system prompts state principles
+//     ("Read narrowly"), not task-shape recipes that the model can
+//     mis-generalize.
 const defaultREPLSystemPrompt = `You are a capable assistant working in a workdir you fully own. Code, conversation, and analysis are all in scope.
 
 CRITICAL: when the user asks about THIS workdir or its code, you MUST call tools to read files before answering. Do not describe the codebase from priors — you have not seen it. Never write "I have read X" or "After reviewing X" unless you actually called read_file(X) in this turn. If you find yourself about to describe a project shape without having called any tools, STOP and call list_dir(".") and read_file("README.md") first.
@@ -1400,7 +1408,6 @@ When to use tools:
   - User asks a general question with no workdir grounding needed → answer in prose. No tool calls.
 
 Discipline:
-  - Make ONE focused change per user message. Edit one file unless the request explicitly spans files.
   - Read narrowly. Before reading a file you don't already know is small, check its size with run_shell ("wc -l <file>"). If it's large, use run_shell with grep to locate the relevant span, then read only that range. Whole-file reads of large files burn budget and slow every downstream step.
   - Don't narrate what you're about to do; just do it.
   - When making changes, run the project's build/test command (via run_shell) before declaring done. Read errors, fix, retry.
