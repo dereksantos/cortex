@@ -426,11 +426,32 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		l.costUSD += l.Provider.LastCostUSD()
 		res.Turns = turn + 1
 
+		// XML-style tool-call recovery. Several open coders
+		// (Qwen3-Coder, DeepSeek-Coder, CodeLlama in tool-use mode)
+		// emit `<function=NAME><parameter=K>V</parameter></function>`
+		// blocks in the response Content instead of populating the
+		// structured ToolCalls array. Without recovery the loop sees
+		// zero calls and stops with the XML-shaped text as the final
+		// answer — zero work done.
+		//
+		// When ToolCalls is empty AND content has the XML markers,
+		// parse them out and inject so the loop dispatches as if the
+		// model had emitted structured calls. The model's reasoning
+		// stays in Content; only the dispatch list is augmented.
+		xmlRecovered := 0
+		if len(callRes.ToolCalls) == 0 && callRes.Content != "" {
+			if recovered := llm.ParseXMLToolCalls(callRes.Content); len(recovered) > 0 {
+				callRes.ToolCalls = recovered
+				xmlRecovered = len(recovered)
+			}
+		}
+
 		l.note("coding.turn", map[string]any{
 			"turn":           turn,
 			"finish_reason":  callRes.FinishReason,
 			"content_chars":  len(callRes.Content),
 			"tool_calls":     len(callRes.ToolCalls),
+			"xml_recovered":  xmlRecovered,
 			"tokens_in":      stats.InputTokens,
 			"tokens_out":     stats.OutputTokens,
 			"cumulative_in":  l.tokensIn,
