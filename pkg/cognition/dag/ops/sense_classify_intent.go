@@ -40,11 +40,17 @@ type classifyIntentResponse struct {
 // ClassifyIntentSpec returns the NodeSpec for sense.classify_intent.
 //
 // Requires declares the capability preference chain the executor's
-// Router uses to pick the per-node provider. Intent classification is
-// a structured-output task (six fixed buckets) — the tool-calling
-// specialist beats a larger generalist on reliability AND speed for
-// this shape. Chain: prefer a specialist when available, accept any
-// tool-callable model as fallback.
+// Router uses to pick the per-node provider. Classification emits
+// a JSON object matching a schema ({intent, confidence, why}) — that's
+// structured output, NOT function-call shape. Tool-call specialists
+// (xLAM et al.) are trained on the narrow "given a tool catalog, emit
+// one function call" pattern and silently return malformed output for
+// arbitrary schemas — empirically yielded `intent=code conf=0` silent
+// fallback when xLAM was preferred here.
+//
+// Bare CapToolCalling routes to any tool-callable chat model; the
+// picker's "generalist prefers larger" rule lands on whatever the
+// operator deploys as the workhorse (typically the coder).
 func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncSense,
@@ -61,7 +67,7 @@ func ClassifyIntentSpec(cfg ClassifyIntentConfig) dag.NodeSpec {
 		},
 		Cost:      classifyIntentCostHint,
 		Exposable: true,
-		Requires:  []string{llm.CapToolCallingSpecialist, llm.CapToolCalling},
+		Requires:  []string{llm.CapToolCalling},
 		Handler:   NewClassifyIntentHandler(cfg),
 	}
 }

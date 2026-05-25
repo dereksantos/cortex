@@ -140,13 +140,13 @@ func TestClassifyIntent_spec(t *testing.T) {
 	if spec.Cost.LatencyMS == 0 {
 		t.Error("Cost.LatencyMS should be non-zero")
 	}
-	// Per-node routing substrate: Requires drives the executor's Router
-	// to prefer a tool-calling specialist (the picker's "generalist
-	// prefers larger" rule otherwise sends classification to whatever
-	// big tool-callable model is around, which is wasted compute).
-	wantReq := []string{"tool-calling:specialist", "tool-calling"}
-	if len(spec.Requires) != 2 || spec.Requires[0] != wantReq[0] || spec.Requires[1] != wantReq[1] {
-		t.Errorf("Requires: got %v want %v", spec.Requires, wantReq)
+	// Per-node routing substrate: classification is structured output
+	// but NOT function-call shape — tool-call specialists (xLAM et al.)
+	// silently fail on this schema. Bare CapToolCalling routes to any
+	// tool-callable chat model; the workhorse handles classification
+	// fine.
+	if len(spec.Requires) != 1 || spec.Requires[0] != "tool-calling" {
+		t.Errorf("Requires: got %v want [tool-calling]", spec.Requires)
 	}
 }
 
