@@ -113,11 +113,18 @@ const recursionDepthAttr = "_dnext_depth"
 // NextSpec returns the dag.NodeSpec for decide.next.
 //
 // Requires declares the capability preference chain the executor's
-// Router uses to pick the per-node provider. decide.next emits a JSON
-// nodes-list — the same structured-emission task decide.tool_call
-// does — so it leans on the same tool-calling specialist for
-// reliability, falling back to any tool-calling-capable model when
-// no specialist is available.
+// Router uses to pick the per-node provider. decide.next is a
+// *planning* node — it reads the user's prompt + the op catalog and
+// composes a multi-step DAG. That's a reasoning task, not a
+// function-call task. Routing it to a tool-call specialist (xLAM,
+// phi-3-mini-tools, etc.) fails: those models are trained on the
+// narrow "given a tool catalog, emit one function call" shape and
+// respond in English when asked to compose arbitrary JSON node lists.
+//
+// Chain: prefer a reasoning model when one is tagged; fall back to
+// any tool-callable chat model (coder, generalist). On stacks where
+// no reasoning specialist is auto-detected, this falls through to
+// the operator's session default.
 func NextSpec(cfg NextConfig) dag.NodeSpec {
 	return dag.NodeSpec{
 		Function:    dag.FuncDecide,
@@ -133,7 +140,7 @@ func NextSpec(cfg NextConfig) dag.NodeSpec {
 		},
 		Cost:      nextCostHint,
 		Exposable: true, // the LLM can recurse into decide.next
-		Requires:  []string{llm.CapToolCallingSpecialist, llm.CapToolCalling},
+		Requires:  []string{llm.CapReasoning, llm.CapToolCalling},
 		Handler:   NewNextHandler(cfg),
 	}
 }

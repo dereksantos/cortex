@@ -58,10 +58,13 @@ const (
 // a window of this size are:
 //
 //  1. Zero write_file / run_shell calls — pure exploration that
-//     never lands a change is the dominant agent-loop pathology on
-//     small models.
+//     never lands a change. Only fires for `code` intent (or empty,
+//     for backwards compat with non-REPL callers): "review" /
+//     "recall" / "meta" sessions are expected to be read-only and
+//     an all-reads window is the work, not a pathology.
 //  2. Identical read_file / list_dir targets across every turn —
-//     the model re-reading the same files in a circle.
+//     the model re-reading the same files in a circle. Always fires
+//     regardless of intent — that's true spinning.
 //
 // 5 turns is generous enough that legitimate exploration (search →
 // read → search → think → write) clears the bar, but tight enough
@@ -185,6 +188,15 @@ type Loop struct {
 	// turns live in the snapshot.
 	KeepRecentTurns int
 
+	// Intent is the classified intent for this session (e.g. "code",
+	// "review", "recall"). Gates the no_progress heuristic's
+	// "no write_file / no run_shell" condition — that pathology
+	// signal only applies to edit-intended sessions. Empty preserves
+	// pre-intent behavior (condition fires regardless), so callers
+	// that don't classify intent (eval suites, batch jobs) keep
+	// today's protections.
+	Intent string
+
 	// Stats accumulated as the loop runs.
 	tokensIn  int
 	tokensOut int
@@ -244,29 +256,52 @@ func (p *progressTracker) recordTurn(calls []llm.ToolCall) {
 // noProgress reports whether the recent window suggests the loop
 // is spinning. Returns false until the window is full so early
 // exploration isn't punished.
-func (p *progressTracker) noProgress() bool {
+//
+// intent gates condition 1: an all-reads window is normal work for
+// review/recall/explanation intents; only "code" intent (or empty
+// — backwards compat) treats it as a pathology. Condition 2
+// (re-reading the same targets in a circle) fires regardless of
+// intent — that's spinning by any measure.
+func (p *progressTracker) noProgress(intent string) bool {
 	if len(p.turnShapes) < noProgressWindow {
 		return false
 	}
-	// Condition 1: zero write_file/run_shell calls in the entire window.
-	anyWrite := false
-	for _, s := range p.turnShapes {
-		if s.hadWriteOrShell {
-			anyWrite = true
-			break
+	// Condition 1: zero write_file/run_shell calls in the window.
+	// Only meaningful for edit-intended sessions; for review/recall
+	// the work IS exploration, and reading several files without
+	// writing is the expected shape.
+	if intent == "" || intent == "code" {
+		anyWrite := false
+		for _, s := range p.turnShapes {
+			if s.hadWriteOrShell {
+				anyWrite = true
+				break
+			}
+		}
+		if !anyWrite {
+			return true
 		}
 	}
-	if !anyWrite {
-		return true
-	}
-	// Condition 2: every turn in the window re-reads the same set of
-	// targets (and that set is non-empty). The model is reading in a
-	// circle without writing.
-	first := p.turnShapes[0].readTargets
+	// Condition 2: the trailing K turns all read the same set of
+	// targets (and that set is non-empty). Trailing-K rather than
+	// whole-window catches the "model previously did productive
+	// work but is NOW stuck re-reading the same file" failure mode
+	// — when earlier diverse reads keep a whole-window equality
+	// check from ever firing even though the model has clearly
+	// entered a circle.
+	//
+	// K=4 is conservative: 3 consecutive identical reads can be
+	// legitimate (mining a long file for multiple symbols); 4 is
+	// hard to explain as anything but a loop. The buffer cap stays
+	// noProgressWindow (5), so K=4 leaves one slot of historical
+	// diversity before this condition can fire.
+	const trailingIdenticalK = 4
+	tail := p.turnShapes[len(p.turnShapes)-trailingIdenticalK:]
+	first := tail[0].readTargets
 	if first == "" {
 		return false
 	}
-	for _, s := range p.turnShapes[1:] {
+	for _, s := range tail[1:] {
 		if s.readTargets != first {
 			return false
 		}
@@ -426,11 +461,32 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		l.costUSD += l.Provider.LastCostUSD()
 		res.Turns = turn + 1
 
+		// XML-style tool-call recovery. Several open coders
+		// (Qwen3-Coder, DeepSeek-Coder, CodeLlama in tool-use mode)
+		// emit `<function=NAME><parameter=K>V</parameter></function>`
+		// blocks in the response Content instead of populating the
+		// structured ToolCalls array. Without recovery the loop sees
+		// zero calls and stops with the XML-shaped text as the final
+		// answer — zero work done.
+		//
+		// When ToolCalls is empty AND content has the XML markers,
+		// parse them out and inject so the loop dispatches as if the
+		// model had emitted structured calls. The model's reasoning
+		// stays in Content; only the dispatch list is augmented.
+		xmlRecovered := 0
+		if len(callRes.ToolCalls) == 0 && callRes.Content != "" {
+			if recovered := llm.ParseXMLToolCalls(callRes.Content); len(recovered) > 0 {
+				callRes.ToolCalls = recovered
+				xmlRecovered = len(recovered)
+			}
+		}
+
 		l.note("coding.turn", map[string]any{
 			"turn":           turn,
 			"finish_reason":  callRes.FinishReason,
 			"content_chars":  len(callRes.Content),
 			"tool_calls":     len(callRes.ToolCalls),
+			"xml_recovered":  xmlRecovered,
 			"tokens_in":      stats.InputTokens,
 			"tokens_out":     stats.OutputTokens,
 			"cumulative_in":  l.tokensIn,
@@ -481,7 +537,7 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		// stopped exploratory sessions too early. Budget still wins
 		// when cost or tokens cross their caps.
 		progress.recordTurn(callRes.ToolCalls)
-		if progress.noProgress() {
+		if progress.noProgress(l.Intent) {
 			res.Reason = ReasonNoProgress
 			l.note("coding.no_progress", map[string]any{
 				"turn":   turn,
