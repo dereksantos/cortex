@@ -353,6 +353,11 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	// emit a JSON summary (--json) or rely on the standard turn
 	// summary printed at finalize-time.
 	if oneShotPrompt != "" {
+		// One-shot has no interactive /undo path, so per-turn snapshots
+		// are pure overhead. Skipping them also keeps stale snapshot
+		// trees from polluting the model's find/grep results across
+		// runs.
+		state.skipSnapshots = true
 		if !jsonOutput {
 			printREPLBanner(state)
 		}
@@ -512,7 +517,15 @@ type replState struct {
 	//                      output fed back each round).
 	customVerifierCmd string
 	headless          bool
-	maxRetries        int
+	// skipSnapshots disables per-turn workdir copies into
+	// .cortex/sessions/<ts>/snapshots/turn-<n>/. Snapshots back /undo
+	// and /diff, which are unreachable in one-shot mode (--prompt) and
+	// the cumulative pile pollutes find/grep across the workdir
+	// (.cortex/sessions/.../snapshots/turn-001/<file> shows up in
+	// recursive searches the model runs). Default false preserves
+	// interactive behavior; --prompt flips it on.
+	skipSnapshots bool
+	maxRetries    int
 	// Optional per-attempt budget overrides. Zero = inherit the REPL
 	// defaults (defaultMaxTurns / defaults from internal/harness).
 	// Benchmark harnesses bump these because SWE-bench-class repo
@@ -1721,9 +1734,13 @@ func (s *replState) runTurn(userPrompt string) error {
 	// the prior turn wasn't a clarify (lastClarifyPrompt empty).
 	turnPrompt := s.stitchClarifyFollowUp(userPrompt)
 
-	snapDir, err := s.snapshotWorkdir(turnNum)
-	if err != nil {
-		return fmt.Errorf("snapshot: %w", err)
+	snapDir := ""
+	if !s.skipSnapshots {
+		var err error
+		snapDir, err = s.snapshotWorkdir(turnNum)
+		if err != nil {
+			return fmt.Errorf("snapshot: %w", err)
+		}
 	}
 
 	row := turnRow{
@@ -2659,7 +2676,37 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// harness HarnessFactory captures for decide.coding_turn, so the
 	// setter takes effect on the next RunSessionWithResult call.
 	h.SetIntent(intent)
+	// Default budget from the intent table. This stays as the FLOOR —
+	// if the scope estimator is unavailable, parses badly, or returns
+	// fallback, the executor still has a workable envelope so the turn
+	// completes. When estimation succeeds we replace the per-axis
+	// numbers below.
 	turnBudget := dag.BudgetForIntent(intent)
+	// Scope estimation: reason about how much work THIS specific prompt
+	// implies and seed the budget accordingly. Free-form scope + integer
+	// axes; falls back to the intent table on any failure so misroutes
+	// can't starve a turn. See sense.estimate_scope.
+	scope, scopeBudget, scopeFallback := estimateScopeForTurn(reg, router, prompt, intent, projectSignalFor(s.workdir), traceCB)
+	if !scopeFallback {
+		// Take the maximum across each axis so the estimator can only
+		// EXPAND the envelope, never shrink it below the intent floor.
+		// Prevents a low-confidence estimate from accidentally tightening
+		// the budget for a known-expensive intent shape.
+		if scopeBudget.Tokens > turnBudget.Tokens {
+			turnBudget.Tokens = scopeBudget.Tokens
+		}
+		if scopeBudget.LatencyMS > turnBudget.LatencyMS {
+			turnBudget.LatencyMS = scopeBudget.LatencyMS
+		}
+		if scopeBudget.Depth > turnBudget.Depth {
+			turnBudget.Depth = scopeBudget.Depth
+		}
+		// Surface the free-form scope on the budget so decide.next's
+		// boundaries block includes it — the planner sees "audit-wide,
+		// 779 files" and emits a wide plan instead of the same 5-read
+		// shape it uses for pinpoint questions.
+		turnBudget.Scope = scope
+	}
 	// Layer the model's n_ctx onto the seed budget so handlers
 	// (attend.accumulate, decide.next, attend.compact) can size
 	// their own prompts via budget.PromptBudget(). Probe-cache miss
@@ -2688,6 +2735,9 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	if s.verbose {
 		s.ui.Info(fmt.Sprintf("  · intent=%s (conf=%.2f), budget=%s, seed=%s",
 			intent, intentConf, turnBudget, seed[0].QualifiedName()))
+		if scope != "" {
+			s.ui.Info(fmt.Sprintf("  · scope=%q (fallback=%v)", scope, scopeFallback))
+		}
 	}
 	if _, err := ex.Run(context.Background(), turnID, seed, turnBudget); err != nil {
 		return capturedHR, capturedLR, intent, intentConf, fmt.Errorf("repl chain executor: %w", err)
@@ -2746,6 +2796,136 @@ func classifyIntentForTurn(reg *dag.Registry, router dag.Router, prompt string, 
 	confidence, _ := res.Out["confidence"].(float64)
 	emitClassifyTraceEntry(traceCB, classifyNodeID, classifySeedID, intent, confidence, "", "", &res, pickedModel, pickedReason, started)
 	return intent, confidence
+}
+
+// estimateScopeForTurn runs the sense.estimate_scope handler directly
+// (outside the DAG executor) so the estimated budget is known at
+// seed-time and feeds dag.Executor.Run as its initial Budget. Mirror of
+// classifyIntentForTurn's out-of-executor pattern.
+//
+// Returns (scope, budget, fallback):
+//   - scope    — the free-form description (or "" on failure / op not registered)
+//   - budget   — only the three axes the estimator emits (tokens, latency_ms,
+//                depth); MaxContextTokens stays unset; the caller merges this
+//                with the intent floor and the n_ctx layer
+//   - fallback — true when estimation couldn't be performed or the
+//                handler returned its own fallback; the caller then ignores
+//                the budget entirely and keeps the intent floor as-is
+//
+// Synthesizes a dag.TraceEntry for the estimator call and invokes
+// traceCB with it. traceCB may be nil.
+func estimateScopeForTurn(reg *dag.Registry, router dag.Router, prompt, intent, projectSignal string, traceCB dag.TraceCallback) (string, dag.Budget, bool) {
+	started := time.Now()
+	const (
+		scopeNodeID = "n0-scope"
+		scopeSeedID = "n1"
+	)
+	spec, err := reg.Get("sense.estimate_scope")
+	if err != nil {
+		emitScopeTraceEntry(traceCB, scopeNodeID, scopeSeedID, "", true, "spec_not_registered", err.Error(), nil, "", "", started)
+		return "", dag.Budget{}, true
+	}
+
+	// Run inside the default budget so the estimator itself doesn't
+	// starve. The estimator's cost hint is ~4s/400tok — comfortably
+	// fits in DefaultTurnBudget.
+	budget := dag.DefaultTurnBudget()
+	pickedModel, pickedReason := "", ""
+	if router != nil {
+		provider, modelID, reason := router.Resolve(context.Background(), spec)
+		if provider != nil {
+			budget.Provider = provider
+		}
+		pickedModel = modelID
+		pickedReason = reason
+	}
+
+	res, herr := spec.Handler(context.Background(), map[string]any{
+		"prompt":         prompt,
+		"intent":         intent,
+		"project_signal": projectSignal,
+	}, budget)
+	if herr != nil {
+		emitScopeTraceEntry(traceCB, scopeNodeID, scopeSeedID, "", true, "handler_error", herr.Error(), nil, pickedModel, pickedReason, started)
+		return "", dag.Budget{}, true
+	}
+
+	fallback, _ := res.Out["fallback"].(bool)
+	scope, _ := res.Out["scope"].(string)
+	tokens, _ := res.Out["budget_tokens"].(int)
+	latency, _ := res.Out["budget_latency_ms"].(int)
+	depth, _ := res.Out["budget_depth"].(int)
+
+	emitScopeTraceEntry(traceCB, scopeNodeID, scopeSeedID, scope, fallback, "", "", &res, pickedModel, pickedReason, started)
+
+	if fallback {
+		return scope, dag.Budget{}, true
+	}
+	return scope, dag.Budget{
+		LatencyMS: latency,
+		Tokens:    tokens,
+		Depth:     depth,
+	}, false
+}
+
+// emitScopeTraceEntry synthesizes a dag.TraceEntry for the
+// out-of-executor scope estimator call and invokes traceCB with it.
+// Same shape as emitClassifyTraceEntry; kept separate so each
+// out-of-executor pre-flight surfaces with its own qualified name in
+// dag_traces.jsonl.
+func emitScopeTraceEntry(traceCB dag.TraceCallback, nodeID, seedID, scope string, fallback bool, errCode, errMsg string, res *dag.NodeResult, pickedModel, pickedReason string, started time.Time) {
+	if traceCB == nil {
+		return
+	}
+	end := time.Now()
+	entry := dag.TraceEntry{
+		NodeID:          nodeID,
+		ParentID:        "",
+		QualifiedName:   "sense.estimate_scope",
+		OK:              errCode == "",
+		ErrorCode:       errCode,
+		ErrorMessage:    errMsg,
+		SpawnedChildren: []string{seedID},
+		WallStart:       started,
+		WallEnd:         end,
+		PickedModel:     pickedModel,
+		PickedReason:    pickedReason,
+	}
+	if res != nil {
+		entry.CostConsumed = res.CostConsumed
+		// Surface the estimator's Out on the trace so dag_traces.jsonl
+		// captures scope + budget axes for post-hoc analysis (was the
+		// envelope right? did the synth NEED_MORE within it? etc.)
+		entry.Out = map[string]any{
+			"scope":             scope,
+			"fallback":          fallback,
+			"budget_tokens":     res.Out["budget_tokens"],
+			"budget_latency_ms": res.Out["budget_latency_ms"],
+			"budget_depth":      res.Out["budget_depth"],
+			"reasoning":         res.Out["reasoning"],
+		}
+	}
+	traceCB(entry)
+}
+
+// projectSignalFor returns a short, free-form one-line description of
+// the project's size for sense.estimate_scope. Reads the persisted
+// study summary (cheap; one file open). Returns "" when no study has
+// run yet — the estimator's template treats empty as "unknown, treat
+// as medium" rather than failing.
+//
+// Format: "<files> files, <eff-loc> effective LOC; study at <coverage>%
+// (<insights> insights)" — minimal, scannable, the absolute denominators
+// the estimator's prompt was written against.
+func projectSignalFor(workdir string) string {
+	sum := study.LoadDeficitSummary(filepath.Join(workdir, ".cortex"))
+	if !sum.HasState {
+		return ""
+	}
+	return fmt.Sprintf(
+		"%d files, %d effective LOC; study at %.0f%% effective-LOC coverage (%d insights captured)",
+		sum.TotalFiles, sum.EffTotalLines, 100*sum.LastCoveredEff, sum.InsightsEmitted,
+	)
 }
 
 // emitClassifyTraceEntry synthesizes a dag.TraceEntry for the
@@ -3370,6 +3550,19 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 		Provider: classifyProvider,
 	})); err != nil {
 		return nil, fmt.Errorf("register sense.classify_intent: %w", err)
+	}
+
+	// sense.estimate_scope — reads the prompt + intent + a project-size
+	// signal and emits a free-form scope description plus integer budget
+	// axes (tokens / latency_ms / depth). Runs out-of-executor at seed
+	// time (see estimateScopeForTurn) so its budget output becomes the
+	// executor's seed envelope — making the budget emergent from the
+	// reasoner instead of table-driven via BudgetForIntent. The table
+	// survives as a floor for fallback paths.
+	if err := reg.Register(ops.EstimateScopeSpec(ops.EstimateScopeConfig{
+		Provider: classifyProvider,
+	})); err != nil {
+		return nil, fmt.Errorf("register sense.estimate_scope: %w", err)
 	}
 
 	// act.passthrough — mechanical zero-LLM terminal for trivial

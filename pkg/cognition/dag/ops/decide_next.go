@@ -126,6 +126,18 @@ const recursionDepthAttr = "_dnext_depth"
 // no reasoning specialist is auto-detected, this falls through to
 // the operator's session default.
 func NextSpec(cfg NextConfig) dag.NodeSpec {
+	// MaxFanout must match the handler's internal maxFanout cap or the
+	// executor's per-node cap silently drops the trailing nodes the
+	// handler thought it scheduled. Default Register normalizes 0 to
+	// 10, which was too tight for audit-class plans (10-15 narrow reads
+	// + a synthesizer = 11-16 spawns). Bumping here keeps the two
+	// caps in lockstep. The actual runaway bound is the per-spawn
+	// budget gate (executor refuses to schedule children that would
+	// exceed remaining tokens / depth), not this number.
+	maxFanout := cfg.MaxFanout
+	if maxFanout <= 0 {
+		maxFanout = 16
+	}
 	return dag.NodeSpec{
 		Function:    dag.FuncDecide,
 		Op:          "next",
@@ -139,6 +151,7 @@ func NextSpec(cfg NextConfig) dag.NodeSpec {
 			{Name: "reasoning", Type: "string"},
 		},
 		Cost:      nextCostHint,
+		MaxFanout: maxFanout,
 		Exposable: true, // the LLM can recurse into decide.next
 		Requires:  []string{llm.CapReasoning, llm.CapToolCalling},
 		Handler:   NewNextHandler(cfg),
@@ -169,25 +182,42 @@ Match the plan to the shape of the request:
 - Code change in a known file ("add foo to bar.py"): 2-3 nodes. Read, write, optionally verify.
 - Exploration ("what does this project do?", "how does X work in this codebase?"): 3-5 nodes. Use decide.tool_call to perform specific tool actions (list dir, read README, read manifest), then a final decide.coding_turn that synthesizes the answer. The synthesis node automatically sees prior step outputs as context — don't ask it to re-fetch what's already been read.
 
-decide.tool_call is a SPECIALIST node that turns a natural-language intent into a structured tool call (list_dir, read_file, run_shell, write_file). Use it when you need a specific, focused tool action — it's more reliable than a full coding_turn for one-shot reads.
+decide.tool_call is a SPECIALIST node — a 1-2B function-caller. It only succeeds when the intent is a single action with one target. It WILL fail on compound, multi-target, or hedged intents.
+
+Intent grammar — emit intents in one of these canonical forms ONLY:
+  - "list <path>"                                       → act.list_dir
+  - "read <path>"                                       → act.read_file
+  - "read <path> lines <A>-<B>"                         → act.read_file with start_line/end_line
+  - "shell: <one concrete command>"                     → act.run_shell
+  - "write <path>: <content-description>"               → act.write_file
+
+Rules for intents:
+  - One verb, one target. NO "X or Y or Z". NO "for example by ...". NO "if it exists".
+  - When the target is uncertain (e.g. "the project manifest"), fan out with ONE narrow intent per candidate: separate "read go.mod" and "read package.json" nodes. The reads that find nothing return a file-not-found error; the coding_turn synthesizer sees both and uses whichever succeeded.
+  - When you need to search code, emit "shell: grep -rn 'PATTERN' <dir>" — a single concrete command, not "search for X somewhere".
+  - When you need to discover what files exist before reading, start with a "list <dir>" — the synthesizer will see the listing.
 
 You can also re-enter decide.next when a step's result will fundamentally change what should happen next (e.g., after a search). But do NOT loop "search → decide → search" — if a search returns nothing, don't search again.
 
-Each emitted node should have a CONCRETE prompt or intent naming the specific file/dir/action, not a vague goal. Vague prompts produce vague work.
+Synthesizer node. When the last node in your plan is a decide.coding_turn that ONLY summarizes prior step outputs (the typical exploration / Q&A shape), set attrs.synthesize=true on it. That puts the synthesizer in structured mode: it either answers directly from prior context, or emits a "NEED_MORE: <next action>" line which the executor materializes as a follow-up decide.next — a real DAG node, not a hidden tool-loop. Multi-hop reads (grep → identify file → read file → answer) emerge as additional nodes this way. Do NOT set synthesize=true on a coding_turn that's expected to perform a code change or to use tools itself.
 
 Common shapes:
 
   Direct (conversational or simple Q&A):
     [{"op":"decide.coding_turn","attrs":{"prompt":"<user prompt verbatim>"}}]
 
-  Exploration (tool_call for each read, coding_turn synthesizes at the end):
-    [{"op":"decide.tool_call","attrs":{"intent":"list everything in the workdir root"}},
+  Exploration (one tool_call per concrete file, then a synthesize=true coding_turn):
+    [{"op":"decide.tool_call","attrs":{"intent":"list ."}},
      {"op":"decide.tool_call","attrs":{"intent":"read README.md"}},
-     {"op":"decide.tool_call","attrs":{"intent":"read package.json or the equivalent project manifest"}},
-     {"op":"decide.coding_turn","attrs":{"prompt":"Using the prior step outputs, answer in 2-3 sentences: '<user prompt>'"}}]
+     {"op":"decide.tool_call","attrs":{"intent":"read go.mod"}},
+     {"op":"decide.coding_turn","attrs":{"synthesize":true,"prompt":"Using the prior step outputs, answer in 2-3 sentences: '<user prompt>'"}}]
 
-  Code change:
-    [{"op":"decide.tool_call","attrs":{"intent":"read the file <path>"}},
+  Code search (grep through the tree, then synthesize — synthesizer may NEED_MORE to read the file the grep found):
+    [{"op":"decide.tool_call","attrs":{"intent":"shell: grep -rn 'PATTERN' ."}},
+     {"op":"decide.coding_turn","attrs":{"synthesize":true,"prompt":"Using the grep output, answer: '<user prompt>'"}}]
+
+  Code change (NO synthesize — the coding_turn does real work with tools):
+    [{"op":"decide.tool_call","attrs":{"intent":"read <path>"}},
      {"op":"decide.coding_turn","attrs":{"prompt":"Apply the change: <user prompt>. Then run the project's build/test command."}}]
 
   Search-then-act (specific reason to believe prior captures help):
@@ -235,7 +265,18 @@ type nextResponse struct {
 func NewNextHandler(cfg NextConfig) dag.Handler {
 	maxFanout := cfg.MaxFanout
 	if maxFanout <= 0 {
-		maxFanout = 4
+		// Sized for audit-class plans: a whole-project audit warrants
+		// 10-15 narrow reads + a synthesizer. The earlier cap of 6
+		// was too tight for these — the planner would emit the right
+		// shape and have the trailing nodes silently dropped. 16
+		// covers "list + 14 verification reads + synthesizer" and
+		// keeps the runaway bound (combined with the depth cap and
+		// the per-spawn budget gate, which is the real ceiling).
+		// Pinpoint / cross-file plans naturally emit fewer nodes
+		// because the planner sees scope=pinpoint in its boundaries
+		// block and self-limits — the cap is a safety net, not a
+		// directive.
+		maxFanout = 16
 	}
 	maxLatency := cfg.MaxLatencyMS
 	if maxLatency <= 0 {
@@ -300,14 +341,38 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			return fallbackSpawn(prompt, "fallback: empty nodes list from classifier", started), nil
 		}
 
+		// Reserve a synthesizer slot when the LAST emitted node is a
+		// decide.coding_turn. Common pattern: N narrow tool_calls
+		// followed by ONE coding_turn that reads their outputs and
+		// answers the user. If the fanout cap drops the synthesizer
+		// because it sits at the tail, the turn ends with no final
+		// answer — a far worse outcome than dropping one of the
+		// upstream reads. We preserve the synthesizer by reserving its
+		// slot before the loop and emitting it after.
+		var synthesizer *dag.NodeSpec
+		emitted := parsed.Nodes
+		if len(emitted) > 0 {
+			last := emitted[len(emitted)-1]
+			if strings.TrimSpace(last.Op) == "decide.coding_turn" {
+				if spec, ok := materializeEmittedNode(last, cfg.Registry); ok {
+					synthesizer = &spec
+					emitted = emitted[:len(emitted)-1]
+				}
+			}
+		}
+
 		// Validate + materialize emitted nodes.
 		var (
-			spawn    []dag.NodeSpec
-			skipped  []string
-			accepted int
+			spawn      []dag.NodeSpec
+			skipped    []string
+			accepted   int
+			toolBudget = maxFanout
 		)
-		for _, n := range parsed.Nodes {
-			if accepted >= maxFanout {
+		if synthesizer != nil && toolBudget > 0 {
+			toolBudget-- // reserve one slot for the synthesizer
+		}
+		for _, n := range emitted {
+			if accepted >= toolBudget {
 				skipped = append(skipped, n.Op+"(fanout-cap)")
 				continue
 			}
@@ -333,6 +398,9 @@ func NewNextHandler(cfg NextConfig) dag.Handler {
 			}
 			spawn = append(spawn, spec)
 			accepted++
+		}
+		if synthesizer != nil {
+			spawn = append(spawn, *synthesizer)
 		}
 		if len(spawn) == 0 {
 			return fallbackSpawn(prompt, "fallback: all emitted nodes invalid: "+strings.Join(skipped, ","), started), nil
@@ -459,9 +527,19 @@ func formatBoundariesBlock(boundaries string, budget dag.Budget) string {
 		fmt.Fprintf(&b, "- Remaining budget: latency=%dms, tokens=%d, depth=%d, output_tokens=%d\n",
 			budget.LatencyMS, budget.Tokens, budget.Depth, budget.OutputTokens)
 	}
+	// Scope, when present, is the single most important signal — it tells
+	// the planner WHAT KIND of plan to compose. A pinpoint scope warrants
+	// a 1-3 node plan; an audit scope warrants 10+ narrow reads. Render
+	// it after the budget so the reader sees magnitude + shape together.
+	if scope := strings.TrimSpace(budget.Scope); scope != "" {
+		fmt.Fprintf(&b, "- Scope (estimated for this turn): %s\n", scope)
+	}
 	b.WriteString("\nPlanning guidance:\n")
 	b.WriteString("- Tight output budget or small model → favor fan-out: many narrow decide.tool_call nodes, each producing a compressed deposit. Avoid one big decide.coding_turn that tries to hold everything in its working set.\n")
 	b.WriteString("- Loose output budget or large model → fewer larger nodes are fine; a single decide.coding_turn that reads several files in its agent loop is OK.\n")
+	b.WriteString("- Scope = pinpoint → 1-3 node plan (one targeted read + synthesizer). Don't burn budget on extras.\n")
+	b.WriteString("- Scope = cross-file → 3-6 node plan (a few targeted reads + synthesizer).\n")
+	b.WriteString("- Scope = audit / whole-project → fan out wide: emit ONE narrow tool_call per claim or per file to verify, then a synthesizer. Plans of 10-15 nodes are appropriate here. The synthesizer is in synth-mode and will emit NEED_MORE for any gap, so each upstream read should be a CONCRETE single-fact check, not a general exploration.\n")
 	b.WriteByte('\n')
 	return b.String()
 }

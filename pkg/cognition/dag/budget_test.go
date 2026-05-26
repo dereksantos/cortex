@@ -10,7 +10,7 @@ func TestBudgetForIntent_knownIntents(t *testing.T) {
 		{"greeting", Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500, Intent: "greeting"}},
 		{"clarify", Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600, Intent: "clarify"}},
 		{"recall", Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000, Intent: "recall"}},
-		{"review", Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000, Intent: "review"}},
+		{"review", Budget{LatencyMS: 120000, Tokens: 15000, Depth: 8, OutputTokens: 4000, Intent: "review"}},
 		{"meta", Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500, Intent: "meta"}},
 	}
 	for _, tc := range tests {

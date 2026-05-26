@@ -42,10 +42,11 @@ type ActOpConfig struct {
 func AdaptToolAsAct(cfg ActOpConfig) dag.NodeSpec {
 	t := cfg.Handler
 	contract := cfg.Contract
+	toolSpec := t.Spec()
 	return dag.NodeSpec{
 		Function:    dag.FuncAct,
 		Op:          t.Name(),
-		Description: t.Spec().Function.Description,
+		Description: toolSpec.Function.Description,
 		Inputs: []dag.ParamSpec{
 			{Name: "args", Type: "string", Required: true},
 			{Name: "confirm", Type: "bool", Required: false},
@@ -54,8 +55,14 @@ func AdaptToolAsAct(cfg ActOpConfig) dag.NodeSpec {
 			{Name: "output", Type: "string"},
 			{Name: "tool_error", Type: "string"},
 		},
-		AxisContract: &contract,
-		Cost:         cfg.Cost,
+		// Surface the underlying tool's REAL parameter schema so the
+		// catalog renderer in decide.tool_call shows specialist models
+		// (xLAM, hermes-pro) actual field names + types. Without this,
+		// the catalog only knows the wrapper's `args`/`confirm` plumbing
+		// and the specialist has to guess the real arg names.
+		ToolSchemaJSON: toolSpec.Function.Parameters,
+		AxisContract:   &contract,
+		Cost:           cfg.Cost,
 		Handler: func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
 			started := time.Now()
 

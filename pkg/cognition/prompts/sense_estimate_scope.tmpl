@@ -1,0 +1,46 @@
+---
+version: 1
+op: sense.estimate_scope
+description: estimate how much work this turn implies; emits free-form scope + concrete budget numbers the executor seeds with
+max_output_tokens: 100
+vars: [prompt, intent, project_signal]
+---
+You estimate the SCOPE of this turn — how much reading / reasoning / synthesis the question actually warrants — and derive a budget envelope the executor seeds the DAG with.
+
+Scope is NOT the same as intent. Intent is "what kind of work" (code / review / recall / …). Scope is "how big is this specific request" — pinpoint? cross-file? whole-project audit?
+
+Inputs you have:
+- The user prompt (the actual ask)
+- The classified intent (what kind of work)
+- A project-size signal (raw file/LOC counts; absent means "unknown, treat as medium")
+
+Reasoning rules (use evidence in the prompt, do NOT guess from training-data priors about a project's reputation):
+
+- Pinpoint questions ("what does function X return?", "fix line 42") → small budget. A few reads, one synthesis.
+- Cross-file questions ("how does X call Y?", "trace the request path") → medium. Several reads, one or two synthesis hops.
+- Audit / whole-project questions ("does the README match the code?", "find all places that violate convention Z", "review the architecture") → large. The reader has to cross-reference many claims against many files; each claim takes 1-3 reads. Total work scales with the surface area of the project AND with the number of independent claims in the prompt.
+- Multiply the audit budget by the project-size signal when present — a 600-file project audited end-to-end needs more budget than a 6-file project audited end-to-end. A 5-claim audit on a 600-file project realistically needs N×M reads.
+
+The DAG grows under decaying budget — the executor refuses to spawn nodes that would exceed the remaining budget. Too-small budgets cause synthesizers to stop hopping and answer from incomplete evidence (the failure mode we are trying to fix). Too-large budgets waste compute. Estimate the smallest envelope that lets the work actually complete.
+
+Budget axes (all integers):
+- tokens         — cumulative input+output tokens across the whole turn. Floor 3000 (one classify + one synthesis). For pinpoint set 5000-10000; cross-file 15000-30000; audit on medium projects 30000-60000; audit on large (500+ files) projects 60000-150000.
+- latency_ms     — wall-clock cap. Floor 30000. Scale roughly 10ms per expected token across all calls. Audit-class: 300000-900000.
+- depth          — max DAG depth (synth → next → tool_call → act chain is ~3 deep per hop). Floor 5. Each NEED_MORE hop adds ~3 depth. Audit needing 4-6 hops → 18-25.
+
+User prompt:
+"""
+{{.prompt}}
+"""
+
+Classified intent: {{.intent}}
+
+Project signal: {{.project_signal}}
+
+Output ONLY a JSON object — no prose, no markdown fence:
+{"scope": "<free-form description of how much work this turn implies; cite the specific evidence in the prompt that sets the size>", "budget_tokens": <int>, "budget_latency_ms": <int>, "budget_depth": <int>, "reasoning": "<one short sentence on why these numbers fit the scope>"}
+
+Examples:
+{"scope":"pinpoint single-function lookup","budget_tokens":6000,"budget_latency_ms":45000,"budget_depth":6,"reasoning":"one targeted read + synth; no cross-referencing"}
+{"scope":"cross-file relationship trace covering 2-3 files","budget_tokens":20000,"budget_latency_ms":120000,"budget_depth":10,"reasoning":"requires reading both ends of the relationship plus a synthesis hop"}
+{"scope":"whole-project audit comparing ~15 README claims against implementation across a 600-file Go repo","budget_tokens":90000,"budget_latency_ms":600000,"budget_depth":22,"reasoning":"each of ~15 claims needs 1-3 supporting reads plus a per-claim verification; budget sized for ~30 reads + ~6 synthesis hops"}

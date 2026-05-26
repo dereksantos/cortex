@@ -78,7 +78,11 @@ func (t *runShellTool) Spec() llm.ToolSpec {
 			Description: "Run a shell command via `bash -c` with the workdir as cwd. Full shell " +
 				"semantics: pipes, redirects, glob expansion, env vars all work. Use this to build, " +
 				"test, run, or inspect anything the project needs. 30s timeout; output capped at 8 KiB. " +
-				"Pick the right command for the project's stack (go build, npm test, cargo run, pytest, etc.).",
+				"Pick the right command for the project's stack (go build, npm test, cargo run, pytest, etc.). " +
+				"For search/enumeration: ALWAYS exclude Cortex-internal dirs which contain stale per-turn " +
+				"workdir copies — pass `--exclude-dir=.cortex --exclude-dir=.context` to grep, " +
+				"`-not -path '*/.cortex/*' -not -path '*/.context/*'` to find. The tool also auto-filters " +
+				"these paths from output and returns a `hint` field when it had to.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -137,11 +141,36 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		t.registry.noteShellExit(exitCode)
 	}
 
-	bb := out.Bytes()
+	// Strip Cortex-internal path lines (session snapshots, journals,
+	// daemon logs) from the raw output before any caps or truncation.
+	// Cortex copies the workdir into .cortex/sessions/<ts>/snapshots/
+	// each turn, plus writes journals + daemon state, and recursive
+	// find/grep commands the model runs surface those as if they were
+	// source — they're not, they're stale duplicates that pollute the
+	// result list (especially when the model pipes through `head -N`
+	// and the snapshot copies crowd out the real answer). list_dir
+	// already hides .cortex; this matches that behavior for shell
+	// output.
+	rawOut := out.Bytes()
+	bb := stripCortexSnapshotLines(rawOut)
+	filteredLines := 0
+	if len(bb) != len(rawOut) {
+		filteredLines = bytes.Count(rawOut, []byte("\n")) - bytes.Count(bb, []byte("\n"))
+	}
 	truncated := false
 	if len(bb) > runShellOutputCap {
 		bb = bb[:runShellOutputCap]
 		truncated = true
+	}
+
+	hint := ""
+	if filteredLines > 0 {
+		// Surface a concrete, actionable nudge — small models won't
+		// otherwise know that the harness silently dropped lines and
+		// will misread an empty/sparse result as "no matches in the
+		// project." The flags are correct for both grep and find.
+		hint = fmt.Sprintf("filtered %d line(s) pointing inside Cortex-internal directories (.cortex/, .context/) — those are stale per-turn workdir copies + cortex state, not project source. "+
+			"If results look incomplete, re-run with: grep --exclude-dir=.cortex --exclude-dir=.context  or  find ... -not -path '*/.cortex/*' -not -path '*/.context/*'.", filteredLines)
 	}
 
 	body, _ := json.Marshal(struct {
@@ -150,6 +179,7 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		Truncated bool   `json:"truncated"`
 		ElapsedMs int64  `json:"elapsed_ms"`
 		Output    string `json:"output"`
+		Hint      string `json:"hint,omitempty"`
 		Error     string `json:"error,omitempty"`
 	}{
 		Command:   args.Command,
@@ -157,9 +187,73 @@ func (t *runShellTool) Call(ctx context.Context, rawArgs string) (string, error)
 		Truncated: truncated,
 		ElapsedMs: elapsed.Milliseconds(),
 		Output:    string(bb),
+		Hint:      hint,
 		Error:     runErrorString(runErr, subCtx),
 	})
 	return string(body), nil
+}
+
+// cortexInternalNeedles is the path-substring deny list for shell
+// output filtering. These are directories Cortex itself writes to
+// inside a project workdir — not source code, not user files. When
+// the model runs find/grep recursively, lines pointing here are pure
+// noise that crowds out real answers (especially under `head -N`).
+//
+// Keep this list aligned with list_dir's skippedNames (.git, .cortex,
+// .context, vendor, node_modules etc. for the latter two), though
+// vendor/node_modules are intentionally LEFT IN shell output — the
+// user may legitimately want to grep dependencies. Only Cortex-owned
+// state is filtered.
+var cortexInternalNeedles = [][]byte{
+	[]byte("/.cortex/sessions/"), // per-turn workdir copies
+	[]byte("/.cortex/db/"),       // dag traces + cell_results
+	[]byte("/.cortex/journal/"),  // append-only journals
+	[]byte("/.cortex/data/"),     // observations / insights / etc.
+	[]byte("/.context/"),         // legacy cortex daemon state
+}
+
+// stripCortexSnapshotLines removes lines whose path component points
+// inside Cortex-internal directories — see cortexInternalNeedles.
+// Returns input unchanged when no such lines are present, so commands
+// that don't enumerate paths (e.g. `go build`) pay no cost.
+//
+// Matching is conservative: a line is dropped only when it contains
+// one of the canonical substrings (e.g. "/.cortex/sessions/") or its
+// "./..." or bare-prefix form. The vanishingly unlikely case where a
+// real source path coincides is acceptable; reading inside .cortex/
+// or .context/ requires explicit absolute paths anyway.
+func stripCortexSnapshotLines(b []byte) []byte {
+	hit := false
+	for _, n := range cortexInternalNeedles {
+		if bytes.Contains(b, n) {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return b
+	}
+	lines := bytes.Split(b, []byte("\n"))
+	out := lines[:0]
+nextLine:
+	for _, ln := range lines {
+		for _, n := range cortexInternalNeedles {
+			if bytes.Contains(ln, n) {
+				continue nextLine
+			}
+			// Also catch bare-prefix forms: ".cortex/sessions/foo" or
+			// "./.cortex/sessions/foo". Strip the leading "./" once for
+			// the trimmed check.
+			trimmed := bytes.TrimLeft(ln, " \t")
+			trimmed = bytes.TrimPrefix(trimmed, []byte("./"))
+			bare := n[1:] // drop leading "/"
+			if bytes.HasPrefix(trimmed, bare) {
+				continue nextLine
+			}
+		}
+		out = append(out, ln)
+	}
+	return bytes.Join(out, []byte("\n"))
 }
 
 // runErrorString stringifies the run error, distinguishing context

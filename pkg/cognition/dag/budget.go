@@ -55,6 +55,14 @@ type Budget struct {
 	// pre-intent behavior — callers without classification keep today's
 	// shape.
 	Intent string
+
+	// Scope is the free-form description emitted by sense.estimate_scope
+	// for this turn — e.g. "whole-project audit comparing README claims
+	// against implementation across a 600-file Go repo". The planner
+	// (decide.next) reads this and shapes its plan accordingly: a wide
+	// audit warrants many narrow reads; a pinpoint question warrants
+	// one focused read. Empty preserves pre-estimator behavior.
+	Scope string
 }
 
 // Cost is what a single node call reports as consumed. The executor
@@ -308,7 +316,16 @@ func BudgetForIntent(intent string) Budget {
 	case "recall":
 		b = Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
 	case "review":
-		b = Budget{LatencyMS: 60000, Tokens: 5000, Depth: 8, OutputTokens: 4000}
+		// Sized for multi-hop synthesis: grep → identify file → read
+		// → answer commonly burns one synthesizer's worth of tokens
+		// PER hop (~5-6k tokens in + small out at typical model sizes).
+		// The earlier 5k cap couldn't even finish a single-hop synth
+		// with a chunked grep output, so synth-mode follow-up spawns
+		// got refused as budget_exceeded the moment the first synth
+		// returned NEED_MORE. 15k accommodates ~2 hops at the calibrated
+		// shape; latency bumped in proportion. See dagnode/coding_turn.go
+		// synthesize-mode + maxHopDepth.
+		b = Budget{LatencyMS: 120000, Tokens: 15000, Depth: 8, OutputTokens: 4000}
 	case "meta":
 		b = Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
 	case "code":

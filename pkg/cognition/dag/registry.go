@@ -89,6 +89,17 @@ type NodeSpec struct {
 	Inputs  []ParamSpec
 	Outputs []ParamSpec
 
+	// ToolSchemaJSON is the underlying tool's JSON Schema (only set for
+	// act-typed nodes built by AdaptToolAsAct). It is the OpenAI function-
+	// calling parameters object — what specialist tool-call models (xLAM,
+	// hermes-pro, etc.) are trained to consume. The wrapper's own Inputs
+	// describe the DAG-level handler contract (`args` string + `confirm`
+	// bool); ToolSchemaJSON describes the REAL parameter shape the LLM
+	// must populate. The catalog renderer in decide.tool_call surfaces
+	// this so the specialist sees actual field names and types instead of
+	// the wrapper's plumbing.
+	ToolSchemaJSON json.RawMessage
+
 	// Contracts (set at registration; only meaningful for FuncAct).
 	AxisContract *AxisContract
 

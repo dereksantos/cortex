@@ -90,6 +90,16 @@ type CortexHarness struct {
 	// against. See PROGRESS-REPL.md iter 3/4 for the probe matrix.
 	minimalTools bool
 
+	// noTools — when true, RunSessionWithResult builds an empty tool
+	// registry. The LLM sees zero callable tools, so it can only
+	// produce a textual response. Used by decide.coding_turn's
+	// synthesize mode to force the model into "answer-or-NEED_MORE"
+	// shape — without this, the synthesizer can quietly agent-loop
+	// instead of emitting NEED_MORE for an emergent DAG hop, which
+	// defeats the seed+grow architecture (see memory:
+	// project-multi-hop-via-spawn).
+	noTools bool
+
 	// sharedCortex is plumbed through to the cortex_search tool via
 	// NewCortexSearchToolFromCortex when non-nil. This is what lets the
 	// REPL's auto-capture path become searchable in-session: the
@@ -139,6 +149,16 @@ type CortexHarness struct {
 // route every tool call through the DAG executor (act.* ops + per-tool
 // trace rows).
 func (h *CortexHarness) SetDispatcher(d harness.ToolDispatcher) { h.dispatcher = d }
+
+// SetNoTools toggles the synthesizer-mode zero-tool path. When true,
+// RunSessionWithResult constructs an empty tool registry — the LLM
+// sees no callable tools and must answer in prose (or, with the
+// synthesizer directive in place, emit NEED_MORE: for the next hop).
+// Used by decide.coding_turn when attrs.synthesize=true to enforce
+// the "synthesize from prior context, don't intra-loop tool-call"
+// contract at the protocol level rather than relying on prompt-only
+// instruction. Pass false (default) to restore the full tool surface.
+func (h *CortexHarness) SetNoTools(b bool) { h.noTools = b }
 
 // NewCortexHarness returns a configured harness. The OpenRouter API
 // key is resolved opportunistically (keychain first, env fallback) —
@@ -343,26 +363,33 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	}
 
 	registry := harness.NewToolRegistry()
-	registry.Register(harness.NewReadFileTool(workdir))
-	registry.Register(harness.NewWriteFileTool(workdir, registry))
-	if !h.minimalTools {
-		registry.Register(harness.NewListDirTool(workdir))
-	}
-	registry.Register(harness.NewRunShellTool(workdir, registry))
-	if !h.minimalTools && !h.disableCortexSearch {
-		var (
-			cortexSearch harness.ToolHandler
-			err          error
-		)
-		if h.sharedCortex != nil {
-			cortexSearch, err = harness.NewCortexSearchToolFromCortex(workdir, h.sharedCortex, chatProvider)
-		} else {
-			cortexSearch, err = harness.NewCortexSearchTool(workdir, chatProvider)
+	// noTools short-circuits all registration. The loop still requires
+	// a non-nil registry (it tracks per-call accounting through it
+	// even when no tools fire), but with zero specs registered the
+	// LLM sees no callable tools and is forced into a prose-only
+	// response — which is exactly what synthesize-mode wants.
+	if !h.noTools {
+		registry.Register(harness.NewReadFileTool(workdir))
+		registry.Register(harness.NewWriteFileTool(workdir, registry))
+		if !h.minimalTools {
+			registry.Register(harness.NewListDirTool(workdir))
 		}
-		if err != nil {
-			return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
+		registry.Register(harness.NewRunShellTool(workdir, registry))
+		if !h.minimalTools && !h.disableCortexSearch {
+			var (
+				cortexSearch harness.ToolHandler
+				err          error
+			)
+			if h.sharedCortex != nil {
+				cortexSearch, err = harness.NewCortexSearchToolFromCortex(workdir, h.sharedCortex, chatProvider)
+			} else {
+				cortexSearch, err = harness.NewCortexSearchTool(workdir, chatProvider)
+			}
+			if err != nil {
+				return HarnessResult{}, fmt.Errorf("cortex_search tool: %w", err)
+			}
+			registry.Register(cortexSearch)
 		}
-		registry.Register(cortexSearch)
 	}
 
 	runID := newCodingRunID()

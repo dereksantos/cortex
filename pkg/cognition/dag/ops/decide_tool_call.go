@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -101,22 +102,40 @@ Intent:
 {{INTENT}}
 """
 
-Available act-typed tools (qualified name(input_param_name) - description):
+Available tools — each entry shows the qualified name, a description, and the JSON Schema for its arguments. Field names in your output's "args" object MUST come from the listed schema "properties"; do not invent field names.
+
 {{TOOLS}}
+Output exactly one JSON object, no markdown fences, no prose:
 
-Respond with ONLY JSON, no markdown fences, no prose before or after:
+{"tool_name":"<qualified.op>","args":{<field>:<value>, ...},"reasoning":"<short sentence>"}
 
-{
-  "tool_name": "<qualified.op, e.g. act.read_file>",
-  "args": {"<param>": "<value>", ...},
-  "reasoning": "<one short sentence>"
-}
+Verb-to-tool map (match the FIRST verb in the intent):
+  list   → act.list_dir
+  read   → act.read_file
+  shell  → act.run_shell    (intent starting with "shell:" wraps a literal command)
+  run    → act.run_shell    (intent describing a command to run)
+  write  → act.write_file
+  search/grep/find/look → act.run_shell (use grep/find as the command)
+
+Concrete shape (substitute the intent's actual file/dir; never copy the placeholder verbatim, never invent OR/IF in the args):
+
+  Intent "list ."                                   → {"tool_name":"act.list_dir","args":{"path":"."},"reasoning":"list root"}
+  Intent "list pkg/cognition"                       → {"tool_name":"act.list_dir","args":{"path":"pkg/cognition"},"reasoning":"list subdir"}
+  Intent "read README.md"                           → {"tool_name":"act.read_file","args":{"path":"README.md"},"reasoning":"read it"}
+  Intent "read pkg/cognition/dag/executor.go lines 1-200"
+                                                    → {"tool_name":"act.read_file","args":{"path":"pkg/cognition/dag/executor.go","start_line":1,"end_line":200},"reasoning":"slice"}
+  Intent "shell: grep -rn 'package main' cmd"       → {"tool_name":"act.run_shell","args":{"command":"grep -rn 'package main' cmd"},"reasoning":"locate"}
+  Intent "shell: find . -name '*.go' -path '*/dag/*'"
+                                                    → {"tool_name":"act.run_shell","args":{"command":"find . -name '*.go' -path '*/dag/*'"},"reasoning":"enumerate"}
+  Intent "write notes.md with summary content"      → {"tool_name":"act.write_file","args":{"path":"notes.md","content":"<the literal content>"},"reasoning":"create"}
 
 Rules:
 - tool_name must be one of the listed qualified names exactly.
-- args fields must match the tool's input schema.
-- Paths in args are workdir-relative; no absolute paths.
-- Pick the single best tool; do not emit multiple calls.`
+- "args" keys must be schema field names from the chosen tool. No "input_param_name", no "entrypoint", no "input".
+- Required schema fields must all be present and non-empty. Use "." for the workdir root.
+- Paths are workdir-relative; no absolute paths, no ".." segments.
+- Pick the single best tool; the intent says what to do — match the verb to the tool ("read"→read_file, "list/scan dir"→list_dir, "write/create file"→write_file, "run/execute shell"→run_shell).
+- Pull concrete values straight from the intent text — if the intent names a filename, that's the path.`
 
 type toolCallResponse struct {
 	ToolName  string         `json:"tool_name"`
@@ -153,6 +172,28 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 			return dag.NodeResult{
 				CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds())},
 			}, fmt.Errorf("decide.tool_call: 'intent' (string) is required")
+		}
+
+		// Mechanical fast path: when the planner emits an intent in one
+		// of the canonical short forms (decide.next teaches it to do
+		// this), parse it directly and skip the specialist round-trip.
+		// 1-2B specialist models are unreliable at verb-to-tool matching
+		// for prose like "shell: grep ..." even with examples; matching
+		// the prefix here turns those reliable into 100% reliable AND
+		// shaves the call latency to ~0. The catalog and the specialist
+		// stay as the fallback for genuinely ambiguous prose.
+		if spec, ok := mechanicalToolCallFromIntent(intent, cfg.Registry); ok {
+			spec = attachSalience(spec, cfg, intent, budget)
+			return dag.NodeResult{
+				Out: map[string]any{
+					"tool_name":      spec.QualifiedName(),
+					"tool_args":      decodeArgsAttr(spec),
+					"reasoning":      "mechanical: matched canonical intent prefix",
+					"specialist_skipped": true,
+				},
+				Spawn:        []dag.NodeSpec{spec},
+				CostConsumed: dag.Cost{LatencyMS: int(time.Since(started).Milliseconds())},
+			}, nil
 		}
 
 		provider, providerSrc := resolveToolCallProvider(cfg, in, budget)
@@ -207,27 +248,7 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 			}, nil
 		}
 
-		// Attach a SalienceContract so the executor's post-handler
-		// hook handles oversized act.* outputs before deposit. The
-		// strategy depends on the tool:
-		//
-		//   - act.read_file / act.run_shell → deterministic line-based
-		//     chunking (ChunkOnOversize=true). The calling model sees
-		//     the actual bytes with "[chunk i/N, lines a-b]" headers;
-		//     no LLM is in the read path. Preserves ground truth and
-		//     lets the model re-fetch specific ranges if needed.
-		//
-		//   - Other act.* tools → LLM-mediated attend.compress, sized
-		//     by Intent. Appropriate where genuine salience extraction
-		//     is wanted (e.g. cortex_search results).
-		if cfg.ToolOutputSalienceCap > 0 {
-			spec.Salience = &dag.SalienceContract{
-				MaxOutputTokens:  cfg.ToolOutputSalienceCap,
-				Intent:           intent,
-				ChunkOnOversize:  shouldChunkOnOversize(parsed.ToolName),
-				MaxEmittedTokens: budget.EmittedTokensCap(),
-			}
-		}
+		spec = attachSalience(spec, cfg, intent, budget)
 
 		return dag.NodeResult{
 			Out: map[string]any{
@@ -270,6 +291,12 @@ func resolveToolCallProvider(cfg ToolCallConfig, in map[string]any, budget dag.B
 // choose from. When in["tools"] is a non-empty []string subset, only
 // those are listed — lets the caller scope the choice. Empty/missing
 // → every registered exposable act.* op.
+//
+// Each entry shows the qualified name, a short description, and the
+// underlying tool's JSON Schema (when registered via AdaptToolAsAct).
+// The schema is what lets specialist models (xLAM, hermes-pro) pick
+// correct field names and types — without it they invent plausible-
+// looking but wrong field names.
 func formatActToolsCatalog(reg *dag.Registry, in map[string]any) string {
 	if reg == nil {
 		return "  (no tools registered)"
@@ -297,20 +324,37 @@ func formatActToolsCatalog(reg *dag.Registry, in map[string]any) string {
 		if len(allowed) > 0 && !allowed[qname] {
 			continue
 		}
-		params := "args"
-		if len(s.Inputs) > 0 {
+		fmt.Fprintf(&b, "- %s\n  description: %s\n", qname, truncateOneLine(s.Description, 240))
+		if len(s.ToolSchemaJSON) > 0 {
+			fmt.Fprintf(&b, "  args_schema: %s\n", compactSchemaJSON(s.ToolSchemaJSON))
+		} else if len(s.Inputs) > 0 {
 			names := make([]string, 0, len(s.Inputs))
 			for _, p := range s.Inputs {
 				names = append(names, p.Name)
 			}
-			params = strings.Join(names, ", ")
+			fmt.Fprintf(&b, "  args: %s\n", strings.Join(names, ", "))
 		}
-		fmt.Fprintf(&b, "  %s(%s) - %s\n", qname, params, truncateOneLine(s.Description, 80))
 	}
 	if b.Len() == 0 {
 		return "  (no exposable act.* tools registered)"
 	}
 	return b.String()
+}
+
+// compactSchemaJSON canonicalizes a JSON Schema into single-line form
+// so the catalog stays scannable. On parse failure, returns the input
+// verbatim — the LLM still sees something legible even if it isn't
+// minimally compact.
+func compactSchemaJSON(raw json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(out)
 }
 
 // shouldChunkOnOversize reports whether oversized output from this
@@ -365,6 +409,108 @@ func materializeActSpawn(toolName string, args map[string]any, reg *dag.Registry
 			"confirm": true,
 		},
 	}, true
+}
+
+// attachSalience attaches a SalienceContract to the act spawn so the
+// executor's post-handler hook handles oversized act.* outputs before
+// deposit into turn state. Strategy:
+//
+//   - act.read_file / act.run_shell → deterministic line-based chunking
+//     (ChunkOnOversize=true). The calling model sees raw bytes with
+//     "[chunk i/N, lines a-b]" headers; no LLM is in the read path.
+//   - Other act.* tools → LLM-mediated attend.compress, sized by Intent.
+//
+// When cfg.ToolOutputSalienceCap is zero the contract is omitted (pre-
+// salience-budgets behavior).
+func attachSalience(spec dag.NodeSpec, cfg ToolCallConfig, intent string, budget dag.Budget) dag.NodeSpec {
+	if cfg.ToolOutputSalienceCap <= 0 {
+		return spec
+	}
+	spec.Salience = &dag.SalienceContract{
+		MaxOutputTokens:  cfg.ToolOutputSalienceCap,
+		Intent:           intent,
+		ChunkOnOversize:  shouldChunkOnOversize(spec.QualifiedName()),
+		MaxEmittedTokens: budget.EmittedTokensCap(),
+	}
+	return spec
+}
+
+// decodeArgsAttr returns the parsed JSON args from a materialized act
+// spawn. Used to populate the "tool_args" Out field for tracing /
+// observability when the mechanical fast path skipped the specialist.
+// On any parse failure returns nil — the trace still records the spawn
+// itself.
+func decodeArgsAttr(spec dag.NodeSpec) map[string]any {
+	raw, _ := spec.Attrs["args"].(string)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// Canonical-intent prefix matchers. decide.next is instructed to emit
+// intents in these short forms so the fast path catches them. The
+// regexps are anchored to the start of the (lowercased, trimmed) intent
+// so prose elsewhere in the string doesn't matter.
+var (
+	intentShell     = regexp.MustCompile(`^(?:shell|sh|bash):\s+(.+)$`)
+	intentRunCmd    = regexp.MustCompile(`^run\s+(.+)$`)
+	intentListDir   = regexp.MustCompile(`^list\s+(\S+)\s*$`)
+	intentReadLines = regexp.MustCompile(`^read\s+(\S+)\s+lines?\s+(\d+)\s*[-–]\s*(\d+)\s*$`)
+	intentReadFile  = regexp.MustCompile(`^read\s+(\S+)\s*$`)
+	intentWriteFile = regexp.MustCompile(`^write\s+(\S+)\s*:\s*(.+)$`)
+)
+
+// mechanicalToolCallFromIntent parses the intent into a materialized
+// act spawn when it matches one of the canonical forms decide.next
+// teaches. Returns (zero, false) on any non-match so the caller falls
+// through to the specialist LLM path. The registry is consulted to
+// guarantee the chosen tool exists; if it doesn't (custom op set, test
+// fixture), the fast path silently declines.
+func mechanicalToolCallFromIntent(intent string, reg *dag.Registry) (dag.NodeSpec, bool) {
+	trimmed := strings.TrimSpace(intent)
+	if trimmed == "" {
+		return dag.NodeSpec{}, false
+	}
+	// Match in priority order. read-with-lines must come before plain
+	// read so the longer pattern wins.
+	if m := intentShell.FindStringSubmatch(trimmed); m != nil {
+		return materializeActSpawn("act.run_shell", map[string]any{"command": strings.TrimSpace(m[1])}, reg)
+	}
+	if m := intentRunCmd.FindStringSubmatch(strings.ToLower(trimmed)); m != nil {
+		// Use the ORIGINAL case for the command body — the lowercased
+		// match is just for prefix detection. Re-extract from the trimmed
+		// original.
+		cmd := strings.TrimSpace(trimmed[len("run "):])
+		return materializeActSpawn("act.run_shell", map[string]any{"command": cmd}, reg)
+	}
+	if m := intentReadLines.FindStringSubmatch(trimmed); m != nil {
+		var s, e int
+		fmt.Sscanf(m[2], "%d", &s)
+		fmt.Sscanf(m[3], "%d", &e)
+		return materializeActSpawn("act.read_file", map[string]any{
+			"path":       m[1],
+			"start_line": s,
+			"end_line":   e,
+		}, reg)
+	}
+	if m := intentReadFile.FindStringSubmatch(trimmed); m != nil {
+		return materializeActSpawn("act.read_file", map[string]any{"path": m[1]}, reg)
+	}
+	if m := intentListDir.FindStringSubmatch(trimmed); m != nil {
+		return materializeActSpawn("act.list_dir", map[string]any{"path": m[1]}, reg)
+	}
+	if m := intentWriteFile.FindStringSubmatch(trimmed); m != nil {
+		return materializeActSpawn("act.write_file", map[string]any{
+			"path":    m[1],
+			"content": strings.TrimSpace(m[2]),
+		}, reg)
+	}
+	return dag.NodeSpec{}, false
 }
 
 // parseToolCallResponse extracts JSON from the specialist's raw

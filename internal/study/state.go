@@ -168,6 +168,13 @@ type DeficitSummary struct {
 	CoveredFileN    int        // files in the persisted CoveredFiles map
 	InsightsEmitted int
 	LastHalt        string
+	// Absolute size signals (zero when HasState is false). Surfaced so
+	// callers reasoning about scope / budget have the raw denominators
+	// alongside the coverage ratios — a 600-file project and a 6-file
+	// project both show "100% covered" but warrant very different
+	// budgets for an audit-class prompt. See sense.estimate_scope.
+	TotalFiles    int
+	EffTotalLines int
 }
 
 // WipeCoverage clears the per-file coverage map from the on-disk
@@ -212,6 +219,8 @@ func LoadDeficitSummary(contextDir string) DeficitSummary {
 		CoveredFileN:    s.CoveredFileN,
 		InsightsEmitted: s.InsightsEmitted,
 		LastHalt:        s.Halted,
+		TotalFiles:      s.TotalFiles,
+		EffTotalLines:   s.EffTotalLines,
 	}
 	if s.EffTotalLines > 0 {
 		d.LastCoveredEff = float64(s.CoveredEffLines) / float64(s.EffTotalLines)

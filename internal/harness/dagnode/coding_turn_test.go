@@ -587,3 +587,66 @@ func TestNewActDispatcher_AccumulatorSkippedWhenUnconfigured(t *testing.T) {
 		}
 	}
 }
+
+func TestStripNeedMoreLine(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		wantStr   string
+		wantFound bool
+	}{
+		{
+			name:      "no marker leaves input untouched",
+			in:        "Final answer with no marker.\nAll content preserved.",
+			wantStr:   "Final answer with no marker.\nAll content preserved.",
+			wantFound: false,
+		},
+		{
+			name:      "marker on its own line is removed cleanly",
+			in:        "Partial answer.\n\nNEED_MORE: read foo.go\n",
+			wantStr:   "Partial answer.",
+			wantFound: true,
+		},
+		{
+			name:      "marker as only content yields empty result",
+			in:        "NEED_MORE: read foo.go",
+			wantStr:   "",
+			wantFound: true,
+		},
+		{
+			name:      "marker without trailing newline strips through EOF",
+			in:        "Content here.\nNEED_MORE: read foo.go",
+			wantStr:   "Content here.",
+			wantFound: true,
+		},
+		{
+			name:      "marker with surrounding whitespace",
+			in:        "  body\n   \n  NEED_MORE: read x  \nignored after",
+			wantStr:   "  body",
+			wantFound: true,
+		},
+		{
+			name:      "marker mid-content keeps prefix only",
+			in:        "Step 1: did X.\nStep 2: did Y.\nNEED_MORE: read Z.go\nthis trailing content is also dropped",
+			wantStr:   "Step 1: did X.\nStep 2: did Y.",
+			wantFound: true,
+		},
+		{
+			name:      "empty input returns empty",
+			in:        "",
+			wantStr:   "",
+			wantFound: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := stripNeedMoreLine(tc.in)
+			if got != tc.wantStr {
+				t.Errorf("stripped:\n  got=%q\n want=%q", got, tc.wantStr)
+			}
+			if found != tc.wantFound {
+				t.Errorf("found: got=%v want=%v", found, tc.wantFound)
+			}
+		})
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -54,7 +55,7 @@ func (t *readFileTool) Spec() llm.ToolSpec {
 		Type: "function",
 		Function: llm.ToolFunc{
 			Name:        t.Name(),
-			Description: "Read a UTF-8 text file under the workdir. Returns up to 64 KiB. Use start_line / end_line (1-indexed, inclusive) to fetch a specific line range — required for paginating past the first chunk when a previous read showed a '[truncated]' marker.",
+			Description: "Read a UTF-8 text file under the workdir. Returns up to 64 KiB. Use start_line / end_line (1-indexed, inclusive) to fetch a specific line range — required for paginating past the first chunk when a previous read showed a '[truncated]' marker. When start_line is set, the response also carries an enclosing_symbol field showing the nearest top-level declaration above the slice (e.g. \"line 228: func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler\") — cite this directly when answering \"what function contains line N\" without asking for another read.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -116,9 +117,26 @@ func (t *readFileTool) Call(ctx context.Context, rawArgs string) (string, error)
 			sliced = sliced[:maxReadFileBytes]
 			truncated = true
 		}
+		// Navigation aid: when the model asks for a subset of a file
+		// (slice read), surface the enclosing top-level declaration
+		// above the slice. The synthesizer-mode small model often picks
+		// a line window around a grep hit (line 436 → "lines 380-450")
+		// and then asks "what function is this in?" — without seeing
+		// the enclosing `func`/`type`/`class` header earlier in the
+		// file. enclosing_symbol gives that fact directly so the model
+		// can answer the question, instead of asking for another
+		// NEED_MORE hop just to scan upward. Generic across languages
+		// via a multi-language declaration regex.
+		enclosing := findEnclosingSymbol(string(content), actualStart)
+		if enclosing == "" {
+			return fmt.Sprintf(
+				`{"path":%q,"truncated":%t,"start_line":%d,"end_line":%d,"content":%q}`,
+				args.Path, truncated, actualStart, actualEnd, sliced,
+			), nil
+		}
 		return fmt.Sprintf(
-			`{"path":%q,"truncated":%t,"start_line":%d,"end_line":%d,"content":%q}`,
-			args.Path, truncated, actualStart, actualEnd, sliced,
+			`{"path":%q,"truncated":%t,"start_line":%d,"end_line":%d,"enclosing_symbol":%q,"content":%q}`,
+			args.Path, truncated, actualStart, actualEnd, enclosing, sliced,
 		), nil
 	}
 
@@ -187,4 +205,63 @@ func sliceByLine(content string, startLine, endLine int) (sliced string, actualS
 // the keys are stable so the model can pattern-match.
 func errorJSON(err error) string {
 	return fmt.Sprintf(`{"error":%q}`, err.Error())
+}
+
+// declStartRE matches the start of a top-level declaration line across
+// the most common languages a workdir is likely to hold. The match is
+// anchored to the start-of-line (no leading whitespace) so we pick up
+// top-level decls only — nested functions / inner types are skipped on
+// purpose, since the synthesizer's question "what enclosing symbol
+// contains line N" is almost always answered by the outermost decl.
+//
+// Keywords cover Go (func, type, var, const), Python (def, async def,
+// class), Rust (fn, struct, enum, impl, trait), JS/TS (function,
+// class, const NAME =, let, export), Java/C# (public/private/protected
+// class|interface|enum), and C/C++/Swift (struct, enum, protocol).
+// Extra noise from "let" / "var" in scripting contexts is acceptable —
+// it points the synthesizer at SOMETHING above the slice rather than
+// nothing.
+var declStartRE = regexp.MustCompile(`^(?:func|fn|def|async\s+def|class|struct|enum|impl|trait|interface|type|var|const|let|public|private|protected|export|module|package)\b`)
+
+// findEnclosingSymbol scans backward from sliceStart looking for the
+// nearest top-level declaration line. Returns the matched line trimmed
+// + prefixed with "line N: " — short enough for the model to read at a
+// glance, concrete enough to answer "what symbol contains this".
+//
+// Returns "" when no declaration is found within scanCap lines or when
+// sliceStart is 0/1 (nothing above to scan). The scan is O(sliceStart)
+// in the worst case but capped at ~500 lines to bound cost on huge
+// files.
+func findEnclosingSymbol(content string, sliceStart int) string {
+	if sliceStart <= 1 || content == "" {
+		return ""
+	}
+	const scanCap = 500
+	lines := strings.SplitAfter(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	upper := sliceStart - 1
+	if upper > len(lines) {
+		upper = len(lines)
+	}
+	lower := upper - scanCap
+	if lower < 0 {
+		lower = 0
+	}
+	for i := upper - 1; i >= lower; i-- {
+		ln := strings.TrimRight(lines[i], "\r\n")
+		// Strip the trailing newline kept by SplitAfter then test the
+		// raw line at column 0 — declStartRE is start-anchored.
+		if declStartRE.MatchString(ln) {
+			trimmed := strings.TrimSpace(ln)
+			// Cap the snippet so a long signature doesn't dwarf the
+			// returned content. The reader only needs the symbol head.
+			if len(trimmed) > 200 {
+				trimmed = trimmed[:200] + "…"
+			}
+			return fmt.Sprintf("line %d: %s", i+1, trimmed)
+		}
+	}
+	return ""
 }

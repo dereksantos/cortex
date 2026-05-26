@@ -210,6 +210,50 @@ type CodingTurnConfig struct {
 	ModelRouteResolver func(modelID string) (*llm.EndpointConfig, string, bool)
 }
 
+// synthesizerDirective is appended to the user prompt when a
+// coding_turn is invoked in synthesize mode (attrs.synthesize=true,
+// set by decide.next on the trailing synthesizer node). It tells the
+// model the contract: answer from prior context, or emit a single
+// "NEED_MORE: <next action>" line that the handler parses and turns
+// into a follow-up decide.next spawn. That's how multi-hop emerges
+// as additional DAG nodes instead of getting hidden inside one
+// coding_turn's agent loop — see memory: project-multi-hop-via-spawn.
+const synthesizerDirective = `
+
+---
+
+SYNTHESIZER MODE. Use the PRIOR STEPS context above as your sole source of truth. No tools are available to you this turn — the harness has stripped them.
+
+Your job is to answer the user's question with EVIDENCE, never with hedging. Two responses are valid:
+
+  ANSWER — every claim in your answer is backed by a concrete citation from the prior context (file path, line number, or quoted snippet). For multi-item questions (audits, comparisons, enumerations), produce one line per item paired with its evidence; do NOT summarize.
+
+  NEED_MORE — you cannot answer fully because one specific read or shell command is missing. Respond with EXACTLY one line, nothing else:
+    NEED_MORE: <one concrete next action in the intent grammar — e.g. "read pkg/cognition/dag/ops/decide_next.go" or "read internal/harness/dagnode/coding_turn.go lines 380-450" or "shell: grep -rn 'NewNextHandler' --include=*.go ." or "list internal/harness">
+  The harness will run that action and route the result back to you as a fresh synthesis turn.
+
+Hard rules:
+- NEVER write "not directly confirmed", "not seen in the manifest", "the README mentions X but I cannot verify", or any other variant of "I don't know but here's a guess." Those are hedges. Replace each hedge with either (a) the actual citation that confirms or refutes the claim, or (b) a NEED_MORE for the read that would.
+- NEVER invent a name, line number, function signature, or directory you have not seen verbatim in the prior context. Pattern-matching "looks plausible from the project shape" is hallucination.
+- For multi-item questions: each item is independent. If you can verify 9 of 10 claims and one needs more reading, emit NEED_MORE for the 10th. Don't ship a partial audit that omits the unverified one — the harness will route hop-2 back to you with the missing read.
+
+Wrong patterns to avoid (these are the failure mode this directive exists to prevent):
+  Prior context: a list_dir of root and reads of README, go.mod, manifests.
+  WRONG: "The DAG engine lives in pkg/cognition/dag/, but this is not directly confirmed in the codebase structure."
+  WHY WRONG: the list_dir of root showed (or didn't show) "pkg" as an entry — cite which it was. If you didn't list pkg/cognition, NEED_MORE: list pkg/cognition. Don't say "not directly confirmed."
+
+  Prior context: "coding_turn.go:436: h.SetNoTools(true)" from grep, no surrounding file content.
+  WRONG: "The call is in function NewCodingTurnNode" (guessed name).
+  RIGHT: NEED_MORE: read internal/harness/dagnode/coding_turn.go lines 380-450 (or simpler: rely on the read_file tool's enclosing_symbol field once you read any slice).
+
+Termination: NEED_MORE on the SAME concrete read twice in a row means the read isn't producing the answer — at that point, answer with the evidence you have and explicitly note which sub-claim remains unverified ("unverified: <one sentence on what would resolve it>"). That is the ONLY shape in which a hedge is acceptable; everywhere else, cite or NEED_MORE.`
+
+// needMoreMarker is the structured suffix the synthesizer emits when
+// it needs another hop. Parsed by the handler to materialize a
+// follow-up decide.next spawn. Keep this stable — the prompt above
+// instructs the model to emit it verbatim.
+const needMoreMarker = "NEED_MORE:"
+
 // NewCodingTurnHandler returns a dag.Handler for decide.coding_turn.
 //
 // V0 behavior (per ADR-001):
@@ -377,6 +421,33 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			prompt = priorCtx + "\n\n---\n\nYour task: " + prompt
 		}
 
+		// Synthesizer mode: append the structured-response directive so
+		// the model knows to emit NEED_MORE: <next-action> when prior
+		// context is insufficient (instead of guessing or refusing).
+		// Parsed back into a follow-up decide.next spawn below. The
+		// directive only goes in when the caller (typically decide.next)
+		// explicitly sets attrs.synthesize=true; freestanding
+		// coding_turn invocations are unchanged.
+		synthMode, _ := in["synthesize"].(bool)
+		if !synthMode {
+			// Tolerate JSON-emitted numerics from decide.next's LLM
+			// output that round-trip booleans as 1.0 / float64.
+			if f, ok := in["synthesize"].(float64); ok && f != 0 {
+				synthMode = true
+			}
+		}
+		if synthMode {
+			prompt = prompt + synthesizerDirective
+			// Enforce the directive at the protocol level: strip the
+			// tool surface entirely so the model literally cannot
+			// agent-loop its way out of answer-or-NEED_MORE. Without
+			// this the prior turn observed the synthesizer ignoring
+			// the prompt directive and running 4+ intra-loop tool
+			// calls instead of emitting a clean NEED_MORE that becomes
+			// an emergent hop. See memory: project-multi-hop-via-spawn.
+			h.SetNoTools(true)
+		}
+
 		hr, runErr := h.RunSessionWithResult(ctx, prompt, workdir)
 		latency := int(time.Since(started).Milliseconds())
 		lr := h.LastLoopResult()
@@ -407,6 +478,30 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 					lr.Reason, hr.AgentTurnsTotal, hr.TokensIn, hr.TokensOut)
 			}
 		}
+		// In synth mode, strip any trailing NEED_MORE: line from lr.Final
+		// BEFORE the callback fires. The NEED_MORE marker is the harness's
+		// internal signal for emergent multi-hop — it is not user-facing
+		// terminal text. Two outcomes are both correctly handled by this:
+		//
+		//  1. Hop-2 succeeds. The next decide.coding_turn callback fires
+		//     with hop-2's clean answer, which overwrites this hop's
+		//     captured Final. The user sees hop-2's text.
+		//  2. Hop-2 cannot schedule (budget refused, hop cap, etc.). This
+		//     hop's stripped content stays as the captured Final. The
+		//     user sees the model's partial content WITHOUT the dangling
+		//     "NEED_MORE: ..." line that previously leaked through as
+		//     terminal text.
+		//
+		// Preserves the original Final on `out["raw_final"]` for trace /
+		// debug consumers that want to see what the synth literally
+		// emitted before the marker was stripped.
+		var rawFinalBeforeStrip string
+		if synthMode {
+			if stripped, hadMarker := stripNeedMoreLine(lr.Final); hadMarker {
+				rawFinalBeforeStrip = lr.Final
+				lr.Final = stripped
+			}
+		}
 		if cfg.ResultCallback != nil {
 			cfg.ResultCallback(h, hr, lr, runErr)
 		}
@@ -418,6 +513,83 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 				},
 				CostConsumed: dag.Cost{LatencyMS: latency, Tokens: hr.TokensIn + hr.TokensOut},
 			}, fmt.Errorf("decide.coding_turn run: %w", runErr)
+		}
+		// Multi-hop spawn: when the synthesizer emits the NEED_MORE:
+		// marker, parse the next-action question and spawn a fresh
+		// decide.next carrying it. The originating user prompt rides
+		// along on the spawned node's attrs so downstream synthesizers
+		// know what question the whole chain is ultimately answering.
+		// Caps hops at 3 to bound runaway — three follow-up rounds is
+		// far past the point where a 4th would help; the model should
+		// have answered by then with whatever it has.
+		//
+		// Per project-multi-hop-via-spawn: multi-hop emerges as DAG
+		// nodes, not as intra-loop tool calls. The "response" field is
+		// elided when a spawn fires — the final answer comes from the
+		// follow-up chain's terminal synthesizer.
+		if synthMode {
+			// Parse from the pre-strip Final when we stripped, otherwise
+			// from lr.Final directly. parseNeedMore needs to see the
+			// marker we removed for the callback.
+			needMoreSource := lr.Final
+			if rawFinalBeforeStrip != "" {
+				needMoreSource = rawFinalBeforeStrip
+			}
+			if nextQ, ok := parseNeedMore(needMoreSource); ok {
+				hopDepth := readHopDepth(in)
+				if hopDepth < maxHopDepth {
+					rootPrompt := rootPromptFromIn(in, prompt)
+					// Build a composite prompt for the follow-up
+					// planner so it produces a "act + synthesize"
+					// plan, not just the standalone action. Without
+					// this framing the planner sees "read foo.go" as
+					// a single-node task, emits just decide.tool_call,
+					// and the chain ends with no synthesizer — the
+					// user gets no final answer. Naming the root
+					// question + asking for a trailing synthesize=true
+					// coding_turn nudges the planner toward the right
+					// shape every time.
+					childPrompt := fmt.Sprintf(
+						"Continue resolving the user's original question:\n  %q\n\nNext concrete action this turn:\n  %s\n\nPlan: perform the action above, then add a trailing decide.coding_turn with synthesize=true whose prompt asks for the final answer to the original question (it may emit NEED_MORE: again if the action's output is still insufficient).",
+						rootPrompt, nextQ,
+					)
+					childAttrs := map[string]any{
+						"prompt":     childPrompt,
+						hopDepthAttr: hopDepth + 1,
+						// Inherit the root question so the final
+						// synthesizer (which may be several hops deep)
+						// can frame its answer toward what the user
+						// actually asked.
+						"root_user_prompt": rootPrompt,
+					}
+					return dag.NodeResult{
+						Out: map[string]any{
+							"response":   "",
+							"need_more":  nextQ,
+							"hop_depth":  hopDepth,
+							"turns":      hr.AgentTurnsTotal,
+							"tokens_in":  hr.TokensIn,
+							"tokens_out": hr.TokensOut,
+							"cost_usd":   hr.CostUSD,
+						},
+						Spawn: []dag.NodeSpec{{
+							Function: dag.FuncDecide,
+							Op:       "next",
+							Attrs:    childAttrs,
+						}},
+						CostConsumed: dag.Cost{
+							LatencyMS: latency,
+							Tokens:    hr.TokensIn + hr.TokensOut,
+						},
+					}, nil
+				}
+				// Cap hit: surface in Out so the trace is honest, but
+				// fall through to a normal Out shape (the response will
+				// contain the NEED_MORE: line, which is at least visible
+				// to the user as a debug-grade answer). Concrete enough
+				// that an operator sees the cap was the failure, not a
+				// silent stall.
+			}
 		}
 		return dag.NodeResult{
 			Out: map[string]any{
@@ -435,6 +607,104 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			},
 		}, nil
 	}
+}
+
+// hopDepthAttr is the Attr key used to track decide.coding_turn →
+// decide.next → decide.coding_turn synthesis-hop recursion. Set by
+// this handler on emitted follow-up decide.next spawns
+// (parent_depth + 1); read on entry by readHopDepth to decide whether
+// to permit another hop. Cap is maxHopDepth.
+const hopDepthAttr = "_hop_depth"
+
+// maxHopDepth bounds synthesizer follow-up rounds. Three hops covers
+// realistic patterns (grep → identify file → read file → answer); a
+// fourth almost always means the model is looping. The cap is the
+// stop signal — the chain returns whatever the synthesizer had at
+// that depth rather than spawning again.
+const maxHopDepth = 3
+
+// readHopDepth pulls the synthesis-hop depth out of the input map,
+// tolerating both int and float64 (JSON unmarshalling can yield
+// either). Missing or zero → 0.
+func readHopDepth(in map[string]any) int {
+	v, ok := in[hopDepthAttr]
+	if !ok {
+		return 0
+	}
+	switch x := v.(type) {
+	case int:
+		return x
+	case float64:
+		return int(x)
+	}
+	return 0
+}
+
+// rootPromptFromIn returns the originating user question for a
+// follow-up hop. When upstream nodes set in["root_user_prompt"], that
+// wins; otherwise the current node's prompt is taken as the root
+// (first hop). Threading this through every follow-up means the
+// terminal synthesizer can always frame its answer toward what the
+// user actually asked, even three hops deep.
+func rootPromptFromIn(in map[string]any, fallback string) string {
+	if s, ok := in["root_user_prompt"].(string); ok && s != "" {
+		return s
+	}
+	return fallback
+}
+
+// stripNeedMoreLine removes the NEED_MORE: marker line and everything
+// after it from s. Returns (stripped, true) when the marker was found,
+// (s, false) otherwise.
+//
+// The marker is the harness's internal multi-hop signal. The synth
+// directive contract says NEED_MORE: must be on its own line with
+// nothing else; in practice models sometimes append explanatory text
+// after the marker, which is non-conformant content we don't want
+// surfaced. Stripping through EOF gives a clean cut regardless.
+//
+// Empty preceding content yields "" — caller decides whether to
+// substitute a "follow-up needed" annotation or accept silence (the
+// next synthesis hop's text will overwrite the captured Final if it
+// runs successfully).
+func stripNeedMoreLine(s string) (string, bool) {
+	idx := strings.Index(s, needMoreMarker)
+	if idx < 0 {
+		return s, false
+	}
+	// Scan backward from idx to find the start of the marker's line —
+	// either index 0 or one past the most recent newline. Everything
+	// from there to end-of-string gets dropped.
+	lineStart := strings.LastIndexByte(s[:idx], '\n') + 1
+	// Trim trailing whitespace + newlines on the preceding content so
+	// the result doesn't end with a blank line that the marker was
+	// preceded by.
+	return strings.TrimRight(s[:lineStart], " \t\r\n"), true
+}
+
+// parseNeedMore extracts the "<next action>" payload from a
+// synthesizer response that emitted NEED_MORE:. Returns ok=false
+// when the marker isn't present or the payload is empty after trim.
+//
+// Matching is tolerant: the marker may appear anywhere in the
+// response (some models prefix it with whitespace or a colon-line),
+// but the payload is taken from the first non-empty line containing
+// the marker through end-of-line. Anything past a trailing newline
+// is dropped — the synthesizer's contract is one action per hop.
+func parseNeedMore(s string) (string, bool) {
+	idx := strings.Index(s, needMoreMarker)
+	if idx < 0 {
+		return "", false
+	}
+	rest := s[idx+len(needMoreMarker):]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
 }
 
 // actChildIDCounter is a process-wide monotonic counter for assigning
