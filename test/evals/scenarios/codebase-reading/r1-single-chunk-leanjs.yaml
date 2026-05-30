@@ -1,0 +1,23 @@
+id: r1-single-chunk-leanjs
+group: R
+eval: R1
+project: leanjs
+language: js
+prompt: |
+  Read package.json and report the project's "type" and "main" fields
+  with one file:line citation.
+expected:
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - package.json
+  must_not_invent:
+    # leanjs uses type=module, main=lean.js. Hallucination shapes:
+    - '"type": "commonjs"'
+    - main.js
+    - index.js
+  budget_token_max: 8000

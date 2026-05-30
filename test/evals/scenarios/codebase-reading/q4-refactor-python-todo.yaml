@@ -1,0 +1,28 @@
+id: q4-refactor-python-todo
+group: Q
+eval: Q4
+project: python-todo
+language: python
+prompt: |
+  Suppose app/routes.py grew too large. Propose a split into 2-3 modules
+  (e.g. by HTTP verb or resource). For each, name actual functions from
+  app/routes.py that would move into it. NEED_MORE: if you can't list
+  symbols.
+expected:
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 1
+  read_count_max: 6
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/routes.py
+  must_not_invent:
+    - admin_routes
+    - login_routes
+  budget_token_min: 6000
+  budget_token_max: 80000
+judge_rubric: |
+  Pass only if each proposed module names REAL functions from
+  app/routes.py (list_todos, create_todo, patch_todo, delete_todo).
+  Inventions are a fail.

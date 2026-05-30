@@ -1,0 +1,32 @@
+id: q1-pinpoint-cortex
+group: Q
+eval: Q1
+project: cortex
+language: go
+prompt: |
+  What integer value is the constant MaxEmittedChunks set to in pkg/cognition/dag/salience.go?
+expected:
+  # Pinpoint factual: one hop, zero NEED_MORE, no over-reading.
+  # Target file is ~420 lines — small enough that a small model can
+  # grep + read in one act.read_file call without paging.
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 4
+  # Pinpoint answers consolidate citation into one Evidence block;
+  # observed pinpoint citation_rate hovers around 0.2-0.3.
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - pkg/cognition/dag/salience.go
+  must_not_invent:
+    # Real symbol name. Hallucinated variants:
+    - MaxEmittedChunkCount
+    - MaxEmitChunks
+  # Pinpoint scope → budget should stay small.
+  budget_token_max: 15000
+judge_rubric: |
+  Pass only if the answer states MaxEmittedChunks = 8 (the integer literal),
+  cites pkg/cognition/dag/salience.go, and does not invent a different
+  constant value or location. A vague "around 8" or "it's a small number"
+  is a fail.

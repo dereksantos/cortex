@@ -1,0 +1,32 @@
+id: q2-cross-file-cortex
+group: Q
+eval: Q2
+project: cortex
+language: go
+prompt: |
+  How does the REPL chain (cmd/cortex/commands/repl.go) consume the
+  sense.estimate_scope op (pkg/cognition/dag/ops/sense_estimate_scope.go)?
+  Cite the producer's outputs and the consumer's call site.
+expected:
+  # Cross-file relationship: at least two reads across two files;
+  # multi-hop helps but should stay bounded.
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 2
+  read_count_max: 8
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - pkg/cognition/dag/ops/sense_estimate_scope.go
+    - cmd/cortex/commands/repl.go
+  must_not_invent:
+    - EstimateScopeNode # real spec name is EstimateScopeSpec
+    - sense_estimate_scope_handler
+  budget_token_min: 10000
+  budget_token_max: 80000
+judge_rubric: |
+  Pass only if the answer (a) names the real exported producer in
+  sense_estimate_scope.go (EstimateScopeSpec / NewEstimateScopeHandler / the
+  estimateScopeResponse JSON shape) AND (b) cites a real call site in
+  cmd/cortex/commands/repl.go (estimateScopeForTurn or runREPLChainTurn).
+  Fabricated symbol names or unrelated call sites are a fail.

@@ -1,0 +1,34 @@
+id: q4-refactor-leanjs
+group: Q
+eval: Q4
+project: leanjs
+language: js
+prompt: |
+  lean.js intentionally ships as one file. Suppose you had to split it
+  into 3-4 modules for clarity (while preserving the "fits in an
+  agent's context window" spirit). Propose the split, naming the
+  ACTUAL functions / constants from lean.js that would move into each
+  module. Emit NEED_MORE: rather than hedging if you couldn't enumerate
+  the symbols.
+expected:
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 1
+  read_count_max: 8
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - lean.js
+  must_not_invent:
+    # Real exports in lean.js include schema, h, irToString, rng,
+    # WorkflowError. Plausible-sounding inventions:
+    - createApp
+    - LeanComponent
+    - LeanRouter
+  budget_token_min: 8000
+  budget_token_max: 100000
+judge_rubric: |
+  Pass only if each proposed module names REAL exports / symbols from
+  lean.js (schema, h, irToString, rng, WorkflowError, SchemaError, etc.).
+  Invented helper names are a fail. A NEED_MORE that says "could not
+  enumerate the exports" is acceptable.

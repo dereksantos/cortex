@@ -1,0 +1,22 @@
+id: b2-termination-leanjs
+group: B
+eval: B2
+project: leanjs
+language: js
+prompt: |
+  What's the project name in package.json? Answer with one file:line
+  citation and nothing else.
+expected:
+  # B2 termination: pinpoint resolves in exactly one hop, no NEED_MORE,
+  # no over-reading.
+  hop_count_min: 1
+  hop_count_max: 1
+  read_count_min: 1
+  read_count_max: 2
+  hedge_count_max: -1
+  must_cite_paths:
+    - package.json
+  must_not_invent:
+    - '"name": "lean"'
+    - '"name": "leanjs-core"'
+  budget_token_max: 6000

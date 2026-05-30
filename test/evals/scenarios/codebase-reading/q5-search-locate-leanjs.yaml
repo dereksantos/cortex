@@ -1,0 +1,27 @@
+id: q5-search-locate-leanjs
+group: Q
+eval: Q5
+project: leanjs
+language: js
+prompt: |
+  Where in this codebase does the verifier handle a schema validation
+  failure? Cite one file:line range — not a raw grep dump.
+expected:
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 1
+  read_count_max: 6
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - lean.js
+  must_not_invent:
+    - SchemaValidator
+    - ValidatorError
+  budget_token_min: 3000
+  budget_token_max: 50000
+judge_rubric: |
+  Pass only if the answer cites a concrete file:line range inside lean.js
+  (or bin/verify.mjs) where schema validation failure is surfaced — e.g.,
+  SchemaError, the throw site, or the workflow's error path. A raw grep
+  dump is a fail.

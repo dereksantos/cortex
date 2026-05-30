@@ -1,0 +1,20 @@
+id: b2-termination-rust-weather
+group: B
+eval: B2
+project: rust-weather
+language: rust
+prompt: |
+  What integer value is the constant PORT set to in src/main.rs?
+  Answer with the value and one file:line citation, nothing else.
+expected:
+  hop_count_min: 1
+  hop_count_max: 1
+  read_count_min: 1
+  read_count_max: 2
+  hedge_count_max: -1
+  must_cite_paths:
+    - src/main.rs
+  must_not_invent:
+    - SERVER_PORT
+    - HTTP_PORT
+  budget_token_max: 6000

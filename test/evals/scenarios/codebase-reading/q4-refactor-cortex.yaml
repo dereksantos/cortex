@@ -1,0 +1,37 @@
+id: q4-refactor-cortex
+group: Q
+eval: Q4
+project: cortex
+language: go
+prompt: |
+  cmd/cortex/commands/repl.go is over 5000 lines. Propose a sensible
+  file split (3-5 new files) that groups related functions together.
+  For each proposed file, list the actual function or constant names
+  that would move into it — do not invent symbol names. If the file is
+  too large to be sure of a grouping, emit NEED_MORE: rather than
+  hedging.
+expected:
+  # Refactor proposal: multi-hop expected — synthesizer needs the
+  # symbol list, which requires repeated reads or shell grep.
+  hop_count_min: 1
+  hop_count_max: 6
+  read_count_min: 1
+  read_count_max: 10
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - cmd/cortex/commands/repl.go
+  must_not_invent:
+    # Real symbols in repl.go include newREPLState, runREPLChainTurn,
+    # printREPLBanner. Plausible-sounding inventions:
+    - replSession
+    - StartREPL
+    - runREPLLoop
+  budget_token_min: 10000
+  budget_token_max: 120000
+judge_rubric: |
+  Pass only if each proposed module names REAL symbols from
+  cmd/cortex/commands/repl.go (e.g., newREPLState, runREPLChainTurn,
+  printREPLBanner, dispatchSlash). Invented symbol names are a fail.
+  A NEED_MORE that explicitly says "I could not enumerate symbols without
+  reading more of the file" is acceptable.

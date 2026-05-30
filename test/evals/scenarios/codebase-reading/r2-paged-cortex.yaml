@@ -1,0 +1,27 @@
+id: r2-paged-cortex
+group: R
+eval: R2
+project: cortex
+language: go
+prompt: |
+  cmd/cortex/commands/repl.go is large. Summarize what the function
+  newREPLState does, citing the line range you read and noting any
+  range you needed to re-read.
+expected:
+  # Paged read: the file is 5000+ lines, the symbol sits ~line 650.
+  # We expect at least one act.read_file and may need a second hop
+  # (NEED_MORE → decide.next → another read).
+  hop_count_min: 1
+  hop_count_max: 4
+  read_count_min: 1
+  read_count_max: 6
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - cmd/cortex/commands/repl.go
+  must_not_invent:
+    - newREPLStateNode # real symbol is newREPLState
+    - newReplState
+  # Large-file paged read implies a medium-scope estimate.
+  budget_token_min: 5000
+  budget_token_max: 60000

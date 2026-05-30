@@ -1,0 +1,22 @@
+id: r3-symbol-in-large-file-rust-weather
+group: R
+eval: R3
+project: rust-weather
+language: rust
+prompt: |
+  In src/storage.rs, what function contains the call to
+  self.order.pop_front? Read a narrow slice.
+expected:
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - src/storage.rs
+  must_not_invent:
+    - evict_oldest
+    - drop_oldest
+  budget_token_min: 2000
+  budget_token_max: 25000

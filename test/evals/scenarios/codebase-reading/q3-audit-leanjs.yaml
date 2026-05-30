@@ -1,0 +1,29 @@
+id: q3-audit-leanjs
+group: Q
+eval: Q3
+project: leanjs
+language: js
+prompt: |
+  Compare README.md and SPEC.md against lean.js. List 3-5 concrete
+  claims in the docs that are either confirmed by the code, missing, or
+  outdated — each with a file:line citation.
+expected:
+  hop_count_min: 2
+  hop_count_max: 8
+  citation_rate_min: 0.5
+  hedge_count_max: -1
+  unverified_tail_count_max: -1
+  must_cite_paths:
+    - README.md
+    - SPEC.md
+    - lean.js
+  must_not_invent:
+    - leanjs-cli
+    - lean-react
+    - PROTOCOL_VERSION
+  budget_token_min: 20000
+  budget_token_max: 200000
+judge_rubric: |
+  Pass only if the answer lists 3-5 distinct claims, EACH with a citation
+  to a real file (README.md, SPEC.md, lean.js, examples/*). Vague
+  agreement / disagreement without per-claim citations is a fail.

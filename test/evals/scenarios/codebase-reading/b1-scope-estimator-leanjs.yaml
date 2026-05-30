@@ -1,0 +1,24 @@
+id: b1-scope-estimator-leanjs
+group: B
+eval: B1
+project: leanjs
+language: js
+prompt: |
+  Audit every file under examples/ for conformance with SPEC.md.
+  Report mismatches with file:line citations.
+expected:
+  # Wide audit across multiple example apps → estimator should pick
+  # a substantial budget. Tiny projects (leanjs is ~tier-tiny) still
+  # exercise the audit branch.
+  hop_count_min: 1
+  hop_count_max: 10
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - examples/
+    - SPEC.md
+  must_not_invent:
+    - examples/auth-app
+    - examples/router-app
+  budget_token_min: 20000
+  budget_token_max: 250000

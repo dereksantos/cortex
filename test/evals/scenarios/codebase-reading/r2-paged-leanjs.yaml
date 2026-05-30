@@ -1,0 +1,22 @@
+id: r2-paged-leanjs
+group: R
+eval: R2
+project: leanjs
+language: js
+prompt: |
+  lean.js is ~900 lines. Summarize what the function irToString does
+  and what shape of input it expects. Cite the line range you read.
+expected:
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 5
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - lean.js
+  must_not_invent:
+    - irToStringNode
+    - ir_to_string
+  budget_token_min: 4000
+  budget_token_max: 50000

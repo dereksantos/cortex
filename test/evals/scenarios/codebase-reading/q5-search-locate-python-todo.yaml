@@ -1,0 +1,26 @@
+id: q5-search-locate-python-todo
+group: Q
+eval: Q5
+project: python-todo
+language: python
+prompt: |
+  Where does this codebase return HTTP 401? Cite one file:line range,
+  not a raw grep dump.
+expected:
+  hop_count_min: 1
+  hop_count_max: 4
+  read_count_min: 1
+  read_count_max: 5
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/auth.py
+  must_not_invent:
+    - UnauthorizedException
+    - middleware/auth_check.py
+  budget_token_min: 3000
+  budget_token_max: 40000
+judge_rubric: |
+  Pass only if the answer cites the abort(401, ...) call in
+  app/auth.py with a file:line range. A raw grep dump or unrelated
+  citation is a fail.

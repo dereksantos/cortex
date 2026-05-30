@@ -1,0 +1,27 @@
+id: b1-scope-estimator-cortex
+group: B
+eval: B1
+project: cortex
+language: go
+prompt: |
+  Audit the entire docs/ directory and identify three docs that are
+  outdated relative to the current implementation. For each, cite the
+  doc path and the implementation file that diverges.
+expected:
+  # B1 is the budget-sizing test: an audit-class prompt against a
+  # large directory should drive sense.estimate_scope to a wide
+  # envelope (much larger than the pinpoint R1/Q1 budgets).
+  hop_count_min: 1
+  hop_count_max: 8
+  citation_rate_min: 0.4
+  hedge_count_max: -1
+  must_cite_paths:
+    - docs/
+  must_not_invent:
+    - cortex-data-warehouse
+    - docs/architecture.md # the project doesn't have this file at the top of docs/
+  # Floor at 30k drives the assertion: B1 confirms audit prompts get
+  # >30k token budgets. A regression in the estimator would surface
+  # here.
+  budget_token_min: 30000
+  budget_token_max: 250000

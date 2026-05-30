@@ -1,0 +1,20 @@
+id: b1-scope-estimator-python-todo
+group: B
+eval: B1
+project: python-todo
+language: python
+prompt: |
+  Audit every Python file under app/ for missing type hints. Report the
+  ones lacking annotations with file:line citations.
+expected:
+  hop_count_min: 1
+  hop_count_max: 8
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/
+  must_not_invent:
+    - app/middleware.py
+    - app/celery.py
+  budget_token_min: 15000
+  budget_token_max: 200000

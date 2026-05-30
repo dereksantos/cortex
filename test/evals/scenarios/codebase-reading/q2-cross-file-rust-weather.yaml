@@ -1,0 +1,26 @@
+id: q2-cross-file-rust-weather
+group: Q
+eval: Q2
+project: rust-weather
+language: rust
+prompt: |
+  How does src/handlers.rs consume the storage layer in src/storage.rs?
+  Cite the producer interface and one consumer call site.
+expected:
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 2
+  read_count_max: 6
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - src/handlers.rs
+    - src/storage.rs
+  must_not_invent:
+    - Database
+    - SqlStorage
+  budget_token_min: 5000
+  budget_token_max: 50000
+judge_rubric: |
+  Pass only if the answer names a real StationStore method (latest /
+  record / len) AND cites the handler call site. Inventions are a fail.

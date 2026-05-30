@@ -1,0 +1,20 @@
+id: b1-scope-estimator-rust-weather
+group: B
+eval: B1
+project: rust-weather
+language: rust
+prompt: |
+  Audit every file under src/ for places that could panic at runtime
+  (unwrap, expect, indexing). Report each with a file:line citation.
+expected:
+  hop_count_min: 1
+  hop_count_max: 8
+  citation_rate_min: 0.3
+  hedge_count_max: -1
+  must_cite_paths:
+    - src/
+  must_not_invent:
+    - src/panics.rs
+    - src/unsafe_ops.rs
+  budget_token_min: 15000
+  budget_token_max: 200000

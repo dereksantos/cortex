@@ -1,0 +1,23 @@
+id: b2-termination-cortex
+group: B
+eval: B2
+project: cortex
+language: go
+prompt: |
+  What constant value is CellResultSchemaVersion (in
+  internal/eval/v2/cellresult.go) set to? Answer with just the value
+  and one file:line citation. Do not over-explain.
+expected:
+  # B2 is the "don't waste hops" test: a pinpoint should resolve in
+  # exactly one hop with no NEED_MORE. read_count_max=2 is strict —
+  # if the answer needs more, the prompt or the chain is mis-sized.
+  hop_count_min: 1
+  hop_count_max: 1
+  read_count_min: 1
+  read_count_max: 2
+  hedge_count_max: -1
+  must_cite_paths:
+    - internal/eval/v2/cellresult.go
+  must_not_invent:
+    - SchemaVersionV1
+  budget_token_max: 10000

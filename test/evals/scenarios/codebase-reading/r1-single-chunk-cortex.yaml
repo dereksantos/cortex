@@ -1,0 +1,30 @@
+id: r1-single-chunk-cortex
+group: R
+eval: R1
+project: cortex
+language: go
+prompt: |
+  Read internal/eval/v2/cellresult.go and tell me what the constant CellResultSchemaVersion is set to.
+expected:
+  # Single-chunk read: one act.read_file, one synthesis turn, no fan-out.
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 3
+  # Pinpoint answers consolidate the file citation into a single
+  # Evidence block (one citation across ~4 claim bullets), so 0.5
+  # is the wrong shape — calibrated to the observed pinpoint answer
+  # shape on cortex:R1. Slice-3 (LLM judge) catches "right value,
+  # wrong line" hallucinations that this regex-rate cannot.
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - internal/eval/v2/cellresult.go
+  must_not_invent:
+    # The real exported constant is CellResultSchemaVersion. Common
+    # hallucination shapes:
+    - CellResultVersion
+    - SchemaVersionV1
+  # Pinpoint factual against a tiny file — budget estimator should
+  # come in well under 10k tokens.
+  budget_token_max: 10000

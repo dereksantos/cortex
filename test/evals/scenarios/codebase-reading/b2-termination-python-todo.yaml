@@ -1,0 +1,20 @@
+id: b2-termination-python-todo
+group: B
+eval: B2
+project: python-todo
+language: python
+prompt: |
+  What's the API_VERSION string in app/__init__.py? Answer with the
+  value and one file:line citation, nothing else.
+expected:
+  hop_count_min: 1
+  hop_count_max: 1
+  read_count_min: 1
+  read_count_max: 2
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/__init__.py
+  must_not_invent:
+    - VERSION
+    - SCHEMA_VERSION
+  budget_token_max: 6000

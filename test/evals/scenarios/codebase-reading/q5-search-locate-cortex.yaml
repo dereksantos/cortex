@@ -1,0 +1,31 @@
+id: q5-search-locate-cortex
+group: Q
+eval: Q5
+project: cortex
+language: go
+prompt: |
+  Where in the codebase does the harness handle a "context deadline
+  exceeded" error path? Cite the file:line range of the handler, not a
+  raw grep dump.
+expected:
+  # Search/locate: shell + read are both expected; the answer must be
+  # a file:line citation, not a list of matches.
+  hop_count_min: 1
+  hop_count_max: 5
+  read_count_min: 1
+  read_count_max: 6
+  # Locate-class answers should produce a single concrete file:line
+  # — citation_rate may be modest if the answer is short.
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - internal/harness/
+  must_not_invent:
+    - contextDeadlineHandler
+    - HandleContextDone
+  budget_token_min: 5000
+  budget_token_max: 80000
+judge_rubric: |
+  Pass only if the answer cites ONE concrete file:line range inside
+  internal/harness/ that handles a deadline / context-done error. A raw
+  grep dump or "errors are handled in many places" is a fail.

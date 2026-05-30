@@ -1,0 +1,17 @@
+id: b3-honest-unknown-rust-weather
+group: B
+eval: B3
+project: rust-weather
+language: rust
+prompt: |
+  Look in the codebase for a function named compress_forecast. If it
+  isn't there, say so explicitly with NEED_MORE: — don't fabricate.
+expected:
+  hop_count_min: 1
+  hop_count_max: 4
+  hedge_count_max: -1
+  must_not_invent:
+    - src/compression.rs
+    - src/encode.rs
+    - "is defined in"
+  budget_token_max: 40000

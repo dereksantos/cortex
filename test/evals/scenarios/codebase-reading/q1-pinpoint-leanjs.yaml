@@ -1,0 +1,23 @@
+id: q1-pinpoint-leanjs
+group: Q
+eval: Q1
+project: leanjs
+language: js
+prompt: |
+  What string value is the constant SPEC_VERSION set to in lean.js?
+expected:
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - lean.js
+  must_not_invent:
+    - SCHEMA_VERSION
+    - PROTOCOL_VERSION
+  budget_token_max: 10000
+judge_rubric: |
+  Pass only if the answer states SPEC_VERSION = '0.2' (the literal string)
+  and cites lean.js. A different version number or a wrong file is a fail.

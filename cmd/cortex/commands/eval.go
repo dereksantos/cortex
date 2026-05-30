@@ -75,6 +75,8 @@ func (c *EvalCommand) Execute(ctx *Context) error {
 			return runBenchmark(ctx.Args[1], ctx.Args[2:], false)
 		case "paired":
 			return executePaired(ctx.Args[1:])
+		case "codebase":
+			return executeCodebase(ctx.Args[1:])
 		}
 	}
 

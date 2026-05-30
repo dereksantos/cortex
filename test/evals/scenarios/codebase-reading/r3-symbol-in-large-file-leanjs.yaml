@@ -1,0 +1,25 @@
+id: r3-symbol-in-large-file-leanjs
+group: R
+eval: R3
+project: leanjs
+language: js
+prompt: |
+  In lean.js, what enclosing function contains the WORDS constant array?
+  Read a narrow slice — do not list the whole file.
+expected:
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - lean.js
+  must_not_invent:
+    # WORDS lives at module top-level, not inside a function. The
+    # honest answer is "module-level constant, no enclosing function";
+    # these are plausible inventions if the model fabricates one.
+    - generateWords
+    - buildWordList
+  budget_token_min: 3000
+  budget_token_max: 30000

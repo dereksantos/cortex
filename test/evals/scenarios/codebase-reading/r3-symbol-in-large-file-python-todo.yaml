@@ -1,0 +1,22 @@
+id: r3-symbol-in-large-file-python-todo
+group: R
+eval: R3
+project: python-todo
+language: python
+prompt: |
+  In app/routes.py, what function contains the call to app.storage.add?
+  Read a narrow slice.
+expected:
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/routes.py
+  must_not_invent:
+    - add_todo
+    - createTodo
+  budget_token_min: 2000
+  budget_token_max: 25000

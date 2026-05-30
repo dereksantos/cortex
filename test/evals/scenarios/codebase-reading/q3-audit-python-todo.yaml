@@ -1,0 +1,27 @@
+id: q3-audit-python-todo
+group: Q
+eval: Q3
+project: python-todo
+language: python
+prompt: |
+  Compare README.md against the actual code in app/. List 3-5 claims
+  in the README that are confirmed, outdated, or missing — each with a
+  file:line citation.
+expected:
+  hop_count_min: 2
+  hop_count_max: 8
+  citation_rate_min: 0.5
+  hedge_count_max: -1
+  unverified_tail_count_max: -1
+  must_cite_paths:
+    - README.md
+    - app/
+  must_not_invent:
+    - app/database.py
+    - app/celery_worker.py
+  budget_token_min: 15000
+  budget_token_max: 200000
+judge_rubric: |
+  Pass only if the answer lists 3-5 distinct claims, EACH with a real
+  file path under app/ or README.md. Generic agreement without per-claim
+  citations is a fail.

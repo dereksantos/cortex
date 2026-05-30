@@ -1,0 +1,38 @@
+id: q3-audit-cortex
+group: Q
+eval: Q3
+project: cortex
+language: go
+prompt: |
+  Compare the README.md against the actual project implementation. List 3-5
+  concrete claims in the README that are either confirmed by the code,
+  outdated, or missing — each with a file:line citation.
+expected:
+  # Whole-project audit: multi-hop required, but cap to keep the budget
+  # honest. Pinpoint runs should NOT escalate to this shape.
+  hop_count_min: 2
+  hop_count_max: 8
+  citation_rate_min: 0.6
+  hedge_count_max: -1
+  unverified_tail_count_max: -1
+  must_cite_paths:
+    - pkg/cognition/dag/
+    - cmd/cortex/
+    - docs/
+  must_not_invent:
+    # README mentions the "Cortex" project repeatedly. The following
+    # would only appear if the model is hallucinating:
+    - cortex-data-warehouse
+    - NewCodingTurnNode # real symbol is NewCodingTurnHandler
+    - cortex-cli-v2
+  # Audit-class prompt should drive sense.estimate_scope to a large
+  # envelope. Floor at 30k so a regression that downsizes audit budgets
+  # surfaces here; ceiling at 200k so the estimator can't run away.
+  budget_token_min: 30000
+  budget_token_max: 200000
+judge_rubric: |
+  Pass only if the answer lists 3-5 distinct claims, EACH with a file:line
+  citation to a real path in the cortex repo (pkg/, cmd/, internal/, docs/).
+  Each claim must either confirm the README, flag a divergence, or note a
+  missing item. Vague "the README looks fine overall" with no per-claim
+  citations is a fail.

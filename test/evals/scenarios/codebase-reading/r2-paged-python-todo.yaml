@@ -1,0 +1,22 @@
+id: r2-paged-python-todo
+group: R
+eval: R2
+project: python-todo
+language: python
+prompt: |
+  Summarize what the patch_todo handler does in app/routes.py and cite
+  the line range you read.
+expected:
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 4
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/routes.py
+  must_not_invent:
+    - update_todo
+    - edit_todo
+  budget_token_min: 3000
+  budget_token_max: 30000

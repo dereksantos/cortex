@@ -1,0 +1,20 @@
+id: r1-single-chunk-python-todo
+group: R
+eval: R1
+project: python-todo
+language: python
+prompt: |
+  Read app/storage.py and tell me what the MAX_TODOS constant is set to.
+expected:
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - app/storage.py
+  must_not_invent:
+    - MAX_ITEMS
+    - MAX_TODO
+  budget_token_max: 10000

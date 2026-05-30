@@ -1,0 +1,20 @@
+id: r1-single-chunk-rust-weather
+group: R
+eval: R1
+project: rust-weather
+language: rust
+prompt: |
+  Read src/storage.rs and report what MAX_STATIONS is set to.
+expected:
+  hop_count_min: 1
+  hop_count_max: 2
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - src/storage.rs
+  must_not_invent:
+    - MAX_STATION
+    - STATIONS_CAP
+  budget_token_max: 10000

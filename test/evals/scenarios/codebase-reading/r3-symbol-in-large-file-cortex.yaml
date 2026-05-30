@@ -1,0 +1,26 @@
+id: r3-symbol-in-large-file-cortex
+group: R
+eval: R3
+project: cortex
+language: go
+prompt: |
+  In cmd/cortex/commands/repl.go, what function contains the call to
+  SetNoTools(true)? Read a single slice of the file (use enclosing_symbol
+  if available) — do not list the whole file.
+expected:
+  # Symbol-in-large-file: one targeted read should resolve via the
+  # enclosing_symbol nav aid. Going over 3 reads suggests the
+  # enclosing-symbol shortcut isn't carrying the signal it should.
+  hop_count_min: 1
+  hop_count_max: 3
+  read_count_min: 1
+  read_count_max: 3
+  citation_rate_min: 0.2
+  hedge_count_max: -1
+  must_cite_paths:
+    - cmd/cortex/commands/repl.go
+  must_not_invent:
+    - SetNoToolsHandler
+    - DisableTools
+  budget_token_min: 3000
+  budget_token_max: 40000

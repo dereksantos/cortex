@@ -18,6 +18,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/eval/codebase"
 	"github.com/dereksantos/cortex/internal/journal"
 	intllm "github.com/dereksantos/cortex/internal/llm"
 	"github.com/dereksantos/cortex/internal/storage"
@@ -632,6 +633,7 @@ func (c *StatusCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.Bool("memory", false, "Context-memory dashboard (events / insights / breakdown)")
 	fs.Bool("json", false, "Emit raw storage stats as JSON")
 	fs.Bool("expand", false, "Small-LLM-generated multi-line summary of current state")
+	fs.Bool("eval", false, "Codebase-reading eval aggregate (N/total passing, citation_rate p50)")
 	fs.String("format", "", "Output format: claude (Claude Code stdin variant of the default one-liner)")
 }
 
@@ -645,6 +647,7 @@ func (c *StatusCommand) Execute(ctx *Context) error {
 		showMemory   bool
 		showJSON     bool
 		showExpand   bool
+		showEval     bool
 	)
 	for _, arg := range ctx.Args {
 		switch arg {
@@ -658,17 +661,19 @@ func (c *StatusCommand) Execute(ctx *Context) error {
 			showJSON = true
 		case "--expand":
 			showExpand = true
+		case "--eval":
+			showEval = true
 		}
 	}
 
 	picked := 0
-	for _, b := range []bool{showSystem, showMemory, showJSON, showExpand} {
+	for _, b := range []bool{showSystem, showMemory, showJSON, showExpand, showEval} {
 		if b {
 			picked++
 		}
 	}
 	if picked > 1 {
-		return fmt.Errorf("cortex status: --system, --memory, --json, --expand are mutually exclusive")
+		return fmt.Errorf("cortex status: --system, --memory, --json, --expand, --eval are mutually exclusive")
 	}
 
 	switch {
@@ -680,6 +685,8 @@ func (c *StatusCommand) Execute(ctx *Context) error {
 		return displayStatsJSON(ctx)
 	case showExpand:
 		return displayExpandedStatus(ctx)
+	case showEval:
+		return displayEvalAggregate(ctx)
 	case formatClaude:
 		displayStatusClaude(ctx)
 		return nil
@@ -687,6 +694,25 @@ func (c *StatusCommand) Execute(ctx *Context) error {
 		displayStatus(ctx)
 		return nil
 	}
+}
+
+func displayEvalAggregate(ctx *Context) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	rows, path, err := codebase.LoadBaseline(wd, "latest")
+	if err != nil {
+		return fmt.Errorf("load baseline: %w", err)
+	}
+	if len(rows) == 0 {
+		fmt.Println("codebase eval: no baseline yet — run `cortex eval codebase --baseline`")
+		return nil
+	}
+	agg := codebase.Summarize(rows)
+	fmt.Printf("codebase eval: %d/%d passing  citation_rate p50=%.2f  budget_tokens p50=%d  (source: %s)\n",
+		agg.Passing, agg.Total, agg.CitationP50, agg.BudgetTokenP50, path)
+	return nil
 }
 
 func displayStatus(ctx *Context) {
