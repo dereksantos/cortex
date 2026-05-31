@@ -111,6 +111,28 @@ type EndpointDef struct {
 	// no bare-name routing for this endpoint; bare names fall through
 	// to Ollama (legacy behavior preserved).
 	Models []string `json:"models,omitempty"`
+
+	// ModelCapabilities lets the operator declare per-model capability
+	// tags that the id-pattern auto-detection in
+	// `pkg/llm/capabilities.go` can't recognize. The map key is the
+	// bare model id served by this endpoint (e.g. "reasoner"); values
+	// are Cap* constants from pkg/llm (e.g. ["reasoning",
+	// "reasoning:specialist", "tool-calling"]).
+	//
+	// When the endpoint's /v1/models response already advertises
+	// labels (Lemonade), those win. When the response is label-less,
+	// this map is preferred over id-pattern inference. The map is
+	// purely additive: omitting a model leaves the existing inference
+	// path unchanged.
+	//
+	// Use case: chatterbox's "reasoner" alias serves gpt-oss-20b, but
+	// the id-pattern detector only recognizes "o1/o3/o4" as reasoning
+	// specialists. Adding `"reasoner": ["reasoning",
+	// "reasoning:specialist"]` here lets the per-node router pick it
+	// for nodes that declare `Requires: [CapReasoningSpecialist]`
+	// without modifying source code each time an operator renames a
+	// fleet alias.
+	ModelCapabilities map[string][]string `json:"model_capabilities,omitempty"`
 }
 
 // ResolveAPIKey returns the API key for this endpoint. APIKeyEnv wins

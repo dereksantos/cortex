@@ -583,6 +583,12 @@
       "version": "0.1.0",
       "flags": [
         {
+          "name": "eval",
+          "type": "bool",
+          "default": "false",
+          "description": "Codebase-reading eval aggregate (N/total passing, citation_rate p50)"
+        },
+        {
           "name": "expand",
           "type": "bool",
           "default": "false",

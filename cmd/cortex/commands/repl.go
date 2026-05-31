@@ -759,6 +759,7 @@ func buildREPLRegistry(cortexDir, apiURL string, ui cliout.Sink, verbose bool) l
 				},
 				IsLocal:            true, // configured endpoints are assumed local/LAN today
 				MaxContextOverride: ep.MaxContextOverride,
+				ModelCapabilities:  ep.ModelCapabilities,
 			}))
 		}
 	}

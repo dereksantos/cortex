@@ -82,16 +82,35 @@ func (c *ModelsCommand) Execute(ctx *Context) error {
 	ollamaCatalog := probeOllamaCatalog()
 
 	// Build catalogs for the recommender.
+	// Build a name → ModelCapabilities lookup so we can apply the
+	// operator's per-model capability overrides to the probed
+	// catalogs. Same precedence rule as the registry path: endpoint-
+	// supplied labels win; this map is a fallback for label-less
+	// listings (chatterbox proxies, OpenAI-compat servers without
+	// label support).
+	capOverrides := map[string]map[string][]string{}
+	if cfg != nil {
+		for _, ep := range cfg.Endpoints {
+			if len(ep.ModelCapabilities) > 0 {
+				capOverrides[ep.Name] = ep.ModelCapabilities
+			}
+		}
+	}
+
 	catalogs := make([]llm.EndpointCatalog, 0, len(endpointResults)+1)
 	for _, r := range endpointResults {
 		if !r.Reachable {
 			continue
 		}
+		models := r.Models
+		if overrides, ok := capOverrides[r.Name]; ok {
+			models = applyCapabilityOverrides(models, overrides)
+		}
 		catalogs = append(catalogs, llm.EndpointCatalog{
 			Name:    r.Name,
 			BaseURL: r.BaseURL,
 			IsLocal: isLocalURL(r.BaseURL),
-			Models:  r.Models,
+			Models:  models,
 		})
 	}
 	if ollamaCatalog != nil {
@@ -104,7 +123,7 @@ func (c *ModelsCommand) Execute(ctx *Context) error {
 		return emitModelsJSON(endpointResults, ollamaCatalog, rec)
 	}
 
-	printDetected(endpointResults, ollamaCatalog)
+	printDetected(endpointResults, ollamaCatalog, capOverrides)
 	fmt.Println()
 	printRecommendation(rec)
 
@@ -122,6 +141,28 @@ func (c *ModelsCommand) Execute(ctx *Context) error {
 // buildEndpointConfigs converts the persisted EndpointDef list into
 // the llm.EndpointConfig form the detector expects (resolving the
 // API key from APIKeyEnv if set).
+// applyCapabilityOverrides patches each CompatModel's Labels with
+// operator-supplied capabilities from EndpointDef.ModelCapabilities
+// when the endpoint's /v1/models response didn't already advertise
+// them. Mirrors the runtime registry path in probe_openai_compat.go
+// so `cortex models` and `cortex repl`'s per-node router see the
+// same view of the world.
+func applyCapabilityOverrides(models []llm.CompatModel, overrides map[string][]string) []llm.CompatModel {
+	if len(overrides) == 0 {
+		return models
+	}
+	out := make([]llm.CompatModel, len(models))
+	for i, m := range models {
+		if len(m.Labels) == 0 {
+			if extra, ok := overrides[m.ID]; ok && len(extra) > 0 {
+				m.Labels = extra
+			}
+		}
+		out[i] = m
+	}
+	return out
+}
+
 func buildEndpointConfigs(cfg *config.Config) []llm.EndpointConfig {
 	if cfg == nil {
 		return nil
@@ -179,8 +220,11 @@ func isLocalURL(u string) bool {
 }
 
 // printDetected pretty-prints the discovered endpoints and their
-// models with capability tags.
-func printDetected(endpoints []intllm.EndpointResult, ollama *llm.EndpointCatalog) {
+// models with capability tags. capOverrides supplies operator-
+// declared per-model capabilities for label-less endpoints (matches
+// the runtime registry's precedence: wire labels > operator map > id
+// inference).
+func printDetected(endpoints []intllm.EndpointResult, ollama *llm.EndpointCatalog, capOverrides map[string]map[string][]string) {
 	fmt.Println("Detected endpoints:")
 	if len(endpoints) == 0 && ollama == nil {
 		fmt.Println("  (none — no OpenAI-compatible endpoints configured and Ollama not reachable)")
@@ -192,8 +236,12 @@ func printDetected(endpoints []intllm.EndpointResult, ollama *llm.EndpointCatalo
 			fmt.Printf("  [DOWN] %s (%s) — %s\n", r.Name, r.BaseURL, truncateErr(r.Error, 80))
 			continue
 		}
-		fmt.Printf("  [OK]   %s (%s) — %d models\n", r.Name, r.BaseURL, len(r.Models))
-		for _, m := range r.Models {
+		models := r.Models
+		if overrides, ok := capOverrides[r.Name]; ok {
+			models = applyCapabilityOverrides(models, overrides)
+		}
+		fmt.Printf("  [OK]   %s (%s) — %d models\n", r.Name, r.BaseURL, len(models))
+		for _, m := range models {
 			labels := llm.EffectiveLabels(m)
 			fmt.Printf("           %-45s  %s\n", m.ID, fmtLabels(labels))
 		}

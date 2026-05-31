@@ -32,6 +32,17 @@ type OpenAICompatProbeConfig struct {
 	// size-vs-window math must respect the deployment, so the operator
 	// can pin the runtime size here.
 	MaxContextOverride int
+
+	// ModelCapabilities lets the operator declare per-model capability
+	// tags that the id-pattern auto-detection can't recognize. Keyed
+	// by the bare model id served by this endpoint (e.g. "reasoner");
+	// values are Cap* constants. Applied below as a fallback for
+	// label-less listings — endpoint-supplied labels still win when
+	// present.
+	//
+	// This is the runtime sink for config.EndpointDef.ModelCapabilities.
+	// Empty (default) preserves legacy id-pattern inference.
+	ModelCapabilities map[string][]string
 }
 
 // NewOpenAICompatProbe builds a Probe over one configured OpenAI-compat
@@ -73,6 +84,16 @@ func (p *openAICompatProbe) Probe(ctx context.Context) ([]ModelInfo, error) {
 		ctxWindow := m.ContextLength
 		if p.cfg.MaxContextOverride > 0 {
 			ctxWindow = p.cfg.MaxContextOverride
+		}
+		// Operator-supplied capability tags take precedence over
+		// id-pattern inference, but defer to endpoint-advertised
+		// labels when those exist (Lemonade). Lookup is by bare id
+		// (the operator writes "reasoner" in config; the registered
+		// ModelInfo ID gets the endpoint prefix later).
+		if len(m.Labels) == 0 {
+			if extra, ok := p.cfg.ModelCapabilities[m.ID]; ok && len(extra) > 0 {
+				m.Labels = extra
+			}
 		}
 		out = append(out, ModelInfo{
 			ID:                     fullID,
