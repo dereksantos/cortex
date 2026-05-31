@@ -201,6 +201,11 @@ You can also re-enter decide.next when a step's result will fundamentally change
 
 Synthesizer node. When the last node in your plan is a decide.coding_turn that ONLY summarizes prior step outputs (the typical exploration / Q&A shape), set attrs.synthesize=true on it. That puts the synthesizer in structured mode: it either answers directly from prior context, or emits a "NEED_MORE: <next action>" line which the executor materializes as a follow-up decide.next — a real DAG node, not a hidden tool-loop. Multi-hop reads (grep → identify file → read file → answer) emerge as additional nodes this way. Do NOT set synthesize=true on a coding_turn that's expected to perform a code change or to use tools itself.
 
+Model selection for the synthesizer (attrs.model on a synthesize=true node):
+- For broad audit / explanation / multi-claim review prompts (e.g. "does the README match the implementation?", "list 3-5 concerns about X", "compare the docs against the code", "propose a file split that names real symbols"), route the synthesizer to a reasoning specialist if one is available — these tasks consolidate many observations into structured claims and benefit from deep reasoning.
+- For simple Q&A / pinpoint factual / code-change summaries (e.g. "what value is X set to?", "did the change compile?", "summarize what we wrote"), leave attrs.model unset (use the session default — usually a coding specialist). The coder is faster and equally good on short focused outputs.
+- Tool-call nodes (decide.tool_call) and non-synth coding_turn nodes (the agent loop) should NOT carry attrs.model overrides — those routes are already capability-tuned at the registry level.
+
 Common shapes:
 
   Direct (conversational or simple Q&A):

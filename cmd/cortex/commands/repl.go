@@ -903,10 +903,20 @@ func (s *replState) modelCatalogForREPL() string {
 			fmt.Fprintf(&b, "%s:\n", group)
 			currentGroup = group
 		}
-		// Surface context window when known so the LLM can pick a
-		// model with enough room for the task.
+		// Surface context window + capability summary so the LLM can
+		// pick the right model for a per-node attrs.model override.
+		// Without capability hints the catalog is just a list of opaque
+		// names — the LLM can't tell "reasoner" is a reasoning
+		// specialist vs. another coder variant.
+		caps := summarizeCapabilities(m.Capabilities)
 		if m.EffectiveContextWindow > 0 {
-			fmt.Fprintf(&b, "  %s (ctx=%d)\n", m.ID, m.EffectiveContextWindow)
+			if caps != "" {
+				fmt.Fprintf(&b, "  %s (ctx=%d, %s)\n", m.ID, m.EffectiveContextWindow, caps)
+			} else {
+				fmt.Fprintf(&b, "  %s (ctx=%d)\n", m.ID, m.EffectiveContextWindow)
+			}
+		} else if caps != "" {
+			fmt.Fprintf(&b, "  %s (%s)\n", m.ID, caps)
 		} else {
 			fmt.Fprintf(&b, "  %s\n", m.ID)
 		}
@@ -923,6 +933,44 @@ func (s *replState) modelCatalogForREPL() string {
 // in the catalog) or when /models refresh is invoked.
 func (s *replState) resetModelCatalog() {
 	s.modelCatalogCache = ""
+}
+
+// summarizeCapabilities turns a model's capability tag set into a
+// short human-readable phrase the LLM can use to pick. We prefer the
+// most informative specialty: a "reasoning:specialist" tag wins over
+// the generic "reasoning" tag, etc. Empty caps → empty phrase.
+//
+// Used by the model-catalog renderer fed into decide.next's prompt;
+// the model picker needs more than opaque names to make per-node
+// attrs.model decisions.
+func summarizeCapabilities(caps []string) string {
+	if len(caps) == 0 {
+		return ""
+	}
+	has := map[string]bool{}
+	for _, c := range caps {
+		has[c] = true
+	}
+	// Precedence order: most descriptive specialty first.
+	switch {
+	case has[llm.CapReasoningSpecialist]:
+		return "reasoning specialist"
+	case has[llm.CapCodingSpecialist]:
+		return "coding specialist"
+	case has[llm.CapToolCallingSpecialist]:
+		return "tool-call specialist"
+	case has[llm.CapReranking]:
+		return "reranker"
+	case has[llm.CapEmbedding]:
+		return "embedder"
+	case has[llm.CapReasoning]:
+		return "reasoning"
+	case has[llm.CapCoding]:
+		return "coding"
+	case has[llm.CapToolCalling]:
+		return "tool-calling"
+	}
+	return ""
 }
 
 // buildProviderFactoryForREPL constructs an llm.ProviderFactory the
