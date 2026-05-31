@@ -66,115 +66,168 @@ three directions, described below.
 
 ## Three paths beyond the tuning ceiling
 
+Each path has a "**Built?**" audit — what's already in the repo as of
+commit `5004f30`, separate from what's net-new. The original draft of
+this doc over-claimed the cost of A and B; the audit below corrects it.
+
 ### Path A — DAG decomposition (structural; cortex's thesis play)
 
 Current shape for Q3 / Q4: one big `decide.coding_turn` synth turn
 trying to hold the whole project in working memory. Fails predictably
 on context window + reasoning depth.
 
-Proposed shape: a new compose-op that **decomposes audit/refactor
+Proposed shape: a new seed plan that **decomposes audit/refactor
 prompts into per-file sub-questions, runs each as its own
-`decide.coding_turn`, then synthesizes the answers**. This is
-exactly the cortex thesis — "small model + harness matches bigger
-model alone" — applied to a task class that today defeats single-pass
-synthesis.
+`decide.coding_turn`, then synthesizes the answers**. This is exactly
+the cortex thesis — "small model + harness matches bigger model
+alone" — applied to a task class that today defeats single-pass synth.
 
 Concrete sketch:
 
 ```
 sense.classify_intent  →  intent=audit | refactor
    ↓
-decide.next emits a NEW op  →  attend.decompose
-   ↓                              (LLM emits file list to inspect)
-[fan-out: act.read_file × N targets]
+attend.decompose (NEW)  →  {targets: ["pkg/foo/bar.go", "docs/X.md"], …}
    ↓
-[fan-in: synth.aggregate (new op)]
+[fan-out: act.read_file × N targets, each followed by attend.distill]
+   ↓
+[fan-in: attend.accumulate (existing) collects per-file observations]
    ↓
 decide.coding_turn (synthesize=true)  →  final answer
 ```
 
-What's new:
-- `attend.decompose` — small-LLM call that takes the prompt + intent +
-  project root listing and emits 3-7 specific files/directories to
-  inspect. Output: `{targets: ["pkg/foo/bar.go", "docs/X.md"], why: "..."}`.
-- `synth.aggregate` — collects per-target observations (already in the
-  accumulator via the existing `attend.accumulate` flow) and produces
-  a structured set of (claim, citation, file) tuples the final
-  coding_turn synthesizer renders into prose.
+**Built? ~75%.** The attend.* op family already exists in
+`pkg/cognition/dag/ops/`:
+`attend.accumulate` (fan-in), `attend.compact`, `attend.compress`,
+`attend.distill` (claim extraction), `attend.rerank`,
+`attend.fractal_sample`. `decide.next` already spawns child specs and
+the executor handles fan-out. The NEED_MORE → decide.next →
+coding_turn loop is primitive decomposition that already works.
 
-Cost: ~2 weeks of focused work. Touches `pkg/cognition/dag/ops/`,
-`internal/harness/dagnode/`, and the seed registry in
-`cmd/cortex/commands/repl.go`. Risk: regresses single-pass prompts if
-the intent classifier mis-routes — must be intent-gated.
+**What's net-new:**
+- `attend.decompose` op (~50 lines, mirrors `sense.estimate_scope`'s
+  shape) — small-LLM call that takes prompt + intent + project root
+  listing and emits 3-7 targets.
+- Intent-aware seed plan: when `intent ∈ {audit, refactor}`,
+  `decide.next` (or a new `decide.plan` extension) emits the
+  decomposition shape above instead of the single-turn shape.
 
-Expected lift: Q3 1/4 → 3/4, Q4 1/4 → 3/4. Possibly Q2 cross-file
-also benefits. Net codebase: +5 to +7 cells.
+**Revised cost:** 2-3 days, not 2 weeks. Touches
+`pkg/cognition/dag/ops/`, `internal/harness/dagnode/coding_turn.go`,
+and the seed registry in `cmd/cortex/commands/repl.go`.
 
-### Path B — Model swap for the hard synth nodes (capability play)
+**Risk:** regresses single-pass prompts if intent classifier
+mis-routes — gate strictly on intent + a confidence threshold.
+
+**Expected lift:** Q3 1/4 → 3/4, Q4 1/4 → 3/4. Possibly Q2 also.
+Net codebase: +5 to +7.
+
+### Path B — Per-node model swap (capability play)
 
 Use a stronger model **only for the audit/refactor synth turn**, not
-for the whole pipeline. The per-node routing infrastructure shipped in
-commit `eda2bbe` already supports this: each DAG spec can declare
-`Requires: []string{llm.CapReasoningDeep}`, and the router picks the
-model that satisfies the capability tag.
+for the whole pipeline. The per-node routing shipped in `eda2bbe`
+already does this generally — Path B is just configuring it for the
+hard nodes.
 
-Concrete steps:
-1. Add a `CapReasoningDeep` (or `CapLongContext`) capability tag.
-2. Mark `decide.coding_turn` with the tag when `intent=audit|refactor`.
-3. Either (a) use OpenRouter to a frontier model for these nodes only
-   (costs $0.01-0.10 per audit cell, acceptable), or (b) host a
-   stronger local model behind chatterbox (deepseek-coder-v3, qwen3-72b,
-   etc) and tag it.
+**Built? ~90%.** Audited live:
+- `pkg/llm/capabilities.go` already defines: `CapCoding`,
+  `CapCodingSpecialist`, `CapReasoning`, **`CapReasoningSpecialist`**
+  (the "deep reasoning" tag), `CapToolCalling`,
+  `CapToolCallingSpecialist`, `CapEmbedding`, `CapReranking`,
+  `CapVision`.
+- `dag.NodeSpec.Requires []string` field — ordered capability
+  preference chain consumed by the router.
+- Working examples in the tree: `sense.estimate_scope` and
+  `decide.next` both declare `Requires: []string{llm.CapReasoning,
+  llm.CapToolCalling}` and route correctly today.
 
-Cost: ~3 days. Risk: introduces a non-local dependency if route (a),
-or hardware constraint if route (b). The cortex thesis ("small model
-+ harness matches bigger model alone") doesn't forbid this — the claim
-is *quality normalized by model size or dollars spent*. A frontier
-node on 3 of 12 nodes still beats running everything on the frontier
-model.
+**What's net-new:**
+- `decide.coding_turn`'s spec doesn't currently declare `Requires` —
+  it falls through to the harness default. Add intent-aware `Requires`:
+  when `intent ∈ {audit, refactor, synthesize}`, declare
+  `Requires: []string{llm.CapReasoningSpecialist, llm.CapReasoning}`.
+- Tag a stronger model with `CapReasoningSpecialist`. Two options:
+  - **(a)** OpenRouter route to gpt-5.4 or claude-haiku-4.5 — costs
+    $0.01-0.10 per audit cell, acceptable for an eval push.
+  - **(b)** Add a `deepseek-coder-v3` or `qwen3-72b` to the chatterbox
+    fleet and tag it. Local; requires hardware budget.
 
-Expected lift: Q3 1/4 → 3-4/4, Q4 1/4 → 3-4/4. Net codebase: +4 to
-+7 cells.
+**Revised cost:** 1 day, not 3.
 
-### Path C — cortex_search ranking improvements (foundational; lifts all of Q-class)
+**Risk:** introduces a non-local dependency if route (a). The cortex
+thesis ("small model + harness matches bigger model alone") doesn't
+forbid this — the claim is *quality normalized by model size or
+dollars spent*. A frontier model on 1 of ~6 synth nodes still beats
+running everything on the frontier.
+
+**Expected lift:** Q3 1/4 → 3-4/4, Q4 1/4 → 3-4/4. Net: +4 to +7.
+
+### Path C — cortex_search ranking improvements (foundational)
 
 Q2 cross-file failures and some Q3/Q4 audit failures share a root
-cause: when the synth asks "what's the relationship between X and Y",
-`cortex_search` doesn't return the right files in the top-K. The
-retrieval is wrong, so the synth answers from priors or NEED_MOREs
-fruitlessly.
+cause: when the synth asks "what's the relationship between X and
+Y", `cortex_search` doesn't return the right files in the top-K. The
+synth then answers from priors or NEED_MOREs fruitlessly.
 
-Likely improvements (need profiling first):
-- Re-rank top-K via a reranker model (chatterbox already has one;
-  `cortex_search` Full mode plumbs through Reflect but the path may not
-  be active under the `coder`-routed REPL chain).
-- Improve embedding quality: switch from the default `nomic-embed-text`
-  to a code-tuned embedder for the indexing pass.
-- Hybrid search: blend BM25 + dense to better-handle exact-name queries.
+**Built? ~50%.** Audited live:
+- Fast mode (Reflex) and Full mode (Reflex → Reflect → Resolve) both
+  shipped; tool param `mode: full` opts in per call.
+- `Reflect` IS the rerank pass; takes any `llm.Provider`. Currently
+  uses whatever provider the harness is configured with (the `coder`
+  30B), not a dedicated reranker model.
+- `CapReranking` capability tag + chatterbox `reranker` alias both
+  exist; just not wired into Reflect's provider selection.
+- `attend.rerank` DAG op exists as a separate primitive.
 
-Cost: ~1 week. Risk: changes ranking for *every* benchmark — could
-regress mteb or longmemeval. Must be evaluated in compare mode against
-all suites, not just codebase.
+**What's net-new:**
+- **Quick win (~half day):** Route Reflect through a
+  `CapReranking`-tagged model from the registry instead of the
+  harness's general provider. Mirrors how `sense.estimate_scope`
+  declares its Requires. Faster + likely higher quality than reranking
+  with the 30B coder.
+- **Code-tuned embedder swap (~2 days):** Currently `nomic-embed-text`
+  by default. A code-tuned embedder (jina-code-embeddings,
+  voyage-code-3, or similar) would lift symbol-name queries
+  significantly. Requires re-embedding the workdir on swap — small
+  one-time cost.
+- **Hybrid search (~3-4 days):** Confirmed NOT present
+  (`internal/storage/` has no BM25). Blend BM25 (exact-name match) +
+  dense (semantic) for the top-K. Particularly valuable for symbol
+  lookups where the question has the exact symbol name.
+- **Retrieval-only benchmark (~1 day):** Score "did Full mode surface
+  the right top-3 files for question Q?" in isolation. Currently
+  retrieval quality is only observable through downstream Q-class
+  pass rate — too noisy.
 
-Expected lift: Q2 2/4 → 3-4/4, Q3 +1, Q4 +1. Net codebase: +3 to +5
-cells. Also lifts longmemeval and mteb modestly.
+**Revised cost:** ~1 week for the full path; **half day for the
+quick win**.
 
-### Recommended sequence
+**Risk:** changes ranking for *every* benchmark — could regress mteb
+or longmemeval. Must compare-mode-test across all suites, not just
+codebase.
 
-1. **Loop tier-1 fixes** (this prompt). Drive 28 → ~36 in the easy
-   cells while harness work proceeds in parallel.
-2. **Path C** first (foundational; smallest blast radius if instrumented
-   carefully). +3 to +5.
-3. **Path B** (capability tags + frontier-or-stronger model on 1-2 nodes).
-   +4 to +7.
-4. **Path A** (DAG decomposition) only after B+C land — by then we know
-   exactly which cells remain and whether decomposition adds value the
-   stronger model alone didn't already deliver.
+**Expected lift:** Q2 2/4 → 3-4/4, Q3 +1, Q4 +1. Net codebase: +3 to
++5. Also modest lift on longmemeval.
 
-Combined ceiling on this stack: ~42-44/44. The last cell or two may
-encode genuine limitations of even the strongest small-model
-compositions, which is fine — that's what `eval-strategy.md`'s knee
-analysis is *for*.
+### Recommended sequence (revised)
+
+The original draft put C first because it's foundational. The audit
+reveals B-quick is **one day** and C-quick is **half day**, both
+likely 2-5 cell lifts each. Front-load both quick wins, then loop,
+then bigger work.
+
+| step | actual cost | expected lift | running total |
+|---|---|---|---|
+| **B-quick**: intent-aware `Requires` on `decide.coding_turn` + tag a frontier or stronger local | 1 day | +2 to +5 | 28 → 30-33 |
+| **C-quick**: route Reflect through a `CapReranking`-tagged model | half day | +1 to +3 | 30-33 → 31-36 |
+| **Loop tier 1+2** (this prompt) | 1-2 days | +4 to +6 | 31-36 → 35-42 |
+| **Path A**: intent=audit seed plan + `attend.decompose` op | 2-3 days | +3 to +5 | 35-42 → 38-44 |
+| **C-full**: code-tuned embedder + hybrid BM25/dense + retrieval eval | 1 week | +1 to +3 | 38-44 → 39-44+ |
+
+Combined ceiling on this stack: **42-44/44**, likely cap at 43-44
+since one or two cells encode genuine small-model limits that no
+amount of decomposition or reranking fixes. That's the kind of cell
+worth keeping as a regression target rather than tuning past.
 
 ---
 
@@ -350,6 +403,34 @@ End each iteration with one line to the conversation:
 ## Discussion log
 
 > Section to capture decisions as we iterate on this plan. Newest entries at the top.
+
+### 2026-05-31 — Path audit corrected the cost estimates
+
+Quick audit of the repo against my own plan revealed I had
+significantly over-claimed the cost of Paths A and B:
+
+- **Path B was 90% built, not 70%.** `pkg/llm/capabilities.go`
+  already defines `CapReasoningSpecialist`, `dag.NodeSpec.Requires`
+  already routes by capability chain, and `sense.estimate_scope` +
+  `decide.next` are live working examples. The only net-new work is
+  intent-aware `Requires` on `decide.coding_turn` and tagging a
+  stronger model. **1 day, not 3.**
+- **Path A was 75% built, not 60%.** The entire attend.* op family
+  exists (`accumulate`, `compact`, `compress`, `distill`, `rerank`,
+  `fractal_sample`). What's missing is an `attend.decompose` op
+  (~50 lines) and an intent-aware seed plan. **2-3 days, not 2 weeks.**
+- **Path C was 50% built as claimed**, but the audit surfaced a
+  half-day quick win: route Reflect's rerank call through a
+  `CapReranking`-tagged model instead of the harness's general
+  provider. Faster + likely higher-quality reranking, no infra change.
+
+Recommended sequence reordered: B-quick (1 day) + C-quick (half day)
+front-loaded before the loop, since both are cheap and likely to lift
+several cells each. Then loop tier 1+2, then Path A, then C-full.
+
+Combined ceiling estimate unchanged at 42-44/44; what changed is the
+schedule — what looked like ~2-3 weeks of structural work is now
+roughly a week's worth.
 
 ### 2026-05-31 — initial plan landed
 
