@@ -157,9 +157,13 @@ func executeCodebase(args []string) error {
 
 	judgeOpts := codebase.JudgeOptions{}
 	if judgeModel != "" {
-		jp := intllm.BuildProvider(nil, judgeModel)
+		// Load the repo's .cortex/config.json so endpoint-routed model
+		// ids (chatterbox aliases like "reasoner" / "coder") resolve to
+		// their backend instead of falling through to OpenRouter.
+		cfg, _ := loadEvalConfig()
+		jp := intllm.BuildProvider(cfg, judgeModel)
 		if jp == nil {
-			return fmt.Errorf("judge provider unavailable for model %q (check OpenRouter key or Ollama)", judgeModel)
+			return fmt.Errorf("judge provider unavailable for model %q (check OpenRouter key, Ollama, or endpoint config)", judgeModel)
 		}
 		judgeOpts.Provider = jp
 		judgeOpts.Model = judgeModel

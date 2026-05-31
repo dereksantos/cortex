@@ -78,6 +78,27 @@ var HedgeRegex = regexp.MustCompile(`(?i)\b(not directly confirmed|appears to(?:
 // "Unverified:", emphasized "**Unverified Claims**", etc.).
 var unverifiedHeadingRegex = regexp.MustCompile(`(?im)^\s*(?:#+\s*|\*\*)?unverified(?:\s+claims)?(?:\*\*)?\s*:?\s*$`)
 
+// stripPromptEcho returns the answer with the fixture's prompt removed.
+// Used by must_not_invent so that identifier-shaped sentinels in the
+// fixture prompt itself don't false-positive when the model quotes the
+// question back. Best-effort: removes both the exact prompt text and
+// its trimmed-line shape.
+func stripPromptEcho(answer, prompt string) string {
+	if prompt == "" {
+		return answer
+	}
+	out := answer
+	out = strings.ReplaceAll(out, prompt, "")
+	for _, ln := range strings.Split(prompt, "\n") {
+		ln = strings.TrimSpace(ln)
+		if len(ln) < 8 {
+			continue // skip noise-prone short lines
+		}
+		out = strings.ReplaceAll(out, ln, "")
+	}
+	return out
+}
+
 // Extract computes the mechanical metric set from an answer text + the
 // trace rows for that turn. trace should already be filtered to the
 // fixture's turn_id; the runner is responsible for that filter.
@@ -114,7 +135,11 @@ func Extract(answer string, trace []TraceRow, fx *Fixture) Metrics {
 
 	if fx != nil {
 		m.MustCitePathsSatisfied = checkMustCite(answer, fx.Expected.MustCitePaths)
-		m.MustNotInventHits = findInventions(answer, fx.Expected.MustNotInvent)
+		// Run invention detection against the answer with the prompt
+		// echo stripped. Otherwise sentinels that legitimately appear in
+		// the user's question (the model echoes it back) read as
+		// hallucinated inventions when they aren't.
+		m.MustNotInventHits = findInventions(stripPromptEcho(answer, fx.Prompt), fx.Expected.MustNotInvent)
 		m.MustNotInventClean = len(m.MustNotInventHits) == 0
 		m.BudgetTokenInRange = inBudgetRange(m.BudgetTokens, fx.Expected.BudgetTokenMin, fx.Expected.BudgetTokenMax)
 	}
@@ -158,6 +183,25 @@ func Evaluate(m Metrics, exp Expectation) []Bound {
 			Pass: m.ReadCount <= exp.ReadCountMax,
 			Want: "<= " + itoa(exp.ReadCountMax),
 			Got:  itoa(m.ReadCount),
+		})
+	}
+	// inspect_count = read + shell. Lets a fixture say "I want the model
+	// to inspect the file once" without dictating read_file vs cat.
+	inspectCount := m.ReadCount + m.ShellCount
+	if exp.InspectCountMin > 0 {
+		bounds = append(bounds, Bound{
+			Name: "inspect_count_min",
+			Pass: inspectCount >= exp.InspectCountMin,
+			Want: ">= " + itoa(exp.InspectCountMin),
+			Got:  itoa(inspectCount),
+		})
+	}
+	if exp.InspectCountMax > 0 {
+		bounds = append(bounds, Bound{
+			Name: "inspect_count_max",
+			Pass: inspectCount <= exp.InspectCountMax,
+			Want: "<= " + itoa(exp.InspectCountMax),
+			Got:  itoa(inspectCount),
 		})
 	}
 	if exp.CitationRateMin > 0 {
@@ -294,6 +338,16 @@ func countClaims(answer string) int {
 	return claims
 }
 
+// lineAnchorRegex matches just the file:line[-line] shape — used to
+// weight pinpoint citations higher than bare paths in countCitations.
+var lineAnchorRegex = regexp.MustCompile(`[\w./-]+\.[A-Za-z0-9]+:\d+(?:-\d+)?`)
+
+// lineAnchorWeight is how many "credit units" one file:line citation
+// counts for vs a bare path. The doc names "file:line" as the canonical
+// pinpoint shape; weighting it heavier nudges the rate downward when
+// answers cite vague paths repeatedly.
+const lineAnchorWeight = 2
+
 func countCitations(answer string) int {
 	matches := CitationRegex.FindAllString(answer, -1)
 	// Dedup by exact match so a paragraph repeating "repl.go" three
@@ -304,7 +358,16 @@ func countCitations(answer string) int {
 	for _, m := range matches {
 		seen[m] = struct{}{}
 	}
-	return len(seen)
+	// Weight file:line anchors higher than bare-path citations. A
+	// pinpoint answer that cites foo.go:42 gets more credit than one
+	// that mentions foo.go three times in paragraphs without line
+	// numbers.
+	anchored := map[string]struct{}{}
+	for _, m := range lineAnchorRegex.FindAllString(answer, -1) {
+		anchored[m] = struct{}{}
+	}
+	total := len(seen) + len(anchored)*(lineAnchorWeight-1)
+	return total
 }
 
 func countUnverifiedTail(answer string) int {

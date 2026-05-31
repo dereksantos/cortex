@@ -69,6 +69,13 @@ type Expectation struct {
 	ReadCountMin int `yaml:"read_count_min,omitempty"`
 	ReadCountMax int `yaml:"read_count_max,omitempty"`
 
+	// InspectCountMin / Max bound read_count + shell_count together. Use
+	// this when the prompt could be satisfied by either act.read_file OR
+	// a shell cat/grep — the model picks one tool; the fixture shouldn't
+	// dictate which. R2/R3 fixtures rely on this.
+	InspectCountMin int `yaml:"inspect_count_min,omitempty"`
+	InspectCountMax int `yaml:"inspect_count_max,omitempty"`
+
 	// CitationRateMin is the minimum fraction of "claims" (paragraph
 	// or list-item) that must reference a file path. 0 disables the
 	// check.

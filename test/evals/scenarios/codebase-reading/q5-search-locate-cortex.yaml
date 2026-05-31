@@ -12,8 +12,8 @@ expected:
   # a file:line citation, not a list of matches.
   hop_count_min: 1
   hop_count_max: 5
-  read_count_min: 1
-  read_count_max: 6
+  inspect_count_min: 1
+  inspect_count_max: 8
   # Locate-class answers should produce a single concrete file:line
   # — citation_rate may be modest if the answer is short.
   citation_rate_min: 0.2

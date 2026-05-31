@@ -185,7 +185,18 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 	bounds := Evaluate(m, fx.Expected)
 
 	if ShouldJudge(fx) && opts.Judge.Provider != nil {
-		jr, jerr := Judge(ctx, fx.Prompt, res.AnswerText, fx.JudgeRubric, opts.Judge)
+		// Code-grounded judge: feed the fixture's must_cite_paths to the
+		// judge so it can verify symbol claims instead of pattern-
+		// matching. Workdir defaults to the fixture's resolved workdir
+		// when the caller didn't specify one.
+		judgeOpts := opts.Judge
+		if judgeOpts.Workdir == "" {
+			judgeOpts.Workdir = abs
+		}
+		if judgeOpts.MaxGroundingBytes == 0 {
+			judgeOpts.MaxGroundingBytes = DefaultMaxGroundingBytes
+		}
+		jr, jerr := JudgeWithFixture(ctx, fx.Prompt, res.AnswerText, fx.JudgeRubric, fx, judgeOpts)
 		if jerr != nil && res.CortexExitErr == nil {
 			res.CortexExitErr = fmt.Errorf("judge: %w", jerr)
 		}

@@ -13,8 +13,11 @@ expected:
   # (NEED_MORE → decide.next → another read).
   hop_count_min: 1
   hop_count_max: 4
-  read_count_min: 1
-  read_count_max: 6
+  # The model may inspect via act.read_file OR shell (cat/grep). Both
+  # legitimately satisfy a paged-read; the fixture cares that the file
+  # was looked at, not the tool.
+  inspect_count_min: 1
+  inspect_count_max: 8
   citation_rate_min: 0.2
   hedge_count_max: -1
   must_cite_paths:

@@ -4,13 +4,13 @@ eval: R3
 project: python-todo
 language: python
 prompt: |
-  In app/routes.py, what function contains the call to app.storage.add?
-  Read a narrow slice.
+  In app/routes.py, name the function whose body calls the storage's
+  add method. Cite the enclosing function and its file:line range.
 expected:
   hop_count_min: 1
   hop_count_max: 3
-  read_count_min: 1
-  read_count_max: 3
+  inspect_count_min: 1
+  inspect_count_max: 4
   citation_rate_min: 0.2
   hedge_count_max: -1
   must_cite_paths:

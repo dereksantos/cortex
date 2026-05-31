@@ -13,8 +13,8 @@ expected:
   # enclosing-symbol shortcut isn't carrying the signal it should.
   hop_count_min: 1
   hop_count_max: 3
-  read_count_min: 1
-  read_count_max: 3
+  inspect_count_min: 1
+  inspect_count_max: 4
   citation_rate_min: 0.2
   hedge_count_max: -1
   must_cite_paths:

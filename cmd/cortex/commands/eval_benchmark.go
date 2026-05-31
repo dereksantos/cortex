@@ -248,7 +248,15 @@ func parseBenchmarkArgs(args []string) (benchmarks.LoadOpts, error) {
 // bare ids route to local (Ollama). Returns an error so the caller
 // can treat it as "judge disabled" rather than failing the whole run.
 func newOpenRouterJudgeForBenchmark(model string) (llm.Provider, error) {
-	p := intllm.BuildProvider(&config.Config{}, model)
+	// Load .cortex/config.json so endpoint-routed model ids (chatterbox
+	// aliases like "coder" / "reasoner") resolve to their backend
+	// instead of falling through to OpenRouter. An empty config still
+	// works for slash-prefixed OpenRouter ids and bare Ollama names.
+	cfg, _ := loadEvalConfig()
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	p := intllm.BuildProvider(cfg, model)
 	if p == nil {
 		return nil, fmt.Errorf("judge provider unavailable for model %q", model)
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/dereksantos/cortex/internal/harness/dagnode"
 	"github.com/dereksantos/cortex/pkg/cliout"
 	"github.com/dereksantos/cortex/pkg/cognition/dag"
+	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -213,10 +214,29 @@ func (c *CodeCommand) Execute(ctx *Context) error {
 		maxCost = v
 	}
 
-	h, err := evalv2.NewCortexHarness(model)
+	// Endpoint resolution: when the model id matches a configured
+	// endpoint (e.g. "coder" → chatterbox), point the harness at it so
+	// the request body carries the bare model id and routes to the
+	// endpoint's BaseURL instead of falling through to OpenRouter.
+	// Without this, benchmarks like longmemeval that spawn `cortex code
+	// --model coder` against a fresh tempdir produce 0 tokens / 74ms
+	// silent failures (no .cortex/config.json in the tempdir means no
+	// chatterbox resolution).
+	//
+	// Lookup order for the config: workdir's .cortex/, then the binary's
+	// cwd (the repo root for benchmark invocations). The model id we
+	// pass into NewCortexHarness is the BARE id after route resolution
+	// so the wire request matches what the endpoint actually serves.
+	cfg, resolvedModel, endpoint := resolveCodeEndpoint(resolvedWorkdir, model)
+
+	h, err := evalv2.NewCortexHarness(resolvedModel)
 	if err != nil {
 		return fmt.Errorf("init harness: %w", err)
 	}
+	if endpoint != nil {
+		h.SetEndpoint(endpoint)
+	}
+	_ = cfg // retained for future "warn on stale role pin" etc.
 
 	// Every coding turn routes tool calls through act.* DAG ops
 	// registered on a per-session dag.Registry (axis-5 gate enforced)
@@ -563,4 +583,57 @@ Examples:
 
   cortex code -w ./myproject -m qwen/qwen3-coder \
     "add a /healthz handler to internal/http/server.go"`)
+}
+
+// resolveCodeEndpoint loads .cortex/config.json (workdir first, then
+// cwd as fallback for benchmark tempdirs) and resolves model against
+// the configured endpoints. Returns:
+//
+//   - cfg: the loaded config (nil if neither path resolved)
+//   - bareModel: the post-prefix-strip model id to send on the wire
+//     ("coder" → "coder"; "chatterbox/coder" → "coder"). When no
+//     endpoint resolves, returns the original model unchanged.
+//   - endpoint: non-nil when a backend match was found. Pass to
+//     CortexHarness.SetEndpoint so requests route to its BaseURL.
+//
+// Missing config + unresolved model is fine — the caller falls back to
+// the prior OpenRouter / Ollama routing inside CortexHarness. The fix
+// surfaces only for users with a chatterbox-style endpoint configured.
+func resolveCodeEndpoint(workdir, model string) (*config.Config, string, *llm.EndpointConfig) {
+	// Workdir first — repo-local config wins.
+	cfg := loadCodeConfig(filepath.Join(workdir, ".cortex", "config.json"))
+	if cfg == nil {
+		// Cwd fallback. Benchmark tempdirs have no config; the cortex
+		// process is usually invoked from the repo root, where the
+		// chatterbox endpoint IS configured.
+		if cwd, err := os.Getwd(); err == nil {
+			cfg = loadCodeConfig(filepath.Join(cwd, ".cortex", "config.json"))
+		}
+	}
+	if cfg == nil {
+		return nil, model, nil
+	}
+	ep, bareModel, ok := cfg.ResolveModelRoute(model)
+	if !ok {
+		return cfg, model, nil
+	}
+	return cfg, bareModel, &llm.EndpointConfig{
+		Name:    ep.Name,
+		BaseURL: ep.BaseURL,
+		APIKey:  ep.ResolveAPIKey(),
+	}
+}
+
+func loadCodeConfig(path string) *config.Config {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil
+	}
+	return cfg
 }
