@@ -935,6 +935,39 @@ func (s *replState) resetModelCatalog() {
 	s.modelCatalogCache = ""
 }
 
+// synthModelForIntent picks the model id to use as the synthesizer
+// fallback for a given intent. Returns "" when the intent doesn't
+// benefit from a specialist (keep the session default — usually a
+// coding specialist).
+//
+// Rationale per docs/prompts/loop-codebase-44.md Path B:
+//
+//   - review / recall: consolidating multi-source observations into
+//     structured claims benefits from chain-of-thought / reasoning
+//     specialist (Q3 audit, Q4 refactor, Q5 locate, recall-class
+//     questions).
+//   - code: the synthesis turn for a code change summarizes what tools
+//     did, not philosophical reasoning. The coder is faster and
+//     equally good on short focused outputs.
+//   - greeting / clarify / meta: short replies, no benefit from a
+//     specialist.
+//
+// Consults the registry to find the best CapReasoningSpecialist match
+// (preferring local endpoints). Falls back to "" when no reasoning
+// model is registered — the harness's session default still runs.
+func synthModelForIntent(intent string, registry llm.ModelRegistry) string {
+	if intent != "review" && intent != "recall" {
+		return ""
+	}
+	if registry == nil {
+		return ""
+	}
+	if pick, ok := registry.PickForCapabilities(context.Background(), []string{llm.CapReasoningSpecialist, llm.CapReasoning}); ok {
+		return pick.ID
+	}
+	return ""
+}
+
 // summarizeCapabilities turns a model's capability tag set into a
 // short human-readable phrase the LLM can use to pick. We prefer the
 // most informative specialty: a "reasoning:specialist" tag wins over
@@ -2595,12 +2628,28 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	if accumulatorMaxTokens <= 0 {
 		accumulatorMaxTokens = 1000
 	}
+	// turnIntent is updated below after sense.classify_intent runs.
+	// The SynthDefaultModel closure in codingCfg captures this by
+	// reference, so the coding_turn handler reads the freshest intent
+	// at handler-run time (not at cfg-construction time, which is
+	// before classification). This is what makes review-class synth
+	// turns deterministically route to the reasoner without relying
+	// on the upstream LLM (decide.next) emitting attrs.model.
+	var turnIntent string
 	codingCfg := dagnode.CodingTurnConfig{
 		Model:                 s.model,
 		Workdir:               s.workdir,
 		ActRegistry:           actReg,
 		TraceCB:               traceCB,
 		ToolOutputSalienceCap: salienceCap,
+		// Deterministic synth-mode model fallback. When a synthesize=
+		// true coding_turn spawn arrives without attrs.model set, this
+		// closure picks the right model based on the session's
+		// classified intent. Returning "" preserves the harness's
+		// configured default (typically the coder).
+		SynthDefaultModel: func() string {
+			return synthModelForIntent(turnIntent, s.registry)
+		},
 		// Bounded working memory: each act.* output gets folded
 		// through attend.accumulate so the synthesis decide.coding_turn
 		// (and any decide.next that re-decides mid-plan) sees the
@@ -2711,6 +2760,13 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// greetings). Failure modes return intent=code with confidence=0 so
 	// the seed falls back to today's full chain.
 	intent, intentConf := classifyIntentForTurn(reg, router, prompt, traceCB)
+	// Publish the classified intent to codingCfg.SynthDefaultModel's
+	// closure so synth-mode coding_turn invocations land on the right
+	// model for the intent class. Set BEFORE ex.Run so every coding_turn
+	// handler reads the final value, not the empty default. Recall is
+	// downgraded below for cold-journal escalation; we update the
+	// shared var after the downgrade too.
+	turnIntent = intent
 	// Cold-journal escalation: decide.recall_summary has nothing useful
 	// to say when storage holds no events matching the prompt. Better
 	// to let the agent actually investigate (read README, list dirs)
@@ -2718,6 +2774,7 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	// intent="code" with the original confidence so the seed falls
 	// through to the full chain under DefaultTurnBudget.
 	intent = downgradeRecallIfNoContext(intent, prompt, s.store)
+	turnIntent = intent // re-publish after potential cold-journal downgrade
 	// Forward the classified intent to the session harness so its
 	// inner agent loop's no_progress heuristic knows whether to treat
 	// read-only windows as pathological (code intent) or as the

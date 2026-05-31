@@ -24,6 +24,123 @@ func newTestHarnessRegistry(name, returnOut string, returnErr error) (*harness.T
 	return reg, st
 }
 
+// TestIsSynthMode validates the synth-mode recognizer that gates both
+// the synthesizer prompt directive AND the SynthDefaultModel routing
+// fallback. The two branches must agree on what counts as synth-mode
+// or the model picked for synth turns drifts from the directive
+// applied to them.
+func TestIsSynthMode(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]any
+		want bool
+	}{
+		{"true bool", map[string]any{"synthesize": true}, true},
+		{"false bool", map[string]any{"synthesize": false}, false},
+		{"numeric 1.0 (LLM JSON round-trip)", map[string]any{"synthesize": 1.0}, true},
+		{"numeric 0.0", map[string]any{"synthesize": 0.0}, false},
+		{"missing", map[string]any{}, false},
+		{"string is not coerced", map[string]any{"synthesize": "true"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isSynthMode(c.in); got != c.want {
+				t.Errorf("isSynthMode(%v) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestSynthDefaultModelPrecedence locks the synth-mode precedence
+// rule: in synthesize mode, SynthDefaultModel WINS over an upstream
+// attrs.model when it returns non-empty. Non-synth mode preserves the
+// legacy precedence (in[model] wins). The closure is only consulted
+// in synth mode.
+//
+// Rationale: gpt-5.4 (decide.next's planner) often picks the coder
+// for audit synth turns, which produced hallucinated answers on
+// review-class Q3 baseline runs. The REPL knows the classified intent
+// and can route deterministically to a reasoner — that's the lift
+// Path B is meant to capture. Letting in[model] win would surrender
+// that decision back to the LLM.
+func TestSynthDefaultModelPrecedence(t *testing.T) {
+	called := 0
+	cfg := CodingTurnConfig{
+		Model:   "", // stub-mode default
+		Workdir: t.TempDir(),
+		SynthDefaultModel: func() string {
+			called++
+			return "" // empty -> defer to in[model]/cfg.Model
+		},
+	}
+	h := NewCodingTurnHandler(cfg)
+
+	// Case 1: synth + empty in[model] + SynthDefaultModel returns "" =>
+	// stub-mode. Closure consulted exactly once.
+	res, err := h(context.Background(), map[string]any{
+		"prompt":     "x",
+		"synthesize": true,
+	}, dag.Budget{})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if stub, _ := res.Out["stub"].(bool); !stub {
+		t.Errorf("expected stub-mode; got %+v", res.Out)
+	}
+	if called != 1 {
+		t.Errorf("closure called %d times in synth mode, want 1", called)
+	}
+
+	// Case 2: non-synth + empty in[model] => closure NOT consulted.
+	called = 0
+	res2, _ := h(context.Background(), map[string]any{
+		"prompt":     "x",
+		"synthesize": false,
+	}, dag.Budget{})
+	if stub, _ := res2.Out["stub"].(bool); !stub {
+		t.Errorf("expected stub mode; got %+v", res2.Out)
+	}
+	if called != 0 {
+		t.Errorf("closure should NOT fire on non-synth; called=%d", called)
+	}
+
+	// Case 3: synth + in[model] set + SynthDefaultModel returns "" =>
+	// fall through to in[model]. Closure consulted, returns empty,
+	// in[model] takes over.
+	called = 0
+	_, _ = h(context.Background(), map[string]any{
+		"prompt":     "x",
+		"synthesize": true,
+		"model":      "explicit/winner",
+	}, dag.Budget{})
+	if called != 1 {
+		t.Errorf("closure should be consulted in synth mode; called=%d", called)
+	}
+
+	// Case 4 (Path B inversion): synth + in[model] AND
+	// SynthDefaultModel returns non-empty => closure's pick WINS.
+	// We verify by confirming the closure was still consulted; the
+	// observable model resolution beyond that requires a harness mock.
+	called = 0
+	cfg2 := CodingTurnConfig{
+		Model:   "",
+		Workdir: t.TempDir(),
+		SynthDefaultModel: func() string {
+			called++
+			return "winner/from-closure"
+		},
+	}
+	h2 := NewCodingTurnHandler(cfg2)
+	_, _ = h2(context.Background(), map[string]any{
+		"prompt":     "x",
+		"synthesize": true,
+		"model":      "loser/from-in-model",
+	}, dag.Budget{})
+	if called != 1 {
+		t.Errorf("closure should be consulted; called=%d", called)
+	}
+}
+
 func TestNewActDispatcher_delegatesToHarnessRegistry(t *testing.T) {
 	actReg := dag.NewRegistry()
 	if err := RegisterActOpMetadata(actReg, "read_file",

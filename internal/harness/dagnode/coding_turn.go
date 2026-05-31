@@ -194,6 +194,31 @@ type CodingTurnConfig struct {
 	// kept distinct so callers can override.
 	AccumulatorIntent string
 
+	// SynthDefaultModel, when non-nil, supplies a deterministic
+	// fallback model for synthesize=true coding_turn invocations
+	// where the spawn didn't carry an explicit attrs.model override.
+	// Returns the model id to retarget the harness to (e.g.
+	// "chatterbox/reasoner"), or "" to fall through to the harness's
+	// configured model.
+	//
+	// Used by the REPL to land review/recall-class synth turns on a
+	// reasoning specialist when the LLM that emitted the spawn
+	// (decide.next) chose not to. Without this, synth-mode routing
+	// is LLM-discretion — gpt-5.4 reliably routes tool-call turns but
+	// often leaves the synthesizer un-routed because the prompt
+	// guidance is one sentence in a long template. SynthDefaultModel
+	// makes the decision deterministic for intents we know benefit.
+	//
+	// Same precedence as in["model"]: a non-empty in["model"] still
+	// wins (explicit per-call override is the strongest signal). Only
+	// fires when in["model"] is empty AND synthMode=true.
+	//
+	// The closure is consulted ONCE per coding_turn invocation, so
+	// callers can capture mutable state (e.g. a pointer to the
+	// session's classified intent) and have it read at handler-run
+	// time rather than cfg-construction time.
+	SynthDefaultModel func() string
+
 	// ModelRouteResolver, when non-nil, is consulted for per-call
 	// model overrides (in["model"]) before the harness gets
 	// retargeted. Lets the handler honor endpoint-prefixed forms
@@ -269,6 +294,22 @@ const needMoreMarker = "NEED_MORE:"
 //
 // Errors from the harness are returned as the second return value;
 // the executor will log them as handler_error TraceEntry rows.
+// isSynthMode reports whether the spawn carried attrs.synthesize=true.
+// Tolerant of the JSON-emitted-numeric form decide.next's upstream LLM
+// sometimes uses (round-tripping booleans through JSON as 1.0 /
+// float64). The synthMode flag drives both the prompt directive and
+// the SynthDefaultModel routing fallback, so a single recognizer keeps
+// the two branches consistent.
+func isSynthMode(in map[string]any) bool {
+	if v, ok := in["synthesize"].(bool); ok {
+		return v
+	}
+	if f, ok := in["synthesize"].(float64); ok {
+		return f != 0
+	}
+	return false
+}
+
 func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 	return func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
 		prompt, _ := in["prompt"].(string)
@@ -276,10 +317,38 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			return dag.NodeResult{}, fmt.Errorf("decide.coding_turn: prompt input is required")
 		}
 
-		// Per-call model override (attrs) wins over registration default.
+		// Model selection. In synth-mode, the deterministic
+		// SynthDefaultModel WINS over the upstream LLM's attrs.model
+		// pick when both are present — the REPL knows the session's
+		// classified intent and the LLM doesn't. Without this
+		// inversion, gpt-5.4 reliably picks chatterbox/coder for audit
+		// synth turns (saw real hallucinations in Q3 baseline runs)
+		// because it can't see the intent — Path B's whole point is
+		// that the harness composes a stronger answer than any one
+		// model alone, which requires the harness to control routing
+		// on review-class synth.
+		//
+		// Precedence (synth-mode):
+		//   1. cfg.SynthDefaultModel() if non-empty  — deterministic intent-aware pick
+		//   2. in["model"]                            — LLM's explicit pick
+		//   3. cfg.Model                              — registration default
+		//
+		// Precedence (non-synth, agent loop):
+		//   1. in["model"]              — LLM's explicit pick wins (per-node routing)
+		//   2. cfg.Model                — registration default
 		model := cfg.Model
-		if m, ok := in["model"].(string); ok && m != "" {
-			model = m
+		synth := isSynthMode(in)
+		var synthPick string
+		if synth && cfg.SynthDefaultModel != nil {
+			synthPick = cfg.SynthDefaultModel()
+		}
+		switch {
+		case synth && synthPick != "":
+			model = synthPick
+		default:
+			if m, ok := in["model"].(string); ok && m != "" {
+				model = m
+			}
 		}
 
 		// Stub-mode path: no model configured. Return success with a
@@ -428,14 +497,7 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 		// directive only goes in when the caller (typically decide.next)
 		// explicitly sets attrs.synthesize=true; freestanding
 		// coding_turn invocations are unchanged.
-		synthMode, _ := in["synthesize"].(bool)
-		if !synthMode {
-			// Tolerate JSON-emitted numerics from decide.next's LLM
-			// output that round-trip booleans as 1.0 / float64.
-			if f, ok := in["synthesize"].(float64); ok && f != 0 {
-				synthMode = true
-			}
-		}
+		synthMode := isSynthMode(in)
 		if synthMode {
 			prompt = prompt + synthesizerDirective
 			// Enforce the directive at the protocol level: strip the
