@@ -324,19 +324,67 @@ goal: drive `cortex eval codebase` from its current baseline toward
 44/44 WITHOUT regressing any other eval family. Each iteration makes
 one focused change and proves it helps.
 
-GROUND TRUTH BEFORE STARTING THIS ITERATION
-1. Read docs/prompts/loop-codebase-44.md — the full plan + failure
-   cluster breakdown + regression bounds. This is the source of truth
-   for what to work on and what to avoid.
-2. Read .cortex/db/eval_baselines/<newest>/<latest>.jsonl to find the
-   current pass set + per-fixture metrics. Skip if you already know
-   it from the prior iteration this session.
-3. Confirm /tmp/cortex-eval is built from HEAD:
-   `go build -o /tmp/cortex-eval ./cmd/cortex` (idempotent; ~5s rebuild).
-4. Export: CORTEX_BINARY=/tmp/cortex-eval, CORTEX_SKIP_STUDY=1,
-   CORTEX_EVAL_RUN_USD_CEILING=10000, CORTEX_EVAL_DAILY_USD_CEILING=10000.
+ENVIRONMENT EXPORTS (every session, set once)
+- CORTEX_BINARY=/tmp/cortex-eval
+- CORTEX_SKIP_STUDY=1
+- CORTEX_EVAL_RUN_USD_CEILING=10000
+- CORTEX_EVAL_DAILY_USD_CEILING=10000
+- CORTEX_EVAL_LIFETIME_USD_CEILING=10000
+
+PRE-FLIGHT (run ONCE before the first iteration of this session)
+
+The loop's safety net (regression-check canaries) only works if the
+floor it compares against is current. The pre-flight establishes that
+floor on the current HEAD and verifies every regression-check
+fixture passes BEFORE any iteration changes anything. If the pre-flight
+surfaces a problem, do not enter the loop — surface to the user.
+
+1. Rebuild binary from HEAD:
+   `go build -o /tmp/cortex-eval ./cmd/cortex`
+   Fast (~5s); idempotent.
+
+2. Read the most recent baseline at
+   `.cortex/db/eval_baselines/<commit>/<latest>.jsonl`. Confirm it's
+   from the current commit (`git rev-parse HEAD | head -c 12` matches
+   the commit dir). If stale (older commit), the pre-flight MUST
+   refresh it via step 3. If absent entirely, step 3 generates the
+   first one.
+
+3. Run a fresh full baseline IF (a) no baseline exists for HEAD, or
+   (b) more than one harness/prompt commit has landed since the last
+   baseline:
+     `cortex eval codebase --baseline --timeout 900 --judge-model reasoner`
+   Wall time ~45 min. Skip if a fresh baseline already exists.
+
+4. Regression-check canaries — these MUST pass before the loop starts.
+   Any fail = STOP, surface to user.
+   - Codebase canaries:
+       `cortex eval codebase --only R1 --only B2 --only B3 --timeout 300`
+     Expected: 12/12 passing (R1×4 + B2×4 + B3×4 = 12 universal-pass).
+   - DAG invariants:
+       `cortex eval suite mechanic`
+     Expected: 5/5.
+   - Retrieval signal:
+       `cortex eval benchmark mteb --tasks NFCorpus --limit 50`
+     Expected: 1/1, NDCG signal landed in cell_results.
+   - LongMemEval (small subset, with judge):
+       `cortex eval benchmark longmemeval --subset oracle --limit 3
+        --strategy cortex --model coder --judge --judge-model reasoner`
+     Expected: per-cell tokens > 0 (i.e. real chatterbox calls, not
+     74ms silent failures). Pass count is informational; the signal
+     we lock is "the pipeline runs end-to-end."
+
+5. Record pre-flight result to the conversation as ONE line:
+   `pre-flight: baseline N/44, canaries N/12, mechanic 5/5, mteb ok,
+    longmemeval ok — entering loop` (or `STOP — <what broke>`).
 
 PER-ITERATION LOOP
+
+Pre-iteration check (cheap, every iteration):
+- Confirm `/tmp/cortex-eval` matches HEAD: rebuild if `git rev-parse
+  HEAD` differs from the binary's embedded commit. Use the same env
+  exports from the top of this prompt.
+
 1. Pick the SINGLE cheapest failing fixture you have a clear
    hypothesis for. Use the Tier 1 / Tier 2 lists in
    docs/prompts/loop-codebase-44.md to guide priority. Never pick
@@ -403,6 +451,39 @@ End each iteration with one line to the conversation:
 ## Discussion log
 
 > Section to capture decisions as we iterate on this plan. Newest entries at the top.
+
+### 2026-05-31 — pre-flight gate added; Path B landed
+
+The loop prompt grew a PRE-FLIGHT section that runs ONCE before the
+first iteration of each session, ensuring:
+
+1. The binary at `/tmp/cortex-eval` is built from current HEAD.
+2. A fresh baseline exists for HEAD (refresh if stale or absent —
+   ~45min, but skip if a current one is already on disk).
+3. Every regression-check fixture (R1/B2/B3 canaries + mechanic +
+   mteb-NFCorpus-50 + longmemeval-oracle-3) passes BEFORE any
+   iteration. Failure = STOP, surface to user.
+
+Rationale: without the pre-flight, the loop's `--compare` regression
+check could be diffing against a stale baseline, and a silent
+upstream regression (in mechanic, longmemeval, mteb) wouldn't surface
+until much later. The pre-flight makes "no regression elsewhere" a
+verified property at session start, not just an iteration-level
+hope.
+
+Path B (per-node model swap on review-class synth) landed in commits
+0c87340 (operator capability map), 0eb9a61 (catalog summary +
+prompt nudge), and bb3ec1f (deterministic SynthDefaultModel closure).
+Q1 cortex newly passes with judge_pass=true; Q3 cortex synth now
+runs on the chatterbox/reasoner (95s latency vs 45s for coder).
+Operator config sample documented at docs/config-sample.md.
+
+The current baseline number (28/44 from before Path B) is now stale.
+The pre-flight will generate a fresh post-Path-B baseline on first
+session start — expect 30-32/44 since Q1 cortex newly passes and a
+few other Q-class cells likely benefit from the routing.
+
+
 
 ### 2026-05-31 — Path audit corrected the cost estimates
 
