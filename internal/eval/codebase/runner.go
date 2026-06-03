@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,8 +67,8 @@ type RunOptions struct {
 // RunResult bundles everything Extract needs plus diagnostics for the
 // dashboard. AnswerText is the assistant's final message on the
 // fixture's prompt; TraceRows are the dag_traces.jsonl rows the cortex
-// invocation appended (tail-by-offset, no turn_id filtering required
-// for one-shot mode).
+// invocation appended, selected by turn_id delta (the rows whose
+// turn_id did not exist before the run).
 type RunResult struct {
 	AnswerText string
 	TraceRows  []TraceRow
@@ -112,12 +111,22 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 		bin = "cortex"
 	}
 
-	// Tail-by-offset: snapshot the current dag_traces.jsonl size so we
-	// can read only the rows this invocation appends. Removes the need
-	// to filter by turn_id from the JSON envelope (which the one-shot
-	// path doesn't currently surface).
+	// Turn-id delta: snapshot the turn_ids already present in
+	// dag_traces.jsonl, then after the run keep only rows whose turn_id
+	// is new. A single cortex one-shot invocation stamps every node it
+	// runs — the out-of-executor sense.classify_intent / sense.estimate_scope
+	// AND the executor's nodes — with one turn_id, so this captures
+	// exactly this cell's rows.
+	//
+	// This replaces a byte-offset tail that proved unsafe at full-suite
+	// scale: the offset window could land mid-turn (after the early
+	// estimate_scope row but before the agent-loop rows), silently
+	// dropping the scope row and zeroing budget_tokens for every cell —
+	// while hop/read counts still populated, masking the bug. Keying on
+	// turn_id and reading the fully-flushed file once, after the
+	// subprocess exits, is immune to that and to flush-ordering races.
 	tracesPath := filepath.Join(abs, ".cortex", "db", "dag_traces.jsonl")
-	startOffset := fileSize(tracesPath)
+	priorTurns := snapshotTurnIDs(tracesPath)
 
 	args := []string{
 		"--prompt", fx.Prompt,
@@ -173,11 +182,11 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 		}
 	}
 
-	rows, err := readTraceTail(tracesPath, startOffset)
+	rows, err := readNewTurnRows(tracesPath, priorTurns)
 	if err != nil && res.CortexExitErr == nil {
 		// Trace-read failure shouldn't shadow a successful cortex run —
 		// surface as a soft error to the caller.
-		res.CortexExitErr = fmt.Errorf("read dag_traces.jsonl tail: %w", err)
+		res.CortexExitErr = fmt.Errorf("read dag_traces.jsonl new-turn rows: %w", err)
 	}
 	res.TraceRows = rows
 
@@ -279,11 +288,41 @@ func readFinalText(sessionPath string) (string, error) {
 	return lastFinal, nil
 }
 
-// readTraceTail reads dag_traces.jsonl starting at startOffset (the
-// pre-run byte position) and returns the rows the cortex invocation
-// appended. Empty trace file or a startOffset past EOF returns an empty
-// slice without error.
-func readTraceTail(path string, startOffset int64) ([]TraceRow, error) {
+// snapshotTurnIDs returns the set of turn_ids already present in
+// dag_traces.jsonl before a run. A missing file yields an empty set, so
+// every row the run appends counts as new. The decode is turn_id-only
+// to keep the pre-run scan cheap.
+func snapshotTurnIDs(path string) map[string]struct{} {
+	seen := map[string]struct{}{}
+	f, err := os.Open(path)
+	if err != nil {
+		return seen
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var row struct {
+			TurnID string `json:"turn_id"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			continue
+		}
+		if row.TurnID != "" {
+			seen[row.TurnID] = struct{}{}
+		}
+	}
+	return seen
+}
+
+// readNewTurnRows reads dag_traces.jsonl and returns every row whose
+// turn_id was NOT present before the run (prior). Reading the fully
+// flushed file once, after the subprocess has exited, and keying on
+// turn_id makes row→cell association robust to write-buffer flush
+// ordering and to multiple cells sharing one project's trace file. Rows
+// with no turn_id are dropped — they can't be attributed to this cell.
+// A missing file returns an empty slice without error.
+func readNewTurnRows(path string, prior map[string]struct{}) ([]TraceRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -292,9 +331,6 @@ func readTraceTail(path string, startOffset int64) ([]TraceRow, error) {
 		return nil, err
 	}
 	defer f.Close()
-	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
-		return nil, err
-	}
 	var rows []TraceRow
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -303,20 +339,18 @@ func readTraceTail(path string, startOffset int64) ([]TraceRow, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
 			continue
 		}
+		if row.TurnID == "" {
+			continue
+		}
+		if _, ok := prior[row.TurnID]; ok {
+			continue
+		}
 		rows = append(rows, row)
 	}
 	if err := scanner.Err(); err != nil {
 		return rows, err
 	}
 	return rows, nil
-}
-
-func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return st.Size()
 }
 
 func mergeEnv(parent []string, override map[string]string) []string {

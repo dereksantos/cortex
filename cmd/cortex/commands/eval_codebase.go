@@ -120,6 +120,23 @@ func executeCodebase(args []string) error {
 		}
 	}
 
+	// Subprocess binary resolution: an explicit --binary wins; otherwise
+	// fall back to CORTEX_BINARY. Without this, a baseline run invoked as
+	// bare `cortex eval codebase --baseline` shells out to whatever
+	// `cortex` is on PATH for each cell — which is easily a stale build
+	// while iterations use the freshly built HEAD binary. That mismatch
+	// silently produced budget_tokens=0 baselines (a stale bin/cortex
+	// doesn't emit sense.estimate_scope), comparing HEAD iterations
+	// against a stale-binary floor. The env fallback closes that hole.
+	if binary == "" {
+		if env := os.Getenv("CORTEX_BINARY"); env != "" {
+			binary = env
+		}
+	}
+	if binary != "" {
+		fmt.Printf("[binary] cell subprocess = %s\n", binary)
+	}
+
 	fxs, err := codebase.LoadDir(dir)
 	if err != nil {
 		return fmt.Errorf("load fixtures from %s: %w", dir, err)

@@ -119,8 +119,15 @@ func Extract(answer string, trace []TraceRow, fx *Fixture) Metrics {
 				}
 			}
 		case "sense.estimate_scope":
-			if m.BudgetTokens == 0 && r.Out != nil {
-				m.BudgetTokens = coerceInt(r.Out["budget_tokens"])
+			// Take the last NONZERO budget across this turn's
+			// estimate_scope rows. Skipping zeros means a fallback row
+			// (budget_tokens:0) can't shadow the real estimate, and
+			// "last wins" picks the converged value when --auto-retry
+			// re-ran the scope estimate.
+			if r.Out != nil {
+				if v := coerceInt(r.Out["budget_tokens"]); v > 0 {
+					m.BudgetTokens = v
+				}
 			}
 		}
 	}

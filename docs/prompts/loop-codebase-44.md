@@ -353,13 +353,23 @@ surfaces a problem, do not enter the loop — surface to the user.
 3. Run a fresh full baseline IF (a) no baseline exists for HEAD, or
    (b) more than one harness/prompt commit has landed since the last
    baseline:
-     `cortex eval codebase --baseline --timeout 900 --judge-model reasoner`
+     `$CORTEX_BINARY eval codebase --baseline --binary $CORTEX_BINARY --timeout 900 --judge-model reasoner`
    Wall time ~45 min. Skip if a fresh baseline already exists.
+
+   BINARY DISCIPLINE (non-negotiable): the baseline MUST run on the same
+   HEAD binary the iterations use — both the OUTER `$CORTEX_BINARY eval`
+   invocation AND the per-cell subprocess (`--binary $CORTEX_BINARY`).
+   A bare `cortex` resolves to whatever is on PATH (often a stale
+   `bin/cortex`), and a stale binary that doesn't emit
+   sense.estimate_scope silently zeroes budget_tokens for every cell —
+   comparing HEAD iterations against a stale-binary floor. `eval
+   codebase` now also falls back to $CORTEX_BINARY for the subprocess
+   when `--binary` is omitted, but pass it explicitly anyway.
 
 4. Regression-check canaries — these MUST pass before the loop starts.
    Any fail = STOP, surface to user.
    - Codebase canaries:
-       `cortex eval codebase --only R1 --only B2 --only B3 --timeout 300`
+       `$CORTEX_BINARY eval codebase --only R1 --only B2 --only B3 --binary $CORTEX_BINARY --timeout 300`
      Expected: 12/12 passing (R1×4 + B2×4 + B3×4 = 12 universal-pass).
    - DAG invariants:
        `cortex eval suite mechanic`
@@ -416,7 +426,8 @@ Pre-iteration check (cheap, every iteration):
    `git commit -m "fix(evals): <fixture-id> — <one-line why>"`
    with `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` trailer.
    Use `git status` before staging; do NOT use `git add -A`.
-7. Update the working baseline: `cortex eval codebase --baseline`
+7. Update the working baseline:
+   `$CORTEX_BINARY eval codebase --baseline --binary $CORTEX_BINARY`
    so future --compare runs reflect the new floor.
 
 STOP CONDITIONS (any of these = exit loop)
@@ -451,6 +462,38 @@ End each iteration with one line to the conversation:
 ## Discussion log
 
 > Section to capture decisions as we iterate on this plan. Newest entries at the top.
+
+### 2026-06-01 — the "6/44 catastrophe" was a stale-binary artifact
+
+A first diagnostic baseline read **6/44 with budget_tokens=0 on every
+cell** — apparently a synth-turn collapse. It was not. The baseline
+command omitted `--binary`, so each cell's subprocess shelled out to the
+PATH `cortex` = a 10-day-stale `bin/cortex` (May 21) that doesn't emit
+`sense.estimate_scope` at all → `budget_tokens=0`. Re-running the SAME
+HEAD on the freshly built binary (`--binary $CORTEX_BINARY`) scored
+**24/44** with healthy budgets (5000–120000) — in the same ballpark as
+the prior 28/44, i.e. **no catastrophic regression**.
+
+Root cause was a measurement-honesty hole in this very prompt: the
+baseline + canary steps ran bare `cortex` while iterations ran
+`--binary $CORTEX_BINARY`, comparing HEAD iterations against a
+stale-binary floor. Fixes landed:
+
+- `eval codebase` now falls back to `$CORTEX_BINARY` for the cell
+  subprocess when `--binary` is omitted, and prints the resolved binary.
+- This prompt's baseline/canary/update-baseline steps now invoke the
+  HEAD binary explicitly (outer `$CORTEX_BINARY eval` + `--binary
+  $CORTEX_BINARY`).
+- Hardened row→cell association in the codebase runner: byte-offset tail
+  → turn_id delta (snapshot prior turn_ids, keep rows whose turn_id is
+  new). Robust to flush ordering and shared per-project trace files;
+  not the cause of the 0s here, but removes a fragile assumption.
+
+Caveat for the Path-B story: the earlier bisect used `--binary` on both
+sides, so its canary delta (B2 4→0, R1 4→1) is method-valid — but the
+corrected full baseline shows B at 9/12, so much of that gap is likely
+run-to-run variance. Determinism (temp=0, local-only routing) matters
+more than first weighted; it's the next measurement-honesty lever.
 
 ### 2026-05-31 — pre-flight gate added; Path B landed
 

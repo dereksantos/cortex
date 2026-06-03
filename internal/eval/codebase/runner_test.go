@@ -31,9 +31,9 @@ func TestRunWithStubBinary(t *testing.T) {
 
 	workdir := t.TempDir()
 	// Pre-seed dag_traces.jsonl with a "historical" row so we can
-	// confirm the tail-by-offset logic ignores it. Real cortex runs
-	// will accumulate trace rows over time; the runner must only see
-	// the rows this invocation appends.
+	// confirm the turn_id-delta logic ignores it. Real cortex runs
+	// accumulate trace rows over time; the runner must only see the
+	// rows whose turn_id this invocation introduced.
 	dbDir := filepath.Join(workdir, ".cortex", "db")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ echo '{"ok":true,"data":{"session_id":"20260101T000000Z","session_path":"` + ses
 		t.Fatal("AnswerText is empty (session.jsonl parse failed)")
 	}
 	if len(res.TraceRows) != 4 {
-		t.Errorf("TraceRows = %d, want 4 (historical row should be filtered out by tail-offset)", len(res.TraceRows))
+		t.Errorf("TraceRows = %d, want 4 (historical row should be filtered out by turn_id delta)", len(res.TraceRows))
 	}
 
 	if m.HopCount != 1 || m.ReadCount != 1 {
@@ -170,5 +170,74 @@ func TestReadFinalTextPrefersRetry(t *testing.T) {
 	}
 	if txt != "after-retry" {
 		t.Errorf("readFinalText = %q, want after-retry (retry should win)", txt)
+	}
+}
+
+// TestReadNewTurnRowsByTurnID locks the property the old byte-offset
+// tail lacked: a cell's rows are associated by turn_id, NOT file
+// position. The previous offset window could land mid-turn (after the
+// early sense.estimate_scope row but before the agent-loop rows),
+// silently dropping budget_tokens while hop/read still populated. Here
+// the new turn's estimate_scope row is INTERLEAVED among prior-turn
+// rows; readNewTurnRows must still capture it, and Extract must read its
+// budget. Rows with no turn_id are dropped (unattributable).
+func TestReadNewTurnRowsByTurnID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dag_traces.jsonl")
+
+	// Phase 1: prior content (two historical turns).
+	prior := `{"turn_id":"old-1","qualified_name":"decide.next","ok":true}
+{"turn_id":"old-2","qualified_name":"sense.estimate_scope","ok":true,"out":{"budget_tokens":99000}}
+`
+	if err := os.WriteFile(path, []byte(prior), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	priorTurns := snapshotTurnIDs(path)
+	if len(priorTurns) != 2 {
+		t.Fatalf("snapshotTurnIDs = %d turns, want 2", len(priorTurns))
+	}
+
+	// Phase 2: append this run's rows, deliberately interleaved with a
+	// late-arriving prior-turn row and a turn_id-less row. The new turn's
+	// estimate_scope sits BEFORE its own agent-loop rows — exactly the
+	// ordering the offset tail mishandled.
+	appended := `{"turn_id":"repl-new","qualified_name":"sense.estimate_scope","ok":true,"out":{"budget_tokens":7000}}
+{"turn_id":"old-2","qualified_name":"act.read_file","ok":true}
+{"qualified_name":"act.list_dir","ok":true}
+{"turn_id":"repl-new","qualified_name":"decide.next","ok":true}
+{"turn_id":"repl-new","qualified_name":"act.read_file","ok":true}
+`
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(appended)
+	f.Close()
+
+	rows, err := readNewTurnRows(path, priorTurns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expect exactly the three repl-new rows; old-2's late row and the
+	// turn_id-less row are excluded.
+	if len(rows) != 3 {
+		t.Fatalf("readNewTurnRows returned %d rows, want 3 (the repl-new rows only)", len(rows))
+	}
+	for _, r := range rows {
+		if r.TurnID != "repl-new" {
+			t.Errorf("captured foreign turn_id %q", r.TurnID)
+		}
+	}
+
+	// The interleaved estimate_scope must survive into the metric.
+	m := Extract("", rows, nil)
+	if m.BudgetTokens != 7000 {
+		t.Errorf("BudgetTokens = %d, want 7000 (the new turn's scope budget, not old-2's 99000)", m.BudgetTokens)
+	}
+	if m.HopCount != 1 {
+		t.Errorf("HopCount = %d, want 1 (one repl-new decide.next)", m.HopCount)
+	}
+	if m.ReadCount != 1 {
+		t.Errorf("ReadCount = %d, want 1 (one repl-new act.read_file; old-2's excluded)", m.ReadCount)
 	}
 }
