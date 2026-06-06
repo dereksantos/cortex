@@ -156,3 +156,51 @@ func TestSummarize(t *testing.T) {
 		t.Errorf("p50 citation = %v, want 0.4", agg.CitationP50)
 	}
 }
+
+func TestSummarizeExcludesInvalid(t *testing.T) {
+	rows := []BaselineRow{
+		sampleRow("a", true, 1, 0.2),
+		sampleRow("b", false, 2, 0.4),
+		sampleRow("c", false, 3, 0.6),
+		sampleRow("d", false, 1, 0.1),
+	}
+	// c and d were harness failures, not quality fails.
+	rows[2].Invalid = true
+	rows[3].Invalid = true
+
+	agg := Summarize(rows)
+	if agg.Total != 4 {
+		t.Errorf("Total = %d, want 4", agg.Total)
+	}
+	if agg.Invalid != 2 {
+		t.Errorf("Invalid = %d, want 2", agg.Invalid)
+	}
+	// Passing counts only scoreable cells: a passes, b fails → 1.
+	if agg.Passing != 1 {
+		t.Errorf("Passing = %d, want 1 (invalid cells excluded, not counted as fail)", agg.Passing)
+	}
+	if agg.Scoreable() != 2 {
+		t.Errorf("Scoreable = %d, want 2 (4 total - 2 invalid)", agg.Scoreable())
+	}
+	// 2/4 invalid = 50% > 15% threshold → compromised.
+	if !agg.Compromised() {
+		t.Error("Compromised = false, want true (50% invalid)")
+	}
+}
+
+func TestCompareInvalidIsNotRegression(t *testing.T) {
+	prev := []BaselineRow{sampleRow("a", true, 1, 0.2)}  // passed before
+	curr := []BaselineRow{sampleRow("a", false, 1, 0.2)} // "failed" now…
+	curr[0].Invalid = true                               // …but it was a harness failure
+
+	diffs := Compare(prev, curr)
+	if len(diffs) != 1 {
+		t.Fatalf("got %d diffs, want 1", len(diffs))
+	}
+	if diffs[0].Regressed {
+		t.Error("Regressed = true, want false (pass→invalid is a harness failure, not a model regression)")
+	}
+	if !diffs[0].Invalid {
+		t.Error("Invalid = false, want true")
+	}
+}

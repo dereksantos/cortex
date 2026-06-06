@@ -214,7 +214,7 @@ func executeCodebase(args []string) error {
 	commit := codebase.CurrentGitSHA()
 
 	rows := make([]codebase.BaselineRow, 0, len(fxs))
-	total, passed := 0, 0
+	total, passed, invalid := 0, 0, 0
 	for _, fx := range fxs {
 		total++
 		workdir := codebase.ResolveFixturePath(fixtureRoot, repoRoot, fx.Project)
@@ -244,10 +244,17 @@ func executeCodebase(args []string) error {
 		}
 		printMetricsAndBounds(m, bounds, elapsed)
 		fixturePass := codebase.AllPass(bounds)
-		if fixturePass {
+		// Quarantine harness failures (killed/timed-out/empty) as INVALID
+		// instead of scoring them FAIL — a fleet stall isn't a quality
+		// result and must not count against the pass rate.
+		switch {
+		case res.Invalid:
+			invalid++
+			fmt.Printf("  → INVALID (%s)\n", res.InvalidReason)
+		case fixturePass:
 			passed++
 			fmt.Printf("  → PASS\n")
-		} else {
+		default:
 			fmt.Printf("  → FAIL\n")
 		}
 
@@ -262,9 +269,11 @@ func executeCodebase(args []string) error {
 			Model:        model,
 			WallTimeMs:   elapsed.Milliseconds(),
 			Metrics:      m,
-			Bounds:       bounds,
-			Pass:         fixturePass,
-			AnswerSample: oneLine(res.AnswerText),
+			Bounds:        bounds,
+			Pass:          fixturePass && !res.Invalid,
+			Invalid:       res.Invalid,
+			InvalidReason: res.InvalidReason,
+			AnswerSample:  oneLine(res.AnswerText),
 		}
 		if judgeOpts.Model != "" {
 			row.JudgeModel = judgeOpts.Model
@@ -280,7 +289,18 @@ func executeCodebase(args []string) error {
 		rows = append(rows, row)
 	}
 
-	fmt.Printf("\nsummary: %d/%d passing\n", passed, total)
+	// Pass rate is over SCOREABLE cells (total minus quarantined INVALID),
+	// so a fleet stall can't deflate it. When INVALID dominates the run is
+	// compromised — its pass rate is not a trustworthy result.
+	scoreable := total - invalid
+	if invalid > 0 {
+		fmt.Printf("\nsummary: %d/%d passing (%d invalid, excluded)\n", passed, scoreable, invalid)
+		if total > 0 && float64(invalid) > 0.15*float64(total) {
+			fmt.Printf("⚠ RUN COMPROMISED: %d/%d cells INVALID (killed/timed-out/empty — likely a fleet stall). Pass rate is NOT trustworthy; re-run before drawing conclusions.\n", invalid, total)
+		}
+	} else {
+		fmt.Printf("\nsummary: %d/%d passing\n", passed, total)
+	}
 
 	if persistBaseline {
 		path, err := codebase.WriteBaseline(repoRoot, commit, rows)

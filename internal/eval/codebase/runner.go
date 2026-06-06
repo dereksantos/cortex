@@ -81,6 +81,14 @@ type RunResult struct {
 	// is useful for "what went wrong" debugging.
 	CortexExitErr error
 
+	// Invalid marks a HARNESS failure (not a quality failure): the cell
+	// could not be fairly scored because the subprocess was killed /
+	// timed out or produced no answer at all. INVALID cells are excluded
+	// from pass-rate denominators so a fleet stall can't masquerade as a
+	// regression. InvalidReason carries the human-readable cause.
+	Invalid       bool
+	InvalidReason string
+
 	Stderr string
 
 	// Judge is the slice-3 LLM-judge verdict. nil when the fixture
@@ -190,6 +198,11 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 	}
 	res.TraceRows = rows
 
+	// Quarantine harness failures BEFORE scoring. A killed/timed-out
+	// subprocess or an empty answer isn't a quality signal — scoring it
+	// as FAIL is what let a fleet stall read as a 6/44 regression.
+	res.Invalid, res.InvalidReason = classifyInvalid(res)
+
 	m := Extract(res.AnswerText, res.TraceRows, fx)
 	bounds := Evaluate(m, fx.Expected)
 
@@ -220,6 +233,33 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 		}
 	}
 	return res, m, bounds, nil
+}
+
+// classifyInvalid decides whether a run is a HARNESS failure rather than
+// a scoreable quality outcome. Two unambiguous signals:
+//
+//   - the subprocess was killed or timed out (context deadline cancels
+//     runCtx → the child gets SIGKILL → "signal: killed"); the turn
+//     never finished, so its bounds are meaningless.
+//   - no answer was produced at all (empty AnswerText) — the synthesis
+//     turn emitted nothing to score.
+//
+// A non-empty wrong answer, a "NEED_MORE:" that never converged, or an
+// honest "I don't know" are all REAL quality outcomes and stay
+// scoreable (FAIL/PASS) — only genuine harness failures are quarantined.
+func classifyInvalid(res *RunResult) (bool, string) {
+	if res.CortexExitErr != nil {
+		e := res.CortexExitErr.Error()
+		for _, sig := range []string{"signal: killed", "killed", "deadline", "context canceled", "context deadline"} {
+			if strings.Contains(e, sig) {
+				return true, "subprocess killed/timed out: " + truncate(e, 160)
+			}
+		}
+	}
+	if strings.TrimSpace(res.AnswerText) == "" {
+		return true, "no answer produced (empty synthesis turn)"
+	}
+	return false, ""
 }
 
 // parseSessionPath extracts session_path from the one-shot JSON

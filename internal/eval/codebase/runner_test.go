@@ -3,9 +3,11 @@ package codebase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -239,5 +241,38 @@ func TestReadNewTurnRowsByTurnID(t *testing.T) {
 	}
 	if m.ReadCount != 1 {
 		t.Errorf("ReadCount = %d, want 1 (one repl-new act.read_file; old-2's excluded)", m.ReadCount)
+	}
+}
+
+// TestClassifyInvalid locks the harness-failure-vs-quality boundary: a
+// killed/timed-out subprocess or an empty answer is INVALID (quarantine,
+// don't score); a present-but-wrong answer, a non-converged NEED_MORE,
+// and an honest "I don't know" are REAL quality outcomes and stay
+// scoreable.
+func TestClassifyInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		res     *RunResult
+		want    bool
+		reasonH string // substring the reason should contain when invalid
+	}{
+		{"killed", &RunResult{AnswerText: "partial", CortexExitErr: errors.New("cortex exit: signal: killed (stderr=)")}, true, "killed"},
+		{"deadline", &RunResult{AnswerText: "x", CortexExitErr: errors.New("context deadline exceeded")}, true, "timed out"},
+		{"empty-answer", &RunResult{AnswerText: "   "}, true, "no answer"},
+		{"wrong-but-present", &RunResult{AnswerText: "MAX_TODOS is 5"}, false, ""},
+		{"need-more", &RunResult{AnswerText: "NEED_MORE: read app/storage.py"}, false, ""},
+		{"honest-unknown", &RunResult{AnswerText: "I couldn't find that in the codebase."}, false, ""},
+		{"clean-nonzero-exit-with-answer", &RunResult{AnswerText: "answer", CortexExitErr: errors.New("read dag_traces.jsonl: parse error")}, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := classifyInvalid(tc.res)
+			if got != tc.want {
+				t.Fatalf("classifyInvalid = %v (reason=%q), want %v", got, reason, tc.want)
+			}
+			if got && tc.reasonH != "" && !strings.Contains(reason, tc.reasonH) {
+				t.Errorf("reason %q missing %q", reason, tc.reasonH)
+			}
+		})
 	}
 }

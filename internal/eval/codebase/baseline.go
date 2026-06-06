@@ -30,7 +30,13 @@ type BaselineRow struct {
 	Metrics      Metrics   `json:"metrics"`
 	Bounds       []Bound   `json:"bounds"`
 	Pass         bool      `json:"pass"`
-	JudgePass    *bool     `json:"judge_pass,omitempty"`
+	// Invalid marks a harness failure (killed/timed-out subprocess or
+	// empty answer) rather than a quality failure. Invalid rows are
+	// excluded from pass-rate denominators and never count as a
+	// regression — an infra stall isn't a model regression.
+	Invalid       bool   `json:"invalid,omitempty"`
+	InvalidReason string `json:"invalid_reason,omitempty"`
+	JudgePass     *bool  `json:"judge_pass,omitempty"`
 	JudgeReason  string    `json:"judge_reason,omitempty"`
 	CortexExit   string    `json:"cortex_exit,omitempty"`
 	AnswerSample string    `json:"answer_sample,omitempty"` // first 400 chars; full text stays in session.jsonl
@@ -196,6 +202,7 @@ type Diff struct {
 	Curr       *BaselineRow
 	Regressed  bool
 	Improved   bool
+	Invalid    bool // curr or prev was a harness failure — not a model delta
 	BigChanges []MetricChange
 }
 
@@ -245,8 +252,15 @@ func Compare(prev, curr []BaselineRow) []Diff {
 	for _, id := range idList {
 		d := Diff{FixtureID: id, Prev: prevByID[id], Curr: currByID[id]}
 		if d.Prev != nil && d.Curr != nil {
-			d.Regressed = d.Prev.Pass && !d.Curr.Pass
-			d.Improved = !d.Prev.Pass && d.Curr.Pass
+			// A cell that went INVALID this run is a harness failure, not
+			// a model regression — don't flag it as regressed/improved.
+			// Same if the PREVIOUS baseline was invalid (no trustworthy
+			// floor to compare against).
+			d.Invalid = d.Curr.Invalid || d.Prev.Invalid
+			if !d.Invalid {
+				d.Regressed = d.Prev.Pass && !d.Curr.Pass
+				d.Improved = !d.Prev.Pass && d.Curr.Pass
+			}
 			d.BigChanges = bigMetricChanges(d.Prev.Metrics, d.Curr.Metrics)
 		}
 		diffs = append(diffs, d)
@@ -386,12 +400,25 @@ func absf(f float64) float64 {
 type Aggregate struct {
 	Total         int
 	Passing       int
+	Invalid       int // harness failures, excluded from the pass denominator
 	Regressed     int
 	Improved      int
 	CitationP50   float64
 	BudgetTokenP50 int
 	Source        string // path to the baseline file the aggregate summarized
 	Captured      time.Time
+}
+
+// Scoreable returns the pass-rate denominator: total cells minus
+// quarantined INVALID ones. A run where INVALID dominates has a small,
+// untrustworthy denominator — see Compromised.
+func (a Aggregate) Scoreable() int { return a.Total - a.Invalid }
+
+// Compromised reports whether enough cells were quarantined that the
+// pass rate is not trustworthy (a fleet stall / mass timeout, not a real
+// result). Threshold: more than 15% of cells INVALID.
+func (a Aggregate) Compromised() bool {
+	return a.Total > 0 && float64(a.Invalid) > 0.15*float64(a.Total)
 }
 
 // Summarize builds the dashboard one-line aggregate from a baseline
@@ -405,6 +432,10 @@ func Summarize(rows []BaselineRow) Aggregate {
 	budgets := make([]int, 0, len(rows))
 	var newest time.Time
 	for _, r := range rows {
+		if r.Invalid {
+			a.Invalid++
+			continue // quarantined: not counted as pass or fail
+		}
 		if r.Pass {
 			a.Passing++
 		}

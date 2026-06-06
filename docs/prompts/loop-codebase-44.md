@@ -1,10 +1,28 @@
-# Loop — drive codebase eval suite from 28/44 toward 44/44
+# Loop — drive the codebase eval suite to its honest ceiling
 
-Goal: take the codebase-reading eval suite
-(`docs/eval-suite-codebase-reading.md`) from its current local-only
-baseline of **28/44** (commit `35dedfa`, model = chatterbox `coder`
-qwen3-30b-moe + reasoner judge) toward **44/44** without regressing any
-other eval family (mechanic / journeys / mteb / niah / longmemeval).
+Goal (reframed 2026-06): make **every cell green except the 2–3 we
+deliberately keep red as small-model regression targets** — NOT a
+literal 44/44. Forcing the genuine-small-model-limit cells (the
+q3-audit / q4-refactor hard cluster) to pass would launder the score,
+the exact anti-pattern `eval-principles.md` warns against. A realistic
+*trustworthy* ceiling is high-30s/low-40s, with the remaining reds
+intentional. No regressions to other eval families (mechanic /
+journeys / mteb / niah / longmemeval).
+
+Prerequisite, learned the hard way: the measurement apparatus has to be
+honest first. Three trust-killers, each its own fix:
+1. **Stale subprocess binary** — baselines ran a different binary than
+   iterations. Fixed (`a9aaae3`): runner honors `CORTEX_BINARY`, prompt
+   uses `--binary` everywhere.
+2. **Nondeterminism** — providers sent no temperature (~0.7 default),
+   flipping ~1/3 of cells run-to-run. Addressed (`4b314b3`):
+   `--temperature 0` across all providers. Helps but isn't sufficient.
+3. **Fleet stalls → timeouts → killed/empty cells scored as FAILs** —
+   a whole run can collapse (e.g. 6/44) and look like a regression.
+   Fix = INVALID-vs-FAIL quarantine (Workstream C).
+
+Only on a trustworthy apparatus does per-cell tuning have signal: a +1
+from a prompt tweak is meaningless when the floor wobbles ±4 on its own.
 
 This file is the living plan. Each major decision lands as an edit
 here; the loop prompt at the bottom is the runnable artifact.
@@ -462,6 +480,31 @@ End each iteration with one line to the conversation:
 ## Discussion log
 
 > Section to capture decisions as we iterate on this plan. Newest entries at the top.
+
+### 2026-06-06 — reframed the target; variance quantified
+
+With the binary hole closed, ran the baseline 3× to quantify variance.
+Split (default temp): **19 always-pass · 10 always-fail · 15 flaky**.
+Per-run totals (24/28/30) hide that **~1/3 of the suite flips
+run-to-run**. The "true" score is anywhere in 19–34 by luck. So the
+loop was tuning against a coin-flip.
+
+Decision: **reframe the goal away from literal 44/44** (see top of
+file). The 10 stable always-fails split into ~4–6 tunable (q1/q2/q5
+leaf cases + b1-scope-estimator-cortex) and ~4–6 genuinely hard
+(q3-audit ×3, q4-refactor ×2) — the latter encode real small-model
+limits; 2–3 stay red on purpose.
+
+Determinism check (`--temperature 0`, Workstream B `4b314b3`):
+same-commit flip count dropped only **8 → 6**. Temperature helps but
+isn't the main lever. The validation's 3rd run collapsed to 6/44 from
+`signal: killed` / 10-min timeouts — a **fleet-stall** variance source
+temperature can't touch, and the single biggest reason a run looks like
+a regression when it isn't. That motivates Workstream C: mark
+killed/timed-out/empty-answer cells **INVALID** (not FAIL), exclude
+them from the pass denominator, and flag a run "compromised" when
+INVALID exceeds a threshold — so an infra stall can never masquerade as
+a quality regression.
 
 ### 2026-06-01 — the "6/44 catastrophe" was a stale-binary artifact
 
