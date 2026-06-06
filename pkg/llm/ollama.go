@@ -19,6 +19,7 @@ type OllamaClient struct {
 	baseURL        string
 	model          string
 	embeddingModel string
+	temperature    *float64 // CORTEX_TEMPERATURE; nil → not sent (backend default)
 	httpClient     *http.Client
 }
 
@@ -32,18 +33,31 @@ func NewOllamaClient(cfg *config.Config) *OllamaClient {
 		baseURL:        cfg.OllamaURL,
 		model:          cfg.OllamaModel,
 		embeddingModel: embeddingModel,
+		temperature:    envTemperature(),
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
 }
 
+// SetTemperature pins this client's sampling temperature, overriding the
+// CORTEX_TEMPERATURE env default read at construction.
+func (c *OllamaClient) SetTemperature(t float64) { c.temperature = &t }
+
 // OllamaRequest represents a request to Ollama
 type OllamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	System string `json:"system,omitempty"`
-	Stream bool   `json:"stream"`
+	Model   string         `json:"model"`
+	Prompt  string         `json:"prompt"`
+	System  string         `json:"system,omitempty"`
+	Stream  bool           `json:"stream"`
+	Options *ollamaOptions `json:"options,omitempty"`
+}
+
+// ollamaOptions carries sampling knobs under Ollama's "options" object.
+// Only set when a knob is pinned, so the wire shape is unchanged by
+// default.
+type ollamaOptions struct {
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // OllamaResponse represents a response from Ollama
@@ -160,6 +174,9 @@ func (c *OllamaClient) generateInternal(prompt, system string) (string, Generati
 		Prompt: prompt,
 		System: system,
 		Stream: false,
+	}
+	if c.temperature != nil {
+		reqBody.Options = &ollamaOptions{Temperature: c.temperature}
 	}
 
 	jsonData, err := json.Marshal(reqBody)

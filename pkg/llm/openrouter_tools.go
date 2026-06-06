@@ -140,12 +140,13 @@ func (c *OpenRouterClient) GenerateWithTools(ctx context.Context, msgs []ChatMes
 	}
 
 	body := orToolsRequest{
-		Model:      c.model,
-		MaxTokens:  c.maxTokens,
-		Messages:   msgs,
-		Tools:      tools,
-		ToolChoice: toolChoice,
-		Usage:      orUsageReq{Include: true},
+		Model:       c.model,
+		MaxTokens:   c.maxTokens,
+		Messages:    msgs,
+		Tools:       tools,
+		ToolChoice:  toolChoice,
+		Usage:       orUsageReq{Include: true},
+		Temperature: c.temperature,
 	}
 
 	bb, err := c.doRaw(ctx, body)

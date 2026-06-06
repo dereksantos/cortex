@@ -77,6 +77,12 @@ type OpenAICompatClient struct {
 	maxTokens  int
 	httpClient *http.Client
 
+	// temperature, when non-nil, is sent on every request. Initialized
+	// from CORTEX_TEMPERATURE at construction (nil when unset → no
+	// temperature sent, so the backend default applies — today's
+	// behavior). SetTemperature overrides it for in-process callers.
+	temperature *float64
+
 	// swapTracker, when set, gets a Note(endpoint, model) after every
 	// successful request — feeds the Phase 4 Slice E swap-aware
 	// routing substrate. Nil is fine (no tracking).
@@ -96,15 +102,21 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 		name = "openai-compat"
 	}
 	return &OpenAICompatClient{
-		name:      name,
-		baseURL:   strings.TrimRight(ep.BaseURL, "/"),
-		apiKey:    ep.APIKey,
-		maxTokens: defaultMaxTokens,
+		name:        name,
+		baseURL:     strings.TrimRight(ep.BaseURL, "/"),
+		apiKey:      ep.APIKey,
+		maxTokens:   defaultMaxTokens,
+		temperature: envTemperature(),
 		httpClient: &http.Client{
 			Timeout: compatTimeout(),
 		},
 	}
 }
+
+// SetTemperature pins this client's sampling temperature, overriding the
+// CORTEX_TEMPERATURE env default read at construction. Sent on every
+// subsequent request.
+func (c *OpenAICompatClient) SetTemperature(t float64) { c.temperature = &t }
 
 // Name returns the configured endpoint identifier. Distinct from
 // "openai-compat" so telemetry can attribute calls to specific
@@ -161,9 +173,10 @@ func (c *OpenAICompatClient) GenerateWithStats(ctx context.Context, prompt strin
 // vendor extensions — the point of this client is universal
 // compatibility.
 type compatRequest struct {
-	Model     string          `json:"model"`
-	MaxTokens int             `json:"max_tokens"`
-	Messages  []compatMessage `json:"messages"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	Messages    []compatMessage `json:"messages"`
+	Temperature *float64        `json:"temperature,omitempty"`
 }
 
 type compatMessage struct {
@@ -287,9 +300,10 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 	msgs = append(msgs, compatMessage{Role: "user", Content: prompt})
 
 	body := compatRequest{
-		Model:     c.model,
-		MaxTokens: c.maxTokens,
-		Messages:  msgs,
+		Model:       c.model,
+		MaxTokens:   c.maxTokens,
+		Messages:    msgs,
+		Temperature: c.temperature,
 	}
 
 	raw, err := c.doRaw(ctx, "/chat/completions", body)

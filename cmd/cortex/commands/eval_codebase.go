@@ -16,6 +16,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/eval/codebase"
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 const codebaseUsage = `Usage: cortex eval codebase [flags]
@@ -34,6 +35,10 @@ Flags:
       --project NAME   Restrict to one fixture project (cortex|leanjs|python-todo|rust-weather).
       --fixture-root D Override the fixture-project root (slice-5 Python/Rust projects)
       --timeout SECS   Per-fixture wall-clock cap (default: 600)
+      --temperature T  Pin sampling temperature (e.g. 0) for every LLM call —
+                       judge AND cell subprocesses — via CORTEX_TEMPERATURE.
+                       Omitted: each backend's default (~0.7), which makes
+                       ~1/3 of cells flip run-to-run.
       --judge-model M  Enable the slice-3 LLM judge for Q-class fixtures
                        carrying judge_rubric. Resolves via the same provider
                        resolver as the REPL — slash-prefixed routes to
@@ -64,6 +69,7 @@ func executeCodebase(args []string) error {
 	judgeModel := ""
 	persistBaseline := false
 	compareRef := ""
+	temperature := ""
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -107,6 +113,11 @@ func executeCodebase(args []string) error {
 				judgeModel = args[i+1]
 				i++
 			}
+		case "--temperature":
+			if i+1 < len(args) {
+				temperature = args[i+1]
+				i++
+			}
 		case "--baseline":
 			persistBaseline = true
 		case "--compare":
@@ -135,6 +146,18 @@ func executeCodebase(args []string) error {
 	}
 	if binary != "" {
 		fmt.Printf("[binary] cell subprocess = %s\n", binary)
+	}
+
+	// Determinism knob: --temperature pins sampling temperature for every
+	// LLM call in the run. os.Setenv reaches BOTH levels through one
+	// mechanism — the judge built in THIS process (BuildProvider reads
+	// CORTEX_TEMPERATURE at construction) and each cell SUBPROCESS, which
+	// inherits it because the runner's mergeEnv starts from os.Environ().
+	// Without this, every provider sends no temperature and the backend
+	// default (~0.7) makes ~1/3 of cells flip run-to-run.
+	if temperature != "" {
+		os.Setenv(llm.TemperatureEnv, temperature)
+		fmt.Printf("[determinism] CORTEX_TEMPERATURE=%s (judge + cell subprocesses)\n", temperature)
 	}
 
 	fxs, err := codebase.LoadDir(dir)

@@ -25,10 +25,11 @@ func NewOpenRouterClientWithKey(cfg *config.Config, apiKey string) *OpenRouterCl
 	_ = cfg
 
 	return &OpenRouterClient{
-		apiKey:    apiKey,
-		model:     model,
-		maxTokens: defaultMaxTokens,
-		apiURL:    openrouterAPIURL,
+		apiKey:      apiKey,
+		model:       model,
+		maxTokens:   defaultMaxTokens,
+		apiURL:      openrouterAPIURL,
+		temperature: envTemperature(),
 		httpClient: &http.Client{
 			Timeout: openrouterTimeoutSec * time.Second,
 		},

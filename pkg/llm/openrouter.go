@@ -50,15 +50,20 @@ type OpenRouterModel struct {
 // re-exports to OPENROUTER_API_KEY for litellm compatibility — that's
 // not this client's concern.
 type OpenRouterClient struct {
-	apiKey     string
-	model      string
-	maxTokens  int
-	apiURL     string // overridable for tests via SetAPIURL
-	httpClient *http.Client
+	apiKey      string
+	model       string
+	maxTokens   int
+	apiURL      string   // overridable for tests via SetAPIURL
+	temperature *float64 // CORTEX_TEMPERATURE; nil → not sent (backend default)
+	httpClient  *http.Client
 
 	lastCostUSD  float64 // surface this via LastCostUSD()
 	lastProvider string  // upstream provider that served the most recent call
 }
+
+// SetTemperature pins this client's sampling temperature, overriding the
+// CORTEX_TEMPERATURE env default read at construction.
+func (c *OpenRouterClient) SetTemperature(t float64) { c.temperature = &t }
 
 // NewOpenRouterClient constructs a client. The model defaults to a known
 // working :free model (suitable for development); callers wiring a grid
@@ -76,10 +81,11 @@ func NewOpenRouterClient(cfg *config.Config) *OpenRouterClient {
 	_ = cfg // reserved for future cfg-driven knobs (max_tokens, timeout)
 
 	return &OpenRouterClient{
-		apiKey:    apiKey,
-		model:     model,
-		maxTokens: defaultMaxTokens,
-		apiURL:    openrouterAPIURL,
+		apiKey:      apiKey,
+		model:       model,
+		maxTokens:   defaultMaxTokens,
+		apiURL:      openrouterAPIURL,
+		temperature: envTemperature(),
 		httpClient: &http.Client{
 			Timeout: openrouterTimeoutSec * time.Second,
 		},
@@ -147,10 +153,11 @@ func (c *OpenRouterClient) GenerateWithStats(ctx context.Context, prompt string)
 // sub-object is OpenRouter's request-side opt-in for surfacing per-call
 // cost in the response.
 type orRequest struct {
-	Model     string      `json:"model"`
-	MaxTokens int         `json:"max_tokens"`
-	Messages  []orMessage `json:"messages"`
-	Usage     orUsageReq  `json:"usage"`
+	Model       string      `json:"model"`
+	MaxTokens   int         `json:"max_tokens"`
+	Messages    []orMessage `json:"messages"`
+	Usage       orUsageReq  `json:"usage"`
+	Temperature *float64    `json:"temperature,omitempty"`
 }
 
 type orMessage struct {
@@ -197,10 +204,11 @@ func (c *OpenRouterClient) generate(ctx context.Context, prompt, system string) 
 	msgs = append(msgs, orMessage{Role: "user", Content: prompt})
 
 	body := orRequest{
-		Model:     c.model,
-		MaxTokens: c.maxTokens,
-		Messages:  msgs,
-		Usage:     orUsageReq{Include: true},
+		Model:       c.model,
+		MaxTokens:   c.maxTokens,
+		Messages:    msgs,
+		Usage:       orUsageReq{Include: true},
+		Temperature: c.temperature,
 	}
 
 	bb, err := c.doRaw(ctx, body)
