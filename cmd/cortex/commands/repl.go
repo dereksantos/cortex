@@ -764,12 +764,17 @@ func buildREPLRegistry(cortexDir, apiURL string, ui cliout.Sink, verbose bool) l
 		}
 	}
 
-	// OpenRouter — only when a key is resolvable.
-	if key, _, err := secret.MustOpenRouterKey(); err == nil && key != "" {
-		probes = append(probes, llm.NewOpenRouterProbe(llm.OpenRouterProbeConfig{
-			APIKey: key,
-			Cfg:    cfg,
-		}))
+	// OpenRouter — only when a key is resolvable AND we're not in
+	// local-only mode. Excluding the probe keeps remote models out of the
+	// registry entirely, so capability routing (e.g. sense.estimate_scope's
+	// Requires chain) can only ever land on a local model.
+	if !llm.LocalOnly() {
+		if key, _, err := secret.MustOpenRouterKey(); err == nil && key != "" {
+			probes = append(probes, llm.NewOpenRouterProbe(llm.OpenRouterProbeConfig{
+				APIKey: key,
+				Cfg:    cfg,
+			}))
+		}
 	}
 
 	onError := llm.ErrorReporter(nil)
@@ -784,6 +789,25 @@ func buildREPLRegistry(cortexDir, apiURL string, ui cliout.Sink, verbose bool) l
 		ProbeTimeout: 5 * time.Second,
 		OnError:      onError,
 	})
+}
+
+// localOnlyRouting returns the subset of routing pins whose target
+// resolves to a configured (local) endpoint. Pins to a remote model
+// (e.g. "openai/gpt-5.4", whose "openai" prefix is no configured
+// endpoint) are dropped so a CORTEX_LOCAL_ONLY session never routes off
+// the box. Dropped nodes fall through to capability/default routing,
+// which is local once the OpenRouter probe is excluded from the registry.
+func localOnlyRouting(cfg *config.Config, pins map[string]string) map[string]string {
+	if cfg == nil || len(pins) == 0 {
+		return pins
+	}
+	out := make(map[string]string, len(pins))
+	for qname, target := range pins {
+		if _, _, ok := cfg.ResolveModelRoute(target); ok {
+			out[qname] = target
+		}
+	}
+	return out
 }
 
 // trimOllamaChatSuffix returns the Ollama root URL given either a root
@@ -2744,6 +2768,13 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 	routingByQname := map[string]string(nil)
 	if routingCfg != nil {
 		routingByQname = routingCfg.Routing
+		if llm.LocalOnly() {
+			// Strip pins that target a non-local model so a local-only run
+			// never leaves the box via an operator pin. Dropped pins fall
+			// through to capability/default routing, which — with the
+			// OpenRouter probe excluded above — can only pick local models.
+			routingByQname = localOnlyRouting(routingCfg, routingByQname)
+		}
 	}
 	router := dag.NewDefaultRouter(dag.RouterDeps{
 		Registry:        s.registry,

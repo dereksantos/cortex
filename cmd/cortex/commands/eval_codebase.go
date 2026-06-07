@@ -39,6 +39,10 @@ Flags:
                        judge AND cell subprocesses — via CORTEX_TEMPERATURE.
                        Omitted: each backend's default (~0.7), which makes
                        ~1/3 of cells flip run-to-run.
+      --local-only     Keep every LLM call on the local fleet (sets
+                       CORTEX_LOCAL_ONLY=1): excludes OpenRouter from the
+                       registry and drops remote routing pins, so a remote
+                       model's degradation can't collapse the suite.
       --judge-model M  Enable the slice-3 LLM judge for Q-class fixtures
                        carrying judge_rubric. Resolves via the same provider
                        resolver as the REPL — slash-prefixed routes to
@@ -70,6 +74,7 @@ func executeCodebase(args []string) error {
 	persistBaseline := false
 	compareRef := ""
 	temperature := ""
+	localOnly := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -118,6 +123,8 @@ func executeCodebase(args []string) error {
 				temperature = args[i+1]
 				i++
 			}
+		case "--local-only":
+			localOnly = true
 		case "--baseline":
 			persistBaseline = true
 		case "--compare":
@@ -158,6 +165,16 @@ func executeCodebase(args []string) error {
 	if temperature != "" {
 		os.Setenv(llm.TemperatureEnv, temperature)
 		fmt.Printf("[determinism] CORTEX_TEMPERATURE=%s (judge + cell subprocesses)\n", temperature)
+	}
+
+	// Local-only: keep every LLM call on the local fleet. Excludes the
+	// OpenRouter probe from the registry and drops remote routing pins, so
+	// nodes like sense.estimate_scope can't be routed to a remote frontier
+	// model whose degradation would collapse the suite. os.Setenv reaches
+	// the cell subprocesses via the runner's os.Environ() merge.
+	if localOnly {
+		os.Setenv(llm.LocalOnlyEnv, "1")
+		fmt.Printf("[local-only] CORTEX_LOCAL_ONLY=1 (no remote/OpenRouter routing)\n")
 	}
 
 	fxs, err := codebase.LoadDir(dir)
@@ -214,7 +231,7 @@ func executeCodebase(args []string) error {
 	commit := codebase.CurrentGitSHA()
 
 	rows := make([]codebase.BaselineRow, 0, len(fxs))
-	total, passed, invalid := 0, 0, 0
+	total, passed, invalid, budgetZero := 0, 0, 0, 0
 	for _, fx := range fxs {
 		total++
 		workdir := codebase.ResolveFixturePath(fixtureRoot, repoRoot, fx.Project)
@@ -257,6 +274,14 @@ func executeCodebase(args []string) error {
 		default:
 			fmt.Printf("  → FAIL\n")
 		}
+		// sense.estimate_scope is supposed to emit a nonzero budget on
+		// every scoreable cell. A high budget=0 rate means the scope
+		// estimator is degraded (e.g. a remote model returning garbage) —
+		// a compromise signal the INVALID count alone misses, since these
+		// score as FAIL, not INVALID.
+		if !res.Invalid && m.BudgetTokens == 0 {
+			budgetZero++
+		}
 
 		row := codebase.BaselineRow{
 			FixtureID:    fx.ID,
@@ -295,11 +320,23 @@ func executeCodebase(args []string) error {
 	scoreable := total - invalid
 	if invalid > 0 {
 		fmt.Printf("\nsummary: %d/%d passing (%d invalid, excluded)\n", passed, scoreable, invalid)
-		if total > 0 && float64(invalid) > 0.15*float64(total) {
-			fmt.Printf("⚠ RUN COMPROMISED: %d/%d cells INVALID (killed/timed-out/empty — likely a fleet stall). Pass rate is NOT trustworthy; re-run before drawing conclusions.\n", invalid, total)
-		}
 	} else {
 		fmt.Printf("\nsummary: %d/%d passing\n", passed, total)
+	}
+	// Compromise detection — two independent signals that the run isn't a
+	// trustworthy result:
+	//   1. mass INVALID (killed/timed-out/empty) — overt harness failure.
+	//   2. mass budget=0 among scoreable cells — sense.estimate_scope
+	//      degraded (e.g. a remote model returning garbage). These score
+	//      as FAIL, so the INVALID count alone misses them; without this
+	//      check a degraded-estimator run reads as a real low score.
+	invalidHigh := total > 0 && float64(invalid) > 0.15*float64(total)
+	budgetZeroHigh := scoreable > 0 && float64(budgetZero) > 0.5*float64(scoreable)
+	if invalidHigh {
+		fmt.Printf("⚠ RUN COMPROMISED: %d/%d cells INVALID (killed/timed-out/empty — likely a fleet stall). Pass rate is NOT trustworthy; re-run before drawing conclusions.\n", invalid, total)
+	}
+	if budgetZeroHigh {
+		fmt.Printf("⚠ RUN COMPROMISED: %d/%d scoreable cells have budget_tokens=0 (sense.estimate_scope degraded — often a remote/fleet issue). Pass rate is NOT trustworthy; check routing (try --local-only) and re-run.\n", budgetZero, scoreable)
 	}
 
 	if persistBaseline {
