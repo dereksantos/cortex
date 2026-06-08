@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
@@ -533,5 +534,27 @@ func TestStripToolMarkup(t *testing.T) {
 	got := stripToolMarkup(content)
 	if got != "Let me check." {
 		t.Errorf("stripToolMarkup = %q, want %q", got, "Let me check.")
+	}
+}
+
+func TestMessageRender(t *testing.T) {
+	ts := time.Date(2026, 6, 8, 14, 23, 1, 0, time.UTC)
+	tests := []struct {
+		role string
+		icon string
+	}{
+		{"assistant", iconCortex},
+		{RoleSystem, iconCortex}, // default branch
+		{RoleTool, iconTool},
+		{RoleUser, iconUser},
+	}
+	for _, tt := range tests {
+		m := Message{Role: tt.role, Content: "hello"}
+		got := m.render(ts)
+		for _, want := range []string{tt.icon, "14:23:01", "hello"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("render(role=%s) = %q, missing %q", tt.role, got, want)
+			}
+		}
 	}
 }

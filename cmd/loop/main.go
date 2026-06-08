@@ -27,7 +27,7 @@ TODO:
 [x] Tolerate native Qwen XML tool-call format (proxy fallback)
 [x] Improve session status line
 [x] Improve animation
-[ ] Timestamp in messages
+[x] Timestamp in messages
 [ ] Study tool
 [ ] Journal tool
 [ ] Integrate cortex dream
@@ -388,12 +388,18 @@ func (tc ToolCall) Execute() (string, error) {
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
 
+// printToolAction prints an indented, iconned tool-action line under the
+// current cortex turn, e.g. "  ▸ read_file(go.mod)".
+func printToolAction(action string) {
+	fmt.Printf("  %s\n", withColor(iconTool+" "+action, green))
+}
+
 func (tc ToolCall) ReadFile() (string, error) {
 	path, err := tc.stringArg("path")
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("  %s\n", withColor(fmt.Sprintf("read_file(%s)", path), green))
+	printToolAction(fmt.Sprintf("read_file(%s)", path))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
@@ -410,7 +416,7 @@ func (tc ToolCall) WriteFile() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("  %s\n", withColor(fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)), green))
+	printToolAction(fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
@@ -442,7 +448,7 @@ func (tc ToolCall) EditFile() (string, error) {
 		return "", fmt.Errorf("old_string and new_string are identical; nothing to change")
 	}
 
-	fmt.Printf("  %s\n", withColor(fmt.Sprintf("edit_file(%s)", path), green))
+	printToolAction(fmt.Sprintf("edit_file(%s)", path))
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -492,7 +498,7 @@ func (tc ToolCall) Bash() (string, error) {
 	if !bashAllowlist[fields[0]] {
 		return "", fmt.Errorf("command %q is not in the allowlist", fields[0])
 	}
-	fmt.Printf("  %s\n", withColor(fmt.Sprintf("bash(%s)", command), green))
+	printToolAction(fmt.Sprintf("bash(%s)", command))
 
 	out, runErr := exec.Command(fields[0], fields[1:]...).CombinedOutput()
 	result := string(out)
@@ -593,20 +599,36 @@ func (tc ToolCall) String() string {
 	return fmt.Sprintf("wants %s %s %s %v", tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
 }
 
-// Print writes the message to stdout
-func (m Message) Print() {
-	var formatted string
+// Message source icons for the print gutter. Single-width; swap freely.
+const (
+	iconCortex = "◆" // assistant / cortex
+	iconTool   = "▸" // tool action
+	iconUser   = "❯" // user
+)
 
-	output := m.Content
-
+// gutter returns the icon and color identifying a message's source.
+func (m Message) gutter() (icon, color string) {
 	switch m.Role {
 	case RoleUser:
-		formatted = withColor(output, black)
-	default:
-		formatted = withColor(output, blue)
+		return iconUser, cyan
+	case RoleTool:
+		return iconTool, green
+	default: // assistant / cortex
+		return iconCortex, blue
 	}
+}
 
-	fmt.Printf("%s\n", formatted)
+// render formats the message as "<icon> HH:MM:SS  <content>", the gutter colored
+// by source. ts is injected so the formatting is testable.
+func (m Message) render(ts time.Time) string {
+	icon, color := m.gutter()
+	gutter := withColor(fmt.Sprintf("%s %s", icon, ts.Format("15:04:05")), color)
+	return fmt.Sprintf("%s  %s", gutter, m.Content)
+}
+
+// Print writes the message to stdout with a timestamped, source-colored gutter.
+func (m Message) Print() {
+	fmt.Println(m.render(time.Now()))
 }
 
 // CortexArgs specifies incoming cli arguments
