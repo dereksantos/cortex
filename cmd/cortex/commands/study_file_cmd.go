@@ -59,15 +59,6 @@ func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
 		window = probe.CtxWindowTokens
 	}
 
-	infer := func(ctx context.Context, in study.InferInput) (study.InferOutput, error) {
-		sys, user := study.BuildInferPrompt(in)
-		raw, gerr := provider.GenerateWithSystem(ctx, user, sys)
-		if gerr != nil {
-			return study.InferOutput{}, gerr
-		}
-		return study.ParseInferResponse(raw)
-	}
-
 	req := study.StudyRequest{
 		Path:    abs,
 		RelPath: opts.path,
@@ -75,7 +66,7 @@ func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
 		Window:  window,
 		Focus:   opts.focus,
 		Goal:    opts.goal,
-		Infer:   infer,
+		Infer:   study.ProviderInfer(provider),
 	}
 	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, opts.maxPasses)
 	if err != nil {

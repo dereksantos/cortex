@@ -1,9 +1,13 @@
 package study
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
+
+var errTransport = errors.New("transport boom")
 
 func TestBuildInferPrompt_LabelsRealRanges(t *testing.T) {
 	in := InferInput{
@@ -105,5 +109,48 @@ func TestParseInferResponse_FencedJSON(t *testing.T) {
 func TestParseInferResponse_Garbage(t *testing.T) {
 	if _, err := ParseInferResponse("there is no json here"); err == nil {
 		t.Error("expected an error parsing non-JSON")
+	}
+}
+
+func TestParseInferResponse_TrailingCommas(t *testing.T) {
+	raw := `{"digest":"d","citations":[{"relpath":"a.go","line_start":1,"line_end":2,"claim":"c"},],"leads":[],}`
+	out, err := ParseInferResponse(raw)
+	if err != nil {
+		t.Fatalf("trailing commas should be repaired: %v", err)
+	}
+	if out.Digest != "d" || len(out.Citations) != 1 {
+		t.Errorf("got %+v", out)
+	}
+}
+
+func TestProviderInfer_SalvagesMalformedJSON(t *testing.T) {
+	// Unquoted key — beyond trailing-comma repair. Must NOT error; the
+	// digest is salvaged and no citations are emitted.
+	prov := scriptedCuratorProvider{resp: `{"digest":"the router picks the model", citations: nope}`, avail: true}
+	out, err := ProviderInfer(prov)(context.Background(), InferInput{})
+	if err != nil {
+		t.Fatalf("malformed JSON should degrade, not error: %v", err)
+	}
+	if out.Digest != "the router picks the model" {
+		t.Errorf("Digest = %q, want salvaged digest", out.Digest)
+	}
+	if len(out.Citations) != 0 {
+		t.Errorf("unparseable response must yield no citations, got %d", len(out.Citations))
+	}
+}
+
+func TestProviderInfer_TransportErrorSurfaces(t *testing.T) {
+	prov := scriptedCuratorProvider{avail: true, err: errTransport}
+	if _, err := ProviderInfer(prov)(context.Background(), InferInput{}); err == nil {
+		t.Error("a transport error must surface (not be salvaged)")
+	}
+}
+
+func TestSalvageDigest(t *testing.T) {
+	if got := salvageDigest(`prose {"digest":"hello world","x":bad}`); got != "hello world" {
+		t.Errorf("salvageDigest extracted %q, want hello world", got)
+	}
+	if got := salvageDigest("```\njust prose\n```"); got != "just prose" {
+		t.Errorf("salvageDigest fence-strip = %q, want just prose", got)
 	}
 }

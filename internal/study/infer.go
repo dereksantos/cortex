@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // Phase-2 inference contract. The library only ever sees an InferFunc,
@@ -135,15 +138,43 @@ type inferJSON struct {
 	} `json:"leads"`
 }
 
+// ProviderInfer builds a provenance-constrained InferFunc from a
+// Provider. A transport error is a real error; a malformed-JSON response
+// (common from small models) is NOT fatal — it degrades to the salvaged
+// prose as the digest with no citations, so the deepening loop keeps
+// running and the provenance contract still forbids unverifiable
+// citations. Centralizing this keeps both adapters (CLI + tool) robust.
+func ProviderInfer(p llm.Provider) InferFunc {
+	return func(ctx context.Context, in InferInput) (InferOutput, error) {
+		sys, user := BuildInferPrompt(in)
+		raw, err := p.GenerateWithSystem(ctx, user, sys)
+		if err != nil {
+			return InferOutput{}, err
+		}
+		out, perr := ParseInferResponse(raw)
+		if perr != nil {
+			return InferOutput{Digest: salvageDigest(raw)}, nil
+		}
+		return out, nil
+	}
+}
+
 // ParseInferResponse extracts and decodes the JSON object from a model
-// response, tolerating surrounding prose or code fences.
+// response, tolerating surrounding prose, code fences, and trailing
+// commas.
 func ParseInferResponse(raw string) (InferOutput, error) {
 	obj, ok := extractJSONObject(raw)
 	if !ok {
 		return InferOutput{}, fmt.Errorf("study: no JSON object in inference response")
 	}
 	var j inferJSON
-	if err := json.Unmarshal([]byte(obj), &j); err != nil {
+	err := json.Unmarshal([]byte(obj), &j)
+	if err != nil {
+		// Small models routinely emit trailing commas; repair and retry
+		// once before giving up.
+		err = json.Unmarshal([]byte(stripTrailingCommas(obj)), &j)
+	}
+	if err != nil {
 		return InferOutput{}, fmt.Errorf("study: decode inference response: %w", err)
 	}
 	out := InferOutput{Digest: j.Digest}
@@ -168,4 +199,37 @@ func extractJSONObject(s string) (string, bool) {
 		return "", false
 	}
 	return s[start : end+1], true
+}
+
+var trailingCommaRE = regexp.MustCompile(`,(\s*[}\]])`)
+
+// stripTrailingCommas removes commas that immediately precede a closing
+// brace/bracket — the most common way small-model JSON is invalid.
+func stripTrailingCommas(s string) string {
+	return trailingCommaRE.ReplaceAllString(s, "$1")
+}
+
+var digestFieldRE = regexp.MustCompile(`"digest"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+
+// salvageDigest best-effort extracts a digest from a response whose JSON
+// couldn't be decoded: the "digest" field's value if present, else the
+// fence-stripped, length-capped prose. Never returns citations — an
+// unparseable response can't ground any.
+func salvageDigest(raw string) string {
+	if m := digestFieldRE.FindStringSubmatch(raw); len(m) == 2 {
+		s := m[1]
+		s = strings.ReplaceAll(s, `\"`, `"`)
+		s = strings.ReplaceAll(s, `\n`, "\n")
+		return strings.TrimSpace(s)
+	}
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	s = strings.TrimSuffix(s, "```")
+	s = strings.TrimSpace(s)
+	const max = 2000
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
 }

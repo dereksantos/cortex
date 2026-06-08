@@ -153,18 +153,10 @@ func (t *studyFileTool) focus(args studyFileArgs) *study.Focus {
 // infer builds the provenance-constrained InferFunc from the configured
 // provider, or nil for mechanical-only operation.
 func (t *studyFileTool) infer() study.InferFunc {
-	p := t.opts.Provider
-	if p == nil {
+	if t.opts.Provider == nil {
 		return nil
 	}
-	return func(ctx context.Context, in study.InferInput) (study.InferOutput, error) {
-		sys, user := study.BuildInferPrompt(in)
-		raw, err := p.GenerateWithSystem(ctx, user, sys)
-		if err != nil {
-			return study.InferOutput{}, err
-		}
-		return study.ParseInferResponse(raw)
-	}
+	return study.ProviderInfer(t.opts.Provider)
 }
 
 // parseDensity decodes the density arg, which may be an int or a string.
