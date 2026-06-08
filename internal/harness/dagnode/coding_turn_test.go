@@ -546,8 +546,8 @@ func TestRegisterDefaultActOpMetadata_registersAllFive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if n != 8 {
-		t.Errorf("expected 8 registrations (5 act.* + attend.compress/accumulate/compact), got %d", n)
+	if n != 7 {
+		t.Errorf("expected 7 registrations (5 act.* + attend.compress/compact), got %d", n)
 	}
 	for _, name := range []string{"act.read_file", "act.list_dir", "act.write_file", "act.run_shell", "act.cortex_search"} {
 		spec, err := reg.Get(name)
@@ -559,7 +559,7 @@ func TestRegisterDefaultActOpMetadata_registersAllFive(t *testing.T) {
 			t.Errorf("%s missing AxisContract", name)
 		}
 	}
-	for _, attendOp := range []string{"attend.compress", "attend.accumulate", "attend.compact"} {
+	for _, attendOp := range []string{"attend.compress", "attend.compact"} {
 		if _, err := reg.Get(attendOp); err != nil {
 			t.Errorf("%s should be registered alongside act.* metadata: %v", attendOp, err)
 		}
@@ -600,109 +600,6 @@ func (s *scriptedLLM) GenerateWithSystem(_ context.Context, _, _ string) (string
 }
 func (s *scriptedLLM) GenerateWithStats(_ context.Context, _ string) (string, llm.GenerationStats, error) {
 	return s.out, llm.GenerationStats{InputTokens: 20, OutputTokens: 8}, nil
-}
-
-// TestNewActDispatcher_AccumulatorFoldsToolOutput pins the
-// bounded-context wiring: when AccumulatorProvider + MaxTokens are
-// set on CodingTurnConfig, each tool output gets folded through
-// attend.accumulate and the resulting snapshot is visible via
-// dag.LatestAccumulatorSnapshot for any later node in the turn.
-func TestNewActDispatcher_AccumulatorFoldsToolOutput(t *testing.T) {
-	actReg := dag.NewRegistry()
-	if _, err := RegisterDefaultActOpMetadataWithCompressor(actReg, &scriptedLLM{out: "compressed snippet"}); err != nil {
-		t.Fatalf("register default metadata: %v", err)
-	}
-	harnessReg, _ := newTestHarnessRegistry("read_file", "tool result body", nil)
-
-	var captured []dag.TraceEntry
-	var spawned []string
-	cfg := CodingTurnConfig{
-		ActRegistry:          actReg,
-		TraceCB:              func(e dag.TraceEntry) { captured = append(captured, e) },
-		AccumulatorProvider:  &scriptedLLM{out: "fact A; fact B; tool result body"},
-		AccumulatorMaxTokens: 200,
-		AccumulatorIntent:    "code",
-	}
-	dispatch := NewActDispatcher(cfg, "coding_turn_id", "find the bug", &spawned)
-
-	// Attach turn state so the accumulator deposit lands somewhere
-	// readable. Without this WithTestTurnState the deposit silently
-	// no-ops — pinning that path too via the next test.
-	ctx := dag.WithTestTurnState(context.Background(), nil)
-
-	if _, err := dispatch(ctx, harnessReg, llm.ToolCall{
-		ID:       "call_1",
-		Function: llm.ToolCallFunction{Name: "read_file", Arguments: `{"path":"x"}`},
-	}); err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-
-	if snap := dag.LatestAccumulatorSnapshot(ctx); snap == "" {
-		t.Errorf("expected accumulator snapshot deposited; got empty")
-	}
-
-	// Trace order: act.read_file followed by attend.accumulate.
-	if len(captured) < 2 {
-		t.Fatalf("expected at least 2 trace entries (act + accumulate), got %d", len(captured))
-	}
-	act := captured[0]
-	accumulate := captured[len(captured)-1]
-	if act.QualifiedName != "act.read_file" {
-		t.Errorf("first row should be act.read_file, got %s", act.QualifiedName)
-	}
-	if accumulate.QualifiedName != "attend.accumulate" {
-		t.Errorf("last row should be attend.accumulate, got %s", accumulate.QualifiedName)
-	}
-	if accumulate.ParentID != act.NodeID {
-		t.Errorf("accumulate.ParentID should chain to act row %q, got %q", act.NodeID, accumulate.ParentID)
-	}
-	// act.SpawnedChildren must surface the accumulator deposit ID.
-	found := false
-	for _, c := range act.SpawnedChildren {
-		if c == accumulate.NodeID {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("act.SpawnedChildren should include accumulate %s, got %v", accumulate.NodeID, act.SpawnedChildren)
-	}
-}
-
-// TestNewActDispatcher_AccumulatorSkippedWhenUnconfigured pins the
-// pre-bounded-context behavior: with no AccumulatorProvider set, the
-// dispatcher runs unchanged — no extra trace rows, no deposit.
-func TestNewActDispatcher_AccumulatorSkippedWhenUnconfigured(t *testing.T) {
-	actReg := dag.NewRegistry()
-	if _, err := RegisterDefaultActOpMetadata(actReg); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	harnessReg, _ := newTestHarnessRegistry("read_file", "ok", nil)
-
-	var captured []dag.TraceEntry
-	var spawned []string
-	cfg := CodingTurnConfig{
-		ActRegistry: actReg,
-		TraceCB:     func(e dag.TraceEntry) { captured = append(captured, e) },
-		// AccumulatorProvider intentionally left nil.
-	}
-	dispatch := NewActDispatcher(cfg, "coding_turn_id", "intent", &spawned)
-	ctx := dag.WithTestTurnState(context.Background(), nil)
-
-	if _, err := dispatch(ctx, harnessReg, llm.ToolCall{
-		ID:       "call_1",
-		Function: llm.ToolCallFunction{Name: "read_file", Arguments: `{"path":"x"}`},
-	}); err != nil {
-		t.Fatalf("dispatch: %v", err)
-	}
-
-	if snap := dag.LatestAccumulatorSnapshot(ctx); snap != "" {
-		t.Errorf("expected no accumulator snapshot when unconfigured; got %q", snap)
-	}
-	for _, e := range captured {
-		if e.QualifiedName == "attend.accumulate" {
-			t.Errorf("no attend.accumulate trace should fire when unconfigured; got %+v", e)
-		}
-	}
 }
 
 func TestStripNeedMoreLine(t *testing.T) {

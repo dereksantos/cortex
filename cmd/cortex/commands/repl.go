@@ -2643,15 +2643,6 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		capturedLR  harness.LoopResult
 		capturedErr error
 	)
-	// Accumulator budget: 2x the per-tool salience cap leaves room
-	// for several folded observations before attend.compact rolls
-	// the older ones up. salienceCap is already calibrated per
-	// model-context-class (200 small / 500 medium / 1500 large) so
-	// the accumulator scales with model capability automatically.
-	accumulatorMaxTokens := salienceCap * 2
-	if accumulatorMaxTokens <= 0 {
-		accumulatorMaxTokens = 1000
-	}
 	// turnIntent is updated below after sense.classify_intent runs.
 	// The SynthDefaultModel closure in codingCfg captures this by
 	// reference, so the coding_turn handler reads the freshest intent
@@ -2674,22 +2665,6 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		SynthDefaultModel: func() string {
 			return synthModelForIntent(turnIntent, s.registry)
 		},
-		// Bounded working memory: each act.* output gets folded
-		// through attend.accumulate so the synthesis decide.coding_turn
-		// (and any decide.next that re-decides mid-plan) sees the
-		// distilled snapshot via dag.LatestAccumulatorSnapshot instead
-		// of re-fetching from raw tool transcripts. Shares the same
-		// LLM provider as the salience compressor — one small model
-		// driving both compression paths.
-		AccumulatorProvider:  compressProvider,
-		AccumulatorMaxTokens: accumulatorMaxTokens,
-		// AccumulatorIntent stays empty here: intent isn't known until
-		// after sense.classify_intent runs (below), which is after this
-		// cfg is captured by the dynamic registry. The accumulator
-		// prompt tolerates empty intent (renders as "Intent: " — the
-		// model treats the user's surrounding instructions as the
-		// effective intent). Threading per-turn intent into the
-		// dispatcher is a follow-up if the empty path drifts.
 		HarnessFactory: func() (*evalv2.CortexHarness, error) {
 			return h, nil
 		},
@@ -2943,11 +2918,11 @@ func classifyIntentForTurn(reg *dag.Registry, router dag.Router, prompt string, 
 // Returns (scope, budget, fallback):
 //   - scope    — the free-form description (or "" on failure / op not registered)
 //   - budget   — only the three axes the estimator emits (tokens, latency_ms,
-//                depth); MaxContextTokens stays unset; the caller merges this
-//                with the intent floor and the n_ctx layer
+//     depth); MaxContextTokens stays unset; the caller merges this
+//     with the intent floor and the n_ctx layer
 //   - fallback — true when estimation couldn't be performed or the
-//                handler returned its own fallback; the caller then ignores
-//                the budget entirely and keeps the intent floor as-is
+//     handler returned its own fallback; the caller then ignores
+//     the budget entirely and keeps the intent floor as-is
 //
 // Synthesizes a dag.TraceEntry for the estimator call and invokes
 // traceCB with it. traceCB may be nil.
