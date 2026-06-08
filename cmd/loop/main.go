@@ -235,7 +235,7 @@ var tools = []Tool{readFile, writeFile, bash}
 func (r *AgentRequest) Send() (*AgentResponse, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return nil, fmt.Errorf("error sending agent request %w", err)
+		return nil, fmt.Errorf("error marshaling agent request: %w", err)
 	}
 
 	method := "POST"
@@ -243,20 +243,20 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 	reader := bytes.NewReader(b)
 	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
-		return nil, fmt.Errorf("error building agent request %w", err)
+		return nil, fmt.Errorf("error building agent request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error executing agent request %w", err)
+		return nil, fmt.Errorf("error executing agent request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading agent response %w", err)
+		return nil, fmt.Errorf("error reading agent response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -266,7 +266,7 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 	var response AgentResponse
 	err = json.Unmarshal(body, &response)
 	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling agent response %w", err)
+		return nil, fmt.Errorf("error unmarshaling agent response: %w", err)
 	}
 
 	return &response, nil
@@ -500,7 +500,7 @@ func (cs CortexSession) Resolve() error {
 	for i := 0; i < maxToolIterations; i++ {
 		res, err := cs.send()
 		if err != nil {
-			return err
+			return fmt.Errorf("model response error: %w", err)
 		}
 		if res == nil || len(res.Choices) == 0 {
 			return fmt.Errorf("no choices in agent response")
@@ -550,11 +550,20 @@ func main() {
 	for {
 		fmt.Print(prompt)
 		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("scanner error: %v\n", err)
+			}
 			break
 		}
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
 			continue
+		}
+
+		// /quit and /exit leave the REPL; EOF (Ctrl-D) breaks above. All
+		// three paths fall through to the single "exiting" print below.
+		if input == "/quit" || input == "/exit" {
+			break
 		}
 
 		session.Append(Message{Role: RoleUser, Content: input})
