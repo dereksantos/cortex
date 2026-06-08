@@ -453,3 +453,85 @@ func TestScroller(t *testing.T) {
 		}
 	})
 }
+
+func TestParseXMLToolCalls(t *testing.T) {
+	t.Run("wrapped single call with a pipe", func(t *testing.T) {
+		content := "<tool_call>\n<function=bash>\n<parameter=command>\nls -la | grep cortex\n</parameter>\n</function>\n</tool_call>"
+		calls := parseXMLToolCalls(content)
+		if len(calls) != 1 {
+			t.Fatalf("got %d calls, want 1", len(calls))
+		}
+		if calls[0].Function.Name != "bash" {
+			t.Errorf("name = %q, want bash", calls[0].Function.Name)
+		}
+		got, err := calls[0].stringArg("command")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "ls -la | grep cortex" {
+			t.Errorf("command = %q", got)
+		}
+	})
+
+	t.Run("unwrapped (no tool_call tag)", func(t *testing.T) {
+		content := "<function=read_file>\n<parameter=path>\ngo.mod\n</parameter>\n</function>"
+		calls := parseXMLToolCalls(content)
+		if len(calls) != 1 || calls[0].Function.Name != "read_file" {
+			t.Fatalf("got %+v", calls)
+		}
+		if p, _ := calls[0].stringArg("path"); p != "go.mod" {
+			t.Errorf("path = %q", p)
+		}
+	})
+
+	t.Run("multiple params", func(t *testing.T) {
+		content := "<function=write_file>\n<parameter=path>\nout.txt\n</parameter>\n<parameter=content>\nhello world\n</parameter>\n</function>"
+		calls := parseXMLToolCalls(content)
+		if len(calls) != 1 {
+			t.Fatalf("got %d", len(calls))
+		}
+		path, _ := calls[0].stringArg("path")
+		body, _ := calls[0].stringArg("content")
+		if path != "out.txt" || body != "hello world" {
+			t.Errorf("path=%q content=%q", path, body)
+		}
+	})
+
+	t.Run("multiple function blocks get unique ids", func(t *testing.T) {
+		content := "<function=read_file><parameter=path>a</parameter></function>" +
+			"<function=read_file><parameter=path>b</parameter></function>"
+		calls := parseXMLToolCalls(content)
+		if len(calls) != 2 {
+			t.Fatalf("got %d, want 2", len(calls))
+		}
+		if calls[0].ID == calls[1].ID {
+			t.Errorf("synthesized IDs must be unique, both %q", calls[0].ID)
+		}
+	})
+
+	t.Run("no xml returns nil", func(t *testing.T) {
+		if calls := parseXMLToolCalls("a normal answer, nothing to call"); calls != nil {
+			t.Errorf("expected nil, got %+v", calls)
+		}
+	})
+
+	t.Run("parsed call executes through the normal path", func(t *testing.T) {
+		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
+		calls := parseXMLToolCalls(content)
+		out, err := calls[0].Execute()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "hi") {
+			t.Errorf("got %q", out)
+		}
+	})
+}
+
+func TestStripToolMarkup(t *testing.T) {
+	content := "Let me check.\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
+	got := stripToolMarkup(content)
+	if got != "Let me check." {
+		t.Errorf("stripToolMarkup = %q, want %q", got, "Let me check.")
+	}
+}

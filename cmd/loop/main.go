@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -23,8 +24,9 @@ TODO:
 [x] Tool calling v1 (read_file, write_file, bash allowlist)
 [x] Basic editing
 [x] Bash tool
+[x] Tolerate native Qwen XML tool-call format (proxy fallback)
 [x] Improve session status line
-[ ] Improve animation
+[x] Improve animation
 [ ] Timestamp in messages
 [ ] Study tool
 [ ] Journal tool
@@ -505,6 +507,66 @@ func (tc ToolCall) Bash() (string, error) {
 	return result, nil
 }
 
+// Qwen3-Coder's native tool-call format is XML-ish:
+//
+//	<tool_call>
+//	<function=NAME>
+//	<parameter=PNAME>
+//	VALUE
+//	</parameter>
+//	</function>
+//	</tool_call>
+//
+// The proxy usually normalizes this into OpenAI tool_calls, but when it doesn't
+// the raw XML leaks into message content with tool_calls empty. These regexes
+// let us recover it. The <tool_call> wrapper is optional — we key off <function>.
+var (
+	fnRe    = regexp.MustCompile(`(?s)<function=([^>\s]+)>(.*?)</function>`)
+	paramRe = regexp.MustCompile(`(?s)<parameter=([^>\s]+)>(.*?)</parameter>`)
+)
+
+// parseXMLToolCalls extracts Qwen-native tool calls from raw content. Returns
+// nil if none are present. Each call is normalized into the same ToolCall shape
+// the OpenAI path produces, so it flows through Execute unchanged.
+func parseXMLToolCalls(content string) []ToolCall {
+	fnMatches := fnRe.FindAllStringSubmatch(content, -1)
+	if len(fnMatches) == 0 {
+		return nil
+	}
+	var calls []ToolCall
+	for i, fm := range fnMatches {
+		name, body := fm[1], fm[2]
+		// All current tools take string params, so a string map marshals to the
+		// same JSON-string Arguments shape the wire uses. Note: TrimSpace strips
+		// the framing newlines Qwen adds — fine for paths/commands, though it
+		// would also trim a deliberately trailing newline in file content.
+		args := map[string]string{}
+		for _, pm := range paramRe.FindAllStringSubmatch(body, -1) {
+			args[pm[1]] = strings.TrimSpace(pm[2])
+		}
+		raw, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		calls = append(calls, ToolCall{
+			ID:       fmt.Sprintf("xml-%d", i+1),
+			Type:     "function",
+			Function: FunctionCall{Name: name, Arguments: string(raw)},
+		})
+	}
+	return calls
+}
+
+// stripToolMarkup removes Qwen tool-call XML from content so we don't print the
+// raw markup after converting it to tool calls. Any genuine prose preamble
+// around the markup is preserved.
+func stripToolMarkup(s string) string {
+	s = fnRe.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "<tool_call>", "")
+	s = strings.ReplaceAll(s, "</tool_call>", "")
+	return strings.TrimSpace(s)
+}
+
 type FunctionCall struct {
 	Name string `json:"name"`
 	// Arguments is a JSON-encoded *string* on the wire (e.g. `{"path":"go.mod"}`),
@@ -774,6 +836,16 @@ func (cs *CortexSession) Resolve() error {
 		// prompt_tokens reflects the whole re-sent history = current context fill.
 		cs.LastPromptTokens = res.Usage.PromptTokens
 		msg := res.Choices[0].Message
+
+		// Fallback: if the proxy didn't normalize Qwen's native XML tool-call
+		// format, recover it from the content so the call isn't silently lost
+		// (empty tool_calls would otherwise be treated as a final answer).
+		if len(msg.ToolCalls) == 0 {
+			if calls := parseXMLToolCalls(msg.Content); len(calls) > 0 {
+				msg.ToolCalls = calls
+				msg.Content = stripToolMarkup(msg.Content)
+			}
+		}
 
 		// (1) Append the assistant message BEFORE any tool results. The API
 		// requires the sequence assistant(tool_calls) -> tool(result).
