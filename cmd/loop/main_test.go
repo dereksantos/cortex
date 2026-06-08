@@ -392,39 +392,64 @@ func TestAvailableModels(t *testing.T) {
 	}
 }
 
-func TestSpinnerFrame(t *testing.T) {
-	n := len(track)
+func TestScroller(t *testing.T) {
+	valid := map[rune]bool{}
+	for _, r := range heights {
+		valid[r] = true
+	}
+	for _, r := range flecks {
+		valid[r] = true
+	}
 
-	t.Run("always returns spinnerWidth runes", func(t *testing.T) {
-		for _, i := range []int{0, 1, n - 1, n, n + 3, 1000} {
-			if got := []rune(frame(i)); len(got) != spinnerWidth {
-				t.Errorf("frame(%d) = %q has %d runes, want %d", i, string(got), len(got), spinnerWidth)
+	t.Run("each frame is spinnerWidth runes from the palette", func(t *testing.T) {
+		s := newScroller(1)
+		for n := 0; n < 500; n++ {
+			f := []rune(s.frame())
+			if len(f) != spinnerWidth {
+				t.Fatalf("frame %d = %q has %d runes, want %d", n, string(f), len(f), spinnerWidth)
+			}
+			for _, r := range f {
+				if !valid[r] {
+					t.Errorf("frame %d has off-palette glyph %q", n, string(r))
+				}
 			}
 		}
 	})
 
-	t.Run("wraps seamlessly at the seam", func(t *testing.T) {
-		got := []rune(frame(n - 1))
-		for k := 0; k < spinnerWidth; k++ {
-			want := track[(n-1+k)%n]
-			if got[k] != want {
-				t.Fatalf("seam mismatch at %d: got %q, want %q", k, string(got[k]), string(want))
+	t.Run("scrolls left: each frame shifts in exactly one new column", func(t *testing.T) {
+		s := newScroller(7)
+		prev := []rune(s.frame())
+		for n := 0; n < 100; n++ {
+			cur := []rune(s.frame())
+			for k := 0; k < spinnerWidth-1; k++ {
+				if cur[k] != prev[k+1] {
+					t.Fatalf("frame %d not a left-shift: prev=%q cur=%q", n, string(prev), string(cur))
+				}
+			}
+			prev = cur
+		}
+	})
+
+	t.Run("same seed is deterministic", func(t *testing.T) {
+		a, b := newScroller(42), newScroller(42)
+		for n := 0; n < 50; n++ {
+			if a.frame() != b.frame() {
+				t.Fatalf("seeded scrollers diverged at frame %d", n)
 			}
 		}
 	})
 
-	t.Run("is periodic over the track length", func(t *testing.T) {
-		if frame(0) != frame(n) {
-			t.Errorf("frame(0)=%q != frame(n)=%q", frame(0), frame(n))
+	t.Run("different seeds diverge", func(t *testing.T) {
+		a, b := newScroller(1), newScroller(2)
+		same := true
+		for n := 0; n < 50; n++ {
+			if a.frame() != b.frame() {
+				same = false
+				break
+			}
 		}
-	})
-
-	t.Run("track is long enough", func(t *testing.T) {
-		if n < 50 {
-			t.Errorf("track has %d runes, want >= 50", n)
-		}
-		if n < spinnerWidth {
-			t.Fatalf("track (%d) shorter than window (%d)", n, spinnerWidth)
+		if same {
+			t.Error("different seeds produced identical sequences")
 		}
 	})
 }

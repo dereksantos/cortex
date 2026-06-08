@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -117,24 +118,58 @@ func withColor(v string, c string) string {
 	return fmt.Sprintf("%s%s%s", c, v, reset)
 }
 
-// track is the side-scroller "world" the spinner scrolls through: a breathing
-// swell with foam (▒▓), drifting motes (⠂⠄), mist (░) and the occasional
-// surfacing bubble (∘). The spinner shows a spinnerWidth-rune window onto it,
-// advancing one rune per frame so the scene scrolls. >50 runes => a long loop
-// before it repeats. All glyphs are single-width.
-var track = []rune("▄▃▄▄▃▄▃▄▅▄▃▂▃▅▆▒▃▂▁▃▅▇█▓▅▃▁▂∘▃▅▆▅▃▂▃▄▅▄▃▄▃▄⠂▄∘▄░▄⠄▄▄▄")
-
 const spinnerWidth = 3
 
-// frame returns the spinnerWidth-rune window onto track starting at offset i,
-// wrapping past the end so the scroll loops seamlessly.
-func frame(i int) string {
-	var b strings.Builder
-	n := len(track)
-	for j := 0; j < spinnerWidth; j++ {
-		b.WriteRune(track[(i+j)%n])
+// fleckEvery: roughly 1 in N columns is a fleck instead of terrain.
+const fleckEvery = 9
+
+// The spinner palette. heights is the terrain ramp the random walk moves along;
+// flecks are the foam (▒▓), mist (░), drifting motes (⠂⠄) and surfacing bubble
+// (∘) sprinkled in. All single-width.
+var (
+	heights = []rune("▁▂▃▄▅▆▇█")
+	flecks  = []rune("▒▓░⠂⠄∘")
+)
+
+// scroller generates an endless side-scroller as a random walk: each new column
+// drifts the terrain height up/down by a step, with the odd fleck mixed in. It
+// keeps the breathing-swell look of the old fixed track but never repeats. The
+// rng is seeded so a given seed is fully reproducible (see tests).
+type scroller struct {
+	rng    *rand.Rand
+	height int
+	window []rune
+}
+
+func newScroller(seed int64) *scroller {
+	s := &scroller{rng: rand.New(rand.NewSource(seed)), height: len(heights) / 2}
+	s.window = make([]rune, spinnerWidth)
+	for i := range s.window {
+		s.window[i] = s.next()
 	}
-	return b.String()
+	return s
+}
+
+// next advances the walk one column and returns the incoming glyph.
+func (s *scroller) next() rune {
+	if s.rng.Intn(fleckEvery) == 0 {
+		return flecks[s.rng.Intn(len(flecks))]
+	}
+	s.height += s.rng.Intn(3) - 1 // -1, 0, or +1
+	if s.height < 0 {
+		s.height = 0
+	}
+	if s.height >= len(heights) {
+		s.height = len(heights) - 1
+	}
+	return heights[s.height]
+}
+
+// frame scrolls one step: shift the window left and append a fresh column.
+func (s *scroller) frame() string {
+	copy(s.window, s.window[1:])
+	s.window[len(s.window)-1] = s.next()
+	return string(s.window)
 }
 
 // Spinner renders an in-place animation on stdout while we wait on the model.
@@ -152,14 +187,15 @@ func NewSpinner() *Spinner { return &Spinner{} }
 func (s *Spinner) Start() {
 	s.stopChan = make(chan struct{})
 	s.doneChan = make(chan struct{})
+	sc := newScroller(time.Now().UnixNano())
 	go func() {
 		defer close(s.doneChan)
-		for i := 0; ; i++ {
+		for {
 			select {
 			case <-s.stopChan:
 				return
 			default:
-				fmt.Printf("\r%s", withColor(frame(i), cyan))
+				fmt.Printf("\r%s", withColor(sc.frame(), cyan))
 				time.Sleep(90 * time.Millisecond)
 			}
 		}
