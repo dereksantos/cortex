@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -16,9 +17,9 @@ import (
 TODO:
 [x] Scanner animation v1
 [x] System prompt
-[ ] Tool calling v1 (read_file, write_file, bash allowlist)
+[x] Tool calling v1 (read_file, write_file, bash allowlist)
 [ ] Basic editing
-[ ] Bash tool
+[x] Bash tool
 [ ] Study tool
 [ ] Journal tool
 [ ] Spawn
@@ -34,12 +35,23 @@ const SystemPrompt = `Your are cortex, a coding agent focused on a continous qua
 
 const RoleUser = "user"
 const RoleSystem = "system"
+const RoleTool = "tool"
 const ModelCoder = "coder"
 
 const FunctionReadFile = "read_file"
+const FunctionWriteFile = "write_file"
+const FunctionBash = "bash"
 
 const defaultRole = RoleUser
 const defaultModel = ModelCoder
+
+// maxToolIterations bounds the agentic inner loop so a confused model can't
+// spin forever burning tokens. The smallest form of the "bounded" principle.
+const maxToolIterations = 10
+
+// maxToolOutput caps how much tool output we feed back into context, so a
+// `cat` of a huge file (or `find` over a big tree) can't blow the window.
+const maxToolOutput = 10000
 
 const red = "\033[31m"
 const cyan = "\033[36m"
@@ -169,6 +181,11 @@ func (pa *PromptAnimator) Stop() {
 	close(pa.stopChan)
 }
 
+func (pa *PromptAnimator) ClearAndStop() {
+	pa.Clear()
+	pa.Stop()
+}
+
 // AgentRequest captures parameters to be sent to the agent via API call.
 type AgentRequest struct {
 	Model string `json:"model"`
@@ -189,18 +206,45 @@ type ToolFunction struct {
 	Parameters  map[string]any `json:"parameters"`
 }
 
-var readFile = Tool{
-	Type: "function",
-	Function: ToolFunction{
-		Name:        "read_file",
-		Description: "Read contents of a file",
-		Parameters: map[string]any{
-			"path": "string",
-		},
-	},
+// objectSchema builds a JSON Schema "object" with the given properties and
+// required fields. Keeps the tool definitions readable instead of nesting
+// map[string]any by hand.
+func objectSchema(props map[string]any, required ...string) map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
 }
 
-var tools = []Tool{readFile}
+func stringProp(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc}
+}
+
+func newTool(name, desc string, params map[string]any) Tool {
+	return Tool{Type: "function", Function: ToolFunction{Name: name, Description: desc, Parameters: params}}
+}
+
+var readFile = newTool(FunctionReadFile,
+	"Read the contents of a file at the given path.",
+	objectSchema(map[string]any{
+		"path": stringProp("Path to the file to read, relative to the working directory."),
+	}, "path"))
+
+var writeFile = newTool(FunctionWriteFile,
+	"Write content to a file at the given path, creating or overwriting it.",
+	objectSchema(map[string]any{
+		"path":    stringProp("Path to the file to write."),
+		"content": stringProp("The full contents to write to the file."),
+	}, "path", "content"))
+
+var bash = newTool(FunctionBash,
+	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
+	objectSchema(map[string]any{
+		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
+	}, "command"))
+
+var tools = []Tool{readFile, writeFile, bash}
 
 // Sends the request to the models API endpoint
 func (r *AgentRequest) Send() (*AgentResponse, error) {
@@ -225,13 +269,13 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("error response from agent %w", err)
-	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading agent response %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var response AgentResponse
@@ -274,7 +318,10 @@ type Message struct {
 	// What they said
 	Content string `json:"content"`
 
+	// ToolCalls is set on an assistant message when the model wants tools run.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID links a role:"tool" result back to the call it answers.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type ToolCall struct {
@@ -288,26 +335,100 @@ func (tc ToolCall) Execute() (string, error) {
 	switch name {
 	case FunctionReadFile:
 		return tc.ReadFile()
+	case FunctionWriteFile:
+		return tc.WriteFile()
+	case FunctionBash:
+		return tc.Bash()
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
 
 func (tc ToolCall) ReadFile() (string, error) {
-	path, ok := tc.Function.Arguments["path"].(string)
-	if ok {
-		fmt.Printf("ReadFile(%s)\n", path)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("error reading file %s tool_call %s", path, tc.String())
-		}
-		return string(data), nil
+	path, err := tc.stringArg("path")
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf(`unable to extract "path" arg from tool call %s`, tc.String())
+	fmt.Printf("  %s\n", withColor(fmt.Sprintf("read_file(%s)", path), green))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+func (tc ToolCall) WriteFile() (string, error) {
+	path, err := tc.stringArg("path")
+	if err != nil {
+		return "", err
+	}
+	content, err := tc.stringArg("content")
+	if err != nil {
+		return "", err
+	}
+	fmt.Printf("  %s\n", withColor(fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)), green))
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+}
+
+// bashAllowlist gates which binaries the bash tool may run. This is a guardrail
+// against the model doing something catastrophic by accident — NOT a security
+// sandbox. We exec the binary directly (no shell), so `;`, `&&`, `|`, `>` are
+// inert: a command is always a single allowlisted binary plus literal args.
+var bashAllowlist = map[string]bool{
+	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
+	"grep": true, "find": true, "echo": true, "pwd": true, "tree": true,
+	"go": true, "git": true, "gofmt": true,
+}
+
+func (tc ToolCall) Bash() (string, error) {
+	command, err := tc.stringArg("command")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+	if !bashAllowlist[fields[0]] {
+		return "", fmt.Errorf("command %q is not in the allowlist", fields[0])
+	}
+	fmt.Printf("  %s\n", withColor(fmt.Sprintf("bash(%s)", command), green))
+
+	out, runErr := exec.Command(fields[0], fields[1:]...).CombinedOutput()
+	result := string(out)
+	if len(result) > maxToolOutput {
+		result = result[:maxToolOutput] + "\n...[output truncated]"
+	}
+	// A non-zero exit is an observation, not a harness failure: hand the output
+	// and exit error back to the model so it can react.
+	if runErr != nil {
+		return result + "\n[exit error: " + runErr.Error() + "]", nil
+	}
+	return result, nil
 }
 
 type FunctionCall struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	Name string `json:"name"`
+	// Arguments is a JSON-encoded *string* on the wire (e.g. `{"path":"go.mod"}`),
+	// NOT a JSON object. Parse it with stringArg.
+	Arguments string `json:"arguments"`
+}
+
+// stringArg parses Arguments (a JSON string) and pulls out one string field.
+func (tc ToolCall) stringArg(name string) (string, error) {
+	var m map[string]any
+	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
+		if err := json.Unmarshal([]byte(s), &m); err != nil {
+			return "", fmt.Errorf("parse arguments %q: %w", tc.Function.Arguments, err)
+		}
+	}
+	v, ok := m[name].(string)
+	if !ok {
+		return "", fmt.Errorf("missing or non-string arg %q", name)
+	}
+	return v, nil
 }
 
 func (tc ToolCall) String() string {
@@ -370,6 +491,59 @@ func (cs CortexSession) Append(message Message) {
 	cs.Request.Messages = append(cs.Request.Messages, message)
 }
 
+// Resolve runs the agentic inner loop for one user turn: it appends the
+// assistant message, runs any tools it asked for, feeds the results back, and
+// re-sends — repeating until the model answers with no more tool calls (or we
+// hit the iteration cap). `res` is the model's first response to the new user
+// message; Resolve owns everything from there to the final answer.
+func (cs CortexSession) Resolve(res *AgentResponse) error {
+	for i := 0; i < maxToolIterations; i++ {
+		if len(res.Choices) == 0 {
+			return fmt.Errorf("no choices in agent response")
+		}
+		msg := res.Choices[0].Message
+
+		// (1) Append the assistant message BEFORE any tool results. The API
+		// requires the sequence assistant(tool_calls) -> tool(result).
+		cs.Append(msg)
+
+		// Print any prose the model emitted (a final answer, or a preamble
+		// alongside tool calls).
+		if strings.TrimSpace(msg.Content) != "" {
+			msg.Print()
+		}
+
+		// (2) No tool calls => the model is done with this turn.
+		if len(msg.ToolCalls) == 0 {
+			return nil
+		}
+
+		// (3) Run every requested tool and append one result per call. Each
+		// id MUST get a matching tool message or the next Send 400s.
+		for _, tc := range msg.ToolCalls {
+			content, err := tc.Execute()
+			if err != nil {
+				// Tool errors are observations, not crashes: feed them back so
+				// the model can self-correct.
+				content = "Error: " + err.Error()
+			}
+			cs.Append(Message{
+				Role:       RoleTool,
+				ToolCallID: tc.ID,
+				Content:    content,
+			})
+		}
+
+		// (4) Re-send with the grown history; loop on the new response.
+		var err error
+		res, err = cs.Request.Send()
+		if err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
+}
+
 func main() {
 	session := NewCortexSession()
 
@@ -391,25 +565,20 @@ func main() {
 
 		res, err := session.Request.Send()
 		if err != nil {
-			fmt.Errorf("agent responded with error %w", err)
+			fmt.Printf("agent responded with error: %v\n", err)
+			animator.ClearAndStop()
+			continue
 		}
 
 		if res == nil {
-			fmt.Errorf("nil response from agent")
+			fmt.Println("nil response from agent")
+			animator.ClearAndStop()
 			continue
 		}
+
 		animator.Clear()
-
-		// queue up tool calls
-		// print messages
-		// execute tool calls
-		// loop
-		for i := range res.Choices {
-			choice := res.Choices[i]
-			message := choice.Message
-			message.Print()
-			session.Append(message)
-
+		if err := session.Resolve(res); err != nil {
+			fmt.Printf("turn error: %v\n", err)
 		}
 		animator.Stop()
 	}
