@@ -23,11 +23,13 @@ TODO:
 [x] Basic editing
 [x] Bash tool
 [x] Improve session status line
+[ ] Improve animation
 [ ] Timestamp in messages
 [ ] Study tool
 [ ] Journal tool
-[ ] Spawn
-[ ] Integrate Emergent DAG
+[ ] Integrate cortex dream
+[ ] Integrate cortex think
+[ ] Integreate cortex dag
 [ ] Add hooks and review settings
 [ ] Verify cortex v1 loop
 [ ] cortex model for cataloging and suggesting model setups based on system resources
@@ -115,74 +117,24 @@ func withColor(v string, c string) string {
 	return fmt.Sprintf("%s%s%s", c, v, reset)
 }
 
-// Define the cycling characters
-var chars = []string{
-	"█",
-	"▓",
-	"▒",
-	"░",
-	"░",
-	"▒",
-	"▓",
-	"█",
-	"─",
-	"━",
-	"│",
-	"┃",
-	"┄",
-	"┅",
-	"┆",
-	"┇",
-	"┈",
-	"┉",
-	"┊",
-	"┋",
-	"┌",
-	"┍",
-	"┎",
-	"┏",
-	"└",
-	"┕",
-	"┖",
-	"┗",
-	"┘",
-	"┙",
-	"┚",
-	"┛",
-	"┞",
-	"┟",
-	"┠",
-	"┡",
-	"┢",
-	"┣",
-	"┤",
-	"┥",
-	"┦",
-	"┧",
-	"┨",
-	"┩",
-	"┪",
-	"┫",
-	"┬",
-	"┭",
-	"┮",
-	"┯",
-	"┰",
-	"┱",
-	"┲",
-	"┳",
-	"┴",
-	"┵",
-	"┶",
-	"┷",
-	"┸",
-	"┹",
-	"┺",
-	"┻",
-	"┼",
-	"┽",
-	"┾",
-	"┿",
+// track is the side-scroller "world" the spinner scrolls through: a breathing
+// swell with foam (▒▓), drifting motes (⠂⠄), mist (░) and the occasional
+// surfacing bubble (∘). The spinner shows a spinnerWidth-rune window onto it,
+// advancing one rune per frame so the scene scrolls. >50 runes => a long loop
+// before it repeats. All glyphs are single-width.
+var track = []rune("▄▃▄▄▃▄▃▄▅▄▃▂▃▅▆▒▃▂▁▃▅▇█▓▅▃▁▂∘▃▅▆▅▃▂▃▄▅▄▃▄▃▄⠂▄∘▄░▄⠄▄▄▄")
+
+const spinnerWidth = 3
+
+// frame returns the spinnerWidth-rune window onto track starting at offset i,
+// wrapping past the end so the scroll loops seamlessly.
+func frame(i int) string {
+	var b strings.Builder
+	n := len(track)
+	for j := 0; j < spinnerWidth; j++ {
+		b.WriteRune(track[(i+j)%n])
+	}
+	return b.String()
 }
 
 // Spinner renders an in-place animation on stdout while we wait on the model.
@@ -207,8 +159,8 @@ func (s *Spinner) Start() {
 			case <-s.stopChan:
 				return
 			default:
-				fmt.Printf("\r%s", withColor(chars[i%len(chars)], cyan))
-				time.Sleep(80 * time.Millisecond)
+				fmt.Printf("\r%s", withColor(frame(i), cyan))
+				time.Sleep(90 * time.Millisecond)
 			}
 		}
 	}()

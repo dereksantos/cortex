@@ -391,3 +391,40 @@ func TestAvailableModels(t *testing.T) {
 		t.Errorf("AvailableModels = %q, want coder,reasoner,tiny", got)
 	}
 }
+
+func TestSpinnerFrame(t *testing.T) {
+	n := len(track)
+
+	t.Run("always returns spinnerWidth runes", func(t *testing.T) {
+		for _, i := range []int{0, 1, n - 1, n, n + 3, 1000} {
+			if got := []rune(frame(i)); len(got) != spinnerWidth {
+				t.Errorf("frame(%d) = %q has %d runes, want %d", i, string(got), len(got), spinnerWidth)
+			}
+		}
+	})
+
+	t.Run("wraps seamlessly at the seam", func(t *testing.T) {
+		got := []rune(frame(n - 1))
+		for k := 0; k < spinnerWidth; k++ {
+			want := track[(n-1+k)%n]
+			if got[k] != want {
+				t.Fatalf("seam mismatch at %d: got %q, want %q", k, string(got[k]), string(want))
+			}
+		}
+	})
+
+	t.Run("is periodic over the track length", func(t *testing.T) {
+		if frame(0) != frame(n) {
+			t.Errorf("frame(0)=%q != frame(n)=%q", frame(0), frame(n))
+		}
+	})
+
+	t.Run("track is long enough", func(t *testing.T) {
+		if n < 50 {
+			t.Errorf("track has %d runes, want >= 50", n)
+		}
+		if n < spinnerWidth {
+			t.Fatalf("track (%d) shorter than window (%d)", n, spinnerWidth)
+		}
+	})
+}
