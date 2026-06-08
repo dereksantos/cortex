@@ -114,6 +114,72 @@ func TestWriteFileTool(t *testing.T) {
 	}
 }
 
+func TestEditFileTool(t *testing.T) {
+	edit := func(path, oldS, newS string) (string, error) {
+		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
+		return tc(FunctionEditFile, string(args)).Execute()
+	}
+
+	t.Run("unique match is replaced", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "f.go")
+		os.WriteFile(path, []byte("package main\n\nvar x = 1\n"), 0644)
+
+		if _, err := edit(path, "var x = 1", "var x = 2"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, _ := os.ReadFile(path)
+		if want := "package main\n\nvar x = 2\n"; string(got) != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("not found errors and leaves file untouched", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "f.txt")
+		os.WriteFile(path, []byte("hello"), 0644)
+
+		if _, err := edit(path, "goodbye", "hi"); err == nil {
+			t.Fatal("expected not-found error")
+		}
+		if got, _ := os.ReadFile(path); string(got) != "hello" {
+			t.Errorf("file should be untouched, got %q", got)
+		}
+	})
+
+	t.Run("ambiguous match is refused", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "f.txt")
+		os.WriteFile(path, []byte("a a a"), 0644)
+
+		_, err := edit(path, "a", "b")
+		if err == nil {
+			t.Fatal("expected ambiguity error")
+		}
+		if !strings.Contains(err.Error(), "3 times") {
+			t.Errorf("error should report the match count, got %q", err)
+		}
+	})
+
+	t.Run("empty old_string is rejected", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "f.txt")
+		os.WriteFile(path, []byte("x"), 0644)
+		if _, err := edit(path, "", "y"); err == nil {
+			t.Fatal("expected error for empty old_string")
+		}
+	})
+
+	t.Run("preserves file mode", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "script.sh")
+		os.WriteFile(path, []byte("echo old\n"), 0755)
+
+		if _, err := edit(path, "old", "new"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		info, _ := os.Stat(path)
+		if info.Mode().Perm() != 0755 {
+			t.Errorf("mode = %v, want 0755", info.Mode().Perm())
+		}
+	})
+}
+
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})

@@ -18,7 +18,7 @@ TODO:
 [x] Scanner animation v1
 [x] System prompt
 [x] Tool calling v1 (read_file, write_file, bash allowlist)
-[ ] Basic editing
+[x] Basic editing
 [x] Bash tool
 [ ] Study tool
 [ ] Journal tool
@@ -40,6 +40,7 @@ const ModelCoder = "coder"
 
 const FunctionReadFile = "read_file"
 const FunctionWriteFile = "write_file"
+const FunctionEditFile = "edit_file"
 const FunctionBash = "bash"
 
 const defaultRole = RoleUser
@@ -223,13 +224,23 @@ var writeFile = newTool(FunctionWriteFile,
 		"content": stringProp("The full contents to write to the file."),
 	}, "path", "content"))
 
+var editFile = newTool(FunctionEditFile,
+	"Replace an exact substring in a file. old_string must appear EXACTLY ONCE; "+
+		"include enough surrounding context to make it unique. Prefer this over "+
+		"write_file for small changes to an existing file.",
+	objectSchema(map[string]any{
+		"path":       stringProp("Path to the file to edit."),
+		"old_string": stringProp("The exact text to find. Must match exactly once, including whitespace."),
+		"new_string": stringProp("The text to replace it with. May be empty to delete old_string."),
+	}, "path", "old_string", "new_string"))
+
 var bash = newTool(FunctionBash,
 	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
 
-var tools = []Tool{readFile, writeFile, bash}
+var tools = []Tool{readFile, writeFile, editFile, bash}
 
 // Sends the request to the models API endpoint
 func (r *AgentRequest) Send() (*AgentResponse, error) {
@@ -322,6 +333,8 @@ func (tc ToolCall) Execute() (string, error) {
 		return tc.ReadFile()
 	case FunctionWriteFile:
 		return tc.WriteFile()
+	case FunctionEditFile:
+		return tc.EditFile()
 	case FunctionBash:
 		return tc.Bash()
 	}
@@ -355,6 +368,59 @@ func (tc ToolCall) WriteFile() (string, error) {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+}
+
+// EditFile replaces an exact, unique substring in a file. Requiring old_string
+// to match exactly once is the safety property: if it's missing the edit is
+// wrong, and if it's ambiguous we refuse rather than guess which occurrence the
+// model meant. Both cases return an error that goes back as an observation, so
+// the model can add context and retry.
+func (tc ToolCall) EditFile() (string, error) {
+	path, err := tc.stringArg("path")
+	if err != nil {
+		return "", err
+	}
+	oldStr, err := tc.stringArg("old_string")
+	if err != nil {
+		return "", err
+	}
+	newStr, err := tc.stringArg("new_string")
+	if err != nil {
+		return "", err
+	}
+	if oldStr == "" {
+		return "", fmt.Errorf("old_string must not be empty")
+	}
+	if oldStr == newStr {
+		return "", fmt.Errorf("old_string and new_string are identical; nothing to change")
+	}
+
+	fmt.Printf("  %s\n", withColor(fmt.Sprintf("edit_file(%s)", path), green))
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", path, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	content := string(data)
+
+	switch n := strings.Count(content, oldStr); n {
+	case 0:
+		return "", fmt.Errorf("old_string not found in %s", path)
+	case 1:
+		// exactly one match — the only safe case
+	default:
+		return "", fmt.Errorf("old_string found %d times in %s; add surrounding context so it matches exactly once", n, path)
+	}
+
+	updated := strings.Replace(content, oldStr, newStr, 1)
+	if err := os.WriteFile(path, []byte(updated), info.Mode()); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return fmt.Sprintf("edited %s (replaced %d bytes with %d)", path, len(oldStr), len(newStr)), nil
 }
 
 // bashAllowlist gates which binaries the bash tool may run. This is a guardrail
