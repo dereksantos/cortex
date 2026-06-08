@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -57,9 +58,37 @@ const maxToolIterations = 10
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const maxToolOutput = 10000
 
-// Version is shown in the status line. Bump by hand for now; later it can come
-// from `git describe` via -ldflags.
-const Version = "0.1.0"
+// Version is the semantic base shown in the status line. It's a var (not const)
+// so a release build can override it: go build -ldflags "-X main.Version=1.2.3".
+var Version = "0.1.0"
+
+// version returns the display version: the semantic base plus the short git
+// revision (and a -dirty marker) when the binary was built from a VCS checkout.
+// `go build` stamps this automatically via debug.ReadBuildInfo — no flags needed.
+func version() string {
+	v := Version
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return v
+	}
+	var rev string
+	var dirty bool
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if len(rev) >= 7 {
+		v += "+" + rev[:7]
+		if dirty {
+			v += "-dirty"
+		}
+	}
+	return v
+}
 
 // defaultMaxContext is the fallback context window (tokens) used only when the
 // config has no max_context_override for the active model. The real value is
@@ -558,6 +587,37 @@ type CortexSession struct {
 	// MaxContext is the active model's context window, resolved from config.
 	// Zero means "unknown" → windowSize falls back to defaultMaxContext.
 	MaxContext int
+	// Config is the loaded .cortex/config.json (may be nil), kept so /model can
+	// re-resolve the endpoint when switching models mid-session.
+	Config *Config
+}
+
+// SetModel switches the active model and re-resolves its endpoint (base URL +
+// context window) from config. It errors if the model isn't in any configured
+// endpoint, since without that we don't know where to send or how big the
+// window is. Conversation history is preserved across the switch.
+func (cs *CortexSession) SetModel(model string) error {
+	ep := cs.Config.EndpointFor(model)
+	if ep == nil {
+		return fmt.Errorf("unknown model %q (not in any configured endpoint)", model)
+	}
+	cs.Request.Model = model
+	if ep.BaseURL != "" {
+		cs.Request.BaseURL = ep.BaseURL
+	}
+	cs.MaxContext = ep.MaxContextOverride
+	return nil
+}
+
+// AvailableModels lists every model across all configured endpoints.
+func (cs *CortexSession) AvailableModels() []string {
+	var out []string
+	if cs.Config != nil {
+		for _, ep := range cs.Config.Endpoints {
+			out = append(out, ep.Models...)
+		}
+	}
+	return out
 }
 
 // windowSize is the context window to gauge against: the config-resolved value,
@@ -641,11 +701,12 @@ func LoadConfig() *Config {
 func NewCortexSession() *CortexSession {
 	args := CortexArgs(os.Args)
 	req := args.Request()
-	session := &CortexSession{Args: &args, Request: req}
+	cfg := LoadConfig()
+	session := &CortexSession{Args: &args, Request: req, Config: cfg}
 
 	// Resolve the active model's endpoint from config: its base URL and context
 	// window. Missing config or model => keep the built-in defaults.
-	if ep := LoadConfig().EndpointFor(req.Model); ep != nil {
+	if ep := cfg.EndpointFor(req.Model); ep != nil {
 		if ep.BaseURL != "" {
 			req.BaseURL = ep.BaseURL
 		}
@@ -693,7 +754,7 @@ func ctxColor(used, max int) string {
 // fill. Status is dim; the glyph is the bright input affordance.
 func (cs CortexSession) Prompt() string {
 	win := cs.windowSize()
-	status := withColor(fmt.Sprintf("cortex %s · %s · ", Version, cs.Request.Model), gray)
+	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
 	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
 	return fmt.Sprintf("%s%s  %s ", status, gauge, withColor(promptGlyph, cyan))
 }
@@ -782,6 +843,21 @@ func main() {
 		// three paths fall through to the single "exiting" print below.
 		if input == "/quit" || input == "/exit" {
 			break
+		}
+
+		// /model [name] shows or switches the active model. With no name it
+		// lists what's available; switching re-resolves the endpoint from config
+		// and keeps the conversation history.
+		if input == "/model" || strings.HasPrefix(input, "/model ") {
+			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
+			if name == "" {
+				fmt.Printf("current: %s\navailable: %s\n", session.Request.Model, strings.Join(session.AvailableModels(), ", "))
+			} else if err := session.SetModel(name); err != nil {
+				fmt.Printf("%v\n", err)
+			} else {
+				fmt.Printf("switched to %s\n", name)
+			}
+			continue
 		}
 
 		session.Append(Message{Role: RoleUser, Content: input})

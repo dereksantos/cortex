@@ -340,3 +340,54 @@ func TestSessionPrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestSetModel(t *testing.T) {
+	newSession := func() *CortexSession {
+		return &CortexSession{
+			Request: &AgentRequest{Model: "coder", BaseURL: "http://chatterbox:4000"},
+			Config: &Config{Endpoints: []Endpoint{
+				{Name: "chatterbox", BaseURL: "http://chatterbox:4000", MaxContextOverride: 65536,
+					Models: []string{"coder", "reasoner"}},
+				{Name: "other", BaseURL: "http://other:9000", MaxContextOverride: 8192,
+					Models: []string{"tiny"}},
+			}},
+		}
+	}
+
+	t.Run("switches model and re-resolves endpoint", func(t *testing.T) {
+		s := newSession()
+		if err := s.SetModel("tiny"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if s.Request.Model != "tiny" {
+			t.Errorf("model = %q, want tiny", s.Request.Model)
+		}
+		if s.Request.BaseURL != "http://other:9000" {
+			t.Errorf("base url = %q, want http://other:9000", s.Request.BaseURL)
+		}
+		if s.MaxContext != 8192 {
+			t.Errorf("max context = %d, want 8192", s.MaxContext)
+		}
+	})
+
+	t.Run("unknown model errors and leaves session unchanged", func(t *testing.T) {
+		s := newSession()
+		if err := s.SetModel("nope"); err == nil {
+			t.Fatal("expected error for unknown model")
+		}
+		if s.Request.Model != "coder" {
+			t.Errorf("model changed on failed switch: %q", s.Request.Model)
+		}
+	})
+}
+
+func TestAvailableModels(t *testing.T) {
+	s := &CortexSession{Config: &Config{Endpoints: []Endpoint{
+		{Models: []string{"coder", "reasoner"}},
+		{Models: []string{"tiny"}},
+	}}}
+	got := strings.Join(s.AvailableModels(), ",")
+	if got != "coder,reasoner,tiny" {
+		t.Errorf("AvailableModels = %q, want coder,reasoner,tiny", got)
+	}
+}
