@@ -667,13 +667,24 @@
         {
           "name": "focus-lines",
           "type": "string",
-          "description": "Bias the --sample-only draw toward a START,END line range"
+          "description": "Bias the sample toward a START,END line range"
         },
         {
           "name": "force",
           "type": "bool",
           "default": "false",
           "description": "Wipe per-file coverage before running (re-extract everything)"
+        },
+        {
+          "name": "goal",
+          "type": "string",
+          "description": "Task hint passed to inference / the curator when studying a FILE"
+        },
+        {
+          "name": "max-passes",
+          "type": "int",
+          "default": "4",
+          "description": "Max deepening passes when studying a FILE"
         },
         {
           "name": "model",

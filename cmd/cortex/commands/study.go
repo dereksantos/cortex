@@ -71,7 +71,9 @@ func (c *StudyCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.Bool("sample-only", false, "Mechanically sample a single FILE (byte-grid + sampler, no LLM) and print the chunk table")
 	fs.String("density", "", "Sample density for --sample-only: sparse | normal | dense | <int k>")
 	fs.Int("window", 0, "Consuming-model context window in tokens for --sample-only (default: conservative)")
-	fs.String("focus-lines", "", "Bias the --sample-only draw toward a START,END line range")
+	fs.String("focus-lines", "", "Bias the sample toward a START,END line range")
+	fs.String("goal", "", "Task hint passed to inference / the curator when studying a FILE")
+	fs.Int("max-passes", 4, "Max deepening passes when studying a FILE")
 }
 
 // Execute runs the study subcommand. Positional arg: DURATION.
@@ -96,6 +98,8 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	densityStr := ""
 	sampleWindow := 0
 	focusLinesStr := ""
+	goalStr := ""
+	maxPasses := 4
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -123,6 +127,20 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		case "--focus-lines":
 			if i+1 < len(args) {
 				focusLinesStr = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case "--goal":
+			if i+1 < len(args) {
+				goalStr = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case "--max-passes":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--max-passes: %w", err)
+				}
+				maxPasses = v
 				i++
 			}
 		case "--force":
@@ -234,6 +252,32 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 			density = densityStr
 		}
 		return runSampleOnly(durationStr, density, sampleWindow, focus, os.Stdout)
+	}
+
+	// File-study mode: when the positional is an existing FILE (not a
+	// duration), run the LLM-backed study → curate → deepen loop over it.
+	// A duration like "5m" isn't a file and falls through to the planner.
+	if durationStr != "" {
+		if fi, statErr := os.Stat(durationStr); statErr == nil && !fi.IsDir() {
+			focus, ferr := parseFocusLines(focusLinesStr)
+			if ferr != nil {
+				return ferr
+			}
+			var density study.Density
+			if densityStr != "" {
+				density = densityStr
+			}
+			return runFileStudy(ctx, fileStudyOpts{
+				path:      durationStr,
+				density:   density,
+				window:    sampleWindow,
+				focus:     focus,
+				goal:      goalStr,
+				maxPasses: maxPasses,
+				modelID:   modelID,
+				endpoint:  endpoint,
+			}, os.Stdout)
+		}
 	}
 
 	if durationStr == "" {
