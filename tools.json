@@ -637,6 +637,11 @@
           "description": "Override the derived iteration cap"
         },
         {
+          "name": "density",
+          "type": "string",
+          "description": "Sample density for --sample-only: sparse | normal | dense | \u003cint k\u003e"
+        },
+        {
           "name": "dry-run",
           "type": "bool",
           "default": "false",
@@ -660,6 +665,11 @@
           "description": "Target context-window fill fraction (advanced; default 0.5)"
         },
         {
+          "name": "focus-lines",
+          "type": "string",
+          "description": "Bias the --sample-only draw toward a START,END line range"
+        },
+        {
           "name": "force",
           "type": "bool",
           "default": "false",
@@ -676,6 +686,12 @@
           "description": "Override the RNG salt (default: run_id)"
         },
         {
+          "name": "sample-only",
+          "type": "bool",
+          "default": "false",
+          "description": "Mechanically sample a single FILE (byte-grid + sampler, no LLM) and print the chunk table"
+        },
+        {
           "name": "target-coverage",
           "type": "float64",
           "default": "-1",
@@ -686,6 +702,12 @@
           "type": "bool",
           "default": "false",
           "description": "Print derivation trace + per-iteration banners"
+        },
+        {
+          "name": "window",
+          "type": "int",
+          "default": "0",
+          "description": "Consuming-model context window in tokens for --sample-only (default: conservative)"
         },
         {
           "name": "window-lines",

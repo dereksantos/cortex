@@ -5229,7 +5229,7 @@ func summarizeToolArgs(name, argsStr string, verbose bool) string {
 			if path != "" {
 				return fmt.Sprintf("(%s, %d bytes)", path, len(content))
 			}
-		case "read_file", "list_dir":
+		case "read_file", "study_file", "list_dir":
 			if path, ok := args["path"].(string); ok && path != "" {
 				return fmt.Sprintf("(%s)", path)
 			}

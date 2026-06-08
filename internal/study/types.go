@@ -44,6 +44,7 @@ type Chunk struct {
 	EstTokens  int    // chars / 4 (rough)
 	ModuleID   string // module assignment (rel path of marker dir, or top-level dir)
 	Lang       string // extension-derived hint ("go", "py", "md", "unknown", ...)
+	Refined    bool   // true once a byte-grid chunk's provisional line bounds have been filled from a real read (see RefineChunk)
 }
 
 // Edge connects two modules. Tier 1 only emits Kind="fs_dir".

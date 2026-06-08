@@ -67,6 +67,11 @@ func (c *StudyCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.Int("window-lines", -1, "Override the derived chunk window size in lines")
 	fs.Int("window-overlap", -1, "Override the derived adjacent-chunk overlap in lines")
 	fs.String("salt", "", "Override the RNG salt (default: run_id)")
+	// Mechanical study_file checkpoint: `cortex study FILE --sample-only`.
+	fs.Bool("sample-only", false, "Mechanically sample a single FILE (byte-grid + sampler, no LLM) and print the chunk table")
+	fs.String("density", "", "Sample density for --sample-only: sparse | normal | dense | <int k>")
+	fs.Int("window", 0, "Consuming-model context window in tokens for --sample-only (default: conservative)")
+	fs.String("focus-lines", "", "Bias the --sample-only draw toward a START,END line range")
 }
 
 // Execute runs the study subcommand. Positional arg: DURATION.
@@ -86,6 +91,11 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	overrideWindow := -1
 	overrideOverlap := -1
 	overrideSalt := ""
+	// Mechanical --sample-only checkpoint knobs.
+	sampleOnly := false
+	densityStr := ""
+	sampleWindow := 0
+	focusLinesStr := ""
 
 	args := ctx.Args
 	for i := 0; i < len(args); i++ {
@@ -94,6 +104,27 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		case "-h", "--help":
 			printStudyHelp()
 			return nil
+		case "--sample-only":
+			sampleOnly = true
+		case "--density":
+			if i+1 < len(args) {
+				densityStr = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case "--window":
+			if i+1 < len(args) {
+				v, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("--window: %w", err)
+				}
+				sampleWindow = v
+				i++
+			}
+		case "--focus-lines":
+			if i+1 < len(args) {
+				focusLinesStr = strings.TrimSpace(args[i+1])
+				i++
+			}
 		case "--force":
 			force = true
 		case "--dry-run":
@@ -185,6 +216,24 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 				fmt.Fprintf(os.Stderr, "warning: ignoring extra positional %q\n", arg)
 			}
 		}
+	}
+
+	// Mechanical checkpoint: `cortex study FILE --sample-only` routes to
+	// the no-LLM byte-grid sampler instead of the duration planner. The
+	// positional here is a FILE path, not a DURATION.
+	if sampleOnly {
+		if durationStr == "" {
+			return fmt.Errorf("study --sample-only: FILE argument required")
+		}
+		focus, err := parseFocusLines(focusLinesStr)
+		if err != nil {
+			return err
+		}
+		var density study.Density
+		if densityStr != "" {
+			density = densityStr
+		}
+		return runSampleOnly(durationStr, density, sampleWindow, focus, os.Stdout)
 	}
 
 	if durationStr == "" {

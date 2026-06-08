@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -369,7 +370,25 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 	// LLM sees no callable tools and is forced into a prose-only
 	// response — which is exactly what synthesize-mode wants.
 	if !h.noTools {
-		registry.Register(harness.NewReadFileTool(workdir))
+		// study_file subsumes read_file: a file that fits the model's
+		// window reads byte-identically; a file over the threshold is
+		// sampled (density-bound) instead of ingested whole — the fix for
+		// the large-repo cells that timed out under read+accumulate. Gated
+		// behind CORTEX_STUDY_FILE while it proves out so the committed
+		// baseline (which keys read_count on act.read_file) is untouched.
+		if os.Getenv("CORTEX_STUDY_FILE") == "1" {
+			studyOpts := harness.StudyFileToolOpts{
+				Provider:   chatProvider,
+				ContextDir: filepath.Join(workdir, ".cortex"),
+				ModelID:    h.model,
+			}
+			if h.endpoint != nil {
+				studyOpts.Endpoint = h.endpoint.Name
+			}
+			registry.Register(harness.NewStudyFileTool(workdir, studyOpts))
+		} else {
+			registry.Register(harness.NewReadFileTool(workdir))
+		}
 		registry.Register(harness.NewWriteFileTool(workdir, registry))
 		if !h.minimalTools {
 			registry.Register(harness.NewListDirTool(workdir))

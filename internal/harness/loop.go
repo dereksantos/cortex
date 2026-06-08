@@ -239,7 +239,7 @@ func (p *progressTracker) recordTurn(calls []llm.ToolCall) {
 		switch c.Function.Name {
 		case "write_file", "run_shell":
 			hadWrite = true
-		case "read_file", "list_dir":
+		case "read_file", "study_file", "list_dir":
 			reads = append(reads, c.Function.Arguments)
 		}
 	}
