@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,6 +21,8 @@ TODO:
 [x] Tool calling v1 (read_file, write_file, bash allowlist)
 [x] Basic editing
 [x] Bash tool
+[x] Improve session status line
+[ ] Timestamp in messages
 [ ] Study tool
 [ ] Journal tool
 [ ] Spawn
@@ -54,11 +57,29 @@ const maxToolIterations = 10
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const maxToolOutput = 10000
 
+// Version is shown in the status line. Bump by hand for now; later it can come
+// from `git describe` via -ldflags.
+const Version = "0.1.0"
+
+// defaultMaxContext is the fallback context window (tokens) used only when the
+// config has no max_context_override for the active model. The real value is
+// config-driven — see Config / NewCortexSession.
+const defaultMaxContext = 65536
+
+// defaultBaseURL is the fallback endpoint used only when the config names no
+// endpoint for the active model.
+const defaultBaseURL = "http://chatterbox:4000"
+
+// promptGlyph is the input affordance at the end of the status line.
+const promptGlyph = "❯"
+
 const red = "\033[31m"
 const cyan = "\033[36m"
 const green = "\033[32m"
 const black = "\033[30m"
 const blue = "\033[34m"
+const yellow = "\033[33m"
+const gray = "\033[90m" // bright black, for dim status text
 const reset = "\033[0m" // Reset to default color
 
 func withColor(v string, c string) string {
@@ -179,6 +200,9 @@ type AgentRequest struct {
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	Tools       []Tool    `json:"tools,omitempty"`
+	// BaseURL is the endpoint root (e.g. http://chatterbox:4000), resolved from
+	// config. Not serialized — it's transport, not request body.
+	BaseURL string `json:"-"`
 }
 
 type Tool struct {
@@ -250,7 +274,11 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 	}
 
 	method := "POST"
-	url := "http://chatterbox:4000/v1/chat/completions"
+	base := r.BaseURL
+	if base == "" {
+		base = defaultBaseURL
+	}
+	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
 	reader := bytes.NewReader(b)
 	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
@@ -523,15 +551,109 @@ func (a CortexArgs) Request() *AgentRequest {
 type CortexSession struct {
 	Args    *CortexArgs
 	Request *AgentRequest
+	// LastPromptTokens is the prompt_tokens from the most recent response.
+	// Because we re-send the whole history each call, it equals how full the
+	// context window currently is — the live gauge in the status line.
+	LastPromptTokens int
+	// MaxContext is the active model's context window, resolved from config.
+	// Zero means "unknown" → windowSize falls back to defaultMaxContext.
+	MaxContext int
+}
+
+// windowSize is the context window to gauge against: the config-resolved value,
+// or the default if config didn't provide one.
+func (cs CortexSession) windowSize() int {
+	if cs.MaxContext > 0 {
+		return cs.MaxContext
+	}
+	return defaultMaxContext
+}
+
+// Config is the subset of .cortex/config.json the loop consults. The file is
+// built during cortex setup; the loop is a reader, never a writer. Unknown
+// fields are ignored on unmarshal.
+type Config struct {
+	Endpoints    []Endpoint `json:"endpoints"`
+	DefaultModel string     `json:"default_model"`
+}
+
+type Endpoint struct {
+	Name               string   `json:"name"`
+	BaseURL            string   `json:"base_url"`
+	MaxContextOverride int      `json:"max_context_override"`
+	Models             []string `json:"models"`
+}
+
+// EndpointFor returns the endpoint that serves the given model, or nil.
+func (c *Config) EndpointFor(model string) *Endpoint {
+	if c == nil {
+		return nil
+	}
+	for i := range c.Endpoints {
+		for _, m := range c.Endpoints[i].Models {
+			if m == model {
+				return &c.Endpoints[i]
+			}
+		}
+	}
+	return nil
+}
+
+// findConfigPath walks up from the cwd looking for .cortex/config.json, like
+// git finds .git. Returns "" if none is found.
+func findConfigPath() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		p := filepath.Join(dir, ".cortex", "config.json")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// LoadConfig reads and parses .cortex/config.json. It returns nil on any
+// problem (missing file, bad JSON) so callers transparently fall back to
+// defaults — config is an enhancement, not a hard dependency.
+func LoadConfig() *Config {
+	path := findConfigPath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil
+	}
+	return &cfg
 }
 
 func NewCortexSession() *CortexSession {
 	args := CortexArgs(os.Args)
 	req := args.Request()
-	return &CortexSession{
-		Args:    &args,
-		Request: req,
+	session := &CortexSession{Args: &args, Request: req}
+
+	// Resolve the active model's endpoint from config: its base URL and context
+	// window. Missing config or model => keep the built-in defaults.
+	if ep := LoadConfig().EndpointFor(req.Model); ep != nil {
+		if ep.BaseURL != "" {
+			req.BaseURL = ep.BaseURL
+		}
+		if ep.MaxContextOverride > 0 {
+			session.MaxContext = ep.MaxContextOverride
+		}
 	}
+	return session
 }
 
 func (cs CortexSession) PrintArgs() {
@@ -542,11 +664,40 @@ func (cs CortexSession) Append(message Message) {
 	cs.Request.Messages = append(cs.Request.Messages, message)
 }
 
-// Resolve runs the agentic inner loop for one user turn: it appends the
-// assistant message, runs any tools it asked for, feeds the results back, and
-// re-sends — repeating until the model answers with no more tool calls (or we
-// hit the iteration cap). `res` is the model's first response to the new user
-// message; Resolve owns everything from there to the final answer.
+// humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
+func humanK(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1000), ".0") + "k"
+}
+
+// ctxColor shifts the context gauge green -> yellow -> red as the window fills,
+// so context pressure is ambient — you feel it before you hit the wall.
+func ctxColor(used, max int) string {
+	switch r := float64(used) / float64(max); {
+	case r < 0.5:
+		return green
+	case r < 0.8:
+		return yellow
+	default:
+		return red
+	}
+}
+
+// Prompt renders the inline status line printed before every scan:
+//
+//	cortex 0.1.0 · coder · 8.2k/64k  ❯
+//
+// The token fraction is live (last prompt_tokens / window) and recolors with
+// fill. Status is dim; the glyph is the bright input affordance.
+func (cs CortexSession) Prompt() string {
+	win := cs.windowSize()
+	status := withColor(fmt.Sprintf("cortex %s · %s · ", Version, cs.Request.Model), gray)
+	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
+	return fmt.Sprintf("%s%s  %s ", status, gauge, withColor(promptGlyph, cyan))
+}
+
 // send runs one model call with a spinner during the network wait. The spinner
 // is fully stopped and the line erased before this returns, so the caller can
 // print immediately without interleaving.
@@ -562,7 +713,7 @@ func (cs CortexSession) send() (*AgentResponse, error) {
 // the model asked for, feed the results back, and re-send — repeating until the
 // model answers with no more tool calls (or we hit the iteration cap). The
 // caller appends the user message; Resolve owns everything from there.
-func (cs CortexSession) Resolve() error {
+func (cs *CortexSession) Resolve() error {
 	for i := 0; i < maxToolIterations; i++ {
 		res, err := cs.send()
 		if err != nil {
@@ -571,6 +722,8 @@ func (cs CortexSession) Resolve() error {
 		if res == nil || len(res.Choices) == 0 {
 			return fmt.Errorf("no choices in agent response")
 		}
+		// prompt_tokens reflects the whole re-sent history = current context fill.
+		cs.LastPromptTokens = res.Usage.PromptTokens
 		msg := res.Choices[0].Message
 
 		// (1) Append the assistant message BEFORE any tool results. The API
@@ -611,10 +764,9 @@ func (cs CortexSession) Resolve() error {
 func main() {
 	session := NewCortexSession()
 	scanner := bufio.NewScanner(os.Stdin)
-	prompt := withColor("&> ", cyan)
 
 	for {
-		fmt.Print(prompt)
+		fmt.Print(session.Prompt())
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				fmt.Printf("scanner error: %v\n", err)

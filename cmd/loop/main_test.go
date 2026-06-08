@@ -252,3 +252,91 @@ func TestRequestSeedsSystemPromptAndTools(t *testing.T) {
 		t.Error("expected tools attached to the request")
 	}
 }
+
+func TestHumanK(t *testing.T) {
+	tests := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"},
+		{999, "999"},
+		{1000, "1k"},
+		{1500, "1.5k"},
+		{8200, "8.2k"},
+		{65536, "65.5k"},
+	}
+	for _, tt := range tests {
+		if got := humanK(tt.in); got != tt.want {
+			t.Errorf("humanK(%d) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCtxColor(t *testing.T) {
+	tests := []struct {
+		used int
+		want string
+	}{
+		{0, green},
+		{defaultMaxContext / 4, green},       // 25%
+		{defaultMaxContext * 6 / 10, yellow}, // 60%
+		{defaultMaxContext * 9 / 10, red},    // 90%
+		{defaultMaxContext, red},             // full
+	}
+	for _, tt := range tests {
+		if got := ctxColor(tt.used, defaultMaxContext); got != tt.want {
+			t.Errorf("ctxColor(%d/%d) = %q, want %q", tt.used, defaultMaxContext, got, tt.want)
+		}
+	}
+}
+
+func TestEndpointFor(t *testing.T) {
+	cfg := &Config{Endpoints: []Endpoint{
+		{Name: "chatterbox", BaseURL: "http://chatterbox:4000", MaxContextOverride: 65536,
+			Models: []string{"coder", "reasoner"}},
+		{Name: "other", BaseURL: "http://other:9000", MaxContextOverride: 8192,
+			Models: []string{"tiny"}},
+	}}
+
+	t.Run("resolves model to its endpoint", func(t *testing.T) {
+		ep := cfg.EndpointFor("reasoner")
+		if ep == nil || ep.Name != "chatterbox" || ep.MaxContextOverride != 65536 {
+			t.Fatalf("got %+v, want chatterbox/65536", ep)
+		}
+	})
+
+	t.Run("unknown model returns nil", func(t *testing.T) {
+		if ep := cfg.EndpointFor("nope"); ep != nil {
+			t.Errorf("expected nil, got %+v", ep)
+		}
+	})
+
+	t.Run("nil config is safe", func(t *testing.T) {
+		var c *Config
+		if ep := c.EndpointFor("coder"); ep != nil {
+			t.Errorf("expected nil from nil config, got %+v", ep)
+		}
+	})
+}
+
+// windowSize falls back to the default when MaxContext is unset, so the gauge
+// never divides by zero or shows /0.
+func TestWindowSizeFallback(t *testing.T) {
+	if got := (CortexSession{}).windowSize(); got != defaultMaxContext {
+		t.Errorf("windowSize() = %d, want default %d", got, defaultMaxContext)
+	}
+	if got := (CortexSession{MaxContext: 8192}).windowSize(); got != 8192 {
+		t.Errorf("windowSize() = %d, want 8192", got)
+	}
+}
+
+func TestSessionPrompt(t *testing.T) {
+	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
+	got := sess.Prompt()
+
+	for _, want := range []string{"cortex " + Version, ModelCoder, "8.2k/65.5k", promptGlyph} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Prompt() = %q, missing %q", got, want)
+		}
+	}
+}
