@@ -82,6 +82,32 @@ func TestModelCurator_ParsesDecision(t *testing.T) {
 	}
 }
 
+func TestModelCurator_GroundingFloorOverridesBlindDone(t *testing.T) {
+	// Model says DONE, but the study is ungrounded (no citations), low
+	// coverage, not exhausted → override to DENSIFY.
+	prov := scriptedCuratorProvider{resp: `{"kind":"DONE"}`, avail: true}
+	resp := StudyResponse{
+		Coverage: Coverage{Pct: 0.07},
+		Deepen:   Deepen{Densify: DeepenRef{Density: "normal"}},
+	}
+	d := ModelCurator{Provider: prov}.Decide(resp, "goal")
+	if d.Kind != DecisionDensify {
+		t.Errorf("blind DONE should be overridden to DENSIFY, got %q", d.Kind)
+	}
+}
+
+func TestModelCurator_GroundedDoneRespected(t *testing.T) {
+	// DONE with a validated citation is honored even at low coverage.
+	prov := scriptedCuratorProvider{resp: `{"kind":"DONE"}`, avail: true}
+	resp := StudyResponse{
+		Coverage:  Coverage{Pct: 0.07},
+		Citations: []Citation{{RelPath: "a.go", LineStart: 1, LineEnd: 2, Claim: "found it"}},
+	}
+	if d := (ModelCurator{Provider: prov}).Decide(resp, "goal"); d.Kind != DecisionDone {
+		t.Errorf("grounded DONE should be respected, got %q", d.Kind)
+	}
+}
+
 func TestModelCurator_FallsBackOnError(t *testing.T) {
 	// Provider errors → fall back to the heuristic, which DONEs an
 	// exhausted study.

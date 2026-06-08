@@ -100,6 +100,15 @@ func (m ModelCurator) Decide(resp StudyResponse, goal string) Decision {
 	if !ok {
 		return fb.Decide(resp, goal)
 	}
+	// Grounding floor: a weak curator model often says DONE while still
+	// blind. Don't accept DONE on a study that is ungrounded (no validated
+	// citations), below the grounded-coverage floor, and not exhausted —
+	// deepen instead. A study WITH citations may legitimately be DONE even
+	// at low coverage (it found the answer).
+	if dec.Kind == DecisionDone && !resp.Exhausted &&
+		len(resp.Citations) == 0 && resp.Coverage.Pct < curatorGroundedCoveragePct {
+		return Decision{Kind: DecisionDensify, Density: resp.Deepen.Densify.Density}
+	}
 	return dec
 }
 
