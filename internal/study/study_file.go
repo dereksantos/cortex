@@ -41,6 +41,13 @@ type StudyRequest struct {
 	ContextDir string  // .cortex/ for cached probes (adapter use)
 	Goal       string  // optional task hint passed to inference
 
+	// Covered, when non-nil, is the session's accumulated covered-chunk
+	// set. StudyFile seeds the sampler from it (so a deepening pass draws
+	// NEW regions, not the same ones) and adds the chunks it samples to
+	// it. Nil → a fresh, single-pass draw. StudyLoop threads this across
+	// passes to realize "re-study refines rather than repeats."
+	Covered map[string]bool
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -159,8 +166,15 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		sampler = newFocusSampler(sampler, out, *req.Focus)
 	}
 
+	// Session coverage: seed the sampler with what prior passes already
+	// saw so this pass draws new regions, then fold this pass's picks
+	// back in. Nil Covered → a fresh single-pass draw (unchanged).
+	covered := req.Covered
+	if covered == nil {
+		covered = map[string]bool{}
+	}
 	rng := rand.New(rand.NewSource(out.RNGSeed))
-	ids := sampler.Next(out, map[string]bool{}, k, rng)
+	ids := sampler.Next(out, covered, k, rng)
 
 	byID := make(map[string]*Chunk, len(out.Chunks))
 	for i := range out.Chunks {
@@ -182,6 +196,7 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		if berr != nil {
 			return StudyResponse{}, fmt.Errorf("study: read region %s@%d: %w", ch.RelPath, ch.ByteOffset, berr)
 		}
+		covered[id] = true // fold into session coverage for the next pass
 		seenEff += ch.EffLines
 		sampled = append(sampled, SampledChunk{
 			RelPath:    ch.RelPath,

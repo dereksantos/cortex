@@ -1,0 +1,117 @@
+package study
+
+import (
+	"context"
+	"fmt"
+)
+
+// StudyLoop realizes the deepening loop: study → curate → study-deeper.
+// Each pass studies the file, the curator decides DONE / DENSIFY / TARGET
+// from the digest+leads+coverage, and the decision is applied to the next
+// pass — reusing the session's covered set so deepening samples NEW
+// regions instead of repeating. It stops on DONE, exhaustion, read-mode,
+// or maxPasses.
+//
+// This is the in-process driver; the harness equivalent is the agent loop
+// re-calling study_file with deepen.densify/target between turns. Both
+// share the same StudyFile + Curator, so behavior matches.
+
+// StudyPass records one iteration: the study result and the curator's
+// decision on it (zero-valued Decision on the terminal pass).
+type StudyPass struct {
+	Response StudyResponse
+	Decision Decision
+}
+
+// StudyLoopResult is the accumulated outcome across passes.
+type StudyLoopResult struct {
+	Passes      []StudyPass
+	Digests     []string   // per-pass digests, in order
+	Citations   []Citation // union of validated citations across passes
+	CoveragePct float64    // cumulative, over the union of sampled regions
+	Stopped     string     // "done" | "exhausted" | "read" | "budget"
+}
+
+// StudyLoop runs the loop. A nil curator defaults to HeuristicCurator;
+// maxPasses <= 0 defaults to 4.
+func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses int) (StudyLoopResult, error) {
+	if curator == nil {
+		curator = HeuristicCurator{}
+	}
+	if maxPasses <= 0 {
+		maxPasses = 4
+	}
+
+	covered := req.Covered
+	if covered == nil {
+		covered = map[string]bool{}
+	}
+
+	var res StudyLoopResult
+	cumEff := 0
+	total := 0
+	seen := map[string]bool{}
+
+	for pass := 0; pass < maxPasses; pass++ {
+		req.Covered = covered
+		resp, err := StudyFile(ctx, req)
+		if err != nil {
+			return res, err
+		}
+
+		res.Passes = append(res.Passes, StudyPass{Response: resp})
+		if resp.Digest != "" {
+			res.Digests = append(res.Digests, resp.Digest)
+		}
+		res.Citations = append(res.Citations, resp.Citations...)
+
+		// Cumulative coverage over the union of sampled regions.
+		if resp.Coverage.EffLinesTotal > 0 {
+			total = resp.Coverage.EffLinesTotal
+		}
+		for _, s := range resp.Sampled {
+			key := fmt.Sprintf("%s:%d", s.RelPath, s.ByteOffset)
+			if !seen[key] {
+				seen[key] = true
+				cumEff += s.EffLines
+			}
+		}
+		if total > 0 {
+			res.CoveragePct = float64(cumEff) / float64(total)
+		}
+
+		// Whole-file read → nothing to deepen.
+		if resp.Mode == "read" {
+			res.Stopped = "read"
+			return res, nil
+		}
+
+		dec := curator.Decide(resp, req.Goal)
+		res.Passes[len(res.Passes)-1].Decision = dec
+
+		switch dec.Kind {
+		case DecisionDone:
+			res.Stopped = "done"
+			return res, nil
+		case DecisionDensify:
+			if dec.Density != nil {
+				req.Density = dec.Density
+			}
+			req.Focus = nil // broaden: densify samples more of the whole file
+		case DecisionTarget:
+			req.Focus = dec.Focus
+			if dec.Density != nil {
+				req.Density = dec.Density
+			}
+		}
+
+		// A study that hit the coverage knee can't deepen further.
+		if resp.Exhausted {
+			res.Stopped = "exhausted"
+			return res, nil
+		}
+	}
+
+	res.Stopped = "budget"
+	return res, nil
+}
