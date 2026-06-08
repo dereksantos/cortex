@@ -134,56 +134,41 @@ var chars = []string{
 	"┿",
 }
 
-type PromptAnimator struct {
-	prompt   string
-	chars    []string
+// Spinner renders an in-place animation on stdout while we wait on the model.
+// It is meant to wrap a single network call: Stop() blocks until the goroutine
+// has actually exited and then erases the line, so no frame can bleed into
+// output printed afterward. That guarantee is the whole point — the old version
+// kept spinning during tool execution and interleaved glyphs with real output.
+type Spinner struct {
 	stopChan chan struct{}
+	doneChan chan struct{}
 }
 
-func NewPromptAnimator(prompt string) *PromptAnimator {
-	return &PromptAnimator{
-		prompt: prompt,
-		chars:  chars,
-	}
-}
+func NewSpinner() *Spinner { return &Spinner{} }
 
-func (pa *PromptAnimator) Start() {
-	pa.stopChan = make(chan struct{})
+func (s *Spinner) Start() {
+	s.stopChan = make(chan struct{})
+	s.doneChan = make(chan struct{})
 	go func() {
-		for {
+		defer close(s.doneChan)
+		for i := 0; ; i++ {
 			select {
-			case <-pa.stopChan:
+			case <-s.stopChan:
 				return
 			default:
-				for _, char := range pa.chars {
-					select {
-					case <-pa.stopChan:
-						return
-					default:
-						fmt.Printf("\r%s", char)
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
+				fmt.Printf("\r%s", withColor(chars[i%len(chars)], cyan))
+				time.Sleep(80 * time.Millisecond)
 			}
 		}
 	}()
 }
 
-func (pa *PromptAnimator) Clear() {
-	fmt.Print("\r")
-}
-
-func (pa *PromptAnimator) Prompt() {
-	fmt.Print(pa.prompt)
-}
-
-func (pa *PromptAnimator) Stop() {
-	close(pa.stopChan)
-}
-
-func (pa *PromptAnimator) ClearAndStop() {
-	pa.Clear()
-	pa.Stop()
+// Stop halts the spinner, waits for its goroutine to exit, then erases the
+// line (\r + clear-to-end-of-line) so the cursor is clean for the next print.
+func (s *Spinner) Stop() {
+	close(s.stopChan)
+	<-s.doneChan
+	fmt.Print("\r\033[K")
 }
 
 // AgentRequest captures parameters to be sent to the agent via API call.
@@ -496,9 +481,28 @@ func (cs CortexSession) Append(message Message) {
 // re-sends — repeating until the model answers with no more tool calls (or we
 // hit the iteration cap). `res` is the model's first response to the new user
 // message; Resolve owns everything from there to the final answer.
-func (cs CortexSession) Resolve(res *AgentResponse) error {
+// send runs one model call with a spinner during the network wait. The spinner
+// is fully stopped and the line erased before this returns, so the caller can
+// print immediately without interleaving.
+func (cs CortexSession) send() (*AgentResponse, error) {
+	s := NewSpinner()
+	s.Start()
+	res, err := cs.Request.Send()
+	s.Stop()
+	return res, err
+}
+
+// Resolve runs the agentic inner loop for one user turn: send, run any tools
+// the model asked for, feed the results back, and re-send — repeating until the
+// model answers with no more tool calls (or we hit the iteration cap). The
+// caller appends the user message; Resolve owns everything from there.
+func (cs CortexSession) Resolve() error {
 	for i := 0; i < maxToolIterations; i++ {
-		if len(res.Choices) == 0 {
+		res, err := cs.send()
+		if err != nil {
+			return err
+		}
+		if res == nil || len(res.Choices) == 0 {
 			return fmt.Errorf("no choices in agent response")
 		}
 		msg := res.Choices[0].Message
@@ -519,7 +523,7 @@ func (cs CortexSession) Resolve(res *AgentResponse) error {
 		}
 
 		// (3) Run every requested tool and append one result per call. Each
-		// id MUST get a matching tool message or the next Send 400s.
+		// id MUST get a matching tool message or the next send 400s.
 		for _, tc := range msg.ToolCalls {
 			content, err := tc.Execute()
 			if err != nil {
@@ -533,54 +537,30 @@ func (cs CortexSession) Resolve(res *AgentResponse) error {
 				Content:    content,
 			})
 		}
-
-		// (4) Re-send with the grown history; loop on the new response.
-		var err error
-		res, err = cs.Request.Send()
-		if err != nil {
-			return err
-		}
+		// Loop: the next send picks up the grown history.
 	}
 	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
 }
 
 func main() {
 	session := NewCortexSession()
-
 	scanner := bufio.NewScanner(os.Stdin)
-	animator := NewPromptAnimator(withColor("&>", cyan))
+	prompt := withColor("&> ", cyan)
 
 	for {
-		animator.Prompt()
+		fmt.Print(prompt)
 		if !scanner.Scan() {
 			break
 		}
-		animator.Start()
-
-		prompt := strings.TrimSpace(scanner.Text())
-		session.Append(Message{
-			Role:    RoleUser,
-			Content: prompt,
-		})
-
-		res, err := session.Request.Send()
-		if err != nil {
-			fmt.Printf("agent responded with error: %v\n", err)
-			animator.ClearAndStop()
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
 			continue
 		}
 
-		if res == nil {
-			fmt.Println("nil response from agent")
-			animator.ClearAndStop()
-			continue
-		}
-
-		animator.Clear()
-		if err := session.Resolve(res); err != nil {
+		session.Append(Message{Role: RoleUser, Content: input})
+		if err := session.Resolve(); err != nil {
 			fmt.Printf("turn error: %v\n", err)
 		}
-		animator.Stop()
 	}
 
 	fmt.Println("exiting")
