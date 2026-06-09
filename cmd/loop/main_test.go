@@ -571,3 +571,42 @@ func TestRenderStudyResult(t *testing.T) {
 		}
 	})
 }
+
+func TestParseCtxSize(t *testing.T) {
+	msg := "litellm.BadRequestError: request (41193 tokens) exceeds the available context size (32768 tokens)"
+	if got := parseCtxSize(msg); got != 32768 {
+		t.Errorf("parseCtxSize = %d, want 32768", got)
+	}
+	if got := parseCtxSize("no numbers here"); got != 0 {
+		t.Errorf("parseCtxSize(no match) = %d, want 0", got)
+	}
+}
+
+func TestSampleBudget(t *testing.T) {
+	// headroom = window/4 (min 2048); budget = window - headroom
+	for _, tt := range []struct{ window, want int }{
+		{32768, 24576},   // 32768 - 8192
+		{262144, 196608}, // 262144 - 65536
+		{4096, 2048},     // headroom floored at 2048
+	} {
+		if got := sampleBudget(tt.window); got != tt.want {
+			t.Errorf("sampleBudget(%d) = %d, want %d", tt.window, got, tt.want)
+		}
+	}
+}
+
+func TestStudyWindowResolution(t *testing.T) {
+	defer func() { delete(learnedWindows, "m") }()
+	cs := &CortexSession{Study: ModelSpec{Model: "m", Window: 32768}}
+	if got := cs.studyWindow(); got != 32768 {
+		t.Errorf("configured window = %d, want 32768", got)
+	}
+	learnedWindows["m"] = 16000 // learned beats configured
+	if got := cs.studyWindow(); got != 16000 {
+		t.Errorf("learned window = %d, want 16000", got)
+	}
+	empty := &CortexSession{Study: ModelSpec{Model: "x"}}
+	if got := empty.studyWindow(); got != studyFallbackWindow {
+		t.Errorf("fallback window = %d, want %d", got, studyFallbackWindow)
+	}
+}

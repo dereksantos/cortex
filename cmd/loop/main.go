@@ -110,17 +110,13 @@ const (
 )
 
 // defaultModels is the built-in role → binding map, used when config doesn't
-// override a role. Matches the chatterbox setup: the 30B coder for coding, and
-// reasoner for study (fast + concise; study is read-heavy/think-light, so coder
-// skill isn't needed). Study wants a LONG-context model for deepening — the
-// 256K qwen3-4b is the intended home once its serving is fixed; reasoner's 32K
-// handles a single sparse pass but overflows when deepening densifies.
+// override a role. Window is the model's RAW context size (a starting estimate,
+// config-overridable, and self-corrected at runtime from overflow errors); the
+// sampling budget and density are derived from it, not hardcoded. coder for
+// coding; reasoner for study (fast + concise; study is read-heavy/think-light).
 var defaultModels = map[string]ModelSpec{
-	roleCode: {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
-	// Window is the EFFECTIVE sampling budget, not the raw context size: reasoner
-	// is 32K, but the inference template + the model's completion need headroom,
-	// so we leave ~4K and budget the sample at 28K.
-	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 28000},
+	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
+	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 32768},
 }
 
 // promptGlyph is the input affordance at the end of the status line.
@@ -311,6 +307,56 @@ var studyTool = newTool(FunctionStudy,
 		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1."},
 	}, "path"))
 
+// Dynamic study sizing — no hardcoded breakpoints.
+
+// studyFallbackWindow is the conservative window assumed only until a model's
+// real size is known (from config or learned at runtime).
+const studyFallbackWindow = 8192
+
+// studyChunks is the per-pass chunk count. Each chunk is ~window/8, so the
+// sample is ~studyChunks/8 of the window — a fixed fraction of whatever the
+// model's window turns out to be, never a hardcoded token count.
+const studyChunks = 4
+
+// learnedWindows caches context windows discovered from overflow errors at run
+// time (model → tokens), so a wrong guess self-corrects after one failure.
+var learnedWindows = map[string]int{}
+
+// ctxSizeRe pulls the real context size out of a provider overflow error, e.g.
+// "available context size (32768 tokens)".
+var ctxSizeRe = regexp.MustCompile(`context size \((\d+) tokens\)`)
+
+func parseCtxSize(s string) int {
+	if m := ctxSizeRe.FindStringSubmatch(s); m != nil {
+		n, _ := strconv.Atoi(m[1])
+		return n
+	}
+	return 0
+}
+
+// studyWindow resolves the study model's context window: learned at runtime >
+// configured > fallback.
+func (cs *CortexSession) studyWindow() int {
+	if w, ok := learnedWindows[cs.Study.Model]; ok {
+		return w
+	}
+	if cs.Study.Window > 0 {
+		return cs.Study.Window
+	}
+	return studyFallbackWindow
+}
+
+// sampleBudget is the token budget for one study pass: the window minus headroom
+// for the inference template and the model's completion. Derived from the
+// window, never a magic number.
+func sampleBudget(window int) int {
+	headroom := window / 4
+	if headroom < 2048 {
+		headroom = 2048
+	}
+	return window - headroom
+}
+
 var bash = newTool(FunctionBash,
 	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
 	objectSchema(map[string]any{
@@ -465,19 +511,31 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	req := study.StudyRequest{
 		Path:    abs,
 		RelPath: path,
-		Density: "sparse", // smaller sample → faster prefill on the study model
-		// Window is the STUDY model's window — it ingests the sample and runs
-		// inference, so the sampled prompt must fit IT (reasoner is only 32K). The
-		// result coming back is just a small digest, so the coding model is never
-		// the constraint; the study model is.
-		Window: cs.Study.Window,
-		Goal:   goal,
-		Infer:  study.ProviderInfer(provider),
+		// Density (chunk count) and Window (token budget) both derive from the
+		// model's window — no hardcoded breakpoint. studyChunks regions of
+		// ~window/8 each → the sample is a fixed fraction of the window, so
+		// coverage = sample/filesize emerges as a function of BOTH model and data.
+		Density: studyChunks,
+		Goal:    goal,
+		Infer:   study.ProviderInfer(provider),
 	}
 	// Deepening: `passes` runs the study → curate → deepen loop. The curator
 	// decides DENSIFY/TARGET between passes and carries the covered set forward,
 	// so each pass samples NEW regions. passes=1 is a single sample→infer.
-	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
+	runPasses := func(window int) (study.StudyLoopResult, error) {
+		req.Window = sampleBudget(window) // window minus headroom for template + completion
+		return study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
+	}
+	window := cs.studyWindow()
+	res, err := runPasses(window)
+	// Self-calibrate: if we overflowed, the error states the model's real context
+	// size — learn it and retry correctly sized, so the guess never persists.
+	if err != nil {
+		if real := parseCtxSize(err.Error()); real > 0 && real != window {
+			learnedWindows[cs.Study.Model] = real
+			res, err = runPasses(real)
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("study %s: %w", path, err)
 	}
