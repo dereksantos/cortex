@@ -30,11 +30,15 @@ var studyEvalCases = []studyEvalCase{
 	{"cmd/cortex/commands/study.go", "what subcommands does the study command support"},
 }
 
+// studyEvalSweep is the density (chunk count) sweep the runner measures.
+var studyEvalSweep = []int{4, 6, 8}
+
 // studyEvalRow is the per-case measured result, emitted as JSONL.
 type studyEvalRow struct {
 	Path            string  `json:"path"`
 	Goal            string  `json:"goal"`
 	Model           string  `json:"model"`
+	Chunks          int     `json:"chunks"`
 	Stopped         string  `json:"stopped"`
 	LatencyMS       int64   `json:"latency_ms"`
 	CoveragePct     float64 `json:"coverage_pct"`
@@ -82,41 +86,44 @@ func runStudyEval() {
 	session := NewCortexSession()
 	var rows []studyEvalRow
 
-	for _, c := range studyEvalCases {
-		row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: session.Study.Model}
-		start := time.Now()
-		res, err := session.runStudy(c.Path, c.Goal, 1)
-		row.LatencyMS = time.Since(start).Milliseconds()
-		if err != nil {
-			row.Error = err.Error()
-		} else {
-			row.Stopped = res.Stopped
-			row.CoveragePct = 100 * res.CoveragePct
-			row.DigestChars = len(strings.Join(res.Digests, ""))
-			if data, derr := os.ReadFile(c.Path); derr == nil {
-				row.Citations, row.Grounded = scoreGroundedness(string(data), res)
-				if row.Citations > 0 {
-					row.GroundednessPct = 100 * float64(row.Grounded) / float64(row.Citations)
+	// Density sweep: each fixture at each chunk count, so coverage/groundedness/
+	// latency vs density becomes a readable curve.
+	for _, chunks := range studyEvalSweep {
+		for _, c := range studyEvalCases {
+			row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: session.Study.Model, Chunks: chunks}
+			start := time.Now()
+			res, err := session.runStudy(c.Path, c.Goal, 1, chunks)
+			row.LatencyMS = time.Since(start).Milliseconds()
+			if err != nil {
+				row.Error = err.Error()
+			} else {
+				row.Stopped = res.Stopped
+				row.CoveragePct = 100 * res.CoveragePct
+				row.DigestChars = len(strings.Join(res.Digests, ""))
+				if data, derr := os.ReadFile(c.Path); derr == nil {
+					row.Citations, row.Grounded = scoreGroundedness(string(data), res)
+					if row.Citations > 0 {
+						row.GroundednessPct = 100 * float64(row.Grounded) / float64(row.Citations)
+					}
 				}
 			}
+			rows = append(rows, row)
+			b, _ := json.Marshal(row)
+			fmt.Println(string(b)) // JSONL — one structured row per (chunks, case)
 		}
-		rows = append(rows, row)
-		b, _ := json.Marshal(row)
-		fmt.Println(string(b)) // JSONL — one structured row per case
 	}
 
-	fmt.Printf("\n--- study-eval summary (model: %s) ---\n", session.Study.Model)
-	fmt.Printf("%-42s %7s %6s %6s %s\n", "file", "lat(s)", "cov%", "cites", "grounded%")
+	fmt.Printf("\n--- study-eval density sweep (model: %s) ---\n", session.Study.Model)
+	fmt.Printf("%-42s %4s %7s %6s %6s %s\n", "file", "k", "lat(s)", "cov%", "cites", "grounded%")
 	for _, r := range rows {
 		switch {
 		case r.Error != "":
-			fmt.Printf("%-42s  ERROR: %s\n", r.Path, r.Error)
+			fmt.Printf("%-42s %4d  ERROR: %s\n", r.Path, r.Chunks, r.Error)
 		case r.Stopped == "read":
-			// File fit the budget → read whole. No sampling/citations to ground.
-			fmt.Printf("%-42s %7.1f   read (fit, whole file)\n", r.Path, float64(r.LatencyMS)/1000)
+			fmt.Printf("%-42s %4d %7.1f   read (fit, whole file)\n", r.Path, r.Chunks, float64(r.LatencyMS)/1000)
 		default:
-			fmt.Printf("%-42s %7.1f %5.0f%% %6d %8.0f%%\n",
-				r.Path, float64(r.LatencyMS)/1000, r.CoveragePct, r.Citations, r.GroundednessPct)
+			fmt.Printf("%-42s %4d %7.1f %5.0f%% %6d %8.0f%%\n",
+				r.Path, r.Chunks, float64(r.LatencyMS)/1000, r.CoveragePct, r.Citations, r.GroundednessPct)
 		}
 	}
 }

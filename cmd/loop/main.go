@@ -491,7 +491,7 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(path, goal, passes)
+	res, err := cs.runStudy(path, goal, passes, studyChunks)
 	if err != nil {
 		return "", err
 	}
@@ -502,7 +502,7 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 // result. Shared by the study tool and the study-eval runner. Delegates to the
 // STUDY model in its own context (the small-model-amplifier split: a cheap model
 // reads, the coding model gets only the curated result back).
-func (cs *CortexSession) runStudy(path, goal string, passes int) (study.StudyLoopResult, error) {
+func (cs *CortexSession) runStudy(path, goal string, passes, chunks int) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -522,7 +522,7 @@ func (cs *CortexSession) runStudy(path, goal string, passes int) (study.StudyLoo
 		// model's window — no hardcoded breakpoint. studyChunks regions of
 		// ~window/8 each → the sample is a fixed fraction of the window, so
 		// coverage = sample/filesize emerges as a function of BOTH model and data.
-		Density: studyChunks,
+		Density: chunks,
 		Goal:    goal,
 		Infer:   study.ProviderInfer(provider),
 	}
