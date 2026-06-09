@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,12 +34,17 @@ var studyEvalCases = []studyEvalCase{
 // studyEvalSweep is the density (chunk count) sweep the runner measures.
 var studyEvalSweep = []int{4, 6, 8}
 
-// studyEvalRow is the per-case measured result, emitted as JSONL.
+// studyEvalRepeats: runs per cell. The sampler and backend latency are noisy, so
+// we repeat and aggregate to tell signal (a density effect) from variance.
+const studyEvalRepeats = 3
+
+// studyEvalRow is the per-run measured result, emitted as JSONL.
 type studyEvalRow struct {
 	Path            string  `json:"path"`
 	Goal            string  `json:"goal"`
 	Model           string  `json:"model"`
 	Chunks          int     `json:"chunks"`
+	Rep             int     `json:"rep"`
 	Stopped         string  `json:"stopped"`
 	LatencyMS       int64   `json:"latency_ms"`
 	CoveragePct     float64 `json:"coverage_pct"`
@@ -80,50 +86,105 @@ func scoreGroundedness(content string, res study.StudyLoopResult) (total, ground
 	return total, grounded
 }
 
-// runStudyEval runs every fixture, scores it, prints a JSONL row per case, then
-// a human summary table.
+// measureCell runs study once over a case at a given chunk count and scores it.
+func measureCell(cs *CortexSession, c studyEvalCase, chunks int) studyEvalRow {
+	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: chunks}
+	start := time.Now()
+	res, err := cs.runStudy(c.Path, c.Goal, 1, chunks)
+	row.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		row.Error = err.Error()
+		return row
+	}
+	row.Stopped = res.Stopped
+	row.CoveragePct = 100 * res.CoveragePct
+	row.DigestChars = len(strings.Join(res.Digests, ""))
+	if data, derr := os.ReadFile(c.Path); derr == nil {
+		row.Citations, row.Grounded = scoreGroundedness(string(data), res)
+		if row.Citations > 0 {
+			row.GroundednessPct = 100 * float64(row.Grounded) / float64(row.Citations)
+		}
+	}
+	return row
+}
+
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	return s[len(s)/2]
+}
+
+func minMax(xs []float64) (lo, hi float64) {
+	if len(xs) == 0 {
+		return 0, 0
+	}
+	lo, hi = xs[0], xs[0]
+	for _, x := range xs[1:] {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return lo, hi
+}
+
+// runStudyEval sweeps density × fixtures, repeats each cell studyEvalRepeats
+// times (emitting a JSONL row per run), then prints a per-cell aggregate so the
+// median trend and the spread (signal vs variance) are both visible.
 func runStudyEval() {
 	session := NewCortexSession()
 	var rows []studyEvalRow
 
-	// Density sweep: each fixture at each chunk count, so coverage/groundedness/
-	// latency vs density becomes a readable curve.
 	for _, chunks := range studyEvalSweep {
 		for _, c := range studyEvalCases {
-			row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: session.Study.Model, Chunks: chunks}
-			start := time.Now()
-			res, err := session.runStudy(c.Path, c.Goal, 1, chunks)
-			row.LatencyMS = time.Since(start).Milliseconds()
-			if err != nil {
-				row.Error = err.Error()
-			} else {
-				row.Stopped = res.Stopped
-				row.CoveragePct = 100 * res.CoveragePct
-				row.DigestChars = len(strings.Join(res.Digests, ""))
-				if data, derr := os.ReadFile(c.Path); derr == nil {
-					row.Citations, row.Grounded = scoreGroundedness(string(data), res)
-					if row.Citations > 0 {
-						row.GroundednessPct = 100 * float64(row.Grounded) / float64(row.Citations)
-					}
-				}
+			for rep := 0; rep < studyEvalRepeats; rep++ {
+				row := measureCell(session, c, chunks)
+				row.Rep = rep
+				rows = append(rows, row)
+				b, _ := json.Marshal(row)
+				fmt.Println(string(b)) // JSONL — one row per (chunks, case, rep)
 			}
-			rows = append(rows, row)
-			b, _ := json.Marshal(row)
-			fmt.Println(string(b)) // JSONL — one structured row per (chunks, case)
 		}
 	}
 
-	fmt.Printf("\n--- study-eval density sweep (model: %s) ---\n", session.Study.Model)
-	fmt.Printf("%-42s %4s %7s %6s %6s %s\n", "file", "k", "lat(s)", "cov%", "cites", "grounded%")
-	for _, r := range rows {
-		switch {
-		case r.Error != "":
-			fmt.Printf("%-42s %4d  ERROR: %s\n", r.Path, r.Chunks, r.Error)
-		case r.Stopped == "read":
-			fmt.Printf("%-42s %4d %7.1f   read (fit, whole file)\n", r.Path, r.Chunks, float64(r.LatencyMS)/1000)
-		default:
-			fmt.Printf("%-42s %4d %7.1f %5.0f%% %6d %8.0f%%\n",
-				r.Path, r.Chunks, float64(r.LatencyMS)/1000, r.CoveragePct, r.Citations, r.GroundednessPct)
+	fmt.Printf("\n--- study-eval density sweep (model: %s, n=%d/cell) ---\n", session.Study.Model, studyEvalRepeats)
+	fmt.Printf("%-30s %4s %8s %7s %7s %s\n", "file", "k", "lat(s)", "cov%", "cites", "grounded% (med [min-max])")
+	for _, chunks := range studyEvalSweep {
+		for _, c := range studyEvalCases {
+			var lat, cov, cites, grnd []float64
+			read := false
+			for _, r := range rows {
+				if r.Path != c.Path || r.Chunks != chunks || r.Error != "" {
+					continue
+				}
+				if r.Stopped == "read" {
+					read = true
+				}
+				lat = append(lat, float64(r.LatencyMS)/1000)
+				cov = append(cov, r.CoveragePct)
+				cites = append(cites, float64(r.Citations))
+				grnd = append(grnd, r.GroundednessPct)
+			}
+			name := shortName(c.Path)
+			if read {
+				fmt.Printf("%-30s %4d %8.1f   read (fit, whole file)\n", name, chunks, median(lat))
+				continue
+			}
+			glo, ghi := minMax(grnd)
+			fmt.Printf("%-30s %4d %8.1f %6.0f%% %7.0f %5.0f%% [%.0f-%.0f]\n",
+				name, chunks, median(lat), median(cov), median(cites), median(grnd), glo, ghi)
 		}
 	}
+}
+
+func shortName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
