@@ -491,15 +491,22 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
+	res, err := cs.runStudy(path, goal, passes)
+	if err != nil {
+		return "", err
+	}
+	return renderStudyResult(res), nil
+}
+
+// runStudy executes the study engine over one file and returns the structured
+// result. Shared by the study tool and the study-eval runner. Delegates to the
+// STUDY model in its own context (the small-model-amplifier split: a cheap model
+// reads, the coding model gets only the curated result back).
+func (cs *CortexSession) runStudy(path, goal string, passes int) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve %s: %w", path, err)
+		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
 	}
-
-	// Delegate to the STUDY model — a small, long-context model running in its
-	// OWN context. The big coding model never ingests the raw file; it gets back
-	// only the curated result. This is the small-model-amplifier split: a cheap
-	// model does the heavy reading, the expensive model spends ~no context on it.
 	base := strings.TrimRight(cs.Study.Endpoint, "/")
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
@@ -519,9 +526,8 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 		Goal:    goal,
 		Infer:   study.ProviderInfer(provider),
 	}
-	// Deepening: `passes` runs the study → curate → deepen loop. The curator
-	// decides DENSIFY/TARGET between passes and carries the covered set forward,
-	// so each pass samples NEW regions. passes=1 is a single sample→infer.
+	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
+	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
 		req.Window = sampleBudget(window) // window minus headroom for template + completion
 		return study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
@@ -537,9 +543,9 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 		}
 	}
 	if err != nil {
-		return "", fmt.Errorf("study %s: %w", path, err)
+		return study.StudyLoopResult{}, fmt.Errorf("study %s: %w", path, err)
 	}
-	return renderStudyResult(res), nil
+	return res, nil
 }
 
 // renderStudyResult turns the curated study-loop result into the context string
@@ -1123,6 +1129,13 @@ func runStudyCLI(path, goal string, passes int) {
 }
 
 func main() {
+	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
+	// latency / coverage / groundedness.
+	if len(os.Args) >= 2 && os.Args[1] == "study-eval" {
+		runStudyEval()
+		return
+	}
+
 	// Direct study mode: `loop study <path> [goal...] [passes]`. A trailing bare
 	// integer is taken as the deepening pass count.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
