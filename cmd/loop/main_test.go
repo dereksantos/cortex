@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/study"
 )
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
@@ -76,7 +78,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("reads existing file", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		got, err := tc(FunctionReadFile, string(args)).Execute()
+		got, err := tc(FunctionReadFile, string(args)).Execute(nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -87,7 +89,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("missing file errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "nope.txt")})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(); err == nil {
+		if _, err := tc(FunctionReadFile, string(args)).Execute(nil); err == nil {
 			t.Fatal("expected error reading missing file")
 		}
 	})
@@ -98,7 +100,7 @@ func TestWriteFileTool(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	args, _ := json.Marshal(map[string]string{"path": path, "content": "written by cortex"})
 
-	got, err := tc(FunctionWriteFile, string(args)).Execute()
+	got, err := tc(FunctionWriteFile, string(args)).Execute(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +120,7 @@ func TestWriteFileTool(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	edit := func(path, oldS, newS string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
-		return tc(FunctionEditFile, string(args)).Execute()
+		return tc(FunctionEditFile, string(args)).Execute(nil)
 	}
 
 	t.Run("unique match is replaced", func(t *testing.T) {
@@ -184,7 +186,7 @@ func TestEditFileTool(t *testing.T) {
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})
-		got, err := tc(FunctionBash, string(args)).Execute()
+		got, err := tc(FunctionBash, string(args)).Execute(nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -195,7 +197,7 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("non-allowlisted command rejected", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		_, err := tc(FunctionBash, string(args)).Execute()
+		_, err := tc(FunctionBash, string(args)).Execute(nil)
 		if err == nil {
 			t.Fatal("expected allowlist rejection")
 		}
@@ -206,14 +208,14 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("empty command errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "   "})
-		if _, err := tc(FunctionBash, string(args)).Execute(); err == nil {
+		if _, err := tc(FunctionBash, string(args)).Execute(nil); err == nil {
 			t.Fatal("expected error for empty command")
 		}
 	})
 }
 
 func TestExecuteUnknownTool(t *testing.T) {
-	if _, err := tc("frobnicate", `{}`).Execute(); err == nil {
+	if _, err := tc("frobnicate", `{}`).Execute(nil); err == nil {
 		t.Fatal("expected error for unknown tool name")
 	}
 }
@@ -274,59 +276,56 @@ func TestHumanK(t *testing.T) {
 }
 
 func TestCtxColor(t *testing.T) {
+	win := defaultModels[roleCode].Window
 	tests := []struct {
 		used int
 		want string
 	}{
 		{0, green},
-		{defaultMaxContext / 4, green},       // 25%
-		{defaultMaxContext * 6 / 10, yellow}, // 60%
-		{defaultMaxContext * 9 / 10, red},    // 90%
-		{defaultMaxContext, red},             // full
+		{win / 4, green},       // 25%
+		{win * 6 / 10, yellow}, // 60%
+		{win * 9 / 10, red},    // 90%
+		{win, red},             // full
 	}
 	for _, tt := range tests {
-		if got := ctxColor(tt.used, defaultMaxContext); got != tt.want {
-			t.Errorf("ctxColor(%d/%d) = %q, want %q", tt.used, defaultMaxContext, got, tt.want)
+		if got := ctxColor(tt.used, win); got != tt.want {
+			t.Errorf("ctxColor(%d/%d) = %q, want %q", tt.used, win, got, tt.want)
 		}
 	}
 }
 
-func TestEndpointFor(t *testing.T) {
-	cfg := &Config{Endpoints: []Endpoint{
-		{Name: "chatterbox", BaseURL: "http://chatterbox:4000", MaxContextOverride: 65536,
-			Models: []string{"coder", "reasoner"}},
-		{Name: "other", BaseURL: "http://other:9000", MaxContextOverride: 8192,
-			Models: []string{"tiny"}},
-	}}
-
-	t.Run("resolves model to its endpoint", func(t *testing.T) {
-		ep := cfg.EndpointFor("reasoner")
-		if ep == nil || ep.Name != "chatterbox" || ep.MaxContextOverride != 65536 {
-			t.Fatalf("got %+v, want chatterbox/65536", ep)
-		}
-	})
-
-	t.Run("unknown model returns nil", func(t *testing.T) {
-		if ep := cfg.EndpointFor("nope"); ep != nil {
-			t.Errorf("expected nil, got %+v", ep)
-		}
-	})
-
-	t.Run("nil config is safe", func(t *testing.T) {
+func TestConfigSpec(t *testing.T) {
+	t.Run("nil config returns built-in defaults", func(t *testing.T) {
 		var c *Config
-		if ep := c.EndpointFor("coder"); ep != nil {
-			t.Errorf("expected nil from nil config, got %+v", ep)
+		if code := c.Spec(roleCode); code.Model != "coder" || code.Endpoint == "" || code.Window == 0 {
+			t.Errorf("code default = %+v", code)
+		}
+		if study := c.Spec(roleStudy); study.Model != "reasoner" {
+			t.Errorf("study default model = %q, want reasoner", study.Model)
+		}
+	})
+
+	t.Run("config overrides layer per-field on the default", func(t *testing.T) {
+		c := &Config{Models: map[string]ModelSpec{
+			roleStudy: {Model: "custom-study"}, // only the model; endpoint/window inherit
+		}}
+		s := c.Spec(roleStudy)
+		if s.Model != "custom-study" {
+			t.Errorf("model = %q, want custom-study", s.Model)
+		}
+		if s.Endpoint != defaultModels[roleStudy].Endpoint || s.Window != defaultModels[roleStudy].Window {
+			t.Errorf("endpoint/window should inherit the default, got %+v", s)
 		}
 	})
 }
 
-// windowSize falls back to the default when MaxContext is unset, so the gauge
-// never divides by zero or shows /0.
+// windowSize falls back to the default when Window is unset, so the gauge never
+// divides by zero or shows /0.
 func TestWindowSizeFallback(t *testing.T) {
-	if got := (CortexSession{}).windowSize(); got != defaultMaxContext {
-		t.Errorf("windowSize() = %d, want default %d", got, defaultMaxContext)
+	if got := (CortexSession{}).windowSize(); got != defaultModels[roleCode].Window {
+		t.Errorf("windowSize() = %d, want default %d", got, defaultModels[roleCode].Window)
 	}
-	if got := (CortexSession{MaxContext: 8192}).windowSize(); got != 8192 {
+	if got := (CortexSession{Window: 8192}).windowSize(); got != 8192 {
 		t.Errorf("windowSize() = %d, want 8192", got)
 	}
 }
@@ -343,54 +342,41 @@ func TestSessionPrompt(t *testing.T) {
 }
 
 func TestSetModel(t *testing.T) {
-	newSession := func() *CortexSession {
-		return &CortexSession{
-			Request: &AgentRequest{Model: "coder", BaseURL: "http://chatterbox:4000"},
-			Config: &Config{Endpoints: []Endpoint{
-				{Name: "chatterbox", BaseURL: "http://chatterbox:4000", MaxContextOverride: 65536,
-					Models: []string{"coder", "reasoner"}},
-				{Name: "other", BaseURL: "http://other:9000", MaxContextOverride: 8192,
-					Models: []string{"tiny"}},
-			}},
-		}
+	s := &CortexSession{Request: &AgentRequest{Model: "coder", BaseURL: "http://chatterbox:4000"}}
+	s.SetModel("reasoner")
+	if s.Request.Model != "reasoner" {
+		t.Errorf("model = %q, want reasoner", s.Request.Model)
 	}
-
-	t.Run("switches model and re-resolves endpoint", func(t *testing.T) {
-		s := newSession()
-		if err := s.SetModel("tiny"); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if s.Request.Model != "tiny" {
-			t.Errorf("model = %q, want tiny", s.Request.Model)
-		}
-		if s.Request.BaseURL != "http://other:9000" {
-			t.Errorf("base url = %q, want http://other:9000", s.Request.BaseURL)
-		}
-		if s.MaxContext != 8192 {
-			t.Errorf("max context = %d, want 8192", s.MaxContext)
-		}
-	})
-
-	t.Run("unknown model errors and leaves session unchanged", func(t *testing.T) {
-		s := newSession()
-		if err := s.SetModel("nope"); err == nil {
-			t.Fatal("expected error for unknown model")
-		}
-		if s.Request.Model != "coder" {
-			t.Errorf("model changed on failed switch: %q", s.Request.Model)
-		}
-	})
+	if s.Request.BaseURL != "http://chatterbox:4000" {
+		t.Errorf("endpoint should be unchanged on a model swap, got %q", s.Request.BaseURL)
+	}
 }
 
-func TestAvailableModels(t *testing.T) {
-	s := &CortexSession{Config: &Config{Endpoints: []Endpoint{
-		{Models: []string{"coder", "reasoner"}},
-		{Models: []string{"tiny"}},
-	}}}
-	got := strings.Join(s.AvailableModels(), ",")
-	if got != "coder,reasoner,tiny" {
-		t.Errorf("AvailableModels = %q, want coder,reasoner,tiny", got)
-	}
+func TestReadFileSizeGuard(t *testing.T) {
+	dir := t.TempDir()
+	cs := &CortexSession{Window: 1000} // threshold = 500 tokens ≈ 2000 bytes
+
+	t.Run("oversized read is refused and redirects to study", func(t *testing.T) {
+		big := filepath.Join(dir, "big.txt")
+		os.WriteFile(big, make([]byte, 4000), 0644) // ~1000 tokens > 500
+		args, _ := json.Marshal(map[string]string{"path": big})
+		_, err := tc(FunctionReadFile, string(args)).Execute(cs)
+		if err == nil {
+			t.Fatal("expected size-guard error")
+		}
+		if !strings.Contains(err.Error(), "study") {
+			t.Errorf("guard should redirect to study, got %q", err)
+		}
+	})
+
+	t.Run("small read under the threshold succeeds", func(t *testing.T) {
+		small := filepath.Join(dir, "small.txt")
+		os.WriteFile(small, []byte("hi there"), 0644)
+		args, _ := json.Marshal(map[string]string{"path": small})
+		if _, err := tc(FunctionReadFile, string(args)).Execute(cs); err != nil {
+			t.Fatalf("small read should succeed: %v", err)
+		}
+	})
 }
 
 func TestScroller(t *testing.T) {
@@ -519,7 +505,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("parsed call executes through the normal path", func(t *testing.T) {
 		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
 		calls := parseXMLToolCalls(content)
-		out, err := calls[0].Execute()
+		out, err := calls[0].Execute(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,4 +543,31 @@ func TestMessageRender(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRenderStudyResult(t *testing.T) {
+	t.Run("read mode returns the whole file verbatim", func(t *testing.T) {
+		res := study.StudyLoopResult{
+			Stopped: "read",
+			Passes:  []study.StudyPass{{Response: study.StudyResponse{Mode: "read", ReadContent: "package main\n\nfunc main() {}\n"}}},
+		}
+		if got := renderStudyResult(res); got != "package main\n\nfunc main() {}\n" {
+			t.Errorf("read mode = %q, want the whole content", got)
+		}
+	})
+
+	t.Run("study mode renders digests and cited line ranges", func(t *testing.T) {
+		res := study.StudyLoopResult{
+			Stopped:     "done",
+			CoveragePct: 0.42,
+			Digests:     []string{"the study command registers subcommands", ""},
+			Citations:   []study.Citation{{RelPath: "study.go", LineStart: 10, LineEnd: 20, Claim: "registers the study command"}},
+		}
+		got := renderStudyResult(res)
+		for _, want := range []string{"42%", "done", "the study command registers", "study.go:10-20", "registers the study command"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("render missing %q in:\n%s", want, got)
+			}
+		}
+	})
 }

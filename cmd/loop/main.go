@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/study"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 /*
@@ -28,7 +32,7 @@ TODO:
 [x] Improve session status line
 [x] Improve animation
 [x] Timestamp in messages
-[ ] Study tool
+[x] Study tool (file study via internal/study; dir/orientation study TODO)
 [ ] Journal tool
 [ ] Integrate cortex dream
 [ ] Integrate cortex think
@@ -50,6 +54,7 @@ const ModelCoder = "coder"
 const FunctionReadFile = "read_file"
 const FunctionWriteFile = "write_file"
 const FunctionEditFile = "edit_file"
+const FunctionStudy = "study"
 const FunctionBash = "bash"
 
 const defaultRole = RoleUser
@@ -57,7 +62,7 @@ const defaultModel = ModelCoder
 
 // maxToolIterations bounds the agentic inner loop so a confused model can't
 // spin forever burning tokens. The smallest form of the "bounded" principle.
-const maxToolIterations = 10
+const maxToolIterations = 100
 
 // maxToolOutput caps how much tool output we feed back into context, so a
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
@@ -95,14 +100,23 @@ func version() string {
 	return v
 }
 
-// defaultMaxContext is the fallback context window (tokens) used only when the
-// config has no max_context_override for the active model. The real value is
-// config-driven — see Config / NewCortexSession.
-const defaultMaxContext = 65536
+// Model roles. The harness routes each kind of work to a model binding: the
+// coding turn uses "code", the study tool uses "study". One mechanism — new
+// nodes (think/dream/dag) just add roles. See Config.Spec.
+const (
+	roleCode  = "code"
+	roleStudy = "study"
+)
 
-// defaultBaseURL is the fallback endpoint used only when the config names no
-// endpoint for the active model.
-const defaultBaseURL = "http://chatterbox:4000"
+// defaultModels is the built-in role → binding map, used when config doesn't
+// override a role. Matches the chatterbox setup: the 30B coder for coding, the
+// small long-context qwen3-4b for study (read-heavy, think-light, so a general
+// long-context instruct model is the right tool — and 256K means it ingests big
+// files in one pass).
+var defaultModels = map[string]ModelSpec{
+	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
+	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 65536},
+}
 
 // promptGlyph is the input affordance at the end of the status line.
 const promptGlyph = "❯"
@@ -222,6 +236,9 @@ type AgentRequest struct {
 	// BaseURL is the endpoint root (e.g. http://chatterbox:4000), resolved from
 	// config. Not serialized — it's transport, not request body.
 	BaseURL string `json:"-"`
+	// APIKey is the Bearer token for endpoints that need one (e.g. OpenRouter).
+	// Empty for local endpoints. Not serialized.
+	APIKey string `json:"-"`
 }
 
 type Tool struct {
@@ -255,7 +272,8 @@ func newTool(name, desc string, params map[string]any) Tool {
 }
 
 var readFile = newTool(FunctionReadFile,
-	"Read the contents of a file at the given path.",
+	"Read the whole contents of a file. Only for files that fit the context window "+
+		"— large files are refused; use study for those.",
 	objectSchema(map[string]any{
 		"path": stringProp("Path to the file to read, relative to the working directory."),
 	}, "path"))
@@ -277,13 +295,23 @@ var editFile = newTool(FunctionEditFile,
 		"new_string": stringProp("The text to replace it with. May be empty to delete old_string."),
 	}, "path", "old_string", "new_string"))
 
+var studyTool = newTool(FunctionStudy,
+	"Study a file and return curated context: a size-adaptive, relevance-deepening "+
+		"digest with cited line ranges. Prefer this over read_file for large files, or "+
+		"when you want to understand a file relative to a goal. Reads the whole file when "+
+		"it fits the context window.",
+	objectSchema(map[string]any{
+		"path": stringProp("Path to the file to study."),
+		"goal": stringProp("What you want to learn from the file; guides which regions get deepened."),
+	}, "path"))
+
 var bash = newTool(FunctionBash,
 	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
 
-var tools = []Tool{readFile, writeFile, editFile, bash}
+var tools = []Tool{readFile, writeFile, editFile, studyTool, bash}
 
 // Sends the request to the models API endpoint
 func (r *AgentRequest) Send() (*AgentResponse, error) {
@@ -295,7 +323,7 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 	method := "POST"
 	base := r.BaseURL
 	if base == "" {
-		base = defaultBaseURL
+		base = defaultModels[roleCode].Endpoint
 	}
 	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
 	reader := bytes.NewReader(b)
@@ -304,6 +332,9 @@ func (r *AgentRequest) Send() (*AgentResponse, error) {
 		return nil, fmt.Errorf("error building agent request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if r.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+r.APIKey)
+	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -373,19 +404,96 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
-func (tc ToolCall) Execute() (string, error) {
+// Execute dispatches a tool call. cs carries session config (model, endpoint,
+// window) that some tools need — study does; the file/shell tools ignore it.
+func (tc ToolCall) Execute(cs *CortexSession) (string, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
-		return tc.ReadFile()
+		return tc.ReadFile(cs)
 	case FunctionWriteFile:
 		return tc.WriteFile()
 	case FunctionEditFile:
 		return tc.EditFile()
+	case FunctionStudy:
+		return tc.Study(cs)
 	case FunctionBash:
 		return tc.Bash()
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
+}
+
+// Study runs the real study engine (internal/study) over a file and returns
+// curated context: a size-adaptive, relevance-deepening digest with cited line
+// ranges, or the whole file when it fits the window. Inference and curation are
+// backed by an OpenAI-compatible provider pointed at the session's endpoint.
+func (tc ToolCall) Study(cs *CortexSession) (string, error) {
+	path, err := tc.stringArg("path")
+	if err != nil {
+		return "", err
+	}
+	goal, _ := tc.stringArg("goal") // optional
+	printToolAction(fmt.Sprintf("study(%s) via %s", path, cs.Study.Model))
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+
+	// Delegate to the STUDY model — a small, long-context model running in its
+	// OWN context. The big coding model never ingests the raw file; it gets back
+	// only the curated result. This is the small-model-amplifier split: a cheap
+	// model does the heavy reading, the expensive model spends ~no context on it.
+	base := strings.TrimRight(cs.Study.Endpoint, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{Name: "study", BaseURL: base, APIKey: keychainKey(cs.Study.KeyService)})
+	provider.SetModel(cs.Study.Model)
+	provider.SetTemperature(0)
+
+	req := study.StudyRequest{
+		Path:    abs,
+		RelPath: path,
+		// Window is the CONSUMING model's window — the coding model that gets the
+		// result back — so study reads-whole only when the file fits THAT, and
+		// otherwise samples down to a compact digest. The study model's larger
+		// window just lets it ingest denser samples while inferring.
+		Window: cs.windowSize(),
+		Goal:   goal,
+		Infer:  study.ProviderInfer(provider),
+	}
+	// Full study → curate → deepen loop, all on the study model in its own
+	// context. The curator decides DONE / DENSIFY / TARGET between passes; only
+	// the final curated digest + citations come back to the harness.
+	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, 3)
+	if err != nil {
+		return "", fmt.Errorf("study %s: %w", path, err)
+	}
+	return renderStudyResult(res), nil
+}
+
+// renderStudyResult turns the curated study-loop result into the context string
+// the harness model consumes. Read mode returns the whole file verbatim;
+// otherwise it's the per-pass digests plus provenance-validated citations.
+func renderStudyResult(res study.StudyLoopResult) string {
+	if res.Stopped == "read" && len(res.Passes) > 0 {
+		return res.Passes[0].Response.ReadContent
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "coverage %.0f%%, stopped: %s\n", 100*res.CoveragePct, res.Stopped)
+	for i, d := range res.Digests {
+		if s := strings.TrimSpace(d); s != "" {
+			fmt.Fprintf(&b, "\npass %d:\n%s\n", i+1, s)
+		}
+	}
+	if len(res.Citations) > 0 {
+		b.WriteString("\ncitations:\n")
+		for _, c := range res.Citations {
+			fmt.Fprintf(&b, "  %s:%d-%d  %s\n", c.RelPath, c.LineStart, c.LineEnd, c.Claim)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // printToolAction prints an indented, iconned tool-action line under the
@@ -394,10 +502,21 @@ func printToolAction(action string) {
 	fmt.Printf("  %s\n", withColor(iconTool+" "+action, green))
 }
 
-func (tc ToolCall) ReadFile() (string, error) {
+func (tc ToolCall) ReadFile(cs *CortexSession) (string, error) {
 	path, err := tc.stringArg("path")
 	if err != nil {
 		return "", err
+	}
+	// Size guard: a whole-file read of something bigger than half the coding
+	// model's window would blow its context. Refuse and redirect to study, which
+	// the model can't otherwise be trusted to prefer on its own. (~4 bytes/token.)
+	if cs != nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			if estTokens := int(info.Size()) / 4; estTokens > cs.windowSize()/2 {
+				return "", fmt.Errorf("%s is %d bytes (~%d tokens) — too large to read whole; use study(%q, goal) instead",
+					path, info.Size(), estTokens, path)
+			}
+		}
 	}
 	printToolAction(fmt.Sprintf("read_file(%s)", path))
 	data, err := os.ReadFile(path)
@@ -656,79 +775,77 @@ type CortexSession struct {
 	// Because we re-send the whole history each call, it equals how full the
 	// context window currently is — the live gauge in the status line.
 	LastPromptTokens int
-	// MaxContext is the active model's context window, resolved from config.
-	// Zero means "unknown" → windowSize falls back to defaultMaxContext.
-	MaxContext int
-	// Config is the loaded .cortex/config.json (may be nil), kept so /model can
-	// re-resolve the endpoint when switching models mid-session.
+	// Window is the code model's context window (status gauge + read_file guard).
+	Window int
+	// Study is the study role's binding (small long-context model in its own
+	// context), resolved from config.
+	Study ModelSpec
+	// Config is the loaded .cortex/config.json (may be nil).
 	Config *Config
 }
 
-// SetModel switches the active model and re-resolves its endpoint (base URL +
-// context window) from config. It errors if the model isn't in any configured
-// endpoint, since without that we don't know where to send or how big the
-// window is. Conversation history is preserved across the switch.
-func (cs *CortexSession) SetModel(model string) error {
-	ep := cs.Config.EndpointFor(model)
-	if ep == nil {
-		return fmt.Errorf("unknown model %q (not in any configured endpoint)", model)
-	}
-	cs.Request.Model = model
-	if ep.BaseURL != "" {
-		cs.Request.BaseURL = ep.BaseURL
-	}
-	cs.MaxContext = ep.MaxContextOverride
-	return nil
-}
+// SetModel switches the active coding model id. The code endpoint is unchanged
+// (models on the same endpoint swap freely); history is preserved.
+func (cs *CortexSession) SetModel(model string) { cs.Request.Model = model }
 
-// AvailableModels lists every model across all configured endpoints.
-func (cs *CortexSession) AvailableModels() []string {
-	var out []string
-	if cs.Config != nil {
-		for _, ep := range cs.Config.Endpoints {
-			out = append(out, ep.Models...)
-		}
-	}
-	return out
-}
-
-// windowSize is the context window to gauge against: the config-resolved value,
-// or the default if config didn't provide one.
+// windowSize is the code model's context window — the gauge denominator and the
+// read_file size threshold. Falls back to the built-in default.
 func (cs CortexSession) windowSize() int {
-	if cs.MaxContext > 0 {
-		return cs.MaxContext
+	if cs.Window > 0 {
+		return cs.Window
 	}
-	return defaultMaxContext
+	return defaultModels[roleCode].Window
 }
 
-// Config is the subset of .cortex/config.json the loop consults. The file is
-// built during cortex setup; the loop is a reader, never a writer. Unknown
-// fields are ignored on unmarshal.
+// ModelSpec is one role's binding: where to send, which model, how big its window.
+// KeyService, when set, names a macOS keychain item whose secret is used as the
+// Bearer token (e.g. "cortex-openrouter" for OpenRouter). The key is fetched at
+// call time and never written to config or echoed.
+type ModelSpec struct {
+	Endpoint   string `json:"endpoint"`
+	Model      string `json:"model"`
+	Window     int    `json:"window"`      // context window in tokens
+	KeyService string `json:"key_service"` // keychain service name for the API key, or ""
+}
+
+// keychainKey reads a secret from the macOS keychain by service name. Returns ""
+// on any error (item missing, non-macOS). The value is never logged.
+func keychainKey(service string) string {
+	if service == "" {
+		return ""
+	}
+	out, err := exec.Command("security", "find-generic-password", "-s", service, "-w").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Config is the subset of .cortex/config.json the loop consults: a role → model
+// binding map. The old harness's other keys (endpoints/routing/ollama_*) are
+// ignored — the loop routes through one mechanism.
 type Config struct {
-	Endpoints    []Endpoint `json:"endpoints"`
-	DefaultModel string     `json:"default_model"`
+	Models map[string]ModelSpec `json:"models"`
 }
 
-type Endpoint struct {
-	Name               string   `json:"name"`
-	BaseURL            string   `json:"base_url"`
-	MaxContextOverride int      `json:"max_context_override"`
-	Models             []string `json:"models"`
-}
-
-// EndpointFor returns the endpoint that serves the given model, or nil.
-func (c *Config) EndpointFor(model string) *Endpoint {
-	if c == nil {
-		return nil
-	}
-	for i := range c.Endpoints {
-		for _, m := range c.Endpoints[i].Models {
-			if m == model {
-				return &c.Endpoints[i]
+// Spec resolves a role to its binding: a per-field config override layered on the
+// built-in default, so a config can set just the model and inherit the rest.
+func (c *Config) Spec(role string) ModelSpec {
+	spec := defaultModels[role]
+	if c != nil {
+		if m, ok := c.Models[role]; ok {
+			if m.Endpoint != "" {
+				spec.Endpoint = m.Endpoint
+			}
+			if m.Model != "" {
+				spec.Model = m.Model
+			}
+			if m.Window > 0 {
+				spec.Window = m.Window
 			}
 		}
 	}
-	return nil
+	return spec
 }
 
 // findConfigPath walks up from the cwd looking for .cortex/config.json, like
@@ -774,19 +891,20 @@ func NewCortexSession() *CortexSession {
 	args := CortexArgs(os.Args)
 	req := args.Request()
 	cfg := LoadConfig()
-	session := &CortexSession{Args: &args, Request: req, Config: cfg}
 
-	// Resolve the active model's endpoint from config: its base URL and context
-	// window. Missing config or model => keep the built-in defaults.
-	if ep := cfg.EndpointFor(req.Model); ep != nil {
-		if ep.BaseURL != "" {
-			req.BaseURL = ep.BaseURL
-		}
-		if ep.MaxContextOverride > 0 {
-			session.MaxContext = ep.MaxContextOverride
-		}
+	// Resolve the code role: the model + endpoint + window for the coding turn.
+	code := cfg.Spec(roleCode)
+	req.Model = code.Model
+	req.BaseURL = code.Endpoint
+	req.APIKey = keychainKey(code.KeyService)
+
+	return &CortexSession{
+		Args:    &args,
+		Request: req,
+		Config:  cfg,
+		Window:  code.Window,
+		Study:   cfg.Spec(roleStudy), // study role: small long-context model
 	}
-	return session
 }
 
 func (cs CortexSession) PrintArgs() {
@@ -887,7 +1005,7 @@ func (cs *CortexSession) Resolve() error {
 		// (3) Run every requested tool and append one result per call. Each
 		// id MUST get a matching tool message or the next send 400s.
 		for _, tc := range msg.ToolCalls {
-			content, err := tc.Execute()
+			content, err := tc.Execute(cs)
 			if err != nil {
 				// Tool errors are observations, not crashes: feed them back so
 				// the model can self-correct.
@@ -927,17 +1045,16 @@ func main() {
 			break
 		}
 
-		// /model [name] shows or switches the active model. With no name it
-		// lists what's available; switching re-resolves the endpoint from config
-		// and keeps the conversation history.
+		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
 			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
 			if name == "" {
-				fmt.Printf("current: %s\navailable: %s\n", session.Request.Model, strings.Join(session.AvailableModels(), ", "))
-			} else if err := session.SetModel(name); err != nil {
-				fmt.Printf("%v\n", err)
+				fmt.Printf("code:  %s @ %s\nstudy: %s @ %s\n",
+					session.Request.Model, session.Request.BaseURL,
+					session.Study.Model, session.Study.Endpoint)
 			} else {
-				fmt.Printf("switched to %s\n", name)
+				session.SetModel(name)
+				fmt.Printf("code model → %s\n", name)
 			}
 			continue
 		}
