@@ -114,8 +114,11 @@ const (
 // long-context instruct model is the right tool — and 256K means it ingests big
 // files in one pass).
 var defaultModels = map[string]ModelSpec{
-	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
-	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 65536},
+	roleCode: {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
+	// Window is the EFFECTIVE sampling budget, not the raw context size: reasoner
+	// is 32K, but the inference template + the model's completion need headroom,
+	// so we leave ~4K and budget the sample at 28K.
+	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 28000},
 }
 
 // promptGlyph is the input affordance at the end of the status line.
@@ -455,18 +458,18 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	req := study.StudyRequest{
 		Path:    abs,
 		RelPath: path,
-		// Window is the CONSUMING model's window — the coding model that gets the
-		// result back — so study reads-whole only when the file fits THAT, and
-		// otherwise samples down to a compact digest. The study model's larger
-		// window just lets it ingest denser samples while inferring.
-		Window: cs.windowSize(),
+		// Window is the STUDY model's window — it ingests the sample and runs
+		// inference, so the sampled prompt must fit IT (reasoner is only 32K). The
+		// result coming back is just a small digest, so the coding model is never
+		// the constraint; the study model is.
+		Window: cs.Study.Window,
 		Goal:   goal,
 		Infer:  study.ProviderInfer(provider),
 	}
-	// Full study → curate → deepen loop, all on the study model in its own
-	// context. The curator decides DONE / DENSIFY / TARGET between passes; only
-	// the final curated digest + citations come back to the harness.
-	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, 3)
+	// Single pass for now (maxPasses=1): one sample → infer on the study model.
+	// Deepening (more passes / the curator loop) is the obvious next lever, but
+	// one pass keeps a study call to a single inference for interactivity.
+	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, 1)
 	if err != nil {
 		return "", fmt.Errorf("study %s: %w", path, err)
 	}
@@ -1022,7 +1025,30 @@ func (cs *CortexSession) Resolve() error {
 	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
 }
 
+// runStudyCLI invokes the study tool directly and prints the curated context —
+// no coding model, no REPL. For inspecting what study returns in isolation:
+//
+//	loop study <path> [goal...]
+func runStudyCLI(path, goal string) {
+	session := NewCortexSession()
+	args, _ := json.Marshal(map[string]string{"path": path, "goal": goal})
+	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
+	out, err := call.Study(session)
+	if err != nil {
+		fmt.Println("study error:", err)
+		return
+	}
+	fmt.Println("\n--- curated context ---")
+	fmt.Println(out)
+}
+
 func main() {
+	// Direct study mode: `loop study <path> [goal]` runs study alone.
+	if len(os.Args) >= 3 && os.Args[1] == "study" {
+		runStudyCLI(os.Args[2], strings.Join(os.Args[3:], " "))
+		return
+	}
+
 	session := NewCortexSession()
 	scanner := bufio.NewScanner(os.Stdin)
 
