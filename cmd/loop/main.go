@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,10 +110,11 @@ const (
 )
 
 // defaultModels is the built-in role → binding map, used when config doesn't
-// override a role. Matches the chatterbox setup: the 30B coder for coding, the
-// small long-context qwen3-4b for study (read-heavy, think-light, so a general
-// long-context instruct model is the right tool — and 256K means it ingests big
-// files in one pass).
+// override a role. Matches the chatterbox setup: the 30B coder for coding, and
+// reasoner for study (fast + concise; study is read-heavy/think-light, so coder
+// skill isn't needed). Study wants a LONG-context model for deepening — the
+// 256K qwen3-4b is the intended home once its serving is fixed; reasoner's 32K
+// handles a single sparse pass but overflows when deepening densifies.
 var defaultModels = map[string]ModelSpec{
 	roleCode: {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
 	// Window is the EFFECTIVE sampling budget, not the raw context size: reasoner
@@ -304,8 +306,9 @@ var studyTool = newTool(FunctionStudy,
 		"when you want to understand a file relative to a goal. Reads the whole file when "+
 		"it fits the context window.",
 	objectSchema(map[string]any{
-		"path": stringProp("Path to the file to study."),
-		"goal": stringProp("What you want to learn from the file; guides which regions get deepened."),
+		"path":   stringProp("Path to the file to study."),
+		"goal":   stringProp("What you want to learn from the file; guides which regions get deepened."),
+		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1."},
 	}, "path"))
 
 var bash = newTool(FunctionBash,
@@ -436,7 +439,11 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 		return "", err
 	}
 	goal, _ := tc.stringArg("goal") // optional
-	printToolAction(fmt.Sprintf("study(%s) via %s", path, cs.Study.Model))
+	passes := 1
+	if p, ok := tc.intArg("passes"); ok && p > 0 {
+		passes = p
+	}
+	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -458,6 +465,7 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	req := study.StudyRequest{
 		Path:    abs,
 		RelPath: path,
+		Density: "sparse", // smaller sample → faster prefill on the study model
 		// Window is the STUDY model's window — it ingests the sample and runs
 		// inference, so the sampled prompt must fit IT (reasoner is only 32K). The
 		// result coming back is just a small digest, so the coding model is never
@@ -466,10 +474,10 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 		Goal:   goal,
 		Infer:  study.ProviderInfer(provider),
 	}
-	// Single pass for now (maxPasses=1): one sample → infer on the study model.
-	// Deepening (more passes / the curator loop) is the obvious next lever, but
-	// one pass keeps a study call to a single inference for interactivity.
-	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, 1)
+	// Deepening: `passes` runs the study → curate → deepen loop. The curator
+	// decides DENSIFY/TARGET between passes and carries the covered set forward,
+	// so each pass samples NEW regions. passes=1 is a single sample→infer.
+	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
 	if err != nil {
 		return "", fmt.Errorf("study %s: %w", path, err)
 	}
@@ -715,6 +723,20 @@ func (tc ToolCall) stringArg(name string) (string, error) {
 		return "", fmt.Errorf("missing or non-string arg %q", name)
 	}
 	return v, nil
+}
+
+// intArg pulls an integer field from Arguments. JSON numbers decode as float64.
+// Returns (0, false) when missing or not a number.
+func (tc ToolCall) intArg(name string) (int, bool) {
+	var m map[string]any
+	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
+		if json.Unmarshal([]byte(s), &m) == nil {
+			if v, ok := m[name].(float64); ok {
+				return int(v), true
+			}
+		}
+	}
+	return 0, false
 }
 
 func (tc ToolCall) String() string {
@@ -1028,10 +1050,10 @@ func (cs *CortexSession) Resolve() error {
 // runStudyCLI invokes the study tool directly and prints the curated context —
 // no coding model, no REPL. For inspecting what study returns in isolation:
 //
-//	loop study <path> [goal...]
-func runStudyCLI(path, goal string) {
+//	loop study <path> [goal...] [passes]
+func runStudyCLI(path, goal string, passes int) {
 	session := NewCortexSession()
-	args, _ := json.Marshal(map[string]string{"path": path, "goal": goal})
+	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal, "passes": passes})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
 	out, err := call.Study(session)
 	if err != nil {
@@ -1043,9 +1065,17 @@ func runStudyCLI(path, goal string) {
 }
 
 func main() {
-	// Direct study mode: `loop study <path> [goal]` runs study alone.
+	// Direct study mode: `loop study <path> [goal...] [passes]`. A trailing bare
+	// integer is taken as the deepening pass count.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
-		runStudyCLI(os.Args[2], strings.Join(os.Args[3:], " "))
+		rest := os.Args[2:]
+		path, goalParts, passes := rest[0], rest[1:], 1
+		if n := len(goalParts); n > 0 {
+			if p, err := strconv.Atoi(goalParts[n-1]); err == nil && p > 0 {
+				passes, goalParts = p, goalParts[:n-1]
+			}
+		}
+		runStudyCLI(path, strings.Join(goalParts, " "), passes)
 		return
 	}
 
