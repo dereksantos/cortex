@@ -50,7 +50,9 @@ type studyEvalRow struct {
 	CoveragePct     float64 `json:"coverage_pct"`
 	Citations       int     `json:"citations"`
 	Grounded        int     `json:"grounded"`
-	GroundednessPct float64 `json:"groundedness_pct"`
+	Failed          int     `json:"failed"`
+	Unscored        int     `json:"unscored"`
+	GroundednessPct float64 `json:"groundedness_pct"` // grounded / (grounded+failed)
 	DigestChars     int     `json:"digest_chars"`
 	Error           string  `json:"error,omitempty"`
 }
@@ -66,24 +68,49 @@ func hasUpper(s string) bool {
 	return false
 }
 
-// scoreGroundedness checks each citation: its line range must lie inside the
-// file, and its claim must reference at least one identifier-looking symbol that
-// actually appears in the file. A rough but automatic hallucination check.
-func scoreGroundedness(content string, res study.StudyLoopResult) (total, grounded int) {
-	lines := strings.Count(content, "\n") + 1
+// scoreGroundedness classifies each citation three ways, so "ungrounded" splits
+// into real model errors vs scorer limits:
+//
+//	grounded — a symbol named in the claim appears WITHIN the cited line range
+//	failed   — the claim names a symbol, but it is NOT at the cited lines (wrong
+//	           location or hallucinated): a genuine model error
+//	unscored — the claim names no extractable identifier, so we can't verify it
+//	           (a scorer limitation, not necessarily a model error)
+//
+// Checking the symbol is at the CITED lines (not merely somewhere in the file)
+// is the stronger test — it catches a plausible claim pinned to the wrong place.
+func scoreGroundedness(content string, res study.StudyLoopResult) (grounded, failed, unscored int) {
+	fileLines := strings.Split(content, "\n")
 	for _, c := range res.Citations {
-		total++
-		if c.LineStart < 1 || c.LineStart > c.LineEnd || c.LineEnd > lines {
-			continue // line range out of bounds → not grounded
+		var idents []string
+		for _, s := range identRe.FindAllString(c.Claim, -1) {
+			if hasUpper(s) {
+				idents = append(idents, s)
+			}
 		}
-		for _, sym := range identRe.FindAllString(c.Claim, -1) {
-			if hasUpper(sym) && strings.Contains(content, sym) {
-				grounded++
+		if len(idents) == 0 {
+			unscored++ // nothing identifier-shaped to verify
+			continue
+		}
+		if c.LineStart < 1 || c.LineStart > c.LineEnd || c.LineEnd > len(fileLines) {
+			failed++ // out-of-range line range is a clear error
+			continue
+		}
+		cited := strings.Join(fileLines[c.LineStart-1:c.LineEnd], "\n")
+		ok := false
+		for _, s := range idents {
+			if strings.Contains(cited, s) {
+				ok = true
 				break
 			}
 		}
+		if ok {
+			grounded++
+		} else {
+			failed++
+		}
 	}
-	return total, grounded
+	return grounded, failed, unscored
 }
 
 // measureCell runs study once over a case at a given chunk count and scores it.
@@ -100,9 +127,10 @@ func measureCell(cs *CortexSession, c studyEvalCase, chunks int) studyEvalRow {
 	row.CoveragePct = 100 * res.CoveragePct
 	row.DigestChars = len(strings.Join(res.Digests, ""))
 	if data, derr := os.ReadFile(c.Path); derr == nil {
-		row.Citations, row.Grounded = scoreGroundedness(string(data), res)
-		if row.Citations > 0 {
-			row.GroundednessPct = 100 * float64(row.Grounded) / float64(row.Citations)
+		row.Grounded, row.Failed, row.Unscored = scoreGroundedness(string(data), res)
+		row.Citations = row.Grounded + row.Failed + row.Unscored
+		if g := row.Grounded + row.Failed; g > 0 {
+			row.GroundednessPct = 100 * float64(row.Grounded) / float64(g)
 		}
 	}
 	return row
@@ -115,22 +143,6 @@ func median(xs []float64) float64 {
 	s := append([]float64(nil), xs...)
 	sort.Float64s(s)
 	return s[len(s)/2]
-}
-
-func minMax(xs []float64) (lo, hi float64) {
-	if len(xs) == 0 {
-		return 0, 0
-	}
-	lo, hi = xs[0], xs[0]
-	for _, x := range xs[1:] {
-		if x < lo {
-			lo = x
-		}
-		if x > hi {
-			hi = x
-		}
-	}
-	return lo, hi
 }
 
 // runStudyEval sweeps density × fixtures, repeats each cell studyEvalRepeats
@@ -153,10 +165,11 @@ func runStudyEval() {
 	}
 
 	fmt.Printf("\n--- study-eval density sweep (model: %s, n=%d/cell) ---\n", session.Study.Model, studyEvalRepeats)
-	fmt.Printf("%-30s %4s %8s %7s %7s %s\n", "file", "k", "lat(s)", "cov%", "cites", "grounded% (med [min-max])")
+	fmt.Printf("%-26s %3s %7s %6s   %s\n", "file", "k", "lat(s)", "cov%", "citations summed across reps")
 	for _, chunks := range studyEvalSweep {
 		for _, c := range studyEvalCases {
-			var lat, cov, cites, grnd []float64
+			var lat, cov []float64
+			var g, f, u int
 			read := false
 			for _, r := range rows {
 				if r.Path != c.Path || r.Chunks != chunks || r.Error != "" {
@@ -167,17 +180,21 @@ func runStudyEval() {
 				}
 				lat = append(lat, float64(r.LatencyMS)/1000)
 				cov = append(cov, r.CoveragePct)
-				cites = append(cites, float64(r.Citations))
-				grnd = append(grnd, r.GroundednessPct)
+				g, f, u = g+r.Grounded, f+r.Failed, u+r.Unscored
 			}
 			name := shortName(c.Path)
 			if read {
-				fmt.Printf("%-30s %4d %8.1f   read (fit, whole file)\n", name, chunks, median(lat))
+				fmt.Printf("%-26s %3d %7.1f   read (fit, whole file)\n", name, chunks, median(lat))
 				continue
 			}
-			glo, ghi := minMax(grnd)
-			fmt.Printf("%-30s %4d %8.1f %6.0f%% %7.0f %5.0f%% [%.0f-%.0f]\n",
-				name, chunks, median(lat), median(cov), median(cites), median(grnd), glo, ghi)
+			gp := 0.0
+			if g+f > 0 {
+				gp = 100 * float64(g) / float64(g+f)
+			}
+			// grounded% = real-grounding rate; unscored = citations the scorer
+			// couldn't verify (claim had no extractable identifier).
+			fmt.Printf("%-26s %3d %7.1f %5.0f%%   grounded=%d failed=%d unscored=%d  (%.0f%% grounded)\n",
+				name, chunks, median(lat), median(cov), g, f, u, gp)
 		}
 	}
 }
