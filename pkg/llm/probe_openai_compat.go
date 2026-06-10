@@ -33,6 +33,14 @@ type OpenAICompatProbeConfig struct {
 	// can pin the runtime size here.
 	MaxContextOverride int
 
+	// ModelContextOverrides pins the effective context window for
+	// individual model ids, for endpoints whose models are deployed at
+	// different --ctx-size values. A model's entry wins over
+	// MaxContextOverride. Keyed by the bare model id (e.g. "coder80").
+	//
+	// This is the runtime sink for config.EndpointDef.ModelContextOverrides.
+	ModelContextOverrides map[string]int
+
 	// ModelCapabilities lets the operator declare per-model capability
 	// tags that the id-pattern auto-detection can't recognize. Keyed
 	// by the bare model id served by this endpoint (e.g. "reasoner");
@@ -84,6 +92,9 @@ func (p *openAICompatProbe) Probe(ctx context.Context) ([]ModelInfo, error) {
 		ctxWindow := m.ContextLength
 		if p.cfg.MaxContextOverride > 0 {
 			ctxWindow = p.cfg.MaxContextOverride
+		}
+		if w, ok := p.cfg.ModelContextOverrides[m.ID]; ok && w > 0 {
+			ctxWindow = w
 		}
 		// Operator-supplied capability tags take precedence over
 		// id-pattern inference, but defer to endpoint-advertised

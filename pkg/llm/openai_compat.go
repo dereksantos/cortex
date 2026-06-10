@@ -52,6 +52,15 @@ type EndpointConfig struct {
 	Name    string
 	BaseURL string
 	APIKey  string
+
+	// ChatTemplateKwargs, when non-nil, is sent verbatim as the
+	// `chat_template_kwargs` field on every chat-completions request.
+	// llama.cpp-backed servers (and LiteLLM proxies in front of them)
+	// pass these variables to the model's Jinja chat template; the
+	// canonical use is `{"enable_thinking": false}` to suppress
+	// built-in reasoning on hybrid thinking models. Leave nil for
+	// endpoints that reject unknown request fields (OpenAI proper).
+	ChatTemplateKwargs map[string]any
 }
 
 // CompatModel is one entry from an endpoint's /models listing.
@@ -87,6 +96,10 @@ type OpenAICompatClient struct {
 	// successful request — feeds the Phase 4 Slice E swap-aware
 	// routing substrate. Nil is fine (no tracking).
 	swapTracker *SwapTracker
+
+	// chatTemplateKwargs, when non-nil, rides on every request — see
+	// EndpointConfig.ChatTemplateKwargs.
+	chatTemplateKwargs map[string]any
 }
 
 // SetSwapTracker wires a shared tracker so this client reports its
@@ -102,11 +115,12 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 		name = "openai-compat"
 	}
 	return &OpenAICompatClient{
-		name:        name,
-		baseURL:     strings.TrimRight(ep.BaseURL, "/"),
-		apiKey:      ep.APIKey,
-		maxTokens:   defaultMaxTokens,
-		temperature: envTemperature(),
+		name:               name,
+		baseURL:            strings.TrimRight(ep.BaseURL, "/"),
+		apiKey:             ep.APIKey,
+		maxTokens:          defaultMaxTokens,
+		temperature:        envTemperature(),
+		chatTemplateKwargs: ep.ChatTemplateKwargs,
 		httpClient: &http.Client{
 			Timeout: compatTimeout(),
 		},
@@ -169,14 +183,16 @@ func (c *OpenAICompatClient) GenerateWithStats(ctx context.Context, prompt strin
 	return c.generate(ctx, prompt, "")
 }
 
-// compatRequest is the standard OpenAI chat-completions body. No
-// vendor extensions — the point of this client is universal
-// compatibility.
+// compatRequest is the standard OpenAI chat-completions body. The one
+// vendor extension — chat_template_kwargs — is opt-in per endpoint and
+// omitted from the wire unless configured, so the default request stays
+// universally compatible.
 type compatRequest struct {
-	Model       string          `json:"model"`
-	MaxTokens   int             `json:"max_tokens"`
-	Messages    []compatMessage `json:"messages"`
-	Temperature *float64        `json:"temperature,omitempty"`
+	Model              string          `json:"model"`
+	MaxTokens          int             `json:"max_tokens"`
+	Messages           []compatMessage `json:"messages"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	ChatTemplateKwargs map[string]any  `json:"chat_template_kwargs,omitempty"`
 }
 
 type compatMessage struct {
@@ -300,10 +316,11 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 	msgs = append(msgs, compatMessage{Role: "user", Content: prompt})
 
 	body := compatRequest{
-		Model:       c.model,
-		MaxTokens:   c.maxTokens,
-		Messages:    msgs,
-		Temperature: c.temperature,
+		Model:              c.model,
+		MaxTokens:          c.maxTokens,
+		Messages:           msgs,
+		Temperature:        c.temperature,
+		ChatTemplateKwargs: c.chatTemplateKwargs,
 	}
 
 	raw, err := c.doRaw(ctx, "/chat/completions", body)

@@ -46,6 +46,51 @@ func TestOpenAICompatGenerate(t *testing.T) {
 	}
 }
 
+// chat_template_kwargs rides on the wire only when configured — the
+// default request must stay universally OpenAI-compatible (some hosted
+// endpoints reject unknown fields).
+func TestOpenAICompatChatTemplateKwargs(t *testing.T) {
+	tests := []struct {
+		name   string
+		kwargs map[string]any
+	}{
+		{"sent when configured", map[string]any{"enable_thinking": false}},
+		{"omitted when nil", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var raw map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				got, present := raw["chat_template_kwargs"]
+				if tt.kwargs == nil {
+					if present {
+						t.Errorf("chat_template_kwargs should be omitted, got %s", got)
+					}
+				} else if !present || !strings.Contains(string(got), `"enable_thinking":false`) {
+					t.Errorf("chat_template_kwargs missing or wrong: present=%v body=%s", present, got)
+				}
+				_ = json.NewEncoder(w).Encode(compatResponse{
+					Choices: []compatChoice{{Message: compatMessage{Role: "assistant", Content: "ok"}}},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewOpenAICompatClient(EndpointConfig{Name: "test", BaseURL: srv.URL + "/v1", ChatTemplateKwargs: tt.kwargs})
+			c.SetModel("m")
+
+			if _, err := c.Generate(context.Background(), "hello"); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if _, _, err := c.GenerateWithTools(context.Background(), []ChatMessage{{Role: "user", Content: "hello"}}, nil, ""); err != nil {
+				t.Fatalf("generate with tools: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatStatsRoundtrip(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(compatResponse{

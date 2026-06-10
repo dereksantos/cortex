@@ -75,9 +75,10 @@ func BuildProvider(cfg *config.Config, modelID string, opts ...Option) llm.Provi
 	// model ids route to a configured OpenAI-compat endpoint.
 	if ep, routedModel, ok := cfg.ResolveModelRoute(modelID); ok {
 		client := llm.NewOpenAICompatClient(llm.EndpointConfig{
-			Name:    ep.Name,
-			BaseURL: ep.BaseURL,
-			APIKey:  ep.ResolveAPIKey(),
+			Name:               ep.Name,
+			BaseURL:            ep.BaseURL,
+			APIKey:             ep.ResolveAPIKey(),
+			ChatTemplateKwargs: ep.ChatTemplateKwargsFor(routedModel),
 		})
 		client.SetModel(routedModel)
 		return client

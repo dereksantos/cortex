@@ -68,6 +68,48 @@ func TestOpenAICompatProbeRespectsModelCapabilities(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatProbeModelContextOverrides validates the per-model
+// window pinning for heterogeneous fleets (chatterbox serves coder at
+// 65536 but coder80 at 32768). Precedence: per-model override >
+// endpoint-wide MaxContextOverride > /v1/models-advertised value.
+func TestOpenAICompatProbeModelContextOverrides(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id":"coder"},
+				{"id":"coder80"},
+				{"id":"qwen3-4b","max_context_window":262144}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	probe := NewOpenAICompatProbe(OpenAICompatProbeConfig{
+		Endpoint:           EndpointConfig{Name: "chatterbox", BaseURL: srv.URL + "/v1"},
+		IsLocal:            true,
+		MaxContextOverride: 65536,
+		ModelContextOverrides: map[string]int{
+			"coder80":  32768,
+			"qwen3-4b": 131072,
+		},
+	})
+	models, err := probe.Probe(context.Background())
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	want := map[string]int{
+		"chatterbox/coder":    65536,  // no per-model entry → endpoint-wide override
+		"chatterbox/coder80":  32768,  // per-model wins over endpoint-wide
+		"chatterbox/qwen3-4b": 131072, // per-model wins over the advertised 262144 too
+	}
+	for _, m := range models {
+		if w, ok := want[m.ID]; !ok || m.EffectiveContextWindow != w {
+			t.Errorf("%s window = %d, want %d", m.ID, m.EffectiveContextWindow, want[m.ID])
+		}
+	}
+}
+
 // TestOpenAICompatProbeEndpointLabelsWinOverConfig asserts that when
 // the endpoint's /v1/models response advertises labels[] (Lemonade
 // does this), those wire-supplied labels take precedence over the

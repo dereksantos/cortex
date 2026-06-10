@@ -757,9 +757,10 @@ func buildREPLRegistry(cortexDir, apiURL string, ui cliout.Sink, verbose bool) l
 					BaseURL: ep.BaseURL,
 					APIKey:  ep.ResolveAPIKey(),
 				},
-				IsLocal:            true, // configured endpoints are assumed local/LAN today
-				MaxContextOverride: ep.MaxContextOverride,
-				ModelCapabilities:  ep.ModelCapabilities,
+				IsLocal:               true, // configured endpoints are assumed local/LAN today
+				MaxContextOverride:    ep.MaxContextOverride,
+				ModelContextOverrides: ep.ModelContextOverrides,
+				ModelCapabilities:     ep.ModelCapabilities,
 			}))
 		}
 	}

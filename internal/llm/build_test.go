@@ -1,6 +1,10 @@
 package llm
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -225,6 +229,56 @@ func TestBuildProvider_LegacyAPIURL(t *testing.T) {
 			t.Errorf("api url = %q, want %q", c.APIURL(), customOR)
 		}
 	})
+}
+
+// TestBuildProvider_ChatTemplateKwargs verifies the per-model
+// chat-template declaration in config.endpoints flows through
+// BuildProvider to the wire: a model with declared kwargs sends them,
+// a sibling model on the same endpoint does not.
+func TestBuildProvider_ChatTemplateKwargs(t *testing.T) {
+	gotKwargs := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		gotKwargs <- string(raw["chat_template_kwargs"])
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Endpoints: []config.EndpointDef{{
+			Name:    "chatterbox",
+			BaseURL: srv.URL + "/v1",
+			Models:  []string{"coder", "reasoner"},
+			ModelChatTemplateKwargs: map[string]map[string]any{
+				"coder": {"enable_thinking": false},
+			},
+		}},
+	}
+
+	tests := []struct {
+		model string
+		want  string // serialized kwargs, "" = field absent
+	}{
+		{"coder", `{"enable_thinking":false}`},
+		{"reasoner", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			p := BuildProvider(cfg, tt.model)
+			if p == nil {
+				t.Fatal("want non-nil provider")
+			}
+			if _, err := p.Generate(context.Background(), "hi"); err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			if got := <-gotKwargs; got != tt.want {
+				t.Errorf("chat_template_kwargs on wire = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestBuildEmbedder asserts the embedder helper returns an Ollama

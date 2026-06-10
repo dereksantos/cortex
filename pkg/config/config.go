@@ -102,6 +102,13 @@ type EndpointDef struct {
 	// the model card. Zero (default) trusts /v1/models's value.
 	MaxContextOverride int `json:"max_context_override,omitempty"`
 
+	// ModelContextOverrides pins the effective context window per model
+	// id, in tokens, for fleets where models are served at different
+	// --ctx-size values. A model's entry here wins over
+	// MaxContextOverride; models absent from the map fall back to
+	// MaxContextOverride, then to the /v1/models-advertised value.
+	ModelContextOverrides map[string]int `json:"model_context_overrides,omitempty"`
+
 	// Models lists the bare model ids this endpoint serves. Used by
 	// ResolveModelRoute to resolve bare names (e.g. "coder",
 	// "xlam-1b-fc-r") without forcing every name into the role-map's
@@ -133,6 +140,25 @@ type EndpointDef struct {
 	// without modifying source code each time an operator renames a
 	// fleet alias.
 	ModelCapabilities map[string][]string `json:"model_capabilities,omitempty"`
+
+	// ModelChatTemplateKwargs declares per-model chat-template variables
+	// sent verbatim as `chat_template_kwargs` on every request to that
+	// model. llama.cpp-backed endpoints (and LiteLLM proxies in front of
+	// them) pass these to the model's Jinja template; unknown variables
+	// are ignored. The map key is the bare model id served by this
+	// endpoint (e.g. "coder").
+	//
+	// Use case: chatterbox's "coder" alias serves a hybrid thinking
+	// model. `"coder": {"enable_thinking": false}` suppresses built-in
+	// reasoning so coding turns spend tokens on answers, not
+	// deliberation. Omitting a model sends a standard request.
+	ModelChatTemplateKwargs map[string]map[string]any `json:"model_chat_template_kwargs,omitempty"`
+}
+
+// ChatTemplateKwargsFor returns the chat-template variables declared for
+// the given bare model id, or nil when none are configured.
+func (e EndpointDef) ChatTemplateKwargsFor(model string) map[string]any {
+	return e.ModelChatTemplateKwargs[model]
 }
 
 // ResolveAPIKey returns the API key for this endpoint. APIKeyEnv wins
