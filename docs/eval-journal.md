@@ -2116,3 +2116,35 @@ repl.go    48   1/48       ~512    56.9    36%   6/7  (86%, +1 zero-citation rep
 - Consider flipping the study default toward k=32 × 1/32 once 2–3 more large fixtures confirm; the latency cost (~7s median) is small against a 43-point grounding gain.
 - Tier 3 go/ast BoundaryAnalyzer is now directly motivated: decl-aligned chunks of ~1 function each, real line bounds, no refinement step.
 - The k=48 zero-citation rep suggests the inference prompt may need an explicit "cite every claim" nudge as fragments shrink.
+
+### 2026-06-10 — Cross-format sweep: the law generalizes, and citation anchors matter more
+
+**Command**: `./loop study-eval` ×3 over four fixtures (repl.go code / study.go read-mode control / docs/eval.md prose / synthetic 220KB NDJSON telemetry with seeded errors), two cells at equal data: coarse (8 × window/8, arbitrary cuts) vs auto (unit-sized, boundary-snapped, k = budget/unit). Reasoner = Gemma 4 26B, thinking off, n=3/cell.
+
+**Final-run table** (after the citation-pipeline fixes below):
+
+```
+file          k     fill  lat(s)   cov%   grounded
+repl.go       8     1/8    53.7    29%    15/16 (94%)
+repl.go       auto  unit   44.3    30%    4/7  (57%)
+eval.md       8     1/8    58.7   100%    21/30 (70%)
+eval.md       auto  unit   50.0   100%    15/15 (100%)
+events.jsonl  8     1/8   123.3    33%    51/51 (100%)
+events.jsonl  auto  unit   (timed out at the 300s client cap; fixed post-run — single live run: 20 validated, every spot-checked line exactly a seeded error record)
+```
+
+**The refined law**: groundedness is gated first by the format's available citation ANCHOR, and only second by fragment coherence:
+- **Code** anchors on symbols — works unnumbered; unit fragments help but n=3 variance is too high to pin a number (coarse 43%↔94%, auto 57%↔100% across runs; the original Go-only sweep measured 57→100→86 across k=8/32/48). Auto is consistently ~20% faster.
+- **Prose** anchors on sections — the law generalizes cleanly: coarse 50%/70% vs auto 15/15 + 15/15 = 100% in BOTH runs. The five tree-eval-type citations land exactly on their sections.
+- **Record data** has NO intrinsic line anchor — the model cited record id values (10129…) as line numbers, 0% validated at ANY granularity, while its digests were perfect (both seeded error kinds, correct status codes, correct "all else 200"). Numbering snippet lines ("N| ") took it to 51/51 (coarse) and 13/13-exact (auto, live) — every cited line verifiably a seeded error record.
+
+**Citation-pipeline bugs found by this sweep** (each silently zeroed citations while digests stayed perfect):
+1. ValidateCitations required single-chunk containment — section claims spanning adjacent unit fragments all dropped. Now union-of-sampled-ranges (2-line gap tolerance).
+2. Inference responses truncated at the client's 1024-token default (finish_reason=length) → malformed JSON → silent digest-only degrade. Study now grants completion half the reserved headroom.
+3. Model invented representative line numbers for repeating records → prompt rules 5/6 (narrowest range; cite a visible instance) + numbered data snippets.
+4. The numbered NDJSON auto cell exceeded the 300s HTTP client timeout (completed in ~8 min) → EndpointConfig.Timeout, study uses 10 min.
+
+**Follow-ups**:
+- studyCharsPerToken=4 underestimates JSON (~2.7 chars/token): data prompts run ~40% over their token budget — slow (123s/487s cells) and overflow-prone. Per-format chars-per-token in the unit table would shrink data samples to spec.
+- Code groundedness needs n≥10 reps (or more code fixtures) before tuning density defaults on grounding; the latency win for auto is already stable.
+- digests on data are consistently right while citations were the hard part — supports the study-as-sparse-proxy direction (digest for comprehension, citations for verification).

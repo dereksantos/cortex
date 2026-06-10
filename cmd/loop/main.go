@@ -581,6 +581,10 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		BaseURL:            base,
 		APIKey:             keychainKey(cs.Study.KeyService),
 		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+		// Study sends full-budget samples; prefill alone can exceed the
+		// 300s client default on local hardware (measured: the numbered
+		// NDJSON auto cell timed out at 300s and completed under 600).
+		Timeout: 10 * time.Minute,
 	})
 	provider.SetModel(cs.Study.Model)
 	provider.SetTemperature(0)

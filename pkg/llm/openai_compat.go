@@ -61,6 +61,13 @@ type EndpointConfig struct {
 	// built-in reasoning on hybrid thinking models. Leave nil for
 	// endpoints that reject unknown request fields (OpenAI proper).
 	ChatTemplateKwargs map[string]any
+
+	// Timeout, when > 0, overrides the per-request HTTP timeout for
+	// this client (default compatTimeout / CORTEX_COMPAT_TIMEOUT_SEC).
+	// Callers that send near-window prompts to slow local hardware
+	// (study's full-budget samples) need more than the 300s default —
+	// prefill alone can exceed it.
+	Timeout time.Duration
 }
 
 // CompatModel is one entry from an endpoint's /models listing.
@@ -114,6 +121,10 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 	if name == "" {
 		name = "openai-compat"
 	}
+	timeout := ep.Timeout
+	if timeout <= 0 {
+		timeout = compatTimeout()
+	}
 	return &OpenAICompatClient{
 		name:               name,
 		baseURL:            strings.TrimRight(ep.BaseURL, "/"),
@@ -122,7 +133,7 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 		temperature:        envTemperature(),
 		chatTemplateKwargs: ep.ChatTemplateKwargs,
 		httpClient: &http.Client{
-			Timeout: compatTimeout(),
+			Timeout: timeout,
 		},
 	}
 }
