@@ -584,6 +584,14 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	})
 	provider.SetModel(cs.Study.Model)
 	provider.SetTemperature(0)
+	// The inference response (digest + one citation per claim, each
+	// repeating the file path) routinely exceeds the client's 1024-token
+	// default on data-shaped files, truncating the JSON mid-array — which
+	// degrades to a digest with zero citations. sampleBudget already
+	// reserves window/4 headroom for template + completion; give the
+	// completion half of it.
+	headroom := cs.studyWindow() - sampleBudget(cs.studyWindow())
+	provider.SetMaxTokens(headroom / 2)
 
 	req := study.StudyRequest{
 		Path:    abs,

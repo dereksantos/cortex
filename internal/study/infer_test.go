@@ -154,3 +154,28 @@ func TestSalvageDigest(t *testing.T) {
 		t.Errorf("salvageDigest fence-strip = %q, want just prose", got)
 	}
 }
+
+// Adjacent sampled fragments merge for validation: at unit granularity a
+// legitimate claim spans several contiguous fragments the model saw — a
+// citation across them must validate. Pinhole gaps from edge refinement
+// (≤ citationMergeGapLines) merge too; real gaps do not.
+func TestValidateCitations_UnionOfAdjacentFragments(t *testing.T) {
+	sampled := []SampledChunk{
+		{RelPath: "doc.md", LineStart: 10, LineEnd: 30},
+		{RelPath: "doc.md", LineStart: 31, LineEnd: 55},   // exactly adjacent
+		{RelPath: "doc.md", LineStart: 58, LineEnd: 80},   // pinhole gap (2 lines)
+		{RelPath: "doc.md", LineStart: 200, LineEnd: 220}, // real gap
+	}
+	t.Run("section claim across contiguous fragments validates", func(t *testing.T) {
+		valid := ValidateCitations([]Citation{{RelPath: "doc.md", LineStart: 12, LineEnd: 75, Claim: "whole section"}}, sampled, nil)
+		if len(valid) != 1 {
+			t.Errorf("union-contained citation should validate, got %d", len(valid))
+		}
+	})
+	t.Run("claim spanning a real gap is dropped", func(t *testing.T) {
+		valid := ValidateCitations([]Citation{{RelPath: "doc.md", LineStart: 60, LineEnd: 210, Claim: "spans unseen"}}, sampled, nil)
+		if len(valid) != 0 {
+			t.Errorf("citation across an unseen gap should drop, got %d valid", len(valid))
+		}
+	})
+}

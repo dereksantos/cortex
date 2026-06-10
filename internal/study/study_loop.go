@@ -78,6 +78,11 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 		}
 		if total > 0 {
 			res.CoveragePct = float64(cumEff) / float64(total)
+			// Refined numerator vs estimated denominator can exceed 1
+			// on short-line files — clamp (see StudyFile's cov calc).
+			if res.CoveragePct > 1 {
+				res.CoveragePct = 1
+			}
 		}
 
 		// Whole-file read → nothing to deepen.

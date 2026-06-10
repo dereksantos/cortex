@@ -234,6 +234,13 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	cov := Coverage{EffLinesSeen: seenEff, EffLinesTotal: out.EffTotalLines}
 	if out.EffTotalLines > 0 {
 		cov.Pct = float64(seenEff) / float64(out.EffTotalLines)
+		// The numerator counts REFINED eff-lines but the denominator is
+		// the grid's bytes-per-line estimate; files with short lines
+		// (markdown) push the ratio past 1. Clamp — coverage is a
+		// fraction, and >100% misreads as a scoring bug.
+		if cov.Pct > 1 {
+			cov.Pct = 1
+		}
 	}
 
 	resp := StudyResponse{

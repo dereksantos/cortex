@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -53,6 +54,8 @@ Hard rules (provenance contract):
 2. NEVER cite a line you did not see in a sampled region below.
 3. If the answer needs a region you did NOT see, emit a lead (a pointer to where to look next), not a citation.
 4. Citations are validated against the sampled ranges; any citation outside them is dropped, so never guess a line number.
+5. Cite the NARROWEST line range containing the evidence — do not pad a citation beyond the lines that actually support the claim.
+6. For repeating data (records, log lines): cite the line number of an instance INSIDE a sampled region's labelled range, copied from its header — never a representative or remembered line number from elsewhere in the file.
 
 Respond with a single JSON object and nothing else:
 {"digest":"...","citations":[{"relpath":"...","line_start":N,"line_end":M,"claim":"..."}],"leads":[{"relpath":"...","near_line":N,"why":"..."}]}`
@@ -94,14 +97,26 @@ func describeFocus(f *Focus) string {
 	return ""
 }
 
-// ValidateCitations keeps only citations whose relpath matches a sampled
-// chunk AND whose [line_start,line_end] is fully contained in that
-// chunk's range. Unverifiable citations are passed to onDrop (when
-// non-nil) and excluded from the result.
+// citationMergeGapLines is the gap tolerance when merging sampled
+// ranges for validation. Edge refinement (line snapping + boundary
+// snapping, see RefineChunk) trims a line or two between byte-adjacent
+// chunks, so ranges that were contiguous on disk can show pinhole gaps;
+// a citation spanning such a gap has still effectively been seen.
+const citationMergeGapLines = 2
+
+// ValidateCitations keeps only citations whose relpath matches sampled
+// chunks AND whose [line_start,line_end] is fully contained in the
+// UNION of that file's sampled ranges (merged with a small gap
+// tolerance). Containment in the union — not a single chunk — matters
+// at unit-granularity sampling: a legitimate claim about one section
+// spans several adjacent small fragments, all of which the model saw.
+// Unverifiable citations are passed to onDrop (when non-nil) and
+// excluded from the result.
 func ValidateCitations(cits []Citation, sampled []SampledChunk, onDrop func(Citation)) []Citation {
+	merged := mergeSampledRanges(sampled)
 	valid := make([]Citation, 0, len(cits))
 	for _, c := range cits {
-		if citationInSample(c, sampled) {
+		if citationInSample(c, merged) {
 			valid = append(valid, c)
 		} else if onDrop != nil {
 			onDrop(c)
@@ -110,12 +125,38 @@ func ValidateCitations(cits []Citation, sampled []SampledChunk, onDrop func(Cita
 	return valid
 }
 
-func citationInSample(c Citation, sampled []SampledChunk) bool {
+type lineRange struct{ start, end int }
+
+// mergeSampledRanges collapses each relpath's sampled chunks into
+// sorted, gap-tolerant line intervals.
+func mergeSampledRanges(sampled []SampledChunk) map[string][]lineRange {
+	byPath := map[string][]lineRange{}
+	for _, s := range sampled {
+		byPath[s.RelPath] = append(byPath[s.RelPath], lineRange{s.LineStart, s.LineEnd})
+	}
+	for p, rs := range byPath {
+		sort.Slice(rs, func(i, j int) bool { return rs[i].start < rs[j].start })
+		out := rs[:0]
+		for _, r := range rs {
+			if n := len(out); n > 0 && r.start <= out[n-1].end+1+citationMergeGapLines {
+				if r.end > out[n-1].end {
+					out[n-1].end = r.end
+				}
+				continue
+			}
+			out = append(out, r)
+		}
+		byPath[p] = out
+	}
+	return byPath
+}
+
+func citationInSample(c Citation, merged map[string][]lineRange) bool {
 	if c.LineStart <= 0 || c.LineEnd < c.LineStart {
 		return false
 	}
-	for _, s := range sampled {
-		if s.RelPath == c.RelPath && c.LineStart >= s.LineStart && c.LineEnd <= s.LineEnd {
+	for _, r := range merged[c.RelPath] {
+		if c.LineStart >= r.start && c.LineEnd <= r.end {
 			return true
 		}
 	}
