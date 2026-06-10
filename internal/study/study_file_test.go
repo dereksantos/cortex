@@ -136,3 +136,43 @@ func TestStudyFile_DirIsError(t *testing.T) {
 		t.Error("expected error studying a directory")
 	}
 }
+
+// Fill trades chunk size for chunk count at the same total sample: at
+// window 8192 the default 1/8 fill targets 4096-byte chunks; fill 1/16
+// targets 2048-byte chunks (the clamp floor), so the same draw returns
+// twice the chunks at half the size.
+func TestStudyFile_FillShrinksChunks(t *testing.T) {
+	path := writeBytesFile(t, 64*1024) // well over threshold at window 8192
+
+	sample := func(fill float64, k int) []SampledChunk {
+		t.Helper()
+		resp, err := StudyFile(context.Background(), StudyRequest{
+			Path: path, Window: 8192, Density: k, Fill: fill,
+		})
+		if err != nil {
+			t.Fatalf("StudyFile(fill=%v): %v", fill, err)
+		}
+		if resp.Mode != "study" {
+			t.Fatalf("Mode = %q, want study", resp.Mode)
+		}
+		return resp.Sampled
+	}
+
+	// RefineChunk snaps bounds to line starts, so sizes land within one
+	// line width (50B here) of the grid target rather than exactly on it.
+	near := func(got, want int) bool { return got >= want-100 && got <= want+100 }
+	for _, c := range sample(0, 4) { // default fill targets 4096-byte chunks
+		if !near(c.ByteLength, 4096) {
+			t.Errorf("default fill chunk = %d bytes, want ~4096", c.ByteLength)
+		}
+	}
+	small := sample(1.0/16, 8) // targets 2048-byte chunks, same 16KB total
+	if len(small) != 8 {
+		t.Fatalf("fill 1/16 k=8: sampled %d chunks, want 8", len(small))
+	}
+	for _, c := range small {
+		if !near(c.ByteLength, 2048) {
+			t.Errorf("fill 1/16 chunk = %d bytes, want ~2048", c.ByteLength)
+		}
+	}
+}

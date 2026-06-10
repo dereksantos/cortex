@@ -32,8 +32,24 @@ var studyEvalCases = []studyEvalCase{
 	{"cmd/cortex/commands/study.go", "what subcommands does the study command support"},
 }
 
-// studyEvalSweep is the density (chunk count) sweep the runner measures.
-var studyEvalSweep = []int{4, 6, 8}
+// studyEvalCell is one sweep point: k chunks of fill×window each. Cells with
+// equal k×fill sample the same total data at different granularities, so the
+// sweep separates "how much was read" from "how fragmented it was".
+type studyEvalCell struct {
+	Chunks int
+	Fill   float64 // 0 → engine default (1/8)
+}
+
+// studyEvalSweep holds total data constant (k × fill = 1, the full sample
+// budget) while shrinking fragment size 6×: 8×3072tok → 32×768tok → 48×512tok
+// (the 2KB min-chunk clamp floors the last cell). If groundedness improves as
+// fragments shrink, fragment incoherence — chunks cut mid-symbol — is the
+// failure mode and boundary-aligned (AST) chunking is the fix.
+var studyEvalSweep = []studyEvalCell{
+	{Chunks: 8, Fill: 0}, // baseline: default 1/8 fill
+	{Chunks: 32, Fill: 1.0 / 32},
+	{Chunks: 48, Fill: 1.0 / 48},
+}
 
 // studyEvalRepeats: runs per cell. The sampler and backend latency are noisy, so
 // we repeat and aggregate to tell signal (a density effect) from variance.
@@ -45,6 +61,7 @@ type studyEvalRow struct {
 	Goal            string  `json:"goal"`
 	Model           string  `json:"model"`
 	Chunks          int     `json:"chunks"`
+	Fill            float64 `json:"fill,omitempty"` // per-chunk window fraction; 0 = default 1/8
 	Rep             int     `json:"rep"`
 	Stopped         string  `json:"stopped"`
 	LatencyMS       int64   `json:"latency_ms"`
@@ -114,11 +131,11 @@ func scoreGroundedness(content string, res study.StudyLoopResult) (grounded, fai
 	return grounded, failed, unscored
 }
 
-// measureCell runs study once over a case at a given chunk count and scores it.
-func measureCell(cs *CortexSession, c studyEvalCase, chunks int) studyEvalRow {
-	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: chunks}
+// measureCell runs study once over a case at a given sweep cell and scores it.
+func measureCell(cs *CortexSession, c studyEvalCase, cell studyEvalCell) studyEvalRow {
+	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: cell.Chunks, Fill: cell.Fill}
 	start := time.Now()
-	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, chunks)
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill)
 	row.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = err.Error()
@@ -153,27 +170,27 @@ func runStudyEval() {
 	session := NewCortexSession()
 	var rows []studyEvalRow
 
-	for _, chunks := range studyEvalSweep {
+	for _, cell := range studyEvalSweep {
 		for _, c := range studyEvalCases {
 			for rep := 0; rep < studyEvalRepeats; rep++ {
-				row := measureCell(session, c, chunks)
+				row := measureCell(session, c, cell)
 				row.Rep = rep
 				rows = append(rows, row)
 				b, _ := json.Marshal(row)
-				fmt.Println(string(b)) // JSONL — one row per (chunks, case, rep)
+				fmt.Println(string(b)) // JSONL — one row per (cell, case, rep)
 			}
 		}
 	}
 
-	fmt.Printf("\n--- study-eval density sweep (model: %s, n=%d/cell) ---\n", session.Study.Model, studyEvalRepeats)
-	fmt.Printf("%-26s %3s %7s %6s   %s\n", "file", "k", "lat(s)", "cov%", "citations summed across reps")
-	for _, chunks := range studyEvalSweep {
+	fmt.Printf("\n--- study-eval granularity sweep (model: %s, n=%d/cell, equal data per cell) ---\n", session.Study.Model, studyEvalRepeats)
+	fmt.Printf("%-26s %3s %6s %7s %6s   %s\n", "file", "k", "fill", "lat(s)", "cov%", "citations summed across reps")
+	for _, cell := range studyEvalSweep {
 		for _, c := range studyEvalCases {
 			var lat, cov []float64
 			var g, f, u int
 			read := false
 			for _, r := range rows {
-				if r.Path != c.Path || r.Chunks != chunks || r.Error != "" {
+				if r.Path != c.Path || r.Chunks != cell.Chunks || r.Fill != cell.Fill || r.Error != "" {
 					continue
 				}
 				if r.Stopped == "read" {
@@ -184,8 +201,12 @@ func runStudyEval() {
 				g, f, u = g+r.Grounded, f+r.Failed, u+r.Unscored
 			}
 			name := shortName(c.Path)
+			fillLabel := "1/8"
+			if cell.Fill > 0 {
+				fillLabel = fmt.Sprintf("1/%.0f", 1/cell.Fill)
+			}
 			if read {
-				fmt.Printf("%-26s %3d %7.1f   read (fit, whole file)\n", name, chunks, median(lat))
+				fmt.Printf("%-26s %3d %6s %7.1f   read (fit, whole file)\n", name, cell.Chunks, fillLabel, median(lat))
 				continue
 			}
 			gp := 0.0
@@ -194,8 +215,8 @@ func runStudyEval() {
 			}
 			// grounded% = real-grounding rate; unscored = citations the scorer
 			// couldn't verify (claim had no extractable identifier).
-			fmt.Printf("%-26s %3d %7.1f %5.0f%%   grounded=%d failed=%d unscored=%d  (%.0f%% grounded)\n",
-				name, chunks, median(lat), median(cov), g, f, u, gp)
+			fmt.Printf("%-26s %3d %6s %7.1f %5.0f%%   grounded=%d failed=%d unscored=%d  (%.0f%% grounded)\n",
+				name, cell.Chunks, fillLabel, median(lat), median(cov), g, f, u, gp)
 		}
 	}
 }

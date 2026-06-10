@@ -2092,3 +2092,27 @@ study.go                     8     0.0   read (fit, whole file)
 **Follow-ups**:
 - study-eval rows print to stdout only (`cmd/loop/study_eval.go:163`); they should also append to `.cortex/db/cell_results.jsonl` like every other eval, per the structured-outputs convention.
 - Only one fixture exercises the model path; add 2–3 more large files (different languages/shapes) before tuning density defaults.
+
+### 2026-06-10 — Granularity sweep: equal data, smaller fragments → grounding jumps
+
+**Command**: `./loop study-eval` after plumbing `Fill` (per-chunk window fraction) through `StudyRequest` → `BuildByteGrid`. Sweep holds total sample constant (k × fill = 1 ≈ 24.5K tokens/pass) while shrinking fragment size 6×. Same fixture/model as the 2026-06-10 baseline (reasoner = Gemma 4 26B, thinking off, n=3/cell).
+
+```
+file        k   fill  frag(tok)  lat(s)   cov%   grounded
+repl.go     8    1/8      ~3072    39.9    32%   4/7  (57%)
+repl.go    32   1/32       ~768    47.1    33%   6/6  (100%)
+repl.go    48   1/48       ~512    56.9    36%   6/7  (86%, +1 zero-citation rep)
+```
+
+**Read**: at identical data volume, fragment size — not data quantity — drives groundedness. 245-line fragments cut at arbitrary byte offsets ground 57% of citations; ~60-line fragments ground 100%; ~40-line fragments dip to 86% with one rep emitting a digest but zero citations (a new failure mode: under-citing, not mis-citing). Latency rises mildly with k (more per-chunk headers to prefill): 40 → 47 → 57s median, plus a consistently slow cold-cache first rep (131–151s).
+
+**Hypothesis supported**: fragment incoherence (chunks cut mid-symbol) is the dominant grounding failure, and the optimum sits near function-sized fragments (~60 lines) — which is exactly what decl-aligned Tier 3 (AST) chunking would produce deterministically instead of by luck of the grid. The k=48 dip suggests going smaller than one coherent unit starts to hurt.
+
+**Caveats**: n=3, one file (repl.go), one goal. The k=32 100% is 6/6 citations — small absolute counts. Re-run with more fixtures before tuning defaults.
+
+**Changes landed**: `StudyRequest.Fill` plumb (internal/study/study_file.go), `runStudy` fill param (cmd/loop/main.go), sweep cells (k, fill) in cmd/loop/study_eval.go, line-snap-tolerant plumb test (internal/study/study_file_test.go).
+
+**Follow-ups**:
+- Consider flipping the study default toward k=32 × 1/32 once 2–3 more large fixtures confirm; the latency cost (~7s median) is small against a 43-point grounding gain.
+- Tier 3 go/ast BoundaryAnalyzer is now directly motivated: decl-aligned chunks of ~1 function each, real line bounds, no refinement step.
+- The k=48 zero-citation rep suggests the inference prompt may need an explicit "cite every claim" nudge as fragments shrink.

@@ -554,7 +554,7 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(ctx, path, goal, passes, studyChunks)
+	res, err := cs.runStudy(ctx, path, goal, passes, studyChunks, 0)
 	if err != nil {
 		return "", err
 	}
@@ -564,8 +564,10 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 // runStudy executes the study engine over one file and returns the structured
 // result. Shared by the study tool and the study-eval runner. Delegates to the
 // STUDY model in its own context (the small-model-amplifier split: a cheap model
-// reads, the coding model gets only the curated result back).
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int) (study.StudyLoopResult, error) {
+// reads, the coding model gets only the curated result back). fill is the
+// per-chunk fraction of the window (0 → the engine default, 1/8); keep
+// chunks × fill ≤ 1 so one pass's sample fits the window.
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -591,6 +593,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		// ~window/8 each → the sample is a fixed fraction of the window, so
 		// coverage = sample/filesize emerges as a function of BOTH model and data.
 		Density: chunks,
+		Fill:    fill,
 		Goal:    goal,
 		Infer:   study.ProviderInfer(provider),
 	}

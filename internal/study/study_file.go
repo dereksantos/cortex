@@ -41,6 +41,13 @@ type StudyRequest struct {
 	ContextDir string  // .cortex/ for cached probes (adapter use)
 	Goal       string  // optional task hint passed to inference
 
+	// Fill is the per-chunk target as a fraction of Window; 0 → the
+	// byte-grid default (1/8). Smaller fill + larger Density trades
+	// chunk size for chunk count at the same total sample (keep
+	// Density × Fill ≤ 1 so one pass fits the window). Chunk bytes
+	// still clamp to the grid's [2KB, 256KB] bounds.
+	Fill float64
+
 	// Covered, when non-nil, is the session's accumulated covered-chunk
 	// set. StudyFile seeds the sampler from it (so a deepening pass draws
 	// NEW regions, not the same ones) and adds the chunks it samples to
@@ -154,6 +161,7 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	k := ResolveDensity(req.Density)
 	out := BuildByteGrid(req.Path, relPath, size, ByteGridOpts{
 		WindowTokens: window,
+		TargetFill:   req.Fill,
 		Salt:         req.Session,
 		ModTimeUnix:  fi.ModTime().Unix(),
 	})
