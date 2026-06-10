@@ -1009,3 +1009,57 @@ func TestAppendWithoutTranscript(t *testing.T) {
 		t.Errorf("got %d messages, want 2", n)
 	}
 }
+
+// Per-format grounding: code claims verify by symbol (one hit), prose/data
+// claims by word overlap (two distinct hits), and claims without enough
+// verifiable material fall to unscored rather than failed.
+func TestClaimAnchorsPerFormat(t *testing.T) {
+	tests := []struct {
+		name     string
+		claim    string
+		lang     string
+		wantMin  int // at least this many anchors
+		wantNeed int
+	}{
+		{"code symbol", "The resolveAPIURL function checks for a slash", "code", 1, 1},
+		{"code no symbol", "it checks for a slash here", "code", 0, 1},
+		{"prose words", "The billing section describes timeout handling", "md", 2, 2},
+		{"json words", "billing service reports timeout errors", "json", 2, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			anchors, need := claimAnchors(tt.claim, tt.lang)
+			if len(anchors) < tt.wantMin {
+				t.Errorf("anchors = %v, want >= %d", anchors, tt.wantMin)
+			}
+			if need != tt.wantNeed {
+				t.Errorf("need = %d, want %d", need, tt.wantNeed)
+			}
+		})
+	}
+}
+
+func TestScoreGroundednessPerFormat(t *testing.T) {
+	content := "{\"service\":\"billing\",\"error\":\"timeout\"}\n{\"service\":\"search\",\"status\":200}\n"
+	mk := func(claim string, lo, hi int) study.StudyLoopResult {
+		return study.StudyLoopResult{Citations: []study.Citation{{Claim: claim, LineStart: lo, LineEnd: hi}}}
+	}
+	t.Run("json grounded at cited lines", func(t *testing.T) {
+		g, f, u := scoreGroundedness(content, "json", mk("the billing service reports timeout errors", 1, 1))
+		if g != 1 || f != 0 || u != 0 {
+			t.Errorf("got g=%d f=%d u=%d, want 1/0/0", g, f, u)
+		}
+	})
+	t.Run("json wrong location fails", func(t *testing.T) {
+		g, f, u := scoreGroundedness(content, "json", mk("the billing service reports timeout errors", 2, 2))
+		if g != 0 || f != 1 || u != 0 {
+			t.Errorf("got g=%d f=%d u=%d, want 0/1/0", g, f, u)
+		}
+	})
+	t.Run("thin claim is unscored", func(t *testing.T) {
+		g, f, u := scoreGroundedness(content, "json", mk("it has data", 1, 1))
+		if g != 0 || f != 0 || u != 1 {
+			t.Errorf("got g=%d f=%d u=%d, want 0/0/1", g, f, u)
+		}
+	})
+}
