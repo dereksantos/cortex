@@ -365,6 +365,79 @@ func TestConfigSpec(t *testing.T) {
 			t.Errorf("endpoint/window should inherit the default, got %+v", s)
 		}
 	})
+
+	t.Run("both roles disable thinking by default; config can re-enable", func(t *testing.T) {
+		var nilCfg *Config
+		code := nilCfg.Spec(roleCode)
+		if code.Thinking == nil || *code.Thinking {
+			t.Errorf("code default Thinking = %v, want false", code.Thinking)
+		}
+		if study := nilCfg.Spec(roleStudy); study.Thinking == nil || *study.Thinking {
+			t.Errorf("study default Thinking = %v, want false", study.Thinking)
+		}
+		on := true
+		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: &on}}}
+		if got := c.Spec(roleCode); got.Thinking == nil || !*got.Thinking {
+			t.Errorf("config thinking=true should override the default-off, got %v", got.Thinking)
+		}
+	})
+
+	t.Run("key_service overrides layer on the default", func(t *testing.T) {
+		c := &Config{Models: map[string]ModelSpec{roleCode: {KeyService: "cortex-openrouter"}}}
+		if got := c.Spec(roleCode); got.KeyService != "cortex-openrouter" {
+			t.Errorf("KeyService = %q, want cortex-openrouter", got.KeyService)
+		}
+	})
+}
+
+// TemplateKwargs: thinking=false is the only case that emits kwargs — nil and
+// true both defer to the model's template default.
+func TestTemplateKwargs(t *testing.T) {
+	off, on := false, true
+	tests := []struct {
+		name     string
+		thinking *bool
+		want     bool // kwargs expected?
+	}{
+		{"nil defers to template default", nil, false},
+		{"true defers to template default", &on, false},
+		{"false emits enable_thinking=false", &off, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kw := ModelSpec{Thinking: tt.thinking}.TemplateKwargs()
+			if !tt.want {
+				if kw != nil {
+					t.Errorf("TemplateKwargs() = %v, want nil", kw)
+				}
+				return
+			}
+			if v, ok := kw["enable_thinking"].(bool); !ok || v {
+				t.Errorf("TemplateKwargs() = %v, want enable_thinking=false", kw)
+			}
+		})
+	}
+}
+
+// The wire body must omit chat_template_kwargs when unset (universal
+// compatibility) and carry it when the code role disables thinking.
+func TestRequestMarshalsTemplateKwargs(t *testing.T) {
+	bare, err := json.Marshal(&AgentRequest{Model: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bare), "chat_template_kwargs") {
+		t.Errorf("unset kwargs should be omitted from the body: %s", bare)
+	}
+
+	req := &AgentRequest{Model: "m", ChatTemplateKwargs: map[string]any{"enable_thinking": false}}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"chat_template_kwargs":{"enable_thinking":false}`) {
+		t.Errorf("kwargs missing from body: %s", b)
+	}
 }
 
 // windowSize falls back to the default when Window is unset, so the gauge never
@@ -805,5 +878,134 @@ func TestStudyWindowResolution(t *testing.T) {
 	empty := &CortexSession{Study: ModelSpec{Model: "x"}}
 	if got := empty.studyWindow(); got != studyFallbackWindow {
 		t.Errorf("fallback window = %d, want %d", got, studyFallbackWindow)
+	}
+}
+
+// newTestSession builds a persisted session in an isolated cwd.
+func newTestSession(t *testing.T) *CortexSession {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript file")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	return cs
+}
+
+func TestTranscriptRoundTrip(t *testing.T) {
+	cs := newTestSession(t)
+
+	cs.Append(Message{Role: RoleUser, Content: "fix the bug"})
+	cs.Append(Message{Role: "assistant", ToolCalls: []ToolCall{
+		{ID: "c1", Type: "function", Function: FunctionCall{Name: FunctionBash, Arguments: `{"command":"go test"}`}},
+	}})
+	cs.Append(Message{Role: RoleTool, ToolCallID: "c1", Content: "ok"})
+
+	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := resumed.ResumeTranscript(""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	defer resumed.transcript.Close()
+
+	want := cs.Request.Messages
+	got := resumed.Request.Messages
+	if len(got) != len(want) {
+		t.Fatalf("resumed %d messages, want %d", len(got), len(want))
+	}
+	if got[0].Role != RoleSystem {
+		t.Errorf("messages[0] role = %q, want the persisted system prompt", got[0].Role)
+	}
+	for i := range want {
+		if got[i].Role != want[i].Role || got[i].Content != want[i].Content || got[i].ToolCallID != want[i].ToolCallID {
+			t.Errorf("message %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// The assistant message's tool calls must survive the round trip — resume
+	// with a dangling tool result would 400 on the next send.
+	if calls := got[2].ToolCalls; len(calls) != 1 || calls[0].ID != "c1" || calls[0].Function.Name != FunctionBash {
+		t.Errorf("tool calls did not survive round trip: %+v", calls)
+	}
+	if resumed.SessionID != cs.SessionID {
+		t.Errorf("resumed id %q, want %q", resumed.SessionID, cs.SessionID)
+	}
+}
+
+func TestResumeAppendsToSameFile(t *testing.T) {
+	cs := newTestSession(t)
+	cs.Append(Message{Role: RoleUser, Content: "first life"})
+
+	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := resumed.ResumeTranscript(""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	defer resumed.transcript.Close()
+	resumed.Append(Message{Role: RoleUser, Content: "second life"})
+
+	again := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := again.ResumeTranscript(""); err != nil {
+		t.Fatalf("second resume: %v", err)
+	}
+	defer again.transcript.Close()
+	last := again.Request.Messages[len(again.Request.Messages)-1]
+	if last.Content != "second life" {
+		t.Errorf("post-resume append did not persist; last message = %q", last.Content)
+	}
+}
+
+func TestResumeLatestPicksNewest(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dir := sessionsDir()
+	os.MkdirAll(dir, 0755)
+	line := func(content string) []byte {
+		b, _ := json.Marshal(sessionEntry{Message: Message{Role: RoleUser, Content: content}})
+		return append(b, '\n')
+	}
+	os.WriteFile(filepath.Join(dir, "20260101-000000.jsonl"), line("old"), 0644)
+	os.WriteFile(filepath.Join(dir, "20260201-000000.jsonl"), line("new"), 0644)
+
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := cs.ResumeTranscript(""); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	defer cs.transcript.Close()
+	if cs.SessionID != "20260201-000000" {
+		t.Errorf("resumed %q, want the newest session", cs.SessionID)
+	}
+	if cs.Request.Messages[0].Content != "new" {
+		t.Errorf("loaded %q, want the newest transcript's content", cs.Request.Messages[0].Content)
+	}
+}
+
+func TestResumeErrors(t *testing.T) {
+	t.Run("no sessions dir", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		cs := &CortexSession{Request: CortexArgs{}.Request()}
+		if err := cs.ResumeTranscript(""); err == nil {
+			t.Fatal("expected error with no sessions directory")
+		}
+	})
+
+	t.Run("malformed line is an error, not a silent skip", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		dir := sessionsDir()
+		os.MkdirAll(dir, 0755)
+		os.WriteFile(filepath.Join(dir, "20260101-000000.jsonl"), []byte("{not json\n"), 0644)
+
+		cs := &CortexSession{Request: CortexArgs{}.Request()}
+		if err := cs.ResumeTranscript(""); err == nil {
+			t.Fatal("expected error for malformed transcript")
+		}
+	})
+}
+
+// An unpersisted session (study CLI, tests) must work identically — Append
+// without a transcript is not an error.
+func TestAppendWithoutTranscript(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.Append(Message{Role: RoleUser, Content: "no persistence"})
+	if n := len(cs.Request.Messages); n != 2 {
+		t.Errorf("got %d messages, want 2", n)
 	}
 }

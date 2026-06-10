@@ -38,7 +38,8 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Study tool (file study via internal/study; dir/orientation study TODO)
 [x] Hardening: HTTP timeout, bounded retry, Ctrl-C interrupt
 [x] AGENTS.md project-instructions injection
-[ ] Journal auto-capture + --resume (supersedes "journal tool" — capture is ambient)
+[x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
+[ ] Capture at turn end (cortex capture — distilled insights are what journals)
 [ ] Compaction-as-study (red-gauge answer) + /clear
 [ ] Retrieval injection at turn start
 [ ] Integrate eval suite into new harness
@@ -130,10 +131,20 @@ const (
 // config-overridable, and self-corrected at runtime from overflow errors); the
 // sampling budget and density are derived from it, not hardcoded. coder for
 // coding; reasoner for study (fast + concise; study is read-heavy/think-light).
+//
+// Both chatterbox aliases serve hybrid thinking models, and both roles are
+// bounded micro-calls where built-in reasoning starves the completion budget
+// (measured: the reasoner burned a full max_tokens on reasoning_content and
+// returned empty content, collapsing study coverage). Thinking is therefore
+// off by default for both roles; re-enable per-role via config when a role
+// genuinely wants deliberation.
 var defaultModels = map[string]ModelSpec{
-	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536},
-	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 32768},
+	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536, Thinking: &thinkingOff},
+	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 32768, Thinking: &thinkingOff},
 }
+
+// thinkingOff exists so defaultModels can take a *bool address.
+var thinkingOff = false
 
 // promptGlyph is the input affordance at the end of the status line.
 const promptGlyph = "❯"
@@ -250,6 +261,11 @@ type AgentRequest struct {
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	Tools       []Tool    `json:"tools,omitempty"`
+	// ChatTemplateKwargs passes variables to the server-side chat template
+	// (llama.cpp via LiteLLM honors it; unknown variables are ignored). Used to
+	// disable built-in reasoning on hybrid thinking models — see
+	// ModelSpec.TemplateKwargs.
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 	// BaseURL is the endpoint root (e.g. http://chatterbox:4000), resolved from
 	// config. Not serialized — it's transport, not request body.
 	BaseURL string `json:"-"`
@@ -558,7 +574,12 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
 	}
-	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{Name: "study", BaseURL: base, APIKey: keychainKey(cs.Study.KeyService)})
+	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{
+		Name:               "study",
+		BaseURL:            base,
+		APIKey:             keychainKey(cs.Study.KeyService),
+		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+	})
 	provider.SetModel(cs.Study.Model)
 	provider.SetTemperature(0)
 
@@ -924,6 +945,11 @@ type CortexSession struct {
 	Study ModelSpec
 	// Config is the loaded .cortex/config.json (may be nil).
 	Config *Config
+	// SessionID names this session's transcript file; "" when unpersisted.
+	SessionID string
+	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
+	// through to. nil when the session is unpersisted (study CLI, tests).
+	transcript *os.File
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -948,6 +974,20 @@ type ModelSpec struct {
 	Model      string `json:"model"`
 	Window     int    `json:"window"`      // context window in tokens
 	KeyService string `json:"key_service"` // keychain service name for the API key, or ""
+	// Thinking controls built-in reasoning on hybrid thinking models (e.g. the
+	// chatterbox coder alias). false → requests carry
+	// chat_template_kwargs{enable_thinking:false}; nil/true → the model's
+	// template default applies.
+	Thinking *bool `json:"thinking"`
+}
+
+// TemplateKwargs returns the chat-template variables to send for this binding:
+// enable_thinking=false when thinking is explicitly disabled, nil otherwise.
+func (m ModelSpec) TemplateKwargs() map[string]any {
+	if m.Thinking != nil && !*m.Thinking {
+		return map[string]any{"enable_thinking": false}
+	}
+	return nil
 }
 
 // keychainKey reads a secret from the macOS keychain by service name. Returns ""
@@ -984,6 +1024,12 @@ func (c *Config) Spec(role string) ModelSpec {
 			}
 			if m.Window > 0 {
 				spec.Window = m.Window
+			}
+			if m.KeyService != "" {
+				spec.KeyService = m.KeyService
+			}
+			if m.Thinking != nil {
+				spec.Thinking = m.Thinking
 			}
 		}
 	}
@@ -1063,6 +1109,7 @@ func NewCortexSession() *CortexSession {
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
 	req.APIKey = keychainKey(code.KeyService)
+	req.ChatTemplateKwargs = code.TemplateKwargs()
 
 	return &CortexSession{
 		Args:    &args,
@@ -1079,6 +1126,134 @@ func (cs CortexSession) PrintArgs() {
 
 func (cs CortexSession) Append(message Message) {
 	cs.Request.Messages = append(cs.Request.Messages, message)
+	cs.writeTranscript(message)
+}
+
+// --- Session transcripts -------------------------------------------------
+//
+// Raw conversations persist as plain JSONL under .cortex/sessions/<id>.jsonl,
+// one timestamped message per line (pi-style). Deliberately NOT a journal
+// writer-class: the journal records distilled context (capture events,
+// insights); raw sessions stay out of it. `cat | jq` always works, and
+// .cortex/ is gitignored so transcripts never leave the machine.
+
+// sessionEntry is one transcript line: the message plus when it was appended.
+type sessionEntry struct {
+	TS time.Time `json:"ts"`
+	Message
+}
+
+// sessionsDir resolves where transcripts live: alongside the nearest .cortex
+// up the tree, or cwd/.cortex when none exists yet.
+func sessionsDir() string {
+	root := findUp(".cortex")
+	if root == "" {
+		root = ".cortex"
+	}
+	return filepath.Join(root, "sessions")
+}
+
+// StartTranscript begins persisting this session under a fresh timestamp id.
+// Best-effort: on any error the session simply runs unpersisted — the REPL
+// must never fail to start because the transcript can't be written.
+func (cs *CortexSession) StartTranscript() {
+	dir := sessionsDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	id := time.Now().Format("20060102-150405")
+	f, err := os.OpenFile(filepath.Join(dir, id+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	cs.SessionID = id
+	cs.transcript = f
+	// Persist the seeded system message(s) so resume restores the exact context.
+	for _, m := range cs.Request.Messages {
+		cs.writeTranscript(m)
+	}
+}
+
+// ResumeTranscript loads a prior session — the latest, or a specific id — into
+// the request history and continues appending to the same file.
+func (cs *CortexSession) ResumeTranscript(id string) error {
+	dir := sessionsDir()
+	if id == "" {
+		var err error
+		if id, err = latestSessionID(dir); err != nil {
+			return err
+		}
+	}
+	path := filepath.Join(dir, id+".jsonl")
+	msgs, err := loadTranscript(path)
+	if err != nil {
+		return err
+	}
+	if len(msgs) == 0 {
+		return fmt.Errorf("session %s is empty", id)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("reopen %s: %w", path, err)
+	}
+	cs.Request.Messages = msgs
+	cs.SessionID = id
+	cs.transcript = f
+	return nil
+}
+
+// latestSessionID returns the newest transcript id in dir. Timestamp ids sort
+// lexicographically, so newest = max.
+func latestSessionID(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("no sessions at %s: %w", dir, err)
+	}
+	latest := ""
+	for _, e := range entries {
+		if name := e.Name(); !e.IsDir() && strings.HasSuffix(name, ".jsonl") && name > latest {
+			latest = name
+		}
+	}
+	if latest == "" {
+		return "", fmt.Errorf("no sessions found in %s", dir)
+	}
+	return strings.TrimSuffix(latest, ".jsonl"), nil
+}
+
+// loadTranscript reads a transcript back into messages. A malformed line is an
+// error, not a skip — resuming a silently truncated history would be worse
+// than telling the user the file is damaged.
+func loadTranscript(path string) ([]Message, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read session: %w", err)
+	}
+	var msgs []Message
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
+		}
+		msgs = append(msgs, e.Message)
+	}
+	return msgs, nil
+}
+
+// writeTranscript appends one message to the open transcript, if any.
+// Best-effort by design: a persistence hiccup must not break the live turn.
+func (cs CortexSession) writeTranscript(m Message) {
+	if cs.transcript == nil {
+		return
+	}
+	b, err := json.Marshal(sessionEntry{TS: time.Now(), Message: m})
+	if err != nil {
+		return
+	}
+	cs.transcript.Write(append(b, '\n'))
 }
 
 // humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
@@ -1244,6 +1419,24 @@ func main() {
 	}
 
 	session := NewCortexSession()
+
+	// `loop resume [id]` continues a prior session (the latest when no id is
+	// given); otherwise every REPL session persists under a fresh transcript.
+	if len(os.Args) >= 2 && os.Args[1] == "resume" {
+		id := ""
+		if len(os.Args) >= 3 {
+			id = os.Args[2]
+		}
+		if err := session.ResumeTranscript(id); err != nil {
+			fmt.Printf("resume: %v — starting fresh\n", err)
+			session.StartTranscript()
+		} else {
+			fmt.Printf("%s\n", withColor(fmt.Sprintf("resumed %s (%d messages)", session.SessionID, len(session.Request.Messages)), gray))
+		}
+	} else {
+		session.StartTranscript()
+	}
+
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {

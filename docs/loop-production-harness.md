@@ -92,13 +92,20 @@ is the bet — measure before adding).
 
 The learning-over-time claim lands here. The journal infra already exists.
 
+**Decided (2026-06-09):** raw session transcripts are NOT a journal
+writer-class. They persist as plain JSONL under `.cortex/sessions/<id>.jsonl`
+(pi-style) — the journal records distilled context (capture events, insights),
+and raw conversations stay out of it. Capture *about* the session is the
+journalling layer.
+
 **Need:**
-- Auto-capture each turn to a journal writer-class (session transcript as
-  JSONL) — supersedes the "journal tool" TODO: capture should be ambient, not
-  a tool the model must remember to call.
-- `--resume` from the captured transcript.
+- ~~Session transcript persistence~~ — done: every REPL session appends each
+  message ambiently to its transcript; `loop resume [id]` continues the
+  latest (or a named) session.
+- Capture at turn end (`cortex capture` of distilled insights) — this is what
+  enters the journal.
 - Retrieval injection at turn start (`cortex search` → system context) — the
-  documented slice order stands: auto-capture first, retrieval second.
+  documented slice order stands: capture first, retrieval second.
 
 **Don't:** session trees/branching (pi has it; we don't need it); sharing;
 multi-session orchestration.
@@ -144,8 +151,8 @@ answers later (DAG spawn, study).
 1. **Hardening micro-slice** (part 1+2): HTTP timeout + retry, Ctrl-C
    interrupt. Small, removes the two ways the REPL dies/hangs today.
 2. **AGENTS.md injection** (part 3): one function, immediate quality lift.
-3. **Journal auto-capture + `--resume`** (part 4): persistence riding existing
-   infra.
+3. **Session transcripts + resume** (part 4): plain JSONL under
+   `.cortex/sessions/`, deliberately outside the journal. Done.
 4. **Compaction-as-study** (part 3): the red-gauge answer, reusing the engine.
 5. **Retrieval injection** (part 4): the learning-over-time slice.
 6. **Eval integration** (part 6): continuous, gating each step above.
