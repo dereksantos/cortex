@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -55,7 +56,7 @@ Hard rules (provenance contract):
 3. If the answer needs a region you did NOT see, emit a lead (a pointer to where to look next), not a citation.
 4. Citations are validated against the sampled ranges; any citation outside them is dropped, so never guess a line number.
 5. Cite the NARROWEST line range containing the evidence — do not pad a citation beyond the lines that actually support the claim.
-6. For repeating data (records, log lines): cite the line number of an instance INSIDE a sampled region's labelled range, copied from its header — never a representative or remembered line number from elsewhere in the file.
+6. For repeating data (records, log lines): cite the line number of an instance you can see. When lines carry a visible "N| " prefix, N is the line number to cite — record ids or other field values are NOT line numbers.
 
 Respond with a single JSON object and nothing else:
 {"digest":"...","citations":[{"relpath":"...","line_start":N,"line_end":M,"claim":"..."}],"leads":[{"relpath":"...","near_line":N,"why":"..."}]}`
@@ -76,10 +77,41 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 		display = in.Path
 	}
 	fmt.Fprintf(&b, "Sampled regions of %s (a PARTIAL view — not the whole file):\n\n", display)
+	numbered := numberSnippetLines(display)
 	for _, s := range in.Sampled {
-		fmt.Fprintf(&b, "----- %s:%d-%d -----\n%s\n\n", s.RelPath, s.LineStart, s.LineEnd, s.Snippet)
+		fmt.Fprintf(&b, "----- %s:%d-%d -----\n", s.RelPath, s.LineStart, s.LineEnd)
+		if numbered {
+			writeNumberedSnippet(&b, s.Snippet, s.LineStart)
+		} else {
+			b.WriteString(s.Snippet)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 	return inferSystemPrompt, b.String()
+}
+
+// numberSnippetLines reports whether snippets for this file get explicit
+// per-line numbers in the prompt. Record-shaped data (NDJSON, CSV, …)
+// needs them: every line looks alike, so without visible numbers the
+// model locates records by their intrinsic keys (an id field) and emits
+// citations that fail validation. Code and prose don't need them —
+// region headers suffice (measured 100% grounded) — and skipping the
+// prefix saves ~15% of the sample budget.
+func numberSnippetLines(path string) bool {
+	switch langFor(filepath.Ext(path)) {
+	case "json", "yaml", "csv", "toml", "ini":
+		return true
+	}
+	return false
+}
+
+// writeNumberedSnippet emits the snippet with each line prefixed by its
+// absolute file line number ("123| …"), starting at base.
+func writeNumberedSnippet(b *strings.Builder, snippet string, base int) {
+	for i, line := range strings.Split(strings.TrimRight(snippet, "\n"), "\n") {
+		fmt.Fprintf(b, "%d| %s\n", base+i, line)
+	}
 }
 
 func describeFocus(f *Focus) string {

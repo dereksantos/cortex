@@ -179,3 +179,26 @@ func TestValidateCitations_UnionOfAdjacentFragments(t *testing.T) {
 		}
 	})
 }
+
+// Record-shaped data gets per-line numbers in the prompt (the model
+// otherwise locates records by their id fields and cites unverifiable
+// line numbers); code and prose stay unnumbered (headers suffice and the
+// prefix costs budget).
+func TestBuildInferPrompt_NumbersDataLines(t *testing.T) {
+	mk := func(rel string) InferInput {
+		return InferInput{
+			RelPath: rel,
+			Sampled: []SampledChunk{{RelPath: rel, LineStart: 51, LineEnd: 52, Snippet: "{\"id\":1}\n{\"id\":2}\n"}},
+		}
+	}
+	_, user := BuildInferPrompt(mk("events.jsonl"))
+	for _, want := range []string{"51| {\"id\":1}", "52| {\"id\":2}"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("data prompt missing numbered line %q in:\n%s", want, user)
+		}
+	}
+	_, user = BuildInferPrompt(mk("main.go"))
+	if strings.Contains(user, "51| ") {
+		t.Errorf("code prompt should not number lines:\n%s", user)
+	}
+}
