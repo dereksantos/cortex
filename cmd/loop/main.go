@@ -345,10 +345,10 @@ var studyTool = newTool(FunctionStudy,
 // real size is known (from config or learned at runtime).
 const studyFallbackWindow = 8192
 
-// studyChunks is the per-pass chunk count. Each chunk is ~window/8, so the
-// sample is ~studyChunks/8 of the window — a fixed fraction of whatever the
-// model's window turns out to be, never a hardcoded token count.
-const studyChunks = 4
+// The study tool runs at auto density (chunks=0 → engine-derived): the
+// engine sizes chunks to the format's coherence unit and draws enough of
+// them to fill the window — maximum breadth at unit granularity, derived
+// from the model window and the data's shape, never hardcoded.
 
 // learnedWindows caches context windows discovered from overflow errors at run
 // time (model → tokens), so a wrong guess self-corrects after one failure.
@@ -554,7 +554,7 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(ctx, path, goal, passes, studyChunks, 0)
+	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0)
 	if err != nil {
 		return "", err
 	}
@@ -588,14 +588,16 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	req := study.StudyRequest{
 		Path:    abs,
 		RelPath: path,
-		// Density (chunk count) and Window (token budget) both derive from the
-		// model's window — no hardcoded breakpoint. studyChunks regions of
-		// ~window/8 each → the sample is a fixed fraction of the window, so
-		// coverage = sample/filesize emerges as a function of BOTH model and data.
-		Density: chunks,
 		Fill:    fill,
 		Goal:    goal,
 		Infer:   study.ProviderInfer(provider),
+	}
+	// chunks > 0 pins the per-pass draw (the eval sweep does this);
+	// chunks <= 0 leaves Density nil so the engine derives both chunk
+	// size (the format's coherence unit) and count (window / unit) —
+	// the sample fills the budget as a function of BOTH model and data.
+	if chunks > 0 {
+		req.Density = chunks
 	}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.

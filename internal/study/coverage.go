@@ -57,6 +57,10 @@ func langFor(ext string) string {
 		return "txt"
 	case "rst":
 		return "rst"
+	case "json", "jsonl", "ndjson":
+		return "json"
+	case "csv", "tsv":
+		return "csv"
 	}
 	return "unknown"
 }

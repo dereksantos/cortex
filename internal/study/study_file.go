@@ -158,13 +158,27 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	if relPath == "" {
 		relPath = filepath.Base(req.Path)
 	}
-	k := ResolveDensity(req.Density)
 	out := BuildByteGrid(req.Path, relPath, size, ByteGridOpts{
 		WindowTokens: window,
 		TargetFill:   req.Fill,
 		Salt:         req.Session,
 		ModTimeUnix:  fi.ModTime().Unix(),
 	})
+
+	// Density resolution. An explicit Density (named level or int) is
+	// honored as-is. Nil derives k from the budget: window / chunk
+	// target, so one pass samples the full window in unit-sized
+	// fragments — maximum breadth at the format's coherence size (the
+	// 2026-06-10 granularity sweep: breadth at unit size beats fewer,
+	// coarser fragments at equal data).
+	k := ResolveDensity(req.Density)
+	if req.Density == nil && len(out.Chunks) > 0 {
+		if unit := out.Chunks[0].ByteLength; unit > 0 {
+			if ak := window * studyCharsPerToken / unit; ak > k {
+				k = ak
+			}
+		}
+	}
 
 	var sampler Sampler = &HierarchicalSampler{}
 	if req.sampler != nil {
@@ -228,7 +242,7 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		Sampled:   sampled,
 		Exhausted: len(ids) < k || cov.Pct >= studyDefaultMaxCoverage,
 		Deepen: Deepen{
-			Densify: DeepenRef{Session: req.Session, Density: nextDenserDensity(req.Density)},
+			Densify: DeepenRef{Session: req.Session, Density: densifyDensity(req.Density, k)},
 			Target:  DeepenRef{Session: req.Session, Focus: req.Focus},
 		},
 	}
@@ -269,6 +283,18 @@ func byteOffsetForCitation(c Citation, sampled []SampledChunk) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// densifyDensity returns the density for the Densify deepening
+// affordance. Explicit densities step up a named level; a nil (auto)
+// density already fills the window each pass, so densifying means
+// another full-budget pass over new regions at the same k — the
+// covered set guarantees novelty, and going denser would overflow.
+func densifyDensity(d Density, autoK int) Density {
+	if d == nil {
+		return autoK
+	}
+	return nextDenserDensity(d)
 }
 
 // nextDenserDensity returns the next density level up, for the Densify

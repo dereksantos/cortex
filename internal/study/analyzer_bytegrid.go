@@ -25,10 +25,10 @@ import (
 // per-module anti-coverage bias then spreads draws across the whole
 // file instead of clumping in one region.
 const (
-	byteGridMinChunkBytes = 2 * 1024
+	byteGridMinChunkBytes = 1024 // floor admits the prose coherence unit (see boundary.go)
 	byteGridMaxChunkBytes = 256 * 1024
 	byteGridDefaultBands  = 16
-	byteGridDefaultFill   = 0.125 // chunk targets ~window/8
+	byteGridDefaultFill   = 0.125 // window-derived fallback for formats with no coherence unit
 )
 
 // ByteGridOpts configures the byte-grid producer. WindowTokens is the
@@ -36,7 +36,7 @@ const (
 // size. Zero values fall back to sensible defaults.
 type ByteGridOpts struct {
 	WindowTokens int     // consuming-model window in tokens; default studyDefaultCtxWindow
-	TargetFill   float64 // fraction of the window each chunk targets; default 1/8
+	TargetFill   float64 // explicit per-chunk window fraction; 0 → the format's coherence unit, then window/8
 	Bands        int     // synthetic module count for anti-coverage spread; default 16
 	Salt         string  // mixed into the RNG seed
 	ModTimeUnix  int64   // file mtime; folds into the drift key + state hash
@@ -61,11 +61,19 @@ func BuildByteGrid(absPath, relPath string, size int64, opts ByteGridOpts) *Boun
 	if winTokens <= 0 {
 		winTokens = studyDefaultCtxWindow
 	}
-	fill := opts.TargetFill
-	if fill <= 0 || fill > 1 {
-		fill = byteGridDefaultFill
+	lang := langFor(filepath.Ext(relPath))
+
+	// Chunk-size targeting, most-specific first: an explicit TargetFill
+	// wins; otherwise the format's coherence unit (boundary.go); only
+	// formats with no known unit fall back to the window-derived 1/8.
+	var target int
+	if opts.TargetFill > 0 && opts.TargetFill <= 1 {
+		target = int(float64(winTokens) * studyCharsPerToken * opts.TargetFill)
+	} else if u := unitBytesFor(lang); u > 0 {
+		target = u
+	} else {
+		target = int(float64(winTokens) * studyCharsPerToken * byteGridDefaultFill)
 	}
-	target := int(float64(winTokens) * studyCharsPerToken * fill)
 	if target < byteGridMinChunkBytes {
 		target = byteGridMinChunkBytes
 	}
@@ -85,8 +93,6 @@ func BuildByteGrid(absPath, relPath string, size int64, opts ByteGridOpts) *Boun
 	if bands > n {
 		bands = n
 	}
-
-	lang := langFor(filepath.Ext(relPath))
 
 	chunks := make([]Chunk, 0, n)
 	for i := 0; i < n; i++ {

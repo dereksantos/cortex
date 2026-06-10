@@ -138,9 +138,9 @@ func TestStudyFile_DirIsError(t *testing.T) {
 }
 
 // Fill trades chunk size for chunk count at the same total sample: at
-// window 8192 the default 1/8 fill targets 4096-byte chunks; fill 1/16
-// targets 2048-byte chunks (the clamp floor), so the same draw returns
-// twice the chunks at half the size.
+// window 8192, fill 1/8 targets 4096-byte chunks and fill 1/16 targets
+// 2048-byte chunks, so the same data arrives as twice the chunks at
+// half the size.
 func TestStudyFile_FillShrinksChunks(t *testing.T) {
 	path := writeBytesFile(t, 64*1024) // well over threshold at window 8192
 
@@ -161,9 +161,9 @@ func TestStudyFile_FillShrinksChunks(t *testing.T) {
 	// RefineChunk snaps bounds to line starts, so sizes land within one
 	// line width (50B here) of the grid target rather than exactly on it.
 	near := func(got, want int) bool { return got >= want-100 && got <= want+100 }
-	for _, c := range sample(0, 4) { // default fill targets 4096-byte chunks
+	for _, c := range sample(1.0/8, 4) {
 		if !near(c.ByteLength, 4096) {
-			t.Errorf("default fill chunk = %d bytes, want ~4096", c.ByteLength)
+			t.Errorf("fill 1/8 chunk = %d bytes, want ~4096", c.ByteLength)
 		}
 	}
 	small := sample(1.0/16, 8) // targets 2048-byte chunks, same 16KB total
@@ -174,5 +174,38 @@ func TestStudyFile_FillShrinksChunks(t *testing.T) {
 		if !near(c.ByteLength, 2048) {
 			t.Errorf("fill 1/16 chunk = %d bytes, want ~2048", c.ByteLength)
 		}
+	}
+}
+
+// Nil Density is the zero-knob path: chunk size comes from the format's
+// coherence unit (txt → 1024B) and k from the budget (window×4 / unit),
+// so one pass samples the full window at unit granularity. Explicit
+// densities stay pinned (the "sparse"→4 contract above).
+func TestStudyFile_AutoDensityFillsBudget(t *testing.T) {
+	path := writeBytesFile(t, 64*1024)
+	resp, err := StudyFile(context.Background(), StudyRequest{Path: path, Window: 8192})
+	if err != nil {
+		t.Fatalf("StudyFile: %v", err)
+	}
+	if resp.Mode != "study" {
+		t.Fatalf("Mode = %q, want study", resp.Mode)
+	}
+	// window 8192 → 32768 budget bytes / 1024B prose unit = 32 chunks.
+	if len(resp.Sampled) != 32 {
+		t.Fatalf("auto density sampled %d chunks, want 32 (budget/unit)", len(resp.Sampled))
+	}
+	var total int
+	for _, s := range resp.Sampled {
+		total += s.ByteLength
+	}
+	// The sample should land near the full budget (line-snapping trims
+	// up to a line width per chunk).
+	if budget := 8192 * 4; total < budget*3/4 || total > budget {
+		t.Errorf("auto density sampled %d bytes, want ~%d (full budget)", total, budget)
+	}
+	// Densify on the auto path re-runs at the same k — the budget is
+	// already full; novelty comes from the covered set, not more chunks.
+	if d := ResolveDensity(resp.Deepen.Densify.Density); d != 32 {
+		t.Errorf("auto Densify density = %d, want 32 (same-k repass)", d)
 	}
 }

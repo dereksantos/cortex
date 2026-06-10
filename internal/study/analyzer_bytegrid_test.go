@@ -125,3 +125,32 @@ func TestBuildByteGrid_TinyFileSingleChunk(t *testing.T) {
 		t.Errorf("single chunk ByteLength=%d, want 100", out.Chunks[0].ByteLength)
 	}
 }
+
+// Chunk-size targeting precedence: explicit TargetFill > the format's
+// coherence unit > the window-derived 1/8 fallback for unknown formats.
+func TestBuildByteGrid_CoherenceUnitSizing(t *testing.T) {
+	const size = 200000
+	tests := []struct {
+		name    string
+		relPath string
+		opts    ByteGridOpts
+		want    int // target bytes of a non-final chunk
+	}{
+		{"go uses the code unit", "f.go", ByteGridOpts{WindowTokens: 8192}, unitBytesCode},
+		{"md uses the prose unit", "doc.md", ByteGridOpts{WindowTokens: 8192}, unitBytesProse},
+		{"json uses the data unit", "d.json", ByteGridOpts{WindowTokens: 8192}, unitBytesData},
+		{"unknown ext falls back to window/8", "blob", ByteGridOpts{WindowTokens: 8192}, 8192 * studyCharsPerToken / 8},
+		{"explicit fill beats the unit", "f.go", ByteGridOpts{WindowTokens: 8192, TargetFill: 0.25}, 8192 * studyCharsPerToken / 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := BuildByteGrid("/abs/"+tt.relPath, tt.relPath, size, tt.opts)
+			if len(out.Chunks) < 2 {
+				t.Fatalf("expected a multi-chunk grid, got %d", len(out.Chunks))
+			}
+			if got := out.Chunks[0].ByteLength; got != tt.want {
+				t.Errorf("chunk target = %d bytes, want %d", got, tt.want)
+			}
+		})
+	}
+}

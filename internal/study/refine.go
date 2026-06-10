@@ -16,9 +16,11 @@ import (
 //
 // It snaps the chunk's byte edges to newline boundaries (dropping a
 // partial leading line unless the offset already sits at a line start,
-// and a partial trailing line), then resolves the absolute LineStart
-// via lineBase and counts lines within the snapped body. Idempotent:
-// a chunk already marked Refined is left untouched.
+// and a partial trailing line), then advances the leading edge to the
+// format's nearest coherence boundary (Tier 1.5 — see boundary.go),
+// then resolves the absolute LineStart via lineBase and counts lines
+// within the snapped body. Idempotent: a chunk already marked Refined
+// is left untouched.
 //
 // lineBase maps a byte offset to its absolute 1-indexed line number;
 // streamingLineBase builds one for a path.
@@ -59,6 +61,18 @@ func RefineChunk(ch *Chunk, lineBase func(off int64) (int, error)) error {
 	// trailing line) when the body has one.
 	if i := bytes.LastIndexByte(body, '\n'); i >= 0 {
 		body = body[:i+1]
+	}
+
+	// Tier 1.5: advance the leading edge to the first coherence
+	// boundary (decl / heading / paragraph start — see boundary.go), so
+	// the fragment begins at a whole unit instead of mid-symbol. Skipped
+	// at file head (offset 0 is inherently a unit start); bounded to the
+	// chunk's first half by snapToBoundary.
+	if startByte > 0 {
+		if skip := snapToBoundary(body, ch.Lang); skip > 0 && skip < len(body) {
+			startByte += int64(skip)
+			body = body[skip:]
+		}
 	}
 
 	ch.ByteOffset = startByte
