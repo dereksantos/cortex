@@ -2063,3 +2063,32 @@ CORTEX_RUN_AB=1 \
 - Consider tightening overview's `importance` rubric — the Python README scored importance=0.1 (incorrect; READMEs are high-value for project overview) and the ts README scored 0.9 on the same role. Prompt has room for clearer guidance on what importance means for `doc` role.
 - The current overview prompt occasionally hallucinates non-existent dependencies (cortex docs/bootstrap-dag-plan.md scored `dependencies: ["cortex:docs/bootstrap-dag-plan.md"]` — a self-reference). Minor; consider a "for `doc` role, dependencies should be empty unless the doc literally lists files/services it depends on" clause in v2.
 
+
+### 2026-06-10 — study-eval baseline on the new chatterbox fleet (Gemma 4 reasoner, thinking off)
+
+**Command**: `./loop study-eval` (cmd/loop @ d3474dd + 7e794db)
+**Versions**: study role = `reasoner` alias, now serving Gemma 4 26B-A4B QAT q4_0 at `--ctx-size 32768` (fleet swap of 2026-06-09; previous alias target retired). `enable_thinking=false` sent via `chat_template_kwargs` — without it the reasoner burns its full completion budget on `reasoning_content` and returns empty content (measured during the fleet bring-up; study output collapsed entirely). n=3 reps/cell, density sweep k=4/6/8.
+
+**Result table** (latency = median seconds, citations summed across reps):
+
+```
+file                         k  lat(s)   cov%   citations summed across reps
+repl.go                      4    26.1    14%   grounded=3 failed=2 unscored=0  (60% grounded)
+study.go                     4     0.0   read (fit, whole file)
+repl.go                      6    43.1    25%   grounded=5 failed=10 unscored=0  (33% grounded)
+study.go                     6     0.0   read (fit, whole file)
+repl.go                      8    46.1    32%   grounded=3 failed=3 unscored=0  (50% grounded)
+study.go                     8     0.0   read (fit, whole file)
+```
+
+**Context**: there is no comparable prior table — the pre-swap sweep was only ever printed to a session terminal and never persisted, so this entry is the first durable study-eval baseline. Treat it as the reference point for the new fleet, not as a delta.
+
+**Observations**:
+- Coverage scales near-linearly with density (14% → 25% → 32% at k=4/6/8), as designed — chunks are ~window/8 each.
+- Groundedness is noisy at n=3 (60% / 33% / 50% across cells; per-rep spread 20–100%). The k=6 cell's 10 failed citations came disproportionately from two reps. More reps (or more large-file cases — repl.go is the only file that exercises the model path) are needed before reading any density→groundedness trend.
+- Latency within a cell varies ~3× (21–74s); first rep per cell is consistently slowest (cold prefix cache), so the median understates cold-start cost.
+- study.go (fits the 24K sample budget) takes the whole-file pass-through in every cell — zero model cost, by design.
+
+**Follow-ups**:
+- study-eval rows print to stdout only (`cmd/loop/study_eval.go:163`); they should also append to `.cortex/db/cell_results.jsonl` like every other eval, per the structured-outputs convention.
+- Only one fixture exercises the model path; add 2–3 more large files (different languages/shapes) before tuning density defaults.
