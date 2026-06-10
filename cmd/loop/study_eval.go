@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -117,7 +118,7 @@ func scoreGroundedness(content string, res study.StudyLoopResult) (grounded, fai
 func measureCell(cs *CortexSession, c studyEvalCase, chunks int) studyEvalRow {
 	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: chunks}
 	start := time.Now()
-	res, err := cs.runStudy(c.Path, c.Goal, 1, chunks)
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, chunks)
 	row.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = err.Error()

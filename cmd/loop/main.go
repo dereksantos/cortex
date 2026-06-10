@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -23,7 +25,7 @@ import (
 )
 
 /*
-TODO:
+TODO (production sequence in docs/loop-production-harness.md):
 [x] Scanner animation v1
 [x] System prompt
 [x] Tool calling v1 (read_file, write_file, bash allowlist)
@@ -34,14 +36,14 @@ TODO:
 [x] Improve animation
 [x] Timestamp in messages
 [x] Study tool (file study via internal/study; dir/orientation study TODO)
-[ ] Journal tool
-[ ] Integrate cortex dream
-[ ] Integrate cortex think
-[ ] Integreate cortex dag
-[ ] Add hooks and review settings
-[ ] Verify cortex v1 loop
-[ ] cortex model for cataloging and suggesting model setups based on system resources
+[x] Hardening: HTTP timeout, bounded retry, Ctrl-C interrupt
+[x] AGENTS.md project-instructions injection
+[ ] Journal auto-capture + --resume (supersedes "journal tool" — capture is ambient)
+[ ] Compaction-as-study (red-gauge answer) + /clear
+[ ] Retrieval injection at turn start
 [ ] Integrate eval suite into new harness
+[ ] cortex model for cataloging and suggesting model setups based on system resources
+[ ] Later (after harness is stable): cortex dream / think / dag integration
 
 */
 
@@ -68,6 +70,20 @@ const maxToolIterations = 100
 // maxToolOutput caps how much tool output we feed back into context, so a
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const maxToolOutput = 10000
+
+// requestTimeout caps one model call end-to-end. Local generation can be slow,
+// so it's generous — Ctrl-C is the interactive escape hatch; this catches a
+// server that accepted the request and will never answer.
+const requestTimeout = 10 * time.Minute
+
+// maxSendAttempts bounds retries of one model call. Only transient failures
+// (transport errors, 429/5xx) retry; a 4xx means the request itself is wrong
+// (e.g. context overflow) and retrying can't fix it.
+const maxSendAttempts = 3
+
+// retryBackoff is the base delay between attempts (attempt × retryBackoff).
+// A var so tests can shrink it.
+var retryBackoff = 500 * time.Millisecond
 
 // Version is the semantic base shown in the status line. It's a var (not const)
 // so a release build can override it: go build -ldflags "-X main.Version=1.2.3".
@@ -365,52 +381,82 @@ var bash = newTool(FunctionBash,
 
 var tools = []Tool{readFile, writeFile, editFile, studyTool, bash}
 
-// Sends the request to the models API endpoint
-func (r *AgentRequest) Send() (*AgentResponse, error) {
+// httpClient is shared by all model calls. The timeout is the backstop guard:
+// without it a server that accepts the request and never answers hangs the
+// REPL forever.
+var httpClient = &http.Client{Timeout: requestTimeout}
+
+// Send runs one model call with bounded retry. Transient failures (transport
+// errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything
+// else — including a canceled ctx — returns immediately.
+func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling agent request: %w", err)
 	}
 
-	method := "POST"
 	base := r.BaseURL
 	if base == "" {
 		base = defaultModels[roleCode].Endpoint
 	}
 	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
-	reader := bytes.NewReader(b)
-	req, err := http.NewRequest(method, url, reader)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt-1) * retryBackoff):
+			}
+		}
+		res, retryable, err := r.sendOnce(ctx, url, b)
+		if err == nil {
+			return res, nil
+		}
+		if !retryable || ctx.Err() != nil {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxSendAttempts, lastErr)
+}
+
+// sendOnce performs a single HTTP round trip. retryable reports whether the
+// failure is transient (worth another attempt): transport errors and 429/5xx
+// are; everything else isn't. A canceled ctx also surfaces as a transport
+// error — the caller's ctx.Err() check stops the retry loop for that case.
+func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (res *AgentResponse, retryable bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("error building agent request: %w", err)
+		return nil, false, fmt.Errorf("error building agent request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if r.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.APIKey)
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error executing agent request: %w", err)
+		return nil, true, fmt.Errorf("error executing agent request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading agent response: %w", err)
+		return nil, true, fmt.Errorf("error reading agent response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(body))
+		transient := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return nil, transient, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var response AgentResponse
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshaling agent response: %w", err)
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, false, fmt.Errorf("error unmarshaling agent response: %w", err)
 	}
-
-	return &response, nil
+	return &response, false, nil
 }
 
 // AgentResponse captures the agents response from an AgentRequest
@@ -456,9 +502,10 @@ type ToolCall struct {
 	Function FunctionCall `json:"function"`
 }
 
-// Execute dispatches a tool call. cs carries session config (model, endpoint,
-// window) that some tools need — study does; the file/shell tools ignore it.
-func (tc ToolCall) Execute(cs *CortexSession) (string, error) {
+// Execute dispatches a tool call. ctx cancels long-running tools (bash, study)
+// on interrupt; cs carries session config (model, endpoint, window) that some
+// tools need — study does; the file tools ignore both.
+func (tc ToolCall) Execute(ctx context.Context, cs *CortexSession) (string, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
@@ -468,9 +515,9 @@ func (tc ToolCall) Execute(cs *CortexSession) (string, error) {
 	case FunctionEditFile:
 		return tc.EditFile()
 	case FunctionStudy:
-		return tc.Study(cs)
+		return tc.Study(ctx, cs)
 	case FunctionBash:
-		return tc.Bash()
+		return tc.Bash(ctx)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -479,7 +526,7 @@ func (tc ToolCall) Execute(cs *CortexSession) (string, error) {
 // curated context: a size-adaptive, relevance-deepening digest with cited line
 // ranges, or the whole file when it fits the window. Inference and curation are
 // backed by an OpenAI-compatible provider pointed at the session's endpoint.
-func (tc ToolCall) Study(cs *CortexSession) (string, error) {
+func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error) {
 	path, err := tc.stringArg("path")
 	if err != nil {
 		return "", err
@@ -491,7 +538,7 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(path, goal, passes, studyChunks)
+	res, err := cs.runStudy(ctx, path, goal, passes, studyChunks)
 	if err != nil {
 		return "", err
 	}
@@ -502,7 +549,7 @@ func (tc ToolCall) Study(cs *CortexSession) (string, error) {
 // result. Shared by the study tool and the study-eval runner. Delegates to the
 // STUDY model in its own context (the small-model-amplifier split: a cheap model
 // reads, the coding model gets only the curated result back).
-func (cs *CortexSession) runStudy(path, goal string, passes, chunks int) (study.StudyLoopResult, error) {
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -530,7 +577,7 @@ func (cs *CortexSession) runStudy(path, goal string, passes, chunks int) (study.
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
 		req.Window = sampleBudget(window) // window minus headroom for template + completion
-		return study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
+		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider}, passes)
 	}
 	window := cs.studyWindow()
 	res, err := runPasses(window)
@@ -680,7 +727,7 @@ var bashAllowlist = map[string]bool{
 	"go": true, "git": true, "gofmt": true,
 }
 
-func (tc ToolCall) Bash() (string, error) {
+func (tc ToolCall) Bash(ctx context.Context) (string, error) {
 	command, err := tc.stringArg("command")
 	if err != nil {
 		return "", err
@@ -694,7 +741,7 @@ func (tc ToolCall) Bash() (string, error) {
 	}
 	printToolAction(fmt.Sprintf("bash(%s)", command))
 
-	out, runErr := exec.Command(fields[0], fields[1:]...).CombinedOutput()
+	out, runErr := exec.CommandContext(ctx, fields[0], fields[1:]...).CombinedOutput()
 	result := string(out)
 	if len(result) > maxToolOutput {
 		result = result[:maxToolOutput] + "\n...[output truncated]"
@@ -842,11 +889,17 @@ func (m Message) Print() {
 // CortexArgs specifies incoming cli arguments
 type CortexArgs []string
 
-// Request constructs a Request struct instance parsed from CortexArgs.
+// Request constructs a Request struct instance parsed from CortexArgs. The
+// system message is the base prompt plus the project's AGENTS.md when one is
+// found — the project speaks once, at session start, not per turn.
 func (a CortexArgs) Request() *AgentRequest {
+	content := SystemPrompt
+	if inst := projectInstructions(); inst != "" {
+		content += "\n\n# Project instructions (AGENTS.md)\n\n" + inst
+	}
 	systemMessage := Message{
 		Role:    RoleSystem,
-		Content: SystemPrompt,
+		Content: content,
 	}
 	messages := []Message{systemMessage}
 	return &AgentRequest{
@@ -937,15 +990,15 @@ func (c *Config) Spec(role string) ModelSpec {
 	return spec
 }
 
-// findConfigPath walks up from the cwd looking for .cortex/config.json, like
-// git finds .git. Returns "" if none is found.
-func findConfigPath() string {
+// findUp walks up from the cwd looking for rel (a path relative to each
+// ancestor directory), like git finds .git. Returns "" if none is found.
+func findUp(rel string) string {
 	dir, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
 	for {
-		p := filepath.Join(dir, ".cortex", "config.json")
+		p := filepath.Join(dir, rel)
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -955,6 +1008,30 @@ func findConfigPath() string {
 		}
 		dir = parent
 	}
+}
+
+func findConfigPath() string { return findUp(filepath.Join(".cortex", "config.json")) }
+
+// maxInstructionBytes caps how much of AGENTS.md is injected into the system
+// prompt, so a bloated instructions file can't quietly eat the window.
+const maxInstructionBytes = 16384
+
+// projectInstructions returns the nearest AGENTS.md contents (size-capped), or
+// "" when there is none — instructions are an enhancement, not a dependency.
+func projectInstructions() string {
+	path := findUp("AGENTS.md")
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(data))
+	if len(s) > maxInstructionBytes {
+		s = s[:maxInstructionBytes] + "\n...[AGENTS.md truncated]"
+	}
+	return s
 }
 
 // LoadConfig reads and parses .cortex/config.json. It returns nil on any
@@ -1041,21 +1118,46 @@ func (cs CortexSession) Prompt() string {
 // send runs one model call with a spinner during the network wait. The spinner
 // is fully stopped and the line erased before this returns, so the caller can
 // print immediately without interleaving.
-func (cs CortexSession) send() (*AgentResponse, error) {
+func (cs CortexSession) send(ctx context.Context) (*AgentResponse, error) {
 	s := NewSpinner()
 	s.Start()
-	res, err := cs.Request.Send()
+	res, err := cs.Request.Send(ctx)
 	s.Stop()
 	return res, err
+}
+
+// runToolCalls executes every requested call and appends one tool result per
+// call ID — even after an interrupt. The wire invariant is that every
+// assistant(tool_calls) id gets a matching tool message or the next send 400s,
+// so a mid-turn cancel records "interrupted" results rather than dropping them.
+func (cs *CortexSession) runToolCalls(ctx context.Context, calls []ToolCall) {
+	for _, tc := range calls {
+		var content string
+		if ctx.Err() != nil {
+			content = "Error: interrupted by user before this tool ran"
+		} else if out, err := tc.Execute(ctx, cs); err != nil {
+			// Tool errors are observations, not crashes: feed them back so
+			// the model can self-correct.
+			content = "Error: " + err.Error()
+		} else {
+			content = out
+		}
+		cs.Append(Message{
+			Role:       RoleTool,
+			ToolCallID: tc.ID,
+			Content:    content,
+		})
+	}
 }
 
 // Resolve runs the agentic inner loop for one user turn: send, run any tools
 // the model asked for, feed the results back, and re-send — repeating until the
 // model answers with no more tool calls (or we hit the iteration cap). The
-// caller appends the user message; Resolve owns everything from there.
-func (cs *CortexSession) Resolve() error {
+// caller appends the user message; Resolve owns everything from there. A
+// canceled ctx ends the turn at the next boundary with history left valid.
+func (cs *CortexSession) Resolve(ctx context.Context) error {
 	for i := 0; i < maxToolIterations; i++ {
-		res, err := cs.send()
+		res, err := cs.send(ctx)
 		if err != nil {
 			return fmt.Errorf("model response error: %w", err)
 		}
@@ -1091,20 +1193,11 @@ func (cs *CortexSession) Resolve() error {
 			return nil
 		}
 
-		// (3) Run every requested tool and append one result per call. Each
-		// id MUST get a matching tool message or the next send 400s.
-		for _, tc := range msg.ToolCalls {
-			content, err := tc.Execute(cs)
-			if err != nil {
-				// Tool errors are observations, not crashes: feed them back so
-				// the model can self-correct.
-				content = "Error: " + err.Error()
-			}
-			cs.Append(Message{
-				Role:       RoleTool,
-				ToolCallID: tc.ID,
-				Content:    content,
-			})
+		// (3) Run the tools, then stop at the iteration boundary if the user
+		// interrupted — history is valid, and the model can pick up next turn.
+		cs.runToolCalls(ctx, msg.ToolCalls)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		// Loop: the next send picks up the grown history.
 	}
@@ -1119,7 +1212,7 @@ func runStudyCLI(path, goal string, passes int) {
 	session := NewCortexSession()
 	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal, "passes": passes})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
-	out, err := call.Study(session)
+	out, err := call.Study(context.Background(), session)
 	if err != nil {
 		fmt.Println("study error:", err)
 		return
@@ -1187,7 +1280,17 @@ func main() {
 		}
 
 		session.Append(Message{Role: RoleUser, Content: input})
-		if err := session.Resolve(); err != nil {
+		// Ctrl-C cancels the in-flight turn (model call or tool) instead of
+		// killing the REPL. stop() restores default signal handling at the
+		// prompt, so Ctrl-C while idle still exits the process.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		err := session.Resolve(ctx)
+		stop()
+		switch {
+		case err == nil:
+		case errors.Is(err, context.Canceled):
+			fmt.Println(withColor("interrupted", yellow))
+		default:
 			fmt.Printf("turn error: %v\n", err)
 		}
 	}

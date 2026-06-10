@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +81,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("reads existing file", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		got, err := tc(FunctionReadFile, string(args)).Execute(nil)
+		got, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -89,7 +92,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("missing file errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "nope.txt")})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(nil); err == nil {
+		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), nil); err == nil {
 			t.Fatal("expected error reading missing file")
 		}
 	})
@@ -100,7 +103,7 @@ func TestWriteFileTool(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	args, _ := json.Marshal(map[string]string{"path": path, "content": "written by cortex"})
 
-	got, err := tc(FunctionWriteFile, string(args)).Execute(nil)
+	got, err := tc(FunctionWriteFile, string(args)).Execute(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -120,7 +123,7 @@ func TestWriteFileTool(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	edit := func(path, oldS, newS string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
-		return tc(FunctionEditFile, string(args)).Execute(nil)
+		return tc(FunctionEditFile, string(args)).Execute(context.Background(), nil)
 	}
 
 	t.Run("unique match is replaced", func(t *testing.T) {
@@ -186,7 +189,7 @@ func TestEditFileTool(t *testing.T) {
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})
-		got, err := tc(FunctionBash, string(args)).Execute(nil)
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -197,7 +200,7 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("non-allowlisted command rejected", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		_, err := tc(FunctionBash, string(args)).Execute(nil)
+		_, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
 		if err == nil {
 			t.Fatal("expected allowlist rejection")
 		}
@@ -208,14 +211,14 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("empty command errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "   "})
-		if _, err := tc(FunctionBash, string(args)).Execute(nil); err == nil {
+		if _, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil); err == nil {
 			t.Fatal("expected error for empty command")
 		}
 	})
 }
 
 func TestExecuteUnknownTool(t *testing.T) {
-	if _, err := tc("frobnicate", `{}`).Execute(nil); err == nil {
+	if _, err := tc("frobnicate", `{}`).Execute(context.Background(), nil); err == nil {
 		t.Fatal("expected error for unknown tool name")
 	}
 }
@@ -237,6 +240,7 @@ func TestToolResultWireFormat(t *testing.T) {
 }
 
 func TestRequestSeedsSystemPromptAndTools(t *testing.T) {
+	t.Chdir(t.TempDir()) // hermetic: no AGENTS.md anywhere up the tree
 	req := CortexArgs{"build something"}.Request()
 
 	if len(req.Messages) == 0 {
@@ -254,6 +258,50 @@ func TestRequestSeedsSystemPromptAndTools(t *testing.T) {
 	if len(req.Tools) == 0 {
 		t.Error("expected tools attached to the request")
 	}
+}
+
+func TestProjectInstructionsInjection(t *testing.T) {
+	t.Run("AGENTS.md is appended to the system prompt", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("Use table-driven tests.\n"), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.HasPrefix(sys, SystemPrompt) {
+			t.Error("system message should start with the base prompt")
+		}
+		for _, want := range []string{"# Project instructions (AGENTS.md)", "Use table-driven tests."} {
+			if !strings.Contains(sys, want) {
+				t.Errorf("system message missing %q", want)
+			}
+		}
+	})
+
+	t.Run("found in a parent directory", func(t *testing.T) {
+		root := t.TempDir()
+		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from the root"), 0644)
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		t.Chdir(child)
+
+		if sys := (CortexArgs{}).Request().Messages[0].Content; !strings.Contains(sys, "from the root") {
+			t.Error("AGENTS.md in an ancestor directory should be found")
+		}
+	})
+
+	t.Run("oversized file is truncated", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(strings.Repeat("x", maxInstructionBytes+100)), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "[AGENTS.md truncated]") {
+			t.Error("oversized AGENTS.md should be marked truncated")
+		}
+		if len(sys) > len(SystemPrompt)+maxInstructionBytes+200 {
+			t.Errorf("system message is %d bytes; the cap did not hold", len(sys))
+		}
+	})
 }
 
 func TestHumanK(t *testing.T) {
@@ -360,7 +408,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		big := filepath.Join(dir, "big.txt")
 		os.WriteFile(big, make([]byte, 4000), 0644) // ~1000 tokens > 500
 		args, _ := json.Marshal(map[string]string{"path": big})
-		_, err := tc(FunctionReadFile, string(args)).Execute(cs)
+		_, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs)
 		if err == nil {
 			t.Fatal("expected size-guard error")
 		}
@@ -373,7 +421,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		small := filepath.Join(dir, "small.txt")
 		os.WriteFile(small, []byte("hi there"), 0644)
 		args, _ := json.Marshal(map[string]string{"path": small})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(cs); err != nil {
+		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs); err != nil {
 			t.Fatalf("small read should succeed: %v", err)
 		}
 	})
@@ -505,7 +553,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("parsed call executes through the normal path", func(t *testing.T) {
 		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
 		calls := parseXMLToolCalls(content)
-		out, err := calls[0].Execute(nil)
+		out, err := calls[0].Execute(context.Background(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -592,6 +640,155 @@ func TestSampleBudget(t *testing.T) {
 		if got := sampleBudget(tt.window); got != tt.want {
 			t.Errorf("sampleBudget(%d) = %d, want %d", tt.window, got, tt.want)
 		}
+	}
+}
+
+// quickRetries shrinks the retry backoff for the duration of a test.
+func quickRetries(t *testing.T) {
+	t.Helper()
+	saved := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = saved })
+}
+
+const okResponse = `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1}}`
+
+func TestSendRetriesTransientErrors(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(okResponse))
+	}))
+	defer srv.Close()
+
+	req := &AgentRequest{Model: "m", BaseURL: srv.URL}
+	res, err := req.Send(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("server saw %d calls, want 3 (two 503s then success)", calls)
+	}
+	if res.Choices[0].Message.Content != "ok" {
+		t.Errorf("unexpected response content %q", res.Choices[0].Message.Content)
+	}
+}
+
+func TestSendGivesUpAfterMaxAttempts(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background())
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != maxSendAttempts {
+		t.Errorf("server saw %d calls, want %d", calls, maxSendAttempts)
+	}
+}
+
+// A 4xx means the request itself is wrong (e.g. context overflow) — retrying
+// can't fix it and would just burn time, so exactly one attempt is made.
+func TestSendDoesNotRetryClientErrors(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("context size (32768 tokens)"))
+	}))
+	defer srv.Close()
+
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if calls != 1 {
+		t.Errorf("server saw %d calls, want 1 (no retry on 4xx)", calls)
+	}
+	// The error must preserve the provider's message — study's window
+	// self-calibration parses it.
+	if !strings.Contains(err.Error(), "context size (32768 tokens)") {
+		t.Errorf("error should carry the response body, got %q", err)
+	}
+}
+
+func TestSendHonorsContextCancel(t *testing.T) {
+	quickRetries(t)
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-block // hold the request open until the test ends
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(ctx)
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Send took %v after cancel; should return promptly", elapsed)
+	}
+}
+
+// runToolCalls must append one tool result per call ID even when the turn was
+// interrupted — a missing result for a tool_call id breaks the next send.
+func TestRunToolCallsInterruptedAppendsAllResults(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	before := len(cs.Request.Messages)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already interrupted
+
+	calls := []ToolCall{
+		tc(FunctionBash, `{"command":"echo one"}`),
+		{ID: "call_2", Type: "function", Function: FunctionCall{Name: FunctionBash, Arguments: `{"command":"echo two"}`}},
+	}
+	cs.runToolCalls(ctx, calls)
+
+	got := cs.Request.Messages[before:]
+	if len(got) != 2 {
+		t.Fatalf("appended %d messages, want 2 (one per call)", len(got))
+	}
+	for i, m := range got {
+		if m.Role != RoleTool {
+			t.Errorf("message %d role = %q, want %q", i, m.Role, RoleTool)
+		}
+		if m.ToolCallID != calls[i].ID {
+			t.Errorf("message %d tool_call_id = %q, want %q", i, m.ToolCallID, calls[i].ID)
+		}
+		if !strings.Contains(m.Content, "interrupted") {
+			t.Errorf("message %d should record the interrupt, got %q", i, m.Content)
+		}
+	}
+}
+
+func TestRunToolCallsHappyPath(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	before := len(cs.Request.Messages)
+
+	cs.runToolCalls(context.Background(), []ToolCall{tc(FunctionBash, `{"command":"echo hello"}`)})
+
+	got := cs.Request.Messages[before:]
+	if len(got) != 1 {
+		t.Fatalf("appended %d messages, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Content, "hello") {
+		t.Errorf("tool result = %q, want echo output", got[0].Content)
 	}
 }
 
