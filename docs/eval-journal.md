@@ -2148,3 +2148,24 @@ events.jsonl  auto  unit   (timed out at the 300s client cap; fixed post-run —
 - studyCharsPerToken=4 underestimates JSON (~2.7 chars/token): data prompts run ~40% over their token budget — slow (123s/487s cells) and overflow-prone. Per-format chars-per-token in the unit table would shrink data samples to spec.
 - Code groundedness needs n≥10 reps (or more code fixtures) before tuning density defaults on grounding; the latency win for auto is already stable.
 - digests on data are consistently right while citations were the hard part — supports the study-as-sparse-proxy direction (digest for comprehension, citations for verification).
+
+### 2026-06-10 — n=10 2×2 grid (code): coordinates dominate granularity / REVISES earlier law-on-code claim
+
+**Command**: `./loop study-eval code-grid` — {coarse 8×window/8, auto unit} × {numbered, unnumbered} on repl.go, n=10/cell, 40 runs. First CLEAN comparison: every earlier cross-run delta on code was confounded by citation-pipeline fixes landing between runs (the union validator, truncation fix, and prompt rules each changed which citations survive to be scored).
+
+```
+   k  numbered  lat(s)   grounded
+   8     false    70.2   64/66  (97%)
+   8      true    53.1   33/36  (92%)
+auto     false    43.7   12/23  (52%)
+auto      true    50.3   28/28  (100%)
+```
+
+**Findings**:
+- **Coordinates dominate granularity for code citation accuracy.** Unit fragments WITHOUT numbers are the worst cell (52%); WITH numbers the best (100%, 28/28). Coarse fragments are fine either way (97%/92%) — a 245-line fragment gives the model room to anchor claims, and it cites generously (6.6/rep vs 2.3–2.8/rep at unit).
+- **The earlier "unit fragments fix code grounding" claim does not survive n=10.** The original k=8→32 sweep (57%→100%) ran on the pre-union validator that systematically discarded coarse-cell citations spanning chunk edges; subsequent n=3 runs swung 43↔94%. Granularity's real, surviving benefits for code: ~30% lower latency at equal coverage, and boundary-snapped fragments — citation accuracy comes from coordinates.
+- **Default flipped**: code now gets numbered snippets (numberSnippetLines: everything except prose + unknown). Operating point = auto + numbered: 100% grounded, 50s, full-budget breadth.
+
+**Caveats**: one fixture, one goal, one model. The 2×2 should be repeated on a second code file and on the prose fixture (prose unnumbered measured 100% at unit — the prefix may be pure cost there, but that's n=6 total).
+
+**Next**: macro cash-out — re-run `cortex eval codebase` (44 fixtures, 64% baseline 2026-05-31) with the improved study tool to measure end-to-end lift on read-heavy cases.

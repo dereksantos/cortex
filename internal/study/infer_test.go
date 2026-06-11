@@ -180,25 +180,33 @@ func TestValidateCitations_UnionOfAdjacentFragments(t *testing.T) {
 	})
 }
 
-// Record-shaped data gets per-line numbers in the prompt (the model
-// otherwise locates records by their id fields and cites unverifiable
-// line numbers); code and prose stay unnumbered (headers suffice and the
-// prefix costs budget).
+// Data and code get per-line numbers in the prompt (data: the model
+// otherwise cites record ids as line numbers; code: 52% -> 100% grounded
+// in the n=10 2x2 grid); prose stays unnumbered (sections anchor well
+// and the prefix costs budget). The Numbered override forces either way.
 func TestBuildInferPrompt_NumbersDataLines(t *testing.T) {
-	mk := func(rel string) InferInput {
+	mk := func(rel string, numbered *bool) InferInput {
 		return InferInput{
-			RelPath: rel,
-			Sampled: []SampledChunk{{RelPath: rel, LineStart: 51, LineEnd: 52, Snippet: "{\"id\":1}\n{\"id\":2}\n"}},
+			RelPath:  rel,
+			Numbered: numbered,
+			Sampled:  []SampledChunk{{RelPath: rel, LineStart: 51, LineEnd: 52, Snippet: "{\"id\":1}\n{\"id\":2}\n"}},
 		}
 	}
-	_, user := BuildInferPrompt(mk("events.jsonl"))
-	for _, want := range []string{"51| {\"id\":1}", "52| {\"id\":2}"} {
-		if !strings.Contains(user, want) {
-			t.Errorf("data prompt missing numbered line %q in:\n%s", want, user)
+	for _, rel := range []string{"events.jsonl", "main.go"} {
+		_, user := BuildInferPrompt(mk(rel, nil))
+		for _, want := range []string{"51| {\"id\":1}", "52| {\"id\":2}"} {
+			if !strings.Contains(user, want) {
+				t.Errorf("%s prompt missing numbered line %q in:\n%s", rel, want, user)
+			}
 		}
 	}
-	_, user = BuildInferPrompt(mk("main.go"))
+	_, user := BuildInferPrompt(mk("doc.md", nil))
 	if strings.Contains(user, "51| ") {
-		t.Errorf("code prompt should not number lines:\n%s", user)
+		t.Errorf("prose prompt should not number lines:\n%s", user)
+	}
+	off := false
+	_, user = BuildInferPrompt(mk("main.go", &off))
+	if strings.Contains(user, "51| ") {
+		t.Errorf("Numbered=false override should suppress numbering:\n%s", user)
 	}
 }

@@ -554,7 +554,7 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0)
+	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil)
 	if err != nil {
 		return "", err
 	}
@@ -566,8 +566,9 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 // STUDY model in its own context (the small-model-amplifier split: a cheap model
 // reads, the coding model gets only the curated result back). fill is the
 // per-chunk fraction of the window (0 → the engine default, 1/8); keep
-// chunks × fill ≤ 1 so one pass's sample fits the window.
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64) (study.StudyLoopResult, error) {
+// chunks × fill ≤ 1 so one pass's sample fits the window. numbered overrides
+// per-line snippet numbering (nil → format default).
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -598,11 +599,12 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	provider.SetMaxTokens(headroom / 2)
 
 	req := study.StudyRequest{
-		Path:    abs,
-		RelPath: path,
-		Fill:    fill,
-		Goal:    goal,
-		Infer:   study.ProviderInfer(provider),
+		Path:     abs,
+		RelPath:  path,
+		Fill:     fill,
+		Goal:     goal,
+		Numbered: numbered,
+		Infer:    study.ProviderInfer(provider),
 	}
 	// chunks > 0 pins the per-pass draw (the eval sweep does this);
 	// chunks <= 0 leaves Density nil so the engine derives both chunk
@@ -1415,8 +1417,13 @@ func runStudyCLI(path, goal string, passes int) {
 
 func main() {
 	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
-	// latency / coverage / groundedness.
+	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
+	// 2×2 granularity × numbering isolation experiment on the code fixture.
 	if len(os.Args) >= 2 && os.Args[1] == "study-eval" {
+		if len(os.Args) >= 3 && os.Args[2] == "code-grid" {
+			runStudyEvalCodeGrid()
+			return
+		}
 		runStudyEval()
 		return
 	}

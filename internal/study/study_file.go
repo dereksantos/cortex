@@ -48,6 +48,10 @@ type StudyRequest struct {
 	// still clamp to the grid's [2KB, 256KB] bounds.
 	Fill float64
 
+	// Numbered overrides per-line snippet numbering in the inference
+	// prompt (see InferInput.Numbered). Nil → format default.
+	Numbered *bool
+
 	// Covered, when non-nil, is the session's accumulated covered-chunk
 	// set. StudyFile seeds the sampler from it (so a deepening pass draws
 	// NEW regions, not the same ones) and adds the chunks it samples to
@@ -259,11 +263,12 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	// returned alongside the error so callers can degrade gracefully.
 	if req.Infer != nil {
 		io, ierr := req.Infer(ctx, InferInput{
-			Path:    req.Path,
-			RelPath: relPath,
-			Sampled: sampled,
-			Focus:   req.Focus,
-			Goal:    req.Goal,
+			Path:     req.Path,
+			RelPath:  relPath,
+			Sampled:  sampled,
+			Focus:    req.Focus,
+			Goal:     req.Goal,
+			Numbered: req.Numbered,
 		})
 		if ierr != nil {
 			return resp, fmt.Errorf("study: inference: %w", ierr)

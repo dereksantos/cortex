@@ -74,8 +74,9 @@ func ensureStudyEvalJSONL() (string, error) {
 // equal k×fill sample the same total data at different granularities, so the
 // sweep separates "how much was read" from "how fragmented it was".
 type studyEvalCell struct {
-	Chunks int
-	Fill   float64 // 0 → engine default (1/8)
+	Chunks   int
+	Fill     float64 // 0 → engine default (1/8)
+	Numbered *bool   // per-line snippet numbering; nil → format default
 }
 
 // studyEvalSweep compares the two regimes at equal total data (the full
@@ -99,7 +100,8 @@ type studyEvalRow struct {
 	Goal            string  `json:"goal"`
 	Model           string  `json:"model"`
 	Chunks          int     `json:"chunks"`
-	Fill            float64 `json:"fill,omitempty"` // per-chunk window fraction; 0 = default 1/8
+	Fill            float64 `json:"fill,omitempty"`     // per-chunk window fraction; 0 = default 1/8
+	Numbered        *bool   `json:"numbered,omitempty"` // line-numbering override; nil = format default
 	Rep             int     `json:"rep"`
 	Stopped         string  `json:"stopped"`
 	LatencyMS       int64   `json:"latency_ms"`
@@ -201,9 +203,9 @@ func scoreGroundedness(content, lang string, res study.StudyLoopResult) (grounde
 
 // measureCell runs study once over a case at a given sweep cell and scores it.
 func measureCell(cs *CortexSession, c studyEvalCase, cell studyEvalCell) studyEvalRow {
-	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: cell.Chunks, Fill: cell.Fill}
+	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: cell.Chunks, Fill: cell.Fill, Numbered: cell.Numbered}
 	start := time.Now()
-	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill)
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill, cell.Numbered)
 	row.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = err.Error()
@@ -322,4 +324,61 @@ func shortName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// runStudyEvalCodeGrid is the 2×2 isolation experiment on the code fixture:
+// {coarse, unit} × {numbered, unnumbered}, n=10/cell. It separates three
+// candidate explanations for noisy code groundedness — fragment coherence,
+// coordinate availability, and plain model variance. Run with:
+// `loop study-eval code-grid`.
+func runStudyEvalCodeGrid() {
+	session := NewCortexSession()
+	c := studyEvalCase{"cmd/cortex/commands/repl.go", "how are slash commands dispatched"}
+	on, off := true, false
+	cells := []studyEvalCell{
+		{Chunks: 8, Fill: 1.0 / 8, Numbered: &off},
+		{Chunks: 8, Fill: 1.0 / 8, Numbered: &on},
+		{Chunks: 0, Fill: 0, Numbered: &off},
+		{Chunks: 0, Fill: 0, Numbered: &on},
+	}
+	const reps = 10
+
+	var rows []studyEvalRow
+	for _, cell := range cells {
+		for rep := 0; rep < reps; rep++ {
+			row := measureCell(session, c, cell)
+			row.Rep = rep
+			rows = append(rows, row)
+			b, _ := json.Marshal(row)
+			fmt.Println(string(b))
+		}
+	}
+
+	fmt.Printf("\n--- study-eval code 2x2 (model: %s, n=%d/cell, %s) ---\n", session.Study.Model, reps, shortName(c.Path))
+	fmt.Printf("%4s %9s %7s   %s\n", "k", "numbered", "lat(s)", "citations summed across reps")
+	for _, cell := range cells {
+		var lat []float64
+		var g, f, u, errs int
+		for _, r := range rows {
+			if r.Chunks != cell.Chunks || r.Numbered == nil || cell.Numbered == nil || *r.Numbered != *cell.Numbered {
+				continue
+			}
+			if r.Error != "" {
+				errs++
+				continue
+			}
+			lat = append(lat, float64(r.LatencyMS)/1000)
+			g, f, u = g+r.Grounded, f+r.Failed, u+r.Unscored
+		}
+		kLabel := fmt.Sprintf("%d", cell.Chunks)
+		if cell.Chunks == 0 {
+			kLabel = "auto"
+		}
+		gp := 0.0
+		if g+f > 0 {
+			gp = 100 * float64(g) / float64(g+f)
+		}
+		fmt.Printf("%4s %9v %7.1f   grounded=%d failed=%d unscored=%d errs=%d  (%.0f%% grounded)\n",
+			kLabel, *cell.Numbered, median(lat), g, f, u, errs, gp)
+	}
 }

@@ -31,6 +31,11 @@ type InferInput struct {
 	Sampled []SampledChunk
 	Focus   *Focus
 	Goal    string
+	// Numbered overrides per-line "N| " snippet numbering: nil → the
+	// format default (numberSnippetLines), true/false → forced. The
+	// override exists so evals can isolate coordinate availability from
+	// fragment granularity.
+	Numbered *bool
 }
 
 // InferOutput is the raw inference result, before citation validation.
@@ -78,6 +83,9 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 	}
 	fmt.Fprintf(&b, "Sampled regions of %s (a PARTIAL view — not the whole file):\n\n", display)
 	numbered := numberSnippetLines(display)
+	if in.Numbered != nil {
+		numbered = *in.Numbered
+	}
 	for _, s := range in.Sampled {
 		fmt.Fprintf(&b, "----- %s:%d-%d -----\n", s.RelPath, s.LineStart, s.LineEnd)
 		if numbered {
@@ -92,18 +100,28 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 }
 
 // numberSnippetLines reports whether snippets for this file get explicit
-// per-line numbers in the prompt. Record-shaped data (NDJSON, CSV, …)
-// needs them: every line looks alike, so without visible numbers the
-// model locates records by their intrinsic keys (an id field) and emits
-// citations that fail validation. Code and prose don't need them —
-// region headers suffice (measured 100% grounded) — and skipping the
-// prefix saves ~15% of the sample budget.
+// per-line numbers in the prompt. Everything except prose needs them:
+//
+//   - Record data (NDJSON, CSV, …): without visible numbers the model
+//     locates records by intrinsic keys (an id field) and emits
+//     citations that fail validation (0% → 100% grounded when added).
+//   - Code: the n=10 2×2 grid (eval-journal 2026-06-10) measured
+//     unit-fragment sampling at 52% grounded unnumbered vs 100%
+//     numbered — coordinates dominate granularity for citation
+//     accuracy.
+//   - Prose keeps bare snippets: sections anchor citations well
+//     (measured 100% grounded unnumbered at unit granularity), and the
+//     prefix would cost ~10-15% of the sample budget.
+//
+// Unknown formats stay unnumbered (conservative: spend budget on
+// content until a measurement says otherwise).
 func numberSnippetLines(path string) bool {
-	switch langFor(filepath.Ext(path)) {
-	case "json", "yaml", "csv", "toml", "ini":
-		return true
+	switch lang := langFor(filepath.Ext(path)); lang {
+	case "md", "txt", "rst", "unknown":
+		return false
+	default:
+		return lang != ""
 	}
-	return false
 }
 
 // writeNumberedSnippet emits the snippet with each line prefixed by its
