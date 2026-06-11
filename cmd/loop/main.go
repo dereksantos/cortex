@@ -366,9 +366,20 @@ func parseCtxSize(s string) int {
 	return 0
 }
 
-// studyWindow resolves the study model's context window: learned at runtime >
-// configured > fallback.
+// studyWindow resolves the study model's context window: explicit env
+// override > learned at runtime > configured > fallback.
+//
+// CORTEX_LOOP_STUDY_WINDOW is the experiment knob: a smaller window
+// lowers the read-vs-study threshold so files that would pass through
+// whole get studied instead — required for recursion experiments
+// (studying digests of digests) where the corpus is small but a digest
+// is the point.
 func (cs *CortexSession) studyWindow() int {
+	if v := os.Getenv("CORTEX_LOOP_STUDY_WINDOW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
 	if w, ok := learnedWindows[cs.Study.Model]; ok {
 		return w
 	}

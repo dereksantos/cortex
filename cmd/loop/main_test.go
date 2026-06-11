@@ -1063,3 +1063,17 @@ func TestScoreGroundednessPerFormat(t *testing.T) {
 		}
 	})
 }
+
+// CORTEX_LOOP_STUDY_WINDOW overrides every other window source — the
+// recursion-experiment knob (force study mode on small digest corpora).
+func TestStudyWindowEnvOverride(t *testing.T) {
+	t.Setenv("CORTEX_LOOP_STUDY_WINDOW", "8192")
+	cs := &CortexSession{Study: ModelSpec{Model: "reasoner", Window: 32768}}
+	if got := cs.studyWindow(); got != 8192 {
+		t.Errorf("studyWindow() = %d, want 8192 (env override)", got)
+	}
+	t.Setenv("CORTEX_LOOP_STUDY_WINDOW", "")
+	if got := cs.studyWindow(); got != 32768 {
+		t.Errorf("studyWindow() = %d, want 32768 (configured)", got)
+	}
+}
