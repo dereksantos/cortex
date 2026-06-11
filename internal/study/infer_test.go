@@ -210,3 +210,26 @@ func TestBuildInferPrompt_NumbersDataLines(t *testing.T) {
 		t.Errorf("Numbered=false override should suppress numbering:\n%s", user)
 	}
 }
+
+// Verbatim relays validate; invented ranges on the same file do not.
+// This is the digest-of-digests hierarchy contract: a lower level's
+// citation visible in a sampled snippet may propagate upward unchanged.
+func TestValidateCitations_VerbatimRelay(t *testing.T) {
+	sampled := []SampledChunk{{
+		RelPath: "corpus.txt", LineStart: 1, LineEnd: 4,
+		Snippet: "===== LEVEL-0 DIGEST OF: pkg/a/x.go =====\nThe widget frobs.\ncitations:\n  pkg/a/x.go:35-48  Frob entrypoint.\n",
+	}}
+	valid := ValidateCitations([]Citation{
+		{RelPath: "pkg/a/x.go", LineStart: 35, LineEnd: 48, Claim: "faithful relay"},
+		{RelPath: "pkg/a/x.go", LineStart: 30, LineEnd: 50, Claim: "invented range"},
+		{RelPath: "corpus.txt", LineStart: 2, LineEnd: 2, Claim: "normal in-sample"},
+	}, sampled, nil)
+	if len(valid) != 2 {
+		t.Fatalf("want 2 valid (relay + in-sample), got %d: %+v", len(valid), valid)
+	}
+	for _, v := range valid {
+		if v.Claim == "invented range" {
+			t.Errorf("invented relay range must drop")
+		}
+	}
+}

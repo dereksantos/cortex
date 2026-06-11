@@ -1077,3 +1077,20 @@ func TestStudyWindowEnvOverride(t *testing.T) {
 		t.Errorf("studyWindow() = %d, want 32768 (configured)", got)
 	}
 }
+
+// studyCompletionCap: half the headroom, floored where that collapses to
+// the JSON-truncation point (citations die silently below ~2K tokens).
+func TestStudyCompletionCap(t *testing.T) {
+	tests := []struct {
+		window, want int
+	}{
+		{32768, 4096}, // headroom 8192 → half
+		{8192, 2048},  // headroom 2048 → half=1024 → floored
+		{6144, 2048},  // floor dominates small windows
+	}
+	for _, tt := range tests {
+		if got := studyCompletionCap(tt.window); got != tt.want {
+			t.Errorf("studyCompletionCap(%d) = %d, want %d", tt.window, got, tt.want)
+		}
+	}
+}

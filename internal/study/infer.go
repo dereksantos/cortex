@@ -166,13 +166,34 @@ func ValidateCitations(cits []Citation, sampled []SampledChunk, onDrop func(Cita
 	merged := mergeSampledRanges(sampled)
 	valid := make([]Citation, 0, len(cits))
 	for _, c := range cits {
-		if citationInSample(c, merged) {
+		if citationInSample(c, merged) || citationRelayed(c, sampled) {
 			valid = append(valid, c)
 		} else if onDrop != nil {
 			onDrop(c)
 		}
 	}
 	return valid
+}
+
+// citationRelayed reports whether the citation is a VERBATIM relay: its
+// exact "path:start-end" string appears inside a sampled snippet. This
+// is the hierarchy contract — when studying digests of digests, the
+// lower level's citations are visible as text, and propagating one
+// upward unchanged preserves the provenance chain (the cited string is
+// itself the evidence). Measured necessity: free-form relaying invents
+// line ranges (7/11 fabricated on the first level-1 corpus run); exact
+// string match admits only the faithful copies.
+func citationRelayed(c Citation, sampled []SampledChunk) bool {
+	if c.RelPath == "" || c.LineStart <= 0 || c.LineEnd < c.LineStart {
+		return false
+	}
+	needle := fmt.Sprintf("%s:%d-%d", c.RelPath, c.LineStart, c.LineEnd)
+	for _, s := range sampled {
+		if strings.Contains(s.Snippet, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 type lineRange struct{ start, end int }

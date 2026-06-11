@@ -400,6 +400,24 @@ func sampleBudget(window int) int {
 	return window - headroom
 }
 
+// studyCompletionCap is the max_tokens granted to one study inference
+// response. The response carries the digest plus one citation per claim
+// (each repeating the file path), which routinely exceeds the client's
+// 1024-token default — truncating the JSON mid-array, which silently
+// degrades to a digest with zero citations. Half the window headroom
+// usually suffices, but at small (forced) windows that collapses back
+// to the truncation point, so it floors at 2048. The floor can nominally
+// overshoot a genuinely tiny window; the overflow self-correction
+// (learnedWindows) handles that case, while a silently citation-less
+// study would not self-correct at all.
+func studyCompletionCap(window int) int {
+	c := (window - sampleBudget(window)) / 2
+	if c < 2048 {
+		c = 2048
+	}
+	return c
+}
+
 var bash = newTool(FunctionBash,
 	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
 	objectSchema(map[string]any{
@@ -600,14 +618,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	})
 	provider.SetModel(cs.Study.Model)
 	provider.SetTemperature(0)
-	// The inference response (digest + one citation per claim, each
-	// repeating the file path) routinely exceeds the client's 1024-token
-	// default on data-shaped files, truncating the JSON mid-array — which
-	// degrades to a digest with zero citations. sampleBudget already
-	// reserves window/4 headroom for template + completion; give the
-	// completion half of it.
-	headroom := cs.studyWindow() - sampleBudget(cs.studyWindow())
-	provider.SetMaxTokens(headroom / 2)
+	provider.SetMaxTokens(studyCompletionCap(cs.studyWindow()))
 
 	req := study.StudyRequest{
 		Path:     abs,

@@ -2169,3 +2169,17 @@ auto      true    50.3   28/28  (100%)
 **Caveats**: one fixture, one goal, one model. The 2×2 should be repeated on a second code file and on the prose fixture (prose unnumbered measured 100% at unit — the prefix may be pure cost there, but that's n=6 total).
 
 **Next**: macro cash-out — re-run `cortex eval codebase` (44 fixtures, 64% baseline 2026-05-31) with the improved study tool to measure end-to-end lift on read-heavy cases.
+
+### 2026-06-11 — Recursion receipt: digest-of-digests with a verified provenance chain
+
+**Setup**: 24 largest non-test Go files (~2.5MB source) studied at a forced 8K window → 50.7KB of L0 digests+citations → concatenated, labelled corpus → studied again (L1) at 11% sample. Scripts: /tmp/cortex-recursion-exp.sh; knob: CORTEX_LOOP_STUDY_WINDOW.
+
+**Comprehension**: the L1 digest correctly maps all four subsystems (CLI/ingestion, DAG harness/orchestration, study controller, eval/benchmarking incl. SWE-bench Docker detail) from sampling ~6K tokens two levels above ~2.5MB — ≈1000:1 through two honest levels.
+
+**Provenance — two failures fixed on the way**:
+1. Completion cap collapsed to the 1024-token truncation point at small windows (headroom/2). `studyCompletionCap` now floors at 2048.
+2. The model RELAYED L0 citations upward (cited source paths it never read, copied from digest text) — but free-form relaying invented line ranges on 7/11. New validation rule: a citation is also valid if its exact "path:start-end" string appears verbatim in a sampled snippet (`citationRelayed`). Faithful relays pass; inventions drop.
+
+**Result**: L1 emits 4 validated citations, all verbatim relays pointing directly at source (e.g. internal/harness/loop.go:391-414 — spot-checked: the lines say exactly what the claim says). The hierarchy contract works: every level's artifact is the same shape (digest + citations), the validator enforces honesty per level, and verbatim relay carries ground-truth pointers to the top.
+
+**Follow-ups**: numbered corpus lines (Numbered override exposed to the study CLI) should raise relay yield above 4/11 by letting the model also cite corpus-locally; per-format chars-per-token still pending; a `cortex study-project` slice could productionize the L0 loop (the controller exists, needs the citation contract ported).
