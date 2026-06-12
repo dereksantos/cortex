@@ -80,7 +80,7 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 
 	moduleCache := make(map[string]moduleAssignment) // dir → assignment
 
-	files, err := walkSourceFiles(projectRoot, ignore)
+	files, err := walkSourceFiles(projectRoot, ignore, universalMaxFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -200,9 +200,11 @@ type sourceFile struct {
 
 // walkSourceFiles walks root and returns its studyable files, sorted
 // lexically by rel path: ignore-set exclusions (dirs, files, sensitive
-// magic bytes) applied, empty and >1 MiB files skipped, capped at
-// universalSanityCap.
-func walkSourceFiles(root string, ignore *projectscan.IgnoreSet) ([]sourceFile, error) {
+// magic bytes) applied, empty files skipped, capped at
+// universalSanityCap. maxFileBytes > 0 additionally skips files above
+// that size (the analyzer's reading cap); 0 walks uncapped so the
+// directory-study path can route oversized files through byte grids.
+func walkSourceFiles(root string, ignore *projectscan.IgnoreSet, maxFileBytes int64) ([]sourceFile, error) {
 	var files []sourceFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -224,7 +226,7 @@ func walkSourceFiles(root string, ignore *projectscan.IgnoreSet) ([]sourceFile, 
 		if err != nil {
 			return nil
 		}
-		if info.Size() == 0 || info.Size() > universalMaxFileBytes {
+		if info.Size() == 0 || (maxFileBytes > 0 && info.Size() > maxFileBytes) {
 			return nil
 		}
 		// Layer 3 magic-byte sniff: catches sensitive content that

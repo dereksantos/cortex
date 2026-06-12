@@ -2,6 +2,8 @@ package study
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path"
@@ -30,7 +32,9 @@ import (
 // studyDir handles StudyFile requests whose Path is a directory.
 func studyDir(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	ignore := projectscan.LoadIgnoreSet(req.Path)
-	files, err := walkSourceFiles(req.Path, ignore)
+	// Uncapped walk: oversized files must count toward the threshold and
+	// be studied (via byte grids below), not silently vanish.
+	files, err := walkSourceFiles(req.Path, ignore, 0)
 	if err != nil {
 		return StudyResponse{}, err
 	}
@@ -46,7 +50,8 @@ func studyDir(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	}
 
 	// Threshold: the whole corpus fits → inline it, one labelled section
-	// per file in deterministic (sorted relpath) order.
+	// per file in deterministic (sorted relpath) order. (An over-cap file
+	// can only reach this branch when the window genuinely fits it.)
 	var total int64
 	for _, f := range files {
 		total += f.size
@@ -55,15 +60,22 @@ func studyDir(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		return StudyResponse{Mode: "read", ReadContent: readCorpus(files, relBase)}, nil
 	}
 
-	// Corpus boundary: the universal analyzer scoped to this directory.
-	// TODO(study): files over universalMaxFileBytes are skipped by the
-	// walk, so a huge file inside a studied dir is invisible here; route
-	// such files through per-file byte grids merged into this boundary.
+	// Corpus boundary: the universal analyzer scoped to this directory
+	// (its walk re-applies the reading cap), with every over-cap file
+	// merged in as a per-file byte grid so huge files are sampled like
+	// any other region instead of being invisible.
 	an := UniversalAnalyzer{Salt: req.Session}
 	out, err := an.Analyze(ctx, req.Path, ignore)
 	if err != nil {
 		return StudyResponse{}, fmt.Errorf("study: analyze %s: %w", req.Path, err)
 	}
+	var large []sourceFile
+	for _, f := range files {
+		if f.size > universalMaxFileBytes {
+			large = append(large, f)
+		}
+	}
+	mergeLargeFiles(out, large, window, req.Fill, req.Session)
 
 	// Citations must be meaningful to the CALLER: chunk relpaths are
 	// analyzer-relative (to the studied dir), so prefix them with the
@@ -80,6 +92,45 @@ func studyDir(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		display = filepath.Base(req.Path)
 	}
 	return sampleAndInfer(ctx, req, out, display, meanChunkBytes(out.Chunks), window)
+}
+
+// mergeLargeFiles folds per-file byte grids for over-cap files into the
+// corpus boundary, so the dir study sees ALL its content: the universal
+// analyzer reads + line-chunks everything up to its cap, and anything
+// bigger is gridded from size alone (the byte grid never reads the file
+// to chunk it) and sampled like any other region. Band modules are
+// namespaced by relpath — every grid emits band-00..band-NN and two
+// large files must not share coverage groups. The state hash + RNG seed
+// are re-derived so large-file drift changes the draw deterministically.
+func mergeLargeFiles(out *BoundaryOutput, large []sourceFile, window int, fill float64, salt string) {
+	if len(large) == 0 {
+		return
+	}
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", out.StateHash)
+	for _, f := range large {
+		grid := BuildByteGrid(f.abs, f.rel, f.size, ByteGridOpts{
+			WindowTokens: window,
+			TargetFill:   fill,
+			Salt:         salt,
+			ModTimeUnix:  f.mtime,
+		})
+		for i := range grid.Chunks {
+			grid.Chunks[i].ModuleID = f.rel + "#" + grid.Chunks[i].ModuleID
+		}
+		for i := range grid.Modules {
+			grid.Modules[i].ID = f.rel + "#" + grid.Modules[i].ID
+		}
+		out.Chunks = append(out.Chunks, grid.Chunks...)
+		out.Modules = append(out.Modules, grid.Modules...)
+		out.EffTotalLines += grid.EffTotalLines
+		out.TotalLines += grid.TotalLines
+		out.TotalFiles++
+		out.FileHashes[f.rel] = byteGridDriftKey(f.size, f.mtime)
+		fmt.Fprintf(h, "%s:%d:%d\n", f.rel, f.size, f.mtime)
+	}
+	out.StateHash = hex.EncodeToString(h.Sum(nil))
+	out.RNGSeed = seedFrom(out.StateHash, salt)
 }
 
 // readCorpus concatenates every walked file with a "----- relpath -----"

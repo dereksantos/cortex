@@ -236,9 +236,11 @@ caller-relative path so citations stay real for the consuming agent.
 `Focus.Path` (file or subtree) is the corpus targeting knob — line
 numbers alone are ambiguous across files — and the curator emits it
 from a lead's relpath (`focus_path` in the model-curator contract).
-Known gap: files over the analyzer's 1 MiB cap are skipped by the walk,
-so a huge file inside a studied dir is invisible; the fix is per-file
-byte grids merged into the corpus boundary (TODO in `studyDir`).
+Files over the analyzer's 1 MiB reading cap are NOT skipped: each is
+gridded from size alone (per-file byte grid, band modules namespaced by
+relpath) and merged into the corpus boundary (`mergeLargeFiles`), so a
+5 GB log inside a studied dir is sampled like any other region and
+counts toward both the read threshold and the coverage denominator.
 
 The net-new producer must **not read the file to chunk it** (that defeats
 the purpose):

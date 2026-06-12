@@ -196,6 +196,120 @@ func TestStudyDir_SessionCoverageDrawsNewRegions(t *testing.T) {
 	}
 }
 
+// TestMergeLargeFiles_NamespacesAndTotals unit-tests the merge seam:
+// two over-cap files become byte grids whose band modules are
+// namespaced per relpath (no cross-file coverage groups), totals grow,
+// drift keys land, and the RNG seed is re-derived.
+func TestMergeLargeFiles_NamespacesAndTotals(t *testing.T) {
+	root := writeDirFixture(t, map[string]string{
+		"small.txt": lineBlob(20000),
+		"big1.txt":  lineBlob(1300000),
+		"big2.txt":  lineBlob(1300000),
+	})
+	out, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if got := len(out.FileHashes); got != 1 {
+		t.Fatalf("analyzer should only see the small file, got %d hashes", got)
+	}
+	preEff := out.EffTotalLines
+	preSeed := out.RNGSeed
+	preChunks := len(out.Chunks)
+
+	large := []sourceFile{
+		{abs: filepath.Join(root, "big1.txt"), rel: "big1.txt", size: 1300000, mtime: 1111},
+		{abs: filepath.Join(root, "big2.txt"), rel: "big2.txt", size: 1300000, mtime: 2222},
+	}
+	mergeLargeFiles(out, large, 8192, 0, "s")
+
+	if len(out.Chunks) <= preChunks {
+		t.Fatal("merge added no chunks")
+	}
+	if out.EffTotalLines <= preEff {
+		t.Error("merge did not grow EffTotalLines")
+	}
+	if out.RNGSeed == preSeed {
+		t.Error("merge must re-derive the RNG seed (large-file drift changes the draw)")
+	}
+	for _, rel := range []string{"big1.txt", "big2.txt"} {
+		if _, ok := out.FileHashes[rel]; !ok {
+			t.Errorf("FileHashes missing drift key for %s", rel)
+		}
+	}
+	// Module IDs must be unique — every grid emits band-00..band-NN and
+	// two large files must not share coverage groups.
+	seenMod := map[string]bool{}
+	for _, m := range out.Modules {
+		if seenMod[m.ID] {
+			t.Errorf("module ID collision: %s", m.ID)
+		}
+		seenMod[m.ID] = true
+	}
+	// Chunks of each large file sit in modules namespaced by its relpath.
+	for _, c := range out.Chunks {
+		if c.RelPath == "big1.txt" && !strings.HasPrefix(c.ModuleID, "big1.txt#") {
+			t.Errorf("big1 chunk in module %q, want big1.txt# prefix", c.ModuleID)
+		}
+	}
+
+	// Determinism: merging the same inputs again from a fresh Analyze
+	// yields the same seed and chunk IDs.
+	out2, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("Analyze 2: %v", err)
+	}
+	mergeLargeFiles(out2, large, 8192, 0, "s")
+	if out2.RNGSeed != out.RNGSeed {
+		t.Errorf("seeds differ across identical merges: %d vs %d", out.RNGSeed, out2.RNGSeed)
+	}
+	if len(out2.Chunks) != len(out.Chunks) {
+		t.Errorf("chunk counts differ across identical merges: %d vs %d", len(out.Chunks), len(out2.Chunks))
+	}
+}
+
+// TestStudyDir_LargeFileSampled is the end-to-end guarantee: a >1 MiB
+// file inside a studied dir is no longer invisible. With two 1-chunk
+// small files and k=20, at least 18 draws must come from the large
+// file's grid (pigeonhole), and they refine to real line bounds. The
+// large file's size also pushes the dir over the read threshold.
+func TestStudyDir_LargeFileSampled(t *testing.T) {
+	root := writeDirFixture(t, map[string]string{
+		"a.txt":   "tiny alpha\n",
+		"b.txt":   "tiny beta\n",
+		"big.txt": lineBlob(1300000),
+	})
+	resp, err := StudyFile(context.Background(), StudyRequest{
+		Path: root, RelPath: "logs", Window: 8192, Density: 20,
+	})
+	if err != nil {
+		t.Fatalf("StudyFile(dir with large file): %v", err)
+	}
+	if resp.Mode != "study" {
+		t.Fatalf("Mode = %q, want study (large file must count toward the threshold)", resp.Mode)
+	}
+	bigSampled := 0
+	for i, s := range resp.Sampled {
+		if s.RelPath != "logs/big.txt" {
+			continue
+		}
+		bigSampled++
+		if s.LineStart <= 0 || s.LineEnd < s.LineStart {
+			t.Errorf("sampled[%d] unrefined line bounds %d-%d", i, s.LineStart, s.LineEnd)
+		}
+		if s.Snippet == "" {
+			t.Errorf("sampled[%d] empty snippet", i)
+		}
+	}
+	if bigSampled < 18 {
+		t.Errorf("sampled %d chunks from the large file, want >= 18 (only 2 small chunks exist)", bigSampled)
+	}
+	// Coverage denominator includes the large file's estimated lines.
+	if resp.Coverage.EffLinesTotal < 10000 {
+		t.Errorf("EffLinesTotal = %d, want the large file's ~26k estimated lines included", resp.Coverage.EffLinesTotal)
+	}
+}
+
 // TestStudyDir_InferAndCitations exercises phase 2 over a corpus: the
 // inference mock cites one line range it actually saw (kept) and one in
 // a file that was never sampled (dropped by validation).
