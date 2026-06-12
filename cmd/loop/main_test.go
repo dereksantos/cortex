@@ -1341,3 +1341,35 @@ func TestContextRatio(t *testing.T) {
 		t.Error("gauge should be yellow just under compactThreshold")
 	}
 }
+
+// Shell metacharacters get an explicit, instructive rejection — the tool
+// execs without a shell, so a passed-through `|` previously reached the
+// binary as a literal arg and produced confusing downstream errors the
+// model retried verbatim ("find: |: unknown primary").
+func TestBashRejectsShellSyntax(t *testing.T) {
+	cases := []string{
+		`find . -name "*.go" | head -30`,
+		"go vet ./... 2>&1",
+		"echo hi > out.txt",
+		"ls; pwd",
+		"echo $(pwd)",
+		"go test ./... && echo ok",
+	}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			args, _ := json.Marshal(map[string]string{"command": cmd})
+			_, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+			if err == nil {
+				t.Fatal("expected shell-syntax rejection")
+			}
+			if !strings.Contains(err.Error(), "not supported") {
+				t.Errorf("error should explain the limitation, got %q", err)
+			}
+		})
+	}
+	// Bare commands still run.
+	args, _ := json.Marshal(map[string]string{"command": "echo plain"})
+	if out, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil); err != nil || !strings.Contains(out, "plain") {
+		t.Errorf("bare command should still run: out=%q err=%v", out, err)
+	}
+}

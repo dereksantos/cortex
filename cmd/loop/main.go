@@ -839,6 +839,14 @@ var bashAllowlist = map[string]bool{
 	"go": true, "git": true, "gofmt": true,
 }
 
+// bashShellSyntax matches shell metacharacters the bash tool cannot honor
+// (we exec the binary directly, no shell). Without an explicit rejection
+// the operator reaches the underlying binary as a literal argument and the
+// model gets a confusing downstream error — `find . | head` yields
+// "find: |: unknown primary", which models retry verbatim instead of
+// adapting (observed: 3 wasted turns in one session, 2026-06-12).
+var bashShellSyntax = regexp.MustCompile(`[|><;&]|\$\(`)
+
 func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) {
 	command, err := tc.stringArg("command")
 	if err != nil {
@@ -847,6 +855,9 @@ func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) 
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty command")
+	}
+	if m := bashShellSyntax.FindString(command); m != "" {
+		return "", fmt.Errorf("shell syntax %q is not supported (commands run without a shell — no pipes, redirects, or chaining); run the bare command instead, e.g. %q", m, fields[0]+" ...")
 	}
 	if !bashAllowlist[fields[0]] {
 		return "", fmt.Errorf("command %q is not in the allowlist", fields[0])
