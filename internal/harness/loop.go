@@ -461,23 +461,24 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 		l.costUSD += l.Provider.LastCostUSD()
 		res.Turns = turn + 1
 
-		// XML-style tool-call recovery. Several open coders
-		// (Qwen3-Coder, DeepSeek-Coder, CodeLlama in tool-use mode)
-		// emit `<function=NAME><parameter=K>V</parameter></function>`
-		// blocks in the response Content instead of populating the
-		// structured ToolCalls array. Without recovery the loop sees
-		// zero calls and stops with the XML-shaped text as the final
-		// answer — zero work done.
+		// Text-shape tool-call recovery. Several open coders emit
+		// tool calls in the response Content instead of populating
+		// the structured ToolCalls array — XML function blocks
+		// (Qwen3-Coder, DeepSeek-Coder, CodeLlama) or fenced JSON
+		// objects (Qwen3.6 via LiteLLM; this dialect caused 17/44
+		// zero-read fixtures on the 2026-06 fleet, eval-journal
+		// 2026-06-11). Without recovery the loop sees zero calls and
+		// stops with the text as the final answer — zero work done.
 		//
-		// When ToolCalls is empty AND content has the XML markers,
-		// parse them out and inject so the loop dispatches as if the
+		// When ToolCalls is empty AND content is non-empty, try every
+		// known dialect and inject so the loop dispatches as if the
 		// model had emitted structured calls. The model's reasoning
 		// stays in Content; only the dispatch list is augmented.
-		xmlRecovered := 0
+		textRecovered := 0
 		if len(callRes.ToolCalls) == 0 && callRes.Content != "" {
-			if recovered := llm.ParseXMLToolCalls(callRes.Content); len(recovered) > 0 {
+			if recovered := llm.RecoverToolCalls(callRes.Content); len(recovered) > 0 {
 				callRes.ToolCalls = recovered
-				xmlRecovered = len(recovered)
+				textRecovered = len(recovered)
 			}
 		}
 
@@ -486,7 +487,7 @@ func (l *Loop) Run(ctx context.Context, userPrompt string) (LoopResult, error) {
 			"finish_reason":  callRes.FinishReason,
 			"content_chars":  len(callRes.Content),
 			"tool_calls":     len(callRes.ToolCalls),
-			"xml_recovered":  xmlRecovered,
+			"text_recovered": textRecovered,
 			"tokens_in":      stats.InputTokens,
 			"tokens_out":     stats.OutputTokens,
 			"cumulative_in":  l.tokensIn,
