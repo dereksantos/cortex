@@ -2183,3 +2183,17 @@ auto      true    50.3   28/28  (100%)
 **Result**: L1 emits 4 validated citations, all verbatim relays pointing directly at source (e.g. internal/harness/loop.go:391-414 — spot-checked: the lines say exactly what the claim says). The hierarchy contract works: every level's artifact is the same shape (digest + citations), the validator enforces honesty per level, and verbatim relay carries ground-truth pointers to the top.
 
 **Follow-ups**: numbered corpus lines (Numbered override exposed to the study CLI) should raise relay yield above 4/11 by letting the model also cite corpus-locally; per-format chars-per-token still pending; a `cortex study-project` slice could productionize the L0 loop (the controller exists, needs the citation contract ported).
+
+### 2026-06-11 — Repaired read-vs-study A/B: wash on the headline, latency is the real blocker
+
+**Command**: two full passes, identical conditions (temp 0, --local-only, judge=reasoner, salvage + study-gate repairs in), differing only in CORTEX_STUDY_FILE. Both probed green individually before launch.
+
+**Results**: A (read_file) 15/39 valid (38%); B (study_file) 15/35 valid (43%); B had 9 invalid cells vs A's 5 → run stamped COMPROMISED by the suite itself.
+
+**Read**:
+- The B invalids concentrate on cortex-project fixtures A completed (b1/b3/r2/r3-cortex) — the large-file cases where study actually samples. Study's multi-minute reasoner calls blow the 600s per-fixture cap; the suite is measuring study's LATENCY, not its quality, on exactly the fixtures built to test it.
+- One clean large-file comparison completed: q1-pinpoint-cortex FAIL→PASS under study.
+- Small-file flips (4 up, 3 down) are pass-through territory — study ≈ read there; consistent with run-to-run variance.
+- Context for absolute rates: May 31 baseline was 64% on the OLD fleet; tonight's 38% control includes the tool-call salvage, so the gap vs May 31 is model-fitness + judge-change territory (the new coder needed its tool calls scraped from fenced JSON at all). Model selection (coder80) is the open experiment.
+
+**Follow-ups**: targeted rerun of cortex-project fixtures at --timeout 1800 (launched); study latency reduction (per-format chars-per-token; prefix caching); coder80 harness-fitness probe; per-fixture --compare against the May 31 baseline to split judge effects from coder effects.
