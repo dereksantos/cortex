@@ -77,13 +77,18 @@ This is where the thesis lives; study is the differentiator.
 cap, live gauge with color pressure.
 
 **Need:**
-- Project instructions file read at session start (`AGENTS.md`) — table stakes
-  in all three harnesses, and the single highest-leverage context injection.
-- An answer for the red gauge: when the window fills, something must happen.
-  The distinctive option: **compaction as a study call over the session
-  transcript** — the same curate-and-cite engine, pointed at the conversation
-  instead of a file. One mechanism instead of a bespoke summarizer.
-- `/clear` as the manual escape hatch.
+- ~~Project instructions file read at session start (`AGENTS.md`)~~ — done.
+- ~~An answer for the red gauge~~ — done: **compaction IS study**, pointed at
+  the session transcript. The study request carries the *consumer's* budget
+  (a quarter of the code window, capped by study capacity), which is what
+  forces study mode over read mode — to the study model the transcript might
+  "fit", but fitting isn't the goal, compression is. Triggers: manual
+  `/compact`, auto at the turn boundary when fill ≥ 80% (same threshold as
+  the red gauge), and overflow recovery (a 400 naming the real window learns
+  it, compacts, and asks for a re-send). The digest seeds a new transcript;
+  the raw one stays on disk.
+- ~~`/clear` as the manual escape hatch~~ — done (re-reads AGENTS.md,
+  preserves the model binding, new transcript).
 
 **Don't:** skills / dynamic context packages; RAG over the repo (study + grep
 is the bet — measure before adding).
@@ -154,6 +159,7 @@ answers later (DAG spawn, study).
 3. **Session transcripts + resume** (part 4): plain JSONL under
    `.cortex/sessions/`, deliberately outside the journal. Done.
 4. **Compaction-as-study** (part 3): the red-gauge answer, reusing the engine.
+   Done.
 5. **Retrieval injection** (part 4): the learning-over-time slice.
 6. **Eval integration** (part 6): continuous, gating each step above.
 

@@ -40,7 +40,7 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] AGENTS.md project-instructions injection
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
 [ ] Capture at turn end (cortex capture — distilled insights are what journals)
-[ ] Compaction-as-study (red-gauge answer) + /clear
+[x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
 [ ] Retrieval injection at turn start
 [ ] Integrate eval suite into new harness
 [ ] cortex model for cataloging and suggesting model setups based on system resources
@@ -85,6 +85,22 @@ const maxSendAttempts = 3
 // retryBackoff is the base delay between attempts (attempt × retryBackoff).
 // A var so tests can shrink it.
 var retryBackoff = 500 * time.Millisecond
+
+// compactThreshold is the window-fill ratio where the gauge goes red and the
+// turn-boundary auto-compact fires. One number, shared, so what the user sees
+// (red) and what the harness does (compact) can't drift apart.
+const compactThreshold = 0.8
+
+// compactPasses: deepening passes for the compaction study. The digest budget
+// is a fraction of the transcript, so a second pass (covering NEW regions)
+// roughly doubles conversation coverage for one extra bounded call.
+const compactPasses = 2
+
+// compactGoal steers the compaction study toward what a continuing session
+// needs — state over narrative, recent and unresolved over settled.
+const compactGoal = "Summarize this coding session for continuation: the user's task and intent, " +
+	"decisions made and why, files read or edited (exact paths), commands run and their key results, " +
+	"the current state of the work, and anything unresolved. Prefer recent and open items over settled ones."
 
 // Version is the semantic base shown in the status line. It's a var (not const)
 // so a release build can override it: go build -ldflags "-X main.Version=1.2.3".
@@ -583,7 +599,7 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
 
-	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil)
+	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil, 0)
 	if err != nil {
 		return "", err
 	}
@@ -591,13 +607,16 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 }
 
 // runStudy executes the study engine over one file and returns the structured
-// result. Shared by the study tool and the study-eval runner. Delegates to the
-// STUDY model in its own context (the small-model-amplifier split: a cheap model
-// reads, the coding model gets only the curated result back). fill is the
-// per-chunk fraction of the window (0 → the engine default, 1/8); keep
-// chunks × fill ≤ 1 so one pass's sample fits the window. numbered overrides
-// per-line snippet numbering (nil → format default).
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool) (study.StudyLoopResult, error) {
+// result. Shared by the study tool, the study-eval runner, and compaction.
+// Delegates to the STUDY model in its own context (the small-model-amplifier
+// split: a cheap model reads, the coding model gets only the curated result
+// back). fill is the per-chunk fraction of the window (0 → the engine default,
+// 1/8); keep chunks × fill ≤ 1 so one pass's sample fits the window. numbered
+// overrides per-line snippet numbering (nil → format default). window, when
+// > 0, overrides the consuming-model window the budget derives from (0 → the
+// study model's own window) — compaction uses this to size the digest for the
+// CODE model rather than for what the study model can hold.
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -641,12 +660,15 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		req.Window = sampleBudget(window) // window minus headroom for template + completion
 		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider}, passes)
 	}
-	window := cs.studyWindow()
-	res, err := runPasses(window)
+	win := window
+	if win <= 0 {
+		win = cs.studyWindow()
+	}
+	res, err := runPasses(win)
 	// Self-calibrate: if we overflowed, the error states the model's real context
 	// size — learn it and retry correctly sized, so the guess never persists.
 	if err != nil {
-		if real := parseCtxSize(err.Error()); real > 0 && real != window {
+		if real := parseCtxSize(err.Error()); real > 0 && real != win {
 			learnedWindows[cs.Study.Model] = real
 			res, err = runPasses(real)
 		}
@@ -1202,10 +1224,21 @@ func (cs *CortexSession) StartTranscript() {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
-	id := time.Now().Format("20060102-150405")
-	f, err := os.OpenFile(filepath.Join(dir, id+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
+	// O_EXCL plus suffix probing keeps ids unique when two sessions — or a
+	// same-second compact/clear — land on one timestamp.
+	base := time.Now().Format("20060102-150405")
+	id := base
+	var f *os.File
+	for i := 2; ; i++ {
+		var err error
+		f, err = os.OpenFile(filepath.Join(dir, id+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) || i > 100 {
+			return
+		}
+		id = fmt.Sprintf("%s-%d", base, i)
 	}
 	cs.SessionID = id
 	cs.transcript = f
@@ -1297,6 +1330,95 @@ func (cs CortexSession) writeTranscript(m Message) {
 	cs.transcript.Write(append(b, '\n'))
 }
 
+// --- Compaction ------------------------------------------------------------
+//
+// Compaction IS study, pointed at the conversation: the same engine that
+// curates big files curates the session transcript. No bespoke summarizer.
+
+// compactStudy runs the study engine over a transcript for Compact. A var so
+// tests can stub the model call.
+var compactStudy = func(ctx context.Context, cs *CortexSession, path string, window int) (study.StudyLoopResult, error) {
+	return cs.runStudy(ctx, path, compactGoal, compactPasses, 0, 0, nil, window)
+}
+
+// contextRatio is the live window-fill estimate. The gauge color and the
+// auto-compact trigger both read it.
+func (cs CortexSession) contextRatio() float64 {
+	return float64(cs.LastPromptTokens) / float64(cs.windowSize())
+}
+
+// Compact replaces the conversation with a study-curated digest of its own
+// transcript. The raw transcript stays on disk; the digest seeds a NEW
+// transcript, so resume restores the compacted state, not the overflowing one.
+func (cs *CortexSession) Compact(ctx context.Context) error {
+	if cs.transcript == nil || cs.SessionID == "" {
+		return fmt.Errorf("no transcript to compact (unpersisted session)")
+	}
+	path := filepath.Join(sessionsDir(), cs.SessionID+".jsonl")
+
+	// The digest's consumer is the CODE model, and the point of compacting is
+	// to leave most of its window free — so the budget is a quarter of the
+	// code window, capped by what the study model can actually hold. Passing
+	// the consumer window (not the study model's) is also what forces study
+	// mode: to the study model the transcript might "fit", but fitting is not
+	// the goal — compression is.
+	window := cs.windowSize() / 4
+	if sw := cs.studyWindow(); sw < window {
+		window = sw
+	}
+	res, err := compactStudy(ctx, cs, path, window)
+	if err != nil {
+		return fmt.Errorf("compact: %w", err)
+	}
+	// Read mode = the whole transcript fits well inside the digest budget.
+	// There is nothing to compress yet; replacing history with itself would
+	// only churn the session id.
+	if res.Stopped == "read" {
+		return fmt.Errorf("session fits within the %s-token digest budget; nothing to compact yet", humanK(window))
+	}
+	// Check the digests themselves, not the render — the render always carries
+	// a coverage header, so it is never empty even when the study said nothing.
+	if strings.TrimSpace(strings.Join(res.Digests, "")) == "" {
+		return fmt.Errorf("compact: study returned an empty digest")
+	}
+	digest := strings.TrimSpace(renderStudyResult(res))
+
+	// Rebuild: the original system seed plus the digest as carried-over
+	// context. The digest rides a user message because many chat templates
+	// allow only one system message per conversation.
+	sys := cs.Request.Messages[0]
+	summary := Message{
+		Role:    RoleUser,
+		Content: "[Compacted session — summary of the conversation so far. Continue from this state.]\n\n" + digest,
+	}
+	cs.transcript.Close()
+	cs.transcript = nil
+	cs.Request.Messages = []Message{sys}
+	cs.StartTranscript()
+	cs.Append(summary)
+	// Fill is unknown until the next send; the gauge resets rather than lies.
+	cs.LastPromptTokens = 0
+	return nil
+}
+
+// Clear resets the conversation to a fresh seed (system prompt + AGENTS.md,
+// re-read from disk) and starts a new transcript. The old transcript stays on
+// disk; the model binding — including a /model switch — is preserved.
+func (cs *CortexSession) Clear() {
+	if cs.transcript != nil {
+		cs.transcript.Close()
+		cs.transcript = nil
+	}
+	old := cs.Request
+	cs.Request = (CortexArgs{}).Request()
+	cs.Request.Model = old.Model
+	cs.Request.BaseURL = old.BaseURL
+	cs.Request.APIKey = old.APIKey
+	cs.Request.ChatTemplateKwargs = old.ChatTemplateKwargs
+	cs.LastPromptTokens = 0
+	cs.StartTranscript()
+}
+
 // humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
 func humanK(n int) string {
 	if n < 1000 {
@@ -1306,12 +1428,13 @@ func humanK(n int) string {
 }
 
 // ctxColor shifts the context gauge green -> yellow -> red as the window fills,
-// so context pressure is ambient — you feel it before you hit the wall.
+// so context pressure is ambient — you feel it before you hit the wall. Red
+// begins exactly at compactThreshold: the color and the auto-compact agree.
 func ctxColor(used, max int) string {
 	switch r := float64(used) / float64(max); {
 	case r < 0.5:
 		return green
-	case r < 0.8:
+	case r < compactThreshold:
 		return yellow
 	default:
 		return red
@@ -1420,6 +1543,19 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
 }
 
+// compactNow runs Compact with Ctrl-C wired and prints the outcome. Shared by
+// the manual /compact, the red-gauge auto-trigger, and overflow recovery.
+func compactNow(session *CortexSession, reason string) {
+	fmt.Println(withColor(reason+" — compacting via study…", yellow))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := session.Compact(ctx); err != nil {
+		fmt.Printf("compact: %v\n", err)
+		return
+	}
+	fmt.Println(withColor("compacted → session "+session.SessionID, gray))
+}
+
 // runStudyCLI invokes the study tool directly and prints the curated context —
 // no coding model, no REPL. For inspecting what study returns in isolation:
 //
@@ -1504,6 +1640,17 @@ func main() {
 			break
 		}
 
+		// /clear resets the conversation; /compact distills it via study.
+		if input == "/clear" {
+			session.Clear()
+			fmt.Println(withColor("cleared → session "+session.SessionID, gray))
+			continue
+		}
+		if input == "/compact" {
+			compactNow(session, "manual compact")
+			continue
+		}
+
 		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
 			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
@@ -1527,10 +1674,25 @@ func main() {
 		stop()
 		switch {
 		case err == nil:
+			// Red gauge: compact at the turn boundary, before the window
+			// actually overflows. The boundary is the only safe point —
+			// mid-turn compaction would orphan tool_call sequences.
+			if session.contextRatio() >= compactThreshold {
+				compactNow(session, fmt.Sprintf("context at %.0f%%", 100*session.contextRatio()))
+			}
 		case errors.Is(err, context.Canceled):
 			fmt.Println(withColor("interrupted", yellow))
 		default:
 			fmt.Printf("turn error: %v\n", err)
+			// An overflow error names the code model's real window: learn it
+			// (the gauge and read_file guard self-correct) and compact so the
+			// next request fits. The failed request is in the digest; the
+			// user re-asks.
+			if real := parseCtxSize(err.Error()); real > 0 {
+				session.Window = real
+				compactNow(session, "context overflowed")
+				fmt.Println("please re-send your request")
+			}
 		}
 	}
 

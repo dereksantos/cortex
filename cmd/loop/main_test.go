@@ -1094,3 +1094,181 @@ func TestStudyCompletionCap(t *testing.T) {
 		}
 	}
 }
+
+// stubCompactStudy replaces the compaction study call (no model, no network)
+// for the duration of a test, recording the path and window it was given.
+func stubCompactStudy(t *testing.T, res study.StudyLoopResult, err error) (gotPath *string, gotWindow *int) {
+	t.Helper()
+	saved := compactStudy
+	t.Cleanup(func() { compactStudy = saved })
+	gotPath, gotWindow = new(string), new(int)
+	compactStudy = func(_ context.Context, _ *CortexSession, path string, window int) (study.StudyLoopResult, error) {
+		*gotPath, *gotWindow = path, window
+		return res, err
+	}
+	return gotPath, gotWindow
+}
+
+func TestCompactRebuildsHistory(t *testing.T) {
+	digest := study.StudyLoopResult{
+		Stopped:     "budget",
+		CoveragePct: 0.5,
+		Digests:     []string{"user is hardening the loop; edited cmd/loop/main.go; tests pass"},
+	}
+	gotPath, gotWindow := stubCompactStudy(t, digest, nil)
+
+	cs := newTestSession(t)
+	cs.Window = 64000
+	cs.Study.Window = 32768
+	cs.LastPromptTokens = 60000
+	cs.Append(Message{Role: RoleUser, Content: "long conversation"})
+	cs.Append(Message{Role: "assistant", Content: "lots of work"})
+	oldID := cs.SessionID
+	sys := cs.Request.Messages[0]
+
+	if err := cs.Compact(context.Background()); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	defer cs.transcript.Close()
+
+	// Studied the right transcript with the consumer-derived budget:
+	// min(codeWindow/4=16000, studyWindow=32768) = 16000.
+	if !strings.HasSuffix(*gotPath, oldID+".jsonl") {
+		t.Errorf("studied %q, want the old transcript %s.jsonl", *gotPath, oldID)
+	}
+	if *gotWindow != 16000 {
+		t.Errorf("study window = %d, want 16000 (codeWindow/4)", *gotWindow)
+	}
+
+	// History = original system seed + one digest message.
+	msgs := cs.Request.Messages
+	if len(msgs) != 2 {
+		t.Fatalf("compacted history has %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Content != sys.Content || msgs[0].Role != RoleSystem {
+		t.Error("system seed should survive compaction unchanged")
+	}
+	if msgs[1].Role != RoleUser || !strings.Contains(msgs[1].Content, "hardening the loop") {
+		t.Errorf("digest message = %+v", msgs[1])
+	}
+
+	// Gauge reset; new transcript with a new id; old transcript intact.
+	if cs.LastPromptTokens != 0 {
+		t.Errorf("LastPromptTokens = %d, want 0 after compaction", cs.LastPromptTokens)
+	}
+	if cs.SessionID == oldID {
+		t.Error("compaction should start a NEW session id")
+	}
+	if _, err := os.Stat(filepath.Join(sessionsDir(), oldID+".jsonl")); err != nil {
+		t.Errorf("raw transcript should stay on disk: %v", err)
+	}
+
+	// The new transcript must resume to exactly the compacted state.
+	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := resumed.ResumeTranscript(cs.SessionID); err != nil {
+		t.Fatalf("resume after compact: %v", err)
+	}
+	defer resumed.transcript.Close()
+	if len(resumed.Request.Messages) != 2 || !strings.Contains(resumed.Request.Messages[1].Content, "hardening the loop") {
+		t.Errorf("resume should restore the compacted state, got %d messages", len(resumed.Request.Messages))
+	}
+}
+
+func TestCompactErrors(t *testing.T) {
+	t.Run("unpersisted session", func(t *testing.T) {
+		cs := &CortexSession{Request: CortexArgs{}.Request()}
+		if err := cs.Compact(context.Background()); err == nil {
+			t.Fatal("expected error for unpersisted session")
+		}
+	})
+
+	t.Run("read mode is refused — nothing to compress", func(t *testing.T) {
+		stubCompactStudy(t, study.StudyLoopResult{Stopped: "read"}, nil)
+		cs := newTestSession(t)
+		cs.Append(Message{Role: RoleUser, Content: "short"})
+		before := len(cs.Request.Messages)
+
+		err := cs.Compact(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "nothing to compact") {
+			t.Fatalf("expected nothing-to-compact error, got %v", err)
+		}
+		if len(cs.Request.Messages) != before {
+			t.Error("a refused compact must leave history unchanged")
+		}
+	})
+
+	t.Run("empty digest leaves history unchanged", func(t *testing.T) {
+		stubCompactStudy(t, study.StudyLoopResult{Stopped: "budget", Digests: []string{"  "}}, nil)
+		cs := newTestSession(t)
+		cs.Append(Message{Role: RoleUser, Content: "work"})
+		before := len(cs.Request.Messages)
+
+		if err := cs.Compact(context.Background()); err == nil {
+			t.Fatal("expected error for empty digest")
+		}
+		if len(cs.Request.Messages) != before {
+			t.Error("a failed compact must leave history unchanged")
+		}
+	})
+}
+
+func TestClearResetsSession(t *testing.T) {
+	cs := newTestSession(t)
+	cs.Request.Model = "switched-model"
+	cs.Request.BaseURL = "http://somewhere:1234"
+	cs.LastPromptTokens = 9000
+	cs.Append(Message{Role: RoleUser, Content: "old work"})
+	oldID := cs.SessionID
+
+	cs.Clear()
+	defer cs.transcript.Close()
+
+	if n := len(cs.Request.Messages); n != 1 || cs.Request.Messages[0].Role != RoleSystem {
+		t.Errorf("cleared history = %d messages, want just the system seed", n)
+	}
+	if cs.Request.Model != "switched-model" || cs.Request.BaseURL != "http://somewhere:1234" {
+		t.Error("clear must preserve the model binding")
+	}
+	if cs.LastPromptTokens != 0 {
+		t.Error("clear must reset the gauge")
+	}
+	if cs.SessionID == oldID {
+		t.Error("clear should start a new session id")
+	}
+	if _, err := os.Stat(filepath.Join(sessionsDir(), oldID+".jsonl")); err != nil {
+		t.Errorf("old transcript should stay on disk: %v", err)
+	}
+}
+
+// Same-second sessions (compact and clear do this routinely) must get
+// distinct transcript files, not interleave into one.
+func TestStartTranscriptCollisionSafe(t *testing.T) {
+	t.Chdir(t.TempDir())
+	a := &CortexSession{Request: CortexArgs{}.Request()}
+	b := &CortexSession{Request: CortexArgs{}.Request()}
+	a.StartTranscript()
+	b.StartTranscript()
+	defer a.transcript.Close()
+	defer b.transcript.Close()
+
+	if a.SessionID == "" || b.SessionID == "" {
+		t.Fatal("both sessions should persist")
+	}
+	if a.SessionID == b.SessionID {
+		t.Errorf("same-second sessions share id %q", a.SessionID)
+	}
+}
+
+func TestContextRatio(t *testing.T) {
+	cs := CortexSession{Window: 1000, LastPromptTokens: 800}
+	if got := cs.contextRatio(); got != 0.8 {
+		t.Errorf("contextRatio = %v, want 0.8", got)
+	}
+	// The gauge color and the compact trigger share the same threshold.
+	if ctxColor(800, 1000) != red {
+		t.Error("gauge should be red exactly at compactThreshold")
+	}
+	if ctxColor(799, 1000) != yellow {
+		t.Error("gauge should be yellow just under compactThreshold")
+	}
+}

@@ -205,7 +205,7 @@ func scoreGroundedness(content, lang string, res study.StudyLoopResult) (grounde
 func measureCell(cs *CortexSession, c studyEvalCase, cell studyEvalCell) studyEvalRow {
 	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: cell.Chunks, Fill: cell.Fill, Numbered: cell.Numbered}
 	start := time.Now()
-	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill, cell.Numbered)
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill, cell.Numbered, 0)
 	row.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = err.Error()
