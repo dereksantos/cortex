@@ -148,4 +148,9 @@ func TestStudyLoop_RespectsMaxPasses(t *testing.T) {
 	if res.Stopped != "budget" {
 		t.Errorf("Stopped = %q, want budget", res.Stopped)
 	}
+	// The final pass's decision can never be applied, so the curator must
+	// not be consulted for it — one Decide per non-terminal pass.
+	if cur.i != 1 {
+		t.Errorf("curator consulted %d times for 2 passes, want 1 (final pass skipped)", cur.i)
+	}
 }

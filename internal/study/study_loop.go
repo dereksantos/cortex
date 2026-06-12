@@ -91,6 +91,18 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 			return res, nil
 		}
 
+		// The final pass's decision could never be applied — don't spend
+		// a curator call (an LLM round for ModelCurator) computing it.
+		// The terminal pass keeps the zero-valued Decision the StudyPass
+		// doc promises; Stopped reads "exhausted" or "budget" as usual.
+		if pass == maxPasses-1 {
+			if resp.Exhausted {
+				res.Stopped = "exhausted"
+				return res, nil
+			}
+			break
+		}
+
 		dec := curator.Decide(resp, req.Goal)
 		res.Passes[len(res.Passes)-1].Decision = dec
 

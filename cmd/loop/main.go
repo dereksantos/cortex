@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,7 +37,8 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Improve session status line
 [x] Improve animation
 [x] Timestamp in messages
-[x] Study tool (file study via internal/study; dir/orientation study TODO)
+[x] Study tool (file + dir study via internal/study; dirs default to 3 passes)
+[x] Oversized bash output studied, not truncated (spill to .cortex/shell/ + digest)
 [x] Hardening: HTTP timeout, bounded retry, Ctrl-C interrupt
 [x] AGENTS.md project-instructions injection
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
@@ -95,6 +98,14 @@ const compactThreshold = 0.8
 // is a fraction of the transcript, so a second pass (covering NEW regions)
 // roughly doubles conversation coverage for one extra bounded call.
 const compactPasses = 2
+
+// dirStudyPasses: default deepening passes when the study target is a
+// directory. A corpus boundary is far larger than one file's, so a single
+// window-budget pass sees only a sliver of the tree; the curator still ends
+// the loop early (DONE / exhausted), so this is a cap, not a floor. Files
+// keep the 1-pass default — their deepening loop is the agent re-calling
+// study with a goal or the model passing passes explicitly.
+const dirStudyPasses = 3
 
 // compactGoal steers the compaction study toward what a continuing session
 // needs — state over narrative, recent and unresolved over settled.
@@ -345,14 +356,15 @@ var editFile = newTool(FunctionEditFile,
 	}, "path", "old_string", "new_string"))
 
 var studyTool = newTool(FunctionStudy,
-	"Study a file and return curated context: a size-adaptive, relevance-deepening "+
-		"digest with cited line ranges. Prefer this over read_file for large files, or "+
-		"when you want to understand a file relative to a goal. Reads the whole file when "+
-		"it fits the context window.",
+	"Study a file or directory and return curated context: a size-adaptive, "+
+		"relevance-deepening digest with cited file:line ranges. Prefer this over "+
+		"read_file for large files, for understanding whole packages/directories, or "+
+		"when you want to understand something relative to a goal. Small targets are "+
+		"returned whole (a directory as every file inlined under path headers).",
 	objectSchema(map[string]any{
-		"path":   stringProp("Path to the file to study."),
-		"goal":   stringProp("What you want to learn from the file; guides which regions get deepened."),
-		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1."},
+		"path":   stringProp("Path to the file or directory to study."),
+		"goal":   stringProp("What you want to learn; guides which regions get deepened."),
+		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1 for files, 3 for directories."},
 	}, "path"))
 
 // Dynamic study sizing — no hardcoded breakpoints.
@@ -578,7 +590,7 @@ func (tc ToolCall) Execute(ctx context.Context, cs *CortexSession) (string, erro
 	case FunctionStudy:
 		return tc.Study(ctx, cs)
 	case FunctionBash:
-		return tc.Bash(ctx)
+		return tc.Bash(ctx, cs)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -593,17 +605,33 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 		return "", err
 	}
 	goal, _ := tc.stringArg("goal") // optional
-	passes := 1
+	passes := 0
 	if p, ok := tc.intArg("passes"); ok && p > 0 {
 		passes = p
 	}
-	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass)", path, cs.Study.Model, passes))
+	if passes == 0 {
+		passes = defaultStudyPasses(path)
+	}
+	plural := ""
+	if passes != 1 {
+		plural = "es"
+	}
+	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass%s)", path, cs.Study.Model, passes, plural))
 
 	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil, 0)
 	if err != nil {
 		return "", err
 	}
 	return renderStudyResult(res), nil
+}
+
+// defaultStudyPasses picks the pass count when the model didn't ask for one:
+// 1 for files, dirStudyPasses for directories (see the const's rationale).
+func defaultStudyPasses(path string) int {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return dirStudyPasses
+	}
+	return 1
 }
 
 // runStudy executes the study engine over one file and returns the structured
@@ -811,7 +839,7 @@ var bashAllowlist = map[string]bool{
 	"go": true, "git": true, "gofmt": true,
 }
 
-func (tc ToolCall) Bash(ctx context.Context) (string, error) {
+func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) {
 	command, err := tc.stringArg("command")
 	if err != nil {
 		return "", err
@@ -827,8 +855,15 @@ func (tc ToolCall) Bash(ctx context.Context) (string, error) {
 
 	out, runErr := exec.CommandContext(ctx, fields[0], fields[1:]...).CombinedOutput()
 	result := string(out)
+	// Oversized output is studied, not lost: the full output spills to
+	// .cortex/shell/ and the model gets a cited digest plus the spill path
+	// to study deeper. Truncation is only the no-study fallback.
 	if len(result) > maxToolOutput {
-		result = result[:maxToolOutput] + "\n...[output truncated]"
+		if studied, ok := studyShellOutput(ctx, cs, command, out); ok {
+			result = studied
+		} else {
+			result = result[:maxToolOutput] + "\n...[output truncated]"
+		}
 	}
 	// A non-zero exit is an observation, not a harness failure: hand the output
 	// and exit error back to the model so it can react.
@@ -836,6 +871,58 @@ func (tc ToolCall) Bash(ctx context.Context) (string, error) {
 		return result + "\n[exit error: " + runErr.Error() + "]", nil
 	}
 	return result, nil
+}
+
+// bashStudyWindow is the consuming-model window the shell-output study is
+// sized for, in tokens. Chosen so the engine's read-vs-study threshold
+// (window/2 tokens, after sample headroom) sits BELOW maxToolOutput:
+// anything big enough to spill is always sampled into a bounded digest,
+// never passed through whole — passthrough would re-create the context
+// bloat the spill exists to avoid.
+const bashStudyWindow = maxToolOutput / 2
+
+// spillShellOutput writes oversized command output under .cortex/shell/,
+// content-addressed (same output → same file) so repeated runs of an
+// unchanged command don't pile up copies.
+func spillShellOutput(command string, out []byte) (string, error) {
+	dir := filepath.Join(".cortex", "shell")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	head := "out"
+	if f := strings.Fields(command); len(f) > 0 {
+		head = f[0]
+	}
+	sum := sha256.Sum256(out)
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.txt", head, hex.EncodeToString(sum[:])[:12]))
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// studyShellOutput turns oversized bash output into curated context instead
+// of a truncation: the full output spills to .cortex/shell/ and the study
+// engine digests it with real line citations into the spill file, which the
+// model can study again (with a goal) to dig deeper. Returns ok=false on any
+// failure so the caller degrades to plain truncation — losing the study is
+// acceptable, losing the turn is not.
+func studyShellOutput(ctx context.Context, cs *CortexSession, command string, out []byte) (string, bool) {
+	if cs == nil {
+		return "", false
+	}
+	spill, err := spillShellOutput(command, out)
+	if err != nil {
+		return "", false
+	}
+	printToolAction(fmt.Sprintf("output %d KB → study(%s)", len(out)/1024, spill))
+	goal := fmt.Sprintf("This is the output of `%s`. What does it show? Surface errors, failures, and anomalies first.", command)
+	res, err := cs.runStudy(ctx, spill, goal, 1, 0, 0, nil, bashStudyWindow)
+	if err != nil {
+		return "", false
+	}
+	header := fmt.Sprintf("[%d bytes of output — studied below; full output at %s — study(path, goal) to dig deeper]\n", len(out), spill)
+	return header + renderStudyResult(res), true
 }
 
 // Qwen3-Coder's native tool-call format is XML-ish:
@@ -1587,10 +1674,11 @@ func main() {
 	}
 
 	// Direct study mode: `loop study <path> [goal...] [passes]`. A trailing bare
-	// integer is taken as the deepening pass count.
+	// integer is taken as the deepening pass count; 0 (the default) lets the
+	// study tool pick — 1 for files, dirStudyPasses for directories.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
 		rest := os.Args[2:]
-		path, goalParts, passes := rest[0], rest[1:], 1
+		path, goalParts, passes := rest[0], rest[1:], 0
 		if n := len(goalParts); n > 0 {
 			if p, err := strconv.Atoi(goalParts[n-1]); err == nil && p > 0 {
 				passes, goalParts = p, goalParts[:n-1]

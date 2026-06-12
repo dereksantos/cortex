@@ -215,6 +215,75 @@ func TestBashTool(t *testing.T) {
 			t.Fatal("expected error for empty command")
 		}
 	})
+
+	t.Run("oversized output truncates when study unavailable", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		// head -c 20000 /dev/zero → 20KB, over maxToolOutput. With a nil
+		// session the study path is unavailable; the old truncation
+		// behavior must hold.
+		args, _ := json.Marshal(map[string]string{"command": "head -c 20000 /dev/zero"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "[output truncated]") {
+			t.Errorf("expected truncation sentinel in fallback path")
+		}
+		if len(got) > maxToolOutput+100 {
+			t.Errorf("fallback output not bounded: %d bytes", len(got))
+		}
+	})
+}
+
+func TestDefaultStudyPasses(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		path string
+		want int
+	}{
+		{"file", file, 1},
+		{"dir", dir, dirStudyPasses},
+		{"missing", filepath.Join(dir, "nope"), 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := defaultStudyPasses(c.path); got != c.want {
+				t.Errorf("defaultStudyPasses(%s) = %d, want %d", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSpillShellOutput(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out := []byte(strings.Repeat("log line\n", 100))
+	p1, err := spillShellOutput("go test ./...", out)
+	if err != nil {
+		t.Fatalf("spill: %v", err)
+	}
+	data, err := os.ReadFile(p1)
+	if err != nil {
+		t.Fatalf("read spill: %v", err)
+	}
+	if string(data) != string(out) {
+		t.Error("spill content differs from output")
+	}
+	if !strings.HasPrefix(filepath.ToSlash(p1), ".cortex/shell/go-") {
+		t.Errorf("spill path %q, want .cortex/shell/go-<hash>.txt", p1)
+	}
+	// Content-addressed: same output → same path (no pile-up).
+	p2, err := spillShellOutput("go test ./...", out)
+	if err != nil {
+		t.Fatalf("spill 2: %v", err)
+	}
+	if p1 != p2 {
+		t.Errorf("same output spilled to different paths: %q vs %q", p1, p2)
+	}
 }
 
 func TestExecuteUnknownTool(t *testing.T) {
