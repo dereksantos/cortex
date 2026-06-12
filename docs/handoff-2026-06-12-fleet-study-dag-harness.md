@@ -1,0 +1,111 @@
+# Handoff — 2026-06-12: fleet bring-up, study maturation, DAG-harness fault tree
+
+Three evenings of work (June 9–12) on branch `derek.s/self-improvement-loop`
+(~20 commits, `7e794db..41b5184`). All measured results are in
+`docs/eval-journal.md` (entries dated 2026-06-10 through 2026-06-11); this doc
+is the state map and the work queue, not the data.
+
+## What landed (done, tested, committed)
+
+**Fleet config (new chatterbox fleet: Qwen3.6-35B coder / coder80 / Gemma 4 reasoner)**
+- `chat_template_kwargs` per model (pkg/llm + pkg/config + cmd/loop): thinking
+  suppressed for coder + reasoner everywhere. Thinking-on starves bounded calls
+  (reasoner burned full max_tokens on reasoning_content, returned empty).
+- `model_context_overrides` per model (probe + config); per-endpoint HTTP
+  `Timeout` (study uses 10m — full-budget prefill exceeds the 300s default).
+- NOTE: `.cortex/config.json` is gitignored — the fleet config (aliases,
+  capabilities, kwargs, windows) lives only on this machine.
+
+**Study (the week's centerpiece — usable and trusted in cmd/loop)**
+- Tier 1.5 boundary layer (`internal/study/boundary.go`): per-format coherence
+  units (code 3072B measured / prose 1024B / data 2048B), boundary-snap of
+  fragment leading edges, zero-knob auto density (k = budget/unit).
+- Citation pipeline: union-of-ranges validation (+2-line gap tolerance),
+  completion-cap floor (`studyCompletionCap`, kills the recurring 1024-token
+  JSON truncation), numbered snippets for code+data (prose stays bare),
+  verbatim-relay validation (`citationRelayed`) for digest-of-digests chains.
+- Measured grounding at the operating point: code 100% (n=10), prose 100%,
+  record data 100%. The n=10 2×2 grid REVISED an earlier claim: coordinates
+  (line numbers) dominate granularity for citation accuracy; granularity buys
+  latency + breadth.
+- Hierarchy receipt: 24 files (~2.5MB) → 50.7KB L0 digests → L1 study at 11%
+  sample → correct 4-subsystem map with 4 relay citations chained to source.
+  Scripts: /tmp/cortex-recursion-exp.sh; knob: CORTEX_LOOP_STUDY_WINDOW.
+- The other session landed `studyDir` (corpus studies) + per-region numbering;
+  live-validated in a real loop session (transcript
+  `.cortex/sessions/20260612-003737.jsonl` — study + go test/vet/gofmt
+  composed into a grounded code-quality review).
+- Loop bash tool now rejects shell metacharacters instructively (was: `|`
+  reached find as a literal arg; model retried verbatim 3 turns).
+
+**DAG harness (`cortex code` path) repairs**
+- Fenced-JSON tool-call salvage (`pkg/llm/json_tool_calls.go`,
+  `RecoverToolCalls` in the loop): Qwen3.6 emits tool calls as fenced JSON
+  text; this caused 17/44 fixtures to do ZERO file reads. Probe-verified.
+- CORTEX_STUDY_FILE gate repaired: planner op surface follows the gate,
+  `act.study_file` counts as a read in codebase-eval metrics, and a
+  dispatch-only registry alias maps habitual `read_file` calls onto study.
+
+## Macro verdict (read-vs-study A/B, 2026-06-11)
+
+Wash on the headline (A 15/39 valid, B 15/35 valid), run stamped COMPROMISED
+(9 invalid cells). Study is macro-NEUTRAL on this suite: where it samples it
+neither lifts nor sinks; the binding failures are in the coding model's
+synthesis, not in how files are read. Two structural notes for future runs:
+- The suite's fixture files are mostly too small to exercise study (pass-through).
+- Study latency blows the 600s fixture cap on large-file fixtures; the 30m
+  retry rescued only one cell — the rest fail on the items below.
+
+## The fault tree for the remaining failures (NEXT WORK, in order)
+
+1. **`/v1` URL bug in the budget classifier.** Every `decide.next` trace row
+   shows `fallback: classifier error (budget:chatterbox): Post
+   "http://chatterbox:4000/chat/completions": context deadline exceeded` —
+   the path is missing `/v1`. Find where that client joins base URL + path
+   (it is NOT pkg/llm's OpenAICompatClient, which appends /v1 correctly).
+   This degrades planning on EVERY fixture.
+2. **No-progress guard kills legitimate exploration**
+   (`internal/harness/loop.go` `progressTracker`, `noProgressWindow=5`).
+   Condition 1 (5 tool-calling turns, no write/shell → abort) fires on
+   cross-file questions when `sense.classify_intent` mislabels them "code"
+   (observed) or errors to "". This is the q2/q3/q4-cortex "empty synthesis"
+   (`no_progress with no final response`, up to 93K tokens burned). Fix
+   direction: count NEW read targets as progress; only fire on repetition
+   (condition 2) or a hard cap. Also check classify_intent quality on the
+   new fleet.
+3. **Model selection — the coder80 probe.** The 35B was picked on inference
+   benchmarks; harness fitness was never measured. coder80 is Coder-family
+   (likely native tool_calls). Probe slice:
+   `cortex eval codebase --only r3-symbol-in-large-file-rust-weather --only q1-pinpoint-cortex --only b2-termination-cortex -m coder80 ...`
+   Compare vs the same slice on coder before any full run (probe-first).
+4. **May-31 baseline diff** (`--compare`, baselines in
+   `.cortex/db/eval_baselines/`) to split judge-change effects from
+   coder-change effects in the 64%→38% drop. Old fleet's models are gone, so
+   this is forensic, not re-runnable.
+
+## Open follow-ups (smaller, queued in eval-journal entries)
+
+- Per-format chars-per-token (JSON ≈ 2.7, engine assumes 4): data-study
+  prompts run ~40% over token budget → slow cells + overflow risk.
+- Corpus-study productionization: port the citation contract into the
+  project-study controller (`internal/study/controller.go`); the L0 loop
+  exists, insights currently uncited.
+- Numbered corpus lines for L1 studies should raise relay yield above 4/11.
+- `--probe` flag for `eval codebase` (canonical 3-fixture mechanical-health
+  slice, nonzero exit) — make probe-first a command, not a habit.
+- Wall-clock: RTX 3090 as second backend (cleanest: add to chatterbox's
+  LiteLLM as a remote backend; new alias + window entry in config only),
+  enables parallel A/B passes via endpoint-prefixed `--model`. Nightly cron
+  for full suites.
+
+## Working agreements (from this arc; memory has details)
+
+- **Probe before long runs** — minutes-scale sanity slice before hours-scale
+  runs, mandatory on new configurations. (Learned the hard way, twice.)
+- **Fine-tuning is deferred** until the harness matures — don't propose
+  training spend; trajectories + eval verdicts accrue free in
+  `dag_traces.jsonl` / `cell_results.jsonl`.
+- Eval claims get revised when n says so (the n=3 → n=10 granularity story);
+  every measured claim goes in `docs/eval-journal.md` with its command.
+- Branch plan: merge `derek.s/self-improvement-loop`, start
+  `derek.s/dag-harness-fixes` for items 1–4 above.
