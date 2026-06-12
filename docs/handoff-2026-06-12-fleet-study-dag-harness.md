@@ -107,5 +107,6 @@ synthesis, not in how files are read. Two structural notes for future runs:
   `dag_traces.jsonl` / `cell_results.jsonl`.
 - Eval claims get revised when n says so (the n=3 → n=10 granularity story);
   every measured claim goes in `docs/eval-journal.md` with its command.
-- Branch plan: merge `derek.s/self-improvement-loop`, start
-  `derek.s/dag-harness-fixes` for items 1–4 above.
+- Branch plan: items 1–4 continue on `derek.s/self-improvement-loop`
+  (the DAG-harness repairs are part of the same arc; merge to main when
+  the fault tree is closed out).
