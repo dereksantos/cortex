@@ -30,6 +30,12 @@ type ToolHandler interface {
 // than a panic — the model gets to see the error and try again.
 type ToolRegistry struct {
 	tools map[string]ToolHandler
+	// aliases maps alternate call names to canonical tool names.
+	// Dispatch resolves through it; Specs does NOT advertise aliases.
+	// Use case: models keep calling read_file from training habit even
+	// when the registry serves study_file — the alias makes the habit
+	// land on the right tool instead of burning turns on "unknown tool".
+	aliases map[string]string
 	// observedInjectedTokens accumulates bytes the cortex_search tool
 	// returned. Divided by 4 to estimate tokens (matches the rough
 	// proxy used elsewhere in this codebase).
@@ -47,8 +53,16 @@ type ToolRegistry struct {
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
 		tools:        make(map[string]ToolHandler),
+		aliases:      make(map[string]string),
 		filesWritten: make(map[string]bool),
 	}
+}
+
+// RegisterAlias routes calls named alias to the canonical tool. The
+// alias is dispatch-only — it never appears in Specs, so the model is
+// steered toward the canonical name while stale habits still work.
+func (r *ToolRegistry) RegisterAlias(alias, canonical string) {
+	r.aliases[alias] = canonical
 }
 
 // Register adds a handler. Replaces any prior handler with the same
@@ -98,6 +112,12 @@ func (r *ToolRegistry) Specs() []llm.ToolSpec {
 func (r *ToolRegistry) Dispatch(ctx context.Context, call llm.ToolCall) (string, error) {
 	name := normalizeToolName(call.Function.Name)
 	h, ok := r.tools[name]
+	if !ok {
+		if canonical, aliased := r.aliases[name]; aliased {
+			name = canonical
+			h, ok = r.tools[name]
+		}
+	}
 	if !ok {
 		return fmt.Sprintf(`{"error":"unknown tool: %s"}`, name), errors.New("unknown tool")
 	}

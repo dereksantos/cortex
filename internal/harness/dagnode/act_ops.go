@@ -132,6 +132,7 @@ func RegisterActOps(reg *dag.Registry, configs []ActOpConfig) (int, error) {
 func DefaultActOpContracts() map[string]dag.AxisContract {
 	return map[string]dag.AxisContract{
 		"read_file":     {Mutator: false, RequiresConfirmation: false},
+		"study_file":    {Mutator: false, RequiresConfirmation: false},
 		"list_dir":      {Mutator: false, RequiresConfirmation: false},
 		"cortex_search": {Mutator: false, RequiresConfirmation: false},
 		"write_file":    {Mutator: true, RequiresConfirmation: false},
@@ -167,6 +168,7 @@ func DefaultActOpContracts() map[string]dag.AxisContract {
 func DefaultActOpCosts() map[string]dag.Cost {
 	return map[string]dag.Cost{
 		"read_file":     {LatencyMS: 5, Tokens: 0},
+		"study_file":    {LatencyMS: 600000, Tokens: 0}, // study runs its own model passes; matches its 10m client timeout (worst case)
 		"list_dir":      {LatencyMS: 5, Tokens: 0},
 		"write_file":    {LatencyMS: 5, Tokens: 0},
 		"cortex_search": {LatencyMS: 100, Tokens: 0},   // includes embedder + storage scan; no real-data anchor yet

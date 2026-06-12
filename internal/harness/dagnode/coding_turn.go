@@ -14,6 +14,7 @@ package dagnode
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1023,6 +1024,15 @@ func RegisterDefaultActOpMetadataWithCompressor(reg *dag.Registry, provider llm.
 	contracts := DefaultActOpContracts()
 	costs := DefaultActOpCosts()
 	names := []string{"read_file", "list_dir", "write_file", "run_shell", "cortex_search"}
+	// Keep the advertised op surface in lockstep with the tool registry:
+	// when the study gate swaps read_file -> study_file (see
+	// library_service_cortex_harness.go), the planner must advertise the
+	// tool that actually exists. A split surface had the model calling an
+	// unregistered read_file while study_file sat invisible (eval-journal
+	// 2026-06-10, the aborted pass B).
+	if os.Getenv("CORTEX_STUDY_FILE") == "1" {
+		names[0] = "study_file"
+	}
 	for _, n := range names {
 		if err := RegisterActOpMetadata(reg, n, contracts[n], costs[n]); err != nil {
 			return 0, fmt.Errorf("register act.%s: %w", n, err)

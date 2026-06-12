@@ -386,6 +386,11 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 				studyOpts.Endpoint = h.endpoint.Name
 			}
 			registry.Register(harness.NewStudyFileTool(workdir, studyOpts))
+			// Models call read_file from habit regardless of the
+			// advertised specs (measured: every recovered call in the
+			// gated probe named read_file). Dispatch-only alias so the
+			// habit lands on study instead of "unknown tool".
+			registry.RegisterAlias("read_file", "study_file")
 		} else {
 			registry.Register(harness.NewReadFileTool(workdir))
 		}

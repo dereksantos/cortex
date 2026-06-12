@@ -108,7 +108,10 @@ func Extract(answer string, trace []TraceRow, fx *Fixture) Metrics {
 		switch r.QualifiedName {
 		case "decide.next":
 			m.HopCount++
-		case "act.read_file":
+		case "act.read_file", "act.study_file":
+			// study_file replaces read_file under CORTEX_STUDY_FILE=1;
+			// both are "the model inspected a file" for every gate that
+			// keys on reads (read_count_min/max, inspect_count_*).
 			m.ReadCount++
 		case "act.run_shell":
 			m.ShellCount++
