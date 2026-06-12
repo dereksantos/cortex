@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"math/rand"
 	"os"
+	"strings"
 )
 
 // FocusSampler wraps any Sampler and biases its draws toward chunks
@@ -45,6 +46,29 @@ const focusDefaultBias = 0.7
 // read (e.g. synthetic grids in tests).
 func newFocusSampler(inner Sampler, out *BoundaryOutput, f Focus) *FocusSampler {
 	fs := &FocusSampler{Inner: inner, Bias: focusDefaultBias, inFocus: map[string]bool{}}
+
+	// Cross-file targeting: a relpath names the file or subtree to chase
+	// (corpus studies — line numbers alone are ambiguous across files),
+	// with Lines narrowing within it. A path that covers EVERY chunk
+	// (single-file grid) is vacuous as a filter; fall through to the
+	// byte-resolved line targeting below, which is more accurate there.
+	if f.Path != "" && !allChunksUnder(out, f.Path) {
+		lo, hi := f.Lines[0], f.Lines[1]
+		if hi < lo {
+			lo, hi = hi, lo
+		}
+		for _, c := range out.Chunks {
+			if !relPathUnder(c.RelPath, f.Path) {
+				continue
+			}
+			if hi > 0 && (c.LineStart > hi || c.LineEnd < lo) {
+				continue
+			}
+			fs.inFocus[c.ID] = true
+		}
+		return fs
+	}
+
 	spec, _ := ResolveFocus(out.ProjectRoot, f)
 
 	if spec.Bytes[1] > spec.Bytes[0] {
@@ -68,6 +92,23 @@ func newFocusSampler(inner Sampler, out *BoundaryOutput, f Focus) *FocusSampler 
 		}
 	}
 	return fs
+}
+
+// relPathUnder reports whether rel is base itself or inside the base
+// subtree. Both sides are slash-separated.
+func relPathUnder(rel, base string) bool {
+	return rel == base || strings.HasPrefix(rel, base+"/")
+}
+
+// allChunksUnder reports whether every chunk in the boundary lies under
+// base — true for a single-file grid focused on its own file.
+func allChunksUnder(out *BoundaryOutput, base string) bool {
+	for _, c := range out.Chunks {
+		if !relPathUnder(c.RelPath, base) {
+			return false
+		}
+	}
+	return true
 }
 
 // Name identifies the sampler in study metadata.

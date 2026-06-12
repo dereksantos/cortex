@@ -35,13 +35,20 @@ func runSampleOnly(path string, density study.Density, window int, focus *study.
 	}
 
 	if resp.Mode == "read" {
-		fmt.Fprintf(w, "mode: read — file fits window/2; study degenerates to a whole-file read (%d bytes).\n", len(resp.ReadContent))
+		fmt.Fprintf(w, "mode: read — target fits window/2; study degenerates to a whole read (%d bytes).\n", len(resp.ReadContent))
 		return nil
 	}
 
 	fmt.Fprintf(w, "mode: study   path=%s   sampled=%d chunks\n", path, len(resp.Sampled))
 	if focus != nil {
-		fmt.Fprintf(w, "focus: lines %d-%d\n", focus.Lines[0], focus.Lines[1])
+		switch {
+		case focus.Path != "" && (focus.Lines[0] > 0 || focus.Lines[1] > 0):
+			fmt.Fprintf(w, "focus: path %s lines %d-%d\n", focus.Path, focus.Lines[0], focus.Lines[1])
+		case focus.Path != "":
+			fmt.Fprintf(w, "focus: path %s\n", focus.Path)
+		default:
+			fmt.Fprintf(w, "focus: lines %d-%d\n", focus.Lines[0], focus.Lines[1])
+		}
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %-28s %-18s %-7s  %s\n", "region", "bytes", "eff", "snippet")
@@ -70,6 +77,23 @@ func firstLine(s string) string {
 		s = s[:max] + "…"
 	}
 	return s
+}
+
+// parseFocus combines the --focus-lines and --focus-path flags into a
+// *study.Focus. Both empty yields nil (no focus).
+func parseFocus(lines, path string) (*study.Focus, error) {
+	f, err := parseFocusLines(lines)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return f, nil
+	}
+	if f == nil {
+		f = &study.Focus{}
+	}
+	f.Path = filepath.ToSlash(path)
+	return f, nil
 }
 
 // parseFocusLines parses a "start,end" pair into a *study.Focus. Empty

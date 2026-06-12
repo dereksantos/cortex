@@ -23,8 +23,12 @@ import (
 
 // Focus drives DENSIFY/TARGET deepening: a line range, a symbol, or a
 // semantic query. Lines is authoritative; Symbol/Query are resolved to a
-// line range by ResolveFocus (added with the focus sampler).
+// line range by ResolveFocus (added with the focus sampler). Path names
+// a file or subtree (caller-relative, slash-separated) for corpus
+// studies, where line numbers alone are ambiguous across files; Lines
+// then narrows within it.
 type Focus struct {
+	Path   string `json:"path,omitempty"`
 	Lines  [2]int `json:"lines,omitempty"`
 	Symbol string `json:"symbol,omitempty"`
 	Query  string `json:"query,omitempty"`
@@ -133,13 +137,16 @@ type StudyResponse struct {
 }
 
 // StudyFile runs the size-adaptive read. See the package doc above.
+// Directories take the corpus path (study_dir.go): same threshold, same
+// sampler and provenance machinery, with the file tree as the boundary
+// space instead of one file's byte space.
 func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	fi, err := os.Stat(req.Path)
 	if err != nil {
 		return StudyResponse{}, fmt.Errorf("study: stat %s: %w", req.Path, err)
 	}
 	if fi.IsDir() {
-		return StudyResponse{}, fmt.Errorf("study: %s is a directory, not a file", req.Path)
+		return studyDir(ctx, req)
 	}
 	size := fi.Size()
 
@@ -169,6 +176,20 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		ModTimeUnix:  fi.ModTime().Unix(),
 	})
 
+	// The byte grid is uniform, so the first chunk's size is the
+	// format's unit for budget-derived density.
+	autoUnit := 0
+	if len(out.Chunks) > 0 {
+		autoUnit = out.Chunks[0].ByteLength
+	}
+	return sampleAndInfer(ctx, req, out, relPath, autoUnit, window)
+}
+
+// sampleAndInfer is the post-boundary pipeline shared by the file and
+// directory paths: density resolution → (focus) sampler → region reads
+// with lazy refinement for grids that need it → coverage → deepening
+// affordances → optional phase-2 inference.
+func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, display string, autoUnit, window int) (StudyResponse, error) {
 	// Density resolution. An explicit Density (named level or int) is
 	// honored as-is. Nil derives k from the budget: window / chunk
 	// target, so one pass samples the full window in unit-sized
@@ -176,11 +197,9 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	// 2026-06-10 granularity sweep: breadth at unit size beats fewer,
 	// coarser fragments at equal data).
 	k := ResolveDensity(req.Density)
-	if req.Density == nil && len(out.Chunks) > 0 {
-		if unit := out.Chunks[0].ByteLength; unit > 0 {
-			if ak := window * studyCharsPerToken / unit; ak > k {
-				k = ak
-			}
+	if req.Density == nil && autoUnit > 0 {
+		if ak := window * studyCharsPerToken / autoUnit; ak > k {
+			k = ak
 		}
 	}
 
@@ -207,7 +226,18 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		byID[out.Chunks[i].ID] = &out.Chunks[i]
 	}
 
-	lineBase := streamingLineBase(req.Path)
+	// Line-base lookups are per file: byte-grid chunks all share one
+	// path; corpus chunks arrive Refined, so their entry is never built.
+	lineBases := map[string]func(int64) (int, error){}
+	lineBaseFor := func(path string) func(int64) (int, error) {
+		lb, ok := lineBases[path]
+		if !ok {
+			lb = streamingLineBase(path)
+			lineBases[path] = lb
+		}
+		return lb
+	}
+
 	sampled := make([]SampledChunk, 0, len(ids))
 	seenEff := 0
 	for _, id := range ids {
@@ -215,8 +245,10 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 		if ch == nil {
 			continue
 		}
-		if rerr := RefineChunk(ch, lineBase); rerr != nil {
-			return StudyResponse{}, rerr
+		if !ch.Refined {
+			if rerr := RefineChunk(ch, lineBaseFor(ch.Path)); rerr != nil {
+				return StudyResponse{}, rerr
+			}
 		}
 		body, berr := fractal.ReadRegion(ch.Path, ch.ByteOffset, ch.ByteLength)
 		if berr != nil {
@@ -264,7 +296,7 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	if req.Infer != nil {
 		io, ierr := req.Infer(ctx, InferInput{
 			Path:     req.Path,
-			RelPath:  relPath,
+			RelPath:  display,
 			Sampled:  sampled,
 			Focus:    req.Focus,
 			Goal:     req.Goal,

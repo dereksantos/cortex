@@ -81,12 +81,15 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 	if display == "" {
 		display = in.Path
 	}
-	fmt.Fprintf(&b, "Sampled regions of %s (a PARTIAL view — not the whole file):\n\n", display)
-	numbered := numberSnippetLines(display)
-	if in.Numbered != nil {
-		numbered = *in.Numbered
-	}
+	fmt.Fprintf(&b, "Sampled regions of %s (a PARTIAL view — not the whole content):\n\n", display)
 	for _, s := range in.Sampled {
+		// Numbering is decided per region: a corpus mixes formats, and
+		// the measured rule (code/records numbered, prose bare) is a
+		// property of each file, not of the study target as a whole.
+		numbered := numberSnippetLines(s.RelPath)
+		if in.Numbered != nil {
+			numbered = *in.Numbered
+		}
 		fmt.Fprintf(&b, "----- %s:%d-%d -----\n", s.RelPath, s.LineStart, s.LineEnd)
 		if numbered {
 			writeNumberedSnippet(&b, s.Snippet, s.LineStart)
@@ -136,15 +139,22 @@ func describeFocus(f *Focus) string {
 	if f == nil {
 		return ""
 	}
+	var d string
 	switch {
 	case f.Symbol != "":
-		return "symbol " + f.Symbol
+		d = "symbol " + f.Symbol
 	case f.Query != "":
-		return f.Query
+		d = f.Query
 	case f.Lines[0] > 0 || f.Lines[1] > 0:
-		return fmt.Sprintf("lines %d-%d", f.Lines[0], f.Lines[1])
+		d = fmt.Sprintf("lines %d-%d", f.Lines[0], f.Lines[1])
 	}
-	return ""
+	if f.Path != "" {
+		if d == "" {
+			return "path " + f.Path
+		}
+		return "path " + f.Path + ", " + d
+	}
+	return d
 }
 
 // citationMergeGapLines is the gap tolerance when merging sampled

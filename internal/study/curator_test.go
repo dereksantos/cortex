@@ -54,6 +54,9 @@ func TestHeuristicCurator_StrongLeadTargets(t *testing.T) {
 	if d.Focus == nil || d.Focus.Lines[0] > 1400 || d.Focus.Lines[1] < 1400 {
 		t.Errorf("TARGET focus should bracket the lead line 1400, got %+v", d.Focus)
 	}
+	if d.Focus == nil || d.Focus.Path != "a.go" {
+		t.Errorf("TARGET focus should carry the lead's relpath for cross-file deepening, got %+v", d.Focus)
+	}
 }
 
 func TestHeuristicCurator_ExhaustedDone(t *testing.T) {
@@ -79,6 +82,17 @@ func TestModelCurator_ParsesDecision(t *testing.T) {
 	}
 	if d.Focus == nil || d.Focus.Lines != [2]int{100, 200} {
 		t.Errorf("focus = %+v, want lines [100 200]", d.Focus)
+	}
+}
+
+func TestModelCurator_ParsesFocusPath(t *testing.T) {
+	prov := scriptedCuratorProvider{resp: `{"kind":"TARGET","focus_path":"internal/llm/build.go","focus_lines":[10,80]}`, avail: true}
+	d := ModelCurator{Provider: prov}.Decide(StudyResponse{Coverage: Coverage{Pct: 0.1}}, "")
+	if d.Kind != DecisionTarget {
+		t.Fatalf("Kind = %q, want TARGET", d.Kind)
+	}
+	if d.Focus == nil || d.Focus.Path != "internal/llm/build.go" {
+		t.Errorf("focus = %+v, want path internal/llm/build.go", d.Focus)
 	}
 }
 

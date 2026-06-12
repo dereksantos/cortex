@@ -284,16 +284,16 @@ func executeCodebase(args []string) error {
 		}
 
 		row := codebase.BaselineRow{
-			FixtureID:    fx.ID,
-			Group:        string(fx.Group),
-			Eval:         fx.Eval,
-			Project:      fx.Project,
-			Language:     fx.Language,
-			Timestamp:    time.Now().UTC().Format(time.RFC3339),
-			GitCommitSHA: commit,
-			Model:        model,
-			WallTimeMs:   elapsed.Milliseconds(),
-			Metrics:      m,
+			FixtureID:     fx.ID,
+			Group:         string(fx.Group),
+			Eval:          fx.Eval,
+			Project:       fx.Project,
+			Language:      fx.Language,
+			Timestamp:     time.Now().UTC().Format(time.RFC3339),
+			GitCommitSHA:  commit,
+			Model:         model,
+			WallTimeMs:    elapsed.Milliseconds(),
+			Metrics:       m,
 			Bounds:        bounds,
 			Pass:          fixturePass && !res.Invalid,
 			Invalid:       res.Invalid,
@@ -399,4 +399,3 @@ func oneLine(s string) string {
 	}
 	return s
 }
-

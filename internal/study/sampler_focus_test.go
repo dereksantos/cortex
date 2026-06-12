@@ -3,6 +3,7 @@ package study
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -156,6 +157,80 @@ func TestStudyFile_FocusByRealLines(t *testing.T) {
 	}
 	if fh <= nh {
 		t.Errorf("real-line focus did not concentrate: in-focus with=%d, without=%d", fh, nh)
+	}
+}
+
+// corpusGrid builds a real multi-file boundary over a fixture dir so
+// focus-by-path membership is exercised against analyzer-shaped chunks.
+func corpusGrid(t *testing.T) *BoundaryOutput {
+	t.Helper()
+	root := writeDirFixture(t, map[string]string{
+		"top.txt":     lineBlob(20000),
+		"pkg/a.txt":   lineBlob(20000),
+		"pkg/b.txt":   lineBlob(20000),
+		"other/c.txt": lineBlob(20000),
+		"other/d.txt": lineBlob(20000),
+	})
+	out, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	return out
+}
+
+func TestFocusSampler_PathTargetsSubtree(t *testing.T) {
+	out := corpusGrid(t)
+	fs := newFocusSampler(&HierarchicalSampler{}, out, Focus{Path: "pkg"})
+	if len(fs.inFocus) == 0 {
+		t.Fatal("path focus matched no chunks")
+	}
+	for _, c := range out.Chunks {
+		under := c.RelPath == "pkg" || strings.HasPrefix(c.RelPath, "pkg/")
+		if fs.inFocus[c.ID] != under {
+			t.Errorf("chunk %s in-focus=%t, want %t", c.RelPath, fs.inFocus[c.ID], under)
+		}
+	}
+
+	// The bias concentrates draws under the path (statistical, fixed seed).
+	rng := rand.New(rand.NewSource(3))
+	in, total := 0, 0
+	for i := 0; i < 300; i++ {
+		for _, id := range fs.Next(out, map[string]bool{}, 1, rng) {
+			total++
+			if fs.inFocus[id] {
+				in++
+			}
+		}
+	}
+	if frac := float64(in) / float64(total); frac < 0.5 {
+		t.Errorf("path bias too weak: in-focus fraction = %.2f, want >= 0.5", frac)
+	}
+}
+
+func TestFocusSampler_PathTargetsSingleFile(t *testing.T) {
+	out := corpusGrid(t)
+	fs := newFocusSampler(&HierarchicalSampler{}, out, Focus{Path: "other/c.txt"})
+	for _, c := range out.Chunks {
+		if fs.inFocus[c.ID] != (c.RelPath == "other/c.txt") {
+			t.Errorf("chunk %s in-focus=%t, want %t", c.RelPath, fs.inFocus[c.ID], c.RelPath == "other/c.txt")
+		}
+	}
+}
+
+// A path focus on a single-file grid (every chunk shares the relpath) is
+// vacuous as a filter; it must fall through to byte-resolved line
+// targeting rather than putting the entire file in focus.
+func TestFocusSampler_PathOnSingleFileGridUsesLines(t *testing.T) {
+	path := writeBytesFile(t, 500000)
+	out := BuildByteGrid(path, "blob.txt", 500000, ByteGridOpts{WindowTokens: 8192, Bands: 16})
+	withPath := newFocusSampler(&HierarchicalSampler{}, out, Focus{Path: "blob.txt", Lines: [2]int{5000, 5200}})
+	linesOnly := newFocusSampler(&HierarchicalSampler{}, out, Focus{Lines: [2]int{5000, 5200}})
+	if len(withPath.inFocus) == 0 {
+		t.Fatal("path+lines focus matched no chunks")
+	}
+	if len(withPath.inFocus) != len(linesOnly.inFocus) {
+		t.Errorf("single-file path+lines in-focus = %d chunks, want %d (same as lines-only)",
+			len(withPath.inFocus), len(linesOnly.inFocus))
 	}
 }
 

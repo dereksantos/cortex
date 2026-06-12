@@ -131,12 +131,6 @@ func TestStudyFile_ThresholdBoundary(t *testing.T) {
 	}
 }
 
-func TestStudyFile_DirIsError(t *testing.T) {
-	if _, err := StudyFile(context.Background(), StudyRequest{Path: t.TempDir(), Window: 8192}); err == nil {
-		t.Error("expected error studying a directory")
-	}
-}
-
 // Fill trades chunk size for chunk count at the same total sample: at
 // window 8192, fill 1/8 targets 4096-byte chunks and fill 1/16 targets
 // 2048-byte chunks, so the same data arrives as twice the chunks at

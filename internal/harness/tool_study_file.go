@@ -10,11 +10,13 @@ import (
 )
 
 // studyFileTool is the size-adaptive reading primitive that subsumes
-// read_file. It is the agent's sole reading tool: for a file that fits
-// the consuming model's window it behaves byte-for-byte like read_file
-// (mode "read"); for a file over the threshold it samples bounded byte
-// regions and infers a provenance-constrained digest (mode "study"),
-// so a huge file costs the same to read as a merely-large one and never
+// read_file. It is the agent's sole reading tool, and takes files OR
+// directories: a target that fits the consuming model's window is
+// returned whole (mode "read" — byte-for-byte read_file parity for
+// files; every file inlined with labelled headers for directories);
+// a target over the threshold is sampled into bounded regions with a
+// provenance-constrained digest (mode "study"), so a huge file or a
+// whole package costs the same to read as a merely-large one and never
 // blows the context window. See docs/study-file.md.
 type studyFileTool struct {
 	workdir string
@@ -45,16 +47,17 @@ func (t *studyFileTool) Spec() llm.ToolSpec {
 		Type: "function",
 		Function: llm.ToolFunc{
 			Name:        t.Name(),
-			Description: "Read a file under the workdir. Small files are returned whole (like read_file). Files too large to fit the model's context are SAMPLED instead: you get a bounded digest with file:line citations, a coverage map, and leads. To go deeper, call again with focus.lines/focus.symbol (TARGET) or a higher density (DENSIFY) — citations are validated against what was actually sampled, so unsampled lines are never cited.",
+			Description: "Read a file OR a directory under the workdir. Small targets are returned whole (a directory comes as every file inlined with '----- path -----' headers). Targets too large to fit the model's context are SAMPLED instead: you get a bounded digest with file:line citations, a coverage map, and leads. To go deeper, call again with focus (TARGET: focus.path for a file/subdir, focus.lines for a line range) or a higher density (DENSIFY) — citations are validated against what was actually sampled, so unsampled lines are never cited.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
-					"path": {"type": "string", "description": "Path relative to the workdir (no leading slash, no .. segments)."},
-					"density": {"description": "Sampling density when the file is studied: \"sparse\" | \"normal\" | \"dense\", or an integer chunk count."},
+					"path": {"type": "string", "description": "File or directory path relative to the workdir (no leading slash, no .. segments)."},
+					"density": {"description": "Sampling density when the target is studied: \"sparse\" | \"normal\" | \"dense\", or an integer chunk count."},
 					"focus": {
 						"type": "object",
 						"description": "Deepen toward a region.",
 						"properties": {
+							"path": {"type": "string", "description": "File or subdirectory (workdir-relative) to bias the sample toward when studying a directory."},
 							"lines": {"type": "array", "items": {"type": "integer"}, "description": "[start, end] line range to bias the sample toward."},
 							"symbol": {"type": "string", "description": "Symbol/identifier to target."},
 							"query": {"type": "string", "description": "Semantic lead to target."}
@@ -72,6 +75,7 @@ type studyFileArgs struct {
 	Path    string          `json:"path"`
 	Density json.RawMessage `json:"density,omitempty"`
 	Focus   *struct {
+		Path   string `json:"path,omitempty"`
 		Lines  []int  `json:"lines,omitempty"`
 		Symbol string `json:"symbol,omitempty"`
 		Query  string `json:"query,omitempty"`
@@ -143,7 +147,7 @@ func (t *studyFileTool) focus(args studyFileArgs) *study.Focus {
 	if args.Focus == nil {
 		return nil
 	}
-	f := &study.Focus{Symbol: args.Focus.Symbol, Query: args.Focus.Query}
+	f := &study.Focus{Path: args.Focus.Path, Symbol: args.Focus.Symbol, Query: args.Focus.Query}
 	if len(args.Focus.Lines) == 2 {
 		f.Lines = [2]int{args.Focus.Lines[0], args.Focus.Lines[1]}
 	}

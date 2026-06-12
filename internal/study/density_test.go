@@ -19,6 +19,10 @@ func TestResolveDensity_Mapping(t *testing.T) {
 		{"raw-int", 12, 12},
 		{"zero-int", 0, 8},
 		{"negative-int", -3, 8},
+		{"numeric-string", "6", 6},
+		{"numeric-string-trimmed", " 24 ", 24},
+		{"zero-string", "0", 8},
+		{"negative-string", "-2", 8},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

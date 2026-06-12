@@ -80,67 +80,10 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 
 	moduleCache := make(map[string]moduleAssignment) // dir → assignment
 
-	// Per-file records (collected first, deterministically sorted, then
-	// processed). This isolates randomness in filesystem walk order
-	// from the chunk-emission order, satisfying the determinism contract.
-	type fileRec struct {
-		abs   string
-		rel   string
-		size  int64
-		mtime int64 // unix seconds (UTC)
-	}
-	var files []fileRec
-
-	err := filepath.WalkDir(projectRoot, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if path == projectRoot {
-				return nil
-			}
-			if ignore.IsDirExcluded(path, d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if ignore.IsFileExcluded(path) {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if info.Size() == 0 || info.Size() > universalMaxFileBytes {
-			return nil
-		}
-		// Layer 3 magic-byte sniff: catches sensitive content that
-		// slipped past layers 1 + 2 (e.g., .txt file containing a
-		// PEM private key).
-		if ignore.IsSensitiveByMagicBytes(path) {
-			return nil
-		}
-		rel, _ := filepath.Rel(projectRoot, path)
-		rel = filepath.ToSlash(rel)
-		files = append(files, fileRec{
-			abs:   path,
-			rel:   rel,
-			size:  info.Size(),
-			mtime: info.ModTime().UTC().Unix(),
-		})
-		if len(files) >= universalSanityCap {
-			return filepath.SkipAll
-		}
-		return nil
-	})
+	files, err := walkSourceFiles(projectRoot, ignore)
 	if err != nil {
-		return nil, fmt.Errorf("study: walk: %w", err)
+		return nil, err
 	}
-
-	// Sort files lexically by rel path (defensive — WalkDir already
-	// emits lexical order, but we don't rely on Go's implementation
-	// detail).
-	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 
 	// Build the state hash from sorted (relpath:size:mtime) tuples.
 	h := sha256.New()
@@ -242,6 +185,74 @@ func (a UniversalAnalyzer) Analyze(ctx context.Context, projectRoot string, igno
 	out.Edges = buildSiblingEdges(out.Modules, projectRoot)
 
 	return out, nil
+}
+
+// sourceFile is one walkable source file: the per-file record both the
+// universal analyzer and the directory-study threshold/read paths
+// consume. Collected first and deterministically sorted so randomness
+// in filesystem walk order never reaches chunk-emission order.
+type sourceFile struct {
+	abs   string
+	rel   string // slash-separated, relative to the walk root
+	size  int64
+	mtime int64 // unix seconds (UTC)
+}
+
+// walkSourceFiles walks root and returns its studyable files, sorted
+// lexically by rel path: ignore-set exclusions (dirs, files, sensitive
+// magic bytes) applied, empty and >1 MiB files skipped, capped at
+// universalSanityCap.
+func walkSourceFiles(root string, ignore *projectscan.IgnoreSet) ([]sourceFile, error) {
+	var files []sourceFile
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			if ignore.IsDirExcluded(path, d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ignore.IsFileExcluded(path) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if info.Size() == 0 || info.Size() > universalMaxFileBytes {
+			return nil
+		}
+		// Layer 3 magic-byte sniff: catches sensitive content that
+		// slipped past layers 1 + 2 (e.g., .txt file containing a
+		// PEM private key).
+		if ignore.IsSensitiveByMagicBytes(path) {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		files = append(files, sourceFile{
+			abs:   path,
+			rel:   rel,
+			size:  info.Size(),
+			mtime: info.ModTime().UTC().Unix(),
+		})
+		if len(files) >= universalSanityCap {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("study: walk: %w", err)
+	}
+	// Defensive sort — WalkDir already emits lexical order, but we don't
+	// rely on Go's implementation detail.
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	return files, nil
 }
 
 // moduleAssignment is the result of resolving which module a file
@@ -431,6 +442,9 @@ func buildChunks(
 			EstTokens:  length / 4,
 			ModuleID:   moduleID,
 			Lang:       lang,
+			// Bounds are computed from the real content here, unlike the
+			// byte grid's size-only estimates — nothing to lazily refine.
+			Refined: true,
 		}
 		chunks = append(chunks, ch)
 		if end >= totalLines {

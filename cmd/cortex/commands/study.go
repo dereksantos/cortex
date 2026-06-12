@@ -67,13 +67,14 @@ func (c *StudyCommand) DescribeFlags(fs *flag.FlagSet) {
 	fs.Int("window-lines", -1, "Override the derived chunk window size in lines")
 	fs.Int("window-overlap", -1, "Override the derived adjacent-chunk overlap in lines")
 	fs.String("salt", "", "Override the RNG salt (default: run_id)")
-	// Mechanical study_file checkpoint: `cortex study FILE --sample-only`.
-	fs.Bool("sample-only", false, "Mechanically sample a single FILE (byte-grid + sampler, no LLM) and print the chunk table")
+	// Mechanical study_file checkpoint: `cortex study FILE|DIR --sample-only`.
+	fs.Bool("sample-only", false, "Mechanically sample a FILE or DIR (sampler only, no LLM) and print the chunk table")
 	fs.String("density", "", "Sample density for --sample-only: sparse | normal | dense | <int k>")
 	fs.Int("window", 0, "Consuming-model context window in tokens for --sample-only (default: conservative)")
 	fs.String("focus-lines", "", "Bias the sample toward a START,END line range")
-	fs.String("goal", "", "Task hint passed to inference / the curator when studying a FILE")
-	fs.Int("max-passes", 4, "Max deepening passes when studying a FILE")
+	fs.String("focus-path", "", "Bias the sample toward a file or subdirectory (DIR studies)")
+	fs.String("goal", "", "Task hint passed to inference / the curator when studying a FILE or DIR")
+	fs.Int("max-passes", 4, "Max deepening passes when studying a FILE or DIR")
 }
 
 // Execute runs the study subcommand. Positional arg: DURATION.
@@ -98,6 +99,7 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 	densityStr := ""
 	sampleWindow := 0
 	focusLinesStr := ""
+	focusPathStr := ""
 	goalStr := ""
 	maxPasses := 4
 
@@ -127,6 +129,11 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		case "--focus-lines":
 			if i+1 < len(args) {
 				focusLinesStr = strings.TrimSpace(args[i+1])
+				i++
+			}
+		case "--focus-path":
+			if i+1 < len(args) {
+				focusPathStr = strings.TrimSpace(args[i+1])
 				i++
 			}
 		case "--goal":
@@ -236,14 +243,15 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		}
 	}
 
-	// Mechanical checkpoint: `cortex study FILE --sample-only` routes to
-	// the no-LLM byte-grid sampler instead of the duration planner. The
-	// positional here is a FILE path, not a DURATION.
+	// Mechanical checkpoint: `cortex study TARGET --sample-only` routes
+	// to the no-LLM sampler (byte grid for a file, universal analyzer
+	// for a dir) instead of the duration planner. The positional here is
+	// a FILE or DIR path, not a DURATION.
 	if sampleOnly {
 		if durationStr == "" {
 			return fmt.Errorf("study --sample-only: FILE argument required")
 		}
-		focus, err := parseFocusLines(focusLinesStr)
+		focus, err := parseFocus(focusLinesStr, focusPathStr)
 		if err != nil {
 			return err
 		}
@@ -254,12 +262,13 @@ func (c *StudyCommand) Execute(ctx *Context) error {
 		return runSampleOnly(durationStr, density, sampleWindow, focus, os.Stdout)
 	}
 
-	// File-study mode: when the positional is an existing FILE (not a
-	// duration), run the LLM-backed study → curate → deepen loop over it.
-	// A duration like "5m" isn't a file and falls through to the planner.
+	// Target-study mode: when the positional is an existing FILE or DIR
+	// (not a duration), run the LLM-backed study → curate → deepen loop
+	// over it. A duration like "5m" isn't a path and falls through to
+	// the planner.
 	if durationStr != "" {
-		if fi, statErr := os.Stat(durationStr); statErr == nil && !fi.IsDir() {
-			focus, ferr := parseFocusLines(focusLinesStr)
+		if _, statErr := os.Stat(durationStr); statErr == nil {
+			focus, ferr := parseFocus(focusLinesStr, focusPathStr)
 			if ferr != nil {
 				return ferr
 			}
@@ -541,9 +550,12 @@ func emitStudyClosingInsight(cortexDir string, plan study.Plan, st *study.State,
 }
 
 func printStudyHelp() {
-	fmt.Println("Usage: cortex study DURATION [flags]")
+	fmt.Println("Usage: cortex study DURATION|FILE|DIR [flags]")
 	fmt.Println("")
 	fmt.Println("  DURATION: a Go time.Duration string — e.g. 30s, 5m, 1h, 2h30m.")
+	fmt.Println("  FILE|DIR: an existing path runs the size-adaptive study → curate →")
+	fmt.Println("            deepen loop over that file or directory instead (use")
+	fmt.Println("            --goal, --max-passes, --density; --sample-only for no-LLM).")
 	fmt.Println("")
 	fmt.Println("Spends DURATION of wall-clock budget extracting overview insights about")
 	fmt.Println("the project. Chunk size and chunk count are derived from your model's")

@@ -15,10 +15,10 @@ func TestLocalOnlyRouting(t *testing.T) {
 			{Name: "chatterbox", BaseURL: "http://chatterbox:4000", Models: []string{"coder", "reasoner"}},
 		},
 		Routing: map[string]string{
-			"decide.next":         "openai/gpt-5.4", // remote → drop
-			"decide.tool_call":    "chatterbox/coder", // endpoint/model → keep
+			"decide.next":          "openai/gpt-5.4",   // remote → drop
+			"decide.tool_call":     "chatterbox/coder", // endpoint/model → keep
 			"sense.estimate_scope": "reasoner",         // bare local model → keep
-			"attend.compress":     "anthropic/claude", // remote → drop
+			"attend.compress":      "anthropic/claude", // remote → drop
 		},
 	}
 

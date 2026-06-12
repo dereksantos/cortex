@@ -61,9 +61,12 @@ func (HeuristicCurator) Decide(resp StudyResponse, _ string) Decision {
 		if lo < 1 {
 			lo = 1
 		}
+		// Path carries the lead's file so corpus studies deepen into the
+		// right file; single-file grids treat their own path as vacuous
+		// (see newFocusSampler) and use the line range alone.
 		return Decision{
 			Kind:    DecisionTarget,
-			Focus:   &Focus{Lines: [2]int{lo, l.NearLine + curatorTargetWindow}},
+			Focus:   &Focus{Path: l.RelPath, Lines: [2]int{lo, l.NearLine + curatorTargetWindow}},
 			Density: resp.Deepen.Target.Density,
 		}
 	}
@@ -112,13 +115,13 @@ func (m ModelCurator) Decide(resp StudyResponse, goal string) Decision {
 	return dec
 }
 
-const curatorSystemPrompt = `You decide whether a partial study of a large file is good enough or needs to go deeper. You are given a digest, the coverage so far, and any leads (regions referenced but not yet read). Choose exactly one action:
+const curatorSystemPrompt = `You decide whether a partial study of a large file or directory is good enough or needs to go deeper. You are given a digest, the coverage so far, and any leads (regions referenced but not yet read). Choose exactly one action:
 - DONE: the digest answers the task, or coverage is sufficient.
-- DENSIFY: sample more of the file at higher density (no specific target).
-- TARGET: chase a specific lead — provide focus_lines [start,end].
+- DENSIFY: sample more of the content at higher density (no specific target).
+- TARGET: chase a specific lead — provide focus_lines [start,end], plus focus_path (the lead's file path) when studying a directory.
 
 Respond with a single JSON object and nothing else:
-{"kind":"DONE|DENSIFY|TARGET","focus_lines":[start,end],"density":"sparse|normal|dense"}`
+{"kind":"DONE|DENSIFY|TARGET","focus_path":"relpath","focus_lines":[start,end],"density":"sparse|normal|dense"}`
 
 func buildCuratorPrompt(resp StudyResponse, goal string) (system, user string) {
 	var b strings.Builder
@@ -143,6 +146,7 @@ func parseCuratorDecision(raw string) (Decision, bool) {
 	}
 	var j struct {
 		Kind       string `json:"kind"`
+		FocusPath  string `json:"focus_path"`
 		FocusLines []int  `json:"focus_lines"`
 		Density    string `json:"density"`
 	}
@@ -161,6 +165,12 @@ func parseCuratorDecision(raw string) (Decision, bool) {
 	}
 	if len(j.FocusLines) == 2 {
 		dec.Focus = &Focus{Lines: [2]int{j.FocusLines[0], j.FocusLines[1]}}
+	}
+	if p := strings.TrimSpace(j.FocusPath); p != "" {
+		if dec.Focus == nil {
+			dec.Focus = &Focus{}
+		}
+		dec.Focus.Path = p
 	}
 	return dec, true
 }

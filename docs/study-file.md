@@ -1,8 +1,10 @@
 # `study_file` — size-adaptive, deepening-on-relevance reading
 
-> Status: **v1 DRAFT / design** (2026-06). Decided so far: `attend.accumulate`
-> is subsumed by study coverage; leads/targeting are layered (grep · study ·
-> AST). Supersedes the "read whole file → compress"
+> Status: **v1 SHIPPED for files and directories** (2026-06): the
+> `study_file` tool takes either, with the same threshold/sample/infer
+> identity (see Boundary producers). Decided: `attend.accumulate`
+> is subsumed by study coverage (removed); leads/targeting are layered
+> (grep · study · AST). Supersedes the "read whole file → compress"
 > path that produced the `attend.accumulate` death spiral (see Motivation).
 > Aligns with [`cortex-study-plan.md`](cortex-study-plan.md) (the study
 > session + coverage) and [`file-tool-roadmap.md`](file-tool-roadmap.md)
@@ -221,8 +223,22 @@ the agent uses constantly for plain location.
 | target | boundary space | producer | status |
 |---|---|---|---|
 | project | tree of files | `UniversalAnalyzer.Analyze(root)` | exists |
-| dir | subtree | scope the walk | exists (scope it) |
-| **single huge file** | **byte ranges within it** | **byte-space grid** | **net-new** |
+| dir | subtree | `studyDir` → scoped `UniversalAnalyzer` | ✅ shipped (2026-06) |
+| single huge file | byte ranges within it | byte-space grid | ✅ shipped (2026-06) |
+
+Directory studies (`internal/study/study_dir.go`) keep the same
+size-adaptive identity: a dir whose total size fits window/2 is returned
+WHOLE — every file inlined under a `----- relpath -----` header, the
+"study this small package" comprehension win — and a larger dir routes
+through the scoped universal analyzer into the same sampler + inference
++ citation pipeline. Chunk relpaths are prefixed with the dir's own
+caller-relative path so citations stay real for the consuming agent.
+`Focus.Path` (file or subtree) is the corpus targeting knob — line
+numbers alone are ambiguous across files — and the curator emits it
+from a lead's relpath (`focus_path` in the model-curator contract).
+Known gap: files over the analyzer's 1 MiB cap are skipped by the walk,
+so a huge file inside a studied dir is invisible; the fix is per-file
+byte grids merged into the corpus boundary (TODO in `studyDir`).
 
 The net-new producer must **not read the file to chunk it** (that defeats
 the purpose):
@@ -280,11 +296,11 @@ the purpose):
 | Coverage / resume (`covered`, `FileHashes`, `TargetCoverage`) | ✅ exists |
 | Study session loop + extract ops (`Controller`, `ExtractFunc`) | ✅ exists |
 | Project/dir boundary producer (`UniversalAnalyzer`) | ✅ exists |
-| **Byte-space boundary producer (single huge file)** | 🔨 net-new |
-| **Size threshold + `study_file` delegation seam** | 🔨 net-new |
-| **`focus` weight in the sampler (TARGET/DENSIFY)** | 🔨 net-new |
-| **Provenance-constrained inference prompt + citation validation** | 🔨 net-new |
-| **`study_file` request/response tool contract** | 🔨 net-new |
+| Byte-space boundary producer (single huge file) | ✅ shipped |
+| Size threshold + `study_file` delegation seam (files + dirs) | ✅ shipped |
+| `focus` weight in the sampler (TARGET/DENSIFY, lines + path) | ✅ shipped |
+| Provenance-constrained inference prompt + citation validation | ✅ shipped |
+| `study_file` request/response tool contract | ✅ shipped |
 
 ## Rollout & eval impact
 

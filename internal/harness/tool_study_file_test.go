@@ -122,6 +122,58 @@ func TestStudyFileTool_FocusAccepted(t *testing.T) {
 	}
 }
 
+// writeWorkdirDir materializes rel→content files under workdir/dir.
+func writeWorkdirDir(t *testing.T, dir string, files map[string]string) (workdir string) {
+	t.Helper()
+	workdir = t.TempDir()
+	for rel, content := range files {
+		p := filepath.Join(workdir, dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	return workdir
+}
+
+func TestStudyFileTool_SmallDir_ReadShape(t *testing.T) {
+	workdir := writeWorkdirDir(t, "pkg", map[string]string{
+		"a.txt": "alpha\n",
+		"b.txt": "beta\n",
+	})
+	study := NewStudyFileTool(workdir, StudyFileToolOpts{Window: 8192})
+	out, err := study.Call(context.Background(), `{"path":"pkg"}`)
+	if err != nil {
+		t.Fatalf("study_file Call(dir): %v", err)
+	}
+	for _, want := range []string{`"truncated":false`, "----- pkg/a.txt -----", "alpha", "----- pkg/b.txt -----", "beta"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("small-dir read output missing %q in: %s", want, out)
+		}
+	}
+}
+
+func TestStudyFileTool_LargeDir_StudyShape(t *testing.T) {
+	blob := strings.Repeat(strings.Repeat("a", 49)+"\n", 1200) // 60KB per file
+	workdir := writeWorkdirDir(t, "pkg", map[string]string{
+		"one.txt": blob,
+		"two.txt": blob,
+	})
+	prov := fakeInferProvider{resp: `{"digest":"corpus digest","citations":[],"leads":[{"relpath":"pkg/two.txt","near_line":7,"why":"ref"}]}`}
+	study := NewStudyFileTool(workdir, StudyFileToolOpts{Window: 8192, Provider: prov})
+	out, err := study.Call(context.Background(), `{"path":"pkg","density":"sparse","focus":{"path":"pkg/one.txt"}}`)
+	if err != nil {
+		t.Fatalf("study_file Call(dir): %v", err)
+	}
+	for _, want := range []string{`"mode":"study"`, `"digest":"corpus digest"`, `"coverage"`, `"pkg/two.txt"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("large-dir study output missing %q in: %s", want, out)
+		}
+	}
+}
+
 func TestStudyFileTool_Spec(t *testing.T) {
 	study := NewStudyFileTool(t.TempDir(), StudyFileToolOpts{})
 	if study.Name() != "study_file" {

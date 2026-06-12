@@ -12,8 +12,8 @@ import (
 	"github.com/dereksantos/cortex/internal/study"
 )
 
-// fileStudyOpts bundles the knobs for `cortex study FILE` (the LLM-backed
-// study → curate → deepen loop over a single file).
+// fileStudyOpts bundles the knobs for `cortex study FILE|DIR` (the
+// LLM-backed study → curate → deepen loop over a file or directory).
 type fileStudyOpts struct {
 	path      string
 	density   study.Density
@@ -25,8 +25,9 @@ type fileStudyOpts struct {
 	endpoint  string
 }
 
-// runFileStudy runs the deepening loop over one file and prints each
-// pass's digest + citations + the curator's decision, then a summary. It
+// runFileStudy runs the deepening loop over one file or directory and
+// prints each pass's digest + citations + the curator's decision, then
+// a summary. It
 // reuses the command's provider/probe wiring; inference and the curator
 // are both backed by the resolved provider.
 func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
@@ -76,7 +77,7 @@ func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
 	for i, p := range res.Passes {
 		fmt.Fprintf(w, "── pass %d ──\n", i+1)
 		if p.Response.Mode == "read" {
-			fmt.Fprintf(w, "read whole file (%d bytes; it fits the window)\n\n", len(p.Response.ReadContent))
+			fmt.Fprintf(w, "read whole target (%d bytes; it fits the window)\n\n", len(p.Response.ReadContent))
 			continue
 		}
 		fmt.Fprintf(w, "coverage %.1f%%   sampled %d chunks   exhausted=%t\n",
@@ -103,7 +104,10 @@ func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
 func decisionStr(d study.Decision) string {
 	switch d.Kind {
 	case study.DecisionTarget:
-		if d.Focus != nil {
+		switch {
+		case d.Focus != nil && d.Focus.Path != "":
+			return fmt.Sprintf("TARGET %s lines %d-%d", d.Focus.Path, d.Focus.Lines[0], d.Focus.Lines[1])
+		case d.Focus != nil:
 			return fmt.Sprintf("TARGET lines %d-%d", d.Focus.Lines[0], d.Focus.Lines[1])
 		}
 		return "TARGET"

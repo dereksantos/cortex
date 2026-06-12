@@ -670,6 +670,11 @@
           "description": "Bias the sample toward a START,END line range"
         },
         {
+          "name": "focus-path",
+          "type": "string",
+          "description": "Bias the sample toward a file or subdirectory (DIR studies)"
+        },
+        {
           "name": "force",
           "type": "bool",
           "default": "false",
@@ -678,13 +683,13 @@
         {
           "name": "goal",
           "type": "string",
-          "description": "Task hint passed to inference / the curator when studying a FILE"
+          "description": "Task hint passed to inference / the curator when studying a FILE or DIR"
         },
         {
           "name": "max-passes",
           "type": "int",
           "default": "4",
-          "description": "Max deepening passes when studying a FILE"
+          "description": "Max deepening passes when studying a FILE or DIR"
         },
         {
           "name": "model",
@@ -700,7 +705,7 @@
           "name": "sample-only",
           "type": "bool",
           "default": "false",
-          "description": "Mechanically sample a single FILE (byte-grid + sampler, no LLM) and print the chunk table"
+          "description": "Mechanically sample a FILE or DIR (sampler only, no LLM) and print the chunk table"
         },
         {
           "name": "target-coverage",

@@ -211,6 +211,25 @@ func TestBuildInferPrompt_NumbersDataLines(t *testing.T) {
 	}
 }
 
+// A corpus mixes formats; the numbering rule is per region, not per
+// study target. Code regions get coordinates, prose regions stay bare.
+func TestBuildInferPrompt_NumbersPerRegionInCorpus(t *testing.T) {
+	in := InferInput{
+		RelPath: "pkg/stuff", // a directory display path
+		Sampled: []SampledChunk{
+			{RelPath: "pkg/stuff/main.go", LineStart: 10, LineEnd: 11, Snippet: "func a() {}\nfunc b() {}\n"},
+			{RelPath: "pkg/stuff/README.md", LineStart: 5, LineEnd: 6, Snippet: "# Title\nProse line.\n"},
+		},
+	}
+	_, user := BuildInferPrompt(in)
+	if !strings.Contains(user, "10| func a() {}") {
+		t.Errorf("code region in corpus should be numbered:\n%s", user)
+	}
+	if strings.Contains(user, "5| # Title") {
+		t.Errorf("prose region in corpus should stay bare:\n%s", user)
+	}
+}
+
 // Verbatim relays validate; invented ranges on the same file do not.
 // This is the digest-of-digests hierarchy contract: a lower level's
 // citation visible in a sampled snippet may propagate upward unchanged.

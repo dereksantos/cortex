@@ -1,6 +1,9 @@
 package study
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Density is the sampling-density knob. It is either a named level
 // ("sparse" | "normal" | "dense") or a raw int k (chunks to draw per
@@ -39,6 +42,11 @@ func ResolveDensity(d Density) int {
 			return densityDenseK
 		case "normal", "":
 			return densityNormalK
+		}
+		// Numeric strings count as raw k — the CLI's --density flag
+		// arrives as a string, and "6" silently meaning 8 is a trap.
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return n
 		}
 		return densityNormalK
 	default:
