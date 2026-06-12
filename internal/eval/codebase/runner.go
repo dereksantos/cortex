@@ -15,8 +15,8 @@ import (
 
 // RunOptions configures one fixture run. The runner shells out to the
 // cortex binary (CortexBinary) with --prompt + --workdir + --json +
-// --auto-retry + --keep-on-fail, then collects telemetry from the
-// resulting session JSONL and dag_traces.jsonl.
+// --auto-retry, then collects telemetry from the resulting session
+// JSONL and dag_traces.jsonl.
 //
 // Treating cortex as a black box keeps the eval honest: any future
 // REPL refactor that changes how the chain wires together is exercised
@@ -141,7 +141,6 @@ func Run(ctx context.Context, fx *Fixture, opts RunOptions) (*RunResult, Metrics
 		"--workdir", abs,
 		"--json",
 		"--auto-retry",
-		"--keep-on-fail",
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)

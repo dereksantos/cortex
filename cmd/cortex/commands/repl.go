@@ -21,20 +21,17 @@
 //     auto-detect verifier (Go-only for v1), auto-retry once on
 //     verify-fail with the error in context.
 //
-//   - Slash commands (/help, /diff, /undo, /model) cover the steering
-//     loop. /undo restores from a pre-turn file snapshot under
-//     .cortex/sessions/<ts>/snapshots/turn-<n>/ — no git required.
+//   - Slash commands (/help, /model, /models, ...) cover the steering
+//     loop. Undo/diff are git's job — the REPL keeps no parallel
+//     snapshot system; failed turns leave their edits in the workdir.
 package commands
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -106,10 +103,6 @@ const (
 	// floor.
 	defaultToolOutputSalienceCap = 500
 
-	// snapshotMaxFileBytes skips files above this when snapshotting
-	// for /undo. Big binaries shouldn't round-trip through .cortex.
-	snapshotMaxFileBytes = 1 << 20 // 1 MiB
-
 	// envREPLModel lets users pin a default model without retyping
 	// --model every invocation.
 	envREPLModel = "CORTEX_REPL_MODEL"
@@ -164,7 +157,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	maxCumulativeOverride := 0   // --max-cumulative-tokens N: override the per-attempt token budget (default 300000)
 	fullTools := false           // --full-tools: kept as a no-op alias since full surface is the iter-7 default
 	minimalTools := false        // --minimal-tools: explicit opt-in to 3-tool registry for users on tiny Ollama models
-	keepOnFail := false          // --keep-on-fail: do not roll back the workdir when the verifier fails (benchmark default)
 	historyTurnsOverride := -1   // --history-turns N: cap on conversation-history block (-1 = use default, 0 = disabled)
 	priorSummariesOverride := -1 // --prior-summaries N: cap on prior-session summaries (-1 = use default, 0 = disabled)
 
@@ -227,8 +219,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 			fullTools = true
 		case "--minimal-tools":
 			minimalTools = true
-		case "--keep-on-fail":
-			keepOnFail = true
 		case "--history-turns":
 			if i+1 < len(args) {
 				fmt.Sscanf(args[i+1], "%d", &historyTurnsOverride)
@@ -324,7 +314,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	state.maxCumulativeTokens = maxCumulativeOverride
 	state.fullTools = fullTools
 	state.minimalTools = minimalTools
-	state.keepOnFail = keepOnFail
 	if historyTurnsOverride >= 0 {
 		state.historyLimit = historyTurnsOverride
 	} else {
@@ -353,11 +342,6 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 	// emit a JSON summary (--json) or rely on the standard turn
 	// summary printed at finalize-time.
 	if oneShotPrompt != "" {
-		// One-shot has no interactive /undo path, so per-turn snapshots
-		// are pure overhead. Skipping them also keeps stale snapshot
-		// trees from polluting the model's find/grep results across
-		// runs.
-		state.skipSnapshots = true
 		if !jsonOutput {
 			printREPLBanner(state)
 		}
@@ -427,7 +411,7 @@ func (c *REPLCommand) Execute(ctx *Context) error {
 }
 
 // replState bundles per-session mutable state: model + workdir + the
-// session JSONL writer + turn counter + last snapshot for /undo.
+// session JSONL writer + turn counter.
 type replState struct {
 	workdir string
 	model   string
@@ -441,19 +425,14 @@ type replState struct {
 	systemPrompt string
 
 	// sessionDir is .cortex/sessions/<ts>/, the per-invocation root for
-	// the JSONL transcript and per-turn snapshots.
+	// the JSONL transcript.
 	sessionDir  string
 	sessionPath string // <sessionDir>/session.jsonl
 	jsonl       *os.File
 
-	// turns is the 1-indexed counter of accepted turns. Snapshots and
-	// jsonl rows reference this number.
+	// turns is the 1-indexed counter of accepted turns. JSONL rows
+	// reference this number.
 	turns int
-
-	// snapshotStack holds the pre-turn snapshot dir for each accepted
-	// turn, in chronological order. /undo pops the top entry, allowing
-	// chained undo back to session start. Empty before the first turn.
-	snapshotStack []string
 
 	// captureCfg + captureClient are lazily constructed on first
 	// accepted turn so the capture write doesn't pay setup cost when
@@ -517,15 +496,7 @@ type replState struct {
 	//                      output fed back each round).
 	customVerifierCmd string
 	headless          bool
-	// skipSnapshots disables per-turn workdir copies into
-	// .cortex/sessions/<ts>/snapshots/turn-<n>/. Snapshots back /undo
-	// and /diff, which are unreachable in one-shot mode (--prompt) and
-	// the cumulative pile pollutes find/grep across the workdir
-	// (.cortex/sessions/.../snapshots/turn-001/<file> shows up in
-	// recursive searches the model runs). Default false preserves
-	// interactive behavior; --prompt flips it on.
-	skipSnapshots bool
-	maxRetries    int
+	maxRetries        int
 	// Optional per-attempt budget overrides. Zero = inherit the REPL
 	// defaults (defaultMaxTurns / defaults from internal/harness).
 	// Benchmark harnesses bump these because SWE-bench-class repo
@@ -544,15 +515,6 @@ type replState struct {
 	// models that lose function-call discipline at ≥5 tools. Default
 	// false; only set when the user passes --minimal-tools.
 	minimalTools bool
-	// keepOnFail suppresses runTurn's snapshot rollback when verify
-	// fails. For interactive REPL use the default (rollback) is
-	// right: don't keep half-broken edits. For benchmark harnesses
-	// it's wrong — a real engineer iterating on a failing test
-	// keeps their changes and refines, doesn't reset to scratch
-	// every attempt. SWE-bench in particular needs this so the
-	// agent's file writes persist across retries and the final
-	// scorer sees the actual attempt rather than an empty diff.
-	keepOnFail bool
 
 	// ui is the I/O sink for everything the REPL displays or asks for.
 	// All Info/Warn/Error/Banner/Event/ReadLine call sites route
@@ -579,7 +541,7 @@ type replState struct {
 	// chronological order. The tail (most recent historyLimit
 	// entries) becomes the harness's PriorMessages block on the next
 	// turn so the model has working memory beyond what cortex_search
-	// surfaces. /undo pops the last entry alongside the snapshot.
+	// surfaces.
 	history []turnExchange
 
 	// openRouterModelsCache holds the result of the most recent
@@ -1641,10 +1603,6 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        Opt-in for users still running tiny (<7B)
                        Ollama models that lose tool-call discipline
                        at 5 tools.
-      --keep-on-fail   Don't roll back the workdir when the verifier
-                       fails. Benchmark default — iterations build
-                       on prior work instead of restarting from
-                       scratch each attempt.
       --history-turns N  Cap on the conversation-history block sent to
                        the model on each turn. Default 6 (last 3
                        user/assistant pairs). 0 disables history.
@@ -1656,8 +1614,6 @@ Headless flags (skip stdin scanner, used by benchmark harnesses):
                        /prior-summaries N changes the cap.
 In the REPL:
   /help                Show slash-command help.
-  /diff                Show files changed since session start.
-  /undo                Restore workdir to pre-last-turn snapshot.
   /model <id>          Swap model for subsequent turns.
   /quit or Ctrl-D      Exit; session saved to .cortex/sessions/<ts>/.
 
@@ -1753,18 +1709,6 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 		}
 		s.ui.Info(fmt.Sprintf("  verbose → %s", state))
 		return true, nil
-	// TODO: remove /diff and /undo — see snapshotWorkdir TODO. Modern
-	// coding harnesses (Claude Code, Cursor) punt to git/IDE for both;
-	// keeping them here just to back a parallel snapshot system isn't
-	// worth the maintenance.
-	case "/diff":
-		s.printDiff()
-		return true, nil
-	case "/undo":
-		if err := s.undoLastTurn(); err != nil {
-			return true, err
-		}
-		return true, nil
 	default:
 		return true, fmt.Errorf("unknown slash command %q — try /help", cmd)
 	}
@@ -1772,8 +1716,6 @@ func (s *replState) dispatchSlash(line string) (bool, error) {
 
 func (s *replState) printSlashHelp() {
 	s.ui.Info(`  /help              this message
-  /diff              changed files since session start
-  /undo              restore workdir to pre-last-turn snapshot
   /model [<id>]      show or swap model (slash in name = OpenRouter, no slash = Ollama)
   /models [refresh]  list installed Ollama models + OpenRouter catalogue (cached per session)
   /shell-policy      show the user-configured shell allow/deny policy (if any)
@@ -1792,15 +1734,17 @@ func displayAPI(api string) string {
 
 // runTurn is the single-prompt path. The flow is:
 //
-//	snapshot pre-turn state
 //	attempt 1: harness(userPrompt)             → verify
 //	if fail   → attempt 2: harness(+errorCtx)  → verify
 //	if fail   → user gate [r/e/s/q]
 //	          r: ask hint, harness(+errorCtx+hint) → verify → re-gate
 //	          e: pause for manual workdir edits → verify → re-gate
-//	          s: rollback, return
-//	          q: rollback, signal exit
-//	on accept → push snapshot, write jsonl, fire background capture
+//	          s: reject turn, return (edits stay; git is the undo path)
+//	          q: reject turn, signal exit
+//	on accept → write jsonl, fire background capture
+//
+// Edits are never rolled back — rejected turns leave the workdir as
+// the agent left it, and the user reverts with git when they want to.
 //
 // The structured row in session.jsonl carries enough to reconstruct
 // what happened, including the auto-retry round and any user-driven
@@ -1841,15 +1785,6 @@ func (s *replState) runTurn(userPrompt string) error {
 	// the prior turn wasn't a clarify (lastClarifyPrompt empty).
 	turnPrompt := s.stitchClarifyFollowUp(userPrompt)
 
-	snapDir := ""
-	if !s.skipSnapshots {
-		var err error
-		snapDir, err = s.snapshotWorkdir(turnNum)
-		if err != nil {
-			return fmt.Errorf("snapshot: %w", err)
-		}
-	}
-
 	row := turnRow{
 		Turn:         turnNum,
 		SessionID:    s.sessionID,
@@ -1858,7 +1793,6 @@ func (s *replState) runTurn(userPrompt string) error {
 		Model:        s.model,
 		APIURL:       s.apiURL,
 		SystemPrompt: s.systemPrompt,
-		SnapshotDir:  snapDir,
 	}
 
 	// Attempt 1: fresh model call. The intent classification from this
@@ -1943,7 +1877,7 @@ func (s *replState) runTurn(userPrompt string) error {
 	for !s.headless && !verifyRes.OK && verifyRes.Kind != verifierNone {
 		attempts++
 		if attempts > userGateMaxAttempts {
-			s.ui.Info(fmt.Sprintf("  reached %d user-retry attempts; rolling back", userGateMaxAttempts))
+			s.ui.Info(fmt.Sprintf("  reached %d user-retry attempts; giving up (edits kept — revert with git if unwanted)", userGateMaxAttempts))
 			break
 		}
 		decision := s.promptGate(verifyRes)
@@ -1955,12 +1889,12 @@ func (s *replState) runTurn(userPrompt string) error {
 		case gateSkip:
 			row.UserGate = "skip"
 			s.fillRowGateLoop(&row, userHints)
-			return s.finalize(row, snapDir, false)
+			return s.finalize(row, false)
 		case gateQuit:
 			row.UserGate = "quit"
 			s.exitRequested = true
 			s.fillRowGateLoop(&row, userHints)
-			return s.finalize(row, snapDir, false)
+			return s.finalize(row, false)
 		case gateRetry:
 			row.UserGate = "retry"
 			userHints = append(userHints, decision.hint)
@@ -1985,7 +1919,7 @@ func (s *replState) runTurn(userPrompt string) error {
 
 	s.fillRowGateLoop(&row, userHints)
 	accepted := verifyRes.OK || verifyRes.Kind == verifierNone
-	return s.finalize(row, snapDir, accepted)
+	return s.finalize(row, accepted)
 }
 
 // userGateMaxAttempts caps the user-driven retry loop. Set high enough
@@ -2002,12 +1936,12 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 	row.UserRetryHints = strings.Join(hints, " | ")
 }
 
-// finalize completes a turn: writes the JSONL row, pushes the snapshot
-// to the undo stack and fires background capture on accept, or rolls
-// back from snapshot on reject (unless --keep-on-fail suppresses
-// the rollback for benchmark callers that want iteration to build on
-// prior attempts instead of resetting to scratch). Always writes the
-// row.
+// finalize completes a turn: writes the JSONL row and, on accept,
+// fires background capture + the session-summary pipeline. Rejected
+// turns keep their workdir edits — a real engineer iterating on a
+// failing test builds on the attempt rather than resetting to
+// scratch, and git is the revert path when the edits are unwanted.
+// Always writes the row.
 //
 // TODO (learning loop is open): captureTurn records user prompts as
 // events, but the OUTCOME signals on `row` — VerifyOK, UserGate (skip/
@@ -2019,11 +1953,10 @@ func (s *replState) fillRowGateLoop(row *turnRow, hints []string) {
 // surfaces "last time you tried X the verifier said Y; the fix was Z"
 // on the next session. Today the inbound wire (shared Storage →
 // cortex_search) exists; the outbound wire doesn't.
-func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
+func (s *replState) finalize(row turnRow, accepted bool) error {
 	row.Accepted = accepted
 	if accepted {
 		s.turns = row.Turn
-		s.snapshotStack = append(s.snapshotStack, snapDir)
 		// Append to the conversation buffer so subsequent turns see this
 		// exchange via PriorMessages. Only the user prompt + assistant
 		// final text — no tool-call traces.
@@ -2052,19 +1985,6 @@ func (s *replState) finalize(row turnRow, snapDir string, accepted bool) error {
 			s.ui.Warn(fmt.Sprintf("(capture failed: %v)", err))
 		} else if s.verbose {
 			s.ui.Info("  (captured)")
-		}
-	} else if s.keepOnFail {
-		// Benchmark mode: preserve the agent's attempt so the next
-		// retry's verifier sees what it actually did, and so an
-		// out-of-budget mid-attempt termination doesn't lose all
-		// the work the agent did get done. Snapshot still lives on
-		// disk; `/undo` could surface it if needed.
-		if s.verbose {
-			s.ui.Info("  (--keep-on-fail: rollback suppressed; preserving agent edits)")
-		}
-	} else {
-		if err := s.restoreFromSnapshot(snapDir); err != nil {
-			s.ui.Warn(fmt.Sprintf("rollback failed: %v", err))
 		}
 	}
 	if err := s.writeJSONL(row); err != nil {
@@ -4058,7 +3978,6 @@ type turnRow struct {
 	Model        string `json:"model"`
 	APIURL       string `json:"api_url,omitempty"`
 	SystemPrompt string `json:"system_prompt"`
-	SnapshotDir  string `json:"snapshot_dir"`
 
 	// Intent ingestion result (sense.classify_intent) from the FIRST
 	// runHarness call. Retries reuse the same intent — the user's
@@ -4115,241 +4034,6 @@ func (s *replState) writeJSONL(row turnRow) error {
 		return err
 	}
 	return s.jsonl.Sync()
-}
-
-// snapshotWorkdir copies every small text-like file under workdir into
-// <sessionDir>/snapshots/turn-<n>/. Skips .git, .cortex, files larger
-// than snapshotMaxFileBytes. Returns the snapshot dir path.
-//
-// For GoL-sized workdirs this is microseconds. For large repos we
-// should switch to git-based snapshots — flagged in PROGRESS-REPL.md.
-//
-// TODO (drop the snapshot system entirely, require git): the every-
-// file copy per turn doesn't scale (Django-sized = tens of thousands
-// of files even after the skip-list) AND the parallel snapshot
-// machinery exists mostly to back /diff + /undo, which modern coding
-// harnesses don't provide — Claude Code and Cursor punt to git/IDE;
-// Aider has /undo + /diff but they're git-backed. Direction: require
-// a git repo at session start (fail clearly + offer `git init` if
-// missing, mirroring /ultrareview), delete snapshotWorkdir +
-// restoreFromSnapshot + the snapshotStack field, and delete /diff +
-// /undo from dispatchSlash. runTurn's rollback-on-fail becomes a
-// no-op (keep-on-fail default) — users have `git checkout .` and
-// `git stash` natively.
-func (s *replState) snapshotWorkdir(turn int) (string, error) {
-	snapDir := filepath.Join(s.sessionDir, "snapshots", fmt.Sprintf("turn-%03d", turn))
-	if err := os.MkdirAll(snapDir, 0o755); err != nil {
-		return "", err
-	}
-
-	manifest := map[string]string{}
-	err := filepath.WalkDir(s.workdir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(s.workdir, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		// Skip vendor + tooling state.
-		top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-		if top == ".git" || top == ".cortex" || top == "node_modules" || top == "vendor" {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if info.Size() > snapshotMaxFileBytes {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		dst := filepath.Join(snapDir, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, data, info.Mode().Perm()); err != nil {
-			return err
-		}
-		sum := sha256.Sum256(data)
-		manifest[rel] = hex.EncodeToString(sum[:])
-		return nil
-	})
-	if err != nil {
-		return snapDir, err
-	}
-	mb, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return snapDir, err
-	}
-	if err := os.WriteFile(filepath.Join(snapDir, ".manifest.json"), mb, 0o644); err != nil {
-		return snapDir, err
-	}
-	return snapDir, nil
-}
-
-// restoreFromSnapshot reverts the workdir to the contents of snapDir.
-// Files present in snapshot are overwritten with snapshot content;
-// files absent from snapshot (= created by the rejected turn) are
-// removed. Skip-rules match snapshotWorkdir (.git, .cortex untouched).
-func (s *replState) restoreFromSnapshot(snapDir string) error {
-	if snapDir == "" {
-		return fmt.Errorf("no snapshot to restore from")
-	}
-	manifestPath := filepath.Join(snapDir, ".manifest.json")
-	mb, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return fmt.Errorf("read manifest: %w", err)
-	}
-	var manifest map[string]string
-	if err := json.Unmarshal(mb, &manifest); err != nil {
-		return fmt.Errorf("parse manifest: %w", err)
-	}
-	for rel := range manifest {
-		src := filepath.Join(snapDir, rel)
-		dst := filepath.Join(s.workdir, rel)
-		data, err := os.ReadFile(src)
-		if err != nil {
-			return fmt.Errorf("read snap %s: %w", rel, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return fmt.Errorf("mkdir for %s: %w", rel, err)
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return fmt.Errorf("write back %s: %w", rel, err)
-		}
-	}
-	// Delete files in the workdir that are NOT in the snapshot (those
-	// were created by the rejected turn). Same skip rules as snapshot.
-	return filepath.WalkDir(s.workdir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(s.workdir, path)
-		if err != nil || rel == "." {
-			return err
-		}
-		top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-		if top == ".git" || top == ".cortex" || top == "node_modules" || top == "vendor" {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if _, ok := manifest[rel]; !ok {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
-}
-
-// undoLastTurn restores the workdir to the snapshot taken before the
-// most recent accepted turn and pops the snapshot stack. Repeated
-// /undo walks chronologically back to session start.
-func (s *replState) undoLastTurn() error {
-	n := len(s.snapshotStack)
-	if n == 0 {
-		return fmt.Errorf("nothing to undo")
-	}
-	top := s.snapshotStack[n-1]
-	if err := s.restoreFromSnapshot(top); err != nil {
-		return err
-	}
-	s.ui.Info(fmt.Sprintf("  undone turn %d (%d more available)", s.turns, n-1))
-	s.turns--
-	s.snapshotStack = s.snapshotStack[:n-1]
-	// Pop the corresponding conversation-history entry so the model
-	// doesn't see "I made that change" on the next turn for a change
-	// that's been rolled back.
-	if h := len(s.history); h > 0 {
-		s.history = s.history[:h-1]
-	}
-	return nil
-}
-
-// printDiff lists files that differ between the most recent pre-turn
-// snapshot and the current workdir. Best-effort — for v1 we list paths
-// only, not unified diffs.
-func (s *replState) printDiff() {
-	n := len(s.snapshotStack)
-	if n == 0 {
-		s.ui.Info("  no accepted turns yet")
-		return
-	}
-	top := s.snapshotStack[n-1]
-	mb, err := os.ReadFile(filepath.Join(top, ".manifest.json"))
-	if err != nil {
-		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest read: %v)", err))
-		return
-	}
-	var manifest map[string]string
-	if err := json.Unmarshal(mb, &manifest); err != nil {
-		s.ui.Info(fmt.Sprintf("  diff unavailable (manifest parse: %v)", err))
-		return
-	}
-	var changed, added, removed []string
-	current := map[string]string{}
-	filepath.WalkDir(s.workdir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			return nil
-		}
-		rel, _ := filepath.Rel(s.workdir, path)
-		top := strings.SplitN(rel, string(os.PathSeparator), 2)[0]
-		if top == ".git" || top == ".cortex" || top == "node_modules" || top == "vendor" {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		sum := sha256.Sum256(data)
-		current[rel] = hex.EncodeToString(sum[:])
-		return nil
-	})
-	for rel, sum := range current {
-		if prev, ok := manifest[rel]; !ok {
-			added = append(added, rel)
-		} else if prev != sum {
-			changed = append(changed, rel)
-		}
-	}
-	for rel := range manifest {
-		if _, ok := current[rel]; !ok {
-			removed = append(removed, rel)
-		}
-	}
-	sort.Strings(changed)
-	sort.Strings(added)
-	sort.Strings(removed)
-	if len(changed)+len(added)+len(removed) == 0 {
-		s.ui.Info("  no changes since pre-last-turn snapshot")
-		return
-	}
-	s.ui.Info(fmt.Sprintf("  changes since pre-last-turn snapshot (turn %d):", s.turns))
-	for _, p := range added {
-		s.ui.Info(fmt.Sprintf("    + %s", p))
-	}
-	for _, p := range changed {
-		s.ui.Info(fmt.Sprintf("    ~ %s", p))
-	}
-	for _, p := range removed {
-		s.ui.Info(fmt.Sprintf("    - %s", p))
-	}
 }
 
 // tailString returns the last n bytes of s, prefixed with "..." if it

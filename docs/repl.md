@@ -7,9 +7,8 @@ you type the next thing.
 
 Designed for small local models: the defaults target
 `qwen2.5-coder:1.5b` via Ollama, with a tight system prompt + bounded
-output tokens + auto-retry on build failures + a snapshot stack for
-chained `/undo`. The same surface scales up — point `--model` at any
-OpenRouter model and the same UX works.
+output tokens + auto-retry on build failures. The same surface scales
+up — point `--model` at any OpenRouter model and the same UX works.
 
 ## Quick start
 
@@ -46,13 +45,6 @@ cortex · /Users/derek/code/gol · qwen2.5-coder:1.5b · http://localhost:11434/
   verify failed (go build), auto-retrying once with error context...
   ✓ turn 3 · files: main.go · verify: go build ok · tokens: 894/231 · 3140ms
 
-~ /diff
-  changes since pre-last-turn snapshot (turn 3):
-    ~ main.go
-
-~ /undo
-  undone turn 3 (2 more available)
-
 ~ /quit
 session saved → /Users/derek/code/gol/.cortex/sessions/20260516T210145Z/session.jsonl
 ```
@@ -61,37 +53,36 @@ session saved → /Users/derek/code/gol/.cortex/sessions/20260516T210145Z/sessio
 
 For every non-slash input, the REPL runs a 3-round verify loop:
 
-1. **Snapshot** — copy every file ≤1 MiB under workdir (skipping
-   `.git`, `.cortex`, `node_modules`, `vendor`) into
-   `.cortex/sessions/<ts>/snapshots/turn-<n>/`. This is what `/undo`
-   restores from and what `/diff` compares against.
-2. **Attempt 1** — compose the system prompt + your request, call the
+1. **Attempt 1** — compose the system prompt + your request, call the
    in-process Cortex harness (same one `cortex code` uses), apply the
    resulting file edits, run the verifier.
-3. **Attempt 2 (auto)** — on verify-fail, re-run the harness with the
+2. **Attempt 2 (auto)** — on verify-fail, re-run the harness with the
    verifier output appended to the prompt as "PREVIOUS ATTEMPT FAILED."
    Bounded to one auto-retry; the model gets exactly one shot at
    self-correction.
-4. **User gate** — if verify still fails, prompt `[r]etry / [e]dit / [s]kip / [q]uit`:
+3. **User gate** — if verify still fails, prompt `[r]etry / [e]dit / [s]kip / [q]uit`:
    - `r`: ask for an optional hint, run the harness again with verifier
      output + hint. Up to 5 user-driven retries (configurable in code).
    - `e`: pause for manual file edits. Edit in another terminal/editor,
      press enter to re-verify.
-   - `s`: discard this turn, roll back to the snapshot.
-   - `q`: discard and exit the REPL.
-5. **Accept** — on verify-pass (or on `no-verify` workdirs), push the
-   snapshot onto the undo stack, log a structured row to
-   `.cortex/sessions/<ts>/session.jsonl`, and fire a background
-   `cortex capture` event so the change becomes searchable next
-   session.
+   - `s`: reject this turn. Edits stay in the workdir — revert with
+     git if unwanted.
+   - `q`: reject and exit the REPL.
+4. **Accept** — on verify-pass (or on `no-verify` workdirs), log a
+   structured row to `.cortex/sessions/<ts>/session.jsonl` and fire a
+   background `cortex capture` event so the change becomes searchable
+   next session.
+
+Edits are never rolled back: rejected turns leave the workdir as the
+agent left it (an engineer iterating on a failing test builds on the
+attempt, not from scratch). Undo and diff are git's job — there's no
+parallel snapshot system.
 
 ## Slash commands
 
 | Command | Effect |
 |---|---|
 | `/help`, `/?` | List slash commands |
-| `/diff` | List files that differ between the most recent pre-turn snapshot and current state. Shows `+`/`~`/`-` for added/changed/removed. |
-| `/undo` | Restore workdir to the pre-most-recent-accepted-turn snapshot. Chained — repeat `/undo` walks back through every accepted turn this session. |
 | `/model [<id>]` | With no arg: show current model + API URL. With arg: swap model for subsequent turns. Slash in name → OpenRouter; no slash → Ollama. |
 | `/quit`, `/exit` | Exit. `Ctrl-D` does the same. |
 
@@ -105,7 +96,6 @@ For every non-slash input, the REPL runs a 3-round verify loop:
 | Verifier | `go build ./...` if a `go.mod` exists at workdir root; otherwise none (warned once per session) |
 | Per-turn max output | 4000 tokens |
 | Per-turn max agent turns | 8 |
-| Per-turn snapshot ceiling | 1 MiB per file (larger files are skipped) |
 | Auto-retry on verify-fail | 1 round |
 | User-driven retry cap | 5 rounds per turn |
 | Session directory | `.cortex/sessions/<ISO-UTC-timestamp>/` |
@@ -118,14 +108,7 @@ For every non-slash input, the REPL runs a 3-round verify loop:
 ├── repl-system-prompt.md            # seeded on first run; edit to tune
 ├── sessions/
 │   └── 20260516T210145Z/
-│       ├── session.jsonl            # one row per turn (see schema below)
-│       └── snapshots/
-│           ├── turn-001/
-│           │   ├── .manifest.json   # path → sha256 for /diff
-│           │   ├── main.go
-│           │   └── ...
-│           ├── turn-002/...
-│           └── turn-003/...
+│       └── session.jsonl            # one row per turn (see schema below)
 └── journal/
     └── capture/                     # one capture event per accepted turn
         └── 20260516-000000-<hash>.jsonl
@@ -143,7 +126,6 @@ is a single JSON object with the structure:
   "model": "qwen2.5-coder:1.5b",
   "api_url": "http://localhost:11434/v1/chat/completions",
   "system_prompt": "You are pair-programming...",
-  "snapshot_dir": "/path/.cortex/sessions/.../snapshots/turn-002",
   "agent_turns": 3,
   "tokens_in": 510,
   "tokens_out": 142,
@@ -186,14 +168,14 @@ function to define, give an example.
 
 ## Tradeoffs and design notes
 
-### Per-turn snapshots (instead of git)
+### Git is the undo path (no snapshot system)
 
-The REPL doesn't require a git repository. Every accepted turn
-snapshots files into `.cortex/sessions/<ts>/snapshots/turn-<n>/`.
-Pros: works in any directory; `/undo` is unambiguous; no impact on
-your existing git workflow. Cons: O(workdir-size) per turn; large
-repos (>1 GiB) will groan. For projects above ~100 MiB consider
-switching to a git-stash-based mode (not yet implemented).
+The REPL keeps no parallel snapshot/undo machinery — the same call
+modern coding harnesses make (Claude Code and Cursor punt to git/IDE;
+Aider's `/undo` is git-backed). Failed or rejected turns leave their
+edits in the workdir; `git diff`, `git checkout .`, and `git stash`
+are the review/revert tools. Run the REPL in a git repository if you
+want that safety net.
 
 ### Background capture, not auto-commit
 
@@ -232,7 +214,6 @@ the turn surfaces the error.
 | What | Why | Workaround |
 |---|---|---|
 | Auto-retry retry-count is 1, not configurable | Defaults are conservative for 1.5B economics | Edit `defaultMaxTurns` / retry constant in `cmd/cortex/commands/repl.go` |
-| Snapshot strategy is full-walk per turn | Simple, correct, no git dep | OK for projects ≤100 MiB |
 | Verifier is Go-only | Most common case for now | Manual `[e]` gate + `go build` |
 | `OPEN_ROUTER_API_KEY` is auto-stubbed when Ollama-routed | Harness constructor mandates a key | Will fix with `NewCortexHarnessLocal()` constructor |
 | Windows is unsupported (`//go:build !windows`) | Inherited from the harness file | Same as `cortex code` |

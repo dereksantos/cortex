@@ -81,54 +81,6 @@ func TestLoadOrSeedSystemPrompt(t *testing.T) {
 	})
 }
 
-// TestUndoStackChained walks chronologically back through three turns,
-// confirming that each /undo restores the workdir state captured before
-// the most recent accepted turn. Exercises the snapshotStack push/pop.
-func TestUndoStackChained(t *testing.T) {
-	workdir := t.TempDir()
-	mustWrite(t, workdir, "go.mod", "module test\n")
-	mustWrite(t, workdir, "step.txt", "v0")
-
-	sessionDir := filepath.Join(workdir, ".cortex", "sessions", "test")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("session dir: %v", err)
-	}
-	s := &replState{workdir: workdir, sessionDir: sessionDir, ui: cliout.Discard()}
-
-	// Simulate three accepted turns. Each turn snapshots the pre-state,
-	// then mutates step.txt, then pushes the snap onto the stack.
-	for i, content := range []string{"v1", "v2", "v3"} {
-		snap, err := s.snapshotWorkdir(i + 1)
-		if err != nil {
-			t.Fatalf("snap %d: %v", i+1, err)
-		}
-		mustWrite(t, workdir, "step.txt", content)
-		s.snapshotStack = append(s.snapshotStack, snap)
-		s.turns = i + 1
-	}
-	if got := mustRead(t, workdir, "step.txt"); got != "v3" {
-		t.Fatalf("setup: expected v3, got %q", got)
-	}
-
-	// Walk back three undos. After each, step.txt should match the
-	// pre-turn state.
-	wantAfterEach := []string{"v2", "v1", "v0"}
-	for i, want := range wantAfterEach {
-		if err := s.undoLastTurn(); err != nil {
-			t.Fatalf("undo %d: %v", i+1, err)
-		}
-		got := mustRead(t, workdir, "step.txt")
-		if got != want {
-			t.Errorf("after undo %d: got %q want %q", i+1, got, want)
-		}
-	}
-
-	// Fourth undo should fail — stack is empty.
-	if err := s.undoLastTurn(); err == nil {
-		t.Errorf("expected error on undo with empty stack")
-	}
-}
-
 // TestCaptureTurnWritesJournalEntry confirms the background capture
 // path lands an event in .cortex/journal/capture/. We don't decode the
 // payload here (that's captured by capture_test.go); we just verify the
@@ -190,68 +142,6 @@ func TestCaptureTurnSkipsOnReject(t *testing.T) {
 	}
 }
 
-// TestSnapshotAndRestore is the round-trip integrity test for the
-// /undo machinery. Snapshot a workdir, mutate it (edit, add, delete),
-// restore from snapshot, assert state matches pre-mutation.
-func TestSnapshotAndRestore(t *testing.T) {
-	workdir := t.TempDir()
-	mustWrite(t, workdir, "go.mod", "module test\n\ngo 1.22\n")
-	mustWrite(t, workdir, "main.go", "package main\n\nfunc main(){}\n")
-	mustWrite(t, workdir, "sub/util.go", "package sub\n")
-	// .cortex must be ignored by the snapshot — confirm it survives mutation.
-	mustWrite(t, workdir, ".cortex/keep.txt", "this should not be overwritten")
-
-	s := &replState{
-		workdir:    workdir,
-		sessionDir: filepath.Join(workdir, ".cortex", "sessions", "test"),
-		ui:         cliout.Discard(),
-	}
-	if err := os.MkdirAll(s.sessionDir, 0o755); err != nil {
-		t.Fatalf("session dir: %v", err)
-	}
-
-	snapDir, err := s.snapshotWorkdir(1)
-	if err != nil {
-		t.Fatalf("snapshotWorkdir: %v", err)
-	}
-
-	// Mutate: change main.go, add new file, delete sub/util.go.
-	mustWrite(t, workdir, "main.go", "package main\n\nfunc main(){println(\"changed\")}\n")
-	mustWrite(t, workdir, "added.go", "package main\n")
-	if err := os.Remove(filepath.Join(workdir, "sub", "util.go")); err != nil {
-		t.Fatalf("remove sub/util.go: %v", err)
-	}
-
-	if err := s.restoreFromSnapshot(snapDir); err != nil {
-		t.Fatalf("restoreFromSnapshot: %v", err)
-	}
-
-	// main.go is back to original.
-	got := mustRead(t, workdir, "main.go")
-	want := "package main\n\nfunc main(){}\n"
-	if got != want {
-		t.Errorf("main.go after restore: got %q, want %q", got, want)
-	}
-
-	// sub/util.go was restored.
-	gotUtil := mustRead(t, workdir, "sub/util.go")
-	wantUtil := "package sub\n"
-	if gotUtil != wantUtil {
-		t.Errorf("sub/util.go after restore: got %q, want %q", gotUtil, wantUtil)
-	}
-
-	// added.go (not in snapshot) was removed.
-	if _, err := os.Stat(filepath.Join(workdir, "added.go")); !os.IsNotExist(err) {
-		t.Errorf("added.go should be removed after restore; stat err: %v", err)
-	}
-
-	// .cortex/keep.txt untouched.
-	gotKeep := mustRead(t, workdir, ".cortex/keep.txt")
-	if gotKeep != "this should not be overwritten" {
-		t.Errorf(".cortex/keep.txt was disturbed: %q", gotKeep)
-	}
-}
-
 // TestDispatchSlash covers the slash-command parsing surface. Asserts
 // that /quit returns continue=false, unknown commands return an error,
 // and /help / /model don't crash on bare invocation.
@@ -280,7 +170,8 @@ func TestDispatchSlash(t *testing.T) {
 		{"exit alias", "/exit", false, false},
 		{"model bare prints current", "/model", true, false},
 		{"model swap", "/model llama3.2:3b", true, false},
-		{"diff with no turns", "/diff", true, false},
+		{"diff removed (git's job now)", "/diff", true, true},
+		{"undo removed (git's job now)", "/undo", true, true},
 		{"unknown", "/whoami", true, true},
 	}
 	for _, tt := range tests {

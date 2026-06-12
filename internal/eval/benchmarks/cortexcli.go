@@ -132,11 +132,6 @@ type REPLHeadlessOpts struct {
 	// routed to Ollama. SWE-bench-class benchmarks need list_dir to
 	// navigate real repos and must set this to true.
 	FullTools bool
-	// KeepOnFail suppresses the REPL's snapshot-rollback when the
-	// verifier fails so iterative agent attempts build on prior
-	// work. Benchmark-default true; interactive REPL keeps the
-	// old behavior (rollback on broken edits).
-	KeepOnFail bool
 }
 
 // REPLHeadlessOutput is the parsed JSON summary the REPL emits on
@@ -205,9 +200,6 @@ func RunREPLHeadless(ctx context.Context, binary string, opts REPLHeadlessOpts) 
 	}
 	if opts.FullTools {
 		args = append(args, "--full-tools")
-	}
-	if opts.KeepOnFail {
-		args = append(args, "--keep-on-fail")
 	}
 
 	cmd := exec.CommandContext(ctx, binary, args...)
