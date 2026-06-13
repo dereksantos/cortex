@@ -2337,3 +2337,32 @@ Study *works* (24K→6K, goal-aware), but on this fleet the coverage needed to s
 3. On NEED_MORE, DENSIFY the same file at the emitted `deepen` hint instead of a fresh grep hop.
 
 **Follow-ups**: study-latency-aware turn budget is the q2 lever now (supersedes item 7's framing); coder80 probe (item 3 — may study+synth faster); the gate stays off by default until the latency path lands. Items 1/2/5/6 are independent and stay.
+
+### 2026-06-13 — Relaxed the turn latency budgets (cloud→local); multi-hop chain now runs, study window is the next blocker
+
+**Cortex**: branch `derek.s/self-improvement-loop` (on top of `b5866d1`)
+**Commands**:
+```
+CORTEX_STUDY_FILE=1 CORTEX_LOCAL_ONLY=1 CORTEX_TEMPERATURE=0 ./cortex --prompt "<q2 prompt>"
+go test ./pkg/cognition/dag/
+```
+**Versions**: fleet=chatterbox (coder synth, reasoner planner, study=coder)
+
+**Why this run**: Derek — "relax the latency budgets, it's ok if the llm has to work a while." The DAG turn latency budgets were calibrated against Haiku 4.5 (~15s/op, cloud); the local 30B fleet runs 1-3 min/op, so a single synth or large-file study read blew the cap and STARVED the next node (`budget_after_latency_ms` negative → coding_turn never scheduled).
+
+**Change** (`pkg/cognition/dag/budget.go`): latency is a wall-clock brake, not a magnitude axis (tokens/depth bound magnitude), so relaxing it is safe — cheap turns finish in seconds and never approach the cap.
+| intent | old | new |
+|---|---|---|
+| code / default | 150s | **600s** |
+| review | 120s | **600s** |
+| recall | 20s | **180s** |
+| meta | 10s | **60s** |
+| greeting / clarify | 2s / 3s | unchanged (truly trivial) |
+
+**Result — it worked as a budget fix.** q2 now runs the FULL multi-hop chain: study read (1m29s) → synth n-4 (2m13s, NEED_MORE) → **hop-2 decide.next n-9 (scheduled!)** → synth n-10 (48s). Nothing starved; `budget_after_latency_ms` stayed positive (+356K after the first synth). Before, hop-2 was refused and the turn dead-ended. This is the right change regardless of q2's outcome — without it NO multi-hop turn can complete on local hardware.
+
+**But q2 still doesn't pass — the blocker moved again, to study WINDOW resolution.** Even with latency relaxed AND dense study re-enabled, the studied digest of repl.go said *"the REPL does not directly consume sense.estimate_scope in the sampled code"* — it sampled around lines 3056/3754 and **missed the call site at 2715**. My direct `cortex study --goal` probe found 2715 at 40% coverage; the DAG-path study tool resolves a much smaller window (`resolveWindow()` with no probe cache → small default) → far fewer chunks → low coverage → misses. Plus the study digest is needlessly re-chunked by `attend.chunk` (n-8) — study already window-fitted it. So dense was reverted (it only added latency); density was never the lever — **study window/coverage in the DAG path is.**
+
+**Reframed (again):** the q2 chain is: latency (FIXED) → study coverage (study tool resolves too small a window in the DAG path; and its digest shouldn't be re-chunked). Next: thread the real consuming-model window into the study tool's `resolveWindow` in `buildREPLDynamicRegistry` (the probe cache / config window for s.model), and skip `attend.chunk` on study-mode output.
+
+**Follow-ups**: study-window resolution + no-rechunk-on-study-digest is the q2 lever now; coder80 probe (item 3); eval `--timeout` likely needs raising past 600s for gated study cells (a full multi-hop study turn ran ~5 min here).

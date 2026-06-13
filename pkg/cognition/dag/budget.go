@@ -233,7 +233,16 @@ func (b Budget) PromptBudget() int {
 // pkg/config will override per project.
 func DefaultTurnBudget() Budget {
 	return Budget{
-		LatencyMS:    150000,
+		// 10 min. The token/depth axes bound MAGNITUDE; latency is just
+		// the wall-clock safety brake, so it must reflect the deployment's
+		// real per-op cost. The original 150s was calibrated against Haiku
+		// 4.5 (~15s/op, cloud). The local 30B fleet runs 1-3 min/op (a
+		// synth pass or a large-file study read), so a multi-hop turn
+		// legitimately needs minutes — 150s refused the synthesizer node
+		// mid-turn (budget_after_latency_ms went negative). Cheap turns
+		// finish in seconds and never approach this cap. See eval-journal
+		// 2026-06-13.
+		LatencyMS:    600000,
 		Tokens:       10000,
 		Depth:        10,
 		OutputTokens: 8000, // ~half a 16k ctx window — see docs/salience-budgets.md
@@ -314,7 +323,8 @@ func BudgetForIntent(intent string) Budget {
 	case "clarify":
 		b = Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600}
 	case "recall":
-		b = Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
+		// 3 min — search + a synthesis pass on the local fleet.
+		b = Budget{LatencyMS: 180000, Tokens: 3000, Depth: 5, OutputTokens: 2000}
 	case "review":
 		// Sized for multi-hop synthesis: grep → identify file → read
 		// → answer commonly burns one synthesizer's worth of tokens
@@ -323,11 +333,18 @@ func BudgetForIntent(intent string) Budget {
 		// with a chunked grep output, so synth-mode follow-up spawns
 		// got refused as budget_exceeded the moment the first synth
 		// returned NEED_MORE. 15k accommodates ~2 hops at the calibrated
-		// shape; latency bumped in proportion. See dagnode/coding_turn.go
-		// synthesize-mode + maxHopDepth.
-		b = Budget{LatencyMS: 120000, Tokens: 15000, Depth: 8, OutputTokens: 4000}
+		// shape.
+		//
+		// Latency = 10 min: a review turn on the local 30B fleet is
+		// read/study (1-2 min) + synth (1-3 min), times up to ~2 hops.
+		// The old 2-min cap starved the synthesizer node the moment a
+		// large-file study or a slow synth ran (budget_after_latency_ms
+		// negative → coding_turn never scheduled). See eval-journal
+		// 2026-06-13; latency is a wall-clock brake, not a magnitude axis.
+		b = Budget{LatencyMS: 600000, Tokens: 15000, Depth: 8, OutputTokens: 4000}
 	case "meta":
-		b = Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
+		// 1 min — meta answers are a single light LLM call.
+		b = Budget{LatencyMS: 60000, Tokens: 2000, Depth: 4, OutputTokens: 1500}
 	case "code":
 		b = DefaultTurnBudget()
 	default:

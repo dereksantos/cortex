@@ -3840,12 +3840,14 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 			// without it study returns a generic overview the synth can't
 			// answer from).
 			DefaultGoal: prompt,
-			// NOTE: density is left adaptive. Forcing "dense" surfaces the
-			// call site but the ~100s dense pass exhausts the turn's
-			// latency budget and STARVES the synthesizer node (it never
-			// schedules → empty turn). The density↔latency tradeoff on
-			// this fleet needs a latency budget that accounts for study
-			// cost, not a blunt density bump — see eval-journal 2026-06-13.
+			// Density left adaptive. With latency relaxed (10 min) dense
+			// study no longer STARVES the synth, but it still doesn't make
+			// q2 pass: the DAG-path study tool resolves too small a window
+			// → too few chunks → it sampled around lines 3056/3754 and
+			// missed the call site at 2715, even dense. The lever now is
+			// study WINDOW/coverage resolution in this path (+ not
+			// re-chunking the already-window-fitted digest), not density.
+			// See eval-journal 2026-06-13.
 		}
 		if cfg != nil {
 			if ep, _, ok := cfg.ResolveModelRoute(s.model); ok {

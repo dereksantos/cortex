@@ -9,9 +9,9 @@ func TestBudgetForIntent_knownIntents(t *testing.T) {
 	}{
 		{"greeting", Budget{LatencyMS: 2000, Tokens: 300, Depth: 3, OutputTokens: 500, Intent: "greeting"}},
 		{"clarify", Budget{LatencyMS: 3000, Tokens: 500, Depth: 3, OutputTokens: 600, Intent: "clarify"}},
-		{"recall", Budget{LatencyMS: 20000, Tokens: 3000, Depth: 5, OutputTokens: 2000, Intent: "recall"}},
-		{"review", Budget{LatencyMS: 120000, Tokens: 15000, Depth: 8, OutputTokens: 4000, Intent: "review"}},
-		{"meta", Budget{LatencyMS: 10000, Tokens: 2000, Depth: 4, OutputTokens: 1500, Intent: "meta"}},
+		{"recall", Budget{LatencyMS: 180000, Tokens: 3000, Depth: 5, OutputTokens: 2000, Intent: "recall"}},
+		{"review", Budget{LatencyMS: 600000, Tokens: 15000, Depth: 8, OutputTokens: 4000, Intent: "review"}},
+		{"meta", Budget{LatencyMS: 60000, Tokens: 2000, Depth: 4, OutputTokens: 1500, Intent: "meta"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.intent, func(t *testing.T) {
@@ -73,8 +73,10 @@ func TestBudget_WithMaxContextTokens(t *testing.T) {
 	if b.MaxContextTokens != 32768 {
 		t.Errorf("MaxContextTokens = %d, want 32768", b.MaxContextTokens)
 	}
-	// Other axes survive.
-	if b.LatencyMS != 150000 || b.Tokens != 10000 {
+	// Other axes survive (compare against the live default so this
+	// doesn't re-break every time a budget axis is retuned).
+	def := DefaultTurnBudget()
+	if b.LatencyMS != def.LatencyMS || b.Tokens != def.Tokens {
 		t.Errorf("axes corrupted by WithMaxContextTokens: %+v", b)
 	}
 	// Negative clamps to 0 (unknown).
