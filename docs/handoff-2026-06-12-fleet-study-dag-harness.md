@@ -80,11 +80,19 @@ synthesis, not in how files are read. Two structural notes for future runs:
    NEED_MORE can't schedule → synth-mode stripped the NEED_MORE line →
    empty Final. The handoff's "no_progress, 93K burned" fit the OLD
    broken-classifier runs. See eval-journal 2026-06-12 + new items below.
-3. **Model selection — the coder80 probe.** The 35B was picked on inference
-   benchmarks; harness fitness was never measured. coder80 is Coder-family
-   (likely native tool_calls). Probe slice:
-   `cortex eval codebase --only r3-symbol-in-large-file-rust-weather --only q1-pinpoint-cortex --only b2-termination-cortex -m coder80 ...`
-   Compare vs the same slice on coder before any full run (probe-first).
+3. **Model selection — the coder80 probe. ATTEMPTED 2026-06-13, BLOCKED on harness bugs.**
+   coder80 fitness still UNMEASURED, but the probe surfaced a cascade
+   (all in eval-journal 2026-06-13): (a) coder80 needed `enable_thinking:
+   false` in `.cortex/config.json` — ADDED + curl-verified; (b) relative
+   `--binary` + per-fixture cwd silently INVALIDs cross-project fixtures —
+   use an absolute path / fix the runner; (c) THE WALL: the eval captured
+   INVALID "empty synthesis" on cells whose synth trace held a CORRECT
+   cited answer (`ANSWER: 8 … MaxEmittedChunks = 8`). The model answers;
+   the codebase-eval harness doesn't capture it. Fix the answer-capture
+   path FIRST (internal/eval/codebase/runner.go — trace `response` vs
+   scored stdout); coder80 can't be compared until then. Probe-first
+   command (after the capture fix):
+   `cortex eval codebase --only r3-symbol-in-large-file-rust-weather --only q1-pinpoint-cortex --only b2-termination-cortex -m coder80 --binary <ABS> --timeout 900 ...`
 4. **May-31 baseline diff** (`--compare`, baselines in
    `.cortex/db/eval_baselines/`) to split judge-change effects from
    coder-change effects in the 64%→38% drop. Old fleet's models are gone, so

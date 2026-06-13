@@ -2388,3 +2388,24 @@ Items 5/6 (no-empty-synth, token floor) are the safety nets behind it.
 **Notes**: `attend.chunk` on the study digest (n-8) did NOT truncate away the answer this time — the window-fitted digest fit — so the "skip re-chunk" idea is deferred (YAGNI). Study at the 32K window is slow (~4 min/large-file read); the eval `--timeout` must be ≥ ~600s for gated study cells, and coder80 (item 3) may study faster. The gate stays OFF by default; this is validated via direct prompt, not yet a full-suite eval pass.
 
 **Follow-ups**: official q2 eval-harness pass with the gate (`--timeout 900`); coder80 fitness probe (item 3); decide whether to enable the study gate by default once a full gated-suite run shows the INVALID-count drop without a latency-timeout regression.
+
+### 2026-06-13 — coder80 probe (item 3): UNMEASURED — a cascade of harness bugs, ending in answer-capture failure
+
+**Cortex**: branch `derek.s/self-improvement-loop`; probe binary `cortex-probe` frozen at `e09597b`
+**Command** (3 launches, fixing a bug each time):
+```
+./cortex-probe eval codebase --only r3-symbol-in-large-file-rust-weather --only q1-pinpoint-cortex --only b2-termination-cortex -m {coder80|coder} --binary <abs> --local-only --temperature 0 --timeout 900
+```
+**Result**: NO clean coder80-vs-coder comparison obtained. coder80 fitness remains unmeasured — but NOT because of coder80.
+
+**Why this run**: fault-tree item 3 — measure coder80 (Coder-family, likely native tool_calls) vs the 35B coder on a 3-fixture mechanical-health slice.
+
+**Bugs the probe surfaced, in order (each real, each fixed/identified):**
+1. **zsh doesn't word-split unquoted `$SLICE`** — the `--only` flags became one arg, so the filter matched nothing and the FULL suite ran. (Fixed: inline flags.)
+2. **Relative `--binary ./cortex-probe` + per-fixture cwd** (`runner.go` sets `cmd.Dir = fixtureWorkdir`) → cross-project fixtures (rust-weather) `fork/exec: no such file` → silent INVALID. Any relative binary path silently INVALIDs every non-cortex-project fixture. (Fixed in-probe with an absolute path; the RUNNER should resolve `--binary` to absolute up front.)
+3. **coder80 had no `enable_thinking:false`** in `.cortex/config.json` (only coder/reasoner did) → thinking-on burned the output budget on `reasoning_content`. Curl-verified: coder80 thinking-on = 160 completion tokens / 9-char content / 579-char reasoning; thinking-off = 6 tokens, clean. Added coder80 to the local config (gitignored — lives only on this machine).
+4. **Answer-capture failure (the real wall).** Even with 1-3 fixed, cells came back INVALID "no answer produced (empty synthesis turn)" — yet the synth's trace `response` held a CORRECT cited answer: `ANSWER: 8 (pkg/cognition/dag/salience.go: const MaxEmittedChunks = 8)`. The model produced the answer; the codebase-eval harness did not capture/score it. Intermittent (coder q1 passed at 59s in the same run; others empty at 20-36s) and the runner auto-flagged `RUN COMPROMISED`.
+
+**Read**: the local models ARE answering (q2 answered via study; q1 answered "MaxEmittedChunks=8"), but the `eval codebase` subprocess answer-capture is unreliable right now — many "empty synthesis" INVALIDs are answers produced-but-not-captured. That means the suite's INVALID/pass counts are currently untrustworthy as a model signal, and **no model comparison is possible until the capture path is fixed.** Likely suspects: `--json` stdout parsing, a non-terminal synth answer being overwritten, or subprocess exit before flush. Plus genuine intermittent fleet flakiness after a heavy day of runs.
+
+**Follow-ups (reprioritized)**: (a) fix the answer-capture path in `internal/eval/codebase/runner.go` — verify trace `response` vs the scored stdout answer on a single known-good cell; (b) resolve `--binary` to absolute in the runner; (c) THEN re-probe coder80 vs coder. coder80 fitness is blocked on (a). The `.cortex/config.json` coder80 thinking-off entry is in place for when it unblocks.
