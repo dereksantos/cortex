@@ -3815,15 +3815,63 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	actToolReg.Register(listTool)
 	actToolReg.Register(shellTool)
 
+	// Study gate (CORTEX_STUDY_FILE=1): back act.read_file with the
+	// study tool on the DAG read→synth edge. A plain read returns the
+	// file's first window-sized CHUNK regardless of where the answer
+	// lives — so a question about repl.go:2715 gets handed lines 1-2000
+	// and the synthesizer NEED_MOREs because the call site isn't in what
+	// it received. Study instead SAMPLES across the whole file and
+	// returns a window-fitting digest with grounded file:line citations
+	// to the relevant regions (probed: studying repl.go for the q2 goal
+	// surfaces line 2715 in one pass). This mirrors the eval-v2 harness
+	// gate (library_service_cortex_harness.go) so the path that
+	// `cortex --prompt` actually runs finally consumes study. The op
+	// stays named act.read_file so habitual decide.tool_call spawns route
+	// to it and the read_count metric is unchanged.
+	var readActHandler harness.ToolHandler = readTool
+	if os.Getenv("CORTEX_STUDY_FILE") == "1" {
+		cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+		studyOpts := harness.StudyFileToolOpts{
+			Provider:   buildLLMProviderForREPL(cfg, s.model, s.apiURL),
+			ContextDir: filepath.Join(s.workdir, ".cortex"),
+			ModelID:    s.model,
+			// The turn's question directs the sampler at the answer
+			// region (probed: this is what surfaces repl.go:2715 for q2;
+			// without it study returns a generic overview the synth can't
+			// answer from).
+			DefaultGoal: prompt,
+			// NOTE: density is left adaptive. Forcing "dense" surfaces the
+			// call site but the ~100s dense pass exhausts the turn's
+			// latency budget and STARVES the synthesizer node (it never
+			// schedules → empty turn). The density↔latency tradeoff on
+			// this fleet needs a latency budget that accounts for study
+			// cost, not a blunt density bump — see eval-journal 2026-06-13.
+		}
+		if cfg != nil {
+			if ep, _, ok := cfg.ResolveModelRoute(s.model); ok {
+				studyOpts.Endpoint = ep.Name
+			}
+		}
+		readActHandler = harness.NewStudyFileTool(s.workdir, studyOpts)
+	}
+
 	contracts := dagnode.DefaultActOpContracts()
 	costs := dagnode.DefaultActOpCosts()
 	for _, t := range []harness.ToolHandler{readTool, listTool, writeTool, shellTool} {
 		name := t.Name()
+		handler := t
+		if name == "read_file" {
+			// study tool when gated; plain reader otherwise. spec.Op is
+			// forced to "read_file" below so the DAG op name is stable
+			// even though the study tool's own Name() is "study_file".
+			handler = readActHandler
+		}
 		spec := dagnode.AdaptToolAsAct(dagnode.ActOpConfig{
-			Handler:  t,
+			Handler:  handler,
 			Contract: contracts[name],
 			Cost:     costs[name],
 		})
+		spec.Op = name
 		spec.Exposable = true
 		if err := reg.Register(spec); err != nil {
 			return nil, fmt.Errorf("register act.%s: %w", name, err)

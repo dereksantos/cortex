@@ -33,6 +33,18 @@ type StudyFileToolOpts struct {
 	ModelID    string
 	Endpoint   string
 	Provider   llm.Provider
+	// DefaultGoal directs the sampler when a study call arrives without
+	// its own goal (the common case — specialist tool-callers emit only
+	// a path). Set to the turn's question so a read→study spawn samples
+	// for the answer, not a generic overview. An explicit per-call goal
+	// still wins.
+	DefaultGoal string
+	// DefaultDensity is the sampling density used when a study call
+	// arrives without its own ("sparse"|"normal"|"dense" or an integer
+	// chunk count). A specialist tool-caller emits only a path, so the
+	// derived default can sample too sparsely to surface a specific call
+	// site in a large file. An explicit per-call density still wins.
+	DefaultDensity string
 }
 
 // NewStudyFileTool constructs the tool. workdir must be an absolute path.
@@ -100,15 +112,32 @@ func (t *studyFileTool) Call(ctx context.Context, rawArgs string) (string, error
 		window = t.resolveWindow()
 	}
 
+	// Goal directs the sampler toward the answer-bearing regions. A
+	// specialist tool-caller (xLAM et al.) emits only {"path":...}, so
+	// without a default the study would sample for a GENERIC overview and
+	// miss the specific call site the turn is asking about — the synth
+	// then NEED_MOREs over a digest that never mentions it. Fall back to
+	// the turn's question so a habitual read_file→study spawn still studies
+	// FOR the question. An explicit args.goal (rare) still wins.
+	goal := args.Goal
+	if goal == "" {
+		goal = t.opts.DefaultGoal
+	}
+
+	density := parseDensity(args.Density)
+	if density == nil && t.opts.DefaultDensity != "" {
+		density = t.opts.DefaultDensity
+	}
+
 	resp, err := study.StudyFile(ctx, study.StudyRequest{
 		Path:       abs,
 		RelPath:    args.Path,
-		Density:    parseDensity(args.Density),
+		Density:    density,
 		Focus:      t.focus(args),
 		Session:    args.Session,
 		Window:     window,
 		ContextDir: t.opts.ContextDir,
-		Goal:       args.Goal,
+		Goal:       goal,
 		Infer:      t.infer(),
 	})
 	if err != nil {

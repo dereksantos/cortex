@@ -2299,3 +2299,41 @@ go build -o cortex ./cmd/cortex
 **New fault-tree item 7 — synthesizer latency on large injected context.** The 3m14s/call comes from dumping repl.go's full 2000-line chunk-1 (~24K tokens) into the synthesizer via formatPriorOutputs for a question about ONE op. Narrowing what's injected (salience/study on the read output, or a smaller per-read chunk for synth-mode) cuts both latency AND raises the odds the synth answers in one pass (no NEED_MORE). That — not a bigger latency cap — is what makes q2 reliably pass. Recorded as item 7.
 
 **Follow-ups**: item 7 (synth-context salience) is now the q2 reliability lever; item 3 (coder80 probe — coder80 may also synthesize faster); full-suite rerun reading INVALID-count first.
+
+### 2026-06-13 — Wired study into the DAG read→synth edge; architecture validated, blocked on study latency
+
+**Cortex**: branch `derek.s/self-improvement-loop` (on top of `46c27ee`)
+**Commands**:
+```
+./cortex study cmd/cortex/commands/repl.go --model coder --goal "How does the REPL consume sense.estimate_scope? Find the call site..." --max-passes 1
+CORTEX_STUDY_FILE=1 ./cortex --prompt "<q2 prompt>"   # ×3 across density settings
+go test ./internal/harness/ -run TestStudyFileTool
+```
+**Versions**: fleet=chatterbox (coder synth, reasoner planner); study model=coder
+**Result**: the read→synth edge now consumes study (goal-directed); study surfaces the call site when dense enough; but the dense pass starves the synth on latency. q2 still fails on this fleet — the blocker moved from budget to STUDY LATENCY.
+
+**Why this run**: Derek's question — "the synth is to fit large context into the window; isn't study already doing that?" It isn't, in the DAG path. Investigated, then wired it.
+
+**The architecture finding (Derek was right).** q2's synth failed because the read→synth edge used mechanical `attend.chunk` (first-N-lines): `repl.go` was handed as lines 1-2000, but the call site is at **line 2715**, so the synth NEED_MORE'd over a slice that couldn't contain the answer. Items 5/6/7 were all symptoms of feeding the synth the wrong slice. Study is the right mechanism — and it was **not wired into the DAG path at all**: the `study_file` tool + read→study alias lived only in the eval-v2 flat harness (`library_service_cortex_harness.go`); `cortex --prompt` / `cortex eval codebase` register plain `read_file` (repl.go:3809). So the handoff's "study macro-neutral" verdict was measured on a *different harness* than the real DAG one.
+
+**Direct proof study can answer**: `cortex study repl.go --goal "<q2 question>"` at 40% coverage cited `repl.go:2714-2715` (the call site), the producer region, and the budget merge — in one pass, as a compact digest. Mechanical chunking structurally cannot do this.
+
+**What I changed** (gated behind `CORTEX_STUDY_FILE=1`, OFF by default):
+- `buildREPLDynamicRegistry` backs `act.read_file` with the study tool when the gate is on (op name kept `read_file` so habitual spawns route to it + the read metric is unchanged). Mirrors the eval-v2 gate.
+- `StudyFileTool` gains `DefaultGoal` — the turn's question, so a specialist's bare `{"path":...}` spawn studies FOR the question instead of a generic overview. Unit-tested (`TestStudyFileTool_DefaultGoal_UsedWhenArgsOmitGoal`).
+
+**The wall — density↔latency.** Three gated probes of q2:
+| density | study lat | synth input | coverage | outcome |
+|---|---|---|---|---|
+| (no goal) | 1m28s | 6.0K | overview | synth NEED_MORE (digest generic) |
+| adaptive + goal | 50s | 6.1K | **8.6%** | synth NEED_MORE (missed line 2715) |
+| dense + goal | 1m43s | — | higher | **synth STARVED** — `budget_after_latency_ms=-1055`, coding_turn never scheduled → empty turn |
+
+Study *works* (24K→6K, goal-aware), but on this fleet the coverage needed to surface a specific call site in a 4000-line file costs ~100s, which exhausts the turn's latency budget and the synthesizer node never runs. Sparse is fast but misses; dense answers but starves. So `DefaultDensity` is left **adaptive** (forcing dense made it strictly worse).
+
+**Reframed fault tree.** The q2 blocker is **study latency vs the turn latency budget**, not token budget (item 6) or synth context size (item 7 — study already shrinks it). The real levers:
+1. A latency budget that *accounts for study cost* (study is a read that costs an LLM pass — the executor must reserve synth latency behind it), and/or
+2. Faster study (fewer chunks at higher hit-rate via the goal; a faster study model; cached study across turns), and/or
+3. On NEED_MORE, DENSIFY the same file at the emitted `deepen` hint instead of a fresh grep hop.
+
+**Follow-ups**: study-latency-aware turn budget is the q2 lever now (supersedes item 7's framing); coder80 probe (item 3 — may study+synth faster); the gate stays off by default until the latency path lands. Items 1/2/5/6 are independent and stay.

@@ -85,6 +85,60 @@ func TestStudyFileTool_LargeFile_StudyShape(t *testing.T) {
 	}
 }
 
+// capturingInferProvider records the last prompt it was asked to
+// generate from, so a test can assert what the study sampler injected.
+type capturingInferProvider struct {
+	resp       string
+	lastPrompt string
+}
+
+func (p *capturingInferProvider) Generate(_ context.Context, prompt string) (string, error) {
+	p.lastPrompt = prompt
+	return p.resp, nil
+}
+
+// study.ProviderInfer drives the sampler through GenerateWithSystem; the
+// goal rides in the user or system message, so record both.
+func (p *capturingInferProvider) GenerateWithSystem(_ context.Context, user, sys string) (string, error) {
+	p.lastPrompt = sys + "\n" + user
+	return p.resp, nil
+}
+func (p *capturingInferProvider) GenerateWithStats(_ context.Context, prompt string) (string, llm.GenerationStats, error) {
+	p.lastPrompt = prompt
+	return p.resp, llm.GenerationStats{}, nil
+}
+func (p *capturingInferProvider) IsAvailable() bool { return true }
+func (p *capturingInferProvider) Name() string      { return "capturing" }
+
+// TestStudyFileTool_DefaultGoal_UsedWhenArgsOmitGoal pins the fix that
+// makes a habitual read_file→study spawn study FOR the question: a
+// specialist tool-caller emits only {"path":...}, so without the opt the
+// sampler runs goalless (a generic overview that misses the specific
+// call site). The turn's question, threaded via DefaultGoal, must reach
+// the sampler's prompt.
+func TestStudyFileTool_DefaultGoal_UsedWhenArgsOmitGoal(t *testing.T) {
+	workdir, _ := writeWorkdirFile(t, "big.txt", 120000)
+	prov := &capturingInferProvider{resp: `{"digest":"d","citations":[],"leads":[]}`}
+	const goal = "FIND-THE-CALL-SITE-SENTINEL"
+	study := NewStudyFileTool(workdir, StudyFileToolOpts{Window: 8192, Provider: prov, DefaultGoal: goal})
+
+	if _, err := study.Call(context.Background(), `{"path":"big.txt","density":"sparse"}`); err != nil {
+		t.Fatalf("study_file Call: %v", err)
+	}
+	if !strings.Contains(prov.lastPrompt, goal) {
+		t.Errorf("DefaultGoal did not reach the sampler prompt; want substring %q in:\n%s", goal, prov.lastPrompt)
+	}
+
+	// An explicit per-call goal still wins over the default.
+	prov.lastPrompt = ""
+	if _, err := study.Call(context.Background(), `{"path":"big.txt","density":"sparse","goal":"EXPLICIT-WINS"}`); err != nil {
+		t.Fatalf("study_file Call (explicit goal): %v", err)
+	}
+	if strings.Contains(prov.lastPrompt, goal) || !strings.Contains(prov.lastPrompt, "EXPLICIT-WINS") {
+		t.Errorf("explicit per-call goal must win over DefaultGoal; prompt:\n%s", prov.lastPrompt)
+	}
+}
+
 func TestStudyFileTool_MalformedArgs_SoftError(t *testing.T) {
 	workdir := t.TempDir()
 	study := NewStudyFileTool(workdir, StudyFileToolOpts{})

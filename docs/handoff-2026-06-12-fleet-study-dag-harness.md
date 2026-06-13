@@ -109,16 +109,22 @@ synthesis, not in how files are read. Two structural notes for future runs:
    (would trade a valid fallback-FAIL for a slow timeout-INVALID). See
    eval-journal 2026-06-13.
 
-7. **Synthesizer latency on large injected context (NEW, now q2's blocker).**
-   With tokens fixed, the NEED_MORE→hop-2 path dead-ends on LATENCY:
-   the coder synth took 194,684 ms for ONE pass over ~24K injected
-   tokens (repl.go chunk-1 dumped whole via formatPriorOutputs) vs a
-   120,000 ms budget → `budget_after_latency_ms=-91963` → hop-2 refused
-   → item-5 fallback shown (correct, non-empty). Fix direction:
-   NARROW the synth's injected context (salience/study the read output,
-   or a smaller synth-mode chunk) — cuts latency AND raises the odds the
-   synth answers in one pass. NOT a bigger latency cap. coder80 may also
-   synth faster (ties into item 3).
+7. **~~Synth latency on large context~~ → REFRAMED: study wired in, blocker is STUDY latency.**
+   Derek's call: the synth shouldn't be digesting raw bulk — study
+   already fits-large-context-to-window. It WASN'T wired into the DAG
+   path (only the eval-v2 flat harness). Now wired (gated
+   `CORTEX_STUDY_FILE=1`, OFF by default): `act.read_file`→study tool +
+   `DefaultGoal`=turn question. Proven: `cortex study repl.go --goal`
+   cites the call site (line 2715) mechanical chunking missed. BUT on
+   this fleet the density needed to surface a specific call site costs
+   ~100s, which starves the synthesizer node on latency
+   (`budget_after_latency_ms=-1055` → coding_turn never schedules →
+   empty turn). Sparse study (8.6% cov) misses the line; dense starves.
+   NEW blocker = **study latency vs the turn latency budget**. Levers:
+   (a) latency budget that reserves synth time behind a study read;
+   (b) faster/cached study; (c) NEED_MORE→DENSIFY same file, not a fresh
+   grep hop. coder80 (item 3) may study+synth faster. Full data:
+   eval-journal 2026-06-13.
 
 ## Open follow-ups (smaller, queued in eval-journal entries)
 
