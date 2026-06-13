@@ -2273,3 +2273,29 @@ go build -o cortex ./cmd/cortex
 **What actually makes q2 reliable is item 6 (scope under-budget)**, not item 5. Item 5 is the safety net that bounds the worst case (NEED_MORE + refused hop) to a valid FAIL instead of a run-compromising empty. Forcing the dead-end live is hard (can't deterministically make the model emit NEED_MORE), so the unit test is the right proof level.
 
 **Follow-ups**: item 6 (estimate_scope weighting target file size) is the reliability lever; item 3 (coder80 probe); a full-suite rerun now that items 1/2/5 are in — read INVALID-cell count as the headline (item 5 should drop it) before pass-rate.
+
+### 2026-06-13 — Scope token floor (item 6) lands + verified; latency is the next binding constraint
+
+**Cortex**: branch `derek.s/self-improvement-loop` (item-6 change on top of `ee07ff8`)
+**Commands**:
+```
+go test ./cmd/cortex/commands/ -run TestReferencedFileFloor
+go build -o cortex ./cmd/cortex
+./cortex --prompt "<q2-cross-file-cortex prompt>"   # direct, CORTEX_LOCAL_ONLY=1 CORTEX_TEMPERATURE=0
+```
+**Versions**: fleet=chatterbox (coder synth / reasoner planner, thinking off)
+**Result**: token floor works (trace `budget_after_tokens` −6410 → +33765); but the NEED_MORE→hop-2 path now dead-ends on LATENCY, and the item-5 fallback fires live.
+
+**Why this run**: fault-tree item 6 — `sense.estimate_scope` reasons from prompt text alone and under-budgeted q2 (20K tokens for a question naming repl.go @ ~49K tokens).
+
+**Fix (item 6)**: `referencedFileFloor` (repl.go) scans the prompt for file paths that exist under workdir and floors the turn's TOKEN axis at `base(8000) + Σ(file bytes/4)`, clamped to 200K. Deterministic, no LLM dependency; never shrinks the budget; applies even on scope fallback. Pinpoint questions over small files (q1: salience.go ~3.6K) stay cheap, preserving budget–quality discrimination. 8 unit-test cases (path extraction, existence filter, summing, clamp, absolute paths).
+
+**Verified in the trace**: turn budget rose 20K → ~60K (`base 8000 + repl.go 49280 + sense_estimate_scope.go 2164`). The synth pass spent 24,249 in / 2,095 out and left `budget_after_tokens=+33765` (was −6410). The token starvation is gone.
+
+**But latency is now binding.** Same trace: `budget_after_latency_ms = −91963`. The synthesizer (coder, default) took **194,684 ms (3m14s)** for ONE pass over ~24K injected tokens, against a 120,000 ms scope-latency budget. So when the synth emits NEED_MORE, hop-2 is refused on LATENCY instead of tokens — and the user sees the item-5 fallback ("I could not complete … the next step needed was: shell: grep …"). **This is the first LIVE exercise of the item-5 fallback path** — it fired correctly with a non-empty honest message (no empty cell). Item 5 confirmed end-to-end.
+
+**Decision: do NOT add a latency floor.** A latency floor scaled by file size would let hop-2 schedule, but the second synth pass is another ~190s → a ~6.5-min turn that blows the eval's fixture cap (→ INVALID/timeout) and is poor interactive UX. The current behavior — token floor + item-5 fallback — is strictly better for the suite: q2 either answers directly (PASS) or falls back cleanly (valid FAIL), never INVALID. The real reliability lever is REDUCING synth latency, not permitting the slow path.
+
+**New fault-tree item 7 — synthesizer latency on large injected context.** The 3m14s/call comes from dumping repl.go's full 2000-line chunk-1 (~24K tokens) into the synthesizer via formatPriorOutputs for a question about ONE op. Narrowing what's injected (salience/study on the read output, or a smaller per-read chunk for synth-mode) cuts both latency AND raises the odds the synth answers in one pass (no NEED_MORE). That — not a bigger latency cap — is what makes q2 reliably pass. Recorded as item 7.
+
+**Follow-ups**: item 7 (synth-context salience) is now the q2 reliability lever; item 3 (coder80 probe — coder80 may also synthesize faster); full-suite rerun reading INVALID-count first.

@@ -101,11 +101,24 @@ synthesis, not in how files are read. Two structural notes for future runs:
    boundary, not the fallback path (which item 5 can't influence). Item 5
    bounds the worst case to a valid FAIL; item 6 is what makes q2
    *reliably* pass. See eval-journal 2026-06-12.
-6. **`sense.estimate_scope` under-budgets large-file cross-file Qs.**
-   It set 20K tokens for a question whose target (repl.go) reads as 35
-   chunks — the budget can't even hold the reads. The coding_turn went
-   to `budget_after_tokens=-6410`. Scope needs to weigh target file size,
-   not just hop/read counts.
+6. **~~estimate_scope under-budgets large-file Qs~~ → token axis FIXED 2026-06-13.**
+   `referencedFileFloor` (repl.go) floors the turn's token budget at
+   `8000 + Σ(named-file bytes/4)`, clamped to 200K. Verified: q2 budget
+   20K → ~60K, `budget_after_tokens` −6410 → +33765. Deterministic, no
+   LLM dep, pinpoint questions unaffected. Did NOT add a latency floor
+   (would trade a valid fallback-FAIL for a slow timeout-INVALID). See
+   eval-journal 2026-06-13.
+
+7. **Synthesizer latency on large injected context (NEW, now q2's blocker).**
+   With tokens fixed, the NEED_MORE→hop-2 path dead-ends on LATENCY:
+   the coder synth took 194,684 ms for ONE pass over ~24K injected
+   tokens (repl.go chunk-1 dumped whole via formatPriorOutputs) vs a
+   120,000 ms budget → `budget_after_latency_ms=-91963` → hop-2 refused
+   → item-5 fallback shown (correct, non-empty). Fix direction:
+   NARROW the synth's injected context (salience/study the read output,
+   or a smaller synth-mode chunk) — cuts latency AND raises the odds the
+   synth answers in one pass. NOT a bigger latency cap. coder80 may also
+   synth faster (ties into item 3).
 
 ## Open follow-ups (smaller, queued in eval-journal entries)
 

@@ -2733,6 +2733,19 @@ func runREPLChainTurn(s *replState, h *evalv2.CortexHarness, prompt string) (eva
 		// shape it uses for pinpoint questions.
 		turnBudget.Scope = scope
 	}
+	// File-size floor (fault-tree item 6): estimate_scope reasons from
+	// prompt text alone and chronically under-budgets questions whose
+	// target files are large. Floor the TOKEN axis only at enough to
+	// read the files the prompt actually names — never shrinks the
+	// budget, and applies even on scope fallback (the intent table is
+	// just as blind to file size). Pinpoint questions over small files
+	// are unaffected.
+	if fileSignal, floor := referencedFileFloor(s.workdir, prompt); floor > turnBudget.Tokens {
+		turnBudget.Tokens = floor
+		if s.verbose {
+			s.ui.Info(fmt.Sprintf("  · token budget floored to %d (%s)", floor, fileSignal))
+		}
+	}
 	// Layer the model's n_ctx onto the seed budget so handlers
 	// (attend.accumulate, decide.next, attend.compact) can size
 	// their own prompts via budget.PromptBudget(). Probe-cache miss
@@ -2952,6 +2965,74 @@ func projectSignalFor(workdir string) string {
 		"%d files, %d effective LOC; study at %.0f%% effective-LOC coverage (%d insights captured)",
 		sum.TotalFiles, sum.EffTotalLines, 100*sum.LastCoveredEff, sum.InsightsEmitted,
 	)
+}
+
+const (
+	// scopeFileFloorBase is the token headroom added on top of the
+	// referenced files' own size — covers the prompt, the synthesizer's
+	// system + directive, and output. Empirically a synth pass over a
+	// chunked large-file read plus a follow-up hop needs the file's
+	// tokens once for the read-into-context and again for the hop, so
+	// the base is deliberately generous rather than tight.
+	scopeFileFloorBase = 8000
+	// maxScopeFloorTokens mirrors ops.maxBudgetTokens (unexported there)
+	// so the floor can never exceed the estimator's own clamp.
+	maxScopeFloorTokens = 200000
+)
+
+// referencedFilePathRe matches path-like tokens ending in a dotted
+// extension (e.g. "cmd/cortex/commands/repl.go"). Deliberately loose —
+// os.Stat under the workdir is the real filter, so false positives like
+// "sense.estimate_scope" simply fail to stat and contribute nothing.
+var referencedFilePathRe = regexp.MustCompile(`[\w./-]+\.[A-Za-z][\w]*`)
+
+// referencedFileFloor scans the prompt for file paths that actually
+// exist under workdir and returns (a) a human-readable size signal and
+// (b) a token-budget floor large enough to read them. The floor is
+// base + sum(file tokens), clamped to the estimator's max.
+//
+// Rationale: sense.estimate_scope reasons from the prompt text alone and
+// has NO signal for how large the named files are. A question naming a
+// ~49K-token file (repl.go) was budgeted at 20K — too small to hold even
+// one synthesizer pass over it, so the synth's NEED_MORE hop was refused
+// as budget_exceeded and the turn dead-ended (q2-cross-file-cortex,
+// docs/eval-journal.md 2026-06-12). This floor weighs target file size
+// directly. It's deterministic (no LLM dependency) and never shrinks the
+// budget; questions over small files (q1-pinpoint) stay cheap, preserving
+// the budget–quality discrimination the bounded-emergence thesis needs.
+func referencedFileFloor(workdir, prompt string) (signal string, floor int) {
+	matches := referencedFilePathRe.FindAllString(prompt, -1)
+	if len(matches) == 0 {
+		return "", 0
+	}
+	var parts []string
+	total := 0
+	seen := make(map[string]bool, len(matches))
+	for _, p := range matches {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(workdir, p)
+		}
+		fi, err := os.Stat(abs)
+		if err != nil || fi.IsDir() || fi.Size() == 0 {
+			continue
+		}
+		tok := int(fi.Size()) / 4 // ~4 bytes/token
+		total += tok
+		parts = append(parts, fmt.Sprintf("%s ~%dK tok", filepath.Base(p), (tok+500)/1000))
+	}
+	if total == 0 {
+		return "", 0
+	}
+	floor = scopeFileFloorBase + total
+	if floor > maxScopeFloorTokens {
+		floor = maxScopeFloorTokens
+	}
+	return "referenced files: " + strings.Join(parts, ", "), floor
 }
 
 // emitClassifyTraceEntry synthesizes a dag.TraceEntry for the
