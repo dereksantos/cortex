@@ -2249,3 +2249,27 @@ So the handoff's "no_progress with 93K tokens burned" description fit the OLD br
 - New item: when a hop can't schedule (budget refused / hop cap) AND synth-mode stripped the only content, fall back to a non-empty Final — surface the NEED_MORE line as a debug-grade answer, or answer with evidence-so-far, rather than emitting "". The code comment at coding_turn.go:509 assumes "the stripped content stays as the captured Final" — but the stripped content is empty here.
 - `sense.estimate_scope` under-budgets cross-file questions whose target files are large (repl.go = 35 chunks). The 20K budget can't even hold the reads, let alone synthesis + a hop.
 - The no-progress guard fix is unit-verified but no fixture in this suite currently drives it to fire (cells terminate via NEED_MORE or model-done first); a dedicated 5+ distinct-read fixture would exercise it end-to-end.
+
+### 2026-06-12 — No-empty-terminal fix (item 5): dead-ended hops yield a valid FAIL, not an INVALID empty
+
+**Cortex**: branch `derek.s/self-improvement-loop` (item-5 change on top of `603f2b8`)
+**Commands**:
+```
+go test ./internal/harness/dagnode/ -run TestFinalizeSynthFinal
+go build -o cortex ./cmd/cortex
+./cortex eval codebase --only q2-cross-file-cortex --binary ./cortex --local-only --temperature 0 --timeout 900   # ×3
+```
+**Versions**: fleet=chatterbox (coder/reasoner, thinking off)
+**Result**: helper unit test green; q2-cross-file-cortex 3/3 PASS — but see the confound below.
+
+**Why this run**: fault-tree item 5 — when a synth-mode coding_turn's ONLY output is a `NEED_MORE:` line and hop-2 can't schedule (budget refused / hop cap), stripping the marker left an empty Final → INVALID cell → COMPROMISED run.
+
+**Fix**: `finalizeSynthFinal` (coding_turn.go) now substitutes an honest "I could not complete … the next step needed was: <action>" fallback when stripping yields empty. The answer channel is the last `ResultCallback`'s `lr.Final` (→ `row.FinalText`); a successful deeper hop still overwrites it, so the fallback only surfaces when the chain genuinely dead-ends. Also fixed the cap-hit path, whose comment wrongly claimed `lr.Final` still held the marker (it had already been stripped). Unit test pins the invariant: marker-only input never returns empty.
+
+**Honest confound — the 3 green q2 runs do NOT exercise the fix.** All three show `need_more=0 citation_rate=1.00`: the synthesizer answered DIRECTLY from its 2 reads instead of emitting NEED_MORE. item-5 only changes the post-NEED_MORE path, so it cannot have caused the answer-vs-NEED_MORE flip. q2 is a boundary case: the earlier INVALID run drew the NEED_MORE branch (then budget-blown), these three drew direct-answer. The flip is local-backend nondeterminism at temp 0 (llama.cpp/LiteLLM batching + numerics), not the fix. So:
+- The fallback path is verified at the UNIT level only (`TestFinalizeSynthFinal`), not live — no live run here hit a NEED_MORE dead-end.
+- The live greens are evidence q2 is no longer reliably-INVALID, but the cause is variance, not item 5.
+
+**What actually makes q2 reliable is item 6 (scope under-budget)**, not item 5. Item 5 is the safety net that bounds the worst case (NEED_MORE + refused hop) to a valid FAIL instead of a run-compromising empty. Forcing the dead-end live is hard (can't deterministically make the model emit NEED_MORE), so the unit test is the right proof level.
+
+**Follow-ups**: item 6 (estimate_scope weighting target file size) is the reliability lever; item 3 (coder80 probe); a full-suite rerun now that items 1/2/5 are in — read INVALID-cell count as the headline (item 5 should drop it) before pass-rate.

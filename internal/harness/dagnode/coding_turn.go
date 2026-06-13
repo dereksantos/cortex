@@ -499,28 +499,15 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 			}
 		}
 		// In synth mode, strip any trailing NEED_MORE: line from lr.Final
-		// BEFORE the callback fires. The NEED_MORE marker is the harness's
-		// internal signal for emergent multi-hop — it is not user-facing
-		// terminal text. Two outcomes are both correctly handled by this:
-		//
-		//  1. Hop-2 succeeds. The next decide.coding_turn callback fires
-		//     with hop-2's clean answer, which overwrites this hop's
-		//     captured Final. The user sees hop-2's text.
-		//  2. Hop-2 cannot schedule (budget refused, hop cap, etc.). This
-		//     hop's stripped content stays as the captured Final. The
-		//     user sees the model's partial content WITHOUT the dangling
-		//     "NEED_MORE: ..." line that previously leaked through as
-		//     terminal text.
-		//
-		// Preserves the original Final on `out["raw_final"]` for trace /
-		// debug consumers that want to see what the synth literally
-		// emitted before the marker was stripped.
+		// BEFORE the callback fires — the marker is the harness's internal
+		// multi-hop signal, not user-facing terminal text. finalizeSynthFinal
+		// also substitutes an honest fallback when stripping leaves nothing
+		// (so a dead-ended hop never surfaces empty). See its doc for the
+		// three outcomes. rawFinalBeforeStrip preserves the literal emission
+		// for the spawn branch's re-parse below.
 		var rawFinalBeforeStrip string
 		if synthMode {
-			if stripped, hadMarker := stripNeedMoreLine(lr.Final); hadMarker {
-				rawFinalBeforeStrip = lr.Final
-				lr.Final = stripped
-			}
+			lr.Final, rawFinalBeforeStrip = finalizeSynthFinal(lr.Final)
 		}
 		if cfg.ResultCallback != nil {
 			cfg.ResultCallback(h, hr, lr, runErr)
@@ -603,12 +590,12 @@ func NewCodingTurnHandler(cfg CodingTurnConfig) dag.Handler {
 						},
 					}, nil
 				}
-				// Cap hit: surface in Out so the trace is honest, but
-				// fall through to a normal Out shape (the response will
-				// contain the NEED_MORE: line, which is at least visible
-				// to the user as a debug-grade answer). Concrete enough
-				// that an operator sees the cap was the failure, not a
-				// silent stall.
+				// Cap hit: fall through to the normal Out shape. lr.Final
+				// here is finalizeSynthFinal's output — the synthesizer's
+				// partial content, or an honest "couldn't finish, next
+				// step was X" fallback when its only output was the marker.
+				// Either way the response is non-empty, so the operator
+				// sees the cap was the failure, not a silent stall.
 			}
 		}
 		return dag.NodeResult{
@@ -725,6 +712,50 @@ func parseNeedMore(s string) (string, bool) {
 		return "", false
 	}
 	return rest, true
+}
+
+// finalizeSynthFinal applies synth-mode NEED_MORE handling to a
+// synthesizer's raw Final and returns (userFacingFinal, rawBeforeStrip).
+// rawBeforeStrip is "" when there was no marker (so callers can re-parse
+// the returned final), otherwise it carries the literal emission for the
+// spawn branch's parseNeedMore.
+//
+// Three outcomes, all yielding a NON-EMPTY final so a dead-ended chain
+// never surfaces empty terminal text:
+//
+//  1. No marker → the final is returned untouched.
+//  2. Marker with content before it (a partial answer + a follow-up
+//     request) → the marker line is stripped, the partial stays. A
+//     successful hop-2's callback overwrites it; a refused hop-2 leaves
+//     the partial, which is more useful than the fallback.
+//  3. Marker as the ONLY content → stripping leaves nothing. Substitute
+//     an honest "couldn't finish, here's the next step" fallback. This
+//     is the case that previously produced an empty Final — an INVALID
+//     cell that compromised the whole eval run — when the budget was
+//     exhausted before hop-2 could schedule (the q2-cross-file-cortex
+//     failure; see docs/eval-journal.md 2026-06-12).
+func finalizeSynthFinal(raw string) (final, rawBeforeStrip string) {
+	stripped, hadMarker := stripNeedMoreLine(raw)
+	if !hadMarker {
+		return raw, ""
+	}
+	if strings.TrimSpace(stripped) == "" {
+		action, _ := parseNeedMore(raw)
+		return needMoreFallback(action), raw
+	}
+	return stripped, raw
+}
+
+// needMoreFallback builds a non-empty terminal answer for the case where
+// the synthesizer's only output was a NEED_MORE: line and the follow-up
+// hop cannot run (budget refused or hop cap). An honest partial is a
+// valid (if failing) answer; a silent empty is an INVALID cell.
+func needMoreFallback(action string) string {
+	msg := "I could not complete the answer within this turn's budget."
+	if strings.TrimSpace(action) != "" {
+		msg += " The next step needed was: " + action
+	}
+	return msg
 }
 
 // actChildIDCounter is a process-wide monotonic counter for assigning

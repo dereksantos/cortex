@@ -664,3 +664,63 @@ func TestStripNeedMoreLine(t *testing.T) {
 		})
 	}
 }
+
+// TestFinalizeSynthFinal pins the no-empty-terminal invariant: in synth
+// mode, a synthesizer whose only output is a NEED_MORE: line must never
+// yield an empty Final — otherwise a hop that can't schedule (budget
+// refused / hop cap) surfaces an empty answer and INVALIDates the eval
+// cell (the q2-cross-file-cortex failure).
+func TestFinalizeSynthFinal(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantFinal   string
+		wantRaw     string
+		wantNonEmpt bool
+	}{
+		{
+			name:      "no marker passes through, no raw",
+			raw:       "Here is the answer, with a citation.",
+			wantFinal: "Here is the answer, with a citation.",
+			wantRaw:   "",
+		},
+		{
+			name:      "partial answer + marker keeps the partial",
+			raw:       "Found the producer at line 42.\nNEED_MORE: read consumer.go",
+			wantFinal: "Found the producer at line 42.",
+			wantRaw:   "Found the producer at line 42.\nNEED_MORE: read consumer.go",
+		},
+		{
+			name:        "marker-only falls back to non-empty with the action",
+			raw:         "NEED_MORE: shell: grep -rn estimate_scope .",
+			wantRaw:     "NEED_MORE: shell: grep -rn estimate_scope .",
+			wantNonEmpt: true,
+		},
+		{
+			name:        "marker-only with empty action still non-empty",
+			raw:         "NEED_MORE:",
+			wantRaw:     "NEED_MORE:",
+			wantNonEmpt: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			final, raw := finalizeSynthFinal(tc.raw)
+			if strings.TrimSpace(final) == "" {
+				t.Errorf("final is empty; the no-empty-terminal invariant is violated for %q", tc.raw)
+			}
+			if tc.wantFinal != "" && final != tc.wantFinal {
+				t.Errorf("final:\n  got=%q\n want=%q", final, tc.wantFinal)
+			}
+			if tc.wantNonEmpt {
+				// Fallback must name the action when one was present.
+				if action, ok := parseNeedMore(tc.raw); ok && !strings.Contains(final, action) {
+					t.Errorf("fallback %q does not surface the needed action %q", final, action)
+				}
+			}
+			if raw != tc.wantRaw {
+				t.Errorf("rawBeforeStrip:\n  got=%q\n want=%q", raw, tc.wantRaw)
+			}
+		})
+	}
+}

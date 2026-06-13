@@ -92,13 +92,15 @@ synthesis, not in how files are read. Two structural notes for future runs:
 
 ## New fault-tree items (found 2026-06-12 while closing item 2)
 
-5. **Empty Final when a hop can't schedule.** When a coding_turn emits
-   `NEED_MORE:` but hop-2 is refused (budget exhausted / hop cap) AND
-   synth-mode already stripped the NEED_MORE line, the Final is `""` →
-   INVALID. `coding_turn.go:509` assumes the stripped content survives as
-   the Final, but it's empty in this path. Fix: fall back to a non-empty
-   answer (surface NEED_MORE as debug-grade, or answer with evidence so
-   far). This is now the q2-cross-file-cortex blocker.
+5. **~~Empty Final when a hop can't schedule~~ → FIXED 2026-06-12 (unit-level).**
+   `finalizeSynthFinal` (coding_turn.go) substitutes an honest non-empty
+   fallback when synth-mode stripping of a marker-only Final yields empty;
+   cap-hit path fixed too. Unit-verified (`TestFinalizeSynthFinal`). NOT
+   proven live: q2 went 3/3 PASS afterward but all via direct-answer
+   (`need_more=0`) — local-backend variance at the answer↔NEED_MORE
+   boundary, not the fallback path (which item 5 can't influence). Item 5
+   bounds the worst case to a valid FAIL; item 6 is what makes q2
+   *reliably* pass. See eval-journal 2026-06-12.
 6. **`sense.estimate_scope` under-budgets large-file cross-file Qs.**
    It set 20K tokens for a question whose target (repl.go) reads as 35
    chunks — the budget can't even hold the reads. The coding_turn went
