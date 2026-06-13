@@ -135,13 +135,6 @@ type CortexHarness struct {
 	// keepRecentTurns is forwarded to Loop.KeepRecentTurns. 0 lets
 	// the loop apply its own default (1).
 	keepRecentTurns int
-
-	// intent is the classified session intent (code / review / recall /
-	// etc.) forwarded to Loop.Intent. Gates the loop's no_progress
-	// heuristic: read-only windows are normal for explanatory
-	// intents and shouldn't trigger ReasonNoProgress, but they remain
-	// the dominant pathology signal for code-intended sessions.
-	intent string
 }
 
 // SetDispatcher overrides the per-tool dispatcher for subsequent
@@ -230,14 +223,6 @@ func (h *CortexHarness) SetAPIURL(url string) { h.apiURL = url }
 // is the Phase 4 model-registry hook used by the REPL when the
 // configured endpoint resolves a model id (e.g. "chatterbox/...").
 func (h *CortexHarness) SetEndpoint(ep *llm.EndpointConfig) { h.endpoint = ep }
-
-// SetIntent records the per-turn classified intent ("code", "review",
-// "recall", "meta", etc.). Forwarded to Loop.Intent which gates the
-// no_progress heuristic — read-only windows are expected for
-// explanation intents and shouldn't trigger ReasonNoProgress, but
-// they remain the dominant pathology signal for code intent. Empty
-// preserves pre-intent loop behavior (no_progress fires regardless).
-func (h *CortexHarness) SetIntent(intent string) { h.intent = intent }
 
 // SetCortexSearchEnabled toggles registration of the cortex_search
 // tool in subsequent RunSession* calls. Defaults to enabled. Pass
@@ -452,7 +437,6 @@ func (h *CortexHarness) RunSessionWithResult(ctx context.Context, prompt, workdi
 		ContextWindowTokens: ctxWindow,
 		AccumulatorSnapshot: h.accumulatorSnapshot,
 		KeepRecentTurns:     h.keepRecentTurns,
-		Intent:              h.intent,
 	}
 
 	start := time.Now()

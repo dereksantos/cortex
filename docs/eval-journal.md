@@ -2220,3 +2220,32 @@ curl ... '{"model":"reasoner",...,"max_tokens":1024,"chat_template_kwargs":{"ena
 - Fixed: factory now passes `ep.ChatTemplateKwargsFor(routedModel)`; plus `normalizeCompatBaseURL` appends `/v1` to bare-root base_urls in `NewOpenAICompatClient` (closes the works-only-against-LiteLLM hole for strict endpoints; deliberate paths pass through). Tests: `TestProviderFactory_EndpointRoute_KwargsAndV1OnTheWire`, `TestNormalizeCompatBaseURL`.
 
 **Follow-ups**: fault-tree item 2 (no-progress guard) is next; planning quality on all fixtures should improve now that decide.next actually classifies — worth re-reading hop/plan metrics on the next full run before attributing changes to anything else.
+
+### 2026-06-12 — No-progress guard rewritten (novelty-based); q2 "empty synthesis" re-attributed to a budget/hop-2 bug
+
+**Cortex**: branch `derek.s/self-improvement-loop` (item-2 change on top of `b028f44`)
+**Commands**:
+```
+go test ./internal/harness/ ./internal/eval/v2/
+go build -o cortex ./cmd/cortex
+./cortex eval codebase --only q2-cross-file-cortex --binary ./cortex --local-only --temperature 0 --timeout 900
+```
+**Versions**: fleet=chatterbox (coder/reasoner, thinking off); judge=N/A for the trace dissection
+**Result**: harness + v2 suites green; q2-cross-file-cortex still INVALID (empty synthesis) — but NOT from the no-progress guard.
+
+**Why this run**: handoff fault-tree item 2 — the no-progress guard (`internal/harness/loop.go`) was killing legitimate cross-file exploration. Handoff attributed the q2/q3/q4-cortex "empty synthesis" to `no_progress` firing mid-exploration.
+
+**What changed (item 2)**: replaced the intent-gated "zero write/shell in the window → spinning" condition with intent-agnostic **novelty**. A turn makes progress if it writes/shells OR issues an information-gathering call (read/study/list/search) whose exact `(tool, args)` signature is new this session. Fires only when the last `noProgressWindow` (5) turns ALL surface nothing new (genuine repetition) or on the hard caps (MaxTurns/Budget). Dropped the `Loop.Intent` field + `CortexHarness.SetIntent` plumbing — intent no longer gates this, removing a dependency on the (unreliable) classifier. 12 tracker unit tests rewritten: distinct reads never fire, same-file/two-file circles fire after the window fills, novel line-ranges and novel searches count as progress.
+
+**Surprise — q2's empty synthesis is a DIFFERENT bug.** With item 1's classifier fix in, q2 now plans cleanly (classify=review✓, scope→20K-token budget, 2 reads + synthesizer) and the no-progress guard never engages (it needs 5 tool-calling turns; the model voluntarily stopped after 2 reads with a NEED_MORE). Trace `repl-1781318314900329000`:
+- `sense.estimate_scope` set `budget_tokens=20000` for a question that requires `cmd/cortex/commands/repl.go` (read as chunk 1/35 — the file is ~70K tokens).
+- `decide.coding_turn` spent **24,625 in + 1,512 out = 26,137 tokens** → `budget_after_tokens = -6410` (blew the budget).
+- It correctly emitted `NEED_MORE: shell: grep -rn 'estimate_scope' …`, but hop-2 `decide.next` could not schedule on a negative budget, so the spawn never ran (no hop-2 node in the turn).
+- synth-mode had already stripped the NEED_MORE line from the Final (it's an internal marker), leaving `response=""` → INVALID (empty synthesis).
+
+So the handoff's "no_progress with 93K tokens burned" description fit the OLD broken-classifier runs (which thrashed across many fallback-planned turns into the guard). With the classifier fixed, the residual q2 empty-synthesis is **scope underestimation + NEED_MORE-strip-leaves-empty when hop-2 can't schedule** — a new fault-tree item, not the guard.
+
+**Follow-ups**:
+- New item: when a hop can't schedule (budget refused / hop cap) AND synth-mode stripped the only content, fall back to a non-empty Final — surface the NEED_MORE line as a debug-grade answer, or answer with evidence-so-far, rather than emitting "". The code comment at coding_turn.go:509 assumes "the stripped content stays as the captured Final" — but the stripped content is empty here.
+- `sense.estimate_scope` under-budgets cross-file questions whose target files are large (repl.go = 35 chunks). The 20K budget can't even hold the reads, let alone synthesis + a hop.
+- The no-progress guard fix is unit-verified but no fixture in this suite currently drives it to fire (cells terminate via NEED_MORE or model-done first); a dedicated 5+ distinct-read fixture would exercise it end-to-end.

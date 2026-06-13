@@ -66,15 +66,20 @@ synthesis, not in how files are read. Two structural notes for future runs:
    Factory now threads the kwargs; `NewOpenAICompatClient` also normalizes
    bare-root base_urls to `/v1`. Probe-verified: decide.next 13.5s, real
    2-node plan, no fallback. Full entry in eval-journal 2026-06-12.
-2. **No-progress guard kills legitimate exploration**
-   (`internal/harness/loop.go` `progressTracker`, `noProgressWindow=5`).
-   Condition 1 (5 tool-calling turns, no write/shell → abort) fires on
-   cross-file questions when `sense.classify_intent` mislabels them "code"
-   (observed) or errors to "". This is the q2/q3/q4-cortex "empty synthesis"
-   (`no_progress with no final response`, up to 93K tokens burned). Fix
-   direction: count NEW read targets as progress; only fire on repetition
-   (condition 2) or a hard cap. Also check classify_intent quality on the
-   new fleet.
+2. **~~No-progress guard~~ → FIXED 2026-06-12, but it was NOT q2's blocker.**
+   Rewrote the guard (`internal/harness/loop.go`) to intent-agnostic
+   novelty: progress = write/shell OR a new `(tool, args)` signature;
+   fires only on genuine repetition or the hard caps. Dropped the
+   `Loop.Intent` plumbing (and `CortexHarness.SetIntent`) — no longer
+   depends on the classifier. 12 tracker unit tests rewritten.
+   BUT: with item 1's classifier fixed, q2-cross-file-cortex still emits
+   empty synthesis from a DIFFERENT cause (the guard never engages — the
+   model stops after 2 reads with a NEED_MORE). Real cause = scope
+   under-budget (20K tokens for a question needing repl.go @ 35 chunks)
+   → coding_turn blows budget (`budget_after_tokens=-6410`) → hop-2
+   NEED_MORE can't schedule → synth-mode stripped the NEED_MORE line →
+   empty Final. The handoff's "no_progress, 93K burned" fit the OLD
+   broken-classifier runs. See eval-journal 2026-06-12 + new items below.
 3. **Model selection — the coder80 probe.** The 35B was picked on inference
    benchmarks; harness fitness was never measured. coder80 is Coder-family
    (likely native tool_calls). Probe slice:
@@ -84,6 +89,21 @@ synthesis, not in how files are read. Two structural notes for future runs:
    `.cortex/db/eval_baselines/`) to split judge-change effects from
    coder-change effects in the 64%→38% drop. Old fleet's models are gone, so
    this is forensic, not re-runnable.
+
+## New fault-tree items (found 2026-06-12 while closing item 2)
+
+5. **Empty Final when a hop can't schedule.** When a coding_turn emits
+   `NEED_MORE:` but hop-2 is refused (budget exhausted / hop cap) AND
+   synth-mode already stripped the NEED_MORE line, the Final is `""` →
+   INVALID. `coding_turn.go:509` assumes the stripped content survives as
+   the Final, but it's empty in this path. Fix: fall back to a non-empty
+   answer (surface NEED_MORE as debug-grade, or answer with evidence so
+   far). This is now the q2-cross-file-cortex blocker.
+6. **`sense.estimate_scope` under-budgets large-file cross-file Qs.**
+   It set 20K tokens for a question whose target (repl.go) reads as 35
+   chunks — the budget can't even hold the reads. The coding_turn went
+   to `budget_after_tokens=-6410`. Scope needs to weigh target file size,
+   not just hop/read counts.
 
 ## Open follow-ups (smaller, queued in eval-journal entries)
 

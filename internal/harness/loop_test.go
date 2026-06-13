@@ -64,6 +64,14 @@ func writeCall(id, path string) llm.ToolCall {
 	}
 }
 
+func shellCall(id, cmd string) llm.ToolCall {
+	return llm.ToolCall{
+		ID:       id,
+		Type:     "function",
+		Function: llm.ToolCallFunction{Name: "run_shell", Arguments: `{"cmd":"` + cmd + `"}`},
+	}
+}
+
 // newRegistry wires read/write/list/shell with a fresh workdir so
 // Dispatch doesn't blow up; tests don't care about outputs.
 func newRegistry(t *testing.T) *ToolRegistry {
@@ -79,148 +87,160 @@ func newRegistry(t *testing.T) *ToolRegistry {
 
 func TestProgressTracker_NotEnoughTurnsYet(t *testing.T) {
 	p := &progressTracker{}
+	// Even pure repetition can't fire before the window is full — early
+	// turns must never be punished.
 	for i := 0; i < noProgressWindow-1; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), "a.go")})
 	}
-	if p.noProgress("code") {
+	if p.noProgress() {
 		t.Errorf("noProgress() = true before window full; want false")
 	}
 }
 
-func TestProgressTracker_AllReadsNoWrite_TriggersStop_ForCodeIntent(t *testing.T) {
+// TestProgressTracker_DistinctReads_DoNotTriggerStop pins the fix: a
+// window of reads against DIFFERENT files is productive exploration
+// (each surfaces something new), not spinning. The earlier heuristic
+// fired here whenever the session lacked a write — killing cross-file
+// questions one turn before synthesis ("empty synthesis").
+func TestProgressTracker_DistinctReads_DoNotTriggerStop(t *testing.T) {
 	p := &progressTracker{}
-	// Window of pure-read turns with varying paths. For code intent
-	// the "no write_file/run_shell" condition fires — an editing
-	// session that's only read after 5 turns is the agent-loop
-	// pathology the heuristic catches.
-	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
-	for i := 0; i < noProgressWindow; i++ {
-		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), paths[i%len(paths)])})
-	}
-	if !p.noProgress("code") {
-		t.Errorf("noProgress(code) = false; want true after %d read-only turns", noProgressWindow)
-	}
-	// Empty intent preserves pre-intent behavior — backwards compat
-	// for non-REPL callers (eval suites) that don't classify.
-	if !p.noProgress("") {
-		t.Errorf("noProgress(\"\") = false; want true (backwards compat)")
-	}
-}
-
-func TestProgressTracker_AllReadsNoWrite_DoesNotTrigger_ForReviewIntent(t *testing.T) {
-	p := &progressTracker{}
-	// Same shape as the code-intent test — but for review/recall the
-	// read-only window IS the work, not a pathology. condition 1
-	// must be suppressed; condition 2 doesn't fire because reads
-	// differ across turns.
-	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
-	for i := 0; i < noProgressWindow; i++ {
-		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), paths[i%len(paths)])})
-	}
-	for _, intent := range []string{"review", "recall", "meta", "clarify"} {
-		if p.noProgress(intent) {
-			t.Errorf("noProgress(%q) = true; want false — read-only is expected for this intent", intent)
+	// More distinct reads than the window: still never fires, because
+	// every turn introduces a new target.
+	for i := 0; i < noProgressWindow*2; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("c%d", i), fmt.Sprintf("file%d.go", i))})
+		if p.noProgress() {
+			t.Fatalf("noProgress() = true at turn %d; want false — distinct reads are progress", i)
 		}
 	}
 }
 
 func TestProgressTracker_OneWriteResets_DoesNotStop(t *testing.T) {
 	p := &progressTracker{}
-	// First turn writes, subsequent turns read different files — the
-	// window has at least one write so condition 1 fails, and reads
-	// differ so condition 2 fails.
+	// A write is progress, and the following reads are all distinct —
+	// the whole window is productive.
 	p.recordTurn([]llm.ToolCall{writeCall("w0", "main.go")})
 	paths := []string{"a.go", "b.go", "c.go", "d.go"}
 	for i := 0; i < noProgressWindow-1; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), paths[i])})
 	}
-	if p.noProgress("code") {
-		t.Errorf("noProgress(code) = true; want false when window contains a write")
+	if p.noProgress() {
+		t.Errorf("noProgress() = true; want false when the window contains a write and distinct reads")
 	}
 }
 
+// TestProgressTracker_RepeatedShell_DoesNotStop — a debug loop that
+// re-runs tests (or any run_shell) keeps making progress; side effects
+// are never spinning. The hard caps bound a genuinely stuck shell loop.
+func TestProgressTracker_RepeatedShell_DoesNotStop(t *testing.T) {
+	p := &progressTracker{}
+	for i := 0; i < noProgressWindow*2; i++ {
+		p.recordTurn([]llm.ToolCall{shellCall(fmt.Sprintf("s%d", i), "go test ./...")})
+		if p.noProgress() {
+			t.Fatalf("noProgress() = true at turn %d; want false — run_shell is side-effecting progress", i)
+		}
+	}
+}
+
+// TestProgressTracker_SameFileReadInCircle_TriggersStop — the genuine
+// pathology: the model re-reads the exact same file (identical args)
+// and learns nothing new. The first read is productive (novel), so the
+// stop fires once the window fills with repeats — at turn
+// noProgressWindow+1.
 func TestProgressTracker_SameFileReadInCircle_TriggersStop(t *testing.T) {
 	p := &progressTracker{}
-	// Every turn in the window reads exactly the same file. Condition
-	// 2 (re-reading targets in a circle) is true spinning regardless
-	// of intent — must fire for both code AND review.
 	for i := 0; i < noProgressWindow; i++ {
 		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "main.go")})
 	}
-	for _, intent := range []string{"code", "review", "recall", ""} {
-		if !p.noProgress(intent) {
-			t.Errorf("noProgress(%q) = false; want true — same-file-in-circle is spinning regardless of intent", intent)
+	if p.noProgress() {
+		t.Errorf("noProgress() = true after %d reads; want false — the first read was novel", noProgressWindow)
+	}
+	// One more repeat pushes the novel first-read out of the window.
+	p.recordTurn([]llm.ToolCall{readCall("rN", "main.go")})
+	if !p.noProgress() {
+		t.Errorf("noProgress() = false; want true — %d consecutive identical reads is spinning", noProgressWindow)
+	}
+}
+
+// TestProgressTracker_TwoFileCircle_TriggersStop — alternating between
+// two already-seen files surfaces nothing new after the first read of
+// each. A whole-window novelty check catches the cycle.
+func TestProgressTracker_TwoFileCircle_TriggersStop(t *testing.T) {
+	p := &progressTracker{}
+	files := []string{"a.go", "b.go"}
+	fired := false
+	for i := 0; i < noProgressWindow*2; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), files[i%2])})
+		if p.noProgress() {
+			fired = true
+			break
+		}
+	}
+	if !fired {
+		t.Errorf("noProgress() never fired; want true — A/B/A/B re-reads are a circle")
+	}
+}
+
+// TestProgressTracker_SamePathDifferentRanges_StaysProductive — reading
+// different line ranges of one file carries distinct args, so mining a
+// long file for several symbols is progress, not a circle.
+func TestProgressTracker_SamePathDifferentRanges_StaysProductive(t *testing.T) {
+	p := &progressTracker{}
+	for i := 0; i < noProgressWindow*2; i++ {
+		args := fmt.Sprintf(`{"path":"big.go","start":%d,"end":%d}`, i*40, i*40+40)
+		p.recordTurn([]llm.ToolCall{{
+			ID:       fmt.Sprintf("r%d", i),
+			Type:     "function",
+			Function: llm.ToolCallFunction{Name: "read_file", Arguments: args},
+		}})
+		if p.noProgress() {
+			t.Fatalf("noProgress() = true at turn %d; want false — distinct line ranges are new info", i)
 		}
 	}
 }
 
-// TestProgressTracker_TrailingIdentical_TriggersStop_EvenWithVariedLead —
-// the failure mode caught from a live session: model does productive
-// work for the first turn of the window, then gets stuck re-reading
-// the same file for the trailing 4 turns. Whole-window equality check
-// would NOT fire (turn 0 differs), but trailing-K does. Fires for
-// review intent because the read-in-circle is spinning even when
-// reading is the expected work.
-func TestProgressTracker_TrailingIdentical_TriggersStop_EvenWithVariedLead(t *testing.T) {
+// TestProgressTracker_NovelReadResetsStreak — a single new read in an
+// otherwise-stuck run resets the no-progress window. The model that
+// breaks out of a circle by reading something new is not stopped.
+func TestProgressTracker_NovelReadResetsStreak(t *testing.T) {
 	p := &progressTracker{}
-	// Window: [main.go, repl.go, repl.go, repl.go, repl.go]
+	// Four repeats of the same file (one novel + three stuck), then a
+	// genuinely new read.
 	p.recordTurn([]llm.ToolCall{readCall("r0", "main.go")})
-	for i := 1; i < noProgressWindow; i++ {
-		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "repl.go")})
+	for i := 1; i < noProgressWindow-1; i++ {
+		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "main.go")})
 	}
-	for _, intent := range []string{"code", "review", "recall"} {
-		if !p.noProgress(intent) {
-			t.Errorf("noProgress(%q) = false; want true — trailing-4 identical reads is spinning", intent)
+	p.recordTurn([]llm.ToolCall{readCall("fresh", "other.go")})
+	if p.noProgress() {
+		t.Errorf("noProgress() = true; want false — a novel read broke the streak")
+	}
+}
+
+func TestProgressTracker_NovelSearchCountsAsProgress(t *testing.T) {
+	p := &progressTracker{}
+	// Distinct search queries are information-gathering progress; the
+	// tracker is tool-agnostic about what surfaces new info.
+	for i := 0; i < noProgressWindow*2; i++ {
+		p.recordTurn([]llm.ToolCall{{
+			ID:       fmt.Sprintf("q%d", i),
+			Type:     "function",
+			Function: llm.ToolCallFunction{Name: "cortex_search", Arguments: fmt.Sprintf(`{"query":"term-%d"}`, i)},
+		}})
+		if p.noProgress() {
+			t.Fatalf("noProgress() = true at turn %d; want false — distinct searches are progress", i)
 		}
-	}
-}
-
-// TestProgressTracker_ThreeTrailingIdentical_DoesNotTrigger_ForReview —
-// K=4 boundary: only 3 consecutive identical reads doesn't trip
-// trailing-K. Legitimate "mine this file for multiple things" pattern
-// shouldn't get killed by an aggressive heuristic.
-func TestProgressTracker_ThreeTrailingIdentical_DoesNotTrigger_ForReview(t *testing.T) {
-	p := &progressTracker{}
-	// Window: [main.go, util.go, repl.go, repl.go, repl.go]
-	// Trailing 4: [util.go, repl.go, repl.go, repl.go] — first differs
-	// from the rest, so K=4 doesn't fire.
-	p.recordTurn([]llm.ToolCall{readCall("r0", "main.go")})
-	p.recordTurn([]llm.ToolCall{readCall("r1", "util.go")})
-	for i := 2; i < noProgressWindow; i++ {
-		p.recordTurn([]llm.ToolCall{readCall(fmt.Sprintf("r%d", i), "repl.go")})
-	}
-	if p.noProgress("review") {
-		t.Errorf("noProgress(review) = true; want false — only 3 trailing identical reads, K=4 boundary")
-	}
-}
-
-func TestProgressTracker_TurnOrderIndependent(t *testing.T) {
-	// Two reads in the same turn should hash to the same readTargets
-	// regardless of arrival order.
-	p1 := &progressTracker{}
-	p2 := &progressTracker{}
-	for i := 0; i < noProgressWindow; i++ {
-		p1.recordTurn([]llm.ToolCall{readCall("a", "x.go"), readCall("b", "y.go")})
-		p2.recordTurn([]llm.ToolCall{readCall("b", "y.go"), readCall("a", "x.go")})
-	}
-	if p1.turnShapes[0].readTargets != p2.turnShapes[0].readTargets {
-		t.Errorf("readTargets not order-independent: %q vs %q", p1.turnShapes[0].readTargets, p2.turnShapes[0].readTargets)
 	}
 }
 
 func TestLoop_NoProgress_StopsLoop_RespectsBudgetCeiling(t *testing.T) {
-	// Build a script of noProgressWindow turns, each issuing a single
-	// read_file (no writes, no run_shell). After the window fills the
-	// loop should stop with ReasonNoProgress — well before defaultMaxTurns.
+	// A model stuck re-reading the SAME file every turn. The first read
+	// is novel (progress); once the window fills with identical repeats
+	// the loop stops with ReasonNoProgress — well before defaultMaxTurns.
 	reg := newRegistry(t)
-	resps := make([]llm.ChatResult, 0, noProgressWindow+1)
-	for i := 0; i < noProgressWindow+1; i++ {
+	resps := make([]llm.ChatResult, 0, noProgressWindow+2)
+	for i := 0; i < noProgressWindow+2; i++ {
 		resps = append(resps, llm.ChatResult{
-			Content: "",
-			ToolCalls: []llm.ToolCall{readCall(
-				fmt.Sprintf("c%d", i),
-				fmt.Sprintf("file%d.go", i),
-			)},
+			Content:      "",
+			ToolCalls:    []llm.ToolCall{readCall(fmt.Sprintf("c%d", i), "stuck.go")},
 			FinishReason: "tool_calls",
 		})
 	}
@@ -228,7 +248,6 @@ func TestLoop_NoProgress_StopsLoop_RespectsBudgetCeiling(t *testing.T) {
 		Provider: &scriptedProvider{responses: resps},
 		Registry: reg,
 		System:   "test",
-		Intent:   "code", // condition 1 only fires for edit-intended sessions
 	}
 	res, err := loop.Run(context.Background(), "explore the repo")
 	if err != nil {
@@ -237,29 +256,25 @@ func TestLoop_NoProgress_StopsLoop_RespectsBudgetCeiling(t *testing.T) {
 	if res.Reason != ReasonNoProgress {
 		t.Fatalf("Reason=%q; want %q", res.Reason, ReasonNoProgress)
 	}
-	if res.Turns != noProgressWindow {
-		t.Errorf("Turns=%d; want %d (stop fires after the window fills)", res.Turns, noProgressWindow)
+	// The novel first read keeps the window productive until it scrolls
+	// off, so the stop fires one turn after the window fills.
+	if res.Turns != noProgressWindow+1 {
+		t.Errorf("Turns=%d; want %d (stop fires once repeats fill the window)", res.Turns, noProgressWindow+1)
 	}
 }
 
-// TestLoop_ReviewIntent_ReadOnlyWindow_DoesNotTriggerNoProgress —
-// pins that explanation/review sessions can read several files
-// without writing and STILL reach a model-done final answer. Before
-// the Intent field, a 5-read window terminated with ReasonNoProgress
-// regardless of intent, killing read-heavy explanations one turn
-// before the model could synthesize.
-func TestLoop_ReviewIntent_ReadOnlyWindow_DoesNotTriggerNoProgress(t *testing.T) {
+// TestLoop_DistinctReadsThenFinal_ReachesModelDone — the regression the
+// fix targets: a read-heavy session that reads several DIFFERENT files
+// then synthesizes must reach its final answer. The earlier guard fired
+// ReasonNoProgress on the write-less window and killed the session one
+// turn before the model could respond (the "empty synthesis" failure).
+func TestLoop_DistinctReadsThenFinal_ReachesModelDone(t *testing.T) {
 	reg := newRegistry(t)
-	// 5 distinct-file reads, then a final text message. With code
-	// intent this would fire ReasonNoProgress; with review intent
-	// condition 1 is suppressed so the loop runs the final turn.
+	// More distinct reads than the window, then a final text message.
 	resps := []llm.ChatResult{}
-	for i := 0; i < noProgressWindow; i++ {
+	for i := 0; i < noProgressWindow+2; i++ {
 		resps = append(resps, llm.ChatResult{
-			ToolCalls: []llm.ToolCall{readCall(
-				fmt.Sprintf("r%d", i),
-				fmt.Sprintf("file%d.go", i),
-			)},
+			ToolCalls:    []llm.ToolCall{readCall(fmt.Sprintf("r%d", i), fmt.Sprintf("file%d.go", i))},
 			FinishReason: "tool_calls",
 		})
 	}
@@ -269,14 +284,13 @@ func TestLoop_ReviewIntent_ReadOnlyWindow_DoesNotTriggerNoProgress(t *testing.T)
 		Provider: &scriptedProvider{responses: resps},
 		Registry: reg,
 		System:   "test",
-		Intent:   "review",
 	}
 	res, err := loop.Run(context.Background(), "explain the core files")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Reason != ReasonModelDone {
-		t.Errorf("Reason=%q; want %q — review intent must complete after read-only exploration", res.Reason, ReasonModelDone)
+		t.Errorf("Reason=%q; want %q — distinct-read exploration must complete", res.Reason, ReasonModelDone)
 	}
 	if res.Final != "here is the explanation" {
 		t.Errorf("Final=%q; want final synthesis text", res.Final)

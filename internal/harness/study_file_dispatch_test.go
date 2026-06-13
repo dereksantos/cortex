@@ -20,19 +20,22 @@ func studyCall(id, path string) llm.ToolCall {
 }
 
 func TestProgressTracker_StudyFileCountsAsRead(t *testing.T) {
+	// A novel study_file is information-gathering progress, just like
+	// read_file: the first study of a file keeps the window productive.
 	p := &progressTracker{}
 	p.recordTurn([]llm.ToolCall{studyCall("c0", "a.go")})
-	if len(p.turnShapes) != 1 || p.turnShapes[0].readTargets == "" {
-		t.Fatalf("study_file should bucket as a read, got turnShape=%+v", p.turnShapes)
+	if p.noProgress() {
+		t.Fatalf("a single novel study_file should not signal no-progress")
 	}
 
 	// Repeated identical study_file reads with no write must trip the
-	// no-progress detector exactly like read_file does.
+	// no-progress detector exactly like read_file does — the first is
+	// novel, so the stop fires once repeats fill the window.
 	q := &progressTracker{}
-	for i := 0; i < noProgressWindow; i++ {
+	for i := 0; i < noProgressWindow+1; i++ {
 		q.recordTurn([]llm.ToolCall{studyCall(fmt.Sprintf("c%d", i), "a.go")})
 	}
-	if !q.noProgress("code") {
+	if !q.noProgress() {
 		t.Errorf("repeated identical study_file reads should signal no-progress")
 	}
 }
