@@ -3831,27 +3831,35 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	var readActHandler harness.ToolHandler = readTool
 	if os.Getenv("CORTEX_STUDY_FILE") == "1" {
 		cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
+		contextDir := filepath.Join(s.workdir, ".cortex")
 		studyOpts := harness.StudyFileToolOpts{
 			Provider:   buildLLMProviderForREPL(cfg, s.model, s.apiURL),
-			ContextDir: filepath.Join(s.workdir, ".cortex"),
+			ContextDir: contextDir,
 			ModelID:    s.model,
 			// The turn's question directs the sampler at the answer
 			// region (probed: this is what surfaces repl.go:2715 for q2;
 			// without it study returns a generic overview the synth can't
 			// answer from).
 			DefaultGoal: prompt,
-			// Density left adaptive. With latency relaxed (10 min) dense
-			// study no longer STARVES the synth, but it still doesn't make
-			// q2 pass: the DAG-path study tool resolves too small a window
-			// → too few chunks → it sampled around lines 3056/3754 and
-			// missed the call site at 2715, even dense. The lever now is
-			// study WINDOW/coverage resolution in this path (+ not
-			// re-chunking the already-window-fitted digest), not density.
-			// See eval-journal 2026-06-13.
 		}
 		if cfg != nil {
-			if ep, _, ok := cfg.ResolveModelRoute(s.model); ok {
+			if ep, bareModel, ok := cfg.ResolveModelRoute(s.model); ok {
 				studyOpts.Endpoint = ep.Name
+				studyOpts.ModelID = bareModel
+				// Size the digest to the consuming model's REAL window so
+				// the sampler draws enough chunks to cover a specific call
+				// site (probed: a small default window → ~9% coverage,
+				// missed repl.go:2715; the real 32K window → ~40%, found
+				// it). The probe cache is keyed model@endpoint but historic
+				// probes were written with an empty endpoint, so try the
+				// resolved endpoint then "". Setting Window explicitly also
+				// short-circuits the tool's own (same-keyed) lookup.
+				for _, epKey := range []string{ep.Name, ""} {
+					if p, ok := study.LookupCached(contextDir, bareModel, epKey); ok && p.CtxWindowTokens > 0 {
+						studyOpts.Window = p.CtxWindowTokens
+						break
+					}
+				}
 			}
 		}
 		readActHandler = harness.NewStudyFileTool(s.workdir, studyOpts)

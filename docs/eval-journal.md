@@ -2366,3 +2366,25 @@ go test ./pkg/cognition/dag/
 **Reframed (again):** the q2 chain is: latency (FIXED) → study coverage (study tool resolves too small a window in the DAG path; and its digest shouldn't be re-chunked). Next: thread the real consuming-model window into the study tool's `resolveWindow` in `buildREPLDynamicRegistry` (the probe cache / config window for s.model), and skip `attend.chunk` on study-mode output.
 
 **Follow-ups**: study-window resolution + no-rechunk-on-study-digest is the q2 lever now; coder80 probe (item 3); eval `--timeout` likely needs raising past 600s for gated study cells (a full multi-hop study turn ran ~5 min here).
+
+### 2026-06-13 — q2 ANSWERS via study: window-resolution fix closes the loop
+
+**Cortex**: branch `derek.s/self-improvement-loop` (on top of `e09597b`)
+**Command**: `CORTEX_STUDY_FILE=1 CORTEX_LOCAL_ONLY=1 CORTEX_TEMPERATURE=0 ./cortex --prompt "<q2 prompt>"`
+**Result**: q2 produces a correct, cited ANSWER in ONE pass — no NEED_MORE, no hop, no fallback. The end of the multi-day q2 chase.
+
+**The fix**: the DAG-path study tool resolved a tiny default window because the probe cache is keyed `model@endpoint` but historic probes were written with an **empty** endpoint (`coder@`, ctx=32768), while the gate looked up `coder@chatterbox` → miss → window 0 → ~9% coverage → missed the call site. `buildREPLDynamicRegistry` now resolves the bare model id and tries both endpoint keys (`ep.Name` then `""`), setting `studyOpts.Window` explicitly.
+
+**Verified in the trace**: study sampled enough to surface the call site (`act.read_file` n-7 raw output contains `estimateScopeForTurn` / lines 2714/2856); synth `need_more=''`, `response` 863 chars citing `repl.go:2714-2735` (the call site) + the producer regions; `budget_after_latency_ms=+207180` (207s headroom). Costs: study read 4m07s (32K window → more chunks), synth 2m05s — both fit the relaxed 600s budget.
+
+**The full causal chain that fixed q2** (all five were necessary):
+1. classifier kwargs/`/v1` (`b028f44`) — decide.next actually plans.
+2. no-progress guard (`603f2b8`) — exploration not killed.
+3. study wired into the read→synth edge + goal-directed (`b5866d1`) — sample-across, not first-N-lines.
+4. relaxed latency (`e09597b`) — the 4-min study + 2-min synth fit.
+5. **window resolution (this)** — study draws enough chunks to surface the specific call site.
+Items 5/6 (no-empty-synth, token floor) are the safety nets behind it.
+
+**Notes**: `attend.chunk` on the study digest (n-8) did NOT truncate away the answer this time — the window-fitted digest fit — so the "skip re-chunk" idea is deferred (YAGNI). Study at the 32K window is slow (~4 min/large-file read); the eval `--timeout` must be ≥ ~600s for gated study cells, and coder80 (item 3) may study faster. The gate stays OFF by default; this is validated via direct prompt, not yet a full-suite eval pass.
+
+**Follow-ups**: official q2 eval-harness pass with the gate (`--timeout 900`); coder80 fitness probe (item 3); decide whether to enable the study gate by default once a full gated-suite run shows the INVALID-count drop without a latency-timeout regression.
