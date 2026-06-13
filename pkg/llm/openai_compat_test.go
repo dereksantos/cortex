@@ -217,3 +217,29 @@ func TestOpenAICompatBaseURLTrailingSlashTrimmed(t *testing.T) {
 		t.Errorf("trailing slash not trimmed: %q", c.BaseURL())
 	}
 }
+
+// Bare-root base URLs get /v1 appended; anything with a deliberate
+// path passes through. Bare roots previously worked only against
+// proxies (LiteLLM) that alias /chat/completions to /v1/chat/completions.
+func TestNormalizeCompatBaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"bare root gets /v1", "http://chatterbox:4000", "http://chatterbox:4000/v1"},
+		{"bare root trailing slash", "http://chatterbox:4000/", "http://chatterbox:4000/v1"},
+		{"already /v1 untouched", "http://localhost:13305/v1", "http://localhost:13305/v1"},
+		{"/v1 trailing slash trimmed only", "http://localhost:13305/v1/", "http://localhost:13305/v1"},
+		{"custom path untouched", "https://proxy.internal/api/v1", "https://proxy.internal/api/v1"},
+		{"non-v1 path untouched", "https://proxy.internal/openai", "https://proxy.internal/openai"},
+		{"empty stays empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeCompatBaseURL(tt.in); got != tt.want {
+				t.Errorf("normalizeCompatBaseURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

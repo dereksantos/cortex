@@ -58,12 +58,14 @@ synthesis, not in how files are read. Two structural notes for future runs:
 
 ## The fault tree for the remaining failures (NEXT WORK, in order)
 
-1. **`/v1` URL bug in the budget classifier.** Every `decide.next` trace row
-   shows `fallback: classifier error (budget:chatterbox): Post
-   "http://chatterbox:4000/chat/completions": context deadline exceeded` —
-   the path is missing `/v1`. Find where that client joins base URL + path
-   (it is NOT pkg/llm's OpenAICompatClient, which appends /v1 correctly).
-   This degrades planning on EVERY fixture.
+1. **~~`/v1` URL bug~~ → FIXED 2026-06-12, diagnosis revised.** The missing
+   `/v1` was a red herring (LiteLLM serves both paths — probed 200/200).
+   Real cause: `pkg/llm/provider_factory.go` built endpoint clients without
+   `ChatTemplateKwargs`, so the Router-resolved reasoner ran with thinking
+   ON and blew the 30s classifier deadline (37.8s vs 1.6s, curl-measured).
+   Factory now threads the kwargs; `NewOpenAICompatClient` also normalizes
+   bare-root base_urls to `/v1`. Probe-verified: decide.next 13.5s, real
+   2-node plan, no fallback. Full entry in eval-journal 2026-06-12.
 2. **No-progress guard kills legitimate exploration**
    (`internal/harness/loop.go` `progressTracker`, `noProgressWindow=5`).
    Condition 1 (5 tool-calling turns, no write/shell → abort) fires on

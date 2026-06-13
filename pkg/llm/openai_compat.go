@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -46,8 +47,9 @@ func compatTimeout() time.Duration {
 // EndpointConfig identifies one OpenAI-compatible endpoint. Name is a
 // short stable identifier ("chatterbox", "lm-studio-local") used in
 // telemetry and config; BaseURL is the OpenAI root (e.g.
-// "http://localhost:13305/v1"); APIKey is optional — many local
-// endpoints accept any string or none at all.
+// "http://localhost:13305/v1" — a bare host:port gets "/v1" appended
+// at construction); APIKey is optional — many local endpoints accept
+// any string or none at all.
 type EndpointConfig struct {
 	Name    string
 	BaseURL string
@@ -127,7 +129,7 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 	}
 	return &OpenAICompatClient{
 		name:               name,
-		baseURL:            strings.TrimRight(ep.BaseURL, "/"),
+		baseURL:            normalizeCompatBaseURL(ep.BaseURL),
 		apiKey:             ep.APIKey,
 		maxTokens:          defaultMaxTokens,
 		temperature:        envTemperature(),
@@ -136,6 +138,23 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 			Timeout: timeout,
 		},
 	}
+}
+
+// normalizeCompatBaseURL trims trailing slashes and appends /v1 when
+// the URL has no path component. OpenAI-compat endpoints live under
+// /v1; a bare-root base_url (e.g. "http://chatterbox:4000") only
+// worked against proxies like LiteLLM that alias both routes. URLs
+// that already carry a path — "/v1", "/api/v1", anything deliberate —
+// pass through untouched.
+func normalizeCompatBaseURL(raw string) string {
+	base := strings.TrimRight(raw, "/")
+	if base == "" {
+		return ""
+	}
+	if u, err := url.Parse(base); err == nil && u.Host != "" && u.Path == "" {
+		return base + "/v1"
+	}
+	return base
 }
 
 // SetTemperature pins this client's sampling temperature, overriding the

@@ -14,6 +14,11 @@
 package llm
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/pkg/config"
@@ -57,6 +62,52 @@ func TestProviderFactory_BareName_FallsThroughToOllamaWhenUnconfigured(t *testin
 	}
 	if _, ok := p.(*OpenAICompatClient); ok {
 		t.Errorf("unlisted bare name should NOT route via OpenAI-compat (chatterbox), got %T", p)
+	}
+}
+
+// The factory must build endpoint clients with the SAME wire behavior
+// as internal/llm.BuildProvider: per-model chat_template_kwargs ride
+// the request, and a bare-root base_url still hits /v1/chat/completions.
+// Regression: the factory dropped kwargs, so the budget classifier's
+// reasoner ran with thinking ON and blew its 30s deadline (2026-06-12).
+func TestProviderFactory_EndpointRoute_KwargsAndV1OnTheWire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("path: got %s want /v1/chat/completions", r.URL.Path)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		got, present := raw["chat_template_kwargs"]
+		if !present || !strings.Contains(string(got), `"enable_thinking":false`) {
+			t.Errorf("chat_template_kwargs missing or wrong: present=%v body=%s", present, got)
+		}
+		_ = json.NewEncoder(w).Encode(compatResponse{
+			Choices: []compatChoice{{Message: compatMessage{Role: "assistant", Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Endpoints: []config.EndpointDef{
+			{
+				Name:    "chatterbox",
+				BaseURL: srv.URL, // bare root, no /v1 — like the live fleet config
+				Models:  []string{"reasoner"},
+				ModelChatTemplateKwargs: map[string]map[string]any{
+					"reasoner": {"enable_thinking": false},
+				},
+			},
+		},
+	}
+	f := NewProviderFactory(FactoryConfig{Cfg: cfg})
+	p, err := f.Get("reasoner")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := p.Generate(context.Background(), "hello"); err != nil {
+		t.Fatalf("generate: %v", err)
 	}
 }
 

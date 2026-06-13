@@ -160,6 +160,11 @@ func (f *defaultProviderFactory) build(modelID, apiURL string) (Provider, error)
 			Name:    ep.Name,
 			BaseURL: ep.BaseURL,
 			APIKey:  ep.ResolveAPIKey(),
+			// Without the per-model kwargs, hybrid thinking models run
+			// with thinking ON for factory-routed calls — the budget
+			// classifier's reasoner burned its whole 30s deadline on
+			// reasoning_content (37.8s vs 1.6s measured, 2026-06-12).
+			ChatTemplateKwargs: ep.ChatTemplateKwargsFor(routedModel),
 		})
 		client.SetModel(routedModel)
 		return client, nil

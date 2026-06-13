@@ -2197,3 +2197,26 @@ auto      true    50.3   28/28  (100%)
 - Context for absolute rates: May 31 baseline was 64% on the OLD fleet; tonight's 38% control includes the tool-call salvage, so the gap vs May 31 is model-fitness + judge-change territory (the new coder needed its tool calls scraped from fenced JSON at all). Model selection (coder80) is the open experiment.
 
 **Follow-ups**: targeted rerun of cortex-project fixtures at --timeout 1800 (launched); study latency reduction (per-format chars-per-token; prefix caching); coder80 harness-fitness probe; per-fixture --compare against the May 31 baseline to split judge effects from coder effects.
+
+### 2026-06-12 — Budget-classifier "missing /v1" diagnosis REVISED: factory dropped chat_template_kwargs
+
+**Cortex**: branch `derek.s/self-improvement-loop` (tip `9a7663a` + this fix)
+**Commands**:
+```
+curl -m 20 -X POST http://chatterbox:4000/chat/completions ...      # 200, 0.7s
+curl -m 20 -X POST http://chatterbox:4000/v1/chat/completions ...   # 200, 0.4s
+curl ... '{"model":"reasoner",...,"max_tokens":1024}'                                          # thinking ON:  37.8s, 863 completion tokens (3334 chars reasoning_content)
+curl ... '{"model":"reasoner",...,"max_tokens":1024,"chat_template_kwargs":{"enable_thinking":false}}'  # thinking OFF: 1.6s, 25 tokens
+./cortex eval codebase --only q1-pinpoint-cortex --binary ./cortex --local-only --temperature 0
+```
+**Versions**: fleet=chatterbox (Gemma 4 reasoner via LiteLLM); judge=N/A (mechanical probe)
+**Result**: q1-pinpoint-cortex PASS; latest `decide.next` trace row 13.5s, `picked_model=chatterbox/reasoner`, real 2-node plan (pre-fix rows: 30,001ms = deadline, fallback single-spawn).
+
+**Why this run**: handoff fault-tree item 1 blamed a missing `/v1` in the classifier URL for `context deadline exceeded` on every `decide.next`.
+
+**Observations**:
+- The /v1 diagnosis was WRONG: chatterbox (LiteLLM) serves `/chat/completions` both with and without `/v1` (both probed 200). A timeout was never going to be a 404 symptom anyway.
+- Real cause: `pkg/llm/provider_factory.go` built endpoint clients WITHOUT `ChatTemplateKwargs`, unlike `internal/llm.BuildProvider`. The Router resolves `decide.next` → `requires:chatterbox/reasoner` → factory → thinking-ON reasoner. Thinking burns 37.8s on a *tiny* prompt (real planner prompts are far larger) vs the handler's 30s `maxLatency` deadline → every plan degraded to `fallbackSpawn`. Same failure class as the fleet bring-up's "thinking-on starves bounded calls".
+- Fixed: factory now passes `ep.ChatTemplateKwargsFor(routedModel)`; plus `normalizeCompatBaseURL` appends `/v1` to bare-root base_urls in `NewOpenAICompatClient` (closes the works-only-against-LiteLLM hole for strict endpoints; deliberate paths pass through). Tests: `TestProviderFactory_EndpointRoute_KwargsAndV1OnTheWire`, `TestNormalizeCompatBaseURL`.
+
+**Follow-ups**: fault-tree item 2 (no-progress guard) is next; planning quality on all fixtures should improve now that decide.next actually classifies — worth re-reading hop/plan metrics on the next full run before attributing changes to anything else.
