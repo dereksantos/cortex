@@ -22,11 +22,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/capture"
 	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -46,7 +48,8 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Hardening: HTTP timeout, bounded retry, Ctrl-C interrupt
 [x] AGENTS.md project-instructions injection
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
-[ ] Capture at turn end (cortex capture — distilled insights are what journals)
+[x] Capture at turn end — Tier 1 (structural, mechanical: every turn + /remember)
+[ ] Capture Tier 2 (model-distilled insights, async on the reasoner)
 [x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
 [x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
 [ ] Integrate eval suite into new harness
@@ -1146,6 +1149,9 @@ type CortexSession struct {
 	// unpersisted session). store is its backing handle, closed at exit.
 	retriever *intcog.Cortex
 	store     *storage.Storage
+	// capturer writes turn captures to the same store (so they're immediately
+	// retrievable) and to the journal (durable). nil when retrieval is disabled.
+	capturer *capture.Capture
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -1653,6 +1659,111 @@ func (cs *CortexSession) EnableRetrieval() {
 	}
 	cs.store = store
 	cs.retriever = cortex
+	cs.capturer = capture.NewWithStorage(cfg, store)
+}
+
+// --- Capture (Tier 1) ------------------------------------------------------
+//
+// At turn end the loop writes a structural capture to the store so the work
+// becomes retrievable across sessions — the write side of the learning loop
+// (retrieval is the read side). Mechanical, synchronous, best-effort: no
+// model, and a failure never breaks the turn. EVERY completed turn is captured,
+// read-only included — a mechanical filter can't tell a durable lesson (a
+// stated preference, a correction) from noise, and read-only turns are exactly
+// where those live. Tier 2 (a model, async) distills the durable unit later and
+// supersedes these raw rows; until then retrieval ranking sorts the noise.
+
+// captureExcerptCap bounds the stored answer excerpt; the full turn lives in
+// the transcript (reachable via the session id), so this is just a retrieval
+// surface, not the record.
+const captureExcerptCap = 280
+
+// turnArtifacts derives the mechanical outcome of a turn from its messages: the
+// files edited and commands run (from tool calls), and the model's final answer
+// (the last assistant message with prose and no tool calls). Pure — no I/O.
+func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
+	var files, cmds []string
+	seen := map[string]bool{}
+	for _, m := range turnMsgs {
+		for _, tc := range m.ToolCalls {
+			switch tc.Function.Name {
+			case FunctionWriteFile, FunctionEditFile:
+				if p, err := tc.stringArg("path"); err == nil && !seen["f:"+p] {
+					seen["f:"+p] = true
+					files = append(files, p)
+				}
+			case FunctionBash:
+				if c, err := tc.stringArg("command"); err == nil && !seen["c:"+c] {
+					seen["c:"+c] = true
+					cmds = append(cmds, c)
+				}
+			}
+		}
+		if m.Role != RoleUser && m.Role != RoleTool && len(m.ToolCalls) == 0 && strings.TrimSpace(m.Content) != "" {
+			answer = m.Content // last one wins → the final answer
+		}
+	}
+	var parts []string
+	if len(files) > 0 {
+		parts = append(parts, "edited: "+strings.Join(files, ", "))
+	}
+	if len(cmds) > 0 {
+		parts = append(parts, "ran: "+strings.Join(cmds, "; "))
+	}
+	return strings.Join(parts, " | "), answer
+}
+
+// captureTurn records a completed turn to the store. The user's message is the
+// retrieval key (where stated preferences/corrections live); the outcome line
+// and a capped answer excerpt give a hit some substance. ID is left empty so
+// capture assigns a unique one.
+func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
+	if cs.capturer == nil || strings.TrimSpace(userMsg) == "" {
+		return
+	}
+	outcome, answer := turnArtifacts(turnMsgs)
+	// The durable summary goes in ToolResult: Reflex surfaces that field as a
+	// result's Content (what gets injected next time). The user's message is
+	// the key, the outcome says what changed, a capped answer excerpt adds
+	// substance.
+	summary := userMsg
+	if outcome != "" {
+		summary += "\n[" + outcome + "]"
+	}
+	if answer != "" {
+		if len(answer) > captureExcerptCap {
+			answer = answer[:captureExcerptCap] + "…"
+		}
+		summary += "\n→ " + answer
+	}
+	_ = cs.capturer.CaptureEvent(&events.Event{
+		Source:     events.SourceGeneric,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   "loop",
+		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
+		ToolResult: summary,
+		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+	})
+}
+
+// remember stores an explicit user memory (/remember) — the highest-precision
+// capture, because the user marked it as worth keeping.
+func (cs *CortexSession) remember(text string) error {
+	if cs.capturer == nil {
+		return fmt.Errorf("memory unavailable — no .cortex store")
+	}
+	// Text in ToolResult so it surfaces as the retrieved Content (Reflex maps
+	// Content from ToolResult); type in ToolInput marks it for Tier 2.
+	return cs.capturer.CaptureEvent(&events.Event{
+		Source:     events.SourceGeneric,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   "loop",
+		ToolInput:  map[string]any{"type": "memory"},
+		ToolResult: text,
+		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+	})
 }
 
 // retrieve runs one Fast retrieval for the turn and returns the hits, or nil
@@ -1956,6 +2067,20 @@ func main() {
 			continue
 		}
 
+		// /remember <text> stores an explicit memory — the highest-precision
+		// capture, since the user marked it worth keeping.
+		if input == "/remember" || strings.HasPrefix(input, "/remember ") {
+			text := strings.TrimSpace(strings.TrimPrefix(input, "/remember"))
+			if text == "" {
+				fmt.Println("usage: /remember <text to store as a memory>")
+			} else if err := session.remember(text); err != nil {
+				fmt.Printf("remember: %v\n", err)
+			} else {
+				fmt.Println(withColor("remembered", gray))
+			}
+			continue
+		}
+
 		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
 			name := strings.TrimSpace(strings.TrimPrefix(input, "/model"))
@@ -1970,6 +2095,8 @@ func main() {
 			continue
 		}
 
+		// Mark where this turn's messages begin, so we can capture what it did.
+		turnStart := len(session.Request.Messages)
 		session.Append(Message{Role: RoleUser, Content: input})
 
 		// Fast retrieval for THIS turn. The hits are recorded to the transcript
@@ -1990,6 +2117,11 @@ func main() {
 		session.Request.EphemeralSystem = ""
 		switch {
 		case err == nil:
+			// Capture the completed turn to the store (retrievable next time)
+			// BEFORE any compaction rewrites history. Every turn, read-only
+			// included — see captureTurn.
+			session.captureTurn(input, session.Request.Messages[turnStart:])
+
 			// Red gauge: compact at the turn boundary, before the window
 			// actually overflows. The boundary is the only safe point —
 			// mid-turn compaction would orphan tool_call sequences.

@@ -1563,3 +1563,122 @@ func TestLoadTranscriptBackCompat(t *testing.T) {
 		t.Errorf("legacy (kind-less) entry should replay as a core message, got %+v", msgs)
 	}
 }
+
+// --- Capture (Tier 1) ------------------------------------------------------
+
+func TestTurnArtifacts(t *testing.T) {
+	t.Run("extracts edited files, commands, and the final answer", func(t *testing.T) {
+		msgs := []Message{
+			{Role: RoleUser, Content: "fix the bug and test it"},
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Function: FunctionCall{Name: FunctionEditFile, Arguments: `{"path":"main.go"}`}},
+				{Function: FunctionCall{Name: FunctionBash, Arguments: `{"command":"go test ./..."}`}},
+			}},
+			{Role: RoleTool, Content: "ok"},
+			{Role: "assistant", Content: "Done — fixed and tested."},
+		}
+		outcome, answer := turnArtifacts(msgs)
+		for _, want := range []string{"edited: main.go", "ran: go test ./..."} {
+			if !strings.Contains(outcome, want) {
+				t.Errorf("outcome %q missing %q", outcome, want)
+			}
+		}
+		if answer != "Done — fixed and tested." {
+			t.Errorf("answer = %q, want the final assistant message", answer)
+		}
+	})
+
+	t.Run("read-only turn has empty outcome but keeps the answer", func(t *testing.T) {
+		msgs := []Message{
+			{Role: RoleUser, Content: "how does auth work?"},
+			{Role: "assistant", Content: "It uses JWT."},
+		}
+		outcome, answer := turnArtifacts(msgs)
+		if outcome != "" {
+			t.Errorf("read-only outcome should be empty, got %q", outcome)
+		}
+		if answer != "It uses JWT." {
+			t.Errorf("answer = %q", answer)
+		}
+	})
+
+	t.Run("repeated edits to one file are de-duplicated", func(t *testing.T) {
+		msgs := []Message{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Function: FunctionCall{Name: FunctionEditFile, Arguments: `{"path":"a.go"}`}},
+			}},
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Function: FunctionCall{Name: FunctionEditFile, Arguments: `{"path":"a.go"}`}},
+			}},
+		}
+		outcome, _ := turnArtifacts(msgs)
+		if strings.Count(outcome, "a.go") != 1 {
+			t.Errorf("file should appear once, got %q", outcome)
+		}
+	})
+}
+
+func TestCaptureDisabledIsNoOp(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}                        // capturer == nil
+	cs.captureTurn("anything", []Message{{Role: RoleUser, Content: "anything"}}) // must not panic
+	if err := cs.remember("note"); err == nil {
+		t.Error("remember without a store should return an error")
+	}
+}
+
+// Every completed turn is captured — read-only included — and is retrievable.
+func TestCaptureTurnIsRetrievable(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.StartTranscript()
+	cs.EnableRetrieval()
+	if cs.capturer == nil {
+		t.Fatal("EnableRetrieval should wire a capturer")
+	}
+	t.Cleanup(cs.Close)
+
+	// A read-only turn where the USER states a durable fact (no file edits).
+	cs.captureTurn("we use JWT for authentication, not server-side sessions", []Message{
+		{Role: RoleUser, Content: "we use JWT for authentication, not server-side sessions"},
+		{Role: "assistant", Content: "Understood — JWT it is."},
+	})
+
+	hits := cs.retrieve("authentication")
+	if len(hits) == 0 {
+		t.Fatal("a captured read-only turn must be retrievable — read-only lessons matter")
+	}
+	found := false
+	for _, h := range hits {
+		if strings.Contains(strings.ToLower(h.Content), "jwt") || strings.Contains(strings.ToLower(h.Content), "authentication") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("retrieved hits should carry the captured content: %+v", hits)
+	}
+}
+
+func TestRememberIsRetrievable(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.StartTranscript()
+	cs.EnableRetrieval()
+	t.Cleanup(cs.Close)
+
+	if err := cs.remember("the staging database is reset every night at 2am UTC"); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+	hits := cs.retrieve("staging database reset")
+	if len(hits) == 0 {
+		t.Fatal("an explicit /remember memory must be retrievable")
+	}
+	found := false
+	for _, h := range hits {
+		if strings.Contains(h.Content, "staging") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("hits should carry the remembered text: %+v", hits)
+	}
+}

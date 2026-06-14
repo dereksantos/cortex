@@ -121,8 +121,26 @@ sessions feel like they lost the thread.
 - ~~Session transcript persistence~~ — done: every REPL session appends each
   message ambiently to its transcript; `loop resume [id]` continues the
   latest (or a named) session.
-- Capture at turn end (`cortex capture` of distilled insights) — this is what
-  enters the journal.
+- Capture at turn end — the write side of the learning loop (retrieval is the
+  read side; without capture the shelf is empty). Two tiers:
+  - **Tier 1 (done): structural, mechanical, every turn.** At turn end the loop
+    writes a capture to the *same store* retrieval reads (`capture.NewWithStorage`,
+    so it's instantly findable) — the user's message as the key, plus an outcome
+    line (files edited / commands run) and a capped answer excerpt, in
+    `ToolResult` (the field Reflex surfaces as a hit's Content). **Every** turn,
+    read-only included: a mechanical filter can't tell a stated preference or a
+    correction from noise, and those live in read-only turns — dropping them
+    would discard the lessons. (Reversed an earlier "mutating turns only"
+    default, at the user's call: record-everything, judge-on-read, same as
+    transcripts.) Plus `/remember <text>` — the highest-precision capture, since
+    the user marked it. Best-effort, no model, no added foreground latency.
+  - **Tier 2 (next): model-distilled insights, async on the reasoner.** Distill
+    the durable unit (decision/correction/pattern) from a turn — including the
+    read-only ones — assign a real type, supersede the raw Tier 1 rows. Runs
+    off the foreground (parallel/idle on the reasoner) so it adds no turn
+    latency; the honest caveat is that on a shared endpoint "parallel" is
+    time-sharing, so it wants preemption / idle-budgeting (the Think
+    integration).
 - ~~Retrieval injection at turn start~~ — done: each turn runs **Fast**
   (mechanical Reflex) retrieval over `.cortex/`. The hits are **recorded** to
   the transcript (`kind:retrieval`) and **merged into the system message for
