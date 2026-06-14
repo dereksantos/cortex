@@ -303,6 +303,28 @@ type AgentRequest struct {
 	// APIKey is the Bearer token for endpoints that need one (e.g. OpenRouter).
 	// Empty for local endpoints. Not serialized.
 	APIKey string `json:"-"`
+	// EphemeralSystem is per-turn context (e.g. retrieved memory) merged into
+	// the system message ONLY for the wire payload — never stored in Messages,
+	// so it doesn't accumulate across turns or persist. Set before a turn,
+	// cleared after. The durable record of what was retrieved lives in the
+	// transcript as a separate labelled entry, not here.
+	EphemeralSystem string `json:"-"`
+}
+
+// wireMessages returns the messages to send: Messages as-is, or — when an
+// ephemeral per-turn note is set — a copy with that note folded into the
+// system message. The stored Messages are never mutated, so nothing
+// accumulates and the transcript stays clean. Folding into the single system
+// message (rather than adding a second system/synthetic-role message) is the
+// portable choice: every local chat template honors exactly one system slot.
+func (r *AgentRequest) wireMessages() []Message {
+	if r.EphemeralSystem == "" || len(r.Messages) == 0 {
+		return r.Messages
+	}
+	out := make([]Message, len(r.Messages))
+	copy(out, r.Messages)
+	out[0].Content = out[0].Content + "\n\n" + r.EphemeralSystem
+	return out
 }
 
 type Tool struct {
@@ -467,7 +489,11 @@ var httpClient = &http.Client{Timeout: requestTimeout}
 // errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything
 // else — including a canceled ctx — returns immediately.
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
-	b, err := json.Marshal(r)
+	// Marshal a shallow copy with composed wire messages, so a per-turn
+	// ephemeral note reaches the model without mutating stored Messages.
+	payload := *r
+	payload.Messages = r.wireMessages()
+	b, err := json.Marshal(&payload)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling agent request: %w", err)
 	}
@@ -1302,15 +1328,49 @@ func (cs CortexSession) Append(message Message) {
 // --- Session transcripts -------------------------------------------------
 //
 // Raw conversations persist as plain JSONL under .cortex/sessions/<id>.jsonl,
-// one timestamped message per line (pi-style). Deliberately NOT a journal
+// one timestamped entry per line (pi-style). Deliberately NOT a journal
 // writer-class: the journal records distilled context (capture events,
 // insights); raw sessions stay out of it. `cat | jq` always works, and
 // .cortex/ is gitignored so transcripts never leave the machine.
+//
+// The transcript records EVERYTHING that happened in a turn — not just the
+// conversation, but the context that was retrieved and any compaction. `kind`
+// labels each entry so the record is complete (debug "why did it do that")
+// while replay stays selective: resume rebuilds the live window from `message`
+// entries only (record-only policy), so retrieved context is on the record but
+// not blindly re-fed. What's core vs. aux is a label, not a storage decision.
 
-// sessionEntry is one transcript line: the message plus when it was appended.
+const (
+	kindMessage    = "message"    // core conversation: replayed into the window on resume
+	kindRetrieval  = "retrieval"  // context fed to the model this turn: recorded, not replayed
+	kindCompaction = "compaction" // marker that history was compacted here
+)
+
+// sessionEntry is one transcript line. Message carries the conversation when
+// kind=="message"; Query/Results carry the retrieved context when
+// kind=="retrieval"; From/Coverage mark a compaction. A missing kind (older
+// transcripts) is treated as a core message.
 type sessionEntry struct {
-	TS time.Time `json:"ts"`
-	Message
+	TS      time.Time `json:"ts"`
+	Kind    string    `json:"kind,omitempty"`
+	Message           // populated for kindMessage
+
+	// kindRetrieval:
+	Query   string            `json:"query,omitempty"`
+	Results []retrievedRecord `json:"results,omitempty"`
+
+	// kindCompaction:
+	From     string  `json:"from,omitempty"`     // the prior session id this was compacted from
+	Coverage float64 `json:"coverage,omitempty"` // study coverage of the compacted transcript
+}
+
+// retrievedRecord is one retrieved hit as stored in the transcript — the
+// durable record of what memory the model was given on a turn.
+type retrievedRecord struct {
+	Category string  `json:"category,omitempty"`
+	Content  string  `json:"content"`
+	Score    float64 `json:"score,omitempty"`
+	ID       string  `json:"id,omitempty"`
 }
 
 // contextDir resolves the project's .cortex: the nearest one up the tree, or
@@ -1423,22 +1483,48 @@ func loadTranscript(path string) ([]Message, error) {
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
 		}
-		msgs = append(msgs, e.Message)
+		// Record-only replay: rebuild the live window from core conversation
+		// only. Retrieval/compaction entries stay in the file (the record)
+		// but are not re-fed — retrieval re-runs fresh against the new turn.
+		// A missing kind (older transcripts) is a core message.
+		if e.Kind == "" || e.Kind == kindMessage {
+			msgs = append(msgs, e.Message)
+		}
 	}
 	return msgs, nil
 }
 
-// writeTranscript appends one message to the open transcript, if any.
+// writeEntry appends one labelled entry to the open transcript, if any.
 // Best-effort by design: a persistence hiccup must not break the live turn.
-func (cs CortexSession) writeTranscript(m Message) {
+func (cs CortexSession) writeEntry(e sessionEntry) {
 	if cs.transcript == nil {
 		return
 	}
-	b, err := json.Marshal(sessionEntry{TS: time.Now(), Message: m})
+	e.TS = time.Now()
+	b, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
 	cs.transcript.Write(append(b, '\n'))
+}
+
+// writeTranscript records one core conversation message.
+func (cs CortexSession) writeTranscript(m Message) {
+	cs.writeEntry(sessionEntry{Kind: kindMessage, Message: m})
+}
+
+// recordRetrieval records what memory was fed to the model this turn. The
+// record is complete (debuggability); replay is selective (loadTranscript
+// skips it). No-op when nothing was retrieved.
+func (cs CortexSession) recordRetrieval(query string, results []cognition.Result) {
+	if len(results) == 0 {
+		return
+	}
+	recs := make([]retrievedRecord, 0, len(results))
+	for _, r := range results {
+		recs = append(recs, retrievedRecord{Category: r.Category, Content: r.Content, Score: r.Score, ID: r.ID})
+	}
+	cs.writeEntry(sessionEntry{Kind: kindRetrieval, Query: query, Results: recs})
 }
 
 // --- Compaction ------------------------------------------------------------
@@ -1502,10 +1588,14 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 		Role:    RoleUser,
 		Content: "[Compacted session — summary of the conversation so far. Continue from this state.]\n\n" + digest,
 	}
+	from := cs.SessionID
 	cs.transcript.Close()
 	cs.transcript = nil
 	cs.Request.Messages = []Message{sys}
 	cs.StartTranscript()
+	// Mark the new transcript as a compaction of the old, so the record shows
+	// where the digest came from (the raw prior transcript is still on disk).
+	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from, Coverage: res.CoveragePct})
 	cs.Append(summary)
 	// Fill is unknown until the next send; the gauge resets rather than lies.
 	cs.LastPromptTokens = 0
@@ -1565,24 +1655,24 @@ func (cs *CortexSession) EnableRetrieval() {
 	cs.retriever = cortex
 }
 
-// retrieve runs one Fast retrieval for the turn and returns a compact context
-// note, or "" when retrieval is disabled, errors, or finds nothing. It uses a
-// background context, not the turn's: Reflex is mechanical (no model) so it
-// needn't be Ctrl-C-cancelable, and detaching lets the async Reflect caching
-// survive the turn to warm the next one. Results are quality-gated by Resolve;
-// we inject them regardless of its inject/queue/wait decision — that gate is
+// retrieve runs one Fast retrieval for the turn and returns the hits, or nil
+// when retrieval is disabled, errors, or finds nothing. It uses a background
+// context, not the turn's: Reflex is mechanical (no model) so it needn't be
+// Ctrl-C-cancelable, and detaching lets the async Reflect caching survive the
+// turn to warm the next one. Results are quality-gated by Resolve; the caller
+// injects them regardless of its inject/queue/wait decision — that gate is
 // tuned for embedding-scale scores and would suppress everything on the
 // text-only path local setups use.
-func (cs *CortexSession) retrieve(query string) string {
+func (cs *CortexSession) retrieve(query string) []cognition.Result {
 	if cs.retriever == nil || strings.TrimSpace(query) == "" {
-		return ""
+		return nil
 	}
 	res, err := cs.retriever.Retrieve(context.Background(),
 		cognition.Query{Text: query, Limit: retrievalLimit}, cognition.Fast)
-	if err != nil || res == nil || len(res.Results) == 0 {
-		return ""
+	if err != nil || res == nil {
+		return nil
 	}
-	return formatRetrieved(res.Results)
+	return res.Results
 }
 
 // formatRetrieved renders results as a compact, clearly-labelled context block.
@@ -1610,20 +1700,6 @@ func formatRetrieved(results []cognition.Result) string {
 		return ""
 	}
 	return "# Relevant context from memory (retrieved, not user-authored)\n" + strings.TrimRight(b.String(), "\n")
-}
-
-// augmentSystem appends an ephemeral note to the system message for one turn
-// and returns a restore func. The note is NOT persisted (no Append → no
-// transcript write) and is stripped before the next turn, so retrieved context
-// never accumulates in history or fights compaction (which reads message[0] as
-// the clean seed). A "" note is a no-op.
-func (cs *CortexSession) augmentSystem(note string) func() {
-	if note == "" || len(cs.Request.Messages) == 0 {
-		return func() {}
-	}
-	orig := cs.Request.Messages[0].Content
-	cs.Request.Messages[0].Content = orig + "\n\n" + note
-	return func() { cs.Request.Messages[0].Content = orig }
 }
 
 // Close releases the transcript and retrieval resources at REPL exit.
@@ -1896,10 +1972,14 @@ func main() {
 
 		session.Append(Message{Role: RoleUser, Content: input})
 
-		// Fast retrieval for THIS turn: relevant prior context injected into
-		// the system message ephemerally (restore() strips it before the next
-		// turn, so it never accumulates or reaches the transcript).
-		restore := session.augmentSystem(session.retrieve(input))
+		// Fast retrieval for THIS turn. The hits are recorded to the transcript
+		// (kindRetrieval — the durable record of what the model was given) and
+		// merged into the system message for the wire only (EphemeralSystem),
+		// cleared after the turn so they don't accumulate or persist as core
+		// conversation.
+		hits := session.retrieve(input)
+		session.recordRetrieval(input, hits)
+		session.Request.EphemeralSystem = formatRetrieved(hits)
 
 		// Ctrl-C cancels the in-flight turn (model call or tool) instead of
 		// killing the REPL. stop() restores default signal handling at the
@@ -1907,7 +1987,7 @@ func main() {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		err := session.Resolve(ctx)
 		stop()
-		restore()
+		session.Request.EphemeralSystem = ""
 		switch {
 		case err == nil:
 			// Red gauge: compact at the turn boundary, before the window

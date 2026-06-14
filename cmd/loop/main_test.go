@@ -1425,53 +1425,55 @@ func TestFormatRetrieved(t *testing.T) {
 	})
 }
 
-func TestAugmentSystemIsEphemeral(t *testing.T) {
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	orig := cs.Request.Messages[0].Content
+// wireMessages folds the ephemeral note into the system message for the wire
+// only — the stored Messages must be untouched, so nothing accumulates.
+func TestWireMessagesComposesEphemerally(t *testing.T) {
+	req := CortexArgs{}.Request()
+	orig := req.Messages[0].Content
 
-	restore := cs.augmentSystem("# memory\n- [decision] use pgx")
-	if !strings.Contains(cs.Request.Messages[0].Content, "use pgx") {
-		t.Fatal("note should be injected into the system message")
-	}
-	if !strings.HasPrefix(cs.Request.Messages[0].Content, orig) {
-		t.Error("augmentation must preserve the original system prompt as the prefix")
-	}
-	restore()
-	if cs.Request.Messages[0].Content != orig {
-		t.Errorf("restore() must return the system message to its original content")
-	}
+	t.Run("no ephemeral → system content unchanged", func(t *testing.T) {
+		if req.wireMessages()[0].Content != orig {
+			t.Error("without ephemeral, system content should be unchanged")
+		}
+	})
+
+	t.Run("ephemeral folds into system on the wire, not in storage", func(t *testing.T) {
+		req.EphemeralSystem = "# memory\n- [decision] use pgx"
+		wire := req.wireMessages()
+		if !strings.Contains(wire[0].Content, "use pgx") {
+			t.Error("wire system message should carry the ephemeral note")
+		}
+		if !strings.HasPrefix(wire[0].Content, orig) {
+			t.Error("wire system message should keep the original prompt as prefix")
+		}
+		if req.Messages[0].Content != orig {
+			t.Error("stored system message must NOT be mutated by composition")
+		}
+	})
 }
 
-func TestAugmentSystemEmptyNoteIsNoOp(t *testing.T) {
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	orig := cs.Request.Messages[0].Content
-	restore := cs.augmentSystem("")
-	if cs.Request.Messages[0].Content != orig {
-		t.Error("empty note must not change the system message")
-	}
-	restore() // must not panic
-}
-
-func TestRetrieveDisabledReturnsEmpty(t *testing.T) {
+func TestRetrieveDisabledReturnsNil(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()} // retriever == nil
-	if got := cs.retrieve("anything"); got != "" {
-		t.Errorf("retrieve with no retriever = %q, want empty", got)
+	if got := cs.retrieve("anything"); got != nil {
+		t.Errorf("retrieve with no retriever = %v, want nil", got)
 	}
 }
 
 // Round-trip: a captured insight under the project's .cortex/ store must
-// surface through the loop's Fast retrieval. Mirrors the capture package's
-// own round-trip test, but exercises the loop's retrieve()/EnableRetrieval()
-// wiring end to end. No model: Reflex is text-only here.
-func TestRetrieveSurfacesCapturedInsight(t *testing.T) {
+// surface through the loop's Fast retrieval, AND be recorded to the transcript
+// as a kindRetrieval entry while staying OUT of the replayed window on resume
+// (record-only policy). No model: Reflex is text-only here.
+func TestRetrieveRecordsButDoesNotReplay(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.StartTranscript()
 	cs.EnableRetrieval()
-	if cs.retriever == nil {
-		t.Fatal("EnableRetrieval should construct a retriever in a writable dir")
+	if cs.retriever == nil || cs.transcript == nil {
+		t.Fatal("EnableRetrieval/StartTranscript should both succeed in a writable dir")
 	}
 	t.Cleanup(cs.Close)
+	id := cs.SessionID
 
 	cap := capture.NewWithStorage(
 		&config.Config{ContextDir: contextDir(), ProjectRoot: filepath.Dir(contextDir())},
@@ -1493,14 +1495,71 @@ func TestRetrieveSurfacesCapturedInsight(t *testing.T) {
 		t.Fatalf("CaptureEvent: %v", err)
 	}
 
-	note := cs.retrieve("authentication")
-	if note == "" {
+	// A turn: retrieve, record, and (would) inject.
+	hits := cs.retrieve("authentication")
+	if len(hits) == 0 {
 		t.Fatal("retrieve found nothing — capture is not visible to the loop's retrieval")
 	}
+	cs.recordRetrieval("authentication", hits)
+	cs.Append(Message{Role: RoleUser, Content: "how does auth work?"})
+
+	// The note that WOULD be injected carries provenance + content.
+	note := formatRetrieved(hits)
 	if !strings.Contains(note, "retrieved, not user-authored") {
 		t.Errorf("note missing provenance header:\n%s", note)
 	}
 	if !strings.Contains(strings.ToLower(note), "jwt") && !strings.Contains(strings.ToLower(note), "authentication") {
-		t.Errorf("note should carry the captured content, got:\n%s", note)
+		t.Errorf("note should carry the captured content:\n%s", note)
+	}
+
+	// The raw transcript records the retrieval (debuggability)...
+	raw, err := os.ReadFile(filepath.Join(sessionsDir(), id+".jsonl"))
+	if err != nil {
+		t.Fatalf("read transcript: %v", err)
+	}
+	if !strings.Contains(string(raw), `"kind":"retrieval"`) {
+		t.Error("transcript should record a kindRetrieval entry")
+	}
+	if !strings.Contains(string(raw), "JWT") {
+		t.Error("recorded retrieval should carry the retrieved content")
+	}
+
+	// ...but resume rebuilds the window from core messages ONLY: the system
+	// seed and the user turn, never the retrieval entry.
+	msgs, err := loadTranscript(filepath.Join(sessionsDir(), id+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadTranscript: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "JWT") || strings.Contains(m.Content, "retrieved, not user-authored") {
+			t.Errorf("retrieval must not be replayed into the window, but found: %q", m.Content)
+		}
+	}
+	roles := make([]string, len(msgs))
+	for i, m := range msgs {
+		roles[i] = m.Role
+	}
+	if len(msgs) != 2 || roles[0] != RoleSystem || roles[1] != RoleUser {
+		t.Errorf("replayed window = roles %v, want [system user] (core conversation only)", roles)
+	}
+}
+
+// Older transcripts have no kind field; those entries must still replay as
+// core messages.
+func TestLoadTranscriptBackCompat(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dir := sessionsDir()
+	os.MkdirAll(dir, 0755)
+	// Legacy line: {ts, role, content} with no "kind".
+	legacy := `{"ts":"2026-01-01T00:00:00Z","role":"user","content":"legacy turn"}` + "\n"
+	path := filepath.Join(dir, "20260101-000000.jsonl")
+	os.WriteFile(path, []byte(legacy), 0644)
+
+	msgs, err := loadTranscript(path)
+	if err != nil {
+		t.Fatalf("loadTranscript: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "legacy turn" {
+		t.Errorf("legacy (kind-less) entry should replay as a core message, got %+v", msgs)
 	}
 }

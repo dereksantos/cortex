@@ -103,6 +103,20 @@ writer-class. They persist as plain JSONL under `.cortex/sessions/<id>.jsonl`
 and raw conversations stay out of it. Capture *about* the session is the
 journalling layer.
 
+**Decided (2026-06-14): record-everything, label-for-replay.** The transcript
+records EVERYTHING that happened in a turn — conversation, what was retrieved,
+and compaction markers — each line tagged with a `kind`
+(`message`/`retrieval`/`compaction`). Two axes that were being conflated:
+*the record* (disk, full fidelity, "why did it do that") and *the live window*
+(what's re-sent to the model). Persistence belongs to the first; window economy
+to the second. `kind` bridges them: the record is complete, but replay is
+selective. Core-vs-aux is a **label, not a storage decision**. Resume defaults
+to **record-only** — it rebuilds the live window from `message` entries, so
+retrieved context is on the record (inspect with `jq 'select(.kind=="retrieval")'`)
+but not blindly re-fed (retrieval re-runs fresh against the new turn). Faithful
+replay (re-feeding historical retrievals) is now a free policy flip if continued
+sessions feel like they lost the thread.
+
 **Need:**
 - ~~Session transcript persistence~~ — done: every REPL session appends each
   message ambiently to its transcript; `loop resume [id]` continues the
@@ -110,9 +124,11 @@ journalling layer.
 - Capture at turn end (`cortex capture` of distilled insights) — this is what
   enters the journal.
 - ~~Retrieval injection at turn start~~ — done: each turn runs **Fast**
-  (mechanical Reflex) retrieval over `.cortex/` and injects the hits into the
-  system message **ephemerally** (stripped before the next turn, never
-  persisted or accumulated). Reuses `internal/cognition` so reranking
+  (mechanical Reflex) retrieval over `.cortex/`. The hits are **recorded** to
+  the transcript (`kind:retrieval`) and **merged into the system message for
+  the wire only** (`AgentRequest.EphemeralSystem`, composed at marshal time so
+  stored `Messages` are never mutated), cleared after the turn so they don't
+  accumulate in the live window. Reuses `internal/cognition` so reranking
   (Reflect/Think on the reasoner, in parallel) attaches later without changing
   the call site. Results are injected regardless of Resolve's inject/queue
   decision — that gate is embedding-scale-tuned and would suppress everything
