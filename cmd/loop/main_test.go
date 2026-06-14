@@ -11,7 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/study"
+	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
+	"github.com/dereksantos/cortex/pkg/events"
 )
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
@@ -1371,5 +1375,132 @@ func TestBashRejectsShellSyntax(t *testing.T) {
 	args, _ := json.Marshal(map[string]string{"command": "echo plain"})
 	if out, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil); err != nil || !strings.Contains(out, "plain") {
 		t.Errorf("bare command should still run: out=%q err=%v", out, err)
+	}
+}
+
+// --- Retrieval -------------------------------------------------------------
+
+func TestFormatRetrieved(t *testing.T) {
+	t.Run("empty input yields empty string", func(t *testing.T) {
+		if got := formatRetrieved(nil); got != "" {
+			t.Errorf("formatRetrieved(nil) = %q, want empty", got)
+		}
+	})
+
+	t.Run("all-blank content yields empty string", func(t *testing.T) {
+		got := formatRetrieved([]cognition.Result{{Content: "   "}, {Content: ""}})
+		if got != "" {
+			t.Errorf("blank content should produce no note, got %q", got)
+		}
+	})
+
+	t.Run("labels category, collapses whitespace, marks provenance", func(t *testing.T) {
+		got := formatRetrieved([]cognition.Result{
+			{Category: "decision", Content: "Use pgx\n  not database/sql"},
+			{Content: "no category here"}, // → "note"
+		})
+		for _, want := range []string{
+			"retrieved, not user-authored",
+			"- [decision] Use pgx not database/sql",
+			"- [note] no category here",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("formatRetrieved missing %q in:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "\n  not") {
+			t.Error("content newlines should be collapsed")
+		}
+	})
+
+	t.Run("oversized content is truncated", func(t *testing.T) {
+		long := strings.Repeat("x", retrievedContentCap+50)
+		got := formatRetrieved([]cognition.Result{{Content: long}})
+		if !strings.Contains(got, "…") {
+			t.Error("oversized snippet should be truncated with an ellipsis")
+		}
+		if len(got) > len("# Relevant context from memory (retrieved, not user-authored)\n- [note] ")+retrievedContentCap+10 {
+			t.Errorf("truncation cap did not hold: %d bytes", len(got))
+		}
+	})
+}
+
+func TestAugmentSystemIsEphemeral(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	orig := cs.Request.Messages[0].Content
+
+	restore := cs.augmentSystem("# memory\n- [decision] use pgx")
+	if !strings.Contains(cs.Request.Messages[0].Content, "use pgx") {
+		t.Fatal("note should be injected into the system message")
+	}
+	if !strings.HasPrefix(cs.Request.Messages[0].Content, orig) {
+		t.Error("augmentation must preserve the original system prompt as the prefix")
+	}
+	restore()
+	if cs.Request.Messages[0].Content != orig {
+		t.Errorf("restore() must return the system message to its original content")
+	}
+}
+
+func TestAugmentSystemEmptyNoteIsNoOp(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	orig := cs.Request.Messages[0].Content
+	restore := cs.augmentSystem("")
+	if cs.Request.Messages[0].Content != orig {
+		t.Error("empty note must not change the system message")
+	}
+	restore() // must not panic
+}
+
+func TestRetrieveDisabledReturnsEmpty(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()} // retriever == nil
+	if got := cs.retrieve("anything"); got != "" {
+		t.Errorf("retrieve with no retriever = %q, want empty", got)
+	}
+}
+
+// Round-trip: a captured insight under the project's .cortex/ store must
+// surface through the loop's Fast retrieval. Mirrors the capture package's
+// own round-trip test, but exercises the loop's retrieve()/EnableRetrieval()
+// wiring end to end. No model: Reflex is text-only here.
+func TestRetrieveSurfacesCapturedInsight(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.EnableRetrieval()
+	if cs.retriever == nil {
+		t.Fatal("EnableRetrieval should construct a retriever in a writable dir")
+	}
+	t.Cleanup(cs.Close)
+
+	cap := capture.NewWithStorage(
+		&config.Config{ContextDir: contextDir(), ProjectRoot: filepath.Dir(contextDir())},
+		cs.store,
+	)
+	if err := cap.CaptureEvent(&events.Event{
+		ID:        "evt-loop-rt",
+		Source:    events.SourceGeneric,
+		EventType: events.EventToolUse,
+		Timestamp: time.Now(),
+		ToolName:  "loop",
+		ToolInput: map[string]interface{}{
+			"type":    "decision",
+			"content": "we use JWT for authentication, not server-side sessions",
+		},
+		ToolResult: "captured the JWT authentication decision",
+		Context:    events.EventContext{SessionID: "s1", ProjectPath: contextDir()},
+	}); err != nil {
+		t.Fatalf("CaptureEvent: %v", err)
+	}
+
+	note := cs.retrieve("authentication")
+	if note == "" {
+		t.Fatal("retrieve found nothing — capture is not visible to the loop's retrieval")
+	}
+	if !strings.Contains(note, "retrieved, not user-authored") {
+		t.Errorf("note missing provenance header:\n%s", note)
+	}
+	if !strings.Contains(strings.ToLower(note), "jwt") && !strings.Contains(strings.ToLower(note), "authentication") {
+		t.Errorf("note should carry the captured content, got:\n%s", note)
 	}
 }

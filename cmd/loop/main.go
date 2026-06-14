@@ -22,7 +22,11 @@ import (
 	"strings"
 	"time"
 
+	intcog "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
+	"github.com/dereksantos/cortex/pkg/cognition"
+	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -44,7 +48,7 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
 [ ] Capture at turn end (cortex capture — distilled insights are what journals)
 [x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
-[ ] Retrieval injection at turn start
+[x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
 [ ] Integrate eval suite into new harness
 [ ] cortex model for cataloging and suggesting model setups based on system resources
 [ ] Later (after harness is stable): cortex dream / think / dag integration
@@ -1111,6 +1115,11 @@ type CortexSession struct {
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
 	// through to. nil when the session is unpersisted (study CLI, tests).
 	transcript *os.File
+	// retriever serves Fast (mechanical) context retrieval from the project's
+	// .cortex/ store; nil when retrieval is disabled (no store, or an
+	// unpersisted session). store is its backing handle, closed at exit.
+	retriever *intcog.Cortex
+	store     *storage.Storage
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -1304,15 +1313,19 @@ type sessionEntry struct {
 	Message
 }
 
-// sessionsDir resolves where transcripts live: alongside the nearest .cortex
-// up the tree, or cwd/.cortex when none exists yet.
-func sessionsDir() string {
+// contextDir resolves the project's .cortex: the nearest one up the tree, or
+// cwd/.cortex when none exists yet. The journal, transcripts, and retrieval
+// store all live under it.
+func contextDir() string {
 	root := findUp(".cortex")
 	if root == "" {
 		root = ".cortex"
 	}
-	return filepath.Join(root, "sessions")
+	return root
 }
+
+// sessionsDir is where raw transcripts live.
+func sessionsDir() string { return filepath.Join(contextDir(), "sessions") }
 
 // StartTranscript begins persisting this session under a fresh timestamp id.
 // Best-effort: on any error the session simply runs unpersisted — the REPL
@@ -1517,6 +1530,118 @@ func (cs *CortexSession) Clear() {
 	cs.StartTranscript()
 }
 
+// --- Retrieval -------------------------------------------------------------
+//
+// Fast (mechanical) retrieval surfaces relevant prior context at turn start:
+// a Reflex pass over the project's .cortex/ store, foreground-latency-bounded.
+// Reranking (Reflect/Think on the reasoner, in parallel) layers on later —
+// this is the latency-bounded foreground half of that split.
+
+// retrievalLimit caps how many prior-context hits a turn injects.
+const retrievalLimit = 5
+
+// retrievedContentCap bounds each injected snippet so one long capture can't
+// dominate the window.
+const retrievedContentCap = 240
+
+// EnableRetrieval wires Fast retrieval over the project's .cortex/ store.
+// Best-effort: any failure leaves retrieval disabled and the REPL runs exactly
+// as before. Text-only (nil embedder + nil provider) — semantic search and
+// Think reranking attach later without changing this call site. Only the
+// interactive REPL calls this; the study/eval subcommands never build storage.
+func (cs *CortexSession) EnableRetrieval() {
+	dir := contextDir()
+	cfg := &config.Config{ContextDir: dir, ProjectRoot: filepath.Dir(dir)}
+	store, err := storage.New(cfg)
+	if err != nil {
+		return
+	}
+	cortex, err := intcog.New(store, nil, nil, cfg)
+	if err != nil {
+		store.Close()
+		return
+	}
+	cs.store = store
+	cs.retriever = cortex
+}
+
+// retrieve runs one Fast retrieval for the turn and returns a compact context
+// note, or "" when retrieval is disabled, errors, or finds nothing. It uses a
+// background context, not the turn's: Reflex is mechanical (no model) so it
+// needn't be Ctrl-C-cancelable, and detaching lets the async Reflect caching
+// survive the turn to warm the next one. Results are quality-gated by Resolve;
+// we inject them regardless of its inject/queue/wait decision — that gate is
+// tuned for embedding-scale scores and would suppress everything on the
+// text-only path local setups use.
+func (cs *CortexSession) retrieve(query string) string {
+	if cs.retriever == nil || strings.TrimSpace(query) == "" {
+		return ""
+	}
+	res, err := cs.retriever.Retrieve(context.Background(),
+		cognition.Query{Text: query, Limit: retrievalLimit}, cognition.Fast)
+	if err != nil || res == nil || len(res.Results) == 0 {
+		return ""
+	}
+	return formatRetrieved(res.Results)
+}
+
+// formatRetrieved renders results as a compact, clearly-labelled context block.
+// The header marks the text as retrieved memory, not a user instruction, so the
+// model weighs it accordingly. Returns "" if nothing has printable content.
+func formatRetrieved(results []cognition.Result) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range results {
+		c := strings.Join(strings.Fields(r.Content), " ") // collapse whitespace/newlines
+		if c == "" {
+			continue
+		}
+		if len(c) > retrievedContentCap {
+			c = c[:retrievedContentCap] + "…"
+		}
+		cat := r.Category
+		if cat == "" {
+			cat = "note"
+		}
+		fmt.Fprintf(&b, "- [%s] %s\n", cat, c)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	return "# Relevant context from memory (retrieved, not user-authored)\n" + strings.TrimRight(b.String(), "\n")
+}
+
+// augmentSystem appends an ephemeral note to the system message for one turn
+// and returns a restore func. The note is NOT persisted (no Append → no
+// transcript write) and is stripped before the next turn, so retrieved context
+// never accumulates in history or fights compaction (which reads message[0] as
+// the clean seed). A "" note is a no-op.
+func (cs *CortexSession) augmentSystem(note string) func() {
+	if note == "" || len(cs.Request.Messages) == 0 {
+		return func() {}
+	}
+	orig := cs.Request.Messages[0].Content
+	cs.Request.Messages[0].Content = orig + "\n\n" + note
+	return func() { cs.Request.Messages[0].Content = orig }
+}
+
+// Close releases the transcript and retrieval resources at REPL exit.
+func (cs *CortexSession) Close() {
+	if cs.transcript != nil {
+		cs.transcript.Close()
+		cs.transcript = nil
+	}
+	if cs.retriever != nil {
+		cs.retriever.Shutdown(context.Background())
+		cs.retriever = nil
+	}
+	if cs.store != nil {
+		cs.store.Close()
+		cs.store = nil
+	}
+}
+
 // humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
 func humanK(n int) string {
 	if n < 1000 {
@@ -1718,6 +1843,11 @@ func main() {
 		session.StartTranscript()
 	}
 
+	// Fast retrieval over .cortex/ (best-effort; disabled cleanly if the store
+	// can't open). Shut down with the transcript at exit.
+	session.EnableRetrieval()
+	defer session.Close()
+
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
@@ -1765,12 +1895,19 @@ func main() {
 		}
 
 		session.Append(Message{Role: RoleUser, Content: input})
+
+		// Fast retrieval for THIS turn: relevant prior context injected into
+		// the system message ephemerally (restore() strips it before the next
+		// turn, so it never accumulates or reaches the transcript).
+		restore := session.augmentSystem(session.retrieve(input))
+
 		// Ctrl-C cancels the in-flight turn (model call or tool) instead of
 		// killing the REPL. stop() restores default signal handling at the
 		// prompt, so Ctrl-C while idle still exits the process.
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		err := session.Resolve(ctx)
 		stop()
+		restore()
 		switch {
 		case err == nil:
 			// Red gauge: compact at the turn boundary, before the window

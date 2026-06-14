@@ -109,8 +109,21 @@ journalling layer.
   latest (or a named) session.
 - Capture at turn end (`cortex capture` of distilled insights) — this is what
   enters the journal.
-- Retrieval injection at turn start (`cortex search` → system context) — the
-  documented slice order stands: capture first, retrieval second.
+- ~~Retrieval injection at turn start~~ — done: each turn runs **Fast**
+  (mechanical Reflex) retrieval over `.cortex/` and injects the hits into the
+  system message **ephemerally** (stripped before the next turn, never
+  persisted or accumulated). Reuses `internal/cognition` so reranking
+  (Reflect/Think on the reasoner, in parallel) attaches later without changing
+  the call site. Results are injected regardless of Resolve's inject/queue
+  decision — that gate is embedding-scale-tuned and would suppress everything
+  on the text-only path local setups use. Best-effort: disabled cleanly when
+  the store can't open.
+- Capture order note: we did retrieval *before* capture (inverting the planned
+  order) at the user's call — Think integration is the natural home for the
+  parallel-reasoner half, and Fast retrieval stands alone against captures from
+  prior `cortex capture` use or other agents sharing `.cortex/`. Capture at
+  turn end (structural always + model-distilled when a model is available,
+  likely processed async on the reasoner, not inline) is the next slice.
 
 **Don't:** session trees/branching (pi has it; we don't need it); sharing;
 multi-session orchestration.
@@ -160,7 +173,9 @@ answers later (DAG spawn, study).
    `.cortex/sessions/`, deliberately outside the journal. Done.
 4. **Compaction-as-study** (part 3): the red-gauge answer, reusing the engine.
    Done.
-5. **Retrieval injection** (part 4): the learning-over-time slice.
+5. **Retrieval injection** (part 4): the learning-over-time slice. Done
+   (Fast/Reflex, ephemeral per-turn). Think reranking + capture-at-turn-end
+   follow.
 6. **Eval integration** (part 6): continuous, gating each step above.
 
 Dream/Think/DAG integration (existing TODOs) deliberately come *after* this
