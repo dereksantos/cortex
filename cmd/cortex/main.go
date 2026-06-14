@@ -49,7 +49,6 @@ func main() {
 		cortex version or --version --> shows version
 		cortex help or --help --> shows cli manual
 		cortex install --> optional. creates default settings for cortex
-		cortex daemon --> runs the daemon or returns its status
 
 		Agentic commands
 
