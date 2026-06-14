@@ -82,6 +82,14 @@ const defaultModel = ModelCoder
 // spin forever burning tokens. The smallest form of the "bounded" principle.
 const maxToolIterations = 100
 
+// maxRepeatedToolCalls bounds how many byte-identical consecutive tool-call
+// batches the inner loop tolerates before intervening. A weak model that gets a
+// content-free result can otherwise re-issue the same call until
+// maxToolIterations, burning the whole turn (observed: 68 identical greps in
+// one turn, 2026-06-14). On the (maxRepeatedToolCalls-1)th repeat we inject a
+// nudge giving the model one chance to change course; on the next we abort.
+const maxRepeatedToolCalls = 3
+
 // maxToolOutput caps how much tool output we feed back into context, so a
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const maxToolOutput = 10000
@@ -832,25 +840,97 @@ var bashAllowlist = map[string]bool{
 	"go": true, "git": true, "gofmt": true,
 }
 
-// bashShellSyntax matches shell metacharacters the bash tool cannot honor
-// (we exec the binary directly, no shell). Without an explicit rejection
-// the operator reaches the underlying binary as a literal argument and the
-// model gets a confusing downstream error — `find . | head` yields
-// "find: |: unknown primary", which models retry verbatim instead of
-// adapting (observed: 3 wasted turns in one session, 2026-06-12).
-var bashShellSyntax = regexp.MustCompile(`[|><;&]|\$\(`)
+// tokenizeCommand splits a command line into argv the way a POSIX shell would
+// for the cases we support: it honors single quotes, double quotes, and
+// backslash escapes so quoted arguments reach the binary WITHOUT their quote
+// characters. strings.Fields did not — `grep -n "Scroller" f` reached grep as
+// the literal pattern `"Scroller"` (quotes included), which never matched, so
+// the model retried the identical command 68 times before hitting the
+// iteration cap (2026-06-14). We still exec the binary directly (no shell), so
+// any shell metacharacter that appears *outside* quotes is something we cannot
+// honor: tokenize reports the first such bare metacharacter as bareMeta so the
+// caller can reject the command with a helpful message instead of silently
+// passing a mangled argument. Metacharacters inside quotes are literal and
+// allowed (e.g. grep -n "a|b" f searches for the literal a|b).
+func tokenizeCommand(command string) (fields []string, bareMeta string, err error) {
+	var cur strings.Builder
+	inField := false
+	flush := func() {
+		if inField {
+			fields = append(fields, cur.String())
+			cur.Reset()
+			inField = false
+		}
+	}
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		switch c := runes[i]; {
+		case c == '\'':
+			inField = true
+			for i++; i < len(runes) && runes[i] != '\''; i++ {
+				cur.WriteRune(runes[i])
+			}
+			if i >= len(runes) {
+				return nil, "", fmt.Errorf("unterminated single quote in command")
+			}
+		case c == '"':
+			inField = true
+			for i++; i < len(runes) && runes[i] != '"'; i++ {
+				// Inside double quotes the shell unescapes only a few chars.
+				if runes[i] == '\\' && i+1 < len(runes) {
+					if n := runes[i+1]; n == '"' || n == '\\' || n == '$' || n == '`' {
+						i++
+					}
+				}
+				cur.WriteRune(runes[i])
+			}
+			if i >= len(runes) {
+				return nil, "", fmt.Errorf("unterminated double quote in command")
+			}
+		case c == '\\':
+			if i+1 < len(runes) {
+				i++
+				cur.WriteRune(runes[i])
+				inField = true
+			}
+		case c == ' ' || c == '\t' || c == '\n':
+			flush()
+		case c == '|' || c == '>' || c == '<' || c == ';' || c == '&':
+			if bareMeta == "" {
+				bareMeta = string(c)
+			}
+		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			if bareMeta == "" {
+				bareMeta = "$("
+			}
+			i++ // consume '('
+		default:
+			cur.WriteRune(c)
+			inField = true
+		}
+	}
+	flush()
+	return fields, bareMeta, nil
+}
 
 func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) {
 	command, err := tc.stringArg("command")
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(command)
+	fields, bareMeta, err := tokenizeCommand(command)
+	if err != nil {
+		return "", err
+	}
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty command")
 	}
-	if m := bashShellSyntax.FindString(command); m != "" {
-		return "", fmt.Errorf("shell syntax %q is not supported (commands run without a shell — no pipes, redirects, or chaining); run the bare command instead, e.g. %q", m, fields[0]+" ...")
+	// A bare metacharacter is shell syntax we can't honor. Reject explicitly:
+	// reaching the binary as a literal arg yields confusing downstream errors
+	// (`find . | head` → "find: |: unknown primary") that models retry verbatim
+	// instead of adapting (observed: 3 wasted turns, 2026-06-12).
+	if bareMeta != "" {
+		return "", fmt.Errorf("shell syntax %q is not supported (commands run without a shell — no pipes, redirects, or chaining); run the bare command instead, e.g. %q", bareMeta, fields[0]+" ...")
 	}
 	if !bashAllowlist[fields[0]] {
 		return "", fmt.Errorf("command %q is not in the allowlist", fields[0])
@@ -872,6 +952,16 @@ func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) 
 	// A non-zero exit is an observation, not a harness failure: hand the output
 	// and exit error back to the model so it can react.
 	if runErr != nil {
+		// grep exits 1 to mean "no matches" — a normal, content-free result, not
+		// an error. Reported as a bare "[exit error: exit status 1]" it gave the
+		// model nothing to act on and it retried the same command in a loop
+		// (2026-06-14). Name the empty-result case explicitly. Exit >=2 is a real
+		// grep error and keeps its stderr (merged into result by CombinedOutput).
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
+			fields[0] == "grep" && strings.TrimSpace(result) == "" {
+			return "(no matches)", nil
+		}
 		return result + "\n[exit error: " + runErr.Error() + "]", nil
 	}
 	return result, nil
@@ -2165,12 +2255,29 @@ func (cs *CortexSession) runToolCalls(ctx context.Context, calls []ToolCall) {
 	}
 }
 
+// toolCallSignature is a stable fingerprint of a tool-call batch, used by the
+// inner loop to detect a model stuck re-issuing the same call. Order matters;
+// call IDs (which vary every time) are deliberately excluded so two batches
+// that differ only by ID compare equal.
+func toolCallSignature(calls []ToolCall) string {
+	var b strings.Builder
+	for _, c := range calls {
+		b.WriteString(c.Function.Name)
+		b.WriteByte(0)
+		b.WriteString(c.Function.Arguments)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // Resolve runs the agentic inner loop for one user turn: send, run any tools
 // the model asked for, feed the results back, and re-send — repeating until the
 // model answers with no more tool calls (or we hit the iteration cap). The
 // caller appends the user message; Resolve owns everything from there. A
 // canceled ctx ends the turn at the next boundary with history left valid.
 func (cs *CortexSession) Resolve(ctx context.Context) error {
+	var lastSig string
+	var repeats int // consecutive batches identical to lastSig, including current
 	for i := 0; i < maxToolIterations; i++ {
 		res, err := cs.send(ctx)
 		if err != nil {
@@ -2212,11 +2319,35 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 			return nil
 		}
 
+		// No-progress guard: a weak model handed a content-free result can
+		// re-issue the identical batch forever. Track consecutive repeats and
+		// break the loop before it burns the whole turn.
+		if sig := toolCallSignature(msg.ToolCalls); sig == lastSig {
+			repeats++
+		} else {
+			lastSig, repeats = sig, 1
+		}
+
 		// (3) Run the tools, then stop at the iteration boundary if the user
 		// interrupted — history is valid, and the model can pick up next turn.
 		cs.runToolCalls(ctx, msg.ToolCalls)
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+
+		// Abort once the same batch has repeated past the cap: the model is not
+		// going to recover on its own. The nudge below already gave it a chance.
+		if repeats >= maxRepeatedToolCalls {
+			fmt.Println(withColor("stopped: model repeated the same tool call with no progress", yellow))
+			return nil
+		}
+		// One repeat short of the cap, inject a nudge so the model can change
+		// course (it sees the result was identical and tries something else).
+		if repeats == maxRepeatedToolCalls-1 {
+			cs.Append(Message{
+				Role:    RoleUser,
+				Content: "Harness note: that tool call was byte-identical to the previous one and produced the same result. Repeating it will not yield new information — try a different command or approach, or stop and report what you've found.",
+			})
 		}
 		// Loop: the next send picks up the grown history.
 	}

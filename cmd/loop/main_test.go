@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1321,6 +1322,94 @@ func TestBashRejectsShellSyntax(t *testing.T) {
 	}
 }
 
+// tokenizeCommand must honor quotes/escapes (so quoted args reach the binary
+// without their quotes) while still flagging bare shell metacharacters.
+func TestTokenizeCommand(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     []string
+		bareMeta string
+		wantErr  bool
+	}{
+		{in: `grep -n "Scroller" f`, want: []string{"grep", "-n", "Scroller", "f"}},
+		{in: `grep -n 'a b' f`, want: []string{"grep", "-n", "a b", "f"}},
+		{in: `echo a\ b`, want: []string{"echo", "a b"}},
+		{in: `echo "a\"b"`, want: []string{"echo", `a"b`}},
+		// A pipe INSIDE quotes is a literal arg, not shell syntax — allowed.
+		{in: `grep "a|b" f`, want: []string{"grep", "a|b", "f"}},
+		// Bare metacharacters are reported so the caller can reject.
+		{in: `find . | head`, bareMeta: "|"},
+		{in: `echo hi > out`, bareMeta: ">"},
+		{in: `ls ; pwd`, bareMeta: ";"},
+		{in: `go test && echo ok`, bareMeta: "&"},
+		{in: `echo $(pwd)`, bareMeta: "$("},
+		{in: `echo "unterminated`, wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, bareMeta, err := tokenizeCommand(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", c.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if bareMeta != c.bareMeta {
+				t.Errorf("bareMeta = %q, want %q", bareMeta, c.bareMeta)
+			}
+			if c.bareMeta == "" && !slices.Equal(got, c.want) {
+				t.Errorf("fields = %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+// Regression: a quoted grep pattern must actually match. Before the tokenizer
+// fix, `grep -n "X" f` searched for the literal `"X"` (quotes included), found
+// nothing, and the model looped on the identical command (2026-06-14).
+func TestBashHonorsQuotedArgs(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("func TestScroller(t *testing.T) {\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, cmd := range []string{`grep -n Scroller f.txt`, `grep -n "Scroller" f.txt`} {
+		args, _ := json.Marshal(map[string]string{"command": cmd})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("%q: unexpected error: %v", cmd, err)
+		}
+		if !strings.Contains(got, "Scroller") {
+			t.Errorf("%q: got %q, want a line containing Scroller", cmd, got)
+		}
+	}
+}
+
+// grep's exit 1 means "no matches" — a content-free result, not a failure.
+// It must read as such, not as a bare "[exit error: exit status 1]" the model
+// can't distinguish from a broken command.
+func TestBashGrepNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("nothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]string{"command": `grep -n Absent f.txt`})
+	got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "(no matches)" {
+		t.Errorf("got %q, want %q", got, "(no matches)")
+	}
+	if strings.Contains(got, "exit error") {
+		t.Errorf("grep no-match should not surface as an exit error: %q", got)
+	}
+}
+
 // --- Retrieval -------------------------------------------------------------
 
 func TestFormatRetrieved(t *testing.T) {
@@ -1805,6 +1894,36 @@ func TestResolveAccumulatesTokens(t *testing.T) {
 	}
 	if cs.tokensIn != 12 || cs.tokensOut != 3 {
 		t.Errorf("accumulated tokens = %d in / %d out, want 12/3", cs.tokensIn, cs.tokensOut)
+	}
+}
+
+// The inner loop must break when the model re-issues the byte-identical
+// tool-call batch, rather than spinning to maxToolIterations. The model in the
+// 2026-06-14 transcript made the same grep 68 times before the cap.
+func TestResolveStopsRepeatedToolCalls(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		// Always ask for the same harmless allowlisted command.
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.Append(Message{Role: RoleUser, Content: "go"})
+	if err := cs.Resolve(context.Background()); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	// Guard fires at maxRepeatedToolCalls identical batches — far below the
+	// maxToolIterations cap. Allow a small margin but assert it didn't run away.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+1 {
+		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
+	}
+	if calls >= maxToolIterations {
+		t.Errorf("guard failed: ran to the iteration cap (%d)", calls)
 	}
 }
 
