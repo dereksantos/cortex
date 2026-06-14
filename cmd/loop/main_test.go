@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -1834,5 +1835,97 @@ func TestIsDuplicateInsight(t *testing.T) {
 	}
 	if isDuplicateInsight("use sqlx for queries", known) {
 		t.Error("distinct insight should not be a duplicate")
+	}
+}
+
+// --- Session metrics (6a) --------------------------------------------------
+
+func TestSessionSummary(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now().Add(-90 * time.Second)}
+	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.retrievals = 5, 52000, 8000, 9, 6
+	cs.insights.Store(4)
+	s := cs.sessionSummary()
+	for _, want := range []string{"5 turns", "52k in", "8k out", "9 captured", "4 insights", "6 retrievals"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("summary %q missing %q", s, want)
+		}
+	}
+}
+
+func TestResolveAccumulatesTokens(t *testing.T) {
+	quickRetries(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":12,"completion_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.Append(Message{Role: RoleUser, Content: "hi"})
+	if err := cs.Resolve(context.Background()); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cs.tokensIn != 12 || cs.tokensOut != 3 {
+		t.Errorf("accumulated tokens = %d in / %d out, want 12/3", cs.tokensIn, cs.tokensOut)
+	}
+}
+
+func TestEmitSessionMetrics(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now()}
+	cs.StartTranscript()
+	t.Cleanup(func() {
+		if cs.transcript != nil {
+			cs.transcript.Close()
+		}
+	})
+	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.retrievals, cs.injectedChars = 3, 1200, 340, 2, 1, 400
+	cs.insights.Store(1)
+
+	cs.emitSessionMetrics()
+
+	r, err := journal.NewReader(filepath.Join(contextDir(), "journal", "eval"))
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	var got []*journal.EvalCellResultPayload
+	for {
+		e, err := r.Next()
+		if e == nil || err != nil {
+			break
+		}
+		if p, perr := journal.ParseEvalCellResult(e); perr == nil {
+			got = append(got, p)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d eval.cell_result entries, want 1", len(got))
+	}
+	p := got[0]
+	if p.Harness != "loop" || p.RunID != cs.SessionID || p.ScenarioID != "repl-session" {
+		t.Errorf("identity wrong: harness=%q run=%q scenario=%q", p.Harness, p.RunID, p.ScenarioID)
+	}
+	if p.TokensIn != 1200 || p.TokensOut != 340 || p.AgentTurnsTotal != 3 {
+		t.Errorf("metrics wrong: in=%d out=%d turns=%d", p.TokensIn, p.TokensOut, p.AgentTurnsTotal)
+	}
+	if p.InjectedContextTokens != 100 { // 400 chars / 4
+		t.Errorf("injected tokens = %d, want 100", p.InjectedContextTokens)
+	}
+	if p.ContextStrategy != "none" { // retriever nil in this test
+		t.Errorf("context strategy = %q, want none", p.ContextStrategy)
+	}
+	if !strings.Contains(p.Notes, "insights=1") || !strings.Contains(p.Notes, "captures=2") {
+		t.Errorf("notes = %q", p.Notes)
+	}
+}
+
+// An unpersisted session (no SessionID) emits nothing rather than erroring.
+func TestEmitSessionMetricsUnpersistedNoOp(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now()}
+	cs.emitSessionMetrics() // must not panic; SessionID == "" → skip
+	if _, err := os.Stat(filepath.Join(contextDir(), "journal", "eval")); err == nil {
+		t.Error("unpersisted session should not write an eval entry")
 	}
 }

@@ -21,10 +21,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
 	intcog "github.com/dereksantos/cortex/internal/cognition"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -51,6 +53,8 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
 [x] Capture at turn end — Tier 1 (structural, mechanical: every turn + /remember)
 [x] Capture Tier 2 (model-distilled insights, async on the reasoner, preemptible)
+[x] Eval 6a: per-session metrics (tokens/turns/captures/insights) → eval.cell_result + summary
+[ ] Eval 6b: learning-loop eval runner (cold vs warm memory) — design next
 [x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
 [x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
 [ ] Integrate eval suite into new harness
@@ -1161,6 +1165,20 @@ type CortexSession struct {
 	pendingTurns  []pendingTurn
 	distillCancel context.CancelFunc
 	distillDone   chan struct{}
+
+	// Session metrics (6a), cumulative across the session: shown in the
+	// closing summary and emitted as one eval.cell_result at exit. tokensIn/Out
+	// sum every billed model call (prompt re-sent each call, so summing prompt
+	// tokens reflects real cost). insights is written by the distill goroutine,
+	// so it's atomic; the rest are main-thread only.
+	sessionStart  time.Time
+	turns         int
+	tokensIn      int
+	tokensOut     int
+	injectedChars int // retrieved context merged into the wire (≈ tokens × 4)
+	captures      int // Tier 1 turn captures + /remember
+	retrievals    int // turns that injected retrieved context
+	insights      atomic.Int64
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -1323,11 +1341,12 @@ func NewCortexSession() *CortexSession {
 	req.ChatTemplateKwargs = code.TemplateKwargs()
 
 	return &CortexSession{
-		Args:    &args,
-		Request: req,
-		Config:  cfg,
-		Window:  code.Window,
-		Study:   cfg.Spec(roleStudy), // study role: small long-context model
+		Args:         &args,
+		Request:      req,
+		Config:       cfg,
+		Window:       code.Window,
+		Study:        cfg.Spec(roleStudy), // study role: small long-context model
+		sessionStart: time.Now(),
 	}
 }
 
@@ -1745,7 +1764,7 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		}
 		summary += "\n→ " + answer
 	}
-	_ = cs.capturer.CaptureEvent(&events.Event{
+	if err := cs.capturer.CaptureEvent(&events.Event{
 		Source:     events.SourceGeneric,
 		EventType:  events.EventToolUse,
 		Timestamp:  time.Now(),
@@ -1753,7 +1772,9 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
 		ToolResult: summary,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
-	})
+	}); err == nil {
+		cs.captures++
+	}
 }
 
 // remember stores an explicit user memory (/remember) — the highest-precision
@@ -1764,7 +1785,7 @@ func (cs *CortexSession) remember(text string) error {
 	}
 	// Text in ToolResult so it surfaces as the retrieved Content (Reflex maps
 	// Content from ToolResult); type in ToolInput marks it for Tier 2.
-	return cs.capturer.CaptureEvent(&events.Event{
+	err := cs.capturer.CaptureEvent(&events.Event{
 		Source:     events.SourceGeneric,
 		EventType:  events.EventToolUse,
 		Timestamp:  time.Now(),
@@ -1773,6 +1794,10 @@ func (cs *CortexSession) remember(text string) error {
 		ToolResult: text,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
 	})
+	if err == nil {
+		cs.captures++
+	}
+	return err
 }
 
 // --- Capture (Tier 2: model-distilled insights) ----------------------------
@@ -1909,8 +1934,10 @@ func (cs *CortexSession) distillPending(ctx context.Context) {
 		}
 		if f, perr := intcog.ParseInsight(resp); perr == nil {
 			if c := strings.TrimSpace(f.Content); c != "" && !isDuplicateInsight(c, known) {
-				_ = cs.store.StoreInsightWithSession("", f.Category, c, int(f.Importance*10), f.Tags,
-					"distilled from a session turn", cs.SessionID, "loop")
+				if serr := cs.store.StoreInsightWithSession("", f.Category, c, int(f.Importance*10), f.Tags,
+					"distilled from a session turn", cs.SessionID, "loop"); serr == nil {
+					cs.insights.Add(1)
+				}
 			}
 		}
 		// Consume the turn (distilled / NO_INSIGHT / unparseable all consume it).
@@ -2052,6 +2079,67 @@ func (cs *CortexSession) Close() {
 	}
 }
 
+// --- Session metrics (6a) --------------------------------------------------
+
+// contextStrategy names this session's memory mode for the eval record:
+// "cortex" when retrieval/capture are active, "none" when they're disabled.
+func (cs *CortexSession) contextStrategy() string {
+	if cs.retriever != nil {
+		return "cortex"
+	}
+	return "none"
+}
+
+// sessionSummary is the one-line closing report.
+func (cs *CortexSession) sessionSummary() string {
+	dur := time.Since(cs.sessionStart).Round(time.Second)
+	return fmt.Sprintf("%d turns · %s in / %s out · %d captured · %d insights · %d retrievals · %s",
+		cs.turns, humanK(cs.tokensIn), humanK(cs.tokensOut),
+		cs.captures, cs.insights.Load(), cs.retrievals, dur)
+}
+
+// emitSessionMetrics writes one eval.cell_result for the session to the eval
+// journal class — the canonical structured sink (shared with the eval suite).
+// Best-effort: a metrics-write failure never affects the session.
+func (cs *CortexSession) emitSessionMetrics() {
+	if cs.SessionID == "" {
+		return
+	}
+	p := journal.EvalCellResultPayload{
+		SchemaVersion:         "1",
+		RunID:                 cs.SessionID,
+		Timestamp:             time.Now().UTC().Format(time.RFC3339),
+		ScenarioID:            "repl-session",
+		Harness:               "loop",
+		Provider:              "openai-compat",
+		Model:                 cs.Request.Model,
+		Backend:               cs.Request.BaseURL,
+		ContextStrategy:       cs.contextStrategy(),
+		CortexVersion:         version(),
+		Temperature:           cs.Request.Temperature,
+		TokensIn:              cs.tokensIn,
+		TokensOut:             cs.tokensOut,
+		InjectedContextTokens: cs.injectedChars / 4, // ~4 bytes/token
+		LatencyMs:             time.Since(cs.sessionStart).Milliseconds(),
+		AgentTurnsTotal:       cs.turns,
+		Notes: fmt.Sprintf("captures=%d insights=%d retrievals=%d",
+			cs.captures, cs.insights.Load(), cs.retrievals),
+	}
+	entry, err := journal.NewEvalCellResultEntry(p)
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: filepath.Join(contextDir(), "journal", "eval"),
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	_, _ = w.Append(entry)
+}
+
 // humanK renders a token count compactly: 8200 -> "8.2k", 999 -> "999".
 func humanK(n int) string {
 	if n < 1000 {
@@ -2138,6 +2226,10 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 		}
 		// prompt_tokens reflects the whole re-sent history = current context fill.
 		cs.LastPromptTokens = res.Usage.PromptTokens
+		// Every send is a billed call (prompt re-sent each time), so summing
+		// across the tool loop reflects real session cost.
+		cs.tokensIn += res.Usage.PromptTokens
+		cs.tokensOut += res.Usage.CompletionTokens
 		msg := res.Choices[0].Message
 
 		// Fallback: if the proxy didn't normalize Qwen's native XML tool-call
@@ -2333,7 +2425,12 @@ func main() {
 		// conversation.
 		hits := session.retrieve(input)
 		session.recordRetrieval(input, hits)
-		session.Request.EphemeralSystem = formatRetrieved(hits)
+		note := formatRetrieved(hits)
+		session.Request.EphemeralSystem = note
+		if note != "" {
+			session.retrievals++
+			session.injectedChars += len(note)
+		}
 
 		// Ctrl-C cancels the in-flight turn (model call or tool) instead of
 		// killing the REPL. stop() restores default signal handling at the
@@ -2342,6 +2439,7 @@ func main() {
 		err := session.Resolve(ctx)
 		stop()
 		session.Request.EphemeralSystem = ""
+		session.turns++
 		switch {
 		case err == nil:
 			// Capture the completed turn to the store (retrievable next time)
@@ -2375,5 +2473,12 @@ func main() {
 		}
 	}
 
+	// Settle background distillation so its insight count is final, then report
+	// and record the session. emitSessionMetrics rides the eval journal class.
+	if session.turns > 0 {
+		session.stopDistill()
+		session.emitSessionMetrics()
+		fmt.Println(withColor(session.sessionSummary(), gray))
+	}
 	fmt.Println("exiting")
 }

@@ -193,10 +193,23 @@ scanning. Each is real surface area with weak payoff at this scale.
 convention, status line, VCS-stamped version, table-driven tests.
 
 **Need:**
-- Per-session token/cost accounting (usage is already returned; sum it, show
-  it at exit).
-- Harness-level eval integration (existing TODO; the codebase-eval-suite
-  handoff doc is the starting point) — the gate for every "Need" above.
+- ~~Per-session token/cost accounting~~ — done (6a): the session sums billed
+  tokens (prompt+completion across every model call) and counts turns,
+  captures, retrievals-injected, and distilled insights. At exit it prints a
+  one-line summary and emits ONE `eval.cell_result` to the `eval` journal class
+  — the canonical structured sink shared with the eval suite
+  (`journal.EvalCellResultPayload`), with `Harness="loop"`,
+  `ContextStrategy=cortex|none`, tokens/turns/injected-context/latency filled.
+  No pricing table yet, so `CostUSD=0` — tokens are the portable metric. This
+  is the substrate the learning-curve eval (6b) stands on: you can't plot a
+  curve without per-session rows.
+- Harness-level eval integration — **6b (next): the learning-loop runner.** A
+  `loop eval` mode (mirroring `study-eval`) that runs a fixture task set
+  cold (empty `.cortex/`) vs warm (after a priming session), scoring whether
+  capture+retrieve makes session N beat session 0 — Tier 2a scoped to the
+  loop. Open fork: its own self-contained runner (lean) vs. the loop as a
+  harness option in `internal/eval/v2` (the strategy doc's learning-curve
+  driver). Emits the same `EvalCellResultPayload` rows (`ContextStrategy=cold|warm`).
 
 **Don't:** dashboards (the daemon was retired for a reason); telemetry; logs
 beyond the journal.
