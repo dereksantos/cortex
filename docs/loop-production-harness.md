@@ -134,13 +134,25 @@ sessions feel like they lost the thread.
     default, at the user's call: record-everything, judge-on-read, same as
     transcripts.) Plus `/remember <text>` — the highest-precision capture, since
     the user marked it. Best-effort, no model, no added foreground latency.
-  - **Tier 2 (next): model-distilled insights, async on the reasoner.** Distill
-    the durable unit (decision/correction/pattern) from a turn — including the
-    read-only ones — assign a real type, supersede the raw Tier 1 rows. Runs
-    off the foreground (parallel/idle on the reasoner) so it adds no turn
-    latency; the honest caveat is that on a shared endpoint "parallel" is
-    time-sharing, so it wants preemption / idle-budgeting (the Think
-    integration).
+  - **Tier 2 (done): model-distilled insights, async on the reasoner.** A
+    completed turn buffers into `pendingTurns` and fires a **cancelable**
+    goroutine that distills during the idle gap before the next prompt; the
+    next turn **preempts** it (`stopDistill`) so foreground model work never
+    waits behind distillation. The REPL's exact idle signal (blocked in
+    `Scan()`) is the schedule. Each turn → the reasoner via cognition's
+    `DreamAnalysisPrompt` + `ParseInsight` (lifted to a shared exported func —
+    same contract Dream uses; only scheduling/turn-plumbing are local) → a
+    typed insight written via `StoreInsightWithSession`. **Supersede is soft**:
+    insights live in the insights layer, which Reflex favors over raw event
+    rows, so they outrank the Tier 1 rows without deleting them. **Dedup**:
+    recent insight summaries are fed to the reasoner ("already captured, don't
+    repeat"), with a normalized-string backstop. Best-effort: no reasoner →
+    Tier 1 rows remain; a preempted/failed turn stays pending and retries next
+    idle; a NO_INSIGHT/unparseable turn is consumed (no infinite retry).
+    v1 scope is in-memory (in-session); cross-restart drain is a follow-up.
+    **Honest caveat (unchanged):** on a shared endpoint (code + reasoner one
+    server) "parallel" is time-sharing, so a fast typist preempts distillation
+    repeatedly — Tier 2's payoff scales with a separate or idle reasoner.
 - ~~Retrieval injection at turn start~~ — done: each turn runs **Fast**
   (mechanical Reflex) retrieval over `.cortex/`. The hits are **recorded** to
   the transcript (`kind:retrieval`) and **merged into the system message for

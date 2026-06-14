@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
@@ -516,10 +518,12 @@ func TestRequestMarshalsTemplateKwargs(t *testing.T) {
 // windowSize falls back to the default when Window is unset, so the gauge never
 // divides by zero or shows /0.
 func TestWindowSizeFallback(t *testing.T) {
-	if got := (CortexSession{}).windowSize(); got != defaultModels[roleCode].Window {
+	def := &CortexSession{}
+	if got := def.windowSize(); got != defaultModels[roleCode].Window {
 		t.Errorf("windowSize() = %d, want default %d", got, defaultModels[roleCode].Window)
 	}
-	if got := (CortexSession{Window: 8192}).windowSize(); got != 8192 {
+	sized := &CortexSession{Window: 8192}
+	if got := sized.windowSize(); got != 8192 {
 		t.Errorf("windowSize() = %d, want 8192", got)
 	}
 }
@@ -1680,5 +1684,155 @@ func TestRememberIsRetrievable(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("hits should carry the remembered text: %+v", hits)
+	}
+}
+
+// --- Capture (Tier 2: distillation) ----------------------------------------
+
+// stubDistill replaces the reasoner call for the test's duration, returning a
+// canned analysis response. No model, no network.
+func stubDistill(t *testing.T, response string, err error) *int {
+	t.Helper()
+	saved := distillExtract
+	t.Cleanup(func() { distillExtract = saved })
+	calls := new(int)
+	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
+		*calls++
+		return response, err
+	}
+	return calls
+}
+
+func newDistillSession(t *testing.T) *CortexSession {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.StartTranscript()
+	cs.EnableRetrieval()
+	if cs.store == nil {
+		t.Fatal("EnableRetrieval should open a store")
+	}
+	t.Cleanup(cs.Close)
+	return cs
+}
+
+func TestDistillPendingStoresInsight(t *testing.T) {
+	stubDistill(t, `{"content":"use pgx, not database/sql","category":"decision","importance":0.8,"tags":["db"]}`, nil)
+	cs := newDistillSession(t)
+	cs.pendingTurns = []pendingTurn{{user: "what db driver?", msgs: []Message{
+		{Role: RoleUser, Content: "what db driver?"},
+		{Role: "assistant", Content: "We use pgx."},
+	}}}
+
+	cs.distillPending(context.Background())
+
+	if len(cs.pendingTurns) != 0 {
+		t.Errorf("distilled turn should be consumed, %d left", len(cs.pendingTurns))
+	}
+	// The insight is in the insights layer and retrievable.
+	hits := cs.retrieve("database driver")
+	found := false
+	for _, h := range hits {
+		if strings.Contains(strings.ToLower(h.Content), "pgx") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("distilled insight should be retrievable, got %+v", hits)
+	}
+}
+
+func TestDistillPendingDedups(t *testing.T) {
+	cs := newDistillSession(t)
+	// Pre-store the insight the reasoner is about to "discover" again.
+	if err := cs.store.StoreInsightWithSession("", "decision", "use pgx, not database/sql", 8, nil, "", cs.SessionID, "loop"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := cs.store.GetRecentInsights(100)
+
+	stubDistill(t, `{"content":"Use pgx, not database/sql.","category":"decision","importance":0.8}`, nil)
+	cs.pendingTurns = []pendingTurn{{user: "db?", msgs: []Message{{Role: RoleUser, Content: "db?"}}}}
+	cs.distillPending(context.Background())
+
+	after, _ := cs.store.GetRecentInsights(100)
+	if len(after) != len(before) {
+		t.Errorf("duplicate insight should not be stored: before=%d after=%d", len(before), len(after))
+	}
+	if len(cs.pendingTurns) != 0 {
+		t.Error("turn should still be consumed even when deduped")
+	}
+}
+
+func TestDistillPendingNoInsightConsumesTurn(t *testing.T) {
+	calls := stubDistill(t, "NO_INSIGHT", nil)
+	cs := newDistillSession(t)
+	cs.pendingTurns = []pendingTurn{{user: "hi", msgs: []Message{{Role: RoleUser, Content: "hi"}}}}
+
+	cs.distillPending(context.Background())
+
+	if *calls != 1 {
+		t.Errorf("reasoner should be called once, got %d", *calls)
+	}
+	if len(cs.pendingTurns) != 0 {
+		t.Error("a NO_INSIGHT turn must still be consumed (not retried forever)")
+	}
+	if got, _ := cs.store.GetRecentInsights(10); len(got) != 0 {
+		t.Errorf("NO_INSIGHT should store nothing, got %d insights", len(got))
+	}
+}
+
+func TestDistillPendingPreemptedLeavesTurn(t *testing.T) {
+	calls := stubDistill(t, `{"content":"x","category":"pattern","importance":0.5}`, nil)
+	cs := newDistillSession(t)
+	cs.pendingTurns = []pendingTurn{{user: "q", msgs: []Message{{Role: RoleUser, Content: "q"}}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already preempted
+
+	cs.distillPending(ctx)
+
+	if *calls != 0 {
+		t.Errorf("preempted distill should not call the reasoner, got %d", *calls)
+	}
+	if len(cs.pendingTurns) != 1 {
+		t.Error("a preempted turn must stay pending for the next idle")
+	}
+}
+
+// A transient model error leaves the turn pending; a later retry succeeds.
+func TestDistillPendingTransientErrorRetries(t *testing.T) {
+	saved := distillExtract
+	t.Cleanup(func() { distillExtract = saved })
+	cs := newDistillSession(t)
+	cs.pendingTurns = []pendingTurn{{user: "db?", msgs: []Message{{Role: RoleUser, Content: "db?"}}}}
+
+	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
+		return "", errTest
+	}
+	cs.distillPending(context.Background())
+	if len(cs.pendingTurns) != 1 {
+		t.Fatal("a model error must leave the turn pending")
+	}
+
+	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
+		return `{"content":"use pgx","category":"decision","importance":0.7}`, nil
+	}
+	cs.distillPending(context.Background())
+	if len(cs.pendingTurns) != 0 {
+		t.Error("retry should consume the turn")
+	}
+}
+
+var errTest = fmt.Errorf("transient model error")
+
+func TestIsDuplicateInsight(t *testing.T) {
+	known := []string{"Use pgx, not database/sql"}
+	for _, dup := range []string{"use pgx, not database/sql", "Use  pgx,  not   database/sql", "USE PGX, NOT DATABASE/SQL"} {
+		if !isDuplicateInsight(dup, known) {
+			t.Errorf("%q should be a duplicate", dup)
+		}
+	}
+	if isDuplicateInsight("use sqlx for queries", known) {
+		t.Error("distinct insight should not be a duplicate")
 	}
 }

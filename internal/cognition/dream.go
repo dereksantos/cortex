@@ -546,29 +546,43 @@ func buildRegionNote(item cognition.DreamItem) string {
 	return fmt.Sprintf("Region: window at offset %d, length %d. Analyze only what is visible.\n", off, length)
 }
 
-// insightResponse represents the LLM's insight output.
-type insightResponse struct {
+// InsightFields are the fields the analysis prompt (DreamAnalysisPrompt)
+// returns. Shared so other callers — e.g. the loop harness's turn-end
+// distillation — extract insights with the exact same contract.
+type InsightFields struct {
 	Content    string   `json:"content"`
 	Category   string   `json:"category"`
 	Importance float64  `json:"importance"`
 	Tags       []string `json:"tags"`
 }
 
-// parseInsightResponse parses the LLM response into a Result.
-func (d *Dream) parseInsightResponse(response string, item cognition.DreamItem) (*cognition.Result, error) {
+// ParseInsight extracts the insight JSON object from an LLM analysis response.
+// It tolerates prose around the object (takes the outermost {...}) and
+// normalizes an out-of-range importance to 0.5. Returns an error when no JSON
+// object is present — which is also how a "NO_INSIGHT" reply surfaces, so
+// callers treat the error as "nothing durable here," not a failure.
+func ParseInsight(response string) (InsightFields, error) {
 	start := strings.Index(response, "{")
 	end := strings.LastIndex(response, "}")
 	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("no JSON found in response")
+		return InsightFields{}, fmt.Errorf("no JSON found in response")
 	}
-	jsonStr := response[start : end+1]
+	var f InsightFields
+	if err := json.Unmarshal([]byte(response[start:end+1]), &f); err != nil {
+		return InsightFields{}, err
+	}
+	if f.Importance <= 0 || f.Importance > 1.0 {
+		f.Importance = 0.5
+	}
+	return f, nil
+}
 
-	var ir insightResponse
-	if err := json.Unmarshal([]byte(jsonStr), &ir); err != nil {
+// parseInsightResponse parses the LLM response into a Result, decorating it
+// with the source item's metadata. The parse itself is shared via ParseInsight.
+func (d *Dream) parseInsightResponse(response string, item cognition.DreamItem) (*cognition.Result, error) {
+	ir, err := ParseInsight(response)
+	if err != nil {
 		return nil, err
-	}
-	if ir.Importance <= 0 || ir.Importance > 1.0 {
-		ir.Importance = 0.5
 	}
 
 	meta := map[string]any{

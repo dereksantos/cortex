@@ -20,6 +20,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
@@ -49,7 +50,7 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] AGENTS.md project-instructions injection
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
 [x] Capture at turn end — Tier 1 (structural, mechanical: every turn + /remember)
-[ ] Capture Tier 2 (model-distilled insights, async on the reasoner)
+[x] Capture Tier 2 (model-distilled insights, async on the reasoner, preemptible)
 [x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
 [x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
 [ ] Integrate eval suite into new harness
@@ -1152,6 +1153,14 @@ type CortexSession struct {
 	// capturer writes turn captures to the same store (so they're immediately
 	// retrievable) and to the journal (durable). nil when retrieval is disabled.
 	capturer *capture.Capture
+
+	// Tier 2 distillation runs off the foreground: completed turns buffer in
+	// pendingTurns, a cancelable goroutine distills them during idle, and the
+	// next turn preempts it. See the Tier 2 capture section.
+	distillMu     sync.Mutex
+	pendingTurns  []pendingTurn
+	distillCancel context.CancelFunc
+	distillDone   chan struct{}
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -1160,7 +1169,7 @@ func (cs *CortexSession) SetModel(model string) { cs.Request.Model = model }
 
 // windowSize is the code model's context window — the gauge denominator and the
 // read_file size threshold. Falls back to the built-in default.
-func (cs CortexSession) windowSize() int {
+func (cs *CortexSession) windowSize() int {
 	if cs.Window > 0 {
 		return cs.Window
 	}
@@ -1322,11 +1331,11 @@ func NewCortexSession() *CortexSession {
 	}
 }
 
-func (cs CortexSession) PrintArgs() {
+func (cs *CortexSession) PrintArgs() {
 	fmt.Printf("Cortex Model: %s Temp:%f\n", cs.Request.Model, cs.Request.Temperature)
 }
 
-func (cs CortexSession) Append(message Message) {
+func (cs *CortexSession) Append(message Message) {
 	cs.Request.Messages = append(cs.Request.Messages, message)
 	cs.writeTranscript(message)
 }
@@ -1502,7 +1511,7 @@ func loadTranscript(path string) ([]Message, error) {
 
 // writeEntry appends one labelled entry to the open transcript, if any.
 // Best-effort by design: a persistence hiccup must not break the live turn.
-func (cs CortexSession) writeEntry(e sessionEntry) {
+func (cs *CortexSession) writeEntry(e sessionEntry) {
 	if cs.transcript == nil {
 		return
 	}
@@ -1515,14 +1524,14 @@ func (cs CortexSession) writeEntry(e sessionEntry) {
 }
 
 // writeTranscript records one core conversation message.
-func (cs CortexSession) writeTranscript(m Message) {
+func (cs *CortexSession) writeTranscript(m Message) {
 	cs.writeEntry(sessionEntry{Kind: kindMessage, Message: m})
 }
 
 // recordRetrieval records what memory was fed to the model this turn. The
 // record is complete (debuggability); replay is selective (loadTranscript
 // skips it). No-op when nothing was retrieved.
-func (cs CortexSession) recordRetrieval(query string, results []cognition.Result) {
+func (cs *CortexSession) recordRetrieval(query string, results []cognition.Result) {
 	if len(results) == 0 {
 		return
 	}
@@ -1546,7 +1555,7 @@ var compactStudy = func(ctx context.Context, cs *CortexSession, path string, win
 
 // contextRatio is the live window-fill estimate. The gauge color and the
 // auto-compact trigger both read it.
-func (cs CortexSession) contextRatio() float64 {
+func (cs *CortexSession) contextRatio() float64 {
 	return float64(cs.LastPromptTokens) / float64(cs.windowSize())
 }
 
@@ -1766,6 +1775,219 @@ func (cs *CortexSession) remember(text string) error {
 	})
 }
 
+// --- Capture (Tier 2: model-distilled insights) ----------------------------
+//
+// Tier 1 records every turn raw; Tier 2 distills the durable unit (a decision,
+// correction, pattern, constraint) with the reasoner and writes it to the
+// insights layer, which Reflex favors over raw event rows — so the insight
+// outranks (soft-supersedes) the Tier 1 row it came from.
+//
+// It runs OFF the foreground: a turn buffers into pendingTurns and fires a
+// cancelable goroutine that distills during the idle gap before the next
+// prompt. The next turn preempts it (stopDistill) so foreground model work
+// never waits behind distillation. Best-effort: a preempted or failed turn
+// stays pending and retries next idle; no reasoner → nothing distilled, Tier 1
+// rows remain. The extraction reuses cognition's prompt + parser (the same
+// contract Dream uses); only the scheduling and turn-plumbing are local.
+
+// distillRecentInsights bounds how many existing insights we show the reasoner
+// as "already captured, don't repeat" (dedup across batches/sessions).
+const distillRecentInsights = 20
+
+// pendingTurn is a completed turn awaiting distillation.
+type pendingTurn struct {
+	user string
+	msgs []Message
+}
+
+// distillExtract runs the reasoner over the analysis prompt. A var so tests
+// stub the model call.
+var distillExtract = func(ctx context.Context, p llm.Provider, prompt string) (string, error) {
+	return p.GenerateWithSystem(ctx, prompt, llm.AnalysisSystemPrompt)
+}
+
+// reasoner builds the provider for background distillation — the study/reasoner
+// binding, the model that thinks off the foreground path.
+func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
+	base := strings.TrimRight(cs.Study.Endpoint, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
+		Name:               "distill",
+		BaseURL:            base,
+		APIKey:             keychainKey(cs.Study.KeyService),
+		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+		Timeout:            10 * time.Minute,
+	})
+	p.SetModel(cs.Study.Model)
+	p.SetTemperature(0)
+	return p
+}
+
+// noteTurn buffers a completed turn and kicks off distillation over the
+// backlog. Best-effort: requires the store (where insights land).
+func (cs *CortexSession) noteTurn(user string, msgs []Message) {
+	if cs.store == nil || strings.TrimSpace(user) == "" {
+		return
+	}
+	cp := make([]Message, len(msgs))
+	copy(cp, msgs)
+	cs.distillMu.Lock()
+	cs.pendingTurns = append(cs.pendingTurns, pendingTurn{user: user, msgs: cp})
+	cs.distillMu.Unlock()
+	cs.startDistill()
+}
+
+// startDistill fires a cancelable background distillation if there are pending
+// turns and none is already running.
+func (cs *CortexSession) startDistill() {
+	cs.distillMu.Lock()
+	if cs.store == nil || len(cs.pendingTurns) == 0 || cs.distillCancel != nil {
+		cs.distillMu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	cs.distillCancel, cs.distillDone = cancel, done
+	cs.distillMu.Unlock()
+	go cs.distillLoop(ctx, done)
+}
+
+// stopDistill preempts any in-flight distillation and waits for it to exit, so
+// the next turn's foreground model work gets the endpoint. A canceled HTTP
+// call returns promptly, so the wait is short.
+func (cs *CortexSession) stopDistill() {
+	cs.distillMu.Lock()
+	cancel, done := cs.distillCancel, cs.distillDone
+	cs.distillCancel, cs.distillDone = nil, nil
+	cs.distillMu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
+}
+
+// distillLoop wraps distillPending with the cancel/done bookkeeping.
+func (cs *CortexSession) distillLoop(ctx context.Context, done chan struct{}) {
+	defer func() {
+		cs.distillMu.Lock()
+		if cs.distillDone == done { // natural finish — let startDistill run again
+			cs.distillCancel, cs.distillDone = nil, nil
+		}
+		cs.distillMu.Unlock()
+		close(done)
+	}()
+	cs.distillPending(ctx)
+}
+
+// distillPending drains pending turns one at a time through the reasoner,
+// storing at most one insight per turn (the prompt's contract). Preemptible:
+// it stops at the next turn boundary on ctx cancel, leaving the current turn
+// pending. A turn that yields an insight, NO_INSIGHT, or unparseable output is
+// consumed; only a transient model error leaves it to retry.
+func (cs *CortexSession) distillPending(ctx context.Context) {
+	for {
+		cs.distillMu.Lock()
+		if len(cs.pendingTurns) == 0 {
+			cs.distillMu.Unlock()
+			return
+		}
+		turn := cs.pendingTurns[0]
+		cs.distillMu.Unlock()
+
+		if ctx.Err() != nil {
+			return // preempted — leave the turn pending
+		}
+
+		known := cs.recentInsightSummaries(distillRecentInsights)
+		content := formatTurnForDistill(turn, known)
+		prompt := fmt.Sprintf(intcog.DreamAnalysisPrompt, content, "session", cs.SessionID, "")
+		resp, err := distillExtract(ctx, cs.reasoner(), prompt)
+		if err != nil || ctx.Err() != nil {
+			return // transient: leave pending, retry next idle
+		}
+		if f, perr := intcog.ParseInsight(resp); perr == nil {
+			if c := strings.TrimSpace(f.Content); c != "" && !isDuplicateInsight(c, known) {
+				_ = cs.store.StoreInsightWithSession("", f.Category, c, int(f.Importance*10), f.Tags,
+					"distilled from a session turn", cs.SessionID, "loop")
+			}
+		}
+		// Consume the turn (distilled / NO_INSIGHT / unparseable all consume it).
+		cs.distillMu.Lock()
+		if len(cs.pendingTurns) > 0 {
+			cs.pendingTurns = cs.pendingTurns[1:]
+		}
+		cs.distillMu.Unlock()
+	}
+}
+
+// recentInsightSummaries returns recent stored insight summaries, the dedup
+// context fed to the reasoner ("already captured, don't repeat").
+func (cs *CortexSession) recentInsightSummaries(limit int) []string {
+	if cs.store == nil {
+		return nil
+	}
+	insights, err := cs.store.GetRecentInsights(limit)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(insights))
+	for _, in := range insights {
+		if s := strings.TrimSpace(in.Summary); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// formatTurnForDistill renders one turn for the analysis prompt: the user's
+// message, what changed, the final answer, and the already-known insights so
+// the reasoner doesn't re-extract them.
+func formatTurnForDistill(turn pendingTurn, known []string) string {
+	outcome, answer := turnArtifacts(turn.msgs)
+	var b strings.Builder
+	fmt.Fprintf(&b, "User: %s\n", turn.user)
+	if outcome != "" {
+		fmt.Fprintf(&b, "Actions: %s\n", outcome)
+	}
+	if answer != "" {
+		fmt.Fprintf(&b, "Assistant: %s\n", answer)
+	}
+	if len(known) > 0 {
+		b.WriteString("\nAlready captured (do not repeat these):\n")
+		for _, k := range known {
+			fmt.Fprintf(&b, "- %s\n", k)
+		}
+	}
+	return b.String()
+}
+
+// isDuplicateInsight reports whether content restates something already stored.
+// Mechanical backstop to the prompt-level dedup: normalized equality or
+// containment either way.
+func isDuplicateInsight(content string, known []string) bool {
+	c := normalizeInsight(content)
+	if c == "" {
+		return false
+	}
+	for _, k := range known {
+		n := normalizeInsight(k)
+		if n == "" {
+			continue
+		}
+		if n == c || strings.Contains(n, c) || strings.Contains(c, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeInsight lowercases and collapses whitespace for comparison.
+func normalizeInsight(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
 // retrieve runs one Fast retrieval for the turn and returns the hits, or nil
 // when retrieval is disabled, errors, or finds nothing. It uses a background
 // context, not the turn's: Reflex is mechanical (no model) so it needn't be
@@ -1815,6 +2037,7 @@ func formatRetrieved(results []cognition.Result) string {
 
 // Close releases the transcript and retrieval resources at REPL exit.
 func (cs *CortexSession) Close() {
+	cs.stopDistill() // cancel any in-flight distillation and wait for it
 	if cs.transcript != nil {
 		cs.transcript.Close()
 		cs.transcript = nil
@@ -1857,7 +2080,7 @@ func ctxColor(used, max int) string {
 //
 // The token fraction is live (last prompt_tokens / window) and recolors with
 // fill. Status is dim; the glyph is the bright input affordance.
-func (cs CortexSession) Prompt() string {
+func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
 	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
@@ -1867,7 +2090,7 @@ func (cs CortexSession) Prompt() string {
 // send runs one model call with a spinner during the network wait. The spinner
 // is fully stopped and the line erased before this returns, so the caller can
 // print immediately without interleaving.
-func (cs CortexSession) send(ctx context.Context) (*AgentResponse, error) {
+func (cs *CortexSession) send(ctx context.Context) (*AgentResponse, error) {
 	s := NewSpinner()
 	s.Start()
 	res, err := cs.Request.Send(ctx)
@@ -2095,6 +2318,10 @@ func main() {
 			continue
 		}
 
+		// Preempt any background distillation so this turn's foreground model
+		// work gets the endpoint (it resumes at turn end over the new backlog).
+		session.stopDistill()
+
 		// Mark where this turn's messages begin, so we can capture what it did.
 		turnStart := len(session.Request.Messages)
 		session.Append(Message{Role: RoleUser, Content: input})
@@ -2120,7 +2347,11 @@ func main() {
 			// Capture the completed turn to the store (retrievable next time)
 			// BEFORE any compaction rewrites history. Every turn, read-only
 			// included — see captureTurn.
-			session.captureTurn(input, session.Request.Messages[turnStart:])
+			turnMsgs := session.Request.Messages[turnStart:]
+			session.captureTurn(input, turnMsgs)
+			// Tier 2: buffer the turn and distill it (async, on the reasoner,
+			// during the idle gap before the next prompt).
+			session.noteTurn(input, turnMsgs)
 
 			// Red gauge: compact at the turn boundary, before the window
 			// actually overflows. The boundary is the only safe point —
