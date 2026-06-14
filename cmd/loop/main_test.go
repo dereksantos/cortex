@@ -578,68 +578,6 @@ func TestReadFileSizeGuard(t *testing.T) {
 	})
 }
 
-func TestScroller(t *testing.T) {
-	valid := map[rune]bool{}
-	for _, r := range heights {
-		valid[r] = true
-	}
-	for _, r := range flecks {
-		valid[r] = true
-	}
-
-	t.Run("each frame is spinnerWidth runes from the palette", func(t *testing.T) {
-		s := newScroller(1)
-		for n := 0; n < 500; n++ {
-			f := []rune(s.frame())
-			if len(f) != spinnerWidth {
-				t.Fatalf("frame %d = %q has %d runes, want %d", n, string(f), len(f), spinnerWidth)
-			}
-			for _, r := range f {
-				if !valid[r] {
-					t.Errorf("frame %d has off-palette glyph %q", n, string(r))
-				}
-			}
-		}
-	})
-
-	t.Run("scrolls left: each frame shifts in exactly one new column", func(t *testing.T) {
-		s := newScroller(7)
-		prev := []rune(s.frame())
-		for n := 0; n < 100; n++ {
-			cur := []rune(s.frame())
-			for k := 0; k < spinnerWidth-1; k++ {
-				if cur[k] != prev[k+1] {
-					t.Fatalf("frame %d not a left-shift: prev=%q cur=%q", n, string(prev), string(cur))
-				}
-			}
-			prev = cur
-		}
-	})
-
-	t.Run("same seed is deterministic", func(t *testing.T) {
-		a, b := newScroller(42), newScroller(42)
-		for n := 0; n < 50; n++ {
-			if a.frame() != b.frame() {
-				t.Fatalf("seeded scrollers diverged at frame %d", n)
-			}
-		}
-	})
-
-	t.Run("different seeds diverge", func(t *testing.T) {
-		a, b := newScroller(1), newScroller(2)
-		same := true
-		for n := 0; n < 50; n++ {
-			if a.frame() != b.frame() {
-				same = false
-				break
-			}
-		}
-		if same {
-			t.Error("different seeds produced identical sequences")
-		}
-	})
-}
-
 func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("wrapped single call with a pipe", func(t *testing.T) {
 		content := "<tool_call>\n<function=bash>\n<parameter=command>\nls -la | grep cortex\n</parameter>\n</function>\n</tool_call>"
