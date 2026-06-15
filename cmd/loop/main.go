@@ -1555,7 +1555,7 @@ func (tc ToolCall) String() string {
 
 // Message source icons for the print gutter. Single-width; swap freely.
 const (
-	iconCortex = "◆" // assistant / cortex
+	iconCortex = "" // assistant / cortex
 	iconTool   = "▸" // tool action
 	iconUser   = "❯" // user
 )
@@ -1568,15 +1568,15 @@ func (m Message) gutter() (icon, color string) {
 	case RoleTool:
 		return iconTool, green
 	default: // assistant / cortex
-		return iconCortex, blue
+		return "", blue
 	}
 }
 
-// render formats the message as "<icon> HH:MM:SS  <content>", the gutter colored
+// render formats the message as "HH:MM:SS  <content>", the timestamp gutter colored
 // by source. ts is injected so the formatting is testable.
 func (m Message) render(ts time.Time) string {
-	icon, color := m.gutter()
-	gutter := withColor(fmt.Sprintf("%s %s", icon, ts.Format("15:04:05")), color)
+	_, color := m.gutter()
+	gutter := withColor(ts.Format("15:04:05"), color)
 	return fmt.Sprintf("%s  %s", gutter, m.Content)
 }
 
@@ -2921,8 +2921,8 @@ func (p *streamPrinter) emit(s string) {
 		if p.spinner != nil {
 			p.spinner.Stop()
 		}
-		icon, color := Message{Role: "assistant"}.gutter()
-		fmt.Fprintf(p.writer(), "%s  ", withColor(fmt.Sprintf("%s %s", icon, time.Now().Format("15:04:05")), color))
+		_, color := Message{Role: "assistant"}.gutter()
+		fmt.Fprintf(p.writer(), "%s  ", withColor(time.Now().Format("15:04:05"), color))
 		p.began = true
 	}
 	fmt.Fprint(p.writer(), s)
