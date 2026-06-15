@@ -223,6 +223,16 @@ type compatRequest struct {
 	Messages           []compatMessage `json:"messages"`
 	Temperature        *float64        `json:"temperature,omitempty"`
 	ChatTemplateKwargs map[string]any  `json:"chat_template_kwargs,omitempty"`
+	// Stream and StreamOptions are set only on the streaming path; omitempty
+	// keeps the blocking request byte-identical to before.
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// streamOptions toggles OpenAI's include_usage so the server emits a final
+// chunk carrying token counts (otherwise streamed responses report no usage).
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type compatMessage struct {
@@ -374,6 +384,59 @@ func (c *OpenAICompatClient) generate(ctx context.Context, prompt, system string
 		OutputTokens: apiResp.Usage.CompletionTokens,
 	}
 	return apiResp.Choices[0].Message.Content, stats, nil
+}
+
+// GenerateStream produces a response over SSE, invoking onDelta for each
+// content fragment as it arrives, and returns the full text plus token usage.
+// system is optional. Satisfies StreamingProvider. Local inference reports
+// usage only because we request stream_options.include_usage below.
+func (c *OpenAICompatClient) GenerateStream(ctx context.Context, prompt, system string, onDelta func(string)) (string, GenerationStats, error) {
+	if c.model == "" {
+		return "", GenerationStats{}, fmt.Errorf("%s: model not set (use SetModel before generating)", c.name)
+	}
+	if c.baseURL == "" {
+		return "", GenerationStats{}, fmt.Errorf("%s: baseURL not configured", c.name)
+	}
+
+	msgs := make([]compatMessage, 0, 2)
+	if system != "" {
+		msgs = append(msgs, compatMessage{Role: "system", Content: system})
+	}
+	msgs = append(msgs, compatMessage{Role: "user", Content: prompt})
+
+	body := compatRequest{
+		Model:              c.model,
+		MaxTokens:          c.maxTokens,
+		Messages:           msgs,
+		Temperature:        c.temperature,
+		ChatTemplateKwargs: c.chatTemplateKwargs,
+		Stream:             true,
+		StreamOptions:      &streamOptions{IncludeUsage: true},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", GenerationStats{}, fmt.Errorf("%s: marshal request: %w", c.name, err)
+	}
+
+	res, err := StreamChat(ctx, c.streamClient(), c.baseURL+"/chat/completions", c.apiKey, raw, onDelta, nil)
+	if err != nil {
+		return "", GenerationStats{}, err
+	}
+	if c.swapTracker != nil {
+		c.swapTracker.Note(c.name, c.model)
+	}
+	return res.Content, res.Stats, nil
+}
+
+// streamClient returns an http.Client safe for long-lived streams: it reuses
+// the configured timeout only to bound time-to-first-byte, never the whole
+// stream. Context cancellation stops the body read.
+func (c *OpenAICompatClient) streamClient() *http.Client {
+	headerTimeout := compatTimeout()
+	if c.httpClient != nil && c.httpClient.Timeout > 0 {
+		headerTimeout = c.httpClient.Timeout
+	}
+	return StreamHTTPClient(headerTimeout)
 }
 
 // doRaw POSTs JSON to baseURL+path. Authorization is only set when

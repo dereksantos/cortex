@@ -290,10 +290,20 @@ var spinnerChars = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 type Spinner struct {
 	stopChan chan struct{}
 	doneChan chan struct{}
-	mu       sync.Mutex // serializes all stdout writes
+	mu       sync.Mutex // serializes all stdout writes + guards label
+	label    string     // optional suffix (already colored) shown after the glyph
 }
 
 func NewSpinner() *Spinner { return &Spinner{} }
+
+// SetLabel updates the text shown after the spinner glyph (e.g. a live
+// "thinking…" reasoning tail). The string is printed verbatim, so callers apply
+// their own color/truncation. Safe to call from another goroutine.
+func (s *Spinner) SetLabel(label string) {
+	s.mu.Lock()
+	s.label = label
+	s.mu.Unlock()
+}
 
 func (s *Spinner) Start() {
 	s.stopChan = make(chan struct{})
@@ -309,7 +319,13 @@ func (s *Spinner) Start() {
 				return
 			case <-ticker.C:
 				s.mu.Lock()
-				fmt.Printf("\r%s", withColor(string(spinnerChars[idx%len(spinnerChars)]), cyan))
+				glyph := withColor(string(spinnerChars[idx%len(spinnerChars)]), cyan)
+				if s.label != "" {
+					// \033[K clears any residue when the label shrinks.
+					fmt.Printf("\r%s %s\033[K", glyph, s.label)
+				} else {
+					fmt.Printf("\r%s\033[K", glyph)
+				}
 				s.mu.Unlock()
 				idx++
 			}
@@ -351,6 +367,18 @@ type AgentRequest struct {
 	// cleared after. The durable record of what was retrieved lives in the
 	// transcript as a separate labelled entry, not here.
 	EphemeralSystem string `json:"-"`
+
+	// Stream and StreamOptions are set only on the streaming payload (SendStream);
+	// omitempty keeps the blocking request byte-identical to before.
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// streamOptions toggles OpenAI's include_usage so the streamed response ends
+// with a chunk carrying token counts (otherwise streaming reports no usage,
+// and the context gauge would never update).
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // wireMessages returns the messages to send: Messages as-is, or — when an
@@ -573,6 +601,108 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 		return nil, false, fmt.Errorf("error unmarshaling agent response: %w", err)
 	}
 	return &response, false, nil
+}
+
+// SendStream runs one model call over SSE, invoking onContent for each prose
+// fragment as it streams in, and assembles the result into the same
+// *AgentResponse shape Send returns — so Resolve's downstream logic (tool-call
+// handling, token accounting, history append) is identical either way. Retry
+// mirrors Send but only applies before the first byte reaches the terminal:
+// once onContent has fired we're committed, since retrying would double-print.
+func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
+	payload := *r
+	payload.Messages = r.wireMessages()
+	payload.Stream = true
+	payload.StreamOptions = &streamOptions{IncludeUsage: true}
+	b, err := json.Marshal(&payload)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling agent request: %w", err)
+	}
+
+	base := r.BaseURL
+	if base == "" {
+		base = defaultEndpoint
+	}
+	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
+
+	// requestTimeout bounds only time-to-first-byte here, never the whole
+	// stream — a long generation must not be killed by a total-request deadline.
+	hc := llm.StreamHTTPClient(requestTimeout)
+
+	var started bool
+	guarded := func(s string) {
+		started = true
+		if onContent != nil {
+			onContent(s)
+		}
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt-1) * retryBackoff):
+			}
+		}
+		res, err := llm.StreamChat(ctx, hc, url, r.APIKey, b, guarded, onReasoning)
+		if err == nil {
+			return assembleStreamResponse(res), nil
+		}
+		// Never retry once we've printed anything, when the ctx is done, or for
+		// non-transient failures (4xx, overflow). Only transport blips and
+		// 429/5xx before first byte are worth another attempt.
+		if started || ctx.Err() != nil || !retryableStreamErr(err) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxSendAttempts, lastErr)
+}
+
+// assembleStreamResponse maps the streamed aggregate into the wire AgentResponse
+// shape: a single assistant Choice carrying the content, reconstructed tool
+// calls, finish reason, and token usage.
+func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
+	calls := make([]ToolCall, 0, len(res.ToolCalls))
+	for _, tc := range res.ToolCalls {
+		typ := tc.Type
+		if typ == "" {
+			typ = "function"
+		}
+		calls = append(calls, ToolCall{
+			ID:       tc.ID,
+			Type:     typ,
+			Function: FunctionCall{Name: tc.Name, Arguments: tc.Arguments},
+		})
+	}
+	return &AgentResponse{
+		Choices: []Choice{{
+			Index:        0,
+			Message:      Message{Role: "assistant", Content: res.Content, ToolCalls: calls},
+			FinishReason: res.FinishReason,
+		}},
+		Usage: Usage{
+			PromptTokens:     res.Stats.InputTokens,
+			CompletionTokens: res.Stats.OutputTokens,
+			TotalTokens:      res.Stats.TotalTokens(),
+		},
+	}
+}
+
+// retryableStreamErr classifies a streaming failure as transient — transport
+// errors and 429/5xx, matching sendOnce's retry policy. Overflow and other 4xx
+// are not retried (they fail identically on retry); the caller surfaces them so
+// the overflow-recovery path can learn the real window.
+func retryableStreamErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "request failed") ||
+		strings.Contains(msg, "stream status 429") ||
+		strings.Contains(msg, "stream status 5")
 }
 
 // AgentResponse captures the agents response from an AgentRequest
@@ -2428,15 +2558,149 @@ func (cs *CortexSession) Prompt() string {
 	return fmt.Sprintf("%s%s  %s ", status, gauge, withColor(promptGlyph, cyan))
 }
 
-// send runs one model call with a spinner during the network wait. The spinner
-// is fully stopped and the line erased before this returns, so the caller can
-// print immediately without interleaving.
-func (cs *CortexSession) send(ctx context.Context) (*AgentResponse, error) {
+// streamingEnabled reports whether the REPL streams responses (the default).
+// CORTEX_LOOP_STREAM=0/false/off forces the blocking spinner path — a safety
+// hatch for any endpoint that doesn't speak SSE.
+func streamingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORTEX_LOOP_STREAM"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// toolMarker is Qwen's native tool-call opener. When the proxy doesn't
+// normalize tool calls they arrive as this markup inside content; it's stripped
+// from the stored message, so the live echo must hold back at this point too.
+const toolMarker = "<tool_call"
+
+// streamPrinter echoes assistant prose to the terminal as it streams. It prints
+// the gutter lazily on the first visible byte (stopping the spinner first), and
+// suppresses output once a tool-call marker appears so raw markup never shows.
+// All printing happens on the calling goroutine (StreamChat invokes onContent
+// synchronously), so it never races the spinner once that's stopped.
+type streamPrinter struct {
+	spinner  *Spinner        // stopped on first visible byte; nil to skip (tests)
+	out      io.Writer       // destination; nil means os.Stdout
+	buf      strings.Builder // all content seen so far
+	reason   strings.Builder // accumulated reasoning, for the live ticker tail
+	printed  int             // bytes of buf already written
+	suppress bool            // a tool-call marker appeared; stop echoing
+	began    bool            // gutter printed (and spinner stopped)
+}
+
+// reasoningTailWidth caps the live "thinking…" ticker to one line on typical
+// terminals — we show the most recent runes, not the whole chain-of-thought.
+const reasoningTailWidth = 80
+
+// reasoningTail collapses whitespace and returns the last width runes, so the
+// ticker stays a single, bounded line as reasoning streams.
+func reasoningTail(s string, width int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > width {
+		r = r[len(r)-width:]
+	}
+	return string(r)
+}
+
+// onReasoning is the StreamChat reasoning callback: it feeds the spinner a dim
+// live tail of the chain-of-thought. Reasoning is never printed to the
+// transcript — once the answer starts, emit stops the spinner and the ticker is
+// erased. No-op after the answer has begun (or with no spinner, e.g. tests).
+func (p *streamPrinter) onReasoning(s string) {
+	if p.began || p.spinner == nil {
+		return
+	}
+	p.reason.WriteString(s)
+	p.spinner.SetLabel(withColor("thinking… "+reasoningTail(p.reason.String(), reasoningTailWidth), gray))
+}
+
+// writer returns the configured sink, defaulting to stdout.
+func (p *streamPrinter) writer() io.Writer {
+	if p.out != nil {
+		return p.out
+	}
+	return os.Stdout
+}
+
+// onContent is the StreamChat callback: accumulate, then print the portion that
+// is safe to show — everything before a tool-call marker, holding back a
+// possible partial marker straddling the chunk boundary.
+func (p *streamPrinter) onContent(s string) {
+	p.buf.WriteString(s)
+	if p.suppress {
+		return
+	}
+	full := p.buf.String()
+	if i := strings.Index(full, toolMarker); i >= 0 {
+		p.emit(full[p.printed:i])
+		p.printed = len(full) // skip the markup entirely
+		p.suppress = true
+		return
+	}
+	// Hold back len(toolMarker)-1 trailing bytes: they might be the start of a
+	// marker that completes in the next chunk.
+	safe := len(full) - (len(toolMarker) - 1)
+	if safe < p.printed {
+		safe = p.printed
+	}
+	p.emit(full[p.printed:safe])
+	p.printed = safe
+}
+
+// emit writes a fragment, printing the assistant gutter (and stopping the
+// spinner) on the first non-empty byte.
+func (p *streamPrinter) emit(s string) {
+	if s == "" {
+		return
+	}
+	if !p.began {
+		if p.spinner != nil {
+			p.spinner.Stop()
+		}
+		icon, color := Message{Role: "assistant"}.gutter()
+		fmt.Fprintf(p.writer(), "%s  ", withColor(fmt.Sprintf("%s %s", icon, time.Now().Format("15:04:05")), color))
+		p.began = true
+	}
+	fmt.Fprint(p.writer(), s)
+}
+
+// finish flushes any held-back tail (when no marker ever appeared) and closes
+// the line. Returns whether the gutter was printed (i.e. anything was shown).
+func (p *streamPrinter) finish() bool {
+	if !p.suppress {
+		if full := p.buf.String(); p.printed < len(full) {
+			p.emit(full[p.printed:])
+			p.printed = len(full)
+		}
+	}
+	if p.began {
+		fmt.Fprintln(p.writer())
+	}
+	return p.began
+}
+
+// send runs one model call. In streaming mode (the default) it echoes prose
+// live via a streamPrinter and returns streamed=true so Resolve doesn't
+// re-print. The blocking fallback keeps the old spinner-around-the-call
+// behavior and returns streamed=false (Resolve prints). Either way the spinner
+// is fully stopped and the line is clean before this returns.
+func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed bool, err error) {
 	s := NewSpinner()
 	s.Start()
-	res, err := cs.Request.Send(ctx)
-	s.Stop()
-	return res, err
+	if !streamingEnabled() {
+		res, err = cs.Request.Send(ctx)
+		s.Stop()
+		return res, false, err
+	}
+	p := &streamPrinter{spinner: s}
+	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
+	p.finish()
+	if !p.began {
+		s.Stop()
+	}
+	return res, true, err
 }
 
 // runToolCalls executes every requested call and appends one tool result per
@@ -2487,7 +2751,7 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 	var lastSig string
 	var repeats int // consecutive batches identical to lastSig, including current
 	for i := 0; i < maxToolIterations; i++ {
-		res, err := cs.send(ctx)
+		res, streamed, err := cs.send(ctx)
 		if err != nil {
 			return fmt.Errorf("model response error: %w", err)
 		}
@@ -2517,8 +2781,9 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 		cs.Append(msg)
 
 		// Print any prose the model emitted (a final answer, or a preamble
-		// alongside tool calls).
-		if strings.TrimSpace(msg.Content) != "" {
+		// alongside tool calls). The streaming path already echoed it live, so
+		// only the blocking fallback prints here.
+		if !streamed && strings.TrimSpace(msg.Content) != "" {
 			msg.Print()
 		}
 

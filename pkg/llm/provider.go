@@ -65,6 +65,16 @@ type Provider interface {
 	Name() string
 }
 
+// StreamingProvider is an optional capability: a Provider that can stream its
+// response token-by-token. Callers type-assert for it and fall back to Generate
+// when a provider doesn't implement it, so non-streaming providers (Ollama,
+// Anthropic, Mock, …) need no changes. onDelta is invoked per content fragment
+// as it arrives; the full text and usage are returned when the stream ends.
+type StreamingProvider interface {
+	Provider
+	GenerateStream(ctx context.Context, prompt, system string, onDelta func(string)) (string, GenerationStats, error)
+}
+
 // Embedder defines the interface for embedding text into vectors.
 // This is separate from Provider since embedding is mechanical (fast, deterministic)
 // while generation is agentic (slow, variable).

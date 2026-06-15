@@ -2098,9 +2098,11 @@ func TestSessionSummary(t *testing.T) {
 
 func TestResolveAccumulatesTokens(t *testing.T) {
 	quickRetries(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":12,"completion_tokens":3}}`))
-	}))
+	srv := httptest.NewServer(sseHandler(sseBody(
+		`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}`,
+	)))
 	defer srv.Close()
 
 	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
@@ -2121,10 +2123,15 @@ func TestResolveStopsRepeatedToolCalls(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
 	var calls int
+	body := sseBody(
+		// Always ask for the same harmless allowlisted command.
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		// Always ask for the same harmless allowlisted command.
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+		w.Write([]byte(body))
 	}))
 	defer srv.Close()
 
