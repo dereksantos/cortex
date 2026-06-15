@@ -401,7 +401,7 @@ func TestHumanK(t *testing.T) {
 }
 
 func TestCtxColor(t *testing.T) {
-	win := defaultModels[roleCode].Window
+	win := 131072
 	tests := []struct {
 		used int
 		want string
@@ -419,50 +419,297 @@ func TestCtxColor(t *testing.T) {
 	}
 }
 
-func TestConfigSpec(t *testing.T) {
-	t.Run("nil config returns built-in defaults", func(t *testing.T) {
+// testFleet mirrors the live chatterbox fleet for resolution tests.
+var testFleet = Fleet{
+	"coder":        {Role: "coder", MaxInput: 131072, Thinking: true, SwapGroup: "igpu-8080"},
+	"coder80":      {Role: "coder", MaxInput: 131072, Thinking: false, SwapGroup: "igpu-8080", Experimental: true},
+	"reasoner":     {Role: "reasoner", MaxInput: 32768, Thinking: true, SwapGroup: "igpu-8080"},
+	"reasoner-npu": {Role: "reasoner", MaxInput: 32768, Thinking: true},
+	"qwen3-4b":     {Role: "fast", MaxInput: 131072, Thinking: false, SwapGroup: "igpu-8080"},
+	"embedder":     {Role: "embedder", MaxInput: 32768},
+	"reranker":     {Role: "reranker", MaxInput: 8192},
+	"xlam-1b-fc-r": {Role: "tool", MaxInput: 32768},
+}
+
+// selectModel picks a role's model from discovery by capability, with no model
+// names baked in source. Tiebreaks: code prefers the stable coder, hard-code the
+// experimental one; reason/study prefer swap-free silicon.
+func TestSelectModel(t *testing.T) {
+	cases := []struct{ role, want string }{
+		{roleCode, "coder"},
+		{roleHardCode, "coder80"},
+		{roleReason, "reasoner-npu"},
+		{roleStudy, "reasoner-npu"},
+		{roleFast, "qwen3-4b"},
+		{roleEmbed, "embedder"},
+		{roleRerank, "reranker"},
+		{roleTools, "xlam-1b-fc-r"},
+	}
+	for _, c := range cases {
+		if got := selectModel(testFleet, c.role); got != c.want {
+			t.Errorf("selectModel(%s) = %q, want %q", c.role, got, c.want)
+		}
+	}
+	t.Run("study auto-falls-back to reasoner when the NPU model is gone", func(t *testing.T) {
+		f := Fleet{"reasoner": {Role: "reasoner", MaxInput: 32768, SwapGroup: "igpu-8080"}}
+		if got := selectModel(f, roleStudy); got != "reasoner" {
+			t.Errorf("got %q, want reasoner", got)
+		}
+	})
+	t.Run("nil fleet selects nothing", func(t *testing.T) {
+		if got := selectModel(nil, roleCode); got != "" {
+			t.Errorf("got %q, want empty", got)
+		}
+	})
+}
+
+func TestResolveBinding(t *testing.T) {
+	t.Run("nil config selects from discovery by capability", func(t *testing.T) {
 		var c *Config
-		if code := c.Spec(roleCode); code.Model != "coder" || code.Endpoint == "" || code.Window == 0 {
-			t.Errorf("code default = %+v", code)
+		code := c.resolveBinding(roleCode, testFleet)
+		if code.Model != "coder" || code.Endpoint == "" || code.Window != 131072 {
+			t.Errorf("code = %+v", code)
 		}
-		if study := c.Spec(roleStudy); study.Model != "reasoner" {
-			t.Errorf("study default model = %q, want reasoner", study.Model)
-		}
-	})
-
-	t.Run("config overrides layer per-field on the default", func(t *testing.T) {
-		c := &Config{Models: map[string]ModelSpec{
-			roleStudy: {Model: "custom-study"}, // only the model; endpoint/window inherit
-		}}
-		s := c.Spec(roleStudy)
-		if s.Model != "custom-study" {
-			t.Errorf("model = %q, want custom-study", s.Model)
-		}
-		if s.Endpoint != defaultModels[roleStudy].Endpoint || s.Window != defaultModels[roleStudy].Window {
-			t.Errorf("endpoint/window should inherit the default, got %+v", s)
+		if study := c.resolveBinding(roleStudy, testFleet); study.Model != "reasoner-npu" || study.Window != 32768 {
+			t.Errorf("study = %+v", study)
 		}
 	})
 
-	t.Run("both roles disable thinking by default; config can re-enable", func(t *testing.T) {
+	t.Run("config pins the model; window from discovery, endpoint from backend", func(t *testing.T) {
+		c := &Config{Models: map[string]ModelSpec{roleStudy: {Model: "coder"}}}
+		s := c.resolveBinding(roleStudy, testFleet)
+		if s.Model != "coder" {
+			t.Errorf("model = %q, want pinned coder", s.Model)
+		}
+		if s.Window != 131072 || s.Endpoint != c.backendEndpoint() {
+			t.Errorf("window from discovery + endpoint from backend, got %+v", s)
+		}
+	})
+
+	t.Run("config-pinned window wins over discovery", func(t *testing.T) {
+		c := &Config{Models: map[string]ModelSpec{roleCode: {Window: 8000}}}
+		if s := c.resolveBinding(roleCode, testFleet); s.Window != 8000 {
+			t.Errorf("window = %d, want pinned 8000", s.Window)
+		}
+	})
+
+	t.Run("thinking off for code/study by default; config can re-enable", func(t *testing.T) {
 		var nilCfg *Config
-		code := nilCfg.Spec(roleCode)
-		if code.Thinking == nil || *code.Thinking {
-			t.Errorf("code default Thinking = %v, want false", code.Thinking)
+		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking == nil || *code.Thinking {
+			t.Errorf("code Thinking = %v, want false", code.Thinking)
 		}
-		if study := nilCfg.Spec(roleStudy); study.Thinking == nil || *study.Thinking {
-			t.Errorf("study default Thinking = %v, want false", study.Thinking)
+		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking == nil || *study.Thinking {
+			t.Errorf("study Thinking = %v, want false", study.Thinking)
 		}
 		on := true
 		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: &on}}}
-		if got := c.Spec(roleCode); got.Thinking == nil || !*got.Thinking {
-			t.Errorf("config thinking=true should override the default-off, got %v", got.Thinking)
+		if got := c.resolveBinding(roleCode, testFleet); got.Thinking == nil || !*got.Thinking {
+			t.Errorf("config thinking=true should win, got %v", got.Thinking)
 		}
 	})
 
-	t.Run("key_service overrides layer on the default", func(t *testing.T) {
-		c := &Config{Models: map[string]ModelSpec{roleCode: {KeyService: "cortex-openrouter"}}}
-		if got := c.Spec(roleCode); got.KeyService != "cortex-openrouter" {
-			t.Errorf("KeyService = %q, want cortex-openrouter", got.KeyService)
+	t.Run("non-thinking selected model carries no enable_thinking kwarg", func(t *testing.T) {
+		// fast → qwen3-4b (thinking:false): the off-policy kwarg is dropped.
+		if got := (&Config{}).resolveBinding(roleFast, testFleet); got.Thinking != nil {
+			t.Errorf("fast/qwen3-4b should not carry the kwarg, got %v", got.Thinking)
+		}
+	})
+
+	t.Run("key_service: per-role override, else backend default", func(t *testing.T) {
+		c := &Config{
+			Backend: Backend{KeyService: "backend-key"},
+			Models:  map[string]ModelSpec{roleCode: {KeyService: "cortex-openrouter"}},
+		}
+		if got := c.resolveBinding(roleCode, testFleet); got.KeyService != "cortex-openrouter" {
+			t.Errorf("per-role key = %q, want cortex-openrouter", got.KeyService)
+		}
+		if got := c.resolveBinding(roleStudy, testFleet); got.KeyService != "backend-key" {
+			t.Errorf("study should inherit backend key, got %q", got.KeyService)
+		}
+	})
+}
+
+// A realistic /model/info payload (trimmed to the fields we read, plus extra
+// keys to prove we ignore them) for discovery tests.
+const fleetInfoJSON = `{"data":[
+  {"model_name":"coder","litellm_params":{"model":"openai/coder"},"model_info":{"max_input_tokens":131072,"role":"coder","silicon":"igpu","thinking":true,"swap_group":"igpu-8080","always_warm":false,"experimental":false,"input_cost_per_token":0}},
+  {"model_name":"reasoner-npu","model_info":{"max_input_tokens":32768,"role":"reasoner","silicon":"npu","thinking":true,"swap_group":null,"always_warm":true}},
+  {"model_name":"reranker","model_info":{"max_input_tokens":8192,"role":"reranker","silicon":"cpu","thinking":null}}
+]}`
+
+func fleetServer(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/model/info" {
+			t.Errorf("discovery hit %q, want /model/info", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestDiscoverFleet(t *testing.T) {
+	t.Run("parses model_info, ignores extra keys", func(t *testing.T) {
+		srv := fleetServer(t, 200, fleetInfoJSON)
+		f := discoverFleet(context.Background(), srv.URL)
+		if f == nil {
+			t.Fatal("expected a fleet, got nil")
+		}
+		coder, ok := f["coder"]
+		if !ok {
+			t.Fatal("coder missing from fleet")
+		}
+		if coder.MaxInput != 131072 || coder.Role != "coder" || coder.Silicon != "igpu" || !coder.Thinking || coder.SwapGroup != "igpu-8080" {
+			t.Errorf("coder = %+v", coder)
+		}
+		if npu := f["reasoner-npu"]; npu.MaxInput != 32768 || npu.SwapGroup != "" || !npu.AlwaysWarm {
+			t.Errorf("reasoner-npu = %+v", npu)
+		}
+		if rr := f["reranker"]; rr.MaxInput != 8192 || rr.Thinking {
+			t.Errorf("reranker = %+v", rr)
+		}
+	})
+
+	t.Run("best-effort: nil on non-200, bad JSON, empty", func(t *testing.T) {
+		for _, c := range []struct {
+			name, body string
+			status     int
+		}{
+			{"500", "{}", 500},
+			{"bad json", "not json", 200},
+			{"empty data", `{"data":[]}`, 200},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				srv := fleetServer(t, c.status, c.body)
+				if f := discoverFleet(context.Background(), srv.URL); f != nil {
+					t.Errorf("want nil fleet, got %+v", f)
+				}
+			})
+		}
+	})
+
+	t.Run("nil on unreachable backend", func(t *testing.T) {
+		if f := discoverFleet(context.Background(), "http://127.0.0.1:1"); f != nil {
+			t.Errorf("want nil for unreachable, got %+v", f)
+		}
+	})
+}
+
+// No backend address lives in source: the endpoint resolves config > env >
+// neutral localhost, and every role inherits it unless pinned.
+func TestBackendEndpoint(t *testing.T) {
+	t.Run("neutral localhost fallback, no env", func(t *testing.T) {
+		t.Setenv("CORTEX_BACKEND", "")
+		var c *Config
+		if got := c.backendEndpoint(); got != defaultEndpoint {
+			t.Errorf("nil config = %q, want %q", got, defaultEndpoint)
+		}
+		// Source carries no address: a binding resolved with no config/env/fleet
+		// falls back to the neutral localhost only.
+		if b := (&Config{}).resolveBinding(roleCode, nil); b.Endpoint != defaultEndpoint {
+			t.Errorf("resolved endpoint = %q, want neutral %q", b.Endpoint, defaultEndpoint)
+		}
+	})
+	t.Run("env overrides the fallback", func(t *testing.T) {
+		t.Setenv("CORTEX_BACKEND", "http://env-host:4000")
+		var c *Config
+		if got := c.backendEndpoint(); got != "http://env-host:4000" {
+			t.Errorf("env = %q, want http://env-host:4000", got)
+		}
+	})
+	t.Run("config wins over env, and every role inherits it", func(t *testing.T) {
+		t.Setenv("CORTEX_BACKEND", "http://env-host:4000")
+		c := &Config{Backend: Backend{Endpoint: "http://cfg-host:4000", KeyService: "cortex-openrouter"}}
+		if got := c.backendEndpoint(); got != "http://cfg-host:4000" {
+			t.Errorf("config = %q, want http://cfg-host:4000", got)
+		}
+		for _, role := range []string{roleCode, roleStudy, roleReason, roleEmbed} {
+			s := c.resolveBinding(role, testFleet)
+			if s.Endpoint != "http://cfg-host:4000" {
+				t.Errorf("%s endpoint = %q, want backend address", role, s.Endpoint)
+			}
+			if s.KeyService != "cortex-openrouter" {
+				t.Errorf("%s should inherit backend key_service, got %q", role, s.KeyService)
+			}
+		}
+	})
+	t.Run("a role may pin its own endpoint", func(t *testing.T) {
+		c := &Config{
+			Backend: Backend{Endpoint: "http://cfg-host:4000"},
+			Models:  map[string]ModelSpec{roleRerank: {Endpoint: "http://rerank-host:8081"}},
+		}
+		if s := c.resolveBinding(roleRerank, testFleet); s.Endpoint != "http://rerank-host:8081" {
+			t.Errorf("pinned endpoint = %q, want http://rerank-host:8081", s.Endpoint)
+		}
+	})
+}
+
+func TestApplyFleet(t *testing.T) {
+	off := false
+	fleet := Fleet{
+		"coder":    {MaxInput: 131072, Thinking: true},
+		"qwen3-4b": {MaxInput: 131072, Thinking: false},
+	}
+	t.Run("fills an unset window from discovery", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "coder"}, fleet)
+		if got.Window != 131072 {
+			t.Errorf("window = %d, want 131072", got.Window)
+		}
+	})
+	t.Run("leaves a config-pinned window intact", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "coder", Window: 8000}, fleet)
+		if got.Window != 8000 {
+			t.Errorf("window = %d, want pinned 8000", got.Window)
+		}
+	})
+	t.Run("keeps enable_thinking for a thinking model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "coder", Thinking: &off}, fleet)
+		if got.Thinking == nil || *got.Thinking {
+			t.Errorf("thinking spec should survive for a thinking model, got %v", got.Thinking)
+		}
+	})
+	t.Run("drops enable_thinking for a non-thinking model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "qwen3-4b", Thinking: &off}, fleet)
+		if got.Thinking != nil {
+			t.Errorf("non-thinking model should not carry the kwarg, got %v", got.Thinking)
+		}
+	})
+	t.Run("unknown model and nil fleet pass through untouched", func(t *testing.T) {
+		in := ModelSpec{Model: "mystery", Window: 4096, Thinking: &off}
+		if got := applyFleet(in, fleet); got != in {
+			t.Errorf("unknown model mutated: %+v", got)
+		}
+		if got := applyFleet(in, nil); got != in {
+			t.Errorf("nil fleet mutated: %+v", got)
+		}
+	})
+}
+
+func TestSharedSwapGroup(t *testing.T) {
+	fleet := Fleet{
+		"coder":        {SwapGroup: "igpu-8080"},
+		"reasoner":     {SwapGroup: "igpu-8080"},
+		"reasoner-npu": {SwapGroup: ""},
+	}
+	spec := func(m string) ModelSpec { return ModelSpec{Model: m} }
+	t.Run("flags two different models in the same group", func(t *testing.T) {
+		if g := sharedSwapGroup(fleet, spec("coder"), spec("reasoner")); g != "igpu-8080" {
+			t.Errorf("want igpu-8080, got %q", g)
+		}
+	})
+	t.Run("no conflict across silicon (swap-free study)", func(t *testing.T) {
+		if g := sharedSwapGroup(fleet, spec("coder"), spec("reasoner-npu")); g != "" {
+			t.Errorf("want no conflict, got %q", g)
+		}
+	})
+	t.Run("same model is not a conflict, nil fleet is safe", func(t *testing.T) {
+		if g := sharedSwapGroup(fleet, spec("coder"), spec("coder")); g != "" {
+			t.Errorf("same model should not conflict, got %q", g)
+		}
+		if g := sharedSwapGroup(nil, spec("coder"), spec("reasoner")); g != "" {
+			t.Errorf("nil fleet should be safe, got %q", g)
 		}
 	})
 }
@@ -521,8 +768,8 @@ func TestRequestMarshalsTemplateKwargs(t *testing.T) {
 // divides by zero or shows /0.
 func TestWindowSizeFallback(t *testing.T) {
 	def := &CortexSession{}
-	if got := def.windowSize(); got != defaultModels[roleCode].Window {
-		t.Errorf("windowSize() = %d, want default %d", got, defaultModels[roleCode].Window)
+	if got := def.windowSize(); got != fallbackWindow {
+		t.Errorf("windowSize() = %d, want fallback %d", got, fallbackWindow)
 	}
 	sized := &CortexSession{Window: 8192}
 	if got := sized.windowSize(); got != 8192 {
@@ -534,7 +781,7 @@ func TestSessionPrompt(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
 	got := sess.Prompt()
 
-	for _, want := range []string{"cortex " + Version, ModelCoder, "8.2k/65.5k", promptGlyph} {
+	for _, want := range []string{"cortex " + Version, ModelCoder, "8.2k/32.8k", promptGlyph} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Prompt() = %q, missing %q", got, want)
 		}
@@ -542,12 +789,12 @@ func TestSessionPrompt(t *testing.T) {
 }
 
 func TestSetModel(t *testing.T) {
-	s := &CortexSession{Request: &AgentRequest{Model: "coder", BaseURL: "http://chatterbox:4000"}}
+	s := &CortexSession{Request: &AgentRequest{Model: "coder", BaseURL: "http://backend.example:4000"}}
 	s.SetModel("reasoner")
 	if s.Request.Model != "reasoner" {
 		t.Errorf("model = %q, want reasoner", s.Request.Model)
 	}
-	if s.Request.BaseURL != "http://chatterbox:4000" {
+	if s.Request.BaseURL != "http://backend.example:4000" {
 		t.Errorf("endpoint should be unchanged on a model swap, got %q", s.Request.BaseURL)
 	}
 }

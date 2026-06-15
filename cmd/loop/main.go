@@ -164,32 +164,103 @@ func version() string {
 	return v
 }
 
+// defaultEndpoint is a NEUTRAL local fallback — the conventional LiteLLM port —
+// so a fresh checkout runs against a local proxy. Real backend addresses and any
+// auth never live in source: they come from gitignored .cortex/config.json
+// (the backend block) or the CORTEX_BACKEND env var. The chat path appends
+// /v1/chat/completions and the study client appends /v1; discovery hits
+// /model/info, which is NOT under /v1 — all three derive from this one root.
+const defaultEndpoint = "http://localhost:4000"
+
 // Model roles. The harness routes each kind of work to a model binding: the
 // coding turn uses "code", the study tool uses "study". One mechanism — new
-// nodes (think/dream/dag) just add roles. See Config.Spec.
+// nodes (think/dream/dag) just add roles. See Config.Spec. Only code and study
+// are exercised today; the rest are baked so config and future DAG nodes can
+// resolve them against the discovered fleet.
 const (
-	roleCode  = "code"
-	roleStudy = "study"
+	roleCode     = "code"      // the coding turn (big agent)
+	roleHardCode = "hard-code" // harder coding, no-thinking variant
+	roleReason   = "reason"    // deliberate planning/reasoning
+	roleFast     = "fast"      // quick, direct answers
+	roleStudy    = "study"     // the study tool (read-heavy, think-light)
+	roleEmbed    = "embed"     // embeddings
+	roleRerank   = "rerank"    // reranking (direct, not via LiteLLM)
+	roleTools    = "tools"     // function-calling / tool selection
 )
 
-// defaultModels is the built-in role → binding map, used when config doesn't
-// override a role. Window is the model's RAW context size (a starting estimate,
-// config-overridable, and self-corrected at runtime from overflow errors); the
-// sampling budget and density are derived from it, not hardcoded. coder for
-// coding; reasoner for study (fast + concise; study is read-heavy/think-light).
+// rolePolicy is the only source-resident routing knowledge for a logical role:
+// which backend role tag it draws from, how to break ties when several models
+// share that tag, and whether to default built-in thinking off. No model NAMES
+// or WINDOWS live here — names are selected from discovery by capability
+// (selectModel) and windows come from each model's max_input_tokens. Add a model
+// to the backend and the matching role picks it up; rename one and nothing here
+// changes.
 //
-// Both chatterbox aliases serve hybrid thinking models, and both roles are
-// bounded micro-calls where built-in reasoning starves the completion budget
-// (measured: the reasoner burned a full max_tokens on reasoning_content and
-// returned empty content, collapsing study coverage). Thinking is therefore
-// off by default for both roles; re-enable per-role via config when a role
-// genuinely wants deliberation.
-var defaultModels = map[string]ModelSpec{
-	roleCode:  {Endpoint: "http://chatterbox:4000", Model: "coder", Window: 65536, Thinking: &thinkingOff},
-	roleStudy: {Endpoint: "http://chatterbox:4000", Model: "reasoner", Window: 32768, Thinking: &thinkingOff},
+//   - preferExperimental: among same-tag models pick the experimental one
+//     (hard-code wants coder80; code wants the stable coder — the zero value).
+//   - preferSwapFree: prefer a model with no swap_group, i.e. its own silicon.
+//     reason/study want this because they run alongside the coder (swap_group
+//     "igpu-8080"); a same-group reasoner would evict/reload coder every turn
+//     (the brief's "don't alternate in a tight loop"). reasoner-npu is swap-free.
+//   - thinkingOff: code/fast/study are bounded micro-calls where built-in
+//     reasoning starves the completion budget (measured: a reasoner burned a
+//     full max_tokens on reasoning_content and returned empty content). reason
+//     leaves it on so the model deliberates. The enable_thinking kwarg only
+//     reaches thinking-capable models; applyFleet drops it for the rest.
+type rolePolicy struct {
+	tag                string
+	preferExperimental bool
+	preferSwapFree     bool
+	thinkingOff        bool
 }
 
-// thinkingOff exists so defaultModels can take a *bool address.
+var rolePolicies = map[string]rolePolicy{
+	roleCode:     {tag: "coder", thinkingOff: true},
+	roleHardCode: {tag: "coder", preferExperimental: true},
+	roleReason:   {tag: "reasoner", preferSwapFree: true},
+	roleFast:     {tag: "fast", thinkingOff: true},
+	roleStudy:    {tag: "reasoner", preferSwapFree: true, thinkingOff: true},
+	roleEmbed:    {tag: "embedder"},
+	roleRerank:   {tag: "reranker"},
+	roleTools:    {tag: "tool"},
+}
+
+// selectModel picks the backend model for a logical role from the discovered
+// fleet by capability: the model whose role tag matches, best tiebreak score
+// wins (name breaks exact ties, deterministically). Returns "" when the fleet
+// can't satisfy the role (or is nil) — the caller then relies on a config-pinned
+// model. This is what lets the harness route without baking model names: e.g.
+// study auto-falls-back from reasoner-npu to reasoner if the NPU model vanishes.
+func selectModel(fleet Fleet, role string) string {
+	pol, ok := rolePolicies[role]
+	if !ok {
+		return ""
+	}
+	best, bestScore := "", -1
+	for name, info := range fleet {
+		if info.Role != pol.tag {
+			continue
+		}
+		score := 0
+		if info.Experimental == pol.preferExperimental {
+			score += 2
+		}
+		if pol.preferSwapFree && info.SwapGroup == "" {
+			score++
+		}
+		if score > bestScore || (score == bestScore && (best == "" || name < best)) {
+			best, bestScore = name, score
+		}
+	}
+	return best
+}
+
+// fallbackWindow is the gauge/budget default used only when a model's real
+// window is unknown — discovery down AND no config-pinned window. Cosmetic in
+// practice: when the backend is reachable, discovery supplies the true window.
+const fallbackWindow = 32768
+
+// thinkingOff exists so role bindings can take a *bool address.
 var thinkingOff = false
 
 // promptGlyph is the input affordance at the end of the status line.
@@ -268,7 +339,7 @@ type AgentRequest struct {
 	// disable built-in reasoning on hybrid thinking models — see
 	// ModelSpec.TemplateKwargs.
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
-	// BaseURL is the endpoint root (e.g. http://chatterbox:4000), resolved from
+	// BaseURL is the endpoint root (e.g. http://localhost:4000), resolved from
 	// config. Not serialized — it's transport, not request body.
 	BaseURL string `json:"-"`
 	// APIKey is the Bearer token for endpoints that need one (e.g. OpenRouter).
@@ -471,7 +542,7 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 
 	base := r.BaseURL
 	if base == "" {
-		base = defaultModels[roleCode].Endpoint
+		base = defaultEndpoint
 	}
 	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
 
@@ -1187,6 +1258,10 @@ type CortexSession struct {
 	// Study is the study role's binding (small long-context model in its own
 	// context), resolved from config.
 	Study ModelSpec
+	// Fleet is the model metadata discovered from the backend at startup (nil
+	// when discovery was unavailable). Windows in Request/Study/Window already
+	// reflect it; kept for status display and future routing.
+	Fleet Fleet
 	// Config is the loaded .cortex/config.json (may be nil).
 	Config *Config
 	// SessionID names this session's transcript file; "" when unpersisted.
@@ -1231,12 +1306,13 @@ type CortexSession struct {
 func (cs *CortexSession) SetModel(model string) { cs.Request.Model = model }
 
 // windowSize is the code model's context window — the gauge denominator and the
-// read_file size threshold. Falls back to the built-in default.
+// read_file size threshold. Falls back to fallbackWindow only when discovery and
+// config both left it unknown.
 func (cs *CortexSession) windowSize() int {
 	if cs.Window > 0 {
 		return cs.Window
 	}
-	return defaultModels[roleCode].Window
+	return fallbackWindow
 }
 
 // ModelSpec is one role's binding: where to send, which model, how big its window.
@@ -1249,7 +1325,7 @@ type ModelSpec struct {
 	Window     int    `json:"window"`      // context window in tokens
 	KeyService string `json:"key_service"` // keychain service name for the API key, or ""
 	// Thinking controls built-in reasoning on hybrid thinking models (e.g. the
-	// chatterbox coder alias). false → requests carry
+	// coder alias). false → requests carry
 	// chat_template_kwargs{enable_thinking:false}; nil/true → the model's
 	// template default applies.
 	Thinking *bool `json:"thinking"`
@@ -1262,6 +1338,111 @@ func (m ModelSpec) TemplateKwargs() map[string]any {
 		return map[string]any{"enable_thinking": false}
 	}
 	return nil
+}
+
+// ModelInfo is the per-model metadata the LiteLLM backend serves at
+// /model/info (LiteLLM-specific; plain /v1/models returns only IDs). We read the
+// real context window and routing hints instead of guessing windows.
+type ModelInfo struct {
+	MaxInput     int    // max_input_tokens — the real context window
+	Role         string // coder/reasoner/fast/reranker/embedder/tool
+	Silicon      string // igpu/npu/cpu/macmini-metal
+	Thinking     bool   // hybrid thinking model
+	SwapGroup    string // models sharing a group are mutually exclusive (one slot)
+	AlwaysWarm   bool
+	Experimental bool
+}
+
+// Fleet maps model_name → ModelInfo, discovered once at startup. A nil Fleet
+// means discovery was unavailable; callers fall back to baked windows.
+type Fleet map[string]ModelInfo
+
+// fleetDiscoveryTimeout bounds startup discovery so an unreachable backend can't
+// stall the REPL — discovery is an enhancement, not a dependency.
+const fleetDiscoveryTimeout = 4 * time.Second
+
+// discoverFleet fetches /model/info from the backend root. Best-effort: any
+// failure (backend down, non-200, bad JSON) returns nil and the harness falls
+// to a config-pinned model + fallbackWindow, exactly like a missing config.
+func discoverFleet(ctx context.Context, endpoint string) Fleet {
+	ctx, cancel := context.WithTimeout(ctx, fleetDiscoveryTimeout)
+	defer cancel()
+	url := strings.TrimRight(endpoint, "/") + "/model/info"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil
+	}
+	var body struct {
+		Data []struct {
+			ModelName string `json:"model_name"`
+			ModelInfo struct {
+				MaxInputTokens int    `json:"max_input_tokens"`
+				Role           string `json:"role"`
+				Silicon        string `json:"silicon"`
+				Thinking       bool   `json:"thinking"`
+				SwapGroup      string `json:"swap_group"`
+				AlwaysWarm     bool   `json:"always_warm"`
+				Experimental   bool   `json:"experimental"`
+			} `json:"model_info"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil || len(body.Data) == 0 {
+		return nil
+	}
+	f := make(Fleet, len(body.Data))
+	for _, m := range body.Data {
+		f[m.ModelName] = ModelInfo{
+			MaxInput:     m.ModelInfo.MaxInputTokens,
+			Role:         m.ModelInfo.Role,
+			Silicon:      m.ModelInfo.Silicon,
+			Thinking:     m.ModelInfo.Thinking,
+			SwapGroup:    m.ModelInfo.SwapGroup,
+			AlwaysWarm:   m.ModelInfo.AlwaysWarm,
+			Experimental: m.ModelInfo.Experimental,
+		}
+	}
+	return f
+}
+
+// applyFleet overlays discovered metadata onto a resolved binding: the real
+// context window fills an unset window (a config-pinned window is left intact),
+// and the enable_thinking kwarg is dropped for models that aren't
+// thinking-capable (it's meaningless to them). A nil Fleet or an unknown model
+// leaves the spec untouched.
+func applyFleet(spec ModelSpec, fleet Fleet) ModelSpec {
+	info, ok := fleet[spec.Model]
+	if !ok {
+		return spec
+	}
+	if info.MaxInput > 0 && spec.Window == 0 {
+		spec.Window = info.MaxInput
+	}
+	if !info.Thinking {
+		spec.Thinking = nil
+	}
+	return spec
+}
+
+// sharedSwapGroup reports the swap_group two bindings collide in — non-empty
+// only when they resolve to DIFFERENT models in the SAME group, i.e. they'd
+// evict each other on one accelerator slot. Returns "" when there's no conflict
+// or the fleet is unknown.
+func sharedSwapGroup(fleet Fleet, a, b ModelSpec) string {
+	if fleet == nil || a.Model == b.Model {
+		return ""
+	}
+	if g := fleet[a.Model].SwapGroup; g != "" && g == fleet[b.Model].SwapGroup {
+		return g
+	}
+	return ""
 }
 
 // keychainKey reads a secret from the macOS keychain by service name. Returns ""
@@ -1277,24 +1458,56 @@ func keychainKey(service string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// Config is the subset of .cortex/config.json the loop consults: a role → model
-// binding map. The old harness's other keys (endpoints/routing/ollama_*) are
-// ignored — the loop routes through one mechanism.
-type Config struct {
-	Models map[string]ModelSpec `json:"models"`
+// Backend is the one place an address and its auth live — read from gitignored
+// .cortex/config.json, never baked into source. Type names the profile (e.g.
+// "litellm" for a local LiteLLM proxy, "openrouter") so discovery and routing can
+// specialize; Endpoint is the root URL; KeyService names a keychain item for the
+// bearer token (e.g. "cortex-openrouter"), fetched at call time, never stored.
+type Backend struct {
+	Type       string `json:"type"`
+	Endpoint   string `json:"endpoint"`
+	KeyService string `json:"key_service"`
 }
 
-// Spec resolves a role to its binding: a per-field config override layered on the
-// built-in default, so a config can set just the model and inherit the rest.
-func (c *Config) Spec(role string) ModelSpec {
-	spec := defaultModels[role]
+// Config is the subset of .cortex/config.json the loop consults: the backend
+// address/auth plus per-role model overrides. The old harness's other keys
+// (endpoints/routing/ollama_*) are ignored — the loop routes through one
+// mechanism.
+type Config struct {
+	Backend Backend              `json:"backend"`
+	Models  map[string]ModelSpec `json:"models"`
+}
+
+// backendEndpoint resolves the backend root: config wins, then CORTEX_BACKEND,
+// then the neutral localhost fallback. Safe on a nil Config. No address is ever
+// read from source.
+func (c *Config) backendEndpoint() string {
+	if c != nil && c.Backend.Endpoint != "" {
+		return c.Backend.Endpoint
+	}
+	if v := os.Getenv("CORTEX_BACKEND"); v != "" {
+		return v
+	}
+	return defaultEndpoint
+}
+
+// resolveBinding builds the final binding for a role from three layers, in
+// precedence order: an explicit config override (model/window/endpoint/key/
+// thinking) wins; otherwise the model is selected from discovery by capability
+// (selectModel) and its window comes from max_input_tokens; the role's thinking
+// policy and the shared backend address/key fill the rest. No model name,
+// window, or address is read from source. Safe on a nil Config and nil Fleet.
+func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
+	pol := rolePolicies[role]
+	spec := ModelSpec{Endpoint: c.backendEndpoint()}
+	if pol.thinkingOff {
+		spec.Thinking = &thinkingOff
+	}
 	if c != nil {
 		if m, ok := c.Models[role]; ok {
+			spec.Model = m.Model
 			if m.Endpoint != "" {
 				spec.Endpoint = m.Endpoint
-			}
-			if m.Model != "" {
-				spec.Model = m.Model
 			}
 			if m.Window > 0 {
 				spec.Window = m.Window
@@ -1306,8 +1519,16 @@ func (c *Config) Spec(role string) ModelSpec {
 				spec.Thinking = m.Thinking
 			}
 		}
+		if spec.KeyService == "" {
+			spec.KeyService = c.Backend.KeyService
+		}
 	}
-	return spec
+	// Derive the model from discovery when config didn't pin one.
+	if spec.Model == "" {
+		spec.Model = selectModel(fleet, role)
+	}
+	// Overlay the real window + gate the thinking kwarg to thinking-capable models.
+	return applyFleet(spec, fleet)
 }
 
 // findUp walks up from the cwd looking for rel (a path relative to each
@@ -1378,8 +1599,23 @@ func NewCortexSession() *CortexSession {
 	req := args.Request()
 	cfg := LoadConfig()
 
-	// Resolve the code role: the model + endpoint + window for the coding turn.
-	code := cfg.Spec(roleCode)
+	// Discover the fleet, then resolve the live roles against it: model selected
+	// by capability (study auto-prefers swap-free reasoner-npu, falling back to
+	// reasoner if it's gone), window from max_input_tokens. A nil fleet means the
+	// backend is unreachable — note it so an empty model id isn't a mystery.
+	fleet := discoverFleet(context.Background(), cfg.backendEndpoint())
+	if fleet == nil {
+		fmt.Println(withColor(fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()), yellow))
+	}
+	code := cfg.resolveBinding(roleCode, fleet)
+	study := cfg.resolveBinding(roleStudy, fleet)
+
+	// Surface the swap-group thrash the brief warns about: code and study run
+	// back-to-back within a turn, so same-group bindings evict each other.
+	if g := sharedSwapGroup(fleet, code, study); g != "" {
+		fmt.Println(withColor(fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g), yellow))
+	}
+
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
 	req.APIKey = keychainKey(code.KeyService)
@@ -1390,7 +1626,8 @@ func NewCortexSession() *CortexSession {
 		Request:      req,
 		Config:       cfg,
 		Window:       code.Window,
-		Study:        cfg.Spec(roleStudy), // study role: small long-context model
+		Study:        study,
+		Fleet:        fleet,
 		sessionStart: time.Now(),
 	}
 }
