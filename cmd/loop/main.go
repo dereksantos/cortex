@@ -485,35 +485,6 @@ func (cs *CortexSession) studyWindow() int {
 	return studyFallbackWindow
 }
 
-// sampleBudget is the token budget for one study pass: the window minus headroom
-// for the inference template and the model's completion. Derived from the
-// window, never a magic number.
-func sampleBudget(window int) int {
-	headroom := window / 4
-	if headroom < 2048 {
-		headroom = 2048
-	}
-	return window - headroom
-}
-
-// studyCompletionCap is the max_tokens granted to one study inference
-// response. The response carries the digest plus one citation per claim
-// (each repeating the file path), which routinely exceeds the client's
-// 1024-token default — truncating the JSON mid-array, which silently
-// degrades to a digest with zero citations. Half the window headroom
-// usually suffices, but at small (forced) windows that collapses back
-// to the truncation point, so it floors at 2048. The floor can nominally
-// overshoot a genuinely tiny window; the overflow self-correction
-// (learnedWindows) handles that case, while a silently citation-less
-// study would not self-correct at all.
-func studyCompletionCap(window int) int {
-	c := (window - sampleBudget(window)) / 2
-	if c < 2048 {
-		c = 2048
-	}
-	return c
-}
-
 var bash = newTool(FunctionBash,
 	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
 	objectSchema(map[string]any{
@@ -737,7 +708,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	})
 	provider.SetModel(cs.Study.Model)
 	provider.SetTemperature(0)
-	provider.SetMaxTokens(studyCompletionCap(cs.studyWindow()))
+	provider.SetMaxTokens(study.CompletionTokenBudget(cs.studyWindow(), 0))
 
 	req := study.StudyRequest{
 		Path:     abs,
@@ -757,7 +728,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
-		req.Window = sampleBudget(window) // window minus headroom for template + completion
+		req.Window = study.SampleTokenBudget(window, 0) // shared budget: conservative fraction, overhead-aware
 		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider}, passes)
 	}
 	win := window

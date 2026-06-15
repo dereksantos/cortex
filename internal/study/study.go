@@ -46,7 +46,45 @@ const (
 	studyDefaultMaxCoverage   = 0.80 // controller's own cap
 	studyCharsPerToken        = 4    // rough English/code average
 	studyCharsPerLine         = 50   // rough average line width
+	studyMinCompletionTokens  = 2048 // completion floor; below this, citation JSON truncates mid-array
 )
+
+// SampleTokenBudget is the single per-call INPUT budget shared by every study
+// path: how many tokens of sampled content one inference may carry, after
+// reserving prompt overhead and the output cap from a conservative fraction
+// (fill, default studyDefaultTargetFill = 0.5) of the window. MakePlan and the
+// agent study tool both derive from this one formula, so a sample can never
+// exceed what the window holds — there is no second, divergent budget. A
+// non-positive window or out-of-range fill falls back to the defaults.
+func SampleTokenBudget(window int, fill float64) int {
+	if window <= 0 {
+		window = studyDefaultCtxWindow
+	}
+	if fill <= 0 || fill > 1 {
+		fill = studyDefaultTargetFill
+	}
+	u := int(float64(window)*fill) - studyPromptOverheadTokens - studyOutputCapTokens
+	if u < studyPromptOverheadTokens {
+		u = studyPromptOverheadTokens
+	}
+	return u
+}
+
+// CompletionTokenBudget is the matching per-call OUTPUT cap (the inference's
+// max_tokens): the room the window has left after the input sample, halved so
+// the prompt and the digest+citations response never collide, floored at
+// studyMinCompletionTokens so a small window still returns citations instead of
+// truncating the JSON mid-array.
+func CompletionTokenBudget(window int, fill float64) int {
+	if window <= 0 {
+		window = studyDefaultCtxWindow
+	}
+	c := (window - SampleTokenBudget(window, fill)) / 2
+	if c < studyMinCompletionTokens {
+		c = studyMinCompletionTokens
+	}
+	return c
+}
 
 // MakePlan derives a Plan from a requested duration, the model's
 // context window in tokens, the calibrated per-call latency in ms, and
@@ -70,14 +108,9 @@ func MakePlan(d time.Duration, ctxWindowTokens, latencyMS, projectEffLOC int, ta
 		targetFill = studyDefaultTargetFill
 	}
 
-	// Step 1 — usable token budget per call after subtracting prompt
-	// overhead and output cap.
-	usableTokens := int(float64(ctxWindowTokens) * targetFill)
-	usableTokens -= studyPromptOverheadTokens
-	usableTokens -= studyOutputCapTokens
-	if usableTokens < studyPromptOverheadTokens {
-		usableTokens = studyPromptOverheadTokens
-	}
+	// Step 1 — usable token budget per call (the shared budget formula:
+	// conservative fraction of the window minus prompt overhead + output cap).
+	usableTokens := SampleTokenBudget(ctxWindowTokens, targetFill)
 
 	// Step 2 — chars → lines, clamped to [50, 4000] to keep the chunk
 	// shape sensible. Tiny window models still get something readable;

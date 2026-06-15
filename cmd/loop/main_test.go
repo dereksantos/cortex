@@ -967,19 +967,6 @@ func TestParseCtxSize(t *testing.T) {
 	}
 }
 
-func TestSampleBudget(t *testing.T) {
-	// headroom = window/4 (min 2048); budget = window - headroom
-	for _, tt := range []struct{ window, want int }{
-		{32768, 24576},   // 32768 - 8192
-		{262144, 196608}, // 262144 - 65536
-		{4096, 2048},     // headroom floored at 2048
-	} {
-		if got := sampleBudget(tt.window); got != tt.want {
-			t.Errorf("sampleBudget(%d) = %d, want %d", tt.window, got, tt.want)
-		}
-	}
-}
-
 // quickRetries shrinks the retry backoff for the duration of a test.
 func quickRetries(t *testing.T) {
 	t.Helper()
@@ -1339,23 +1326,6 @@ func TestStudyWindowEnvOverride(t *testing.T) {
 	t.Setenv("CORTEX_LOOP_STUDY_WINDOW", "")
 	if got := cs.studyWindow(); got != 32768 {
 		t.Errorf("studyWindow() = %d, want 32768 (configured)", got)
-	}
-}
-
-// studyCompletionCap: half the headroom, floored where that collapses to
-// the JSON-truncation point (citations die silently below ~2K tokens).
-func TestStudyCompletionCap(t *testing.T) {
-	tests := []struct {
-		window, want int
-	}{
-		{32768, 4096}, // headroom 8192 → half
-		{8192, 2048},  // headroom 2048 → half=1024 → floored
-		{6144, 2048},  // floor dominates small windows
-	}
-	for _, tt := range tests {
-		if got := studyCompletionCap(tt.window); got != tt.want {
-			t.Errorf("studyCompletionCap(%d) = %d, want %d", tt.window, got, tt.want)
-		}
 	}
 }
 

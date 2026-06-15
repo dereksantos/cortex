@@ -6,6 +6,51 @@ import (
 	"time"
 )
 
+// SampleTokenBudget is the single per-call input budget every study path shares.
+func TestSampleTokenBudget(t *testing.T) {
+	// 0.5 fraction minus prompt overhead (800) + output cap (100).
+	cases := []struct {
+		window int
+		fill   float64
+		want   int
+	}{
+		{32768, 0, 16384 - 900},  // default fill 0.5
+		{32768, 0.5, 16384 - 900},
+		{32768, 0.25, 8192 - 900},
+		{0, 0, 4096 - 900},       // window<=0 → studyDefaultCtxWindow (8192)
+		{32768, 2, 16384 - 900},  // out-of-range fill → default 0.5
+	}
+	for _, c := range cases {
+		if got := SampleTokenBudget(c.window, c.fill); got != c.want {
+			t.Errorf("SampleTokenBudget(%d, %v) = %d, want %d", c.window, c.fill, got, c.want)
+		}
+	}
+	t.Run("floors so the sample is never negative on a tiny window", func(t *testing.T) {
+		if got := SampleTokenBudget(1000, 0.5); got != studyPromptOverheadTokens {
+			t.Errorf("tiny window = %d, want floor %d", got, studyPromptOverheadTokens)
+		}
+	})
+}
+
+// CompletionTokenBudget + SampleTokenBudget together must fit the window: the
+// guarantee that replaced the divergent cmd/loop budget path.
+func TestBudgetsFitWindow(t *testing.T) {
+	for _, window := range []int{8192, 32768, 131072} {
+		sample := SampleTokenBudget(window, 0)
+		completion := CompletionTokenBudget(window, 0)
+		// sample + prompt overhead + completion must leave headroom under window.
+		used := sample + studyPromptOverheadTokens + completion
+		if used > window {
+			t.Errorf("window %d: sample(%d)+overhead+completion(%d)=%d exceeds window", window, sample, completion, used)
+		}
+	}
+	t.Run("completion floors so citations don't truncate", func(t *testing.T) {
+		if got := CompletionTokenBudget(4096, 0); got != studyMinCompletionTokens {
+			t.Errorf("small window completion = %d, want floor %d", got, studyMinCompletionTokens)
+		}
+	})
+}
+
 func TestMakePlan_Qwen30B_5m(t *testing.T) {
 	// Qwen3-Coder-30B (262K ctx, ~5000ms/call) + Cortex (~94K eff_loc).
 	// capacity = 59 * 4000 = 236K > eff_loc → caps at default 0.80.
