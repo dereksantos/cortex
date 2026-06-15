@@ -423,6 +423,10 @@ func stringProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
 }
 
+func boolProp(desc string) map[string]any {
+	return map[string]any{"type": "boolean", "description": desc}
+}
+
 func newTool(name, desc string, params map[string]any) Tool {
 	return Tool{Type: "function", Function: ToolFunction{Name: name, Description: desc, Parameters: params}}
 }
@@ -442,14 +446,27 @@ var writeFile = newTool(FunctionWriteFile,
 	}, "path", "content"))
 
 var editFile = newTool(FunctionEditFile,
-	"Replace an exact substring in a file. old_string must appear EXACTLY ONCE; "+
-		"include enough surrounding context to make it unique. Prefer this over "+
-		"write_file for small changes to an existing file.",
+	"Replace text in a file. Matching is exact first; if that finds nothing it "+
+		"retries ignoring leading/trailing whitespace, so indentation needn't be "+
+		"byte-perfect. old_string must still resolve to exactly one place unless "+
+		"replace_all is set. Prefer this over write_file for changes to an existing "+
+		"file. To make several changes at once, pass an `edits` array — they apply "+
+		"in order and atomically (all succeed or the file is left untouched).",
 	objectSchema(map[string]any{
-		"path":       stringProp("Path to the file to edit."),
-		"old_string": stringProp("The exact text to find. Must match exactly once, including whitespace."),
-		"new_string": stringProp("The text to replace it with. May be empty to delete old_string."),
-	}, "path", "old_string", "new_string"))
+		"path":        stringProp("Path to the file to edit."),
+		"old_string":  stringProp("Text to find (single edit). Include enough context to be unique; indentation may differ from the file."),
+		"new_string":  stringProp("Replacement text (single edit). May be empty to delete old_string."),
+		"replace_all": boolProp("Replace every occurrence instead of requiring a unique match. Default false."),
+		"edits": map[string]any{
+			"type":        "array",
+			"description": "Optional: multiple edits applied in order, atomically. When set, the top-level old_string/new_string are ignored.",
+			"items": objectSchema(map[string]any{
+				"old_string":  stringProp("Text to find; indentation may differ from the file."),
+				"new_string":  stringProp("Replacement text; may be empty to delete."),
+				"replace_all": boolProp("Replace every occurrence. Default false."),
+			}, "old_string", "new_string"),
+		},
+	}, "path"))
 
 var studyTool = newTool(FunctionStudy,
 	"Study a file or directory and return curated context: a size-adaptive, "+
@@ -949,57 +966,302 @@ func (tc ToolCall) WriteFile() (string, error) {
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
 }
 
-// EditFile replaces an exact, unique substring in a file. Requiring old_string
-// to match exactly once is the safety property: if it's missing the edit is
-// wrong, and if it's ambiguous we refuse rather than guess which occurrence the
-// model meant. Both cases return an error that goes back as an observation, so
-// the model can add context and retry.
+// editOp is one find/replace within an edit_file call. Several can be batched
+// via the `edits` array and are applied in order to the evolving content.
+type editOp struct {
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+// EditFile replaces text in a file. The safety property is a UNIQUE match:
+// missing means the edit is wrong, ambiguous means we'd be guessing — both come
+// back as observations the model can correct. Matching is exact first, then
+// whitespace-tolerant (so a model that mis-indents old_string still lands the
+// edit). replace_all relaxes uniqueness for renames; an `edits` array applies
+// several changes atomically — if any fails the file is left untouched.
 func (tc ToolCall) EditFile() (string, error) {
-	path, err := tc.stringArg("path")
-	if err != nil {
-		return "", err
+	var a struct {
+		Path       string   `json:"path"`
+		OldString  string   `json:"old_string"`
+		NewString  string   `json:"new_string"`
+		ReplaceAll bool     `json:"replace_all"`
+		Edits      []editOp `json:"edits"`
 	}
-	oldStr, err := tc.stringArg("old_string")
-	if err != nil {
-		return "", err
+	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
+		if err := json.Unmarshal([]byte(s), &a); err != nil {
+			return "", fmt.Errorf("parse edit_file args: %w", err)
+		}
 	}
-	newStr, err := tc.stringArg("new_string")
-	if err != nil {
-		return "", err
-	}
-	if oldStr == "" {
-		return "", fmt.Errorf("old_string must not be empty")
-	}
-	if oldStr == newStr {
-		return "", fmt.Errorf("old_string and new_string are identical; nothing to change")
+	if a.Path == "" {
+		return "", fmt.Errorf("path is required")
 	}
 
-	printToolAction(fmt.Sprintf("edit_file(%s)", path))
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", path, err)
+	edits := a.Edits
+	multi := len(edits) > 0
+	if !multi {
+		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
+		printToolAction(fmt.Sprintf("edit_file(%s)", a.Path))
+	} else {
+		printToolAction(fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
 	}
-	data, err := os.ReadFile(path)
+
+	info, err := os.Stat(a.Path)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
+		return "", fmt.Errorf("stat %s: %w", a.Path, err)
+	}
+	data, err := os.ReadFile(a.Path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", a.Path, err)
 	}
 	content := string(data)
 
-	switch n := strings.Count(content, oldStr); n {
-	case 0:
-		return "", fmt.Errorf("old_string not found in %s", path)
-	case 1:
-		// exactly one match — the only safe case
-	default:
-		return "", fmt.Errorf("old_string found %d times in %s; add surrounding context so it matches exactly once", n, path)
+	// Apply all edits in memory; only touch disk if every one succeeds.
+	total := 0
+	for i, e := range edits {
+		updated, n, err := applyEdit(content, e.OldString, e.NewString, e.ReplaceAll)
+		if err != nil {
+			if multi {
+				return "", fmt.Errorf("%s edit %d: %w", a.Path, i+1, err)
+			}
+			return "", fmt.Errorf("%s: %w", a.Path, err)
+		}
+		content = updated
+		total += n
 	}
 
-	updated := strings.Replace(content, oldStr, newStr, 1)
-	if err := os.WriteFile(path, []byte(updated), info.Mode()); err != nil {
-		return "", fmt.Errorf("write %s: %w", path, err)
+	if err := os.WriteFile(a.Path, []byte(content), info.Mode()); err != nil {
+		return "", fmt.Errorf("write %s: %w", a.Path, err)
 	}
-	return fmt.Sprintf("edited %s (replaced %d bytes with %d)", path, len(oldStr), len(newStr)), nil
+	if multi {
+		return fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), nil
+	}
+	return fmt.Sprintf("edited %s (%s)", a.Path, countNoun(total, "replacement")), nil
+}
+
+// countNoun renders "1 edit" / "2 edits" — naive +s pluralization, fine for the
+// nouns used here (edit, replacement).
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// applyEdit performs one find/replace on content, returning the result and the
+// number of replacements. It tries an exact substring match first; only when
+// that finds nothing does it fall back to whitespace-tolerant matching, so the
+// fast path is unchanged and tolerance never overrides an exact hit.
+func applyEdit(content, old, new string, replaceAll bool) (string, int, error) {
+	if old == "" {
+		return "", 0, fmt.Errorf("old_string must not be empty")
+	}
+	if old == new {
+		return "", 0, fmt.Errorf("old_string and new_string are identical; nothing to change")
+	}
+	if n := strings.Count(content, old); n > 0 {
+		if replaceAll {
+			return strings.ReplaceAll(content, old, new), n, nil
+		}
+		if n > 1 {
+			return "", 0, fmt.Errorf("old_string found %d times; add surrounding context to make it unique, or set replace_all", n)
+		}
+		return strings.Replace(content, old, new, 1), 1, nil
+	}
+	return tolerantEdit(content, old, new, replaceAll)
+}
+
+// tolerantEdit matches old against content line-by-line ignoring whitespace,
+// then re-indents the replacement to the file's actual indentation. Tier 1
+// ignores only trailing whitespace; tier 2 also ignores leading indentation —
+// the safer tolerance is tried first. A match must still be unique unless
+// replace_all is set.
+func tolerantEdit(content, old, new string, replaceAll bool) (string, int, error) {
+	fileLines := dropTrailingEmpty(strings.SplitAfter(content, "\n"))
+	oldLines := dropTrailingEmpty(strings.SplitAfter(old, "\n"))
+	k := len(oldLines)
+	if k == 0 || k > len(fileLines) {
+		return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+	}
+	for tier := 1; tier <= 2; tier++ {
+		var starts []int
+		for i := 0; i+k <= len(fileLines); i++ {
+			if windowMatches(fileLines[i:i+k], oldLines, tier) {
+				starts = append(starts, i)
+			}
+		}
+		if len(starts) == 0 {
+			continue
+		}
+		if !replaceAll && len(starts) > 1 {
+			return "", 0, fmt.Errorf("old_string matches %d places (ignoring whitespace); add context or set replace_all", len(starts))
+		}
+		return rebuildWithReplacements(fileLines, oldLines, new, starts), len(starts), nil
+	}
+	return "", 0, fmt.Errorf("old_string not found%s", nearMissHint(fileLines, oldLines))
+}
+
+// windowMatches reports whether a run of file lines equals the old block under
+// the given tolerance tier.
+func windowMatches(win, old []string, tier int) bool {
+	for j := range old {
+		if lineKey(win[j], tier) != lineKey(old[j], tier) {
+			return false
+		}
+	}
+	return true
+}
+
+// lineKey normalizes a line for tolerant comparison: tier 1 drops trailing
+// whitespace, tier 2 drops leading and trailing whitespace.
+func lineKey(line string, tier int) string {
+	line = strings.TrimSuffix(line, "\n")
+	if tier == 1 {
+		return strings.TrimRight(line, " \t")
+	}
+	return strings.TrimSpace(line)
+}
+
+// rebuildWithReplacements substitutes new at each matched start (greedy,
+// non-overlapping), re-indenting new from old's base indentation to the file
+// region's, and preserving the trailing-newline state of the replaced span.
+func rebuildWithReplacements(fileLines, oldLines []string, new string, starts []int) string {
+	startSet := make(map[int]bool, len(starts))
+	for _, s := range starts {
+		startSet[s] = true
+	}
+	k := len(oldLines)
+	oldBase := indentBase(oldLines)
+	anchor := firstNonBlank(oldLines)
+	var b strings.Builder
+	for i := 0; i < len(fileLines); {
+		if startSet[i] {
+			fileBase := leadingWS(strings.TrimSuffix(fileLines[i+anchor], "\n"))
+			repl := swapIndent(new, oldBase, fileBase)
+			lastHadNL := strings.HasSuffix(fileLines[i+k-1], "\n")
+			if lastHadNL && !strings.HasSuffix(repl, "\n") {
+				repl += "\n"
+			} else if !lastHadNL && strings.HasSuffix(repl, "\n") {
+				repl = strings.TrimSuffix(repl, "\n")
+			}
+			b.WriteString(repl)
+			i += k
+			continue
+		}
+		b.WriteString(fileLines[i])
+		i++
+	}
+	return b.String()
+}
+
+// swapIndent shifts new's base indentation: on each non-blank line that starts
+// with oldBase, that prefix is swapped for fileBase (when oldBase is empty,
+// fileBase is prepended). A no-op when the bases already match.
+func swapIndent(s, oldBase, fileBase string) string {
+	if oldBase == fileBase {
+		return s
+	}
+	lines := strings.SplitAfter(s, "\n")
+	for idx, ln := range lines {
+		body := strings.TrimSuffix(ln, "\n")
+		hadNL := strings.HasSuffix(ln, "\n")
+		if strings.TrimSpace(body) == "" {
+			continue // leave blank lines untouched
+		}
+		if strings.HasPrefix(body, oldBase) {
+			body = fileBase + strings.TrimPrefix(body, oldBase)
+		}
+		if hadNL {
+			body += "\n"
+		}
+		lines[idx] = body
+	}
+	return strings.Join(lines, "")
+}
+
+// dropTrailingEmpty removes the empty element SplitAfter leaves when the input
+// ends with "\n", so line-window counts are exact.
+func dropTrailingEmpty(lines []string) []string {
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		return lines[:n-1]
+	}
+	return lines
+}
+
+func firstNonBlank(lines []string) int {
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			return i
+		}
+	}
+	return 0
+}
+
+func indentBase(lines []string) string {
+	return leadingWS(strings.TrimSuffix(lines[firstNonBlank(lines)], "\n"))
+}
+
+func leadingWS(s string) string {
+	return s[:len(s)-len(strings.TrimLeft(s, " \t"))]
+}
+
+// nearMissHint points the model at the file line most similar (by word overlap)
+// to old's first meaningful line, so a failed match is fixable in one retry
+// instead of looping. Returns "" when nothing is similar enough.
+func nearMissHint(fileLines, oldLines []string) string {
+	target := ""
+	for _, l := range oldLines {
+		if t := strings.TrimSpace(strings.TrimSuffix(l, "\n")); t != "" {
+			target = t
+			break
+		}
+	}
+	tset := wordSet(target)
+	if len(tset) == 0 {
+		return ""
+	}
+	bestIdx, bestScore := -1, 0.0
+	for i, l := range fileLines {
+		body := strings.TrimSpace(strings.TrimSuffix(l, "\n"))
+		if body == "" {
+			continue
+		}
+		if s := jaccard(tset, wordSet(body)); s > bestScore {
+			bestScore, bestIdx = s, i
+		}
+	}
+	if bestIdx < 0 || bestScore < 0.5 {
+		return ""
+	}
+	line := strings.TrimSpace(strings.TrimSuffix(fileLines[bestIdx], "\n"))
+	if len(line) > 80 {
+		line = line[:80] + "…"
+	}
+	return fmt.Sprintf(" — closest is line %d: %q (re-read the file if it changed)", bestIdx+1, line)
+}
+
+// wordSet splits text into a set of lowercased alphanumeric tokens.
+func wordSet(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !('a' <= r && r <= 'z' || '0' <= r && r <= '9')
+	}) {
+		set[w] = true
+	}
+	return set
+}
+
+func jaccard(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	inter := 0
+	for w := range a {
+		if b[w] {
+			inter++
+		}
+	}
+	return float64(inter) / float64(len(a)+len(b)-inter)
 }
 
 // bashAllowlist gates which binaries the bash tool may run. This is a guardrail
