@@ -157,6 +157,14 @@ func normalizeCompatBaseURL(raw string) string {
 	return base
 }
 
+// NormalizeBaseURL canonicalizes an OpenAI-compatible endpoint to its versioned
+// root: a bare host (e.g. "http://localhost:4000") gets "/v1" appended; an
+// endpoint that already carries a path (e.g. "https://openrouter.ai/api/v1")
+// passes through untouched. Append "/chat/completions" (etc.) to the result.
+// Exported so other clients (the loop's agent path) build URLs identically to
+// this package, instead of each appending "/v1" with different assumptions.
+func NormalizeBaseURL(raw string) string { return normalizeCompatBaseURL(raw) }
+
 // SetTemperature pins this client's sampling temperature, overriding the
 // CORTEX_TEMPERATURE env default read at construction. Sent on every
 // subsequent request.

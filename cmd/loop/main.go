@@ -571,7 +571,7 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	if base == "" {
 		base = defaultEndpoint
 	}
-	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
+	url := llm.NormalizeBaseURL(base) + "/chat/completions"
 
 	var lastErr error
 	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
@@ -651,7 +651,7 @@ func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning fu
 	if base == "" {
 		base = defaultEndpoint
 	}
-	url := strings.TrimRight(base, "/") + "/v1/chat/completions"
+	url := llm.NormalizeBaseURL(base) + "/chat/completions"
 
 	// requestTimeout bounds only time-to-first-byte here, never the whole
 	// stream — a long generation must not be killed by a total-request deadline.
@@ -1956,6 +1956,13 @@ type ToolConfig struct {
 	DeleteRoot string `json:"delete_root"`
 }
 
+// isOpenRouter reports whether the backend is OpenRouter, which has no
+// LiteLLM-style /model/info endpoint — so discovery is skipped and models come
+// from config.
+func (c *Config) isOpenRouter() bool {
+	return c != nil && strings.EqualFold(c.Backend.Type, "openrouter")
+}
+
 // deleteEnabled reports whether the remove_path tool is offered (default true).
 func (c *Config) deleteEnabled() bool {
 	if c == nil || c.Tools.AllowDelete == nil {
@@ -2102,9 +2109,14 @@ func NewCortexSession() *CortexSession {
 	// by capability (study auto-prefers swap-free reasoner-npu, falling back to
 	// reasoner if it's gone), window from max_input_tokens. A nil fleet means the
 	// backend is unreachable — note it so an empty model id isn't a mystery.
-	fleet := discoverFleet(context.Background(), cfg.backendEndpoint())
-	if fleet == nil {
-		fmt.Println(withColor(fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()), yellow))
+	// OpenRouter (and any backend without LiteLLM's /model/info) is driven by
+	// config-pinned models; skip discovery and its "unavailable" note there.
+	var fleet Fleet
+	if !cfg.isOpenRouter() {
+		fleet = discoverFleet(context.Background(), cfg.backendEndpoint())
+		if fleet == nil {
+			fmt.Println(withColor(fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()), yellow))
+		}
 	}
 	code := cfg.resolveBinding(roleCode, fleet)
 	study := cfg.resolveBinding(roleStudy, fleet)
