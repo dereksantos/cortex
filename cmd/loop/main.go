@@ -1555,7 +1555,7 @@ func (tc ToolCall) String() string {
 
 // Message source icons for the print gutter. Single-width; swap freely.
 const (
-	iconCortex = "" // assistant / cortex
+	iconCortex = "◆" // assistant / cortex
 	iconTool   = "▸" // tool action
 	iconUser   = "❯" // user
 )
@@ -1568,16 +1568,22 @@ func (m Message) gutter() (icon, color string) {
 	case RoleTool:
 		return iconTool, green
 	default: // assistant / cortex
-		return "", blue
+		return iconCortex, blue
 	}
 }
 
-// render formats the message as "HH:MM:SS  <content>", the timestamp gutter colored
-// by source. ts is injected so the formatting is testable.
+// gutterPrefix renders the leading "<icon> <timestamp>  ": the source icon in
+// its color, the timestamp dim so it reads as metadata, not content. Shared by
+// Message.render and the live stream printer so both gutters match.
+func gutterPrefix(icon, color string, ts time.Time) string {
+	return fmt.Sprintf("%s %s  ", withColor(icon, color), withColor(ts.Format("15:04:05"), gray))
+}
+
+// render formats the message as "<icon> HH:MM:SS  <content>" — a colored source
+// icon, a dim timestamp, then the content. ts is injected so it's testable.
 func (m Message) render(ts time.Time) string {
-	_, color := m.gutter()
-	gutter := withColor(ts.Format("15:04:05"), color)
-	return fmt.Sprintf("%s  %s", gutter, m.Content)
+	icon, color := m.gutter()
+	return gutterPrefix(icon, color, ts) + m.Content
 }
 
 // Print writes the message to stdout with a timestamped, source-colored gutter.
@@ -2145,6 +2151,93 @@ func latestSessionID(dir string) (string, error) {
 	return strings.TrimSuffix(latest, ".jsonl"), nil
 }
 
+// sessionInfo is a one-line summary of a saved session, for /sessions.
+type sessionInfo struct {
+	ID       string
+	ModTime  time.Time
+	Messages int    // core user+assistant messages
+	First    string // first user prompt, for a human-readable preview
+}
+
+// listSessions summarizes saved sessions newest-first, capped at limit (0 =
+// all). A transcript that fails to parse still appears (with zero counts)
+// rather than vanishing from the listing.
+func listSessions(dir string, limit int) ([]sessionInfo, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("no sessions at %s: %w", dir, err)
+	}
+	var out []sessionInfo
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		info := sessionInfo{ID: strings.TrimSuffix(name, ".jsonl")}
+		if fi, ferr := e.Info(); ferr == nil {
+			info.ModTime = fi.ModTime()
+		}
+		if msgs, lerr := loadTranscript(filepath.Join(dir, name)); lerr == nil {
+			for _, m := range msgs {
+				if m.Role != RoleUser && m.Role != "assistant" {
+					continue
+				}
+				info.Messages++
+				if m.Role == RoleUser && info.First == "" && strings.TrimSpace(m.Content) != "" {
+					info.First = firstLine(m.Content)
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	// ReadDir is name-sorted and ids are timestamps, so the slice is
+	// chronological; reverse for newest-first.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// firstLine returns the first non-blank line of s, trimmed.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+// relTime renders a coarse "Nm ago" / "Nh ago" / "Nd ago" age.
+func relTime(t time.Time) string {
+	if t.IsZero() {
+		return "?"
+	}
+	switch d := time.Since(t); {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// invokedName is the command the user ran (argv[0]'s base), so resume hints
+// quote the right binary whatever it was built/installed as.
+func invokedName() string {
+	if len(os.Args) > 0 {
+		if b := filepath.Base(os.Args[0]); b != "" && b != "." && b != "/" {
+			return b
+		}
+	}
+	return "loop"
+}
+
 // loadTranscript reads a transcript back into messages. A malformed line is an
 // error, not a skip — resuming a silently truncated history would be worse
 // than telling the user the file is damaged.
@@ -2284,6 +2377,32 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 // Clear resets the conversation to a fresh seed (system prompt + AGENTS.md,
 // re-read from disk) and starts a new transcript. The old transcript stays on
 // disk; the model binding — including a /model switch — is preserved.
+// printSessions lists recent saved sessions for in-REPL discovery, marking the
+// current one. Resuming still happens at startup (loop resume <id>); this makes
+// the ids — otherwise just timestamps — discoverable and meaningful.
+func (cs *CortexSession) printSessions() {
+	infos, err := listSessions(sessionsDir(), 15)
+	if err != nil || len(infos) == 0 {
+		fmt.Println(withColor("no sessions found", gray))
+		return
+	}
+	for _, s := range infos {
+		marker := "  "
+		if s.ID == cs.SessionID {
+			marker = withColor("✦ ", green)
+		}
+		preview := s.First
+		if preview == "" {
+			preview = "(no prompt)"
+		}
+		if r := []rune(preview); len(r) > 60 {
+			preview = string(r[:60]) + "…"
+		}
+		fmt.Printf("%s%s  %-8s  %2d msgs  %s\n", marker, s.ID, relTime(s.ModTime), s.Messages, preview)
+	}
+	fmt.Println(withColor(fmt.Sprintf("resume at startup: %s resume <id>", invokedName()), gray))
+}
+
 func (cs *CortexSession) Clear() {
 	if cs.transcript != nil {
 		cs.transcript.Close()
@@ -2921,8 +3040,8 @@ func (p *streamPrinter) emit(s string) {
 		if p.spinner != nil {
 			p.spinner.Stop()
 		}
-		_, color := Message{Role: "assistant"}.gutter()
-		fmt.Fprintf(p.writer(), "%s  ", withColor(time.Now().Format("15:04:05"), color))
+		icon, color := Message{Role: "assistant"}.gutter()
+		fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
 		p.began = true
 	}
 	fmt.Fprint(p.writer(), s)
@@ -3203,6 +3322,13 @@ func main() {
 			continue
 		}
 
+		// /sessions lists saved sessions so their ids are discoverable from
+		// inside the REPL (resuming still happens at startup).
+		if input == "/sessions" {
+			session.printSessions()
+			continue
+		}
+
 		// /remember <text> stores an explicit memory — the highest-precision
 		// capture, since the user marked it worth keeping.
 		if input == "/remember" || strings.HasPrefix(input, "/remember ") {
@@ -3300,6 +3426,11 @@ func main() {
 		session.stopDistill()
 		session.emitSessionMetrics()
 		fmt.Println(withColor(session.sessionSummary(), gray))
+		// Pre-fill the resume command with this session's id so picking it back
+		// up is copy-paste, not a hunt through .cortex/sessions/.
+		if session.SessionID != "" {
+			fmt.Println(withColor(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), gray))
+		}
 	}
 	fmt.Println("exiting")
 }
