@@ -3427,6 +3427,79 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
 }
 
+// TurnResult carries the outcome of one user turn for a transport-agnostic
+// caller. Reply is the model's final prose (the last assistant message with no
+// tool calls in this turn); in the interactive REPL it has already streamed to
+// the terminal, but a headless driver — the sprite worker, a Discord adapter —
+// reads it from here. Interrupted is true when the turn ended on a canceled ctx
+// with history left valid (the model can pick up next turn).
+type TurnResult struct {
+	Reply       string
+	Interrupted bool
+}
+
+// Turn runs one full user turn end to end: it appends the user message, attaches
+// this turn's fast-retrieval context (cleared after, so it neither accumulates
+// nor persists), runs the agentic Resolve loop, and — on success — captures the
+// turn to the store (retrievable next time) and buffers it for background
+// distillation. It is the single driveable entry point shared by the
+// interactive REPL and any headless caller; the caller owns input acquisition,
+// display, compaction, and the cancelable ctx.
+func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
+	// Preempt any background distillation so this turn's foreground model work
+	// gets the endpoint (it resumes at turn end over the new backlog).
+	cs.stopDistill()
+
+	// Mark where this turn's messages begin, so we can capture what it did.
+	turnStart := len(cs.Request.Messages)
+	cs.Append(Message{Role: RoleUser, Content: input})
+
+	// Fast retrieval for THIS turn. Hits are recorded to the transcript
+	// (kindRetrieval — the durable record of what the model was given) and
+	// merged into the system message for the wire only (EphemeralSystem),
+	// cleared after the turn so they don't accumulate or persist.
+	hits := cs.retrieve(input)
+	cs.recordRetrieval(input, hits)
+	note := formatRetrieved(hits)
+	cs.Request.EphemeralSystem = note
+	if note != "" {
+		cs.retrievals++
+		cs.injectedChars += len(note)
+	}
+
+	err := cs.Resolve(ctx)
+	cs.Request.EphemeralSystem = ""
+	cs.turns++
+
+	if err != nil {
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
+	}
+
+	// Capture the completed turn to the store (retrievable next time) BEFORE any
+	// compaction the caller may run rewrites history. Every turn, read-only
+	// included — see captureTurn. Tier 2: buffer and distill async (on the
+	// reasoner, during the idle gap before the next prompt).
+	turnMsgs := cs.Request.Messages[turnStart:]
+	cs.captureTurn(input, turnMsgs)
+	cs.noteTurn(input, turnMsgs)
+
+	return TurnResult{Reply: lastAssistantText(turnMsgs)}, nil
+}
+
+// lastAssistantText returns the prose of the final assistant message in a turn's
+// message slice — the answer a headless caller relays back to its transport.
+// Tool-call-only assistant messages (empty content) are skipped, so the result
+// is the model's actual reply, not an intermediate tool dispatch.
+func lastAssistantText(turnMsgs []Message) string {
+	for i := len(turnMsgs) - 1; i >= 0; i-- {
+		m := turnMsgs[i]
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
 // compactNow runs Compact with Ctrl-C wired and prints the outcome. Shared by
 // the manual /compact, the red-gauge auto-trigger, and overflow recovery.
 func compactNow(session *CortexSession, reason string) {
@@ -3612,28 +3685,6 @@ func main() {
 			continue
 		}
 
-		// Preempt any background distillation so this turn's foreground model
-		// work gets the endpoint (it resumes at turn end over the new backlog).
-		session.stopDistill()
-
-		// Mark where this turn's messages begin, so we can capture what it did.
-		turnStart := len(session.Request.Messages)
-		session.Append(Message{Role: RoleUser, Content: input})
-
-		// Fast retrieval for THIS turn. The hits are recorded to the transcript
-		// (kindRetrieval — the durable record of what the model was given) and
-		// merged into the system message for the wire only (EphemeralSystem),
-		// cleared after the turn so they don't accumulate or persist as core
-		// conversation.
-		hits := session.retrieve(input)
-		session.recordRetrieval(input, hits)
-		note := formatRetrieved(hits)
-		session.Request.EphemeralSystem = note
-		if note != "" {
-			session.retrievals++
-			session.injectedChars += len(note)
-		}
-
 		// Cancel the in-flight turn (model call or tool) without killing the
 		// REPL. With the editor active the terminal is in cbreak mode, so ESC
 		// and Ctrl-C arrive as bytes the watcher reads; otherwise (piped input)
@@ -3645,21 +3696,13 @@ func main() {
 		} else {
 			ctx, stop = signal.NotifyContext(context.Background(), os.Interrupt)
 		}
-		err := session.Resolve(ctx)
+		// The whole per-turn pipeline lives in Turn now — the same entry point a
+		// headless driver calls. The REPL owns only the cancelable ctx, display,
+		// and compaction; the reply already streamed to the terminal.
+		_, err := session.Turn(ctx, input)
 		stop()
-		session.Request.EphemeralSystem = ""
-		session.turns++
 		switch {
 		case err == nil:
-			// Capture the completed turn to the store (retrievable next time)
-			// BEFORE any compaction rewrites history. Every turn, read-only
-			// included — see captureTurn.
-			turnMsgs := session.Request.Messages[turnStart:]
-			session.captureTurn(input, turnMsgs)
-			// Tier 2: buffer the turn and distill it (async, on the reasoner,
-			// during the idle gap before the next prompt).
-			session.noteTurn(input, turnMsgs)
-
 			// Red gauge: compact at the turn boundary, before the window
 			// actually overflows. The boundary is the only safe point —
 			// mid-turn compaction would orphan tool_call sequences.
