@@ -1741,6 +1741,11 @@ type CortexSession struct {
 	// allowDelete gates the tool entirely.
 	deleteRoot  string
 	allowDelete bool
+	// quiet mutes all terminal emission for the turn — no spinner, no live
+	// streaming, no final-prose echo. Headless drivers (the `loop turn`
+	// entrypoint, a sprite worker, a Discord adapter) set this and read the
+	// reply from TurnResult instead, keeping stdout clean for machine parsing.
+	quiet bool
 	// SessionID names this session's transcript file; "" when unpersisted.
 	SessionID string
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
@@ -3286,6 +3291,12 @@ func (p *streamPrinter) finish() bool {
 // behavior and returns streamed=false (Resolve prints). Either way the spinner
 // is fully stopped and the line is clean before this returns.
 func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed bool, err error) {
+	// Headless: no spinner, no live token echo — the caller reads the reply
+	// from TurnResult and owns all output.
+	if cs.quiet {
+		res, err = cs.Request.Send(ctx)
+		return res, false, err
+	}
 	s := NewSpinner()
 	s.Start()
 	if !streamingEnabled() {
@@ -3383,7 +3394,7 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 		// Print any prose the model emitted (a final answer, or a preamble
 		// alongside tool calls). The streaming path already echoed it live, so
 		// only the blocking fallback prints here.
-		if !streamed && strings.TrimSpace(msg.Content) != "" {
+		if !streamed && !cs.quiet && strings.TrimSpace(msg.Content) != "" {
 			msg.Print()
 		}
 
@@ -3530,6 +3541,88 @@ func runStudyCLI(path, goal string, passes int) {
 	fmt.Println(out)
 }
 
+// runTurnCLI implements `loop turn`: one headless agent turn over a fresh or
+// resumed session, with clean machine-readable output. It is the integration
+// seam for the sprite + Discord architecture — an external driver invokes it
+// with the persistent session's id and the user's message, and reads the reply
+// (plain on stdout, or a JSON object with --json). All progress chatter and the
+// resolved session id go to stderr so stdout carries only the reply.
+func runTurnCLI(args []string) {
+	sessionID, asJSON := "", false
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session", "-s":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		case "--json":
+			asJSON = true
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+
+	// Input from the args, or — when none are given — the whole of stdin, so a
+	// driver can pipe a message body without shell-quoting it.
+	input := strings.TrimSpace(strings.Join(rest, " "))
+	if input == "" {
+		if b, err := io.ReadAll(os.Stdin); err == nil {
+			input = strings.TrimSpace(string(b))
+		}
+	}
+	if input == "" {
+		fmt.Fprintln(os.Stderr, "usage: loop turn [--session <id>] [--json] <input>")
+		os.Exit(2)
+	}
+
+	session := NewCortexSession()
+	session.quiet = true // headless: reply comes back via TurnResult, not stdout
+	if sessionID != "" {
+		if err := session.ResumeTranscript(sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "resume %s: %v — starting fresh\n", sessionID, err)
+			session.StartTranscript()
+		}
+	} else {
+		session.StartTranscript()
+	}
+	session.EnableRetrieval()
+	defer session.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	res, turnErr := session.Turn(ctx, input)
+
+	// Settle background distillation and record the session so a one-shot
+	// invocation still contributes its insight + eval metrics.
+	if session.turns > 0 {
+		session.stopDistill()
+		session.emitSessionMetrics()
+	}
+
+	if asJSON {
+		out := map[string]any{"session": session.SessionID, "reply": res.Reply}
+		if turnErr != nil {
+			out["error"] = turnErr.Error()
+			out["interrupted"] = res.Interrupted
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+	} else {
+		if turnErr != nil {
+			fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
+		}
+		if res.Reply != "" {
+			fmt.Println(res.Reply)
+		}
+		fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
+	}
+	if turnErr != nil {
+		os.Exit(1)
+	}
+}
+
 func main() {
 	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
 	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
@@ -3555,6 +3648,17 @@ func main() {
 			}
 		}
 		runStudyCLI(path, strings.Join(goalParts, " "), passes)
+		return
+	}
+
+	// Headless single-turn mode: `loop turn [--session <id>] [--json] <input…>`
+	// (or the input on stdin). Runs exactly one Turn over a fresh or resumed
+	// session and prints the model's reply — the seam a sprite worker or Discord
+	// adapter shells into. Pass the persistent session's id to keep the same
+	// conversation + shared .cortex/ across invocations ("one session at a
+	// time"); the id is echoed on stderr so a driver can thread it forward.
+	if len(os.Args) >= 2 && os.Args[1] == "turn" {
+		runTurnCLI(os.Args[2:])
 		return
 	}
 
