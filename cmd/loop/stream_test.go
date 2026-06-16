@@ -16,6 +16,37 @@ func sseHandler(body string) http.HandlerFunc {
 	}
 }
 
+// TestAttributionHeaders verifies both the blocking and streaming agent paths
+// send OpenRouter's HTTP-Referer / X-Title attribution headers.
+func TestAttributionHeaders(t *testing.T) {
+	check := func(name, body string, run func(url string) error) {
+		var ref, title string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ref = r.Header.Get("HTTP-Referer")
+			title = r.Header.Get("X-Title")
+			w.Write([]byte(body))
+		}))
+		defer srv.Close()
+		if err := run(srv.URL); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ref == "" || title == "" {
+			t.Errorf("%s: missing attribution (HTTP-Referer=%q X-Title=%q)", name, ref, title)
+		}
+	}
+	check("non-stream", okResponse, func(u string) error {
+		_, err := (&AgentRequest{Model: "m", BaseURL: u}).Send(context.Background())
+		return err
+	})
+	check("stream", sseBody(
+		`{"choices":[{"delta":{"content":"hi"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	), func(u string) error {
+		_, err := (&AgentRequest{Model: "m", BaseURL: u}).SendStream(context.Background(), nil, nil)
+		return err
+	})
+}
+
 // sseBody wraps each event JSON as a `data:` SSE frame and appends the
 // terminating [DONE]. Used by Resolve tests to drive the streaming path.
 func sseBody(events ...string) string {

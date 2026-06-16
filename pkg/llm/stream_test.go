@@ -130,6 +130,42 @@ func TestStreamChat_ServerError(t *testing.T) {
 	}
 }
 
+func TestStreamChatSendsAttributionAndCost(t *testing.T) {
+	var ref, title string
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"cost":0.0009}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ref = r.Header.Get("HTTP-Referer")
+		title = r.Header.Get("X-Title")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	res, err := StreamChat(context.Background(), srv.Client(), srv.URL, "", []byte(`{}`), nil, nil)
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	if ref == "" || title == "" {
+		t.Errorf("attribution not sent (HTTP-Referer=%q X-Title=%q)", ref, title)
+	}
+	if res.Stats.CostUSD != 0.0009 {
+		t.Errorf("cost = %v, want 0.0009", res.Stats.CostUSD)
+	}
+}
+
+func TestSetAttribution(t *testing.T) {
+	h := http.Header{}
+	SetAttribution(h)
+	if h.Get("HTTP-Referer") == "" || h.Get("X-Title") == "" {
+		t.Errorf("SetAttribution did not set both headers: %v", h)
+	}
+}
+
 func TestParseSSEData(t *testing.T) {
 	tests := []struct {
 		line     string

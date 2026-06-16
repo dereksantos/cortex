@@ -90,6 +90,7 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	SetAttribution(req.Header)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -131,6 +132,7 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 						res.Stats = GenerationStats{
 							InputTokens:  chunk.Usage.PromptTokens,
 							OutputTokens: chunk.Usage.CompletionTokens,
+							CostUSD:      chunk.Usage.Cost,
 						}
 					}
 					for _, ch := range chunk.Choices {

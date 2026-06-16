@@ -374,6 +374,15 @@ type AgentRequest struct {
 	// omitempty keeps the blocking request byte-identical to before.
 	Stream        bool           `json:"stream,omitempty"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	// Usage opts into OpenRouter's cost reporting (usage:{include:true}); set
+	// only for OpenRouter so local backends never see an unknown field.
+	Usage *usageInclude `json:"usage,omitempty"`
+}
+
+// usageInclude is OpenRouter's request-side flag to return dollar cost in the
+// response usage object.
+type usageInclude struct {
+	Include bool `json:"include"`
 }
 
 // streamOptions toggles OpenAI's include_usage so the streamed response ends
@@ -604,6 +613,7 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 		return nil, false, fmt.Errorf("error building agent request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	llm.SetAttribution(req.Header)
 	if r.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+r.APIKey)
 	}
@@ -715,6 +725,7 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 			PromptTokens:     res.Stats.InputTokens,
 			CompletionTokens: res.Stats.OutputTokens,
 			TotalTokens:      res.Stats.TotalTokens(),
+			Cost:             res.Stats.CostUSD,
 		},
 	}
 }
@@ -748,6 +759,9 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// Cost is the dollar cost of the call, returned by OpenRouter when the
+	// request enables usage accounting (see usageInclude). Zero otherwise.
+	Cost float64 `json:"cost"`
 }
 
 // Choice represents the model response(s)
@@ -1758,9 +1772,10 @@ type CortexSession struct {
 	turns         int
 	tokensIn      int
 	tokensOut     int
-	injectedChars int // retrieved context merged into the wire (≈ tokens × 4)
-	captures      int // Tier 1 turn captures + /remember
-	retrievals    int // turns that injected retrieved context
+	costUSD       float64 // cumulative dollar cost when the backend reports it
+	injectedChars int     // retrieved context merged into the wire (≈ tokens × 4)
+	captures      int     // Tier 1 turn captures + /remember
+	retrievals    int     // turns that injected retrieved context
 	insights      atomic.Int64
 }
 
@@ -2131,6 +2146,12 @@ func NewCortexSession() *CortexSession {
 	req.BaseURL = code.Endpoint
 	req.APIKey = keychainKey(code.KeyService)
 	req.ChatTemplateKwargs = code.TemplateKwargs()
+
+	// OpenRouter returns per-call dollar cost when asked; opt in so the gauge can
+	// show spend. Gated to OpenRouter — local backends don't grok this field.
+	if cfg.isOpenRouter() {
+		req.Usage = &usageInclude{Include: true}
+	}
 
 	// Extend the bash allowlist from config + env (merged with the built-ins).
 	for _, c := range cfg.bashAllowExtra() {
@@ -3033,9 +3054,26 @@ func (cs *CortexSession) contextStrategy() string {
 // sessionSummary is the one-line closing report.
 func (cs *CortexSession) sessionSummary() string {
 	dur := time.Since(cs.sessionStart).Round(time.Second)
-	return fmt.Sprintf("%d turns · %s in / %s out · %d captured · %d insights · %d retrievals · %s",
-		cs.turns, humanK(cs.tokensIn), humanK(cs.tokensOut),
+	cost := ""
+	if cs.costUSD > 0 {
+		cost = " · " + humanCost(cs.costUSD)
+	}
+	return fmt.Sprintf("%d turns · %s in / %s out%s · %d captured · %d insights · %d retrievals · %s",
+		cs.turns, humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
 		cs.captures, cs.insights.Load(), cs.retrievals, dur)
+}
+
+// humanCost formats a dollar cost with precision that scales to the magnitude —
+// per-turn costs are often fractions of a cent.
+func humanCost(c float64) string {
+	switch {
+	case c >= 1:
+		return fmt.Sprintf("$%.2f", c)
+	case c >= 0.01:
+		return fmt.Sprintf("$%.3f", c)
+	default:
+		return fmt.Sprintf("$%.4f", c)
+	}
 }
 
 // emitSessionMetrics writes one eval.cell_result for the session to the eval
@@ -3112,7 +3150,11 @@ func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
 	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
-	return fmt.Sprintf("%s%s  %s ", status, gauge, withColor(promptGlyph, cyan))
+	cost := ""
+	if cs.costUSD > 0 {
+		cost = withColor(" · "+humanCost(cs.costUSD), gray)
+	}
+	return fmt.Sprintf("%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
 }
 
 // streamingEnabled reports whether the REPL streams responses (the default).
@@ -3321,6 +3363,7 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 		// across the tool loop reflects real session cost.
 		cs.tokensIn += res.Usage.PromptTokens
 		cs.tokensOut += res.Usage.CompletionTokens
+		cs.costUSD += res.Usage.Cost
 		msg := res.Choices[0].Message
 
 		// Fallback: if the proxy didn't normalize Qwen's native XML tool-call

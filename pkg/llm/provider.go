@@ -40,6 +40,9 @@ Respond concisely. Future AI assistants will use your extracted context to give 
 type GenerationStats struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+	// CostUSD is the request's dollar cost when the backend reports it
+	// (OpenRouter with usage accounting); zero otherwise.
+	CostUSD float64 `json:"cost_usd,omitempty"`
 }
 
 // TotalTokens returns the sum of input and output tokens.

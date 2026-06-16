@@ -265,6 +265,22 @@ type compatUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// Cost is the request's dollar cost, returned by OpenRouter when the request
+	// sets usage:{include:true}. Zero for backends that don't report it.
+	Cost float64 `json:"cost"`
+}
+
+// Attribution headers identify Cortex to OpenRouter (used for app rankings and
+// the dashboard). Harmless to other backends, which ignore unknown headers.
+const (
+	attributionReferer = "https://github.com/dereksantos/cortex"
+	attributionTitle   = "Cortex"
+)
+
+// SetAttribution adds OpenRouter's optional HTTP-Referer / X-Title headers.
+func SetAttribution(h http.Header) {
+	h.Set("HTTP-Referer", attributionReferer)
+	h.Set("X-Title", attributionTitle)
 }
 
 type compatErr struct {
@@ -473,6 +489,7 @@ func (c *OpenAICompatClient) doRaw(ctx context.Context, path string, body any) (
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	SetAttribution(req.Header)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
