@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"golang.org/x/term"
@@ -18,11 +19,19 @@ var ErrInterrupted = errors.New("lineedit: interrupted")
 // Terminal owns a TTY in cbreak mode for an interactive session. Construct with
 // Open and always Close (it restores the prior terminal state).
 type Terminal struct {
-	in  *os.File
-	out io.Writer
-	fd  int
-	old *termState
+	in      *os.File
+	out     io.Writer
+	fd      int
+	old     *termState
+	history *History
 }
+
+// SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
+func (t *Terminal) SetHistory(h *History) { t.history = h }
+
+// AddHistory records a submitted line for recall. The caller chooses what to
+// record (e.g. skipping session-ending meta commands).
+func (t *Terminal) AddHistory(s string) { t.history.Add(s) }
 
 // IsInteractive reports whether f is a terminal — the gate for using the line
 // editor at all (piped/redirected input falls back to a plain reader).
@@ -83,6 +92,11 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
 	redraw()
 
+	// History navigation: hpos indexes into history; at history.Len() means the
+	// live draft (preserved so ↓ past the newest restores what was typed).
+	hpos := t.history.Len()
+	var draft []rune
+
 	for {
 		ev, err := decodeKey(src)
 		if err != nil {
@@ -93,8 +107,41 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 		}
 		switch ev.kind {
 		case keyEnter:
+			line := buf.string()
 			io.WriteString(t.out, "\r\n")
-			return buf.string(), nil
+			return line, nil // caller decides what to record (AddHistory)
+		case keyUp:
+			if hpos == 0 {
+				continue
+			}
+			if hpos == t.history.Len() {
+				draft = append([]rune{}, buf.runes...)
+			}
+			hpos--
+			setBuffer(buf, t.history.at(hpos))
+		case keyDown:
+			if hpos >= t.history.Len() {
+				continue
+			}
+			hpos++
+			if hpos == t.history.Len() {
+				buf.runes, buf.pos = append([]rune{}, draft...), len(draft)
+			} else {
+				setBuffer(buf, t.history.at(hpos))
+			}
+		case keyReverseSearch:
+			if t.history.Len() == 0 {
+				continue
+			}
+			res, action := t.reverseSearch(src)
+			switch action {
+			case rsSubmit:
+				io.WriteString(t.out, "\r\n")
+				return res, nil
+			case rsAccept:
+				setBuffer(buf, res)
+				hpos = t.history.Len()
+			}
 		case keyEOF:
 			if len(buf.runes) == 0 {
 				io.WriteString(t.out, "\r\n")
@@ -130,11 +177,86 @@ func (t *Terminal) ReadLine(prompt string) (string, error) {
 			buf.killToStart()
 		case keyKillWord:
 			buf.killWord()
-		case keyUp, keyDown, keyUnknown:
+		case keyUnknown, keyAbort:
 			continue // no state change → no redraw
 		}
 		redraw()
 	}
+}
+
+// setBuffer replaces the line with s and parks the cursor at the end.
+func setBuffer(b *buffer, s string) {
+	b.runes = []rune(s)
+	b.pos = len(b.runes)
+}
+
+// reverse-search outcomes.
+const (
+	rsCancel = iota // restore the pre-search line
+	rsAccept        // put the match in the buffer for further editing
+	rsSubmit        // accept and submit the match immediately
+)
+
+// reverseSearch runs an incremental Ctrl-R history search as a sub-mode reading
+// from the same source. Typing refines the query; Ctrl-R steps to the next older
+// match; Enter submits; a cursor key accepts the match for editing; Ctrl-G or
+// Ctrl-C cancels. Returns the resulting line and the chosen outcome.
+func (t *Terminal) reverseSearch(src *readerSource) (string, int) {
+	var query []rune
+	idx, match, _ := t.history.searchBackward("", t.history.Len())
+
+	render := func() {
+		io.WriteString(t.out, "\r\033[K(reverse-i-search)`"+string(query)+"': "+firstLine(match))
+	}
+	research := func(from int) {
+		if i, m, ok := t.history.searchBackward(string(query), from); ok {
+			idx, match = i, m
+		} else {
+			match = ""
+		}
+	}
+	render()
+
+	for {
+		ev, err := decodeKey(src)
+		if err != nil {
+			return "", rsCancel
+		}
+		switch ev.kind {
+		case keyEnter:
+			if match == "" {
+				return "", rsCancel
+			}
+			return match, rsSubmit
+		case keyInterrupt, keyAbort:
+			return "", rsCancel
+		case keyReverseSearch:
+			research(idx) // step to the next older match
+		case keyRune:
+			query = append(query, ev.r)
+			research(t.history.Len())
+		case keyBackspace:
+			if len(query) > 0 {
+				query = query[:len(query)-1]
+			}
+			research(t.history.Len())
+		case keyLeft, keyRight, keyHome, keyEnd, keyWordLeft, keyWordRight:
+			if match == "" {
+				return "", rsCancel
+			}
+			return match, rsAccept
+		}
+		render()
+	}
+}
+
+// firstLine returns s up to its first newline — multi-line history entries show
+// as one line in the search prompt.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // Interruptible returns a context cancelled when the user presses ESC or Ctrl-C

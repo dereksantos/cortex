@@ -3299,6 +3299,7 @@ func main() {
 	if lineedit.IsInteractive(os.Stdin) {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
+			editor.SetHistory(lineedit.LoadHistory(filepath.Join(contextDir(), "history")))
 			defer editor.Close()
 		}
 	}
@@ -3333,6 +3334,12 @@ func main() {
 		}
 		if input == "" {
 			continue
+		}
+
+		// Record for ↑/↓ and Ctrl-R recall — but not the session-enders, so a
+		// fresh prompt's first ↑ lands on real work, not "/quit".
+		if editor != nil && input != "/quit" && input != "/exit" {
+			editor.AddHistory(input)
 		}
 
 		// /quit and /exit leave the REPL; EOF (Ctrl-D) breaks above. All

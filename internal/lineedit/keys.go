@@ -21,12 +21,14 @@ const (
 	keyEnd
 	keyWordLeft
 	keyWordRight
-	keyKillToEnd   // Ctrl-K
-	keyKillToStart // Ctrl-U
-	keyKillWord    // Ctrl-W
-	keyInterrupt   // Ctrl-C
-	keyEOF         // Ctrl-D
-	keyPaste       // bracketed paste (text in keyEvent.paste)
+	keyKillToEnd     // Ctrl-K
+	keyKillToStart   // Ctrl-U
+	keyKillWord      // Ctrl-W
+	keyInterrupt     // Ctrl-C
+	keyEOF           // Ctrl-D
+	keyReverseSearch // Ctrl-R
+	keyAbort         // Ctrl-G
+	keyPaste         // bracketed paste (text in keyEvent.paste)
 	keyUnknown
 )
 
@@ -68,6 +70,10 @@ func decodeKey(src byteSource) (keyEvent, error) {
 		return keyEvent{kind: keyKillToStart}, nil // Ctrl-U
 	case 0x17:
 		return keyEvent{kind: keyKillWord}, nil // Ctrl-W
+	case 0x12:
+		return keyEvent{kind: keyReverseSearch}, nil // Ctrl-R
+	case 0x07:
+		return keyEvent{kind: keyAbort}, nil // Ctrl-G
 	case 0x03:
 		return keyEvent{kind: keyInterrupt}, nil // Ctrl-C
 	case 0x04:
