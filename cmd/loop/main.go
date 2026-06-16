@@ -75,6 +75,7 @@ const FunctionWriteFile = "write_file"
 const FunctionEditFile = "edit_file"
 const FunctionStudy = "study"
 const FunctionBash = "bash"
+const FunctionRemove = "remove_path"
 
 const defaultRole = RoleUser
 const defaultModel = ModelCoder
@@ -537,7 +538,16 @@ var bash = newTool(FunctionBash,
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
 
-var tools = []Tool{readFile, writeFile, editFile, studyTool, bash}
+var removeTool = newTool(FunctionRemove,
+	"Delete a file or directory (recursively). Confined to the workspace: paths "+
+		"that escape it, the workspace root itself, and .git/.cortex are refused. "+
+		"In a git repo prefer `git rm` for tracked files; use this for untracked "+
+		"files or directories.",
+	objectSchema(map[string]any{
+		"path": stringProp("Path to delete, relative to the working directory."),
+	}, "path"))
+
+var tools = []Tool{readFile, writeFile, editFile, studyTool, bash, removeTool}
 
 // httpClient is shared by all model calls. The timeout is the backstop guard:
 // without it a server that accepts the request and never answers hangs the
@@ -782,6 +792,8 @@ func (tc ToolCall) Execute(ctx context.Context, cs *CortexSession) (string, erro
 		return tc.Study(ctx, cs)
 	case FunctionBash:
 		return tc.Bash(ctx, cs)
+	case FunctionRemove:
+		return tc.RemovePath(cs)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -1265,13 +1277,90 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(inter) / float64(len(a)+len(b)-inter)
 }
 
+// RemovePath deletes a file or directory, confined to the workspace. It is the
+// only deletion path (raw rm is not allowlisted): the confinement — not a
+// human prompt — is the safety property, so the tool stays autonomous.
+func (tc ToolCall) RemovePath(cs *CortexSession) (string, error) {
+	if cs == nil || !cs.allowDelete {
+		return "", fmt.Errorf("remove_path is disabled")
+	}
+	path, err := tc.stringArg("path")
+	if err != nil {
+		return "", err
+	}
+	abs, err := confinedPath(cs.deleteRoot, path)
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("remove_path(%s)", path))
+	if err := os.RemoveAll(abs); err != nil {
+		return "", fmt.Errorf("remove %s: %w", path, err)
+	}
+	return fmt.Sprintf("removed %s", path), nil
+}
+
+// confinedPath resolves p against root and verifies it stays inside it. It
+// rejects absolute/`..` escapes, the root itself, the protected .git/.cortex
+// trees, and symlink escapes (a path whose real parent leaves the root). The
+// returned path is absolute and safe to delete.
+func confinedPath(root, p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve root: %w", err)
+	}
+	abs := filepath.Clean(p)
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(rootAbs, abs)
+	}
+	rel, err := filepath.Rel(rootAbs, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside the workspace (%s)", p, rootAbs)
+	}
+	if rel == "." {
+		return "", fmt.Errorf("refusing to delete the workspace root")
+	}
+	top := rel
+	if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
+		top = rel[:i]
+	}
+	if top == ".git" || top == ".cortex" {
+		return "", fmt.Errorf("refusing to delete protected path %q", rel)
+	}
+	// Symlink-escape guard: a lexical in-root path can still point out via a
+	// symlinked parent (root/link -> /etc, then "link/x"). Re-check the real
+	// parent. The final component may itself be a symlink — RemoveAll deletes
+	// the link, not its target, so that's safe.
+	if realParent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
+		rootReal, err2 := filepath.EvalSymlinks(rootAbs)
+		if err2 == nil {
+			if r, err := filepath.Rel(rootReal, realParent); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+				return "", fmt.Errorf("path %q escapes the workspace via a symlink", p)
+			}
+		}
+	}
+	return abs, nil
+}
+
 // bashAllowlist gates which binaries the bash tool may run. This is a guardrail
 // against the model doing something catastrophic by accident — NOT a security
 // sandbox. We exec the binary directly (no shell), so `;`, `&&`, `|`, `>` are
 // inert: a command is always a single allowlisted binary plus literal args.
 var bashAllowlist = map[string]bool{
+	// read / search
 	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
-	"grep": true, "find": true, "echo": true, "pwd": true, "tree": true,
+	"grep": true, "rg": true, "find": true, "tree": true, "diff": true,
+	"stat": true, "which": true, "echo": true, "pwd": true,
+	// filesystem management (literal paths only — no shell, no globbing).
+	// Deletion is deliberately absent here: it goes through the confined
+	// remove_path tool, not raw rm.
+	"mkdir": true, "mv": true, "cp": true, "touch": true, "rmdir": true,
+	// build / vcs
 	"go": true, "git": true, "gofmt": true,
 }
 
@@ -1634,6 +1723,10 @@ type CortexSession struct {
 	Fleet Fleet
 	// Config is the loaded .cortex/config.json (may be nil).
 	Config *Config
+	// deleteRoot confines remove_path to the workspace (default cwd at startup);
+	// allowDelete gates the tool entirely.
+	deleteRoot  string
+	allowDelete bool
 	// SessionID names this session's transcript file; "" when unpersisted.
 	SessionID string
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
@@ -1846,6 +1939,42 @@ type Backend struct {
 type Config struct {
 	Backend Backend              `json:"backend"`
 	Models  map[string]ModelSpec `json:"models"`
+	Tools   ToolConfig           `json:"tools"`
+}
+
+// ToolConfig tunes the agent's tool surface. All fields are optional.
+type ToolConfig struct {
+	// BashAllow adds extra commands to the built-in bash allowlist (merged, not
+	// replaced). Also extendable via CORTEX_BASH_ALLOW (comma-separated).
+	BashAllow []string `json:"bash_allow"`
+	// AllowDelete enables the confined remove_path tool. Nil means the default
+	// (enabled): deletion is autonomous but jailed to the workspace. Set false
+	// to remove the tool entirely.
+	AllowDelete *bool `json:"allow_delete"`
+	// DeleteRoot overrides the deletion confinement root (default: the working
+	// directory). Relative paths resolve against the cwd.
+	DeleteRoot string `json:"delete_root"`
+}
+
+// deleteEnabled reports whether the remove_path tool is offered (default true).
+func (c *Config) deleteEnabled() bool {
+	if c == nil || c.Tools.AllowDelete == nil {
+		return true
+	}
+	return *c.Tools.AllowDelete
+}
+
+// bashAllowExtra returns extra allowlisted commands from config and the
+// CORTEX_BASH_ALLOW env var (comma-separated).
+func (c *Config) bashAllowExtra() []string {
+	var out []string
+	if c != nil {
+		out = append(out, c.Tools.BashAllow...)
+	}
+	if v := os.Getenv("CORTEX_BASH_ALLOW"); v != "" {
+		out = append(out, strings.Split(v, ",")...)
+	}
+	return out
 }
 
 // backendEndpoint resolves the backend root: config wins, then CORTEX_BACKEND,
@@ -1991,6 +2120,27 @@ func NewCortexSession() *CortexSession {
 	req.APIKey = keychainKey(code.KeyService)
 	req.ChatTemplateKwargs = code.TemplateKwargs()
 
+	// Extend the bash allowlist from config + env (merged with the built-ins).
+	for _, c := range cfg.bashAllowExtra() {
+		if c = strings.TrimSpace(c); c != "" {
+			bashAllowlist[c] = true
+		}
+	}
+
+	// Deletion: confined to the workspace, autonomous by default. When disabled,
+	// drop remove_path from the advertised tools so the model never sees it.
+	allowDelete := cfg.deleteEnabled()
+	deleteRoot := "."
+	if cfg != nil && cfg.Tools.DeleteRoot != "" {
+		deleteRoot = cfg.Tools.DeleteRoot
+	}
+	if abs, err := filepath.Abs(deleteRoot); err == nil {
+		deleteRoot = abs
+	}
+	if !allowDelete {
+		req.Tools = toolsExcept(req.Tools, FunctionRemove)
+	}
+
 	return &CortexSession{
 		Args:         &args,
 		Request:      req,
@@ -1998,8 +2148,21 @@ func NewCortexSession() *CortexSession {
 		Window:       code.Window,
 		Study:        study,
 		Fleet:        fleet,
+		deleteRoot:   deleteRoot,
+		allowDelete:  allowDelete,
 		sessionStart: time.Now(),
 	}
+}
+
+// toolsExcept returns the tool list without the named function.
+func toolsExcept(ts []Tool, name string) []Tool {
+	out := make([]Tool, 0, len(ts))
+	for _, t := range ts {
+		if t.Function.Name != name {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (cs *CortexSession) PrintArgs() {
