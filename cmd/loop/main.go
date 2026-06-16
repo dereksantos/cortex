@@ -3662,6 +3662,17 @@ func main() {
 		return
 	}
 
+	// One-change-at-a-time git lifecycle: `loop change <start|commit|status>`.
+	// The sprite drives these around an agent turn so each change lands on its
+	// own branch, isolated and reviewable. Local only — see change.go.
+	if len(os.Args) >= 2 && os.Args[1] == "change" {
+		if err := runChangeCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	session := NewCortexSession()
 
 	// `loop resume [id]` continues a prior session (the latest when no id is
