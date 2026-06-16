@@ -26,6 +26,7 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -3290,17 +3291,46 @@ func main() {
 	session.EnableRetrieval()
 	defer session.Close()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	// Interactive terminals get the raw-mode line editor (arrows, editing,
+	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
+	// `printf … | loop` — falls back to the plain scanner unchanged.
+	var editor *lineedit.Terminal
+	var scanner *bufio.Scanner
+	if lineedit.IsInteractive(os.Stdin) {
+		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
+			editor = t
+			defer editor.Close()
+		}
+	}
+	if editor == nil {
+		scanner = bufio.NewScanner(os.Stdin)
+	}
 
 	for {
-		fmt.Print(session.Prompt())
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("scanner error: %v\n", err)
+		var input string
+		if editor != nil {
+			line, err := editor.ReadLine(session.Prompt())
+			if err == io.EOF {
+				break
 			}
-			break
+			if err == lineedit.ErrInterrupted {
+				continue // Ctrl-C abandons the line, keeps the REPL
+			}
+			if err != nil {
+				fmt.Printf("input error: %v\n", err)
+				break
+			}
+			input = strings.TrimSpace(line)
+		} else {
+			fmt.Print(session.Prompt())
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					fmt.Printf("scanner error: %v\n", err)
+				}
+				break
+			}
+			input = strings.TrimSpace(scanner.Text())
 		}
-		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
 			continue
 		}
@@ -3379,10 +3409,17 @@ func main() {
 			session.injectedChars += len(note)
 		}
 
-		// Ctrl-C cancels the in-flight turn (model call or tool) instead of
-		// killing the REPL. stop() restores default signal handling at the
-		// prompt, so Ctrl-C while idle still exits the process.
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		// Cancel the in-flight turn (model call or tool) without killing the
+		// REPL. With the editor active the terminal is in cbreak mode, so ESC
+		// and Ctrl-C arrive as bytes the watcher reads; otherwise (piped input)
+		// fall back to SIGINT.
+		var ctx context.Context
+		var stop func()
+		if editor != nil {
+			ctx, stop = editor.Interruptible(context.Background())
+		} else {
+			ctx, stop = signal.NotifyContext(context.Background(), os.Interrupt)
+		}
 		err := session.Resolve(ctx)
 		stop()
 		session.Request.EphemeralSystem = ""
