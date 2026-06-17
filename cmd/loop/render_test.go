@@ -142,6 +142,28 @@ func TestTrimBlockPadding(t *testing.T) {
 	}
 }
 
+func TestTrimLeadingIndent(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain indent", "  Hello", "Hello"},
+		{"leading newlines", "\n\n  Hello", "Hello"},
+		{"empty sgr pairs then indent", "\x1b[38;5;252m\x1b[0m  \x1b[38;5;252mHello", "\x1b[38;5;252mHello"},
+		{"keeps color of first glyph", "  \x1b[1mBold", "\x1b[1mBold"},
+		{"nothing to trim", "Hello world", "Hello world"},
+		{"interior indent preserved", "First\n  second", "First\n  second"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := trimLeadingIndent(tt.in); got != tt.want {
+				t.Errorf("trimLeadingIndent(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // stripANSI removes CSI/OSC escape sequences so assertions can match the
 // visible text glamour wraps in styling codes.
 func stripANSI(s string) string {

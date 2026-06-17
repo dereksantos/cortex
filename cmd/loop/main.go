@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -3235,15 +3236,16 @@ const toolMarker = "<tool_call"
 // All printing happens on the calling goroutine (StreamChat invokes onContent
 // synchronously), so it never races the spinner once that's stopped.
 type streamPrinter struct {
-	spinner  *Spinner          // stopped on first visible byte; nil to skip (tests)
-	out      io.Writer         // destination; nil means os.Stdout
-	buf      strings.Builder   // all content seen so far
-	reason   strings.Builder   // accumulated reasoning, for the live ticker tail
-	printed  int               // bytes of buf already written
-	suppress bool              // a tool-call marker appeared; stop echoing
-	began    bool              // gutter printed (and spinner stopped)
-	md       *markdownRenderer // nil → raw token streaming; set → block-buffered render
-	pending  string            // md path: prose not yet flushed as a complete block
+	spinner    *Spinner          // stopped on first visible byte; nil to skip (tests)
+	out        io.Writer         // destination; nil means os.Stdout
+	buf        strings.Builder   // all content seen so far
+	reason     strings.Builder   // accumulated reasoning, for the live ticker tail
+	printed    int               // bytes of buf already written
+	suppress   bool              // a tool-call marker appeared; stop echoing
+	began      bool              // gutter printed (and spinner stopped)
+	md         *markdownRenderer // nil → raw token streaming; set → block-buffered render
+	pending    string            // md path: prose not yet flushed as a complete block
+	gutterOpen bool              // md path: gutter printed, first block not yet joined to it
 	// onStatus drives a "thinking…" indicator when there's no standalone spinner
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
@@ -3317,8 +3319,9 @@ func (p *streamPrinter) onContent(s string) {
 }
 
 // begin stops the spinner and prints the assistant gutter once, on the first
-// visible content. In render mode the gutter gets its own line so glamour's
-// margined block output reads cleanly beneath it.
+// visible content. The gutter is left open (no trailing newline) so the first
+// fragment — raw bytes, or the first rendered block with its leading margin
+// trimmed — sits on the same line as the timestamp.
 func (p *streamPrinter) begin() {
 	if p.began {
 		return
@@ -3331,9 +3334,7 @@ func (p *streamPrinter) begin() {
 	}
 	icon, color := Message{Role: "assistant"}.gutter()
 	fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
-	if p.md != nil {
-		fmt.Fprintln(p.writer())
-	}
+	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
 }
 
@@ -3357,14 +3358,21 @@ func (p *streamPrinter) emit(s string) {
 	}
 }
 
-// writeBlock renders one complete markdown block and prints it under the
-// gutter. Blank blocks are skipped so separators don't leave gaps.
+// writeBlock renders one complete markdown block and prints it. Blank blocks
+// are skipped so separators don't leave gaps. The first block after the gutter
+// has its leading margin trimmed so it joins the timestamp line; later blocks
+// flow beneath at glamour's own indent.
 func (p *streamPrinter) writeBlock(b string) {
 	if strings.TrimSpace(b) == "" {
 		return
 	}
 	p.begin()
-	fmt.Fprintln(p.writer(), p.md.render(b))
+	out := p.md.render(b)
+	if p.gutterOpen {
+		out = trimLeadingIndent(out)
+		p.gutterOpen = false
+	}
+	fmt.Fprintln(p.writer(), out)
 }
 
 // finish flushes any held-back tail (when no marker ever appeared) plus, in
@@ -3877,6 +3885,15 @@ func main() {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(contextDir(), "history")))
 			defer editor.Close()
+			// Background cognition (Think/Dream) logs via the global logger to
+			// stderr; in an interactive session that lands on top of the prompt.
+			// Divert it to a file so the terminal stays clean (jq-free debugging
+			// still available via tail -f .cortex/loop.log).
+			if lf, err := os.OpenFile(filepath.Join(contextDir(), "loop.log"),
+				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+				log.SetOutput(lf)
+				defer lf.Close()
+			}
 		}
 	}
 	if editor == nil {

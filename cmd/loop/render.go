@@ -79,6 +79,32 @@ func (m *markdownRenderer) render(block string) string {
 // ansiSuffix matches an ANSI SGR code at the end of a string.
 var ansiSuffix = regexp.MustCompile(`\x1b\[[0-9;]*m$`)
 
+// ansiPrefix matches an ANSI SGR code at the start of a string.
+var ansiPrefix = regexp.MustCompile(`^\x1b\[[0-9;]*m`)
+
+// trimLeadingIndent removes glamour's leading margin — newlines, indent spaces,
+// and the empty SGR pairs it emits — so a rendered block can sit on the gutter
+// line. An SGR code is only dropped when it styles whitespace (what follows is a
+// space, newline, or another code); the code that colors the first visible glyph
+// is preserved, so the joined text keeps its styling.
+func trimLeadingIndent(s string) string {
+	for {
+		switch {
+		case strings.HasPrefix(s, "\n"), strings.HasPrefix(s, " "):
+			s = s[1:]
+		default:
+			if loc := ansiPrefix.FindStringIndex(s); loc != nil {
+				rest := s[loc[1]:]
+				if rest == "" || rest[0] == ' ' || rest[0] == '\n' || strings.HasPrefix(rest, "\x1b[") {
+					s = rest
+					continue
+				}
+			}
+			return s
+		}
+	}
+}
+
 // trimBlockPadding strips glamour's right-pad: WithWordWrap fills every line to
 // the wrap width with (color-wrapped) trailing spaces, which clutters a plain
 // scrolling REPL.
