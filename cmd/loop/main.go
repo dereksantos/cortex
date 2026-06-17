@@ -1741,6 +1741,11 @@ type CortexSession struct {
 	// allowDelete gates the tool entirely.
 	deleteRoot  string
 	allowDelete bool
+	// quiet mutes all terminal emission for the turn — no spinner, no live
+	// streaming, no final-prose echo. Headless drivers (the `loop turn`
+	// entrypoint, a sprite worker, a Discord adapter) set this and read the
+	// reply from TurnResult instead, keeping stdout clean for machine parsing.
+	quiet bool
 	// SessionID names this session's transcript file; "" when unpersisted.
 	SessionID string
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
@@ -3286,6 +3291,12 @@ func (p *streamPrinter) finish() bool {
 // behavior and returns streamed=false (Resolve prints). Either way the spinner
 // is fully stopped and the line is clean before this returns.
 func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed bool, err error) {
+	// Headless: no spinner, no live token echo — the caller reads the reply
+	// from TurnResult and owns all output.
+	if cs.quiet {
+		res, err = cs.Request.Send(ctx)
+		return res, false, err
+	}
 	s := NewSpinner()
 	s.Start()
 	if !streamingEnabled() {
@@ -3383,7 +3394,7 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 		// Print any prose the model emitted (a final answer, or a preamble
 		// alongside tool calls). The streaming path already echoed it live, so
 		// only the blocking fallback prints here.
-		if !streamed && strings.TrimSpace(msg.Content) != "" {
+		if !streamed && !cs.quiet && strings.TrimSpace(msg.Content) != "" {
 			msg.Print()
 		}
 
@@ -3427,6 +3438,79 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
 }
 
+// TurnResult carries the outcome of one user turn for a transport-agnostic
+// caller. Reply is the model's final prose (the last assistant message with no
+// tool calls in this turn); in the interactive REPL it has already streamed to
+// the terminal, but a headless driver — the sprite worker, a Discord adapter —
+// reads it from here. Interrupted is true when the turn ended on a canceled ctx
+// with history left valid (the model can pick up next turn).
+type TurnResult struct {
+	Reply       string
+	Interrupted bool
+}
+
+// Turn runs one full user turn end to end: it appends the user message, attaches
+// this turn's fast-retrieval context (cleared after, so it neither accumulates
+// nor persists), runs the agentic Resolve loop, and — on success — captures the
+// turn to the store (retrievable next time) and buffers it for background
+// distillation. It is the single driveable entry point shared by the
+// interactive REPL and any headless caller; the caller owns input acquisition,
+// display, compaction, and the cancelable ctx.
+func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
+	// Preempt any background distillation so this turn's foreground model work
+	// gets the endpoint (it resumes at turn end over the new backlog).
+	cs.stopDistill()
+
+	// Mark where this turn's messages begin, so we can capture what it did.
+	turnStart := len(cs.Request.Messages)
+	cs.Append(Message{Role: RoleUser, Content: input})
+
+	// Fast retrieval for THIS turn. Hits are recorded to the transcript
+	// (kindRetrieval — the durable record of what the model was given) and
+	// merged into the system message for the wire only (EphemeralSystem),
+	// cleared after the turn so they don't accumulate or persist.
+	hits := cs.retrieve(input)
+	cs.recordRetrieval(input, hits)
+	note := formatRetrieved(hits)
+	cs.Request.EphemeralSystem = note
+	if note != "" {
+		cs.retrievals++
+		cs.injectedChars += len(note)
+	}
+
+	err := cs.Resolve(ctx)
+	cs.Request.EphemeralSystem = ""
+	cs.turns++
+
+	if err != nil {
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
+	}
+
+	// Capture the completed turn to the store (retrievable next time) BEFORE any
+	// compaction the caller may run rewrites history. Every turn, read-only
+	// included — see captureTurn. Tier 2: buffer and distill async (on the
+	// reasoner, during the idle gap before the next prompt).
+	turnMsgs := cs.Request.Messages[turnStart:]
+	cs.captureTurn(input, turnMsgs)
+	cs.noteTurn(input, turnMsgs)
+
+	return TurnResult{Reply: lastAssistantText(turnMsgs)}, nil
+}
+
+// lastAssistantText returns the prose of the final assistant message in a turn's
+// message slice — the answer a headless caller relays back to its transport.
+// Tool-call-only assistant messages (empty content) are skipped, so the result
+// is the model's actual reply, not an intermediate tool dispatch.
+func lastAssistantText(turnMsgs []Message) string {
+	for i := len(turnMsgs) - 1; i >= 0; i-- {
+		m := turnMsgs[i]
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
 // compactNow runs Compact with Ctrl-C wired and prints the outcome. Shared by
 // the manual /compact, the red-gauge auto-trigger, and overflow recovery.
 func compactNow(session *CortexSession, reason string) {
@@ -3457,6 +3541,88 @@ func runStudyCLI(path, goal string, passes int) {
 	fmt.Println(out)
 }
 
+// runTurnCLI implements `loop turn`: one headless agent turn over a fresh or
+// resumed session, with clean machine-readable output. It is the integration
+// seam for the sprite + Discord architecture — an external driver invokes it
+// with the persistent session's id and the user's message, and reads the reply
+// (plain on stdout, or a JSON object with --json). All progress chatter and the
+// resolved session id go to stderr so stdout carries only the reply.
+func runTurnCLI(args []string) {
+	sessionID, asJSON := "", false
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session", "-s":
+			if i+1 < len(args) {
+				sessionID = args[i+1]
+				i++
+			}
+		case "--json":
+			asJSON = true
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+
+	// Input from the args, or — when none are given — the whole of stdin, so a
+	// driver can pipe a message body without shell-quoting it.
+	input := strings.TrimSpace(strings.Join(rest, " "))
+	if input == "" {
+		if b, err := io.ReadAll(os.Stdin); err == nil {
+			input = strings.TrimSpace(string(b))
+		}
+	}
+	if input == "" {
+		fmt.Fprintln(os.Stderr, "usage: loop turn [--session <id>] [--json] <input>")
+		os.Exit(2)
+	}
+
+	session := NewCortexSession()
+	session.quiet = true // headless: reply comes back via TurnResult, not stdout
+	if sessionID != "" {
+		if err := session.ResumeTranscript(sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "resume %s: %v — starting fresh\n", sessionID, err)
+			session.StartTranscript()
+		}
+	} else {
+		session.StartTranscript()
+	}
+	session.EnableRetrieval()
+	defer session.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	res, turnErr := session.Turn(ctx, input)
+
+	// Settle background distillation and record the session so a one-shot
+	// invocation still contributes its insight + eval metrics.
+	if session.turns > 0 {
+		session.stopDistill()
+		session.emitSessionMetrics()
+	}
+
+	if asJSON {
+		out := map[string]any{"session": session.SessionID, "reply": res.Reply}
+		if turnErr != nil {
+			out["error"] = turnErr.Error()
+			out["interrupted"] = res.Interrupted
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+	} else {
+		if turnErr != nil {
+			fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
+		}
+		if res.Reply != "" {
+			fmt.Println(res.Reply)
+		}
+		fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
+	}
+	if turnErr != nil {
+		os.Exit(1)
+	}
+}
+
 func main() {
 	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
 	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
@@ -3482,6 +3648,28 @@ func main() {
 			}
 		}
 		runStudyCLI(path, strings.Join(goalParts, " "), passes)
+		return
+	}
+
+	// Headless single-turn mode: `loop turn [--session <id>] [--json] <input…>`
+	// (or the input on stdin). Runs exactly one Turn over a fresh or resumed
+	// session and prints the model's reply — the seam a sprite worker or Discord
+	// adapter shells into. Pass the persistent session's id to keep the same
+	// conversation + shared .cortex/ across invocations ("one session at a
+	// time"); the id is echoed on stderr so a driver can thread it forward.
+	if len(os.Args) >= 2 && os.Args[1] == "turn" {
+		runTurnCLI(os.Args[2:])
+		return
+	}
+
+	// One-change-at-a-time git lifecycle: `loop change <start|commit|status>`.
+	// The sprite drives these around an agent turn so each change lands on its
+	// own branch, isolated and reviewable. Local only — see change.go.
+	if len(os.Args) >= 2 && os.Args[1] == "change" {
+		if err := runChangeCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -3612,28 +3800,6 @@ func main() {
 			continue
 		}
 
-		// Preempt any background distillation so this turn's foreground model
-		// work gets the endpoint (it resumes at turn end over the new backlog).
-		session.stopDistill()
-
-		// Mark where this turn's messages begin, so we can capture what it did.
-		turnStart := len(session.Request.Messages)
-		session.Append(Message{Role: RoleUser, Content: input})
-
-		// Fast retrieval for THIS turn. The hits are recorded to the transcript
-		// (kindRetrieval — the durable record of what the model was given) and
-		// merged into the system message for the wire only (EphemeralSystem),
-		// cleared after the turn so they don't accumulate or persist as core
-		// conversation.
-		hits := session.retrieve(input)
-		session.recordRetrieval(input, hits)
-		note := formatRetrieved(hits)
-		session.Request.EphemeralSystem = note
-		if note != "" {
-			session.retrievals++
-			session.injectedChars += len(note)
-		}
-
 		// Cancel the in-flight turn (model call or tool) without killing the
 		// REPL. With the editor active the terminal is in cbreak mode, so ESC
 		// and Ctrl-C arrive as bytes the watcher reads; otherwise (piped input)
@@ -3645,21 +3811,13 @@ func main() {
 		} else {
 			ctx, stop = signal.NotifyContext(context.Background(), os.Interrupt)
 		}
-		err := session.Resolve(ctx)
+		// The whole per-turn pipeline lives in Turn now — the same entry point a
+		// headless driver calls. The REPL owns only the cancelable ctx, display,
+		// and compaction; the reply already streamed to the terminal.
+		_, err := session.Turn(ctx, input)
 		stop()
-		session.Request.EphemeralSystem = ""
-		session.turns++
 		switch {
 		case err == nil:
-			// Capture the completed turn to the store (retrievable next time)
-			// BEFORE any compaction rewrites history. Every turn, read-only
-			// included — see captureTurn.
-			turnMsgs := session.Request.Messages[turnStart:]
-			session.captureTurn(input, turnMsgs)
-			// Tier 2: buffer the turn and distill it (async, on the reasoner,
-			// during the idle gap before the next prompt).
-			session.noteTurn(input, turnMsgs)
-
 			// Red gauge: compact at the turn boundary, before the window
 			// actually overflows. The boundary is the only safe point —
 			// mid-turn compaction would orphan tool_call sequences.
