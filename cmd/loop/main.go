@@ -1743,7 +1743,7 @@ type CortexSession struct {
 	allowDelete bool
 	// quiet mutes all terminal emission for the turn — no spinner, no live
 	// streaming, no final-prose echo. Headless drivers (the `loop turn`
-	// entrypoint, a sprite worker, a Discord adapter) set this and read the
+	// entrypoint or the Discord adapter) set this and read the
 	// reply from TurnResult instead, keeping stdout clean for machine parsing.
 	quiet bool
 	// SessionID names this session's transcript file; "" when unpersisted.
@@ -3441,7 +3441,7 @@ func (cs *CortexSession) Resolve(ctx context.Context) error {
 // TurnResult carries the outcome of one user turn for a transport-agnostic
 // caller. Reply is the model's final prose (the last assistant message with no
 // tool calls in this turn); in the interactive REPL it has already streamed to
-// the terminal, but a headless driver — the sprite worker, a Discord adapter —
+// the terminal, but a headless driver — the `loop turn` entrypoint or the Discord adapter —
 // reads it from here. Interrupted is true when the turn ended on a canceled ctx
 // with history left valid (the model can pick up next turn).
 type TurnResult struct {
@@ -3543,7 +3543,7 @@ func runStudyCLI(path, goal string, passes int) {
 
 // runTurnCLI implements `loop turn`: one headless agent turn over a fresh or
 // resumed session, with clean machine-readable output. It is the integration
-// seam for the sprite + Discord architecture — an external driver invokes it
+// seam for the headless + Discord architecture — an external driver invokes it
 // with the persistent session's id and the user's message, and reads the reply
 // (plain on stdout, or a JSON object with --json). All progress chatter and the
 // resolved session id go to stderr so stdout carries only the reply.
@@ -3653,7 +3653,7 @@ func main() {
 
 	// Headless single-turn mode: `loop turn [--session <id>] [--json] <input…>`
 	// (or the input on stdin). Runs exactly one Turn over a fresh or resumed
-	// session and prints the model's reply — the seam a sprite worker or Discord
+	// session and prints the model's reply — the seam a headless driver or Discord
 	// adapter shells into. Pass the persistent session's id to keep the same
 	// conversation + shared .cortex/ across invocations ("one session at a
 	// time"); the id is echoed on stderr so a driver can thread it forward.
@@ -3663,10 +3663,21 @@ func main() {
 	}
 
 	// One-change-at-a-time git lifecycle: `loop change <start|commit|status>`.
-	// The sprite drives these around an agent turn so each change lands on its
-	// own branch, isolated and reviewable. Local only — see change.go.
+	// A driver runs these around an agent turn so each change lands on its own
+	// branch, isolated and reviewable. Local only — see change.go.
 	if len(os.Args) >= 2 && os.Args[1] == "change" {
 		if err := runChangeCLI(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Discord adapter: `loop discord` connects to Discord and drives one
+	// persistent session in-process. The only Discord-aware entry point — see
+	// discord.go. Token + scope come from the environment.
+	if len(os.Args) >= 2 && os.Args[1] == "discord" {
+		if err := runDiscordCLI(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

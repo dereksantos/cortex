@@ -7,10 +7,10 @@ import (
 )
 
 // One change at a time. The persistent loop works on a single branch dedicated
-// to the active change, so a sprite's edits stay isolated and reviewable and the
-// "one PR/change at a time" invariant holds. "Cortex + sprite manage git" —
-// these are the harness-level git primitives the sprite drives; the agent still
-// edits files through its own tools.
+// to the active change, so edits stay isolated and reviewable and the "one
+// PR/change at a time" invariant holds. These are the harness-level git
+// primitives an external driver runs around an agent turn; the agent still edits
+// files through its own tools.
 //
 // Local only by design: nothing here pushes or opens a PR. Publishing a branch
 // is outward-facing and needs explicit human consent, so it stays out of the
@@ -124,7 +124,7 @@ func slugifyChange(name string) string {
 }
 
 // runChangeCLI implements `loop change <start|commit|status>` — the one-change-
-// at-a-time git lifecycle a sprite drives around an agent turn. All operations
+// at-a-time git lifecycle a driver runs around an agent turn. All operations
 // are local; the branch is left for a consented push step.
 func runChangeCLI(args []string) error {
 	if len(args) == 0 {
