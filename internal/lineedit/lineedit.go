@@ -87,8 +87,18 @@ func (t *Terminal) width() int {
 // ReadLine renders prompt and edits one line until Enter. Returns io.EOF on
 // Ctrl-D at an empty line and ErrInterrupted on Ctrl-C.
 func (t *Terminal) ReadLine(prompt string) (string, error) {
+	return t.ReadLinePrefilled(prompt, "")
+}
+
+// ReadLinePrefilled is ReadLine with the edit buffer pre-seeded (cursor at end).
+// It backs the type-ahead path: keystrokes captured while a turn streamed land
+// here as the starting draft, so the user's in-flight input isn't lost.
+func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 	src := newReaderSource(t.fd)
 	buf := &buffer{}
+	if prefill != "" {
+		setBuffer(buf, prefill)
+	}
 	redraw := func() { io.WriteString(t.out, renderLine(prompt, buf, t.width())) }
 	redraw()
 
@@ -264,10 +274,16 @@ func firstLine(s string) string {
 // watcher reads the fd directly; because cbreak uses VTIME, each read returns
 // within ~0.1s, so stop() can signal the goroutine and it exits at the next
 // read boundary — no concurrent reads with the next ReadLine.
-func (t *Terminal) Interruptible(parent context.Context) (context.Context, func()) {
+//
+// The stop func returns any type-ahead the user typed during the turn: cbreak
+// disables echo, so those keystrokes never reached the screen and would
+// otherwise be lost. The caller feeds the returned text into the next prompt
+// via ReadLinePrefilled, so "start typing while it's still answering" works.
+func (t *Terminal) Interruptible(parent context.Context) (context.Context, func() string) {
 	ctx, cancel := context.WithCancel(parent)
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
+	var typed []byte // type-ahead, owned by the watcher goroutine until done closes
 	go func() {
 		defer close(done)
 		b := make([]byte, 64)
@@ -285,17 +301,42 @@ func (t *Terminal) Interruptible(parent context.Context) (context.Context, func(
 				return
 			}
 			for _, c := range b[:n] {
-				if c == 0x1b || c == 0x03 { // ESC or Ctrl-C
+				var interrupt bool
+				if typed, interrupt = appendTypeAhead(typed, c); interrupt {
 					cancel()
 					return
 				}
 			}
 		}
 	}()
-	return ctx, func() {
+	return ctx, func() string {
 		close(stopCh)
 		<-done
 		cancel()
+		// Only a leading newline is noise (Enter mashed during the turn); keep
+		// interior newlines so a pasted multi-line draft survives.
+		return strings.TrimLeft(string(typed), "\r\n")
+	}
+}
+
+// appendTypeAhead folds one byte read during a turn into the captured
+// type-ahead buffer. ESC and Ctrl-C request interrupt (interrupt=true);
+// Backspace/DEL erases the last byte; printable bytes and Enter accumulate;
+// anything else (stray control bytes, escape-sequence intro bytes) is dropped.
+// Pure, so the watcher's keystroke handling is unit-testable without a TTY.
+func appendTypeAhead(buf []byte, c byte) (out []byte, interrupt bool) {
+	switch {
+	case c == 0x1b || c == 0x03: // ESC or Ctrl-C
+		return buf, true
+	case c == 0x7f || c == 0x08: // DEL / Backspace
+		if len(buf) > 0 {
+			buf = buf[:len(buf)-1]
+		}
+		return buf, false
+	case c == '\r' || c == '\n' || c >= 0x20: // Enter + printable
+		return append(buf, c), false
+	default:
+		return buf, false
 	}
 }
 

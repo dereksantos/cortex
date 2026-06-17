@@ -277,7 +277,15 @@ const yellow = "\033[33m"
 const gray = "\033[90m" // bright black, for dim status text
 const reset = "\033[0m" // Reset to default color
 
+// colorDisabled honors the NO_COLOR convention (https://no-color.org): any
+// non-empty NO_COLOR strips ANSI from every withColor call. Read once at
+// startup — the env doesn't change mid-session.
+var colorDisabled = os.Getenv("NO_COLOR") != ""
+
 func withColor(v string, c string) string {
+	if colorDisabled {
+		return v
+	}
 	return fmt.Sprintf("%s%s%s", c, v, reset)
 }
 
@@ -948,9 +956,18 @@ func renderStudyResult(res study.StudyLoopResult) string {
 }
 
 // printToolAction prints an indented, iconned tool-action line under the
-// current cortex turn, e.g. "  ▸ read_file(go.mod)".
+// current cortex turn, e.g. "  ▸ read_file(go.mod)". The tool name shows in
+// green; its argument list is dimmed so the verb reads first.
 func printToolAction(action string) {
-	fmt.Printf("  %s\n", withColor(iconTool+" "+action, green))
+	name, args := action, ""
+	if i := strings.IndexByte(action, '('); i >= 0 {
+		name, args = action[:i], action[i:]
+	}
+	line := withColor(iconTool+" "+name, green)
+	if args != "" {
+		line += withColor(args, gray)
+	}
+	fmt.Printf("  %s\n", line)
 }
 
 func (tc ToolCall) ReadFile(cs *CortexSession) (string, error) {
@@ -1782,6 +1799,25 @@ type CortexSession struct {
 	captures      int     // Tier 1 turn captures + /remember
 	retrievals    int     // turns that injected retrieved context
 	insights      atomic.Int64
+
+	// md is the cached glamour renderer for streamed assistant output, rebuilt
+	// when the terminal width changes. nil when rendering is disabled (non-TTY,
+	// NO_COLOR, CORTEX_LOOP_RENDER=0) — the raw token-streaming path.
+	md      *markdownRenderer
+	mdWidth int
+}
+
+// markdown returns the session's markdown renderer for the current terminal
+// width, building or rebuilding it as needed. Returns nil when rendering is
+// disabled or the turn is headless, so streaming falls back to raw bytes.
+func (cs *CortexSession) markdown() *markdownRenderer {
+	if cs.quiet || !renderEnabled() {
+		return nil
+	}
+	if w := terminalWidth(); cs.md == nil || cs.mdWidth != w {
+		cs.md, cs.mdWidth = newMarkdownRenderer(w), w
+	}
+	return cs.md
 }
 
 // SetModel switches the active coding model id. The code endpoint is unchanged
@@ -3184,13 +3220,15 @@ const toolMarker = "<tool_call"
 // All printing happens on the calling goroutine (StreamChat invokes onContent
 // synchronously), so it never races the spinner once that's stopped.
 type streamPrinter struct {
-	spinner  *Spinner        // stopped on first visible byte; nil to skip (tests)
-	out      io.Writer       // destination; nil means os.Stdout
-	buf      strings.Builder // all content seen so far
-	reason   strings.Builder // accumulated reasoning, for the live ticker tail
-	printed  int             // bytes of buf already written
-	suppress bool            // a tool-call marker appeared; stop echoing
-	began    bool            // gutter printed (and spinner stopped)
+	spinner  *Spinner          // stopped on first visible byte; nil to skip (tests)
+	out      io.Writer         // destination; nil means os.Stdout
+	buf      strings.Builder   // all content seen so far
+	reason   strings.Builder   // accumulated reasoning, for the live ticker tail
+	printed  int               // bytes of buf already written
+	suppress bool              // a tool-call marker appeared; stop echoing
+	began    bool              // gutter printed (and spinner stopped)
+	md       *markdownRenderer // nil → raw token streaming; set → block-buffered render
+	pending  string            // md path: prose not yet flushed as a complete block
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -3253,25 +3291,57 @@ func (p *streamPrinter) onContent(s string) {
 	p.printed = safe
 }
 
-// emit writes a fragment, printing the assistant gutter (and stopping the
-// spinner) on the first non-empty byte.
+// begin stops the spinner and prints the assistant gutter once, on the first
+// visible content. In render mode the gutter gets its own line so glamour's
+// margined block output reads cleanly beneath it.
+func (p *streamPrinter) begin() {
+	if p.began {
+		return
+	}
+	if p.spinner != nil {
+		p.spinner.Stop()
+	}
+	icon, color := Message{Role: "assistant"}.gutter()
+	fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
+	if p.md != nil {
+		fmt.Fprintln(p.writer())
+	}
+	p.began = true
+}
+
+// emit writes a fragment. In raw mode (md nil) it streams bytes straight
+// through, as before. In render mode it accumulates prose and flushes each
+// complete markdown block through glamour as soon as it closes.
 func (p *streamPrinter) emit(s string) {
 	if s == "" {
 		return
 	}
-	if !p.began {
-		if p.spinner != nil {
-			p.spinner.Stop()
-		}
-		icon, color := Message{Role: "assistant"}.gutter()
-		fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
-		p.began = true
+	if p.md == nil {
+		p.begin()
+		fmt.Fprint(p.writer(), s)
+		return
 	}
-	fmt.Fprint(p.writer(), s)
+	p.pending += s
+	blocks, rest := splitBlocks(p.pending)
+	p.pending = rest
+	for _, b := range blocks {
+		p.writeBlock(b)
+	}
 }
 
-// finish flushes any held-back tail (when no marker ever appeared) and closes
-// the line. Returns whether the gutter was printed (i.e. anything was shown).
+// writeBlock renders one complete markdown block and prints it under the
+// gutter. Blank blocks are skipped so separators don't leave gaps.
+func (p *streamPrinter) writeBlock(b string) {
+	if strings.TrimSpace(b) == "" {
+		return
+	}
+	p.begin()
+	fmt.Fprintln(p.writer(), p.md.render(b))
+}
+
+// finish flushes any held-back tail (when no marker ever appeared) plus, in
+// render mode, the final unterminated block, then closes the line. Returns
+// whether the gutter was printed (i.e. anything was shown).
 func (p *streamPrinter) finish() bool {
 	if !p.suppress {
 		if full := p.buf.String(); p.printed < len(full) {
@@ -3279,7 +3349,13 @@ func (p *streamPrinter) finish() bool {
 			p.printed = len(full)
 		}
 	}
-	if p.began {
+	if p.md != nil && strings.TrimSpace(p.pending) != "" {
+		p.writeBlock(p.pending)
+		p.pending = ""
+	}
+	// Raw mode terminates the streamed line here; render mode already newline-
+	// terminated every block in writeBlock.
+	if p.began && p.md == nil {
 		fmt.Fprintln(p.writer())
 	}
 	return p.began
@@ -3304,7 +3380,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 		return res, false, err
 	}
-	p := &streamPrinter{spinner: s}
+	p := &streamPrinter{spinner: s, md: cs.markdown()}
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.finish()
 	if !p.began {
@@ -3724,10 +3800,15 @@ func main() {
 		scanner = bufio.NewScanner(os.Stdin)
 	}
 
+	// typeAhead carries keystrokes the user typed while the previous turn was
+	// still streaming (captured by Interruptible) into the next prompt's draft.
+	var typeAhead string
+
 	for {
 		var input string
 		if editor != nil {
-			line, err := editor.ReadLine(session.Prompt())
+			line, err := editor.ReadLinePrefilled(session.Prompt(), typeAhead)
+			typeAhead = ""
 			if err == io.EOF {
 				break
 			}
@@ -3816,17 +3897,19 @@ func main() {
 		// and Ctrl-C arrive as bytes the watcher reads; otherwise (piped input)
 		// fall back to SIGINT.
 		var ctx context.Context
-		var stop func()
+		var stop func() string
 		if editor != nil {
 			ctx, stop = editor.Interruptible(context.Background())
 		} else {
-			ctx, stop = signal.NotifyContext(context.Background(), os.Interrupt)
+			c, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			ctx, stop = c, func() string { cancel(); return "" }
 		}
 		// The whole per-turn pipeline lives in Turn now — the same entry point a
 		// headless driver calls. The REPL owns only the cancelable ctx, display,
 		// and compaction; the reply already streamed to the terminal.
 		_, err := session.Turn(ctx, input)
-		stop()
+		// Type-ahead the user entered mid-turn seeds the next prompt's draft.
+		typeAhead = stop()
 		switch {
 		case err == nil:
 			// Red gauge: compact at the turn boundary, before the window
