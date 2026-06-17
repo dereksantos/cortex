@@ -3489,18 +3489,58 @@ func (cs *CortexSession) runToolCalls(ctx context.Context, calls []ToolCall) {
 		var content string
 		if ctx.Err() != nil {
 			content = "Error: interrupted by user before this tool ran"
-		} else if out, err := tc.Execute(ctx, cs); err != nil {
-			// Tool errors are observations, not crashes: feed them back so
-			// the model can self-correct.
-			content = "Error: " + err.Error()
 		} else {
-			content = out
+			// Animate a status row while the tool runs — study especially makes
+			// several model passes with no output until it returns.
+			cs.startActivity(tc.activityLabel())
+			out, err := tc.Execute(ctx, cs)
+			cs.stopActivity()
+			if err != nil {
+				// Tool errors are observations, not crashes: feed them back so
+				// the model can self-correct.
+				content = "Error: " + err.Error()
+			} else {
+				content = out
+			}
 		}
 		cs.Append(Message{
 			Role:       RoleTool,
 			ToolCallID: tc.ID,
 			Content:    content,
 		})
+	}
+}
+
+// activityLabel is the concise "tool(arg)" shown on the spinning status row
+// while a tool runs — enough to tell which call is in flight without the full
+// argument dump printToolAction already recorded above.
+func (tc ToolCall) activityLabel() string {
+	name := tc.Function.Name
+	if p, err := tc.stringArg("path"); err == nil && p != "" {
+		return name + "(" + p + ")"
+	}
+	if c, err := tc.stringArg("command"); err == nil && c != "" {
+		first := firstLine(c)
+		if len(first) > 40 {
+			first = first[:40] + "…"
+		}
+		return name + "(" + first + ")"
+	}
+	return name
+}
+
+// startActivity/stopActivity drive the anchored status spinner around a unit of
+// work. No-op outside the anchored REPL (raw-streaming and headless modes have
+// no pinned status row to animate).
+func (cs *CortexSession) startActivity(label string) {
+	if cs.live != nil {
+		cs.live.SetActivity(label)
+	}
+}
+
+func (cs *CortexSession) stopActivity() {
+	if cs.live != nil {
+		cs.live.SetActivity("")
 	}
 }
 

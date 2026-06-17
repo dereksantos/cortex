@@ -3,6 +3,7 @@ package lineedit
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestAnchor builds an Anchor wired to an in-memory sink at a fixed width,
@@ -80,6 +81,59 @@ func TestAnchorThinkingStatusRow(t *testing.T) {
 	}
 	if a.status != "" {
 		t.Errorf("status not cleared: %q", a.status)
+	}
+}
+
+func TestAnchorActivityStatusRow(t *testing.T) {
+	a, out := newTestAnchor("> ", "", 80)
+	a.mu.Lock()
+	a.drawLocked()
+	a.mu.Unlock()
+
+	a.SetActivity("study(main.go)")
+	if got := stripANSI(out.String()); !strings.Contains(got, "study(main.go)") {
+		t.Errorf("activity row missing tool label; visible = %q", got)
+	}
+	if a.rows != 2 {
+		t.Errorf("rows = %d, want 2 (status + input)", a.rows)
+	}
+
+	// A tick advances the glyph while activity is set.
+	a.mu.Lock()
+	a.spinIdx++
+	a.refreshStatusLocked()
+	a.mu.Unlock()
+
+	a.SetActivity("")
+	if a.rows != 1 || a.status != "" {
+		t.Errorf("activity not cleared: rows=%d status=%q", a.rows, a.status)
+	}
+}
+
+func TestAnchorTickAnimates(t *testing.T) {
+	a, out := newTestAnchor("> ", "", 80)
+	a.stop = make(chan struct{})
+	a.mu.Lock()
+	a.activity = "study(main.go)"
+	a.drawLocked()
+	a.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() { defer close(done); a.tickLoop() }()
+	time.Sleep(350 * time.Millisecond) // ~3-4 ticks at 90ms
+	close(a.stop)
+	<-done
+
+	glyphs := map[rune]bool{}
+	for _, r := range stripANSI(out.String()) {
+		for _, g := range anchorSpinner {
+			if r == g {
+				glyphs[r] = true
+			}
+		}
+	}
+	if len(glyphs) < 2 {
+		t.Errorf("spinner did not animate: saw %d distinct glyphs, want >=2", len(glyphs))
 	}
 }
 
