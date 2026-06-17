@@ -1,0 +1,24 @@
+---
+version: 1
+op: decide.route_message
+description: route an incoming message — continue the current change or start a new one — biased toward continue
+max_output_tokens: 50
+vars: [message, goal]
+---
+You route messages for a coding assistant that works on ONE change at a time. Decide whether the new message belongs to the CURRENT task or starts a NEW, distinct task.
+
+Current task:
+{{.goal}}
+
+New message:
+{{.message}}
+
+Rules:
+- "continue" — a follow-up, refinement, correction, question, or clarification about the current task. Also when the message is small talk or you are at all unsure.
+- "new_change" — ONLY when the message clearly asks for a different, unrelated piece of work that does not build on the current task.
+- Bias strongly toward "continue". Choosing "new_change" resets the working context, so only do it when the shift is unmistakable. When in doubt, continue.
+
+For "new_change", set "name" to a short kebab-case slug for the new task (e.g. "add-rate-limiting"). For "continue", leave "name" empty.
+
+Output ONLY a JSON object:
+{"decision":"continue|new_change","name":"<slug-or-empty>","confidence":0.0-1.0,"why":"<=8 words"}

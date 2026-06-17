@@ -88,6 +88,11 @@ func RegisterDefaults(reg *dag.Registry, cfg DefaultsConfig) (int, error) {
 		DetectContradictionSpec(DetectContradictionConfig{Provider: cfg.Provider}),
 		InjectSpec(InjectConfig{Provider: cfg.Provider}),
 		ShouldCaptureSpec(ShouldCaptureConfig{Provider: cfg.Provider}),
+		// Session-lifecycle router: continue the current change or start a
+		// new one. A long-lived harness invokes it at message ingress;
+		// fails safe to "continue" so an uncertain call never resets a live
+		// session.
+		RouteMessageSpec(RouteMessageConfig{Provider: cfg.Provider}),
 		PredictNextSpec(PredictNextConfig{Provider: cfg.Provider}),
 		PlanSpec(PlanConfig{Provider: cfg.Provider}),
 		ExtractInsightSpec(ExtractInsightConfig{Provider: cfg.Provider}),

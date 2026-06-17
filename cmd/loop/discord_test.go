@@ -59,6 +59,33 @@ func TestChunkMessageNeverExceedsMax(t *testing.T) {
 	}
 }
 
+// parseBotCommand distinguishes manual overrides from ordinary messages by the
+// first token, and carries the change name for !new.
+func TestParseBotCommand(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantKind string
+		wantArg  string
+	}{
+		{"!status", "status", ""},
+		{"!continue", "continue", ""},
+		{"!new add-metrics", "new", "add-metrics"},
+		{"!new   the auth bug  ", "new", "the auth bug"},
+		{"!new", "new", ""},
+		{"fix the login bug", "", "fix the login bug"},
+		{"", "", ""},
+		{"!newish thing", "", "!newish thing"}, // not !new — must not match as a command
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			kind, arg := parseBotCommand(tt.in)
+			if kind != tt.wantKind || arg != tt.wantArg {
+				t.Errorf("parseBotCommand(%q) = (%q, %q), want (%q, %q)", tt.in, kind, arg, tt.wantKind, tt.wantArg)
+			}
+		})
+	}
+}
+
 // stripMention removes the bot's mention in both plain and nickname forms so the
 // model sees the request, not the plumbing.
 func TestStripMention(t *testing.T) {
