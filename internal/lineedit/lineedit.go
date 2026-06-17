@@ -379,3 +379,25 @@ func (s *readerSource) next() (byte, error) {
 	s.i++
 	return b, nil
 }
+
+// firstByte reads the first byte of a keystroke without blocking past one VTIME
+// tick: timedOut=true means no input arrived this tick, so a concurrent reader
+// can re-check its stop signal and poll again. Buffered bytes return
+// immediately. Used for the anchored editor's cancellable read loop;
+// continuation bytes still go through the blocking next() (they arrive in the
+// same burst, so they never time out mid-sequence).
+func (s *readerSource) firstByte() (b byte, timedOut bool, err error) {
+	if s.i >= s.n {
+		n, e := rawRead(s.fd, s.buf[:])
+		if e != nil {
+			return 0, false, e
+		}
+		if n == 0 {
+			return 0, true, nil
+		}
+		s.n, s.i = n, 0
+	}
+	b = s.buf[s.i]
+	s.i++
+	return b, false, nil
+}

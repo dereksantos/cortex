@@ -51,6 +51,14 @@ func decodeKey(src byteSource) (keyEvent, error) {
 	if err != nil {
 		return keyEvent{}, err
 	}
+	return decodeKeyByte(b, src)
+}
+
+// decodeKeyByte interprets a keystroke whose first byte was already read — the
+// concurrent anchored editor reads that byte through a timeout-aware path (so
+// it stays cancellable) and hands it here, while continuation bytes of an
+// escape or UTF-8 sequence come straight from src.
+func decodeKeyByte(b byte, src byteSource) (keyEvent, error) {
 	switch b {
 	case '\r', '\n':
 		return keyEvent{kind: keyEnter}, nil

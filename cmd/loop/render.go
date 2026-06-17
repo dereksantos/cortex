@@ -26,6 +26,13 @@ func renderEnabled() bool {
 	return lineedit.IsInteractive(os.Stdout)
 }
 
+// anchoredInput reports whether the REPL should pin the prompt to the bottom
+// row and echo type-ahead live during a turn. Requires the rich-render path
+// (TTY + color) and streaming; otherwise the simpler capture-and-seed path runs.
+func anchoredInput() bool {
+	return renderEnabled() && streamingEnabled()
+}
+
 // terminalWidth is the current stdout column count, for glamour word-wrap.
 func terminalWidth() int {
 	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {

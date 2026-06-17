@@ -1805,16 +1805,31 @@ type CortexSession struct {
 	// NO_COLOR, CORTEX_LOOP_RENDER=0) — the raw token-streaming path.
 	md      *markdownRenderer
 	mdWidth int
+
+	// live is the anchored bottom-row prompt during a turn (interactive +
+	// streaming + render only). When set, send() routes the "thinking" status to
+	// it instead of the standalone spinner, and turn output is funneled above it.
+	live *lineedit.Anchor
 }
 
 // markdown returns the session's markdown renderer for the current terminal
 // width, building or rebuilding it as needed. Returns nil when rendering is
 // disabled or the turn is headless, so streaming falls back to raw bytes.
 func (cs *CortexSession) markdown() *markdownRenderer {
-	if cs.quiet || !renderEnabled() {
+	if cs.quiet {
 		return nil
 	}
-	if w := terminalWidth(); cs.md == nil || cs.mdWidth != w {
+	// An anchored turn redirects os.Stdout to a pipe, so renderEnabled() and
+	// terminalWidth() (which probe os.Stdout) would misreport — width as 80 and
+	// rendering as off. In that mode rendering is on by construction and the
+	// width comes from the anchor's real terminal.
+	w := terminalWidth()
+	if cs.live != nil {
+		w = cs.live.Width()
+	} else if !renderEnabled() {
+		return nil
+	}
+	if cs.md == nil || cs.mdWidth != w {
 		cs.md, cs.mdWidth = newMarkdownRenderer(w), w
 	}
 	return cs.md
@@ -3229,6 +3244,10 @@ type streamPrinter struct {
 	began    bool              // gutter printed (and spinner stopped)
 	md       *markdownRenderer // nil → raw token streaming; set → block-buffered render
 	pending  string            // md path: prose not yet flushed as a complete block
+	// onStatus drives a "thinking…" indicator when there's no standalone spinner
+	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
+	// the answer starts. nil in the normal spinner path.
+	onStatus func(on bool, tail string)
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -3251,11 +3270,17 @@ func reasoningTail(s string, width int) string {
 // transcript — once the answer starts, emit stops the spinner and the ticker is
 // erased. No-op after the answer has begun (or with no spinner, e.g. tests).
 func (p *streamPrinter) onReasoning(s string) {
-	if p.began || p.spinner == nil {
+	if p.began {
 		return
 	}
 	p.reason.WriteString(s)
-	p.spinner.SetLabel(withColor("thinking… "+reasoningTail(p.reason.String(), reasoningTailWidth), gray))
+	tail := reasoningTail(p.reason.String(), reasoningTailWidth)
+	switch {
+	case p.spinner != nil:
+		p.spinner.SetLabel(withColor("thinking… "+tail, gray))
+	case p.onStatus != nil:
+		p.onStatus(true, tail)
+	}
 }
 
 // writer returns the configured sink, defaulting to stdout.
@@ -3300,6 +3325,9 @@ func (p *streamPrinter) begin() {
 	}
 	if p.spinner != nil {
 		p.spinner.Stop()
+	}
+	if p.onStatus != nil {
+		p.onStatus(false, "") // answer started — clear the thinking status
 	}
 	icon, color := Message{Role: "assistant"}.gutter()
 	fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
@@ -3373,6 +3401,17 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		res, err = cs.Request.Send(ctx)
 		return res, false, err
 	}
+	// Anchored REPL: no standalone spinner — the "thinking" indicator lives on
+	// the pinned status row, and prose streams above it (stdout is redirected to
+	// the anchor's pipe). Always streaming here (anchored mode requires it).
+	if cs.live != nil {
+		cs.live.SetThinking(true, "")
+		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking}
+		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
+		p.finish()
+		cs.live.SetThinking(false, "")
+		return res, true, err
+	}
 	s := NewSpinner()
 	s.Start()
 	if !streamingEnabled() {
@@ -3387,6 +3426,50 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 	}
 	return res, true, err
+}
+
+// runAnchoredTurn runs one turn with the prompt pinned to the bottom row and
+// every byte of turn output funneled above it. os.Stdout is redirected through
+// a pipe whose lines feed the anchor (so ad-hoc fmt.Print output, tool-action
+// lines, and the streamed answer all land above the prompt); the anchor draws
+// the input and "thinking" status straight to the real terminal. Keystrokes
+// typed during the turn edit the pinned line live and are returned to seed the
+// next prompt. ESC/Ctrl-C cancels via the anchor's context.
+func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, seed string) (string, error) {
+	anchor, ctx := editor.Anchor(session.Prompt(), seed)
+	r, w, err := os.Pipe()
+	if err != nil {
+		// Pipe setup failed (rare): fall back to the silent-capture path so the
+		// turn still runs and cancels cleanly.
+		anchor.Stop()
+		c, stop := editor.Interruptible(context.Background())
+		_, e := session.Turn(c, input)
+		return stop(), e
+	}
+	realStdout := os.Stdout
+	os.Stdout = w
+	session.live = anchor
+
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			anchor.EmitLine(sc.Text())
+		}
+	}()
+
+	_, turnErr := session.Turn(ctx, input)
+
+	// Restore stdout, then close the write end so the drain goroutine sees EOF
+	// and flushes the last line before we erase the pinned block.
+	os.Stdout = realStdout
+	session.live = nil
+	w.Close()
+	<-drained
+	r.Close()
+	return anchor.Stop(), turnErr
 }
 
 // runToolCalls executes every requested call and appends one tool result per
@@ -3892,24 +3975,27 @@ func main() {
 			continue
 		}
 
-		// Cancel the in-flight turn (model call or tool) without killing the
-		// REPL. With the editor active the terminal is in cbreak mode, so ESC
-		// and Ctrl-C arrive as bytes the watcher reads; otherwise (piped input)
-		// fall back to SIGINT.
-		var ctx context.Context
-		var stop func() string
-		if editor != nil {
-			ctx, stop = editor.Interruptible(context.Background())
-		} else {
-			c, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-			ctx, stop = c, func() string { cancel(); return "" }
+		// Run the turn. The whole per-turn pipeline lives in Turn now — the same
+		// entry point a headless driver calls; the REPL owns only the cancelable
+		// ctx, display, and compaction. Three input modes:
+		//   - anchored: the prompt is pinned to the bottom row and type-ahead
+		//     echoes live above the streaming output (interactive + render);
+		//   - capture: ESC/Ctrl-C cancel and mid-turn keystrokes are captured
+		//     silently to seed the next prompt (interactive, raw streaming);
+		//   - signal: piped input falls back to SIGINT for cancel.
+		var err error
+		switch {
+		case editor != nil && anchoredInput():
+			typeAhead, err = runAnchoredTurn(session, editor, input, typeAhead)
+		case editor != nil:
+			ctx, stop := editor.Interruptible(context.Background())
+			_, err = session.Turn(ctx, input)
+			typeAhead = stop()
+		default:
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			_, err = session.Turn(ctx, input)
+			cancel()
 		}
-		// The whole per-turn pipeline lives in Turn now — the same entry point a
-		// headless driver calls. The REPL owns only the cancelable ctx, display,
-		// and compaction; the reply already streamed to the terminal.
-		_, err := session.Turn(ctx, input)
-		// Type-ahead the user entered mid-turn seeds the next prompt's draft.
-		typeAhead = stop()
 		switch {
 		case err == nil:
 			// Red gauge: compact at the turn boundary, before the window
