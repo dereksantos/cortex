@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.2
-	github.com/mattn/go-runewidth v0.0.21
+	github.com/mattn/go-runewidth v0.0.24
 	github.com/viterin/vek v0.4.3
 	golang.org/x/sys v0.44.0
 	golang.org/x/term v0.43.0
