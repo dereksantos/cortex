@@ -184,22 +184,27 @@ func TestStudyFile_AutoDensityFillsBudget(t *testing.T) {
 	if resp.Mode != "study" {
 		t.Fatalf("Mode = %q, want study", resp.Mode)
 	}
-	// window 8192 → 32768 budget bytes / 1024B prose unit = 32 chunks.
-	if len(resp.Sampled) != 32 {
-		t.Fatalf("auto density sampled %d chunks, want 32 (budget/unit)", len(resp.Sampled))
+	// Auto k = input budget / 1024B prose unit. The budget is SampleTokenBudget
+	// (which reserves prompt overhead + output room), NOT the raw window — sizing
+	// k from the raw window packed ~100% of the context into one call and
+	// overflowed the model. ±1 chunk: line-snapping makes a chunk slightly larger
+	// than the unit, so the cumulative cap can drop the last one.
+	budget := SampleTokenBudget(8192, studyDefaultTargetFill) * studyCharsPerToken
+	wantChunks := budget / 1024
+	if got := len(resp.Sampled); got < wantChunks-1 || got > wantChunks {
+		t.Fatalf("auto density sampled %d chunks, want ~%d (budget/unit)", got, wantChunks)
 	}
 	var total int
 	for _, s := range resp.Sampled {
 		total += s.ByteLength
 	}
-	// The sample should land near the full budget (line-snapping trims
-	// up to a line width per chunk).
-	if budget := 8192 * 4; total < budget*3/4 || total > budget {
-		t.Errorf("auto density sampled %d bytes, want ~%d (full budget)", total, budget)
+	// The sample fills most of the budget without exceeding it.
+	if total < budget*3/4 || total > budget {
+		t.Errorf("auto density sampled %d bytes, want ~%d (budget)", total, budget)
 	}
 	// Densify on the auto path re-runs at the same k — the budget is
 	// already full; novelty comes from the covered set, not more chunks.
-	if d := ResolveDensity(resp.Deepen.Densify.Density); d != 32 {
-		t.Errorf("auto Densify density = %d, want 32 (same-k repass)", d)
+	if d := ResolveDensity(resp.Deepen.Densify.Density); d != wantChunks {
+		t.Errorf("auto Densify density = %d, want %d (same-k repass)", d, wantChunks)
 	}
 }

@@ -196,9 +196,19 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	// fragments — maximum breadth at the format's coherence size (the
 	// 2026-06-10 granularity sweep: breadth at unit size beats fewer,
 	// coarser fragments at equal data).
+	// Per-call INPUT budget in chars — the same budget MakePlan derives, which
+	// reserves prompt overhead + output room and takes a fill fraction of the
+	// window. Sizing k from this (not the raw window) is what keeps one inference
+	// call inside the model's context: the old `window * charsPerToken` form
+	// targeted ~100% of the window in input alone, so the call overflowed once
+	// the system prompt, snippet numbering, and the completion were added (and
+	// code tokenizes denser than the 4-chars/token estimate). Passes don't enter
+	// this — each pass is a separate, independently-budgeted call.
+	budgetChars := SampleTokenBudget(window, studyDefaultTargetFill) * studyCharsPerToken
+
 	k := ResolveDensity(req.Density)
 	if req.Density == nil && autoUnit > 0 {
-		if ak := window * studyCharsPerToken / autoUnit; ak > k {
+		if ak := budgetChars / autoUnit; ak > k {
 			k = ak
 		}
 	}
@@ -240,6 +250,7 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 
 	sampled := make([]SampledChunk, 0, len(ids))
 	seenEff := 0
+	usedChars := 0
 	for _, id := range ids {
 		ch := byID[id]
 		if ch == nil {
@@ -254,6 +265,16 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 		if berr != nil {
 			return StudyResponse{}, fmt.Errorf("study: read region %s@%d: %w", ch.RelPath, ch.ByteOffset, berr)
 		}
+		// Budget guard on the AUTO path: there k is budget-derived, and a
+		// directory study mixes chunk sizes across files so the derived k can
+		// still overshoot — this cumulative cap makes a single call fit
+		// regardless. Always keep at least one chunk so the call is never empty;
+		// skipped chunks stay uncovered, so the next deepening pass draws them.
+		// An explicit Density is the caller's choice and is honored as requested.
+		if req.Density == nil && len(sampled) > 0 && usedChars+len(body) > budgetChars {
+			break
+		}
+		usedChars += len(body)
 		covered[id] = true // fold into session coverage for the next pass
 		seenEff += ch.EffLines
 		sampled = append(sampled, SampledChunk{
