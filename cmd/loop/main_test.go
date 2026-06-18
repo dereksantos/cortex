@@ -1674,29 +1674,56 @@ func TestFormatRetrieved(t *testing.T) {
 	})
 }
 
-// wireMessages folds the ephemeral note into the system message for the wire
-// only — the stored Messages must be untouched, so nothing accumulates.
+// wireMessages folds the ephemeral note onto the LAST USER message for the wire
+// only — never the system message — so the cacheable prefix stays byte-stable
+// and the stored Messages are untouched.
 func TestWireMessagesComposesEphemerally(t *testing.T) {
-	req := CortexArgs{}.Request()
-	orig := req.Messages[0].Content
+	req := CortexArgs{}.Request() // system message only
+	sys := req.Messages[0].Content
+	req.Messages = append(req.Messages, Message{Role: RoleUser, Content: "add a field"})
+	userOrig := req.Messages[1].Content
 
-	t.Run("no ephemeral → system content unchanged", func(t *testing.T) {
-		if req.wireMessages()[0].Content != orig {
-			t.Error("without ephemeral, system content should be unchanged")
+	t.Run("no ephemeral → everything unchanged", func(t *testing.T) {
+		wire := req.wireMessages()
+		if wire[0].Content != sys || wire[1].Content != userOrig {
+			t.Error("without ephemeral, no message should change")
 		}
 	})
 
-	t.Run("ephemeral folds into system on the wire, not in storage", func(t *testing.T) {
+	t.Run("ephemeral rides the user message; system prefix is byte-stable", func(t *testing.T) {
 		req.EphemeralSystem = "# memory\n- [decision] use pgx"
 		wire := req.wireMessages()
-		if !strings.Contains(wire[0].Content, "use pgx") {
-			t.Error("wire system message should carry the ephemeral note")
+
+		// The cache-critical invariant: the system message (position 0) must be
+		// untouched, or the backend's prefix cache invalidates every turn.
+		if wire[0].Content != sys {
+			t.Error("system message must stay byte-identical (prefix cache stability)")
 		}
-		if !strings.HasPrefix(wire[0].Content, orig) {
-			t.Error("wire system message should keep the original prompt as prefix")
+		// The note rides the last user message instead.
+		if !strings.Contains(wire[1].Content, "use pgx") {
+			t.Error("wire user message should carry the ephemeral note")
 		}
-		if req.Messages[0].Content != orig {
-			t.Error("stored system message must NOT be mutated by composition")
+		if !strings.HasPrefix(wire[1].Content, userOrig) {
+			t.Error("wire user message should keep the original prompt as prefix")
+		}
+		// Storage is never mutated.
+		if req.Messages[0].Content != sys || req.Messages[1].Content != userOrig {
+			t.Error("stored messages must NOT be mutated by composition")
+		}
+	})
+
+	t.Run("folds onto the LAST user message as the tool loop appends", func(t *testing.T) {
+		// Mid tool-loop: assistant + tool messages follow the user turn. The note
+		// must still land on the user message (a stable position), not the tail.
+		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}})
+		req.Messages = append(req.Messages, Message{Role: RoleTool, ToolCallID: "1", Content: "tool output"})
+		req.EphemeralSystem = "ctx"
+		wire := req.wireMessages()
+		if !strings.Contains(wire[1].Content, "ctx") {
+			t.Error("note should fold onto the user message even mid-tool-loop")
+		}
+		if strings.Contains(wire[len(wire)-1].Content, "ctx") {
+			t.Error("note must not land on the trailing tool message")
 		}
 	})
 }

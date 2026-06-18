@@ -402,18 +402,38 @@ type streamOptions struct {
 }
 
 // wireMessages returns the messages to send: Messages as-is, or — when an
-// ephemeral per-turn note is set — a copy with that note folded into the
-// system message. The stored Messages are never mutated, so nothing
-// accumulates and the transcript stays clean. Folding into the single system
-// message (rather than adding a second system/synthetic-role message) is the
-// portable choice: every local chat template honors exactly one system slot.
+// ephemeral per-turn note is set — a copy with that note folded onto the LAST
+// USER message. The stored Messages are never mutated, so nothing accumulates
+// and the transcript stays clean.
+//
+// Crucially the note rides the current user turn, NOT the system message
+// (position 0). The retrieved note differs every turn; anything before the
+// variable tail of the prompt that changes per turn invalidates the backend's
+// prefix/KV cache from that point on. Folding it into the system message meant
+// position 0 changed every turn → a full re-prefill from token 0, every turn.
+// Attaching it to the last user message instead keeps [system][tools][prior
+// history] byte-identical across turns, so the backend's prefix cache
+// (llama-server LCP match, DeepSeek/GLM auto-cache) reuses the whole history and
+// only the current turn re-prefills. Editing an existing message's content
+// (rather than appending a new system/user message) keeps this portable across
+// every chat template — no second system slot, no role-alternation surprise.
 func (r *AgentRequest) wireMessages() []Message {
 	if r.EphemeralSystem == "" || len(r.Messages) == 0 {
 		return r.Messages
 	}
 	out := make([]Message, len(r.Messages))
 	copy(out, r.Messages)
-	out[0].Content = out[0].Content + "\n\n" + r.EphemeralSystem
+	// Fold onto the last user message — during a turn that's this turn's user
+	// prompt, and it stays put as tool-call/result messages append after it, so
+	// the note's position is stable across the inner tool loop too.
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role == RoleUser {
+			out[i].Content = out[i].Content + "\n\n" + r.EphemeralSystem
+			return out
+		}
+	}
+	// No user message to carry it (unexpected mid-turn): leave the prompt
+	// unchanged rather than poisoning the cacheable system prefix.
 	return out
 }
 
