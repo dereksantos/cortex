@@ -1728,6 +1728,73 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 	})
 }
 
+// applyPromptCache marks Anthropic cache breakpoints on the system message and
+// the end of prior history, and only for anthropic/* models. The default
+// (no-cache) message must marshal byte-identically so transcripts are untouched.
+func TestPromptCache(t *testing.T) {
+	mk := func() []Message {
+		return []Message{
+			{Role: RoleSystem, Content: "SYS"},
+			{Role: RoleUser, Content: "first task"},
+			{Role: "assistant", Content: "doing it"},
+			{Role: RoleUser, Content: "follow up"}, // current turn (last user)
+		}
+	}
+	cached := func(m Message) bool {
+		b, _ := json.Marshal(&m) // pointer, as addressable wire-slice elements are
+		return strings.Contains(string(b), "cache_control")
+	}
+
+	t.Run("default message marshals byte-identically (no cache_control)", func(t *testing.T) {
+		b, _ := json.Marshal(Message{Role: RoleUser, Content: "hi"})
+		if string(b) != `{"role":"user","content":"hi"}` {
+			t.Errorf("default marshal changed: %s", b)
+		}
+	})
+
+	t.Run("non-anthropic model is a no-op", func(t *testing.T) {
+		msgs := mk()
+		applyPromptCache(msgs, "z-ai/glm-4.6")
+		for i, m := range msgs {
+			if cached(m) {
+				t.Errorf("message %d should not be cached for a non-anthropic model", i)
+			}
+		}
+	})
+
+	t.Run("anthropic marks system + end-of-prior-history, not the current turn", func(t *testing.T) {
+		msgs := mk()
+		applyPromptCache(msgs, "anthropic/claude-haiku-4.5")
+		want := map[int]bool{0: true, 1: false, 2: true, 3: false} // sys + pre-current-user
+		for i, m := range msgs {
+			if cached(m) != want[i] {
+				t.Errorf("message %d (role %s) cached=%v, want %v", i, m.Role, cached(m), want[i])
+			}
+		}
+		// The cached system message must carry the structured content form.
+		b, _ := json.Marshal(&msgs[0])
+		if !strings.Contains(string(b), `"type":"ephemeral"`) || !strings.Contains(string(b), `"text":"SYS"`) {
+			t.Errorf("cached message not in content-parts form: %s", b)
+		}
+		// The real wire path marshals the message SLICE inside the payload —
+		// addressable elements must invoke the pointer marshaler there too.
+		wire, _ := json.Marshal(struct {
+			Messages []Message `json:"messages"`
+		}{msgs})
+		if got := strings.Count(string(wire), "cache_control"); got != 2 {
+			t.Errorf("wire payload should carry 2 cache breakpoints, got %d: %s", got, wire)
+		}
+	})
+
+	t.Run("first turn (no prior history) marks only the system message", func(t *testing.T) {
+		msgs := []Message{{Role: RoleSystem, Content: "SYS"}, {Role: RoleUser, Content: "hi"}}
+		applyPromptCache(msgs, "anthropic/claude-opus-4.8")
+		if !cached(msgs[0]) || cached(msgs[1]) {
+			t.Error("first turn should cache only the system message")
+		}
+	})
+}
+
 func TestRetrieveDisabledReturnsNil(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()} // retriever == nil
 	if got := cs.retrieve("anything"); got != nil {

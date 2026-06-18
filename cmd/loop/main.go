@@ -437,6 +437,35 @@ func (r *AgentRequest) wireMessages() []Message {
 	return out
 }
 
+// applyPromptCache marks Anthropic prompt-cache breakpoints on the wire messages
+// so the stable prefix is billed at ~10% on a hit. It pairs with the
+// tail-injection in wireMessages: that keeps the prefix byte-stable;
+// llama-server/DeepSeek/GLM then auto-cache it, but Anthropic only caches at
+// explicit cache_control breakpoints, so anthropic/* models need this. No-op for
+// every other model (which auto-cache and would not expect cache_control).
+//
+// Two breakpoints (Anthropic allows up to 4): the system message (large, fully
+// static, shared across every turn and session), and the message just before
+// this turn's user message — i.e. the end of prior history, which only grows by
+// append and so stays a cross-turn cache hit. The current turn (user note + its
+// tool loop) is new and intentionally uncached. Mutates the passed slice, which
+// is already an ephemeral wire copy.
+func applyPromptCache(msgs []Message, model string) {
+	if !strings.HasPrefix(model, "anthropic/") || len(msgs) == 0 {
+		return
+	}
+	ephemeral := &cacheControl{Type: "ephemeral"}
+	msgs[0].cache = ephemeral
+	for i := len(msgs) - 1; i >= 1; i-- {
+		if msgs[i].Role == RoleUser {
+			if i-1 >= 1 { // skip when it would only re-mark the system message
+				msgs[i-1].cache = ephemeral
+			}
+			break
+		}
+	}
+}
+
 type Tool struct {
 	Type     string       `json:"type"`
 	Function ToolFunction `json:"function"`
@@ -600,6 +629,7 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	// ephemeral note reaches the model without mutating stored Messages.
 	payload := *r
 	payload.Messages = r.wireMessages()
+	applyPromptCache(payload.Messages, r.Model)
 	b, err := json.Marshal(&payload)
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling agent request: %w", err)
@@ -679,6 +709,7 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	applyPromptCache(payload.Messages, r.Model)
 	payload.Stream = true
 	payload.StreamOptions = &streamOptions{IncludeUsage: true}
 	b, err := json.Marshal(&payload)
@@ -811,6 +842,56 @@ type Message struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID links a role:"tool" result back to the call it answers.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+
+	// cache, when set, marks this message as an Anthropic prompt-cache
+	// breakpoint on the WIRE only — never stored, never persisted. Unexported so
+	// encoding/json ignores it everywhere except MarshalJSON below, which is what
+	// keeps the transcript byte-identical to before.
+	cache *cacheControl
+}
+
+// cacheControl is an Anthropic prompt-cache breakpoint: everything up to and
+// including the block it sits on is cached (read at ~10% on a hit, 5-min TTL).
+// OpenRouter passes it through to anthropic/* models; other backends auto-cache
+// on prefix and don't need it, so it's only emitted for those models.
+type cacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+// contentPart is the structured content form Anthropic requires to carry a
+// cache_control breakpoint — a plain string content field can't hold one.
+type contentPart struct {
+	Type         string        `json:"type"` // "text"
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// MarshalJSON emits the normal string-content shape (byte-identical to the
+// default, so transcripts and captures are unaffected) unless a cache breakpoint
+// is set — then content becomes a single text part carrying cache_control, the
+// only shape Anthropic accepts a breakpoint on.
+//
+// Pointer receiver on purpose: sessionEntry embeds Message anonymously, and a
+// VALUE-receiver MarshalJSON would promote to sessionEntry and clobber its own
+// fields (ts/kind/query/…) on the transcript. A pointer method does not promote
+// to the embedding value, so transcript serialization stays default. On the wire
+// the messages are addressable slice elements, so encoding/json still invokes it.
+func (m *Message) MarshalJSON() ([]byte, error) {
+	if m.cache == nil {
+		type alias Message // drops MarshalJSON (no recursion); unexported cache is ignored
+		return json.Marshal(alias(*m))
+	}
+	return json.Marshal(struct {
+		Role       string        `json:"role"`
+		Content    []contentPart `json:"content"`
+		ToolCalls  []ToolCall    `json:"tool_calls,omitempty"`
+		ToolCallID string        `json:"tool_call_id,omitempty"`
+	}{
+		Role:       m.Role,
+		Content:    []contentPart{{Type: "text", Text: m.Content, CacheControl: m.cache}},
+		ToolCalls:  m.ToolCalls,
+		ToolCallID: m.ToolCallID,
+	})
 }
 
 type ToolCall struct {
