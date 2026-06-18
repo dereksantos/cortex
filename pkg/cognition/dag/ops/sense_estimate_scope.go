@@ -109,8 +109,8 @@ const (
 //   - budget_depth      — clamped int
 //   - reasoning         — short explanation (or fallback reason)
 //   - fallback          — true when estimation failed; the REPL should
-//                         then ignore the numbers and use BudgetForIntent
-//                         as the floor
+//     then ignore the numbers and use BudgetForIntent
+//     as the floor
 func NewEstimateScopeHandler(cfg EstimateScopeConfig) dag.Handler {
 	return func(ctx context.Context, in map[string]any, budget dag.Budget) (dag.NodeResult, error) {
 		started := time.Now()

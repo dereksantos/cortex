@@ -46,10 +46,10 @@ type JudgeResult struct {
 // grounding the judge has to trust or reject pure text — high false-
 // negative rate on any plausible-sounding but unverifiable claim.
 type JudgeOptions struct {
-	Provider           llm.Provider
-	Model              string // informational; provider already pinned to a model
-	Workdir            string // root for resolving fixture.must_cite_paths
-	MaxGroundingBytes  int    // 0 = no grounding; positive caps total bytes injected
+	Provider          llm.Provider
+	Model             string // informational; provider already pinned to a model
+	Workdir           string // root for resolving fixture.must_cite_paths
+	MaxGroundingBytes int    // 0 = no grounding; positive caps total bytes injected
 }
 
 // DefaultMaxGroundingBytes caps the source-code context the judge sees

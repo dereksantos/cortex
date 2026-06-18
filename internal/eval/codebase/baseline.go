@@ -17,30 +17,30 @@ import (
 // of a single fixture run. Designed so slice-4's --compare can diff two
 // runs by FixtureID without reaching back into dag_traces.jsonl.
 type BaselineRow struct {
-	FixtureID    string    `json:"fixture_id"`
-	Group        string    `json:"group"`
-	Eval         string    `json:"eval"`
-	Project      string    `json:"project"`
-	Language     string    `json:"language,omitempty"`
-	Timestamp    string    `json:"timestamp"`
-	GitCommitSHA string    `json:"git_commit_sha,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	JudgeModel   string    `json:"judge_model,omitempty"`
-	WallTimeMs   int64     `json:"wall_time_ms"`
-	Metrics      Metrics   `json:"metrics"`
-	Bounds       []Bound   `json:"bounds"`
-	Pass         bool      `json:"pass"`
+	FixtureID    string  `json:"fixture_id"`
+	Group        string  `json:"group"`
+	Eval         string  `json:"eval"`
+	Project      string  `json:"project"`
+	Language     string  `json:"language,omitempty"`
+	Timestamp    string  `json:"timestamp"`
+	GitCommitSHA string  `json:"git_commit_sha,omitempty"`
+	Model        string  `json:"model,omitempty"`
+	JudgeModel   string  `json:"judge_model,omitempty"`
+	WallTimeMs   int64   `json:"wall_time_ms"`
+	Metrics      Metrics `json:"metrics"`
+	Bounds       []Bound `json:"bounds"`
+	Pass         bool    `json:"pass"`
 	// Invalid marks a harness failure (killed/timed-out subprocess or
 	// empty answer) rather than a quality failure. Invalid rows are
 	// excluded from pass-rate denominators and never count as a
 	// regression — an infra stall isn't a model regression.
-	Invalid       bool   `json:"invalid,omitempty"`
-	InvalidReason string `json:"invalid_reason,omitempty"`
-	JudgePass     *bool  `json:"judge_pass,omitempty"`
-	JudgeReason  string    `json:"judge_reason,omitempty"`
-	CortexExit   string    `json:"cortex_exit,omitempty"`
-	AnswerSample string    `json:"answer_sample,omitempty"` // first 400 chars; full text stays in session.jsonl
-	Captured     time.Time `json:"-"`                       // populated on load
+	Invalid       bool      `json:"invalid,omitempty"`
+	InvalidReason string    `json:"invalid_reason,omitempty"`
+	JudgePass     *bool     `json:"judge_pass,omitempty"`
+	JudgeReason   string    `json:"judge_reason,omitempty"`
+	CortexExit    string    `json:"cortex_exit,omitempty"`
+	AnswerSample  string    `json:"answer_sample,omitempty"` // first 400 chars; full text stays in session.jsonl
+	Captured      time.Time `json:"-"`                       // populated on load
 }
 
 // BaselineDir returns the canonical directory baselines write to under
@@ -398,15 +398,15 @@ func absf(f float64) float64 {
 
 // Aggregate is the one-line summary shape `cortex status --eval` emits.
 type Aggregate struct {
-	Total         int
-	Passing       int
-	Invalid       int // harness failures, excluded from the pass denominator
-	Regressed     int
-	Improved      int
-	CitationP50   float64
+	Total          int
+	Passing        int
+	Invalid        int // harness failures, excluded from the pass denominator
+	Regressed      int
+	Improved       int
+	CitationP50    float64
 	BudgetTokenP50 int
-	Source        string // path to the baseline file the aggregate summarized
-	Captured      time.Time
+	Source         string // path to the baseline file the aggregate summarized
+	Captured       time.Time
 }
 
 // Scoreable returns the pass-rate denominator: total cells minus

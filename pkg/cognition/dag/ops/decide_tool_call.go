@@ -186,9 +186,9 @@ func NewToolCallHandler(cfg ToolCallConfig) dag.Handler {
 			spec = attachSalience(spec, cfg, intent, budget)
 			return dag.NodeResult{
 				Out: map[string]any{
-					"tool_name":      spec.QualifiedName(),
-					"tool_args":      decodeArgsAttr(spec),
-					"reasoning":      "mechanical: matched canonical intent prefix",
+					"tool_name":          spec.QualifiedName(),
+					"tool_args":          decodeArgsAttr(spec),
+					"reasoning":          "mechanical: matched canonical intent prefix",
 					"specialist_skipped": true,
 				},
 				Spawn:        []dag.NodeSpec{spec},
