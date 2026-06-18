@@ -3828,7 +3828,7 @@ func buildREPLDynamicRegistry(s *replState, prompt string, codingCfg dagnode.Cod
 	// `cortex --prompt` actually runs finally consumes study. The op
 	// stays named act.read_file so habitual decide.tool_call spawns route
 	// to it and the read_count metric is unchanged.
-	var readActHandler harness.ToolHandler = readTool
+	var readActHandler = readTool
 	if os.Getenv("CORTEX_STUDY_FILE") == "1" {
 		cfg := loadREPLConfig(filepath.Join(s.workdir, ".cortex"))
 		contextDir := filepath.Join(s.workdir, ".cortex")

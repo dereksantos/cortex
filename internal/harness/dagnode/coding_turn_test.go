@@ -584,24 +584,6 @@ func TestAdaptToolAsAct_stillWorksStandalone(t *testing.T) {
 	}
 }
 
-// scriptedLLM is a minimal llm.Provider that returns a fixed string —
-// used to drive attend.accumulate without a real network call.
-type scriptedLLM struct {
-	out string
-}
-
-func (s *scriptedLLM) Name() string      { return "scripted" }
-func (s *scriptedLLM) IsAvailable() bool { return true }
-func (s *scriptedLLM) Generate(_ context.Context, _ string) (string, error) {
-	return s.out, nil
-}
-func (s *scriptedLLM) GenerateWithSystem(_ context.Context, _, _ string) (string, error) {
-	return s.out, nil
-}
-func (s *scriptedLLM) GenerateWithStats(_ context.Context, _ string) (string, llm.GenerationStats, error) {
-	return s.out, llm.GenerationStats{InputTokens: 20, OutputTokens: 8}, nil
-}
-
 func TestStripNeedMoreLine(t *testing.T) {
 	tests := []struct {
 		name      string

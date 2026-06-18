@@ -78,7 +78,6 @@ const FunctionStudy = "study"
 const FunctionBash = "bash"
 const FunctionRemove = "remove_path"
 
-const defaultRole = RoleUser
 const defaultModel = ModelCoder
 
 // maxToolIterations bounds the agentic inner loop so a confused model can't
@@ -272,7 +271,6 @@ const promptGlyph = "❯"
 const red = "\033[31m"
 const cyan = "\033[36m"
 const green = "\033[32m"
-const black = "\033[30m"
 const blue = "\033[34m"
 const yellow = "\033[33m"
 const gray = "\033[90m" // bright black, for dim status text
@@ -1390,7 +1388,7 @@ func nearMissHint(fileLines, oldLines []string) string {
 func wordSet(s string) map[string]bool {
 	set := map[string]bool{}
 	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !('a' <= r && r <= 'z' || '0' <= r && r <= '9')
+		return ('a' > r || r > 'z') && ('0' > r || r > '9')
 	}) {
 		set[w] = true
 	}

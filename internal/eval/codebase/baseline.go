@@ -290,15 +290,15 @@ func bigMetricChanges(prev, curr Metrics) []MetricChange {
 		}
 		if absf(mc.Pct) >= RegressionThreshold {
 			mc.IsBig = true
-			switch {
-			case t.name == "hedge_count" || t.name == "need_more":
+			switch t.name {
+			case "hedge_count", "need_more":
 				// higher = worse
 				if mc.Delta > 0 {
 					mc.Concern = "regression"
 				} else {
 					mc.Concern = "improvement"
 				}
-			case t.name == "citation_rate":
+			case "citation_rate":
 				// higher = better
 				if mc.Delta > 0 {
 					mc.Concern = "improvement"

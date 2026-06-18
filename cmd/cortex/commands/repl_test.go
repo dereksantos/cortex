@@ -525,17 +525,6 @@ func TestSummarizeToolArgs(t *testing.T) {
 
 // --- helpers ---
 
-func mustWrite(t *testing.T, root, rel, content string) {
-	t.Helper()
-	full := filepath.Join(root, rel)
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		t.Fatalf("mkdir for %s: %v", rel, err)
-	}
-	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-		t.Fatalf("write %s: %v", rel, err)
-	}
-}
-
 func mustRead(t *testing.T, root, rel string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(root, rel))

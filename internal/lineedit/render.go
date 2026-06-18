@@ -115,7 +115,7 @@ func stripANSI(s string) string {
 			if j < len(s) && s[j] == '[' {
 				j++
 			}
-			for j < len(s) && !(s[j] >= 0x40 && s[j] <= 0x7e) {
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
 				j++
 			}
 			if j < len(s) {

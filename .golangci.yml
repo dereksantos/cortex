@@ -4,6 +4,16 @@ linters:
   default: standard
   disable:
     - errcheck  # Too many false positives on intentional ignores (cleanup, deferred close)
+  exclusions:
+    rules:
+      # SA5011 false-positives on the standard `if x == nil { t.Fatal(...) }`
+      # guard idiom in tests: t.Fatal stops execution, so the later deref is
+      # safe, but recent staticcheck flags it anyway. Scoped to tests only —
+      # SA5011 still applies to production code.
+      - path: _test\.go
+        linters:
+          - staticcheck
+        text: SA5011
 
 formatters:
   enable:
