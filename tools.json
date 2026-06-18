@@ -662,7 +662,7 @@
           "name": "fill",
           "type": "float64",
           "default": "0",
-          "description": "Target context-window fill fraction (advanced; default 0.5)"
+          "description": "Target context-window fill fraction (advanced; default 0.4)"
         },
         {
           "name": "focus-lines",

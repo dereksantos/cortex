@@ -8,17 +8,18 @@ import (
 
 // SampleTokenBudget is the single per-call input budget every study path shares.
 func TestSampleTokenBudget(t *testing.T) {
-	// 0.5 fraction minus prompt overhead (800) + output cap (100).
+	// fill fraction of the window minus prompt overhead (800) + output cap (100).
+	// Default fill is studyDefaultTargetFill (0.4); explicit fills are honored.
 	cases := []struct {
 		window int
 		fill   float64
 		want   int
 	}{
-		{32768, 0, 16384 - 900},  // default fill 0.5
-		{32768, 0.5, 16384 - 900},
-		{32768, 0.25, 8192 - 900},
-		{0, 0, 4096 - 900},       // window<=0 → studyDefaultCtxWindow (8192)
-		{32768, 2, 16384 - 900},  // out-of-range fill → default 0.5
+		{32768, 0, 13107 - 900},   // default fill 0.4 (32768*0.4 = 13107)
+		{32768, 0.5, 16384 - 900}, // explicit 0.5
+		{32768, 0.25, 8192 - 900}, // explicit 0.25
+		{0, 0, 3276 - 900},        // window<=0 → studyDefaultCtxWindow (8192), default fill 0.4
+		{32768, 2, 13107 - 900},   // out-of-range fill → default 0.4
 	}
 	for _, c := range cases {
 		if got := SampleTokenBudget(c.window, c.fill); got != c.want {
@@ -91,10 +92,10 @@ func TestMakePlan_TightBudget_CapsByReach(t *testing.T) {
 func TestMakePlan_Ollama7B_5m(t *testing.T) {
 	// Ollama qwen2.5-coder:7b (32K ctx, ~2000ms/call) + Cortex.
 	p := MakePlan(5*time.Minute, 32768, 2000, 94000, 0)
-	// usable_tokens ≈ 32768*0.5 - 800 - 100 = 15484
-	// usable_chars ≈ 61936 → window_lines ≈ 1238
-	if p.WindowLines < 1100 || p.WindowLines > 1400 {
-		t.Errorf("window_lines = %d, want ~1238", p.WindowLines)
+	// usable_tokens ≈ 32768*0.4 - 800 - 100 = 12207
+	// usable_chars ≈ 48828 → window_lines ≈ 976
+	if p.WindowLines < 900 || p.WindowLines > 1050 {
+		t.Errorf("window_lines = %d, want ~976", p.WindowLines)
 	}
 	// (300_000 - 1500) / 2000 = 149
 	if p.MaxCalls < 148 || p.MaxCalls > 150 {

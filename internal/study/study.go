@@ -36,7 +36,7 @@ type Plan struct {
 const (
 	studyPromptOverheadTokens = 800  // extract_overview prompt + system
 	studyOutputCapTokens      = 100  // MaxOutputBudget from template loader
-	studyDefaultTargetFill    = 0.5  // half the context window
+	studyDefaultTargetFill    = 0.4  // 40% of the window for the sample; leaves headroom for the prompt envelope + output, and trims per-call tokens for speed/cost (small-window models especially)
 	studyDefaultLatencyMS     = 3000 // when probe gives us nothing
 	studyDefaultCtxWindow     = 8192 // conservative fallback ctx window
 	studyStartupMS            = 1500 // analyzer walk + meta insight emission
