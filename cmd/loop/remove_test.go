@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -120,18 +119,6 @@ func TestConfigToolMerges(t *testing.T) {
 		no := false
 		if (&Config{Tools: ToolConfig{AllowDelete: &no}}).deleteEnabled() {
 			t.Error("explicit false should disable")
-		}
-	})
-
-	t.Run("bashAllowExtra from config and env", func(t *testing.T) {
-		t.Setenv("CORTEX_BASH_ALLOW", "make, npm")
-		cfg := &Config{Tools: ToolConfig{BashAllow: []string{"docker"}}}
-		got := cfg.bashAllowExtra()
-		joined := strings.Join(got, ",")
-		for _, want := range []string{"docker", "make", " npm"} {
-			if !strings.Contains(joined, want) {
-				t.Errorf("bashAllowExtra = %v, missing %q", got, want)
-			}
 		}
 	})
 

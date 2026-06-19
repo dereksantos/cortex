@@ -28,6 +28,7 @@ import (
 	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
@@ -598,7 +599,7 @@ func (cs *CortexSession) studyWindow() int {
 }
 
 var bash = newTool(FunctionBash,
-	"Run a shell command. Only allowlisted commands are permitted; no pipes or redirects.",
+	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
@@ -1478,94 +1479,44 @@ func confinedPath(root, p string) (string, error) {
 	return abs, nil
 }
 
-// bashAllowlist gates which binaries the bash tool may run. This is a guardrail
-// against the model doing something catastrophic by accident — NOT a security
-// sandbox. We exec the binary directly (no shell), so `;`, `&&`, `|`, `>` are
-// inert: a command is always a single allowlisted binary plus literal args.
-var bashAllowlist = map[string]bool{
-	// read / search
-	"ls": true, "cat": true, "head": true, "tail": true, "wc": true,
-	"grep": true, "rg": true, "find": true, "tree": true, "diff": true,
-	"stat": true, "which": true, "echo": true, "pwd": true,
-	// filesystem management (literal paths only — no shell, no globbing).
-	// Deletion is deliberately absent here: it goes through the confined
-	// remove_path tool, not raw rm.
-	"mkdir": true, "mv": true, "cp": true, "touch": true, "rmdir": true,
-	// build / vcs
-	"go": true, "git": true, "gofmt": true,
-}
-
-// tokenizeCommand splits a command line into argv the way a POSIX shell would
-// for the cases we support: it honors single quotes, double quotes, and
-// backslash escapes so quoted arguments reach the binary WITHOUT their quote
-// characters. strings.Fields did not — `grep -n "Scroller" f` reached grep as
-// the literal pattern `"Scroller"` (quotes included), which never matched, so
-// the model retried the identical command 68 times before hitting the
-// iteration cap (2026-06-14). We still exec the binary directly (no shell), so
-// any shell metacharacter that appears *outside* quotes is something we cannot
-// honor: tokenize reports the first such bare metacharacter as bareMeta so the
-// caller can reject the command with a helpful message instead of silently
-// passing a mangled argument. Metacharacters inside quotes are literal and
-// allowed (e.g. grep -n "a|b" f searches for the literal a|b).
-func tokenizeCommand(command string) (fields []string, bareMeta string, err error) {
-	var cur strings.Builder
-	inField := false
-	flush := func() {
-		if inField {
-			fields = append(fields, cur.String())
-			cur.Reset()
-			inField = false
+// gateShell runs the shell-risk gate (internal/shellrisk) in place of the old
+// static binary allowlist. It returns ok=true to proceed; otherwise a message
+// for the model and ok=false. The classifier is built lazily inside the
+// ClassifyFn so the deny-floor and safe-path tiers never construct a provider
+// (no keychain access, no latency) for the common case.
+//
+// Tier order is owned by shellrisk.Classify: deny-floor (catastrophic, always
+// refused) → safe-path (read-only, runs immediately) → classifier (gray zone).
+// Here we map the verdict to an action: Safe runs; Blocked is refused; Risky is
+// confirmed interactively when a TTY is present, else refused (headless drivers
+// have no human to approve, so they block and report so the model can adapt).
+func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {
+	var fn shellrisk.ClassifyFn
+	if cs != nil {
+		fn = cs.classifyShell
+		if fn == nil {
+			fn = func(ctx context.Context, command string) (shellrisk.Level, string, error) {
+				return shellrisk.ProviderClassifier(cs.reasoner())(ctx, command)
+			}
 		}
 	}
-	runes := []rune(command)
-	for i := 0; i < len(runes); i++ {
-		switch c := runes[i]; {
-		case c == '\'':
-			inField = true
-			for i++; i < len(runes) && runes[i] != '\''; i++ {
-				cur.WriteRune(runes[i])
+	v := shellrisk.Classify(ctx, command, fn)
+	switch v.Level {
+	case shellrisk.Safe:
+		return "", true
+	case shellrisk.Blocked:
+		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
+	default: // Risky
+		if cs != nil && !cs.quiet && cs.confirmRisky != nil {
+			q := fmt.Sprintf("\n⚠ risky command — %s\n    %s\n  run it? [y/N] ", v.Reason, command)
+			if cs.confirmRisky(q) {
+				return "", true
 			}
-			if i >= len(runes) {
-				return nil, "", fmt.Errorf("unterminated single quote in command")
-			}
-		case c == '"':
-			inField = true
-			for i++; i < len(runes) && runes[i] != '"'; i++ {
-				// Inside double quotes the shell unescapes only a few chars.
-				if runes[i] == '\\' && i+1 < len(runes) {
-					if n := runes[i+1]; n == '"' || n == '\\' || n == '$' || n == '`' {
-						i++
-					}
-				}
-				cur.WriteRune(runes[i])
-			}
-			if i >= len(runes) {
-				return nil, "", fmt.Errorf("unterminated double quote in command")
-			}
-		case c == '\\':
-			if i+1 < len(runes) {
-				i++
-				cur.WriteRune(runes[i])
-				inField = true
-			}
-		case c == ' ' || c == '\t' || c == '\n':
-			flush()
-		case c == '|' || c == '>' || c == '<' || c == ';' || c == '&':
-			if bareMeta == "" {
-				bareMeta = string(c)
-			}
-		case c == '$' && i+1 < len(runes) && runes[i+1] == '(':
-			if bareMeta == "" {
-				bareMeta = "$("
-			}
-			i++ // consume '('
-		default:
-			cur.WriteRune(c)
-			inField = true
+			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
 		}
+		// Headless / non-interactive: no human to approve.
+		return fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason), false
 	}
-	flush()
-	return fields, bareMeta, nil
 }
 
 func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) {
@@ -1573,26 +1524,26 @@ func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	fields, bareMeta, err := tokenizeCommand(command)
-	if err != nil {
-		return "", err
-	}
-	if len(fields) == 0 {
+	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("empty command")
 	}
-	// A bare metacharacter is shell syntax we can't honor. Reject explicitly:
-	// reaching the binary as a literal arg yields confusing downstream errors
-	// (`find . | head` → "find: |: unknown primary") that models retry verbatim
-	// instead of adapting (observed: 3 wasted turns, 2026-06-12).
-	if bareMeta != "" {
-		return "", fmt.Errorf("shell syntax %q is not supported (commands run without a shell — no pipes, redirects, or chaining); run the bare command instead, e.g. %q", bareMeta, fields[0]+" ...")
+	// Risk gate (replaces the static allowlist). A refused/declined command
+	// returns its explanation as the tool result — not an error — so the model
+	// reads the reason plainly and adapts.
+	if msg, ok := cs.gateShell(ctx, command); !ok {
+		return msg, nil
 	}
-	if !bashAllowlist[fields[0]] {
-		return "", fmt.Errorf("command %q is not in the allowlist", fields[0])
+	// leadBin is the first token, used only for the grep-empty heuristic below.
+	leadBin := ""
+	if f := strings.Fields(command); len(f) > 0 {
+		leadBin = f[0]
 	}
 	printToolAction(fmt.Sprintf("bash(%s)", command))
 
-	out, runErr := exec.CommandContext(ctx, fields[0], fields[1:]...).CombinedOutput()
+	// Full shell semantics via `bash -c`: pipes, redirects, and chaining all
+	// work. The risk gate above (with its non-negotiable deny-floor) is what
+	// keeps this safe now that a command is no longer a single inert binary.
+	out, runErr := exec.CommandContext(ctx, "bash", "-c", command).CombinedOutput()
 	result := string(out)
 	// Oversized output is studied, not lost: the full output spills to
 	// .cortex/shell/ and the model gets a cited digest plus the spill path
@@ -1614,7 +1565,7 @@ func (tc ToolCall) Bash(ctx context.Context, cs *CortexSession) (string, error) 
 		// grep error and keeps its stderr (merged into result by CombinedOutput).
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 &&
-			fields[0] == "grep" && strings.TrimSpace(result) == "" {
+			leadBin == "grep" && strings.TrimSpace(result) == "" {
 			return "(no matches)", nil
 		}
 		return result + "\n[exit error: " + runErr.Error() + "]", nil
@@ -1863,6 +1814,15 @@ type CortexSession struct {
 	// entrypoint or the Discord adapter) set this and read the
 	// reply from TurnResult instead, keeping stdout clean for machine parsing.
 	quiet bool
+	// confirmRisky asks the user to approve a risky shell command, returning
+	// true to proceed. Wired by the interactive REPL (reads y/N from the line
+	// editor); nil in headless/piped sessions, where the gate blocks risky
+	// commands instead of prompting. See gateShell.
+	confirmRisky func(question string) bool
+	// classifyShell overrides the gray-zone shell classifier (test seam). Nil
+	// in production → gateShell builds the provider-backed classifier from the
+	// reasoner binding.
+	classifyShell shellrisk.ClassifyFn
 	// SessionID names this session's transcript file; "" when unpersisted.
 	SessionID string
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
@@ -2115,9 +2075,6 @@ type Config struct {
 
 // ToolConfig tunes the agent's tool surface. All fields are optional.
 type ToolConfig struct {
-	// BashAllow adds extra commands to the built-in bash allowlist (merged, not
-	// replaced). Also extendable via CORTEX_BASH_ALLOW (comma-separated).
-	BashAllow []string `json:"bash_allow"`
 	// AllowDelete enables the confined remove_path tool. Nil means the default
 	// (enabled): deletion is autonomous but jailed to the workspace. Set false
 	// to remove the tool entirely.
@@ -2140,19 +2097,6 @@ func (c *Config) deleteEnabled() bool {
 		return true
 	}
 	return *c.Tools.AllowDelete
-}
-
-// bashAllowExtra returns extra allowlisted commands from config and the
-// CORTEX_BASH_ALLOW env var (comma-separated).
-func (c *Config) bashAllowExtra() []string {
-	var out []string
-	if c != nil {
-		out = append(out, c.Tools.BashAllow...)
-	}
-	if v := os.Getenv("CORTEX_BASH_ALLOW"); v != "" {
-		out = append(out, strings.Split(v, ",")...)
-	}
-	return out
 }
 
 // backendEndpoint resolves the backend root: config wins, then CORTEX_BACKEND,
@@ -2307,13 +2251,6 @@ func NewCortexSession() *CortexSession {
 	// show spend. Gated to OpenRouter — local backends don't grok this field.
 	if cfg.isOpenRouter() {
 		req.Usage = &usageInclude{Include: true}
-	}
-
-	// Extend the bash allowlist from config + env (merged with the built-ins).
-	for _, c := range cfg.bashAllowExtra() {
-		if c = strings.TrimSpace(c); c != "" {
-			bashAllowlist[c] = true
-		}
 	}
 
 	// Deletion: confined to the workspace, autonomous by default. When disabled,
@@ -4024,6 +3961,22 @@ func main() {
 			editor = t
 			editor.SetHistory(lineedit.LoadHistory(filepath.Join(contextDir(), "history")))
 			defer editor.Close()
+			// Risky-command confirmation reads a y/N line from the editor. Tool
+			// calls run synchronously on this goroutine between ReadLine calls,
+			// so there's no concurrent reader to fight. Headless/piped sessions
+			// leave this nil and the gate blocks risky commands instead.
+			session.confirmRisky = func(question string) bool {
+				ans, err := editor.ReadLine(question)
+				if err != nil {
+					return false
+				}
+				switch strings.ToLower(strings.TrimSpace(ans)) {
+				case "y", "yes":
+					return true
+				default:
+					return false
+				}
+			}
 			// Background cognition (Think/Dream) logs via the global logger to
 			// stderr; in an interactive session that lands on top of the prompt.
 			// Divert it to a file so the terminal stays clean (jq-free debugging

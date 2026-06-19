@@ -8,13 +8,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
+	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
@@ -206,14 +206,19 @@ func TestBashTool(t *testing.T) {
 		}
 	})
 
-	t.Run("non-allowlisted command rejected", func(t *testing.T) {
+	t.Run("risky command is gated when no approver is present", func(t *testing.T) {
+		// Nil session → no classifier and no confirmRisky hook. A gray-zone
+		// command fails closed to Risky and, with no interactive approver, is
+		// blocked and reported back (as a result, not an error) so the model
+		// can adapt.
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		_, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
-		if err == nil {
-			t.Fatal("expected allowlist rejection")
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("gating should not error: %v", err)
 		}
-		if !strings.Contains(err.Error(), "allowlist") {
-			t.Errorf("error %q should mention the allowlist", err)
+		low := strings.ToLower(got)
+		if !strings.Contains(low, "block") && !strings.Contains(low, "risk") {
+			t.Errorf("expected the command to be gated, got %q", got)
 		}
 	})
 
@@ -1511,77 +1516,96 @@ func TestContextRatio(t *testing.T) {
 // execs without a shell, so a passed-through `|` previously reached the
 // binary as a literal arg and produced confusing downstream errors the
 // model retried verbatim ("find: |: unknown primary").
-func TestBashRejectsShellSyntax(t *testing.T) {
-	cases := []string{
-		`find . -name "*.go" | head -30`,
-		"go vet ./... 2>&1",
-		"echo hi > out.txt",
-		"ls; pwd",
-		"echo $(pwd)",
-		"go test ./... && echo ok",
+// Shell syntax (pipes, redirects, chaining) now runs via `bash -c` when the
+// risk gate permits it — the old "not supported" rejection is gone. The gate,
+// not the tokenizer, is what governs whether a command runs.
+func TestBashShellSyntax(t *testing.T) {
+	stubSafe := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Safe, "test: safe", nil
 	}
-	for _, cmd := range cases {
-		t.Run(cmd, func(t *testing.T) {
-			args, _ := json.Marshal(map[string]string{"command": cmd})
-			_, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
-			if err == nil {
-				t.Fatal("expected shell-syntax rejection")
-			}
-			if !strings.Contains(err.Error(), "not supported") {
-				t.Errorf("error should explain the limitation, got %q", err)
-			}
-		})
+	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Risky, "test: risky", nil
 	}
-	// Bare commands still run.
-	args, _ := json.Marshal(map[string]string{"command": "echo plain"})
-	if out, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil); err != nil || !strings.Contains(out, "plain") {
-		t.Errorf("bare command should still run: out=%q err=%v", out, err)
-	}
-}
 
-// tokenizeCommand must honor quotes/escapes (so quoted args reach the binary
-// without their quotes) while still flagging bare shell metacharacters.
-func TestTokenizeCommand(t *testing.T) {
-	cases := []struct {
-		in       string
-		want     []string
-		bareMeta string
-		wantErr  bool
-	}{
-		{in: `grep -n "Scroller" f`, want: []string{"grep", "-n", "Scroller", "f"}},
-		{in: `grep -n 'a b' f`, want: []string{"grep", "-n", "a b", "f"}},
-		{in: `echo a\ b`, want: []string{"echo", "a b"}},
-		{in: `echo "a\"b"`, want: []string{"echo", `a"b`}},
-		// A pipe INSIDE quotes is a literal arg, not shell syntax — allowed.
-		{in: `grep "a|b" f`, want: []string{"grep", "a|b", "f"}},
-		// Bare metacharacters are reported so the caller can reject.
-		{in: `find . | head`, bareMeta: "|"},
-		{in: `echo hi > out`, bareMeta: ">"},
-		{in: `ls ; pwd`, bareMeta: ";"},
-		{in: `go test && echo ok`, bareMeta: "&"},
-		{in: `echo $(pwd)`, bareMeta: "$("},
-		{in: `echo "unterminated`, wantErr: true},
-	}
-	for _, c := range cases {
-		t.Run(c.in, func(t *testing.T) {
-			got, bareMeta, err := tokenizeCommand(c.in)
-			if c.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for %q", c.in)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if bareMeta != c.bareMeta {
-				t.Errorf("bareMeta = %q, want %q", bareMeta, c.bareMeta)
-			}
-			if c.bareMeta == "" && !slices.Equal(got, c.want) {
-				t.Errorf("fields = %#v, want %#v", got, c.want)
-			}
-		})
-	}
+	t.Run("pipe runs when the gate allows", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubSafe}
+		args, _ := json.Marshal(map[string]string{"command": "echo hello | tr a-z A-Z"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "HELLO") {
+			t.Errorf("pipe did not run through bash -c: %q", got)
+		}
+	})
+
+	t.Run("chaining runs when the gate allows", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubSafe}
+		args, _ := json.Marshal(map[string]string{"command": "echo a && echo b"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "a") || !strings.Contains(got, "b") {
+			t.Errorf("chained command did not run: %q", got)
+		}
+	})
+
+	t.Run("deny-floor blocks even when the classifier says safe", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		cs := &CortexSession{classifyShell: stubSafe}
+		args, _ := json.Marshal(map[string]string{"command": "echo x > /etc/cortex-should-never-write"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(strings.ToLower(got), "refused") {
+			t.Errorf("deny-floor should refuse the redirect, got %q", got)
+		}
+	})
+
+	t.Run("risky command runs after interactive yes", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return true }}
+		args, _ := json.Marshal(map[string]string{"command": "echo confirmed | cat"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "confirmed") {
+			t.Errorf("approved risky command did not run: %q", got)
+		}
+	})
+
+	t.Run("risky command refused after interactive no", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return false }}
+		args, _ := json.Marshal(map[string]string{"command": "echo nope | cat"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "nope") {
+			t.Errorf("declined command should not have run: %q", got)
+		}
+		if !strings.Contains(strings.ToLower(got), "declined") {
+			t.Errorf("expected a declined message, got %q", got)
+		}
+	})
+
+	t.Run("risky command blocked when headless (no approver)", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
+			confirmRisky: func(string) bool { return true }} // present but ignored when quiet
+		args, _ := json.Marshal(map[string]string{"command": "echo headless | cat"})
+		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "headless\n") {
+			t.Errorf("headless risky command should not run: %q", got)
+		}
+		if !strings.Contains(strings.ToLower(got), "block") {
+			t.Errorf("expected a blocked message when headless, got %q", got)
+		}
+	})
 }
 
 // Regression: a quoted grep pattern must actually match. Before the tokenizer
