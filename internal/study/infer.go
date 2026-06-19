@@ -90,7 +90,12 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 		if in.Numbered != nil {
 			numbered = *in.Numbered
 		}
-		fmt.Fprintf(&b, "----- %s:%d-%d -----\n", s.RelPath, s.LineStart, s.LineEnd)
+		// Terse "@relpath:start-end" header: ~3-4 fewer tokens per region
+		// than a fenced "----- … -----" rule (it adds up once a pass carries
+		// many small fragments). relpath:start-end stays CONTIGUOUS so the
+		// citationRelayed substring match (digest-of-digests relay) still
+		// fires on the header text.
+		fmt.Fprintf(&b, "@%s:%d-%d\n", s.RelPath, s.LineStart, s.LineEnd)
 		if numbered {
 			writeNumberedSnippet(&b, s.Snippet, s.LineStart)
 		} else {

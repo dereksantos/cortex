@@ -9,17 +9,17 @@ import (
 // SampleTokenBudget is the single per-call input budget every study path shares.
 func TestSampleTokenBudget(t *testing.T) {
 	// fill fraction of the window minus prompt overhead (800) + output cap (100).
-	// Default fill is studyDefaultTargetFill (0.4); explicit fills are honored.
+	// Default fill is studyDefaultTargetFill (0.3); explicit fills are honored.
 	cases := []struct {
 		window int
 		fill   float64
 		want   int
 	}{
-		{32768, 0, 13107 - 900},   // default fill 0.4 (32768*0.4 = 13107)
+		{32768, 0, 9830 - 900},    // default fill 0.3 (32768*0.3 = 9830)
 		{32768, 0.5, 16384 - 900}, // explicit 0.5
 		{32768, 0.25, 8192 - 900}, // explicit 0.25
-		{0, 0, 3276 - 900},        // window<=0 → studyDefaultCtxWindow (8192), default fill 0.4
-		{32768, 2, 13107 - 900},   // out-of-range fill → default 0.4
+		{0, 0, 2457 - 900},        // window<=0 → studyDefaultCtxWindow (8192), default fill 0.3
+		{32768, 2, 9830 - 900},    // out-of-range fill → default 0.3
 	}
 	for _, c := range cases {
 		if got := SampleTokenBudget(c.window, c.fill); got != c.want {
@@ -81,9 +81,9 @@ func TestMakePlan_TightBudget_CapsByReach(t *testing.T) {
 	// 30s on a 94K-LOC project with a small model: capacity is well
 	// under eff_loc → target_coverage drops below the default cap.
 	p := MakePlan(30*time.Second, 8192, 3000, 94000, 0)
-	// window_lines ≈ (8192*0.5 - 900) * 4 / 50 = 256
+	// window_lines ≈ (8192*0.3 - 900) * 4 / 50 = 124
 	// max_calls = (30000 - 1500) / 3000 = 9
-	// capacity = 9 * ~256 = ~2300; ratio = 2300 / 94000 ≈ 0.025 → floor 0.05
+	// capacity = 9 * ~124 = ~1116; ratio = 1116 / 94000 ≈ 0.012 → floor 0.05
 	if p.TargetCoverage >= studyDefaultMaxCoverage {
 		t.Errorf("target_coverage = %.3f, want < %.3f when budget << project", p.TargetCoverage, studyDefaultMaxCoverage)
 	}
@@ -92,10 +92,10 @@ func TestMakePlan_TightBudget_CapsByReach(t *testing.T) {
 func TestMakePlan_Ollama7B_5m(t *testing.T) {
 	// Ollama qwen2.5-coder:7b (32K ctx, ~2000ms/call) + Cortex.
 	p := MakePlan(5*time.Minute, 32768, 2000, 94000, 0)
-	// usable_tokens ≈ 32768*0.4 - 800 - 100 = 12207
-	// usable_chars ≈ 48828 → window_lines ≈ 976
-	if p.WindowLines < 900 || p.WindowLines > 1050 {
-		t.Errorf("window_lines = %d, want ~976", p.WindowLines)
+	// usable_tokens ≈ 32768*0.3 - 800 - 100 = 8930
+	// usable_chars ≈ 35720 → window_lines ≈ 714
+	if p.WindowLines < 680 || p.WindowLines > 750 {
+		t.Errorf("window_lines = %d, want ~714", p.WindowLines)
 	}
 	// (300_000 - 1500) / 2000 = 149
 	if p.MaxCalls < 148 || p.MaxCalls > 150 {

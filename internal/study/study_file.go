@@ -208,7 +208,15 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 
 	k := ResolveDensity(req.Density)
 	if req.Density == nil && autoUnit > 0 {
-		if ak := budgetChars / autoUnit; ak > k {
+		// Nil → k IS the budget-derived count (budget / unit), so one pass
+		// fills the window at unit granularity. Take it directly rather than
+		// max(normal, ak): when the budget affords FEWER fragments than the
+		// normal-8 default (small window or large unit — now the common case
+		// at the 0.3 fill), the old max kept k=8, overshooting the budget so
+		// the cumulative cap below trimmed the sample while Densify still
+		// advertised the inflated k. ak==0 (unit > whole budget) keeps the
+		// default so the draw is never empty.
+		if ak := budgetChars / autoUnit; ak > 0 {
 			k = ak
 		}
 	}

@@ -127,7 +127,7 @@ func TestBuildByteGrid_TinyFileSingleChunk(t *testing.T) {
 }
 
 // Chunk-size targeting precedence: explicit TargetFill > the format's
-// coherence unit > the window-derived 1/8 fallback for unknown formats.
+// coherence unit > the window-derived 1/16 fallback for unknown formats.
 func TestBuildByteGrid_CoherenceUnitSizing(t *testing.T) {
 	const size = 200000
 	tests := []struct {
@@ -139,7 +139,7 @@ func TestBuildByteGrid_CoherenceUnitSizing(t *testing.T) {
 		{"go uses the code unit", "f.go", ByteGridOpts{WindowTokens: 8192}, unitBytesCode},
 		{"md uses the prose unit", "doc.md", ByteGridOpts{WindowTokens: 8192}, unitBytesProse},
 		{"json uses the data unit", "d.json", ByteGridOpts{WindowTokens: 8192}, unitBytesData},
-		{"unknown ext falls back to window/8", "blob", ByteGridOpts{WindowTokens: 8192}, 8192 * studyCharsPerToken / 8},
+		{"unknown ext falls back to window/16", "blob", ByteGridOpts{WindowTokens: 8192}, 8192 * studyCharsPerToken / 16},
 		{"explicit fill beats the unit", "f.go", ByteGridOpts{WindowTokens: 8192, TargetFill: 0.25}, 8192 * studyCharsPerToken / 4},
 	}
 	for _, tt := range tests {

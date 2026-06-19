@@ -36,7 +36,7 @@ type Plan struct {
 const (
 	studyPromptOverheadTokens = 800  // extract_overview prompt + system
 	studyOutputCapTokens      = 100  // MaxOutputBudget from template loader
-	studyDefaultTargetFill    = 0.4  // 40% of the window for the sample; leaves headroom for the prompt envelope + output, and trims per-call tokens for speed/cost (small-window models especially)
+	studyDefaultTargetFill    = 0.3  // 30% of the window for the sample. Drives BOTH the per-call input prefill (SampleTokenBudget) and the auto-density chunk count (k = budget/unit), so lowering it cuts prefill tokens AND fragment count — the main lever for local-model study latency. Provisional: re-tune jointly with the findings-vs-sample split once working-memory-study P1 lands.
 	studyDefaultLatencyMS     = 3000 // when probe gives us nothing
 	studyDefaultCtxWindow     = 8192 // conservative fallback ctx window
 	studyStartupMS            = 1500 // analyzer walk + meta insight emission
@@ -52,7 +52,7 @@ const (
 // SampleTokenBudget is the single per-call INPUT budget shared by every study
 // path: how many tokens of sampled content one inference may carry, after
 // reserving prompt overhead and the output cap from a conservative fraction
-// (fill, default studyDefaultTargetFill = 0.5) of the window. MakePlan and the
+// (fill, default studyDefaultTargetFill = 0.3) of the window. MakePlan and the
 // agent study tool both derive from this one formula, so a sample can never
 // exceed what the window holds — there is no second, divergent budget. A
 // non-positive window or out-of-range fill falls back to the defaults.
@@ -92,7 +92,7 @@ func CompletionTokenBudget(window int, fill float64) int {
 // LLM calls.
 //
 // targetFill is the fraction of the context window each chunk should
-// consume. Pass 0 for the default 0.5.
+// consume. Pass 0 for the default studyDefaultTargetFill (0.3).
 //
 // The derivation is intentionally simple — every step is a single
 // arithmetic transform, documented inline so the Reasoning trace can

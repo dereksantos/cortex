@@ -28,7 +28,7 @@ const (
 	byteGridMinChunkBytes = 1024 // floor admits the prose coherence unit (see boundary.go)
 	byteGridMaxChunkBytes = 256 * 1024
 	byteGridDefaultBands  = 16
-	byteGridDefaultFill   = 0.125 // window-derived fallback for formats with no coherence unit
+	byteGridDefaultFill   = 0.0625 // window/16 fallback for formats with no coherence unit: smaller, more-distributed chunks spread draws wider across a huge blob (logs/data) at finer grain. Code/prose keep their measured coherence-unit sizing (unitBytesFor); this only governs unknown formats.
 )
 
 // ByteGridOpts configures the byte-grid producer. WindowTokens is the
@@ -36,7 +36,7 @@ const (
 // size. Zero values fall back to sensible defaults.
 type ByteGridOpts struct {
 	WindowTokens int     // consuming-model window in tokens; default studyDefaultCtxWindow
-	TargetFill   float64 // explicit per-chunk window fraction; 0 → the format's coherence unit, then window/8
+	TargetFill   float64 // explicit per-chunk window fraction; 0 → the format's coherence unit, then window/16
 	Bands        int     // synthetic module count for anti-coverage spread; default 16
 	Salt         string  // mixed into the RNG seed
 	ModTimeUnix  int64   // file mtime; folds into the drift key + state hash
