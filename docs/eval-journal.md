@@ -2518,3 +2518,45 @@ before working memory becomes a study default. All of P1–P4 stays opt-in
 (`NoWorkingMemory` default-on path threads findings; curation/directed behind
 `CORTEX_STUDY_CURATE` / `CORTEX_STUDY_DIRECTED`). Next lever if revisited: a
 larger model or a longer (8–12 pass) run where accumulation has room to matter.
+
+---
+
+## 2026-06-20 — Working memory: multi-model probe (the capability floor)
+
+Re-ran the live WM eval (`TestWMEvalLive`, now key-aware via CORTEX_WM_KEY) across
+the fleet + OpenRouter, after the user added a `study` role to the fleet. The
+configured backend (chatterbox) was back up.
+
+**Diagnostic first — the fleet `study` model is llama-3.2-3b.** A direct
+/v1/chat/completions probe with an identical inference request returned
+BYTE-IDENTICAL output to local Ollama `llama3.2:3b` (same 70 completion tokens,
+finish_reason=stop). So its tiny digests (~180B) are the 3b's natural concise
+output, NOT a cap or misconfig (70 of 1500 allowed tokens used). Testing it
+re-confirmed the 3b null result; it added no new model.
+
+**Multi-model table (findings off → on, NDJSON fixture):**
+
+| reader                       | passes | cov%   | ground%  | relays | synth  |
+|------------------------------|--------|--------|----------|--------|--------|
+| llama-3.2-3b (fleet `study`) | 2      | 1→1    | 0→0      | 0→0    | 3→3    |
+| llama-3.3-70b (OpenRouter)   | 2      | 14→14  | 43→**57**| 0→0    | 1→1    |
+| `coder` (fleet)              | 3      | 14→**19** | 100→100 | 0→0  | 8→**11** |
+| gpt-5.4 (OpenRouter)         | 2      | 14→14  | 100→100  | 0→**3**| 4→**5**  |
+
+**Read — there is a capability floor, and working memory clears it above it:**
+- **3b: flat on every axis.** Too small to use the stapled-on findings (the
+  byte-identical probe predicted this).
+- **70b: +14pts grounding** with findings (43→57%) — notably still writes terse
+  ~180B digests (a llama-family trait, not a size limit).
+- **`coder`: synth +3 AND coverage +5pts** (14→19) — used the memory to deepen
+  more effectively, the clearest gain. (Slow: ~14 min for the run; a thinking
+  model.)
+- **gpt-5.4: relay 0→3** (the only model to cite THROUGH to a prior pass's
+  evidence) + synth +1 + bigger digests (it synthesizes more, not less).
+
+So the earlier "continuity null on a 3b" was a floor effect, not a dead feature:
+**every model above ~3b shows some working-memory gain**, in a currency that
+varies by model (grounding / coverage / synth / relay). This is the
+small-model-amplifier thesis with a measured threshold. Caveat: single 2–3 pass
+probes — directional, not yet statistically solid; a fuller blind-vs-directed
+(P3) run on an engaged model follows.

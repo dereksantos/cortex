@@ -37,6 +37,7 @@ func TestWMEvalLive(t *testing.T) {
 	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{
 		Name:    "wm-live",
 		BaseURL: endpoint,
+		APIKey:  os.Getenv("CORTEX_WM_KEY"), // empty for local backends; set for OpenRouter
 		Timeout: 10 * time.Minute,
 	})
 	provider.SetModel(model)
@@ -59,25 +60,34 @@ func TestWMEvalLive(t *testing.T) {
 		digestChars  int
 		err          string
 	}
-	out := map[bool]result{}
+	// Three regimes so P3 (directed sampling) is isolated against on-blind, not
+	// just against off. on-directed is added only when CORTEX_WM_DIRECTED is set.
+	type regime struct {
+		name     string
+		wm       bool
+		directed bool
+	}
+	regimes := []regime{{"off", false, false}, {"on-blind", true, false}}
+	if os.Getenv("CORTEX_WM_DIRECTED") != "" {
+		regimes = append(regimes, regime{"on-directed", true, true})
+	}
 
+	out := map[string]result{}
 	curate := os.Getenv("CORTEX_WM_CURATE") != ""
 	evicted := 0
-	for _, wm := range []bool{false, true} {
+	for _, rg := range regimes {
 		req := study.StudyRequest{
-			Path:            jsonl,
-			RelPath:         "events.jsonl",
-			Goal:            goal,
-			Window:          study.SampleTokenBudget(window, 0), // mirror runStudy's budget plumbing
-			NoWorkingMemory: !wm,
-			Infer:           study.ProviderInfer(provider),
+			Path:             jsonl,
+			RelPath:          "events.jsonl",
+			Goal:             goal,
+			Window:           study.SampleTokenBudget(window, 0), // mirror runStudy's budget plumbing
+			NoWorkingMemory:  !rg.wm,
+			DirectedSampling: rg.directed,
+			Infer:            study.ProviderInfer(provider),
 		}
-		if wm && curate {
+		if rg.wm && curate {
 			req.CurateFindings = true
 			req.OnEvict = func(study.Finding) { evicted++ }
-		}
-		if wm && os.Getenv("CORTEX_WM_DIRECTED") != "" {
-			req.DirectedSampling = true
 		}
 		start := time.Now()
 		res, rerr := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
@@ -85,8 +95,8 @@ func TestWMEvalLive(t *testing.T) {
 		r := result{}
 		if rerr != nil {
 			r.err = rerr.Error()
-			out[wm] = r
-			t.Logf("findings=%v: ERROR after %s: %v", wm, dur.Round(time.Second), rerr)
+			out[rg.name] = r
+			t.Logf("%-11s ERROR after %s: %v", rg.name, dur.Round(time.Second), rerr)
 			continue
 		}
 		r.cov = 100 * res.CoveragePct
@@ -98,35 +108,31 @@ func TestWMEvalLive(t *testing.T) {
 			r.gp = 100 * float64(r.g) / float64(r.g+r.f)
 		}
 		r.digestChars = len(strings.Join(res.Digests, ""))
-		out[wm] = r
-		t.Logf("findings=%v: %s  cov=%.0f%% ground=%.0f%% relays=%d synth=%d digests=%dB stopped=%s",
-			wm, dur.Round(time.Second), r.cov, r.gp, r.relays, r.synth, r.digestChars, res.Stopped)
+		out[rg.name] = r
+		t.Logf("%-11s %s  cov=%.0f%% ground=%.0f%% relays=%d synth=%d digests=%dB stopped=%s",
+			rg.name, dur.Round(time.Second), r.cov, r.gp, r.relays, r.synth, r.digestChars, res.Stopped)
 	}
 
 	// Emit a compact comparison table to stdout for the eval journal.
 	fmt.Printf("\n--- WM live eval (model=%s, window=%d, passes=%d) ---\n", model, window, passes)
-	fmt.Printf("%-9s %6s %8s %7s %6s %6s %7s\n", "findings", "cov%", "ground%", "relays", "synth", "warm", "breaks")
-	for _, wm := range []bool{false, true} {
-		r := out[wm]
-		label := "off"
-		if wm {
-			label = "on"
-		}
+	fmt.Printf("%-12s %6s %8s %7s %6s %6s %7s\n", "regime", "cov%", "ground%", "relays", "synth", "warm", "breaks")
+	for _, rg := range regimes {
+		r := out[rg.name]
 		if r.err != "" {
-			fmt.Printf("%-9s ERROR: %s\n", label, firstLine(r.err))
+			fmt.Printf("%-12s ERROR: %s\n", rg.name, firstLine(r.err))
 			continue
 		}
-		fmt.Printf("%-9s %5.0f%% %7.0f%% %7d %6d %6d %7d\n", label, r.cov, r.gp, r.relays, r.synth, r.warm, r.breaks)
+		fmt.Printf("%-12s %5.0f%% %7.0f%% %7d %6d %6d %7d\n", rg.name, r.cov, r.gp, r.relays, r.synth, r.warm, r.breaks)
 	}
 
 	if curate {
 		fmt.Printf("curation: evicted %d findings (demoted)\n", evicted)
 	}
 
-	// The one mechanical P1 assertion that doesn't depend on model quality:
-	// findings OFF can never relay (no prior findings in the prompt).
-	if out[false].err == "" && out[false].relays != 0 {
-		t.Errorf("findings-off must have 0 relays, got %d", out[false].relays)
+	// The one mechanical assertion independent of model quality: the findings-off
+	// baseline can never relay (no prior findings in the prompt).
+	if out["off"].err == "" && out["off"].relays != 0 {
+		t.Errorf("findings-off must have 0 relays, got %d", out["off"].relays)
 	}
 }
 
