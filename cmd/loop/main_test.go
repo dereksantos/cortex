@@ -520,6 +520,24 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit config thinking survives a backend-non-thinking model", func(t *testing.T) {
+		// qwen3-4b is reported thinking:false by the backend, but it thinks by
+		// default and needs enable_thinking=false. A config override must NOT be
+		// stripped by applyFleet (the regression that made study run it slow).
+		off := false
+		c := &Config{Models: map[string]ModelSpec{roleStudy: {Model: "qwen3-4b", Thinking: &off}}}
+		got := c.resolveBinding(roleStudy, testFleet)
+		if got.Model != "qwen3-4b" {
+			t.Fatalf("model = %q, want qwen3-4b", got.Model)
+		}
+		if got.Thinking == nil || *got.Thinking {
+			t.Errorf("config thinking=false must survive applyFleet, got %v", got.Thinking)
+		}
+		if kw := got.TemplateKwargs(); kw["enable_thinking"] != false {
+			t.Errorf("TemplateKwargs should send enable_thinking=false, got %v", kw)
+		}
+	})
+
 	t.Run("key_service: per-role override, else backend default", func(t *testing.T) {
 		c := &Config{
 			Backend: Backend{KeyService: "backend-key"},

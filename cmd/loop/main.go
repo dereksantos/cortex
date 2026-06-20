@@ -2163,7 +2163,18 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 		spec.Model = selectModel(fleet, role)
 	}
 	// Overlay the real window + gate the thinking kwarg to thinking-capable models.
-	return applyFleet(spec, fleet)
+	spec = applyFleet(spec, fleet)
+	// An explicit config thinking override wins over the fleet's thinking
+	// metadata (the documented precedence). Some hybrid models — e.g. qwen3-4b —
+	// are reported non-thinking by the backend yet still think by default and
+	// need enable_thinking=false to suppress it; applyFleet would otherwise strip
+	// that flag. Re-assert the config override last so it survives.
+	if c != nil {
+		if m, ok := c.Models[role]; ok && m.Thinking != nil {
+			spec.Thinking = m.Thinking
+		}
+	}
+	return spec
 }
 
 // findUp walks up from the cwd looking for rel (a path relative to each
