@@ -3,6 +3,7 @@ package study
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // StudyLoop realizes the deepening loop: study → curate → study-deeper.
@@ -34,6 +35,17 @@ type StudyLoopResult struct {
 	// prior finding (the working-memory continuity signal). 0 when working
 	// memory is off or no later pass cited through to an earlier one.
 	FindingRelays int
+	// SynthesisTerms is the cross-pass total carry-forward count: digest terms
+	// drawn from prior findings but not from the pass's own sample. The
+	// disjoint-sampling continuity signal; 0 with working memory off.
+	SynthesisTerms int
+	// PrefixWarmPasses / PrefixBreaks measure cross-pass cache warmth (P4): a
+	// pass is "warm" when its [system][goal][findings] prefix has the previous
+	// pass's as a byte-prefix (append-only → a cache hit), and a "break" when
+	// the prefix changed shape (a curation rewrite or head drop → a cache miss).
+	// Pass 0 counts as neither.
+	PrefixWarmPasses int
+	PrefixBreaks     int
 }
 
 // StudyLoop runs the loop. A nil curator defaults to HeuristicCurator;
@@ -55,6 +67,9 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 	cumEff := 0
 	total := 0
 	seen := map[string]bool{}
+	usedLeads := map[string]bool{} // P3: leads already turned into a Focus
+	prevPrefix := ""               // P4: previous pass's cacheable prefix
+	havePrev := false
 	// Working memory: each pass's distilled result accumulates here and rides
 	// the next pass's prompt front (PriorFindings), so deepening builds on what
 	// earlier passes found instead of re-deriving it. Append-only in P1; the
@@ -73,7 +88,20 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 
 		res.Passes = append(res.Passes, StudyPass{Response: resp})
 		res.FindingRelays += resp.FindingRelays
+		// P4: is this pass's cacheable prefix a clean extension of the previous?
+		if havePrev {
+			if strings.HasPrefix(resp.CachePrefix, prevPrefix) {
+				res.PrefixWarmPasses++
+			} else {
+				res.PrefixBreaks++
+			}
+		}
+		prevPrefix, havePrev = resp.CachePrefix, true
 		if resp.Digest != "" {
+			// Synthesis continuity: terms this digest carries from PRIOR digests
+			// (accumulated regardless of injection) but not from its own sample.
+			// Measured for both on/off so on−off isolates working memory's effect.
+			res.SynthesisTerms += synthesisCarryForward(resp.Digest, res.Digests, resp.Sampled)
 			res.Digests = append(res.Digests, resp.Digest)
 			findings = append(findings, Finding{
 				Pass:      pass,
@@ -138,6 +166,17 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 			req.Focus = dec.Focus
 			if dec.Density != nil {
 				req.Density = dec.Density
+			}
+		}
+
+		// P3: override the curator's (blind) focus with the most recent
+		// unexplored lead the investigation surfaced, so the next pass samples
+		// where the model pointed rather than an arbitrary uncovered region.
+		// Falls back to the curator's decision when no unused lead remains.
+		if req.DirectedSampling && !req.NoWorkingMemory {
+			if f, key := nextDirectedFocus(findings, usedLeads); f != nil {
+				req.Focus = f
+				usedLeads[key] = true
 			}
 		}
 

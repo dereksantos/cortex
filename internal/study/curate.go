@@ -161,8 +161,53 @@ func goalOverlap(digest, goal string) float64 {
 	return float64(hits) / float64(len(terms))
 }
 
-// significantWords lowercases and de-dupes the goal's words ≥4 chars (skipping
-// short stopwords), the tokens worth matching against a digest.
+// synthesisCarryForward is the working-memory continuity metric that fits
+// study's disjoint sampling: the number of significant terms in the digest that
+// appear in PRIOR passes' digests but NOT in this pass's own sample. Such a term
+// links the pass back to an earlier one rather than to the region it freshly
+// sampled.
+//
+// Crucially it measures against the accumulated prior digests, which exist
+// whether or not working memory injected them — so the eval can score BOTH the
+// findings-on and findings-off regimes and read the continuity ATTRIBUTABLE to
+// working memory as the on−off delta (measuring only when injected would make
+// off trivially 0 and the comparison meaningless). Deterministic; returns 0
+// with no prior digests.
+func synthesisCarryForward(digest string, priorDigests []string, sampled []SampledChunk) int {
+	if len(priorDigests) == 0 || strings.TrimSpace(digest) == "" {
+		return 0
+	}
+	prior := map[string]bool{}
+	for _, d := range priorDigests {
+		for _, w := range significantWords(d) {
+			prior[w] = true
+		}
+	}
+	if len(prior) == 0 {
+		return 0
+	}
+	inSample := map[string]bool{}
+	for _, s := range sampled {
+		for _, w := range significantWords(s.Snippet) {
+			inSample[w] = true
+		}
+	}
+	seen := map[string]bool{}
+	n := 0
+	for _, w := range significantWords(digest) {
+		if seen[w] {
+			continue
+		}
+		seen[w] = true
+		if prior[w] && !inSample[w] {
+			n++
+		}
+	}
+	return n
+}
+
+// significantWords lowercases and de-dupes a string's words ≥4 chars (skipping
+// short stopwords), the tokens worth matching across digests and samples.
 func significantWords(s string) []string {
 	seen := map[string]bool{}
 	var out []string

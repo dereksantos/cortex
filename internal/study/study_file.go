@@ -86,6 +86,12 @@ type StudyRequest struct {
 	Compress       CompressFunc
 	OnEvict        func(Finding)
 
+	// DirectedSampling (P3) steers each deepening pass toward the most recent
+	// unexplored Lead accumulated across prior findings, instead of a blind
+	// disjoint draw. Requires working memory. Off → the curator's blind
+	// densify/target decision stands. See directed.go.
+	DirectedSampling bool
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -171,10 +177,14 @@ type StudyResponse struct {
 	Exhausted   bool           `json:"exhausted"`
 	Sampled     []SampledChunk `json:"-"` // mechanical sample (checkpoint/inference source)
 	// FindingRelays counts citations this pass admitted by relaying a prior
-	// finding's grounded citation (admitFindingRelays) — the working-memory
-	// continuity signal: a non-zero count means the pass cited through to an
-	// earlier pass's evidence rather than only its own sample.
+	// finding's grounded citation (admitFindingRelays) — a continuity signal for
+	// citation REUSE. ~0 under study's disjoint sampling (see eval-journal
+	// 2026-06-19); kept as a cheap correctness check (always 0 with WM off).
 	FindingRelays int `json:"finding_relays,omitempty"`
+	// CachePrefix is this pass's stable [system][goal][findings] prefix (P4).
+	// StudyLoop compares consecutive prefixes to measure cross-pass cache
+	// warmth. Not serialized — it duplicates prompt content already on the wire.
+	CachePrefix string `json:"-"`
 }
 
 // StudyFile runs the size-adaptive read. See the package doc above.
@@ -390,16 +400,18 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	// Phase-2 inference. Nil Infer → mechanical --sample-only path. On
 	// inference error the mechanical resp (sample + coverage) is still
 	// returned alongside the error so callers can degrade gracefully.
+	inferInput := InferInput{
+		Path:          req.Path,
+		RelPath:       display,
+		Sampled:       sampled,
+		Focus:         req.Focus,
+		Goal:          req.Goal,
+		Numbered:      req.Numbered,
+		PriorFindings: findings,
+	}
+	resp.CachePrefix = CacheablePrefix(inferInput) // P4: the cache-stable head
 	if req.Infer != nil {
-		io, ierr := req.Infer(ctx, InferInput{
-			Path:          req.Path,
-			RelPath:       display,
-			Sampled:       sampled,
-			Focus:         req.Focus,
-			Goal:          req.Goal,
-			Numbered:      req.Numbered,
-			PriorFindings: findings,
-		})
+		io, ierr := req.Infer(ctx, inferInput)
 		if ierr != nil {
 			return resp, fmt.Errorf("study: inference: %w", ierr)
 		}

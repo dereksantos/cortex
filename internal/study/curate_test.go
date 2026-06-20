@@ -139,6 +139,42 @@ func TestFindingValue_RecencyDominates(t *testing.T) {
 	}
 }
 
+func TestSynthesisCarryForward(t *testing.T) {
+	prior := []string{"the billing service reports timeout errors frequently"}
+	sampled := []SampledChunk{{RelPath: "x", Snippet: "checkout latency increased during deploy"}}
+
+	t.Run("counts terms from prior digests not in the sample", func(t *testing.T) {
+		// "timeout" and "billing" come from the prior digest, not the sample →
+		// carried forward. "checkout"/"latency" are in the sample → not counted.
+		digest := "billing timeout also affects checkout latency"
+		got := synthesisCarryForward(digest, prior, sampled)
+		if got < 2 {
+			t.Errorf("expected ≥2 carried terms (billing, timeout), got %d", got)
+		}
+	})
+
+	t.Run("term present in the sample is not carry-forward", func(t *testing.T) {
+		// A digest term that IS in the sample can't be attributed to prior passes.
+		digest := "checkout latency"
+		if got := synthesisCarryForward(digest, prior, sampled); got != 0 {
+			t.Errorf("sample-derived terms must not count, got %d", got)
+		}
+	})
+
+	t.Run("no prior digests → zero", func(t *testing.T) {
+		if got := synthesisCarryForward("billing timeout", nil, sampled); got != 0 {
+			t.Errorf("no prior → 0, got %d", got)
+		}
+	})
+
+	t.Run("each carried term counted once", func(t *testing.T) {
+		digest := "timeout timeout timeout"
+		if got := synthesisCarryForward(digest, prior, sampled); got != 1 {
+			t.Errorf("repeated term counted once, got %d", got)
+		}
+	})
+}
+
 func passes(fs []Finding) []int {
 	out := make([]int, len(fs))
 	for i, f := range fs {

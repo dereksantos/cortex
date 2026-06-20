@@ -1017,6 +1017,11 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		req.CurateFindings = true
 		req.OnEvict = cs.demoteFinding
 	}
+	// P3 findings-directed sampling, opt-in until the eval shows it beats blind
+	// disjoint draws on coverage-to-value.
+	if !noWM && os.Getenv("CORTEX_STUDY_DIRECTED") != "" {
+		req.DirectedSampling = true
+	}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {

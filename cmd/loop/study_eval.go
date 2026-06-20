@@ -342,7 +342,8 @@ type wmEvalRow struct {
 	Failed          int     `json:"failed"`
 	Unscored        int     `json:"unscored"`
 	GroundednessPct float64 `json:"groundedness_pct"`
-	Relays          int     `json:"finding_relays"` // continuity: cites through to a prior finding
+	Relays          int     `json:"finding_relays"`  // continuity: cites through to a prior finding
+	Synthesis       int     `json:"synthesis_terms"` // continuity: terms carried from prior findings
 	DigestChars     int     `json:"digest_chars"`
 	Error           string  `json:"error,omitempty"`
 }
@@ -360,6 +361,7 @@ func measureWM(cs *CortexSession, c studyEvalCase, passes, rep int, wm bool) wmE
 	row.Stopped = res.Stopped
 	row.CoveragePct = 100 * res.CoveragePct
 	row.Relays = res.FindingRelays
+	row.Synthesis = res.SynthesisTerms
 	row.DigestChars = len(strings.Join(res.Digests, ""))
 	if data, derr := os.ReadFile(c.Path); derr == nil {
 		row.Grounded, row.Failed, row.Unscored = scoreGroundedness(string(data), langForPath(c.Path), res)
@@ -397,7 +399,8 @@ func runStudyEvalWM() {
 
 	type agg struct {
 		cov, gp        []float64
-		relays, g, f   int
+		relays, synth  int
+		g, f           int
 		u, errs, dchar int
 	}
 	sums := map[bool]*agg{false: {}, true: {}}
@@ -417,6 +420,7 @@ func runStudyEvalWM() {
 				a.gp = append(a.gp, row.GroundednessPct)
 			}
 			a.relays += row.Relays
+			a.synth += row.Synthesis
 			a.g, a.f, a.u = a.g+row.Grounded, a.f+row.Failed, a.u+row.Unscored
 			a.dchar += row.DigestChars
 		}
@@ -424,17 +428,17 @@ func runStudyEvalWM() {
 
 	fmt.Printf("\n--- study-eval working memory (model: %s, %d passes, n=%d/cell, %s) ---\n",
 		session.Study.Model, passes, reps, shortName(c.Path))
-	fmt.Printf("%-8s %6s %7s %8s %9s %7s\n", "findings", "cov%", "ground%", "relays", "digestKB", "errs")
+	fmt.Printf("%-8s %6s %7s %7s %7s %9s %5s\n", "findings", "cov%", "ground%", "relays", "synth", "digestKB", "errs")
 	for _, wm := range []bool{false, true} {
 		a := sums[wm]
 		label := "off"
 		if wm {
 			label = "on"
 		}
-		fmt.Printf("%-8s %5.0f%% %6.0f%% %8d %8.1fK %7d\n",
-			label, median(a.cov), median(a.gp), a.relays, float64(a.dchar)/1024, a.errs)
+		fmt.Printf("%-8s %5.0f%% %6.0f%% %7d %7d %8.1fK %5d\n",
+			label, median(a.cov), median(a.gp), a.relays, a.synth, float64(a.dchar)/1024, a.errs)
 	}
-	fmt.Println("\nP1 reads: relays>0 (on) = continuity; cov%/ground% on≈off = continuity is ~free.")
+	fmt.Println("\nP1 reads: synth>0 (on) = cross-pass continuity; cov%/ground% on≈off = ~free.")
 }
 
 // envInt reads a positive int from an env var, falling back to def.

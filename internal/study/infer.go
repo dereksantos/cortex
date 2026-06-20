@@ -76,23 +76,17 @@ Respond with a single JSON object and nothing else:
 // header so the model can only cite ranges it was actually shown.
 func BuildInferPrompt(in InferInput) (system, user string) {
 	var b strings.Builder
-	if in.Goal != "" {
-		fmt.Fprintf(&b, "Task: %s\n\n", in.Goal)
+	// Cacheable prefix first: [goal][findings]. It grows only at the tail
+	// (findings append) across passes, so a backend's prefix cache reuses it.
+	prefix := cacheablePrefixUser(in)
+	b.WriteString(prefix)
+	if prefix != "" {
+		b.WriteString("\n\n") // separator into the volatile tail (outside the prefix)
 	}
+	// Focus is per-pass (P3 directed sampling rewrites it each pass), so it sits
+	// AFTER the stable prefix, with the sample, in the volatile tail.
 	if d := describeFocus(in.Focus); d != "" {
 		fmt.Fprintf(&b, "Focus: %s\n\n", d)
-	}
-	// Findings prefix: prior passes' distilled results lead, before the sample,
-	// so the model builds on them and the [system][goal][findings] prefix stays
-	// cache-stable (only the sample tail re-prefills). The path:line anchors are
-	// rendered verbatim so a citation relaying one survives validation (see
-	// admitFindingRelays).
-	if len(in.PriorFindings) > 0 {
-		b.WriteString("Findings so far (from earlier passes of THIS study — build on them, do not repeat; you may cite their path:line ranges):\n\n")
-		for _, f := range in.PriorFindings {
-			b.WriteString(renderFinding(f))
-		}
-		b.WriteString("\n")
 	}
 
 	display := in.RelPath
@@ -123,6 +117,42 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 		b.WriteString("\n")
 	}
 	return inferSystemPrompt, b.String()
+}
+
+// cacheablePrefixUser renders the stable head of the user prompt — the goal
+// then the findings block — everything that, across passes, changes only by
+// appending a new finding at the tail. Focus and the sample come after it and
+// are NOT included here.
+func cacheablePrefixUser(in InferInput) string {
+	var b strings.Builder
+	if in.Goal != "" {
+		fmt.Fprintf(&b, "Task: %s\n\n", in.Goal)
+	}
+	// Findings prefix: prior passes' distilled results, with path:line anchors
+	// rendered verbatim so a citation relaying one survives validation (see
+	// admitFindingRelays).
+	if len(in.PriorFindings) > 0 {
+		b.WriteString("Findings so far (from earlier passes of THIS study — build on them, do not repeat; you may cite their path:line ranges):\n\n")
+		for _, f := range in.PriorFindings {
+			b.WriteString(renderFinding(f))
+		}
+		// No trailing separator: the block must end exactly at the last
+		// finding's newline so appending the next finding EXTENDS this byte
+		// string (the prefix-cache property P4 measures). The blank line before
+		// the volatile tail is added by BuildInferPrompt, outside the prefix.
+	}
+	return b.String()
+}
+
+// CacheablePrefix is the full stable prefix a backend can cache across a study's
+// passes: the system prompt plus the goal+findings head of the user prompt
+// (everything before Focus and the sample). P4 measures its cross-pass
+// byte-stability; an Anthropic backend would place a cache_control breakpoint at
+// its end (local/OpenAI-compatible backends cache the longest common prefix
+// automatically). Between curations it grows only by appending findings, so a
+// later pass's prefix has the earlier pass's as a byte-prefix — a cache hit.
+func CacheablePrefix(in InferInput) string {
+	return inferSystemPrompt + "\n\n" + cacheablePrefixUser(in)
 }
 
 // numberSnippetLines reports whether snippets for this file get explicit

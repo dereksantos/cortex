@@ -51,11 +51,13 @@ func TestWMEvalLive(t *testing.T) {
 	goal := "which services report errors and what kinds of errors appear"
 
 	type result struct {
-		cov, gp     float64
-		relays      int
-		g, f, u     int
-		digestChars int
-		err         string
+		cov, gp      float64
+		relays       int
+		synth        int
+		warm, breaks int
+		g, f, u      int
+		digestChars  int
+		err          string
 	}
 	out := map[bool]result{}
 
@@ -74,6 +76,9 @@ func TestWMEvalLive(t *testing.T) {
 			req.CurateFindings = true
 			req.OnEvict = func(study.Finding) { evicted++ }
 		}
+		if wm && os.Getenv("CORTEX_WM_DIRECTED") != "" {
+			req.DirectedSampling = true
+		}
 		start := time.Now()
 		res, rerr := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, passes)
 		dur := time.Since(start)
@@ -86,19 +91,21 @@ func TestWMEvalLive(t *testing.T) {
 		}
 		r.cov = 100 * res.CoveragePct
 		r.relays = res.FindingRelays
+		r.synth = res.SynthesisTerms
+		r.warm, r.breaks = res.PrefixWarmPasses, res.PrefixBreaks
 		r.g, r.f, r.u = scoreGroundedness(string(data), "json", res)
 		if r.g+r.f > 0 {
 			r.gp = 100 * float64(r.g) / float64(r.g+r.f)
 		}
 		r.digestChars = len(strings.Join(res.Digests, ""))
 		out[wm] = r
-		t.Logf("findings=%v: %s  cov=%.0f%% ground=%.0f%% relays=%d digests=%dB stopped=%s",
-			wm, dur.Round(time.Second), r.cov, r.gp, r.relays, r.digestChars, res.Stopped)
+		t.Logf("findings=%v: %s  cov=%.0f%% ground=%.0f%% relays=%d synth=%d digests=%dB stopped=%s",
+			wm, dur.Round(time.Second), r.cov, r.gp, r.relays, r.synth, r.digestChars, res.Stopped)
 	}
 
 	// Emit a compact comparison table to stdout for the eval journal.
 	fmt.Printf("\n--- WM live eval (model=%s, window=%d, passes=%d) ---\n", model, window, passes)
-	fmt.Printf("%-9s %6s %8s %7s %9s\n", "findings", "cov%", "ground%", "relays", "digestB")
+	fmt.Printf("%-9s %6s %8s %7s %6s %6s %7s\n", "findings", "cov%", "ground%", "relays", "synth", "warm", "breaks")
 	for _, wm := range []bool{false, true} {
 		r := out[wm]
 		label := "off"
@@ -109,7 +116,7 @@ func TestWMEvalLive(t *testing.T) {
 			fmt.Printf("%-9s ERROR: %s\n", label, firstLine(r.err))
 			continue
 		}
-		fmt.Printf("%-9s %5.0f%% %7.0f%% %7d %9d\n", label, r.cov, r.gp, r.relays, r.digestChars)
+		fmt.Printf("%-9s %5.0f%% %7.0f%% %7d %6d %6d %7d\n", label, r.cov, r.gp, r.relays, r.synth, r.warm, r.breaks)
 	}
 
 	if curate {
