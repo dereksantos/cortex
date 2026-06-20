@@ -2409,3 +2409,55 @@ Items 5/6 (no-empty-synth, token floor) are the safety nets behind it.
 **Read**: the local models ARE answering (q2 answered via study; q1 answered "MaxEmittedChunks=8"), but the `eval codebase` subprocess answer-capture is unreliable right now — many "empty synthesis" INVALIDs are answers produced-but-not-captured. That means the suite's INVALID/pass counts are currently untrustworthy as a model signal, and **no model comparison is possible until the capture path is fixed.** Likely suspects: `--json` stdout parsing, a non-terminal synth answer being overwritten, or subprocess exit before flush. Plus genuine intermittent fleet flakiness after a heavy day of runs.
 
 **Follow-ups (reprioritized)**: (a) fix the answer-capture path in `internal/eval/codebase/runner.go` — verify trace `response` vs the scored stdout answer on a single known-good cell; (b) resolve `--binary` to absolute in the runner; (c) THEN re-probe coder80 vs coder. coder80 fitness is blocked on (a). The `.cortex/config.json` coder80 thinking-off entry is in place for when it unblocks.
+
+---
+
+## 2026-06-19 — Working memory P1/P2 (study findings prefix)
+
+Built the P1 working-memory eval (`loop study-eval wm`, and an env-gated live
+test `TestWMEvalLive`) and ran it on local models via Ollama (the configured
+chatterbox/litellm backend was down). Compares a 3-pass study with the findings
+prefix OFF (today's independent passes) vs ON, same fixture (the ~220KB synthetic
+NDJSON) and budget.
+
+**llama3.2:3b, window 16384, 3 passes:**
+
+| findings | cov% | ground% | relays | digestB | wall |
+|---|---|---|---|---|---|
+| off | 24% | 100% | 0 | 4094 | 3m41s |
+| on  | 24% | 100% | 0 | 4094 | 3m37s |
+
+qwen2.5-coder:1.5b (window 8192, 2 passes) produced ~0 grounded citations on the
+NDJSON (too weak for the record-citation task), so no signal — included only as a
+floor.
+
+**Reads:**
+- **Coverage- and grounding-neutral.** ON == OFF on both axes — the findings
+  prefix does not cost coverage or grounding at this budget. P1 claim "continuity
+  is ~free" holds on the coverage axis.
+- **Relays = 0 (the honest miss).** No citation-relay continuity surfaced. Most
+  likely structural, not a bug: study deliberately samples *disjoint* regions each
+  pass (the `covered` set), so a later pass rarely needs to re-cite an *earlier*
+  pass's exact line ranges. The relay metric measures citation **reuse**, which
+  this workload doesn't generate. Continuity in study lives in digest
+  **synthesis** (pass N's prose building on pass N-1's conclusions), which this
+  eval does not yet measure.
+- **Caveat:** the live harness sets `req.Window = SampleTokenBudget(window)` to
+  mirror `runStudy`, so the effective window is smaller than the nominal 16384;
+  the findings budget at low pass counts is correspondingly small, which dampens
+  any prefix effect. ON/OFF digests came back byte-identical, consistent with a
+  small findings budget making little difference at 3 passes.
+
+**Follow-up:** the continuity metric needs to move from citation-relay to a
+**synthesis** signal — an LLM-judge "does pass N build on pass N-1's findings", or
+a lexical-overlap proxy on the digests. The relay counter stays as a cheap
+mechanical signal (and a correctness check: OFF must always be 0). A longer run
+(more passes, full window) on a stronger model is needed before working memory
+becomes a study default.
+
+**P2 (curation):** keep/compress/evict implemented + unit-tested (bound never
+exceeded, newest always retained, citation anchors preserved under compression,
+lowest-value evicted, dynamic pressure trigger). Wired into `runStudy` behind
+`CORTEX_STUDY_CURATE`, with eviction demoting to the journal via the capturer.
+Live P2 validation pending (curation only triggers after several passes exceed
+the findings budget — expensive on local models).

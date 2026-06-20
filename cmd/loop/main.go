@@ -944,7 +944,7 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	}
 	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass%s)", path, cs.Study.Model, passes, plural))
 
-	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil, 0)
+	res, err := cs.runStudy(ctx, path, goal, passes, 0, 0, nil, 0, false)
 	if err != nil {
 		return "", err
 	}
@@ -970,7 +970,7 @@ func defaultStudyPasses(path string) int {
 // > 0, overrides the consuming-model window the budget derives from (0 → the
 // study model's own window) — compaction uses this to size the digest for the
 // CODE model rather than for what the study model can hold.
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int) (study.StudyLoopResult, error) {
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
@@ -994,12 +994,13 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	provider.SetMaxTokens(study.CompletionTokenBudget(cs.studyWindow(), 0))
 
 	req := study.StudyRequest{
-		Path:     abs,
-		RelPath:  path,
-		Fill:     fill,
-		Goal:     goal,
-		Numbered: numbered,
-		Infer:    study.ProviderInfer(provider),
+		Path:            abs,
+		RelPath:         path,
+		Fill:            fill,
+		Goal:            goal,
+		Numbered:        numbered,
+		NoWorkingMemory: noWM,
+		Infer:           study.ProviderInfer(provider),
 	}
 	// chunks > 0 pins the per-pass draw (the eval sweep does this);
 	// chunks <= 0 leaves Density nil so the engine derives both chunk
@@ -1007,6 +1008,14 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	// the sample fills the budget as a function of BOTH model and data.
 	if chunks > 0 {
 		req.Density = chunks
+	}
+	// Working-memory P2 curation is opt-in (CORTEX_STUDY_CURATE) until the eval
+	// makes it a default: under budget pressure the findings prefix is
+	// value-ranked keep/compress/evict instead of a recency drop, and evicted
+	// findings are demoted to the journal so they stay recoverable via search.
+	if !noWM && os.Getenv("CORTEX_STUDY_CURATE") != "" {
+		req.CurateFindings = true
+		req.OnEvict = cs.demoteFinding
 	}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
@@ -1617,7 +1626,7 @@ func studyShellOutput(ctx context.Context, cs *CortexSession, command string, ou
 	}
 	printToolAction(fmt.Sprintf("output %d KB → study(%s)", len(out)/1024, spill))
 	goal := fmt.Sprintf("This is the output of `%s`. What does it show? Surface errors, failures, and anomalies first.", command)
-	res, err := cs.runStudy(ctx, spill, goal, 1, 0, 0, nil, bashStudyWindow)
+	res, err := cs.runStudy(ctx, spill, goal, 1, 0, 0, nil, bashStudyWindow, false)
 	if err != nil {
 		return "", false
 	}
@@ -2597,7 +2606,7 @@ func (cs *CortexSession) recordRetrieval(query string, results []cognition.Resul
 // compactStudy runs the study engine over a transcript for Compact. A var so
 // tests can stub the model call.
 var compactStudy = func(ctx context.Context, cs *CortexSession, path string, window int) (study.StudyLoopResult, error) {
-	return cs.runStudy(ctx, path, compactGoal, compactPasses, 0, 0, nil, window)
+	return cs.runStudy(ctx, path, compactGoal, compactPasses, 0, 0, nil, window, false)
 }
 
 // contextRatio is the live window-fill estimate. The gauge color and the
@@ -2832,6 +2841,30 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 }
 
 // remember stores an explicit user memory (/remember) — the highest-precision
+// demoteFinding journals a working-memory finding that curation evicted from
+// the active prefix, so it stays recoverable via search (the eviction =
+// demote-to-journal contract, docs/working-memory-study.md). Best-effort: a nil
+// capturer (study CLI / eval, no store) just drops it — the next deepening pass
+// can re-derive it from a Lead or re-sample.
+func (cs *CortexSession) demoteFinding(f study.Finding) {
+	if cs == nil || cs.capturer == nil || strings.TrimSpace(f.Digest) == "" {
+		return
+	}
+	text := f.Digest
+	for _, c := range f.Citations {
+		text += fmt.Sprintf("\n%s:%d-%d", c.RelPath, c.LineStart, c.LineEnd)
+	}
+	_ = cs.capturer.CaptureEvent(&events.Event{
+		Source:     events.SourceGeneric,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   "study",
+		ToolInput:  map[string]any{"type": "evicted_finding"},
+		ToolResult: text,
+		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+	})
+}
+
 // capture, because the user marked it as worth keeping.
 func (cs *CortexSession) remember(text string) error {
 	if cs.capturer == nil {
@@ -3873,6 +3906,10 @@ func main() {
 	if len(os.Args) >= 2 && os.Args[1] == "study-eval" {
 		if len(os.Args) >= 3 && os.Args[2] == "code-grid" {
 			runStudyEvalCodeGrid()
+			return
+		}
+		if len(os.Args) >= 3 && os.Args[2] == "wm" {
+			runStudyEvalWM()
 			return
 		}
 		runStudyEval()

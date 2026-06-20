@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -205,7 +206,7 @@ func scoreGroundedness(content, lang string, res study.StudyLoopResult) (grounde
 func measureCell(cs *CortexSession, c studyEvalCase, cell studyEvalCell) studyEvalRow {
 	row := studyEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Chunks: cell.Chunks, Fill: cell.Fill, Numbered: cell.Numbered}
 	start := time.Now()
-	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill, cell.Numbered, 0)
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, cell.Chunks, cell.Fill, cell.Numbered, 0, false)
 	row.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		row.Error = err.Error()
@@ -324,6 +325,126 @@ func shortName(p string) string {
 		return p[i+1:]
 	}
 	return p
+}
+
+// wmEvalRow is one multi-pass working-memory run (findings on or off).
+type wmEvalRow struct {
+	Path            string  `json:"path"`
+	Goal            string  `json:"goal"`
+	Model           string  `json:"model"`
+	WorkingMemory   bool    `json:"working_memory"`
+	Passes          int     `json:"passes"`
+	Rep             int     `json:"rep"`
+	Stopped         string  `json:"stopped"`
+	LatencyMS       int64   `json:"latency_ms"`
+	CoveragePct     float64 `json:"coverage_pct"`
+	Grounded        int     `json:"grounded"`
+	Failed          int     `json:"failed"`
+	Unscored        int     `json:"unscored"`
+	GroundednessPct float64 `json:"groundedness_pct"`
+	Relays          int     `json:"finding_relays"` // continuity: cites through to a prior finding
+	DigestChars     int     `json:"digest_chars"`
+	Error           string  `json:"error,omitempty"`
+}
+
+// measureWM runs one multi-pass study with working memory on/off and scores it.
+func measureWM(cs *CortexSession, c studyEvalCase, passes, rep int, wm bool) wmEvalRow {
+	row := wmEvalRow{Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, WorkingMemory: wm, Passes: passes, Rep: rep}
+	start := time.Now()
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, passes, 0, 0, nil, 0, !wm)
+	row.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		row.Error = err.Error()
+		return row
+	}
+	row.Stopped = res.Stopped
+	row.CoveragePct = 100 * res.CoveragePct
+	row.Relays = res.FindingRelays
+	row.DigestChars = len(strings.Join(res.Digests, ""))
+	if data, derr := os.ReadFile(c.Path); derr == nil {
+		row.Grounded, row.Failed, row.Unscored = scoreGroundedness(string(data), langForPath(c.Path), res)
+		if g := row.Grounded + row.Failed; g > 0 {
+			row.GroundednessPct = 100 * float64(row.Grounded) / float64(g)
+		}
+	}
+	return row
+}
+
+// runStudyEvalWM is the P1 working-memory eval: a multi-pass study run with the
+// findings prefix OFF (today's independent passes — the baseline) vs ON, over
+// the same fixture and budget. It reads out the two P1 claims:
+//
+//	continuity         — finding-relays (citations that cite THROUGH to a prior
+//	                     pass's evidence). 0 by construction with WM off; >0 with
+//	                     WM on means later passes built on earlier ones.
+//	coverage at equal  — coverage% and groundedness% on vs off. The findings
+//	  budget             prefix spends sample budget, so the question is whether
+//	                     continuity costs net coverage/grounding.
+//
+// Passes/reps are overridable via CORTEX_WM_PASSES / CORTEX_WM_REPS to bound
+// runtime on slow local models. Run with: `loop study-eval wm`.
+func runStudyEvalWM() {
+	session := NewCortexSession()
+	jsonl, err := ensureStudyEvalJSONL()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "study-eval wm: jsonl fixture: %v\n", err)
+		return
+	}
+	c := studyEvalCase{jsonl, "which services report errors and what kinds of errors appear"}
+
+	passes := envInt("CORTEX_WM_PASSES", 3)
+	reps := envInt("CORTEX_WM_REPS", 2)
+
+	type agg struct {
+		cov, gp        []float64
+		relays, g, f   int
+		u, errs, dchar int
+	}
+	sums := map[bool]*agg{false: {}, true: {}}
+
+	for _, wm := range []bool{false, true} {
+		for rep := 0; rep < reps; rep++ {
+			row := measureWM(session, c, passes, rep, wm)
+			b, _ := json.Marshal(row)
+			fmt.Println(string(b)) // JSONL — one row per (wm, rep)
+			a := sums[wm]
+			if row.Error != "" {
+				a.errs++
+				continue
+			}
+			a.cov = append(a.cov, row.CoveragePct)
+			if row.Grounded+row.Failed > 0 {
+				a.gp = append(a.gp, row.GroundednessPct)
+			}
+			a.relays += row.Relays
+			a.g, a.f, a.u = a.g+row.Grounded, a.f+row.Failed, a.u+row.Unscored
+			a.dchar += row.DigestChars
+		}
+	}
+
+	fmt.Printf("\n--- study-eval working memory (model: %s, %d passes, n=%d/cell, %s) ---\n",
+		session.Study.Model, passes, reps, shortName(c.Path))
+	fmt.Printf("%-8s %6s %7s %8s %9s %7s\n", "findings", "cov%", "ground%", "relays", "digestKB", "errs")
+	for _, wm := range []bool{false, true} {
+		a := sums[wm]
+		label := "off"
+		if wm {
+			label = "on"
+		}
+		fmt.Printf("%-8s %5.0f%% %6.0f%% %8d %8.1fK %7d\n",
+			label, median(a.cov), median(a.gp), a.relays, float64(a.dchar)/1024, a.errs)
+	}
+	fmt.Println("\nP1 reads: relays>0 (on) = continuity; cov%/ground% on≈off = continuity is ~free.")
+}
+
+// envInt reads a positive int from an env var, falling back to def.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 // runStudyEvalCodeGrid is the 2×2 isolation experiment on the code fixture:

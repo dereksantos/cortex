@@ -12,11 +12,17 @@
 > deterministic passes, a clear "finding" unit (the digest). Proving the
 > curated-prefix pattern here de-risks it before the open-ended REPL/Discord case.
 >
-> **Status.** Design resolved (see Decisions). P1 code landed on
-> `working-memory/p1-findings-prefix` (structured `Finding` + prefix render +
-> growth-capped budget + citation relay + loop threading, all unit-tested);
-> the P1 **eval** (continuity, coverage-at-equal-budget) is the next step
-> before it becomes a default. P2–P4 not started.
+> **Status.** Design resolved (see Decisions). **P1 + P2 landed** on
+> `working-memory/p1-findings-prefix`, all unit-tested. P1: structured `Finding`
+> + prefix render + growth-capped budget + citation relay + loop threading. P2:
+> value-ranked keep/compress/evict with a dynamic pressure trigger,
+> anchor-preserving compression, and eviction → journal demotion (wired behind
+> `CORTEX_STUDY_CURATE`). The P1 eval (`loop study-eval wm`, live
+> `TestWMEvalLive`) ran on local models (see docs/eval-journal.md 2026-06-19):
+> coverage- and grounding-neutral, but the **citation-relay continuity metric
+> reads 0** — study samples disjoint regions per pass, so continuity lives in
+> digest *synthesis*, which needs a judge-based metric (the open follow-up
+> before WM becomes a study default). P3–P4 not started.
 >
 > **Owner.** `internal/study/` (the pass loop + prompt assembly) + the
 > working-memory triage nodes in `pkg/cognition/dag/ops/`.

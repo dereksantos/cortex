@@ -171,3 +171,132 @@ func TestStudyLoop_ThreadsFindingsAcrossPasses(t *testing.T) {
 		t.Errorf("threaded finding lost its digest: %+v", seen[1][0])
 	}
 }
+
+func TestStudyLoop_NoWorkingMemory_Independent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	blob := make([]byte, 256*1024)
+	for i := range blob {
+		if (i+1)%50 == 0 {
+			blob[i] = '\n'
+		} else {
+			blob[i] = 'a'
+		}
+	}
+	if err := os.WriteFile(path, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sawFindings := false
+	infer := func(_ context.Context, in InferInput) (InferOutput, error) {
+		if len(in.PriorFindings) > 0 {
+			sawFindings = true
+		}
+		return InferOutput{Digest: "d"}, nil
+	}
+	req := StudyRequest{Path: path, Window: 8192, Infer: infer, NoWorkingMemory: true}
+	if _, err := StudyLoop(context.Background(), req, alwaysDensify{}, 3); err != nil {
+		t.Fatalf("StudyLoop: %v", err)
+	}
+	if sawFindings {
+		t.Error("NoWorkingMemory: no pass should receive prior findings")
+	}
+}
+
+// End-to-end: a later pass that cites a prior finding's anchor (which it did
+// NOT sample) has that citation admitted as a relay and counted.
+func TestStudyLoop_CountsFindingRelays(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	blob := make([]byte, 256*1024)
+	for i := range blob {
+		blob[i] = 'a'
+		if (i+1)%50 == 0 {
+			blob[i] = '\n'
+		}
+	}
+	if err := os.WriteFile(path, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pass := 0
+	infer := func(_ context.Context, in InferInput) (InferOutput, error) {
+		defer func() { pass++ }()
+		if pass == 0 {
+			// Ground a citation in this pass's own sample.
+			s := in.Sampled[0]
+			return InferOutput{Digest: "first", Citations: []Citation{{RelPath: s.RelPath, LineStart: s.LineStart, LineEnd: s.LineEnd}}}, nil
+		}
+		// Later pass cites pass 0's finding anchor verbatim — not in its sample,
+		// so only the relay path can admit it.
+		if len(in.PriorFindings) > 0 && len(in.PriorFindings[0].Citations) > 0 {
+			c := in.PriorFindings[0].Citations[0]
+			return InferOutput{Digest: "builds on first", Citations: []Citation{c}}, nil
+		}
+		return InferOutput{Digest: "no findings"}, nil
+	}
+	req := StudyRequest{Path: path, Window: 8192, Infer: infer}
+	res, err := StudyLoop(context.Background(), req, alwaysDensify{}, 3)
+	if err != nil {
+		t.Fatalf("StudyLoop: %v", err)
+	}
+	if res.FindingRelays < 1 {
+		t.Errorf("expected ≥1 finding relay across passes, got %d (stopped=%s)", res.FindingRelays, res.Stopped)
+	}
+}
+
+// P2 end-to-end: with curation on, the findings block each pass receives never
+// exceeds its budget, and eviction fires (demoting via OnEvict) once enough
+// findings accumulate.
+func TestStudyLoop_CurationBoundsFindings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	blob := make([]byte, 256*1024)
+	for i := range blob {
+		blob[i] = 'a'
+		if (i+1)%50 == 0 {
+			blob[i] = '\n'
+		}
+	}
+	if err := os.WriteFile(path, blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const window = 4096
+	bigDigest := strings.Repeat("finding detail ", 200) // ~3KB, forces pressure fast
+
+	// The bound that must never be exceeded is the cap (findings ≤ 30% of the
+	// window). Per-pass budget grows with the pre-curation count up to that cap;
+	// curation keeps each pass's prompt under the active budget, so the cap is
+	// the externally-observable ceiling.
+	capChars := FindingsBudgetChars(window, 1_000_000) // saturates to the cap
+	var overBudget []int
+	infer := func(_ context.Context, in InferInput) (InferOutput, error) {
+		if total := findingsCharsTotal(in.PriorFindings); total > capChars {
+			overBudget = append(overBudget, total)
+		}
+		s := SampledChunk{RelPath: "big.txt", LineStart: 1, LineEnd: 2}
+		if len(in.Sampled) > 0 {
+			s = in.Sampled[0]
+		}
+		return InferOutput{Digest: bigDigest, Citations: []Citation{{RelPath: s.RelPath, LineStart: s.LineStart, LineEnd: s.LineEnd}}}, nil
+	}
+
+	evicted := 0
+	req := StudyRequest{
+		Path:           path,
+		Window:         window,
+		Infer:          infer,
+		CurateFindings: true,
+		OnEvict:        func(Finding) { evicted++ },
+	}
+	res, err := StudyLoop(context.Background(), req, alwaysDensify{}, 6)
+	if err != nil {
+		t.Fatalf("StudyLoop: %v", err)
+	}
+	if len(overBudget) > 0 {
+		t.Errorf("findings block exceeded budget on passes with nPrior=%v", overBudget)
+	}
+	if evicted == 0 {
+		t.Errorf("expected evictions under sustained pressure (passes=%d)", len(res.Passes))
+	}
+}

@@ -30,6 +30,10 @@ type StudyLoopResult struct {
 	Citations   []Citation // union of validated citations across passes
 	CoveragePct float64    // cumulative, over the union of sampled regions
 	Stopped     string     // "done" | "exhausted" | "read" | "budget"
+	// FindingRelays is the cross-pass total of citations admitted by relaying a
+	// prior finding (the working-memory continuity signal). 0 when working
+	// memory is off or no later pass cited through to an earlier one.
+	FindingRelays int
 }
 
 // StudyLoop runs the loop. A nil curator defaults to HeuristicCurator;
@@ -59,13 +63,16 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 
 	for pass := 0; pass < maxPasses; pass++ {
 		req.Covered = covered
-		req.PriorFindings = findings
+		if !req.NoWorkingMemory {
+			req.PriorFindings = findings
+		}
 		resp, err := StudyFile(ctx, req)
 		if err != nil {
 			return res, err
 		}
 
 		res.Passes = append(res.Passes, StudyPass{Response: resp})
+		res.FindingRelays += resp.FindingRelays
 		if resp.Digest != "" {
 			res.Digests = append(res.Digests, resp.Digest)
 			findings = append(findings, Finding{

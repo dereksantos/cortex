@@ -72,6 +72,20 @@ type StudyRequest struct {
 	// nil.
 	PriorFindings []Finding
 
+	// NoWorkingMemory disables the findings prefix in StudyLoop — passes run
+	// independently, as before P1. The eval baseline (findings on vs off) and a
+	// kill-switch until the eval makes working memory a default.
+	NoWorkingMemory bool
+
+	// CurateFindings (P2) replaces P1's recency-drop bound with value-ranked
+	// keep/compress/evict when the findings block crosses its budget. Off → P1
+	// behavior. Compress overrides the mechanical compressor (e.g. an LLM
+	// attend.distill); OnEvict is called per evicted finding so the harness can
+	// demote it to the journal. See curate.go.
+	CurateFindings bool
+	Compress       CompressFunc
+	OnEvict        func(Finding)
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -156,6 +170,11 @@ type StudyResponse struct {
 	Deepen      Deepen         `json:"deepen"`
 	Exhausted   bool           `json:"exhausted"`
 	Sampled     []SampledChunk `json:"-"` // mechanical sample (checkpoint/inference source)
+	// FindingRelays counts citations this pass admitted by relaying a prior
+	// finding's grounded citation (admitFindingRelays) — the working-memory
+	// continuity signal: a non-zero count means the pass cited through to an
+	// earlier pass's evidence rather than only its own sample.
+	FindingRelays int `json:"finding_relays,omitempty"`
 }
 
 // StudyFile runs the size-adaptive read. See the package doc above.
@@ -231,8 +250,22 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	// Working memory: prior findings ride the prompt front and consume part of
 	// the window, so carve their budget out of the sample — growth-capped, and
 	// floored so the new sample never starves (docs/working-memory-study.md).
-	// The trimmed set is what BOTH the prompt and the relay validation use.
-	findings := trimFindingsToBudget(req.PriorFindings, FindingsBudgetChars(window, len(req.PriorFindings)))
+	// The retained set is what BOTH the prompt and the relay validation use.
+	// P2 (CurateFindings) value-ranks keep/compress/evict under budget pressure;
+	// otherwise P1's recency drop bounds the block.
+	fbudget := FindingsBudgetChars(window, len(req.PriorFindings))
+	var findings []Finding
+	if req.CurateFindings {
+		var evicted []Finding
+		findings, evicted = curateFindings(req.PriorFindings, fbudget, req.Goal, req.Compress)
+		if req.OnEvict != nil {
+			for _, f := range evicted {
+				req.OnEvict(f)
+			}
+		}
+	} else {
+		findings = trimFindingsToBudget(req.PriorFindings, fbudget)
+	}
 	if cost := findingsCharsTotal(findings); cost > 0 {
 		if budgetChars-cost < sampleFloorChars(window) {
 			budgetChars = sampleFloorChars(window)
@@ -375,8 +408,11 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 		resp.Citations = ValidateCitations(io.Citations, sampled, nil)
 		// Working memory: also keep citations that faithfully relay a prior
 		// finding's already-grounded citation (the model saw the anchor in the
-		// findings prefix, not in this pass's sample).
+		// findings prefix, not in this pass's sample). The count is the
+		// continuity signal.
+		grounded := len(resp.Citations)
 		resp.Citations = admitFindingRelays(io.Citations, resp.Citations, findings)
+		resp.FindingRelays = len(resp.Citations) - grounded
 		for i := range resp.Citations {
 			if off, ok := byteOffsetForCitation(resp.Citations[i], sampled); ok {
 				resp.Citations[i].ByteOffset = off
