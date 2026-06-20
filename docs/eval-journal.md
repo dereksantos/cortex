@@ -2631,3 +2631,45 @@ premature; the data is mixed.
 
 (`CORTEX_WM_THINK=on|off` added so the same model can be compared with built-in
 reasoning on vs off; thinking-on fleet comparison to follow.)
+
+### Fleet: thinking ON vs OFF (3 passes, window 32768) — study doesn't want reasoning
+
+Re-ran the hybrid models with `CORTEX_WM_THINK=on`. Latency exploded (~6–8 min
+per regime vs ~1.5–2 min thinking-off — roughly 4×).
+
+WM effect (off → on-blind), synth and coverage, both modes:
+
+| model    | think-off synth | think-on synth | think-off cov | think-on cov |
+|----------|-----------------|----------------|---------------|--------------|
+| reasoner | 8 → **27**      | 16 → **7** ↓   | 14 → 14       | 20 → 20      |
+| coder80  | 26 → 21         | 16 → 19        | 20 → 20       | 14 → **26**  |
+| qwen3-4b | 7 → **25**      | 12 → **23**    | 14 → 20       | 19 → 19      |
+
+**Reads:**
+- **Thinking-on is a net negative for study.** ~4× the wall-clock for noisier,
+  not-better results: reasoner's clean thinking-off WM win (8→27) INVERTS with
+  thinking on (16→7); the others are mixed. Study is a read-and-summarize task —
+  the model's reasoning budget doesn't reliably help and costs a lot. Keep the
+  study role thinking-OFF (matches the fleet config default for reasoner/coder*).
+- **qwen3-4b is the robust WM beneficiary** — synth ~doubles-to-triples in BOTH
+  modes (7→25 off, 12→23 on). Combined with its 131K context and 4B size, it's
+  the recommended default study model.
+- Single-run thinking-on numbers are noisy; not over-interpreting beyond "slower,
+  no clear gain → don't enable it for study."
+
+## Working-memory arc — final summary (2026-06-20)
+
+Across local fleet (3b/reasoner/coder/coder80/qwen3-4b/xlam-1b) + OpenRouter
+(llama-3.3-70b, gpt-5.4):
+- **P1 findings prefix: the win.** Large and growing-with-depth above a ~3b
+  capability floor; biggest measured gain gpt-5.4 4-pass (cov +23, ground +21,
+  synth 7×). qwen3-4b best local. Floor models (3b, 1b) gain nothing.
+- **P2 curation:** verified live (evicts + demotes; bound holds).
+- **P4 cacheable prefix:** verified (0 breaks, fully warm).
+- **P3 directed sampling:** model-dependent — helps qwen3-4b/coder80 coverage,
+  hurts reasoner/gpt-5.4. Off by default, opt-in lever.
+- **Thinking:** off for study (4× slower, no gain).
+
+**Recommendation:** default findings-prefix + curation + caching for study roles
+≥ ~7b (or qwen3-4b); point the fleet `study` role at qwen3-4b (currently 3b,
+below the floor); leave directed sampling and thinking off.
