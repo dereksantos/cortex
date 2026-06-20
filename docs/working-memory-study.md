@@ -20,14 +20,20 @@
 >   `[system][goal][findings]` prefix extends append-only (Focus + sample are
 >   the volatile tail). cache_control for Anthropic is the only remaining
 >   provider tail; local backends cache the LCP automatically.
-> - **P1/P3 continuity — null-to-marginal on a 3b/3-pass run** (synthesis
->   off=4, on-blind=4, on-directed=5; coverage-neutral). The infra is built and
->   correct; the payoff is unproven at this model/scale and needs a stronger
->   model or longer (8–12 pass) runs.
+> - **P1 — PROVEN at depth above a ~3b floor.** Multi-model probe + a 4-pass
+>   gpt-5.4 run (eval-journal 2026-06-20): on-blind vs off gave coverage +23pts
+>   (14→37), grounding +21pts (79→100), synth 7×, relays 0→6 — and WM *sustained*
+>   the deepening loop (off stopped early at 14%). 3b shows nothing (capability
+>   floor); 70b/coder/gpt-5.4 all gain, in model-dependent currency.
+> - **P3 directed sampling — NEGATIVE.** on-directed underperformed on-blind on
+>   every quality axis at equal coverage; blind disjoint draws beat lead-chasing.
+>   No evidence it helps. Stays OFF.
 >
-> Everything stays opt-in (curation `CORTEX_STUDY_CURATE`, directed
-> `CORTEX_STUDY_DIRECTED`); findings threading is the default-on path but the
-> eval does not yet justify making the continuity claim a default.
+> **Recommendation:** make the findings prefix (P1) + curation (P2) + cacheable
+> prefix (P4) a default for capable study models (>~7b); leave directed sampling
+> (P3) opt-in/off pending a better focus-selection policy. The fleet `study`
+> model is llama-3.2-3b (below the floor) — bump it to a ≥7b for the gains to
+> show.
 >
 > **Owner.** `internal/study/` (the pass loop + prompt assembly) + the
 > working-memory triage nodes in `pkg/cognition/dag/ops/`.

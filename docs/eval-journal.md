@@ -2560,3 +2560,40 @@ varies by model (grounding / coverage / synth / relay). This is the
 small-model-amplifier thesis with a measured threshold. Caveat: single 2–3 pass
 probes — directional, not yet statistically solid; a fuller blind-vs-directed
 (P3) run on an engaged model follows.
+
+### gpt-5.4, 4 passes, 3 regimes (off / on-blind / on-directed) — the depth result
+
+| regime       | cov%  | ground% | relays | synth | digestB | stopped |
+|--------------|-------|---------|--------|-------|---------|---------|
+| off          | 14%   | 79%     | 0      | 7     | 596     | done (early) |
+| on-blind     | **37%** | **100%** | **6** | **49** | 1779   | budget  |
+| on-directed  | 37%   | 82%     | 2      | 40    | 1942    | budget  |
+
+(P4: on runs warm=3 breaks=0 — fully cache-warm across all 4 passes.)
+
+**P1 working memory — a LARGE win at depth on a capable model.** on-blind vs off:
+coverage +23pts (14→37), grounding +21pts (79→100), synth 7×, relays 0→6,
+digests 3×. The 2-pass probes badly undersold it — the payoff is in accumulation,
+so it grows with passes. Notably `off` stopped EARLY (the curator called "done"
+after ~1–2 passes at 14% coverage), while with working memory the model kept the
+investigation productively going to the budget. So WM doesn't just add context —
+it sustains the deepening loop.
+
+**P3 directed sampling — NEGATIVE.** on-directed vs on-blind, at equal coverage
+(37%): grounding 100→82, relays 6→2, synth 49→40. Steering the sample to the
+model's own leads UNDERperformed blind disjoint draws on every quality axis.
+Likely cause: blind anti-coverage sampling gives broader, more varied evidence
+per pass; lead-chasing narrows it and revisits already-understood regions. Single
+run, so not conclusive, but there is **no evidence P3 helps and a consistent
+signal it slightly hurts** — do not default it. Kept opt-in
+(`CORTEX_STUDY_DIRECTED`); revisit only with a different focus-selection policy
+(e.g. lead-value ranking, or widen the focus window).
+
+**P4 caching — confirmed** (breaks=0, warm across all passes).
+
+**Bottom line for the working-memory arc:** P1 (accumulating findings prefix) is
+the win — large and growing-with-depth above the ~3b capability floor; P2
+(curation) and P4 (cacheable prefix) are the correct, verified supports; P3
+(directed sampling) is a measured non-improvement. Recommend making the findings
+prefix a default for capable study models (>~7b), with curation on, caching on,
+and directed sampling OFF.
