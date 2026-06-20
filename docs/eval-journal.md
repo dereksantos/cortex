@@ -2597,3 +2597,37 @@ the win — large and growing-with-depth above the ~3b capability floor; P2
 (directed sampling) is a measured non-improvement. Recommend making the findings
 prefix a default for capable study models (>~7b), with curation on, caching on,
 and directed sampling OFF.
+
+### Fleet sweep — thinking off (3 passes, window 32768, NDJSON)
+
+Ran the rest of the generative fleet (after confirming the `study` role = 3b).
+Three regimes (off / on-blind / on-directed), thinking off (study-role default).
+
+| model            | synth off→blind→dir | cov% off→blind→dir | ground% |
+|------------------|---------------------|--------------------|---------|
+| reasoner         | 8 → **27** → 24     | 14 → 14 → 14       | 100     |
+| coder80          | 26 → 21 → 23        | 20 → 20 → **25**   | 100     |
+| qwen3-4b         | 7 → **25** → 26     | 14 → 20 → **26**   | 100     |
+| xlam-1b-fc-r     | 7 → 8 → 8           | 16 (ground 0%)     | floor   |
+
+**Reads:**
+- **WM (on-blind vs off) is a real win on capable locals:** reasoner synth 8→27
+  (3.4×), qwen3-4b 7→25 (3.6×) AND coverage 14→20. qwen3-4b stands out — biggest
+  all-round gain, and only 4B / 131K ctx → strong default-study candidate.
+- **coder80 is the exception:** it already synthesizes heavily off (synth 26), so
+  WM added nothing there (26→21); but directed sampling lifted its coverage
+  (20→25). Suggests the synth metric saturates for verbose, vocabulary-consistent
+  models — read it as a relative (on−off) signal, with coverage/grounding as the
+  harder numbers.
+- **xlam-1b: null + ground 0%** — below the floor, confirmed.
+
+**P3 directed sampling — CORRECTION to the earlier "uniform loss" call.** It is
+model-dependent, not dead:
+- HELPED coverage on qwen3-4b (20→**26**) and coder80 (20→**25**).
+- HURT on reasoner (synth 24<27) and gpt-5.4 (earlier).
+So: off by default, but keep it as an opt-in lever (`CORTEX_STUDY_DIRECTED`) — it
+clearly helps some models' coverage. The clean "stays off, full stop" was
+premature; the data is mixed.
+
+(`CORTEX_WM_THINK=on|off` added so the same model can be compared with built-in
+reasoning on vs off; thinking-on fleet comparison to follow.)

@@ -34,11 +34,27 @@ func TestWMEvalLive(t *testing.T) {
 	window := envInt("CORTEX_WM_WINDOW", 8192)
 	passes := envInt("CORTEX_WM_PASSES", 3)
 
+	// CORTEX_WM_THINK toggles built-in reasoning on hybrid thinking models
+	// (reasoner/coder/coder80): "on" → enable_thinking=true, "off" → false,
+	// unset → the model's template default. (CORTEX_WM_NOTHINK stays as an
+	// off alias.) Lets a single model be compared thinking-on vs -off.
+	var kwargs map[string]any
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORTEX_WM_THINK"))) {
+	case "on", "true", "1":
+		kwargs = map[string]any{"enable_thinking": true}
+	case "off", "false", "0":
+		kwargs = map[string]any{"enable_thinking": false}
+	default:
+		if os.Getenv("CORTEX_WM_NOTHINK") != "" {
+			kwargs = map[string]any{"enable_thinking": false}
+		}
+	}
 	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{
-		Name:    "wm-live",
-		BaseURL: endpoint,
-		APIKey:  os.Getenv("CORTEX_WM_KEY"), // empty for local backends; set for OpenRouter
-		Timeout: 10 * time.Minute,
+		Name:               "wm-live",
+		BaseURL:            endpoint,
+		APIKey:             os.Getenv("CORTEX_WM_KEY"), // empty for local backends; set for OpenRouter
+		ChatTemplateKwargs: kwargs,
+		Timeout:            10 * time.Minute,
 	})
 	provider.SetModel(model)
 	provider.SetTemperature(0)
