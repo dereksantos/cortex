@@ -2459,5 +2459,12 @@ becomes a study default.
 exceeded, newest always retained, citation anchors preserved under compression,
 lowest-value evicted, dynamic pressure trigger). Wired into `runStudy` behind
 `CORTEX_STUDY_CURATE`, with eviction demoting to the journal via the capturer.
-Live P2 validation pending (curation only triggers after several passes exceed
-the findings budget — expensive on local models).
+
+**Live P2 validated** (llama3.2:3b, window 8192, 5 passes, `CORTEX_WM_CURATE=1`):
+the run completed clean and reported `curation: evicted 2 findings (demoted)` —
+under sustained pressure the dynamic trigger fired and the eviction→demotion path
+ran end-to-end against a real model. Coverage on==off (47%) again; grounding 0%
+at this smaller window (the 3b can't ground record citations once the sample
+budget shrinks — a model/window-size floor, not a curation regression). So P2's
+mechanism is confirmed live; its *quality* (retention vs. drop) still rides the
+same synthesis-metric follow-up that P1's continuity does.
