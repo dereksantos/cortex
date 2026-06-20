@@ -12,17 +12,22 @@
 > deterministic passes, a clear "finding" unit (the digest). Proving the
 > curated-prefix pattern here de-risks it before the open-ended REPL/Discord case.
 >
-> **Status.** Design resolved (see Decisions). **P1 + P2 landed** on
-> `working-memory/p1-findings-prefix`, all unit-tested. P1: structured `Finding`
-> + prefix render + growth-capped budget + citation relay + loop threading. P2:
-> value-ranked keep/compress/evict with a dynamic pressure trigger,
-> anchor-preserving compression, and eviction → journal demotion (wired behind
-> `CORTEX_STUDY_CURATE`). The P1 eval (`loop study-eval wm`, live
-> `TestWMEvalLive`) ran on local models (see docs/eval-journal.md 2026-06-19):
-> coverage- and grounding-neutral, but the **citation-relay continuity metric
-> reads 0** — study samples disjoint regions per pass, so continuity lives in
-> digest *synthesis*, which needs a judge-based metric (the open follow-up
-> before WM becomes a study default). P3–P4 not started.
+> **Status.** Design resolved (see Decisions). **P1–P4 all landed +
+> unit-tested** on `working-memory/p1-findings-prefix`, with a synthesis
+> continuity metric replacing the disjoint-blind relay signal. Live runs on a
+> local 3b (see docs/eval-journal.md 2026-06-19):
+> - **P4 (caching) — confirmed working:** 0 prefix breaks across passes; the
+>   `[system][goal][findings]` prefix extends append-only (Focus + sample are
+>   the volatile tail). cache_control for Anthropic is the only remaining
+>   provider tail; local backends cache the LCP automatically.
+> - **P1/P3 continuity — null-to-marginal on a 3b/3-pass run** (synthesis
+>   off=4, on-blind=4, on-directed=5; coverage-neutral). The infra is built and
+>   correct; the payoff is unproven at this model/scale and needs a stronger
+>   model or longer (8–12 pass) runs.
+>
+> Everything stays opt-in (curation `CORTEX_STUDY_CURATE`, directed
+> `CORTEX_STUDY_DIRECTED`); findings threading is the default-on path but the
+> eval does not yet justify making the continuity claim a default.
 >
 > **Owner.** `internal/study/` (the pass loop + prompt assembly) + the
 > working-memory triage nodes in `pkg/cognition/dag/ops/`.

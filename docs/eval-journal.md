@@ -2468,3 +2468,53 @@ at this smaller window (the 3b can't ground record citations once the sample
 budget shrinks — a model/window-size floor, not a curation regression). So P2's
 mechanism is confirmed live; its *quality* (retention vs. drop) still rides the
 same synthesis-metric follow-up that P1's continuity does.
+
+---
+
+## 2026-06-19 (cont.) — Working memory: synthesis metric, P3, P4
+
+Continued the working-memory arc through the synthesis metric, P3 (directed
+sampling), and P4 (cacheable prefix). All three code-complete + unit-tested;
+live runs on llama3.2:3b (Ollama).
+
+**Synthesis metric — fixed a measurement bias.** First cut counted digest terms
+carried from the *injected* findings, so findings-off scored 0 by construction
+(10-on vs 0-off was an artifact, not a behavior delta). Corrected to measure
+carry-forward against the *accumulated prior digests* (which exist whether or not
+they were injected), so both regimes score and on−off isolates the effect.
+
+**Live (window 16384, 3 passes, NDJSON fixture):**
+
+| regime         | cov% | ground% | relays | synth | warm | breaks |
+|----------------|------|---------|--------|-------|------|--------|
+| findings off   | 13%  | 0%      | 0      | 4     | 2    | 0      |
+| on (blind)     | 24%  | —       | 0      | 4     | —    | —      |
+| on (directed)  | 13%  | 0%      | 0      | 5     | 2    | 0      |
+
+(grounding 0% here is the smaller-window floor for the 3b; the 16384/3-pass run
+earlier hit 67%. Coverage/grounding vary run-to-run; the metric deltas are the
+signal.)
+
+**Reads:**
+- **P4 caching — confirmed.** `breaks=0` across the run: the [system][goal]
+  [findings] prefix extends cleanly every pass (append-only, no curation in a
+  3-pass run), so it is fully cache-warm. The reorder (Focus moved out of the
+  prefix into the volatile tail) + ending the findings block exactly at the last
+  finding are what make append a byte-prefix extension. cache_control for an
+  Anthropic backend is the remaining provider-specific tail; study runs local,
+  where the longest-common-prefix cache is automatic.
+- **Continuity (P1/P3) — null-to-marginal.** Synthesis: off=4, on-blind=4,
+  on-directed=5. Working memory adds ~0–1 carried term on a 3b at 3 passes —
+  inside the noise. Directed sampling nudged it +1 over blind but did not move
+  coverage. So on this model/scale, accumulating + directing findings does not
+  measurably change what the model synthesizes.
+- The relay metric stays 0 (disjoint sampling, as expected) — kept only as a
+  correctness check (off must be 0).
+
+**Verdict:** the *infrastructure* (prefix, budget, curation, directed focus,
+caching) is built, tested, and — for P4 — demonstrably working. The *continuity
+payoff* is unproven on a local 3b; it needs a stronger model and/or more passes
+before working memory becomes a study default. All of P1–P4 stays opt-in
+(`NoWorkingMemory` default-on path threads findings; curation/directed behind
+`CORTEX_STUDY_CURATE` / `CORTEX_STUDY_DIRECTED`). Next lever if revisited: a
+larger model or a longer (8–12 pass) run where accumulation has room to matter.
