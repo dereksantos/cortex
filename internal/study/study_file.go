@@ -32,6 +32,11 @@ type Focus struct {
 	Lines  [2]int `json:"lines,omitempty"`
 	Symbol string `json:"symbol,omitempty"`
 	Query  string `json:"query,omitempty"`
+	// Keywords bias sampling toward chunks whose CONTENT contains a term — the
+	// mechanical-search focus that targets the goal (Query is prompt-only and
+	// does not steer sampling). Goal-derived; matches are case-insensitive
+	// substrings. No matches → no bias (falls back to breadth). See keyword_focus.go.
+	Keywords []string `json:"keywords,omitempty"`
 }
 
 // StudyRequest is the tool contract input (see docs/study-file.md).
@@ -91,6 +96,11 @@ type StudyRequest struct {
 	// disjoint draw. Requires working memory. Off → the curator's blind
 	// densify/target decision stands. See directed.go.
 	DirectedSampling bool
+
+	// KeywordFocus biases pass-1 sampling toward regions whose content contains
+	// the goal's significant terms (the mechanical-search "aimed wide net"), when
+	// no explicit Focus is set. Off → blind breadth sampling. See keyword_focus.go.
+	KeywordFocus bool
 
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
@@ -303,8 +313,16 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	if req.sampler != nil {
 		sampler = req.sampler
 	}
-	if req.Focus != nil {
-		sampler = newFocusSampler(sampler, out, *req.Focus)
+	// Focus precedence: an explicit Focus (a curator/directed target) wins;
+	// otherwise, when KeywordFocus is on and there's a goal, aim pass-1 sampling
+	// at the goal's terms (the mechanical-search wide net). No usable terms →
+	// nil → blind breadth.
+	focus := req.Focus
+	if focus == nil && req.KeywordFocus {
+		focus = keywordFocusFromGoal(req.Goal)
+	}
+	if focus != nil {
+		sampler = newFocusSampler(sampler, out, *focus)
 	}
 
 	// Session coverage: seed the sampler with what prior passes already

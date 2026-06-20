@@ -31,6 +31,12 @@ func TestBuildInferPrompt_LabelsRealRanges(t *testing.T) {
 			t.Errorf("system prompt missing constraint marker %q", want)
 		}
 	}
+	// Reporter-not-critic framing: study surfaces grounded material, never verdicts.
+	for _, want := range []string{"REPORTER", "not a critic"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing reporter-framing marker %q", want)
+		}
+	}
 }
 
 func sampledFixture() []SampledChunk {

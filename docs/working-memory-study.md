@@ -193,3 +193,38 @@ over a multi-pass run** vs today's independent-passes baseline. Supporting:
   (P2.)
 - **Does it help the small model at all** — the eval gates this before
   accumulating context becomes a default; no assumption baked in.
+
+## Curation budget + targeted sampling (2026-06-20)
+
+Two coupled additions after observing a REPL transcript where the coder studied
+`main.go` (58% digest) and then `read_file`'d the whole 155 KB file anyway:
+
+- **Fixed curation budget** (`curationBudgetTokens`, cmd/loop). `read_file`
+  redirects to study above a *fixed* token threshold, NOT a fraction of the
+  coder window. Sizing the trigger to the window let a big-window model read
+  everything raw, defeating curation — the whole point is to spend the coder's
+  context on distilled signal, not raw bytes it could technically hold.
+- **Keyword focus** (`Focus.Keywords`, `KeywordFocus`, keyword_focus.go). The
+  study tool's natural-language `goal` can't steer the sampler — `Focus.Query` is
+  prompt-only; the sampler targets line/byte/path/symbol. So a tight budget could
+  produce a confident digest of the *wrong* regions. Keyword focus extracts the
+  goal's significant terms, scans chunk content for them, and biases sampling
+  toward matches — "search without an agent". Graceful fallback: abstract goals
+  ("assess the architecture") whose terms don't appear mark nothing → breadth, as
+  they should. Opt-in (`CORTEX_STUDY_KEYWORDS`) until eval'd.
+- **Reporter-not-critic prompt** (`inferSystemPrompt`). The study model is a
+  grounded *reporter* — it surfaces structure/responsibilities/signals relevant
+  to the goal, never verdicts. Keeps the small model on retrieval (its strength)
+  and leaves judgment to the coder, even when the goal asks for an assessment.
+
+### Parked: agentic study (search tools)
+
+Considered giving the study model real search tools (grep/read-range/find-refs)
+to drive its own exploration — "wide thin net, then dig in" under model control.
+**Parked, not pursued:** small models (3–4B) have poor tool-calling discipline
+(observed this session — xlam-1b won't call tools; eval-journal notes mistral-7b
+failing the same way), so an agentic loop on the cheap study model is the regime
+most likely to flail. The keyword-focus above gets most of the targeting benefit
+*mechanically* (bounded, predictable, no tool-use loop). Revisit agentic study
+only if/when a capable-enough study model is the binding — and as a separate bet,
+not the default path.

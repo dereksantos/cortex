@@ -263,6 +263,15 @@ func selectModel(fleet Fleet, role string) string {
 // practice: when the backend is reachable, discovery supplies the true window.
 const fallbackWindow = 32768
 
+// curationBudgetTokens is the read_file → study redirect threshold: a whole-file
+// read estimated above this many tokens is refused in favor of study, so the
+// coder receives a curated digest instead of a raw dump. Fixed (not a fraction
+// of the coder window) so curation stays the default even on a large-window
+// model — the whole point is to spend the coder's context on distilled signal,
+// not raw bytes it could technically hold. ~16k tok ≈ 64 KB ≈ 1600 lines:
+// ordinary source files still read whole; large files curate.
+const curationBudgetTokens = 16000
+
 // thinkingOff exists so role bindings can take a *bool address.
 var thinkingOff = false
 
@@ -1022,6 +1031,12 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	if !noWM && os.Getenv("CORTEX_STUDY_DIRECTED") != "" {
 		req.DirectedSampling = true
 	}
+	// Keyword focus: aim pass-1 sampling at the goal's terms (mechanical search).
+	// Opt-in until eval'd; pairs with the curation budget to make tight curation
+	// land on what the coder asked about.
+	if os.Getenv("CORTEX_STUDY_KEYWORDS") != "" {
+		req.KeywordFocus = true
+	}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
@@ -1090,15 +1105,15 @@ func (tc ToolCall) ReadFile(cs *CortexSession) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Size guard: a whole-file read of something bigger than half the coding
-	// model's window would blow its context. Refuse and redirect to study, which
-	// the model can't otherwise be trusted to prefer on its own. (~4 bytes/token.)
-	if cs != nil {
-		if info, statErr := os.Stat(path); statErr == nil {
-			if estTokens := int(info.Size()) / 4; estTokens > cs.windowSize()/2 {
-				return "", fmt.Errorf("%s is %d bytes (~%d tokens) — too large to read whole; use study(%q, goal) instead",
-					path, info.Size(), estTokens, path)
-			}
+	// Curation budget: a whole-file read above curationBudgetTokens is refused
+	// and redirected to study, so the coder gets a CURATED digest rather than a
+	// raw dump. Decoupled from the coder's window on purpose — sizing the trigger
+	// to the window let a big-window model read everything raw, defeating
+	// curation (2026-06-20). (~4 bytes/token.)
+	if info, statErr := os.Stat(path); statErr == nil {
+		if estTokens := int(info.Size()) / 4; estTokens > curationBudgetTokens {
+			return "", fmt.Errorf("%s is %d bytes (~%d tokens) — too large to read whole; use study(%q, goal) instead",
+				path, info.Size(), estTokens, path)
 		}
 	}
 	printToolAction(fmt.Sprintf("read_file(%s)", path))

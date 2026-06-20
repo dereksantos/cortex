@@ -60,6 +60,8 @@ type InferFunc func(ctx context.Context, in InferInput) (InferOutput, error)
 // present and the contract can't silently drift.
 const inferSystemPrompt = `You study large files by reading only a SAMPLE of their regions. You are given a set of sampled regions, each labelled with its real path and line range. Infer a concise digest of what these regions show, grounded ONLY in what you can see.
 
+You are a REPORTER, not a critic. Your job is to surface the raw material the caller needs to reason — structure, responsibilities, behavior, dependencies, signals, anomalies — faithfully and grounded in what you can see. Even when the goal asks you to assess, recommend, or evaluate, do NOT deliver verdicts, ratings, or recommendations: report the evidence that bears on the question and let the caller draw the conclusion. A precise description the caller can act on beats a judgment it cannot verify.
+
 Hard rules (provenance contract):
 1. Every claim in the digest MUST be attributable to one sampled region's real line range.
 2. NEVER cite a line you did not see in a sampled region below.

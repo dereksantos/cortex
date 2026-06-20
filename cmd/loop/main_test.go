@@ -824,11 +824,13 @@ func TestSetModel(t *testing.T) {
 
 func TestReadFileSizeGuard(t *testing.T) {
 	dir := t.TempDir()
-	cs := &CortexSession{Window: 1000} // threshold = 500 tokens ≈ 2000 bytes
+	// The curation budget is fixed (curationBudgetTokens), independent of the
+	// session window — so a big-window coder still curates large files.
+	cs := &CortexSession{Window: 131072}
 
 	t.Run("oversized read is refused and redirects to study", func(t *testing.T) {
 		big := filepath.Join(dir, "big.txt")
-		os.WriteFile(big, make([]byte, 4000), 0644) // ~1000 tokens > 500
+		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644) // over the budget
 		args, _ := json.Marshal(map[string]string{"path": big})
 		_, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs)
 		if err == nil {
@@ -839,12 +841,23 @@ func TestReadFileSizeGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("small read under the threshold succeeds", func(t *testing.T) {
-		small := filepath.Join(dir, "small.txt")
-		os.WriteFile(small, []byte("hi there"), 0644)
+	t.Run("ordinary source file under the budget still reads whole", func(t *testing.T) {
+		small := filepath.Join(dir, "small.go")
+		os.WriteFile(small, make([]byte, 8000), 0644) // ~2k tokens, well under the budget
 		args, _ := json.Marshal(map[string]string{"path": small})
 		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs); err != nil {
-			t.Fatalf("small read should succeed: %v", err)
+			t.Fatalf("under-budget read should succeed: %v", err)
+		}
+	})
+
+	t.Run("budget is fixed, not window-scaled", func(t *testing.T) {
+		// A file over the budget is refused even with a huge window (the bug this
+		// fixes: a big window used to push the threshold past the file size).
+		big := filepath.Join(dir, "big2.txt")
+		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644)
+		args, _ := json.Marshal(map[string]string{"path": big})
+		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), &CortexSession{Window: 1_000_000}); err == nil {
+			t.Error("a huge window must not exempt a large file from curation")
 		}
 	})
 }

@@ -47,6 +47,14 @@ const focusDefaultBias = 0.7
 func newFocusSampler(inner Sampler, out *BoundaryOutput, f Focus) *FocusSampler {
 	fs := &FocusSampler{Inner: inner, Bias: focusDefaultBias, inFocus: map[string]bool{}}
 
+	// Keyword focus: content-search targeting (the goal's terms). Resolved by
+	// scanning chunk bytes for matches, not by line/byte geometry, so it's its
+	// own branch. No matches → empty in-focus set → pass-through to breadth.
+	if len(f.Keywords) > 0 {
+		markKeywordChunks(fs, out, f.Keywords)
+		return fs
+	}
+
 	// Cross-file targeting: a relpath names the file or subtree to chase
 	// (corpus studies — line numbers alone are ambiguous across files),
 	// with Lines narrowing within it. A path that covers EVERY chunk
