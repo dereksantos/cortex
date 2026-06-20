@@ -31,6 +31,11 @@ type InferInput struct {
 	Sampled []SampledChunk
 	Focus   *Focus
 	Goal    string
+	// PriorFindings are earlier passes' distilled results, rendered at the
+	// prompt front (before the sample) so the model builds on them and the
+	// stable prefix can be cached. Already trimmed to budget by the caller —
+	// BuildInferPrompt renders them verbatim. Nil on pass 1 / single-shot.
+	PriorFindings []Finding
 	// Numbered overrides per-line "N| " snippet numbering: nil → the
 	// format default (numberSnippetLines), true/false → forced. The
 	// override exists so evals can isolate coordinate availability from
@@ -77,6 +82,19 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 	if d := describeFocus(in.Focus); d != "" {
 		fmt.Fprintf(&b, "Focus: %s\n\n", d)
 	}
+	// Findings prefix: prior passes' distilled results lead, before the sample,
+	// so the model builds on them and the [system][goal][findings] prefix stays
+	// cache-stable (only the sample tail re-prefills). The path:line anchors are
+	// rendered verbatim so a citation relaying one survives validation (see
+	// admitFindingRelays).
+	if len(in.PriorFindings) > 0 {
+		b.WriteString("Findings so far (from earlier passes of THIS study — build on them, do not repeat; you may cite their path:line ranges):\n\n")
+		for _, f := range in.PriorFindings {
+			b.WriteString(renderFinding(f))
+		}
+		b.WriteString("\n")
+	}
+
 	display := in.RelPath
 	if display == "" {
 		display = in.Path
@@ -188,6 +206,97 @@ func ValidateCitations(cits []Citation, sampled []SampledChunk, onDrop func(Cita
 		}
 	}
 	return valid
+}
+
+// renderFinding renders one prior finding for the findings prefix: a "[pass N]"
+// label, its digest, and its citation anchors as verbatim "path:start-end"
+// ranges (so a later pass can cite through them — see admitFindingRelays). The
+// rendered length is also the unit cost trimFindingsToBudget bounds against.
+func renderFinding(f Finding) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[pass %d] %s\n", f.Pass+1, strings.TrimSpace(f.Digest))
+	if len(f.Citations) > 0 {
+		b.WriteString("  cite:")
+		for i, c := range f.Citations {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, " %s:%d-%d", c.RelPath, c.LineStart, c.LineEnd)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// findingChars is one finding's rendered size in characters — the unit the
+// findings budget is spent in.
+func findingChars(f Finding) int { return len(renderFinding(f)) }
+
+// findingsCharsTotal is the rendered size of a findings set — what the prefix
+// costs the sample budget.
+func findingsCharsTotal(findings []Finding) int {
+	total := 0
+	for _, f := range findings {
+		total += findingChars(f)
+	}
+	return total
+}
+
+// trimFindingsToBudget keeps the most-recent findings that fit budgetChars
+// (recency ≈ relevance to the current deepening), dropping the oldest. This is
+// P1's crude bound; P2 replaces it with value-based keep/compress/evict. The
+// newest finding is always kept even if it alone exceeds the budget, so a pass
+// never loses the immediately-prior result.
+func trimFindingsToBudget(findings []Finding, budgetChars int) []Finding {
+	if len(findings) == 0 || budgetChars <= 0 {
+		return nil
+	}
+	used, start := 0, len(findings)
+	for i := len(findings) - 1; i >= 0; i-- {
+		c := findingChars(findings[i])
+		if used+c > budgetChars && start != len(findings) {
+			break
+		}
+		used += c
+		start = i
+	}
+	return findings[start:]
+}
+
+// citeKey is the "relpath:start-end" identity of a citation — the relay anchor.
+func citeKey(c Citation) string {
+	return fmt.Sprintf("%s:%d-%d", c.RelPath, c.LineStart, c.LineEnd)
+}
+
+// admitFindingRelays re-admits citations that the sample-based validation
+// dropped but which EXACTLY relay a prior finding's citation. A prior finding's
+// citation was already validated against its own pass's sample, so it is
+// grounded; propagating it upward unchanged preserves the provenance chain
+// (the working-memory analogue of citationRelayed). raw is the model's
+// citations, validated is what ValidateCitations kept; the result is validated
+// plus any faithful relays, de-duplicated.
+func admitFindingRelays(raw, validated []Citation, findings []Finding) []Citation {
+	if len(findings) == 0 {
+		return validated
+	}
+	prior := map[string]bool{}
+	for _, f := range findings {
+		for _, c := range f.Citations {
+			prior[citeKey(c)] = true
+		}
+	}
+	have := map[string]bool{}
+	for _, c := range validated {
+		have[citeKey(c)] = true
+	}
+	for _, c := range raw {
+		k := citeKey(c)
+		if prior[k] && !have[k] {
+			validated = append(validated, c)
+			have[k] = true
+		}
+	}
+	return validated
 }
 
 // citationRelayed reports whether the citation is a VERBATIM relay: its

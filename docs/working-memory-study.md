@@ -12,7 +12,11 @@
 > deterministic passes, a clear "finding" unit (the digest). Proving the
 > curated-prefix pattern here de-risks it before the open-ended REPL/Discord case.
 >
-> **Status.** Design.
+> **Status.** Design resolved (see Decisions). P1 code landed on
+> `working-memory/p1-findings-prefix` (structured `Finding` + prefix render +
+> growth-capped budget + citation relay + loop threading, all unit-tested);
+> the P1 **eval** (continuity, coverage-at-equal-budget) is the next step
+> before it becomes a default. P2–P4 not started.
 >
 > **Owner.** `internal/study/` (the pass loop + prompt assembly) + the
 > working-memory triage nodes in `pkg/cognition/dag/ops/`.
@@ -103,15 +107,27 @@ from pass 2 on and grows with the investigation.
 
 ## Phases (each shippable + evaluable)
 
-- **P1 — accumulating findings prefix.** Add `InferInput.PriorFindings`; thread
-  `StudyLoop`'s accumulated digests into each pass (capped at a fixed budget
-  split); `BuildInferPrompt` places it *before* the sample. Continuity + a
-  cacheable prefix, no curation yet. Eval: does pass N reference pass N-1's
-  findings; coverage/groundedness at equal total budget vs today.
-- **P2 — curate the findings.** When the findings block crosses its budget, run
-  the keep/compress/evict triage (`value.score` the digests, `attend.compress` the
-  rest) so long runs stay bounded. Eval: retention quality (are dropped findings
-  recoverable / unimportant), bound never exceeded.
+- **P1 — accumulating findings prefix.** Add `InferInput.PriorFindings` as a
+  slice of **structured units** (`{pass, digest, citations, leads}`, NOT a
+  pre-joined string — so P2 curation has units to score/compress/evict);
+  thread `StudyLoop`'s accumulated findings into each pass; `BuildInferPrompt`
+  renders them *before* the sample. The findings budget is **growth-based,
+  capped** (see Decisions): early passes give the window to the sample, later
+  passes let findings claim more, up to a cap, with a sample floor so the new
+  sample never starves. Append-only, no curation yet. Eval: does pass N
+  reference pass N-1's findings; coverage/groundedness at equal total budget vs
+  today.
+- **P2 — curate the findings.** When the appended block crosses its budget
+  high-watermark, run the keep/compress/evict triage (`value.score` the
+  findings, `attend.compress` the rest) so long runs stay bounded. **Curation
+  contract:** compression shortens the *prose* but preserves each finding's
+  *citation anchors* verbatim, so the `citationRelayed` relay (`infer.go`) still
+  lets a later pass cite through to the original lines — compressing away the
+  `path:N-M` coordinates would decay a citable finding into a mere lead.
+  Eviction demotes to the journal (recoverable via `vector_search`), it does not
+  delete. Each curation is a one-time prefix rewrite (the single cache miss);
+  between curations the block stays append-stable. Eval: retention quality (are
+  dropped findings recoverable / unimportant), bound never exceeded.
 - **P3 — findings-directed sampling.** Use accumulated findings + `Leads` to set
   the next pass's `Focus`, replacing blind disjoint draws. Eval: coverage-to-value
   (does directed sampling find more relevant regions per pass).
@@ -135,14 +151,28 @@ over a multi-pass run** vs today's independent-passes baseline. Supporting:
   across passes (the direct read of whether the prefix is actually stable).
 - **Latency / cost** — wall-clock and tokens per multi-pass run vs baseline.
 
-## Open questions
+## Decisions
 
-- **Budget split** — what fraction of the window should findings get? Static, or
-  grow with pass count until a cap?
-- **Curation trigger** — pass count, findings-token pressure, or a redundancy
-  signal? (Hysteresis: as late as possible to protect the cache.)
-- **Findings granularity** — full prior digests, or a re-distilled running summary?
-  Digest-on-digest decay is the same risk `working-memory.md` flags.
-- **Does it help the small model at all** — or does directed, accumulating context
-  only pay off above a model-size threshold? The eval gates this before it becomes
-  a default.
+- **Budget split — grow until capped.** The findings budget is not a fixed
+  fraction. It grows with pass count up to a cap, so early passes spend the
+  window on the sample (coverage-first, little to remember yet) and later passes
+  let findings claim more:
+  `findings_budget(n) = min(cap, base + rate·n, window − sample_floor − envelope)`.
+  The `sample_floor` guarantees the new sample never starves; `cap` and `rate`
+  are provisional constants the eval sweeps (like the 0.3 fill).
+- **Findings granularity — full prior digests, appended (option A).** The block
+  is the prior findings verbatim, append-only. This is faithful and
+  cache-stable (the prefix only grows at the tail). The rejected alternative — a
+  re-distilled running summary — compounds loss (a summary of summaries:
+  "digest-on-digest decay", the risk `working-memory.md` flags) AND rewrites the
+  whole block every pass (cache-hostile). The linear-growth cost of appending is
+  deferred to P2 curation rather than paid continuously as quality decay.
+- **Curation trigger — dynamic, not scheduled.** Fire on actual budget pressure
+  (the block crossing its high-watermark), preferentially evicting/compressing
+  what a redundancy/value signal marks low-novelty — never a fixed "every K
+  passes" counter. A fixed schedule forces prefix rewrites (cache misses) on
+  passes that didn't need them; a pressure-triggered predicate keeps the prefix
+  byte-stable for as long as possible. This is the hysteresis the design wants.
+  (P2.)
+- **Does it help the small model at all** — the eval gates this before
+  accumulating context becomes a default; no assumption baked in.

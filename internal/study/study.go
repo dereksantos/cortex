@@ -86,6 +86,45 @@ func CompletionTokenBudget(window int, fill float64) int {
 	return c
 }
 
+// Working-memory findings budget (docs/working-memory-study.md → Decisions).
+// Growth-based + capped: the findings prefix gets more of the window as the
+// study deepens (early passes spend it on the sample — little to remember yet),
+// never exceeding findingsBudgetCapFrac, and never pushing the sample below
+// findingsSampleFloorFrac. Provisional constants the eval sweeps, like the fill.
+const (
+	findingsBudgetBaseFrac  = 0.05 // pass-2 carry-in floor (~one digest)
+	findingsBudgetRateFrac  = 0.05 // added per accumulated prior pass
+	findingsBudgetCapFrac   = 0.30 // findings never exceed 30% of the window
+	findingsSampleFloorFrac = 0.15 // the new sample keeps ≥15% of the window
+)
+
+// FindingsBudgetChars is the character budget the findings prefix may consume
+// given the window (tokens) and how many prior passes have accumulated. Grows
+// with nPrior up to the cap. Zero when there are no prior passes (pass 1 is
+// unchanged). A non-positive window falls back to the default.
+func FindingsBudgetChars(window, nPrior int) int {
+	if nPrior <= 0 {
+		return 0
+	}
+	if window <= 0 {
+		window = studyDefaultCtxWindow
+	}
+	frac := findingsBudgetBaseFrac + findingsBudgetRateFrac*float64(nPrior)
+	if frac > findingsBudgetCapFrac {
+		frac = findingsBudgetCapFrac
+	}
+	return int(float64(window)*frac) * studyCharsPerToken
+}
+
+// sampleFloorChars is the smallest sample budget the findings prefix may leave —
+// below this the new sample starves and the pass stops being worth running.
+func sampleFloorChars(window int) int {
+	if window <= 0 {
+		window = studyDefaultCtxWindow
+	}
+	return int(float64(window)*findingsSampleFloorFrac) * studyCharsPerToken
+}
+
 // MakePlan derives a Plan from a requested duration, the model's
 // context window in tokens, the calibrated per-call latency in ms, and
 // the project's effective LOC. All inputs come from cheap probes; no

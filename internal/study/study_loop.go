@@ -51,9 +51,15 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 	cumEff := 0
 	total := 0
 	seen := map[string]bool{}
+	// Working memory: each pass's distilled result accumulates here and rides
+	// the next pass's prompt front (PriorFindings), so deepening builds on what
+	// earlier passes found instead of re-deriving it. Append-only in P1; the
+	// budget carve-out + recency trim live in sampleAndInfer.
+	var findings []Finding
 
 	for pass := 0; pass < maxPasses; pass++ {
 		req.Covered = covered
+		req.PriorFindings = findings
 		resp, err := StudyFile(ctx, req)
 		if err != nil {
 			return res, err
@@ -62,6 +68,12 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 		res.Passes = append(res.Passes, StudyPass{Response: resp})
 		if resp.Digest != "" {
 			res.Digests = append(res.Digests, resp.Digest)
+			findings = append(findings, Finding{
+				Pass:      pass,
+				Digest:    resp.Digest,
+				Citations: resp.Citations,
+				Leads:     resp.Leads,
+			})
 		}
 		res.Citations = append(res.Citations, resp.Citations...)
 

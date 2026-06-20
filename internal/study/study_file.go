@@ -63,6 +63,15 @@ type StudyRequest struct {
 	// passes to realize "re-study refines rather than repeats."
 	Covered map[string]bool
 
+	// PriorFindings are earlier passes' distilled results, carried as working
+	// memory. sampleAndInfer renders them at the prompt front (before the new
+	// sample, so the [system][goal][findings] prefix is cache-stable) and
+	// carves their token budget out of the sample, growth-capped with a sample
+	// floor (see FindingsBudgetChars). Nil → today's independent-pass behavior.
+	// StudyLoop threads these across passes; a single StudyFile call leaves them
+	// nil.
+	PriorFindings []Finding
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -101,6 +110,19 @@ type Lead struct {
 	RelPath  string `json:"relpath"`
 	NearLine int    `json:"near_line"`
 	Why      string `json:"why"`
+}
+
+// Finding is one prior pass's distilled result, carried into later passes as
+// working memory (the curated-findings-prefix design,
+// docs/working-memory-study.md). It is stored STRUCTURED — not pre-joined into
+// a string — so P2 curation can score/compress/evict units while preserving
+// each finding's citation anchors (the relay contract). P1 appends and renders;
+// it does not curate.
+type Finding struct {
+	Pass      int        `json:"pass"`
+	Digest    string     `json:"digest"`
+	Citations []Citation `json:"citations,omitempty"`
+	Leads     []Lead     `json:"leads,omitempty"`
 }
 
 // Coverage is the fraction of effective lines the sample has seen.
@@ -205,6 +227,19 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	// code tokenizes denser than the 4-chars/token estimate). Passes don't enter
 	// this — each pass is a separate, independently-budgeted call.
 	budgetChars := SampleTokenBudget(window, studyDefaultTargetFill) * studyCharsPerToken
+
+	// Working memory: prior findings ride the prompt front and consume part of
+	// the window, so carve their budget out of the sample — growth-capped, and
+	// floored so the new sample never starves (docs/working-memory-study.md).
+	// The trimmed set is what BOTH the prompt and the relay validation use.
+	findings := trimFindingsToBudget(req.PriorFindings, FindingsBudgetChars(window, len(req.PriorFindings)))
+	if cost := findingsCharsTotal(findings); cost > 0 {
+		if budgetChars-cost < sampleFloorChars(window) {
+			budgetChars = sampleFloorChars(window)
+		} else {
+			budgetChars -= cost
+		}
+	}
 
 	k := ResolveDensity(req.Density)
 	if req.Density == nil && autoUnit > 0 {
@@ -324,12 +359,13 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 	// returned alongside the error so callers can degrade gracefully.
 	if req.Infer != nil {
 		io, ierr := req.Infer(ctx, InferInput{
-			Path:     req.Path,
-			RelPath:  display,
-			Sampled:  sampled,
-			Focus:    req.Focus,
-			Goal:     req.Goal,
-			Numbered: req.Numbered,
+			Path:          req.Path,
+			RelPath:       display,
+			Sampled:       sampled,
+			Focus:         req.Focus,
+			Goal:          req.Goal,
+			Numbered:      req.Numbered,
+			PriorFindings: findings,
 		})
 		if ierr != nil {
 			return resp, fmt.Errorf("study: inference: %w", ierr)
@@ -337,6 +373,10 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 		resp.Digest = io.Digest
 		resp.Leads = io.Leads
 		resp.Citations = ValidateCitations(io.Citations, sampled, nil)
+		// Working memory: also keep citations that faithfully relay a prior
+		// finding's already-grounded citation (the model saw the anchor in the
+		// findings prefix, not in this pass's sample).
+		resp.Citations = admitFindingRelays(io.Citations, resp.Citations, findings)
 		for i := range resp.Citations {
 			if off, ok := byteOffsetForCitation(resp.Citations[i], sampled); ok {
 				resp.Citations[i].ByteOffset = off
