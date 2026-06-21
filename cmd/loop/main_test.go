@@ -397,6 +397,9 @@ func TestHumanK(t *testing.T) {
 		{1500, "1.5k"},
 		{8200, "8.2k"},
 		{65536, "65.5k"},
+		{1000000, "1M"},
+		{1048576, "1M"},
+		{1500000, "1.5M"},
 	}
 	for _, tt := range tests {
 		if got := humanK(tt.in); got != tt.want {

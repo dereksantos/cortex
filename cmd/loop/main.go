@@ -3285,6 +3285,9 @@ func humanK(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
 	}
+	if n >= 1_000_000 {
+		return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1_000_000), ".0") + "M"
+	}
 	return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1000), ".0") + "k"
 }
 
