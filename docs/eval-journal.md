@@ -2673,3 +2673,44 @@ Across local fleet (3b/reasoner/coder/coder80/qwen3-4b/xlam-1b) + OpenRouter
 **Recommendation:** default findings-prefix + curation + caching for study roles
 ≥ ~7b (or qwen3-4b); point the fleet `study` role at qwen3-4b (currently 3b,
 below the floor); leave directed sampling and thinking off.
+
+---
+
+## 2026-06-20 — go/ast boundary producer: decl-chunking LOSES, the outline is the lever
+
+Prototyped a Go AST boundary producer (BuildASTGrid: one chunk per top-level
+declaration, real bounds, + a symbol inventory) as a drop-in alternative to the
+byte grid, and A/B'd it on cmd/loop/main.go (the refactor task).
+
+**gpt-5.4, window 32768, 3 passes:**
+
+| producer  | cov% | grounded | failed | symbol fidelity | digestB |
+|-----------|------|----------|--------|-----------------|---------|
+| byte-grid | 30%  | 43       | 3      | 53/53 = 100%    | 12469   |
+| ast       | 5%   | 12       | 1      | 23/23 = 100%    | 4829    |
+
+**Read — decl-aligned chunking is WORSE as a sampler swap:**
+- AST covered 6× less (5% vs 30%), surfaced fewer grounded citations (12 vs 43)
+  and fewer real symbols (23 vs 53). Whole-declaration chunks are large and
+  variable; on a file with big functions (Turn, runAnchoredTurn = hundreds of
+  lines), a fixed sample budget affords only a handful of whole decls → breadth
+  collapses. The byte grid's many small windows spread wider. Coherence-vs-
+  coverage, and at equal budget coverage wins for a broad "map the file" goal.
+- **Symbol fidelity was 100% for BOTH** — gpt-5.4 doesn't hallucinate symbols
+  regardless of chunking, so the metric built to catch the RunShell/Search
+  problem couldn't differentiate. The hallucination axis needs a weaker model to
+  show, but the coverage collapse makes decl-chunking unattractive there too.
+
+**The pivot the data points to:** the AST's value is NOT decl-aligned chunks for
+sampling — it's the SYMBOL INVENTORY (built here, unused by the eval) as a cheap,
+complete, grounded structural map. The byte grid samples *content*; the AST can
+hand the model the full list of every func/type with real line numbers for
+~free (names + lines, tiny), then byte-grid sampling fills in body depth.
+Breadth (every symbol named + grounded) + depth (sampled bodies) — and it's
+exactly what would have prevented the refactor-doc hallucinations (the model
+would have the real, complete symbol list instead of guessing).
+
+**Verdict:** do NOT promote AST decl-chunking. Keep BuildASTGrid + the inventory
+(both committed, opt-in CORTEX_STUDY_AST), and the next experiment is
+SYMBOL-OUTLINE INJECTION: prepend the AST inventory to the study prompt while
+sampling stays byte-grid. That's the AST lever worth pursuing.
