@@ -85,6 +85,59 @@ func TestRenderIsCompactAndGrouped(t *testing.T) {
 	}
 }
 
+func TestSingleFileSkeleton(t *testing.T) {
+	dir := t.TempDir()
+	src := "package p\n\nconst Greeting = \"hi\"\n\nvar registry = map[string]int{}\n\ntype Server struct{}\n\nfunc (s *Server) Start() {}\n\nfunc helper() {}\n"
+	p := filepath.Join(dir, "srv.go")
+	if err := os.WriteFile(p, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ix, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ix.SingleFile || len(ix.Files) != 1 {
+		t.Fatalf("expected single-file index, got SingleFile=%v files=%d", ix.SingleFile, len(ix.Files))
+	}
+	out := ix.Render()
+	// const/var appear in the skeleton (they're filtered only from the dir view).
+	for _, want := range []string{"const", "Greeting", "var", "registry", "type", "Server", "(*Server) Start", "helper"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("skeleton missing %q; got:\n%s", want, out)
+		}
+	}
+	// Declarations stay in file order: const → var → type → method → func.
+	order := []string{"Greeting", "registry", "Server", "Start", "helper"}
+	last := -1
+	for _, sym := range order {
+		i := strings.Index(out, sym)
+		if i < 0 {
+			t.Fatalf("missing %q", sym)
+		}
+		if i < last {
+			t.Errorf("declaration order broken at %q:\n%s", sym, out)
+		}
+		last = i
+	}
+}
+
+func TestDirViewOmitsConstVar(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"),
+		[]byte("package a\nconst Secret = 1\nvar table = 2\ntype T struct{}\nfunc F(){}\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.go"), []byte("package a\nfunc G(){}\n"), 0644)
+
+	ix, _ := Build(dir)
+	out := ix.Render() // multi-file → compact directory view
+	if strings.Contains(out, "Secret") || strings.Contains(out, "table") {
+		t.Errorf("directory view should omit const/var; got:\n%s", out)
+	}
+	if !strings.Contains(out, "T:") || !strings.Contains(out, "F:") {
+		t.Errorf("directory view should keep funcs/types; got:\n%s", out)
+	}
+}
+
 // TestRenderRepoSize is an env-gated preview of the real repo index, to eyeball
 // size and shape. Run: PREVIEW=1 go test ./internal/projectindex -run RepoSize -v
 func TestRenderRepoSize(t *testing.T) {

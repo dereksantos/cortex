@@ -560,13 +560,15 @@ var studyTool = newTool(FunctionStudy,
 	}, "path"))
 
 var projectIndexTool = newTool(FunctionProjectIndex,
-	"Map the project: a recursive file tree plus a per-file symbol inventory "+
-		"(top-level funcs and types with line numbers, for Go). Cheap, high-signal "+
-		"orientation — call this first to learn the layout and find where things "+
-		"live without reading files. Respects .gitignore and skips vendor/build "+
-		"dirs and secrets. Pass a subdirectory path to scope a large repo.",
+	"Map a project or file structurally without reading contents. On a directory: "+
+		"a recursive file tree plus per-file funcs and types with line numbers (Go). "+
+		"On a single file: its full declaration skeleton — every top-level func, "+
+		"type, const, and var in file order with line numbers — the fastest way to "+
+		"see a file's seams before editing it. Cheap, high-signal orientation; call "+
+		"it first. Respects .gitignore and skips vendor/build dirs and secrets. Pass "+
+		"a subdirectory to scope a large repo.",
 	objectSchema(map[string]any{
-		"path": stringProp("Directory (or file) to index, relative to the working directory. Default: the whole project ('.')."),
+		"path": stringProp("Directory or file to index, relative to the working directory. A directory gives the tree+symbols map; a file gives its full declaration skeleton. Default: the whole project ('.')."),
 	}))
 
 // Dynamic study sizing — no hardcoded breakpoints.

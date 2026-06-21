@@ -7,6 +7,7 @@
 package projectindex
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -34,8 +35,9 @@ type File struct {
 
 // Index is the project map: every non-ignored file, in path order.
 type Index struct {
-	Root  string
-	Files []File
+	Root       string
+	Files      []File
+	SingleFile bool // the root was one file → render the full declaration skeleton
 }
 
 // Build walks root (respecting projectscan's ignore rules) and returns the
@@ -52,8 +54,9 @@ func Build(root string) (*Index, error) {
 	ix := &Index{Root: abs}
 	ignore := projectscan.LoadIgnoreSet(abs)
 
-	// A single-file target is still a valid (tiny) index.
+	// A single-file target renders as a full declaration skeleton, not a tree.
 	if !info.IsDir() {
+		ix.SingleFile = true
 		ix.Files = append(ix.Files, indexFile(abs, filepath.Base(abs)))
 		return ix, nil
 	}
@@ -100,10 +103,11 @@ func indexFile(abs, rel string) File {
 	return f
 }
 
-// goSymbols parses Go source and returns its top-level funcs and types, in
-// declaration order. Methods carry their receiver as "(*T) Method". const/var/
-// import are intentionally omitted — they're noise for navigation. A parse
-// error yields nil (the file is still listed, just without symbols).
+// goSymbols parses Go source and returns its top-level declarations in file
+// order: funcs (methods carry their receiver, "(*T) Method"), types (one per
+// spec), and const/var blocks (compacted to "First +N"). imports are omitted.
+// A parse error yields nil (the file is still listed, just without symbols).
+// The directory view filters to func/type; the single-file skeleton shows all.
 func goSymbols(src []byte) []Symbol {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "", src, parser.SkipObjectResolution)
@@ -120,17 +124,45 @@ func goSymbols(src []byte) []Symbol {
 			}
 			syms = append(syms, Symbol{Name: name, Kind: "func", Line: fset.Position(v.Pos()).Line})
 		case *ast.GenDecl:
-			if v.Tok != token.TYPE {
-				continue
-			}
-			for _, spec := range v.Specs {
-				if ts, ok := spec.(*ast.TypeSpec); ok {
-					syms = append(syms, Symbol{Name: ts.Name.Name, Kind: "type", Line: fset.Position(ts.Pos()).Line})
+			switch v.Tok {
+			case token.TYPE:
+				for _, spec := range v.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						syms = append(syms, Symbol{Name: ts.Name.Name, Kind: "type", Line: fset.Position(ts.Pos()).Line})
+					}
+				}
+			case token.CONST, token.VAR:
+				if name := valueNames(v); name != "" {
+					syms = append(syms, Symbol{Name: name, Kind: v.Tok.String(), Line: fset.Position(v.Pos()).Line})
 				}
 			}
 		}
 	}
 	return syms
+}
+
+// valueNames compacts a const/var block to its first declared name plus a "+N"
+// count of the rest (mirroring the grep-skeleton's one-line-per-block feel).
+// Blank identifiers are ignored. Returns "" for an all-blank block.
+func valueNames(g *ast.GenDecl) string {
+	var names []string
+	for _, s := range g.Specs {
+		if vs, ok := s.(*ast.ValueSpec); ok {
+			for _, n := range vs.Names {
+				if n.Name != "_" {
+					names = append(names, n.Name)
+				}
+			}
+		}
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	default:
+		return fmt.Sprintf("%s +%d", names[0], len(names)-1)
+	}
 }
 
 // recvType renders a method receiver type, including pointer and generic forms

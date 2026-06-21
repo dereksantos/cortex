@@ -17,6 +17,9 @@ import (
 //	  render.go (60)
 //	    func Render:14
 func (ix *Index) Render() string {
+	if ix.SingleFile && len(ix.Files) == 1 {
+		return renderSkeleton(ix.Files[0])
+	}
 	var b strings.Builder
 	root := path.Base(ix.Root)
 	if root == "." || root == "/" || root == "" {
@@ -59,24 +62,41 @@ func (ix *Index) Render() string {
 	return b.String()
 }
 
-// renderSymbols formats one file's symbols as "name:line · name:line · …",
-// types first then funcs in declaration order, so the shape of a file reads at
-// a glance. Returns "" when there are none.
+// renderSymbols formats a file's navigable symbols (funcs and types only — the
+// compact directory view) as "name:line · …", types first then funcs in
+// declaration order. const/var are omitted here; the single-file skeleton shows
+// them. Returns "" when there are none.
 func renderSymbols(syms []Symbol) string {
-	if len(syms) == 0 {
+	var nav []Symbol
+	for _, s := range syms {
+		if s.Kind == "func" || s.Kind == "type" {
+			nav = append(nav, s)
+		}
+	}
+	if len(nav) == 0 {
 		return ""
 	}
-	ordered := make([]Symbol, len(syms))
-	copy(ordered, syms)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		if (ordered[i].Kind == "type") != (ordered[j].Kind == "type") {
-			return ordered[i].Kind == "type" // types lead
+	sort.SliceStable(nav, func(i, j int) bool {
+		if (nav[i].Kind == "type") != (nav[j].Kind == "type") {
+			return nav[i].Kind == "type" // types lead
 		}
 		return false // otherwise keep declaration order
 	})
-	parts := make([]string, len(ordered))
-	for i, s := range ordered {
+	parts := make([]string, len(nav))
+	for i, s := range nav {
 		parts[i] = fmt.Sprintf("%s:%d", s.Name, s.Line)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// renderSkeleton is the single-file view the "what are the seams" use case wants:
+// every top-level declaration in file order, one per line, with its line number
+// and kind — a cleaner native form of `grep -nE '^(func|type|const|var)'`.
+func renderSkeleton(f File) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s — %d lines, %d declarations\n\n", f.Path, f.Lines, len(f.Symbols))
+	for _, s := range f.Symbols {
+		fmt.Fprintf(&b, "  %-6s %-5s %s\n", fmt.Sprintf("L%d", s.Line), s.Kind, s.Name)
+	}
+	return b.String()
 }
