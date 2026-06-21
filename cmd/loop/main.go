@@ -1037,6 +1037,11 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	if os.Getenv("CORTEX_STUDY_KEYWORDS") != "" {
 		req.KeywordFocus = true
 	}
+	// AST boundary producer for Go files (declaration-aligned chunks). Opt-in
+	// until eval'd against the byte grid.
+	if os.Getenv("CORTEX_STUDY_AST") != "" {
+		req.UseAST = true
+	}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {

@@ -102,6 +102,11 @@ type StudyRequest struct {
 	// no explicit Focus is set. Off → blind breadth sampling. See keyword_focus.go.
 	KeywordFocus bool
 
+	// UseAST chunks Go files by top-level declaration (go/ast) instead of byte
+	// windows — coherent, declaration-aligned regions. Falls back to the byte
+	// grid for non-Go or unparseable files. See analyzer_ast.go.
+	UseAST bool
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -230,15 +235,29 @@ func StudyFile(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 	if relPath == "" {
 		relPath = filepath.Base(req.Path)
 	}
-	out := BuildByteGrid(req.Path, relPath, size, ByteGridOpts{
+	opts := ByteGridOpts{
 		WindowTokens: window,
 		TargetFill:   req.Fill,
 		Salt:         req.Session,
 		ModTimeUnix:  fi.ModTime().Unix(),
-	})
+	}
+	var out *BoundaryOutput
+	// AST boundary producer for Go files (opt-in): declaration-aligned chunks
+	// instead of byte windows. Falls back to the byte grid for non-Go files or
+	// on any parse error — never fatal.
+	if req.UseAST && langFor(filepath.Ext(relPath)) == "go" {
+		if src, rerr := fractal.ReadRegion(req.Path, 0, int(size)); rerr == nil {
+			if g, _, aerr := BuildASTGrid(req.Path, relPath, []byte(src), opts); aerr == nil {
+				out = g
+			}
+		}
+	}
+	if out == nil {
+		out = BuildByteGrid(req.Path, relPath, size, opts)
+	}
 
-	// The byte grid is uniform, so the first chunk's size is the
-	// format's unit for budget-derived density.
+	// The first chunk's size seeds budget-derived density (byte grid is uniform;
+	// for the AST grid this is just the header/first-decl size — a reasonable unit).
 	autoUnit := 0
 	if len(out.Chunks) > 0 {
 		autoUnit = out.Chunks[0].ByteLength
