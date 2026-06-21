@@ -511,8 +511,10 @@ func newTool(name, desc string, params map[string]any) Tool {
 }
 
 var readFile = newTool(FunctionReadFile,
-	"Read the whole contents of a file. Only for files that fit the context window "+
-		"— large files are refused; use study for those.",
+	"Read the whole contents of a file. Best for files that fit the curation "+
+		"budget. A too-large Go file returns its declaration skeleton (funcs/types/"+
+		"const/var with line numbers) instead of the content, so you can orient and "+
+		"then study a region; a too-large non-Go file redirects to study.",
 	objectSchema(map[string]any{
 		"path": stringProp("Path to the file to read, relative to the working directory."),
 	}, "path"))
@@ -1149,6 +1151,16 @@ func (tc ToolCall) ReadFile(cs *CortexSession) (string, error) {
 	// curation (2026-06-20). (~4 bytes/token.)
 	if info, statErr := os.Stat(path); statErr == nil {
 		if estTokens := int(info.Size()) / 4; estTokens > curationBudgetTokens {
+			// Read the map before the territory: a too-large Go file hands back
+			// its declaration skeleton so the model can orient and target a
+			// region (study for content, bash sed for an exact range) instead of
+			// dead-ending. Non-Go (no skeleton) still redirects to study.
+			if skel := goFileSkeleton(path); skel != "" {
+				printToolAction(fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
+				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its declaration skeleton is below; "+
+					"use study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` to read an exact line range.\n\n%s",
+					path, estTokens, path, path, skel), nil
+			}
 			return "", fmt.Errorf("%s is %d bytes (~%d tokens) — too large to read whole; use study(%q, goal) instead",
 				path, info.Size(), estTokens, path)
 		}
@@ -1159,6 +1171,20 @@ func (tc ToolCall) ReadFile(cs *CortexSession) (string, error) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// goFileSkeleton returns the declaration skeleton of a Go file (every top-level
+// func/type/const/var with line numbers), or "" for non-Go or unparseable files
+// — the orientation a too-large read_file hands back in place of the content.
+func goFileSkeleton(path string) string {
+	if !strings.HasSuffix(path, ".go") {
+		return ""
+	}
+	ix, err := projectindex.Build(path)
+	if err != nil || len(ix.Files) == 0 || len(ix.Files[0].Symbols) == 0 {
+		return ""
+	}
+	return ix.Render()
 }
 
 func (tc ToolCall) WriteFile() (string, error) {

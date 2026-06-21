@@ -844,6 +844,29 @@ func TestReadFileSizeGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("oversized Go file returns its declaration skeleton, not an error", func(t *testing.T) {
+		bigGo := filepath.Join(dir, "big.go")
+		// Real decls plus a giant comment to push the file over the budget while
+		// staying parseable — the content must never be dumped, only the map.
+		src := "package p\n\ntype Marker struct{}\n\nfunc Sentinel() {}\n\n// " +
+			strings.Repeat("x", (curationBudgetTokens+1000)*4) + "\n"
+		os.WriteFile(bigGo, []byte(src), 0644)
+		args, _ := json.Marshal(map[string]string{"path": bigGo})
+		out, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs)
+		if err != nil {
+			t.Fatalf("Go skeleton path should not error: %v", err)
+		}
+		if !strings.Contains(out, "Marker") || !strings.Contains(out, "Sentinel") {
+			t.Errorf("skeleton missing symbols; got head: %.160q", out)
+		}
+		if !strings.Contains(out, "too large") || !strings.Contains(out, "study") {
+			t.Errorf("skeleton should explain how to get content; got head: %.160q", out)
+		}
+		if strings.Contains(out, strings.Repeat("x", 500)) {
+			t.Error("skeleton path leaked raw file content")
+		}
+	})
+
 	t.Run("ordinary source file under the budget still reads whole", func(t *testing.T) {
 		small := filepath.Join(dir, "small.go")
 		os.WriteFile(small, make([]byte, 8000), 0644) // ~2k tokens, well under the budget
