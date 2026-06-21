@@ -28,6 +28,7 @@ import (
 	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/projectindex"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/internal/study"
@@ -78,6 +79,7 @@ const FunctionEditFile = "edit_file"
 const FunctionStudy = "study"
 const FunctionBash = "bash"
 const FunctionRemove = "remove_path"
+const FunctionProjectIndex = "project_index"
 
 const defaultModel = ModelCoder
 
@@ -557,6 +559,16 @@ var studyTool = newTool(FunctionStudy,
 		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1 for files, 3 for directories."},
 	}, "path"))
 
+var projectIndexTool = newTool(FunctionProjectIndex,
+	"Map the project: a recursive file tree plus a per-file symbol inventory "+
+		"(top-level funcs and types with line numbers, for Go). Cheap, high-signal "+
+		"orientation — call this first to learn the layout and find where things "+
+		"live without reading files. Respects .gitignore and skips vendor/build "+
+		"dirs and secrets. Pass a subdirectory path to scope a large repo.",
+	objectSchema(map[string]any{
+		"path": stringProp("Directory (or file) to index, relative to the working directory. Default: the whole project ('.')."),
+	}))
+
 // Dynamic study sizing — no hardcoded breakpoints.
 
 // studyFallbackWindow is the conservative window assumed only until a model's
@@ -622,7 +634,7 @@ var removeTool = newTool(FunctionRemove,
 		"path": stringProp("Path to delete, relative to the working directory."),
 	}, "path"))
 
-var tools = []Tool{readFile, writeFile, editFile, studyTool, bash, removeTool}
+var tools = []Tool{readFile, writeFile, editFile, studyTool, projectIndexTool, bash, removeTool}
 
 // httpClient is shared by all model calls. The timeout is the backstop guard:
 // without it a server that accepts the request and never answers hangs the
@@ -922,12 +934,30 @@ func (tc ToolCall) Execute(ctx context.Context, cs *CortexSession) (string, erro
 		return tc.EditFile()
 	case FunctionStudy:
 		return tc.Study(ctx, cs)
+	case FunctionProjectIndex:
+		return tc.ProjectIndex()
 	case FunctionBash:
 		return tc.Bash(ctx, cs)
 	case FunctionRemove:
 		return tc.RemovePath(cs)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
+}
+
+// ProjectIndex returns the project map — a recursive file tree plus per-file
+// Go symbol inventory — for orientation without reading files. The path arg is
+// optional (default "."); a subdirectory scopes a large repo.
+func (tc ToolCall) ProjectIndex() (string, error) {
+	path := "."
+	if p, _ := tc.stringArg("path"); strings.TrimSpace(p) != "" {
+		path = p
+	}
+	printToolAction(fmt.Sprintf("project_index(%s)", path))
+	ix, err := projectindex.Build(path)
+	if err != nil {
+		return "", fmt.Errorf("index %s: %w", path, err)
+	}
+	return ix.Render(), nil
 }
 
 // Study runs the real study engine (internal/study) over a file and returns
