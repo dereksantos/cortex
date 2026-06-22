@@ -141,10 +141,11 @@ func TestStreamPrinterSuppressesToolMarkup(t *testing.T) {
 				t.Errorf("output leaked tool markup: %q", out)
 			}
 			// Strip the gutter prefix (everything up to the double-space) when
-			// anything was printed, then compare the prose body.
+			// anything was printed, then compare the prose body. Trailing
+			// newlines are presentation spacing, not content.
 			if began {
 				if i := strings.Index(out, "  "); i >= 0 {
-					out = strings.TrimSuffix(out[i+2:], "\n")
+					out = strings.TrimRight(out[i+2:], "\n")
 				}
 			}
 			if out != tt.want {

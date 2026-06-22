@@ -3278,9 +3278,11 @@ func (cs *CortexSession) sessionSummary() string {
 	if cs.costUSD > 0 {
 		cost = " · " + humanCost(cs.costUSD)
 	}
-	return fmt.Sprintf("%d turns · %s in / %s out%s · %d captured · %d insights · %d retrievals · %s",
-		cs.turns, humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
-		cs.captures, cs.insights.Load(), cs.retrievals, dur)
+	header := fmt.Sprintf("%d turns · %s", cs.turns, dur)
+	body := fmt.Sprintf("%s in / %s out%s · %d captured · %d insights · %d retrievals",
+		humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
+		cs.captures, cs.insights.Load(), cs.retrievals)
+	return header + "\n" + body
 }
 
 // humanCost formats a dollar cost with precision that scales to the magnitude —
@@ -3368,7 +3370,8 @@ func ctxColor(used, max int) string {
 //	cortex 0.1.0 · coder · 8.2k/64k  ❯
 //
 // The token fraction is live (last prompt_tokens / window) and recolors with
-// fill. Status is dim; the glyph is the bright input affordance.
+// fill. Status is dim; the glyph is the bright input affordance. A leading
+// blank line separates turns visually when scrolling back.
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
@@ -3377,7 +3380,7 @@ func (cs *CortexSession) Prompt() string {
 	if cs.costUSD > 0 {
 		cost = withColor(" · "+humanCost(cs.costUSD), gray)
 	}
-	return fmt.Sprintf("%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
+	return fmt.Sprintf("\n%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
 }
 
 // streamingEnabled reports whether the REPL streams responses (the default).
@@ -3556,8 +3559,10 @@ func (p *streamPrinter) finish() bool {
 		p.pending = ""
 	}
 	// Raw mode terminates the streamed line here; render mode already newline-
-	// terminated every block in writeBlock.
+	// terminated every block in writeBlock. A trailing blank line gives the
+	// answer breathing room before the next prompt or status notice.
 	if p.began && p.md == nil {
+		fmt.Fprintln(p.writer())
 		fmt.Fprintln(p.writer())
 	}
 	return p.began
@@ -3651,6 +3656,11 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 // assistant(tool_calls) id gets a matching tool message or the next send 400s,
 // so a mid-turn cancel records "interrupted" results rather than dropping them.
 func (cs *CortexSession) runToolCalls(ctx context.Context, calls []ToolCall) {
+	// A blank line before the first tool action separates the model's prose
+	// from its dispatch — the two read as distinct steps, not a run-on.
+	if !cs.quiet && len(calls) > 0 {
+		fmt.Println()
+	}
 	for _, tc := range calls {
 		var content string
 		if ctx.Err() != nil {
@@ -4275,5 +4285,5 @@ func main() {
 			fmt.Println(withColor(fmt.Sprintf("resume: %s resume %s", invokedName(), session.SessionID), gray))
 		}
 	}
-	fmt.Println("exiting")
+	fmt.Println(withColor("exiting", gray))
 }
