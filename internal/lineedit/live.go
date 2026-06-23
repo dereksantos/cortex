@@ -36,6 +36,8 @@ type Anchor struct {
 	activity string // label shown after the spinner glyph; "" hides the status row
 	spinIdx  int
 
+	confirm *confirmState // in-flight y/N question, served by the key loop
+
 	stop chan struct{}
 	done chan struct{} // closed when both the key loop and ticker have exited
 }
@@ -86,6 +88,88 @@ func (t *Terminal) Anchor(prompt, seed string) (*Anchor, context.Context) {
 // Width is the anchor's current terminal column count — the source of truth for
 // output word-wrap while os.Stdout is redirected away from the terminal.
 func (a *Anchor) Width() int { return a.widthFn() }
+
+// confirmState is an in-flight yes/no question. The anchor's key loop already
+// owns the terminal during a turn, so a confirmation must be served from THAT
+// loop — opening a second reader (Terminal.ReadLine) makes the two fight for
+// each keystroke and the answer never lands. ask sits on the status row; the
+// resolved answer is delivered on res.
+type confirmState struct {
+	ask string
+	res chan bool
+}
+
+// Confirm pauses live editing to ask a yes/no question, reading the answer
+// through the key loop that already owns the terminal (never a competing
+// reader). The question's context lines are emitted into scrollback; only the
+// final "run it? [y/N]" line sits on the status row above the prompt. Returns
+// true only on an explicit y/Y; n/N/Enter decline, Ctrl-C declines and cancels
+// the turn. Safe to call from the turn goroutine while the key loop runs.
+func (a *Anchor) Confirm(question string) bool {
+	body, ask := splitConfirm(question)
+	for _, line := range body {
+		a.EmitLine(line)
+	}
+	res := make(chan bool, 1)
+	a.mu.Lock()
+	a.confirm = &confirmState{ask: ask, res: res}
+	a.eraseLocked()
+	a.drawLocked()
+	a.mu.Unlock()
+	select {
+	case <-a.stop: // turn ended without an answer → treat as declined
+		return false
+	case v := <-res:
+		return v
+	}
+}
+
+// splitConfirm separates a multi-line confirm prompt into the context lines
+// (shown in scrollback) and the final ask (shown on the status row). The input
+// is the gateShell question: a blank lead, a "⚠ risky command" line, the
+// command, then "run it? [y/N]".
+func splitConfirm(q string) (body []string, ask string) {
+	lines := strings.Split(strings.Trim(q, "\n"), "\n")
+	ask = strings.TrimSpace(lines[len(lines)-1])
+	for _, l := range lines[:len(lines)-1] {
+		if strings.TrimSpace(l) != "" {
+			body = append(body, strings.TrimRight(l, " "))
+		}
+	}
+	return body, ask
+}
+
+// handleConfirmByte folds one key into an in-flight confirmation. Only y/N,
+// Enter, and Ctrl-C are meaningful; any other key is ignored so a stray
+// keystroke can't be misread as an answer.
+func (a *Anchor) handleConfirmByte(b byte) {
+	var answer, cancel bool
+	switch b {
+	case 'y', 'Y':
+		answer = true
+	case 'n', 'N', '\r', '\n':
+		answer = false
+	case 0x03: // Ctrl-C: decline this command and cancel the turn
+		answer, cancel = false, true
+	default:
+		return // not an answer — keep waiting
+	}
+	a.mu.Lock()
+	c := a.confirm
+	a.confirm = nil
+	if c != nil {
+		a.eraseLocked()
+		a.drawLocked()
+	}
+	a.mu.Unlock()
+	if c == nil {
+		return
+	}
+	if cancel && a.cancel != nil {
+		a.cancel()
+	}
+	c.res <- answer
+}
 
 // EmitLine prints one line of turn output above the pinned prompt, then redraws
 // the prompt beneath it. s should not contain a trailing newline (the pipe
@@ -163,6 +247,13 @@ func (a *Anchor) keyLoop() {
 // distinguished from an arrow-key escape sequence by a follow-up poll: a real
 // sequence's bytes arrive in the same burst, so a timeout means a bare ESC.
 func (a *Anchor) handleByte(b byte) (interrupt bool) {
+	a.mu.Lock()
+	confirming := a.confirm != nil
+	a.mu.Unlock()
+	if confirming {
+		a.handleConfirmByte(b)
+		return false
+	}
 	if b == 0x1b {
 		nb, timedOut, err := a.src.firstByte()
 		if err != nil {
@@ -289,9 +380,15 @@ func (a *Anchor) drawLocked() {
 	width := a.widthFn()
 	var b strings.Builder
 	rows := 1
-	if a.status != "" {
+	// A pending confirmation takes the status row, rendered bright (not dimmed)
+	// so the ask stands out from a transient activity label.
+	status := a.status
+	if a.confirm != nil {
+		status = a.confirm.ask
+	}
+	if status != "" {
 		b.WriteString("\r\033[K")
-		b.WriteString(truncate(a.status, width))
+		b.WriteString(truncate(status, width))
 		b.WriteString("\r\n")
 		rows = 2
 	}

@@ -4172,6 +4172,14 @@ func main() {
 			// so there's no concurrent reader to fight. Headless/piped sessions
 			// leave this nil and the gate blocks risky commands instead.
 			session.confirmRisky = func(question string) bool {
+				// During an anchored turn the Anchor's key loop owns the terminal;
+				// a second reader (editor.ReadLine) fights it for the keystroke and
+				// the y/N never lands — the user can't approve and resorts to Ctrl-C.
+				// Route the confirm through the anchor, which serves it from the same
+				// loop. Fall back to a direct read only when no turn is pinned.
+				if a := session.live; a != nil {
+					return a.Confirm(question)
+				}
 				ans, err := editor.ReadLine(question)
 				if err != nil {
 					return false
