@@ -204,14 +204,17 @@ Two coupled additions after observing a REPL transcript where the coder studied
   coder window. Sizing the trigger to the window let a big-window model read
   everything raw, defeating curation — the whole point is to spend the coder's
   context on distilled signal, not raw bytes it could technically hold.
-- **Keyword focus** (`Focus.Keywords`, `KeywordFocus`, keyword_focus.go). The
-  study tool's natural-language `goal` can't steer the sampler — `Focus.Query` is
-  prompt-only; the sampler targets line/byte/path/symbol. So a tight budget could
-  produce a confident digest of the *wrong* regions. Keyword focus extracts the
-  goal's significant terms, scans chunk content for them, and biases sampling
-  toward matches — "search without an agent". Graceful fallback: abstract goals
-  ("assess the architecture") whose terms don't appear mark nothing → breadth, as
-  they should. Opt-in (`CORTEX_STUDY_KEYWORDS`) until eval'd.
+- **Keyword focus — removed (2026-06-23).** A pass-1-only, env-gated
+  (`CORTEX_STUDY_KEYWORDS`), never-default workaround for the goal not reaching
+  the sampler: it extracted the goal's terms, scanned chunk content for them, and
+  biased sampling toward matches ("search without an agent"). Removed because two
+  other mechanisms cover its job with clearer purpose: **module-boundary scoping**
+  (`scopeToRootModule`, structural + automatic — uses the build system's own
+  markers, not content search) and **curator TARGET/directed sampling**
+  (LLM-guided, per-pass). Three sampling mechanisms collapsed to two — the
+  boundary layer (structural) and the curator layer (LLM-guided). The
+  `Focus.Keywords` / `StudyRequest.KeywordFocus` fields, `keyword_focus.go`, and
+  the env flag are all gone.
 - **Reporter-not-critic prompt** (`inferSystemPrompt`). The study model is a
   grounded *reporter* — it surfaces structure/responsibilities/signals relevant
   to the goal, never verdicts. Keeps the small model on retrieval (its strength)
@@ -224,7 +227,7 @@ to drive its own exploration — "wide thin net, then dig in" under model contro
 **Parked, not pursued:** small models (3–4B) have poor tool-calling discipline
 (observed this session — xlam-1b won't call tools; eval-journal notes mistral-7b
 failing the same way), so an agentic loop on the cheap study model is the regime
-most likely to flail. The keyword-focus above gets most of the targeting benefit
-*mechanically* (bounded, predictable, no tool-use loop). Revisit agentic study
-only if/when a capable-enough study model is the binding — and as a separate bet,
-not the default path.
+most likely to flail. Module-boundary scoping + curator targeting get most of the
+targeting benefit *mechanically* (bounded, predictable, no tool-use loop).
+Revisit agentic study only if/when a capable-enough study model is the binding —
+and as a separate bet, not the default path.
