@@ -2,6 +2,8 @@ package study
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -152,5 +154,49 @@ func TestStudyLoop_RespectsMaxPasses(t *testing.T) {
 	// not be consulted for it — one Decide per non-terminal pass.
 	if cur.i != 1 {
 		t.Errorf("curator consulted %d times for 2 passes, want 1 (final pass skipped)", cur.i)
+	}
+}
+
+// A corpus study that doesn't reach every file surfaces the gaps in
+// UncoveredFiles so a follow-up study can target them. Single-file
+// studies never populate it (the gap is a line range, not a file).
+func TestStudyLoop_CorpusUncoveredFiles(t *testing.T) {
+	dir := t.TempDir()
+	blob := make([]byte, 30000)
+	for i := range blob {
+		if (i+1)%50 == 0 {
+			blob[i] = '\n'
+		} else {
+			blob[i] = 'a'
+		}
+	}
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), blob, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	res, err := StudyLoop(context.Background(), StudyRequest{
+		Path: dir, Window: 8192, Density: "sparse", Infer: passDigest,
+	}, nil, 1) // single pass → many files untouched
+	if err != nil {
+		t.Fatalf("StudyLoop: %v", err)
+	}
+	if res.Stopped == "read" {
+		t.Skip("corpus fit in read mode — adjust fixture size")
+	}
+	if len(res.UncoveredFiles) == 0 {
+		t.Fatalf("expected uncovered files in sparse single-pass corpus study, got none")
+	}
+	// No uncovered file may have been sampled in any pass.
+	sampledPaths := map[string]bool{}
+	for _, p := range res.Passes {
+		for _, s := range p.Response.Sampled {
+			sampledPaths[s.RelPath] = true
+		}
+	}
+	for _, f := range res.UncoveredFiles {
+		if sampledPaths[f] {
+			t.Errorf("uncovered file %q was sampled in a pass", f)
+		}
 	}
 }

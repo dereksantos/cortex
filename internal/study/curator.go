@@ -83,6 +83,10 @@ func (HeuristicCurator) Decide(resp StudyResponse, _ string) Decision {
 type ModelCurator struct {
 	Provider llm.Provider
 	Fallback Curator
+	// ProjectMap is the structural map of the study target, injected into
+	// the curator prompt so it can make goal-aware TARGET decisions toward
+	// unsampled files the goal cares about — not just blind densification.
+	ProjectMap string
 }
 
 // Decide implements Curator.
@@ -94,7 +98,7 @@ func (m ModelCurator) Decide(resp StudyResponse, goal string) Decision {
 	if m.Provider == nil || !m.Provider.IsAvailable() {
 		return fb.Decide(resp, goal)
 	}
-	sys, user := buildCuratorPrompt(resp, goal)
+	sys, user := buildCuratorPrompt(resp, goal, m.ProjectMap)
 	out, err := m.Provider.GenerateWithSystem(context.Background(), user, sys)
 	if err != nil {
 		return fb.Decide(resp, goal)
@@ -115,21 +119,34 @@ func (m ModelCurator) Decide(resp StudyResponse, goal string) Decision {
 	return dec
 }
 
-const curatorSystemPrompt = `You decide whether a partial study of a large file or directory is good enough or needs to go deeper. You are given a digest, the coverage so far, and any leads (regions referenced but not yet read). Choose exactly one action:
+const curatorSystemPrompt = `You decide whether a partial study of a large file or directory is good enough or needs to go deeper. You are given a digest, the coverage so far, any leads (regions referenced but not yet read), the uncovered files (sampled in no pass), and — when studying a directory — the full project map (every file and its symbols). Choose exactly one action:
 - DONE: the digest answers the task, or coverage is sufficient.
 - DENSIFY: sample more of the content at higher density (no specific target).
-- TARGET: chase a specific lead — provide focus_lines [start,end], plus focus_path (the lead's file path) when studying a directory.
+- TARGET: chase a specific lead or an uncovered file the goal cares about — provide focus_path (the file's relative path) and focus_lines [start,end]. Use the project map to pick a goal-relevant uncovered file when no lead points the way.
 
 Respond with a single JSON object and nothing else:
 {"kind":"DONE|DENSIFY|TARGET","focus_path":"relpath","focus_lines":[start,end],"density":"sparse|normal|dense"}`
 
-func buildCuratorPrompt(resp StudyResponse, goal string) (system, user string) {
+func buildCuratorPrompt(resp StudyResponse, goal, projectMap string) (system, user string) {
 	var b strings.Builder
 	if goal != "" {
 		fmt.Fprintf(&b, "Task: %s\n", goal)
 	}
-	fmt.Fprintf(&b, "Coverage: %.0f%% of effective lines seen; exhausted=%t\n", 100*resp.Coverage.Pct, resp.Exhausted)
+	if projectMap != "" {
+		b.WriteString("\nProject map (the FULL file tree — compare against what was sampled to find goal-relevant gaps):\n")
+		b.WriteString(projectMap)
+		if !strings.HasSuffix(projectMap, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	fmt.Fprintf(&b, "\nCoverage: %.0f%% of effective lines seen; exhausted=%t\n", 100*resp.Coverage.Pct, resp.Exhausted)
 	fmt.Fprintf(&b, "Digest:\n%s\n", resp.Digest)
+	if len(resp.UncoveredFiles) > 0 {
+		b.WriteString("Uncovered files (had chunks but none sampled this pass):\n")
+		for _, f := range resp.UncoveredFiles {
+			fmt.Fprintf(&b, "  - %s\n", f)
+		}
+	}
 	if len(resp.Leads) > 0 {
 		b.WriteString("Leads (not yet read):\n")
 		for _, l := range resp.Leads {

@@ -208,3 +208,74 @@ func TestStudyFile_AutoDensityFillsBudget(t *testing.T) {
 		t.Errorf("auto Densify density = %d, want %d (same-k repass)", d, wantChunks)
 	}
 }
+
+// A single-file study never lists uncovered files: the gap is a line
+// range within the one file, not a missing file. UncoveredFiles is the
+// corpus signal — it names the files a deepening pass should target.
+func TestStudyFile_SingleFile_NoUncoveredFiles(t *testing.T) {
+	path := writeBytesFile(t, 60000)
+	resp, err := StudyFile(context.Background(), StudyRequest{Path: path, Window: 8192, Density: "sparse"})
+	if err != nil {
+		t.Fatalf("StudyFile: %v", err)
+	}
+	if len(resp.UncoveredFiles) != 0 {
+		t.Errorf("single-file study should have no uncovered files, got %v", resp.UncoveredFiles)
+	}
+}
+
+// A corpus study at low density leaves whole files untouched; the
+// response names them so a deepening pass can target the gaps.
+func TestStudyFile_Corpus_ListsUncoveredFiles(t *testing.T) {
+	dir := t.TempDir()
+	blob := make([]byte, 30000) // each file over threshold alone; corpus well over
+	for i := range blob {
+		if (i+1)%50 == 0 {
+			blob[i] = '\n'
+		} else {
+			blob[i] = 'a'
+		}
+	}
+	for _, name := range []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt", "h.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), blob, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	resp, err := StudyFile(context.Background(), StudyRequest{Path: dir, Window: 8192, Density: "sparse"})
+	if err != nil {
+		t.Fatalf("StudyFile: %v", err)
+	}
+	if resp.Mode != "study" {
+		t.Fatalf("Mode = %q, want study", resp.Mode)
+	}
+	// Sparse (k=4) over 8 files: the sampler spreads draws across
+	// modules, but 4 chunks can't cover 8 files — at least 4 are gaps.
+	if len(resp.UncoveredFiles) < 4 {
+		t.Errorf("expected ≥4 uncovered files in sparse corpus study (8 files, k=4), got %d: %v",
+			len(resp.UncoveredFiles), resp.UncoveredFiles)
+	}
+	// Every listed file must actually be unsampled.
+	sampledPaths := map[string]bool{}
+	for _, s := range resp.Sampled {
+		sampledPaths[s.RelPath] = true
+	}
+	for _, f := range resp.UncoveredFiles {
+		if sampledPaths[f] {
+			t.Errorf("uncovered file %q was actually sampled", f)
+		}
+	}
+	// Uncovered files are sorted for stable output.
+	for i := 1; i < len(resp.UncoveredFiles); i++ {
+		if resp.UncoveredFiles[i-1] > resp.UncoveredFiles[i] {
+			t.Errorf("uncovered files not sorted: %v", resp.UncoveredFiles)
+			break
+		}
+	}
+}
+
+func countDistinctFiles(sampled []SampledChunk) int {
+	seen := map[string]bool{}
+	for _, s := range sampled {
+		seen[s.RelPath] = true
+	}
+	return len(seen)
+}

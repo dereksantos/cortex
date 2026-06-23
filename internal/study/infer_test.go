@@ -37,6 +37,74 @@ func TestBuildInferPrompt_LabelsRealRanges(t *testing.T) {
 			t.Errorf("system prompt missing reporter-framing marker %q", want)
 		}
 	}
+	// Analytical-depth framing: the digest must explain how/why, not
+	// just describe what — the measured weakness was descriptive-only
+	// digests that didn't surface interactions or design rationale.
+	for _, want := range []string{"HOW", "WHY", "interactions"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt missing analytical-depth marker %q", want)
+		}
+	}
+}
+
+// The findings prefix carries explicit anti-repetition guidance so a
+// later pass adds new grounded detail rather than re-deriving the
+// overview an earlier pass already established.
+func TestBuildInferPrompt_FindingsAntiRepetition(t *testing.T) {
+	in := InferInput{
+		RelPath: "pkg/x",
+		Goal:    "how does routing work",
+		PriorFindings: []Finding{
+			{Pass: 0, Digest: "Router resolves model by capability chain."},
+		},
+		Sampled: []SampledChunk{
+			{RelPath: "pkg/x/router.go", LineStart: 10, LineEnd: 20, Snippet: "func Resolve() {}"},
+		},
+	}
+	_, user := BuildInferPrompt(in)
+	for _, want := range []string{"do not repeat", "Do NOT restate", "ADD new grounded detail"} {
+		if !strings.Contains(user, want) {
+			t.Errorf("findings prefix missing anti-repetition marker %q in:\n%s", want, user)
+		}
+	}
+}
+
+// The project map is injected into the inference prompt so the model sees
+// the full terrain — not just the sampled sliver — and can reason about
+// which files are relevant to the goal and emit leads toward unsampled
+// files. It sits in the cacheable prefix (stable across passes).
+func TestBuildInferPrompt_ProjectMap(t *testing.T) {
+	const mapText = "internal/study/ — 3 files, 5 symbols\n\n  sampler_hierarchical.go (157)\n    HierarchicalSampler:24 · Next:46\n"
+	in := InferInput{
+		RelPath:    "internal/study",
+		Goal:       "how does sampling work",
+		ProjectMap: mapText,
+		Sampled: []SampledChunk{
+			{RelPath: "internal/study/study_file.go", LineStart: 10, LineEnd: 20, Snippet: "func StudyFile() {}"},
+		},
+	}
+	sys, user := BuildInferPrompt(in)
+
+	// The map text must appear in the user prompt.
+	if !strings.Contains(user, mapText) {
+		t.Errorf("project map not in user prompt:\n%s", user)
+	}
+	// The framing must tell the model to use the map for unsampled files.
+	if !strings.Contains(user, "FULL file tree") {
+		t.Errorf("project map framing missing 'FULL file tree' marker in:\n%s", user)
+	}
+	if !strings.Contains(user, "unsampled files") {
+		t.Errorf("project map framing missing 'unsampled files' guidance in:\n%s", user)
+	}
+	// The map must be in the cacheable prefix (before the sample).
+	sampleMarker := "Sampled regions of"
+	mapIdx := strings.Index(user, mapText)
+	sampleIdx := strings.Index(user, sampleMarker)
+	if mapIdx < 0 || sampleIdx < 0 || mapIdx > sampleIdx {
+		t.Errorf("project map must appear before the sample in the prompt")
+	}
+	// The system prompt is unchanged (the map is a user-prompt concern).
+	_ = sys
 }
 
 func sampledFixture() []SampledChunk {

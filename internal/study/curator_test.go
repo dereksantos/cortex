@@ -3,6 +3,7 @@ package study
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -138,3 +139,49 @@ func TestModelCurator_FallsBackOnError(t *testing.T) {
 		t.Errorf("unavailable provider should fall back to heuristic DENSIFY, got %q", d2.Kind)
 	}
 }
+
+// The curator prompt includes the project map and uncovered files so the
+// model can make goal-aware TARGET decisions toward unsampled files —
+// not just blind densification. A capturing provider records the prompt
+// so the test can assert the map and gaps reached it.
+func TestModelCurator_PromptIncludesMapAndUncovered(t *testing.T) {
+	const mapText = "pkg/ — 2 files, 2 symbols\n\n  a.go (50)\n    FuncA:10\n  b.go (50)\n    FuncB:10\n"
+	prov := &capturingCuratorProvider{resp: `{"kind":"DONE"}`, avail: true}
+	resp := StudyResponse{
+		Coverage:       Coverage{Pct: 0.1},
+		Digest:         "sampled a.go",
+		UncoveredFiles: []string{"pkg/b.go"},
+		Citations:      []Citation{{RelPath: "pkg/a.go", LineStart: 10, LineEnd: 12, Claim: "x"}},
+	}
+	mc := ModelCurator{Provider: prov, ProjectMap: mapText}
+	mc.Decide(resp, "how does FuncB work")
+	if !strings.Contains(prov.lastUser, mapText) {
+		t.Errorf("curator prompt missing project map:\n%s", prov.lastUser)
+	}
+	if !strings.Contains(prov.lastUser, "pkg/b.go") {
+		t.Errorf("curator prompt missing uncovered file pkg/b.go:\n%s", prov.lastUser)
+	}
+	if !strings.Contains(prov.lastUser, "how does FuncB work") {
+		t.Errorf("curator prompt missing goal:\n%s", prov.lastUser)
+	}
+}
+
+// capturingCuratorProvider records the last user prompt it received.
+type capturingCuratorProvider struct {
+	resp     string
+	avail    bool
+	lastUser string
+}
+
+func (p *capturingCuratorProvider) Generate(_ context.Context, _ string) (string, error) {
+	return p.resp, nil
+}
+func (p *capturingCuratorProvider) GenerateWithSystem(_ context.Context, user, _ string) (string, error) {
+	p.lastUser = user
+	return p.resp, nil
+}
+func (p *capturingCuratorProvider) GenerateWithStats(_ context.Context, _ string) (string, llm.GenerationStats, error) {
+	return p.resp, llm.GenerationStats{}, nil
+}
+func (p *capturingCuratorProvider) IsAvailable() bool { return p.avail }
+func (p *capturingCuratorProvider) Name() string      { return "capturing-curator" }

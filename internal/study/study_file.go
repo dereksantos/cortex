@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/dereksantos/cortex/internal/cognition/fractal"
 )
@@ -97,6 +98,16 @@ type StudyRequest struct {
 	// grid for non-Go or unparseable files. See analyzer_ast.go.
 	UseAST bool
 
+	// ProjectMap is the structural map of the study target (file tree +
+	// per-file symbols, as produced by projectindex.Render). When non-empty
+	// it is injected into the inference and curator prompts so the model
+	// sees the FULL terrain — not just the sampled sliver — and can reason
+	// about which files are relevant to the goal, emit leads pointing at
+	// unsampled files, and steer the curator's TARGET decisions toward
+	// goal-relevant gaps. The adapter builds this from the study path;
+	// the library itself has no projectindex dependency.
+	ProjectMap string
+
 	// Infer, when non-nil, runs phase-2 inference over the sampled
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
@@ -178,9 +189,13 @@ type StudyResponse struct {
 	Citations   []Citation     `json:"citations,omitempty"`
 	Coverage    Coverage       `json:"coverage"`
 	Leads       []Lead         `json:"leads,omitempty"`
-	Deepen      Deepen         `json:"deepen"`
-	Exhausted   bool           `json:"exhausted"`
-	Sampled     []SampledChunk `json:"-"` // mechanical sample (checkpoint/inference source)
+	// UncoveredFiles lists relpaths that had chunks in the boundary but
+	// none sampled this pass — the gaps a deepening pass should target.
+	// Empty in read mode and when every file was sampled.
+	UncoveredFiles []string `json:"uncovered_files,omitempty"`
+	Deepen         Deepen   `json:"deepen"`
+	Exhausted      bool     `json:"exhausted"`
+	Sampled        []SampledChunk `json:"-"` // mechanical sample (checkpoint/inference source)
 	// FindingRelays counts citations this pass admitted by relaying a prior
 	// finding's grounded citation (admitFindingRelays) — a continuity signal for
 	// citation REUSE. ~0 under study's disjoint sampling (see eval-journal
@@ -409,11 +424,19 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 		}
 	}
 
+	// Uncovered files: relpaths that had chunks in the boundary but
+	// none sampled this pass. The sampler's anti-coverage bias spreads
+	// draws across regions, but a single pass at low density leaves
+	// whole files untouched — naming them lets a deepening pass target
+	// the gaps rather than densify blindly. Sorted for stable output.
+	uncovered := uncoveredFiles(out, sampled)
+
 	resp := StudyResponse{
-		Mode:      "study",
-		Coverage:  cov,
-		Sampled:   sampled,
-		Exhausted: len(ids) < k || cov.Pct >= studyDefaultMaxCoverage,
+		Mode:           "study",
+		Coverage:       cov,
+		Sampled:        sampled,
+		UncoveredFiles: uncovered,
+		Exhausted:      len(ids) < k || cov.Pct >= studyDefaultMaxCoverage,
 		Deepen: Deepen{
 			Densify: DeepenRef{Session: req.Session, Density: densifyDensity(req.Density, k)},
 			Target:  DeepenRef{Session: req.Session, Focus: req.Focus},
@@ -429,6 +452,7 @@ func sampleAndInfer(ctx context.Context, req StudyRequest, out *BoundaryOutput, 
 		Sampled:       sampled,
 		Focus:         req.Focus,
 		Goal:          req.Goal,
+		ProjectMap:    req.ProjectMap,
 		Numbered:      req.Numbered,
 		PriorFindings: findings,
 	}
@@ -467,6 +491,27 @@ func byteOffsetForCitation(c Citation, sampled []SampledChunk) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// uncoveredFiles returns the sorted relpaths that had chunks in the
+// boundary but none sampled this pass. A single-file study yields nil
+// (one file, partially sampled — the gap is a line range, not a file).
+func uncoveredFiles(out *BoundaryOutput, sampled []SampledChunk) []string {
+	sampledPaths := make(map[string]bool, len(sampled))
+	for _, s := range sampled {
+		sampledPaths[s.RelPath] = true
+	}
+	var gaps []string
+	seen := map[string]bool{}
+	for _, c := range out.Chunks {
+		if sampledPaths[c.RelPath] || seen[c.RelPath] {
+			continue
+		}
+		seen[c.RelPath] = true
+		gaps = append(gaps, c.RelPath)
+	}
+	sort.Strings(gaps)
+	return gaps
 }
 
 // densifyDensity returns the density for the Densify deepening

@@ -31,6 +31,14 @@ type InferInput struct {
 	Sampled []SampledChunk
 	Focus   *Focus
 	Goal    string
+	// ProjectMap is the structural map of the whole study target (file tree
+	// + symbols). When non-empty it is rendered at the prompt front so the
+	// model sees the full terrain — not just the sampled sliver — and can
+	// reason about which files are relevant to the goal, surface
+	// connections between sampled and unsampled regions, and emit leads
+	// pointing at files it did not see. Sits in the cacheable prefix
+	// (stable across passes) after the goal and before the findings.
+	ProjectMap string
 	// PriorFindings are earlier passes' distilled results, rendered at the
 	// prompt front (before the sample) so the model builds on them and the
 	// stable prefix can be cached. Already trimmed to budget by the caller —
@@ -60,7 +68,7 @@ type InferFunc func(ctx context.Context, in InferInput) (InferOutput, error)
 // present and the contract can't silently drift.
 const inferSystemPrompt = `You study large files by reading only a SAMPLE of their regions. You are given a set of sampled regions, each labelled with its real path and line range. Infer a concise digest of what these regions show, grounded ONLY in what you can see.
 
-You are a REPORTER, not a critic. Your job is to surface the raw material the caller needs to reason — structure, responsibilities, behavior, dependencies, signals, anomalies — faithfully and grounded in what you can see. Even when the goal asks you to assess, recommend, or evaluate, do NOT deliver verdicts, ratings, or recommendations: report the evidence that bears on the question and let the caller draw the conclusion. A precise description the caller can act on beats a judgment it cannot verify.
+You are a REPORTER, not a critic. Your job is to surface the raw material the caller needs to reason — structure, responsibilities, behavior, dependencies, signals, anomalies — faithfully and grounded in what you can see. Go beyond describing WHAT each region contains: explain HOW the pieces fit together — control flow, data flow, interactions between components, and the WHY behind design choices where the code makes it visible. Synthesize across regions: when two sampled regions interact, name the connection. Even when the goal asks you to assess, recommend, or evaluate, do NOT deliver verdicts, ratings, or recommendations: report the evidence that bears on the question and let the caller draw the conclusion. A precise analysis the caller can act on beats a judgment it cannot verify.
 
 Hard rules (provenance contract):
 1. Every claim in the digest MUST be attributable to one sampled region's real line range.
@@ -121,20 +129,34 @@ func BuildInferPrompt(in InferInput) (system, user string) {
 	return inferSystemPrompt, b.String()
 }
 
-// cacheablePrefixUser renders the stable head of the user prompt — the goal
-// then the findings block — everything that, across passes, changes only by
-// appending a new finding at the tail. Focus and the sample come after it and
-// are NOT included here.
+// cacheablePrefixUser renders the stable head of the user prompt — the goal,
+// the project map, then the findings block — everything that, across passes,
+// changes only by appending a new finding at the tail. Focus and the sample
+// come after it and are NOT included here.
 func cacheablePrefixUser(in InferInput) string {
 	var b strings.Builder
 	if in.Goal != "" {
 		fmt.Fprintf(&b, "Task: %s\n\n", in.Goal)
+	}
+	// The project map gives the model the FULL terrain — every file and its
+	// symbols — so it can reason about which files are relevant to the goal
+	// even when they weren't sampled. This is the bridge between the
+	// structural map and the study digest: the model sees what it missed and
+	// can emit leads pointing at unsampled files the goal cares about.
+	if in.ProjectMap != "" {
+		b.WriteString("Project map (the FULL file tree — you see only a SAMPLE below; use this to reason about what you did NOT see and emit leads toward goal-relevant unsampled files):\n\n")
+		b.WriteString(in.ProjectMap)
+		if !strings.HasSuffix(in.ProjectMap, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
 	}
 	// Findings prefix: prior passes' distilled results, with path:line anchors
 	// rendered verbatim so a citation relaying one survives validation (see
 	// admitFindingRelays).
 	if len(in.PriorFindings) > 0 {
 		b.WriteString("Findings so far (from earlier passes of THIS study — build on them, do not repeat; you may cite their path:line ranges):\n\n")
+		b.WriteString("Do NOT restate what a prior pass already established. Each pass must ADD new grounded detail: regions the prior passes did not cover, interactions not yet named, or evidence not yet surfaced. If a prior finding covers a region, reference it by its pass number and move on to what is NEW.\n\n")
 		for _, f := range in.PriorFindings {
 			b.WriteString(renderFinding(f))
 		}

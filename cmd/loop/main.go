@@ -1074,6 +1074,21 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		NoWorkingMemory: noWM,
 		Infer:           study.ProviderInfer(provider),
 	}
+	// Build the structural map once and thread it into both the study
+	// request (so the inference model sees the full terrain and can emit
+	// leads toward goal-relevant unsampled files) and the curator (so its
+	// TARGET decisions are goal-aware, not blind densification). The map
+	// is also prepended to the result for the consuming agent — but now
+	// it drives the study itself, not just the consumer.
+	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+		if ix, err := projectindex.Build(abs); err == nil {
+			m := ix.Render()
+			if len(m) > studyMapBudget {
+				m = m[:studyMapBudget] + "\n… (map truncated; use project_index for the full tree)"
+			}
+			req.ProjectMap = m
+		}
+	}
 	// chunks > 0 pins the per-pass draw (the eval sweep does this);
 	// chunks <= 0 leaves Density nil so the engine derives both chunk
 	// size (the format's coherence unit) and count (window / unit) —
@@ -1103,7 +1118,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
 		req.Window = study.SampleTokenBudget(window, 0) // shared budget: conservative fraction, overhead-aware
-		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider}, passes)
+		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider, ProjectMap: req.ProjectMap}, passes)
 	}
 	win := window
 	if win <= 0 {
@@ -1142,6 +1157,12 @@ func renderStudyResult(res study.StudyLoopResult) string {
 		b.WriteString("\ncitations:\n")
 		for _, c := range res.Citations {
 			fmt.Fprintf(&b, "  %s:%d-%d  %s\n", c.RelPath, c.LineStart, c.LineEnd, c.Claim)
+		}
+	}
+	if len(res.UncoveredFiles) > 0 {
+		b.WriteString("\nuncovered files (not sampled in any pass — target these to deepen):\n")
+		for _, f := range res.UncoveredFiles {
+			fmt.Fprintf(&b, "  %s\n", f)
 		}
 	}
 	return strings.TrimSpace(b.String())

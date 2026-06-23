@@ -46,6 +46,12 @@ type StudyLoopResult struct {
 	// Pass 0 counts as neither.
 	PrefixWarmPasses int
 	PrefixBreaks     int
+	// UncoveredFiles lists relpaths that had chunks in the boundary but were
+	// never sampled across ANY pass — the gaps a follow-up study should target.
+	// Computed from the last pass's per-pass uncovered set minus every file
+	// sampled in any earlier pass. Empty in read mode or when every file was
+	// reached.
+	UncoveredFiles []string
 }
 
 // StudyLoop runs the loop. A nil curator defaults to HeuristicCurator;
@@ -67,8 +73,9 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 	cumEff := 0
 	total := 0
 	seen := map[string]bool{}
-	usedLeads := map[string]bool{} // P3: leads already turned into a Focus
-	prevPrefix := ""               // P4: previous pass's cacheable prefix
+	sampledRelPaths := map[string]bool{} // any file sampled in ANY pass
+	usedLeads := map[string]bool{}       // P3: leads already turned into a Focus
+	prevPrefix := ""                     // P4: previous pass's cacheable prefix
 	havePrev := false
 	// Working memory: each pass's distilled result accumulates here and rides
 	// the next pass's prompt front (PriorFindings), so deepening builds on what
@@ -122,6 +129,7 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 				seen[key] = true
 				cumEff += s.EffLines
 			}
+			sampledRelPaths[s.RelPath] = true
 		}
 		if total > 0 {
 			res.CoveragePct = float64(cumEff) / float64(total)
@@ -137,6 +145,12 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 			res.Stopped = "read"
 			return res, nil
 		}
+
+		// Uncovered files: the last pass's per-pass gaps minus any file an
+		// earlier pass reached. This is the set a follow-up study should
+		// target. Recomputed each pass so the terminal value reflects the
+		// final state.
+		res.UncoveredFiles = filterUncovered(resp.UncoveredFiles, sampledRelPaths)
 
 		// The final pass's decision could never be applied — don't spend
 		// a curator call (an LLM round for ModelCurator) computing it.
@@ -189,4 +203,17 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 
 	res.Stopped = "budget"
 	return res, nil
+}
+
+// filterUncovered drops relpaths that were sampled in any pass from the
+// last pass's per-pass uncovered list, leaving only files never reached
+// across the whole loop.
+func filterUncovered(lastPassUncovered []string, sampledRelPaths map[string]bool) []string {
+	var out []string
+	for _, f := range lastPassUncovered {
+		if !sampledRelPaths[f] {
+			out = append(out, f)
+		}
+	}
+	return out
 }
