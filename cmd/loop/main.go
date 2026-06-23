@@ -3370,8 +3370,13 @@ func ctxColor(used, max int) string {
 //	cortex 0.1.0 · coder · 8.2k/64k  ❯
 //
 // The token fraction is live (last prompt_tokens / window) and recolors with
-// fill. Status is dim; the glyph is the bright input affordance. A leading
-// blank line separates turns visually when scrolling back.
+// fill. Status is dim; the glyph is the bright input affordance.
+//
+// The string must stay a single line: line editors redraw the prompt on every
+// keystroke with only a carriage-return + clear-line (\r\033[K), which resets
+// the cursor within the current row but cannot erase an embedded newline. A \n
+// here would re-emit per character, walking the prompt down one row per byte
+// typed. The inter-turn blank line is printed once by the REPL loop instead.
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
@@ -3380,7 +3385,7 @@ func (cs *CortexSession) Prompt() string {
 	if cs.costUSD > 0 {
 		cost = withColor(" · "+humanCost(cs.costUSD), gray)
 	}
-	return fmt.Sprintf("\n%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
+	return fmt.Sprintf("%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
 }
 
 // streamingEnabled reports whether the REPL streams responses (the default).
@@ -4141,6 +4146,12 @@ func main() {
 	var typeAhead string
 
 	for {
+		// A blank line before each prompt separates turns when scrolling back.
+		// Printed here — once per turn — rather than baked into Prompt(), which
+		// is redrawn on every keystroke and cannot carry a newline (see Prompt).
+		if !session.quiet {
+			fmt.Println()
+		}
 		var input string
 		if editor != nil {
 			line, err := editor.ReadLinePrefilled(session.Prompt(), typeAhead)

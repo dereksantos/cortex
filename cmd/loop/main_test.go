@@ -812,6 +812,13 @@ func TestSessionPrompt(t *testing.T) {
 			t.Errorf("Prompt() = %q, missing %q", got, want)
 		}
 	}
+
+	// The prompt is redrawn on every keystroke with only \r\033[K, which cannot
+	// erase an embedded newline — a \n here walks the line down one row per byte
+	// typed. The inter-turn blank line is the REPL loop's job, not Prompt()'s.
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("Prompt() must be a single line, got %q", got)
+	}
 }
 
 func TestSetModel(t *testing.T) {
