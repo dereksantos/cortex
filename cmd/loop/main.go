@@ -1645,7 +1645,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		fn = cs.classifyShell
 		if fn == nil {
 			fn = func(ctx context.Context, command string) (shellrisk.Level, string, error) {
-				return shellrisk.ProviderClassifier(cs.reasoner())(ctx, command)
+				return shellrisk.ProviderClassifier(cs.reasoner(), cs.turnIntent)(ctx, command)
 			}
 		}
 	}
@@ -1972,6 +1972,10 @@ type CortexSession struct {
 	// in production → gateShell builds the provider-backed classifier from the
 	// reasoner binding.
 	classifyShell shellrisk.ClassifyFn
+	// turnIntent is the current turn's user request, passed to the gray-zone
+	// shell classifier so it can judge a command against the task at hand rather
+	// than in isolation. Set at the start of each Turn.
+	turnIntent string
 	// SessionID names this session's transcript file; "" when unpersisted.
 	SessionID string
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
@@ -3909,6 +3913,8 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	// Mark where this turn's messages begin, so we can capture what it did.
 	turnStart := len(cs.Request.Messages)
 	cs.Append(Message{Role: RoleUser, Content: input})
+	// The shell-risk classifier judges commands against the task at hand.
+	cs.turnIntent = input
 
 	// Fast retrieval for THIS turn. Hits are recorded to the transcript
 	// (kindRetrieval — the durable record of what the model was given) and
