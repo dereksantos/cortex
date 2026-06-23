@@ -310,6 +310,130 @@ func TestStudyDir_LargeFileSampled(t *testing.T) {
 	}
 }
 
+// TestStudyDir_ScopeToRootModule_ExcludesNestedModules is the core
+// guarantee: a nested module (its own go.mod) inside the studied root is
+// excluded from sampling, while marker-less subdirs of the root module
+// are kept. This is the fix for the eval-fixture misfire — studying the
+// repo root must not sample test/evals/projects/*/server.
+func TestStudyDir_ScopeToRootModule_ExcludesNestedModules(t *testing.T) {
+	root := writeDirFixture(t, map[string]string{
+		"go.mod":               "module example.com/m\n",
+		"main.go":              "package main\nfunc main() {}\n",
+		"src/small.go":         "package src\nvar _ = 1\n",
+		"nested/go.mod":        "module example.com/m/nested\n",
+		"nested/server.go":     "package nested\nfunc Serve() {}\n",
+		"nested/deep/go.mod":   "module example.com/m/nested/deep\n",
+		"nested/deep/x.go":     "package deep\nvar _ = 1\n",
+	})
+	out, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	large := []sourceFile{}
+	large = scopeToRootModule(out, root, large)
+
+	// The nested module and its sub-module are excluded; root + src kept.
+	for _, c := range out.Chunks {
+		if strings.HasPrefix(c.RelPath, "nested/") {
+			t.Errorf("nested-module chunk leaked: %s (module %s)", c.RelPath, c.ModuleID)
+		}
+	}
+	seenFiles := map[string]bool{}
+	for _, c := range out.Chunks {
+		seenFiles[c.RelPath] = true
+	}
+	if !seenFiles["main.go"] {
+		t.Error("root-module file main.go was excluded")
+	}
+	if !seenFiles["src/small.go"] {
+		t.Error("marker-less subdir file src/small.go was excluded")
+	}
+
+	// Totals reflect only the kept chunks. go.mod itself is a 1-line
+	// file that produces a chunk, so the kept files are go.mod, main.go,
+	// and src/small.go.
+	wantFiles := 3
+	if out.TotalFiles != wantFiles {
+		t.Errorf("TotalFiles = %d, want %d", out.TotalFiles, wantFiles)
+	}
+	if out.EffTotalLines <= 0 {
+		t.Errorf("EffTotalLines = %d, want > 0", out.EffTotalLines)
+	}
+
+	// Excluded modules are gone from the module list.
+	for _, m := range out.Modules {
+		if m.ID == "nested" || m.ID == "nested/deep" {
+			t.Errorf("excluded module survived: %s", m.ID)
+		}
+	}
+}
+
+// TestStudyDir_ScopeToRootModule_NoMarkerAtRootIsNoOp confirms the
+// filter is a no-op when the studied root has no language-root marker —
+// a plain directory of scripts has no objective module boundary to
+// enforce, so nothing is excluded.
+func TestStudyDir_ScopeToRootModule_NoMarkerAtRootIsNoOp(t *testing.T) {
+	root := writeDirFixture(t, map[string]string{
+		"a.sh":          "echo a\n",
+		"sub/b.sh":      "echo b\n",
+		"nested/go.mod": "module example.com/nested\n",
+		"nested/x.go":   "package nested\nvar _ = 1\n",
+	})
+	out, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	preChunks := len(out.Chunks)
+	preMods := len(out.Modules)
+	preEff := out.EffTotalLines
+	large := []sourceFile{}
+	large = scopeToRootModule(out, root, large)
+
+	if len(out.Chunks) != preChunks {
+		t.Errorf("chunks changed: %d → %d (should be no-op without root marker)", preChunks, len(out.Chunks))
+	}
+	if len(out.Modules) != preMods {
+		t.Errorf("modules changed: %d → %d", preMods, len(out.Modules))
+	}
+	if out.EffTotalLines != preEff {
+		t.Errorf("EffTotalLines changed: %d → %d", preEff, out.EffTotalLines)
+	}
+}
+
+// TestStudyDir_ScopeToRootModule_StudyingNestedModuleDirectly confirms
+// that pointing study at a nested module path scopes to THAT module:
+// its own go.mod is the root marker, and its own sub-modules are
+// excluded. This is how the agent studies a specific subproject.
+func TestStudyDir_ScopeToRootModule_StudyingNestedModuleDirectly(t *testing.T) {
+	root := writeDirFixture(t, map[string]string{
+		"go.mod":             "module example.com/m\n",
+		"main.go":            "package main\nfunc main() {}\n",
+		"sub/go.mod":         "module example.com/m/sub\n",
+		"sub/a.go":           "package sub\nvar _ = 1\n",
+		"sub/inner/go.mod":   "module example.com/m/sub/inner\n",
+		"sub/inner/b.go":     "package inner\nvar _ = 1\n",
+	})
+	subRoot := filepath.Join(root, "sub")
+	out, err := UniversalAnalyzer{}.Analyze(context.Background(), subRoot, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	large := []sourceFile{}
+	large = scopeToRootModule(out, subRoot, large)
+
+	// sub/ is now the root; sub/a.go is kept, sub/inner/ is excluded.
+	seenFiles := map[string]bool{}
+	for _, c := range out.Chunks {
+		seenFiles[c.RelPath] = true
+	}
+	if !seenFiles["a.go"] {
+		t.Error("root-module file a.go was excluded when studying sub/ directly")
+	}
+	if seenFiles["inner/b.go"] {
+		t.Error("sub-module inner/b.go leaked when studying sub/ directly")
+	}
+}
+
 // TestStudyDir_InferAndCitations exercises phase 2 over a corpus: the
 // inference mock cites one line range it actually saw (kept) and one in
 // a file that was never sampled (dropped by validation).

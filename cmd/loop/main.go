@@ -991,8 +991,37 @@ func (tc ToolCall) Study(ctx context.Context, cs *CortexSession) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return renderStudyResult(res), nil
+	return renderStudyResultWithMap(path, res), nil
 }
+
+// renderStudyResultWithMap prefixes the study digest with a structural map
+// of the target when it's a directory — the map→study producer/consumer
+// contract. The agent sees the terrain (file tree + symbols) before the
+// analysis, so it can judge coverage gaps and decide where to deepen.
+// Single-file studies skip the map: the study result already carries
+// per-region citations, and project_index is the cheaper orient for one
+// file. The map is bounded so it never dominates the study output.
+func renderStudyResultWithMap(path string, res study.StudyLoopResult) string {
+	digest := renderStudyResult(res)
+	fi, err := os.Stat(path)
+	if err != nil || !fi.IsDir() {
+		return digest
+	}
+	ix, err := projectindex.Build(path)
+	if err != nil {
+		return digest // map is a bonus, not a gate — degrade to digest-only.
+	}
+	m := ix.Render()
+	if len(m) > studyMapBudget {
+		m = m[:studyMapBudget] + "\n… (map truncated; use project_index for the full tree)"
+	}
+	return m + "\n\n" + digest
+}
+
+// studyMapBudget caps the structural map prefix so it never dominates the
+// study digest on large trees. The map is orientation; the digest is the
+// substance. project_index remains available for the unbounded view.
+const studyMapBudget = 4000
 
 // defaultStudyPasses picks the pass count when the model didn't ask for one:
 // 1 for files, dirStudyPasses for directories (see the const's rationale).
@@ -1064,12 +1093,6 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	// disjoint draws on coverage-to-value.
 	if !noWM && os.Getenv("CORTEX_STUDY_DIRECTED") != "" {
 		req.DirectedSampling = true
-	}
-	// Keyword focus: aim pass-1 sampling at the goal's terms (mechanical search).
-	// Opt-in until eval'd; pairs with the curation budget to make tight curation
-	// land on what the coder asked about.
-	if os.Getenv("CORTEX_STUDY_KEYWORDS") != "" {
-		req.KeywordFocus = true
 	}
 	// AST boundary producer for Go files (declaration-aligned chunks). Opt-in
 	// until eval'd against the byte grid.

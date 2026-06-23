@@ -75,6 +75,12 @@ func studyDir(ctx context.Context, req StudyRequest) (StudyResponse, error) {
 			large = append(large, f)
 		}
 	}
+	// Scope to the root module: nested modules (dirs with their own
+	// language-root marker like go.mod) are separate projects — exclude
+	// them so studying the repo root doesn't sample eval fixtures or
+	// vendored subprojects. Marker-less subdirs (src/, cmd/, internal/)
+	// are part of the root module's tree and are kept.
+	large = scopeToRootModule(out, req.Path, large)
 	mergeLargeFiles(out, large, window, req.Fill, req.Session)
 
 	// Citations must be meaningful to the CALLER: chunk relpaths are
@@ -174,4 +180,83 @@ func meanChunkBytes(chunks []Chunk) int {
 		total += c.ByteLength
 	}
 	return total / len(chunks)
+}
+
+// scopeToRootModule filters the boundary to the root module's tree,
+// excluding nested modules — directories with their own language-root
+// marker (go.mod, package.json, …) that aren't the studied root. Nested
+// modules are separate projects; studying the repo root should not
+// sample eval fixtures or vendored subprojects. Marker-less subdirs
+// (src/, cmd/, internal/) belong to the root module's tree and are kept.
+//
+// No-op when the studied root has no marker itself (a plain directory of
+// scripts, a docs folder): there's no objective boundary to enforce, so
+// behavior is unchanged. The large-file list is filtered to match so
+// over-cap files inside excluded modules aren't gridded back in.
+func scopeToRootModule(out *BoundaryOutput, root string, large []sourceFile) []sourceFile {
+	rootHasMarker := false
+	for _, m := range out.Modules {
+		if m.RootPath == root && m.HasMarker {
+			rootHasMarker = true
+			break
+		}
+	}
+	if !rootHasMarker {
+		return large
+	}
+	excluded := map[string]bool{}
+	for _, m := range out.Modules {
+		if m.HasMarker && m.RootPath != root {
+			excluded[m.ID] = true
+		}
+	}
+	if len(excluded) == 0 {
+		return large
+	}
+
+	// Filter chunks in place.
+	kept := out.Chunks[:0]
+	for _, c := range out.Chunks {
+		if !excluded[c.ModuleID] {
+			kept = append(kept, c)
+		}
+	}
+	out.Chunks = kept
+
+	// Filter modules in place.
+	mods := out.Modules[:0]
+	for _, m := range out.Modules {
+		if !excluded[m.ID] {
+			mods = append(mods, m)
+		}
+	}
+	out.Modules = mods
+
+	// Filter large files under excluded modules.
+	keptLarge := large[:0]
+	for _, f := range large {
+		nested := false
+		for id := range excluded {
+			if f.rel == id || strings.HasPrefix(f.rel, id+"/") {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			keptLarge = append(keptLarge, f)
+		}
+	}
+
+	// Recompute totals from the kept chunks so coverage fractions stay
+	// accurate (the sampler's denominator is EffTotalLines).
+	out.EffTotalLines = 0
+	out.TotalLines = 0
+	filesSeen := map[string]bool{}
+	for _, c := range out.Chunks {
+		out.EffTotalLines += c.EffLines
+		out.TotalLines += c.LineEnd - c.LineStart + 1
+		filesSeen[c.RelPath] = true
+	}
+	out.TotalFiles = len(filesSeen)
+	return keptLarge
 }
