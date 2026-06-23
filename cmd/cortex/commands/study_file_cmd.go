@@ -9,8 +9,13 @@ import (
 	"time"
 
 	intllm "github.com/dereksantos/cortex/internal/llm"
+	"github.com/dereksantos/cortex/internal/projectindex"
 	"github.com/dereksantos/cortex/internal/study"
 )
+
+// cliStudyMapBudget caps the structural map so it never dominates the
+// study digest on large trees. Mirrors the loop harness's studyMapBudget.
+const cliStudyMapBudget = 4000
 
 // fileStudyOpts bundles the knobs for `cortex study FILE|DIR` (the
 // LLM-backed study → curate → deepen loop over a file or directory).
@@ -69,6 +74,22 @@ func runFileStudy(c *Context, opts fileStudyOpts, w io.Writer) error {
 		Goal:    opts.goal,
 		Infer:   study.ProviderInfer(provider),
 	}
+	// Build the structural map for directories so the director and the
+	// inference/curator prompts see the full terrain. The loop harness
+	// does the same; the CLI needs it here for the director to aim from.
+	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
+		if ix, err := projectindex.Build(abs); err == nil {
+			m := ix.Render()
+			if len(m) > cliStudyMapBudget {
+				m = m[:cliStudyMapBudget] + "\n… (map truncated)"
+			}
+			req.ProjectMap = m
+		}
+	}
+	// Pre-pass direction: the first pass samples where the goal points
+	// (via the project map) instead of a goal-blind mechanical draw.
+	// Degrades to nil (→ mechanical sampling) with no goal or no map.
+	req.Director = study.ModelDirector{Provider: provider, ProjectMap: req.ProjectMap}
 	res, err := study.StudyLoop(context.Background(), req, study.ModelCurator{Provider: provider}, opts.maxPasses)
 	if err != nil {
 		return err

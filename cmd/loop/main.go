@@ -491,6 +491,14 @@ type ToolFunction struct {
 // required fields. Keeps the tool definitions readable instead of nesting
 // map[string]any by hand.
 func objectSchema(props map[string]any, required ...string) map[string]any {
+	// Emit "required": [] not null when there are no required fields: a nil
+	// []string marshals to JSON null, and strict tool-call parsers (GLM-4.7-Flash
+	// on llama.cpp) reject "required": null with "type must be array, but is
+	// null" when generating their constrained grammar. [] is also the correct
+	// JSON Schema for "no required properties".
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{
 		"type":       "object",
 		"properties": props,
@@ -1114,6 +1122,11 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	if os.Getenv("CORTEX_STUDY_AST") != "" {
 		req.UseAST = true
 	}
+	// Pre-pass direction: the first pass samples where the goal points
+	// (via the project map) instead of a goal-blind mechanical draw.
+	// The ModelDirector degrades to nil (→ mechanical sampling) when
+	// there's no provider, no goal, or no map, so it's safe as a default.
+	req.Director = study.ModelDirector{Provider: provider, ProjectMap: req.ProjectMap}
 	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
 	// covered set forward so each pass samples NEW regions.
 	runPasses := func(window int) (study.StudyLoopResult, error) {
