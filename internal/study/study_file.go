@@ -112,6 +112,13 @@ type StudyRequest struct {
 	// regions. Nil → mechanical sample only (the --sample-only path).
 	Infer InferFunc
 
+	// Director, when non-nil, sets the initial Focus before the first
+	// pass so the first sample is goal-directed rather than mechanical.
+	// Nil → the first pass uses the HierarchicalSampler's breadth-first
+	// draw (unchanged behavior). A Director that returns nil focus also
+	// falls back to mechanical sampling. See director.go.
+	Director Director
+
 	// sampler overrides the default HierarchicalSampler. Test seam.
 	sampler Sampler
 }

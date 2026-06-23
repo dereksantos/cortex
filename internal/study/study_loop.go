@@ -69,6 +69,16 @@ func StudyLoop(ctx context.Context, req StudyRequest, curator Curator, maxPasses
 		covered = map[string]bool{}
 	}
 
+	// Pre-pass direction: before the first mechanical draw, let the
+	// director aim the first sample at a goal-relevant region. The
+	// FocusSampler it feeds still falls back to the mechanical sampler
+	// when the in-focus set is exhausted, so this never samples FEWER
+	// regions — it just front-loads the ones the goal cares about. A
+	// nil director or nil focus leaves the first pass mechanical.
+	if req.Focus == nil && req.Director != nil {
+		req.Focus = req.Director.Direct(req.Goal)
+	}
+
 	var res StudyLoopResult
 	cumEff := 0
 	total := 0
