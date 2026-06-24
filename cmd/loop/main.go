@@ -1062,7 +1062,7 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{
 		Name:               "study",
 		BaseURL:            base,
-		APIKey:             keychainKey(cs.Study.KeyService),
+		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
 		// Study sends full-budget samples; prefill alone can exceed the
 		// 300s client default on local hardware (measured: the numbered
@@ -2063,13 +2063,14 @@ func (cs *CortexSession) windowSize() int {
 }
 
 // ModelSpec is one role's binding: where to send, which model, how big its window.
-// KeyService, when set, names a macOS keychain item whose secret is used as the
-// Bearer token (e.g. "cortex-openrouter" for OpenRouter). The key is fetched at
-// call time and never written to config or echoed.
+// The Bearer token is resolved at call time and never written to config or echoed:
+// KeyEnv (an env var name) takes precedence as the generic, cross-platform source;
+// KeyService (a macOS keychain item) is the fallback. See resolveKey.
 type ModelSpec struct {
 	Endpoint   string `json:"endpoint"`
 	Model      string `json:"model"`
 	Window     int    `json:"window"`      // context window in tokens
+	KeyEnv     string `json:"key_env"`     // env var holding the API key (generic); wins over KeyService
 	KeyService string `json:"key_service"` // keychain service name for the API key, or ""
 	// Thinking controls built-in reasoning on hybrid thinking models (e.g. the
 	// coder alias). false → requests carry
@@ -2205,15 +2206,31 @@ func keychainKey(service string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// resolveKey returns the Bearer token for a binding. The env var named by KeyEnv
+// is tried first — it is generic and cross-platform, so it's the path a portable
+// `cortex setup` writes — and the macOS keychain item named by KeyService is the
+// fallback. Returns "" when neither yields a value. The token is never logged.
+func resolveKey(m ModelSpec) string {
+	if m.KeyEnv != "" {
+		if v := strings.TrimSpace(os.Getenv(m.KeyEnv)); v != "" {
+			return v
+		}
+	}
+	return keychainKey(m.KeyService)
+}
+
 // Backend is the one place an address and its auth live — read from gitignored
 // .cortex/config.json, never baked into source. Type names the profile (e.g.
 // "litellm" for a local LiteLLM proxy, "openrouter") so discovery and routing can
-// specialize; Endpoint is the root URL; KeyService names a keychain item for the
-// bearer token (e.g. "cortex-openrouter"), fetched at call time, never stored.
+// specialize; Endpoint is the root URL. The bearer token is resolved at call time
+// and never stored: KeyEnv (an env var name, e.g. "OPENROUTER_API_KEY") is the
+// generic cross-platform source and wins; KeyService (a macOS keychain item) is
+// the fallback. A binding's own key fields override these (see resolveBinding).
 type Backend struct {
 	Type       string `json:"type"`
 	Endpoint   string `json:"endpoint"`
-	KeyService string `json:"key_service"`
+	KeyEnv     string `json:"key_env"`     // env var holding the API key (generic); wins over KeyService
+	KeyService string `json:"key_service"` // macOS keychain service name; fallback when KeyEnv is unset
 }
 
 // Config is the subset of .cortex/config.json the loop consults: the backend
@@ -2286,12 +2303,18 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			if m.Window > 0 {
 				spec.Window = m.Window
 			}
+			if m.KeyEnv != "" {
+				spec.KeyEnv = m.KeyEnv
+			}
 			if m.KeyService != "" {
 				spec.KeyService = m.KeyService
 			}
 			if m.Thinking != nil {
 				spec.Thinking = m.Thinking
 			}
+		}
+		if spec.KeyEnv == "" {
+			spec.KeyEnv = c.Backend.KeyEnv
 		}
 		if spec.KeyService == "" {
 			spec.KeyService = c.Backend.KeyService
@@ -2360,11 +2383,35 @@ func projectInstructions() string {
 	return s
 }
 
-// LoadConfig reads and parses .cortex/config.json. It returns nil on any
-// problem (missing file, bad JSON) so callers transparently fall back to
-// defaults — config is an enhancement, not a hard dependency.
+// LoadConfig resolves the effective config by inheriting the user-level config
+// (~/.cortex/config.json) and overlaying the project config (./.cortex/config.json):
+// the user layer is "set once, every project inherits it"; the project layer pins
+// only what it overrides. Returns nil when NEITHER exists, so callers transparently
+// fall back to defaults — config is an enhancement, not a hard dependency.
 func LoadConfig() *Config {
-	path := findConfigPath()
+	return loadMergedConfig(userConfigPath(), findConfigPath())
+}
+
+// loadMergedConfig reads the user then project config files and merges them
+// (project over user, field by field). Split from LoadConfig so the merge is
+// testable without touching $HOME. Either path may be "" or missing.
+func loadMergedConfig(userPath, projectPath string) *Config {
+	user := readConfigFile(userPath)
+	project := readConfigFile(projectPath)
+	switch {
+	case user == nil:
+		return project
+	case project == nil:
+		return user
+	default:
+		return mergeConfig(user, project)
+	}
+}
+
+// readConfigFile parses one config file, returning nil on any problem (empty
+// path, missing file, bad JSON) so a malformed layer degrades to "absent" rather
+// than failing the whole resolution.
+func readConfigFile(path string) *Config {
 	if path == "" {
 		return nil
 	}
@@ -2377,6 +2424,110 @@ func LoadConfig() *Config {
 		return nil
 	}
 	return &cfg
+}
+
+// userConfigPath returns the user-level config path (~/.cortex/config.json),
+// matching registry.GlobalDir's convention. CORTEX_HOME overrides the home dir —
+// a seam for tests and non-standard installs. "" when no home is resolvable.
+func userConfigPath() string {
+	if h := os.Getenv("CORTEX_HOME"); h != "" {
+		return filepath.Join(h, "config.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cortex", "config.json")
+}
+
+// mergeConfig overlays over onto base field by field and returns a NEW Config
+// (neither input is mutated). over's set values win; unset fields inherit from
+// base. This is the user←project inheritance: a project pins only what it
+// changes and inherits the rest from ~/.cortex/config.json.
+func mergeConfig(base, over *Config) *Config {
+	if base == nil {
+		return over
+	}
+	if over == nil {
+		return base
+	}
+	out := *base
+	out.Backend = mergeBackend(base.Backend, over.Backend)
+	out.Models = mergeModels(base.Models, over.Models)
+	out.Tools = mergeTools(base.Tools, over.Tools)
+	return &out
+}
+
+// mergeBackend overlays over's non-empty backend fields onto base.
+func mergeBackend(base, over Backend) Backend {
+	if over.Type != "" {
+		base.Type = over.Type
+	}
+	if over.Endpoint != "" {
+		base.Endpoint = over.Endpoint
+	}
+	if over.KeyEnv != "" {
+		base.KeyEnv = over.KeyEnv
+	}
+	if over.KeyService != "" {
+		base.KeyService = over.KeyService
+	}
+	return base
+}
+
+// mergeModels merges per-role bindings: a role present in both is field-merged
+// (so a project can override just the model and inherit the endpoint/key), a
+// role in only one layer is taken as-is.
+func mergeModels(base, over map[string]ModelSpec) map[string]ModelSpec {
+	if len(base) == 0 {
+		return over
+	}
+	out := make(map[string]ModelSpec, len(base)+len(over))
+	for role, spec := range base {
+		out[role] = spec
+	}
+	for role, o := range over {
+		if b, ok := out[role]; ok {
+			out[role] = mergeSpec(b, o)
+		} else {
+			out[role] = o
+		}
+	}
+	return out
+}
+
+// mergeSpec overlays over's set fields onto a base binding.
+func mergeSpec(base, over ModelSpec) ModelSpec {
+	if over.Endpoint != "" {
+		base.Endpoint = over.Endpoint
+	}
+	if over.Model != "" {
+		base.Model = over.Model
+	}
+	if over.Window > 0 {
+		base.Window = over.Window
+	}
+	if over.KeyEnv != "" {
+		base.KeyEnv = over.KeyEnv
+	}
+	if over.KeyService != "" {
+		base.KeyService = over.KeyService
+	}
+	if over.Thinking != nil {
+		base.Thinking = over.Thinking
+	}
+	return base
+}
+
+// mergeTools overlays over's set tool fields onto base.
+func mergeTools(base, over ToolConfig) ToolConfig {
+	if over.AllowDelete != nil {
+		base.AllowDelete = over.AllowDelete
+	}
+	if over.DeleteRoot != "" {
+		base.DeleteRoot = over.DeleteRoot
+	}
+	return base
 }
 
 func NewCortexSession() *CortexSession {
@@ -2408,7 +2559,7 @@ func NewCortexSession() *CortexSession {
 
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
-	req.APIKey = keychainKey(code.KeyService)
+	req.APIKey = resolveKey(code)
 	req.ChatTemplateKwargs = code.TemplateKwargs()
 
 	// OpenRouter returns per-call dollar cost when asked; opt in so the gauge can
@@ -3083,7 +3234,7 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
 		Name:               "distill",
 		BaseURL:            base,
-		APIKey:             keychainKey(cs.Study.KeyService),
+		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
 		Timeout:            10 * time.Minute,
 	})

@@ -553,6 +553,130 @@ func TestResolveBinding(t *testing.T) {
 			t.Errorf("study should inherit backend key, got %q", got.KeyService)
 		}
 	})
+
+	t.Run("key_env: per-role override, else backend default", func(t *testing.T) {
+		c := &Config{
+			Backend: Backend{KeyEnv: "BACKEND_KEY"},
+			Models:  map[string]ModelSpec{roleCode: {KeyEnv: "OPENROUTER_API_KEY"}},
+		}
+		if got := c.resolveBinding(roleCode, testFleet); got.KeyEnv != "OPENROUTER_API_KEY" {
+			t.Errorf("per-role key_env = %q, want OPENROUTER_API_KEY", got.KeyEnv)
+		}
+		if got := c.resolveBinding(roleStudy, testFleet); got.KeyEnv != "BACKEND_KEY" {
+			t.Errorf("study should inherit backend key_env, got %q", got.KeyEnv)
+		}
+	})
+}
+
+func TestResolveKey(t *testing.T) {
+	t.Run("key_env wins when the var is set", func(t *testing.T) {
+		t.Setenv("CORTEX_TEST_KEY", "sk-from-env")
+		if got := resolveKey(ModelSpec{KeyEnv: "CORTEX_TEST_KEY", KeyService: "ignored"}); got != "sk-from-env" {
+			t.Errorf("resolveKey = %q, want sk-from-env", got)
+		}
+	})
+
+	t.Run("empty when neither source is set", func(t *testing.T) {
+		if got := resolveKey(ModelSpec{}); got != "" {
+			t.Errorf("resolveKey = %q, want empty", got)
+		}
+	})
+
+	t.Run("blank env value falls through to keychain", func(t *testing.T) {
+		t.Setenv("CORTEX_TEST_KEY", "   ")
+		// KeyService is empty, so keychainKey returns "" without shelling out —
+		// proves the env path doesn't return a blank value as if it were a key.
+		if got := resolveKey(ModelSpec{KeyEnv: "CORTEX_TEST_KEY"}); got != "" {
+			t.Errorf("resolveKey = %q, want empty (blank env is not a key)", got)
+		}
+	})
+}
+
+func TestLoadMergedConfig(t *testing.T) {
+	write := func(t *testing.T, dir, name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("project overrides user, inherits the rest", func(t *testing.T) {
+		dir := t.TempDir()
+		userPath := write(t, dir, "user.json", `{
+			"backend": {"type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY"},
+			"models": {
+				"code":  {"model": "qwen/qwen3-coder:free"},
+				"study": {"model": "openai/gpt-oss-20b:free"}
+			}
+		}`)
+		projPath := write(t, dir, "proj.json", `{
+			"models": {"code": {"model": "anthropic/claude-sonnet"}}
+		}`)
+
+		cfg := loadMergedConfig(userPath, projPath)
+		if cfg == nil {
+			t.Fatal("merged config is nil")
+		}
+		// Project overrode only code's model.
+		if cfg.Models["code"].Model != "anthropic/claude-sonnet" {
+			t.Errorf("code model = %q, want the project override", cfg.Models["code"].Model)
+		}
+		// Backend and the study role inherited from the user layer.
+		if cfg.Backend.Type != "openrouter" || cfg.Backend.KeyEnv != "OPENROUTER_API_KEY" {
+			t.Errorf("backend not inherited: %+v", cfg.Backend)
+		}
+		if cfg.Models["study"].Model != "openai/gpt-oss-20b:free" {
+			t.Errorf("study model = %q, want inherited free model", cfg.Models["study"].Model)
+		}
+	})
+
+	t.Run("field-level merge within a shared role", func(t *testing.T) {
+		dir := t.TempDir()
+		userPath := write(t, dir, "user.json", `{
+			"models": {"code": {"model": "qwen/qwen3-coder:free", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY"}}
+		}`)
+		projPath := write(t, dir, "proj.json", `{
+			"models": {"code": {"model": "openai/gpt-oss-120b:free"}}
+		}`)
+		cfg := loadMergedConfig(userPath, projPath)
+		code := cfg.Models["code"]
+		if code.Model != "openai/gpt-oss-120b:free" {
+			t.Errorf("model = %q, want project override", code.Model)
+		}
+		if code.Endpoint != "https://openrouter.ai/api/v1" || code.KeyEnv != "OPENROUTER_API_KEY" {
+			t.Errorf("endpoint/key_env should inherit from user: %+v", code)
+		}
+	})
+
+	t.Run("only one layer present", func(t *testing.T) {
+		dir := t.TempDir()
+		userPath := write(t, dir, "user.json", `{"backend": {"type": "openrouter"}}`)
+		if cfg := loadMergedConfig(userPath, filepath.Join(dir, "missing.json")); cfg == nil || cfg.Backend.Type != "openrouter" {
+			t.Errorf("user-only load failed: %+v", cfg)
+		}
+		projPath := write(t, dir, "proj.json", `{"backend": {"type": "litellm"}}`)
+		if cfg := loadMergedConfig(filepath.Join(dir, "missing.json"), projPath); cfg == nil || cfg.Backend.Type != "litellm" {
+			t.Errorf("project-only load failed: %+v", cfg)
+		}
+	})
+
+	t.Run("neither present returns nil", func(t *testing.T) {
+		if cfg := loadMergedConfig("", ""); cfg != nil {
+			t.Errorf("want nil when no layer exists, got %+v", cfg)
+		}
+	})
+
+	t.Run("malformed layer degrades to absent", func(t *testing.T) {
+		dir := t.TempDir()
+		bad := write(t, dir, "bad.json", `{not json`)
+		good := write(t, dir, "good.json", `{"backend": {"type": "openrouter"}}`)
+		// Bad user layer, good project layer → project alone survives.
+		if cfg := loadMergedConfig(bad, good); cfg == nil || cfg.Backend.Type != "openrouter" {
+			t.Errorf("malformed user layer should be ignored: %+v", cfg)
+		}
+	})
 }
 
 // A realistic /model/info payload (trimmed to the fields we read, plus extra
