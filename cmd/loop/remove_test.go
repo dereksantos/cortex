@@ -8,54 +8,8 @@ import (
 	"testing"
 )
 
-func TestConfinedPath(t *testing.T) {
-	root := t.TempDir()
-	ok := []struct{ in, wantRel string }{
-		{"file.go", "file.go"},
-		{"sub/dir", "sub/dir"},
-		{"./a/b/../c", "a/c"},
-	}
-	for _, tt := range ok {
-		got, err := confinedPath(root, tt.in)
-		if err != nil {
-			t.Errorf("confinedPath(%q) errored: %v", tt.in, err)
-			continue
-		}
-		if want := filepath.Join(root, tt.wantRel); got != want {
-			t.Errorf("confinedPath(%q) = %q, want %q", tt.in, got, want)
-		}
-	}
-
-	bad := []string{
-		"",                  // empty
-		".",                 // the root itself
-		"..",                // escape up
-		"../sibling",        // escape up
-		"sub/../../escape",  // traversal escape
-		"/etc/passwd",       // absolute outside
-		".git",              // protected
-		".git/config",       // protected subtree
-		".cortex",           // protected
-		".cortex/journal/x", // protected subtree
-	}
-	for _, in := range bad {
-		if _, err := confinedPath(root, in); err == nil {
-			t.Errorf("confinedPath(%q) should have been refused", in)
-		}
-	}
-}
-
-func TestConfinedPathSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
-	}
-	// "link/x" is lexically in-root but its real parent is outside.
-	if _, err := confinedPath(root, "link/x"); err == nil {
-		t.Error("expected symlink-escape refusal for link/x")
-	}
-}
+// TestConfinedPath and TestConfinedPathSymlinkEscape moved to cmd/loop/tools,
+// alongside the unexported confinedPath helper they exercise.
 
 func TestRemovePathTool(t *testing.T) {
 	root := t.TempDir()
@@ -123,14 +77,14 @@ func TestConfigToolMerges(t *testing.T) {
 	})
 
 	t.Run("toolsExcept drops the named tool", func(t *testing.T) {
-		out := toolsExcept(tools, FunctionRemove)
+		out := toolsExcept(toolSet, FunctionRemove)
 		for _, tl := range out {
 			if tl.Function.Name == FunctionRemove {
 				t.Error("remove_path should have been dropped")
 			}
 		}
-		if len(out) != len(tools)-1 {
-			t.Errorf("len = %d, want %d", len(out), len(tools)-1)
+		if len(out) != len(toolSet)-1 {
+			t.Errorf("len = %d, want %d", len(out), len(toolSet)-1)
 		}
 	})
 }

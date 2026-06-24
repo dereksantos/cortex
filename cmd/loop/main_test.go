@@ -37,7 +37,7 @@ func TestToolCallArgumentsAreJSONString(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &call); err != nil {
 		t.Fatalf("unmarshal tool call: %v", err)
 	}
-	got, err := call.stringArg("path")
+	got, err := call.StringArg("path")
 	if err != nil {
 		t.Fatalf("stringArg: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestStringArg(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tc("x", tt.args).stringArg(tt.key)
+			got, err := tc("x", tt.args).StringArg(tt.key)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got value %q", got)
@@ -248,56 +248,9 @@ func TestBashTool(t *testing.T) {
 	})
 }
 
-func TestDefaultStudyPasses(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "f.txt")
-	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name string
-		path string
-		want int
-	}{
-		{"file", file, 1},
-		{"dir", dir, dirStudyPasses},
-		{"missing", filepath.Join(dir, "nope"), 1},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := defaultStudyPasses(c.path); got != c.want {
-				t.Errorf("defaultStudyPasses(%s) = %d, want %d", c.name, got, c.want)
-			}
-		})
-	}
-}
-
-func TestSpillShellOutput(t *testing.T) {
-	t.Chdir(t.TempDir())
-	out := []byte(strings.Repeat("log line\n", 100))
-	p1, err := spillShellOutput("go test ./...", out)
-	if err != nil {
-		t.Fatalf("spill: %v", err)
-	}
-	data, err := os.ReadFile(p1)
-	if err != nil {
-		t.Fatalf("read spill: %v", err)
-	}
-	if string(data) != string(out) {
-		t.Error("spill content differs from output")
-	}
-	if !strings.HasPrefix(filepath.ToSlash(p1), ".cortex/shell/go-") {
-		t.Errorf("spill path %q, want .cortex/shell/go-<hash>.txt", p1)
-	}
-	// Content-addressed: same output → same path (no pile-up).
-	p2, err := spillShellOutput("go test ./...", out)
-	if err != nil {
-		t.Fatalf("spill 2: %v", err)
-	}
-	if p1 != p2 {
-		t.Errorf("same output spilled to different paths: %q vs %q", p1, p2)
-	}
-}
+// TestDefaultStudyPasses, TestSpillShellOutput, TestConfinedPath, and
+// TestConfinedPathSymlinkEscape now live in cmd/loop/tools, next to the
+// (unexported) helpers they cover.
 
 func TestExecuteUnknownTool(t *testing.T) {
 	if _, err := tc("frobnicate", `{}`).Execute(context.Background(), nil); err == nil {
@@ -1029,7 +982,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 		if calls[0].Function.Name != "bash" {
 			t.Errorf("name = %q, want bash", calls[0].Function.Name)
 		}
-		got, err := calls[0].stringArg("command")
+		got, err := calls[0].StringArg("command")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1044,7 +997,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 		if len(calls) != 1 || calls[0].Function.Name != "read_file" {
 			t.Fatalf("got %+v", calls)
 		}
-		if p, _ := calls[0].stringArg("path"); p != "go.mod" {
+		if p, _ := calls[0].StringArg("path"); p != "go.mod" {
 			t.Errorf("path = %q", p)
 		}
 	})
@@ -1055,8 +1008,8 @@ func TestParseXMLToolCalls(t *testing.T) {
 		if len(calls) != 1 {
 			t.Fatalf("got %d", len(calls))
 		}
-		path, _ := calls[0].stringArg("path")
-		body, _ := calls[0].stringArg("content")
+		path, _ := calls[0].StringArg("path")
+		body, _ := calls[0].StringArg("content")
 		if path != "out.txt" || body != "hello world" {
 			t.Errorf("path=%q content=%q", path, body)
 		}
