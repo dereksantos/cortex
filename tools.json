@@ -578,6 +578,46 @@
       ]
     },
     {
+      "name": "setup",
+      "description": "Configure Cortex model bindings (user-level by default; --project to scope to one repo)",
+      "version": "0.1.0",
+      "flags": [
+        {
+          "name": "backend",
+          "type": "string",
+          "description": "Backend to write: free | openrouter | local (skips the prompt)"
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "description": "Pin the code (agent) model"
+        },
+        {
+          "name": "free",
+          "type": "bool",
+          "default": "false",
+          "description": "Use OpenRouter free-tier models (no cost; prompts leave your machine)"
+        },
+        {
+          "name": "project",
+          "type": "bool",
+          "default": "false",
+          "description": "Write project config (./.cortex/config.json) instead of user config"
+        },
+        {
+          "name": "study",
+          "type": "string",
+          "description": "Pin the study model"
+        },
+        {
+          "name": "yes",
+          "type": "bool",
+          "default": "false",
+          "description": "Non-interactive: take detected defaults, overwrite without asking"
+        }
+      ]
+    },
+    {
       "name": "status",
       "description": "Show cortex status (default: one-line; --system|--memory|--json|--expand for views)",
       "version": "0.1.0",

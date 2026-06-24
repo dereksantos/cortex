@@ -87,7 +87,7 @@ func main() {
 		if cmd := commands.Get(command); cmd != nil {
 			runCommand(command, cmd, &commands.Context{Args: os.Args[2:]})
 		}
-	case "init", "install", "uninstall", "projects", "study":
+	case "init", "install", "uninstall", "projects", "study", "setup":
 		if cmd := commands.Get(command); cmd != nil {
 			// Study reads cfg.DefaultGenerationModel() when --model is
 			// blank; load config best-effort (nil-safe if absent).
@@ -299,6 +299,7 @@ Usage:
 
 Commands:
   init           Initialize Cortex in current directory
+  setup          Configure model bindings (user-level; --project to scope, --free for zero-cost)
   install        Install Cortex hooks for Claude Code
   uninstall      Remove Cortex hooks (--purge to also delete .cortex/)
   projects       List registered projects
