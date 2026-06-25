@@ -23,9 +23,12 @@ import (
 const navMaxIterations = 10
 
 // navMapBudget caps the seed map so orientation never dominates the navigator's
-// own context. Large trees are truncated; the navigator can project_index a
-// subdirectory to drill in.
-const navMapBudget = 6000
+// own context. Sized to hold a large single file's full declaration skeleton
+// (~one compact line per decl) — truncating it hides the file's back half and
+// forces sequential scanning instead of targeted reads (measured on
+// cmd/loop/main.go, whose 7.3KB skeleton was clipped at 6KB). A huge directory
+// tree still truncates, with a note to project_index a subdirectory to drill in.
+const navMapBudget = 16000
 
 // navTools is the narrow read-only surface the navigator may call: orient with
 // project_index (map), pull exact ranges with read_file. No write/edit/bash/

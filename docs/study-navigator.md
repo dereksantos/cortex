@@ -232,6 +232,29 @@ in [`working-memory.md`](working-memory.md) survives — it's the sampling
 - **Budget bound shape.** Iteration cap vs token budget vs both — recommend a small
   iteration cap + the existing no-progress guard. Keep it dead simple.
 
+## Eval findings (first live run — glm-4.7-flash, n=1, 2026-06-25)
+
+`loop study-eval nav` ran against the live fleet. Honest read — the navigator
+**works** but the eval did **not** cleanly clear, so the engine stays default:
+
+- **Goal-hit: navigator 5/5, engine 5/5** (after crediting engine read-mode).
+  The navigator reliably surfaces the goal and produces a real digest on all
+  three fixtures; the engine read-moded (raw-dumped) the two smaller files.
+- **Groundedness comparable on the medium file** (tools.go: navigator 67% vs
+  engine 71%, with tight targeted reads), but the **large file (main.go) is
+  unmeasurable** — the navigator's prose `@path:Lx-y` citations parse to claims
+  the scorer can't anchor (all "unscored"), unlike the engine's structured
+  (range, claim) citations. The comparison is not yet apples-to-apples.
+- **Large-file latency is a real risk**: main.go took **117s** (vs engine 9.8s).
+  The map-truncation bug was fixed (skeleton budget 6KB→16KB, which stopped the
+  sequential-scan fallback), but a thinking study model doing many read-rounds
+  is slow.
+
+Before the navigator can replace the engine (the phase-6 gate): (1) emit
+**structured** citations (JSON range+claim) so grounding is measurable and fair;
+(2) tame large-file latency (try thinking-off for the study model; cap reads);
+(3) run n≥3 across the fleet (incl. qwen3-4b) for signal vs variance.
+
 ## Phasing (status)
 
 1. ✅ **`map` = `project_index` + symbol spans (`EndLine`)** + ranged
