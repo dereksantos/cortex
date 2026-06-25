@@ -91,16 +91,44 @@ Capture → Filter → Store → Retrieve → Inject
 
 ## Quick Start
 
-**Prerequisites:**
-- Go 1.25+
-- Either Ollama at `http://localhost:11434` with `llama3.1:8b` (or larger) and `nomic-embed-text` pulled, **or** `ANTHROPIC_API_KEY` exported. Capture and search work without an LLM; Reflect/Dream and insight extraction need one. Models smaller than ~3B have measured below the task floor — see [docs/eval.md](docs/eval.md).
+**Prerequisites:** Go 1.25+ and a model backend. `cortex setup` picks the
+backend for you — it needs no LLM of its own.
 
 ```bash
 go build -o bin/cortex ./cmd/cortex
+./bin/cortex setup               # detect environment, write model config (~/.cortex/config.json)
 ./bin/cortex init                # one-time per project: creates .cortex/, registers project
 ./bin/cortex repl                # interactive coding loop; hosts the background ingest + Think/Dream
 ./bin/cortex code "..."          # one-shot coding turn rooted in the cwd
 ```
+
+`cortex setup` is deterministic — it probes the conventional local ports
+(Ollama `:11434`, LiteLLM `:4000`) and looks for `OPENROUTER_API_KEY` /
+`ANTHROPIC_API_KEY` in your environment, then writes a config. Pick a backend:
+
+- **Zero-cost start:** `cortex setup --free` pins free, tool-capable OpenRouter
+  models. Export `OPENROUTER_API_KEY` (a free account key works) and you're
+  running. Prompts leave your machine; choose a local backend for privacy.
+- **Local & private:** with Ollama or LiteLLM running, setup routes through it
+  — for Ollama it auto-pins installed models from `/api/tags`. No key needed,
+  nothing leaves your machine.
+- **Your own models:** `cortex setup --backend openrouter --code <model> --study <model>`,
+  or edit the written config by hand.
+
+Config is layered: `~/.cortex/config.json` (user — set once) is inherited by
+every project, and a project may override per-role in its own
+`.cortex/config.json`. API keys are referenced by env-var name (`key_env`) and
+never written to disk.
+
+### Two ways to get set up
+
+- **Hand it to your agent.** Point Claude Code, Cursor, or whatever agent you
+  already use at this section. The config schema is small and the `cortex setup`
+  flags are deterministic, so it can wire everything up for you.
+- **Let Cortex set itself up.** `cortex setup --free && cortex init && cortex repl`
+  gives you a working free agent immediately. From inside the loop, ask it to
+  refine its own setup — it has shell access and the `cortex setup` command, so
+  it can detect models, edit `~/.cortex/config.json`, and switch backends itself.
 
 `cortex install` exists as a compatibility verb (it now just ensures
 `.cortex/` is initialized and reports local LLM availability — no
@@ -168,6 +196,7 @@ Think and Dream use activity-based budgets:
 ### Lifecycle
 
 ```bash
+cortex setup             # Configure model bindings; --free for zero-cost, --project to scope
 cortex init              # Initialize .cortex/ in current project
 cortex install           # Ensure .cortex/ exists + report LLM availability
 cortex uninstall         # Remove .cortex/ data (--purge required to delete)
@@ -234,7 +263,28 @@ cortex/
 Cortex stores data in `~/.cortex/` (global, project registry) and
 `.cortex/` (per-project, captured events + embeddings + queue).
 
-LLM providers — selection is via the `ANTHROPIC_API_KEY` env var (set → Anthropic; unset → Ollama):
+**Coding-harness models** (`repl` / `code`) are configured by `cortex setup`,
+which writes a small JSON config:
+
+```json
+{
+  "backend": { "type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY" },
+  "models": {
+    "code":  { "model": "qwen/qwen3-coder:free" },
+    "study": { "model": "openai/gpt-oss-20b:free" }
+  }
+}
+```
+
+Resolution is layered, lowest to highest precedence: `~/.cortex/config.json`
+(user) → `./.cortex/config.json` (project) → `CORTEX_BACKEND` env. A project
+inherits the user config and overrides only what it pins — field by field, so
+overriding `code.model` keeps the inherited endpoint and key. Auth is resolved
+at call time from `key_env` (an env-var name, the portable default) or
+`key_service` (a macOS keychain item); the secret is never written to config.
+
+**Background cognition** (capture/analyze, Think/Dream) is a separate subsystem
+selected via the `ANTHROPIC_API_KEY` env var (set → Anthropic; unset → Ollama):
 - **Ollama**: local inference at `http://localhost:11434`. Free. Recommended models: `llama3.1:8b` for analysis and `nomic-embed-text` for embeddings. Smaller models have measured below the task floor; the configured `ollama_model` in `.cortex/config.json` must actually be pulled or the REPL's background cognition will silently produce zero insights.
 - **Anthropic**: set `ANTHROPIC_API_KEY`. Uses `claude-haiku-4-5` for analysis. Embeddings still go through Ollama (`nomic-embed-text`); there is no Anthropic embedding fallback.
 - **No LLM**: capture and search still work; Reflect/Dream and insight extraction are skipped.
