@@ -58,7 +58,7 @@ func Build(root string) (*Index, error) {
 	// A single-file target renders as a full declaration skeleton, not a tree.
 	if !info.IsDir() {
 		ix.SingleFile = true
-		ix.Files = append(ix.Files, indexFile(abs, filepath.Base(abs)))
+		ix.Files = append(ix.Files, indexFile(abs, filepath.Base(abs), true))
 		return ix, nil
 	}
 
@@ -79,7 +79,7 @@ func Build(root string) (*Index, error) {
 		if relErr != nil {
 			return nil
 		}
-		ix.Files = append(ix.Files, indexFile(path, filepath.ToSlash(rel)))
+		ix.Files = append(ix.Files, indexFile(path, filepath.ToSlash(rel), false))
 		return nil
 	})
 	if err != nil {
@@ -89,17 +89,24 @@ func Build(root string) (*Index, error) {
 	return ix, nil
 }
 
-// indexFile reads one file, counting lines and extracting Go symbols. A read or
+// indexFile reads one file, counting lines and extracting symbols. Go files use
+// the go/ast path always (cheap, and the dir view shows them). Non-Go files get
+// a tiered structural outline only when full is set — i.e. a single-file map,
+// where the outline is the whole point; a directory walk skips it (the dir view
+// shows Go symbols only, so per-file outlines would be wasted work). A read or
 // parse failure degrades to a listing with no symbols — the file still appears.
-func indexFile(abs, rel string) File {
+func indexFile(abs, rel string, full bool) File {
 	f := File{Path: rel}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return f
 	}
 	f.Lines = countLines(data)
-	if strings.HasSuffix(abs, ".go") {
+	switch {
+	case strings.HasSuffix(abs, ".go"):
 		f.Symbols = goSymbols(data)
+	case full:
+		f.Symbols = outlineSymbols(abs, data)
 	}
 	return f
 }
