@@ -327,6 +327,203 @@ func shortName(p string) string {
 	return p
 }
 
+// --- nav eval: navigator vs sampling engine ----------------------------
+
+// navCase is a fixture plus the keywords a correct digest should surface, so
+// the nav eval measures "did it find the goal" alongside latency and
+// groundedness. Single-file fixtures only: the navigator emits inline
+// @path:line citations scored against one file's content.
+type navCase struct {
+	Path string
+	Goal string
+	Want []string
+}
+
+var navEvalCases = []navCase{
+	{"cmd/loop/main.go", "how is REPL input dispatched to commands and the agent", []string{"Resolve", "tool"}},
+	{"cmd/loop/tools/tools.go", "what tools are available to the agent and how are they registered", []string{"Execute", "All"}},
+	{"docs/loop-production-harness.md", "what is the plan to make cmd/loop a production harness", []string{"harness"}},
+}
+
+// navEvalRow is one measured run of either arm over a case.
+type navEvalRow struct {
+	Arm             string  `json:"arm"` // "engine" | "navigator"
+	Path            string  `json:"path"`
+	Goal            string  `json:"goal"`
+	Model           string  `json:"model"`
+	Rep             int     `json:"rep"`
+	Stopped         string  `json:"stopped,omitempty"`
+	LatencyMS       int64   `json:"latency_ms"`
+	Citations       int     `json:"citations"`
+	Grounded        int     `json:"grounded"`
+	Failed          int     `json:"failed"`
+	Unscored        int     `json:"unscored"`
+	GroundednessPct float64 `json:"groundedness_pct"`
+	GoalHits        int     `json:"goal_hits"` // how many Want keywords appeared
+	GoalWant        int     `json:"goal_want"`
+	DigestChars     int     `json:"digest_chars"`
+	Error           string  `json:"error,omitempty"`
+}
+
+// navCiteRe matches the navigator's inline citations (@path:start-end, end
+// optional). The path is captured but unused in single-file scoring — the range
+// is checked against the case's one file.
+var navCiteRe = regexp.MustCompile(`@([\w./-]+):(\d+)(?:-(\d+))?`)
+
+// parseNavCitations turns the navigator's inline @path:start-end refs into
+// study.Citation structs so the shared groundedness scorer can grade them. The
+// claim is the text from the previous sentence break up to the ref, so the
+// scorer's anchor extraction (symbol names, words) has the surrounding prose to
+// match against the cited lines.
+func parseNavCitations(digest string) []study.Citation {
+	var cits []study.Citation
+	for _, m := range navCiteRe.FindAllStringSubmatchIndex(digest, -1) {
+		start := atoiSafe(digest[m[4]:m[5]])
+		end := start
+		if m[6] >= 0 {
+			end = atoiSafe(digest[m[6]:m[7]])
+		}
+		claim := strings.TrimSpace(digest[sentenceStart(digest, m[0]):m[0]])
+		cits = append(cits, study.Citation{
+			RelPath: digest[m[2]:m[3]], LineStart: start, LineEnd: end, Claim: claim,
+		})
+	}
+	return cits
+}
+
+// sentenceStart returns the index just after the nearest preceding sentence
+// terminator (. ! ? or newline) before pos — the start of the claim a citation
+// closes.
+func sentenceStart(s string, pos int) int {
+	i := strings.LastIndexAny(s[:pos], ".!?\n")
+	if i < 0 {
+		return 0
+	}
+	return i + 1
+}
+
+func atoiSafe(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// countGoalHits reports how many of want's keywords appear in text
+// (case-insensitive) — the soft "did it surface the goal" signal.
+func countGoalHits(text string, want []string) int {
+	lower := strings.ToLower(text)
+	hits := 0
+	for _, w := range want {
+		if strings.Contains(lower, strings.ToLower(w)) {
+			hits++
+		}
+	}
+	return hits
+}
+
+// measureNavArm runs the map-first navigator over a case and scores its inline
+// citations and goal hits.
+func measureNavArm(cs *CortexSession, c navCase, rep int) navEvalRow {
+	row := navEvalRow{Arm: "navigator", Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Rep: rep, GoalWant: len(c.Want)}
+	start := time.Now()
+	digest, err := cs.runNavigator(context.Background(), c.Path, c.Goal)
+	row.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		row.Error = err.Error()
+		return row
+	}
+	row.DigestChars = len(digest)
+	row.GoalHits = countGoalHits(digest, c.Want)
+	res := study.StudyLoopResult{Citations: parseNavCitations(digest)}
+	if data, derr := os.ReadFile(c.Path); derr == nil {
+		row.Grounded, row.Failed, row.Unscored = scoreGroundedness(string(data), langForPath(c.Path), res)
+		row.Citations = row.Grounded + row.Failed + row.Unscored
+		if g := row.Grounded + row.Failed; g > 0 {
+			row.GroundednessPct = 100 * float64(row.Grounded) / float64(g)
+		}
+	}
+	return row
+}
+
+// measureEngineArm runs the sampling engine (single pass, auto density) over a
+// case and scores it with the same metrics, for an apples-to-apples comparison.
+func measureEngineArm(cs *CortexSession, c navCase, rep int) navEvalRow {
+	row := navEvalRow{Arm: "engine", Path: c.Path, Goal: c.Goal, Model: cs.Study.Model, Rep: rep, GoalWant: len(c.Want)}
+	start := time.Now()
+	res, err := cs.runStudy(context.Background(), c.Path, c.Goal, 1, 0, 0, nil, 0, false)
+	row.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		row.Error = err.Error()
+		return row
+	}
+	row.Stopped = res.Stopped
+	digest := strings.Join(res.Digests, "\n")
+	row.DigestChars = len(digest)
+	row.GoalHits = countGoalHits(digest, c.Want)
+	if data, derr := os.ReadFile(c.Path); derr == nil {
+		row.Grounded, row.Failed, row.Unscored = scoreGroundedness(string(data), langForPath(c.Path), res)
+		row.Citations = row.Grounded + row.Failed + row.Unscored
+		if g := row.Grounded + row.Failed; g > 0 {
+			row.GroundednessPct = 100 * float64(row.Grounded) / float64(g)
+		}
+	}
+	return row
+}
+
+// runStudyEvalNav compares the map-first navigator against the sampling engine
+// on the same fixtures: latency, citation groundedness, and goal-keyword hits.
+// Both arms run regardless of CORTEX_STUDY_NAV (the runner calls each path
+// directly). Reps overridable via CORTEX_NAV_REPS. Run: `loop study-eval nav`.
+func runStudyEvalNav() {
+	session := NewCortexSession()
+	reps := envInt("CORTEX_NAV_REPS", 1)
+
+	type agg struct {
+		lat, gp     []float64
+		g, f, u     int
+		hits, want  int
+		dchar, errs int
+	}
+	sums := map[string]*agg{"engine": {}, "navigator": {}}
+	add := func(row navEvalRow) {
+		a := sums[row.Arm]
+		if row.Error != "" {
+			a.errs++
+			return
+		}
+		a.lat = append(a.lat, float64(row.LatencyMS)/1000)
+		if row.Grounded+row.Failed > 0 {
+			a.gp = append(a.gp, row.GroundednessPct)
+		}
+		a.g, a.f, a.u = a.g+row.Grounded, a.f+row.Failed, a.u+row.Unscored
+		a.hits, a.want = a.hits+row.GoalHits, a.want+row.GoalWant
+		a.dchar += row.DigestChars
+	}
+
+	for _, c := range navEvalCases {
+		for rep := 0; rep < reps; rep++ {
+			for _, row := range []navEvalRow{measureEngineArm(session, c, rep), measureNavArm(session, c, rep)} {
+				b, _ := json.Marshal(row)
+				fmt.Println(string(b)) // JSONL — one row per (arm, case, rep)
+				add(row)
+			}
+		}
+	}
+
+	fmt.Printf("\n--- study-eval navigator vs engine (model: %s, n=%d/case, %d cases) ---\n",
+		session.Study.Model, reps, len(navEvalCases))
+	fmt.Printf("%-10s %7s %8s %9s %8s %5s\n", "arm", "lat(s)", "ground%", "grounded", "goalHit", "errs")
+	for _, arm := range []string{"engine", "navigator"} {
+		a := sums[arm]
+		gp := 0.0
+		if a.g+a.f > 0 {
+			gp = 100 * float64(a.g) / float64(a.g+a.f)
+		}
+		fmt.Printf("%-10s %7.1f %7.0f%% %4d/%-4d %4d/%-4d %5d\n",
+			arm, median(a.lat), gp, a.g, a.g+a.f, a.hits, a.want, a.errs)
+	}
+	fmt.Println("\nReads: lower lat + similar/higher ground% and goalHit ⇒ navigator wins.")
+}
+
 // wmEvalRow is one multi-pass working-memory run (findings on or off).
 type wmEvalRow struct {
 	Path            string  `json:"path"`

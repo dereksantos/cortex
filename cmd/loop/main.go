@@ -3356,6 +3356,10 @@ func main() {
 			runStudyEvalWM()
 			return
 		}
+		if len(os.Args) >= 3 && os.Args[2] == "nav" {
+			runStudyEvalNav()
+			return
+		}
 		runStudyEval()
 		return
 	}
