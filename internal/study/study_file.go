@@ -190,18 +190,18 @@ type Deepen struct {
 
 // StudyResponse is the tool contract output (see docs/study-file.md).
 type StudyResponse struct {
-	Mode        string         `json:"mode"` // "read" | "study"
-	ReadContent string         `json:"-"`    // populated when Mode=="read"
-	Digest      string         `json:"digest,omitempty"`
-	Citations   []Citation     `json:"citations,omitempty"`
-	Coverage    Coverage       `json:"coverage"`
-	Leads       []Lead         `json:"leads,omitempty"`
+	Mode        string     `json:"mode"` // "read" | "study"
+	ReadContent string     `json:"-"`    // populated when Mode=="read"
+	Digest      string     `json:"digest,omitempty"`
+	Citations   []Citation `json:"citations,omitempty"`
+	Coverage    Coverage   `json:"coverage"`
+	Leads       []Lead     `json:"leads,omitempty"`
 	// UncoveredFiles lists relpaths that had chunks in the boundary but
 	// none sampled this pass — the gaps a deepening pass should target.
 	// Empty in read mode and when every file was sampled.
-	UncoveredFiles []string `json:"uncovered_files,omitempty"`
-	Deepen         Deepen   `json:"deepen"`
-	Exhausted      bool     `json:"exhausted"`
+	UncoveredFiles []string       `json:"uncovered_files,omitempty"`
+	Deepen         Deepen         `json:"deepen"`
+	Exhausted      bool           `json:"exhausted"`
 	Sampled        []SampledChunk `json:"-"` // mechanical sample (checkpoint/inference source)
 	// FindingRelays counts citations this pass admitted by relaying a prior
 	// finding's grounded citation (admitFindingRelays) — a continuity signal for

@@ -317,13 +317,13 @@ func TestStudyDir_LargeFileSampled(t *testing.T) {
 // repo root must not sample test/evals/projects/*/server.
 func TestStudyDir_ScopeToRootModule_ExcludesNestedModules(t *testing.T) {
 	root := writeDirFixture(t, map[string]string{
-		"go.mod":               "module example.com/m\n",
-		"main.go":              "package main\nfunc main() {}\n",
-		"src/small.go":         "package src\nvar _ = 1\n",
-		"nested/go.mod":        "module example.com/m/nested\n",
-		"nested/server.go":     "package nested\nfunc Serve() {}\n",
-		"nested/deep/go.mod":   "module example.com/m/nested/deep\n",
-		"nested/deep/x.go":     "package deep\nvar _ = 1\n",
+		"go.mod":             "module example.com/m\n",
+		"main.go":            "package main\nfunc main() {}\n",
+		"src/small.go":       "package src\nvar _ = 1\n",
+		"nested/go.mod":      "module example.com/m/nested\n",
+		"nested/server.go":   "package nested\nfunc Serve() {}\n",
+		"nested/deep/go.mod": "module example.com/m/nested/deep\n",
+		"nested/deep/x.go":   "package deep\nvar _ = 1\n",
 	})
 	out, err := UniversalAnalyzer{}.Analyze(context.Background(), root, nil)
 	if err != nil {
@@ -406,12 +406,12 @@ func TestStudyDir_ScopeToRootModule_NoMarkerAtRootIsNoOp(t *testing.T) {
 // excluded. This is how the agent studies a specific subproject.
 func TestStudyDir_ScopeToRootModule_StudyingNestedModuleDirectly(t *testing.T) {
 	root := writeDirFixture(t, map[string]string{
-		"go.mod":             "module example.com/m\n",
-		"main.go":            "package main\nfunc main() {}\n",
-		"sub/go.mod":         "module example.com/m/sub\n",
-		"sub/a.go":           "package sub\nvar _ = 1\n",
-		"sub/inner/go.mod":   "module example.com/m/sub/inner\n",
-		"sub/inner/b.go":     "package inner\nvar _ = 1\n",
+		"go.mod":           "module example.com/m\n",
+		"main.go":          "package main\nfunc main() {}\n",
+		"sub/go.mod":       "module example.com/m/sub\n",
+		"sub/a.go":         "package sub\nvar _ = 1\n",
+		"sub/inner/go.mod": "module example.com/m/sub/inner\n",
+		"sub/inner/b.go":   "package inner\nvar _ = 1\n",
 	})
 	subRoot := filepath.Join(root, "sub")
 	out, err := UniversalAnalyzer{}.Analyze(context.Background(), subRoot, nil)
