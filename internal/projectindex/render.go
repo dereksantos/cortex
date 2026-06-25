@@ -90,13 +90,24 @@ func renderSymbols(syms []Symbol) string {
 }
 
 // renderSkeleton is the single-file view the "what are the seams" use case wants:
-// every top-level declaration in file order, one per line, with its line number
-// and kind — a cleaner native form of `grep -nE '^(func|type|const|var)'`.
+// every top-level declaration in file order, one per line, with its line SPAN
+// and kind — a cleaner native form of `grep -nE '^(func|type|const|var)'`. The
+// span (L3-8, not just L3) is what lets a navigator issue a precise ranged read
+// of exactly one declaration instead of guessing how far it extends.
 func renderSkeleton(f File) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s — %d lines, %d declarations\n\n", f.Path, f.Lines, len(f.Symbols))
 	for _, s := range f.Symbols {
-		fmt.Fprintf(&b, "  %-6s %-5s %s\n", fmt.Sprintf("L%d", s.Line), s.Kind, s.Name)
+		fmt.Fprintf(&b, "  %-9s %-5s %s\n", lineSpan(s), s.Kind, s.Name)
 	}
 	return b.String()
+}
+
+// lineSpan renders a symbol's location as "L3-8", or "L3" when the declaration
+// is a single line (or EndLine is unset, e.g. a non-Go symbol).
+func lineSpan(s Symbol) string {
+	if s.EndLine > s.Line {
+		return fmt.Sprintf("L%d-%d", s.Line, s.EndLine)
+	}
+	return fmt.Sprintf("L%d", s.Line)
 }

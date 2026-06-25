@@ -131,12 +131,15 @@ func newTool(name, desc string, params map[string]any) Tool {
 // --- Tool declarations --------------------------------------------------
 
 var ReadFile = newTool(FunctionReadFile,
-	"Read the whole contents of a file. Best for files that fit the curation "+
-		"budget. A too-large Go file returns its declaration skeleton (funcs/types/"+
-		"const/var with line numbers) instead of the content, so you can orient and "+
-		"then study a region; a too-large non-Go file redirects to study.",
+	"Read a file, or an exact line range of one. With just a path: the whole "+
+		"file (a too-large Go file returns its declaration skeleton instead, a "+
+		"too-large non-Go file redirects to study). With start/end: exactly those "+
+		"1-indexed lines, which bypasses the size limit — the precise way to pull "+
+		"one declaration after a project_index/study points you at its line span.",
 	objectSchema(map[string]any{
-		"path": stringProp("Path to the file to read, relative to the working directory."),
+		"path":  stringProp("Path to the file to read, relative to the working directory."),
+		"start": map[string]any{"type": "integer", "description": "Optional: 1-indexed first line to read. When set, only the line range is returned (the size limit does not apply)."},
+		"end":   map[string]any{"type": "integer", "description": "Optional: 1-indexed last line (inclusive). Defaults to a bounded window after start when omitted."},
 	}, "path"))
 
 var WriteFile = newTool(FunctionWriteFile,
@@ -448,10 +451,30 @@ func RenderStudyResult(res study.StudyLoopResult) string {
 
 // --- read_file ----------------------------------------------------------
 
+// DefaultRangeLines is the window read_file returns when start is given without
+// end — enough to see a declaration plus context without the model having to
+// name an exact end. A range is bounded by construction, so it bypasses the
+// whole-file size gate.
+const DefaultRangeLines = 200
+
+// MaxRangeLines caps a single ranged read so a model can't ask for lines
+// 1–1000000 and pull a whole large file back through the gate it bypassed.
+const MaxRangeLines = 800
+
 func (tc ToolCall) ReadFile(deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
+	}
+	// Ranged read: exact 1-indexed lines, bypassing the size gate (a range is
+	// bounded). This is the navigator's precise pull — project_index/study hands
+	// back a line span, and read_file(path, start, end) reads exactly it.
+	if start, ok := tc.IntArg("start"); ok && start > 0 {
+		end, hasEnd := tc.IntArg("end")
+		if !hasEnd || end < start {
+			end = start + DefaultRangeLines - 1
+		}
+		return tc.readRange(path, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -480,6 +503,37 @@ func (tc ToolCall) ReadFile(deps ToolDeps) (string, error) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// readRange returns lines [start,end] (1-indexed, inclusive) of a file, capped
+// at MaxRangeLines. The output carries a "@path:start-end" header so the model
+// sees exactly which lines it got (and a truncation note when the request was
+// clamped). Lines beyond EOF are silently dropped — asking past the end yields
+// what exists, not an error.
+func (tc ToolCall) readRange(path string, start, end int) (string, error) {
+	if end-start+1 > MaxRangeLines {
+		end = start + MaxRangeLines - 1
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	// A file ending in "\n" splits to a trailing "" that isn't a real line; drop
+	// it so line numbers match the file's (and an EOF clamp lands correctly).
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	if start > len(lines) {
+		return "", fmt.Errorf("%s has %d lines; start %d is past the end", path, len(lines), start)
+	}
+	hi := end
+	if hi > len(lines) {
+		hi = len(lines)
+	}
+	printToolAction(fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
+	body := strings.Join(lines[start-1:hi], "\n")
+	return fmt.Sprintf("@%s:%d-%d\n%s", path, start, hi, body), nil
 }
 
 // goFileSkeleton returns the declaration skeleton of a Go file (every top-level

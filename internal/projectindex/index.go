@@ -21,9 +21,10 @@ import (
 
 // Symbol is one top-level declaration worth navigating to.
 type Symbol struct {
-	Name string // "Foo" for a plain decl, "(*T) Method" for a method
-	Kind string // "func" | "type"
-	Line int    // 1-indexed line of the declaration
+	Name    string // "Foo" for a plain decl, "(*T) Method" for a method
+	Kind    string // "func" | "type"
+	Line    int    // 1-indexed line of the declaration
+	EndLine int    // 1-indexed last line of the declaration (== Line for one-liners)
 }
 
 // File is one indexed file: its path, size, and (for Go) symbols.
@@ -122,18 +123,18 @@ func goSymbols(src []byte) []Symbol {
 			if v.Recv != nil && len(v.Recv.List) > 0 {
 				name = "(" + recvType(v.Recv.List[0].Type) + ") " + v.Name.Name
 			}
-			syms = append(syms, Symbol{Name: name, Kind: "func", Line: fset.Position(v.Pos()).Line})
+			syms = append(syms, Symbol{Name: name, Kind: "func", Line: fset.Position(v.Pos()).Line, EndLine: fset.Position(v.End()).Line})
 		case *ast.GenDecl:
 			switch v.Tok {
 			case token.TYPE:
 				for _, spec := range v.Specs {
 					if ts, ok := spec.(*ast.TypeSpec); ok {
-						syms = append(syms, Symbol{Name: ts.Name.Name, Kind: "type", Line: fset.Position(ts.Pos()).Line})
+						syms = append(syms, Symbol{Name: ts.Name.Name, Kind: "type", Line: fset.Position(ts.Pos()).Line, EndLine: fset.Position(ts.End()).Line})
 					}
 				}
 			case token.CONST, token.VAR:
 				if name := valueNames(v); name != "" {
-					syms = append(syms, Symbol{Name: name, Kind: v.Tok.String(), Line: fset.Position(v.Pos()).Line})
+					syms = append(syms, Symbol{Name: name, Kind: v.Tok.String(), Line: fset.Position(v.Pos()).Line, EndLine: fset.Position(v.End()).Line})
 				}
 			}
 		}

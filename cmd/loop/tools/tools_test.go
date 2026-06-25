@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,49 @@ func TestDefaultStudyPasses(t *testing.T) {
 				t.Errorf("defaultStudyPasses(%s) = %d, want %d", c.name, got, c.want)
 			}
 		})
+	}
+}
+
+func TestReadFileRange(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f.txt")
+	// 10 lines: "L1".."L10".
+	var sb strings.Builder
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&sb, "L%d\n", i)
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read := func(args string) (string, error) {
+		tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: args}}
+		return tc.ReadFile(headlessDeps{})
+	}
+
+	// Explicit range returns exactly those lines with a header.
+	out, err := read(fmt.Sprintf(`{"path":%q,"start":3,"end":5}`, file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, "@"+file+":3-5\n") {
+		t.Errorf("missing range header; got:\n%s", out)
+	}
+	if !strings.Contains(out, "L3\nL4\nL5") || strings.Contains(out, "L2") || strings.Contains(out, "L6") {
+		t.Errorf("range body wrong; got:\n%s", out)
+	}
+
+	// end past EOF clamps to the last line, not an error.
+	out, err = read(fmt.Sprintf(`{"path":%q,"start":9,"end":100}`, file))
+	if err != nil {
+		t.Fatalf("clamp to EOF should succeed: %v", err)
+	}
+	if !strings.Contains(out, ":9-10\n") || !strings.Contains(out, "L10") {
+		t.Errorf("expected lines 9-10; got:\n%s", out)
+	}
+
+	// start past EOF is an error.
+	if _, err := read(fmt.Sprintf(`{"path":%q,"start":50}`, file)); err == nil {
+		t.Error("start past EOF should error")
 	}
 }
 

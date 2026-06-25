@@ -122,6 +122,36 @@ func TestSingleFileSkeleton(t *testing.T) {
 	}
 }
 
+func TestSymbolSpans(t *testing.T) {
+	dir := t.TempDir()
+	// Render spans a multi-line declaration; New is a one-liner.
+	src := "package p\n\ntype Server struct {\n\tname string\n\tport int\n}\n\nfunc New() *Server { return nil }\n"
+	p := filepath.Join(dir, "srv.go")
+	if err := os.WriteFile(p, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Symbol{}
+	for _, s := range ix.Files[0].Symbols {
+		byName[s.Name] = s
+	}
+	// type Server spans L3-6 (struct{ … } across four lines).
+	if s := byName["Server"]; s.Line != 3 || s.EndLine != 6 {
+		t.Errorf("Server span = L%d-%d, want L3-6", s.Line, s.EndLine)
+	}
+	// func New is a single line (L8).
+	if s := byName["New"]; s.Line != 8 || s.EndLine != 8 {
+		t.Errorf("New span = L%d-%d, want L8-8", s.Line, s.EndLine)
+	}
+	// The skeleton renders the multi-line span as a range.
+	if out := ix.Render(); !strings.Contains(out, "L3-6") {
+		t.Errorf("skeleton missing span L3-6; got:\n%s", out)
+	}
+}
+
 func TestDirViewOmitsConstVar(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.go"),
