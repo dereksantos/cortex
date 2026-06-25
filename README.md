@@ -1,331 +1,181 @@
-# Cortex
+# Cortex / `loop`
 
 [![CI](https://github.com/dereksantos/cortex/actions/workflows/test.yml/badge.svg)](https://github.com/dereksantos/cortex/actions/workflows/test.yml)
 [![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**A coding harness with a continuous learning loop.** Cortex owns the
-coding loop (`cortex code` / `cortex repl` / `cortex run`) and runs
-*Think* and *Dream* in the background between turns. Small local models
-do the continuous integration work; a frontier model can be invoked at
-query time and receive pre-computed context.
+**An interactive coding agent for small and local models, with working
+memory built in.** `loop` is a single-binary REPL coding harness: it runs
+an agentic tool loop, captures what each turn did, and curates its own
+context window so a long session stays coherent without blowing the
+context budget. It's designed to get good work out of small/local models
+by managing context for them, not by reaching for a bigger model.
 
-> **Status: Experimental.** The core capture → store → retrieve → inject
-> pipeline works and is in daily use on the author's machine, but Cortex
-> is a research-grade tool, not a polished product. Pre-DAG-protocol
-> baselines record ABR 0.586 (recorded in `docs/eval-journal.md`); the
-> DAG ops landing under audit slice K + the eval migration under E are
-> what move that upward. Small Ollama models (≤3B params) have measured
-> below the floor for insight extraction — `llama3.1:8b` or larger, or
-> `ANTHROPIC_API_KEY`, is recommended. Expect rough edges, breaking
-> changes, and bugs that may require reading code to diagnose.
+> **Status: Experimental.** Research-grade and in daily use on the author's
+> machine, not a polished product. Expect rough edges and breaking changes.
+> The project was recently slimmed to center on `cmd/loop`; the prior
+> `cortex` CLI, eval framework, and Claude-Code host integration were
+> removed (preserved in [`docs/archive.md`](docs/archive.md) and git
+> history).
 
-## What Cortex Does
+## What `loop` does
 
-Cortex performs **continuous context integration** as part of its own
-coding loop — observing events as they happen, reconciling new
-information against existing knowledge, and surfacing relevant context
-on the next turn. It runs as a single binary; the REPL hosts the
-long-lived process and drives the background cognition (Think, Dream)
-on its idle hook. Decisions, patterns, and corrections are stored
-through fast mechanical retrieval (Reflex) backed by an asynchronous
-agentic loop (Reflect, Resolve, Think, Dream).
+The core loop: **read input → run agentic tool calls → capture the turn →
+curate context → reply.** Three things make it more than a thin wrapper:
 
-The role sits within the framework of cognitive architectures for
-language agents (CoALA) and is closely related to sleep-time /
-background-agent patterns (Letta) and memory-evolution approaches
-(A-Mem). Two architectural commitments shape Cortex's particular
-implementation:
+- **Working memory.** Instead of truncating history when the context
+  window fills, `loop` *studies* the conversation into a curated digest
+  (salience-ranked, with cited `file:line` ranges) and continues from
+  that. Compaction fires automatically at ~80% context, or on `/compact`.
+- **Per-turn capture.** Every turn records what it touched — files edited,
+  commands run, the final answer — to an append-only journal, mechanically
+  and without blocking the turn. A background pass distills durable
+  insights. Retrieval injects relevant prior context at turn start.
+- **The `study` tool.** A size-adaptive reader: small targets are inlined
+  whole; large files/directories are chunked, boundary-snapped, and
+  curated against your goal so the model sees signal, not raw bytes.
 
-**Inverse activity gradient on background processing.** Think runs
-while you're actively working at *reduced* budget, doing only what
-spare cycles allow. Dream runs while you're idle and *grows* with idle
-time, capped at a configurable maximum. This refines the binary
-active/idle split common in sleep-time approaches with a smooth
-response to host activity. Both modes are bounded by design.
+## Quick start
 
-**Mechanical foreground with a latency target.** Reflex aims to keep
-retrieval on the critical path fast — <20ms is the design target, with
-no LLM call on the foreground path. Agentic processing (Reflect,
-Resolve, Think, Dream) runs off-path and feeds Reflex via cached
-artifacts. This is an active engineering target, not a number that's
-been pinned across the eval corpus.
-
-Full positioning — lineage, concurrent work, falsification — is in
-[docs/learning-harness.md](docs/learning-harness.md).
-
-## Problem
-
-Coding harnesses waste tokens. Every session re-discovers past
-decisions, re-reads files already understood, and re-establishes
-context that existed yesterday. This token waste compounds: longer
-projects mean more redundant context, higher costs, slower responses.
-
-- **Re-discovered decisions**: "We use JWT" gets explained turn after turn
-- **Redundant file reads**: The same architecture files get read and re-read
-- **Repeated context**: Corrections, patterns, constraints re-stated manually
-- **No measurement**: No way to know if injected context actually reduces downstream token use
-
-Cortex addresses this with a shared context pipeline that reduces token
-costs over time through semantic retrieval, budget-bounded cognitive
-modes, and the ABR metric for measurable context quality.
-
-## Solution: A Context Pipeline That Reduces Token Costs Over Time
-
-```
-Capture → Filter → Store → Retrieve → Inject
-   │         │        │         │         │
-  <20ms    Signal   SQLite   Embeddings  Format
-  hooks    vs noise  + vec    + rerank   for LLM
-```
-
-**Capture**: Record events to the append-only journal (capture writer-class), fsync per entry.
-
-**Filter**: Extract durable context—decisions, corrections, patterns. Ignore noise.
-
-**Store**: Immutable event log + embeddings for semantic search.
-
-**Retrieve**: Fast mechanical lookup (embeddings) + optional LLM reranking.
-
-**Inject**: Format context for consumption by the current turn.
-
-## Quick Start
-
-**Prerequisites:** Go 1.25+ and a model backend. `cortex setup` picks the
-backend for you — it needs no LLM of its own.
+**Prerequisites:** Go 1.25+ and a model backend — a local OpenAI-compatible
+endpoint (Ollama at `:11434`, LiteLLM at `:4000`, LM Studio, vLLM), or an
+OpenRouter / Anthropic key.
 
 ```bash
-go build -o bin/cortex ./cmd/cortex
-./bin/cortex setup               # detect environment, write model config (~/.cortex/config.json)
-./bin/cortex init                # one-time per project: creates .cortex/, registers project
-./bin/cortex repl                # interactive coding loop; hosts the background ingest + Think/Dream
-./bin/cortex code "..."          # one-shot coding turn rooted in the cwd
+go build -o bin/loop ./cmd/loop      # build
+
+# point at a backend (any one of):
+export CORTEX_BACKEND=http://localhost:11434      # local OpenAI-compatible
+export OPENROUTER_API_KEY=...                      # or a hosted backend
+
+./bin/loop                            # interactive REPL (fresh session)
+./bin/loop resume                     # resume the latest session
 ```
 
-`cortex setup` is deterministic — it probes the conventional local ports
-(Ollama `:11434`, LiteLLM `:4000`) and looks for `OPENROUTER_API_KEY` /
-`ANTHROPIC_API_KEY` in your environment, then writes a config. Pick a backend:
+Sessions persist to `.cortex/sessions/<id>.jsonl`. The agent reads an
+`AGENTS.md` from the repo root if present, and has access to the tools
+below.
 
-- **Zero-cost start:** `cortex setup --free` pins free, tool-capable OpenRouter
-  models. Export `OPENROUTER_API_KEY` (a free account key works) and you're
-  running. Prompts leave your machine; choose a local backend for privacy.
-- **Local & private:** with Ollama or LiteLLM running, setup routes through it
-  — for Ollama it auto-pins installed models from `/api/tags`. No key needed,
-  nothing leaves your machine.
-- **Your own models:** `cortex setup --backend openrouter --code <model> --study <model>`,
-  or edit the written config by hand.
-
-Config is layered: `~/.cortex/config.json` (user — set once) is inherited by
-every project, and a project may override per-role in its own
-`.cortex/config.json`. API keys are referenced by env-var name (`key_env`) and
-never written to disk.
-
-### Two ways to get set up
-
-- **Hand it to your agent.** Point Claude Code, Cursor, or whatever agent you
-  already use at this section. The config schema is small and the `cortex setup`
-  flags are deterministic, so it can wire everything up for you.
-- **Let Cortex set itself up.** `cortex setup --free && cortex init && cortex repl`
-  gives you a working free agent immediately. From inside the loop, ask it to
-  refine its own setup — it has shell access and the `cortex setup` command, so
-  it can detect models, edit `~/.cortex/config.json`, and switch backends itself.
-
-`cortex install` exists as a compatibility verb (it now just ensures
-`.cortex/` is initialized and reports local LLM availability — no
-external editor / hook wiring is done).
-
-## Multi-Agent / CI Setup
-
-Cortex's capture and search paths work as standalone CLI tools. Any
-external process can drive them, which is enough to give multiple
-agents a shared context pool over the same `.cortex/` directory.
+## Commands
 
 ```bash
-go build -o bin/cortex ./cmd/cortex
-./bin/cortex init                                                 # one-time per project
-./bin/cortex capture --type=decision --content="Use PostgreSQL"   # record an event
-./bin/cortex ingest                                               # drain journal → DB
-./bin/cortex search "database"
+loop                       # interactive REPL (default)
+loop resume [id]           # resume a prior session (default: latest)
+loop turn [--session id] [--json] <input...>
+                           # headless single turn — for drivers/scripts; session id echoed to stderr
+loop study <path> [goal...] [passes]
+                           # one-off study of a file/dir; prints a curated digest
+loop change <start|commit|status>
+                           # git change lifecycle — one reviewable change at a time (local git only)
+loop discord               # run as a Discord bot (token from DISCORD_BOT_TOKEN)
+loop study-eval [code-grid|wm]
+                           # measure the study tool's latency / coverage / groundedness
 ```
 
-The journal (`.cortex/journal/<class>/`) uses per-segment flock for
-cross-process capture safety; storage hydrates from JSONL projection
-files. Concurrent writers may hit brief locks under heavy parallel
-writes. `cortex init` does not require any external editor / IDE
-installation.
+### REPL slash commands
 
-## Cognitive Architecture
+| Command | Purpose |
+|---|---|
+| `/compact` | Distill the conversation into a curated digest now (also auto-fires at ~80% context) |
+| `/clear` | Reset to a fresh session (system prompt + `AGENTS.md`) |
+| `/remember <text>` | Store an explicit, high-precision memory |
+| `/sessions` | List saved sessions and their ids |
+| `/model [name]` | Show role bindings, or switch the coding model |
+| `/quit`, `/exit` | Exit (also Ctrl-D); prints a resume command |
 
-Cortex uses five cognitive modes, inspired by how humans process information:
+## Tools the agent has
 
-| Mode | Type | Speed | Purpose |
-|------|------|-------|---------|
-| Reflex | Mechanical | <20ms target | "What feels related?" - embeddings, tags, recency |
-| Reflect | Agentic | 200ms+ | "Is this actually relevant?" - LLM reranking |
-| Resolve | Agentic | 50-100ms | "Should I act now or wait?" - injection decisions |
-| Think | Background | Bounded | Active-period learning using spare cycles |
-| Dream | Background | Bounded | Idle-period exploration and discovery |
+Registered in [`cmd/loop/tools/tools.go`](cmd/loop/tools/tools.go):
 
-### Retrieval Modes
+| Tool | What it does |
+|---|---|
+| `read_file` | Read a whole file. Large Go files return a declaration skeleton; large non-Go files redirect to `study`. |
+| `write_file` | Write/create a file (parent dirs implied). |
+| `edit_file` | Exact-match replace, whitespace-tolerant retry; supports atomic multi-edit. Preferred over `write_file` for edits. |
+| `study` | Size-adaptive, goal-curated reader for files/directories; returns cited `file:line` digests. |
+| `project_index` | Structural map of a project/file (tree + per-file funcs/types with line numbers) without reading contents. |
+| `bash` | Run a shell command, gated by a risk classifier (see below). |
+| `remove_path` | Delete a file/dir, confined to the workspace (`.git`/`.cortex`/root refused). |
 
-```
-Fast (mid-session):     Reflex → Resolve → Inject
-                                   ↑
-                         (cached Reflect results)
-
-Full (session start):   Reflex → Reflect → Resolve → Inject
-```
-
-**Fast mode**: Minimizes latency during active work. Reflect runs async and caches results.
-
-**Full mode**: Used at session start when accuracy matters more than speed.
-
-### Background Processing
-
-Think and Dream use activity-based budgets:
-
-| Mode | Activity Level | Budget |
-|------|----------------|--------|
-| Think | High (busy) | Low (spare cycles only) |
-| Think | Low (winding down) | Higher |
-| Dream | High (busy) | Skip entirely |
-| Dream | Low (idle) | High (capped) |
-
-## CLI Commands
-
-### Lifecycle
-
-```bash
-cortex setup             # Configure model bindings; --free for zero-cost, --project to scope
-cortex init              # Initialize .cortex/ in current project
-cortex install           # Ensure .cortex/ exists + report LLM availability
-cortex uninstall         # Remove .cortex/ data (--purge required to delete)
-cortex status            # One-line status; --system | --memory | --json | --expand
-```
-
-### Coding harness
-
-```bash
-cortex repl              # Interactive coding loop
-cortex code "..."        # One-shot coding turn
-cortex run --type=turn   # Run a DAG by type (turn | eval | think | dream | capture)
-```
-
-### Search & query
-
-```bash
-cortex search "query"                 # Cognitive retrieval over captured context
-cortex search --type=recent           # Recent events (replaces the old `recent` command)
-cortex search --type=insights [cat]   # Show insights (was: `insights`)
-cortex search --type=entities [type]  # Knowledge-graph entities (was: `entities`)
-cortex search --type=graph <type> <n> # Entity relationships (was: `graph`)
-```
-
-### Memory ops
-
-```bash
-cortex capture --type=decision --content="..."   # Record an event from the CLI
-cortex forget <id>                               # Mark context as outdated
-cortex journal {ingest|rebuild|replay|verify|show|tail|migrate}
-```
-
-### Evals
-
-```bash
-cortex eval              # Run a scenario or suite
-cortex measure           # Measure prompt quality for small context windows
-cortex calibrate         # Recompute per-op p50 cost hints from dag_traces.jsonl
-```
-
-## Project Structure
-
-```
-cortex/
-├── cmd/cortex/          # CLI entry point
-├── internal/            # Private implementation
-│   ├── capture/         # Fast event capture (<20ms target)
-│   ├── cognition/       # Five cognitive modes
-│   ├── storage/         # SQLite + search
-│   ├── processor/       # Async event processing
-│   ├── journal/         # Append-only event log (source of truth)
-│   ├── eval/v2/         # v2 eval runner + unified cell_results.jsonl sink
-│   └── eval/benchmarks/ # Wrapped benchmarks (SWE-bench, NIAH, LongMemEval, MTEB)
-└── pkg/                 # Public API
-    ├── cognition/dag/   # DAG engine + op registry
-    ├── cognition/       # Mode interfaces
-    ├── config/          # Configuration
-    ├── events/          # Event types
-    └── llm/             # LLM providers (Anthropic, Ollama, OpenRouter)
-```
+**Shell-risk gate** (`internal/shellrisk`): commands are classified Safe
+(run immediately), Risky (prompt for approval, judged in the context of
+your current request), or Blocked (refused). In headless/piped sessions,
+Risky is treated as Blocked.
 
 ## Configuration
 
-Cortex stores data in `~/.cortex/` (global, project registry) and
-`.cortex/` (per-project, captured events + embeddings + queue).
-
-**Coding-harness models** (`repl` / `code`) are configured by `cortex setup`,
-which writes a small JSON config:
+Config is layered, lowest to highest precedence:
+`~/.cortex/config.json` (user, set once) → `./.cortex/config.json`
+(project, overrides field-by-field) → `CORTEX_BACKEND` env.
 
 ```json
 {
   "backend": { "type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY" },
   "models": {
-    "code":  { "model": "qwen/qwen3-coder:free" },
-    "study": { "model": "openai/gpt-oss-20b:free" }
-  }
+    "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
+    "study": { "model": "qwen/qwen3-4b" }
+  },
+  "tools": { "allow_delete": true }
 }
 ```
 
-Resolution is layered, lowest to highest precedence: `~/.cortex/config.json`
-(user) → `./.cortex/config.json` (project) → `CORTEX_BACKEND` env. A project
-inherits the user config and overrides only what it pins — field by field, so
-overriding `code.model` keeps the inherited endpoint and key. Auth is resolved
-at call time from `key_env` (an env-var name, the portable default) or
-`key_service` (a macOS keychain item); the secret is never written to config.
+- **Roles**: `code` (the agent) and `study` (curation/compaction). Each may
+  pin its own `endpoint`, `model`, context `window`, and `thinking`
+  override.
+- **Auth** is resolved at call time from `key_env` (an env-var *name* — the
+  portable default) or `key_service` (a macOS keychain item). Secrets are
+  never written to config.
+- **Deletion**: set `tools.allow_delete: false` to drop the `remove_path`
+  tool; `tools.delete_root` confines it (default: cwd).
 
-**Background cognition** (capture/analyze, Think/Dream) is a separate subsystem
-selected via the `ANTHROPIC_API_KEY` env var (set → Anthropic; unset → Ollama):
-- **Ollama**: local inference at `http://localhost:11434`. Free. Recommended models: `llama3.1:8b` for analysis and `nomic-embed-text` for embeddings. Smaller models have measured below the task floor; the configured `ollama_model` in `.cortex/config.json` must actually be pulled or the REPL's background cognition will silently produce zero insights.
-- **Anthropic**: set `ANTHROPIC_API_KEY`. Uses `claude-haiku-4-5` for analysis. Embeddings still go through Ollama (`nomic-embed-text`); there is no Anthropic embedding fallback.
-- **No LLM**: capture and search still work; Reflect/Dream and insight extraction are skipped.
+Useful env vars: `CORTEX_BACKEND`, `CORTEX_HOME` (override config home),
+`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`, `NO_COLOR`,
+`CORTEX_LOOP_RENDER=0` (disable markdown rendering). Study experiment
+knobs: `CORTEX_STUDY_{CURATE,DIRECTED,AST}`, `CORTEX_LOOP_STUDY_WINDOW`.
 
-## Current Status
+## Project structure
 
-Active development. See [ROADMAP.md](ROADMAP.md) for the full breakdown
-and [`docs/simplification-audit.md`](docs/simplification-audit.md) for
-the in-flight simplification-to-cortex-only work.
-
-Key metrics from cognitive evaluation:
-- Reflex latency <20ms — design target, not yet reliably pinned in
-  real-world sessions
-- Pre-DAG-protocol baseline ABR = 0.586 (recorded in
-  `docs/eval-journal.md`)
-
-### Known Limitations
-
-- **Embedding bootstrap is brittle.** `cortex reembed` requires existing embeddings; events captured before `nomic-embed-text` is pulled don't get backfilled. Pull the embedding model before the first capture.
-- **Background cognition fails silently on missing models.** If the configured `ollama_model` isn't pulled, the REPL's ingest goroutine still drains events but Think/Dream produce zero insights and zero embeddings. Check `cortex status --system` if insights aren't appearing.
-- **Provider selection is env-driven, not config-driven.** The REPL must inherit `ANTHROPIC_API_KEY` in its environment to use Anthropic; restart it after exporting the key.
-
-## Documentation
-
-- [CLAUDE.md](CLAUDE.md) - Developer guide for AI assistants
-- [ROADMAP.md](ROADMAP.md) - Development status and gaps
-- [docs/abstract.md](docs/abstract.md) - Implementation paper with evaluation results
-- [docs/context-evolution.md](docs/context-evolution.md) - Theoretical foundations
-- [docs/product.md](docs/product.md) - Detailed product documentation
-- [docs/eval.md](docs/eval.md) - Evaluation methodology
-- [docs/simplification-audit.md](docs/simplification-audit.md) - Current simplification work
+```
+cortex/
+├── cmd/loop/            # the loop binary
+│   ├── main.go          # REPL, session, turn loop, dispatch
+│   ├── change.go        # git change lifecycle
+│   ├── discord.go       # Discord adapter
+│   ├── study_eval.go    # study-tool eval harness
+│   ├── tools/           # the agent's tool surface
+│   └── ui/              # rendering helpers
+├── internal/
+│   ├── study/           # working-memory: chunking, boundaries, curation
+│   ├── capture/         # fast per-turn event capture
+│   ├── journal/         # append-only event log (source of truth)
+│   ├── storage/         # local store + retrieval
+│   ├── cognition/       # retrieval-side cognition used by loop
+│   ├── projectindex/    # structural project mapping
+│   ├── shellrisk/       # command risk classifier
+│   └── measure/ projectscan/ lineedit/
+└── pkg/
+    ├── cognition/dag/   # DAG engine + op registry
+    ├── config/          # layered config
+    ├── llm/             # providers (Anthropic, Ollama, OpenRouter, OpenAI-compatible)
+    ├── events/ secret/ cliout/
+```
 
 ## Development
 
 ```bash
-go build ./cmd/cortex    # Build
-go test ./...            # Run tests
-go fmt ./...             # Format code
+go build ./cmd/loop          # build
+go test ./...                # tests (standard library only — no testify)
+./scripts/check.sh           # gofmt + go vet + golangci-lint
 ```
 
-Testing uses standard library only—no testify or external assertion libraries.
+## Documentation
+
+- [CLAUDE.md](CLAUDE.md) — guide for AI assistants working in this repo
+- [ROADMAP.md](ROADMAP.md) — direction and status
+- [docs/working-memory.md](docs/working-memory.md) — the working-memory design
+- [docs/working-memory-study.md](docs/working-memory-study.md) — study-as-working-memory
+- [docs/loop-production-harness.md](docs/loop-production-harness.md) — the plan to harden `loop`
+- [docs/archive.md](docs/archive.md) — what the system was before centering on `loop`
 
 ## License
 
