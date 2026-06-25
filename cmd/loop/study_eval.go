@@ -365,28 +365,28 @@ type navEvalRow struct {
 	Error           string  `json:"error,omitempty"`
 }
 
-// navCiteRe matches the navigator's inline citations (@path:start-end, end
-// optional). The path is captured but unused in single-file scoring — the range
-// is checked against the case's one file.
-var navCiteRe = regexp.MustCompile(`@([\w./-]+):(\d+)(?:-(\d+))?`)
+// navCiteRe matches the navigator's inline citations in the two forms models
+// actually emit: an @path:start-end ref, or a bare Lstart-end / Lstart ref. The
+// dash class accepts the ASCII hyphen and the typographic hyphens/dashes models
+// sometimes render (U+2010–U+2015). The line numbers (groups 1,2) are what
+// matters; the path is unused in single-file scoring.
+var navCiteRe = regexp.MustCompile(`(?:@[\w./-]+:|L)(\d+)(?:[-\x{2010}-\x{2015}](\d+))?`)
 
-// parseNavCitations turns the navigator's inline @path:start-end refs into
-// study.Citation structs so the shared groundedness scorer can grade them. The
-// claim is the text from the previous sentence break up to the ref, so the
-// scorer's anchor extraction (symbol names, words) has the surrounding prose to
-// match against the cited lines.
+// parseNavCitations turns the navigator's inline citations into study.Citation
+// structs so the shared groundedness scorer can grade them. The claim is the
+// text from the previous sentence break up to the ref, so the scorer's anchor
+// extraction (symbol names, words) has the surrounding prose to match against
+// the cited lines.
 func parseNavCitations(digest string) []study.Citation {
 	var cits []study.Citation
 	for _, m := range navCiteRe.FindAllStringSubmatchIndex(digest, -1) {
-		start := atoiSafe(digest[m[4]:m[5]])
+		start := atoiSafe(digest[m[2]:m[3]])
 		end := start
-		if m[6] >= 0 {
-			end = atoiSafe(digest[m[6]:m[7]])
+		if m[4] >= 0 {
+			end = atoiSafe(digest[m[4]:m[5]])
 		}
 		claim := strings.TrimSpace(digest[sentenceStart(digest, m[0]):m[0]])
-		cits = append(cits, study.Citation{
-			RelPath: digest[m[2]:m[3]], LineStart: start, LineEnd: end, Claim: claim,
-		})
+		cits = append(cits, study.Citation{LineStart: start, LineEnd: end, Claim: claim})
 	}
 	return cits
 }
@@ -456,7 +456,10 @@ func measureEngineArm(cs *CortexSession, c navCase, rep int) navEvalRow {
 		return row
 	}
 	row.Stopped = res.Stopped
-	digest := strings.Join(res.Digests, "\n")
+	// renderStudyResult captures read-mode (whole-file passthrough) too, so a
+	// small file that fit the window is still credited for goal hits — the agent
+	// does see that content. Join(res.Digests) would undercount it as empty.
+	digest := renderStudyResult(res)
 	row.DigestChars = len(digest)
 	row.GoalHits = countGoalHits(digest, c.Want)
 	if data, derr := os.ReadFile(c.Path); derr == nil {

@@ -3,21 +3,27 @@ package main
 import "testing"
 
 func TestParseNavCitations(t *testing.T) {
-	digest := "The dispatcher runs tools in Resolve @cmd/loop/main.go:3086-3165. " +
-		"A single line is cited @tools.go:42. Non-citation: see line 99 here."
+	// Both citation forms the model emits: @path:start-end and bare Lstart-end,
+	// plus a single-line ref and a typographic-hyphen range (U+2011).
+	digest := "The dispatcher runs in Resolve @cmd/loop/main.go:3086-3165. " +
+		"The skeleton renders via renderSkeleton L97-104. A single ref L42. " +
+		"A typographic range Span L19‑63 too."
 	cits := parseNavCitations(digest)
-	if len(cits) != 2 {
-		t.Fatalf("want 2 citations, got %d: %+v", len(cits), cits)
+	if len(cits) != 4 {
+		t.Fatalf("want 4 citations, got %d: %+v", len(cits), cits)
 	}
-	if cits[0].RelPath != "cmd/loop/main.go" || cits[0].LineStart != 3086 || cits[0].LineEnd != 3165 {
-		t.Errorf("first citation wrong: %+v", cits[0])
+	if cits[0].LineStart != 3086 || cits[0].LineEnd != 3165 {
+		t.Errorf("@path ref wrong: %+v", cits[0])
 	}
-	// Single-line @ref → start == end.
-	if cits[1].LineStart != 42 || cits[1].LineEnd != 42 {
-		t.Errorf("single-line citation should have start==end, got %+v", cits[1])
+	if cits[1].LineStart != 97 || cits[1].LineEnd != 104 {
+		t.Errorf("bare L ref wrong: %+v", cits[1])
 	}
-	// The claim is the sentence text preceding the ref (so the scorer can match
-	// 'Resolve' against the cited lines).
+	if cits[2].LineStart != 42 || cits[2].LineEnd != 42 {
+		t.Errorf("single-line ref should have start==end, got %+v", cits[2])
+	}
+	if cits[3].LineStart != 19 || cits[3].LineEnd != 63 {
+		t.Errorf("typographic-hyphen range should parse, got %+v", cits[3])
+	}
 	if !contains(cits[0].Claim, "Resolve") {
 		t.Errorf("claim should carry preceding prose; got %q", cits[0].Claim)
 	}
