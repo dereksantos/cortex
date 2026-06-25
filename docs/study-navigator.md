@@ -7,9 +7,15 @@
 > what's relevant" — which is both cheaper and far higher-signal for the small and
 > local models this harness targets.
 >
-> **Status.** Proposed. Supersedes the sampling-era machinery (incl. the P1–P4
-> findings-prefix work in [`working-memory-study.md`](working-memory-study.md) for
-> the *path-study* case — see "What this supersedes").
+> **Status.** Phases 1–5 landed on `study/navigator` (map spans + ranged read;
+> outline tiers; the navigator behind `CORTEX_STUDY_NAV`; a nav-vs-engine eval;
+> the free-text summarizer for compaction + shell-output). Phase 6 — physically
+> deleting the sampling stack — is **gated** on a live-model run of
+> `loop study-eval nav` clearing, then promoting the navigator to default. Until
+> then the engine remains the default `study` path (the navigator is opt-in).
+> Supersedes the sampling-era machinery (incl. the P1–P4 findings-prefix work in
+> [`working-memory-study.md`](working-memory-study.md) for the *path-study* case
+> — see "What this supersedes").
 >
 > **Owner.** `internal/study/`, `internal/projectindex/` (→ `map`), and the study
 > tool wiring in `cmd/loop/tools/tools.go` + `cmd/loop/main.go`.
@@ -226,17 +232,34 @@ in [`working-memory.md`](working-memory.md) survives — it's the sampling
 - **Budget bound shape.** Iteration cap vs token budget vs both — recommend a small
   iteration cap + the existing no-progress guard. Keep it dead simple.
 
-## Suggested phasing
+## Phasing (status)
 
-1. **`map` = `project_index` + symbol spans (`EndLine`)** + ranged
-   `read_file(path, start, end)`. Cheap, independently useful, no behavior change
-   to study yet.
-2. **Outline tiers 2–4** in `map` (regex decls from `boundary.go`, markdown
-   headings, JSON/CSV shape) + the tier-5 positional fallback.
-3. **Navigator sub-loop behind a flag** (`CORTEX_STUDY_NAV` or config), alongside
-   the old engine. Seed `[system][goal][map]`, narrow toolset, bounded.
-4. **New eval** comparing navigator vs old engine on the existing study corpora
-   (latency + did-it-find-the-goal + citation groundedness).
-5. **Split the summarizer path** — compaction (→ journal/turn index) and shell
-   spill (→ marker-grep + floor fallback) stop depending on the sampling engine.
-6. **Delete the sampling stack** once the eval clears.
+1. ✅ **`map` = `project_index` + symbol spans (`EndLine`)** + ranged
+   `read_file(path, start, end)`. `projectindex.Symbol.EndLine`; the skeleton
+   renders `L3-8` spans; `read_file` takes optional start/end that bypass the
+   size gate. (Done — no behavior change to study yet.)
+2. ✅ **Outline tiers** in `map` (`internal/projectindex/outline.go`): regex
+   decls (tier 2), markdown/prose headings + paragraphs (tier 3), data
+   section/key markers (tier 4), positional floor (tier 5). Computed only for
+   single-file maps so `map(dir)` stays cheap.
+3. ✅ **Navigator behind `CORTEX_STUDY_NAV`** (`cmd/loop/navigator.go`): seed
+   `[system][goal][map]`, narrow read-only toolset (read_file + project_index)
+   with an execution allowlist, bounded loop + no-progress guard + finalize
+   fallback. Routed from the study tool (`tc.Study` → `Navigate`), off by default.
+4. ✅ **`loop study-eval nav`**: nav-vs-engine over the same fixtures, scoring
+   latency, citation groundedness (shared `scoreGroundedness`, inline
+   `@path:line` parsed via `parseNavCitations`), and goal-keyword hits.
+5. ✅ **Summarizer split** (`cmd/loop/summarize.go`): compaction and oversized
+   shell-output study now use a sequential chunk-and-fold summarizer instead of
+   the sampling engine (no RNG/coverage/curator/director).
+6. ⏳ **Delete the sampling stack — GATED on the eval clearing.** Run
+   `loop study-eval nav` against the fleet; if the navigator matches/beats the
+   engine on grounding + goal-hit at lower latency, promote it to the default
+   `study` path (flip the `CORTEX_STUDY_NAV` gate to an opt-*out*), then remove:
+   `analyzer_bytegrid.go`, `analyzer_universal.go`, `sampler_hierarchical.go`,
+   `sampler_focus.go`, `director.go`, `curator.go`, `curate.go`, `directed.go`,
+   `density.go`, `refine.go`, `boundary.go`, `controller.go`, the findings-prefix
+   P1–P4 stack, and `study.go`'s budget math; repoint `loop study` + the engine
+   arm of `study-eval` at the navigator. Not executed here: it needs a live model
+   to clear, and removing the default engine before then would regress study.
+   The engine carries a deprecation pointer (`runStudy`) until this lands.

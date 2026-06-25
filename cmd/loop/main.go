@@ -857,6 +857,13 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 	return p
 }
 
+// runStudy drives the byte-grid sampling engine (internal/study). DEPRECATED:
+// the map-first navigator (navigator.go) is its replacement and is slated to
+// become the default study path. This engine stays as the default until a
+// live-model `loop study-eval nav` run clears the navigator (see
+// docs/study-navigator.md, phase 6); after that this and the internal/study
+// sampling stack are removed. Compaction and shell-output already moved off it
+// (Summarize, phase 5).
 func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
