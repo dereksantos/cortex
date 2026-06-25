@@ -41,6 +41,10 @@ type ToolDeps interface {
 	// returning (digest, true, err). ok=false means the navigator is off and
 	// the caller should fall back to RunStudy. Scoped to the study tool.
 	Navigate(ctx context.Context, path, goal string) (digest string, ok bool, err error)
+	// Summarize reduces a free-text file (no structural map) to a digest via
+	// sequential chunk-and-fold. Used by oversized shell-output study; the
+	// compressed flag is unused there.
+	Summarize(ctx context.Context, path, goal string, window int) (digest string, compressed bool, err error)
 	// GateShell runs the shell-risk gate. Returns (message, ok); ok=false
 	// means the command must not run and message explains why.
 	GateShell(ctx context.Context, command string) (string, bool)
@@ -65,6 +69,9 @@ func (headlessDeps) RunStudy(context.Context, string, string, int, int, float64,
 }
 func (headlessDeps) Navigate(context.Context, string, string) (string, bool, error) {
 	return "", false, nil // navigator needs a session; headless falls back
+}
+func (headlessDeps) Summarize(context.Context, string, string, int) (string, bool, error) {
+	return "", false, errors.New("summarize unavailable: no session")
 }
 func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
 	v := shellrisk.Classify(ctx, command, nil)
@@ -1043,25 +1050,26 @@ func spillShellOutput(command string, out []byte) (string, error) {
 	return path, nil
 }
 
-// studyShellOutput turns oversized bash output into curated context instead
-// of a truncation: the full output spills to .cortex/shell/ and the study
-// engine digests it with real line citations into the spill file, which the
-// model can study again (with a goal) to dig deeper. Returns ok=false on any
-// failure so the caller degrades to plain truncation — losing the study is
+// studyShellOutput turns oversized bash output into curated context instead of
+// a truncation: the full output spills to .cortex/shell/ and the free-text
+// summarizer folds it into a digest (errors first), with the spill path so the
+// model can study it again to dig deeper. Command output has no structural map,
+// so this is the summarizer path, not the navigator/engine. Returns ok=false on
+// any failure so the caller degrades to plain truncation — losing the digest is
 // acceptable, losing the turn is not.
 func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []byte) (string, bool) {
 	spill, err := spillShellOutput(command, out)
 	if err != nil {
 		return "", false
 	}
-	printToolAction(fmt.Sprintf("output %d KB → study(%s)", len(out)/1024, spill))
+	printToolAction(fmt.Sprintf("output %d KB → summarize(%s)", len(out)/1024, spill))
 	goal := fmt.Sprintf("This is the output of `%s`. What does it show? Surface errors, failures, and anomalies first.", command)
-	res, err := deps.RunStudy(ctx, spill, goal, 1, 0, 0, nil, bashStudyWindow, false)
+	digest, _, err := deps.Summarize(ctx, spill, goal, bashStudyWindow)
 	if err != nil {
 		return "", false
 	}
-	header := fmt.Sprintf("[%d bytes of output — studied below; full output at %s — study(path, goal) to dig deeper]\n", len(out), spill)
-	return header + RenderStudyResult(res), true
+	header := fmt.Sprintf("[%d bytes of output — summarized below; full output at %s — study(path, goal) to dig deeper]\n", len(out), spill)
+	return header + digest, true
 }
 
 // --- Qwen XML tool-call recovery ---------------------------------------

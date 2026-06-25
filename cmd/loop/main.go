@@ -131,11 +131,6 @@ var retryBackoff = 500 * time.Millisecond
 // (red) and what the harness does (compact) can't drift apart.
 const compactThreshold = 0.8
 
-// compactPasses: deepening passes for the compaction study. The digest budget
-// is a fraction of the transcript, so a second pass (covering NEW regions)
-// roughly doubles conversation coverage for one extra bounded call.
-const compactPasses = 2
-
 // compactGoal steers the compaction study toward what a continuing session
 // needs — state over narrative, recent and unresolved over settled ones.
 // Carries the working-style intent (checkpoints, tidy-vs-feature split) so
@@ -819,7 +814,7 @@ type ToolCall = tools.ToolCall
 type FunctionCall = tools.FunctionCall
 
 // renderStudyResult is implemented in the tools package; aliased for the
-// compaction path that calls it directly.
+// study-result rendering tests and any direct callers.
 var renderStudyResult = tools.RenderStudyResult
 
 // parseXMLToolCalls and stripToolMarkup recover Qwen-native tool calls;
@@ -837,16 +832,16 @@ var stripToolMarkup = tools.StripToolMarkup
 // > 0, overrides the consuming-model window the budget derives from (0 → the
 // study model's own window) — compaction uses this to size the digest for the
 // CODE model rather than for what the study model can hold.
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
-	}
+// newStudyProvider builds the OpenAI-compatible client pointed at the study
+// role's endpoint/model, with the given per-call output cap. Shared by the
+// sampling engine (runStudy) and the free-text summarizer (Summarize) so the
+// endpoint/key/template wiring lives in one place.
+func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient {
 	base := strings.TrimRight(cs.Study.Endpoint, "/")
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
 	}
-	provider := llm.NewOpenAICompatClient(llm.EndpointConfig{
+	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
 		Name:               "study",
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
@@ -856,9 +851,18 @@ func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes
 		// NDJSON auto cell timed out at 300s and completed under 600).
 		Timeout: 10 * time.Minute,
 	})
-	provider.SetModel(cs.Study.Model)
-	provider.SetTemperature(0)
-	provider.SetMaxTokens(study.CompletionTokenBudget(cs.studyWindow(), 0))
+	p.SetModel(cs.Study.Model)
+	p.SetTemperature(0)
+	p.SetMaxTokens(maxTokens)
+	return p
+}
+
+func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	provider := cs.newStudyProvider(study.CompletionTokenBudget(cs.studyWindow(), 0))
 
 	req := study.StudyRequest{
 		Path:            abs,
@@ -2042,13 +2046,16 @@ func (cs *CortexSession) recordRetrieval(query string, results []cognition.Resul
 
 // --- Compaction ------------------------------------------------------------
 //
-// Compaction IS study, pointed at the conversation: the same engine that
-// curates big files curates the session transcript. No bespoke summarizer.
+// Compaction is the summarizer pointed at the conversation: the transcript has
+// no structural map to navigate, so it uses the sequential chunk-and-fold
+// summarizer (summarize.go), NOT the byte-grid sampling engine.
 
-// compactStudy runs the study engine over a transcript for Compact. A var so
-// tests can stub the model call.
-var compactStudy = func(ctx context.Context, cs *CortexSession, path string, window int) (study.StudyLoopResult, error) {
-	return cs.runStudy(ctx, path, compactGoal, compactPasses, 0, 0, nil, window, false)
+// compactSummarize folds a transcript into a continuation digest for Compact,
+// returning the digest and whether folding was needed (compressed=false → the
+// session already fits the budget, nothing to compact). A var so tests can stub
+// the model call.
+var compactSummarize = func(ctx context.Context, cs *CortexSession, path string, window int) (string, bool, error) {
+	return cs.Summarize(ctx, path, compactGoal, window)
 }
 
 // contextRatio is the live window-fill estimate. The gauge color and the
@@ -2076,22 +2083,20 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	if sw := cs.studyWindow(); sw < window {
 		window = sw
 	}
-	res, err := compactStudy(ctx, cs, path, window)
+	digest, compressed, err := compactSummarize(ctx, cs, path, window)
 	if err != nil {
 		return fmt.Errorf("compact: %w", err)
 	}
-	// Read mode = the whole transcript fits well inside the digest budget.
-	// There is nothing to compress yet; replacing history with itself would
-	// only churn the session id.
-	if res.Stopped == "read" {
+	// Not compressed = the whole transcript fit a single summary chunk. There is
+	// nothing to compress yet; replacing history with itself would only churn
+	// the session id.
+	if !compressed {
 		return fmt.Errorf("session fits within the %s-token digest budget; nothing to compact yet", humanK(window))
 	}
-	// Check the digests themselves, not the render — the render always carries
-	// a coverage header, so it is never empty even when the study said nothing.
-	if strings.TrimSpace(strings.Join(res.Digests, "")) == "" {
-		return fmt.Errorf("compact: study returned an empty digest")
+	digest = strings.TrimSpace(digest)
+	if digest == "" {
+		return fmt.Errorf("compact: summarizer returned an empty digest")
 	}
-	digest := strings.TrimSpace(renderStudyResult(res))
 
 	// Rebuild: the original system seed plus the digest as carried-over
 	// context. The digest rides a user message because many chat templates
@@ -2108,7 +2113,7 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	cs.StartTranscript()
 	// Mark the new transcript as a compaction of the old, so the record shows
 	// where the digest came from (the raw prior transcript is still on disk).
-	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from, Coverage: res.CoveragePct})
+	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from})
 	cs.Append(summary)
 	// Fill is unknown until the next send; the gauge resets rather than lies.
 	cs.LastPromptTokens = 0

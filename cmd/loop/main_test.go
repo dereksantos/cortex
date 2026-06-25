@@ -1475,27 +1475,24 @@ func TestStudyWindowEnvOverride(t *testing.T) {
 	}
 }
 
-// stubCompactStudy replaces the compaction study call (no model, no network)
-// for the duration of a test, recording the path and window it was given.
-func stubCompactStudy(t *testing.T, res study.StudyLoopResult, err error) (gotPath *string, gotWindow *int) {
+// stubCompactSummarize replaces the compaction summarizer call (no model, no
+// network) for the duration of a test, recording the path and window it was
+// given. compressed=true marks a real compaction; false → nothing to compact.
+func stubCompactSummarize(t *testing.T, digest string, compressed bool, err error) (gotPath *string, gotWindow *int) {
 	t.Helper()
-	saved := compactStudy
-	t.Cleanup(func() { compactStudy = saved })
+	saved := compactSummarize
+	t.Cleanup(func() { compactSummarize = saved })
 	gotPath, gotWindow = new(string), new(int)
-	compactStudy = func(_ context.Context, _ *CortexSession, path string, window int) (study.StudyLoopResult, error) {
+	compactSummarize = func(_ context.Context, _ *CortexSession, path string, window int) (string, bool, error) {
 		*gotPath, *gotWindow = path, window
-		return res, err
+		return digest, compressed, err
 	}
 	return gotPath, gotWindow
 }
 
 func TestCompactRebuildsHistory(t *testing.T) {
-	digest := study.StudyLoopResult{
-		Stopped:     "budget",
-		CoveragePct: 0.5,
-		Digests:     []string{"user is hardening the loop; edited cmd/loop/main.go; tests pass"},
-	}
-	gotPath, gotWindow := stubCompactStudy(t, digest, nil)
+	gotPath, gotWindow := stubCompactSummarize(t,
+		"user is hardening the loop; edited cmd/loop/main.go; tests pass", true, nil)
 
 	cs := newTestSession(t)
 	cs.Window = 64000
@@ -1562,8 +1559,8 @@ func TestCompactErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("read mode is refused — nothing to compress", func(t *testing.T) {
-		stubCompactStudy(t, study.StudyLoopResult{Stopped: "read"}, nil)
+	t.Run("uncompressed is refused — nothing to compress", func(t *testing.T) {
+		stubCompactSummarize(t, "", false, nil) // fit a single chunk → nothing to compact
 		cs := newTestSession(t)
 		cs.Append(Message{Role: RoleUser, Content: "short"})
 		before := len(cs.Request.Messages)
@@ -1578,7 +1575,7 @@ func TestCompactErrors(t *testing.T) {
 	})
 
 	t.Run("empty digest leaves history unchanged", func(t *testing.T) {
-		stubCompactStudy(t, study.StudyLoopResult{Stopped: "budget", Digests: []string{"  "}}, nil)
+		stubCompactSummarize(t, "  ", true, nil) // compressed but empty
 		cs := newTestSession(t)
 		cs.Append(Message{Role: RoleUser, Content: "work"})
 		before := len(cs.Request.Messages)
