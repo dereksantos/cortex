@@ -37,6 +37,10 @@ type ToolDeps interface {
 	// RunStudy executes the study engine over a file. Shared by the study
 	// tool, the shell-output study, and compaction.
 	RunStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error)
+	// Navigate runs the map-first study navigator over a path when enabled,
+	// returning (digest, true, err). ok=false means the navigator is off and
+	// the caller should fall back to RunStudy. Scoped to the study tool.
+	Navigate(ctx context.Context, path, goal string) (digest string, ok bool, err error)
 	// GateShell runs the shell-risk gate. Returns (message, ok); ok=false
 	// means the command must not run and message explains why.
 	GateShell(ctx context.Context, command string) (string, bool)
@@ -58,6 +62,9 @@ func (headlessDeps) StudyModel() string { return "" }
 func (headlessDeps) StudyWindow() int   { return 0 }
 func (headlessDeps) RunStudy(context.Context, string, string, int, int, float64, *bool, int, bool) (study.StudyLoopResult, error) {
 	return study.StudyLoopResult{}, errors.New("study unavailable: no session")
+}
+func (headlessDeps) Navigate(context.Context, string, string) (string, bool, error) {
+	return "", false, nil // navigator needs a session; headless falls back
 }
 func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
 	v := shellrisk.Classify(ctx, command, nil)
@@ -362,6 +369,17 @@ func (tc ToolCall) Study(ctx context.Context, deps ToolDeps) (string, error) {
 		return "", err
 	}
 	goal, _ := tc.StringArg("goal") // optional
+
+	// Map-first navigator (flag-gated). When enabled it replaces the sampling
+	// engine for the study tool, returning a digest grounded in targeted reads;
+	// ok=false means it's off and we fall through to the engine below.
+	if digest, ok, nErr := deps.Navigate(ctx, path, goal); ok {
+		if nErr != nil {
+			return "", nErr
+		}
+		return digest, nil
+	}
+
 	passes := 0
 	if p, ok := tc.IntArg("passes"); ok && p > 0 {
 		passes = p
