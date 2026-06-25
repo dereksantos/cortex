@@ -45,7 +45,7 @@ jobs:
       run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
     - name: Build
-      run: go build -v ./cmd/cortex
+      run: go build -v ./cmd/loop
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v6
@@ -89,13 +89,13 @@ jobs:
         go-version: '1.26'
 
     - name: Build for Linux
-      run: GOOS=linux GOARCH=amd64 go build -o cortex-linux-amd64 ./cmd/cortex
+      run: GOOS=linux GOARCH=amd64 go build -o loop-linux-amd64 ./cmd/loop
 
     - name: Build for macOS (Intel)
-      run: GOOS=darwin GOARCH=amd64 go build -o cortex-darwin-amd64 ./cmd/cortex
+      run: GOOS=darwin GOARCH=amd64 go build -o loop-darwin-amd64 ./cmd/loop
 
     - name: Build for macOS (Apple Silicon)
-      run: GOOS=darwin GOARCH=arm64 go build -o cortex-darwin-arm64 ./cmd/cortex
+      run: GOOS=darwin GOARCH=arm64 go build -o loop-darwin-arm64 ./cmd/loop
 
     # Windows build dropped — see matrix comment above. We're not
     # shipping a Windows binary while the eval-harness work blocks it.
@@ -105,5 +105,5 @@ jobs:
       with:
         name: binaries
         path: |
-          cortex-*
+          loop-*
         retention-days: 7

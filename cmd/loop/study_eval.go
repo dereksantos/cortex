@@ -33,9 +33,9 @@ type studyEvalCase struct {
 // appended at runtime by ensureStudyEvalJSONL (deterministic synthetic
 // telemetry; repo files of that shape aren't stable fixtures).
 var studyEvalCases = []studyEvalCase{
-	{"cmd/cortex/commands/repl.go", "how are slash commands dispatched"},
-	{"cmd/cortex/commands/study.go", "what subcommands does the study command support"},
-	{"docs/eval.md", "what are the tree eval types and what does each one test"},
+	{"cmd/loop/main.go", "how is REPL input dispatched to commands and the agent"},
+	{"cmd/loop/tools/tools.go", "what tools are available to the agent and how are they registered"},
+	{"docs/loop-production-harness.md", "what is the plan to make cmd/loop a production harness"},
 }
 
 // ensureStudyEvalJSONL writes the deterministic NDJSON fixture (synthetic
@@ -458,7 +458,7 @@ func envInt(key string, def int) int {
 // `loop study-eval code-grid`.
 func runStudyEvalCodeGrid() {
 	session := NewCortexSession()
-	c := studyEvalCase{"cmd/cortex/commands/repl.go", "how are slash commands dispatched"}
+	c := studyEvalCase{"cmd/loop/main.go", "how is REPL input dispatched to commands and the agent"}
 	on, off := true, false
 	cells := []studyEvalCell{
 		{Chunks: 8, Fill: 1.0 / 8, Numbered: &off},
