@@ -44,7 +44,8 @@ cognition/dag/ops, cognition/prompts, config, events, llm, secret}`.
 
 Cortex was framed as "a general-purpose coding harness that leverages
 multiple models, learns over time, and has bounded emergence." The eval
-strategy was built around three claims (see `eval-strategy.md`, retained):
+strategy was built around three claims (detailed in the since-removed
+`eval-strategy.md` — see git history):
 
 1. **Multi-model leverage.** Small model + Cortex matches or exceeds a
    bigger model alone, at lower cost. Metric: quality normalized by model
@@ -83,7 +84,8 @@ an ephemeral system block (see CLAUDE.md).
 
 The historical cognitive architecture, inspired by human information
 processing. The current direction views these as compositions of DAG nodes
-(`dag-protocol.md`), but the mode framing drove most of the original code.
+(the DAG-protocol design docs are in git history), but the mode framing
+drove most of the original code.
 
 | Mode | Type | Speed | When |
 |------|------|-------|------|
@@ -150,7 +152,7 @@ over them and the Claude-Code host wiring were removed.
 ## The eval framework (removed)
 
 `internal/eval/*` + `test/evals/` implemented a three-tier strategy
-(`eval-strategy.md`, retained as the thesis record):
+(documented in the since-removed `eval-strategy.md`; see git history):
 
 | Tier | Job | Metric of record |
 |---|---|---|
@@ -163,7 +165,7 @@ coding suite plus a library-service multi-session corpus; and recorded
 results to SQLite + `cell_results.jsonl`. The **Agentic Benefit Ratio**
 (ABR = quality(Fast+Think) / quality(Full)) was an early headline metric,
 later retired in favor of the budget–quality curve; the pre-DAG baseline
-of ABR 0.586 is recorded in `eval-journal.md` (retained).
+of ABR 0.586 was recorded in `eval-journal.md` (now in git history).
 
 `cmd/loop` keeps a small, focused replacement: `loop study-eval` measures
 the study tool's latency / coverage / groundedness over a fixture set.
@@ -173,8 +175,9 @@ the study tool's latency / coverage / groundedness over a fixture set.
 The seed+grow+decay execution model — a DAG grows from a tiny seed under a
 decaying budget, with no upfront emission and no separate planner; spawning,
 a depth cap, and budget exhaustion are the bounds. Most nodes are narrow
-small-LLM micro-calls; planning emerges from composition. See
-`dag-protocol.md`, `dag-build-plan.md`, `bootstrap-dag-plan.md` (retained).
+small-LLM micro-calls; planning emerges from composition. The design docs
+(`dag-protocol.md`, `dag-build-plan.md`, `bootstrap-dag-plan.md`) are in
+git history; the engine itself lives in `pkg/cognition/dag`.
 
 ## Distribution (removed)
 
