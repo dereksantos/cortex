@@ -212,7 +212,8 @@ func significantWords(s string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+		alnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		return !alnum
 	}) {
 		if len(w) < 4 || seen[w] {
 			continue

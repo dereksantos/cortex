@@ -329,8 +329,7 @@ func TestStudyDir_ScopeToRootModule_ExcludesNestedModules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
-	large := []sourceFile{}
-	large = scopeToRootModule(out, root, large)
+	scopeToRootModule(out, root, nil)
 
 	// The nested module and its sub-module are excluded; root + src kept.
 	for _, c := range out.Chunks {
@@ -386,8 +385,7 @@ func TestStudyDir_ScopeToRootModule_NoMarkerAtRootIsNoOp(t *testing.T) {
 	preChunks := len(out.Chunks)
 	preMods := len(out.Modules)
 	preEff := out.EffTotalLines
-	large := []sourceFile{}
-	large = scopeToRootModule(out, root, large)
+	scopeToRootModule(out, root, nil)
 
 	if len(out.Chunks) != preChunks {
 		t.Errorf("chunks changed: %d → %d (should be no-op without root marker)", preChunks, len(out.Chunks))
@@ -418,8 +416,7 @@ func TestStudyDir_ScopeToRootModule_StudyingNestedModuleDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
-	large := []sourceFile{}
-	large = scopeToRootModule(out, subRoot, large)
+	scopeToRootModule(out, subRoot, nil)
 
 	// sub/ is now the root; sub/a.go is kept, sub/inner/ is excluded.
 	seenFiles := map[string]bool{}

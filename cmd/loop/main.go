@@ -136,14 +136,6 @@ const compactThreshold = 0.8
 // roughly doubles conversation coverage for one extra bounded call.
 const compactPasses = 2
 
-// dirStudyPasses: default deepening passes when the study target is a
-// directory. A corpus boundary is far larger than one file's, so a single
-// window-budget pass sees only a sliver of the tree; the curator still ends
-// the loop early (DONE / exhausted), so this is a cap, not a floor. Files
-// keep the 1-pass default — their deepening loop is the agent re-calling
-// study with a goal or the model passing passes explicitly.
-const dirStudyPasses = tools.DirStudyPasses
-
 // compactGoal steers the compaction study toward what a continuing session
 // needs — state over narrative, recent and unresolved over settled ones.
 // Carries the working-style intent (checkpoints, tidy-vs-feature split) so

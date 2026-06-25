@@ -271,11 +271,3 @@ func TestStudyFile_Corpus_ListsUncoveredFiles(t *testing.T) {
 		}
 	}
 }
-
-func countDistinctFiles(sampled []SampledChunk) int {
-	seen := map[string]bool{}
-	for _, s := range sampled {
-		seen[s.RelPath] = true
-	}
-	return len(seen)
-}
