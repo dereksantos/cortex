@@ -3,11 +3,15 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/knights-analytics/hugot"
 	"github.com/knights-analytics/hugot/pipelines"
@@ -17,18 +21,54 @@ import (
 // all-MiniLM-L12-v2 is a higher-quality model that produces 384-dimensional embeddings.
 const DefaultHugotModel = "sentence-transformers/all-MiniLM-L12-v2"
 
-// HugotEmbedder implements the Embedder interface using Hugot's pure Go backend.
-// It provides local embeddings without requiring Ollama or external services.
+// fallbackOnnxFile is the universal fp32 ONNX export — slower than the
+// quantized variants but present and loadable on every platform. Used as the
+// default for unknown arches and as the retry when an arch-specific variant
+// fails to fetch or load.
+const fallbackOnnxFile = "onnx/model.onnx"
+
+// errEmbedderWarming is returned by Embed/EmbedBatch while the model is still
+// loading in the background. Callers treat it like any embed failure and fall
+// back to text search; once warm, subsequent calls succeed. It exists so a
+// first-run model download never blocks the foreground retrieval path.
+var errEmbedderWarming = errors.New("hugot: embedder warming up")
+
+// HugotEmbedder implements the Embedder interface using Hugot's pure Go backend
+// (NewGoSession — no cgo, no onnxruntime shared library), so it cross-compiles
+// and ships with the binary. The model weights are fetched once on first use
+// and cached under ~/.cache/cortex/models. Loading happens in a background
+// goroutine (Warm); Embed is non-blocking and reports not-ready until the
+// pipeline is live.
 type HugotEmbedder struct {
 	modelPath string
 	modelName string
+	onnxFile  string // ONNX variant within the model repo (e.g. onnx/model_qint8_arm64.onnx)
 
 	session  *hugot.Session
 	pipeline *pipelines.FeatureExtractionPipeline
 
-	mu      sync.Mutex
-	initErr error
-	inited  bool
+	mu      sync.Mutex   // guards load() (download + session + pipeline)
+	ready   atomic.Bool  // pipeline is loaded and usable
+	warming atomic.Bool  // a background load goroutine is in flight
+	initErr atomic.Value // last load error (error), for IsEmbeddingAvailable diagnostics
+}
+
+// defaultHugotOnnxFile picks the ONNX variant: a quantized int8 build matched
+// to the CPU arch (≈3× faster + ≈4× smaller than fp32 on the pure-Go backend),
+// falling back to the universal fp32 export on other arches. Override with
+// CORTEX_HUGOT_ONNX (e.g. "onnx/model.onnx" to force fp32).
+func defaultHugotOnnxFile() string {
+	if v := strings.TrimSpace(os.Getenv("CORTEX_HUGOT_ONNX")); v != "" {
+		return v
+	}
+	switch runtime.GOARCH {
+	case "arm64":
+		return "onnx/model_qint8_arm64.onnx"
+	case "amd64":
+		return "onnx/model_quint8_avx2.onnx"
+	default:
+		return fallbackOnnxFile
+	}
 }
 
 // NewHugotEmbedder creates a new HugotEmbedder.
@@ -36,6 +76,7 @@ type HugotEmbedder struct {
 func NewHugotEmbedder() *HugotEmbedder {
 	return &HugotEmbedder{
 		modelName: DefaultHugotModel,
+		onnxFile:  defaultHugotOnnxFile(),
 	}
 }
 
@@ -43,6 +84,7 @@ func NewHugotEmbedder() *HugotEmbedder {
 func NewHugotEmbedderWithModel(modelName string) *HugotEmbedder {
 	return &HugotEmbedder{
 		modelName: modelName,
+		onnxFile:  defaultHugotOnnxFile(),
 	}
 }
 
@@ -50,34 +92,59 @@ func NewHugotEmbedderWithModel(modelName string) *HugotEmbedder {
 func NewHugotEmbedderWithPath(modelPath string) *HugotEmbedder {
 	return &HugotEmbedder{
 		modelPath: modelPath,
+		onnxFile:  defaultHugotOnnxFile(),
 	}
 }
 
-// init performs lazy initialization of the model.
-// It downloads the model if needed and creates the pipeline.
-func (h *HugotEmbedder) init() error {
+// Warm starts loading the model in the background if it isn't ready and no
+// load is already in flight. Non-blocking. Call it at startup so the one-time
+// download/load happens off the first query's critical path. Idempotent and
+// safe to call from any goroutine.
+func (h *HugotEmbedder) Warm() {
+	if h.ready.Load() {
+		return
+	}
+	if !h.warming.CompareAndSwap(false, true) {
+		return // a load is already running
+	}
+	go func() {
+		defer h.warming.Store(false)
+		err := h.load(h.onnxFile)
+		if err != nil && h.onnxFile != fallbackOnnxFile {
+			// The arch-specific (likely quantized) variant didn't fetch/load;
+			// retry with the universal fp32 export so the embedder still works.
+			log.Printf("[hugot] variant %s failed (%v); falling back to %s", h.onnxFile, err, fallbackOnnxFile)
+			h.mu.Lock()
+			h.onnxFile = fallbackOnnxFile
+			h.mu.Unlock()
+			err = h.load(fallbackOnnxFile)
+		}
+		if err != nil {
+			h.initErr.Store(err)
+			return
+		}
+		h.ready.Store(true)
+		log.Printf("[hugot] embedding model ready: %s (%s)", h.modelName, h.onnxFile)
+	}()
+}
+
+// load downloads (if needed) and builds the pipeline for a specific ONNX
+// variant. Blocking; only ever called from the Warm goroutine.
+func (h *HugotEmbedder) load(onnxFile string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.inited {
-		return h.initErr
-	}
-	h.inited = true
-
-	// Determine model path
 	modelPath := h.modelPath
 	if modelPath == "" {
-		// Download model to cache directory
 		cacheDir, err := h.getCacheDir()
 		if err != nil {
-			h.initErr = fmt.Errorf("failed to get cache directory: %w", err)
-			return h.initErr
+			return fmt.Errorf("failed to get cache directory: %w", err)
 		}
-
-		modelPath, err = hugot.DownloadModel(context.Background(), h.modelName, cacheDir, hugot.NewDownloadOptions())
+		opts := hugot.NewDownloadOptions()
+		opts.OnnxFilePath = onnxFile
+		modelPath, err = hugot.DownloadModel(context.Background(), h.modelName, cacheDir, opts)
 		if err != nil {
-			h.initErr = fmt.Errorf("failed to download model %s: %w", h.modelName, err)
-			return h.initErr
+			return fmt.Errorf("failed to download model %s (%s): %w", h.modelName, onnxFile, err)
 		}
 		h.modelPath = modelPath
 	}
@@ -85,30 +152,26 @@ func (h *HugotEmbedder) init() error {
 	// Create a Go session (pure Go backend, no cgo)
 	session, err := hugot.NewGoSession(context.Background())
 	if err != nil {
-		h.initErr = fmt.Errorf("failed to create Go session: %w", err)
-		return h.initErr
+		return fmt.Errorf("failed to create Go session: %w", err)
 	}
-	h.session = session
 
-	// Create feature extraction pipeline with normalization
+	// Create feature extraction pipeline with normalization, pinned to the
+	// chosen ONNX variant (the model repo ships several).
 	config := hugot.FeatureExtractionConfig{
-		ModelPath: modelPath,
-		Name:      "cortex-embeddings",
+		ModelPath:    modelPath,
+		OnnxFilename: onnxFile,
+		Name:         "cortex-embeddings",
 		Options: []hugot.FeatureExtractionOption{
 			pipelines.WithNormalization(),
 		},
 	}
-
 	pipeline, err := hugot.NewPipeline(session, config)
 	if err != nil {
 		session.Destroy()
-		h.session = nil
-		h.initErr = fmt.Errorf("failed to create pipeline: %w", err)
-		return h.initErr
+		return fmt.Errorf("failed to create pipeline (%s): %w", onnxFile, err)
 	}
+	h.session = session
 	h.pipeline = pipeline
-
-	log.Printf("[hugot] Initialized embedding model: %s", h.modelName)
 	return nil
 }
 
@@ -128,11 +191,14 @@ func (h *HugotEmbedder) getCacheDir() (string, error) {
 	return cacheDir, nil
 }
 
-// Embed converts text to a vector embedding.
-// The model is lazy-loaded on first call.
+// Embed converts text to a vector embedding. Non-blocking with respect to model
+// loading: if the model isn't ready it kicks off a background warm and returns
+// errEmbedderWarming immediately, so a cold first-run download never stalls the
+// caller. Once warm, subsequent calls run inference normally.
 func (h *HugotEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	if err := h.init(); err != nil {
-		return nil, err
+	if !h.ready.Load() {
+		h.Warm()
+		return nil, errEmbedderWarming
 	}
 
 	// Check context for cancellation
@@ -156,14 +222,15 @@ func (h *HugotEmbedder) Embed(ctx context.Context, text string) ([]float32, erro
 }
 
 // EmbedBatch converts multiple texts to vector embeddings in a single call.
-// This is more efficient than calling Embed multiple times.
+// This is more efficient than calling Embed multiple times. Like Embed, it is
+// non-blocking on model load and returns errEmbedderWarming until ready.
 func (h *HugotEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
-	if err := h.init(); err != nil {
-		return nil, err
-	}
-
 	if len(texts) == 0 {
 		return nil, nil
+	}
+	if !h.ready.Load() {
+		h.Warm()
+		return nil, errEmbedderWarming
 	}
 
 	// Check context for cancellation
@@ -182,10 +249,15 @@ func (h *HugotEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]flo
 	return output.Embeddings, nil
 }
 
-// IsEmbeddingAvailable checks if the embedder is ready.
-// It attempts to initialize and returns true if successful.
+// IsEmbeddingAvailable reports whether the model is loaded and usable. It is
+// non-blocking — it kicks off a background warm if needed and returns the
+// current readiness, never waiting on the download. Cheap to call on a hot path.
 func (h *HugotEmbedder) IsEmbeddingAvailable() bool {
-	return h.init() == nil
+	if h.ready.Load() {
+		return true
+	}
+	h.Warm()
+	return false
 }
 
 // Dimensions returns the embedding dimension for the loaded model.
@@ -216,8 +288,7 @@ func (h *HugotEmbedder) Close() error {
 		h.session = nil
 	}
 	h.pipeline = nil
-	h.inited = false
-	h.initErr = nil
+	h.ready.Store(false)
 
 	return nil
 }

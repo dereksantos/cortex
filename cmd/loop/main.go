@@ -2126,7 +2126,7 @@ func (cs *CortexSession) EnableRetrieval() {
 	//     (fastflowlm) only ever returns reasoning_content with empty content,
 	//     which Dream's GenerateWithSystem path can't parse; qwen3-4b returns
 	//     real content and, being on igpu, never evicts the cuda coder.
-	embedder := cs.newSpecEmbedder(cs.Config.resolveBinding(roleEmbed, cs.Fleet))
+	embedder := cs.resolveEmbedder()
 	rerank := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "rerank", 2048)
 	dream := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "dream", 4096)
 
@@ -2141,9 +2141,52 @@ func (cs *CortexSession) EnableRetrieval() {
 	cs.capturer.SetEmbedder(embedder) // embed-on-capture: write side of semantic search
 }
 
+// resolveEmbedder picks the embedder for the session, in priority order:
+//
+//  1. The `embed` role binding — an OpenAI-compatible /embeddings endpoint. This
+//     is the fleet's `embedder` when discovery supplies it, OR a free cloud
+//     embedder when the user points models.embed at one in .cortex/config.json
+//     (e.g. Cloudflare Workers AI bge-large = 1024-d, key via key_env). Fastest
+//     path; chosen whenever a model is configured/discovered for the role.
+//  2. Otherwise the self-contained local Hugot embedder (pure-Go, 384-d). This
+//     is the zero-config default: semantic search works with no fleet, no
+//     server, no keys — the right floor for users still setting up local models
+//     (or who never will). It warms in the background so the one-time model
+//     download never blocks a turn; until ready, Reflex uses text search.
+//
+// local-only is the project's goal, not a hard constraint, so the cloud option
+// (1) is allowed — it ships captured content to a third party, the deliberate
+// trade a user makes by configuring it. The dims differ across sources (fleet
+// 1024, Hugot 384, cloud varies); switching embedders orphans prior vectors
+// until they re-embed, which is fine since embeddings regenerate from capture.
+func (cs *CortexSession) resolveEmbedder() llm.Embedder {
+	if e := cs.newSpecEmbedder(cs.Config.resolveBinding(roleEmbed, cs.Fleet)); e != nil {
+		return e
+	}
+	if !localEmbedEnabled() {
+		return nil // no fleet/cloud embedder and local opted out → text search only
+	}
+	h := llm.NewHugotEmbedder()
+	h.Warm() // start the one-time load now, off the first query's path
+	return h
+}
+
+// localEmbedEnabled reports whether the self-contained Hugot embedder may be
+// used as the no-fleet default. On by default; set CORTEX_LOCAL_EMBED to a
+// falsey value to skip it (no model download — retrieval stays text-only).
+// Tests disable it so unit runs never touch the network.
+func localEmbedEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORTEX_LOCAL_EMBED"))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
+}
+
 // newSpecEmbedder builds an OpenAI-compatible embedder for a role binding, or
-// nil when the fleet didn't supply an embedding model (semantic search then
-// falls back to text search). Mirrors newSpecProvider's /v1 + key plumbing.
+// nil when neither config nor the fleet supplied an embedding model. Mirrors
+// newSpecProvider's /v1 + key plumbing, so it serves both the local fleet
+// `embedder` and a configured cloud endpoint identically.
 func (cs *CortexSession) newSpecEmbedder(spec ModelSpec) llm.Embedder {
 	if strings.TrimSpace(spec.Model) == "" {
 		return nil

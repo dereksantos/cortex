@@ -83,17 +83,36 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
   "backend": { "type": "openrouter", "endpoint": "...", "key_env": "OPENROUTER_API_KEY" },
   "models": {
     "code":  { "model": "...", "window": 131072 },
-    "study": { "model": "..." }
+    "study": { "model": "..." },
+    "embed": { "endpoint": "https://api.cloudflare.com/client/v4/accounts/<id>/ai/v1",
+               "model": "@cf/baai/bge-large-en-v1.5", "key_env": "CLOUDFLARE_API_TOKEN" }
   },
   "tools": { "allow_delete": true, "delete_root": "" }
 }
 ```
 
-Roles: `code` (the agent) and `study` (the navigator + the summarizer). Auth is
-resolved at call time from `key_env` (env-var name) or `key_service`
-(macOS keychain) — never written to disk. Env knobs:
-`CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
-`CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`.
+Roles: `code` (the agent), `study` (the navigator + the summarizer), and the
+cognition roles for retrieval — `embed`, plus `fast` (drives Reflect rerank +
+Dream). Auth is resolved at call time from `key_env` (env-var name) or
+`key_service` (macOS keychain) — never written to disk.
+
+**Retrieval embedder resolution** (`CortexSession.resolveEmbedder`): (1) the
+`embed` role if configured/discovered — the fleet's `embedder`, or any
+OpenAI-compatible `/embeddings` endpoint such as a free **Cloudflare Workers AI
+bge-large** (1024-d, like the fleet) or Gemini; (2) otherwise the self-contained
+**Hugot** pure-Go local embedder (384-d, no server/keys/network at steady
+state) — the zero-config default, warmed in the background so its one-time model
+download never blocks a turn. local-only is a goal, not a constraint: the cloud
+option is allowed and ships captured content out. Switching embedders changes
+the vector dim and orphans prior vectors until they re-embed (cheap — they
+regenerate from capture).
+
+Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
+`CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
+`CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot default → text-only
+retrieval), `CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an
+arch-matched int8 build), `CORTEX_REFLEX_EMBED_TIMEOUT_MS` (per-query embed
+budget, default 1000).
 
 ## Journal — source of truth
 

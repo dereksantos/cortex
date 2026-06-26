@@ -21,6 +21,16 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
+// TestMain disables the self-contained local embedder for the whole package so
+// EnableRetrieval-driven tests never trigger a background model download.
+// Tests that want it can re-enable via t.Setenv.
+func TestMain(m *testing.M) {
+	if os.Getenv("CORTEX_LOCAL_EMBED") == "" {
+		_ = os.Setenv("CORTEX_LOCAL_EMBED", "0")
+	}
+	os.Exit(m.Run())
+}
+
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
 // matching the wire shape the model sends.
 func tc(name, args string) ToolCall {
