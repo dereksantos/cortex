@@ -2328,6 +2328,73 @@ func (cs *CortexSession) remember(text string) error {
 	return err
 }
 
+// forget retracts every captured memory whose text contains query (the manual
+// counterpart to the automatic contradiction→retraction): retracted captures are
+// hidden from all future retrieval. The events themselves are not deleted — a
+// retraction is an append-only marker — so it's auditable and reversible. Returns
+// the matched events so the caller can show the user exactly what was pruned.
+func (cs *CortexSession) forget(query string) ([]*events.Event, error) {
+	if cs.store == nil {
+		return nil, fmt.Errorf("memory unavailable — no .cortex store")
+	}
+	matches, err := cs.store.SearchEventsMultiTerm([]string{query}, 50)
+	if err != nil {
+		return nil, err
+	}
+	reason := fmt.Sprintf("user /forget %q", query)
+	for _, ev := range matches {
+		id := "event-" + ev.ID // the ID space retrieval filters on (see reflex.filterRetracted)
+		if err := cs.store.Retract(id, reason); err != nil {
+			return matches, err
+		}
+		cs.journalRetraction(id, reason) // canonical, append-only record of the prune
+	}
+	return matches, nil
+}
+
+// journalRetraction appends a feedback.retraction to <ContextDir>/journal/feedback/.
+// Best-effort: the storage retraction is what gates retrieval; this is the audit
+// trail. Mirrors Reflect's automatic emission so manual and auto prunes look alike.
+func (cs *CortexSession) journalRetraction(gradedID, reason string) {
+	entry, err := journal.NewFeedbackEntry(journal.TypeFeedbackRetraction, journal.FeedbackPayload{
+		GradedID:  gradedID,
+		Reason:    reason,
+		SessionID: cs.SessionID,
+	})
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: filepath.Join(contextDir(), "journal", "feedback"),
+		Fsync:    journal.FsyncPerEntry,
+	})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	_, _ = w.Append(entry)
+}
+
+// forgetLabel is a short, human one-liner for a pruned capture: the user's
+// prompt if present, else a snippet of the stored result.
+func forgetLabel(ev *events.Event) string {
+	if ev.ToolInput != nil {
+		if p, ok := ev.ToolInput["user_prompt"].(string); ok && strings.TrimSpace(p) != "" {
+			return truncateRunes(strings.Join(strings.Fields(p), " "), 60)
+		}
+	}
+	return truncateRunes(strings.Join(strings.Fields(ev.ToolResult), " "), 60)
+}
+
+// truncateRunes caps s to n runes with an ellipsis, without splitting a rune.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
 // --- Capture (Tier 2: model-distilled insights) ----------------------------
 //
 // Tier 1 records every turn raw; Tier 2 distills the durable unit (a decision,
@@ -3591,6 +3658,30 @@ func main() {
 				fmt.Printf("remember: %v\n", err)
 			} else {
 				fmt.Println(withColor("remembered", gray))
+			}
+			continue
+		}
+
+		// /forget <text> retracts matching memories so they're no longer recalled
+		// — the manual counterpart to automatic contradiction→retraction. Visible:
+		// it prints exactly what it pruned.
+		if input == "/forget" || strings.HasPrefix(input, "/forget ") {
+			q := strings.TrimSpace(strings.TrimPrefix(input, "/forget"))
+			if q == "" {
+				fmt.Println("usage: /forget <text> — prune matching memories so they're no longer recalled")
+			} else if matches, err := session.forget(q); err != nil {
+				fmt.Printf("forget: %v\n", err)
+			} else if len(matches) == 0 {
+				fmt.Println(withColor("no matching memories", gray))
+			} else {
+				for _, ev := range matches {
+					fmt.Println(withColor("  ✕ "+forgetLabel(ev), gray))
+				}
+				noun := "memories"
+				if len(matches) == 1 {
+					noun = "memory"
+				}
+				fmt.Println(withColor(fmt.Sprintf("forgot %d %s (reversible — retraction is append-only)", len(matches), noun), gray))
 			}
 			continue
 		}

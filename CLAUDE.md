@@ -52,9 +52,11 @@ Three capabilities distinguish it:
 | `loop discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `loop study-eval` | Navigator acceptance test (pass/fail + latency; `CORTEX_NAV_REPS` reps) |
 
-REPL slash commands: `/compact`, `/clear`, `/remember`, `/sessions`,
-`/model [name]`, `/quit`. Dispatch is in `cmd/loop/main.go` (subcommands
-~`:3354`, slash commands ~`:3544`).
+REPL slash commands: `/compact`, `/clear`, `/remember`, `/forget <text>`
+(retract matching memories so they're no longer recalled — the manual
+counterpart to automatic contradiction→retraction; prints what it pruned),
+`/sessions`, `/model [name]`, `/quit`. Dispatch is in `cmd/loop/main.go`
+(subcommands ~`:3354`, slash commands ~`:3544`).
 
 ## The agent's tools
 
