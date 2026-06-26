@@ -830,6 +830,35 @@ var stripToolMarkup = tools.StripToolMarkup
 // role's endpoint/model, with the given per-call output cap. Shared by the
 // sampling engine (runStudy) and the free-text summarizer (Summarize) so the
 // endpoint/key/template wiring lives in one place.
+// newSpecProvider builds an OpenAI-compatible chat client for an arbitrary
+// role binding. It is the generic form of newStudyProvider/reasoner: same
+// /v1 normalization, key resolution, and thinking-kwarg plumbing, parameterized
+// by the ModelSpec so cognition roles (rerank, reason) can each route to their
+// own fleet model. A zero/empty spec.Model yields a true-nil llm.Provider — the
+// role is unsatisfied (fleet didn't supply it) and the caller leaves that
+// cognition piece dark. The return type is the interface, not the concrete
+// *OpenAICompatClient, precisely so the nil case is a nil interface and not a
+// typed-nil that slips past downstream `provider == nil` guards.
+func (cs *CortexSession) newSpecProvider(spec ModelSpec, name string, maxTokens int) llm.Provider {
+	if strings.TrimSpace(spec.Model) == "" {
+		return nil
+	}
+	base := strings.TrimRight(spec.Endpoint, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
+		Name:               name,
+		BaseURL:            base,
+		APIKey:             resolveKey(spec),
+		ChatTemplateKwargs: spec.TemplateKwargs(),
+	})
+	p.SetModel(spec.Model)
+	p.SetTemperature(0)
+	p.SetMaxTokens(maxTokens)
+	return p
+}
+
 func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient {
 	base := strings.TrimRight(cs.Study.Endpoint, "/")
 	if !strings.HasSuffix(base, "/v1") {
@@ -2067,11 +2096,15 @@ const retrievalLimit = 5
 // dominate the window.
 const retrievedContentCap = 240
 
-// EnableRetrieval wires Fast retrieval over the project's .cortex/ store.
-// Best-effort: any failure leaves retrieval disabled and the REPL runs exactly
-// as before. Text-only (nil embedder + nil provider) — semantic search and
-// Think reranking attach later without changing this call site. Only the
-// interactive REPL calls this; the study/eval subcommands never build storage.
+// EnableRetrieval wires retrieval over the project's .cortex/ store and lights
+// up the cognition stack against the fleet: a semantic embedder for Reflex, a
+// dedicated reranker for Reflect, and a swap-free reasoner for idle Think/Dream.
+// Each is resolved from discovery by role tag (embedder/reranker/reasoner) and
+// is independently optional — a role the fleet can't satisfy resolves to nil and
+// that piece degrades (semantic→text search, rerank→passthrough, dream→no-op)
+// without breaking the turn. Best-effort throughout: any storage failure leaves
+// retrieval disabled and the REPL runs exactly as before. Only the interactive
+// REPL calls this; the study/eval subcommands never build storage.
 func (cs *CortexSession) EnableRetrieval() {
 	dir := contextDir()
 	cfg := &config.Config{ContextDir: dir, ProjectRoot: filepath.Dir(dir)}
@@ -2079,7 +2112,25 @@ func (cs *CortexSession) EnableRetrieval() {
 	if err != nil {
 		return
 	}
-	cortex, err := intcog.New(store, nil, nil, cfg)
+
+	// Resolve the cognition roles against the discovered fleet, choosing silicon
+	// that doesn't contend with the foreground coder (which runs on cuda here):
+	//
+	//   - embed  → the dedicated CPU `embedder` (swap-free): 1024-d vectors for
+	//     Reflex semantic search.
+	//   - rerank → a small CHAT model (`fast` = qwen3-4b, thinking off). Reflect
+	//     is an LLM-as-reranker that calls chat-completions; the fleet's tagged
+	//     `reranker` is a cross-encoder served via the rerank API and 500s on
+	//     chat, so it can't satisfy this interface.
+	//   - dream  → the same small chat model. The swap-free NPU `reasoner`
+	//     (fastflowlm) only ever returns reasoning_content with empty content,
+	//     which Dream's GenerateWithSystem path can't parse; qwen3-4b returns
+	//     real content and, being on igpu, never evicts the cuda coder.
+	embedder := cs.newSpecEmbedder(cs.Config.resolveBinding(roleEmbed, cs.Fleet))
+	rerank := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "rerank", 2048)
+	dream := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "dream", 4096)
+
+	cortex, err := intcog.New(store, rerank, dream, embedder, cfg)
 	if err != nil {
 		store.Close()
 		return
@@ -2087,6 +2138,25 @@ func (cs *CortexSession) EnableRetrieval() {
 	cs.store = store
 	cs.retriever = cortex
 	cs.capturer = capture.NewWithStorage(cfg, store)
+	cs.capturer.SetEmbedder(embedder) // embed-on-capture: write side of semantic search
+}
+
+// newSpecEmbedder builds an OpenAI-compatible embedder for a role binding, or
+// nil when the fleet didn't supply an embedding model (semantic search then
+// falls back to text search). Mirrors newSpecProvider's /v1 + key plumbing.
+func (cs *CortexSession) newSpecEmbedder(spec ModelSpec) llm.Embedder {
+	if strings.TrimSpace(spec.Model) == "" {
+		return nil
+	}
+	base := strings.TrimRight(spec.Endpoint, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	return llm.NewOpenAICompatEmbedder(llm.EndpointConfig{
+		Name:    "embedder",
+		BaseURL: base,
+		APIKey:  resolveKey(spec),
+	}, spec.Model)
 }
 
 // --- Capture (Tier 1) ------------------------------------------------------
@@ -2414,20 +2484,35 @@ func normalizeInsight(s string) string {
 	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
-// retrieve runs one Fast retrieval for the turn and returns the hits, or nil
-// when retrieval is disabled, errors, or finds nothing. It uses a background
-// context, not the turn's: Reflex is mechanical (no model) so it needn't be
-// Ctrl-C-cancelable, and detaching lets the async Reflect caching survive the
-// turn to warm the next one. Results are quality-gated by Resolve; the caller
-// injects them regardless of its inject/queue/wait decision — that gate is
-// tuned for embedding-scale scores and would suppress everything on the
-// text-only path local setups use.
+// retrievalTimeout bounds the synchronous turn-start retrieval. Full mode adds
+// a reranker round-trip to Reflex's mechanical pass; the reranker is a small
+// swap-free CPU model so this normally completes in well under a second, but
+// the cap guarantees a wedged or cold reranker can't stall the turn — Reflect
+// returns Reflex's order unchanged when the context expires.
+const retrievalTimeout = 6 * time.Second
+
+// retrieve runs one retrieval for the turn and returns the hits, or nil when
+// retrieval is disabled, errors, or finds nothing. It runs Full mode (Reflex →
+// Reflect → Resolve) so the dedicated reranker actually reorders the foreground
+// results: Fast mode's rerank cache is keyed by exact query text, so it only
+// pays off on an identical repeat query and never helps a fresh turn. The cost
+// is one bounded reranker call (see retrievalTimeout); on timeout/error Reflect
+// degrades to the mechanical order.
+//
+// The context is derived from Background, not the turn's: Reflex is mechanical
+// and needn't be Ctrl-C-cancelable, and detaching lets any async caching survive
+// the turn. Results are quality-gated by Resolve; the caller injects them
+// regardless of its inject/queue/wait decision — that gate is tuned for
+// embedding-scale scores and would suppress everything on the text-only path
+// local setups fall back to.
 func (cs *CortexSession) retrieve(query string) []cognition.Result {
 	if cs.retriever == nil || strings.TrimSpace(query) == "" {
 		return nil
 	}
-	res, err := cs.retriever.Retrieve(context.Background(),
-		cognition.Query{Text: query, Limit: retrievalLimit}, cognition.Fast)
+	ctx, cancel := context.WithTimeout(context.Background(), retrievalTimeout)
+	defer cancel()
+	res, err := cs.retriever.Retrieve(ctx,
+		cognition.Query{Text: query, Limit: retrievalLimit}, cognition.Full)
 	if err != nil || res == nil {
 		return nil
 	}

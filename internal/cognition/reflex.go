@@ -13,16 +13,30 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// Embedder budget for the Reflex hot path. The HTTP client inside the
-// embedder has its own 30s timeout, but Reflex must stay well under 50ms
-// even when the LLM server is saturated (e.g. another model holding Ollama).
-// We cap each embed call here and trip a circuit breaker after repeated
-// failures so the hot path doesn't keep paying the timeout cost.
+// Embedder budget for the Reflex query-embed. A purely local embedder returns
+// in single-digit ms, but a network embedder (the fleet's CPU `embedder` over
+// HTTP) measures ~50–120ms, so a 100ms cap trips intermittently and silently
+// drops semantic search to text. The default below accommodates the network
+// embedder; the circuit breaker still protects the path when the server is
+// genuinely wedged, and CORTEX_REFLEX_EMBED_TIMEOUT_MS tunes it for slower or
+// faster silicon. The foreground retrieve() bounds the whole step at 6s.
 const (
-	embedTimeout          = 100 * time.Millisecond
+	defaultEmbedTimeoutMS = 1000
 	embedFailureThreshold = 2
 	embedCooldown         = 60 * time.Second
 )
+
+// embedTimeout returns the per-embed-call budget, honoring
+// CORTEX_REFLEX_EMBED_TIMEOUT_MS when set to a positive integer.
+func embedTimeout() time.Duration {
+	if v := os.Getenv("CORTEX_REFLEX_EMBED_TIMEOUT_MS"); v != "" {
+		var ms int
+		if _, err := fmt.Sscanf(v, "%d", &ms); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultEmbedTimeoutMS * time.Millisecond
+}
 
 // Reflex implements cognition.Reflexer for fast mechanical retrieval.
 // Uses semantic search (embeddings) when available, falls back to text search.
@@ -71,12 +85,17 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 	start := time.Now()
 	defer func() {
 		elapsed := time.Since(start)
-		if elapsed > 50*time.Millisecond {
-			// Log warning but don't fail — latency target is aspirational.
-			// Must go to stderr: `cortex search --json` owns stdout, and a
-			// stdout-bound warning here corrupts the JSON contract callers
-			// rely on (seen on slow CI runners).
-			fmt.Fprintf(os.Stderr, "[reflex] warning: took %v (target <50ms)\n", elapsed)
+		// The <50ms target holds for the text-only path. With a network
+		// embedder wired in, a query-embed legitimately costs up to the embed
+		// budget, so warn only past that (plus margin) — otherwise every
+		// semantic call is noise. Must go to stderr: `cortex search --json`
+		// owns stdout, and a stdout-bound warning corrupts the JSON contract.
+		warnAfter := 50 * time.Millisecond
+		if r.embedder != nil {
+			warnAfter = embedTimeout() + 250*time.Millisecond
+		}
+		if elapsed > warnAfter {
+			fmt.Fprintf(os.Stderr, "[reflex] warning: took %v (target <%v)\n", elapsed, warnAfter)
 		}
 	}()
 
@@ -106,7 +125,7 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 	// context timeout — failures fall through to text search.
 	semanticDone := false
 	if q.Text != "" && r.shouldTryEmbedder() {
-		embedCtx, cancel := context.WithTimeout(ctx, embedTimeout)
+		embedCtx, cancel := context.WithTimeout(ctx, embedTimeout())
 		queryVec, err := r.embedder.Embed(embedCtx, q.Text)
 		cancel()
 		if err != nil {

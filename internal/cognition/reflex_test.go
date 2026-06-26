@@ -58,6 +58,9 @@ func newReflexTestStorage(t *testing.T) *storage.Storage {
 // incident: a hung Ollama caused Reflex to take 60s. Reflex must return
 // quickly (well under the embedder's stall) by enforcing its own timeout.
 func TestReflex_SlowEmbedder_DoesNotBlockHotPath(t *testing.T) {
+	// Pin a tight embed budget so the assertion is independent of the
+	// (network-embedder-friendly) default.
+	t.Setenv("CORTEX_REFLEX_EMBED_TIMEOUT_MS", "100")
 	store := newReflexTestStorage(t)
 	embedder := &slowEmbedder{delay: 5 * time.Second, respects: true}
 	r := NewReflex(store, embedder)
@@ -84,6 +87,8 @@ func TestReflex_SlowEmbedder_DoesNotBlockHotPath(t *testing.T) {
 // invoke the embedder until the cooldown elapses. Without this, every
 // Reflex call would pay the per-call timeout cost while Ollama is hung.
 func TestReflex_CircuitBreaker_SkipsAfterRepeatedFailures(t *testing.T) {
+	// Pin a tight embed budget so the 500ms embedder delay always exceeds it.
+	t.Setenv("CORTEX_REFLEX_EMBED_TIMEOUT_MS", "100")
 	store := newReflexTestStorage(t)
 	// Sleep long enough that the per-call timeout always fires.
 	embedder := &slowEmbedder{delay: 500 * time.Millisecond, respects: true}

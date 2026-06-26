@@ -2,6 +2,7 @@
 package capture
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -15,12 +16,20 @@ import (
 	"github.com/dereksantos/cortex/internal/storage"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
+
+// embedWriteTimeout bounds the background embed-on-capture call. Generous
+// relative to the Reflex read budget because this is off the hot path (the
+// turn has already answered), but capped so a wedged embedder can't leak
+// goroutines that outlive a long REPL session.
+const embedWriteTimeout = 15 * time.Second
 
 // Capture handles fast event capture
 type Capture struct {
-	cfg     *config.Config
-	storage *storage.Storage // optional; when non-nil CaptureEvent also writes events synchronously into storage so they are searchable within the same session
+	cfg      *config.Config
+	storage  *storage.Storage // optional; when non-nil CaptureEvent also writes events synchronously into storage so they are searchable within the same session
+	embedder llm.Embedder     // optional; when set, captured events are embedded into storage (the write side of semantic search) asynchronously
 }
 
 // New creates a new Capture instance
@@ -45,6 +54,13 @@ func NewWithStorage(cfg *config.Config, store *storage.Storage) *Capture {
 // the inverse). nil is allowed — clears the attachment.
 func (c *Capture) SetStorage(store *storage.Storage) {
 	c.storage = store
+}
+
+// SetEmbedder attaches an embedder so captured events become semantically
+// searchable. Without it, capture only stores events for text search (Reflex
+// falls back to lexical matching). nil is allowed — clears the attachment.
+func (c *Capture) SetEmbedder(e llm.Embedder) {
+	c.embedder = e
 }
 
 // CaptureFromStdin reads an event from stdin and captures it
@@ -122,8 +138,61 @@ func (c *Capture) CaptureEvent(event *events.Event) error {
 				return fmt.Errorf("storage: %w", err)
 			}
 		}
+		c.embedEvent(event)
 	}
 	return nil
+}
+
+// embedEvent asynchronously embeds a captured event and stores the vector so
+// Reflex's semantic search can find it later. Fire-and-forget by design: the
+// turn has already answered, embedding costs a network round-trip, and a
+// failure must never break capture — so it runs in a bounded goroutine and is
+// silently best-effort (text search remains the floor). A single-turn headless
+// process may exit before the goroutine lands; that vector is simply absent
+// until a future session re-captures or a backfill runs.
+func (c *Capture) embedEvent(event *events.Event) {
+	if c.embedder == nil || !c.embedder.IsEmbeddingAvailable() {
+		return
+	}
+	text := searchableText(event)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), embedWriteTimeout)
+		defer cancel()
+		vec, err := c.embedder.Embed(ctx, text)
+		if err != nil || len(vec) == 0 {
+			return
+		}
+		_ = c.storage.StoreEmbeddingWithModel(event.ID, "event", vec, modelName(c.embedder))
+	}()
+}
+
+// searchableText builds the string embedded for an event: the user's prompt
+// (the retrieval key — where stated preferences and corrections live) joined
+// with the captured result, so a semantically similar future prompt surfaces
+// this turn. Mirrors what SearchByVector returns as content (ToolResult).
+func searchableText(event *events.Event) string {
+	var parts []string
+	if event.ToolInput != nil {
+		if p, ok := event.ToolInput["user_prompt"].(string); ok && p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if event.ToolResult != "" {
+		parts = append(parts, event.ToolResult)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// modelName extracts the embedder's model id for provenance, when it exposes
+// one. Empty otherwise — StoreEmbeddingWithModel treats "" as "unknown model".
+func modelName(e llm.Embedder) string {
+	if n, ok := e.(interface{ ModelName() string }); ok {
+		return n.ModelName()
+	}
+	return ""
 }
 
 // writeToJournal serializes the event and appends it to the capture

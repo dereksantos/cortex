@@ -35,7 +35,7 @@ func TestCapture_RoundTripsThroughCortex(t *testing.T) {
 	}
 	defer store.Close()
 
-	cortex, err := intcognition.New(store, nil, nil, cfg)
+	cortex, err := intcognition.New(store, nil, nil, nil, cfg)
 	if err != nil {
 		t.Fatalf("cognition.New: %v", err)
 	}

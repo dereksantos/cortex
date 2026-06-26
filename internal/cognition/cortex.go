@@ -45,9 +45,18 @@ type Cortex struct {
 	wg sync.WaitGroup
 }
 
-// New creates a new Cortex instance with all cognitive modes.
-// embedder is optional - if provided, enables semantic search in Reflex.
-func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, cfg *config.Config) (*Cortex, error) {
+// New creates a new Cortex instance with all cognitive modes. Each model
+// dependency is optional and degrades gracefully when nil, so the caller can
+// light up the stack piece by piece:
+//
+//   - rerankProvider feeds Reflect (reranking + Think's cache-warming). nil →
+//     Reflect returns Reflex's order unchanged.
+//   - dreamProvider feeds Dream (idle-time insight generation). nil → Dream
+//     no-ops. Kept distinct from rerankProvider so reranking and deep idle
+//     reasoning can route to different silicon (a dedicated CPU reranker vs a
+//     swap-free NPU reasoner) instead of contending on one.
+//   - embedder feeds Reflex semantic search. nil → mechanical text search.
+func New(store *storage.Storage, rerankProvider, dreamProvider llm.Provider, embedder llm.Embedder, cfg *config.Config) (*Cortex, error) {
 	if store == nil {
 		return nil, fmt.Errorf("storage is required")
 	}
@@ -56,8 +65,8 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	activity := NewActivityTracker()
 
 	// Create modes
-	reflex := NewReflex(store, embedder) // embedder can be nil, falls back to text search
-	reflect := NewReflect(provider)      // provider can be nil, Reflect will degrade gracefully
+	reflex := NewReflex(store, embedder)  // embedder can be nil, falls back to text search
+	reflect := NewReflect(rerankProvider) // provider can be nil, Reflect will degrade gracefully
 	think := NewThink(reflex, reflect, activity)
 	contextDir := ""
 	if cfg != nil {
@@ -77,7 +86,7 @@ func New(store *storage.Storage, provider llm.Provider, embedder llm.Embedder, c
 	if contextDir != "" {
 		dreamStatePath = contextDir + "/dream_state.json"
 	}
-	dream := NewDream(store, provider, activity, dreamStatePath)
+	dream := NewDream(store, dreamProvider, activity, dreamStatePath)
 	if contextDir != "" {
 		dream.SetJournalDir(contextDir + "/journal")
 	}
