@@ -8,9 +8,12 @@ for what existed before and why it went.
 
 > Direction docs are authoritative for scope. The live direction is the
 > **working-memory** line: [`docs/working-memory.md`](docs/working-memory.md)
-> (forever-session via continuous context curation) and
+> (forever-session via continuous context curation),
 > [`docs/working-memory-study.md`](docs/working-memory-study.md)
-> (study-as-working-memory). The harness hardening plan is
+> (study-as-working-memory), and
+> [`docs/memory-distillation.md`](docs/memory-distillation.md) (retrieval serves
+> only distilled, model-named memory files; raw transcript reached via
+> `study(journal)` on demand). The harness hardening plan is
 > [`docs/loop-production-harness.md`](docs/loop-production-harness.md).
 
 ## What `loop` is
