@@ -22,6 +22,11 @@ import (
 // purpose: the whole point is a few targeted reads, not exhaustive coverage.
 const navMaxIterations = 10
 
+// navMaxDepth bounds study-spawns-study recursion: a navigator may delegate a
+// sub-study (study(path, goal)) to cover a neighbor file or subdirectory, but
+// only this many levels deep, so a fan-out can't run away.
+const navMaxDepth = 2
+
 // navMapBudget caps the seed map so orientation never dominates the navigator's
 // own context. Sized to hold a large single file's full declaration skeleton
 // (~one compact line per decl) — truncating it hides the file's back half and
@@ -30,10 +35,11 @@ const navMaxIterations = 10
 // tree still truncates, with a note to project_index a subdirectory to drill in.
 const navMapBudget = 16000
 
-// navTools is the narrow read-only surface the navigator may call: orient with
-// project_index (map), pull exact ranges with read_file. No write/edit/bash/
-// remove/study — navigation reads, it does not mutate or recurse.
-var navTools = []Tool{tools.ReadFile, tools.ProjectIndexTool}
+// navTools is the navigator's surface: orient with project_index (map), pull
+// exact ranges with read_file, and delegate a whole neighbor file/subdir to a
+// sub-study with study. No write/edit/bash/remove — navigation reads, it does
+// not mutate.
+var navTools = []Tool{tools.ReadFile, tools.ProjectIndexTool, tools.StudyTool}
 
 // navAllowed is the execution allowlist matching navTools — a defensive guard
 // so a model that hallucinates a call to a tool it wasn't offered (write_file,
@@ -41,26 +47,23 @@ var navTools = []Tool{tools.ReadFile, tools.ProjectIndexTool}
 var navAllowed = map[string]bool{
 	tools.FunctionReadFile:     true,
 	tools.FunctionProjectIndex: true,
+	tools.FunctionStudy:        true,
 }
 
-const navigatorSystem = `You are a code navigator. You are given a structural MAP of a path and a GOAL. Your job is to read ONLY the regions relevant to the goal and return a concise, grounded digest.
+const navigatorSystem = `You are a code navigator. You are given a structural MAP of a path and a GOAL. Read the parts relevant to the goal, then answer it.
 
-How to work:
-- The map lists each declaration or section with its line span, e.g. "L40-92". To read it, call read_file(path, start, end) — e.g. read_file(path, 40, 92). Read one small range at a time.
-- To drill into a file or subdirectory you have not mapped yet, call project_index(path) to get its symbol map / outline.
-- Read narrowly: pull the few regions the goal actually needs. Do NOT read whole files, and do NOT read regions the map shows are irrelevant.
-- You have a limited read budget. Spend it on what matters, then stop.
+- The map lists each declaration or section with its line span, e.g. "L40-92". Read one with read_file(path, 40, 92). Use project_index(path) to map a file or subdirectory you haven't seen yet.
+- To understand a whole NEIGHBOR file or subdirectory at once, call study(path, goal) — it returns a digest of that path so you don't read it all yourself. Use it for breadth (a package, a big related file); read ranges yourself for the path you were given.
+- Read narrowly — pull the few parts the goal needs, not whole files or irrelevant regions. You have a limited read budget; spend it on what matters, then stop.
 
-When you have seen enough, STOP calling tools and reply with the digest:
-- Answer the goal directly and concisely.
-- Explain how the pieces fit together — control flow, data flow, the why behind the design where the code shows it — not just what each region contains.
-- Cite every claim with its source as @path:start-end (the exact lines you read). Never cite a range you did not read.`
+When you've seen enough, stop calling tools and answer the GOAL: explain clearly and concretely how the relevant code works and how the pieces fit together. Mention file:line where it helps the reader find the code. Base your answer only on what you actually read.`
 
 // runNavigator runs the bounded read loop and returns the final digest. It
 // builds its own request against the STUDY model (small, long-context) with the
 // narrow nav tool set — separate from the main conversation's request, so the
-// navigation never pollutes the coder's history.
-func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string) (string, error) {
+// navigation never pollutes the coder's history. depth is the study-spawns-study
+// nesting level (0 at the top); it bounds recursion via navMaxDepth.
+func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string, depth int) (string, error) {
 	if strings.TrimSpace(goal) == "" {
 		goal = "Summarize what this code does and how its parts fit together."
 	}
@@ -127,7 +130,7 @@ func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string) (s
 			req.Messages = append(req.Messages, Message{
 				Role:       RoleTool,
 				ToolCallID: call.ID,
-				Content:    cs.runNavTool(ctx, call),
+				Content:    cs.runNavTool(ctx, call, depth),
 			})
 		}
 		if ctx.Err() != nil {
@@ -141,11 +144,28 @@ func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string) (s
 }
 
 // runNavTool executes one navigator tool call, refusing anything outside the
-// read-only allowlist (defense against a hallucinated write/bash call) and
-// returning the result — or the error text — as the tool message content.
-func (cs *CortexSession) runNavTool(ctx context.Context, call ToolCall) string {
-	if !navAllowed[call.Function.Name] {
-		return fmt.Sprintf("Error: %q is not available to the navigator — use read_file (with start/end) or project_index only.", call.Function.Name)
+// allowlist (defense against a hallucinated write/bash call). A study call is a
+// bounded recursive spawn — a sub-navigator over the named path — capped at
+// navMaxDepth so a fan-out can't run away. Everything else dispatches normally.
+func (cs *CortexSession) runNavTool(ctx context.Context, call ToolCall, depth int) string {
+	name := call.Function.Name
+	if !navAllowed[name] {
+		return fmt.Sprintf("Error: %q is not available to the navigator — use read_file, project_index, or study.", name)
+	}
+	if name == tools.FunctionStudy {
+		path, err := call.StringArg("path")
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+		if depth >= navMaxDepth {
+			return fmt.Sprintf("Error: max study depth (%d) reached — read %s directly with read_file instead of spawning another study.", navMaxDepth, path)
+		}
+		goal, _ := call.StringArg("goal")
+		digest, err := cs.runNavigator(ctx, path, goal, depth+1)
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+		return digest
 	}
 	out, err := call.Execute(ctx, cs)
 	if err != nil {
@@ -213,6 +233,6 @@ func (cs *CortexSession) Navigate(ctx context.Context, path, goal string) (strin
 	if os.Getenv("CORTEX_STUDY_NAV") == "" {
 		return "", false, nil
 	}
-	digest, err := cs.runNavigator(ctx, path, goal)
+	digest, err := cs.runNavigator(ctx, path, goal, 0)
 	return digest, true, err
 }

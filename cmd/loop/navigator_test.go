@@ -49,9 +49,20 @@ func TestNavMapBounded(t *testing.T) {
 func TestNavToolRefusesDisallowed(t *testing.T) {
 	cs := &CortexSession{}
 	call := ToolCall{Function: tools.FunctionCall{Name: tools.FunctionBash, Arguments: `{"command":"rm -rf /"}`}}
-	out := cs.runNavTool(context.Background(), call)
+	out := cs.runNavTool(context.Background(), call, 0)
 	if !strings.Contains(out, "not available to the navigator") {
 		t.Errorf("disallowed tool should be refused, got: %q", out)
+	}
+}
+
+func TestNavStudySpawnDepthCapped(t *testing.T) {
+	// study is allowed, but spawning at the depth cap is refused (no runaway
+	// recursion) — and the refusal doesn't need a live model.
+	cs := &CortexSession{}
+	call := ToolCall{Function: tools.FunctionCall{Name: tools.FunctionStudy, Arguments: `{"path":"cmd/loop","goal":"x"}`}}
+	out := cs.runNavTool(context.Background(), call, navMaxDepth)
+	if !strings.Contains(out, "max study depth") {
+		t.Errorf("study at the depth cap should be refused, got: %q", out)
 	}
 }
 
@@ -65,7 +76,7 @@ func TestNavToolAllowsRangedRead(t *testing.T) {
 	call := ToolCall{Function: tools.FunctionCall{
 		Name: tools.FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q,"start":2,"end":3}`, p),
 	}}
-	out := cs.runNavTool(context.Background(), call)
+	out := cs.runNavTool(context.Background(), call, 0)
 	if !strings.Contains(out, "b\nc") || strings.Contains(out, "Error") {
 		t.Errorf("ranged read through navigator failed: %q", out)
 	}
