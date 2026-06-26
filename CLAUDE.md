@@ -6,14 +6,15 @@ this one binary; the prior `cortex` CLI, eval framework, and Claude-Code
 host integration were removed — see [`docs/archive.md`](docs/archive.md)
 for what existed before and why it went.
 
-> Direction docs are authoritative for scope. The live direction is the
-> **working-memory** line: [`docs/working-memory.md`](docs/working-memory.md)
-> (forever-session via continuous context curation),
-> [`docs/working-memory-study.md`](docs/working-memory-study.md)
-> (study-as-working-memory), and
-> [`docs/memory-distillation.md`](docs/memory-distillation.md) (retrieval serves
-> only distilled, model-named memory files; raw transcript reached via
-> `study(journal)` on demand). The harness hardening plan is
+> Direction docs are authoritative for scope. The **live** direction is
+> [`docs/memory-tools.md`](docs/memory-tools.md): memory is **tools the model
+> drives** (`memory_write/read/search/forget` + `study(journal)`) over free-form
+> named notes + an injected index — NOT a mechanical retrieval/distill pipeline.
+> It supersedes the mechanical memory line —
+> [`docs/memory-distillation.md`](docs/memory-distillation.md),
+> [`docs/working-memory.md`](docs/working-memory.md),
+> [`docs/working-memory-study.md`](docs/working-memory-study.md) — which is kept
+> for history. The harness hardening plan is
 > [`docs/loop-production-harness.md`](docs/loop-production-harness.md).
 
 ## What `loop` is
