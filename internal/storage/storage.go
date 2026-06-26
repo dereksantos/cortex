@@ -701,6 +701,16 @@ func (s *Storage) RecordFeedback(f *Feedback) error {
 	return nil
 }
 
+// AllEvents returns every stored event, newest first. The slice is a fresh
+// copy of pointers; callers may reorder it but must not mutate the events.
+func (s *Storage) AllEvents() []*events.Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*events.Event, len(s.eventsByTime))
+	copy(out, s.eventsByTime)
+	return out
+}
+
 // Retract records a feedback.retraction for gradedID so query paths hide it
 // (see IsRetracted). Append-only and idempotent — re-retracting is harmless.
 // Used to auto-prune a stale capture that a fresher one contradicts.

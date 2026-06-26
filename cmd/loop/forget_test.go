@@ -42,7 +42,10 @@ func TestForget_RetractsMatchingMemories(t *testing.T) {
 	}
 
 	cs := &CortexSession{store: store, SessionID: "t"}
-	matches, err := cs.forget("936 documentation files")
+	// Compound natural-language input (the real failing case): the target phrase
+	// is mixed with an instruction. Term-overlap must still find the 936 capture
+	// and leave the unrelated one.
+	matches, err := cs.forget("936 documentation files, treat the project as a clean slate")
 	if err != nil {
 		t.Fatalf("forget: %v", err)
 	}
@@ -54,6 +57,47 @@ func TestForget_RetractsMatchingMemories(t *testing.T) {
 	}
 	if store.IsRetracted("event-e-keep") {
 		t.Error("unrelated memory was retracted — over-matched")
+	}
+}
+
+// TestForget_All_KeepsRememberNotes checks the clean-slate sentinel retracts
+// auto-captured turns but preserves explicit /remember notes.
+func TestForget_All_KeepsRememberNotes(t *testing.T) {
+	t.Chdir(t.TempDir())
+	store, err := storage.New(&config.Config{ContextDir: contextDir(), ProjectRoot: "."})
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	turn := &events.Event{
+		ID: "e-turn", EventType: events.EventToolUse, Timestamp: now, ToolName: "loop",
+		ToolInput: map[string]any{"type": "turn", "user_prompt": "hi"}, ToolResult: "936 docs",
+	}
+	note := &events.Event{
+		ID: "e-note", EventType: events.EventToolUse, Timestamp: now, ToolName: "loop",
+		ToolInput: map[string]any{"type": "memory"}, ToolResult: "we deploy on Fridays",
+	}
+	for _, ev := range []*events.Event{turn, note} {
+		if err := store.StoreEvent(ev); err != nil {
+			t.Fatalf("StoreEvent: %v", err)
+		}
+	}
+
+	cs := &CortexSession{store: store, SessionID: "t"}
+	matches, err := cs.forget("--all")
+	if err != nil {
+		t.Fatalf("forget --all: %v", err)
+	}
+	if len(matches) != 1 || matches[0].ID != "e-turn" {
+		t.Fatalf("clean slate matched %v, want only the turn capture", matches)
+	}
+	if !store.IsRetracted("event-e-turn") {
+		t.Error("turn capture not retracted by clean slate")
+	}
+	if store.IsRetracted("event-e-note") {
+		t.Error("clean slate retracted an explicit /remember note — should keep it")
 	}
 }
 

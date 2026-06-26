@@ -16,11 +16,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/dereksantos/cortex/cmd/loop/tools"
 	"github.com/dereksantos/cortex/cmd/loop/ui"
@@ -2328,28 +2330,132 @@ func (cs *CortexSession) remember(text string) error {
 	return err
 }
 
-// forget retracts every captured memory whose text contains query (the manual
-// counterpart to the automatic contradiction→retraction): retracted captures are
-// hidden from all future retrieval. The events themselves are not deleted — a
-// retraction is an append-only marker — so it's auditable and reversible. Returns
-// the matched events so the caller can show the user exactly what was pruned.
+// forgetMatchCap bounds how many memories one /forget call prunes.
+const forgetMatchCap = 100
+
+// forget retracts captured memories matching query (the manual counterpart to
+// automatic contradiction→retraction): retracted captures are hidden from all
+// future retrieval. The events themselves are not deleted — a retraction is an
+// append-only marker — so it's auditable and reversible. Returns the matched
+// events so the caller can show the user exactly what was pruned.
+//
+// Matching is by term overlap, not a single verbatim substring: query is split
+// into significant terms and a capture matches when it contains enough of them
+// (min(2, #terms)), so natural phrasing like "936 documentation files" finds the
+// right captures while an incidental single-word hit does not. The sentinel
+// "--all" (or "*") is a clean slate — it retracts every capture except explicit
+// /remember notes, which a fresh start should keep.
 func (cs *CortexSession) forget(query string) ([]*events.Event, error) {
 	if cs.store == nil {
 		return nil, fmt.Errorf("memory unavailable — no .cortex store")
 	}
-	matches, err := cs.store.SearchEventsMultiTerm([]string{query}, 50)
-	if err != nil {
-		return nil, err
+	all := cs.store.AllEvents()
+	var matched []*events.Event
+
+	if q := strings.TrimSpace(query); q == "--all" || q == "*" {
+		for _, ev := range all {
+			if isRememberEvent(ev) {
+				continue // a clean slate keeps what the user deliberately saved
+			}
+			matched = append(matched, ev)
+		}
+	} else {
+		terms := forgetTerms(query)
+		if len(terms) == 0 {
+			return nil, nil
+		}
+		required := 2
+		if len(terms) < required {
+			required = len(terms)
+		}
+		type scored struct {
+			ev *events.Event
+			n  int
+		}
+		var hits []scored
+		for _, ev := range all {
+			if n := termOverlap(ev, terms); n >= required {
+				hits = append(hits, scored{ev, n})
+			}
+		}
+		sort.SliceStable(hits, func(i, j int) bool { return hits[i].n > hits[j].n })
+		for _, h := range hits {
+			matched = append(matched, h.ev)
+		}
+	}
+
+	if len(matched) > forgetMatchCap {
+		matched = matched[:forgetMatchCap]
 	}
 	reason := fmt.Sprintf("user /forget %q", query)
-	for _, ev := range matches {
+	for _, ev := range matched {
 		id := "event-" + ev.ID // the ID space retrieval filters on (see reflex.filterRetracted)
 		if err := cs.store.Retract(id, reason); err != nil {
-			return matches, err
+			return matched, err
 		}
 		cs.journalRetraction(id, reason) // canonical, append-only record of the prune
 	}
-	return matches, nil
+	return matched, nil
+}
+
+// isRememberEvent reports whether an event came from /remember (an explicit,
+// user-marked memory) rather than an automatic turn capture.
+func isRememberEvent(ev *events.Event) bool {
+	if ev.ToolInput == nil {
+		return false
+	}
+	t, _ := ev.ToolInput["type"].(string)
+	return t == "memory"
+}
+
+// forgetStopwords are structural words dropped from a /forget query so matching
+// keys on meaningful terms, not glue. Deliberately NOT topical — we never guess
+// which subject words the user meant.
+var forgetStopwords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true, "of": true,
+	"to": true, "is": true, "are": true, "as": true, "in": true, "on": true,
+	"for": true, "this": true, "that": true, "with": true, "it": true, "at": true,
+	"be": true, "by": true, "we": true, "i": true,
+}
+
+// forgetTerms splits a query into lowercased significant terms (len ≥ 2, minus
+// structural stopwords), deduped.
+func forgetTerms(query string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	}) {
+		if len(f) < 2 || forgetStopwords[f] || seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+// termOverlap counts how many distinct terms appear (case-insensitively) in an
+// event's searchable text: the user's prompt, the stored result, and tool name.
+func termOverlap(ev *events.Event, terms []string) int {
+	var b strings.Builder
+	if ev.ToolInput != nil {
+		if p, ok := ev.ToolInput["user_prompt"].(string); ok {
+			b.WriteString(p)
+			b.WriteByte(' ')
+		}
+	}
+	b.WriteString(ev.ToolResult)
+	b.WriteByte(' ')
+	b.WriteString(ev.ToolName)
+	hay := strings.ToLower(b.String())
+	n := 0
+	for _, t := range terms {
+		if strings.Contains(hay, t) {
+			n++
+		}
+	}
+	return n
 }
 
 // journalRetraction appends a feedback.retraction to <ContextDir>/journal/feedback/.
@@ -3668,7 +3774,7 @@ func main() {
 		if input == "/forget" || strings.HasPrefix(input, "/forget ") {
 			q := strings.TrimSpace(strings.TrimPrefix(input, "/forget"))
 			if q == "" {
-				fmt.Println("usage: /forget <text> — prune matching memories so they're no longer recalled")
+				fmt.Println("usage: /forget <text> — prune matching memories; /forget --all — clean slate (keeps /remember notes)")
 			} else if matches, err := session.forget(q); err != nil {
 				fmt.Printf("forget: %v\n", err)
 			} else if len(matches) == 0 {
