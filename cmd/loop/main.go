@@ -2779,6 +2779,15 @@ func (cs *CortexSession) setActivity(label string) {
 // The header marks the text as retrieved memory, not a user instruction, so the
 // model weighs it accordingly. Returns "" if nothing has printable content.
 func formatRetrieved(results []cognition.Result) string {
+	return formatRetrievedAt(results, time.Now())
+}
+
+// formatRetrievedAt is formatRetrieved with the clock injected, so each hit
+// carries a relative-age tag ("3d ago", "just now") derived mechanically from
+// its timestamp. Without it a stale fact and a current one render identically
+// and the model can't tell which to trust (see TestRetrievalConveysFreshness).
+// Pure string work — no model, sub-millisecond — so it adds no hot-path latency.
+func formatRetrievedAt(results []cognition.Result, now time.Time) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range results {
@@ -2793,6 +2802,9 @@ func formatRetrieved(results []cognition.Result) string {
 		if cat == "" {
 			cat = "note"
 		}
+		if age := relAge(r.Timestamp, now); age != "" {
+			cat += " · " + age
+		}
 		fmt.Fprintf(&b, "- [%s] %s\n", cat, c)
 		n++
 	}
@@ -2800,6 +2812,29 @@ func formatRetrieved(results []cognition.Result) string {
 		return ""
 	}
 	return "# Relevant context from memory (retrieved, not user-authored)\n" + strings.TrimRight(b.String(), "\n")
+}
+
+// relAge renders a timestamp as a compact, human relative age against now.
+// Empty for a zero timestamp (unknown age — don't fabricate one).
+func relAge(ts, now time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	d := now.Sub(ts)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	case d < 30*24*time.Hour:
+		return fmt.Sprintf("%dw ago", int(d.Hours()/(24*7)))
+	default:
+		return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
+	}
 }
 
 // Close releases the transcript and retrieval resources at REPL exit.
