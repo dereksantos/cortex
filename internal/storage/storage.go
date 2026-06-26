@@ -100,6 +100,11 @@ type embeddingEntry struct {
 	Vector      []float32 `json:"vector"`
 	ModelName   string    `json:"model_name,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	// Verified marks content whose claim was grounded in tool inspection (vs
+	// unverified model prose). Retrieval ranks verified hits higher so a
+	// tool-checked fact outranks a confabulated one. Defaults false for older
+	// rows written before provenance tracking.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // --- JSONL record types ---
@@ -694,6 +699,20 @@ func (s *Storage) RecordFeedback(f *Feedback) error {
 		}
 	}
 	return nil
+}
+
+// Retract records a feedback.retraction for gradedID so query paths hide it
+// (see IsRetracted). Append-only and idempotent — re-retracting is harmless.
+// Used to auto-prune a stale capture that a fresher one contradicts.
+func (s *Storage) Retract(gradedID, reason string) error {
+	if gradedID == "" {
+		return fmt.Errorf("retract requires a graded id")
+	}
+	return s.RecordFeedback(&Feedback{
+		Type:     "feedback.retraction",
+		GradedID: gradedID,
+		Reason:   reason,
+	})
 }
 
 // FeedbackFor returns the feedback entries that grade a given derivation
@@ -2120,6 +2139,8 @@ type VectorSearchResult struct {
 	ContentType string
 	Content     string
 	Similarity  float64
+	Verified    bool
+	CreatedAt   time.Time
 }
 
 // EmbeddingContent represents a content ID and type from the embeddings table.
@@ -2135,6 +2156,13 @@ func (s *Storage) StoreEmbedding(contentID, contentType string, vector []float32
 
 // StoreEmbeddingWithModel stores a vector embedding with model name tracking.
 func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector []float32, modelName string) error {
+	return s.StoreEmbeddingVerified(contentID, contentType, vector, modelName, false)
+}
+
+// StoreEmbeddingVerified stores an embedding tagged with whether its content was
+// grounded in tool inspection. Retrieval uses the flag to rank verified content
+// above unverified prose.
+func (s *Storage) StoreEmbeddingVerified(contentID, contentType string, vector []float32, modelName string, verified bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2145,6 +2173,7 @@ func (s *Storage) StoreEmbeddingWithModel(contentID, contentType string, vector 
 		Vector:      vector,
 		ModelName:   modelName,
 		CreatedAt:   time.Now(),
+		Verified:    verified,
 	}
 
 	if err := appendLine(s.embFile, entry); err != nil {
@@ -2200,6 +2229,8 @@ func (s *Storage) SearchByVector(queryVector []float32, limit int, threshold flo
 				ContentType: entry.ContentType,
 				Content:     content,
 				Similarity:  similarity,
+				Verified:    entry.Verified,
+				CreatedAt:   entry.CreatedAt,
 			})
 		}
 	}

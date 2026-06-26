@@ -67,6 +67,7 @@ func New(store *storage.Storage, rerankProvider, dreamProvider llm.Provider, emb
 	// Create modes
 	reflex := NewReflex(store, embedder)  // embedder can be nil, falls back to text search
 	reflect := NewReflect(rerankProvider) // provider can be nil, Reflect will degrade gracefully
+	reflect.SetRetractor(store)           // contradiction → retraction (auto-prune stale memory)
 	think := NewThink(reflex, reflect, activity)
 	contextDir := ""
 	if cfg != nil {

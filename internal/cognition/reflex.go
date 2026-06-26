@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -178,11 +179,20 @@ func (r *Reflex) Reflex(ctx context.Context, q cognition.Query) ([]cognition.Res
 		}
 	}
 
+	// Drop anything a contradiction has retracted (e.g. a stale fact superseded
+	// by a fresher, tool-checked one) so it can never be served again.
+	candidates = r.filterRetracted(candidates)
+
 	// Deduplicate
 	candidates = Deduplicate(candidates)
 
 	// Score and rank
 	candidates = r.scorer.ScoreAndRank(candidates, q)
+
+	// Provenance + recency weighting: a tool-checked, recent capture should
+	// outrank an unverified or stale one of equal textual relevance, so a
+	// confabulated assertion can't be served as fact over reality.
+	candidates = weightByProvenance(candidates)
 
 	// Apply threshold filter
 	if q.Threshold > 0 {
@@ -262,6 +272,67 @@ func (r *Reflex) insightsToResults(insights []*storage.Insight) []cognition.Resu
 	return results
 }
 
+// filterRetracted drops candidates whose ID has a recorded retraction. The ID
+// space matches what Reflect retracts (cognition.Result.ID), so a contradiction
+// resolved on one turn hides the loser on every subsequent retrieval.
+func (r *Reflex) filterRetracted(candidates []cognition.Result) []cognition.Result {
+	out := candidates[:0]
+	for _, c := range candidates {
+		if c.ID != "" && r.storage.IsRetracted(c.ID) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// Provenance/recency weighting knobs. unverifiedPenalty multiplies the score of
+// content not grounded in tool inspection; recencyFloor is the smallest recency
+// multiplier (reached at recencyHorizon age), so stale facts decay but never
+// vanish. Deliberately gentle — this re-ranks ties, it doesn't hard-filter.
+const (
+	unverifiedPenalty = 0.6
+	recencyFloor      = 0.7
+	recencyHorizon    = 30 * 24 * time.Hour
+)
+
+// weightByProvenance re-scores candidates so verified, recent captures rank
+// above unverified or stale ones, then re-sorts by the adjusted score. Pure and
+// mechanical (no model): adjusted = score × verifiedFactor × recencyFactor.
+func weightByProvenance(candidates []cognition.Result) []cognition.Result {
+	now := time.Now()
+	for i := range candidates {
+		f := 1.0
+		if v, _ := candidates[i].Metadata["verified"].(bool); !v {
+			f *= unverifiedPenalty
+		}
+		f *= recencyFactor(candidates[i].Timestamp, now)
+		candidates[i].Score *= f
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+	return candidates
+}
+
+// recencyFactor decays linearly from 1.0 (now) to recencyFloor (recencyHorizon
+// or older). A zero timestamp is treated as neutral (1.0) so unknown-age content
+// isn't penalized for missing metadata.
+func recencyFactor(ts, now time.Time) float64 {
+	if ts.IsZero() {
+		return 1.0
+	}
+	age := now.Sub(ts)
+	if age <= 0 {
+		return 1.0
+	}
+	if age >= recencyHorizon {
+		return recencyFloor
+	}
+	frac := float64(age) / float64(recencyHorizon)
+	return 1.0 - frac*(1.0-recencyFloor)
+}
+
 // eventToResult converts a storage event to cognition.Result.
 func (r *Reflex) eventToResult(event *events.Event) cognition.Result {
 	// Extract meaningful content from event
@@ -279,8 +350,19 @@ func (r *Reflex) eventToResult(event *events.Event) cognition.Result {
 		Metadata: map[string]any{
 			"tool_name":  event.ToolName,
 			"tool_input": event.ToolInput,
+			"verified":   eventVerified(event),
 		},
 	}
+}
+
+// eventVerified reads an event's "verified" provenance bit (set by the loop
+// from whether the turn ran tools). Absent/false → unverified.
+func eventVerified(event *events.Event) bool {
+	if event.Metadata == nil {
+		return false
+	}
+	v, _ := event.Metadata["verified"].(bool)
+	return v
 }
 
 // eventsToResults converts multiple events to results.
@@ -301,12 +383,14 @@ func (r *Reflex) vectorResultsToResults(vectorResults []storage.VectorSearchResu
 			content = content[:500] + "..."
 		}
 		results = append(results, cognition.Result{
-			ID:       vr.ContentType + "-" + vr.ContentID,
-			Content:  content,
-			Category: vr.ContentType,
-			Score:    vr.Similarity,
+			ID:        vr.ContentType + "-" + vr.ContentID,
+			Content:   content,
+			Category:  vr.ContentType,
+			Score:     vr.Similarity,
+			Timestamp: vr.CreatedAt,
 			Metadata: map[string]any{
 				"semantic_match": true,
+				"verified":       vr.Verified,
 			},
 		})
 	}

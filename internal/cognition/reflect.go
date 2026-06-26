@@ -35,6 +35,12 @@ Guidelines:
 - Only report contradictions when candidates genuinely conflict, not just cover different topics
 - Be concise in your reasoning`
 
+// Retractor records a retraction so a contradicted, stale candidate is hidden
+// from future retrieval. Storage implements it (Retract → IsRetracted).
+type Retractor interface {
+	Retract(gradedID, reason string) error
+}
+
 // Reflect implements cognition.Reflector for LLM-based reranking.
 // Takes ~200ms+ due to LLM call.
 type Reflect struct {
@@ -46,7 +52,15 @@ type Reflect struct {
 	// Journal output (slice R1). When set, Reflect emits reflect.rerank
 	// entries to <journalDir>/reflect/ after each rerank operation.
 	journalDir string
+
+	// retractor, when set, lets a detected contradiction auto-retract the older
+	// of the conflicting candidates (recency wins). nil → detect-only.
+	retractor Retractor
 }
+
+// SetRetractor wires the store that applies retractions. Empty disables the
+// contradiction→retraction action (contradictions are still detected/journaled).
+func (r *Reflect) SetRetractor(rt Retractor) { r.retractor = rt }
 
 // SetJournalDir wires the project's <ContextDir>/journal/ root for
 // reflect.rerank emission. Empty disables journal emission.
@@ -93,7 +107,81 @@ func (r *Reflect) Reflect(ctx context.Context, q cognition.Query, candidates []c
 	// Best-effort journal emission (slice R1). Errors logged, never returned.
 	r.emitRerankToJournal(q, candidates, reranked, parsed)
 
+	// Act on detected contradictions: retract the older of each conflicting
+	// pair so a stale claim superseded by a fresher one stops being served.
+	r.applyRetractions(candidates, parsed.Contradictions)
+
 	return reranked, nil
+}
+
+// applyRetractions retracts the older candidate(s) in each detected
+// contradiction (recency wins for factual claims), recording a retraction in
+// storage and a feedback.retraction in the journal. Only acts on strictly-older
+// candidates with known timestamps — never guesses when recency is ambiguous.
+func (r *Reflect) applyRetractions(candidates []cognition.Result, contradictions []contradiction) {
+	if r.retractor == nil || len(contradictions) == 0 {
+		return
+	}
+	byID := make(map[string]cognition.Result, len(candidates))
+	for _, c := range candidates {
+		byID[c.ID] = c
+	}
+	for _, con := range contradictions {
+		var items []cognition.Result
+		for _, id := range con.IDs {
+			if c, ok := byID[id]; ok {
+				items = append(items, c)
+			}
+		}
+		if len(items) < 2 {
+			continue // need at least two known candidates to pick a loser
+		}
+		newest := items[0]
+		for _, it := range items[1:] {
+			if it.Timestamp.After(newest.Timestamp) {
+				newest = it
+			}
+		}
+		for _, it := range items {
+			if it.ID == newest.ID || it.Timestamp.IsZero() || !it.Timestamp.Before(newest.Timestamp) {
+				continue // keep the newest; skip ties / unknown-age to avoid wrong retractions
+			}
+			reason := fmt.Sprintf("superseded by %s — %s", newest.ID, con.Reason)
+			if err := r.retractor.Retract(it.ID, reason); err != nil {
+				log.Printf("reflect: retract %s: %v", it.ID, err)
+				continue
+			}
+			r.emitRetractionToJournal(it.ID, reason)
+		}
+	}
+}
+
+// emitRetractionToJournal appends a feedback.retraction entry (the canonical,
+// append-only record of the prune) to <journalDir>/feedback/. Best-effort.
+func (r *Reflect) emitRetractionToJournal(gradedID, reason string) {
+	if r.journalDir == "" {
+		return
+	}
+	entry, err := journal.NewFeedbackEntry(journal.TypeFeedbackRetraction, journal.FeedbackPayload{
+		GradedID: gradedID,
+		Reason:   reason,
+	})
+	if err != nil {
+		log.Printf("reflect: build retraction entry: %v", err)
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: filepath.Join(r.journalDir, "feedback"),
+		Fsync:    journal.FsyncPerEntry, // retractions are inputs-grade: durable immediately
+	})
+	if err != nil {
+		log.Printf("reflect: open feedback writer: %v", err)
+		return
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		log.Printf("reflect: append retraction: %v", err)
+	}
 }
 
 // emitRerankToJournal writes a reflect.rerank entry capturing this

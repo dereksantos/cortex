@@ -165,7 +165,7 @@ func (c *Capture) embedEvent(event *events.Event) {
 		if err != nil || len(vec) == 0 {
 			return
 		}
-		_ = c.storage.StoreEmbeddingWithModel(event.ID, "event", vec, modelName(c.embedder))
+		_ = c.storage.StoreEmbeddingVerified(event.ID, "event", vec, modelName(c.embedder), eventVerified(event))
 	}()
 }
 
@@ -193,6 +193,16 @@ func modelName(e llm.Embedder) string {
 		return n.ModelName()
 	}
 	return ""
+}
+
+// eventVerified reads the capture's verified provenance bit (set by the loop
+// from whether the turn ran tools). Absent/false → unverified.
+func eventVerified(event *events.Event) bool {
+	if event.Metadata == nil {
+		return false
+	}
+	v, _ := event.Metadata["verified"].(bool)
+	return v
 }
 
 // writeToJournal serializes the event and appends it to the capture

@@ -2253,6 +2253,20 @@ func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
 	return strings.Join(parts, " | "), answer
 }
 
+// turnUsedTools reports whether the turn made any tool call. It is the capture's
+// "verified" signal: a turn that inspected the codebase (read/study/bash/…)
+// grounded its answer in real state, whereas a pure-prose turn (a greeting, an
+// unchecked assertion) did not. Retrieval ranks verified captures above
+// unverified ones so a tool-checked fact outranks a confabulated one.
+func turnUsedTools(turnMsgs []Message) bool {
+	for _, m := range turnMsgs {
+		if len(m.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // captureTurn records a completed turn to the store. The user's message is the
 // retrieval key (where stated preferences/corrections live); the outcome line
 // and a capped answer excerpt give a hit some substance. ID is left empty so
@@ -2284,6 +2298,7 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
 		ToolResult: summary,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+		Metadata:   map[string]any{"verified": turnUsedTools(turnMsgs)},
 	}); err == nil {
 		cs.captures++
 	}
@@ -2305,6 +2320,7 @@ func (cs *CortexSession) remember(text string) error {
 		ToolInput:  map[string]any{"type": "memory"},
 		ToolResult: text,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+		Metadata:   map[string]any{"verified": true}, // the user marked it — highest precision
 	})
 	if err == nil {
 		cs.captures++
