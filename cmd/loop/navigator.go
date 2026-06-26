@@ -3,19 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/dereksantos/cortex/cmd/loop/tools"
 	"github.com/dereksantos/cortex/internal/projectindex"
 )
 
-// navigator.go is the map-first study path (study-navigator direction doc): a
-// bounded read-only agent that leads with a free structural map of the target,
-// then reads ONLY the goal-relevant regions in tiny ranges — instead of the
-// sampling engine's blind, window-filling byte-grid draws. It is flag-gated
-// (CORTEX_STUDY_NAV) and routed only from the study TOOL, so compaction and
-// shell-output study keep their existing engine until phase 5 splits them out.
+// navigator.go is the study tool (study-navigator direction doc): a bounded
+// read-only subagent that leads with a free structural map of the target, then
+// reads ONLY the goal-relevant regions in tiny ranges — and can spawn a bounded
+// sub-study to delegate a neighbor file/subdir. It replaced the byte-grid
+// sampling engine (now removed). Compaction and shell-output study use the
+// free-text summarizer instead — they have no structural map to navigate.
 
 // navMaxIterations bounds the navigator's read loop — how many rounds of
 // tool-calling it gets before it must answer from what it has read. Small on
@@ -225,14 +224,9 @@ func navMap(path string) string {
 	return m
 }
 
-// Navigate routes the study TOOL through the map-first navigator when enabled
-// (CORTEX_STUDY_NAV). Returns ok=false when the navigator is off, so the tool
-// falls back to the sampling engine. Scoped to the tool path on purpose:
-// compaction and shell-output study still call RunStudy directly.
-func (cs *CortexSession) Navigate(ctx context.Context, path, goal string) (string, bool, error) {
-	if os.Getenv("CORTEX_STUDY_NAV") == "" {
-		return "", false, nil
-	}
-	digest, err := cs.runNavigator(ctx, path, goal, 0)
-	return digest, true, err
+// Navigate is the study tool: the map-first navigator over a path. (Compaction
+// and shell-output study use the free-text summarizer instead — they have no
+// structural map to navigate.)
+func (cs *CortexSession) Navigate(ctx context.Context, path, goal string) (string, error) {
+	return cs.runNavigator(ctx, path, goal, 0)
 }

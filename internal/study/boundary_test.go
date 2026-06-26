@@ -1,7 +1,6 @@
 package study
 
 import (
-	"os"
 	"testing"
 )
 
@@ -104,34 +103,5 @@ func TestSnapToBoundary(t *testing.T) {
 				t.Errorf("snapToBoundary = %d, want %d", got, tt.want)
 			}
 		})
-	}
-}
-
-// Boundary snapping is wired into RefineChunk: a byte-grid chunk whose
-// offset lands mid-function comes back refined to start at the next
-// declaration, with line bounds matching.
-func TestRefineChunkSnapsToBoundary(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/f.go"
-	content := "package p\n\nfunc A() {\n\tx := 1\n\t_ = x\n}\n\nfunc B() {\n\ty := 2\n\t_ = y\n}\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Start the chunk inside A's body (at "\tx := 1\n") and run to EOF:
-	// refinement should snap the start to "func B() {".
-	off := int64(len("package p\n\nfunc A() {\n"))
-	ch := &Chunk{
-		Path: path, RelPath: "f.go", Lang: "go",
-		ByteOffset: off, ByteLength: len(content) - int(off),
-	}
-	if err := RefineChunk(ch, streamingLineBase(path)); err != nil {
-		t.Fatalf("RefineChunk: %v", err)
-	}
-	wantOff := int64(len("package p\n\nfunc A() {\n\tx := 1\n\t_ = x\n}\n\n"))
-	if ch.ByteOffset != wantOff {
-		t.Errorf("ByteOffset = %d, want %d (start of func B)", ch.ByteOffset, wantOff)
-	}
-	if ch.LineStart != 8 {
-		t.Errorf("LineStart = %d, want 8 (func B line)", ch.LineStart)
 	}
 }

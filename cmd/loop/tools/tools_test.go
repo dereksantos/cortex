@@ -8,30 +8,6 @@ import (
 	"testing"
 )
 
-func TestDefaultStudyPasses(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "f.txt")
-	if err := os.WriteFile(file, []byte("x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cases := []struct {
-		name string
-		path string
-		want int
-	}{
-		{"file", file, 1},
-		{"dir", dir, DirStudyPasses},
-		{"missing", filepath.Join(dir, "nope"), 1},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := defaultStudyPasses(c.path); got != c.want {
-				t.Errorf("defaultStudyPasses(%s) = %d, want %d", c.name, got, c.want)
-			}
-		})
-	}
-}
-
 func TestReadFileRange(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "f.txt")

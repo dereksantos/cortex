@@ -15,7 +15,6 @@ import (
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/shellrisk"
-	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -1076,33 +1075,6 @@ func TestMessageRender(t *testing.T) {
 	}
 }
 
-func TestRenderStudyResult(t *testing.T) {
-	t.Run("read mode returns the whole file verbatim", func(t *testing.T) {
-		res := study.StudyLoopResult{
-			Stopped: "read",
-			Passes:  []study.StudyPass{{Response: study.StudyResponse{Mode: "read", ReadContent: "package main\n\nfunc main() {}\n"}}},
-		}
-		if got := renderStudyResult(res); got != "package main\n\nfunc main() {}\n" {
-			t.Errorf("read mode = %q, want the whole content", got)
-		}
-	})
-
-	t.Run("study mode renders digests and cited line ranges", func(t *testing.T) {
-		res := study.StudyLoopResult{
-			Stopped:     "done",
-			CoveragePct: 0.42,
-			Digests:     []string{"the study command registers subcommands", ""},
-			Citations:   []study.Citation{{RelPath: "study.go", LineStart: 10, LineEnd: 20, Claim: "registers the study command"}},
-		}
-		got := renderStudyResult(res)
-		for _, want := range []string{"42%", "done", "the study command registers", "study.go:10-20", "registers the study command"} {
-			if !strings.Contains(got, want) {
-				t.Errorf("render missing %q in:\n%s", want, got)
-			}
-		}
-	})
-}
-
 func TestParseCtxSize(t *testing.T) {
 	msg := "litellm.BadRequestError: request (41193 tokens) exceeds the available context size (32768 tokens)"
 	if got := parseCtxSize(msg); got != 32768 {
@@ -1405,60 +1377,6 @@ func TestAppendWithoutTranscript(t *testing.T) {
 	if n := len(cs.Request.Messages); n != 2 {
 		t.Errorf("got %d messages, want 2", n)
 	}
-}
-
-// Per-format grounding: code claims verify by symbol (one hit), prose/data
-// claims by word overlap (two distinct hits), and claims without enough
-// verifiable material fall to unscored rather than failed.
-func TestClaimAnchorsPerFormat(t *testing.T) {
-	tests := []struct {
-		name     string
-		claim    string
-		lang     string
-		wantMin  int // at least this many anchors
-		wantNeed int
-	}{
-		{"code symbol", "The resolveAPIURL function checks for a slash", "code", 1, 1},
-		{"code no symbol", "it checks for a slash here", "code", 0, 1},
-		{"prose words", "The billing section describes timeout handling", "md", 2, 2},
-		{"json words", "billing service reports timeout errors", "json", 2, 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			anchors, need := claimAnchors(tt.claim, tt.lang)
-			if len(anchors) < tt.wantMin {
-				t.Errorf("anchors = %v, want >= %d", anchors, tt.wantMin)
-			}
-			if need != tt.wantNeed {
-				t.Errorf("need = %d, want %d", need, tt.wantNeed)
-			}
-		})
-	}
-}
-
-func TestScoreGroundednessPerFormat(t *testing.T) {
-	content := "{\"service\":\"billing\",\"error\":\"timeout\"}\n{\"service\":\"search\",\"status\":200}\n"
-	mk := func(claim string, lo, hi int) study.StudyLoopResult {
-		return study.StudyLoopResult{Citations: []study.Citation{{Claim: claim, LineStart: lo, LineEnd: hi}}}
-	}
-	t.Run("json grounded at cited lines", func(t *testing.T) {
-		g, f, u := scoreGroundedness(content, "json", mk("the billing service reports timeout errors", 1, 1))
-		if g != 1 || f != 0 || u != 0 {
-			t.Errorf("got g=%d f=%d u=%d, want 1/0/0", g, f, u)
-		}
-	})
-	t.Run("json wrong location fails", func(t *testing.T) {
-		g, f, u := scoreGroundedness(content, "json", mk("the billing service reports timeout errors", 2, 2))
-		if g != 0 || f != 1 || u != 0 {
-			t.Errorf("got g=%d f=%d u=%d, want 0/1/0", g, f, u)
-		}
-	})
-	t.Run("thin claim is unscored", func(t *testing.T) {
-		g, f, u := scoreGroundedness(content, "json", mk("it has data", 1, 1))
-		if g != 0 || f != 0 || u != 1 {
-			t.Errorf("got g=%d f=%d u=%d, want 0/0/1", g, f, u)
-		}
-	})
 }
 
 // CORTEX_LOOP_STUDY_WINDOW overrides every other window source — the

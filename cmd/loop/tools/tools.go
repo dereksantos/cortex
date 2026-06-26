@@ -24,23 +24,14 @@ import (
 	"github.com/dereksantos/cortex/cmd/loop/ui"
 	"github.com/dereksantos/cortex/internal/projectindex"
 	"github.com/dereksantos/cortex/internal/shellrisk"
-	"github.com/dereksantos/cortex/internal/study"
 )
 
 // ToolDeps is the session surface the tools need. *CortexSession satisfies it.
 // Kept minimal: each method is used by at least one tool.
 type ToolDeps interface {
-	// StudyModel returns the study role's model id (for the action label).
-	StudyModel() string
-	// StudyWindow resolves the study model's context window.
-	StudyWindow() int
-	// RunStudy executes the study engine over a file. Shared by the study
-	// tool, the shell-output study, and compaction.
-	RunStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error)
-	// Navigate runs the map-first study navigator over a path when enabled,
-	// returning (digest, true, err). ok=false means the navigator is off and
-	// the caller should fall back to RunStudy. Scoped to the study tool.
-	Navigate(ctx context.Context, path, goal string) (digest string, ok bool, err error)
+	// Navigate runs the map-first study over a path: a bounded read-only
+	// subagent seeded with the structural map + goal. This is the study tool.
+	Navigate(ctx context.Context, path, goal string) (digest string, err error)
 	// Summarize reduces a free-text file (no structural map) to a digest via
 	// sequential chunk-and-fold. Used by oversized shell-output study; the
 	// compressed flag is unused there.
@@ -62,13 +53,8 @@ type ToolDeps interface {
 // delete is disabled.
 type headlessDeps struct{}
 
-func (headlessDeps) StudyModel() string { return "" }
-func (headlessDeps) StudyWindow() int   { return 0 }
-func (headlessDeps) RunStudy(context.Context, string, string, int, int, float64, *bool, int, bool) (study.StudyLoopResult, error) {
-	return study.StudyLoopResult{}, errors.New("study unavailable: no session")
-}
-func (headlessDeps) Navigate(context.Context, string, string) (string, bool, error) {
-	return "", false, nil // navigator needs a session; headless falls back
+func (headlessDeps) Navigate(context.Context, string, string) (string, error) {
+	return "", errors.New("study unavailable: no session")
 }
 func (headlessDeps) Summarize(context.Context, string, string, int) (string, bool, error) {
 	return "", false, errors.New("summarize unavailable: no session")
@@ -292,12 +278,6 @@ const CurationBudgetTokens = 16000
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const MaxToolOutput = 10000
 
-// DirStudyPasses: default deepening passes when the study target is a
-// directory. A corpus boundary is far larger than one file's, so a single
-// window-budget pass sees only a sliver of the tree; the curator still ends
-// the loop early (DONE / exhausted), so this is a cap, not a floor.
-const DirStudyPasses = 3
-
 // printToolAction prints an indented, iconned tool-action line under the
 // current cortex turn, e.g. "  ▸ read_file(go.mod)". The tool name shows in
 // green; its argument list is dimmed so the verb reads first.
@@ -366,112 +346,17 @@ func (tc ToolCall) ProjectIndex() (string, error) {
 
 // --- study --------------------------------------------------------------
 
-// Study runs the real study engine (internal/study) over a file and returns
-// curated context: a size-adaptive, relevance-deepening digest with cited line
-// ranges, or the whole file when it fits the window. Inference and curation are
-// backed by an OpenAI-compatible provider pointed at the session's endpoint.
+// Study runs the map-first study over a file or directory: a bounded read-only
+// subagent seeded with the structural map + the goal, which reads the relevant
+// regions and returns a digest. (The session implements Navigate in
+// navigator.go.)
 func (tc ToolCall) Study(ctx context.Context, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
 	}
 	goal, _ := tc.StringArg("goal") // optional
-
-	// Map-first navigator (flag-gated). When enabled it replaces the sampling
-	// engine for the study tool, returning a digest grounded in targeted reads;
-	// ok=false means it's off and we fall through to the engine below.
-	if digest, ok, nErr := deps.Navigate(ctx, path, goal); ok {
-		if nErr != nil {
-			return "", nErr
-		}
-		return digest, nil
-	}
-
-	passes := 0
-	if p, ok := tc.IntArg("passes"); ok && p > 0 {
-		passes = p
-	}
-	if passes == 0 {
-		passes = defaultStudyPasses(path)
-	}
-	plural := ""
-	if passes != 1 {
-		plural = "es"
-	}
-	printToolAction(fmt.Sprintf("study(%s) via %s (%d pass%s)", path, deps.StudyModel(), passes, plural))
-
-	res, err := deps.RunStudy(ctx, path, goal, passes, 0, 0, nil, 0, false)
-	if err != nil {
-		return "", err
-	}
-	return renderStudyResultWithMap(path, res), nil
-}
-
-// renderStudyResultWithMap prefixes the study digest with a structural map
-// of the target when it's a directory — the map→study producer/consumer
-// contract. The agent sees the terrain (file tree + symbols) before the
-// analysis, so it can judge coverage gaps and decide where to deepen.
-// Single-file studies skip the map: the study result already carries
-// per-region citations, and project_index is the cheaper orient for one
-// file. The map is bounded so it never dominates the study output.
-func renderStudyResultWithMap(path string, res study.StudyLoopResult) string {
-	digest := RenderStudyResult(res)
-	fi, err := os.Stat(path)
-	if err != nil || !fi.IsDir() {
-		return digest
-	}
-	ix, err := projectindex.Build(path)
-	if err != nil {
-		return digest // map is a bonus, not a gate — degrade to digest-only.
-	}
-	m := ix.Render()
-	if len(m) > StudyMapBudget {
-		m = m[:StudyMapBudget] + "\n… (map truncated; use project_index for the full tree)"
-	}
-	return m + "\n\n" + digest
-}
-
-// StudyMapBudget caps the structural map prefix so it never dominates the
-// study digest on large trees. The map is orientation; the digest is the
-// substance. project_index remains available for the unbounded view.
-const StudyMapBudget = 4000
-
-// defaultStudyPasses picks the pass count when the model didn't ask for one:
-// 1 for files, DirStudyPasses for directories.
-func defaultStudyPasses(path string) int {
-	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-		return DirStudyPasses
-	}
-	return 1
-}
-
-// RenderStudyResult turns the curated study-loop result into the context string
-// the harness model consumes. Read mode returns the whole file verbatim;
-// otherwise it's the per-pass digests plus provenance-validated citations.
-func RenderStudyResult(res study.StudyLoopResult) string {
-	if res.Stopped == "read" && len(res.Passes) > 0 {
-		return res.Passes[0].Response.ReadContent
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "coverage %.0f%%, stopped: %s\n", 100*res.CoveragePct, res.Stopped)
-	for i, d := range res.Digests {
-		if s := strings.TrimSpace(d); s != "" {
-			fmt.Fprintf(&b, "\npass %d:\n%s\n", i+1, s)
-		}
-	}
-	if len(res.Citations) > 0 {
-		b.WriteString("\ncitations:\n")
-		for _, c := range res.Citations {
-			fmt.Fprintf(&b, "  %s:%d-%d  %s\n", c.RelPath, c.LineStart, c.LineEnd, c.Claim)
-		}
-	}
-	if len(res.UncoveredFiles) > 0 {
-		b.WriteString("\nuncovered files (not sampled in any pass — target these to deepen):\n")
-		for _, f := range res.UncoveredFiles {
-			fmt.Fprintf(&b, "  %s\n", f)
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return deps.Navigate(ctx, path, goal)
 }
 
 // --- read_file ----------------------------------------------------------

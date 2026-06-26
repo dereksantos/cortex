@@ -28,10 +28,8 @@ import (
 	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
-	"github.com/dereksantos/cortex/internal/projectindex"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/storage"
-	"github.com/dereksantos/cortex/internal/study"
 	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
@@ -49,8 +47,8 @@ TODO (production sequence in docs/loop-production-harness.md):
 [x] Improve session status line
 [x] Improve animation
 [x] Timestamp in messages
-[x] Study tool (file + dir study via internal/study; dirs default to 3 passes)
-[x] Oversized bash output studied, not truncated (spill to .cortex/shell/ + digest)
+[x] Study tool (map-first navigator: reads goal-relevant regions; can spawn sub-studies)
+[x] Oversized bash output summarized, not truncated (spill to .cortex/shell/ + digest)
 [x] Hardening: HTTP timeout, bounded retry, Ctrl-C interrupt
 [x] AGENTS.md project-instructions injection
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
@@ -813,10 +811,6 @@ func (m *Message) MarshalJSON() ([]byte, error) {
 type ToolCall = tools.ToolCall
 type FunctionCall = tools.FunctionCall
 
-// renderStudyResult is implemented in the tools package; aliased for the
-// study-result rendering tests and any direct callers.
-var renderStudyResult = tools.RenderStudyResult
-
 // parseXMLToolCalls and stripToolMarkup recover Qwen-native tool calls;
 // aliased from the tools package.
 var parseXMLToolCalls = tools.ParseXMLToolCalls
@@ -855,118 +849,6 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 	p.SetTemperature(0)
 	p.SetMaxTokens(maxTokens)
 	return p
-}
-
-// runStudy drives the byte-grid sampling engine (internal/study). DEPRECATED:
-// the map-first navigator (navigator.go) is its replacement and is slated to
-// become the default study path. This engine stays as the default until a
-// live-model `loop study-eval nav` run clears the navigator (see
-// docs/study-navigator.md, phase 6); after that this and the internal/study
-// sampling stack are removed. Compaction and shell-output already moved off it
-// (Summarize, phase 5).
-func (cs *CortexSession) runStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return study.StudyLoopResult{}, fmt.Errorf("resolve %s: %w", path, err)
-	}
-	provider := cs.newStudyProvider(study.CompletionTokenBudget(cs.studyWindow(), 0))
-
-	req := study.StudyRequest{
-		Path:            abs,
-		RelPath:         path,
-		Fill:            fill,
-		Goal:            goal,
-		Numbered:        numbered,
-		NoWorkingMemory: noWM,
-		Infer:           study.ProviderInfer(provider),
-	}
-	// Build the structural map once and thread it into both the study
-	// request (so the inference model sees the full terrain and can emit
-	// leads toward goal-relevant unsampled files) and the curator (so its
-	// TARGET decisions are goal-aware, not blind densification). The map
-	// is also prepended to the result for the consuming agent — but now
-	// it drives the study itself, not just the consumer.
-	if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
-		if ix, err := projectindex.Build(abs); err == nil {
-			m := ix.Render()
-			if len(m) > tools.StudyMapBudget {
-				m = m[:tools.StudyMapBudget] + "\n… (map truncated; use project_index for the full tree)"
-			}
-			req.ProjectMap = m
-		}
-	}
-	// chunks > 0 pins the per-pass draw (the eval sweep does this);
-	// chunks <= 0 leaves Density nil so the engine derives both chunk
-	// size (the format's coherence unit) and count (window / unit) —
-	// the sample fills the budget as a function of BOTH model and data.
-	if chunks > 0 {
-		req.Density = chunks
-	}
-	// Working-memory P2 curation is opt-in (CORTEX_STUDY_CURATE) until the eval
-	// makes it a default: under budget pressure the findings prefix is
-	// value-ranked keep/compress/evict instead of a recency drop, and evicted
-	// findings are demoted to the journal so they stay recoverable via search.
-	if !noWM && os.Getenv("CORTEX_STUDY_CURATE") != "" {
-		req.CurateFindings = true
-		req.OnEvict = cs.demoteFinding
-	}
-	// P3 findings-directed sampling, opt-in until the eval shows it beats blind
-	// disjoint draws on coverage-to-value.
-	if !noWM && os.Getenv("CORTEX_STUDY_DIRECTED") != "" {
-		req.DirectedSampling = true
-	}
-	// AST boundary producer for Go files (declaration-aligned chunks). Opt-in
-	// until eval'd against the byte grid.
-	if os.Getenv("CORTEX_STUDY_AST") != "" {
-		req.UseAST = true
-	}
-	// Pre-pass direction: the first pass samples where the goal points
-	// (via the project map) instead of a goal-blind mechanical draw.
-	// The ModelDirector degrades to nil (→ mechanical sampling) when
-	// there's no provider, no goal, or no map, so it's safe as a default.
-	req.Director = study.ModelDirector{Provider: provider, ProjectMap: req.ProjectMap}
-	// Deepening: `passes` runs the study → curate → deepen loop, carrying the
-	// covered set forward so each pass samples NEW regions.
-	runPasses := func(window int) (study.StudyLoopResult, error) {
-		req.Window = study.SampleTokenBudget(window, 0) // shared budget: conservative fraction, overhead-aware
-		return study.StudyLoop(ctx, req, study.ModelCurator{Provider: provider, ProjectMap: req.ProjectMap}, passes)
-	}
-	win := window
-	if win <= 0 {
-		win = cs.studyWindow()
-	}
-	res, err := runPasses(win)
-	// Self-calibrate: if we overflowed, the error states the model's real context
-	// size — learn it and retry correctly sized, so the guess never persists.
-	if err != nil {
-		if real := parseCtxSize(err.Error()); real > 0 && real != win {
-			learnedWindows[cs.Study.Model] = real
-			res, err = runPasses(real)
-		}
-	}
-	if err != nil {
-		return study.StudyLoopResult{}, fmt.Errorf("study %s: %w", path, err)
-	}
-	return res, nil
-}
-
-// renderStudyResult and printToolAction are implemented in the tools package
-// (tools.RenderStudyResult). printToolAction is unexported there; the tool
-// methods call it directly. main.go uses renderStudyResult via the alias above.
-
-// ToolDeps implementation — the session surface the tools package needs.
-// These are thin wrappers over the existing session methods/fields so the
-// tools package stays decoupled from the session internals.
-
-// StudyModel returns the study role's model id.
-func (cs *CortexSession) StudyModel() string { return cs.Study.Model }
-
-// StudyWindow resolves the study model's context window (ToolDeps).
-func (cs *CortexSession) StudyWindow() int { return cs.studyWindow() }
-
-// RunStudy executes the study engine over a file (ToolDeps).
-func (cs *CortexSession) RunStudy(ctx context.Context, path, goal string, passes, chunks int, fill float64, numbered *bool, window int, noWM bool) (study.StudyLoopResult, error) {
-	return cs.runStudy(ctx, path, goal, passes, chunks, fill, numbered, window, noWM)
 }
 
 // GateShell runs the shell-risk gate (ToolDeps).
@@ -2295,30 +2177,6 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 }
 
 // remember stores an explicit user memory (/remember) — the highest-precision
-// demoteFinding journals a working-memory finding that curation evicted from
-// the active prefix, so it stays recoverable via search (the eviction =
-// demote-to-journal contract, docs/working-memory-study.md). Best-effort: a nil
-// capturer (study CLI / eval, no store) just drops it — the next deepening pass
-// can re-derive it from a Lead or re-sample.
-func (cs *CortexSession) demoteFinding(f study.Finding) {
-	if cs == nil || cs.capturer == nil || strings.TrimSpace(f.Digest) == "" {
-		return
-	}
-	text := f.Digest
-	for _, c := range f.Citations {
-		text += fmt.Sprintf("\n%s:%d-%d", c.RelPath, c.LineStart, c.LineEnd)
-	}
-	_ = cs.capturer.CaptureEvent(&events.Event{
-		Source:     events.SourceGeneric,
-		EventType:  events.EventToolUse,
-		Timestamp:  time.Now(),
-		ToolName:   "study",
-		ToolInput:  map[string]any{"type": "evicted_finding"},
-		ToolResult: text,
-		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
-	})
-}
-
 // capture, because the user marked it as worth keeping.
 func (cs *CortexSession) remember(text string) error {
 	if cs.capturer == nil {
@@ -3360,19 +3218,7 @@ func main() {
 	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
 	// 2×2 granularity × numbering isolation experiment on the code fixture.
 	if len(os.Args) >= 2 && os.Args[1] == "study-eval" {
-		if len(os.Args) >= 3 && os.Args[2] == "code-grid" {
-			runStudyEvalCodeGrid()
-			return
-		}
-		if len(os.Args) >= 3 && os.Args[2] == "wm" {
-			runStudyEvalWM()
-			return
-		}
-		if len(os.Args) >= 3 && os.Args[2] == "nav" {
-			runStudyEvalNav()
-			return
-		}
-		runStudyEval()
+		runStudyEvalNav()
 		return
 	}
 

@@ -28,15 +28,17 @@ the repo root into its seed if present.
 Three capabilities distinguish it:
 
 1. **Working memory.** When the context window fills (~80%, `compactThreshold`,
-   or on `/compact`), the conversation is *studied* into a curated digest —
-   salience-ranked, with cited `file:line` ranges — and the session
-   continues from that instead of truncating. Built on `internal/study`.
+   or on `/compact`), the conversation is folded into a digest by the
+   sequential chunk-and-fold summarizer (`cmd/loop/summarize.go`) and the
+   session continues from that instead of truncating.
 2. **Per-turn capture.** `captureTurn()` records files edited, commands run,
    and the final answer to the journal — mechanical, no model, non-blocking.
    `startDistill()` batches turns through the reasoner model for durable
    insights. `/remember <text>` is the highest-precision capture path.
-3. **Size-adaptive `study`.** Small targets inlined whole; large
-   files/dirs chunked + boundary-snapped + curated against the goal.
+3. **Map-first `study`.** The study tool is a bounded read-only subagent
+   (`cmd/loop/navigator.go`): it leads with a free structural map of the
+   target, reads only the goal-relevant regions in tiny ranges, and can spawn
+   a bounded sub-study for a neighbor file/dir.
 
 ## Commands
 
@@ -45,10 +47,10 @@ Three capabilities distinguish it:
 | `loop` | Interactive REPL (default) |
 | `loop resume [id]` | Resume a prior session (default: latest) |
 | `loop turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
-| `loop study <path> [goal...] [passes]` | One-off study; prints a curated digest |
+| `loop study <path> [goal...]` | One-off study (map-first navigator); prints the digest |
 | `loop change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
 | `loop discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
-| `loop study-eval [code-grid\|wm]` | Measure study latency / coverage / groundedness |
+| `loop study-eval` | Navigator acceptance test (pass/fail + latency; `CORTEX_NAV_REPS` reps) |
 
 REPL slash commands: `/compact`, `/clear`, `/remember`, `/sessions`,
 `/model [name]`, `/quit`. Dispatch is in `cmd/loop/main.go` (subcommands
@@ -87,12 +89,11 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
 }
 ```
 
-Roles: `code` (the agent) and `study` (curation/compaction). Auth is
+Roles: `code` (the agent) and `study` (the navigator + the summarizer). Auth is
 resolved at call time from `key_env` (env-var name) or `key_service`
 (macOS keychain) — never written to disk. Env knobs:
-`CORTEX_{BACKEND,HOME}`, `CORTEX_STUDY_{CURATE,DIRECTED,AST}`,
-`CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_LOOP_RENDER`, `NO_COLOR`,
-`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`.
+`CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
+`CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`.
 
 ## Journal — source of truth
 
@@ -141,10 +142,12 @@ go test ./...                # full suite
 
 - `cmd/loop/main.go` — REPL, `CortexSession`, turn loop, dispatch, config
 - `cmd/loop/tools/tools.go` — the agent's tool surface
-- `internal/study/` — working memory: chunking, boundary-snapping, curation
+- `cmd/loop/navigator.go` — the study tool (map-first read-only subagent)
+- `cmd/loop/summarize.go` — free-text summarizer (compaction + shell-output)
+- `internal/projectindex/` — the structural map (`go/ast` + outline tiers)
+- `internal/study/` — structural boundary analysis + sampler (used by the DAG)
 - `internal/journal/` — append-only event log
 - `internal/shellrisk/` — command risk classifier
-- `internal/projectindex/` — structural project mapping
 - `pkg/cognition/dag/` — DAG engine + op registry
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config

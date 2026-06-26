@@ -7,15 +7,15 @@
 > what's relevant" — which is both cheaper and far higher-signal for the small and
 > local models this harness targets.
 >
-> **Status.** Phases 1–5 landed on `study/navigator` (map spans + ranged read;
-> outline tiers; the navigator behind `CORTEX_STUDY_NAV`; a nav-vs-engine eval;
-> the free-text summarizer for compaction + shell-output). Phase 6 — physically
-> deleting the sampling stack — is **gated** on a live-model run of
-> `loop study-eval nav` clearing, then promoting the navigator to default. Until
-> then the engine remains the default `study` path (the navigator is opt-in).
-> Supersedes the sampling-era machinery (incl. the P1–P4 findings-prefix work in
-> [`working-memory-study.md`](working-memory-study.md) for the *path-study* case
-> — see "What this supersedes").
+> **Status.** **DONE** — all six phases landed on `study/navigator`. The study
+> tool is now the map-first navigator (default, no flag); the byte-grid sampling
+> engine and its LLM deepening loop were deleted from `internal/study` (the
+> structural analyzer/sampler the cognition DAG uses is all that remains).
+> Compaction + shell-output use the free-text summarizer. Live acceptance on
+> glm-4.7-flash: 3/3. This **supersedes** the P1–P4 findings-prefix work in
+> [`working-memory-study.md`](working-memory-study.md) for the path-study case
+> (the conversation-memory direction in [`working-memory.md`](working-memory.md)
+> survives).
 >
 > **Owner.** `internal/study/`, `internal/projectindex/` (→ `map`), and the study
 > tool wiring in `cmd/loop/tools/tools.go` + `cmd/loop/main.go`.
@@ -275,14 +275,15 @@ Before the navigator can replace the engine (the phase-6 gate): (1) emit
 5. ✅ **Summarizer split** (`cmd/loop/summarize.go`): compaction and oversized
    shell-output study now use a sequential chunk-and-fold summarizer instead of
    the sampling engine (no RNG/coverage/curator/director).
-6. ⏳ **Delete the sampling stack — GATED on the eval clearing.** Run
-   `loop study-eval nav` against the fleet; if the navigator matches/beats the
-   engine on grounding + goal-hit at lower latency, promote it to the default
-   `study` path (flip the `CORTEX_STUDY_NAV` gate to an opt-*out*), then remove:
-   `analyzer_bytegrid.go`, `analyzer_universal.go`, `sampler_hierarchical.go`,
-   `sampler_focus.go`, `director.go`, `curator.go`, `curate.go`, `directed.go`,
-   `density.go`, `refine.go`, `boundary.go`, `controller.go`, the findings-prefix
-   P1–P4 stack, and `study.go`'s budget math; repoint `loop study` + the engine
-   arm of `study-eval` at the navigator. Not executed here: it needs a live model
-   to clear, and removing the default engine before then would regress study.
-   The engine carries a deprecation pointer (`runStudy`) until this lands.
+6. ✅ **Navigator promoted to default; sampling stack deleted.** The
+   `CORTEX_STUDY_NAV` gate is gone — `tc.Study` always navigates, and study can
+   spawn bounded sub-studies (`navMaxDepth`). Removed from `cmd/loop`: `runStudy`,
+   `RunStudy`, the engine `study-eval` subcommands + groundedness scorer,
+   `demoteFinding`, the `StudyLoopResult` renderers. Removed from `internal/study`
+   (18 source + 23 test files): `study_loop`, `study_file`, `study_dir`, `infer`,
+   `director`, `curator`, `curate`, `directed`, `controller`, `study` (budget
+   math), `refine`, `density`, `state`, `probe`, `pidlock`, `extract_router`,
+   `analyzer_ast`, `sampler_focus`. **Kept** (the cognition DAG —
+   `attend_fractal_sample`, `sense_scan_project_boundaries` — still uses them):
+   `types`, `analyzer_universal`, `analyzer_bytegrid`, `boundary`, `coverage`,
+   `sampler_hierarchical`. Live acceptance after the cut: 3/3.

@@ -33,6 +33,15 @@ const (
 
 // ByteGridOpts configures the byte-grid producer. WindowTokens is the
 // consuming model's context window (tokens); it sets the target chunk
+// Structural sizing constants (formerly in study.go, alongside the removed
+// sampling engine). The byte grid still uses them to estimate provisional line
+// bounds and a default window.
+const (
+	studyDefaultCtxWindow = 8192 // conservative fallback ctx window
+	studyCharsPerToken    = 4    // rough English/code average
+	studyCharsPerLine     = 50   // rough average line width
+)
+
 // size. Zero values fall back to sensible defaults.
 type ByteGridOpts struct {
 	WindowTokens int     // consuming-model window in tokens; default studyDefaultCtxWindow

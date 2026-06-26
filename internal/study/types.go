@@ -1,14 +1,15 @@
-// Package study implements the project-study DAG: a one-shot
-// scan of a project's source files that samples chunks via a
-// hierarchical fractal sampler and emits dream.insight journal entries
-// until coverage hits a target threshold.
+// Package study provides structural boundary analysis and chunk sampling: it
+// walks a project's source files, lays a deterministic chunk grid (line-based,
+// or a byte grid for large files), and samples chunks via a hierarchical
+// fractal sampler. It is consumed by the cognition DAG ops
+// (attend_fractal_sample, sense_scan_project_boundaries).
 //
-// See docs/study-dag-plan.md for the architecture and step-by-step
-// rationale. The package is designed so the controller, analyzer, and
-// sampler are independently testable: the Sampler interface lets a
-// future Lévy / RWR sampler drop in without touching the controller,
-// and the BoundaryAnalyzer interface leaves room for Tier 2 (regex
-// imports per language) and Tier 3 (go/ast, tree-sitter) plugins.
+// NOTE: the LLM-backed study *engine* (the sample→infer→curate deepening loop,
+// director/curator, working-memory findings) was removed — the study tool is
+// now the map-first navigator in cmd/loop (see docs/study-navigator.md). What
+// remains here is the structural sampler the DAG still uses. The Sampler and
+// BoundaryAnalyzer interfaces keep the analyzer and sampler independently
+// testable and swappable.
 //
 // Determinism contract (binding for every file in this package):
 //   - no time.Now() in the seed-derived path; RNGSeed comes solely

@@ -81,12 +81,3 @@ func TestNavToolAllowsRangedRead(t *testing.T) {
 		t.Errorf("ranged read through navigator failed: %q", out)
 	}
 }
-
-func TestNavigateDisabledByDefault(t *testing.T) {
-	t.Setenv("CORTEX_STUDY_NAV", "") // empty == disabled
-	cs := &CortexSession{}
-	_, ok, err := cs.Navigate(context.Background(), ".", "")
-	if ok || err != nil {
-		t.Errorf("navigator should be off by default; got ok=%v err=%v", ok, err)
-	}
-}
