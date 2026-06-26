@@ -218,11 +218,19 @@ func (c *Cortex) IsModeEnabled(mode string) bool {
 func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition.RetrieveMode) (*cognition.ResolveResult, error) {
 	retrievalStart := time.Now()
 
+	// phase reports retrieval progress to the caller (e.g. a REPL status row).
+	phase := func(p string) {
+		if q.OnPhase != nil {
+			q.OnPhase(p)
+		}
+	}
+
 	// Record activity
 	c.activity.RecordRetrieve()
 	c.think.RecordQuery(q)
 
 	// Step 1: Reflex (always runs, must be <10ms)
+	phase("reflex")
 	reflexStart := time.Now()
 	candidates, err := c.reflex.Reflex(ctx, q)
 	reflexLatency := time.Since(reflexStart).Milliseconds()
@@ -246,7 +254,9 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 
 	// Step 2: Reflect (depends on mode)
 	if mode == cognition.Full {
-		// Synchronous Reflect for Full mode
+		// Synchronous Reflect for Full mode — the slow step (a reranker model
+		// call), so the caller's status row should name it.
+		phase("rerank")
 		reflectStart := time.Now()
 		reflected, err := c.reflect.Reflect(ctx, q, candidates)
 		reflectLatency := time.Since(reflectStart).Milliseconds()
@@ -303,6 +313,7 @@ func (c *Cortex) Retrieve(ctx context.Context, q cognition.Query, mode cognition
 	// Step 3: Resolve (with timing). ResolveWithContext threads the
 	// retrieval-start time through so the journal entry records the full
 	// end-to-end latency, not just the Resolve step.
+	phase("resolve")
 	resolveStart := time.Now()
 	modeStr := "fast"
 	if mode == cognition.Full {

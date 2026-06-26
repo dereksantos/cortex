@@ -149,6 +149,12 @@ type Query struct {
 	Since      time.Time // Only results after this time
 	Limit      int       // Max results (0 = default)
 	Threshold  float64   // Min score threshold (0-1)
+
+	// OnPhase, when set, is invoked as retrieval advances through its phases
+	// ("reflex", "rerank", "resolve") so a caller can surface live progress
+	// (e.g. an interactive status row). Called synchronously on the retrieval
+	// goroutine; keep it cheap and non-blocking. Optional; nil is fine.
+	OnPhase func(phase string) `json:"-"`
 }
 
 // Decision represents what to do with retrieved context.

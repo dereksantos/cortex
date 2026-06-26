@@ -2548,18 +2548,42 @@ const retrievalTimeout = 6 * time.Second
 // regardless of its inject/queue/wait decision — that gate is tuned for
 // embedding-scale scores and would suppress everything on the text-only path
 // local setups fall back to.
+//
+// Because the reranker call adds a beat before the model starts, retrieval drives
+// the interactive status row (via OnPhase → setActivity) so the wait shows live
+// progress ("recalling…" → "reranking…") instead of dead air.
 func (cs *CortexSession) retrieve(query string) []cognition.Result {
 	if cs.retriever == nil || strings.TrimSpace(query) == "" {
 		return nil
 	}
+	cs.setActivity("recalling memory…")
 	ctx, cancel := context.WithTimeout(context.Background(), retrievalTimeout)
 	defer cancel()
-	res, err := cs.retriever.Retrieve(ctx,
-		cognition.Query{Text: query, Limit: retrievalLimit}, cognition.Full)
+	res, err := cs.retriever.Retrieve(ctx, cognition.Query{
+		Text:  query,
+		Limit: retrievalLimit,
+		OnPhase: func(phase string) {
+			switch phase {
+			case "rerank":
+				cs.setActivity("reranking memory…")
+			case "resolve":
+				cs.setActivity("selecting context…")
+			}
+		},
+	}, cognition.Full)
 	if err != nil || res == nil {
 		return nil
 	}
 	return res.Results
+}
+
+// setActivity shows a transient, animated status label on the interactive
+// prompt's pinned row (e.g. "reranking memory…"). No-op when there's no live
+// anchor — headless turns and non-anchored renders simply don't show it.
+func (cs *CortexSession) setActivity(label string) {
+	if cs.live != nil {
+		cs.live.SetActivity(label)
+	}
 }
 
 // formatRetrieved renders results as a compact, clearly-labelled context block.
