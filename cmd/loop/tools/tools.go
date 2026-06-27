@@ -200,15 +200,15 @@ var EditFile = newTool(FunctionEditFile,
 	}, "path"))
 
 var StudyTool = newTool(FunctionStudy,
-	"Study a file or directory and return curated context: a size-adaptive, "+
-		"relevance-deepening digest with cited file:line ranges. Prefer this over "+
-		"read_file for large files, for understanding whole packages/directories, or "+
-		"when you want to understand something relative to a goal. Small targets are "+
-		"returned whole (a directory as every file inlined under path headers).",
+	"Study a file or directory against a goal and get back a digest. A read-only "+
+		"subagent is handed a structural map of the target plus your goal; it reads the "+
+		"relevant parts itself and reports what it found — you don't get the raw file. "+
+		"Prefer this over read_file for large files, for whole packages/directories, or "+
+		"whenever you want code explained relative to a goal. The more specific the "+
+		"goal, the tighter the subagent reads.",
 	objectSchema(map[string]any{
-		"path":   stringProp("Path to the file or directory to study."),
-		"goal":   stringProp("What you want to learn; guides which regions get deepened."),
-		"passes": map[string]any{"type": "integer", "description": "Deepening passes (more = denser coverage of relevant regions, but slower). Default 1 for files, 3 for directories."},
+		"path": stringProp("Path to the file or directory to study."),
+		"goal": stringProp("What you want to learn — the subagent reads the parts relevant to this and answers it."),
 	}, "path"))
 
 var ProjectIndexTool = newTool(FunctionProjectIndex,

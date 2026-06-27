@@ -3016,10 +3016,10 @@ func compactNow(session *CortexSession, reason string) {
 // runStudyCLI invokes the study tool directly and prints the curated context —
 // no coding model, no REPL. For inspecting what study returns in isolation:
 //
-//	loop study <path> [goal...] [passes]
-func runStudyCLI(path, goal string, passes int) {
+//	loop study <path> [goal...]
+func runStudyCLI(path, goal string) {
 	session := NewCortexSession()
-	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal, "passes": passes})
+	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
 	out, err := call.Study(context.Background(), session)
 	if err != nil {
@@ -3119,18 +3119,11 @@ func main() {
 		return
 	}
 
-	// Direct study mode: `loop study <path> [goal...] [passes]`. A trailing bare
-	// integer is taken as the deepening pass count; 0 (the default) lets the
-	// study tool pick — 1 for files, dirStudyPasses for directories.
+	// Direct study mode: `loop study <path> [goal...]`. The navigator subagent
+	// reads what the goal needs; there are no deepening passes to configure.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
 		rest := os.Args[2:]
-		path, goalParts, passes := rest[0], rest[1:], 0
-		if n := len(goalParts); n > 0 {
-			if p, err := strconv.Atoi(goalParts[n-1]); err == nil && p > 0 {
-				passes, goalParts = p, goalParts[:n-1]
-			}
-		}
-		runStudyCLI(path, strings.Join(goalParts, " "), passes)
+		runStudyCLI(rest[0], strings.Join(rest[1:], " "))
 		return
 	}
 

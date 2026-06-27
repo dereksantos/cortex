@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -20,6 +21,21 @@ import (
 // tool-calling it gets before it must answer from what it has read. Small on
 // purpose: the whole point is a few targeted reads, not exhaustive coverage.
 const navMaxIterations = 10
+
+// navReadBudgetBytes caps the total tool output the navigator accumulates before
+// it must answer. Without it, a bulk-reading study model (e.g. a coder model
+// pointed at the study role) pulls a large file 800 lines at a time, re-sending
+// the whole grown history each round — context balloons with no ceiling. ~96 KB
+// (~24K tokens) is ample to ground an answer while keeping the call cheap and
+// fast regardless of the study model's window. The iteration cap and this byte
+// cap are independent ceilings; whichever trips first forces the digest.
+const navReadBudgetBytes = 96000
+
+// navReadLines caps how many lines one navigator read_file pulls. The map hands
+// the navigator exact line-spans, so it should read tight regions, not 800-line
+// swaths (the coder's read_file cap); a smaller cap spreads the read budget
+// across more targeted reads instead of spending it on one giant block.
+const navReadLines = 200
 
 // navMaxDepth bounds study-spawns-study recursion: a navigator may delegate a
 // sub-study (study(path, goal)) to cover a neighbor file or subdirectory, but
@@ -85,6 +101,7 @@ func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string, de
 
 	var lastSig string
 	var repeats int
+	var readBytes int // total tool output accumulated; bounds context growth
 	for i := 0; i < navMaxIterations; i++ {
 		res, err := req.Send(ctx)
 		if err != nil {
@@ -126,19 +143,27 @@ func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string, de
 		}
 
 		for _, call := range msg.ToolCalls {
+			out := cs.runNavTool(ctx, call, depth)
+			readBytes += len(out)
 			req.Messages = append(req.Messages, Message{
 				Role:       RoleTool,
 				ToolCallID: call.ID,
-				Content:    cs.runNavTool(ctx, call, depth),
+				Content:    out,
 			})
 		}
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		// Context budget spent: stop reading and answer from what's gathered, so a
+		// bulk-reading model can't keep growing the context past the ceiling.
+		if readBytes >= navReadBudgetBytes {
+			break
+		}
 	}
 
-	// Read budget exhausted (or stuck repeating) while still calling tools: ask
-	// for the digest now, with tools withheld so it must answer from what it has.
+	// Read budget exhausted (iteration cap, byte cap, or stuck repeating) while
+	// still calling tools: ask for the digest now, with tools withheld so it must
+	// answer from what it has.
 	return cs.navFinalize(ctx, req)
 }
 
@@ -166,11 +191,37 @@ func (cs *CortexSession) runNavTool(ctx context.Context, call ToolCall, depth in
 		}
 		return digest
 	}
-	out, err := call.Execute(ctx, cs)
+	out, err := clampNavRead(call).Execute(ctx, cs)
 	if err != nil {
 		return "Error: " + err.Error()
 	}
 	return out
+}
+
+// clampNavRead shrinks an over-wide read_file range so one navigator read can't
+// pull a huge swath of a file and blow the read budget on a single call. Only
+// ranged reads are clamped (to navReadLines); a whole-file read passes through
+// and still hits read_file's size gate (→ a declaration skeleton, not the file).
+// Non-read_file calls are returned unchanged.
+func clampNavRead(call ToolCall) ToolCall {
+	if call.Function.Name != tools.FunctionReadFile {
+		return call
+	}
+	start, ok := call.IntArg("start")
+	if !ok || start <= 0 {
+		return call // whole-file read: the size gate handles it
+	}
+	end, hasEnd := call.IntArg("end")
+	if !hasEnd || end < start || end-start+1 > navReadLines {
+		end = start + navReadLines - 1
+	}
+	path, _ := call.StringArg("path")
+	args, err := json.Marshal(map[string]any{"path": path, "start": start, "end": end})
+	if err != nil {
+		return call
+	}
+	call.Function.Arguments = string(args)
+	return call
 }
 
 // navFinalize requests a final digest with the tool set withheld, so a model
