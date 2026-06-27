@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // chunkMessage feeds Discord's 2000-char limit, so every chunk must stay within
@@ -84,6 +88,98 @@ func TestParseBotCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// parseRouteDecision must lift the JSON out of any surrounding prose, normalize
+// an unrecognized label to "continue" (with zeroed confidence so it can never
+// trip the new_change threshold), clamp confidence to [0,1], and report ok=false
+// only when there is no parseable object at all.
+func TestParseRouteDecision(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		wantOK   bool
+		wantDec  string
+		wantConf float64
+		wantName string
+	}{
+		{"plain new_change", `{"decision":"new_change","name":"add-auth","confidence":0.9,"why":"x"}`, true, "new_change", 0.9, "add-auth"},
+		{"plain continue", `{"decision":"continue","name":"","confidence":0.4,"why":"x"}`, true, "continue", 0.4, ""},
+		{"prose wrapped", "Sure!\n{\"decision\":\"new_change\",\"confidence\":0.8}\nhope that helps", true, "new_change", 0.8, ""},
+		{"uppercase label", `{"decision":"NEW_CHANGE","confidence":0.85}`, true, "new_change", 0.85, ""},
+		{"unknown label → continue, conf zeroed", `{"decision":"maybe","confidence":0.99}`, true, "continue", 0, ""},
+		{"confidence clamped high", `{"decision":"new_change","confidence":1.7}`, true, "new_change", 1, ""},
+		{"confidence clamped low", `{"decision":"new_change","confidence":-0.5}`, true, "new_change", 0, ""},
+		{"no json object", "I cannot decide that.", false, "", 0, ""},
+		{"malformed json", `{"decision":"new_change",`, false, "", 0, ""},
+		{"empty", "", false, "", 0, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dec, ok := parseRouteDecision(tt.in)
+			if ok != tt.wantOK {
+				t.Fatalf("parseRouteDecision(%q) ok = %v, want %v", tt.in, ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if dec.Decision != tt.wantDec || dec.Confidence != tt.wantConf || dec.Name != tt.wantName {
+				t.Errorf("parseRouteDecision(%q) = {decision:%q conf:%v name:%q}, want {decision:%q conf:%v name:%q}",
+					tt.in, dec.Decision, dec.Confidence, dec.Name, tt.wantDec, tt.wantConf, tt.wantName)
+			}
+		})
+	}
+}
+
+// stubProvider is a controllable llm.Provider for the classifyRoute fail-safe
+// paths — it returns a fixed response or error and a settable availability.
+type stubProvider struct {
+	resp      string
+	err       error
+	available bool
+}
+
+func (s stubProvider) Name() string      { return "stub" }
+func (s stubProvider) IsAvailable() bool { return s.available }
+func (s stubProvider) Generate(_ context.Context, _ string) (string, error) {
+	return s.resp, s.err
+}
+func (s stubProvider) GenerateWithSystem(_ context.Context, _, _ string) (string, error) {
+	return s.resp, s.err
+}
+func (s stubProvider) GenerateWithStats(_ context.Context, _ string) (string, llm.GenerationStats, error) {
+	return s.resp, llm.GenerationStats{}, s.err
+}
+
+// classifyRoute must fail safe (ok=false → caller continues) on a nil provider,
+// an unavailable provider, or an LLM error, and only succeed when an available
+// provider returns a parseable object.
+func TestClassifyRoute(t *testing.T) {
+	ctx := context.Background()
+	t.Run("nil provider", func(t *testing.T) {
+		if _, ok := classifyRoute(ctx, nil, "m", "g"); ok {
+			t.Error("nil provider should fail safe (ok=false)")
+		}
+	})
+	t.Run("unavailable provider", func(t *testing.T) {
+		p := stubProvider{resp: `{"decision":"new_change","confidence":0.9}`, available: false}
+		if _, ok := classifyRoute(ctx, p, "m", "g"); ok {
+			t.Error("unavailable provider should fail safe (ok=false)")
+		}
+	})
+	t.Run("llm error", func(t *testing.T) {
+		p := stubProvider{err: errors.New("boom"), available: true}
+		if _, ok := classifyRoute(ctx, p, "m", "g"); ok {
+			t.Error("llm error should fail safe (ok=false)")
+		}
+	})
+	t.Run("happy path", func(t *testing.T) {
+		p := stubProvider{resp: `{"decision":"new_change","name":"x","confidence":0.95}`, available: true}
+		dec, ok := classifyRoute(ctx, p, "m", "g")
+		if !ok || dec.Decision != routeNewChange || dec.Confidence != 0.95 {
+			t.Errorf("classifyRoute happy path = (%+v, %v), want new_change/0.95/true", dec, ok)
+		}
+	})
 }
 
 // stripMention removes the bot's mention in both plain and nickname forms so the

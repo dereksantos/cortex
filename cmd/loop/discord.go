@@ -182,9 +182,12 @@ func (b *discordBot) handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	boundSession(b.session, turnErr)
 }
 
-// routeNewChange is the only decision label that triggers a reset; every other
-// value (including the empty-string fail-safe) means "continue".
-const routeNewChange = "new_change"
+// Route decision labels. routeNewChange is the only one that triggers a reset;
+// any other value (including the empty-string fail-safe) means continue.
+const (
+	routeContinue  = "continue"
+	routeNewChange = "new_change"
+)
 
 // routeMessagePrompt classifies an incoming message against the active task:
 // continue the current change, or start a new, distinct one? Biased hard toward
@@ -271,8 +274,8 @@ func parseRouteDecision(resp string) (routeDecision, bool) {
 		return routeDecision{}, false
 	}
 	dec.Decision = strings.ToLower(strings.TrimSpace(dec.Decision))
-	if dec.Decision != routeNewChange {
-		dec.Decision = "continue"
+	if dec.Decision != routeNewChange && dec.Decision != routeContinue {
+		dec.Decision = routeContinue
 		dec.Confidence = 0
 	}
 	if dec.Confidence < 0 {

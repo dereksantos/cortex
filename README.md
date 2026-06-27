@@ -145,16 +145,13 @@ cortex/
 │   ├── tools/           # the agent's tool surface
 │   └── ui/              # rendering helpers
 ├── internal/
-│   ├── study/           # working-memory: chunking, boundaries, curation
 │   ├── capture/         # fast per-turn event capture
 │   ├── journal/         # append-only event log (source of truth)
-│   ├── storage/         # local store + retrieval
-│   ├── cognition/       # retrieval-side cognition used by loop
+│   ├── storage/         # local store (dormant — kept for a future semantic Reflect)
 │   ├── projectindex/    # structural project mapping
 │   ├── shellrisk/       # command risk classifier
-│   └── measure/ projectscan/ lineedit/
+│   └── projectscan/ lineedit/
 └── pkg/
-    ├── cognition/dag/   # DAG engine + op registry
     ├── config/          # layered config
     ├── llm/             # providers (Anthropic, Ollama, OpenRouter, OpenAI-compatible)
     ├── events/ secret/ cliout/
