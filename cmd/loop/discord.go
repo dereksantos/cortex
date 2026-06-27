@@ -28,8 +28,8 @@ import (
 // one change at a time" and bounds cost.
 //
 // Session lifecycle is decided, not hardcoded: at ingress a small-model
-// classifier (the decide.route_message DAG node) routes each message to either
-// CONTINUE the current change or START a new one. Biased to continue — a reset
+// classifier (classifyRoute, on the loop's own reasoner) routes each message to
+// either CONTINUE the current change or START a new one. Biased to continue — a reset
 // is cheap because per-turn capture already persisted durable facts to .cortex/,
 // so retrieval carries the relevant context into a fresh session. !new / !continue
 // are manual overrides.
@@ -212,6 +212,13 @@ For "new_change", set "name" to a short kebab-case slug for the new task (e.g. "
 Output ONLY a JSON object:
 {"decision":"continue|new_change","name":"<slug-or-empty>","confidence":0.0-1.0,"why":"<=8 words"}`
 
+// routeMaxOutputTokens bounds the classifier's reply — it emits one fixed-shape
+// JSON object, never prose. Restores the cap the original prompt template
+// carried (max_output_tokens: 50), nudged up to avoid clipping a valid object
+// with a longer slug. A reply truncated below the closing brace simply fails to
+// parse and falls back to "continue" — the safe direction.
+const routeMaxOutputTokens = 80
+
 // routeDecision is the classifier's parsed output.
 type routeDecision struct {
 	Decision   string  `json:"decision"`
@@ -230,7 +237,9 @@ func (b *discordBot) maybeRouteNewChange(ctx context.Context, message string) {
 	if strings.TrimSpace(b.goal) == "" {
 		return // no active task to diverge from
 	}
-	dec, ok := classifyRoute(ctx, b.session.reasoner(), message, b.goal)
+	r := b.session.reasoner()
+	r.SetMaxTokens(routeMaxOutputTokens) // fresh client per call; bounding it here can't affect other reasoner() users
+	dec, ok := classifyRoute(ctx, r, message, b.goal)
 	if !ok {
 		return // fail-safe: any error keeps the current session
 	}

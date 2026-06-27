@@ -60,7 +60,9 @@ You have a memory: named notes you've written, listed in the index below.
 `formatRetrieved` + `relAge` freshness injection, `weightByProvenance` recency
 ranking, `applyRetractions` contradiction→retraction, auto-distill
 (`distillPending`/`noteTurn`), and the Reflex/Reflect/Resolve wiring in
-`EnableRetrieval`. Much of `internal/cognition` stops being used on the hot path.
+`EnableRetrieval`. `internal/cognition` (and the `pkg/cognition` DAG it was built
+on) was first dropped from the hot path here, then deleted outright on 2026-06-27
+once nothing live consumed it — see [`archive.md`](archive.md).
 
 **Kept as substrate:** the **journal** (the raw record `study(journal)` reads),
 the **embedder** (can back `memory_search` later), the **navigator/study** (backs
