@@ -15,6 +15,7 @@ const (
 	IconCortex  = "◆" // assistant / cortex
 	IconTool    = "▸" // tool action
 	IconUser    = "❯" // user
+	IconThought = "✻" // reasoning breadcrumb (a persisted trace of a tool step)
 )
 
 // ANSI color codes.

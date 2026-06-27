@@ -1035,9 +1035,10 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 
 // Message source icons for the print gutter — defined in the ui package.
 const (
-	iconCortex = ui.IconCortex
-	iconTool   = ui.IconTool
-	iconUser   = ui.IconUser
+	iconCortex  = ui.IconCortex
+	iconTool    = ui.IconTool
+	iconUser    = ui.IconUser
+	iconThought = ui.IconThought
 )
 
 // gutter returns the icon and color identifying a message's source.
@@ -2656,6 +2657,43 @@ func (p *streamPrinter) finish() bool {
 	return p.began
 }
 
+// breadcrumbCap bounds the persisted reasoning trace to a short single line.
+const breadcrumbCap = 140
+
+// breadcrumb persists a one-line trace of the model's reasoning when a step made
+// tool calls but produced no answer prose. Models like north/glm stream their
+// "let me do X" narration as reasoning_content, which onReasoning only shows on
+// the transient "thinking…" ticker — so without this the narration flashes by
+// and vanishes, leaving only the ▸ tool-action lines. No-op when prose was
+// printed (it already persisted), when there were no tool calls (a final answer
+// path), or when there was no reasoning. Prints to writer() (the anchor pipe in
+// anchored mode, real stdout otherwise — the spinner is already stopped by the
+// caller before this runs).
+func (p *streamPrinter) breadcrumb(res *AgentResponse) {
+	if p.began || res == nil || len(res.Choices) == 0 {
+		return
+	}
+	if len(res.Choices[0].Message.ToolCalls) == 0 {
+		return
+	}
+	line := collapseLine(p.reason.String(), breadcrumbCap)
+	if line == "" {
+		return
+	}
+	fmt.Fprintf(p.writer(), "%s%s\n",
+		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
+}
+
+// collapseLine flattens s to a single whitespace-collapsed line, capped at cap
+// runes with an ellipsis — the short reasoning trace breadcrumb shows.
+func collapseLine(s string, cap int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > cap {
+		return strings.TrimRight(string(r[:cap]), " ") + "…"
+	}
+	return s
+}
+
 // send runs one model call. In streaming mode (the default) it echoes prose
 // live via a streamPrinter and returns streamed=true so Resolve doesn't
 // re-print. The blocking fallback keeps the old spinner-around-the-call
@@ -2677,6 +2715,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.finish()
 		cs.live.SetThinking(false, "")
+		p.breadcrumb(res) // persist the reasoning trace of a silent tool step
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -2690,8 +2729,9 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.finish()
 	if !p.began {
-		s.Stop()
+		s.Stop() // stop before the breadcrumb so the line is clean
 	}
+	p.breadcrumb(res) // persist the reasoning trace of a silent tool step
 	return res, true, err
 }
 
