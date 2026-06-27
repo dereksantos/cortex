@@ -251,8 +251,8 @@ files/subdirs; a file lists its top-level units. Every entry carries a
 
 A **fresh `internal/outline` package**, not a wrapper over `projectindex` (three
 callers — `navigator.go`, `tools.go`, and `memory_tools_test.go` (which builds a
-`projectindex` over `.cortex/journal`) — and not used by the cognition DAG, so
-fully replaceable; the test migrates onto `internal/outline` in phase 4). The
+`projectindex` over `.cortex/journal`) — all inside `cmd/loop`, so fully
+replaceable; the test migrates onto `internal/outline` in phase 4). The
 AST/regex *knowledge* in `projectindex/outline.go` is re-expressed as small,
 named functions, not imported.
 
@@ -446,8 +446,9 @@ type StudyEvalResult struct {
 
 There is currently **no agentic process that analyzes the journal** — `captureTurn`
 writes it mechanically and only an explicit `study(.cortex/journal)` ever reads
-it. The dormant `internal/cognition` Dream/Think/Reflect subsystem used to do
-proactive distillation but was disconnected in the memory pivot.
+it. The `internal/cognition` Dream/Think/Reflect subsystem used to do proactive
+distillation; it was disconnected in the memory pivot and then **deleted** when
+the cognition DAG it was built on was removed (2026-06-27).
 
 Decision (2026-06-27): **stay pull-only** — memory notes + on-demand journal study
 is enough. But the `Subagent` abstraction makes proactive analysis a `var`, not a
@@ -466,16 +467,20 @@ var Reflect = Subagent{
 // — not the deleted storage/embeddings pipeline.
 ```
 
-## Dormant substrate (left in place, documented)
+## Dormant substrate (what remains after the cognition removal)
 
 The loop does **not** use the vector/cognition stack, and this design keeps it
-that way (no `search`, no storage projection). Left compiling-but-unused, on
-purpose, not deleted in this work:
+that way (no `search`, no storage projection). The cognition DAG
+(`pkg/cognition`), its retrieve/Dream/Think/Reflect subsystem
+(`internal/cognition`), and the blind-sampling study engine (`internal/study`)
+were **deleted** on 2026-06-27 — `internal/cognition` couldn't be left dormant
+because it was built on the DAG types and stopped compiling without them. What
+genuinely remains compiling-but-unused, on purpose:
 
 - `internal/storage` vector index + `capture`'s embed write-side — `cs.capturer`
   is built with `capture.New` (no storage), so events go to the journal JSONL
-  only; nothing populates storage.
-- `internal/cognition` Dream/Think/Reflect — no call sites in `cmd/loop`.
+  only; nothing populates storage. Kept as the substrate a future semantic
+  `Reflect` would project into.
 - `CortexSession.resolveEmbedder` — kept, reserved for a future semantic `Reflect`.
 
 A separate cleanup may later remove the unused projection; out of scope here.
@@ -526,7 +531,9 @@ independent; any order before phase 4 wires them into the profile.
 `scripts/verify-study.sh` is the executable form of this contract (sections 1, 3,
 4, 5, 6 cover this doc). It FAILs pre-implementation and flips to PASS as phases
 land; `--diff-base <ref>` adds the LOC-band + scoped-diff checks. Baseline today:
-41,468 src / 26,304 test LOC.
+23,118 src / 15,275 test LOC (re-snapshotted 2026-06-27 after the cognition-stack
+deletion — `pkg/cognition`, `internal/cognition`, `internal/study` removed:
+−18,350 src / −11,029 test).
 
 ### Expected physical deltas (bands, not point targets)
 

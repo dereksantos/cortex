@@ -216,10 +216,8 @@ func sectionKind(lang string) string {
 	}
 }
 
-// fileLang maps a file extension to the outline language key. Mirrors study's
-// langFor for the formats that have an outline pattern; "" for unknown (→ prose
-// or positional). Duplicated from internal/study deliberately — study's copy is
-// retired when the sampling engine is removed (phase 6).
+// fileLang maps a file extension to the outline language key for the formats
+// that have an outline pattern; "" for unknown (→ prose or positional).
 func fileLang(path string) string {
 	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
 	case "py":

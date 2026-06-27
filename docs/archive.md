@@ -170,14 +170,28 @@ of ABR 0.586 was recorded in `eval-journal.md` (now in git history).
 `cmd/loop` keeps a small, focused replacement: `loop study-eval` measures
 the study tool's latency / coverage / groundedness over a fixture set.
 
-## DAG protocol (retained in `pkg/cognition/dag`)
+## DAG protocol + cognition stack (removed 2026-06-27)
 
 The seed+grow+decay execution model — a DAG grows from a tiny seed under a
 decaying budget, with no upfront emission and no separate planner; spawning,
 a depth cap, and budget exhaustion are the bounds. Most nodes are narrow
 small-LLM micro-calls; planning emerges from composition. The design docs
 (`dag-protocol.md`, `dag-build-plan.md`, `bootstrap-dag-plan.md`) are in
-git history; the engine itself lives in `pkg/cognition/dag`.
+git history.
+
+After the memory-as-tools pivot left the DAG with a single live consumer
+(Discord's "continue this change vs. start a new one?" classifier), the whole
+stack was deleted: `pkg/cognition/dag` (engine + op registry), the
+`internal/cognition` retrieve/Dream/Think/Reflect subsystem built on it, and
+`internal/study` (the blind-sampling study engine the DAG's structural ops
+imported). `internal/cognition` could not be left dormant — it was built on the
+DAG types and stopped compiling without them. The route-message classifier was
+reimplemented as a ~70-line standalone LLM call in `cmd/loop/discord.go`
+(`classifyRoute`/`parseRouteDecision`), preserving the bias-to-continue
+fail-safe. Net: −18,350 src / −11,029 test LOC. The capture/storage write-side
+(`internal/storage`, `capture.NewWithStorage`) is kept dormant as the substrate
+a future semantic `Reflect` profile would project into (see
+`docs/study-subagent.md`).
 
 ## Distribution (removed)
 

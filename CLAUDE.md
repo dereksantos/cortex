@@ -107,11 +107,13 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
 Roles: `code` (the agent) and `study` (the navigator + the summarizer). Auth is
 resolved at call time from `key_env` (env-var name) or `key_service` (macOS
 keychain) — never written to disk. (`embed`/`fast` role bindings remain in
-config for the cognition DAG and a future semantic `memory_search`; the loop's
-hot path no longer uses them — `memory_search` is keyword over the small note
-corpus, and the mechanical retrieve/rerank/Dream pipeline was removed in the
-memory-tools pivot. The embedder resolution helper
-`CortexSession.resolveEmbedder` is kept, reserved for that future swap.)
+config reserved for a future semantic `memory_search`; the loop's hot path no
+longer uses them — `memory_search` is keyword over the small note corpus. The
+mechanical retrieve/rerank/Dream pipeline (`pkg/cognition/dag`,
+`internal/cognition`) and the blind-sampling study engine (`internal/study`)
+were deleted outright — see [`docs/archive.md`](docs/archive.md). The embedder
+resolution helper `CortexSession.resolveEmbedder` is kept, reserved for that
+future swap.)
 
 Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
 `CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
@@ -169,9 +171,7 @@ go test ./...                # full suite
 - `cmd/loop/navigator.go` — the study tool (map-first read-only subagent)
 - `cmd/loop/summarize.go` — free-text summarizer (compaction + shell-output)
 - `internal/projectindex/` — the structural map (`go/ast` + outline tiers)
-- `internal/study/` — structural boundary analysis + sampler (used by the DAG)
 - `internal/journal/` — append-only event log
 - `internal/shellrisk/` — command risk classifier
-- `pkg/cognition/dag/` — DAG engine + op registry
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config

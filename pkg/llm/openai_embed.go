@@ -104,10 +104,9 @@ func (e *OpenAICompatEmbedder) embed(ctx context.Context, texts []string) ([][]f
 }
 
 // IsEmbeddingAvailable reports whether the embedder is configured. It is a
-// cheap, non-network check by design: Reflex calls embedders on a <50ms hot
-// path and bounds reachability itself via a context timeout + circuit
-// breaker (see internal/cognition/reflex.go), so a blocking HTTP probe here
-// would defeat that budget.
+// cheap, non-network check by design: embedders may be called on a hot path
+// that bounds reachability itself via a context timeout + circuit breaker, so
+// a blocking HTTP probe here would defeat that budget.
 func (e *OpenAICompatEmbedder) IsEmbeddingAvailable() bool {
 	return e.client != nil && e.client.baseURL != "" && e.model != ""
 }

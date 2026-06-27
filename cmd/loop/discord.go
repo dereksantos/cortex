@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -13,8 +14,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
-	"github.com/dereksantos/cortex/pkg/cognition/dag"
-	"github.com/dereksantos/cortex/pkg/cognition/dag/ops"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // Discord adapter. Cortex knows Discord and nothing else: this file is the only
@@ -182,32 +182,106 @@ func (b *discordBot) handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	boundSession(b.session, turnErr)
 }
 
-// maybeRouteNewChange consults decide.route_message and, only on a confident
-// new_change, resets to a fresh session/branch. Bias to continue: an empty goal,
-// any error, "continue", or sub-threshold confidence all leave the current
-// session untouched. The classifier is the real DAG node, fed the loop's own
-// small-model client as its provider — no parallel classifier here.
+// routeNewChange is the only decision label that triggers a reset; every other
+// value (including the empty-string fail-safe) means "continue".
+const routeNewChange = "new_change"
+
+// routeMessagePrompt classifies an incoming message against the active task:
+// continue the current change, or start a new, distinct one? Biased hard toward
+// continue — resetting throws away the working context, so it only fires on an
+// unmistakable shift. Single small-LLM call, fixed-shape JSON output. The two
+// %s are the goal then the message.
+const routeMessagePrompt = `You route messages for a coding assistant that works on ONE change at a time. Decide whether the new message belongs to the CURRENT task or starts a NEW, distinct task.
+
+Current task:
+%s
+
+New message:
+%s
+
+Rules:
+- "continue" — a follow-up, refinement, correction, question, or clarification about the current task. Also when the message is small talk or you are at all unsure.
+- "new_change" — ONLY when the message clearly asks for a different, unrelated piece of work that does not build on the current task.
+- Bias strongly toward "continue". Choosing "new_change" resets the working context, so only do it when the shift is unmistakable. When in doubt, continue.
+
+For "new_change", set "name" to a short kebab-case slug for the new task (e.g. "add-rate-limiting"). For "continue", leave "name" empty.
+
+Output ONLY a JSON object:
+{"decision":"continue|new_change","name":"<slug-or-empty>","confidence":0.0-1.0,"why":"<=8 words"}`
+
+// routeDecision is the classifier's parsed output.
+type routeDecision struct {
+	Decision   string  `json:"decision"`
+	Name       string  `json:"name"`
+	Confidence float64 `json:"confidence"`
+	Why        string  `json:"why"`
+}
+
+// maybeRouteNewChange classifies the message against the active goal and, only on
+// a confident new_change, resets to a fresh session/branch. Fails safe: an empty
+// goal, an unavailable provider, any LLM/parse error, "continue", or
+// sub-threshold confidence all leave the current session untouched — a misread
+// degrades to "keep going", never a surprise reset. The classifier runs on the
+// loop's own small-model client (the same reasoner the shell gate uses).
 func (b *discordBot) maybeRouteNewChange(ctx context.Context, message string) {
 	if strings.TrimSpace(b.goal) == "" {
 		return // no active task to diverge from
 	}
-	h := ops.NewRouteMessageHandler(ops.RouteMessageConfig{Provider: b.session.reasoner()})
-	res, err := h(ctx, map[string]any{"message": message, "goal": b.goal}, dag.DefaultTurnBudget())
-	if err != nil {
+	dec, ok := classifyRoute(ctx, b.session.reasoner(), message, b.goal)
+	if !ok {
+		return // fail-safe: any error keeps the current session
+	}
+	if dec.Decision != routeNewChange || dec.Confidence < routeConfidenceThreshold {
 		return
 	}
-	decision, _ := res.Out["decision"].(string)
-	conf, _ := res.Out["confidence"].(float64)
-	if decision != ops.DecisionNewChange || conf < routeConfidenceThreshold {
-		return
-	}
-	name, _ := res.Out["name"].(string)
-	if strings.TrimSpace(name) == "" {
+	name := strings.TrimSpace(dec.Name)
+	if name == "" {
 		name = slugifyChange(message)
 	}
-	why, _ := res.Out["why"].(string)
-	log.Printf("discord: route → new change %q (conf %.2f: %s)", name, conf, why)
+	log.Printf("discord: route → new change %q (conf %.2f: %s)", name, dec.Confidence, dec.Why)
 	b.startNewChange(name)
+}
+
+// classifyRoute runs the route-message classification. ok is false on any
+// failure path (provider unavailable, LLM error, no parseable JSON), so the
+// caller treats it as "continue". A non-new_change or out-of-range result is
+// returned as-is for the caller to threshold.
+func classifyRoute(ctx context.Context, p llm.Provider, message, goal string) (routeDecision, bool) {
+	if p == nil || !p.IsAvailable() {
+		return routeDecision{}, false
+	}
+	resp, err := p.Generate(ctx, fmt.Sprintf(routeMessagePrompt, goal, message))
+	if err != nil {
+		return routeDecision{}, false
+	}
+	return parseRouteDecision(resp)
+}
+
+// parseRouteDecision lifts the JSON object out of the model's reply (tolerating
+// surrounding prose), validates the decision label, and clamps confidence to
+// [0,1]. An unrecognized label normalizes to "continue" with zero confidence.
+func parseRouteDecision(resp string) (routeDecision, bool) {
+	start := strings.Index(resp, "{")
+	end := strings.LastIndex(resp, "}")
+	if start < 0 || end <= start {
+		return routeDecision{}, false
+	}
+	var dec routeDecision
+	if err := json.Unmarshal([]byte(resp[start:end+1]), &dec); err != nil {
+		return routeDecision{}, false
+	}
+	dec.Decision = strings.ToLower(strings.TrimSpace(dec.Decision))
+	if dec.Decision != routeNewChange {
+		dec.Decision = "continue"
+		dec.Confidence = 0
+	}
+	if dec.Confidence < 0 {
+		dec.Confidence = 0
+	}
+	if dec.Confidence > 1 {
+		dec.Confidence = 1
+	}
+	return dec, true
 }
 
 // startNewChange resets to a fresh session and cuts a new change branch. Durable
