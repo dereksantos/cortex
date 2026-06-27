@@ -32,7 +32,8 @@ type Config struct {
 	// Web dashboard
 	WebPort int `json:"web_port,omitempty"`
 
-	// Cognitive mode tuning
+	// Cognitive mode tuning. DORMANT — parsed but read by nothing today; see
+	// ModeConfig for the redesign note.
 	Modes *ModeConfig `json:"modes,omitempty"`
 
 	// Multi-endpoint LLM registry (Phase 4 model-registry).
@@ -305,6 +306,20 @@ func indexSlash(s string) int {
 
 // ModeConfig provides per-mode tuning knobs.
 // All fields are optional — nil means use defaults.
+//
+// DORMANT (2026-06-27): these knobs drove the cognition subsystem — Think /
+// Dream / Digest proactive analysis and the retrieval pipeline that consumed
+// Capture / Search — which was deleted with the cognition DAG (see
+// docs/archive.md). Nothing in cmd/loop reads any of these fields today; they
+// are still parsed from config (and the presets in presets.go still build them)
+// so existing config files don't error, but they are inert.
+//
+// TODO(future): redesign these as tuning for the proactive-analysis profile
+// that replaces the deleted stack — a `Reflect` subagent over model-driven
+// memory (docs/study-subagent.md "Future: a Reflect profile") rather than the
+// old Think/Dream/Digest modes — and re-wire them into the loop. Until that
+// design lands, treat the schema as a placeholder, not a contract: it will
+// change shape on re-integration.
 type ModeConfig struct {
 	Think   *ThinkModeConfig   `json:"think,omitempty"`
 	Dream   *DreamModeConfig   `json:"dream,omitempty"`
