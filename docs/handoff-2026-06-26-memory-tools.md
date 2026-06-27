@@ -29,8 +29,9 @@ mechanical retrieval/distill pipeline. The live design is
 [`docs/memory-tools.md`](memory-tools.md): memory = a small tool surface over
 free-form named notes.
 - Tools: `memory_write(name, content)`, `memory_read(name)`,
-  `memory_search(query)`, `memory_forget(name)`, plus `study(journal)` (reuse the
-  navigator on the raw journal for depth).
+  `memory_search(query)`, `memory_forget(name)`, plus `study(journal)` (run the
+  study subagent on the raw journal for depth — note: the navigator is being
+  replaced by the `Study` subagent per `study-subagent.md`/`engine-unification.md`).
 - Storage: `.cortex/memory/<name>.md` (frontmatter `created`/`updated`) +
   `INDEX.md`. The model picks names; update-or-create; no duplicates.
 - The **one mechanical seam**: inject `INDEX.md` at turn start so the model knows
@@ -74,7 +75,8 @@ NEXT (P1 remaining):
 3. **Remove `/remember` `/forget`** slash commands + their handlers
    (`cs.remember`, `cs.forget`, `forgetTerms`, `termOverlap`, dispatch ~`:3640`).
 
-Then P2 (`study(journal)` — point the navigator at `.cortex/journal`/`sessions`),
+Then P2 (`study(journal)` — point the study subagent at `.cortex/journal`/`sessions`;
+the navigator it once reused is being deleted — see `study-subagent.md`),
 P3 (rip out the mechanical pipeline — see below), P4 (tool-native no-mock evals).
 
 ## P3 — the mechanical machinery to REMOVE (much built earlier this session)

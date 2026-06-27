@@ -45,8 +45,10 @@ Recommended sequence (each a green-build checkpoint):
 7. **Working memory: incremental study compaction** — `CompactRecent` +
    a clean session-state layer + manifest.
 
-`cmd/loop/main.go` is ~3.6k lines; the extraction steps above are also the
-[`docs/refactor-loop-main.md`](docs/refactor-loop-main.md) breakup.
+`cmd/loop/main.go` is ~3.6k lines; the loop-extraction work is now specified by
+[`docs/engine-unification.md`](docs/engine-unification.md) (one `runLoop` engine
+in `internal/agent`) and [`docs/study-subagent.md`](docs/study-subagent.md). The
+older `docs/refactor-loop-main.md` breakup was superseded and removed 2026-06-27.
 
 ## Working-memory thesis (the bet)
 
