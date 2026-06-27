@@ -491,7 +491,7 @@ A separate cleanup may later remove the unused projection; out of scope here.
 pkg/llm/            wire protocol: providers, chat/stream, usage          (exists)
 internal/agent/     THE engine + seams + shared data types               (NEW, phase 3)
                     (Tool, ToolCall, Request, Response, Message; see engine-unification.md)
-internal/outline/   structural primitive: Entry, Outline, Render          (NEW; replaces projectindex's two callers)
+internal/outline/   structural primitive: Entry, Outline, Render          (NEW; replaces projectindex's three cmd/loop callers)
 internal/memory/    notes store (unchanged — memory_* tools)              (exists)
 internal/journal/   append-only journal (study reads it as a path)        (exists)
 cmd/loop/tools/     Tool decls, Execute, pure tools (grep, outline-tool,   (exists, grows)
@@ -531,9 +531,10 @@ independent; any order before phase 4 wires them into the profile.
 `scripts/verify-study.sh` is the executable form of this contract (sections 1, 3,
 4, 5, 6 cover this doc). It FAILs pre-implementation and flips to PASS as phases
 land; `--diff-base <ref>` adds the LOC-band + scoped-diff checks. Baseline today:
-23,118 src / 15,275 test LOC (re-snapshotted 2026-06-27 after the cognition-stack
-deletion — `pkg/cognition`, `internal/cognition`, `internal/study` removed:
-−18,350 src / −11,029 test).
+21,655 src / 14,431 test LOC (re-snapshotted 2026-06-27 after the cognition-stack
+*and* `internal/measure` deletions — `pkg/cognition`, `internal/cognition`,
+`internal/study`, `internal/measure` removed, ~−20k src / ~−12k test from the
+pre-deletion 41,468 / 26,304).
 
 ### Expected physical deltas (bands, not point targets)
 
