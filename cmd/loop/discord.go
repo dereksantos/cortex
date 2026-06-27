@@ -81,7 +81,7 @@ func runDiscordCLI() error {
 	} else {
 		session.StartTranscript()
 	}
-	session.EnableRetrieval()
+	session.EnableMemory()
 	bot := &discordBot{session: session, channelID: channelID}
 	defer bot.session.Close()
 
@@ -234,10 +234,9 @@ func (b *discordBot) startNewChange(name string) {
 	ns := NewCortexSession()
 	ns.quiet = true
 	ns.StartTranscript()
-	ns.EnableRetrieval()
+	ns.EnableMemory()
 	b.session = ns
 	b.goal = ""
-	old.stopDistill()
 	old.Close()
 }
 

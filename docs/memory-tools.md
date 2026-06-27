@@ -79,25 +79,37 @@ that's not enough for the smallest models, a later nudge (a cheap "you have N
 notes on this topic — read them?" prompt) can be added, but only if evals show
 the need. Start without it.
 
-## Phased plan
+## Phased plan — DONE
 
-- **P1 — tools + storage + index.** `memory_write/read/search/forget`,
-  `.cortex/memory/` files + `INDEX.md`, index injection at turn start, the
-  system-prompt guidance. Working agentic memory.
-- **P2 — `study(journal)`.** Point the navigator at `.cortex/journal` /
-  `.cortex/sessions` so the model pulls raw detail on demand.
-- **P3 — remove the pipeline.** Rip out pre-turn retrieval + recency +
-  contradiction + freshness + auto-distill from the hot path. Keep journal +
-  embedder + navigator.
-- **P4 — evals (tool-native, no mocks).** (a) model writes a note in session 1,
-  recalls it in a fresh session 2; (b) model updates a note that's gone stale;
-  (c) model uses `study(journal)` for detail no note holds. Acceptance = the
-  behavior, end-to-end against the fleet.
+- **P1 — tools + storage + index. ✅** `memory_write/read/search/forget` in
+  `cmd/loop/tools/tools.go` (dispatch → `CortexSession` via `ToolDeps`), the
+  `internal/memory` note store (`.cortex/memory/<name>.md` + `INDEX.md`), index
+  injection at turn start (`memoryIndexNote`, folded onto the user turn via
+  `EphemeralSystem`), and the memory-principles block in the seed system prompt.
+- **P2 — `study(journal)`. ✅** The navigator reads `.cortex/journal` /
+  `.cortex/sessions` on demand (the system prompt points at them). The ignore set
+  keys off the scan root, so an explicit `.cortex/journal` root is not
+  self-excluded — guarded by `TestStudyJournalPathNavigable`.
+- **P3 — remove the pipeline. ✅** Ripped out pre-turn `retrieve()`, recency
+  weighting, contradiction→retraction, freshness injection, and auto-distill from
+  the hot path; `EnableRetrieval` → `EnableMemory` (note store + journal-only
+  capturer). Kept the journal + navigator as substrate. (The `embed`/`fast`
+  bindings and `resolveEmbedder` survive, reserved for a future semantic
+  `memory_search` — see decision below.)
+- **P4 — evals (tool-native, no mocks). ✅** A fast model-free end-to-end check
+  (`memory_e2e_test.go`: write in session 1 → recall in a fresh session 2, stale
+  update, forget) and a gated live behavioral eval against the fleet
+  (`memory_e2e_live_test.go`, `CORTEX_LIVE_FLEET=1`): (a) cross-session recall,
+  (b) stale-note update, (c) `study(journal)` for an unnoted detail. All three
+  live scenarios pass on the chatterbox fleet (glm-4.7-flash).
 
-## Open decisions
+## Decisions (resolved)
 
-- `memory_search`: keyword-only for P1 (small corpus) vs. embed-on-write from the
-  start (reuse the wired embedder).
-- Does `/remember` / `/forget` stay as REPL commands that call the same tools, or
-  fold entirely into model-driven `memory_write`/`memory_forget`?
-- Frontmatter richness: just timestamps, or also tags/source for better search.
+- **`memory_search` is keyword-only.** The corpus is the model's own notes and
+  the full index is injected anyway. Reversible: swap to embeddings later only if
+  evals show recall misses. (The embedder resolution path is kept dormant.)
+- **`/remember` / `/forget` folded into the model tools.** The slash commands
+  were removed; the user asks in natural language and the agent calls
+  `memory_write` / `memory_forget`.
+- **Frontmatter = timestamps only** (`created` / `updated`). Tags/source can be
+  added if search precision proves insufficient.

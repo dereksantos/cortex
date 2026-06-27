@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,13 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/shellrisk"
-	"github.com/dereksantos/cortex/pkg/cognition"
-	"github.com/dereksantos/cortex/pkg/config"
-	"github.com/dereksantos/cortex/pkg/events"
-	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // TestMain disables the self-contained local embedder for the whole package so
@@ -1717,56 +1711,6 @@ func TestBashGrepNoMatch(t *testing.T) {
 	}
 }
 
-// --- Retrieval -------------------------------------------------------------
-
-func TestFormatRetrieved(t *testing.T) {
-	t.Run("empty input yields empty string", func(t *testing.T) {
-		if got := formatRetrieved(nil); got != "" {
-			t.Errorf("formatRetrieved(nil) = %q, want empty", got)
-		}
-	})
-
-	t.Run("all-blank content yields empty string", func(t *testing.T) {
-		got := formatRetrieved([]cognition.Result{{Content: "   "}, {Content: ""}})
-		if got != "" {
-			t.Errorf("blank content should produce no note, got %q", got)
-		}
-	})
-
-	t.Run("labels category, collapses whitespace, marks provenance", func(t *testing.T) {
-		got := formatRetrieved([]cognition.Result{
-			{Category: "decision", Content: "Use pgx\n  not database/sql"},
-			{Content: "no category here"}, // → "note"
-		})
-		for _, want := range []string{
-			"retrieved, not user-authored",
-			"- [decision] Use pgx not database/sql",
-			"- [note] no category here",
-		} {
-			if !strings.Contains(got, want) {
-				t.Errorf("formatRetrieved missing %q in:\n%s", want, got)
-			}
-		}
-		if strings.Contains(got, "\n  not") {
-			t.Error("content newlines should be collapsed")
-		}
-	})
-
-	t.Run("oversized content is truncated", func(t *testing.T) {
-		long := strings.Repeat("x", retrievedContentCap+50)
-		got := formatRetrieved([]cognition.Result{{Content: long}})
-		if !strings.Contains(got, "…") {
-			t.Error("oversized snippet should be truncated with an ellipsis")
-		}
-		if len(got) > len("# Relevant context from memory (retrieved, not user-authored)\n- [note] ")+retrievedContentCap+10 {
-			t.Errorf("truncation cap did not hold: %d bytes", len(got))
-		}
-	})
-}
-
-// wireMessages folds the ephemeral note onto the LAST USER message for the wire
-// only — never the system message — so the cacheable prefix stays byte-stable
-// and the stored Messages are untouched.
 func TestWireMessagesComposesEphemerally(t *testing.T) {
 	req := CortexArgs{}.Request() // system message only
 	sys := req.Messages[0].Content
@@ -1885,99 +1829,6 @@ func TestPromptCache(t *testing.T) {
 	})
 }
 
-func TestRetrieveDisabledReturnsNil(t *testing.T) {
-	cs := &CortexSession{Request: CortexArgs{}.Request()} // retriever == nil
-	if got := cs.retrieve("anything"); got != nil {
-		t.Errorf("retrieve with no retriever = %v, want nil", got)
-	}
-}
-
-// Round-trip: a captured insight under the project's .cortex/ store must
-// surface through the loop's Fast retrieval, AND be recorded to the transcript
-// as a kindRetrieval entry while staying OUT of the replayed window on resume
-// (record-only policy). No model: Reflex is text-only here.
-func TestRetrieveRecordsButDoesNotReplay(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	cs.StartTranscript()
-	cs.EnableRetrieval()
-	if cs.retriever == nil || cs.transcript == nil {
-		t.Fatal("EnableRetrieval/StartTranscript should both succeed in a writable dir")
-	}
-	t.Cleanup(cs.Close)
-	id := cs.SessionID
-
-	cap := capture.NewWithStorage(
-		&config.Config{ContextDir: contextDir(), ProjectRoot: filepath.Dir(contextDir())},
-		cs.store,
-	)
-	if err := cap.CaptureEvent(&events.Event{
-		ID:        "evt-loop-rt",
-		Source:    events.SourceGeneric,
-		EventType: events.EventToolUse,
-		Timestamp: time.Now(),
-		ToolName:  "loop",
-		ToolInput: map[string]interface{}{
-			"type":    "decision",
-			"content": "we use JWT for authentication, not server-side sessions",
-		},
-		ToolResult: "captured the JWT authentication decision",
-		Context:    events.EventContext{SessionID: "s1", ProjectPath: contextDir()},
-	}); err != nil {
-		t.Fatalf("CaptureEvent: %v", err)
-	}
-
-	// A turn: retrieve, record, and (would) inject.
-	hits := cs.retrieve("authentication")
-	if len(hits) == 0 {
-		t.Fatal("retrieve found nothing — capture is not visible to the loop's retrieval")
-	}
-	cs.recordRetrieval("authentication", hits)
-	cs.Append(Message{Role: RoleUser, Content: "how does auth work?"})
-
-	// The note that WOULD be injected carries provenance + content.
-	note := formatRetrieved(hits)
-	if !strings.Contains(note, "retrieved, not user-authored") {
-		t.Errorf("note missing provenance header:\n%s", note)
-	}
-	if !strings.Contains(strings.ToLower(note), "jwt") && !strings.Contains(strings.ToLower(note), "authentication") {
-		t.Errorf("note should carry the captured content:\n%s", note)
-	}
-
-	// The raw transcript records the retrieval (debuggability)...
-	raw, err := os.ReadFile(filepath.Join(sessionsDir(), id+".jsonl"))
-	if err != nil {
-		t.Fatalf("read transcript: %v", err)
-	}
-	if !strings.Contains(string(raw), `"kind":"retrieval"`) {
-		t.Error("transcript should record a kindRetrieval entry")
-	}
-	if !strings.Contains(string(raw), "JWT") {
-		t.Error("recorded retrieval should carry the retrieved content")
-	}
-
-	// ...but resume rebuilds the window from core messages ONLY: the system
-	// seed and the user turn, never the retrieval entry.
-	msgs, err := loadTranscript(filepath.Join(sessionsDir(), id+".jsonl"))
-	if err != nil {
-		t.Fatalf("loadTranscript: %v", err)
-	}
-	for _, m := range msgs {
-		if strings.Contains(m.Content, "JWT") || strings.Contains(m.Content, "retrieved, not user-authored") {
-			t.Errorf("retrieval must not be replayed into the window, but found: %q", m.Content)
-		}
-	}
-	roles := make([]string, len(msgs))
-	for i, m := range msgs {
-		roles[i] = m.Role
-	}
-	if len(msgs) != 2 || roles[0] != RoleSystem || roles[1] != RoleUser {
-		t.Errorf("replayed window = roles %v, want [system user] (core conversation only)", roles)
-	}
-}
-
-// Older transcripts have no kind field; those entries must still replay as
 // core messages.
 func TestLoadTranscriptBackCompat(t *testing.T) {
 	t.Chdir(t.TempDir())
@@ -2051,229 +1902,13 @@ func TestTurnArtifacts(t *testing.T) {
 	})
 }
 
-func TestCaptureDisabledIsNoOp(t *testing.T) {
-	cs := &CortexSession{Request: CortexArgs{}.Request()}                        // capturer == nil
-	cs.captureTurn("anything", []Message{{Role: RoleUser, Content: "anything"}}) // must not panic
-	if err := cs.remember("note"); err == nil {
-		t.Error("remember without a store should return an error")
-	}
-}
-
-// Every completed turn is captured — read-only included — and is retrievable.
-func TestCaptureTurnIsRetrievable(t *testing.T) {
-	t.Chdir(t.TempDir())
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	cs.StartTranscript()
-	cs.EnableRetrieval()
-	if cs.capturer == nil {
-		t.Fatal("EnableRetrieval should wire a capturer")
-	}
-	t.Cleanup(cs.Close)
-
-	// A read-only turn where the USER states a durable fact (no file edits).
-	cs.captureTurn("we use JWT for authentication, not server-side sessions", []Message{
-		{Role: RoleUser, Content: "we use JWT for authentication, not server-side sessions"},
-		{Role: "assistant", Content: "Understood — JWT it is."},
-	})
-
-	hits := cs.retrieve("authentication")
-	if len(hits) == 0 {
-		t.Fatal("a captured read-only turn must be retrievable — read-only lessons matter")
-	}
-	found := false
-	for _, h := range hits {
-		if strings.Contains(strings.ToLower(h.Content), "jwt") || strings.Contains(strings.ToLower(h.Content), "authentication") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("retrieved hits should carry the captured content: %+v", hits)
-	}
-}
-
-func TestRememberIsRetrievable(t *testing.T) {
-	t.Chdir(t.TempDir())
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	cs.StartTranscript()
-	cs.EnableRetrieval()
-	t.Cleanup(cs.Close)
-
-	if err := cs.remember("the staging database is reset every night at 2am UTC"); err != nil {
-		t.Fatalf("remember: %v", err)
-	}
-	hits := cs.retrieve("staging database reset")
-	if len(hits) == 0 {
-		t.Fatal("an explicit /remember memory must be retrievable")
-	}
-	found := false
-	for _, h := range hits {
-		if strings.Contains(h.Content, "staging") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("hits should carry the remembered text: %+v", hits)
-	}
-}
-
-// --- Capture (Tier 2: distillation) ----------------------------------------
-
-// stubDistill replaces the reasoner call for the test's duration, returning a
-// canned analysis response. No model, no network.
-func stubDistill(t *testing.T, response string, err error) *int {
-	t.Helper()
-	saved := distillExtract
-	t.Cleanup(func() { distillExtract = saved })
-	calls := new(int)
-	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
-		*calls++
-		return response, err
-	}
-	return calls
-}
-
-func newDistillSession(t *testing.T) *CortexSession {
-	t.Helper()
-	t.Chdir(t.TempDir())
-	cs := &CortexSession{Request: CortexArgs{}.Request()}
-	cs.StartTranscript()
-	cs.EnableRetrieval()
-	if cs.store == nil {
-		t.Fatal("EnableRetrieval should open a store")
-	}
-	t.Cleanup(cs.Close)
-	return cs
-}
-
-func TestDistillPendingStoresInsight(t *testing.T) {
-	stubDistill(t, `{"content":"use pgx, not database/sql","category":"decision","importance":0.8,"tags":["db"]}`, nil)
-	cs := newDistillSession(t)
-	cs.pendingTurns = []pendingTurn{{user: "what db driver?", msgs: []Message{
-		{Role: RoleUser, Content: "what db driver?"},
-		{Role: "assistant", Content: "We use pgx."},
-	}}}
-
-	cs.distillPending(context.Background())
-
-	if len(cs.pendingTurns) != 0 {
-		t.Errorf("distilled turn should be consumed, %d left", len(cs.pendingTurns))
-	}
-	// The insight is in the insights layer and retrievable.
-	hits := cs.retrieve("database driver")
-	found := false
-	for _, h := range hits {
-		if strings.Contains(strings.ToLower(h.Content), "pgx") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("distilled insight should be retrievable, got %+v", hits)
-	}
-}
-
-func TestDistillPendingDedups(t *testing.T) {
-	cs := newDistillSession(t)
-	// Pre-store the insight the reasoner is about to "discover" again.
-	if err := cs.store.StoreInsightWithSession("", "decision", "use pgx, not database/sql", 8, nil, "", cs.SessionID, "loop"); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := cs.store.GetRecentInsights(100)
-
-	stubDistill(t, `{"content":"Use pgx, not database/sql.","category":"decision","importance":0.8}`, nil)
-	cs.pendingTurns = []pendingTurn{{user: "db?", msgs: []Message{{Role: RoleUser, Content: "db?"}}}}
-	cs.distillPending(context.Background())
-
-	after, _ := cs.store.GetRecentInsights(100)
-	if len(after) != len(before) {
-		t.Errorf("duplicate insight should not be stored: before=%d after=%d", len(before), len(after))
-	}
-	if len(cs.pendingTurns) != 0 {
-		t.Error("turn should still be consumed even when deduped")
-	}
-}
-
-func TestDistillPendingNoInsightConsumesTurn(t *testing.T) {
-	calls := stubDistill(t, "NO_INSIGHT", nil)
-	cs := newDistillSession(t)
-	cs.pendingTurns = []pendingTurn{{user: "hi", msgs: []Message{{Role: RoleUser, Content: "hi"}}}}
-
-	cs.distillPending(context.Background())
-
-	if *calls != 1 {
-		t.Errorf("reasoner should be called once, got %d", *calls)
-	}
-	if len(cs.pendingTurns) != 0 {
-		t.Error("a NO_INSIGHT turn must still be consumed (not retried forever)")
-	}
-	if got, _ := cs.store.GetRecentInsights(10); len(got) != 0 {
-		t.Errorf("NO_INSIGHT should store nothing, got %d insights", len(got))
-	}
-}
-
-func TestDistillPendingPreemptedLeavesTurn(t *testing.T) {
-	calls := stubDistill(t, `{"content":"x","category":"pattern","importance":0.5}`, nil)
-	cs := newDistillSession(t)
-	cs.pendingTurns = []pendingTurn{{user: "q", msgs: []Message{{Role: RoleUser, Content: "q"}}}}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already preempted
-
-	cs.distillPending(ctx)
-
-	if *calls != 0 {
-		t.Errorf("preempted distill should not call the reasoner, got %d", *calls)
-	}
-	if len(cs.pendingTurns) != 1 {
-		t.Error("a preempted turn must stay pending for the next idle")
-	}
-}
-
-// A transient model error leaves the turn pending; a later retry succeeds.
-func TestDistillPendingTransientErrorRetries(t *testing.T) {
-	saved := distillExtract
-	t.Cleanup(func() { distillExtract = saved })
-	cs := newDistillSession(t)
-	cs.pendingTurns = []pendingTurn{{user: "db?", msgs: []Message{{Role: RoleUser, Content: "db?"}}}}
-
-	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
-		return "", errTest
-	}
-	cs.distillPending(context.Background())
-	if len(cs.pendingTurns) != 1 {
-		t.Fatal("a model error must leave the turn pending")
-	}
-
-	distillExtract = func(_ context.Context, _ llm.Provider, _ string) (string, error) {
-		return `{"content":"use pgx","category":"decision","importance":0.7}`, nil
-	}
-	cs.distillPending(context.Background())
-	if len(cs.pendingTurns) != 0 {
-		t.Error("retry should consume the turn")
-	}
-}
-
-var errTest = fmt.Errorf("transient model error")
-
-func TestIsDuplicateInsight(t *testing.T) {
-	known := []string{"Use pgx, not database/sql"}
-	for _, dup := range []string{"use pgx, not database/sql", "Use  pgx,  not   database/sql", "USE PGX, NOT DATABASE/SQL"} {
-		if !isDuplicateInsight(dup, known) {
-			t.Errorf("%q should be a duplicate", dup)
-		}
-	}
-	if isDuplicateInsight("use sqlx for queries", known) {
-		t.Error("distinct insight should not be a duplicate")
-	}
-}
-
 // --- Session metrics (6a) --------------------------------------------------
 
 func TestSessionSummary(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now().Add(-90 * time.Second)}
-	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.retrievals = 5, 52000, 8000, 9, 6
-	cs.insights.Store(4)
+	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.injections = 5, 52000, 8000, 9, 6
 	s := cs.sessionSummary()
-	for _, want := range []string{"5 turns", "52k in", "8k out", "9 captured", "4 insights", "6 retrievals"} {
+	for _, want := range []string{"5 turns", "52k in", "8k out", "9 captured", "6 memory injections"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("summary %q missing %q", s, want)
 		}
@@ -2344,8 +1979,7 @@ func TestEmitSessionMetrics(t *testing.T) {
 			cs.transcript.Close()
 		}
 	})
-	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.retrievals, cs.injectedChars = 3, 1200, 340, 2, 1, 400
-	cs.insights.Store(1)
+	cs.turns, cs.tokensIn, cs.tokensOut, cs.captures, cs.injections, cs.injectedChars = 3, 1200, 340, 2, 1, 400
 
 	cs.emitSessionMetrics()
 
@@ -2377,10 +2011,10 @@ func TestEmitSessionMetrics(t *testing.T) {
 	if p.InjectedContextTokens != 100 { // 400 chars / 4
 		t.Errorf("injected tokens = %d, want 100", p.InjectedContextTokens)
 	}
-	if p.ContextStrategy != "none" { // retriever nil in this test
+	if p.ContextStrategy != "none" { // memory store nil in this test
 		t.Errorf("context strategy = %q, want none", p.ContextStrategy)
 	}
-	if !strings.Contains(p.Notes, "insights=1") || !strings.Contains(p.Notes, "captures=2") {
+	if !strings.Contains(p.Notes, "injections=1") || !strings.Contains(p.Notes, "captures=2") {
 		t.Errorf("notes = %q", p.Notes)
 	}
 }

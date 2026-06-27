@@ -32,6 +32,17 @@ type ToolDeps interface {
 	// Navigate runs the map-first study over a path: a bounded read-only
 	// subagent seeded with the structural map + goal. This is the study tool.
 	Navigate(ctx context.Context, path, goal string) (digest string, err error)
+	// MemoryWrite creates or updates a named note and returns a confirmation
+	// (the normalized name). The model curates memory through these four methods;
+	// see internal/memory and docs/memory-tools.md.
+	MemoryWrite(name, content string) (result string, err error)
+	// MemoryRead returns one note's body in full.
+	MemoryRead(name string) (body string, err error)
+	// MemorySearch returns notes matching the query as a formatted list (name —
+	// hook — updated date), ready to hand back as the tool result.
+	MemorySearch(query string) (results string, err error)
+	// MemoryForget removes a note and returns a confirmation.
+	MemoryForget(name string) (result string, err error)
 	// Summarize reduces a free-text file (no structural map) to a digest via
 	// sequential chunk-and-fold. Used by oversized shell-output study; the
 	// compressed flag is unused there.
@@ -72,6 +83,18 @@ func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool
 }
 func (headlessDeps) AllowDelete() (string, bool) { return "", false }
 func (headlessDeps) Quiet() bool                 { return false }
+func (headlessDeps) MemoryWrite(string, string) (string, error) {
+	return "", errors.New("memory unavailable: no session")
+}
+func (headlessDeps) MemoryRead(string) (string, error) {
+	return "", errors.New("memory unavailable: no session")
+}
+func (headlessDeps) MemorySearch(string) (string, error) {
+	return "", errors.New("memory unavailable: no session")
+}
+func (headlessDeps) MemoryForget(string) (string, error) {
+	return "", errors.New("memory unavailable: no session")
+}
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -82,6 +105,10 @@ const (
 	FunctionBash         = "bash"
 	FunctionRemove       = "remove_path"
 	FunctionProjectIndex = "project_index"
+	FunctionMemoryWrite  = "memory_write"
+	FunctionMemoryRead   = "memory_read"
+	FunctionMemorySearch = "memory_search"
+	FunctionMemoryForget = "memory_forget"
 )
 
 // Tool is the OpenAI-format tool declaration passed in the tools array.
@@ -211,8 +238,46 @@ var RemoveTool = newTool(FunctionRemove,
 		"path": stringProp("Path to delete, relative to the working directory."),
 	}, "path"))
 
+// --- memory tools -------------------------------------------------------
+//
+// The four model-driven memory tools over the free-form note store
+// (internal/memory). The model curates its own durable notes; the only
+// mechanical seam is the index injected at turn start. See docs/memory-tools.md.
+
+var MemoryWriteTool = newTool(FunctionMemoryWrite,
+	"Save a durable note to memory — something worth having in a future session: a "+
+		"decision and why, a constraint, a user preference, a non-obvious fact. Pick a "+
+		"short kebab-case name; writing an existing name updates that note (don't "+
+		"duplicate). Notes are timestamped automatically.",
+	objectSchema(map[string]any{
+		"name":    stringProp("Short kebab-case identifier for the note, e.g. 'auth-token-rotation'. Reusing a name updates that note."),
+		"content": stringProp("The note body — free-form prose. State the fact and, where it helps, a pointer to the source (a file path, a journal turn)."),
+	}, "name", "content"))
+
+var MemoryReadTool = newTool(FunctionMemoryRead,
+	"Read one memory note in full by name (names are listed in the memory index).",
+	objectSchema(map[string]any{
+		"name": stringProp("The note's name, as shown in the memory index."),
+	}, "name"))
+
+var MemorySearchTool = newTool(FunctionMemorySearch,
+	"Search memory notes by keyword and get back matching names with one-line hooks "+
+		"and their last-updated date. Use it to find a note when the index is long; "+
+		"then memory_read the ones that look relevant.",
+	objectSchema(map[string]any{
+		"query": stringProp("Keywords to match against note names and bodies."),
+	}, "query"))
+
+var MemoryForgetTool = newTool(FunctionMemoryForget,
+	"Delete a memory note by name — use when a note is wrong or obsolete and should "+
+		"no longer be recalled.",
+	objectSchema(map[string]any{
+		"name": stringProp("The note's name, as shown in the memory index."),
+	}, "name"))
+
 // All is the full tool set, in declaration order.
-var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, ProjectIndexTool, Bash, RemoveTool}
+var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, ProjectIndexTool, Bash, RemoveTool,
+	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool}
 
 // --- Wire types ---------------------------------------------------------
 
@@ -261,6 +326,14 @@ func (tc ToolCall) Execute(ctx context.Context, deps ToolDeps) (string, error) {
 		return tc.Bash(ctx, deps)
 	case FunctionRemove:
 		return tc.RemovePath(deps)
+	case FunctionMemoryWrite:
+		return tc.MemoryWrite(deps)
+	case FunctionMemoryRead:
+		return tc.MemoryRead(deps)
+	case FunctionMemorySearch:
+		return tc.MemorySearch(deps)
+	case FunctionMemoryForget:
+		return tc.MemoryForget(deps)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -357,6 +430,52 @@ func (tc ToolCall) Study(ctx context.Context, deps ToolDeps) (string, error) {
 	}
 	goal, _ := tc.StringArg("goal") // optional
 	return deps.Navigate(ctx, path, goal)
+}
+
+// --- memory -------------------------------------------------------------
+//
+// Thin dispatchers: argument parsing + the action line, then delegate to the
+// session-backed store via ToolDeps. The session formats the result (so the
+// tools package needn't import the memory types).
+
+func (tc ToolCall) MemoryWrite(deps ToolDeps) (string, error) {
+	name, err := tc.StringArg("name")
+	if err != nil {
+		return "", err
+	}
+	content, err := tc.StringArg("content")
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("memory_write(%s)", name))
+	return deps.MemoryWrite(name, content)
+}
+
+func (tc ToolCall) MemoryRead(deps ToolDeps) (string, error) {
+	name, err := tc.StringArg("name")
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("memory_read(%s)", name))
+	return deps.MemoryRead(name)
+}
+
+func (tc ToolCall) MemorySearch(deps ToolDeps) (string, error) {
+	query, err := tc.StringArg("query")
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("memory_search(%s)", query))
+	return deps.MemorySearch(query)
+}
+
+func (tc ToolCall) MemoryForget(deps ToolDeps) (string, error) {
+	name, err := tc.StringArg("name")
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("memory_forget(%s)", name))
+	return deps.MemoryForget(name)
 }
 
 // --- read_file ----------------------------------------------------------

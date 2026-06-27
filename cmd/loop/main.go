@@ -16,23 +16,18 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/dereksantos/cortex/cmd/loop/tools"
 	"github.com/dereksantos/cortex/cmd/loop/ui"
 	"github.com/dereksantos/cortex/internal/capture"
-	intcog "github.com/dereksantos/cortex/internal/cognition"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
+	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
-	"github.com/dereksantos/cortex/internal/storage"
-	"github.com/dereksantos/cortex/pkg/cognition"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -76,7 +71,16 @@ Tidy first. Before adding a feature, make the change easy: rename for clarity, e
 
 Commit hygiene. One logical change per checkpoint. A checkpoint compiles and passes tests. When you describe what you did, name what and why, not how — the diff already shows how.
 
-Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package.`
+Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package.
+
+# Memory
+
+You have a persistent memory: named notes you've written in earlier sessions, managed through tools. When notes exist, their index is appended to the turn so you can see what you can recall.
+
+- Read the notes relevant to the task before answering — memory_read by name, or memory_search to find them.
+- When you learn something worth having next session — a decision and why, a constraint, a user preference, a non-obvious fact — save it with memory_write. Update an existing note if one fits; don't duplicate. Don't save what the code or git history already records.
+- Notes are timestamped. If one looks stale for the task at hand, verify it against the code rather than trusting it, then update it. Use memory_forget for a note that's wrong or obsolete.
+- For raw detail a note only points at, study the journal: study(".cortex/journal", goal) or study(".cortex/sessions", goal).`
 
 const RoleUser = "user"
 const RoleSystem = "system"
@@ -832,35 +836,6 @@ var stripToolMarkup = tools.StripToolMarkup
 // role's endpoint/model, with the given per-call output cap. Shared by the
 // sampling engine (runStudy) and the free-text summarizer (Summarize) so the
 // endpoint/key/template wiring lives in one place.
-// newSpecProvider builds an OpenAI-compatible chat client for an arbitrary
-// role binding. It is the generic form of newStudyProvider/reasoner: same
-// /v1 normalization, key resolution, and thinking-kwarg plumbing, parameterized
-// by the ModelSpec so cognition roles (rerank, reason) can each route to their
-// own fleet model. A zero/empty spec.Model yields a true-nil llm.Provider — the
-// role is unsatisfied (fleet didn't supply it) and the caller leaves that
-// cognition piece dark. The return type is the interface, not the concrete
-// *OpenAICompatClient, precisely so the nil case is a nil interface and not a
-// typed-nil that slips past downstream `provider == nil` guards.
-func (cs *CortexSession) newSpecProvider(spec ModelSpec, name string, maxTokens int) llm.Provider {
-	if strings.TrimSpace(spec.Model) == "" {
-		return nil
-	}
-	base := strings.TrimRight(spec.Endpoint, "/")
-	if !strings.HasSuffix(base, "/v1") {
-		base += "/v1"
-	}
-	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
-		Name:               name,
-		BaseURL:            base,
-		APIKey:             resolveKey(spec),
-		ChatTemplateKwargs: spec.TemplateKwargs(),
-	})
-	p.SetModel(spec.Model)
-	p.SetTemperature(0)
-	p.SetMaxTokens(maxTokens)
-	return p
-}
-
 func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient {
 	base := strings.TrimRight(cs.Study.Endpoint, "/")
 	if !strings.HasSuffix(base, "/v1") {
@@ -882,6 +857,26 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 	return p
 }
 
+// reasoner builds a chat client on the study binding for the gray-zone shell-risk
+// classifier (its sole remaining caller — see gateShell). A small judge call, so
+// it borrows the study model rather than standing up a dedicated role.
+func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
+	base := strings.TrimRight(cs.Study.Endpoint, "/")
+	if !strings.HasSuffix(base, "/v1") {
+		base += "/v1"
+	}
+	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
+		Name:               "shell-classifier",
+		BaseURL:            base,
+		APIKey:             resolveKey(cs.Study),
+		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+		Timeout:            10 * time.Minute,
+	})
+	p.SetModel(cs.Study.Model)
+	p.SetTemperature(0)
+	return p
+}
+
 // GateShell runs the shell-risk gate (ToolDeps).
 func (cs *CortexSession) GateShell(ctx context.Context, command string) (string, bool) {
 	return cs.gateShell(ctx, command)
@@ -893,6 +888,110 @@ func (cs *CortexSession) AllowDelete() (string, bool) { return cs.deleteRoot, cs
 
 // Quiet reports whether terminal emission is suppressed (ToolDeps).
 func (cs *CortexSession) Quiet() bool { return cs.quiet }
+
+// --- memory tools (ToolDeps) ----------------------------------------------
+//
+// The session-backed implementations of the four memory_* tools. They format
+// the store's results into the tool-result text the model reads; a nil store
+// (unpersisted session) returns a plain, non-fatal explanation.
+
+// memUnavailable is the result returned when no note store is wired — phrased
+// as an observation the model can adapt to, not a harness error.
+const memUnavailable = "memory is unavailable in this session (no .cortex workspace)"
+
+// MemoryWrite creates or updates a named note (ToolDeps).
+func (cs *CortexSession) MemoryWrite(name, content string) (string, error) {
+	if cs.memory == nil {
+		return memUnavailable, nil
+	}
+	saved, err := cs.memory.Write(name, content, time.Now())
+	if err != nil {
+		return "", err
+	}
+	cs.captures++
+	return fmt.Sprintf("saved note %q", saved), nil
+}
+
+// MemoryRead returns a note's body, or a not-found observation (ToolDeps).
+func (cs *CortexSession) MemoryRead(name string) (string, error) {
+	if cs.memory == nil {
+		return memUnavailable, nil
+	}
+	body, err := cs.memory.Read(name)
+	if os.IsNotExist(err) {
+		return fmt.Sprintf("no note named %q (check the memory index, or memory_search for it)", name), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return body, nil
+}
+
+// MemorySearch renders matching notes as a compact list (ToolDeps).
+func (cs *CortexSession) MemorySearch(query string) (string, error) {
+	if cs.memory == nil {
+		return memUnavailable, nil
+	}
+	hits, err := cs.memory.Search(query)
+	if err != nil {
+		return "", err
+	}
+	if len(hits) == 0 {
+		return fmt.Sprintf("no notes match %q", query), nil
+	}
+	return renderMemoryHits(hits), nil
+}
+
+// MemoryForget removes a note (ToolDeps).
+func (cs *CortexSession) MemoryForget(name string) (string, error) {
+	if cs.memory == nil {
+		return memUnavailable, nil
+	}
+	removed, err := cs.memory.Forget(name)
+	if err != nil {
+		return "", err
+	}
+	if !removed {
+		return fmt.Sprintf("no note named %q to forget", name), nil
+	}
+	return fmt.Sprintf("forgot note %q", name), nil
+}
+
+// memoryIndexCap bounds the injected index so a large note collection can't
+// dominate the window — beyond it the model falls back to memory_search.
+const memoryIndexCap = 4000
+
+// memoryIndexNote renders the per-turn memory injection: the note index, with a
+// one-line nudge to read the relevant notes. Empty when there's no store or no
+// notes (nothing to inject). This is the only mechanical seam — see Turn.
+func (cs *CortexSession) memoryIndexNote() string {
+	if cs.memory == nil {
+		return ""
+	}
+	idx, err := cs.memory.Index()
+	if err != nil || strings.TrimSpace(idx) == "" {
+		return ""
+	}
+	if len(idx) > memoryIndexCap {
+		idx = idx[:memoryIndexCap] + "\n… (index truncated; memory_search to find the rest)"
+	}
+	return "These are notes you saved in earlier sessions. Read the relevant ones with " +
+		"memory_read before answering; update them with memory_write when something changes.\n\n" + idx
+}
+
+// renderMemoryHits formats search results the way the injected index reads —
+// one line per note (name — hook — updated date) — so the two surfaces match.
+func renderMemoryHits(hits []memory.NoteMeta) string {
+	var b strings.Builder
+	for _, m := range hits {
+		when := ""
+		if !m.Updated.IsZero() {
+			when = " (updated " + m.Updated.UTC().Format("2006-01-02") + ")"
+		}
+		fmt.Fprintf(&b, "- %s — %s%s\n", m.Name, m.Hook, when)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
 
 // gateShell runs the shell-risk gate (internal/shellrisk) in place of the old
 // static binary allowlist. It returns ok=true to proceed; otherwise a message
@@ -1041,37 +1140,28 @@ type CortexSession struct {
 	// transcript is the open .cortex/sessions/<id>.jsonl file Append writes
 	// through to. nil when the session is unpersisted (study CLI, tests).
 	transcript *os.File
-	// retriever serves Fast (mechanical) context retrieval from the project's
-	// .cortex/ store; nil when retrieval is disabled (no store, or an
-	// unpersisted session). store is its backing handle, closed at exit.
-	retriever *intcog.Cortex
-	store     *storage.Storage
-	// capturer writes turn captures to the same store (so they're immediately
-	// retrievable) and to the journal (durable). nil when retrieval is disabled.
+	// capturer writes per-turn captures to the append-only journal — the durable
+	// record study(.cortex/journal) reads. nil when capture is disabled (no
+	// .cortex dir, or an unpersisted session). Journal-only: no storage, no
+	// embedding, no mechanical retrieval (model-driven memory replaced that).
 	capturer *capture.Capture
-
-	// Tier 2 distillation runs off the foreground: completed turns buffer in
-	// pendingTurns, a cancelable goroutine distills them during idle, and the
-	// next turn preempts it. See the Tier 2 capture section.
-	distillMu     sync.Mutex
-	pendingTurns  []pendingTurn
-	distillCancel context.CancelFunc
-	distillDone   chan struct{}
+	// memory is the model-driven note store (memory_write/read/search/forget).
+	// nil when unavailable (no .cortex dir, or an unpersisted session). The
+	// model curates it; the index is injected at turn start. See internal/memory.
+	memory *memory.Store
 
 	// Session metrics (6a), cumulative across the session: shown in the
 	// closing summary and emitted as one eval.cell_result at exit. tokensIn/Out
 	// sum every billed model call (prompt re-sent each call, so summing prompt
-	// tokens reflects real cost). insights is written by the distill goroutine,
-	// so it's atomic; the rest are main-thread only.
+	// tokens reflects real cost). All main-thread only.
 	sessionStart  time.Time
 	turns         int
 	tokensIn      int
 	tokensOut     int
 	costUSD       float64 // cumulative dollar cost when the backend reports it
-	injectedChars int     // retrieved context merged into the wire (≈ tokens × 4)
-	captures      int     // Tier 1 turn captures + /remember
-	retrievals    int     // turns that injected retrieved context
-	insights      atomic.Int64
+	injectedChars int     // memory index merged into the wire (≈ tokens × 4)
+	captures      int     // turn captures + memory_write notes
+	injections    int     // turns that injected the memory index
 
 	// md is the cached glamour renderer for streamed assistant output, rebuilt
 	// when the terminal width changes. nil when rendering is disabled (non-TTY,
@@ -1692,40 +1782,27 @@ func (cs *CortexSession) Append(message Message) {
 
 const (
 	kindMessage    = "message"    // core conversation: replayed into the window on resume
-	kindRetrieval  = "retrieval"  // context fed to the model this turn: recorded, not replayed
 	kindCompaction = "compaction" // marker that history was compacted here
 )
 
 // sessionEntry is one transcript line. Message carries the conversation when
-// kind=="message"; Query/Results carry the retrieved context when
-// kind=="retrieval"; From/Coverage mark a compaction. A missing kind (older
-// transcripts) is treated as a core message.
+// kind=="message"; From/Coverage mark a compaction. A missing kind (older
+// transcripts) is treated as a core message. (Older transcripts may also carry
+// "retrieval" entries from the removed retrieval pipeline; an unknown kind is
+// simply skipped on resume, and its now-unmapped JSON fields are ignored.)
 type sessionEntry struct {
 	TS      time.Time `json:"ts"`
 	Kind    string    `json:"kind,omitempty"`
 	Message           // populated for kindMessage
-
-	// kindRetrieval:
-	Query   string            `json:"query,omitempty"`
-	Results []retrievedRecord `json:"results,omitempty"`
 
 	// kindCompaction:
 	From     string  `json:"from,omitempty"`     // the prior session id this was compacted from
 	Coverage float64 `json:"coverage,omitempty"` // study coverage of the compacted transcript
 }
 
-// retrievedRecord is one retrieved hit as stored in the transcript — the
-// durable record of what memory the model was given on a turn.
-type retrievedRecord struct {
-	Category string  `json:"category,omitempty"`
-	Content  string  `json:"content"`
-	Score    float64 `json:"score,omitempty"`
-	ID       string  `json:"id,omitempty"`
-}
-
 // contextDir resolves the project's .cortex: the nearest one up the tree, or
-// cwd/.cortex when none exists yet. The journal, transcripts, and retrieval
-// store all live under it.
+// cwd/.cortex when none exists yet. The journal, transcripts, and memory store
+// all live under it.
 func contextDir() string {
 	root := findUp(".cortex")
 	if root == "" {
@@ -1950,20 +2027,6 @@ func (cs *CortexSession) writeTranscript(m Message) {
 	cs.writeEntry(sessionEntry{Kind: kindMessage, Message: m})
 }
 
-// recordRetrieval records what memory was fed to the model this turn. The
-// record is complete (debuggability); replay is selective (loadTranscript
-// skips it). No-op when nothing was retrieved.
-func (cs *CortexSession) recordRetrieval(query string, results []cognition.Result) {
-	if len(results) == 0 {
-		return
-	}
-	recs := make([]retrievedRecord, 0, len(results))
-	for _, r := range results {
-		recs = append(recs, retrievedRecord{Category: r.Category, Content: r.Content, Score: r.Score, ID: r.ID})
-	}
-	cs.writeEntry(sessionEntry{Kind: kindRetrieval, Query: query, Results: recs})
-}
-
 // --- Compaction ------------------------------------------------------------
 //
 // Compaction is the summarizer pointed at the conversation: the transcript has
@@ -2084,63 +2147,29 @@ func (cs *CortexSession) Clear() {
 	cs.StartTranscript()
 }
 
-// --- Retrieval -------------------------------------------------------------
+// --- Memory ----------------------------------------------------------------
 //
-// Fast (mechanical) retrieval surfaces relevant prior context at turn start:
-// a Reflex pass over the project's .cortex/ store, foreground-latency-bounded.
-// Reranking (Reflect/Think on the reasoner, in parallel) layers on later —
-// this is the latency-bounded foreground half of that split.
+// Memory is model-driven (docs/memory-tools.md): the agent curates free-form
+// named notes through the memory_* tools, and the note index is injected at
+// turn start (memoryIndexNote). The only durable substrate kept alongside is
+// the append-only journal — the per-turn record study(.cortex/journal) reads.
+// The old mechanical retrieve/rerank/distill pipeline was removed.
 
-// retrievalLimit caps how many prior-context hits a turn injects.
-const retrievalLimit = 5
-
-// retrievedContentCap bounds each injected snippet so one long capture can't
-// dominate the window.
-const retrievedContentCap = 240
-
-// EnableRetrieval wires retrieval over the project's .cortex/ store and lights
-// up the cognition stack against the fleet: a semantic embedder for Reflex, a
-// dedicated reranker for Reflect, and a swap-free reasoner for idle Think/Dream.
-// Each is resolved from discovery by role tag (embedder/reranker/reasoner) and
-// is independently optional — a role the fleet can't satisfy resolves to nil and
-// that piece degrades (semantic→text search, rerank→passthrough, dream→no-op)
-// without breaking the turn. Best-effort throughout: any storage failure leaves
-// retrieval disabled and the REPL runs exactly as before. Only the interactive
-// REPL calls this; the study/eval subcommands never build storage.
-func (cs *CortexSession) EnableRetrieval() {
+// EnableMemory wires the model-driven memory store and the journal capturer over
+// the project's .cortex/ directory. Best-effort: a failure just leaves memory
+// unavailable (the tools say so) and capture off; the REPL runs regardless. Only
+// the interactive REPL and headless turn/Discord drivers call this; the
+// study/eval subcommands never build it.
+func (cs *CortexSession) EnableMemory() {
 	dir := contextDir()
+	// The free-form note store the memory_* tools curate.
+	if mem, err := memory.New(dir); err == nil {
+		cs.memory = mem
+	}
+	// Journal-only capture: the durable per-turn record study(.cortex/journal)
+	// reads. No storage, no embedder, no retrieval — just the append-only log.
 	cfg := &config.Config{ContextDir: dir, ProjectRoot: filepath.Dir(dir)}
-	store, err := storage.New(cfg)
-	if err != nil {
-		return
-	}
-
-	// Resolve the cognition roles against the discovered fleet, choosing silicon
-	// that doesn't contend with the foreground coder (which runs on cuda here):
-	//
-	//   - embed  → the dedicated CPU `embedder` (swap-free): 1024-d vectors for
-	//     Reflex semantic search.
-	//   - rerank → a small CHAT model (`fast` = qwen3-4b, thinking off). Reflect
-	//     is an LLM-as-reranker that calls chat-completions; the fleet's tagged
-	//     `reranker` is a cross-encoder served via the rerank API and 500s on
-	//     chat, so it can't satisfy this interface.
-	//   - dream  → the same small chat model. The swap-free NPU `reasoner`
-	//     (fastflowlm) only ever returns reasoning_content with empty content,
-	//     which Dream's GenerateWithSystem path can't parse; qwen3-4b returns
-	//     real content and, being on igpu, never evicts the cuda coder.
-	embedder := cs.resolveEmbedder()
-	rerank := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "rerank", 2048)
-	dream := cs.newSpecProvider(cs.Config.resolveBinding(roleFast, cs.Fleet), "dream", 4096)
-
-	cortex, err := intcog.New(store, rerank, dream, embedder, cfg)
-	if err != nil {
-		store.Close()
-		return
-	}
-	cs.store = store
-	cs.retriever = cortex
-	cs.capturer = capture.NewWithStorage(cfg, store)
-	cs.capturer.SetEmbedder(embedder) // embed-on-capture: write side of semantic search
+	cs.capturer = capture.New(cfg)
 }
 
 // resolveEmbedder picks the embedder for the session, in priority order:
@@ -2306,561 +2335,21 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 	}
 }
 
-// remember stores an explicit user memory (/remember) — the highest-precision
-// capture, because the user marked it as worth keeping.
-func (cs *CortexSession) remember(text string) error {
-	if cs.capturer == nil {
-		return fmt.Errorf("memory unavailable — no .cortex store")
-	}
-	// Text in ToolResult so it surfaces as the retrieved Content (Reflex maps
-	// Content from ToolResult); type in ToolInput marks it for Tier 2.
-	err := cs.capturer.CaptureEvent(&events.Event{
-		Source:     events.SourceGeneric,
-		EventType:  events.EventToolUse,
-		Timestamp:  time.Now(),
-		ToolName:   "loop",
-		ToolInput:  map[string]any{"type": "memory"},
-		ToolResult: text,
-		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
-		Metadata:   map[string]any{"verified": true}, // the user marked it — highest precision
-	})
-	if err == nil {
-		cs.captures++
-	}
-	return err
-}
-
-// forgetMatchCap bounds how many memories one /forget call prunes.
-const forgetMatchCap = 100
-
-// forget retracts captured memories matching query (the manual counterpart to
-// automatic contradiction→retraction): retracted captures are hidden from all
-// future retrieval. The events themselves are not deleted — a retraction is an
-// append-only marker — so it's auditable and reversible. Returns the matched
-// events so the caller can show the user exactly what was pruned.
-//
-// Matching is by term overlap, not a single verbatim substring: query is split
-// into significant terms and a capture matches when it contains enough of them
-// (min(2, #terms)), so natural phrasing like "936 documentation files" finds the
-// right captures while an incidental single-word hit does not. The sentinel
-// "--all" (or "*") is a clean slate — it retracts every capture except explicit
-// /remember notes, which a fresh start should keep.
-func (cs *CortexSession) forget(query string) ([]*events.Event, error) {
-	if cs.store == nil {
-		return nil, fmt.Errorf("memory unavailable — no .cortex store")
-	}
-	all := cs.store.AllEvents()
-	var matched []*events.Event
-
-	if q := strings.TrimSpace(query); q == "--all" || q == "*" {
-		for _, ev := range all {
-			if isRememberEvent(ev) {
-				continue // a clean slate keeps what the user deliberately saved
-			}
-			matched = append(matched, ev)
-		}
-	} else {
-		terms := forgetTerms(query)
-		if len(terms) == 0 {
-			return nil, nil
-		}
-		required := 2
-		if len(terms) < required {
-			required = len(terms)
-		}
-		type scored struct {
-			ev *events.Event
-			n  int
-		}
-		var hits []scored
-		for _, ev := range all {
-			if n := termOverlap(ev, terms); n >= required {
-				hits = append(hits, scored{ev, n})
-			}
-		}
-		sort.SliceStable(hits, func(i, j int) bool { return hits[i].n > hits[j].n })
-		for _, h := range hits {
-			matched = append(matched, h.ev)
-		}
-	}
-
-	if len(matched) > forgetMatchCap {
-		matched = matched[:forgetMatchCap]
-	}
-	reason := fmt.Sprintf("user /forget %q", query)
-	for _, ev := range matched {
-		id := "event-" + ev.ID // the ID space retrieval filters on (see reflex.filterRetracted)
-		if err := cs.store.Retract(id, reason); err != nil {
-			return matched, err
-		}
-		cs.journalRetraction(id, reason) // canonical, append-only record of the prune
-	}
-	return matched, nil
-}
-
-// isRememberEvent reports whether an event came from /remember (an explicit,
-// user-marked memory) rather than an automatic turn capture.
-func isRememberEvent(ev *events.Event) bool {
-	if ev.ToolInput == nil {
-		return false
-	}
-	t, _ := ev.ToolInput["type"].(string)
-	return t == "memory"
-}
-
-// forgetStopwords are structural words dropped from a /forget query so matching
-// keys on meaningful terms, not glue. Deliberately NOT topical — we never guess
-// which subject words the user meant.
-var forgetStopwords = map[string]bool{
-	"the": true, "a": true, "an": true, "and": true, "or": true, "of": true,
-	"to": true, "is": true, "are": true, "as": true, "in": true, "on": true,
-	"for": true, "this": true, "that": true, "with": true, "it": true, "at": true,
-	"be": true, "by": true, "we": true, "i": true,
-}
-
-// forgetTerms splits a query into lowercased significant terms (len ≥ 2, minus
-// structural stopwords), deduped.
-func forgetTerms(query string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, f := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
-	}) {
-		if len(f) < 2 || forgetStopwords[f] || seen[f] {
-			continue
-		}
-		seen[f] = true
-		out = append(out, f)
-	}
-	return out
-}
-
-// termOverlap counts how many distinct terms appear (case-insensitively) in an
-// event's searchable text: the user's prompt, the stored result, and tool name.
-func termOverlap(ev *events.Event, terms []string) int {
-	var b strings.Builder
-	if ev.ToolInput != nil {
-		if p, ok := ev.ToolInput["user_prompt"].(string); ok {
-			b.WriteString(p)
-			b.WriteByte(' ')
-		}
-	}
-	b.WriteString(ev.ToolResult)
-	b.WriteByte(' ')
-	b.WriteString(ev.ToolName)
-	hay := strings.ToLower(b.String())
-	n := 0
-	for _, t := range terms {
-		if strings.Contains(hay, t) {
-			n++
-		}
-	}
-	return n
-}
-
-// journalRetraction appends a feedback.retraction to <ContextDir>/journal/feedback/.
-// Best-effort: the storage retraction is what gates retrieval; this is the audit
-// trail. Mirrors Reflect's automatic emission so manual and auto prunes look alike.
-func (cs *CortexSession) journalRetraction(gradedID, reason string) {
-	entry, err := journal.NewFeedbackEntry(journal.TypeFeedbackRetraction, journal.FeedbackPayload{
-		GradedID:  gradedID,
-		Reason:    reason,
-		SessionID: cs.SessionID,
-	})
-	if err != nil {
-		return
-	}
-	w, err := journal.NewWriter(journal.WriterOpts{
-		ClassDir: filepath.Join(contextDir(), "journal", "feedback"),
-		Fsync:    journal.FsyncPerEntry,
-	})
-	if err != nil {
-		return
-	}
-	defer w.Close()
-	_, _ = w.Append(entry)
-}
-
-// forgetLabel is a short, human one-liner for a pruned capture: the user's
-// prompt if present, else a snippet of the stored result.
-func forgetLabel(ev *events.Event) string {
-	if ev.ToolInput != nil {
-		if p, ok := ev.ToolInput["user_prompt"].(string); ok && strings.TrimSpace(p) != "" {
-			return truncateRunes(strings.Join(strings.Fields(p), " "), 60)
-		}
-	}
-	return truncateRunes(strings.Join(strings.Fields(ev.ToolResult), " "), 60)
-}
-
-// truncateRunes caps s to n runes with an ellipsis, without splitting a rune.
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
-
-// --- Capture (Tier 2: model-distilled insights) ----------------------------
-//
-// Tier 1 records every turn raw; Tier 2 distills the durable unit (a decision,
-// correction, pattern, constraint) with the reasoner and writes it to the
-// insights layer, which Reflex favors over raw event rows — so the insight
-// outranks (soft-supersedes) the Tier 1 row it came from.
-//
-// It runs OFF the foreground: a turn buffers into pendingTurns and fires a
-// cancelable goroutine that distills during the idle gap before the next
-// prompt. The next turn preempts it (stopDistill) so foreground model work
-// never waits behind distillation. Best-effort: a preempted or failed turn
-// stays pending and retries next idle; no reasoner → nothing distilled, Tier 1
-// rows remain. The extraction reuses cognition's prompt + parser (the same
-// contract Dream uses); only the scheduling and turn-plumbing are local.
-
-// distillRecentInsights bounds how many existing insights we show the reasoner
-// as "already captured, don't repeat" (dedup across batches/sessions).
-const distillRecentInsights = 20
-
-// pendingTurn is a completed turn awaiting distillation.
-type pendingTurn struct {
-	user string
-	msgs []Message
-}
-
-// distillExtract runs the reasoner over the analysis prompt. A var so tests
-// stub the model call.
-var distillExtract = func(ctx context.Context, p llm.Provider, prompt string) (string, error) {
-	return p.GenerateWithSystem(ctx, prompt, llm.AnalysisSystemPrompt)
-}
-
-// reasoner builds the provider for background distillation — the study/reasoner
-// binding, the model that thinks off the foreground path.
-func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
-	base := strings.TrimRight(cs.Study.Endpoint, "/")
-	if !strings.HasSuffix(base, "/v1") {
-		base += "/v1"
-	}
-	p := llm.NewOpenAICompatClient(llm.EndpointConfig{
-		Name:               "distill",
-		BaseURL:            base,
-		APIKey:             resolveKey(cs.Study),
-		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
-		Timeout:            10 * time.Minute,
-	})
-	p.SetModel(cs.Study.Model)
-	p.SetTemperature(0)
-	return p
-}
-
-// noteTurn buffers a completed turn and kicks off distillation over the
-// backlog. Best-effort: requires the store (where insights land).
-func (cs *CortexSession) noteTurn(user string, msgs []Message) {
-	if cs.store == nil || strings.TrimSpace(user) == "" {
-		return
-	}
-	cp := make([]Message, len(msgs))
-	copy(cp, msgs)
-	cs.distillMu.Lock()
-	cs.pendingTurns = append(cs.pendingTurns, pendingTurn{user: user, msgs: cp})
-	cs.distillMu.Unlock()
-	cs.startDistill()
-}
-
-// startDistill fires a cancelable background distillation if there are pending
-// turns and none is already running.
-func (cs *CortexSession) startDistill() {
-	cs.distillMu.Lock()
-	if cs.store == nil || len(cs.pendingTurns) == 0 || cs.distillCancel != nil {
-		cs.distillMu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	cs.distillCancel, cs.distillDone = cancel, done
-	cs.distillMu.Unlock()
-	go cs.distillLoop(ctx, done)
-}
-
-// stopDistill preempts any in-flight distillation and waits for it to exit, so
-// the next turn's foreground model work gets the endpoint. A canceled HTTP
-// call returns promptly, so the wait is short.
-func (cs *CortexSession) stopDistill() {
-	cs.distillMu.Lock()
-	cancel, done := cs.distillCancel, cs.distillDone
-	cs.distillCancel, cs.distillDone = nil, nil
-	cs.distillMu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
-	}
-}
-
-// distillLoop wraps distillPending with the cancel/done bookkeeping.
-func (cs *CortexSession) distillLoop(ctx context.Context, done chan struct{}) {
-	defer func() {
-		cs.distillMu.Lock()
-		if cs.distillDone == done { // natural finish — let startDistill run again
-			cs.distillCancel, cs.distillDone = nil, nil
-		}
-		cs.distillMu.Unlock()
-		close(done)
-	}()
-	cs.distillPending(ctx)
-}
-
-// distillPending drains pending turns one at a time through the reasoner,
-// storing at most one insight per turn (the prompt's contract). Preemptible:
-// it stops at the next turn boundary on ctx cancel, leaving the current turn
-// pending. A turn that yields an insight, NO_INSIGHT, or unparseable output is
-// consumed; only a transient model error leaves it to retry.
-func (cs *CortexSession) distillPending(ctx context.Context) {
-	for {
-		cs.distillMu.Lock()
-		if len(cs.pendingTurns) == 0 {
-			cs.distillMu.Unlock()
-			return
-		}
-		turn := cs.pendingTurns[0]
-		cs.distillMu.Unlock()
-
-		if ctx.Err() != nil {
-			return // preempted — leave the turn pending
-		}
-
-		known := cs.recentInsightSummaries(distillRecentInsights)
-		content := formatTurnForDistill(turn, known)
-		prompt := fmt.Sprintf(intcog.DreamAnalysisPrompt, content, "session", cs.SessionID, "")
-		resp, err := distillExtract(ctx, cs.reasoner(), prompt)
-		if err != nil || ctx.Err() != nil {
-			return // transient: leave pending, retry next idle
-		}
-		if f, perr := intcog.ParseInsight(resp); perr == nil {
-			if c := strings.TrimSpace(f.Content); c != "" && !isDuplicateInsight(c, known) {
-				if serr := cs.store.StoreInsightWithSession("", f.Category, c, int(f.Importance*10), f.Tags,
-					"distilled from a session turn", cs.SessionID, "loop"); serr == nil {
-					cs.insights.Add(1)
-				}
-			}
-		}
-		// Consume the turn (distilled / NO_INSIGHT / unparseable all consume it).
-		cs.distillMu.Lock()
-		if len(cs.pendingTurns) > 0 {
-			cs.pendingTurns = cs.pendingTurns[1:]
-		}
-		cs.distillMu.Unlock()
-	}
-}
-
-// recentInsightSummaries returns recent stored insight summaries, the dedup
-// context fed to the reasoner ("already captured, don't repeat").
-func (cs *CortexSession) recentInsightSummaries(limit int) []string {
-	if cs.store == nil {
-		return nil
-	}
-	insights, err := cs.store.GetRecentInsights(limit)
-	if err != nil {
-		return nil
-	}
-	out := make([]string, 0, len(insights))
-	for _, in := range insights {
-		if s := strings.TrimSpace(in.Summary); s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// formatTurnForDistill renders one turn for the analysis prompt: the user's
-// message, what changed, the final answer, and the already-known insights so
-// the reasoner doesn't re-extract them.
-func formatTurnForDistill(turn pendingTurn, known []string) string {
-	outcome, answer := turnArtifacts(turn.msgs)
-	var b strings.Builder
-	fmt.Fprintf(&b, "User: %s\n", turn.user)
-	if outcome != "" {
-		fmt.Fprintf(&b, "Actions: %s\n", outcome)
-	}
-	if answer != "" {
-		fmt.Fprintf(&b, "Assistant: %s\n", answer)
-	}
-	if len(known) > 0 {
-		b.WriteString("\nAlready captured (do not repeat these):\n")
-		for _, k := range known {
-			fmt.Fprintf(&b, "- %s\n", k)
-		}
-	}
-	return b.String()
-}
-
-// isDuplicateInsight reports whether content restates something already stored.
-// Mechanical backstop to the prompt-level dedup: normalized equality or
-// containment either way.
-func isDuplicateInsight(content string, known []string) bool {
-	c := normalizeInsight(content)
-	if c == "" {
-		return false
-	}
-	for _, k := range known {
-		n := normalizeInsight(k)
-		if n == "" {
-			continue
-		}
-		if n == c || strings.Contains(n, c) || strings.Contains(c, n) {
-			return true
-		}
-	}
-	return false
-}
-
-// normalizeInsight lowercases and collapses whitespace for comparison.
-func normalizeInsight(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), " "))
-}
-
-// retrievalTimeout bounds the synchronous turn-start retrieval. Full mode adds
-// a reranker round-trip to Reflex's mechanical pass; the reranker is a small
-// swap-free CPU model so this normally completes in well under a second, but
-// the cap guarantees a wedged or cold reranker can't stall the turn — Reflect
-// returns Reflex's order unchanged when the context expires.
-const retrievalTimeout = 6 * time.Second
-
-// retrieve runs one retrieval for the turn and returns the hits, or nil when
-// retrieval is disabled, errors, or finds nothing. It runs Full mode (Reflex →
-// Reflect → Resolve) so the dedicated reranker actually reorders the foreground
-// results: Fast mode's rerank cache is keyed by exact query text, so it only
-// pays off on an identical repeat query and never helps a fresh turn. The cost
-// is one bounded reranker call (see retrievalTimeout); on timeout/error Reflect
-// degrades to the mechanical order.
-//
-// The context is derived from Background, not the turn's: Reflex is mechanical
-// and needn't be Ctrl-C-cancelable, and detaching lets any async caching survive
-// the turn. Results are quality-gated by Resolve; the caller injects them
-// regardless of its inject/queue/wait decision — that gate is tuned for
-// embedding-scale scores and would suppress everything on the text-only path
-// local setups fall back to.
-//
-// Because the reranker call adds a beat before the model starts, retrieval drives
-// the interactive status row (via OnPhase → setActivity) so the wait shows live
-// progress ("recalling…" → "reranking…") instead of dead air.
-func (cs *CortexSession) retrieve(query string) []cognition.Result {
-	if cs.retriever == nil || strings.TrimSpace(query) == "" {
-		return nil
-	}
-	cs.setActivity("recalling memory…")
-	ctx, cancel := context.WithTimeout(context.Background(), retrievalTimeout)
-	defer cancel()
-	res, err := cs.retriever.Retrieve(ctx, cognition.Query{
-		Text:  query,
-		Limit: retrievalLimit,
-		OnPhase: func(phase string) {
-			switch phase {
-			case "rerank":
-				cs.setActivity("reranking memory…")
-			case "resolve":
-				cs.setActivity("selecting context…")
-			}
-		},
-	}, cognition.Full)
-	if err != nil || res == nil {
-		return nil
-	}
-	return res.Results
-}
-
-// setActivity shows a transient, animated status label on the interactive
-// prompt's pinned row (e.g. "reranking memory…"). No-op when there's no live
-// anchor — headless turns and non-anchored renders simply don't show it.
-func (cs *CortexSession) setActivity(label string) {
-	if cs.live != nil {
-		cs.live.SetActivity(label)
-	}
-}
-
-// formatRetrieved renders results as a compact, clearly-labelled context block.
-// The header marks the text as retrieved memory, not a user instruction, so the
-// model weighs it accordingly. Returns "" if nothing has printable content.
-func formatRetrieved(results []cognition.Result) string {
-	return formatRetrievedAt(results, time.Now())
-}
-
-// formatRetrievedAt is formatRetrieved with the clock injected, so each hit
-// carries a relative-age tag ("3d ago", "just now") derived mechanically from
-// its timestamp. Without it a stale fact and a current one render identically
-// and the model can't tell which to trust (see TestRetrievalConveysFreshness).
-// Pure string work — no model, sub-millisecond — so it adds no hot-path latency.
-func formatRetrievedAt(results []cognition.Result, now time.Time) string {
-	var b strings.Builder
-	n := 0
-	for _, r := range results {
-		c := strings.Join(strings.Fields(r.Content), " ") // collapse whitespace/newlines
-		if c == "" {
-			continue
-		}
-		if len(c) > retrievedContentCap {
-			c = c[:retrievedContentCap] + "…"
-		}
-		cat := r.Category
-		if cat == "" {
-			cat = "note"
-		}
-		if age := relAge(r.Timestamp, now); age != "" {
-			cat += " · " + age
-		}
-		fmt.Fprintf(&b, "- [%s] %s\n", cat, c)
-		n++
-	}
-	if n == 0 {
-		return ""
-	}
-	return "# Relevant context from memory (retrieved, not user-authored)\n" + strings.TrimRight(b.String(), "\n")
-}
-
-// relAge renders a timestamp as a compact, human relative age against now.
-// Empty for a zero timestamp (unknown age — don't fabricate one).
-func relAge(ts, now time.Time) string {
-	if ts.IsZero() {
-		return ""
-	}
-	d := now.Sub(ts)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	case d < 30*24*time.Hour:
-		return fmt.Sprintf("%dw ago", int(d.Hours()/(24*7)))
-	default:
-		return fmt.Sprintf("%dmo ago", int(d.Hours()/(24*30)))
-	}
-}
-
-// Close releases the transcript and retrieval resources at REPL exit.
+// Close releases the transcript at REPL exit.
 func (cs *CortexSession) Close() {
-	cs.stopDistill() // cancel any in-flight distillation and wait for it
 	if cs.transcript != nil {
 		cs.transcript.Close()
 		cs.transcript = nil
-	}
-	if cs.retriever != nil {
-		cs.retriever.Shutdown(context.Background())
-		cs.retriever = nil
-	}
-	if cs.store != nil {
-		cs.store.Close()
-		cs.store = nil
 	}
 }
 
 // --- Session metrics (6a) --------------------------------------------------
 
 // contextStrategy names this session's memory mode for the eval record:
-// "cortex" when retrieval/capture are active, "none" when they're disabled.
+// "memory" when the model-driven note store is active, "none" when it isn't.
 func (cs *CortexSession) contextStrategy() string {
-	if cs.retriever != nil {
-		return "cortex"
+	if cs.memory != nil {
+		return "memory"
 	}
 	return "none"
 }
@@ -2873,9 +2362,9 @@ func (cs *CortexSession) sessionSummary() string {
 		cost = " · " + humanCost(cs.costUSD)
 	}
 	header := fmt.Sprintf("%d turns · %s", cs.turns, dur)
-	body := fmt.Sprintf("%s in / %s out%s · %d captured · %d insights · %d retrievals",
+	body := fmt.Sprintf("%s in / %s out%s · %d captured · %d memory injections",
 		humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
-		cs.captures, cs.insights.Load(), cs.retrievals)
+		cs.captures, cs.injections)
 	return header + "\n" + body
 }
 
@@ -2916,8 +2405,8 @@ func (cs *CortexSession) emitSessionMetrics() {
 		InjectedContextTokens: cs.injectedChars / 4, // ~4 bytes/token
 		LatencyMs:             time.Since(cs.sessionStart).Milliseconds(),
 		AgentTurnsTotal:       cs.turns,
-		Notes: fmt.Sprintf("captures=%d insights=%d retrievals=%d",
-			cs.captures, cs.insights.Load(), cs.retrievals),
+		Notes: fmt.Sprintf("captures=%d injections=%d",
+			cs.captures, cs.injections),
 	}
 	entry, err := journal.NewEvalCellResultEntry(p)
 	if err != nil {
@@ -3421,26 +2910,22 @@ type TurnResult struct {
 // interactive REPL and any headless caller; the caller owns input acquisition,
 // display, compaction, and the cancelable ctx.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
-	// Preempt any background distillation so this turn's foreground model work
-	// gets the endpoint (it resumes at turn end over the new backlog).
-	cs.stopDistill()
-
 	// Mark where this turn's messages begin, so we can capture what it did.
 	turnStart := len(cs.Request.Messages)
 	cs.Append(Message{Role: RoleUser, Content: input})
 	// The shell-risk classifier judges commands against the task at hand.
 	cs.turnIntent = input
 
-	// Fast retrieval for THIS turn. Hits are recorded to the transcript
-	// (kindRetrieval — the durable record of what the model was given) and
-	// merged into the system message for the wire only (EphemeralSystem),
-	// cleared after the turn so they don't accumulate or persist.
-	hits := cs.retrieve(input)
-	cs.recordRetrieval(input, hits)
-	note := formatRetrieved(hits)
+	// Inject the memory index for THIS turn: the recall surface that reminds the
+	// model which notes it has saved, so it chooses to read the relevant ones.
+	// Folded onto the user turn by EphemeralSystem (wire-only, cleared after — it
+	// never accumulates or persists). This is the one mechanical seam of
+	// model-driven memory; everything else is the model's call via the memory_*
+	// tools. See docs/memory-tools.md.
+	note := cs.memoryIndexNote()
 	cs.Request.EphemeralSystem = note
 	if note != "" {
-		cs.retrievals++
+		cs.injections++
 		cs.injectedChars += len(note)
 	}
 
@@ -3452,13 +2937,11 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
 	}
 
-	// Capture the completed turn to the store (retrievable next time) BEFORE any
-	// compaction the caller may run rewrites history. Every turn, read-only
-	// included — see captureTurn. Tier 2: buffer and distill async (on the
-	// reasoner, during the idle gap before the next prompt).
+	// Capture the completed turn to the journal BEFORE any compaction the caller
+	// may run rewrites history. Every turn, read-only included — see captureTurn.
+	// This is the durable record study(.cortex/journal) reads on demand.
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
-	cs.noteTurn(input, turnMsgs)
 
 	return TurnResult{Reply: lastAssistantText(turnMsgs)}, nil
 }
@@ -3553,17 +3036,15 @@ func runTurnCLI(args []string) {
 	} else {
 		session.StartTranscript()
 	}
-	session.EnableRetrieval()
+	session.EnableMemory()
 	defer session.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	res, turnErr := session.Turn(ctx, input)
 
-	// Settle background distillation and record the session so a one-shot
-	// invocation still contributes its insight + eval metrics.
+	// Record the session so a one-shot invocation still contributes its metrics.
 	if session.turns > 0 {
-		session.stopDistill()
 		session.emitSessionMetrics()
 	}
 
@@ -3667,7 +3148,7 @@ func main() {
 
 	// Fast retrieval over .cortex/ (best-effort; disabled cleanly if the store
 	// can't open). Shut down with the transcript at exit.
-	session.EnableRetrieval()
+	session.EnableMemory()
 	defer session.Close()
 
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
@@ -3789,43 +3270,10 @@ func main() {
 			continue
 		}
 
-		// /remember <text> stores an explicit memory — the highest-precision
-		// capture, since the user marked it worth keeping.
-		if input == "/remember" || strings.HasPrefix(input, "/remember ") {
-			text := strings.TrimSpace(strings.TrimPrefix(input, "/remember"))
-			if text == "" {
-				fmt.Println("usage: /remember <text to store as a memory>")
-			} else if err := session.remember(text); err != nil {
-				fmt.Printf("remember: %v\n", err)
-			} else {
-				fmt.Println(withColor("remembered", gray))
-			}
-			continue
-		}
-
-		// /forget <text> retracts matching memories so they're no longer recalled
-		// — the manual counterpart to automatic contradiction→retraction. Visible:
-		// it prints exactly what it pruned.
-		if input == "/forget" || strings.HasPrefix(input, "/forget ") {
-			q := strings.TrimSpace(strings.TrimPrefix(input, "/forget"))
-			if q == "" {
-				fmt.Println("usage: /forget <text> — prune matching memories; /forget --all — clean slate (keeps /remember notes)")
-			} else if matches, err := session.forget(q); err != nil {
-				fmt.Printf("forget: %v\n", err)
-			} else if len(matches) == 0 {
-				fmt.Println(withColor("no matching memories", gray))
-			} else {
-				for _, ev := range matches {
-					fmt.Println(withColor("  ✕ "+forgetLabel(ev), gray))
-				}
-				noun := "memories"
-				if len(matches) == 1 {
-					noun = "memory"
-				}
-				fmt.Println(withColor(fmt.Sprintf("forgot %d %s (reversible — retraction is append-only)", len(matches), noun), gray))
-			}
-			continue
-		}
+		// Memory is now model-driven: ask in natural language ("remember that …",
+		// "forget the … note") and the agent calls memory_write / memory_forget.
+		// The old /remember and /forget slash commands were removed with the
+		// mechanical capture/retract pipeline. See docs/memory-tools.md.
 
 		// /model [name] shows the role bindings, or switches the coding model.
 		if input == "/model" || strings.HasPrefix(input, "/model ") {
@@ -3886,10 +3334,8 @@ func main() {
 		}
 	}
 
-	// Settle background distillation so its insight count is final, then report
-	// and record the session. emitSessionMetrics rides the eval journal class.
+	// Report and record the session. emitSessionMetrics rides the eval journal class.
 	if session.turns > 0 {
-		session.stopDistill()
 		session.emitSessionMetrics()
 		fmt.Println(withColor(session.sessionSummary(), gray))
 		// Pre-fill the resume command with this session's id so picking it back

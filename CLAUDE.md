@@ -35,10 +35,14 @@ Three capabilities distinguish it:
    or on `/compact`), the conversation is folded into a digest by the
    sequential chunk-and-fold summarizer (`cmd/loop/summarize.go`) and the
    session continues from that instead of truncating.
-2. **Per-turn capture.** `captureTurn()` records files edited, commands run,
-   and the final answer to the journal — mechanical, no model, non-blocking.
-   `startDistill()` batches turns through the reasoner model for durable
-   insights. `/remember <text>` is the highest-precision capture path.
+2. **Model-driven memory + per-turn capture.** The agent curates durable
+   free-form notes through the `memory_write/read/search/forget` tools
+   (`internal/memory`); the note index is injected at turn start
+   (`memoryIndexNote`) so a fresh session knows what it can recall. Separately,
+   `captureTurn()` records each turn (files edited, commands run, final answer)
+   to the append-only journal — mechanical, no model — the record
+   `study(.cortex/journal)` reads on demand. See
+   [`docs/memory-tools.md`](docs/memory-tools.md).
 3. **Map-first `study`.** The study tool is a bounded read-only subagent
    (`cmd/loop/navigator.go`): it leads with a free structural map of the
    target, reads only the goal-relevant regions in tiny ranges, and can spawn
@@ -56,17 +60,20 @@ Three capabilities distinguish it:
 | `loop discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `loop study-eval` | Navigator acceptance test (pass/fail + latency; `CORTEX_NAV_REPS` reps) |
 
-REPL slash commands: `/compact`, `/clear`, `/remember`, `/forget <text>`
-(retract matching memories so they're no longer recalled — the manual
-counterpart to automatic contradiction→retraction; prints what it pruned),
-`/sessions`, `/model [name]`, `/quit`. Dispatch is in `cmd/loop/main.go`
-(subcommands ~`:3354`, slash commands ~`:3544`).
+REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
+`/quit`. Dispatch is in `cmd/loop/main.go` (subcommands ~`:3354`, slash
+commands ~`:3544`). Memory is model-driven — ask in natural language
+("remember that …" / "forget the … note") and the agent calls the memory
+tools; the old `/remember` and `/forget` slash commands were removed with the
+mechanical capture/retract pipeline.
 
 ## The agent's tools
 
-Registered in `cmd/loop/tools/tools.go` (`All` at ~`:212`, dispatch in
-`ToolCall.Execute()` ~`:236`): `read_file`, `write_file`, `edit_file`,
-`study`, `project_index`, `bash`, `remove_path`.
+Registered in `cmd/loop/tools/tools.go` (`All` + dispatch in
+`ToolCall.Execute()`): `read_file`, `write_file`, `edit_file`, `study`,
+`project_index`, `bash`, `remove_path`, and the model-driven memory tools
+`memory_write`, `memory_read`, `memory_search`, `memory_forget`
+(`internal/memory`).
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
@@ -97,28 +104,20 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
 }
 ```
 
-Roles: `code` (the agent), `study` (the navigator + the summarizer), and the
-cognition roles for retrieval — `embed`, plus `fast` (drives Reflect rerank +
-Dream). Auth is resolved at call time from `key_env` (env-var name) or
-`key_service` (macOS keychain) — never written to disk.
-
-**Retrieval embedder resolution** (`CortexSession.resolveEmbedder`): (1) the
-`embed` role if configured/discovered — the fleet's `embedder`, or any
-OpenAI-compatible `/embeddings` endpoint such as a free **Cloudflare Workers AI
-bge-large** (1024-d, like the fleet) or Gemini; (2) otherwise the self-contained
-**Hugot** pure-Go local embedder (384-d, no server/keys/network at steady
-state) — the zero-config default, warmed in the background so its one-time model
-download never blocks a turn. local-only is a goal, not a constraint: the cloud
-option is allowed and ships captured content out. Switching embedders changes
-the vector dim and orphans prior vectors until they re-embed (cheap — they
-regenerate from capture).
+Roles: `code` (the agent) and `study` (the navigator + the summarizer). Auth is
+resolved at call time from `key_env` (env-var name) or `key_service` (macOS
+keychain) — never written to disk. (`embed`/`fast` role bindings remain in
+config for the cognition DAG and a future semantic `memory_search`; the loop's
+hot path no longer uses them — `memory_search` is keyword over the small note
+corpus, and the mechanical retrieve/rerank/Dream pipeline was removed in the
+memory-tools pivot. The embedder resolution helper
+`CortexSession.resolveEmbedder` is kept, reserved for that future swap.)
 
 Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
 `CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
-`CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot default → text-only
-retrieval), `CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an
-arch-matched int8 build), `CORTEX_REFLEX_EMBED_TIMEOUT_MS` (per-query embed
-budget, default 1000).
+`CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot embedder default),
+`CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an arch-matched int8
+build).
 
 ## Journal — source of truth
 

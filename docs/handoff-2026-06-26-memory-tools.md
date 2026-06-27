@@ -1,4 +1,16 @@
-# Handoff — 2026-06-26 — memory as tools (P1 in progress)
+# Handoff — 2026-06-26 — memory as tools (P1–P4 COMPLETE)
+
+> **UPDATE (later same session): P1–P4 are all done and green** (gate + full
+> suite). Memory tools (`memory_write/read/search/forget`) are wired through
+> `ToolDeps`; the note index is injected at turn start (`memoryIndexNote`); the
+> memory-principles block is in the seed prompt; `/remember` `/forget` removed.
+> `study(.cortex/journal)` works (P2). The mechanical retrieve/rerank/distill
+> pipeline is ripped out of the hot path; `EnableRetrieval` → `EnableMemory`
+> (note store + journal-only capturer) (P3). Evals: fast model-free
+> `memory_e2e_test.go` + gated live `memory_e2e_live_test.go`
+> (`CORTEX_LIVE_FLEET=1`), all 3 live scenarios pass on the chatterbox fleet
+> (P4). See the updated **Phased plan — DONE** in `docs/memory-tools.md`. The
+> notes below are the original mid-flight handoff, kept for history.
 
 Continue here in a fresh session. Branch `loop/wire-cognition-fleet`, **10
 commits, NOT pushed**, gate + full suite green at the last checkpoint.
