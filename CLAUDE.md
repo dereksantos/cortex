@@ -16,6 +16,14 @@ for what existed before and why it went.
 > [`docs/working-memory-study.md`](docs/working-memory-study.md) — which is kept
 > for history. The harness hardening plan is
 > [`docs/loop-production-harness.md`](docs/loop-production-harness.md).
+>
+> The **in-flight loop/study refactor** is specified by
+> [`docs/engine-unification.md`](docs/engine-unification.md) (collapse the two
+> tool-iteration loops into one `runLoop` engine in `internal/agent`) and
+> [`docs/study-subagent.md`](docs/study-subagent.md) (study becomes a bounded
+> `Study` subagent on that engine using `outline`/`grep`/targeted `read_file`,
+> deleting `navigator.go` + `internal/projectindex/`). These are **design +
+> tracker, not yet shipped** — everything below describes today's code.
 
 ## What `loop` is
 
@@ -46,7 +54,10 @@ Three capabilities distinguish it:
 3. **Map-first `study`.** The study tool is a bounded read-only subagent
    (`cmd/loop/navigator.go`): it leads with a free structural map of the
    target, reads only the goal-relevant regions in tiny ranges, and can spawn
-   a bounded sub-study for a neighbor file/dir.
+   a bounded sub-study for a neighbor file/dir. *(Being redesigned — see
+   [`docs/study-subagent.md`](docs/study-subagent.md): the navigator +
+   `project_index` path is slated for replacement by an `outline`/`grep`/
+   targeted-`read_file` `Study` profile, no recursion.)*
 
 ## Commands
 
