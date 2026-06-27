@@ -185,10 +185,10 @@ func version() string {
 const defaultEndpoint = "http://localhost:4000"
 
 // Model roles. The harness routes each kind of work to a model binding: the
-// coding turn uses "code", the study tool uses "study". One mechanism — new
-// nodes (think/dream/dag) just add roles. See Config.Spec. Only code and study
-// are exercised today; the rest are baked so config and future DAG nodes can
-// resolve them against the discovered fleet.
+// coding turn uses "code", the study tool uses "study". One mechanism — a new
+// kind of work just adds a role. See Config.Spec. Only code and study are
+// exercised today (embed is reserved for a future semantic memory_search); the
+// rest are baked so config can resolve them against the discovered fleet.
 const (
 	roleCode     = "code"      // the coding turn (big agent)
 	roleHardCode = "hard-code" // harder coding, no-thinking variant
@@ -3218,10 +3218,10 @@ func main() {
 					return false
 				}
 			}
-			// Background cognition (Think/Dream) logs via the global logger to
-			// stderr; in an interactive session that lands on top of the prompt.
-			// Divert it to a file so the terminal stays clean (jq-free debugging
-			// still available via tail -f .cortex/loop.log).
+			// Stray stdlib-logger output (any subsystem that calls log.Printf)
+			// goes to stderr, which in an interactive session lands on top of
+			// the prompt. Divert it to a file so the terminal stays clean
+			// (tail -f .cortex/loop.log for debugging).
 			if lf, err := os.OpenFile(filepath.Join(contextDir(), "loop.log"),
 				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 				log.SetOutput(lf)
