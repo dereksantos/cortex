@@ -23,7 +23,7 @@ const (
 	grepMaxHits        = 100     // cap so a broad pattern can't flood context
 	grepMaxFileSize    = 1 << 20 // skip files larger than 1 MiB
 	grepLineCap        = 300     // window width for a long matching line (centered on the match)
-	grepMaxOutputBytes = 12000   // total-output ceiling: long-line hits (journal JSONL) flood context even after the per-line cap
+	grepMaxOutputBytes = 6000    // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
 )
 
 // GrepTool is the search declaration. The description names the RE2 dialect (no
