@@ -499,6 +499,15 @@ added field discriminates that failure:
   operation too, not just under the eval — it feeds debugging and the eval reads the
   same record. **One shape, emitted every run** — never measure eval-only
   instrumentation that's absent in production.
+  - **Shipped status (deferred):** the eval emits the full `StudyEvalResult`-shaped
+    row — every mechanical field (`stop_reason`, `outlines`/`greps`/`reads`/`tool_errs`,
+    `read_bytes`/`bounded`, tokens incl. `peak_output_tokens`/`max_tokens_clamped`) — as
+    **stdout JSONL** (`studyEvalRow`), which is the real ø discrimination and what
+    `verify-study.sh` asserts (`json:"read_bytes|bounded"`). The **journal-sink**
+    alignment (a `study.result` entry sharing `EvalCellResultPayload`'s vocabulary) was
+    **deferred** to keep the refactor's net source LOC inside the contracted band; the
+    row shape is identical, so adding the `journal.NewWriter` path later is a thin wiring
+    change, not a new format.
 
 ### Align with the canonical eval sink (don't invent a third format)
 
