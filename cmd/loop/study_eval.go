@@ -91,10 +91,10 @@ var studyProbes = []StudyProbe{
 	},
 	{
 		Path:    "cmd/loop",
-		Goal:    "Trace how a tool call the model emits actually gets executed and its result returned to the model.",
+		Goal:    "Name two things and explain how they connect: the function that parses tool calls out of the model's response, and the method that dispatches/executes a tool call. Trace a call from the model's output to execution and back.",
 		Gold:    []string{"parseXMLToolCalls", "Execute"},
 		MinGold: 2,
-		Note:    "multi-hop: the trace spans main.go (parse/dispatch) and tools.go (Execute) — needs grep to jump plus targeted reads in both",
+		Note:    "multi-hop: the answer spans main.go (parseXMLToolCalls) and tools.go (Execute) — needs grep to jump + targeted reads in both. Goal asks for the symbols by role so naming them is fair (not keyword-brittle); the discriminator is the cross-file jump, which the grep-less navigator fails (flails, exhausts iterations, finalize errors).",
 	},
 	{
 		Path:    "cmd/loop/tools/tools.go",
