@@ -85,6 +85,9 @@ present "Toolset"               'type Toolset struct'
 present "Bounds"                'type Bounds struct'
 present "Progress sink"         'type Progress func'
 present "requestFor builder"    'func requestFor\('
+# One cap site only: requestFor threads Bounds.MaxTokens; the old applyOutputCap
+# must be DELETED (never two places that bound output, never an unbounded path).
+absent  "no applyOutputCap (single cap site)" '\bapplyOutputCap\b'
 file_present internal/agent     # phase 3: engine moved to its own package
 # Eval-first: the behavior-preservation characterization test must exist BEFORE
 # the Resolve→Turn fold (it records the coder loop's message/dispatch/stop
