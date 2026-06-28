@@ -21,9 +21,10 @@ import (
 const FunctionGrep = "grep"
 
 const (
-	grepMaxHits     = 100     // cap so a broad pattern can't flood context
-	grepMaxFileSize = 1 << 20 // skip files larger than 1 MiB
-	grepLineCap     = 300     // truncate a very long matching line
+	grepMaxHits        = 100     // cap so a broad pattern can't flood context
+	grepMaxFileSize    = 1 << 20 // skip files larger than 1 MiB
+	grepLineCap        = 300     // truncate a very long matching line
+	grepMaxOutputBytes = 12000   // total-output ceiling: 100 hits of long lines (journal JSONL) would otherwise flood context even after the per-line cap
 )
 
 // GrepTool is the search declaration. The description names the RE2 dialect (no
@@ -73,10 +74,12 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	ignore := projectscan.LoadIgnoreSet(absRoot)
 
 	var hits []string
+	hitBytes := 0
 	truncated := false
+	full := func() bool { return len(hits) >= cap || hitBytes >= grepMaxOutputBytes }
 
 	scanFile := func(path, display string) error {
-		if len(hits) >= cap {
+		if full() {
 			truncated = true
 			return nil
 		}
@@ -99,11 +102,13 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 				return nil // binary file — skip the rest
 			}
 			if re.Match(text) {
-				if len(hits) >= cap {
+				if full() {
 					truncated = true
 					return nil
 				}
-				hits = append(hits, fmt.Sprintf("%s:%d:%s", display, line, capLine(text)))
+				hit := fmt.Sprintf("%s:%d:%s", display, line, capLine(text))
+				hits = append(hits, hit)
+				hitBytes += len(hit) + 1
 			}
 		}
 		return nil
@@ -130,7 +135,7 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 			if ignore.IsFileExcluded(path) {
 				return nil
 			}
-			if len(hits) >= cap {
+			if full() {
 				truncated = true
 				return filepath.SkipAll
 			}
@@ -151,7 +156,7 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	}
 	out := strings.Join(hits, "\n")
 	if truncated {
-		out += fmt.Sprintf("\n… (capped at %d matches — narrow the pattern or path)", cap)
+		out += fmt.Sprintf("\n… (capped at %d matches / %dKB — narrow the pattern or path)", cap, grepMaxOutputBytes/1000)
 	}
 	return out, nil
 }
