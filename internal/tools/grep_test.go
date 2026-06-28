@@ -59,6 +59,23 @@ func TestGrepCap(t *testing.T) {
 	}
 }
 
+// TestGrepCentersOnMatch locks the fix for journal recall: a match deep in a very
+// long line (minified JSON / JSONL) must stay VISIBLE in the hit, not be truncated
+// away with the line's leading metadata. Regression: capLine showed the line's
+// first grepLineCap bytes, so a needle at byte 1000 of a 2 KB line vanished.
+func TestGrepCentersOnMatch(t *testing.T) {
+	dir := t.TempDir()
+	line := strings.Repeat("x", 1200) + "NEEDLE" + strings.Repeat("y", 1200)
+	os.WriteFile(filepath.Join(dir, "huge.jsonl"), []byte(line+"\n"), 0o644)
+	out, err := grepFiles(context.Background(), dir, mustRe(t, "NEEDLE"), grepMaxHits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "NEEDLE") {
+		t.Errorf("match deep in a long line must stay visible, got:\n%s", out)
+	}
+}
+
 func TestGrepBinarySkip(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "bin"), []byte("match\x00match\n"), 0o644)

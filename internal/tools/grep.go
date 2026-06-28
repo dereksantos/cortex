@@ -13,18 +13,17 @@ import (
 	"github.com/dereksantos/cortex/internal/projectscan"
 )
 
-// grep.go is the content locator study never had: a pure-Go, dependency-free
-// regex search over the working tree, returning capped file:line:text matches
-// (never file bodies) — how a model jumps to where a symbol lives, and how
-// journal recall works (grep over .cortex/journal). See docs/study-subagent.md §3.
+// grep.go is the content locator study never had: a pure-Go regex search over the
+// working tree returning capped file:line:text matches (never file bodies) — how a
+// model jumps to a symbol, and how journal recall works. See docs/study-subagent.md §3.
 
 const FunctionGrep = "grep"
 
 const (
 	grepMaxHits        = 100     // cap so a broad pattern can't flood context
 	grepMaxFileSize    = 1 << 20 // skip files larger than 1 MiB
-	grepLineCap        = 300     // truncate a very long matching line
-	grepMaxOutputBytes = 12000   // total-output ceiling: 100 hits of long lines (journal JSONL) would otherwise flood context even after the per-line cap
+	grepLineCap        = 300     // window width for a long matching line (centered on the match)
+	grepMaxOutputBytes = 12000   // total-output ceiling: long-line hits (journal JSONL) flood context even after the per-line cap
 )
 
 // GrepTool is the search declaration. The description names the RE2 dialect (no
@@ -101,12 +100,12 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 			if bytes.IndexByte(text, 0) >= 0 {
 				return nil // binary file — skip the rest
 			}
-			if re.Match(text) {
+			if loc := re.FindIndex(text); loc != nil {
 				if full() {
 					truncated = true
 					return nil
 				}
-				hit := fmt.Sprintf("%s:%d:%s", display, line, capLine(text))
+				hit := fmt.Sprintf("%s:%d:%s", display, line, capLine(text, loc[0]))
 				hits = append(hits, hit)
 				hitBytes += len(hit) + 1
 			}
@@ -161,11 +160,18 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	return out, nil
 }
 
-// capLine trims a very long matching line so one broad hit can't dominate.
-func capLine(b []byte) string {
+// capLine returns a grepLineCap window CENTERED on match offset `at`, keeping a hit deep in a long (JSONL) line visible.
+func capLine(b []byte, at int) string {
 	s := strings.TrimRight(string(b), "\r")
-	if len(s) > grepLineCap {
-		return s[:grepLineCap] + "…"
+	if len(s) <= grepLineCap {
+		return s
 	}
-	return s
+	start := at - grepLineCap/2
+	if start < 0 {
+		start = 0
+	}
+	if start+grepLineCap > len(s) {
+		start = len(s) - grepLineCap
+	}
+	return "…" + s[start:start+grepLineCap] + "…"
 }
