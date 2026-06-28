@@ -329,9 +329,10 @@ var Study = Subagent{
 	// MaxTokens is task-fit, not the model max — but it must clear a REASONING
 	// model's deliberation plus its final digest in one completion, or the answer
 	// is truncated mid-thought (north clamped at 12k on a false-premise probe and
-	// returned an empty digest). 24k is the runaway backstop without guillotining
-	// a thinking model's answer.
-	Bounds: agent.Bounds{MaxTokens: 24_000, MaxIter: 10, ReadBudgetBytes: 96_000},
+	// returned an empty digest; 24k still clamped the journal + tool-registration
+	// probes mid-spiral → empty digest). 32k clears a reasoner's deliberation plus
+	// its final digest without guillotining the answer, while staying a backstop.
+	Bounds: agent.Bounds{MaxTokens: 32_000, MaxIter: 10, ReadBudgetBytes: 96_000},
 }
 
 // --- Dispatcher ---------------------------------------------------------
