@@ -498,6 +498,47 @@ added field discriminates that failure:
   same record. **One shape, emitted every run** — never measure eval-only
   instrumentation that's absent in production.
 
+### Align with the canonical eval sink (don't invent a third format)
+
+The codebase already has a structured eval sink: **`journal.EvalCellResultPayload`**
+(`internal/journal/eval.go`), written as an `eval.cell_result` entry into
+`.cortex/journal/eval/` — `emitSessionMetrics()` (`cmd/loop/main.go:2432`) already
+emits one per REPL session. (Its comment still says it "mirrors
+`internal/eval/v2.CellResult`"; that grid framework was **deleted** — the journal
+struct is now the de-facto canonical one, and the comment is stale.
+`pkg/cliout`'s `source`-discriminated `.cortex/db/cell_results.jsonl` union is a
+**second, dormant** sink from the old `cortex` CLI — **not** wired into `loop`;
+align to the journal one, the path `loop` actually writes.)
+
+`StudyEvalResult` should **not** be its own bespoke stdout-only shape (today's
+`studyEvalRow` `fmt.Println`s JSONL with off-vocabulary names —
+`GoldPresent`/`DigestChars`/`Pass`). Align in two moves:
+
+1. **Reuse the standard field vocabulary** for everything that maps, so one query
+   schema reads study + session rows:
+
+   | `StudyEvalResult` | `EvalCellResultPayload` json tag |
+   |---|---|
+   | `Model` | `model` |
+   | `LatencyMS` | `latency_ms` |
+   | `InputTokens` / `OutputTokens` | `tokens_in` / `tokens_out` |
+   | `Iterations` | `agent_turns_total` |
+   | `Probe` | `scenario_id` |
+   | goal-hit pass | `task_success` + `task_success_criterion` |
+   | — | `schema_version`/`run_id`/`timestamp`/`git_*`/`harness:"study"`/`cost_usd` (populate from run context) |
+
+2. **Carry the study-specific discriminators as additional structured fields** —
+   `goal_hit` (fractional), `stop_reason`, `finalize_forced`, `peak_output_tokens`,
+   `max_tokens_clamped`, `outlines`/`greps`/`reads`/`tool_errs`, `read_bytes`,
+   `bounded`. These have no home in the grid struct and **must not** be flattened
+   into the `notes` string (the "structured outputs, not free-text" rule). Emit as a
+   distinct journal entry type (`study.result`, a `StudyResultPayload`) through the
+   same `journal.NewWriter` path `emitSessionMetrics` uses — the journal already
+   discriminates by entry `Type`, exactly as `cliout` discriminates its union by
+   `source`. Net: same vocabulary + same sink mechanism + a typed extension block,
+   not a third format. **Phase-5 sub-task:** route the driver off `fmt.Println`
+   onto this writer.
+
 ---
 
 ## Future: a `Reflect` profile (deferred — door left open)
