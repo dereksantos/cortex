@@ -129,12 +129,11 @@ const (
 const requestTimeout = 10 * time.Minute
 
 // maxSendAttempts bounds retries of one model call. Only transient failures
-// (transport errors, 429/5xx) retry; a 4xx means the request itself is wrong
-// (e.g. context overflow) and retrying can't fix it.
+// (transport errors, 429/5xx) retry; a 4xx means the request is wrong.
 const maxSendAttempts = 3
 
-// retryBackoff is the base delay between attempts (attempt × retryBackoff).
-// A var so tests can shrink it.
+// retryBackoff is the base delay between attempts (attempt × retryBackoff); a var
+// so tests can shrink it.
 var retryBackoff = 500 * time.Millisecond
 
 // compactThreshold is the window-fill ratio where the gauge goes red and the
@@ -566,12 +565,8 @@ var toolSet = tools.All
 var httpClient = &http.Client{Timeout: requestTimeout}
 
 // Send runs one model call with bounded retry. Transient failures (transport
-// errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything
-// else — including a canceled ctx — returns immediately. max_tokens is stamped
-// at the single build site (requestFor) / the engine (runLoop via Bounds) /
-// session init, so no request reaches here unbounded — there is no second cap
-// site (the old per-payload output-cap helper was deleted in the engine
-// unification).
+// errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything else —
+// including a canceled ctx — returns immediately.
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	// Marshal a shallow copy with composed wire messages, so a per-turn
 	// ephemeral note reaches the model without mutating stored Messages.
@@ -597,6 +592,12 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 				return nil, ctx.Err()
 			case <-time.After(time.Duration(attempt-1) * retryBackoff):
 			}
+			// Escape a DETERMINISTIC generation the proxy can't parse (north's tool-call
+			// markup → LiteLLM peg-native 500, reproduced by every temp-0 retry).
+			payload.Temperature = float64(attempt-1) * 0.4
+			if nb, mErr := json.Marshal(&payload); mErr == nil {
+				b = nb
+			}
 		}
 		res, retryable, err := r.sendOnce(ctx, url, b)
 		if err == nil {
@@ -610,10 +611,9 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxSendAttempts, lastErr)
 }
 
-// sendOnce performs a single HTTP round trip. retryable reports whether the
-// failure is transient (worth another attempt): transport errors and 429/5xx
-// are; everything else isn't. A canceled ctx also surfaces as a transport
-// error — the caller's ctx.Err() check stops the retry loop for that case.
+// sendOnce performs a single HTTP round trip. retryable reports whether the failure
+// is transient (transport errors and 429/5xx); everything else isn't. A canceled ctx
+// surfaces as a transport error — the caller's ctx.Err() check stops the retry loop.
 func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (res *AgentResponse, retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

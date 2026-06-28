@@ -1128,6 +1128,40 @@ func TestSendRetriesTransientErrors(t *testing.T) {
 	}
 }
 
+// TestSendPerturbsTemperatureOnRetry locks the peg-500 escape: the first attempt
+// goes at temperature 0 (deterministic); a retry after a 5xx bumps the temperature
+// so the model can escape a deterministic generation the proxy can't parse.
+func TestSendPerturbsTemperatureOnRetry(t *testing.T) {
+	quickRetries(t)
+	var temps []float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Temperature float64 `json:"temperature"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		temps = append(temps, body.Temperature)
+		if len(temps) < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(okResponse))
+	}))
+	defer srv.Close()
+
+	if _, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background()); err != nil {
+		t.Fatalf("expected success on the perturbed retry, got %v", err)
+	}
+	if len(temps) < 2 {
+		t.Fatalf("want at least 2 attempts, got %d", len(temps))
+	}
+	if temps[0] != 0 {
+		t.Errorf("first attempt temp = %v, want 0 (deterministic)", temps[0])
+	}
+	if temps[1] <= 0 {
+		t.Errorf("retry temp = %v, want > 0 (perturbed to escape the 500)", temps[1])
+	}
+}
+
 func TestSendGivesUpAfterMaxAttempts(t *testing.T) {
 	quickRetries(t)
 	calls := 0
