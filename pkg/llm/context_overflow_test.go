@@ -16,7 +16,7 @@ func TestParseContextOverflow(t *testing.T) {
 	}{
 		{
 			name:      "lemonade wrapped llama-server",
-			msg:       "chatterbox: server error: llama-server request failed: request (4946 tokens) exceeds the available context size (4096 tokens), try increasing it",
+			msg:       "local-gw: server error: llama-server request failed: request (4946 tokens) exceeds the available context size (4096 tokens), try increasing it",
 			wantOK:    true,
 			wantReq:   4946,
 			wantAvail: 4096,
@@ -81,7 +81,7 @@ func TestAsContextOverflow_StringFallback(t *testing.T) {
 	// The error chain has no typed ContextOverflowError, but the
 	// formatted message carries the signature — the string fallback
 	// must still catch it.
-	err := errors.New("chatterbox (400): server error: llama-server request failed: request (5012 tokens) exceeds the available context size (4096 tokens)")
+	err := errors.New("local-gw (400): server error: llama-server request failed: request (5012 tokens) exceeds the available context size (4096 tokens)")
 	got, ok := AsContextOverflow(err)
 	if !ok {
 		t.Fatal("string-based fallback should match the signature")

@@ -43,7 +43,7 @@ type ModelInfo struct {
 
 	// Endpoint is the registry-level identifier for the backend hosting
 	// this model. "ollama", "openrouter", or a configured compat
-	// endpoint name (e.g. "chatterbox").
+	// endpoint name (e.g. "local-gw").
 	Endpoint string
 
 	// BaseURL is the OpenAI-compat root for this endpoint, or empty
@@ -92,7 +92,7 @@ func (m ModelInfo) HasCapability(c string) bool {
 // cancellation).
 type Probe interface {
 	// Name identifies the backend in telemetry and dedupe ordering.
-	// Examples: "ollama", "openrouter", "compat:chatterbox".
+	// Examples: "ollama", "openrouter", "compat:local-gw".
 	Name() string
 
 	// Probe fetches the current model list from this backend. Returning

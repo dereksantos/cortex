@@ -8,7 +8,7 @@
 > pipeline is ripped out of the hot path; `EnableRetrieval` → `EnableMemory`
 > (note store + journal-only capturer) (P3). Evals: fast model-free
 > `memory_e2e_test.go` + gated live `memory_e2e_live_test.go`
-> (`CORTEX_LIVE_FLEET=1`), all 3 live scenarios pass on the chatterbox fleet
+> (`CORTEX_LIVE_FLEET=1`), all 3 live scenarios pass on the local-gw fleet
 > (P4). See the updated **Phased plan — DONE** in `docs/memory-tools.md`. The
 > notes below are the original mid-flight handoff, kept for history.
 

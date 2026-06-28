@@ -8,15 +8,15 @@ import (
 func TestResolveModelRouteExplicitEndpointPrefix(t *testing.T) {
 	cfg := &Config{
 		Endpoints: []EndpointDef{
-			{Name: "chatterbox", BaseURL: "http://localhost:13305/v1"},
+			{Name: "local-gw", BaseURL: "http://localhost:13305/v1"},
 		},
 	}
-	ep, model, ok := cfg.ResolveModelRoute("chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF")
+	ep, model, ok := cfg.ResolveModelRoute("local-gw/Qwen3-Coder-30B-A3B-Instruct-GGUF")
 	if !ok {
 		t.Fatal("expected resolution to succeed")
 	}
-	if ep == nil || ep.Name != "chatterbox" {
-		t.Errorf("endpoint: got %v want chatterbox", ep)
+	if ep == nil || ep.Name != "local-gw" {
+		t.Errorf("endpoint: got %v want local-gw", ep)
 	}
 	if model != "Qwen3-Coder-30B-A3B-Instruct-GGUF" {
 		t.Errorf("model: got %q", model)
@@ -26,7 +26,7 @@ func TestResolveModelRouteExplicitEndpointPrefix(t *testing.T) {
 func TestResolveModelRouteUnknownPrefixFallsThrough(t *testing.T) {
 	cfg := &Config{
 		Endpoints: []EndpointDef{
-			{Name: "chatterbox", BaseURL: "http://localhost:13305/v1"},
+			{Name: "local-gw", BaseURL: "http://localhost:13305/v1"},
 		},
 	}
 	// "anthropic/foo" is a valid OpenRouter route; should fall through
@@ -40,15 +40,15 @@ func TestResolveModelRouteUnknownPrefixFallsThrough(t *testing.T) {
 func TestResolveModelRouteRoleMapBareName(t *testing.T) {
 	cfg := &Config{
 		Endpoints: []EndpointDef{
-			{Name: "chatterbox", BaseURL: "http://localhost:13305/v1"},
+			{Name: "local-gw", BaseURL: "http://localhost:13305/v1"},
 		},
 		Models: &ModelsMap{
-			Code: &RoleAssignment{Endpoint: "chatterbox", Model: "Qwen3-Coder-30B-A3B-Instruct-GGUF"},
-			Fast: &RoleAssignment{Endpoint: "chatterbox", Model: "qwen3-8b-FLM"},
+			Code: &RoleAssignment{Endpoint: "local-gw", Model: "Qwen3-Coder-30B-A3B-Instruct-GGUF"},
+			Fast: &RoleAssignment{Endpoint: "local-gw", Model: "qwen3-8b-FLM"},
 		},
 	}
 	ep, model, ok := cfg.ResolveModelRoute("Qwen3-Coder-30B-A3B-Instruct-GGUF")
-	if !ok || ep == nil || ep.Name != "chatterbox" {
+	if !ok || ep == nil || ep.Name != "local-gw" {
 		t.Errorf("bare-name role-map lookup failed: ep=%v ok=%v", ep, ok)
 	}
 	if model != "Qwen3-Coder-30B-A3B-Instruct-GGUF" {
@@ -69,7 +69,7 @@ func TestResolveModelRouteEndpointModelsList(t *testing.T) {
 	cfg := &Config{
 		Endpoints: []EndpointDef{
 			{
-				Name:    "chatterbox",
+				Name:    "local-gw",
 				BaseURL: "http://localhost:4000",
 				Models:  []string{"coder", "reasoner", "xlam-1b-fc-r"},
 			},
@@ -77,7 +77,7 @@ func TestResolveModelRouteEndpointModelsList(t *testing.T) {
 	}
 	for _, want := range []string{"coder", "reasoner", "xlam-1b-fc-r"} {
 		ep, model, ok := cfg.ResolveModelRoute(want)
-		if !ok || ep == nil || ep.Name != "chatterbox" || model != want {
+		if !ok || ep == nil || ep.Name != "local-gw" || model != want {
 			t.Errorf("%s: ep=%v model=%q ok=%v", want, ep, model, ok)
 		}
 	}

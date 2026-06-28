@@ -11,7 +11,7 @@ import (
 // TestOpenAICompatProbeRespectsModelCapabilities validates the
 // operator-config path for capability tagging. A bare model id that
 // id-pattern inference doesn't recognize (here: "reasoner", which
-// happens to serve gpt-oss-20b on the chatterbox fleet) becomes
+// happens to serve gpt-oss-20b on the local-gw fleet) becomes
 // CapReasoningSpecialist when declared via ModelCapabilities.
 //
 // This is the substrate for Path B in
@@ -29,7 +29,7 @@ func TestOpenAICompatProbeRespectsModelCapabilities(t *testing.T) {
 	defer srv.Close()
 
 	probe := NewOpenAICompatProbe(OpenAICompatProbeConfig{
-		Endpoint: EndpointConfig{Name: "chatterbox", BaseURL: srv.URL + "/v1"},
+		Endpoint: EndpointConfig{Name: "local-gw", BaseURL: srv.URL + "/v1"},
 		IsLocal:  true,
 		ModelCapabilities: map[string][]string{
 			"reasoner": {CapReasoning, CapReasoningSpecialist, CapToolCalling},
@@ -48,7 +48,7 @@ func TestOpenAICompatProbeRespectsModelCapabilities(t *testing.T) {
 		byID[m.ID] = m
 	}
 
-	reasoner, ok := byID["chatterbox/reasoner"]
+	reasoner, ok := byID["local-gw/reasoner"]
 	if !ok {
 		t.Fatalf("reasoner not registered with endpoint prefix; got %v", models)
 	}
@@ -62,14 +62,14 @@ func TestOpenAICompatProbeRespectsModelCapabilities(t *testing.T) {
 	// coder isn't in ModelCapabilities and the id-pattern inference
 	// catches it via the "coder" substring rule — so it should still
 	// have CapCoding even without a config override.
-	coder := byID["chatterbox/coder"]
+	coder := byID["local-gw/coder"]
 	if !coder.HasCapability(CapCoding) {
 		t.Errorf("coder lost CapCoding inference: caps=%v", coder.Capabilities)
 	}
 }
 
 // TestOpenAICompatProbeModelContextOverrides validates the per-model
-// window pinning for heterogeneous fleets (chatterbox serves coder at
+// window pinning for heterogeneous fleets (local-gw serves coder at
 // 65536 but coder80 at 32768). Precedence: per-model override >
 // endpoint-wide MaxContextOverride > /v1/models-advertised value.
 func TestOpenAICompatProbeModelContextOverrides(t *testing.T) {
@@ -85,7 +85,7 @@ func TestOpenAICompatProbeModelContextOverrides(t *testing.T) {
 	defer srv.Close()
 
 	probe := NewOpenAICompatProbe(OpenAICompatProbeConfig{
-		Endpoint:           EndpointConfig{Name: "chatterbox", BaseURL: srv.URL + "/v1"},
+		Endpoint:           EndpointConfig{Name: "local-gw", BaseURL: srv.URL + "/v1"},
 		IsLocal:            true,
 		MaxContextOverride: 65536,
 		ModelContextOverrides: map[string]int{
@@ -99,9 +99,9 @@ func TestOpenAICompatProbeModelContextOverrides(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"chatterbox/coder":    65536,  // no per-model entry → endpoint-wide override
-		"chatterbox/coder80":  32768,  // per-model wins over endpoint-wide
-		"chatterbox/qwen3-4b": 131072, // per-model wins over the advertised 262144 too
+		"local-gw/coder":    65536,  // no per-model entry → endpoint-wide override
+		"local-gw/coder80":  32768,  // per-model wins over endpoint-wide
+		"local-gw/qwen3-4b": 131072, // per-model wins over the advertised 262144 too
 	}
 	for _, m := range models {
 		if w, ok := want[m.ID]; !ok || m.EffectiveContextWindow != w {

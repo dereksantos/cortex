@@ -38,7 +38,7 @@ var AllRoles = []Role{RoleCode, RoleReason, RoleFast, RoleEmbed, RoleRerank}
 type EndpointCatalog struct {
 	Name    string
 	BaseURL string
-	IsLocal bool // true for local endpoints (chatterbox/Lemonade, LM Studio, vLLM, Ollama)
+	IsLocal bool // true for local endpoints (local-gw/Lemonade, LM Studio, vLLM, Ollama)
 	Models  []CompatModel
 }
 

@@ -38,7 +38,7 @@ Each part owns one question. Nothing belongs to two parts.
 ### 1. Model plane — everything between the loop and a model
 
 **Have:** OpenAI-compat wire (covers Ollama, llama.cpp, LM Studio, OpenRouter,
-LiteLLM/chatterbox — one protocol is the simplicity win), role routing,
+LiteLLM/local-gw — one protocol is the simplicity win), role routing,
 keychain keys, learned windows, XML tool-call fallback.
 
 **Need:**

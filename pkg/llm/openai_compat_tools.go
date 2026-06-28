@@ -58,7 +58,7 @@ type compatToolsMessage struct {
 //   - "required":   model must call at least one tool
 //   - map[...]:     force a specific function
 //
-// Per the chatterbox-integration.md doc §5, Qwen3-Coder is tuned for
+// Per the local-gw-integration.md doc §5, Qwen3-Coder is tuned for
 // OpenAI-style tool calling and occasionally emits malformed JSON in
 // tool args. Recovery is the caller's responsibility (this method
 // returns the assistant message verbatim — the harness loop has a

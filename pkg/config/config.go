@@ -47,7 +47,7 @@ type Config struct {
 	// DefaultModel pins the REPL's per-session default model when the
 	// user hasn't set CORTEX_REPL_MODEL or passed --model. Resolved
 	// through the same Endpoints / Ollama / OpenRouter routing that
-	// any --model value goes through — `chatterbox/Qwen3-Coder-30B-...`
+	// any --model value goes through — `local-gw/Qwen3-Coder-30B-...`
 	// here works the same as passing it on the command line. Empty
 	// preserves the compile-time fallback (currently
 	// qwen2.5-coder:1.5b via Ollama).
@@ -79,9 +79,9 @@ type Config struct {
 }
 
 // EndpointDef is one user-configured OpenAI-compatible endpoint.
-// Name is a short stable identifier ("chatterbox", "lm-studio") used
+// Name is a short stable identifier ("local-gw", "lm-studio") used
 // both in telemetry and as the routing prefix in model IDs
-// (e.g. "chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF"). BaseURL is
+// (e.g. "local-gw/Qwen3-Coder-30B-A3B-Instruct-GGUF"). BaseURL is
 // the endpoint's OpenAI root (e.g. "http://localhost:13305/v1").
 //
 // APIKey can be set inline (insecure but convenient for dev), via
@@ -133,7 +133,7 @@ type EndpointDef struct {
 	// purely additive: omitting a model leaves the existing inference
 	// path unchanged.
 	//
-	// Use case: chatterbox's "reasoner" alias serves gpt-oss-20b, but
+	// Use case: local-gw's "reasoner" alias serves gpt-oss-20b, but
 	// the id-pattern detector only recognizes "o1/o3/o4" as reasoning
 	// specialists. Adding `"reasoner": ["reasoning",
 	// "reasoning:specialist"]` here lets the per-node router pick it
@@ -149,7 +149,7 @@ type EndpointDef struct {
 	// are ignored. The map key is the bare model id served by this
 	// endpoint (e.g. "coder").
 	//
-	// Use case: chatterbox's "coder" alias serves a hybrid thinking
+	// Use case: local-gw's "coder" alias serves a hybrid thinking
 	// model. `"coder": {"enable_thinking": false}` suppresses built-in
 	// reasoning so coding turns spend tokens on answers, not
 	// deliberation. Omitting a model sends a standard request.

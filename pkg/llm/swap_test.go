@@ -17,8 +17,8 @@ func TestSwapTrackerEmpty(t *testing.T) {
 
 func TestSwapTrackerNoteAndLoaded(t *testing.T) {
 	tr := NewSwapTracker()
-	tr.Note("chatterbox", "Qwen3-Coder-30B")
-	if got := tr.Loaded("chatterbox"); got != "Qwen3-Coder-30B" {
+	tr.Note("local-gw", "Qwen3-Coder-30B")
+	if got := tr.Loaded("local-gw"); got != "Qwen3-Coder-30B" {
 		t.Errorf("Loaded after Note: got %q", got)
 	}
 	if got := tr.Loaded("ollama"); got != "" {
@@ -28,11 +28,11 @@ func TestSwapTrackerNoteAndLoaded(t *testing.T) {
 
 func TestSwapTrackerWouldSwap(t *testing.T) {
 	tr := NewSwapTracker()
-	tr.Note("chatterbox", "Qwen3-Coder-30B")
-	if tr.WouldSwap("chatterbox", "Qwen3-Coder-30B") {
+	tr.Note("local-gw", "Qwen3-Coder-30B")
+	if tr.WouldSwap("local-gw", "Qwen3-Coder-30B") {
 		t.Errorf("same model should not be a swap")
 	}
-	if !tr.WouldSwap("chatterbox", "Qwen3-Embedding") {
+	if !tr.WouldSwap("local-gw", "Qwen3-Embedding") {
 		t.Errorf("different model on same endpoint should be a swap")
 	}
 	if tr.WouldSwap("ollama", "anything") {

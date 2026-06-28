@@ -1,6 +1,6 @@
 // Package llm — model-swap tracker.
 //
-// Lemonade / single-residency endpoints (chatterbox) enforce one
+// Lemonade / single-residency endpoints (local-gw) enforce one
 // loaded model per type; switching costs 7-15s. The tracker keeps an
 // in-memory record of which model each endpoint last served so the
 // runtime can prefer no-swap routing when quality is comparable.

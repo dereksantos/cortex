@@ -197,7 +197,7 @@ func TestOpenAICompatNestedLemonadeError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewOpenAICompatClient(EndpointConfig{Name: "chatterbox", BaseURL: srv.URL + "/v1"})
+	c := NewOpenAICompatClient(EndpointConfig{Name: "local-gw", BaseURL: srv.URL + "/v1"})
 	c.SetModel("m")
 	_, err := c.Generate(context.Background(), "p")
 	if err == nil {
@@ -227,8 +227,8 @@ func TestNormalizeCompatBaseURL(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"bare root gets /v1", "http://chatterbox:4000", "http://chatterbox:4000/v1"},
-		{"bare root trailing slash", "http://chatterbox:4000/", "http://chatterbox:4000/v1"},
+		{"bare root gets /v1", "http://local-gw:4000", "http://local-gw:4000/v1"},
+		{"bare root trailing slash", "http://local-gw:4000/", "http://local-gw:4000/v1"},
 		{"already /v1 untouched", "http://localhost:13305/v1", "http://localhost:13305/v1"},
 		{"/v1 trailing slash trimmed only", "http://localhost:13305/v1/", "http://localhost:13305/v1"},
 		{"custom path untouched", "https://proxy.internal/api/v1", "https://proxy.internal/api/v1"},

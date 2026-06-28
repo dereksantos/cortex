@@ -8,7 +8,7 @@
 //
 // The order matters because operators declare endpoints (Phase 4) to
 // override the legacy slash heuristic — a "coder" bare name should
-// route to chatterbox:4000 when that endpoint declares "coder" in
+// route to local-gw:4000 when that endpoint declares "coder" in
 // its Models list, not silently fall through to Ollama.
 
 package llm
@@ -28,8 +28,8 @@ func TestProviderFactory_BareName_RoutesViaEndpointModelsList(t *testing.T) {
 	cfg := &config.Config{
 		Endpoints: []config.EndpointDef{
 			{
-				Name:    "chatterbox",
-				BaseURL: "http://chatterbox:4000",
+				Name:    "local-gw",
+				BaseURL: "http://local-gw:4000",
 				Models:  []string{"coder", "xlam-1b-fc-r"},
 			},
 		},
@@ -52,7 +52,7 @@ func TestProviderFactory_BareName_FallsThroughToOllamaWhenUnconfigured(t *testin
 	// the Ollama backend (legacy behavior preserved).
 	cfg := &config.Config{
 		Endpoints: []config.EndpointDef{
-			{Name: "chatterbox", BaseURL: "http://chatterbox:4000", Models: []string{"coder"}},
+			{Name: "local-gw", BaseURL: "http://local-gw:4000", Models: []string{"coder"}},
 		},
 	}
 	f := NewProviderFactory(FactoryConfig{Cfg: cfg, OllamaAPIURL: "http://localhost:11434"})
@@ -61,7 +61,7 @@ func TestProviderFactory_BareName_FallsThroughToOllamaWhenUnconfigured(t *testin
 		t.Fatalf("Get: %v", err)
 	}
 	if _, ok := p.(*OpenAICompatClient); ok {
-		t.Errorf("unlisted bare name should NOT route via OpenAI-compat (chatterbox), got %T", p)
+		t.Errorf("unlisted bare name should NOT route via OpenAI-compat (local-gw), got %T", p)
 	}
 }
 
@@ -92,7 +92,7 @@ func TestProviderFactory_EndpointRoute_KwargsAndV1OnTheWire(t *testing.T) {
 	cfg := &config.Config{
 		Endpoints: []config.EndpointDef{
 			{
-				Name:    "chatterbox",
+				Name:    "local-gw",
 				BaseURL: srv.URL, // bare root, no /v1 — like the live fleet config
 				Models:  []string{"reasoner"},
 				ModelChatTemplateKwargs: map[string]map[string]any{
@@ -117,15 +117,15 @@ func TestProviderFactory_ExplicitEndpointPrefix_StillResolves(t *testing.T) {
 	// triggered by the slash-prefix form.
 	cfg := &config.Config{
 		Endpoints: []config.EndpointDef{
-			{Name: "chatterbox", BaseURL: "http://chatterbox:4000"},
+			{Name: "local-gw", BaseURL: "http://local-gw:4000"},
 		},
 	}
 	f := NewProviderFactory(FactoryConfig{Cfg: cfg})
-	p, err := f.Get("chatterbox/Qwen3-Coder-30B-A3B-Instruct-GGUF")
+	p, err := f.Get("local-gw/Qwen3-Coder-30B-A3B-Instruct-GGUF")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if _, ok := p.(*OpenAICompatClient); !ok {
-		t.Errorf("expected *OpenAICompatClient for chatterbox/-prefixed route, got %T", p)
+		t.Errorf("expected *OpenAICompatClient for local-gw/-prefixed route, got %T", p)
 	}
 }

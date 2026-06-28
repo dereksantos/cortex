@@ -103,7 +103,7 @@ the need. Start without it.
   update, forget) and a gated live behavioral eval against the fleet
   (`memory_e2e_live_test.go`, `CORTEX_LIVE_FLEET=1`): (a) cross-session recall,
   (b) stale-note update, (c) `study(journal)` for an unnoted detail. All three
-  live scenarios pass on the chatterbox fleet (glm-4.7-flash).
+  live scenarios pass on the local-gw fleet (glm-4.7-flash).
 
 ## Decisions (resolved)
 

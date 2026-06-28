@@ -18,7 +18,7 @@ func TestWrapServerError_BackendUnreachable(t *testing.T) {
 		"Connection refused on port 8080",
 	}
 	for _, msg := range cases {
-		err := wrapServerError("chatterbox", msg)
+		err := wrapServerError("local-gw", msg)
 		got := err.Error()
 		if strings.Contains(got, "server error:") {
 			t.Errorf("backend-unreachable case should NOT use the generic 'server error:' wrapper; got %q", got)
@@ -26,7 +26,7 @@ func TestWrapServerError_BackendUnreachable(t *testing.T) {
 		if !strings.Contains(got, "backend unreachable") {
 			t.Errorf("expected 'backend unreachable' phrasing for %q; got %q", msg, got)
 		}
-		if !strings.Contains(got, "chatterbox") {
+		if !strings.Contains(got, "local-gw") {
 			t.Errorf("expected endpoint name in error for %q; got %q", msg, got)
 		}
 	}
@@ -35,7 +35,7 @@ func TestWrapServerError_BackendUnreachable(t *testing.T) {
 // TestWrapServerError_GenericPathUnchanged pins that non-backend-down
 // messages still flow through the generic "server error: <msg>" path.
 func TestWrapServerError_GenericPathUnchanged(t *testing.T) {
-	err := wrapServerError("chatterbox", "model not found")
+	err := wrapServerError("local-gw", "model not found")
 	got := err.Error()
 	if !strings.Contains(got, "server error: model not found") {
 		t.Errorf("expected generic wrapper to preserve message; got %q", got)

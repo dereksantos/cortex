@@ -5,7 +5,7 @@ import "testing"
 func TestRecommendPicksLocalCoderForCode(t *testing.T) {
 	cats := []EndpointCatalog{
 		{
-			Name: "chatterbox", IsLocal: true,
+			Name: "local-gw", IsLocal: true,
 			Models: []CompatModel{
 				{ID: "Qwen3-Coder-30B-A3B-Instruct-GGUF", Labels: []string{"coding", "tool-calling"}, ContextLength: 262144},
 				{ID: "Qwen3-14B-GGUF", Labels: []string{"reasoning"}, ContextLength: 40960},
@@ -20,8 +20,8 @@ func TestRecommendPicksLocalCoderForCode(t *testing.T) {
 	}
 	rec := Recommend(cats)
 	code, ok := rec.Choices[RoleCode]
-	if !ok || code.Endpoint != "chatterbox" {
-		t.Fatalf("RoleCode should pick local chatterbox coder, got %+v", code)
+	if !ok || code.Endpoint != "local-gw" {
+		t.Fatalf("RoleCode should pick local local-gw coder, got %+v", code)
 	}
 	if code.Model != "Qwen3-Coder-30B-A3B-Instruct-GGUF" {
 		t.Errorf("RoleCode model: got %q", code.Model)
@@ -32,7 +32,7 @@ func TestRecommendFallsBackToCloudWhenNoLocalCapability(t *testing.T) {
 	// Local has only an embedder; reasoning must fall back to cloud.
 	cats := []EndpointCatalog{
 		{
-			Name: "chatterbox", IsLocal: true,
+			Name: "local-gw", IsLocal: true,
 			Models: []CompatModel{
 				{ID: "Qwen3-Embedding-0.6B-GGUF", Labels: []string{"embeddings"}},
 			},
@@ -72,7 +72,7 @@ func TestRecommendNoCandidateLeavesRoleUnassigned(t *testing.T) {
 func TestRecommendFastPrefersSmaller(t *testing.T) {
 	cats := []EndpointCatalog{
 		{
-			Name: "chatterbox", IsLocal: true,
+			Name: "local-gw", IsLocal: true,
 			Models: []CompatModel{
 				{ID: "Qwen3-Coder-30B", Labels: []string{"coding", "tool-calling"}},
 				{ID: "qwen3-8b-FLM", Labels: []string{"reasoning", "tool-calling"}},
@@ -110,7 +110,7 @@ func TestRecommendCodePrefersLarger(t *testing.T) {
 func TestRecommendEmbedAndRerankAreIsolated(t *testing.T) {
 	cats := []EndpointCatalog{
 		{
-			Name: "chatterbox", IsLocal: true,
+			Name: "local-gw", IsLocal: true,
 			Models: []CompatModel{
 				{ID: "Qwen3-Embedding-0.6B-GGUF", Labels: []string{"embeddings"}},
 				{ID: "bge-reranker-v2-m3-GGUF", Labels: []string{"reranking"}},

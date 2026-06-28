@@ -1,7 +1,7 @@
 // Package llm — generic OpenAI-compatible chat-completions provider.
 //
 // Used for any endpoint speaking the OpenAI HTTP shape: local Lemonade
-// (chatterbox), LM Studio, vLLM, sglang, Together-like proxies, etc.
+// (local-gw), LM Studio, vLLM, sglang, Together-like proxies, etc.
 // OpenRouter has its own provider (openrouter.go) because it carries
 // extra request hints (HTTP-Referer, X-Title) and surfaces per-call
 // cost in a non-standard `usage.cost` field; the generic client here
@@ -45,7 +45,7 @@ func compatTimeout() time.Duration {
 }
 
 // EndpointConfig identifies one OpenAI-compatible endpoint. Name is a
-// short stable identifier ("chatterbox", "lm-studio-local") used in
+// short stable identifier ("local-gw", "lm-studio-local") used in
 // telemetry and config; BaseURL is the OpenAI root (e.g.
 // "http://localhost:13305/v1" — a bare host:port gets "/v1" appended
 // at construction); APIKey is optional — many local endpoints accept
@@ -142,7 +142,7 @@ func NewOpenAICompatClient(ep EndpointConfig) *OpenAICompatClient {
 
 // normalizeCompatBaseURL trims trailing slashes and appends /v1 when
 // the URL has no path component. OpenAI-compat endpoints live under
-// /v1; a bare-root base_url (e.g. "http://chatterbox:4000") only
+// /v1; a bare-root base_url (e.g. "http://local-gw:4000") only
 // worked against proxies like LiteLLM that alias both routes. URLs
 // that already carry a path — "/v1", "/api/v1", anything deliberate —
 // pass through untouched.
@@ -172,7 +172,7 @@ func (c *OpenAICompatClient) SetTemperature(t float64) { c.temperature = &t }
 
 // Name returns the configured endpoint identifier. Distinct from
 // "openai-compat" so telemetry can attribute calls to specific
-// endpoints (chatterbox vs lm-studio vs vllm-cluster-1).
+// endpoints (local-gw vs lm-studio vs vllm-cluster-1).
 func (c *OpenAICompatClient) Name() string { return c.name }
 
 // IsAvailable returns true when the client has enough configuration to
@@ -182,7 +182,7 @@ func (c *OpenAICompatClient) IsAvailable() bool { return c.baseURL != "" }
 
 // SetModel picks the model used for subsequent calls. Pass the
 // endpoint's model ID verbatim (e.g. "Qwen3-Coder-30B-A3B-Instruct-GGUF"
-// for chatterbox, "qwen2.5-coder:3b" for an ollama-shim endpoint).
+// for local-gw, "qwen2.5-coder:3b" for an ollama-shim endpoint).
 func (c *OpenAICompatClient) SetModel(m string) { c.model = m }
 
 // Model returns the currently selected model.
@@ -195,7 +195,7 @@ func (c *OpenAICompatClient) SetMaxTokens(n int) { c.maxTokens = n }
 func (c *OpenAICompatClient) BaseURL() string { return c.baseURL }
 
 // LastCostUSD is always 0 for OpenAI-compatible endpoints. Local
-// inference (chatterbox, LM Studio, vLLM) doesn't bill per token;
+// inference (local-gw, LM Studio, vLLM) doesn't bill per token;
 // hosted proxies that do can be wrapped with their own cost-tracking
 // provider type. Satisfies the harness.LoopProvider interface so the
 // agent loop can ignore cost accounting on local-only sessions.
