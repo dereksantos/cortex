@@ -1,13 +1,9 @@
-// Package outline is the structural primitive study leads with: `ls`, generalized
-// to file interiors, filled breadth-first until a token budget is spent. A
-// directory lists its files/subdirs; a file lists its top-level units. Every
-// entry carries a locator — a child path to outline deeper, or a line span to
-// read_file. Deterministic, no model. See docs/study-subagent.md §2.
-//
-// It is a leaf primitive: it imports only the standard library and
-// internal/projectscan (the shared ignore set) — never cmd/loop. The AST/regex
-// knowledge here is a clean re-expression of what projectindex once held, not a
-// wrapper over it.
+// Package outline is the structural primitive study leads with: `ls` generalized
+// to file interiors, filled breadth-first to a token budget. A directory lists
+// its files/subdirs; a file lists its top-level units; every entry carries a
+// locator — a child path to outline deeper, or a line span to read_file.
+// Deterministic, no model; a leaf primitive (stdlib + projectscan only, never
+// cmd/loop). See docs/study-subagent.md §2.
 package outline
 
 import (

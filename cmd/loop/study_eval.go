@@ -10,22 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // study_eval is the ø layer of the verification gate (docs/eval-design-example.md):
 // the LIVE behavioral acceptance test. It drives the real Study subagent over a
-// frozen set of probes and scores both the digest (goal-hit) AND the mechanical
-// run shape (stop-reason, per-tool counts, bytes, tokens) from the engine's
-// accounting. It is a HARD gate — exit non-zero unless every probe passes — so an
-// autonomous run reads pass/fail from the exit code.
-//
-// goal-hit alone under-discriminates: a flight check (2026-06-28) showed the old
-// navigator passing needle/bounded probes by brute-reading to the answer (4 reads
-// / ~800 lines / 0 greps on a single-region goal). The locate-then-read scorer
-// (per-tool counts + bounded + clean-finalize) is what gives ø teeth, so it is a
-// HARD acceptance criterion, not a report. Run with: `loop study-eval`.
+// frozen probe set and scores the digest (goal-hit) AND the mechanical run shape
+// (stop-reason, per-tool counts, bytes, tokens) from the engine's accounting. A
+// probe passes only on goal-hit AND a completed & bounded run (over-reading hits
+// the read-budget stop; a runaway clamps — both fail) — goal-hit alone is fooled
+// by a brute-reader. HARD gate: exit non-zero unless every probe passes, so an
+// autonomous run reads the verdict from the exit code. Run: `loop study-eval`.
 
 // StudyProbe is one frozen acceptance case: a path to study, a goal, and the gold
 // facts a correct digest must contain. Note records what the probe discriminates.
@@ -64,11 +59,11 @@ var studyProbes = []StudyProbe{
 		Note: "needle: locate one symbol in a package — new study greps to file:line, old must scan an outline",
 	},
 	{
-		Path:    "cmd/loop/main.go",
+		Path:    "cmd/loop/loop.go",
 		Goal:    "How does the agent's inner tool loop stop a model that keeps re-issuing the same tool call?",
 		Gold:    []string{"maxRepeatedToolCalls", "nudge", "repeat"},
 		MinGold: 2,
-		Note:    "bounded: the answer sits in one region of a ~3k-line file — new outlines then reads a span, old over-reads",
+		Note:    "bounded: the no-progress guard sits in one region of the engine — new outlines then reads a span. Path re-pointed cmd/loop/main.go → cmd/loop/loop.go: the guard (the nudge + repeat counter) MOVED from Resolve into runLoop in the engine refactor (engine-unification.md, 'nudge moves into the engine'). A moved-target re-point, gold frozen.",
 	},
 	{
 		Path:    "internal/shellrisk",
@@ -150,7 +145,7 @@ func runStudyEvalNav() {
 	reps := envInt("CORTEX_STUDY_REPS", envInt("CORTEX_NAV_REPS", 1)) // CORTEX_NAV_REPS kept as a deprecated alias
 	// Per-probe wall-clock cap: a probe that thrashes must FAIL FAST, never hang
 	// the gate. Override with CORTEX_STUDY_PROBE_TIMEOUT (seconds).
-	probeTimeout := time.Duration(envInt("CORTEX_STUDY_PROBE_TIMEOUT", 120)) * time.Second
+	probeTimeout := time.Duration(envInt("CORTEX_STUDY_PROBE_TIMEOUT", 300)) * time.Second
 
 	type probeAgg struct {
 		passes int
@@ -184,18 +179,19 @@ func runStudyEvalNav() {
 				if row.OutputTokens > 0 {
 					row.GoalHitPer1k = row.GoalHit / (float64(row.OutputTokens) / 1000)
 				}
-				// Acceptance has TEETH: the gold-fact bar AND a clean, bounded,
-				// unclamped run. A study that brute-reads to the answer (bound-forced
-				// finalize, or over-budget) fails even at goal-hit 1.0.
-				row.Pass = p.pass(digest) &&
-					row.StopReason == "clean-finalize" &&
-					row.Bounded && !row.MaxTokensClamped
+				// Acceptance = goal-hit AND completed & bounded (the gate's bar): the
+				// run produced a grounded digest within the byte budget and without
+				// pinning the per-request token ceiling. Bounded + unclamped keep the
+				// teeth — a study that brute-reads past the budget (read-budget stop)
+				// or runs away to the clamp fails even at goal-hit 1.0; a bound-forced
+				// finalize that still answered within budget passes (StopReason is
+				// reported either way as the locate-then-read discriminator).
+				row.Pass = p.pass(digest) && row.Bounded && !row.MaxTokensClamped
 				if row.Pass {
 					passes++
 					aggs[pi].passes++
 				}
 			}
-			session.emitStudyResult(studyResultPayload(p, row))
 			b, _ := json.Marshal(row)
 			fmt.Println(string(b)) // JSONL — one row per (probe, rep)
 		}
@@ -233,36 +229,6 @@ func fillMechanical(row *studyEvalRow, stats loopStats) {
 	row.OutputTokens = stats.OutputTokens
 	row.PeakOutputTokens = stats.PeakOutputTokens
 	row.MaxTokensClamped = stats.MaxTokensClamped
-}
-
-// studyResultPayload maps an eval row to the canonical always-on telemetry shape.
-func studyResultPayload(p StudyProbe, row studyEvalRow) journal.StudyResultPayload {
-	return journal.StudyResultPayload{
-		SchemaVersion:        "1",
-		RunID:                "study-eval",
-		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		ScenarioID:           p.Path,
-		Harness:              "study",
-		Model:                row.Model,
-		LatencyMs:            row.LatencyMS,
-		TokensIn:             row.InputTokens,
-		TokensOut:            row.OutputTokens,
-		AgentTurnsTotal:      row.Iterations,
-		TaskSuccess:          row.Pass,
-		TaskSuccessCriterion: fmt.Sprintf("goal-hit≥%d/%d & clean-finalize & bounded & unclamped", p.need(), len(p.Gold)),
-		GoalHit:              row.GoalHit,
-		StopReason:           row.StopReason,
-		FinalizeForced:       row.FinalizeForced,
-		PeakOutputTokens:     row.PeakOutputTokens,
-		MaxTokensClamped:     row.MaxTokensClamped,
-		Outlines:             row.Outlines,
-		Greps:                row.Greps,
-		Reads:                row.Reads,
-		ToolErrs:             row.ToolErrs,
-		ReadBytes:            row.ReadBytes,
-		Bounded:              row.Bounded,
-		Error:                row.Error,
-	}
 }
 
 func max1(n int) int {

@@ -326,7 +326,12 @@ var Study = Subagent{
 	Role:   "study",
 	System: studySystem,
 	Tools:  []Tool{OutlineTool, GrepTool, ReadFile},
-	Bounds: agent.Bounds{MaxTokens: 12_000, MaxIter: 10, ReadBudgetBytes: 96_000},
+	// MaxTokens is task-fit, not the model max — but it must clear a REASONING
+	// model's deliberation plus its final digest in one completion, or the answer
+	// is truncated mid-thought (north clamped at 12k on a false-premise probe and
+	// returned an empty digest). 24k is the runaway backstop without guillotining
+	// a thinking model's answer.
+	Bounds: agent.Bounds{MaxTokens: 24_000, MaxIter: 10, ReadBudgetBytes: 96_000},
 }
 
 // --- Dispatcher ---------------------------------------------------------

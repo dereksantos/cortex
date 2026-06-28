@@ -14,10 +14,9 @@ import (
 )
 
 // grep.go is the content locator study never had: a pure-Go, dependency-free
-// regex search over the working tree, returning file:line:text matches (capped,
-// never file bodies). It is how a model jumps straight to where a symbol lives
-// instead of scanning an outline — and how journal recall works
-// (grep("<symbol>", ".cortex/journal")). See docs/study-subagent.md §3.
+// regex search over the working tree, returning capped file:line:text matches
+// (never file bodies) — how a model jumps to where a symbol lives, and how
+// journal recall works (grep over .cortex/journal). See docs/study-subagent.md §3.
 
 const FunctionGrep = "grep"
 

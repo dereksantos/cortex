@@ -17,13 +17,15 @@ for what existed before and why it went.
 > for history. The harness hardening plan is
 > [`docs/loop-production-harness.md`](docs/loop-production-harness.md).
 >
-> The **in-flight loop/study refactor** is specified by
-> [`docs/engine-unification.md`](docs/engine-unification.md) (collapse the two
-> tool-iteration loops into one `runLoop` engine in `internal/agent`) and
-> [`docs/study-subagent.md`](docs/study-subagent.md) (study becomes a bounded
-> `Study` subagent on that engine using `outline`/`grep`/targeted `read_file`,
-> deleting `navigator.go` + `internal/projectindex/`). These are **design +
-> tracker, not yet shipped** — everything below describes today's code.
+> The **loop/study refactor is SHIPPED** (was specified by
+> [`docs/engine-unification.md`](docs/engine-unification.md) +
+> [`docs/study-subagent.md`](docs/study-subagent.md)): the two tool-iteration
+> loops collapsed into one `runLoop` engine driven by a `Sender` + `AgentDispatcher`
+> seam; study is now a bounded `Study` subagent on that engine using
+> `outline`/`grep`/targeted `read_file` (no recursion). `navigator.go` +
+> `internal/projectindex/` are gone; the tool-call vocabulary lives in
+> `internal/agent`, the tool surface in `internal/tools`, the structural map in
+> `internal/outline`. Everything below describes today's (post-refactor) code.
 
 ## What `loop` is
 
@@ -51,13 +53,15 @@ Three capabilities distinguish it:
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
    [`docs/memory-tools.md`](docs/memory-tools.md).
-3. **Map-first `study`.** The study tool is a bounded read-only subagent
-   (`cmd/loop/navigator.go`): it leads with a free structural map of the
-   target, reads only the goal-relevant regions in tiny ranges, and can spawn
-   a bounded sub-study for a neighbor file/dir. *(Being redesigned — see
-   [`docs/study-subagent.md`](docs/study-subagent.md): the navigator +
-   `project_index` path is slated for replacement by an `outline`/`grep`/
-   targeted-`read_file` `Study` profile, no recursion.)*
+3. **`study` — a bounded read-only subagent.** `study(path, goal)` runs the
+   `Study` profile on the shared `runLoop` engine (`cmd/loop/study.go`): seeded
+   with a structural `outline` of the target plus the goal, it works a small
+   bounded loop — `outline`, `grep`, `read_file` — to locate exactly the
+   goal-relevant code, read those spans, and report a digest. It does not see the
+   coder's conversation and cannot recurse. Engineered so narrow is the only
+   option (`read_file` is a clamped span; whole-file reads above a small floor are
+   refused → `outline` first) and the obvious one (`outline`/`grep` hand back exact
+   line numbers). See [`docs/study-subagent.md`](docs/study-subagent.md).
 
 ## Commands
 
@@ -66,10 +70,10 @@ Three capabilities distinguish it:
 | `loop` | Interactive REPL (default) |
 | `loop resume [id]` | Resume a prior session (default: latest) |
 | `loop turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
-| `loop study <path> [goal...]` | One-off study (map-first navigator); prints the digest |
+| `loop study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `loop change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
 | `loop discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
-| `loop study-eval` | Navigator acceptance test (pass/fail + latency; `CORTEX_NAV_REPS` reps) |
+| `loop study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 
 REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
 `/quit`. Dispatch is in `cmd/loop/main.go` (subcommands ~`:3354`, slash
@@ -80,11 +84,11 @@ mechanical capture/retract pipeline.
 
 ## The agent's tools
 
-Registered in `cmd/loop/tools/tools.go` (`All` + dispatch in
-`ToolCall.Execute()`): `read_file`, `write_file`, `edit_file`, `study`,
-`project_index`, `bash`, `remove_path`, and the model-driven memory tools
+Registered in `internal/tools/tools.go` (`All` + dispatch in
+`tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `outline`,
+`grep`, `bash`, `remove_path`, and the model-driven memory tools
 `memory_write`, `memory_read`, `memory_search`, `memory_forget`
-(`internal/memory`).
+(`internal/memory`). (`project_index` was replaced by `outline` + `grep`.)
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
@@ -115,7 +119,7 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
 }
 ```
 
-Roles: `code` (the agent) and `study` (the navigator + the summarizer). Auth is
+Roles: `code` (the agent) and `study` (the `Study` subagent + the summarizer). Auth is
 resolved at call time from `key_env` (env-var name) or `key_service` (macOS
 keychain) — never written to disk. (`embed`/`fast` role bindings remain in
 config reserved for a future semantic `memory_search`; the loop's hot path no
@@ -126,7 +130,7 @@ were deleted outright — see [`docs/archive.md`](docs/archive.md). The embedder
 resolution helper `CortexSession.resolveEmbedder` is kept, reserved for that
 future swap.)
 
-Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_NAV_REPS`,
+Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_STUDY_REPS`,
 `CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
 `CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot embedder default),
 `CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an arch-matched int8
@@ -177,12 +181,14 @@ go test ./...                # full suite
 
 ## Key files
 
-- `cmd/loop/main.go` — REPL, `CortexSession`, turn loop, dispatch, config
-- `cmd/loop/tools/tools.go` — the agent's tool surface
-- `cmd/loop/navigator.go` — the study tool (map-first read-only subagent)
+- `cmd/loop/main.go` — REPL, `CortexSession` (composition root), `Turn`, dispatch, config
+- `cmd/loop/loop.go` — the `runLoop` engine + the `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` seams + `requestFor`
+- `cmd/loop/study.go` — the `Study` subagent wiring (`RunSubagent`, `dispatcherFor`, `Outline`) + telemetry
 - `cmd/loop/summarize.go` — free-text summarizer (compaction + shell-output)
-- `internal/projectindex/` — the structural map (`go/ast` + outline tiers)
-- `internal/journal/` — append-only event log
+- `internal/agent/` — the shared tool-call vocabulary (`Tool`, `ToolCall`, `Bounds`); imports only the stdlib
+- `internal/tools/` — the agent's tool surface (`Execute`, the tool decls, `grep`, the `Study` profile, `ConfinePath`/`TargetedRead`)
+- `internal/outline/` — the structural map (`Outline`/`Render`; `go/ast` + regex tiers, breadth-first to budget)
+- `internal/journal/` — append-only event log (incl. `study.result` telemetry)
 - `internal/shellrisk/` — command risk classifier
 - `pkg/llm/` — LLM providers
 - `pkg/config/` — layered config

@@ -127,6 +127,15 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		stats.Iterations = i + 1
 		res, _, err := send.Send(ctx, req)
 		if err != nil {
+			// A mid-loop model-call failure (transient backend error, or a proxy
+			// rejecting a tool-call round's grammar) shouldn't lose a run that has
+			// already gathered context: if we made progress and the ctx is still
+			// live, finalize from what we have (tools withheld, so the failing round
+			// is sidestepped). Abort only on the first round or a real cancellation.
+			if i > 0 && ctx.Err() == nil {
+				stop = "error-recovered"
+				break
+			}
 			stats.StopReason = "error"
 			return "", stats, err
 		}

@@ -88,14 +88,14 @@ const ModelCoder = "coder"
 
 // Tool function names — canonical identifiers, defined in the tools package.
 const (
-	FunctionReadFile     = tools.FunctionReadFile
-	FunctionWriteFile    = tools.FunctionWriteFile
-	FunctionEditFile     = tools.FunctionEditFile
-	FunctionStudy        = tools.FunctionStudy
-	FunctionBash         = tools.FunctionBash
-	FunctionRemove       = tools.FunctionRemove
-	FunctionOutline      = tools.FunctionOutline
-	FunctionGrep         = tools.FunctionGrep
+	FunctionReadFile  = tools.FunctionReadFile
+	FunctionWriteFile = tools.FunctionWriteFile
+	FunctionEditFile  = tools.FunctionEditFile
+	FunctionStudy     = tools.FunctionStudy
+	FunctionBash      = tools.FunctionBash
+	FunctionRemove    = tools.FunctionRemove
+	FunctionOutline   = tools.FunctionOutline
+	FunctionGrep      = tools.FunctionGrep
 )
 
 const defaultModel = ModelCoder

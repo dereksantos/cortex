@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/dereksantos/cortex/internal/tools"
 )
+
+var errFake = errors.New("fake send failure")
 
 // fakeResp builds a minimal *AgentResponse with one assistant choice.
 func fakeResp(content string, calls []ToolCall, in, out int) *AgentResponse {
@@ -212,6 +215,50 @@ func TestRunLoopMaxIterFinalizes(t *testing.T) {
 	if content != "forced" {
 		t.Errorf("content = %q, want forced", content)
 	}
+}
+
+// TestRunLoopMidLoopErrorFinalizes locks the resilience fix: a model-call failure
+// AFTER progress has been made finalizes from the gathered context (tools
+// withheld) rather than losing the whole run — the dodge for a proxy that rejects
+// a tool-call round's grammar mid-study. A first-send failure still aborts.
+func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
+	t.Run("mid-loop error finalizes", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var round int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // the finalize round (tools withheld) succeeds
+				return fakeResp("recovered answer", nil, 1, 1), false, nil
+			}
+			defer func() { round++ }()
+			if round == 0 {
+				return fakeResp("", []ToolCall{readCall("c", "x")}, 1, 1), false, nil
+			}
+			return nil, false, errFake // the second tool-call round fails
+		})
+		disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("mid-loop error should finalize, not abort: %v", err)
+		}
+		if content != "recovered answer" || stats.StopReason != "error-recovered" {
+			t.Errorf("content=%q stop=%q, want recovered/error-recovered", content, stats.StopReason)
+		}
+	})
+	t.Run("first-send error aborts", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+			return nil, false, errFake
+		})
+		_, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: DispatchFunc(func(context.Context, ToolCall) string { return "" })},
+			Bounds{MaxTokens: 100, MaxIter: 100}, nil, func(m Message) { req.Messages = append(req.Messages, m) })
+		if err == nil || stats.StopReason != "error" {
+			t.Errorf("a first-send failure must abort: err=%v stop=%q", err, stats.StopReason)
+		}
+	})
 }
 
 // TestRunLoopBlockingSubagentPath proves the subagent path with no second real

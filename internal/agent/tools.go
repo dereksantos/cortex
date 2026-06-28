@@ -13,13 +13,10 @@ import (
 )
 
 // Bounds are the engine's independent ceilings for one agent run; whichever
-// trips first forces finalize. THREE mandatory caps — no request is EVER
-// unbounded:
-//   - MaxTokens: a finite per-request completion cap, the primary runaway
-//     backstop — the one thing that holds when cancellation fails (see the
-//     2026-06-28 north runaway in docs/engine-unification.md).
-//   - MaxIter: caps the rounds.
-//   - ReadBudgetBytes: caps accumulated tool output (0 = unbounded, the coder).
+// trips first forces finalize. MaxTokens (a finite per-request completion cap)
+// is the primary runaway backstop — the one thing that holds when cancellation
+// fails (the 2026-06-28 north runaway, docs/engine-unification.md); MaxIter caps
+// the rounds; ReadBudgetBytes caps accumulated tool output (0 = unbounded).
 type Bounds struct {
 	MaxTokens       int
 	MaxIter         int
