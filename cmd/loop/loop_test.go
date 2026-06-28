@@ -182,6 +182,85 @@ func TestRunLoopBytesBudgetFinalizes(t *testing.T) {
 	}
 }
 
+// TestRunLoopMaxIterFinalizes locks the MaxIter ceiling: a model that keeps
+// issuing DIFFERENT calls (so no-progress never fires) is stopped at the
+// iteration cap and finalized — never run unbounded.
+func TestRunLoopMaxIterFinalizes(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	var i int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil {
+			return fakeResp("forced", nil, 1, 1), false, nil
+		}
+		i++
+		return fakeResp("", []ToolCall{readCall("c", strings.Repeat("a", i))}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 4}, nil, appendMsg)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if stats.StopReason != "max-iter" || !stats.FinalizeForced {
+		t.Errorf("stop = %q forced=%v, want max-iter/true", stats.StopReason, stats.FinalizeForced)
+	}
+	if stats.Iterations != 4 {
+		t.Errorf("iterations = %d, want 4 (the cap)", stats.Iterations)
+	}
+	if content != "forced" {
+		t.Errorf("content = %q, want forced", content)
+	}
+}
+
+// TestRunLoopBlockingSubagentPath proves the subagent path with no second real
+// caller: runLoop driven by the real blockingSender over an httptest server (no
+// model) runs a 2-round tool loop, accounts tokens, drives the Progress sink,
+// and clean-finalizes — exactly the path RunSubagent will use.
+func TestRunLoopBlockingSubagentPath(t *testing.T) {
+	quickRetries(t)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the digest"}}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{}
+	req := requestFor(ModelSpec{Model: "m", Endpoint: srv.URL}, "sys", "seed", []Tool{tools.ReadFile}, 1000)
+	var seen []string
+	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
+		seen = append(seen, c.Function.Name)
+		return "FILE BODY"
+	})
+	var progress []string
+	content, stats, err := runLoop(context.Background(), cs.blockingSender(), req,
+		Toolset{Tools: req.Tools, Dispatch: disp},
+		Bounds{MaxTokens: 1000, MaxIter: 10, ReadBudgetBytes: 96000},
+		func(line string) { progress = append(progress, line) },
+		func(m Message) { req.Messages = append(req.Messages, m) })
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "the digest" || stats.StopReason != "clean-finalize" {
+		t.Errorf("content=%q stop=%q, want 'the digest'/clean-finalize", content, stats.StopReason)
+	}
+	if stats.Reads != 1 || len(seen) != 1 || seen[0] != tools.FunctionReadFile {
+		t.Errorf("reads=%d seen=%v, want 1 read_file", stats.Reads, seen)
+	}
+	if stats.InputTokens != 11 || stats.OutputTokens != 5 {
+		t.Errorf("tokens = %d in / %d out, want 11/5", stats.InputTokens, stats.OutputTokens)
+	}
+	if len(progress) != 1 { // one breadcrumb for the one tool call
+		t.Errorf("progress lines = %d, want 1: %v", len(progress), progress)
+	}
+}
+
 // TestRequestForSetsMaxTokens proves no request path is unbounded: requestFor
 // always stamps a finite max_tokens — the passed ceiling when >0, else the
 // role/default fallback. The regression guard for the 2026-06-28 north runaway.
