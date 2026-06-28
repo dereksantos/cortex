@@ -86,10 +86,6 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 		if err != nil {
 			return "Error: " + err.Error()
 		}
-		// Defang tool-call control-token literals so reading a tool-call PARSER's
-		// source (e.g. pkg/llm/xml_tool_calls.go) can't feed the reasoner the exact
-		// byte sequence it then reproduces — which makes the proxy's response parser
-		// 500 ("output does not match the expected peg-native format"). See defang.go.
-		return tools.DefangControlTokens(out)
+		return out
 	})
 }
