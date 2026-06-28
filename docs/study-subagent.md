@@ -396,11 +396,17 @@ func TargetedRead(call ToolCall) ToolCall {
 
 ---
 
-## 5. Acceptance eval — extend `study_eval.go`, don't rebuild
+## 5. Acceptance eval — replace the navigator driver, keep the scorer
 
-`cmd/loop/study_eval.go` already exists (`countGoalHits`, `navEvalCases`,
-`CORTEX_NAV_REPS`, `runStudyEvalNav`). Extend it with **good separation** — four
-distinct pieces, not one mega-loop:
+The navigator is gone as a concept, so its **eval driver** goes with it —
+`navEvalCases`, `CORTEX_NAV_REPS`, `runStudyEvalNav` are deleted in **phase 4**
+(coupled to the `Navigate`/`runNavigator` deletion, else phase 4 can't be "suite
+green" — `study_eval.go` would still reference dead symbols). What survives is the
+**scorer**, `countGoalHits`, which is implementation-agnostic ("is the goal-fact
+present in the digest"). Phase 5 builds the new driver on `RunSubagent` and reuses
+that scorer — a repurpose, not an extend-in-place.
+
+Build it with **good separation** — four distinct pieces, not one mega-loop:
 
 ```
 fixture   StudyProbe{ Path, Goal, Gold []string }   — frozen probes + gold facts
@@ -494,18 +500,22 @@ internal/agent/     THE engine + seams + shared data types               (NEW, p
 internal/outline/   structural primitive: Entry, Outline, Render          (NEW; replaces projectindex's three cmd/loop callers)
 internal/memory/    notes store (unchanged — memory_* tools)              (exists)
 internal/journal/   append-only journal (study reads it as a path)        (exists)
-cmd/loop/tools/     Tool decls, Execute, pure tools (grep, outline-tool,   (exists, grows)
-                    read_file); Outliner / SubAgentRunner; ConfinePath
-cmd/loop/           REPL + CortexSession (implements the interfaces),       (exists, SHRINKS)
-                    Turn, config, Study wiring
+internal/tools/     Tool decls, Execute, pure tools (grep, outline-tool,   (was cmd/loop/tools;
+                    read_file); role-interfaces (ToolDeps split into       MOVES in phase 3)
+                    MemoryStore/Outliner/SubAgentRunner/…); ConfinePath
+cmd/loop/           package main ONLY: REPL + CortexSession (the composition (exists, SHRINKS;
+                    root — implements the tool role-interfaces, BUILDS the   no sub-packages
+                    agent seams, OWNS the substrate), Turn, config, Study    after phase 3)
+                    wiring  ·  cmd/loop/ui folds away in phase 3
 
 dependency arrows (no cycles):
-  cmd/loop ──► internal/agent ──► pkg/llm
-  cmd/loop/tools ──► internal/agent   (for the moved data types: Tool, ToolCall,
+  cmd/loop ──► internal/tools ──► internal/agent ──► pkg/llm
+  internal/tools ──► internal/agent   (for the moved data types: Tool, ToolCall,
                                        Request, Response, Message — phase 3)
-  cmd/loop ──► cmd/loop/tools ──► (tool interfaces; impls back in cmd/loop)
-  cmd/loop ──► internal/{outline,memory,journal}
-  internal/agent ──► pkg/llm only   (never cmd/loop/tools — the types move INTO agent)
+  cmd/loop ──► internal/{tools,outline,memory,journal}
+  internal/agent ──► pkg/llm only   (never internal/tools — the types move INTO agent)
+  (invariant) no internal/* package imports internal/tools — only main + the
+              inverted type arrow touch the tool surface
 ```
 
 ## Status — phase tracker
@@ -519,8 +529,8 @@ green. Flip ☐→☑ on land.
 | 1 | `internal/outline` | `Entry`/`Outline`/`Render`; breadth-first to budget; truncate deep-only (names always listed); go/ast + regex + wholeFile listers | unit tests: budget breadth-first, child-name retention, tree collapse | ☐ |
 | 2 | `grep` tool | pure-Go `grepFiles` (walk + `projectscan` ignore + RE2 + caps + ctx-checks); confinement; `GrepTool` decl | unit tests: cap, binary-skip, ignore-set, bad-regex error, escape rejected | ☐ |
 | 3 | targeted + confined `read_file` | `maxReadLines`; `TargetedRead`; `ConfinePath` (allows `.cortex/journal`, blocks escapes) | unit tests: floor, refuse, clamp, abs/`..` rejected, journal allowed | ☐ |
-| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline` | `loop study` works on the new path; old nav code + `projectindex` gone (incl. the test caller); suite green | ☐ |
-| 5 | eval + telemetry | extend `study_eval.go`: `StudyProbe`/`StudyEvalResult`, mechanical scorers + instrumentation, model × probe table; always-on run stats → journal | `loop study-eval` reports goal-hit + completed/bounded/latency across the fleet | ☐ |
+| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **also delete the navigator eval driver** (`navEvalCases`/`CORTEX_NAV_REPS`/`runStudyEvalNav`) so `study_eval.go` compiles — keep `countGoalHits`, leave `loop study-eval` minimally wired (or temporarily reduced) until phase 5 fills it out | `loop study` works on the new path; old nav code + `projectindex` + nav eval driver gone (incl. the test caller); suite green | ☐ |
+| 5 | eval + telemetry | build the new driver on `RunSubagent` reusing `countGoalHits`: `StudyProbe`/`StudyEvalResult`, mechanical scorers + instrumentation, model × probe table; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit + completed/bounded/latency across the fleet | ☐ |
 | 6 | docs / CLAUDE.md | point `study` at this design (`study-navigator.md` already removed 2026-06-27); update tool list (no project_index, no memory_search change) | docs match shipped code | ☐ |
 
 `internal/outline`, `grep`, and targeted/confined `read_file` (phases 1–3) are
@@ -606,4 +616,10 @@ _Append-only._
 - **2026-06-27** Eval extends `study_eval.go`; ship keyword goal-hit + mechanical
   instrumentation + always-on telemetry first; panel-gold + vendored fixture
   deferred.
+- **2026-06-27** **Correction: the eval is a driver-replacement, not an
+  extend-in-place.** The navigator concept is gone, so its driver
+  (`navEvalCases`/`CORTEX_NAV_REPS`/`runStudyEvalNav`) is deleted in **phase 4**
+  alongside `Navigate` (required to keep phase 4 "suite green"). The scorer
+  `countGoalHits` is implementation-agnostic and survives; phase 5 builds the new
+  `RunSubagent` driver on top of it and renames `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`.
 ```

@@ -135,6 +135,94 @@ building a struct isn't.
 - **`Progress` is the only new capability**, and it's additive — a `nil` sink is
   today's behavior.
 
+## The seam contract — `CortexSession` is three things, not one
+
+`CortexSession` (in `package main`) is the **composition root / dependency sink**:
+it sits at the top of the arrow graph, imports everything below, and nothing below
+imports it. *Why* every interface it satisfies must be defined in the **consumer**:
+`internal/agent` and `internal/tools` cannot import `cmd/loop`, so they declare the
+narrow interface they need and `cs` (at the top) supplies it. This is the standard
+Go "interfaces live on the consumer side" idiom — and it's the antidote to the
+God object: nothing below `main` ever sees more than a 1–4 method slice of `cs`,
+even though the struct itself stays fat.
+
+`cs` relates to the layers below it in **three distinct ways** — conflating them is
+what makes the seam feel murky:
+
+| Relationship | Toward | Mechanism | Examples |
+|---|---|---|---|
+| **implements** (structural) | `internal/tools` | `cs` *is* the interface | the `ToolDeps` role-interfaces |
+| **builds** (factory) | `internal/agent` | `cs` *constructs* an adapter value | `agent.Sender`, `agent.AgentDispatcher` |
+| **owns** (composition) | `internal/{memory,journal,outline}` | `cs` *holds* a concrete | `*memory.Store`, `*capture.Capture` |
+
+The engine never sees `cs`: `cs.streamingSender()` / `cs.blockingSender()` return
+`agent.Sender`s, and `cs.coderDispatcher()` / `cs.dispatcherFor(sa)` return
+`agent.AgentDispatcher`s. `internal/agent` stays pure (`imports only pkg/llm`)
+because the variation is injected as *values*, not as a dependency on `main`. The
+one place the two seam worlds meet is the dispatcher: an `agent.AgentDispatcher`
+whose body calls `tc.Execute(ctx, cs)` — the engine seam wrapping the tool seam.
+
+### Segment the fat `ToolDeps` (phase-1 sub-task)
+
+Today `tools.ToolDeps` is **one 10-method interface** that every tool receives via
+`Execute(ctx, deps)`, and `cs` satisfies it structurally with **no compile-time
+assertion**. It violates Interface Segregation: a memory tool depends on the same
+fat type as `bash`. The study work already starts pulling out `Outliner` /
+`SubAgentRunner`; finish the job — **define narrow consumer-owned role-interfaces
+and compose `ToolDeps` (the union `Execute`'s switch still needs) by embedding
+them:**
+
+```go
+package tools // (internal/tools after phase 3)
+
+type MemoryStore interface {
+	MemoryWrite(name, content string) (string, error)
+	MemoryRead(name string) (string, error)
+	MemorySearch(query string) (string, error)
+	MemoryForget(name string) (string, error)
+}
+type Outliner       interface { Outline(path string, budget int) (string, error) }
+type SubAgentRunner interface { RunSubagent(ctx context.Context, sa Subagent, seed string) (string, error) }
+type ShellGate      interface { GateShell(ctx context.Context, command string) (msg string, ok bool) }
+type DeleteGate     interface { AllowDelete() (root string, allowed bool) }
+
+// The union Execute's big switch consumes — assembled from the parts, not hand-listed.
+type ToolDeps interface {
+	MemoryStore
+	Outliner
+	SubAgentRunner
+	ShellGate
+	DeleteGate
+	Quiet() bool
+}
+```
+
+Payoffs: **pure tools take no deps at all** (`grep`, `read_file` body, `edit_file`
+are functions over the filesystem); **the subagent path and tests depend narrowly**
+(`RunSubagent` needs only `SubAgentRunner`; a memory test fakes 4 methods, not 10);
+and **the God object's blast radius is the interface, not the struct** — `cs` need
+not be broken up, only kept from leaking.
+
+Make the implicit satisfaction explicit at the composition root, so a missing
+method fails *there* with a clear location instead of at a distant dispatch call:
+
+```go
+// cmd/loop/main.go — the seam, asserted.
+var (
+	_ tools.ToolDeps       = (*CortexSession)(nil)
+	_ tools.SubAgentRunner = (*CortexSession)(nil)
+	_ tools.Outliner       = (*CortexSession)(nil)
+)
+```
+
+This segmentation is **independent of the file moves** — it's pure interface
+refactoring inside today's `cmd/loop/tools`, so it lands in **phase 1** (alongside
+the `Resolve`→`Turn` fold, since phase 1 already touches the dispatch site). The
+`Subagent`/`SubAgentRunner` shapes themselves are *built* by the study work
+(study-subagent.md §1); phase 1 only needs to split the surface that exists today
+(`MemoryStore`/`ShellGate`/`DeleteGate`/`Quiet` + the `Outliner` seam the new
+outline tool will use), so the union is already segmented when study wires in.
+
 ## Status — phase tracker
 
 Invariant for every phase: `go build ./...`, `go vet`, `./scripts/check.sh`, and
@@ -143,17 +231,19 @@ Invariant for every phase: `go build ./...`, `go vet`, `./scripts/check.sh`, and
 `navigator.go` is **not in this table** — it is deleted (not refactored) by
 study-subagent.md phase 4, which builds the first real subagent caller
 (`RunSubagent` + `Study` profile) on the engine and wires the `Progress`
-consumer. Here, the engine is proven by `Resolve` + a fake-`Sender` test, so no
-phase touches the doomed loop.
+consumer. Here, the engine is proven by the coder turn (`Turn`, after `Resolve`
+folds in) + a fake-`Sender` test, so no phase touches the doomed loop.
 
 | # | Phase | Scope | Files | Exit criteria | State |
 |---|---|---|---|---|---|
 | 0 | Extract `runLoop` + all seams **inside package `main`** | the engine function + `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` types + `requestFor` + blocking/streaming `Sender`s (the streaming `Sender` carries the per-request deadline); no behavior change | `cmd/loop/` (new `loop.go`) | engine compiles, unused by callers yet, suite green | ☐ |
-| 1 | Refactor `Resolve` onto `runLoop` | main coder loop uses the engine via a streaming `Sender` + full dispatcher; nudge moves into the engine; capture/memory-index stay in `Turn`; `Progress` nil (REPL streams its own breadcrumb); per-request Sender deadline set | `cmd/loop/main.go` | REPL behaves identically; **`loop study-eval` numbers unchanged** (navigator untouched); manual smoke turn; suite green | ☐ |
+| 1 | Fold `Resolve` into `Turn` (delete `Resolve`) **+ segment `ToolDeps`** | the coder loop body becomes `runLoop`, driven via a streaming `Sender` + full dispatcher; the thin wrapper that remained folds into `Turn` (which already holds memory-index injection + turn capture) and **`Resolve` is deleted** — the engine is `runLoop`, the coder entry is `Turn`, no redundant indirection and the vestigial cognition-mode name is gone; nudge moves into the engine; `Progress` nil (REPL streams its own breadcrumb); per-request Sender deadline set; the two `cs.Resolve` test callers (`main_test.go:1930,1960`) retarget to `Turn` or a fake-`Sender` `runLoop`. **Sub-task:** split the fat `ToolDeps` into the role-interfaces (`MemoryStore`/`ShellGate`/`DeleteGate`/`Outliner`/`Quiet`, union by embedding) and add `var _` assertions at the composition root (see "The seam contract") | `cmd/loop/main.go`, `cmd/loop/tools/tools.go`, `cmd/loop/main_test.go` | REPL behaves identically; **`loop study-eval` numbers unchanged** (navigator untouched); **no `Resolve` symbol remains**; `var _ tools.ToolDeps = (*CortexSession)(nil)` compiles; manual smoke turn; suite green | ☐ |
 | 2 | Model-free loop test | `SenderFunc` fake drives `runLoop`; assert `MaxIter`, byte-budget, per-request deadline, no-progress, finalize, and the blocking path all trip — proves the subagent path with no second real caller | `cmd/loop/*_test.go` | runs with zero network; each bound covered | ☐ |
-| 3 | Move engine + the shared data types (`Tool`, `ToolCall`, `Request`, `Response`, `Message`) → `internal/agent`, renaming `AgentRequest`→`Request` and `AgentResponse`→`Response` (today these are aliases in `main` over `cmd/loop/tools`) | mechanical move once the boundary is proven; `cmd/loop/tools` now imports `internal/agent` for the moved types; `internal/agent` never imports `cmd/loop/tools` | new `internal/agent/`, `cmd/loop/`, `cmd/loop/tools/` | no import cycles; `internal/agent` imports only `pkg/llm`; the `cmd/loop/tools`→`internal/agent` arrow exists; suite green | ☐ |
+| 3 | Move engine + shared data types → `internal/agent` **and regularize the package topology** | (a) Move the shared data types (`Tool`, `ToolCall`, `Request`, `Response`, `Message`) → `internal/agent`, renaming `AgentRequest`→`Request` and `AgentResponse`→`Response`. **This consolidates a split ownership, not an alias-rename:** today `AgentRequest`/`AgentResponse`/`Message` are **structs in `main`** while `Tool`/`ToolCall` are **aliases in `main` over `cmd/loop/tools`** — so the move pulls the wire types out of `main` *and* the tool types out of `tools` into one home. (b) **Rename `cmd/loop/tools` → `internal/tools`** (library code does not belong under `cmd/`; it already doesn't import `main`, so the move is just import-path churn in the `main` files). (c) **Fold `cmd/loop/ui`** (44 LOC, one file) into `internal/tools` or `pkg/cliout` — no 44-line package as its own node. End state: `cmd/loop` is `package main` only. | mechanical move once the boundary is proven; `internal/tools` flips from *defining* `Tool`/`ToolCall` to *importing* them from `internal/agent`; `internal/agent` never imports `internal/tools` (this is the one arrow that inverts — vet it first with a spike) | new `internal/agent/`, new `internal/tools/`, `cmd/loop/` (now `main` only) | no import cycles; `internal/agent` imports only `pkg/llm`; the `internal/tools`→`internal/agent` arrow exists; **no `internal/*` package imports `internal/tools`** (only `main` + the inverted type arrow touch it); `cmd/loop` has no sub-packages; suite green | ☐ |
 
 Phase 3 is the only file-move and comes last, after the seam is proven in place.
+It is also the package-topology phase: the type move, the `cmd/loop/tools`→`internal/tools`
+rename, and the `cmd/loop/ui` fold all ride together so the import-path churn is paid once.
 
 ## Verification
 
@@ -166,7 +256,7 @@ flips to PASS as phases land; wire into CI when both docs' work is complete.
 | Phase | Add (src) | Delete (src) | Net character |
 |---|---|---|---|
 | 0 extract engine + seams | +150…220 | 0 | additive (new `loop.go`) |
-| 1 `Resolve`→engine | +30 | −50 | `Resolve` 80→~30; flat-to-negative |
+| 1 fold `Resolve` into `Turn` | +20 | −80 | `Resolve` (80) deleted; ~20 lines of seam-wiring absorbed into `Turn`; net-negative |
 | 2 model-free loop test | +150…220 *(test)* | 0 | test-only |
 | 3 move → `internal/agent` | ~0 net | ~0 net | **relocation only** |
 
@@ -177,14 +267,22 @@ in study-subagent.md phase 4, not here.**
 ### Assertions (machine-checkable)
 
 - **Behavior-preserving (the strongest check):** write characterization tests
-  *first* (a `SenderFunc` fake recording `Resolve`'s message sequence, dispatch
-  order, and stop conditions); they must pass unchanged after every phase. Plus:
+  *first* (a `SenderFunc` fake recording the coder loop's message sequence,
+  dispatch order, and stop conditions — captured against today's `Resolve`, then
+  re-run against `Turn`/`runLoop` after the fold); they must pass unchanged after
+  every phase. Plus:
   `loop study-eval` numbers must be **unchanged** through this work (the navigator
   is untouched here — if those numbers move, something leaked).
 - **Existence:** `runLoop`, `Sender`, `AgentDispatcher`, `Toolset`,
   `Bounds`, `Progress`, `requestFor` exist (script §2).
 - **Import graph:** `internal/agent` imports only `pkg/llm` — no
   cortex-session/tools-by-name (`go list -deps`; script §5).
+- **Topology (post-phase-3):** `cmd/loop` has **no sub-packages** (it is `package
+  main` only — `cmd/loop/tools` and `cmd/loop/ui` are gone); `internal/tools`
+  exists and imports `internal/agent`; **no `internal/*` package imports
+  `internal/tools`** (only `main` and the inverted type arrow touch the tool
+  surface — guards against a future `internal` package taking a dep on it and
+  inverting the graph). `go list -deps`; script §5.
 - **Scoped diff:** the engine-unification diff **must not touch `navigator.go`**
   (it's deleted by the study work). `verify-study.sh --diff-base <ref>` flags it.
 - **Green every phase:** `go build`/`go vet`/`check.sh`/`go test` all pass
@@ -198,6 +296,16 @@ _Append-only. Every choice gets a dated line so the rationale doesn't evaporate.
   interfaces. The func-type-satisfies-1-method idiom lives on the injected seams,
   not on the orchestrator — making the loop an interface would invert the
   dependency for no benefit.
+- **2026-06-27** **`Resolve` is folded into `Turn` and deleted** (not kept as a
+  thin wrapper). `Turn` is already the per-turn entry that injects the memory
+  index and captures the turn; it called `Resolve` as its one substantive step, so
+  once `Resolve`'s loop body moves into `runLoop` the ~20-line remainder belongs in
+  `Turn`. Result: the engine is `runLoop`, the coder entry is `Turn`, the subagent
+  entry is `RunSubagent` — a clean three-name trio with no redundant indirection.
+  Also retires the vestigial `Resolve` name (a leftover from the deleted
+  Reflex/Reflect/Resolve/Think/Dream cognition modes — see
+  [`archive.md`](archive.md)). The two `cs.Resolve` test callers retarget to `Turn`
+  or a fake-`Sender` `runLoop`. Exit criterion: **no `Resolve` symbol remains.**
 - **2026-06-27** This refactor is decoupled from the study feature and lands
   first. It is behavior-preserving; the study redesign assumes the unified engine
   exists.
@@ -215,6 +323,35 @@ _Append-only. Every choice gets a dated line so the rationale doesn't evaporate.
   `Request`, `Response`, `Message`) into `internal/agent` (renaming the `Agent*`
   request/response pair); `cmd/loop/tools` then imports `internal/agent`, and
   `internal/agent` must never import `cmd/loop/tools` (cycle).
+- **2026-06-27** Phase 3 is a **consolidation, not an alias-rename** (corrected
+  after reading the code): today the type ownership is split — `AgentRequest`,
+  `AgentResponse`, and `Message` are **structs defined in `main`** (`main.go:369`,
+  `:726`, `:753`), while `Tool`/`ToolCall`/`ToolFunction`/`FunctionCall` are
+  **aliases in `main` over `cmd/loop/tools`** (`main.go:483-484`, `:817-818`). The
+  move puts all of them in `internal/agent`, so `tools` flips from defining
+  `Tool`/`ToolCall` to importing them. That one arrow inversion is the riskiest
+  step in this doc — prove it with a throwaway spike before treating phase 3 as
+  mechanical.
+- **2026-06-27** **Seam contract recorded** ("The seam contract" section): `cs` is
+  the composition root that relates to lower layers three ways — *implements* the
+  `internal/tools` role-interfaces (structural), *builds* the `internal/agent`
+  seams (factory; the engine never sees `cs`, so it stays `imports only pkg/llm`),
+  and *owns* the `internal/{memory,journal,outline}` substrate (concrete). The fat
+  `ToolDeps` is segmented into narrow consumer-owned role-interfaces (union by
+  embedding) with `var _` assertions at the root; this is a **phase-1 sub-task**
+  (pure interface refactor, independent of the phase-3 file moves).
+- **2026-06-27** Phase 3 also **regularizes the package topology**:
+  `cmd/loop/tools` → `internal/tools`, and `cmd/loop/ui` (44 LOC) folds into
+  `internal/tools`/`pkg/cliout`, leaving `cmd/loop` as `package main` only.
+  Rationale: library code doesn't belong under `cmd/` (which should hold thin
+  entry points); the tool surface was the only substrate package not already in
+  `internal/*`. **Rejected: merging `tools` into `internal/agent`** — `tools`
+  imports `shellrisk`/`projectscan`/`config`/`events`/`secret`, so merging would
+  destroy the engine's `imports only pkg/llm` invariant and couple the pure loop
+  to concrete tool impls. The `Dispatcher` seam exists precisely to keep
+  mechanism (`agent`) and capabilities (`tools`) apart; `agent` owns the type
+  vocabulary, `tools` imports it. Rides phase 3 so the import-path churn is paid
+  once; new invariant: **no `internal/*` imports `internal/tools`**.
 - **2026-06-27** `Bounds.MaxWall` (a hard whole-run wall-clock cancel)
   **rejected / deferred.** Cancelling the run's context to enforce it kills a
   nearly-done study mid-call with no digest, and leaves no live context to run
