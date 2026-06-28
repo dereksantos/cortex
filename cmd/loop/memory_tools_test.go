@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
 	"github.com/dereksantos/cortex/internal/projectindex"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // memCall builds a ToolCall for a memory tool with the given JSON args.
@@ -51,9 +51,9 @@ func TestMemoryTools_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	// write
-	out, err := memCall(tools.FunctionMemoryWrite, map[string]any{
+	out, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "Auth Decision", "content": "We use JWT, not server sessions. Why: stateless scaling.",
-	}).Execute(ctx, cs)
+	}), cs)
 	if err != nil {
 		t.Fatalf("memory_write: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestMemoryTools_RoundTrip(t *testing.T) {
 	}
 
 	// read
-	body, err := memCall(tools.FunctionMemoryRead, map[string]any{"name": "auth-decision"}).Execute(ctx, cs)
+	body, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "auth-decision"}), cs)
 	if err != nil {
 		t.Fatalf("memory_read: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestMemoryTools_RoundTrip(t *testing.T) {
 	}
 
 	// search (keyword)
-	hits, err := memCall(tools.FunctionMemorySearch, map[string]any{"query": "jwt"}).Execute(ctx, cs)
+	hits, err := tools.Execute(ctx, memCall(tools.FunctionMemorySearch, map[string]any{"query": "jwt"}), cs)
 	if err != nil {
 		t.Fatalf("memory_search: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestMemoryTools_RoundTrip(t *testing.T) {
 	}
 
 	// forget
-	gone, err := memCall(tools.FunctionMemoryForget, map[string]any{"name": "auth-decision"}).Execute(ctx, cs)
+	gone, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "auth-decision"}), cs)
 	if err != nil {
 		t.Fatalf("memory_forget: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestMemoryReadMissingIsObservation(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()}
 	cs.EnableMemory()
 
-	out, err := memCall(tools.FunctionMemoryRead, map[string]any{"name": "nope"}).Execute(context.Background(), cs)
+	out, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryRead, map[string]any{"name": "nope"}), cs)
 	if err != nil {
 		t.Fatalf("missing read should not error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestMemoryReadMissingIsObservation(t *testing.T) {
 // unavailability as a result the model can read — never a fatal error.
 func TestMemoryUnavailableIsObservation(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()} // no EnableMemory → memory == nil
-	out, err := memCall(tools.FunctionMemoryWrite, map[string]any{"name": "x", "content": "y"}).Execute(context.Background(), cs)
+	out, err := tools.Execute(context.Background(), memCall(tools.FunctionMemoryWrite, map[string]any{"name": "x", "content": "y"}), cs)
 	if err != nil {
 		t.Fatalf("unavailable memory should not error: %v", err)
 	}
@@ -139,14 +139,14 @@ func TestMemoryWriteUpdatesNotDuplicates(t *testing.T) {
 	ctx := context.Background()
 
 	w := func(content string) {
-		if _, err := memCall(tools.FunctionMemoryWrite, map[string]any{"name": "db", "content": content}).Execute(ctx, cs); err != nil {
+		if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{"name": "db", "content": content}), cs); err != nil {
 			t.Fatal(err)
 		}
 	}
 	w("first")
 	w("second, corrected")
 
-	body, _ := memCall(tools.FunctionMemoryRead, map[string]any{"name": "db"}).Execute(ctx, cs)
+	body, _ := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "db"}), cs)
 	if !strings.Contains(body, "corrected") || strings.Contains(body, "first") {
 		t.Errorf("update should replace, not append: %q", body)
 	}

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // memory_e2e_test.go is the FAST, model-free end-to-end check of the
@@ -39,9 +39,9 @@ func TestMemoryRecallAcrossSessions(t *testing.T) {
 	// --- session 1: the agent saves a durable, non-re-derivable fact ----------
 	s1 := newMemSession(t)
 	const fact = "We deploy only on Tuesdays — never Fridays (change-freeze policy)."
-	if _, err := memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "deploy-policy", "content": fact,
-	}).Execute(ctx, s1); err != nil {
+	}), s1); err != nil {
 		t.Fatalf("session 1 memory_write: %v", err)
 	}
 
@@ -56,7 +56,7 @@ func TestMemoryRecallAcrossSessions(t *testing.T) {
 	}
 
 	// And reading it back returns the full fact — the recall path end to end.
-	body, err := memCall(tools.FunctionMemoryRead, map[string]any{"name": "deploy-policy"}).Execute(ctx, s2)
+	body, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "deploy-policy"}), s2)
 	if err != nil {
 		t.Fatalf("session 2 memory_read: %v", err)
 	}
@@ -74,23 +74,23 @@ func TestMemoryStaleNoteUpdate(t *testing.T) {
 	ctx := context.Background()
 
 	s1 := newMemSession(t)
-	if _, err := memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "staging-reset", "content": "Staging DB resets nightly at 2am UTC.",
-	}).Execute(ctx, s1); err != nil {
+	}), s1); err != nil {
 		t.Fatal(err)
 	}
 
 	// reality changes; the agent updates the existing note rather than adding one
 	s2 := newMemSession(t)
-	if _, err := memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "staging-reset", "content": "Staging DB resets nightly at 4am UTC (moved from 2am).",
-	}).Execute(ctx, s2); err != nil {
+	}), s2); err != nil {
 		t.Fatal(err)
 	}
 
 	// a fresh session recalls only the corrected value
 	s3 := newMemSession(t)
-	body, err := memCall(tools.FunctionMemoryRead, map[string]any{"name": "staging-reset"}).Execute(ctx, s3)
+	body, err := tools.Execute(ctx, memCall(tools.FunctionMemoryRead, map[string]any{"name": "staging-reset"}), s3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,12 +111,12 @@ func TestMemoryForgetRemovesFromRecall(t *testing.T) {
 	ctx := context.Background()
 
 	s1 := newMemSession(t)
-	if _, err := memCall(tools.FunctionMemoryWrite, map[string]any{
+	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryWrite, map[string]any{
 		"name": "obsolete", "content": "An assumption that later proved wrong.",
-	}).Execute(ctx, s1); err != nil {
+	}), s1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := memCall(tools.FunctionMemoryForget, map[string]any{"name": "obsolete"}).Execute(ctx, s1); err != nil {
+	if _, err := tools.Execute(ctx, memCall(tools.FunctionMemoryForget, map[string]any{"name": "obsolete"}), s1); err != nil {
 		t.Fatal(err)
 	}
 

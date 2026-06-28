@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 func TestNavSeedIncludesGoalPathMap(t *testing.T) {

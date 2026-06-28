@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // loop.go is THE agent engine: one tool-iteration loop (`runLoop`) plus the two
@@ -357,7 +357,7 @@ func (cs *CortexSession) coderDispatcher() AgentDispatcher {
 			return "Error: interrupted by user before this tool ran"
 		}
 		cs.startActivity(call.ActivityLabel())
-		out, err := call.Execute(ctx, cs)
+		out, err := tools.Execute(ctx, call, cs)
 		cs.stopActivity()
 		if err != nil {
 			return "Error: " + err.Error()

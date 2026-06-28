@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // runEdit invokes the edit_file tool with raw JSON args and returns its result.
 func runEdit(args map[string]any) (string, error) {
 	b, _ := json.Marshal(args)
-	return tc(FunctionEditFile, string(b)).Execute(context.Background(), nil)
+	return tools.Execute(context.Background(), tc(FunctionEditFile, string(b)), nil)
 }
 
 func TestEditFileWhitespaceTolerant(t *testing.T) {

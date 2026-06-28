@@ -2,7 +2,7 @@
 // across the loop packages (tools, render, session, main). Centralizing them
 // keeps the color palette and the NO_COLOR convention in one place so the
 // extracted packages don't each re-declare the palette.
-package ui
+package tools
 
 import (
 	"fmt"

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // fakeResp builds a minimal *AgentResponse with one assistant choice.

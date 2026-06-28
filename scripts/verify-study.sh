@@ -122,7 +122,7 @@ present "SubAgentRunner"        'type SubAgentRunner interface'
 present "RunSubagent"           'func .*RunSubagent\('
 present "Study profile var"     'Study = Subagent{'
 # Study toolset MUST be exactly {outline, grep, read_file}: no recursion, no bash.
-study_tools=$(grep -A4 'Study = Subagent{' cmd/loop/tools/tools.go 2>/dev/null | grep -E 'Tools:')
+study_tools=$(grep -A4 'Study = Subagent{' internal/tools/tools.go 2>/dev/null | grep -E 'Tools:')
 if echo "$study_tools" | grep -q 'OutlineTool' && echo "$study_tools" | grep -q 'GrepTool' \
    && echo "$study_tools" | grep -q 'ReadFile' && ! echo "$study_tools" | grep -q 'StudyTool' \
    && ! echo "$study_tools" | grep -q 'Bash'; then
@@ -139,7 +139,10 @@ hdr "5. Package import graph (architecture invariants)"
 ############################################################################
 import_only() { # label  pkg  allowed-internal-prefix
   if ! go list "$2" >/dev/null 2>&1; then skip "$1 (pkg $2 not built yet)"; return; fi
-  local bad; bad=$(go list -deps "$2" 2>/dev/null | grep "^$MOD/" | grep -vE "$3")
+  # `go list -deps X` tautologically includes X itself; a package can't fail to
+  # depend on itself, so exclude it before judging — the check still flags any
+  # OTHER illegal dependency.
+  local bad; bad=$(go list -deps "$2" 2>/dev/null | grep "^$MOD/" | grep -vxF "$2" | grep -vE "$3")
   if [ -z "$bad" ]; then ok "$1"; else no "$1" "illegal deps: $(echo "$bad" | tr '\n' ' ')"; fi
 }
 # internal/agent may only reach pkg/llm (no cortex session / tools-by-name).

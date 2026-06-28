@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
 	"github.com/dereksantos/cortex/internal/projectindex"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // navigator.go is the study tool (study-navigator direction doc): a bounded
@@ -192,7 +192,7 @@ func (cs *CortexSession) runNavTool(ctx context.Context, call ToolCall, depth in
 		}
 		return digest
 	}
-	out, err := clampNavRead(call).Execute(ctx, cs)
+	out, err := tools.Execute(ctx, clampNavRead(call), cs)
 	if err != nil {
 		return "Error: " + err.Error()
 	}

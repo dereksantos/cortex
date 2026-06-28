@@ -21,13 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dereksantos/cortex/cmd/loop/tools"
-	"github.com/dereksantos/cortex/cmd/loop/ui"
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
@@ -301,21 +300,21 @@ const curationBudgetTokens = tools.CurationBudgetTokens
 var thinkingOff = false
 
 // promptGlyph is the input affordance at the end of the status line.
-const promptGlyph = ui.PromptGlyph
+const promptGlyph = tools.PromptGlyph
 
 // Color palette and the NO_COLOR-aware wrapper live in the ui package;
 // aliased here so the many call sites in main.go read unchanged.
 const (
-	red    = ui.Red
-	cyan   = ui.Cyan
-	green  = ui.Green
-	blue   = ui.Blue
-	yellow = ui.Yellow
-	gray   = ui.Gray
-	reset  = ui.Reset
+	red    = tools.Red
+	cyan   = tools.Cyan
+	green  = tools.Green
+	blue   = tools.Blue
+	yellow = tools.Yellow
+	gray   = tools.Gray
+	reset  = tools.Reset
 )
 
-func withColor(v string, c string) string { return ui.Color(v, c) }
+func withColor(v string, c string) string { return tools.Color(v, c) }
 
 // spinnerChars is the sequence of frames for the in-place spinner.
 var spinnerChars = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -1072,10 +1071,10 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 
 // Message source icons for the print gutter — defined in the ui package.
 const (
-	iconCortex  = ui.IconCortex
-	iconTool    = ui.IconTool
-	iconUser    = ui.IconUser
-	iconThought = ui.IconThought
+	iconCortex  = tools.IconCortex
+	iconTool    = tools.IconTool
+	iconUser    = tools.IconUser
+	iconThought = tools.IconThought
 )
 
 // gutter returns the icon and color identifying a message's source.
@@ -2969,7 +2968,7 @@ func runStudyCLI(path, goal string) {
 	session := NewCortexSession()
 	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
-	out, err := call.Study(context.Background(), session)
+	out, err := tools.Execute(context.Background(), call, session)
 	if err != nil {
 		fmt.Println("study error:", err)
 		return

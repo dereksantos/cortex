@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // TestConfinedPath and TestConfinedPathSymlinkEscape moved to cmd/loop/tools,
@@ -16,7 +18,7 @@ func TestRemovePathTool(t *testing.T) {
 	cs := &CortexSession{allowDelete: true, deleteRoot: root}
 	call := func(p string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": p})
-		return tc(FunctionRemove, string(args)).Execute(context.Background(), cs)
+		return tools.Execute(context.Background(), tc(FunctionRemove, string(args)), cs)
 	}
 
 	t.Run("deletes a file in the workspace", func(t *testing.T) {
@@ -59,7 +61,7 @@ func TestRemovePathTool(t *testing.T) {
 	t.Run("disabled session refuses", func(t *testing.T) {
 		off := &CortexSession{allowDelete: false, deleteRoot: root}
 		args, _ := json.Marshal(map[string]string{"path": "x"})
-		if _, err := tc(FunctionRemove, string(args)).Execute(context.Background(), off); err == nil {
+		if _, err := tools.Execute(context.Background(), tc(FunctionRemove, string(args)), off); err == nil {
 			t.Error("disabled remove_path should error")
 		}
 	})

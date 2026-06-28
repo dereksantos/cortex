@@ -13,6 +13,8 @@ import (
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // TestMain disables the self-contained local embedder for the whole package so
@@ -92,7 +94,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("reads existing file", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		got, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), nil)
+		got, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -103,7 +105,7 @@ func TestReadFileTool(t *testing.T) {
 
 	t.Run("missing file errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"path": filepath.Join(dir, "nope.txt")})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), nil); err == nil {
+		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), nil); err == nil {
 			t.Fatal("expected error reading missing file")
 		}
 	})
@@ -114,7 +116,7 @@ func TestWriteFileTool(t *testing.T) {
 	path := filepath.Join(dir, "out.txt")
 	args, _ := json.Marshal(map[string]string{"path": path, "content": "written by cortex"})
 
-	got, err := tc(FunctionWriteFile, string(args)).Execute(context.Background(), nil)
+	got, err := tools.Execute(context.Background(), tc(FunctionWriteFile, string(args)), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestWriteFileTool(t *testing.T) {
 func TestEditFileTool(t *testing.T) {
 	edit := func(path, oldS, newS string) (string, error) {
 		args, _ := json.Marshal(map[string]string{"path": path, "old_string": oldS, "new_string": newS})
-		return tc(FunctionEditFile, string(args)).Execute(context.Background(), nil)
+		return tools.Execute(context.Background(), tc(FunctionEditFile, string(args)), nil)
 	}
 
 	t.Run("unique match is replaced", func(t *testing.T) {
@@ -200,7 +202,7 @@ func TestEditFileTool(t *testing.T) {
 func TestBashTool(t *testing.T) {
 	t.Run("allowlisted command runs", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "echo hello"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -215,7 +217,7 @@ func TestBashTool(t *testing.T) {
 		// blocked and reported back (as a result, not an error) so the model
 		// can adapt.
 		args, _ := json.Marshal(map[string]string{"command": "curl http://example.com"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("gating should not error: %v", err)
 		}
@@ -227,7 +229,7 @@ func TestBashTool(t *testing.T) {
 
 	t.Run("empty command errors", func(t *testing.T) {
 		args, _ := json.Marshal(map[string]string{"command": "   "})
-		if _, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil); err == nil {
+		if _, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil); err == nil {
 			t.Fatal("expected error for empty command")
 		}
 	})
@@ -238,7 +240,7 @@ func TestBashTool(t *testing.T) {
 		// session the study path is unavailable; the old truncation
 		// behavior must hold.
 		args, _ := json.Marshal(map[string]string{"command": "head -c 20000 /dev/zero"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -256,7 +258,7 @@ func TestBashTool(t *testing.T) {
 // (unexported) helpers they cover.
 
 func TestExecuteUnknownTool(t *testing.T) {
-	if _, err := tc("frobnicate", `{}`).Execute(context.Background(), nil); err == nil {
+	if _, err := tools.Execute(context.Background(), tc("frobnicate", `{}`), nil); err == nil {
 		t.Fatal("expected error for unknown tool name")
 	}
 }
@@ -923,7 +925,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		big := filepath.Join(dir, "big.txt")
 		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644) // over the budget
 		args, _ := json.Marshal(map[string]string{"path": big})
-		_, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs)
+		_, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err == nil {
 			t.Fatal("expected size-guard error")
 		}
@@ -940,7 +942,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 			strings.Repeat("x", (curationBudgetTokens+1000)*4) + "\n"
 		os.WriteFile(bigGo, []byte(src), 0644)
 		args, _ := json.Marshal(map[string]string{"path": bigGo})
-		out, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs)
+		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
 		if err != nil {
 			t.Fatalf("Go skeleton path should not error: %v", err)
 		}
@@ -959,7 +961,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		small := filepath.Join(dir, "small.go")
 		os.WriteFile(small, make([]byte, 8000), 0644) // ~2k tokens, well under the budget
 		args, _ := json.Marshal(map[string]string{"path": small})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), cs); err != nil {
+		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs); err != nil {
 			t.Fatalf("under-budget read should succeed: %v", err)
 		}
 	})
@@ -970,7 +972,7 @@ func TestReadFileSizeGuard(t *testing.T) {
 		big := filepath.Join(dir, "big2.txt")
 		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644)
 		args, _ := json.Marshal(map[string]string{"path": big})
-		if _, err := tc(FunctionReadFile, string(args)).Execute(context.Background(), &CortexSession{Window: 1_000_000}); err == nil {
+		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000}); err == nil {
 			t.Error("a huge window must not exempt a large file from curation")
 		}
 	})
@@ -1040,7 +1042,7 @@ func TestParseXMLToolCalls(t *testing.T) {
 	t.Run("parsed call executes through the normal path", func(t *testing.T) {
 		content := "<function=bash>\n<parameter=command>\necho hi\n</parameter>\n</function>"
 		calls := parseXMLToolCalls(content)
-		out, err := calls[0].Execute(context.Background(), nil)
+		out, err := tools.Execute(context.Background(), calls[0], nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1618,7 +1620,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("pipe runs when the gate allows", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo hello | tr a-z A-Z"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1630,7 +1632,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("chaining runs when the gate allows", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo a && echo b"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1643,7 +1645,7 @@ func TestBashShellSyntax(t *testing.T) {
 		t.Chdir(t.TempDir())
 		cs := &CortexSession{classifyShell: stubSafe}
 		args, _ := json.Marshal(map[string]string{"command": "echo x > /etc/cortex-should-never-write"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1655,7 +1657,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("risky command runs after interactive yes", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return true }}
 		args, _ := json.Marshal(map[string]string{"command": "echo confirmed | cat"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1667,7 +1669,7 @@ func TestBashShellSyntax(t *testing.T) {
 	t.Run("risky command refused after interactive no", func(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return false }}
 		args, _ := json.Marshal(map[string]string{"command": "echo nope | cat"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1683,7 +1685,7 @@ func TestBashShellSyntax(t *testing.T) {
 		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
 			confirmRisky: func(string) bool { return true }} // present but ignored when quiet
 		args, _ := json.Marshal(map[string]string{"command": "echo headless | cat"})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), cs)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1707,7 +1709,7 @@ func TestBashHonorsQuotedArgs(t *testing.T) {
 	}
 	for _, cmd := range []string{`grep -n Scroller f.txt`, `grep -n "Scroller" f.txt`} {
 		args, _ := json.Marshal(map[string]string{"command": cmd})
-		got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 		if err != nil {
 			t.Fatalf("%q: unexpected error: %v", cmd, err)
 		}
@@ -1727,7 +1729,7 @@ func TestBashGrepNoMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]string{"command": `grep -n Absent f.txt`})
-	got, err := tc(FunctionBash, string(args)).Execute(context.Background(), nil)
+	got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

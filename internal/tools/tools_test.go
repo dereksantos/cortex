@@ -21,7 +21,7 @@ func TestReadFileRange(t *testing.T) {
 	}
 	read := func(args string) (string, error) {
 		tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: args}}
-		return tc.ReadFile(headlessDeps{})
+		return readFile(tc, headlessDeps{})
 	}
 
 	// Explicit range returns exactly those lines with a header.

@@ -21,9 +21,19 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dereksantos/cortex/cmd/loop/ui"
+	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/projectindex"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+)
+
+// The tool-call vocabulary lives in internal/agent (the leaf the engine and this
+// package share); aliased here so the declarations and dispatch read unchanged.
+// The dependency arrow is internal/tools → internal/agent.
+type (
+	Tool         = agent.Tool
+	ToolFunction = agent.ToolFunction
+	ToolCall     = agent.ToolCall
+	FunctionCall = agent.FunctionCall
 )
 
 // The tool deps are segmented into narrow, consumer-owned role-interfaces
@@ -138,19 +148,6 @@ const (
 	FunctionMemorySearch = "memory_search"
 	FunctionMemoryForget = "memory_forget"
 )
-
-// Tool is the OpenAI-format tool declaration passed in the tools array.
-type Tool struct {
-	Type     string       `json:"type"`
-	Function ToolFunction `json:"function"`
-}
-
-// ToolFunction carries the name, description, and JSON-Schema parameters.
-type ToolFunction struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
 
 // objectSchema builds a JSON Schema "object" with the given properties and
 // required fields. Keeps the tool definitions readable instead of nesting
@@ -307,29 +304,14 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, ProjectIndexTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool}
 
-// --- Wire types ---------------------------------------------------------
-
-// FunctionCall is the function part of a tool call.
-type FunctionCall struct {
-	Name string `json:"name"`
-	// Arguments is a JSON-encoded *string* on the wire (e.g. `{"path":"go.mod"}`),
-	// NOT a JSON object. Parse it with stringArg.
-	Arguments string `json:"arguments"`
-}
-
-// ToolCall is one tool invocation from the model.
-type ToolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function FunctionCall `json:"function"`
-}
-
 // --- Dispatcher ---------------------------------------------------------
 
 // Execute dispatches a tool call. ctx cancels long-running tools (bash, study)
 // on interrupt; deps carries session config (model, endpoint, window) that some
-// tools need — study does; the file tools ignore both.
-func (tc ToolCall) Execute(ctx context.Context, deps ToolDeps) (string, error) {
+// tools need — study does; the file tools ignore both. It is a function (not a
+// method) because ToolCall now lives in internal/agent and methods cannot be
+// added to a type from another package.
+func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// A tool dispatched without a session (tests, non-interactive paths) runs
 	// against the nil-safe headless defaults: the shell gate fails closed, study
 	// is unavailable, delete is disabled. This preserves the old behavior of the
@@ -341,27 +323,27 @@ func (tc ToolCall) Execute(ctx context.Context, deps ToolDeps) (string, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
-		return tc.ReadFile(deps)
+		return readFile(tc, deps)
 	case FunctionWriteFile:
-		return tc.WriteFile()
+		return writeFile(tc)
 	case FunctionEditFile:
-		return tc.EditFile()
+		return editFile(tc)
 	case FunctionStudy:
-		return tc.Study(ctx, deps)
+		return study(ctx, tc, deps)
 	case FunctionProjectIndex:
-		return tc.ProjectIndex()
+		return projectIndex(tc)
 	case FunctionBash:
-		return tc.Bash(ctx, deps)
+		return bash(ctx, tc, deps)
 	case FunctionRemove:
-		return tc.RemovePath(deps)
+		return removePath(tc, deps)
 	case FunctionMemoryWrite:
-		return tc.MemoryWrite(deps)
+		return memoryWrite(tc, deps)
 	case FunctionMemoryRead:
-		return tc.MemoryRead(deps)
+		return memoryRead(tc, deps)
 	case FunctionMemorySearch:
-		return tc.MemorySearch(deps)
+		return memorySearch(tc, deps)
 	case FunctionMemoryForget:
-		return tc.MemoryForget(deps)
+		return memoryForget(tc, deps)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -387,44 +369,11 @@ func printToolAction(action string) {
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
 	}
-	line := ui.Color(ui.IconTool+" "+name, ui.Green)
+	line := Color(IconTool+" "+name, Green)
 	if args != "" {
-		line += ui.Color(args, ui.Gray)
+		line += Color(args, Gray)
 	}
 	fmt.Printf("  %s\n", line)
-}
-
-// StringArg parses Arguments (a JSON string) and pulls out one string field.
-func (tc ToolCall) StringArg(name string) (string, error) {
-	var m map[string]any
-	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
-		if err := json.Unmarshal([]byte(s), &m); err != nil {
-			return "", fmt.Errorf("parse arguments %q: %w", tc.Function.Arguments, err)
-		}
-	}
-	v, ok := m[name].(string)
-	if !ok {
-		return "", fmt.Errorf("missing or non-string arg %q", name)
-	}
-	return v, nil
-}
-
-// IntArg pulls an integer field from Arguments. JSON numbers decode as float64.
-// Returns (0, false) when missing or not a number.
-func (tc ToolCall) IntArg(name string) (int, bool) {
-	var m map[string]any
-	if s := strings.TrimSpace(tc.Function.Arguments); s != "" {
-		if json.Unmarshal([]byte(s), &m) == nil {
-			if v, ok := m[name].(float64); ok {
-				return int(v), true
-			}
-		}
-	}
-	return 0, false
-}
-
-func (tc ToolCall) String() string {
-	return fmt.Sprintf("wants %s %s %s %v", tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
 }
 
 // --- project_index ------------------------------------------------------
@@ -432,7 +381,7 @@ func (tc ToolCall) String() string {
 // ProjectIndex returns the project map — a recursive file tree plus per-file
 // Go symbol inventory — for orientation without reading files. The path arg is
 // optional (default "."); a subdirectory scopes a large repo.
-func (tc ToolCall) ProjectIndex() (string, error) {
+func projectIndex(tc ToolCall) (string, error) {
 	path := "."
 	if p, _ := tc.StringArg("path"); strings.TrimSpace(p) != "" {
 		path = p
@@ -451,7 +400,7 @@ func (tc ToolCall) ProjectIndex() (string, error) {
 // subagent seeded with the structural map + the goal, which reads the relevant
 // regions and returns a digest. (The session implements Navigate in
 // navigator.go.)
-func (tc ToolCall) Study(ctx context.Context, deps ToolDeps) (string, error) {
+func study(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -466,7 +415,7 @@ func (tc ToolCall) Study(ctx context.Context, deps ToolDeps) (string, error) {
 // session-backed store via ToolDeps. The session formats the result (so the
 // tools package needn't import the memory types).
 
-func (tc ToolCall) MemoryWrite(deps ToolDeps) (string, error) {
+func memoryWrite(tc ToolCall, deps ToolDeps) (string, error) {
 	name, err := tc.StringArg("name")
 	if err != nil {
 		return "", err
@@ -479,7 +428,7 @@ func (tc ToolCall) MemoryWrite(deps ToolDeps) (string, error) {
 	return deps.MemoryWrite(name, content)
 }
 
-func (tc ToolCall) MemoryRead(deps ToolDeps) (string, error) {
+func memoryRead(tc ToolCall, deps ToolDeps) (string, error) {
 	name, err := tc.StringArg("name")
 	if err != nil {
 		return "", err
@@ -488,7 +437,7 @@ func (tc ToolCall) MemoryRead(deps ToolDeps) (string, error) {
 	return deps.MemoryRead(name)
 }
 
-func (tc ToolCall) MemorySearch(deps ToolDeps) (string, error) {
+func memorySearch(tc ToolCall, deps ToolDeps) (string, error) {
 	query, err := tc.StringArg("query")
 	if err != nil {
 		return "", err
@@ -497,7 +446,7 @@ func (tc ToolCall) MemorySearch(deps ToolDeps) (string, error) {
 	return deps.MemorySearch(query)
 }
 
-func (tc ToolCall) MemoryForget(deps ToolDeps) (string, error) {
+func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
 	name, err := tc.StringArg("name")
 	if err != nil {
 		return "", err
@@ -518,7 +467,7 @@ const DefaultRangeLines = 200
 // 1–1000000 and pull a whole large file back through the gate it bypassed.
 const MaxRangeLines = 800
 
-func (tc ToolCall) ReadFile(deps ToolDeps) (string, error) {
+func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -531,7 +480,7 @@ func (tc ToolCall) ReadFile(deps ToolDeps) (string, error) {
 		if !hasEnd || end < start {
 			end = start + DefaultRangeLines - 1
 		}
-		return tc.readRange(path, start, end)
+		return readRange(path, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -567,7 +516,7 @@ func (tc ToolCall) ReadFile(deps ToolDeps) (string, error) {
 // sees exactly which lines it got (and a truncation note when the request was
 // clamped). Lines beyond EOF are silently dropped — asking past the end yields
 // what exists, not an error.
-func (tc ToolCall) readRange(path string, start, end int) (string, error) {
+func readRange(path string, start, end int) (string, error) {
 	if end-start+1 > MaxRangeLines {
 		end = start + MaxRangeLines - 1
 	}
@@ -609,7 +558,7 @@ func goFileSkeleton(path string) string {
 
 // --- write_file ---------------------------------------------------------
 
-func (tc ToolCall) WriteFile() (string, error) {
+func writeFile(tc ToolCall) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -641,7 +590,7 @@ type editOp struct {
 // whitespace-tolerant (so a model that mis-indents old_string still lands the
 // edit). replace_all relaxes uniqueness for renames; an `edits` array applies
 // several changes atomically — if any fails the file is left untouched.
-func (tc ToolCall) EditFile() (string, error) {
+func editFile(tc ToolCall) (string, error) {
 	var a struct {
 		Path       string   `json:"path"`
 		OldString  string   `json:"old_string"`
@@ -930,7 +879,7 @@ func jaccard(a, b map[string]bool) float64 {
 // RemovePath deletes a file or directory, confined to the workspace. It is the
 // only deletion path (raw rm is not allowlisted): the confinement — not a
 // human prompt — is the safety property, so the tool stays autonomous.
-func (tc ToolCall) RemovePath(deps ToolDeps) (string, error) {
+func removePath(tc ToolCall, deps ToolDeps) (string, error) {
 	root, allowed := deps.AllowDelete()
 	if !allowed {
 		return "", fmt.Errorf("remove_path is disabled")
@@ -1000,7 +949,7 @@ func confinedPath(root, p string) (string, error) {
 
 // --- bash ---------------------------------------------------------------
 
-func (tc ToolCall) Bash(ctx context.Context, deps ToolDeps) (string, error) {
+func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	command, err := tc.StringArg("command")
 	if err != nil {
 		return "", err
@@ -1162,29 +1111,4 @@ func StripToolMarkup(s string) string {
 	s = strings.ReplaceAll(s, "<tool_call>", "")
 	s = strings.ReplaceAll(s, "</tool_call>", "")
 	return strings.TrimSpace(s)
-}
-
-// ActivityLabel is the concise "tool(arg)" shown on the spinning status row
-// while a tool runs — enough to tell which call is in flight without the full
-// argument dump printToolAction already recorded above.
-func (tc ToolCall) ActivityLabel() string {
-	name := tc.Function.Name
-	if p, err := tc.StringArg("path"); err == nil && p != "" {
-		return name + "(" + p + ")"
-	}
-	if c, err := tc.StringArg("command"); err == nil && c != "" {
-		first := firstLine(c)
-		if len(first) > 40 {
-			first = first[:40] + "…"
-		}
-		return name + "(" + first + ")"
-	}
-	return name
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
 }
