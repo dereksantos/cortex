@@ -113,6 +113,12 @@ const noProgressNudge = "Harness note: that tool call was byte-identical to the 
 // rather than nothing.
 const finalizePrompt = "You've reached the limit for this turn. Stop calling tools and answer now from what you've already gathered; be concise."
 
+// reFinalizePrompt is the salvage ask when the first finalize came back EMPTY — a
+// reasoning model that spent its whole completion budget deliberating and emitted
+// no answer (the max-tokens-clamp signature). It re-asks with a hard brevity floor
+// so the model spends its budget on the answer, not the deliberation.
+const reFinalizePrompt = "Your previous reply was empty — you spent the whole budget thinking and never answered. You already have everything you need. Do NOT deliberate further: state the answer NOW, directly, in at most five sentences."
+
 // runLoop is THE engine. It iterates send → dispatch → re-send until the model
 // answers with no tool calls (clean finalize) or a bound trips, then finalizes
 // with tools withheld. The variation between callers is the Sender + Toolset
@@ -250,7 +256,27 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *lo
 	accountUsage(stats, res, req.MaxTokens)
 	msg := res.Choices[0].Message
 	appendMsg(msg)
-	return strings.TrimSpace(msg.Content), *stats, nil
+	answer := strings.TrimSpace(msg.Content)
+	// Spiral salvage: a reasoning model can burn its whole completion budget on
+	// thinking and return an EMPTY answer (the max-tokens clamp). That's the lone
+	// failure mode left on the slow probes — a healthy finalize always returns
+	// prose, so this retry can only fire on the empty-clamp signature and never
+	// touches a passing run. Re-ask ONCE with a hard brevity floor; keep tools
+	// withheld and grounding intact.
+	if answer == "" && stats.MaxTokensClamped {
+		appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
+		res2, _, err2 := send.Send(ctx, req)
+		if err2 == nil && res2 != nil && len(res2.Choices) > 0 {
+			accountUsage(stats, res2, req.MaxTokens)
+			msg2 := res2.Choices[0].Message
+			appendMsg(msg2)
+			if a2 := strings.TrimSpace(msg2.Content); a2 != "" {
+				stats.StopReason = "salvaged-finalize"
+				answer = a2
+			}
+		}
+	}
+	return answer, *stats, nil
 }
 
 // accountUsage folds one response's token usage into the run stats, tracking the

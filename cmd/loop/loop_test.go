@@ -261,6 +261,71 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 	})
 }
 
+// TestRunLoopSalvagesEmptyClampedFinalize locks the spiral-salvage fix: when the
+// forced finalize returns EMPTY because the model burned its whole completion
+// budget thinking (the max-tokens clamp), the engine re-asks ONCE with a hard
+// brevity floor and returns the salvaged answer — the dodge for a reasoning model
+// (north) that over-deliberates a finalize and emits no prose. A non-empty first
+// finalize must NOT trigger the retry (the gate stays off for healthy runs).
+func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
+	t.Run("empty clamped finalize is salvaged", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // a finalize round (tools withheld)
+				finalizes++
+				if finalizes == 1 {
+					return fakeResp("", nil, 1, 100), false, nil // clamp: out == MaxTokens, empty
+				}
+				return fakeResp("salvaged answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "salvaged answer" {
+			t.Errorf("content = %q, want salvaged answer", content)
+		}
+		if stats.StopReason != "salvaged-finalize" {
+			t.Errorf("stop = %q, want salvaged-finalize", stats.StopReason)
+		}
+		if finalizes != 2 {
+			t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
+		}
+	})
+	t.Run("non-empty finalize does not retry", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizes++
+				return fakeResp("clean answer", nil, 1, 100), false, nil // clamp but NON-empty
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, _, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "clean answer" {
+			t.Errorf("content = %q, want clean answer", content)
+		}
+		if finalizes != 1 {
+			t.Errorf("finalize calls = %d, want 1 (no salvage on non-empty)", finalizes)
+		}
+	})
+}
+
 // TestRunLoopBlockingSubagentPath proves the subagent path with no second real
 // caller: runLoop driven by the real blockingSender over an httptest server (no
 // model) runs a 2-round tool loop, accounts tokens, drives the Progress sink,
