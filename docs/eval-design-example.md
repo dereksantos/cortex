@@ -61,20 +61,22 @@ layers are fully green.
                        Δ structural        ø behavioral
    phase              (verify-study.sh)   (live study-eval)
    ─────────────────  ─────────────────   ─────────────────
-   start (today)      ▓░░░░░  5/40        ░  absent
-   engine 0..2        ▓▓▓░░░  seams up    ░  absent
-   engine 3           ▓▓▓▓░░  agent pkg   ░  absent
-   study 1..3         ▓▓▓▓▓░  primitives  ░  absent
-   study 4  ◄──────── ▓▓▓▓▓▓  deletions   ▒  comes ONLINE (RunSubagent exists)
-   study 5            ▓▓▓▓▓▓  green        ▓  goal-hit scored
+   start (today)      ▓░░░░░  7/45        █  green (old nav, 3/3 thinking-ON)
+   engine 0..2        ▓▓▓░░░  seams up    █  green (navigator untouched)
+   engine 3           ▓▓▓▓░░  agent pkg   █  green (navigator untouched)
+   study 1..3         ▓▓▓▓▓░  primitives  █  green (navigator untouched)
+   study 4  ◄──────── ▓▓▓▓▓▓  deletions   ░  ABSENT (nav + old driver deleted)
+   study 5            ▓▓▓▓▓▓  green        ▓  driver rebuilt on RunSubagent
    study 6 (docs)     ██████  GREEN        █  GREEN   ──►  PAUSE ✓
                           Δ ✓                  ø ✓
 ```
 
-Key fact: **ø cannot light up before study phase 4** — there is no
-`RunSubagent` to drive until then. So `ø` is legitimately *absent* (not failing)
-early, then flips on and must reach green. Δ grows monotonically from 5/40
-toward 40/40.
+Key facts: Δ grows monotonically from 7/45 toward all-green. ø is **green today**
+on the working old navigator (the flight-check baseline), stays green through
+Part 1 (the engine work must not change navigator behavior), then goes **absent
+at study phase 4** when the navigator + its eval driver are deleted, and must
+**return to green at phase 5** once the driver is rebuilt on `RunSubagent`. The
+pause is earned only when both are green at the end.
 
 ## The brief
 
@@ -116,12 +118,16 @@ named here** — it lives only in the untracked user config (`~/.cortex/config.j
   `xlam-1b-fc-r`, `embedder`, `reranker` (and variants).
 - **`north` is a reasoning model** (returns `reasoning_content`); a bare
   round-trip answered in ~0.4s.
-- **ø flight result.** `loop study-eval` on `north` over the current
-  (pre-refactor) navigator path: **pass 2/3, median ~17.8s, 0 errors → exit 1.**
-  This confirms ø is wired as a HARD gate (anything below 100% exits non-zero)
-  and is correctly RED before the work lands. The one failing probe (main.go
-  dispatch) returned a thin ~156-char digest — a study-model quality signal,
-  not a harness bug.
+- **ø flight result.** `loop study-eval` on `north` with study deliberating
+  (thinking ON), over the current pre-refactor navigator path: **pass 3/3,
+  median ~33s, 0 errors → exit 0.** With thinking forced OFF it was 2/3 — the
+  main.go probe returned a thin ~156-char digest; enabling reasoning lifted it
+  to a full pass (4.8k-char digest, goal-hit 2/2) at ~2× latency. This is the
+  empirical refutation of the old "thinking-off for study" claim, and confirms
+  ø-green is reachable on a working study impl. The T gate still holds (2/3 ⇒
+  exit 1, 3/3 ⇒ exit 0). Note this exercises the OLD navigator; study phase 4
+  deletes it and phase 5 rebuilds the driver on `RunSubagent`, so ø goes absent
+  then must return to green there.
 - **Study runs on the reasoner, thinking ON.** `study` draws from the `reasoner`
   tag (flight check: bound to `north`). The flight check confirms a reasoner
   uses tools — `north` called `read_file` across all three probes — so study
