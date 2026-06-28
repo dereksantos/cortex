@@ -89,14 +89,29 @@ type Toolset struct {
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
-// Wall-clock time is bounded WITHOUT a hard whole-run timer: the Sender applies
-// a per-request deadline (one hung model call can't run forever) and MaxIter
-// caps the rounds, so worst-case time ≈ MaxIter × per-request deadline. A hard
-// MaxWall was rejected (see the decisions log): cancelling the run's context
-// guillotines a nearly-done study mid-call and leaves no live context to run
-// finalize on. Revisit a SOFT between-iterations wall only if rounds×deadline
-// proves too loose in practice.
+// THREE mandatory caps — no request is EVER unbounded:
+//   - MaxTokens: a finite per-request completion cap, ALWAYS set (by requestFor).
+//     This is the PRIMARY runaway backstop — the one thing that holds when
+//     cancellation fails. Hit live 2026-06-28: a study request to north with no
+//     max_tokens ran away to 124K tokens / ~30 min / 388 W, pinning the single
+//     --parallel 1 CUDA slot, because LiteLLM did not propagate the client
+//     disconnect upstream (client gone from :4000, LiteLLM still held :8090 open).
+//     Never omit it; pick a task-fit ceiling (e.g. 8–16K), not the model max.
+//     See the LiteLLM-disconnect gotcha in CLAUDE.md.
+//   - MaxIter: caps the rounds.
+//   - ReadBudgetBytes: caps accumulated tool output.
+// Wall-clock is bounded WITHOUT a hard whole-run timer: the Sender STREAMS every
+// interruptible call and applies a per-request deadline, propagating ctx-cancel by
+// closing the connection (a closed client socket is how llama-server aborts a
+// slot; a non-streamed call is effectively uncancellable — the server can't notice
+// the client left until it tries to write). worst-case time ≈ MaxIter ×
+// per-request deadline. A hard MaxWall was rejected (see the decisions log):
+// cancelling the run's context guillotines a nearly-done study mid-call and leaves
+// no live context to run finalize on. Because LiteLLM's disconnect propagation is
+// unreliable, MaxTokens + the per-request deadline are the REAL safety net — never
+// rely on abort-propagation alone.
 type Bounds struct {
+	MaxTokens       int
 	MaxIter         int
 	ReadBudgetBytes int
 }
@@ -112,6 +127,9 @@ func runLoop(ctx context.Context, send Sender, req *Request, ts Toolset, b Bound
 // requestFor assembles a model request from a spec — a plain function (building a
 // struct is not a behavior). The single place model/base/key/template-kwargs are
 // set, replacing the duplication across runNavigator + the main request build.
+// MUST set a finite max_tokens on EVERY request (from Bounds.MaxTokens / a role
+// cap) and mark it streamed — being the single build site is exactly what makes
+// "no request is ever unbounded or uncancellable" enforceable in one place.
 func requestFor(spec ModelSpec, system, seed string, tools []Tool) *Request
 ```
 
@@ -275,6 +293,13 @@ in study-subagent.md phase 4, not here.**
   is untouched here — if those numbers move, something leaked).
 - **Existence:** `runLoop`, `Sender`, `AgentDispatcher`, `Toolset`,
   `Bounds`, `Progress`, `requestFor` exist (script §2).
+- **No unbounded request (the runaway tripwire):** every model request carries a
+  finite `max_tokens` and is streamed. Assert `requestFor` sets `MaxTokens` (no
+  request path omits it), `Bounds` has a `MaxTokens` field, and the interruptible
+  `Sender` streams + builds its HTTP request with the call `ctx`
+  (`http.NewRequestWithContext`) so cancel closes the socket. A test fires a
+  `SenderFunc` whose request is missing `max_tokens` / is non-streamed and asserts
+  the engine rejects it. This is the regression guard for the 2026-06-28 runaway.
 - **Import graph:** `internal/agent` imports only `pkg/llm` — no
   cortex-session/tools-by-name (`go list -deps`; script §5).
 - **Topology (post-phase-3):** `cmd/loop` has **no sub-packages** (it is `package
@@ -360,3 +385,21 @@ _Append-only. Every choice gets a dated line so the rationale doesn't evaporate.
   between-iterations wall only if that bound proves too loose in practice.
 - **2026-06-27** The no-progress nudge is engine-level (all callers), not a
   main-loop special case.
+- **2026-06-28** **`Bounds.MaxTokens` is mandatory; every request is streamed +
+  ctx-cancellable. (Promoted from nice-to-have after a live runaway.)** A study
+  request to `north` with no `max_tokens` ran away to 124K tokens / ~30 min /
+  388 W, pinning the single CUDA slot — and could not be cancelled because LiteLLM
+  did not propagate the killed client's disconnect to llama-server (client gone
+  from `:4000`, LiteLLM still holding `:8090`). The old design let this happen
+  repeatedly; the new design must not. Requirements the engine MUST enforce:
+  (1) **`requestFor` always sets a finite `max_tokens`** (`Bounds.MaxTokens`, a
+  task-fit ceiling, never the model max) — the primary backstop, the only thing
+  that holds when cancel fails; (2) **every interruptible call is streamed** and
+  the `Sender` uses `http.NewRequestWithContext` so a cancelled `ctx` closes the
+  socket (a closed socket is the *only* cancel signal in this stack — there is no
+  per-request cancel API in OpenAI proto / LiteLLM / llama-server; a non-streamed
+  call is uncancellable); (3) a **client-side per-request deadline** as a second
+  backstop. Because LiteLLM's disconnect propagation is unreliable, (1)+(3) are
+  the real safety net — don't trust abort-propagation. Optional: bypass LiteLLM
+  (hit llama-server `:8090`/`:8080` directly) for reliably-cancellable chat. Full
+  autopsy + ops mitigations live in CLAUDE.md.
