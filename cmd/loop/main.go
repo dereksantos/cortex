@@ -116,6 +116,21 @@ const maxRepeatedToolCalls = 3
 // in the tools package; aliased here for the references in main.go.
 const maxToolOutput = tools.MaxToolOutput
 
+const (
+	// codeMaxOutputTokens / studyMaxOutputTokens cap each loop's per-turn OUTPUT
+	// (completion) tokens. north (Cohere North-Mini-Code) supports 64K output over
+	// a 256K context; one agentic turn needs far less. An explicit max_tokens is
+	// the ONLY thing that bounds a runaway: unset, llama-server uses n_predict=-1,
+	// and north's --context-shift means even the 256K window isn't a hard stop — a
+	// request ran to 124K tokens / ~30min and pinned the slot (2026-06-28, see
+	// CLAUDE.md). Override per role via config models.<role>.max_tokens.
+	codeMaxOutputTokens  = 16384
+	studyMaxOutputTokens = 8192
+	// defaultAgentMaxTokens backstops any AgentRequest whose cap is unset, so no
+	// wire request is ever unbounded even if a construction site forgets.
+	defaultAgentMaxTokens = codeMaxOutputTokens
+)
+
 // requestTimeout caps one model call end-to-end. Local generation can be slow,
 // so it's generous — Ctrl-C is the interactive escape hatch; this catches a
 // server that accepted the request and will never answer.
@@ -373,6 +388,10 @@ type AgentRequest struct {
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	Tools       []Tool    `json:"tools,omitempty"`
+	// MaxTokens caps OUTPUT (completion) tokens per request — the runaway backstop
+	// (see codeMaxOutputTokens). Forced positive on every wire payload via
+	// applyOutputCap, so a request can never be sent unbounded.
+	MaxTokens int `json:"max_tokens,omitempty"`
 	// ChatTemplateKwargs passes variables to the server-side chat template
 	// (llama.cpp via LiteLLM honors it; unknown variables are ignored). Used to
 	// disable built-in reasoning on hybrid thinking models — see
@@ -543,11 +562,21 @@ var httpClient = &http.Client{Timeout: requestTimeout}
 // Send runs one model call with bounded retry. Transient failures (transport
 // errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything
 // else — including a canceled ctx — returns immediately.
+// applyOutputCap forces a positive max_tokens, so no request is ever sent
+// unbounded — the last line of defense behind the per-role caps. Called on the
+// wire-payload copy in Send/SendStream.
+func (r *AgentRequest) applyOutputCap() {
+	if r.MaxTokens <= 0 {
+		r.MaxTokens = defaultAgentMaxTokens
+	}
+}
+
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	// Marshal a shallow copy with composed wire messages, so a per-turn
 	// ephemeral note reaches the model without mutating stored Messages.
 	payload := *r
 	payload.Messages = r.wireMessages()
+	payload.applyOutputCap()
 	applyPromptCache(payload.Messages, r.Model)
 	b, err := json.Marshal(&payload)
 	if err != nil {
@@ -628,6 +657,7 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
+	payload.applyOutputCap()
 	applyPromptCache(payload.Messages, r.Model)
 	payload.Stream = true
 	payload.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -1094,6 +1124,7 @@ func (a CortexArgs) Request() *AgentRequest {
 		Messages:    messages,
 		Temperature: 0,
 		Tools:       toolSet,
+		MaxTokens:   codeMaxOutputTokens, // session init overrides from config; never unbounded
 	}
 }
 
@@ -1222,6 +1253,7 @@ type ModelSpec struct {
 	Endpoint   string `json:"endpoint"`
 	Model      string `json:"model"`
 	Window     int    `json:"window"`      // context window in tokens
+	MaxTokens  int    `json:"max_tokens"`  // optional per-role OUTPUT cap; 0 → role default
 	KeyEnv     string `json:"key_env"`     // env var holding the API key (generic); wins over KeyService
 	KeyService string `json:"key_service"` // keychain service name for the API key, or ""
 	// Thinking controls built-in reasoning on hybrid thinking models (e.g. the
@@ -1229,6 +1261,15 @@ type ModelSpec struct {
 	// chat_template_kwargs{enable_thinking:false}; nil/true → the model's
 	// template default applies.
 	Thinking *bool `json:"thinking"`
+}
+
+// maxOut returns this role's per-call OUTPUT cap: the config override when set,
+// otherwise def (the role's codeMaxOutputTokens / studyMaxOutputTokens default).
+func (s ModelSpec) maxOut(def int) int {
+	if s.MaxTokens > 0 {
+		return s.MaxTokens
+	}
+	return def
 }
 
 // TemplateKwargs returns the chat-template variables to send for this binding:
@@ -1713,6 +1754,7 @@ func NewCortexSession() *CortexSession {
 	req.BaseURL = code.Endpoint
 	req.APIKey = resolveKey(code)
 	req.ChatTemplateKwargs = code.TemplateKwargs()
+	req.MaxTokens = code.maxOut(codeMaxOutputTokens) // bound output; config can override per role
 
 	// OpenRouter returns per-call dollar cost when asked; opt in so the gauge can
 	// show spend. Gated to OpenRouter — local backends don't grok this field.
@@ -2145,6 +2187,7 @@ func (cs *CortexSession) Clear() {
 	cs.Request.BaseURL = old.BaseURL
 	cs.Request.APIKey = old.APIKey
 	cs.Request.ChatTemplateKwargs = old.ChatTemplateKwargs
+	cs.Request.MaxTokens = old.MaxTokens // preserve any config-overridden output cap
 	cs.LastPromptTokens = 0
 	cs.StartTranscript()
 }

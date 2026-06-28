@@ -92,6 +92,7 @@ func (cs *CortexSession) runNavigator(ctx context.Context, path, goal string, de
 		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
 		Temperature:        0,
+		MaxTokens:          cs.Study.maxOut(studyMaxOutputTokens), // bound output; never unbounded
 		Tools:              navTools,
 		Messages: []Message{
 			{Role: RoleSystem, Content: navigatorSystem},
