@@ -98,6 +98,13 @@ func runStudyEvalNav() {
 	fmt.Printf("\n--- study acceptance (model: %s, n=%d/case, %d cases) ---\n",
 		session.Study.Model, reps, len(navEvalCases))
 	fmt.Printf("pass %d/%d   median latency %.1fs   errors %d\n", passes, total, median(lat), errs)
+
+	// The T gate: this eval is a hard red/green check, not a report. Green only
+	// when every probe passes (goal-hit 100% at the configured reps) with no
+	// errors — so an autonomous run reads pass/fail straight from the exit code.
+	if errs > 0 || passes != total {
+		os.Exit(1)
+	}
 }
 
 func median(xs []float64) float64 {

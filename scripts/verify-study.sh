@@ -53,6 +53,11 @@ present_in() { # label  path  regex
   if [ -d "$2" ] && grep -rEl --include='*.go' "$3" "$2" 2>/dev/null | grep -qv '_test\.go'; then
     ok "$1"; else no "$1" "expected '$3' under $2"; fi
 }
+# --- present_test: pattern MUST appear in a _test.go (the eval-first checks) ---
+present_test() { # label  regex
+  if grep -rEl --include='*_test.go' "$2" . 2>/dev/null | grep -v '/vendor/' | grep -q .; then
+    ok "$1"; else no "$1" "expected '$2' in a _test.go"; fi
+}
 
 ############################################################################
 hdr "1. Deletions — the old navigator + project_index must be GONE (→ 0 refs)"
@@ -81,6 +86,10 @@ present "Bounds"                'type Bounds struct'
 present "Progress sink"         'type Progress func'
 present "requestFor builder"    'func requestFor\('
 file_present internal/agent     # phase 3: engine moved to its own package
+# Eval-first: the behavior-preservation characterization test must exist BEFORE
+# the Resolve→Turn fold (it records the coder loop's message/dispatch/stop
+# sequence against today's behavior and must stay green through the fold).
+present_test "characterization test (locks coder-loop behavior)" 'func TestCoderLoopCharacterization\('
 
 ############################################################################
 hdr "3. Study primitives — outline / grep / targeted+confined read"
@@ -132,10 +141,14 @@ import_only "internal/agent → pkg/llm only" "$MOD/internal/agent" "^$MOD/pkg/l
 import_only "internal/outline imports no cmd/loop" "$MOD/internal/outline" "^$MOD/(internal/.*|pkg/.*)$"
 
 ############################################################################
-hdr "6. Build / vet / tests (the green-at-every-phase invariant)"
+hdr "6. Build / vet / tests + eval gate (the green-at-every-phase invariant)"
 ############################################################################
 if go build ./... >/dev/null 2>&1; then ok "go build ./..."; else no "go build ./..." "see: go build ./..."; fi
 if go vet ./...   >/dev/null 2>&1; then ok "go vet ./...";   else no "go vet ./..."   "see: go vet ./...";   fi
+if go test ./...  >/dev/null 2>&1; then ok "go test ./...";  else no "go test ./..."  "see: go test ./...";  fi
+# ø is a HARD gate, not a report: study-eval must pin T (every probe passes) and
+# exit non-zero otherwise, so an autonomous run reads pass/fail from the exit code.
+present "study-eval pins T (all probes pass)" 'passes != total'
 
 ############################################################################
 if [ -n "$DIFF_BASE" ]; then
