@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 // study_eval is the ø layer of the verification gate (docs/eval-design-example.md):
@@ -153,7 +155,8 @@ func runStudyEvalNav() {
 			row := studyEvalRow{Path: p.Path, Goal: p.Goal, Model: session.Study.Model, Rep: rep, GoldNeed: p.need(), Note: p.Note}
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-			digest, err := session.runNavigator(ctx, p.Path, p.Goal, 0)
+			ol, _ := session.Outline(p.Path, tools.StudySeedBudget)
+			digest, _, err := session.runSubagentStats(ctx, tools.Study, tools.StudySeed(p.Goal, p.Path, ol))
 			cancel()
 			row.LatencyMS = time.Since(start).Milliseconds()
 			if err != nil {

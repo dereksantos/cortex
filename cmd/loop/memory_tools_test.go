@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dereksantos/cortex/internal/projectindex"
+	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -179,14 +179,14 @@ func TestStudyJournalPathNavigable(t *testing.T) {
 	}
 	t.Chdir(root)
 
-	ix, err := projectindex.Build(filepath.Join(".cortex", "journal"))
+	rendered, err := outline.Render(filepath.Join(".cortex", "journal"), 4000)
 	if err != nil {
-		t.Fatalf("project_index on .cortex/journal: %v", err)
+		t.Fatalf("outline on .cortex/journal: %v", err)
 	}
-	if len(ix.Files) == 0 {
+	if strings.TrimSpace(rendered) == "" {
 		t.Fatal("journal map is empty — .cortex/journal was self-excluded, so study(journal) can't navigate it")
 	}
-	if !strings.Contains(ix.Render(), "20260626T000000Z.jsonl") {
-		t.Errorf("journal segment missing from the map:\n%s", ix.Render())
+	if !strings.Contains(rendered, "20260626T000000Z.jsonl") {
+		t.Errorf("journal segment missing from the map:\n%s", rendered)
 	}
 }

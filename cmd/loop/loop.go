@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -15,10 +16,10 @@ import (
 // subagent (study, …) run on this one function; the only variation is the seams
 // they pass. See docs/engine-unification.md.
 //
-// The coder turn (`Turn`) runs on this engine; `runNavigator` is the last
-// remaining second loop and is deleted (not refactored) when the study subagent
-// lands (study-subagent.md phase 4). Phase 3 moves the engine + shared data
-// types into internal/agent.
+// Both callers run on this one engine: the coder turn (`Turn`) and the study
+// subagent (`RunSubagent`, study.go). The old second loop (the navigator) is
+// gone. The tool-call vocabulary lives in internal/agent; the engine itself
+// stays in package main (it composes the session-built seams).
 
 // Sender performs one model round-trip — the seam that makes runLoop testable
 // and lets the coder stream while a subagent blocks. streamed reports whether
@@ -61,19 +62,9 @@ type Toolset struct {
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
-// THREE mandatory caps — no request is EVER unbounded:
-//   - MaxTokens: a finite per-request completion cap, stamped onto the request
-//     (the single source of truth, subsuming the old per-payload output-cap
-//     helper that this refactor deleted). The
-//     primary runaway backstop — the one thing that holds when cancellation
-//     fails (see the 2026-06-28 north runaway in docs/engine-unification.md).
-//   - MaxIter: caps the rounds.
-//   - ReadBudgetBytes: caps accumulated tool output (0 = unbounded, the coder).
-type Bounds struct {
-	MaxTokens       int
-	MaxIter         int
-	ReadBudgetBytes int
-}
+// Defined in internal/agent so a Subagent profile (internal/tools) can carry one;
+// aliased here so the engine reads unchanged.
+type Bounds = agent.Bounds
 
 // Progress is an optional per-tool-call breadcrumb sink. The REPL wires it so a
 // blocking subagent (study) still shows what it's doing; headless and tests

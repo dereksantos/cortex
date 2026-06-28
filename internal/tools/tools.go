@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
-	"github.com/dereksantos/cortex/internal/projectindex"
+	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 )
 
@@ -64,10 +64,16 @@ type Summarizer interface {
 	Summarize(ctx context.Context, path, goal string, window int) (digest string, compressed bool, err error)
 }
 
-// Navigator runs the map-first study over a path (today's study tool). Replaced
-// by SubAgentRunner.RunSubagent when the navigator is deleted (study phase 4).
-type Navigator interface {
-	Navigate(ctx context.Context, path, goal string) (digest string, err error)
+// Outliner renders the structural map of a path (the study tool's seed + the
+// outline tool). Satisfied by *CortexSession via internal/outline.
+type Outliner interface {
+	Outline(path string, budget int) (rendered string, err error)
+}
+
+// SubAgentRunner runs a Subagent profile on the shared engine. Satisfied by
+// *CortexSession (RunSubagent). The study tool is the only caller today.
+type SubAgentRunner interface {
+	RunSubagent(ctx context.Context, sa Subagent, seed string) (digest string, err error)
 }
 
 // ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means the
@@ -83,12 +89,14 @@ type DeleteGate interface {
 }
 
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
-// by embedding, not hand-listed. A pure tool (read_file body, edit_file) takes
-// none of these; a memory tool depends only on MemoryStore.
+// by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
+// outline) takes none of these; a memory tool depends only on MemoryStore; the
+// study tool needs Outliner (to seed) + SubAgentRunner (to run).
 type ToolDeps interface {
 	MemoryStore
 	Summarizer
-	Navigator
+	Outliner
+	SubAgentRunner
 	ShellGate
 	DeleteGate
 	// Quiet reports whether terminal emission is suppressed (headless mode).
@@ -102,7 +110,10 @@ type ToolDeps interface {
 // delete is disabled.
 type headlessDeps struct{}
 
-func (headlessDeps) Navigate(context.Context, string, string) (string, error) {
+func (headlessDeps) Outline(string, int) (string, error) {
+	return "", errors.New("outline unavailable: no session")
+}
+func (headlessDeps) RunSubagent(context.Context, Subagent, string) (string, error) {
 	return "", errors.New("study unavailable: no session")
 }
 func (headlessDeps) Summarize(context.Context, string, string, int) (string, bool, error) {
@@ -142,7 +153,7 @@ const (
 	FunctionStudy        = "study"
 	FunctionBash         = "bash"
 	FunctionRemove       = "remove_path"
-	FunctionProjectIndex = "project_index"
+	FunctionOutline      = "outline"
 	FunctionMemoryWrite  = "memory_write"
 	FunctionMemoryRead   = "memory_read"
 	FunctionMemorySearch = "memory_search"
@@ -236,17 +247,17 @@ var StudyTool = newTool(FunctionStudy,
 		"goal": stringProp("What you want to learn — the subagent reads the parts relevant to this and answers it."),
 	}, "path"))
 
-var ProjectIndexTool = newTool(FunctionProjectIndex,
-	"Map a project or file structurally without reading contents. On a directory: "+
-		"a recursive file tree plus per-file funcs and types with line numbers (Go). "+
-		"On a single file: its full declaration skeleton — every top-level func, "+
-		"type, const, and var in file order with line numbers — the fastest way to "+
-		"see a file's seams before editing it. Cheap, high-signal orientation; call "+
-		"it first. Respects .gitignore and skips vendor/build dirs and secrets. Pass "+
-		"a subdirectory to scope a large repo.",
+var OutlineTool = newTool(FunctionOutline,
+	"Map a path structurally without reading its contents, filled breadth-first to "+
+		"a token budget. A directory lists its files/subdirs; a file lists its "+
+		"top-level units (funcs, types, sections) each with a line span — so you can "+
+		"read_file exactly the part you need. Cheap, high-signal orientation; outline "+
+		"a path before reading it. Respects .gitignore and skips vendor/build dirs "+
+		"and secrets.",
 	objectSchema(map[string]any{
-		"path": stringProp("Directory or file to index, relative to the working directory. A directory gives the tree+symbols map; a file gives its full declaration skeleton. Default: the whole project ('.')."),
-	}))
+		"path":   stringProp("Directory or file to outline, relative to the working directory. Default: the whole project ('.')."),
+		"budget": map[string]any{"type": "integer", "description": "Optional token budget for how much structure to expand (default a few thousand). A bigger budget expands more files/subdirs."},
+	}, "path"))
 
 var Bash = newTool(FunctionBash,
 	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit.",
@@ -300,9 +311,23 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 		"name": stringProp("The note's name, as shown in the memory index."),
 	}, "name"))
 
-// All is the full tool set, in declaration order.
-var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, ProjectIndexTool, Bash, RemoveTool,
+// All is the coder's full tool set, in declaration order. project_index is gone
+// — outline (the structural map) and grep (the content locator) replace it.
+var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool}
+
+// Study is the one subagent profile today (the profile shape + runner live in
+// study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
+// no study (no recursion), no memory_write (writing notes is the coder's job, not
+// a read-only researcher's). MaxTokens is mandatory (the runaway backstop); a
+// profile that left it unset would reintroduce the 2026-06-28 north runaway.
+var Study = Subagent{
+	Name:   "study",
+	Role:   "study",
+	System: studySystem,
+	Tools:  []Tool{OutlineTool, GrepTool, ReadFile},
+	Bounds: agent.Bounds{MaxTokens: 12_000, MaxIter: 10, ReadBudgetBytes: 96_000},
+}
 
 // --- Dispatcher ---------------------------------------------------------
 
@@ -330,8 +355,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return editFile(tc)
 	case FunctionStudy:
 		return study(ctx, tc, deps)
-	case FunctionProjectIndex:
-		return projectIndex(tc)
+	case FunctionOutline:
+		return outlineTool(tc)
 	case FunctionGrep:
 		return grep(ctx, tc)
 	case FunctionBash:
@@ -378,37 +403,50 @@ func printToolAction(action string) {
 	fmt.Printf("  %s\n", line)
 }
 
-// --- project_index ------------------------------------------------------
+// --- outline ------------------------------------------------------------
 
-// ProjectIndex returns the project map — a recursive file tree plus per-file
-// Go symbol inventory — for orientation without reading files. The path arg is
-// optional (default "."); a subdirectory scopes a large repo.
-func projectIndex(tc ToolCall) (string, error) {
+// outlineDefaultBudget is the token budget the outline tool uses when the model
+// omits one — a few thousand tokens of structure, enough to orient.
+const outlineDefaultBudget = 4000
+
+// outlineTool renders the structural map of a path (internal/outline). The path
+// arg is optional (default "."); budget controls how much structure to expand.
+func outlineTool(tc ToolCall) (string, error) {
 	path := "."
 	if p, _ := tc.StringArg("path"); strings.TrimSpace(p) != "" {
 		path = p
 	}
-	printToolAction(fmt.Sprintf("project_index(%s)", path))
-	ix, err := projectindex.Build(path)
-	if err != nil {
-		return "", fmt.Errorf("index %s: %w", path, err)
+	budget := outlineDefaultBudget
+	if n, ok := tc.IntArg("budget"); ok && n > 0 {
+		budget = n
 	}
-	return ix.Render(), nil
+	printToolAction(fmt.Sprintf("outline(%s)", path))
+	return outline.Render(path, budget)
 }
 
 // --- study --------------------------------------------------------------
 
-// Study runs the map-first study over a file or directory: a bounded read-only
-// subagent seeded with the structural map + the goal, which reads the relevant
-// regions and returns a digest. (The session implements Navigate in
-// navigator.go.)
+// study is the entry point: seed the subagent with the goal + an outline of the
+// target, then run the Study profile on the shared engine via SubAgentRunner.
+// An empty digest is reported explicitly so the coder never gets a silent "".
 func study(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
 	}
 	goal, _ := tc.StringArg("goal") // optional
-	return deps.Navigate(ctx, path, goal)
+	ol, err := deps.Outline(path, StudySeedBudget)
+	if err != nil {
+		return "", err
+	}
+	digest, err := deps.RunSubagent(ctx, Study, StudySeed(goal, path, ol))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(digest) == "" {
+		return "study produced no digest for " + path, nil
+	}
+	return digest, nil
 }
 
 // --- memory -------------------------------------------------------------
@@ -544,18 +582,18 @@ func readRange(path string, start, end int) (string, error) {
 	return fmt.Sprintf("@%s:%d-%d\n%s", path, start, hi, body), nil
 }
 
-// goFileSkeleton returns the declaration skeleton of a Go file (every top-level
-// func/type/const/var with line numbers), or "" for non-Go or unparseable files
-// — the orientation a too-large read_file hands back in place of the content.
+// goFileSkeleton returns the declaration outline of a Go file (every top-level
+// unit with line spans), or "" for non-Go or unparseable files — the orientation
+// a too-large read_file hands back in place of the content.
 func goFileSkeleton(path string) string {
 	if !strings.HasSuffix(path, ".go") {
 		return ""
 	}
-	ix, err := projectindex.Build(path)
-	if err != nil || len(ix.Files) == 0 || len(ix.Files[0].Symbols) == 0 {
+	skel, err := outline.Render(path, 8000)
+	if err != nil || strings.TrimSpace(skel) == "" {
 		return ""
 	}
-	return ix.Render()
+	return skel
 }
 
 // --- write_file ---------------------------------------------------------

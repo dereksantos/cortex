@@ -94,7 +94,8 @@ const (
 	FunctionStudy        = tools.FunctionStudy
 	FunctionBash         = tools.FunctionBash
 	FunctionRemove       = tools.FunctionRemove
-	FunctionProjectIndex = tools.FunctionProjectIndex
+	FunctionOutline      = tools.FunctionOutline
+	FunctionGrep         = tools.FunctionGrep
 )
 
 const defaultModel = ModelCoder
@@ -507,12 +508,13 @@ type ToolFunction = tools.ToolFunction
 // satisfies each narrow tool role-interface. A missing method fails HERE with a
 // clear location instead of at a distant dispatch call.
 var (
-	_ tools.ToolDeps    = (*CortexSession)(nil)
-	_ tools.MemoryStore = (*CortexSession)(nil)
-	_ tools.Summarizer  = (*CortexSession)(nil)
-	_ tools.Navigator   = (*CortexSession)(nil)
-	_ tools.ShellGate   = (*CortexSession)(nil)
-	_ tools.DeleteGate  = (*CortexSession)(nil)
+	_ tools.ToolDeps       = (*CortexSession)(nil)
+	_ tools.MemoryStore    = (*CortexSession)(nil)
+	_ tools.Summarizer     = (*CortexSession)(nil)
+	_ tools.Outliner       = (*CortexSession)(nil)
+	_ tools.SubAgentRunner = (*CortexSession)(nil)
+	_ tools.ShellGate      = (*CortexSession)(nil)
+	_ tools.DeleteGate     = (*CortexSession)(nil)
 )
 
 // studyFallbackWindow is the conservative window assumed only until a model's
