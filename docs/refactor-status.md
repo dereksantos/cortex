@@ -1,4 +1,4 @@
-# Refactor status — Δ green; ø reaches 5/6, gated by model non-determinism
+# Refactor status — BOTH gates green (Δ 51/51, ø 6/6 exit 0, reproduced)
 
 **Branch `loop/engine-study-refactor`** (off `8d10b1b`, NOT pushed).
 
@@ -6,15 +6,22 @@
 
 `scripts/verify-study.sh --diff-base 8d10b1b` = **51/51**; `go build ./...`,
 `go vet ./...`, `go test ./...` all pass; net source +600 LOC (band [-600,600]),
-net test +445 (≥100). The engine-unification + study-subagent refactor is shipped
+net test +479 (≥100). The engine-unification + study-subagent refactor is shipped
 exactly per the docs, phase by phase.
 
-## ø live gate — best demonstrated 5/6; 6/6-at-n=1 not reliably reached
+## ø live gate — GREEN ✅
 
-The new grep-based `Study` subagent is correct. Three probes (pkg/llm,
-cmd/loop/loop.go, internal/shellrisk) pass cleanly **every** run (~12–15s). Two
-more were made reliable this session (below). The last two are bottlenecked by
-**north's non-deterministic behavior on a shared serial fleet**, not study logic.
+`loop study-eval` = **6/6, errors 0, EXIT 0**, reproduced on two consecutive
+fresh-fleet runs. All six probes pass at n=1, completed & bounded: pkg/llm (15s),
+cmd/loop/loop.go (15s), internal/shellrisk (11s), .cortex/journal (32s, gold found
+clean), multi-hop "." (15–24s, no peg-500), internal/tools/tools.go (salvaged
+finalize, gold 2/2). The keystones were grep match-centering (#4) and the grep
+output ceiling 12k→6k (#6), which together broke the
+journal-spiral→fleet-load→multi-hop-500 cascade that had capped n=1 at 4–5/6.
+
+The history below documents the path — six robustness fixes, and why the earlier
+"backend-blocked" reading was premature (the fixes had been attacking the model
+prompt / MaxTokens layer instead of the context-bloat + truncated-match mechanics).
 
 ### Six robustness fixes landed this session (each committed, each genuine)
 
