@@ -305,6 +305,15 @@ in study-subagent.md phase 4, not here.**
   promptly and the server observes the closed connection). The end-to-end "GPU
   slot frees" is NOT eval-verifiable (it rides LiteLLM's unreliable disconnect
   propagation) — that's an ops check, which is why `max_tokens` is the backstop.
+  **Surfaced as metrics, not just guards:** the engine's usage accounting exposes
+  per-run **`PeakOutputTokens`** (max output on any single request) and
+  **`MaxTokensClamped`** (any request hit `Bounds.MaxTokens`) on the same always-on
+  telemetry record the study eval reads (`StudyEvalResult`, study-subagent.md §5).
+  These are the *measurable* form of the runaway tripwire — a config that wants to
+  run away pins a request at the ceiling *before* it pins a GPU slot — and apply to
+  the coder turn too, the other place a runaway can originate. A coder-turn eval
+  extends the same shape with turn outcomes (edits-applied / build-passes /
+  tests-pass, files-touched, bash calls + risky-gate prompts).
 - **Import graph:** `internal/agent` imports only `pkg/llm` — no
   cortex-session/tools-by-name (`go list -deps`; script §5).
 - **Topology (post-phase-3):** `cmd/loop` has **no sub-packages** (it is `package

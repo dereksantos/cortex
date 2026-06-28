@@ -411,8 +411,9 @@ Build it with **good separation** — four distinct pieces, not one mega-loop:
 ```
 fixture   StudyProbe{ Path, Goal, Gold []string }   — frozen probes + gold facts
 runner    drive RunSubagent → StudyEvalResult        — collect, with instrumentation
-scorers   mechanical: completed / bounded / latency  (free, deterministic)
+scorers   mechanical: stop-reason / bounded / tokens / per-tool / latency  (free, deterministic)
           judge:      goal-hit = fraction of gold present
+          derived:    goal-hit per 1k output tokens; grep-vs-read ratio; rep pass-rate / p95
 reporter  model × probe table
 ```
 
@@ -424,27 +425,78 @@ type StudyProbe struct {
 }
 
 type StudyEvalResult struct {
-	Model     string
-	Probe     string
-	GoalHit   float64 // fraction of Gold present
-	Completed bool    // finished within MaxIter, no hung call
-	Bounded   bool    // peak accumulated read bytes ≤ ReadBudgetBytes
-	ReadBytes int
+	Model string
+	Probe string
+
+	// quality
+	GoalHit float64 // fraction of Gold present in the digest
+
+	// termination — WHY it stopped, not just whether (the diagnostic axis)
+	StopReason     string // clean-finalize|max-iter|read-budget|no-progress|deadline|error
+	Iterations     int    // model rounds consumed
+	FinalizeForced bool   // answered because a bound dragged finalize out, not voluntarily
+
+	// tokens — cumulative across every round-trip (cost + runaway axis)
+	InputTokens      int
+	OutputTokens     int
+	PeakOutputTokens int  // max output on any single request
+	MaxTokensClamped bool // any request hit Bounds.MaxTokens (eval-time runaway tripwire)
+
+	// tools — per-tool, the locate-then-read discriminator
+	Outlines  int
+	Greps     int
 	Reads     int
+	ToolErrs  int  // bad regex, refused/over-budget read, confinement reject, no-progress repeat
+	ReadBytes int  // accumulated tool output
+	Bounded   bool // peak ReadBytes ≤ ReadBudgetBytes
+
 	LatencyMS int64
 }
 ```
 
-- **Ship first** on the existing keyword goal-hit + the new mechanical
-  instrumentation (`completed`/`bounded`/`latency`/`reads` come *free* from the
-  engine's budget accounting). Accept when goal-hit ≥ T and all completed &
-  bounded.
+The fields beyond `GoalHit`/`Bounded`/`ReadBytes`/`Reads`/`LatencyMS` exist
+because the 2026-06-28 flight check proved **goal-hit alone is fooled by a model
+that got the right answer the wrong way** — `north` passed needle/bounded/grounding
+by brute-reading (~800 lines / 4 reads on a single-region goal, 0 greps). Each
+added field discriminates that failure:
+
+- **Per-tool counts (`Outlines`/`Greps`/`Reads`)** measure the redesign's whole
+  thesis directly: a run with 0 greps and 6 reads *is* the brute-read failure even
+  at goal-hit 1.0. The grep-vs-read ratio is the locate-then-read signal.
+- **`StopReason` + `Iterations` + `FinalizeForced`** say *which bound is binding*.
+  If every probe stops at `max-iter`, the budget is too tight or the model greedy —
+  a `Completed` bool can't tell you that, so it replaces it.
+- **`PeakOutputTokens` + `MaxTokensClamped`** are the eval-time form of the north
+  runaway tripwire: a config that *wants* to run away shows up as a request pinned
+  at the `Bounds.MaxTokens` ceiling *before* it pins a GPU slot for 30 min. Ties the
+  eval to the mandatory-`max_tokens` invariant (engine-unification.md).
+- **`InputTokens`/`OutputTokens`** are cumulative cost; the headline efficiency
+  metric is *derived* — **goal-hit per 1k output tokens** — because two models at
+  goal-hit 1.0 are not equal if one spent 5× the tokens (the small-model-amplifier
+  frontier).
+- **`ToolErrs`** counts the thrash modes the design calls out (RE2 compile errors,
+  refused over-budget reads, confinement rejects, no-progress repeats) — turns "it
+  felt slow" into a number. The engine already tracks the repeat counter.
+
+- **Ship first** on the existing keyword goal-hit + the mechanical instrumentation
+  above — `stop-reason`/`bounded`/`latency`/per-tool counts/`tool-errs`/tokens all
+  come *free* from the engine's usage + budget accounting (both loops already
+  account usage; the dispatcher already sees every tool call + error). Accept when
+  goal-hit ≥ T, `StopReason == clean-finalize` (not bound-forced), all `Bounded`,
+  and no `MaxTokensClamped`.
+- **Report reps, not means.** Under `CORTEX_STUDY_REPS` emit per-rep rows and a
+  `k/n` pass-rate + **p50/p95 latency** (not the mean) — the north thrash was a
+  ~15-min *tail* event a mean would launder, and a harness for local models lives
+  or dies on determinism (2/3 ≠ 3/3).
 - **Defer panel-gold.** Vendored snapshot + panel-consensus `Gold` +
   `loop study-eval gold` is its own mini-project — add only if keyword proves
-  coarse.
+  coarse. Likewise **read precision** (useful-bytes ÷ read-bytes) needs gold spans —
+  defer with panel-gold.
 - **Telemetry, always-on.** Emit each study run's `StudyEvalResult`-shaped stats
-  (model/latency/reads/bytes/completed) to the journal in normal operation too,
-  not just under the eval — it feeds debugging and the eval reads the same record.
+  (model/latency/stop-reason/per-tool/tokens/bytes) to the journal in normal
+  operation too, not just under the eval — it feeds debugging and the eval reads the
+  same record. **One shape, emitted every run** — never measure eval-only
+  instrumentation that's absent in production.
 
 ---
 
@@ -530,7 +582,7 @@ green. Flip ☐→☑ on land.
 | 2 | `grep` tool | pure-Go `grepFiles` (walk + `projectscan` ignore + RE2 + caps + ctx-checks); confinement; `GrepTool` decl | unit tests: cap, binary-skip, ignore-set, bad-regex error, escape rejected | ☐ |
 | 3 | targeted + confined `read_file` | `maxReadLines`; `TargetedRead`; `ConfinePath` (allows `.cortex/journal`, blocks escapes) | unit tests: floor, refuse, clamp, abs/`..` rejected, journal allowed | ☐ |
 | 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **retarget the eval driver** — `study_eval.go` already holds the discriminating `StudyProbe` set + `pass()` scorer + per-probe timeout (the old `navEvalCases` were replaced 2026-06-28); when `runNavigator` is deleted here, point `runStudyEvalNav` at `RunSubagent` (phase 5 finishes the scorer wiring). Keep `countGoalHits`/`StudyProbe` | `loop study` works on the new path; old nav code + `projectindex` gone (incl. the test caller); `study_eval.go` calls `RunSubagent`, not `runNavigator`; suite green | ☐ |
-| 5 | eval + telemetry | retarget the driver from `runNavigator` to `RunSubagent` (the discriminating `StudyProbe` set, `pass()` scorer, and per-probe timeout already exist in `study_eval.go`); **wire the `ReadBytes`/`Reads`/`Bounded` scorer from the engine's budget accounting — this is the real discriminator, not optional**; model × probe table; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit **AND `ReadBytes`/`Reads`/`Bounded` per probe**, all probes pass & bounded across the fleet. **Goal-hit alone is insufficient** — flight check 2026-06-28: the old navigator passed the needle/bounded probes by brute-reading (4 reads / ~800 lines on a single-region goal); ø only gains teeth when the bounded scorer fires | ☐ |
+| 5 | eval + telemetry | retarget the driver from `runNavigator` to `RunSubagent` (the discriminating `StudyProbe` set, `pass()` scorer, and per-probe timeout already exist in `study_eval.go`); **wire the full mechanical scorer from the engine's usage + budget accounting — the real discriminator, not optional: `StopReason`/`Iterations`/`FinalizeForced`, per-tool `Outlines`/`Greps`/`Reads`/`ToolErrs`, `ReadBytes`/`Bounded`, and `InputTokens`/`OutputTokens`/`PeakOutputTokens`/`MaxTokensClamped`**; derived goal-hit-per-1k-output + grep-vs-read ratio; model × probe table with `k/n` pass-rate + p50/p95 latency; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit **AND** the full mechanical block per probe (stop-reason, per-tool counts, tokens incl. peak, bounded); accept when goal-hit ≥ T, `StopReason == clean-finalize`, all `Bounded`, no `MaxTokensClamped`, across the fleet. **Goal-hit alone is insufficient** — flight check 2026-06-28: the old navigator passed the needle/bounded probes by brute-reading (4 reads / ~800 lines / 0 greps on a single-region goal); ø only gains teeth when the stop-reason + per-tool + bounded scorers fire | ☐ |
 | 6 | docs / CLAUDE.md | point `study` at this design (`study-navigator.md` already removed 2026-06-27); update tool list (no project_index, no memory_search change) | docs match shipped code | ☐ |
 
 `internal/outline`, `grep`, and targeted/confined `read_file` (phases 1–3) are
@@ -554,7 +606,7 @@ pre-deletion 41,468 / 26,304).
 | 2 `grep` | +120…160 | 0 | ctx-aware, confined; reuses `projectscan` ignore set |
 | 3 targeted+confined `read_file` | +60…90 | 0 | one `maxReadLines`; `ConfinePath` allows `.cortex/journal` |
 | 4 `Study` profile + **deletions** | +100…130 | **−1150…−1300** | delete `navigator.go` (~283) + `projectindex/` (~895) + `project_index` tool; migrate the test caller |
-| 5 eval + telemetry | +150…230 | 0 | `study_eval.go` 120→~300 |
+| 5 eval + telemetry | +230…320 | 0 | `study_eval.go` 120→~380; richer scorer (stop-reason, per-tool, token incl. peak, derived ratios, rep p50/p95) |
 
 **Whole-effort headline (both docs):** net source **≈ −500 … +300** — the unified
 engine + `grep` + confined/bounded study land for zero-to-negative net lines
@@ -637,4 +689,20 @@ _Append-only._
   goal-hit today (old path can't search the journal). `verify-study.sh` now
   asserts the bounded/reads scorer exists, so ø cannot be declared green on
   keywords alone.
+- **2026-06-28** **`StudyEvalResult` extended to a full mechanical scorer** (§5),
+  on the same "goal-hit alone is fooled by brute-reading" logic that hardened the
+  probe set. Added, all free from the engine's usage + budget accounting:
+  **termination** (`StopReason`/`Iterations`/`FinalizeForced` — replaces the
+  `Completed` bool with *which bound is binding*); **per-tool counts**
+  (`Outlines`/`Greps`/`Reads`/`ToolErrs` — the grep-vs-read ratio measures
+  locate-then-read directly; 0 greps + N reads is the brute-read failure even at
+  goal-hit 1.0); **tokens** (`InputTokens`/`OutputTokens` cumulative, plus
+  `PeakOutputTokens`/`MaxTokensClamped` as the eval-time form of the north runaway
+  tripwire); **derived** goal-hit-per-1k-output (the small-model efficiency
+  frontier) + rep `k/n` pass-rate + p50/p95 (the north thrash was a tail event a
+  mean would launder). Acceptance tightened: goal-hit ≥ T **and**
+  `StopReason == clean-finalize` **and** all `Bounded` **and** no `MaxTokensClamped`.
+  Same shape is the always-on journal telemetry record — one shape, emitted every
+  run, read by the eval (no eval-only instrumentation). Engine-side peak-output /
+  clamp metrics mirrored into engine-unification.md's runaway tripwire.
 ```
