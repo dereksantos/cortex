@@ -1192,9 +1192,21 @@ func TestSendHonorsContextCancel(t *testing.T) {
 	}
 }
 
-// runToolCalls must append one tool result per call ID even when the turn was
-// interrupted — a missing result for a tool_call id breaks the next send.
-func TestRunToolCallsInterruptedAppendsAllResults(t *testing.T) {
+// toolResults filters a turn's messages down to the role:"tool" entries.
+func toolResults(msgs []Message) []Message {
+	var out []Message
+	for _, m := range msgs {
+		if m.Role == RoleTool {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// The coder dispatch path (engine + coderDispatcher) must append one tool result
+// per call ID even when the turn was interrupted — a missing result for a
+// tool_call id breaks the next send.
+func TestCoderDispatchInterruptedAppendsAllResults(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()}
 	before := len(cs.Request.Messages)
 
@@ -1205,34 +1217,49 @@ func TestRunToolCallsInterruptedAppendsAllResults(t *testing.T) {
 		tc(FunctionBash, `{"command":"echo one"}`),
 		{ID: "call_2", Type: "function", Function: FunctionCall{Name: FunctionBash, Arguments: `{"command":"echo two"}`}},
 	}
-	cs.runToolCalls(ctx, calls)
+	send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		return fakeResp("", calls, 1, 1), false, nil
+	})
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher()}
+	_, _, err := runLoop(ctx, send, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append)
+	if err == nil {
+		t.Fatal("expected a canceled-context error")
+	}
 
-	got := cs.Request.Messages[before:]
+	got := toolResults(cs.Request.Messages[before:])
 	if len(got) != 2 {
-		t.Fatalf("appended %d messages, want 2 (one per call)", len(got))
+		t.Fatalf("appended %d tool results, want 2 (one per call)", len(got))
 	}
 	for i, m := range got {
-		if m.Role != RoleTool {
-			t.Errorf("message %d role = %q, want %q", i, m.Role, RoleTool)
-		}
 		if m.ToolCallID != calls[i].ID {
-			t.Errorf("message %d tool_call_id = %q, want %q", i, m.ToolCallID, calls[i].ID)
+			t.Errorf("result %d tool_call_id = %q, want %q", i, m.ToolCallID, calls[i].ID)
 		}
 		if !strings.Contains(m.Content, "interrupted") {
-			t.Errorf("message %d should record the interrupt, got %q", i, m.Content)
+			t.Errorf("result %d should record the interrupt, got %q", i, m.Content)
 		}
 	}
 }
 
-func TestRunToolCallsHappyPath(t *testing.T) {
+func TestCoderDispatchHappyPath(t *testing.T) {
 	cs := &CortexSession{Request: CortexArgs{}.Request()}
 	before := len(cs.Request.Messages)
 
-	cs.runToolCalls(context.Background(), []ToolCall{tc(FunctionBash, `{"command":"echo hello"}`)})
+	var round int
+	send := SenderFunc(func(_ context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		defer func() { round++ }()
+		if round == 0 {
+			return fakeResp("", []ToolCall{tc(FunctionBash, `{"command":"echo hello"}`)}, 1, 1), false, nil
+		}
+		return fakeResp("done", nil, 1, 1), false, nil
+	})
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher()}
+	if _, _, err := runLoop(context.Background(), send, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append); err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
 
-	got := cs.Request.Messages[before:]
+	got := toolResults(cs.Request.Messages[before:])
 	if len(got) != 1 {
-		t.Fatalf("appended %d messages, want 1", len(got))
+		t.Fatalf("appended %d tool results, want 1", len(got))
 	}
 	if !strings.Contains(got[0].Content, "hello") {
 		t.Errorf("tool result = %q, want echo output", got[0].Content)
@@ -1916,7 +1943,7 @@ func TestSessionSummary(t *testing.T) {
 	}
 }
 
-func TestResolveAccumulatesTokens(t *testing.T) {
+func TestTurnAccumulatesTokens(t *testing.T) {
 	quickRetries(t)
 	srv := httptest.NewServer(sseHandler(sseBody(
 		`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}`,
@@ -1927,9 +1954,8 @@ func TestResolveAccumulatesTokens(t *testing.T) {
 
 	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
 		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
-	cs.Append(Message{Role: RoleUser, Content: "hi"})
-	if err := cs.Resolve(context.Background()); err != nil {
-		t.Fatalf("resolve: %v", err)
+	if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("turn: %v", err)
 	}
 	if cs.tokensIn != 12 || cs.tokensOut != 3 {
 		t.Errorf("accumulated tokens = %d in / %d out, want 12/3", cs.tokensIn, cs.tokensOut)
@@ -1939,7 +1965,7 @@ func TestResolveAccumulatesTokens(t *testing.T) {
 // The inner loop must break when the model re-issues the byte-identical
 // tool-call batch, rather than spinning to maxToolIterations. The model in the
 // 2026-06-14 transcript made the same grep 68 times before the cap.
-func TestResolveStopsRepeatedToolCalls(t *testing.T) {
+func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
 	var calls int
@@ -1957,12 +1983,11 @@ func TestResolveStopsRepeatedToolCalls(t *testing.T) {
 
 	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
 		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
-	cs.Append(Message{Role: RoleUser, Content: "go"})
-	if err := cs.Resolve(context.Background()); err != nil {
-		t.Fatalf("resolve: %v", err)
+	if _, err := cs.Turn(context.Background(), "go"); err != nil {
+		t.Fatalf("turn: %v", err)
 	}
-	// Guard fires at maxRepeatedToolCalls identical batches — far below the
-	// maxToolIterations cap. Allow a small margin but assert it didn't run away.
+	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
+	// finalize (tools withheld) — far below the maxToolIterations cap.
 	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+1 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}

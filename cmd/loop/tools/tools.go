@@ -26,15 +26,17 @@ import (
 	"github.com/dereksantos/cortex/internal/shellrisk"
 )
 
-// ToolDeps is the session surface the tools need. *CortexSession satisfies it.
-// Kept minimal: each method is used by at least one tool.
-type ToolDeps interface {
-	// Navigate runs the map-first study over a path: a bounded read-only
-	// subagent seeded with the structural map + goal. This is the study tool.
-	Navigate(ctx context.Context, path, goal string) (digest string, err error)
+// The tool deps are segmented into narrow, consumer-owned role-interfaces
+// (Interface Segregation): each tool depends only on the slice it uses, and the
+// fat ToolDeps that Execute's switch consumes is assembled by EMBEDDING the
+// parts — not hand-listed. *CortexSession satisfies every one of them
+// structurally (asserted at the composition root in main.go).
+
+// MemoryStore is the model-driven note surface (memory_* tools). See
+// internal/memory and docs/memory-tools.md.
+type MemoryStore interface {
 	// MemoryWrite creates or updates a named note and returns a confirmation
-	// (the normalized name). The model curates memory through these four methods;
-	// see internal/memory and docs/memory-tools.md.
+	// (the normalized name).
 	MemoryWrite(name, content string) (result string, err error)
 	// MemoryRead returns one note's body in full.
 	MemoryRead(name string) (body string, err error)
@@ -43,16 +45,42 @@ type ToolDeps interface {
 	MemorySearch(query string) (results string, err error)
 	// MemoryForget removes a note and returns a confirmation.
 	MemoryForget(name string) (result string, err error)
-	// Summarize reduces a free-text file (no structural map) to a digest via
-	// sequential chunk-and-fold. Used by oversized shell-output study; the
-	// compressed flag is unused there.
+}
+
+// Summarizer reduces a free-text file (no structural map) to a digest via
+// sequential chunk-and-fold. Used by oversized shell-output study; permanent,
+// unrelated to the study subagent. The compressed flag is unused there.
+type Summarizer interface {
 	Summarize(ctx context.Context, path, goal string, window int) (digest string, compressed bool, err error)
-	// GateShell runs the shell-risk gate. Returns (message, ok); ok=false
-	// means the command must not run and message explains why.
+}
+
+// Navigator runs the map-first study over a path (today's study tool). Replaced
+// by SubAgentRunner.RunSubagent when the navigator is deleted (study phase 4).
+type Navigator interface {
+	Navigate(ctx context.Context, path, goal string) (digest string, err error)
+}
+
+// ShellGate runs the shell-risk gate. Returns (message, ok); ok=false means the
+// command must not run and message explains why.
+type ShellGate interface {
 	GateShell(ctx context.Context, command string) (string, bool)
-	// AllowDelete reports whether remove_path is enabled, and the workspace
-	// root it's confined to.
+}
+
+// DeleteGate reports whether remove_path is enabled, and the workspace root it's
+// confined to.
+type DeleteGate interface {
 	AllowDelete() (root string, allowed bool)
+}
+
+// ToolDeps is the union Execute's big switch consumes — assembled from the parts
+// by embedding, not hand-listed. A pure tool (read_file body, edit_file) takes
+// none of these; a memory tool depends only on MemoryStore.
+type ToolDeps interface {
+	MemoryStore
+	Summarizer
+	Navigator
+	ShellGate
+	DeleteGate
 	// Quiet reports whether terminal emission is suppressed (headless mode).
 	Quiet() bool
 }

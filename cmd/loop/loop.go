@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/dereksantos/cortex/cmd/loop/tools"
@@ -14,9 +15,10 @@ import (
 // subagent (study, …) run on this one function; the only variation is the seams
 // they pass. See docs/engine-unification.md.
 //
-// Phase 0 introduces the engine inside package main alongside the still-living
-// `Resolve`/`runNavigator`; phase 1 folds the coder onto it and phase 3 moves
-// the engine + shared data types into internal/agent.
+// The coder turn (`Turn`) runs on this engine; `runNavigator` is the last
+// remaining second loop and is deleted (not refactored) when the study subagent
+// lands (study-subagent.md phase 4). Phase 3 moves the engine + shared data
+// types into internal/agent.
 
 // Sender performs one model round-trip — the seam that makes runLoop testable
 // and lets the coder stream while a subagent blocks. streamed reports whether
@@ -61,7 +63,8 @@ type Toolset struct {
 // Bounds are the independent ceilings; whichever trips first forces finalize.
 // THREE mandatory caps — no request is EVER unbounded:
 //   - MaxTokens: a finite per-request completion cap, stamped onto the request
-//     (the single source of truth, subsuming the old applyOutputCap). The
+//     (the single source of truth, subsuming the old per-payload output-cap
+//     helper that this refactor deleted). The
 //     primary runaway backstop — the one thing that holds when cancellation
 //     fails (see the 2026-06-28 north runaway in docs/engine-unification.md).
 //   - MaxIter: caps the rounds.
@@ -213,7 +216,11 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	}
 	stats.StopReason = stop
 	stats.FinalizeForced = true
-	return finalizeLoop(ctx, send, req, &stats, appendMsg)
+	content, finalStats, err := finalizeLoop(ctx, send, req, &stats, appendMsg)
+	// Restore the advertised tools: finalize withheld them, but the caller's
+	// request (cs.Request for the coder) is long-lived and reused next turn.
+	req.Tools = ts.Tools
+	return content, finalStats, err
 }
 
 // finalizeLoop requests a final answer with the tool set withheld, so a model
@@ -275,7 +282,8 @@ func progressLine(call ToolCall) string {
 
 // requestFor assembles a model request from a spec — the single build site where
 // model/base/key/template-kwargs are set, and the single place a finite
-// max_tokens is stamped (subsuming the deleted applyOutputCap). maxTokens must
+// max_tokens is stamped (subsuming the deleted per-payload output-cap helper).
+// maxTokens must
 // be >0; it falls back to the role/default cap only when a caller passes 0, so no
 // request path is ever unbounded. Used by every subagent caller (the coder reuses
 // its long-lived cs.Request instead, which carries the same stamp from init).
@@ -307,4 +315,62 @@ func (cs *CortexSession) blockingSender() Sender {
 		res, err := req.Send(ctx)
 		return res, false, err
 	})
+}
+
+// coderSender is the main coder turn's round-trip: it delegates to the existing
+// send() (streaming echo + breadcrumb in the REPL, blocking spinner otherwise),
+// which sends cs.Request (== the engine's req for the coder). On the
+// non-streamed path it prints the assistant prose itself — the streaming path
+// already echoed it live, so the engine never prints.
+func (cs *CortexSession) coderSender() Sender {
+	return SenderFunc(func(ctx context.Context, _ *AgentRequest) (*AgentResponse, bool, error) {
+		res, streamed, err := cs.send(ctx)
+		if err == nil && !streamed && !cs.quiet && res != nil && len(res.Choices) > 0 {
+			printCoderProse(res.Choices[0].Message)
+		}
+		return res, streamed, err
+	})
+}
+
+// printCoderProse prints the model's prose on the blocking (non-streamed) path,
+// mirroring the old Resolve step: strip any unnormalized Qwen tool markup first
+// (the live stream suppresses it at the marker) and print only if prose remains.
+func printCoderProse(msg Message) {
+	content := msg.Content
+	if len(msg.ToolCalls) == 0 {
+		if calls := parseXMLToolCalls(content); len(calls) > 0 {
+			content = stripToolMarkup(content)
+		}
+	}
+	if strings.TrimSpace(content) != "" {
+		Message{Role: "assistant", Content: content}.Print()
+	}
+}
+
+// coderDispatcher executes one coder tool call: the activity spinner + Execute
+// against the full session, refusing nothing (the coder is granted every tool).
+// A canceled ctx short-circuits with an interrupted observation, matching the
+// old runToolCalls per-call behavior.
+func (cs *CortexSession) coderDispatcher() AgentDispatcher {
+	return DispatchFunc(func(ctx context.Context, call ToolCall) string {
+		if ctx.Err() != nil {
+			return "Error: interrupted by user before this tool ran"
+		}
+		cs.startActivity(call.ActivityLabel())
+		out, err := call.Execute(ctx, cs)
+		cs.stopActivity()
+		if err != nil {
+			return "Error: " + err.Error()
+		}
+		return out
+	})
+}
+
+// coderBeforeBatch prints the blank line that separates the model's prose from
+// its tool actions (the old runToolCalls leading Println), suppressed in quiet
+// headless mode.
+func (cs *CortexSession) coderBeforeBatch() {
+	if !cs.quiet {
+		fmt.Println()
+	}
 }

@@ -59,23 +59,18 @@ func TestStudyProbePass(t *testing.T) {
 	}
 }
 
-// Every agentic request carries a finite output cap — the runaway backstop.
+// Every agentic request carries a finite output cap — the runaway backstop —
+// stamped at the SINGLE cap site (requestFor) plus session init. The old
+// second cap helper was deleted in the engine unification; requestFor's stamp
+// is covered by TestRequestForSetsMaxTokens.
 func TestAgentRequestOutputCapped(t *testing.T) {
 	// The base coder request is bounded by default (before any config override).
 	if got := (CortexArgs{}).Request().MaxTokens; got != codeMaxOutputTokens {
 		t.Errorf("coder request MaxTokens = %d, want %d", got, codeMaxOutputTokens)
 	}
-	// applyOutputCap backstops an unset cap so no request is ever unbounded.
-	r := &AgentRequest{}
-	r.applyOutputCap()
-	if r.MaxTokens != defaultAgentMaxTokens {
-		t.Errorf("unset cap → %d, want backstop %d", r.MaxTokens, defaultAgentMaxTokens)
-	}
-	// An explicit cap survives the backstop.
-	r2 := &AgentRequest{MaxTokens: 999}
-	r2.applyOutputCap()
-	if r2.MaxTokens != 999 {
-		t.Errorf("explicit cap clobbered: %d", r2.MaxTokens)
+	// requestFor never emits an unbounded request: a 0 falls back to the default.
+	if got := requestFor(ModelSpec{}, "s", "g", nil, 0).MaxTokens; got != defaultAgentMaxTokens {
+		t.Errorf("unset cap → %d, want backstop %d", got, defaultAgentMaxTokens)
 	}
 	// ModelSpec.maxOut: a config override wins, else the role default.
 	if got := (ModelSpec{MaxTokens: 4096}).maxOut(studyMaxOutputTokens); got != 4096 {

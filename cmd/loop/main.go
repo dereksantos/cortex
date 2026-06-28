@@ -389,8 +389,9 @@ type AgentRequest struct {
 	Temperature float64   `json:"temperature"`
 	Tools       []Tool    `json:"tools,omitempty"`
 	// MaxTokens caps OUTPUT (completion) tokens per request — the runaway backstop
-	// (see codeMaxOutputTokens). Forced positive on every wire payload via
-	// applyOutputCap, so a request can never be sent unbounded.
+	// (see codeMaxOutputTokens). Stamped finite at the single build site
+	// (requestFor) / the engine Bounds / session init, so a request is never sent
+	// unbounded.
 	MaxTokens int `json:"max_tokens,omitempty"`
 	// ChatTemplateKwargs passes variables to the server-side chat template
 	// (llama.cpp via LiteLLM honors it; unknown variables are ignored). Used to
@@ -503,6 +504,18 @@ func applyPromptCache(msgs []Message, model string) {
 type Tool = tools.Tool
 type ToolFunction = tools.ToolFunction
 
+// The seam, asserted: *CortexSession is the composition root that structurally
+// satisfies each narrow tool role-interface. A missing method fails HERE with a
+// clear location instead of at a distant dispatch call.
+var (
+	_ tools.ToolDeps    = (*CortexSession)(nil)
+	_ tools.MemoryStore = (*CortexSession)(nil)
+	_ tools.Summarizer  = (*CortexSession)(nil)
+	_ tools.Navigator   = (*CortexSession)(nil)
+	_ tools.ShellGate   = (*CortexSession)(nil)
+	_ tools.DeleteGate  = (*CortexSession)(nil)
+)
+
 // studyFallbackWindow is the conservative window assumed only until a model's
 // real size is known (from config or learned at runtime).
 const studyFallbackWindow = 8192
@@ -561,22 +574,16 @@ var httpClient = &http.Client{Timeout: requestTimeout}
 
 // Send runs one model call with bounded retry. Transient failures (transport
 // errors, 429/5xx) retry up to maxSendAttempts with linear backoff; anything
-// else — including a canceled ctx — returns immediately.
-// applyOutputCap forces a positive max_tokens, so no request is ever sent
-// unbounded — the last line of defense behind the per-role caps. Called on the
-// wire-payload copy in Send/SendStream.
-func (r *AgentRequest) applyOutputCap() {
-	if r.MaxTokens <= 0 {
-		r.MaxTokens = defaultAgentMaxTokens
-	}
-}
-
+// else — including a canceled ctx — returns immediately. max_tokens is stamped
+// at the single build site (requestFor) / the engine (runLoop via Bounds) /
+// session init, so no request reaches here unbounded — there is no second cap
+// site (the old per-payload output-cap helper was deleted in the engine
+// unification).
 func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	// Marshal a shallow copy with composed wire messages, so a per-turn
 	// ephemeral note reaches the model without mutating stored Messages.
 	payload := *r
 	payload.Messages = r.wireMessages()
-	payload.applyOutputCap()
 	applyPromptCache(payload.Messages, r.Model)
 	b, err := json.Marshal(&payload)
 	if err != nil {
@@ -657,7 +664,6 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning func(string)) (*AgentResponse, error) {
 	payload := *r
 	payload.Messages = r.wireMessages()
-	payload.applyOutputCap()
 	applyPromptCache(payload.Messages, r.Model)
 	payload.Stream = true
 	payload.StreamOptions = &streamOptions{IncludeUsage: true}
@@ -2827,38 +2833,6 @@ func runAnchoredTurn(session *CortexSession, editor *lineedit.Terminal, input, s
 // call ID — even after an interrupt. The wire invariant is that every
 // assistant(tool_calls) id gets a matching tool message or the next send 400s,
 // so a mid-turn cancel records "interrupted" results rather than dropping them.
-func (cs *CortexSession) runToolCalls(ctx context.Context, calls []ToolCall) {
-	// A blank line before the first tool action separates the model's prose
-	// from its dispatch — the two read as distinct steps, not a run-on.
-	if !cs.quiet && len(calls) > 0 {
-		fmt.Println()
-	}
-	for _, tc := range calls {
-		var content string
-		if ctx.Err() != nil {
-			content = "Error: interrupted by user before this tool ran"
-		} else {
-			// Animate a status row while the tool runs — study especially makes
-			// several model passes with no output until it returns.
-			cs.startActivity(tc.ActivityLabel())
-			out, err := tc.Execute(ctx, cs)
-			cs.stopActivity()
-			if err != nil {
-				// Tool errors are observations, not crashes: feed them back so
-				// the model can self-correct.
-				content = "Error: " + err.Error()
-			} else {
-				content = out
-			}
-		}
-		cs.Append(Message{
-			Role:       RoleTool,
-			ToolCallID: tc.ID,
-			Content:    content,
-		})
-	}
-}
-
 // startActivity/stopActivity drive the anchored status spinner around a unit of
 // work. No-op outside the anchored REPL (raw-streaming and headless modes have
 // no pinned status row to animate).
@@ -2889,92 +2863,6 @@ func toolCallSignature(calls []ToolCall) string {
 	return b.String()
 }
 
-// Resolve runs the agentic inner loop for one user turn: send, run any tools
-// the model asked for, feed the results back, and re-send — repeating until the
-// model answers with no more tool calls (or we hit the iteration cap). The
-// caller appends the user message; Resolve owns everything from there. A
-// canceled ctx ends the turn at the next boundary with history left valid.
-func (cs *CortexSession) Resolve(ctx context.Context) error {
-	var lastSig string
-	var repeats int // consecutive batches identical to lastSig, including current
-	for i := 0; i < maxToolIterations; i++ {
-		res, streamed, err := cs.send(ctx)
-		if err != nil {
-			return fmt.Errorf("model response error: %w", err)
-		}
-		if res == nil || len(res.Choices) == 0 {
-			return fmt.Errorf("no choices in agent response")
-		}
-		// prompt_tokens reflects the whole re-sent history = current context fill.
-		cs.LastPromptTokens = res.Usage.PromptTokens
-		// Every send is a billed call (prompt re-sent each time), so summing
-		// across the tool loop reflects real session cost.
-		cs.tokensIn += res.Usage.PromptTokens
-		cs.tokensOut += res.Usage.CompletionTokens
-		cs.costUSD += res.Usage.Cost
-		msg := res.Choices[0].Message
-
-		// Fallback: if the proxy didn't normalize Qwen's native XML tool-call
-		// format, recover it from the content so the call isn't silently lost
-		// (empty tool_calls would otherwise be treated as a final answer).
-		if len(msg.ToolCalls) == 0 {
-			if calls := parseXMLToolCalls(msg.Content); len(calls) > 0 {
-				msg.ToolCalls = calls
-				msg.Content = stripToolMarkup(msg.Content)
-			}
-		}
-
-		// (1) Append the assistant message BEFORE any tool results. The API
-		// requires the sequence assistant(tool_calls) -> tool(result).
-		cs.Append(msg)
-
-		// Print any prose the model emitted (a final answer, or a preamble
-		// alongside tool calls). The streaming path already echoed it live, so
-		// only the blocking fallback prints here.
-		if !streamed && !cs.quiet && strings.TrimSpace(msg.Content) != "" {
-			msg.Print()
-		}
-
-		// (2) No tool calls => the model is done with this turn.
-		if len(msg.ToolCalls) == 0 {
-			return nil
-		}
-
-		// No-progress guard: a weak model handed a content-free result can
-		// re-issue the identical batch forever. Track consecutive repeats and
-		// break the loop before it burns the whole turn.
-		if sig := toolCallSignature(msg.ToolCalls); sig == lastSig {
-			repeats++
-		} else {
-			lastSig, repeats = sig, 1
-		}
-
-		// (3) Run the tools, then stop at the iteration boundary if the user
-		// interrupted — history is valid, and the model can pick up next turn.
-		cs.runToolCalls(ctx, msg.ToolCalls)
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// Abort once the same batch has repeated past the cap: the model is not
-		// going to recover on its own. The nudge below already gave it a chance.
-		if repeats >= maxRepeatedToolCalls {
-			fmt.Println(withColor("stopped: model repeated the same tool call with no progress", yellow))
-			return nil
-		}
-		// One repeat short of the cap, inject a nudge so the model can change
-		// course (it sees the result was identical and tries something else).
-		if repeats == maxRepeatedToolCalls-1 {
-			cs.Append(Message{
-				Role:    RoleUser,
-				Content: "Harness note: that tool call was byte-identical to the previous one and produced the same result. Repeating it will not yield new information — try a different command or approach, or stop and report what you've found.",
-			})
-		}
-		// Loop: the next send picks up the grown history.
-	}
-	return fmt.Errorf("exceeded max tool iterations (%d)", maxToolIterations)
-}
-
 // TurnResult carries the outcome of one user turn for a transport-agnostic
 // caller. Reply is the model's final prose (the last assistant message with no
 // tool calls in this turn); in the interactive REPL it has already streamed to
@@ -2987,12 +2875,12 @@ type TurnResult struct {
 }
 
 // Turn runs one full user turn end to end: it appends the user message, attaches
-// this turn's fast-retrieval context (cleared after, so it neither accumulates
-// nor persists), runs the agentic Resolve loop, and — on success — captures the
-// turn to the store (retrievable next time) and buffers it for background
-// distillation. It is the single driveable entry point shared by the
-// interactive REPL and any headless caller; the caller owns input acquisition,
-// display, compaction, and the cancelable ctx.
+// this turn's memory index (cleared after, so it neither accumulates nor
+// persists), runs the agentic tool loop on the unified engine (runLoop), and —
+// on success — captures the turn to the journal (study-readable next time). It
+// is the single driveable entry point shared by the interactive REPL and any
+// headless caller; the caller owns input acquisition, display, compaction, and
+// the cancelable ctx.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
 	// Mark where this turn's messages begin, so we can capture what it did.
 	turnStart := len(cs.Request.Messages)
@@ -3013,9 +2901,25 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 		cs.injectedChars += len(note)
 	}
 
-	err := cs.Resolve(ctx)
+	// Run the coder turn on the unified engine. The coder is granted every tool
+	// (cs.Request.Tools), streams its own prose (coderSender), and dispatches
+	// against the full session (coderDispatcher). ReadBudgetBytes is unbounded
+	// for the coder — only iterations and the per-request max_tokens cap apply.
+	maxTok := cs.Request.MaxTokens
+	if maxTok <= 0 {
+		maxTok = codeMaxOutputTokens
+	}
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
+	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxToolIterations}
+	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
+	// Fold the engine's usage accounting into the session totals (every send is
+	// a billed call — prompt re-sent each round — so summing reflects real cost).
+	cs.tokensIn += stats.InputTokens
+	cs.tokensOut += stats.OutputTokens
+	cs.costUSD += stats.Cost
+	cs.LastPromptTokens = stats.LastPromptTokens
 
 	if err != nil {
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
