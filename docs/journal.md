@@ -92,7 +92,7 @@ Three modes, all driven by walking the journal in offset order:
 **Rebuild** (`cortex journal rebuild`):
 1. Truncate all derived state.
 2. Walk the writer-class DAG in topological order: `capture` + `observation` → `dream`, `reflect`, `resolve`, `think` → `feedback`, `eval`.
-3. Within each class, replay entries in offset order, dispatching each to its projector. For `eval.cell_result`, the projector is an injected callback that routes through `internal/eval/v2.ProjectCellFromEntry` so SQLite + `cell_results.jsonl` regenerate from the journal alone.
+3. Within each class, replay entries in offset order, dispatching each to its projector. `eval.cell_result` entries (`journal.EvalCellResultPayload`; see `internal/journal/eval.go`) are today written straight to the journal by their emitter and carry no projector — the `internal/eval/v2` grid framework that once projected them to SQLite + `cell_results.jsonl` was removed.
 4. Refresh FTS5 / vec indexes via existing `rebuildEventIndexes`.
 
 Used after corruption, schema change, or to reset for evals.

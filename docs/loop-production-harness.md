@@ -207,9 +207,9 @@ convention, status line, VCS-stamped version, table-driven tests.
   `loop eval` mode (mirroring `study-eval`) that runs a fixture task set
   cold (empty `.cortex/`) vs warm (after a priming session), scoring whether
   capture+retrieve makes session N beat session 0 — Tier 2a scoped to the
-  loop. Open fork: its own self-contained runner (lean) vs. the loop as a
-  harness option in `internal/eval/v2` (the strategy doc's learning-curve
-  driver). Emits the same `EvalCellResultPayload` rows (`ContextStrategy=cold|warm`).
+  loop. Its own self-contained runner (the `internal/eval/v2` grid framework
+  that was once the alternative host has since been removed). Emits the same
+  `EvalCellResultPayload` rows (`ContextStrategy=cold|warm`).
 
 **Don't:** dashboards (the daemon was retired for a reason); telemetry; logs
 beyond the journal.
