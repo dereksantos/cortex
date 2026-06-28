@@ -10,7 +10,7 @@
 
 There are two hand-rolled tool-iteration loops that have already drifted:
 
-- `Resolve` — `cmd/loop/main.go:2853`. The main coder turn loop. 100 iterations,
+- `Resolve` — `cmd/loop/main.go:2897`. The main coder turn loop. 100 iterations,
   streaming, breadcrumbs, no-progress guard + nudge, XML tool-call recovery,
   usage accounting, ctx-cancel.
 - `runNavigator` — `cmd/loop/navigator.go:81`. The study subagent loop. 10
@@ -47,7 +47,7 @@ between the coder and a subagent is injected through two small interfaces:
 
 ```
 Turn()  (main coder)                    RunSubagent(sa, seed)  (study, …)
-  inject memory index                     req  = requestFor(spec, sa.System, seed, sa.Tools)
+  inject memory index                     req  = requestFor(spec, sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
   send = streamingSender                   send = blockingSender (+ Progress sink)
   capture turn after                       (nothing after)
         │                                       │
@@ -90,7 +90,9 @@ type Toolset struct {
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
 // THREE mandatory caps — no request is EVER unbounded:
-//   - MaxTokens: a finite per-request completion cap, ALWAYS set (by requestFor).
+//   - MaxTokens: a finite per-request completion cap, ALWAYS set — the loop threads
+//     it into requestFor, which stamps it (the single source of truth, subsuming the
+//     old applyOutputCap; every Subagent profile + the coder Turn set a nonzero one).
 //     This is the PRIMARY runaway backstop — the one thing that holds when
 //     cancellation fails. Hit live 2026-06-28: a study request to north with no
 //     max_tokens ran away to 124K tokens / ~30 min / 388 W, pinning the single
@@ -127,10 +129,16 @@ func runLoop(ctx context.Context, send Sender, req *Request, ts Toolset, b Bound
 // requestFor assembles a model request from a spec — a plain function (building a
 // struct is not a behavior). The single place model/base/key/template-kwargs are
 // set, replacing the duplication across runNavigator + the main request build.
-// MUST set a finite max_tokens on EVERY request (from Bounds.MaxTokens / a role
-// cap) and mark it streamed — being the single build site is exactly what makes
-// "no request is ever unbounded or uncancellable" enforceable in one place.
-func requestFor(spec ModelSpec, system, seed string, tools []Tool) *Request
+// MUST stamp the finite max_tokens it is HANDED (the caller passes Bounds.MaxTokens
+// — a task-fit ceiling, never the model max) on EVERY request and mark it streamed:
+// being the single build site, fed the single source of truth, is exactly what makes
+// "no request is ever unbounded or uncancellable" enforceable in one place. This
+// SUBSUMES today's applyOutputCap (cmd/loop/main.go:568) + defaultAgentMaxTokens
+// backstop — one stamp site, one source (Bounds.MaxTokens), so applyOutputCap is
+// DELETED, not kept alongside (a second cap site would be exactly the drift this
+// refactor removes). maxTokens must be >0; requestFor falls back to the role/default
+// cap only if a caller passes 0.
+func requestFor(spec ModelSpec, system, seed string, tools []Tool, maxTokens int) *Request
 ```
 
 **Split rule for the model seam:** *build = a function (`requestFor`), send = an
@@ -146,7 +154,7 @@ building a struct isn't.
   call.
 - **The no-progress nudge becomes engine behavior**, not a main-loop special
   case. Today `Resolve` injects a "harness note" message one short of the repeat
-  cap (main.go:2923). It's generically useful — a stuck study benefits too — so
+  cap (main.go:2965). It's generically useful — a stuck study benefits too — so
   it moves into `runLoop` for every caller, gated by the repeat counter the
   engine already tracks. (Earlier this doc waffled on Sender vs dispatcher;
   resolved: engine-level.)
@@ -182,7 +190,7 @@ whose body calls `tc.Execute(ctx, cs)` — the engine seam wrapping the tool sea
 
 ### Segment the fat `ToolDeps` (phase-1 sub-task)
 
-Today `tools.ToolDeps` is **one 10-method interface** that every tool receives via
+Today `tools.ToolDeps` is **one fat (~9-method) interface** that every tool receives via
 `Execute(ctx, deps)`, and `cs` satisfies it structurally with **no compile-time
 assertion**. It violates Interface Segregation: a memory tool depends on the same
 fat type as `bash`. The study work already starts pulling out `Outliner` /
@@ -215,6 +223,17 @@ type ToolDeps interface {
 }
 ```
 
+**Two members today's `ToolDeps` carries that the END-STATE union above omits — both
+stay through phase 1; do NOT drop them when segmenting:** `Summarize` (the
+compaction / oversized-shell-output summarizer — `cmd/loop/main.go:2085`,
+permanent, unrelated to study) and, until [`study-subagent.md`](study-subagent.md)
+phase 4 deletes the navigator, `Navigate` (today's study tool). Phase 1 segments
+**what exists now**, so its union embeds `MemoryStore` / `ShellGate` / `DeleteGate`
+/ `Outliner` / `Quiet` **plus a `Summarizer` part (`Summarize`) and `Navigate`**.
+The study work then adds `SubAgentRunner` and removes `Navigate` (replaced by
+`RunSubagent`) in its phase 4 — that is why `SubAgentRunner` appears in the
+end-state union above but is not part of the phase-1 split.
+
 Payoffs: **pure tools take no deps at all** (`grep`, `read_file` body, `edit_file`
 are functions over the filesystem); **the subagent path and tests depend narrowly**
 (`RunSubagent` needs only `SubAgentRunner`; a memory test fakes 4 methods, not 10);
@@ -246,6 +265,14 @@ outline tool will use), so the union is already segmented when study wires in.
 Invariant for every phase: `go build ./...`, `go vet`, `./scripts/check.sh`, and
 `go test ./...` all green. **No phase leaves the tree broken.** Flip ☐→☑ on land.
 
+**Unattended boundary.** Every phase's executable acceptance is `go build/vet` +
+`check.sh` + `go test ./...` + `scripts/verify-study.sh` — **zero-network**, runs
+unattended. Behavior preservation is guarded by the `SenderFunc`-fake
+characterization test (`TestCoderLoopCharacterization`, written first), **not** by
+a live model run; the phase-1 "`loop study-eval` numbers unchanged" and "manual
+smoke turn" lines are model-gated ops confirmations, **not** blockers for marking a
+phase ☑.
+
 `navigator.go` is **not in this table** — it is deleted (not refactored) by
 study-subagent.md phase 4, which builds the first real subagent caller
 (`RunSubagent` + `Study` profile) on the engine and wires the `Progress`
@@ -255,7 +282,7 @@ folds in) + a fake-`Sender` test, so no phase touches the doomed loop.
 | # | Phase | Scope | Files | Exit criteria | State |
 |---|---|---|---|---|---|
 | 0 | Extract `runLoop` + all seams **inside package `main`** | the engine function + `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` types + `requestFor` + blocking/streaming `Sender`s (the streaming `Sender` carries the per-request deadline); no behavior change | `cmd/loop/` (new `loop.go`) | engine compiles, unused by callers yet, suite green | ☐ |
-| 1 | Fold `Resolve` into `Turn` (delete `Resolve`) **+ segment `ToolDeps`** | the coder loop body becomes `runLoop`, driven via a streaming `Sender` + full dispatcher; the thin wrapper that remained folds into `Turn` (which already holds memory-index injection + turn capture) and **`Resolve` is deleted** — the engine is `runLoop`, the coder entry is `Turn`, no redundant indirection and the vestigial cognition-mode name is gone; nudge moves into the engine; `Progress` nil (REPL streams its own breadcrumb); per-request Sender deadline set; the two `cs.Resolve` test callers (`main_test.go:1930,1960`) retarget to `Turn` or a fake-`Sender` `runLoop`. **Sub-task:** split the fat `ToolDeps` into the role-interfaces (`MemoryStore`/`ShellGate`/`DeleteGate`/`Outliner`/`Quiet`, union by embedding) and add `var _` assertions at the composition root (see "The seam contract") | `cmd/loop/main.go`, `cmd/loop/tools/tools.go`, `cmd/loop/main_test.go` | REPL behaves identically; **`loop study-eval` numbers unchanged** (navigator untouched); **no `Resolve` symbol remains**; `var _ tools.ToolDeps = (*CortexSession)(nil)` compiles; manual smoke turn; suite green | ☐ |
+| 1 | Fold `Resolve` into `Turn` (delete `Resolve`) **+ segment `ToolDeps`** | the coder loop body becomes `runLoop`, driven via a streaming `Sender` + full dispatcher; the thin wrapper that remained folds into `Turn` (which already holds memory-index injection + turn capture) and **`Resolve` is deleted** — the engine is `runLoop`, the coder entry is `Turn`, no redundant indirection and the vestigial cognition-mode name is gone; nudge moves into the engine; `Progress` nil (REPL streams its own breadcrumb); per-request Sender deadline set; the two `cs.Resolve` test callers (`main_test.go:1931,1961`) retarget to `Turn` or a fake-`Sender` `runLoop`. **Sub-task:** split the fat `ToolDeps` into the role-interfaces (`MemoryStore`/`ShellGate`/`DeleteGate`/`Outliner`/`Quiet`, union by embedding) and add `var _` assertions at the composition root (see "The seam contract") | `cmd/loop/main.go`, `cmd/loop/tools/tools.go`, `cmd/loop/main_test.go` | REPL behaves identically; **`loop study-eval` numbers unchanged** (navigator untouched); **no `Resolve` symbol remains**; `var _ tools.ToolDeps = (*CortexSession)(nil)` compiles; manual smoke turn; suite green | ☐ |
 | 2 | Model-free loop test | `SenderFunc` fake drives `runLoop`; assert `MaxIter`, byte-budget, per-request deadline, no-progress, finalize, and the blocking path all trip — proves the subagent path with no second real caller | `cmd/loop/*_test.go` | runs with zero network; each bound covered | ☐ |
 | 3 | Move engine + shared data types → `internal/agent` **and regularize the package topology** | (a) Move the shared data types (`Tool`, `ToolCall`, `Request`, `Response`, `Message`) → `internal/agent`, renaming `AgentRequest`→`Request` and `AgentResponse`→`Response`. **This consolidates a split ownership, not an alias-rename:** today `AgentRequest`/`AgentResponse`/`Message` are **structs in `main`** while `Tool`/`ToolCall` are **aliases in `main` over `cmd/loop/tools`** — so the move pulls the wire types out of `main` *and* the tool types out of `tools` into one home. (b) **Rename `cmd/loop/tools` → `internal/tools`** (library code does not belong under `cmd/`; it already doesn't import `main`, so the move is just import-path churn in the `main` files). (c) **Fold `cmd/loop/ui`** (44 LOC, one file) into `internal/tools` or `pkg/cliout` — no 44-line package as its own node. End state: `cmd/loop` is `package main` only. | mechanical move once the boundary is proven; `internal/tools` flips from *defining* `Tool`/`ToolCall` to *importing* them from `internal/agent`; `internal/agent` never imports `internal/tools` (this is the one arrow that inverts — vet it first with a spike) | new `internal/agent/`, new `internal/tools/`, `cmd/loop/` (now `main` only) | no import cycles; `internal/agent` imports only `pkg/llm`; the `internal/tools`→`internal/agent` arrow exists; **no `internal/*` package imports `internal/tools`** (only `main` + the inverted type arrow touch it); `cmd/loop` has no sub-packages; suite green | ☐ |
 
@@ -364,9 +391,9 @@ _Append-only. Every choice gets a dated line so the rationale doesn't evaporate.
   `internal/agent` must never import `cmd/loop/tools` (cycle).
 - **2026-06-27** Phase 3 is a **consolidation, not an alias-rename** (corrected
   after reading the code): today the type ownership is split — `AgentRequest`,
-  `AgentResponse`, and `Message` are **structs defined in `main`** (`main.go:369`,
-  `:726`, `:753`), while `Tool`/`ToolCall`/`ToolFunction`/`FunctionCall` are
-  **aliases in `main` over `cmd/loop/tools`** (`main.go:483-484`, `:817-818`). The
+  `AgentResponse`, and `Message` are **structs defined in `main`** (`main.go:385`,
+  `:757`, `:784`), while `Tool`/`ToolCall`/`ToolFunction`/`FunctionCall` are
+  **aliases in `main` over `cmd/loop/tools`** (`main.go:503-504`, `:848-849`). The
   move puts all of them in `internal/agent`, so `tools` flips from defining
   `Tool`/`ToolCall` to importing them. That one arrow inversion is the riskiest
   step in this doc — prove it with a throwaway spike before treating phase 3 as
@@ -417,3 +444,17 @@ _Append-only. Every choice gets a dated line so the rationale doesn't evaporate.
   the real safety net — don't trust abort-propagation. Optional: bypass LiteLLM
   (hit llama-server `:8090`/`:8080` directly) for reliably-cancellable chat. Full
   autopsy + ops mitigations live in CLAUDE.md.
+- **2026-06-28** **`max_tokens` plumbing pinned (closes the requestFor/Bounds
+  ambiguity).** `Bounds.MaxTokens` is the single source of truth; the loop threads it
+  into `requestFor(spec, system, seed, tools, maxTokens int)`, which stamps it on
+  every request. This **subsumes and deletes** the existing `applyOutputCap`
+  (`main.go:568`) + `defaultAgentMaxTokens` backstop — one cap site, not two (a
+  second site is exactly the drift this refactor removes). Every `Subagent` profile
+  and the coder `Turn` MUST set a nonzero `Bounds.MaxTokens` (task-fit, e.g. study
+  12K); `requestFor` falls back to the role/default cap only if handed 0.
+- **2026-06-28** **`ToolDeps` segmentation is temporal.** Phase 1 splits *today's*
+  surface, which still includes `Navigate` (the current study tool) and `Summarize`
+  (the compaction/shell-output summarizer, `main.go:2085`). `Summarize` is permanent;
+  `Navigate` is replaced by `SubAgentRunner.RunSubagent` only when study-subagent.md
+  phase 4 deletes the navigator. The end-state union shown above is post-phase-4 —
+  do not drop `Navigate`/`Summarize` during the phase-1 split.

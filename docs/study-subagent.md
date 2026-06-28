@@ -109,7 +109,7 @@ type Subagent struct {
 	Role   string  // model-role binding the runner resolves (e.g. "study")
 	System string  // system prompt
 	Tools  []Tool  // offered == execution allowlist
-	Bounds Bounds  // engine type — MaxIter, ReadBudgetBytes
+	Bounds Bounds  // engine type — MaxTokens (mandatory), MaxIter, ReadBudgetBytes
 }
 
 type SubAgentRunner interface {
@@ -122,7 +122,7 @@ type SubAgentRunner interface {
 var Study = Subagent{
 	Name: "study", Role: "study", System: studySystem,
 	Tools:  []Tool{OutlineTool, GrepTool, ReadFile},
-	Bounds: Bounds{MaxIter: 10, ReadBudgetBytes: 96_000},
+	Bounds: Bounds{MaxTokens: 12_000, MaxIter: 10, ReadBudgetBytes: 96_000},
 }
 ```
 
@@ -134,7 +134,7 @@ package main
 // shows the subagent's tool calls live (REPL → stderr; headless/tests nil).
 func (cs *CortexSession) RunSubagent(ctx context.Context, sa tools.Subagent, seed string) (string, error) {
 	spec := cs.specForRole(sa.Role)
-	req  := requestFor(spec, sa.System, seed, sa.Tools)
+	req  := requestFor(spec, sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
 	ts   := tools.Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	return runLoop(ctx, cs.blockingSender(), req, ts, sa.Bounds, cs.studyProgress())
 }
@@ -213,7 +213,9 @@ where it helps the reader. Base your answer only on what you read, and be concis
   itself errors, the coder gets the short error and adapts. No failure table.
 - **Empty digest is handled explicitly.** If finalize returns "", the coder gets
   "study produced no digest for <path>" — never a silent empty string.
-- **Bounds are the safety net that must always hold.** `MaxIter` (rounds),
+- **Bounds are the safety net that must always hold.** `MaxTokens` (the mandatory
+  per-request completion cap — the primary runaway backstop; see
+  [`engine-unification.md`](engine-unification.md)), `MaxIter` (rounds),
   `ReadBudgetBytes` (accumulated output), and the no-progress guard are
   independent; whichever trips first forces the engine's finalize. Wall-clock
   time is bounded *without* a hard whole-run timer: the `Sender`'s per-request
@@ -558,7 +560,7 @@ subsystem, if recall ever proves insufficient:
 var Reflect = Subagent{
 	Name: "reflect", Role: "study",
 	Tools:  []Tool{OutlineTool, GrepTool, ReadFile, MemoryWriteTool}, // read journal → write notes
-	Bounds: Bounds{MaxIter: 6, ReadBudgetBytes: 64_000},
+	Bounds: Bounds{MaxTokens: 12_000, MaxIter: 6, ReadBudgetBytes: 64_000},
 }
 // Triggered at idle / a turn-count threshold / session end; reads recent journal
 // entries on the same runLoop engine and writes memory notes. Resurrects the
@@ -617,6 +619,15 @@ Built **after** [`engine-unification.md`](engine-unification.md) lands. Invarian
 every phase: `go build ./...`, `go vet`, `./scripts/check.sh`, `go test ./...`
 green. Flip ☐→☑ on land.
 
+**Unattended boundary.** A phase's executable acceptance is `go build/vet` +
+`./scripts/check.sh` + `go test ./...` + its `scripts/verify-study.sh` checks —
+all **zero-network**, so the full build-out runs unattended. Goal-hit thresholds
+are **pinned in code** (`StudyProbe.need()` / `pass()`; `verify-study.sh` asserts
+the `passes != total` hard gate), not left to judgment. The **only** model-gated
+steps are the live `loop study-eval` fleet numbers (phase 5) and a manual smoke
+`study` — an ops sign-off **after** the code lands, **not** a blocker for marking a
+phase ☑.
+
 | # | Phase | Scope | Exit criteria | State |
 |---|---|---|---|---|
 | 1 | `internal/outline` | `Entry`/`Outline`/`Render`; breadth-first to budget; truncate deep-only (names always listed); go/ast + regex + wholeFile listers | unit tests: budget breadth-first, child-name retention, tree collapse | ☐ |
@@ -647,7 +658,7 @@ pre-deletion 41,468 / 26,304).
 | 2 `grep` | +120…160 | 0 | ctx-aware, confined; reuses `projectscan` ignore set |
 | 3 targeted+confined `read_file` | +60…90 | 0 | one `maxReadLines`; `ConfinePath` allows `.cortex/journal` |
 | 4 `Study` profile + **deletions** | +100…130 | **−1150…−1300** | delete `navigator.go` (~283) + `projectindex/` (~895) + `project_index` tool; migrate the test caller |
-| 5 eval + telemetry | +230…320 | 0 | `study_eval.go` 120→~380; richer scorer (stop-reason, per-tool, token incl. peak, derived ratios, rep p50/p95) |
+| 5 eval + telemetry | +200…300 | 0 | `study_eval.go` ~210→~440 (the 2026-06-28 probe set + `pass()` + per-probe timeout are already in; this adds the mechanical scorer: stop-reason, per-tool, token incl. peak, derived ratios, rep p50/p95, journal telemetry) |
 
 **Whole-effort headline (both docs):** net source **≈ −500 … +300** — the unified
 engine + `grep` + confined/bounded study land for zero-to-negative net lines
@@ -746,4 +757,10 @@ _Append-only._
   Same shape is the always-on journal telemetry record — one shape, emitted every
   run, read by the eval (no eval-only instrumentation). Engine-side peak-output /
   clamp metrics mirrored into engine-unification.md's runaway tripwire.
+- **2026-06-28** **Every `Subagent` profile sets a mandatory `Bounds.MaxTokens`**
+  (`Study` and `Reflect` = 12K), per the engine's "no unbounded request" invariant
+  ([`engine-unification.md`](engine-unification.md)). `RunSubagent` threads
+  `sa.Bounds.MaxTokens` into `requestFor`; the profile literals carry it explicitly.
+  A profile with `MaxTokens` unset would silently reintroduce the 2026-06-28 north
+  runaway — so it is part of the `Bounds` "safety net" list, not optional.
 ```
