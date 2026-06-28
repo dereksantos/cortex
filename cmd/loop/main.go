@@ -104,14 +104,6 @@ const defaultModel = ModelCoder
 // spin forever burning tokens. The smallest form of the "bounded" principle.
 const maxToolIterations = 100
 
-// maxRepeatedToolCalls bounds how many byte-identical consecutive tool-call
-// batches the inner loop tolerates before intervening. A weak model that gets a
-// content-free result can otherwise re-issue the same call until
-// maxToolIterations, burning the whole turn (observed: 68 identical greps in
-// one turn, 2026-06-14). On the (maxRepeatedToolCalls-1)th repeat we inject a
-// nudge giving the model one chance to change course; on the next we abort.
-const maxRepeatedToolCalls = 3
-
 // maxToolOutput caps how much tool output we feed back into context. Defined
 // in the tools package; aliased here for the references in main.go.
 const maxToolOutput = tools.MaxToolOutput

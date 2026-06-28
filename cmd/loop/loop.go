@@ -94,6 +94,15 @@ type loopStats struct {
 
 var errNoChoices = errors.New("no choices in model response")
 
+// maxRepeatedToolCalls bounds how many byte-identical consecutive tool-call
+// batches the inner loop tolerates before intervening. A weak model that gets a
+// content-free result can otherwise re-issue the same call until maxToolIterations,
+// burning the whole turn (observed: 68 identical greps in one turn, 2026-06-14).
+// On the (maxRepeatedToolCalls-1)th repeat the engine injects a nudge giving the
+// model one chance to change course; on the next it breaks and finalizes. Defined
+// here, with its sole user (the no-progress guard in runLoop).
+const maxRepeatedToolCalls = 3
+
 // noProgressNudge is injected one repeat short of the cap so a stuck model can
 // change course before the guard breaks the loop. Engine-level (every caller),
 // not a main-loop special case.
