@@ -584,8 +584,26 @@ func readRange(path string, start, end int) (string, error) {
 	}
 	printToolAction(fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
 	body := strings.Join(lines[start-1:hi], "\n")
-	return fmt.Sprintf("@%s:%d-%d\n%s", path, start, hi, body), nil
+	// Byte ceiling: the line clamp alone doesn't bound a span of VERY long lines
+	// (minified JSON, journal JSONL — ~2.6 KB/line), which could return hundreds of
+	// KB and blow up the context. Cap the bytes too, truncating at a line boundary
+	// with a visible note so the model greps for what it needs instead.
+	note := ""
+	if len(body) > maxReadBytes {
+		cut := maxReadBytes
+		if nl := strings.LastIndexByte(body[:maxReadBytes], '\n'); nl > 0 {
+			cut = nl
+		}
+		body = body[:cut]
+		note = fmt.Sprintf("\n… [truncated at %d bytes — lines here are very long; grep for the specific text you need]", maxReadBytes)
+	}
+	return fmt.Sprintf("@%s:%d-%d\n%s%s", path, start, hi, body, note), nil
 }
+
+// maxReadBytes is the per-read byte ceiling — a span of very long lines can't
+// return more than this regardless of its line count, so a single read can't
+// explode the context. ~24 KB ≈ 6k tokens, ample for a real code span.
+const maxReadBytes = 24000
 
 // goFileSkeleton returns the declaration outline of a Go file (every top-level
 // unit with line spans), or "" for non-Go or unparseable files — the orientation

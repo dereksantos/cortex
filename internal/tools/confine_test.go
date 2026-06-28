@@ -98,3 +98,22 @@ func TestTargetedReadNonReadNoop(t *testing.T) {
 		t.Errorf("TargetedRead must be a no-op for non-read_file calls")
 	}
 }
+
+func TestReadRangeByteCap(t *testing.T) {
+	dir := t.TempDir()
+	// 50 lines of ~3 KB each = ~150 KB — a 200-line clamp wouldn't bound it, but
+	// the byte cap must (journal JSONL / minified files have huge lines).
+	p := filepath.Join(dir, "huge.jsonl")
+	line := strings.Repeat("x", 3000) + "\n"
+	os.WriteFile(p, []byte(strings.Repeat(line, 50)), 0o644)
+	out, err := readRange(p, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > maxReadBytes+200 { // header + note slack
+		t.Errorf("read returned %d bytes, want bounded near maxReadBytes %d", len(out), maxReadBytes)
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Errorf("a huge-line span should carry a truncation note:\n%.200s", out)
+	}
+}
