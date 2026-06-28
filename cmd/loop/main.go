@@ -214,11 +214,12 @@ const (
 //     reason/study want this because they run alongside the coder (swap_group
 //     "igpu-8080"); a same-group reasoner would evict/reload coder every turn
 //     (the brief's "don't alternate in a tight loop"). reasoner-npu is swap-free.
-//   - thinkingOff: code/fast/study are bounded micro-calls where built-in
+//   - thinkingOff: code/fast are bounded micro-calls where built-in
 //     reasoning starves the completion budget (measured: a reasoner burned a
 //     full max_tokens on reasoning_content and returned empty content). reason
-//     leaves it on so the model deliberates. The enable_thinking kwarg only
-//     reaches thinking-capable models; applyFleet drops it for the rest.
+//     and study leave it on so the model deliberates over the goal. The
+//     enable_thinking kwarg only reaches thinking-capable models; applyFleet
+//     drops it for the rest.
 type rolePolicy struct {
 	tag                string
 	preferExperimental bool
@@ -231,7 +232,7 @@ var rolePolicies = map[string]rolePolicy{
 	roleHardCode: {tag: "coder", preferExperimental: true},
 	roleReason:   {tag: "reasoner", preferSwapFree: true},
 	roleFast:     {tag: "fast", thinkingOff: true},
-	roleStudy:    {tag: "reasoner", preferSwapFree: true, thinkingOff: true},
+	roleStudy:    {tag: "reasoner", preferSwapFree: true},
 	roleEmbed:    {tag: "embedder"},
 	roleRerank:   {tag: "reranker"},
 	roleTools:    {tag: "tool"},

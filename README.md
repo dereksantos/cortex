@@ -113,7 +113,7 @@ Config is layered, lowest to highest precedence:
   "backend": { "type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY" },
   "models": {
     "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
-    "study": { "model": "qwen/qwen3-4b" }
+    "study": { "model": "deepseek/deepseek-r1" }
   },
   "tools": { "allow_delete": true }
 }

@@ -103,6 +103,30 @@ toward 40/40.
   something that does not exist yet), but its **scorer already exists and is
   unit-tested**, so it is wiring, not new logic.
 
+## What the eval ran on (flight check — 2026-06-27)
+
+Recorded so it is clear what ø was measured against. **No endpoint host is
+named here** — it lives only in the untracked user config (`~/.cortex/config.json`).
+
+- **Backend.** A local, OpenAI-compatible LiteLLM gateway (`backend.type:
+  litellm`). Endpoint is in the untracked user config, not the repo.
+- **Role bindings at flight-check time.** `code → north`, `study → north`.
+- **Models available on the gateway.** `north`, `glm-4.7-flash`, `qwen3-4b`,
+  `reasoner`, `gpt-oss-20b`, `gpt-oss-120b`, `devstral`, `coder`, `study`,
+  `xlam-1b-fc-r`, `embedder`, `reranker` (and variants).
+- **`north` is a reasoning model** (returns `reasoning_content`); a bare
+  round-trip answered in ~0.4s.
+- **ø flight result.** `loop study-eval` on `north` over the current
+  (pre-refactor) navigator path: **pass 2/3, median ~17.8s, 0 errors → exit 1.**
+  This confirms ø is wired as a HARD gate (anything below 100% exits non-zero)
+  and is correctly RED before the work lands. The one failing probe (main.go
+  dispatch) returned a thin ~156-char digest — a study-model quality signal,
+  not a harness bug.
+- **Study runs on the reasoner, thinking ON.** `study` draws from the `reasoner`
+  tag (flight check: bound to `north`). The flight check confirms a reasoner
+  uses tools — `north` called `read_file` across all three probes — so study
+  deliberates with reasoning enabled rather than forcing it off.
+
 ## Running it
 
 ```bash

@@ -383,7 +383,7 @@ func TestCtxColor(t *testing.T) {
 	}
 }
 
-// testFleet mirrors the live chatterbox fleet for resolution tests.
+// testFleet mirrors the live fleet for resolution tests.
 var testFleet = Fleet{
 	"coder":        {Role: "coder", MaxInput: 131072, Thinking: true, SwapGroup: "igpu-8080"},
 	"coder80":      {Role: "coder", MaxInput: 131072, Thinking: false, SwapGroup: "igpu-8080", Experimental: true},
@@ -457,13 +457,14 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("thinking off for code/study by default; config can re-enable", func(t *testing.T) {
+	t.Run("thinking off for code by default; study deliberates; config can re-enable", func(t *testing.T) {
 		var nilCfg *Config
 		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking == nil || *code.Thinking {
 			t.Errorf("code Thinking = %v, want false", code.Thinking)
 		}
-		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking == nil || *study.Thinking {
-			t.Errorf("study Thinking = %v, want false", study.Thinking)
+		// study draws from the reasoner tag and deliberates: no forced-off kwarg.
+		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking != nil {
+			t.Errorf("study Thinking = %v, want nil (reasoner thinks by default)", study.Thinking)
 		}
 		on := true
 		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: &on}}}
