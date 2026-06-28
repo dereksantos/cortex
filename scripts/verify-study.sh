@@ -149,6 +149,12 @@ if go test ./...  >/dev/null 2>&1; then ok "go test ./...";  else no "go test ./
 # ø is a HARD gate, not a report: study-eval must pin T (every probe passes) and
 # exit non-zero otherwise, so an autonomous run reads pass/fail from the exit code.
 present "study-eval pins T (all probes pass)" 'passes != total'
+# ø must have TEETH: goal-hit alone under-discriminates (flight check 2026-06-28 —
+# the old navigator brute-read its way to a pass). Phase 5 must score read volume,
+# so a study that over-reads to the answer fails the bounded check. Bind to the
+# JSON tag the telemetry emits (not a prose mention) so the check can't pass on a
+# comment — it goes green only when the row actually carries the field.
+present "study-eval scores reads/bounded (ø discriminates)" 'json:"(read_bytes|bounded)"'
 
 ############################################################################
 if [ -n "$DIFF_BASE" ]; then

@@ -529,8 +529,8 @@ green. Flip ☐→☑ on land.
 | 1 | `internal/outline` | `Entry`/`Outline`/`Render`; breadth-first to budget; truncate deep-only (names always listed); go/ast + regex + wholeFile listers | unit tests: budget breadth-first, child-name retention, tree collapse | ☐ |
 | 2 | `grep` tool | pure-Go `grepFiles` (walk + `projectscan` ignore + RE2 + caps + ctx-checks); confinement; `GrepTool` decl | unit tests: cap, binary-skip, ignore-set, bad-regex error, escape rejected | ☐ |
 | 3 | targeted + confined `read_file` | `maxReadLines`; `TargetedRead`; `ConfinePath` (allows `.cortex/journal`, blocks escapes) | unit tests: floor, refuse, clamp, abs/`..` rejected, journal allowed | ☐ |
-| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **also delete the navigator eval driver** (`navEvalCases`/`CORTEX_NAV_REPS`/`runStudyEvalNav`) so `study_eval.go` compiles — keep `countGoalHits`, leave `loop study-eval` minimally wired (or temporarily reduced) until phase 5 fills it out | `loop study` works on the new path; old nav code + `projectindex` + nav eval driver gone (incl. the test caller); suite green | ☐ |
-| 5 | eval + telemetry | build the new driver on `RunSubagent` reusing `countGoalHits`: `StudyProbe`/`StudyEvalResult`, mechanical scorers + instrumentation, model × probe table; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit + completed/bounded/latency across the fleet | ☐ |
+| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **retarget the eval driver** — `study_eval.go` already holds the discriminating `StudyProbe` set + `pass()` scorer + per-probe timeout (the old `navEvalCases` were replaced 2026-06-28); when `runNavigator` is deleted here, point `runStudyEvalNav` at `RunSubagent` (phase 5 finishes the scorer wiring). Keep `countGoalHits`/`StudyProbe` | `loop study` works on the new path; old nav code + `projectindex` gone (incl. the test caller); `study_eval.go` calls `RunSubagent`, not `runNavigator`; suite green | ☐ |
+| 5 | eval + telemetry | retarget the driver from `runNavigator` to `RunSubagent` (the discriminating `StudyProbe` set, `pass()` scorer, and per-probe timeout already exist in `study_eval.go`); **wire the `ReadBytes`/`Reads`/`Bounded` scorer from the engine's budget accounting — this is the real discriminator, not optional**; model × probe table; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit **AND `ReadBytes`/`Reads`/`Bounded` per probe**, all probes pass & bounded across the fleet. **Goal-hit alone is insufficient** — flight check 2026-06-28: the old navigator passed the needle/bounded probes by brute-reading (4 reads / ~800 lines on a single-region goal); ø only gains teeth when the bounded scorer fires | ☐ |
 | 6 | docs / CLAUDE.md | point `study` at this design (`study-navigator.md` already removed 2026-06-27); update tool list (no project_index, no memory_search change) | docs match shipped code | ☐ |
 
 `internal/outline`, `grep`, and targeted/confined `read_file` (phases 1–3) are
@@ -622,4 +622,19 @@ _Append-only._
   alongside `Navigate` (required to keep phase 4 "suite green"). The scorer
   `countGoalHits` is implementation-agnostic and survives; phase 5 builds the new
   `RunSubagent` driver on top of it and renames `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`.
+- **2026-06-28** **ø probe set hardened + flight-tested; goal-hit alone proven
+  insufficient.** Replaced the 3 weak keyword cases with 6 discriminating probes
+  (needle/bounded/grounding/recall/multi-hop/smoke) against cortex's own tree +
+  journal (`study_eval.go`), each leaning on a capability the old navigator lacks.
+  Live flight check on `north`: the navigator passed needle/bounded/grounding by
+  **brute-reading** (e.g. bounded: 4 reads / ~800 lines for a single-region goal),
+  and **thrashed ~15 min on journal-recall** (no JSONL search). Conclusions: (1)
+  goal-hit alone under-discriminates — the `ReadBytes`/`Reads`/`Bounded` scorer is
+  the real discriminator and is now a HARD phase-5 exit criterion, not optional;
+  (2) the eval needs a per-probe wall-clock timeout (added,
+  `CORTEX_STUDY_PROBE_TIMEOUT`, default 120s) so a thrash fails fast instead of
+  hanging the gate; (3) journal-recall is the one probe that discriminates on
+  goal-hit today (old path can't search the journal). `verify-study.sh` now
+  asserts the bounded/reads scorer exists, so ø cannot be declared green on
+  keywords alone.
 ```
