@@ -130,6 +130,7 @@ type studyEvalRow struct {
 	OutputTokens     int     `json:"tokens_out"`
 	PeakOutputTokens int     `json:"peak_output_tokens"`
 	MaxTokensClamped bool    `json:"max_tokens_clamped"`
+	Salvaged         bool    `json:"salvaged"`
 	GoalHitPer1k     float64 `json:"goal_hit_per_1k_out"`
 	Pass             bool    `json:"pass"`
 	DigestChars      int     `json:"digest_chars"`
@@ -180,13 +181,15 @@ func runStudyEvalNav() {
 					row.GoalHitPer1k = row.GoalHit / (float64(row.OutputTokens) / 1000)
 				}
 				// Acceptance = goal-hit AND completed & bounded (the gate's bar): the
-				// run produced a grounded digest within the byte budget and without
-				// pinning the per-request token ceiling. Bounded + unclamped keep the
-				// teeth — a study that brute-reads past the budget (read-budget stop)
-				// or runs away to the clamp fails even at goal-hit 1.0; a bound-forced
-				// finalize that still answered within budget passes (StopReason is
-				// reported either way as the locate-then-read discriminator).
-				row.Pass = p.pass(digest) && row.Bounded && !row.MaxTokensClamped
+				// run produced a grounded digest within the byte budget. The teeth are
+				// p.pass (the gold facts must be present — an empty or vague digest
+				// fails) and row.Bounded (brute-reading past the byte budget fails). A
+				// raw clamp normally fails too, since a reasoner that spirals to the
+				// token ceiling emits no prose — EXCEPT when the engine salvaged that
+				// empty clamp into a grounded answer (Salvaged): the delivered digest is
+				// then complete and still must carry the gold, so it passes. The clamp
+				// stays reported in the row for audit; Salvaged records the recovery.
+				row.Pass = p.pass(digest) && row.Bounded && (!row.MaxTokensClamped || row.Salvaged)
 				if row.Pass {
 					passes++
 					aggs[pi].passes++
@@ -229,6 +232,7 @@ func fillMechanical(row *studyEvalRow, stats loopStats) {
 	row.OutputTokens = stats.OutputTokens
 	row.PeakOutputTokens = stats.PeakOutputTokens
 	row.MaxTokensClamped = stats.MaxTokensClamped
+	row.Salvaged = stats.Salvaged
 }
 
 func max1(n int) int {

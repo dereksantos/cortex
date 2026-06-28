@@ -299,6 +299,29 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 		}
 	})
+	t.Run("natural empty clamped finish is salvaged", func(t *testing.T) {
+		// The live failure mode: the model returns NO tool calls with EMPTY content
+		// because it spiraled to the token clamp on a normal turn (out == MaxTokens).
+		// The natural-finish path must salvage it, not return "".
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // the salvage re-ask
+				return fakeResp("salvaged answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", nil, 1, 100), false, nil // empty + clamped (out == MaxTokens), no tool calls
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
+			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+		}
+	})
 	t.Run("non-empty finalize does not retry", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }

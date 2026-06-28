@@ -81,8 +81,9 @@ type loopStats struct {
 	LastPromptTokens int    // most recent prompt_tokens (the live context gauge)
 	PeakOutputTokens int    // max completion tokens on any single request
 	MaxTokensClamped bool   // any request hit Bounds.MaxTokens (runaway tripwire)
+	Salvaged         bool   // an empty clamped finish was recovered by one terse re-ask
 	Iterations       int    // model rounds consumed
-	StopReason       string // clean-finalize|max-iter|read-budget|no-progress|deadline|error
+	StopReason       string // clean-finalize|salvaged-finalize|max-iter|read-budget|no-progress|deadline|error
 	FinalizeForced   bool   // answered because a bound dragged finalize out
 
 	Outlines  int
@@ -173,10 +174,20 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// assistant(tool_calls) → tool(result) ordering.
 		appendMsg(msg)
 
-		// No tool calls → the model answered. That prose IS the result.
+		// No tool calls → the model answered. That prose IS the result — unless it
+		// came back EMPTY because the model spiraled to the token clamp on this very
+		// turn (north does this on a hard finalize), in which case salvage it with one
+		// terse re-ask rather than returning nothing.
 		if len(msg.ToolCalls) == 0 {
+			answer := strings.TrimSpace(msg.Content)
+			if answer == "" && stats.MaxTokensClamped {
+				if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
+					req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
+					return a2, stats, nil
+				}
+			}
 			stats.StopReason = "clean-finalize"
-			return strings.TrimSpace(msg.Content), stats, nil
+			return answer, stats, nil
 		}
 
 		// No-progress guard: a weak model can re-issue the identical batch
@@ -257,26 +268,35 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *lo
 	msg := res.Choices[0].Message
 	appendMsg(msg)
 	answer := strings.TrimSpace(msg.Content)
-	// Spiral salvage: a reasoning model can burn its whole completion budget on
-	// thinking and return an EMPTY answer (the max-tokens clamp). That's the lone
-	// failure mode left on the slow probes — a healthy finalize always returns
-	// prose, so this retry can only fire on the empty-clamp signature and never
-	// touches a passing run. Re-ask ONCE with a hard brevity floor; keep tools
-	// withheld and grounding intact.
 	if answer == "" && stats.MaxTokensClamped {
-		appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
-		res2, _, err2 := send.Send(ctx, req)
-		if err2 == nil && res2 != nil && len(res2.Choices) > 0 {
-			accountUsage(stats, res2, req.MaxTokens)
-			msg2 := res2.Choices[0].Message
-			appendMsg(msg2)
-			if a2 := strings.TrimSpace(msg2.Content); a2 != "" {
-				stats.StopReason = "salvaged-finalize"
-				answer = a2
-			}
+		if a2 := salvageEmptyFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
+			answer = a2
 		}
 	}
 	return answer, *stats, nil
+}
+
+// salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor when
+// a finish came back EMPTY because a reasoning model burned its whole budget
+// deliberating (the max-tokens clamp → no prose). Returns the salvaged answer (and
+// stamps stop_reason + Salvaged) or "". Gated by the empty-clamp signature at both
+// call sites, so a healthy run (always prose) never triggers it.
+func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
+	req.Tools = nil
+	appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
+	res, _, err := send.Send(ctx, req)
+	if err != nil || res == nil || len(res.Choices) == 0 {
+		return ""
+	}
+	accountUsage(stats, res, req.MaxTokens)
+	msg := res.Choices[0].Message
+	appendMsg(msg)
+	a := strings.TrimSpace(msg.Content)
+	if a != "" {
+		stats.StopReason = "salvaged-finalize"
+		stats.Salvaged = true
+	}
+	return a
 }
 
 // accountUsage folds one response's token usage into the run stats, tracking the
