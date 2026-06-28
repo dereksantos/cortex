@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/tools"
 )
@@ -55,13 +58,46 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	req := requestFor(spec, sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	start := time.Now()
 	digest, stats, err := runLoop(ctx, cs.blockingSender(), req, ts, sa.Bounds, nil, appendMsg)
 	// Fold the subagent's billed usage into the session totals (it does not set
 	// LastPromptTokens — that gauge belongs to the coder's own context).
 	cs.tokensIn += stats.InputTokens
 	cs.tokensOut += stats.OutputTokens
 	cs.costUSD += stats.Cost
+	// Always-on telemetry: emit the run's mechanical stats to the journal in normal
+	// operation too (a persisted session), the same shape the study eval reads.
+	if cs.SessionID != "" {
+		p := journal.StudyResultPayload{
+			SchemaVersion: "1", RunID: cs.SessionID, Timestamp: time.Now().UTC().Format(time.RFC3339),
+			ScenarioID: sa.Name, Harness: "study", Model: spec.Model, Backend: spec.Endpoint,
+			LatencyMs: time.Since(start).Milliseconds(), TokensIn: stats.InputTokens, TokensOut: stats.OutputTokens,
+			AgentTurnsTotal: stats.Iterations, StopReason: stats.StopReason, FinalizeForced: stats.FinalizeForced,
+			PeakOutputTokens: stats.PeakOutputTokens, MaxTokensClamped: stats.MaxTokensClamped,
+			Outlines: stats.Outlines, Greps: stats.Greps, Reads: stats.Reads, ToolErrs: stats.ToolErrs,
+			ReadBytes: stats.ReadBytes, Bounded: stats.ReadBytes <= sa.Bounds.ReadBudgetBytes,
+		}
+		cs.emitStudyResult(p)
+	}
 	return digest, stats, err
+}
+
+// emitStudyResult appends one study.result telemetry entry to the journal —
+// best-effort: a metrics-write failure never affects the run.
+func (cs *CortexSession) emitStudyResult(p journal.StudyResultPayload) {
+	entry, err := journal.NewStudyResultEntry(p)
+	if err != nil {
+		return
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{
+		ClassDir: filepath.Join(contextDir(), "journal", "study"),
+		Fsync:    journal.FsyncPerBatch,
+	})
+	if err != nil {
+		return
+	}
+	defer w.Close()
+	_, _ = w.Append(entry)
 }
 
 // dispatcherFor builds a profile's dispatcher: the offered-tool allowlist plus
