@@ -90,6 +90,10 @@ file_present internal/agent     # phase 3: engine moved to its own package
 # the Resolve→Turn fold (it records the coder loop's message/dispatch/stop
 # sequence against today's behavior and must stay green through the fold).
 present_test "characterization test (locks coder-loop behavior)" 'func TestCoderLoopCharacterization\('
+# Runaway tripwire (2026-06-28): the harness side of "no unbounded/uncancellable
+# request" must be PROVEN, not just documented. Red until the engine lands these.
+present_test "request always bounded (max_tokens set)"     'func TestRequestForSetsMaxTokens\('
+present_test "mid-flight cancel closes the connection"     'func TestSenderCancelClosesConnection\('
 
 ############################################################################
 hdr "3. Study primitives — outline / grep / targeted+confined read"

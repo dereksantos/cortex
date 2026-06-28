@@ -297,9 +297,14 @@ in study-subagent.md phase 4, not here.**
   finite `max_tokens` and is streamed. Assert `requestFor` sets `MaxTokens` (no
   request path omits it), `Bounds` has a `MaxTokens` field, and the interruptible
   `Sender` streams + builds its HTTP request with the call `ctx`
-  (`http.NewRequestWithContext`) so cancel closes the socket. A test fires a
-  `SenderFunc` whose request is missing `max_tokens` / is non-streamed and asserts
-  the engine rejects it. This is the regression guard for the 2026-06-28 runaway.
+  (`http.NewRequestWithContext`) so cancel closes the socket. Two named tests are
+  the regression guard for the 2026-06-28 runaway, and `verify-study.sh` asserts
+  both exist (red until written): **`TestRequestForSetsMaxTokens`** (every request
+  carries a finite `max_tokens`) and **`TestSenderCancelClosesConnection`** (an
+  `httptest` server, no model: cancel the `ctx` mid-stream → the client returns
+  promptly and the server observes the closed connection). The end-to-end "GPU
+  slot frees" is NOT eval-verifiable (it rides LiteLLM's unreliable disconnect
+  propagation) — that's an ops check, which is why `max_tokens` is the backstop.
 - **Import graph:** `internal/agent` imports only `pkg/llm` — no
   cortex-session/tools-by-name (`go list -deps`; script §5).
 - **Topology (post-phase-3):** `cmd/loop` has **no sub-packages** (it is `package
