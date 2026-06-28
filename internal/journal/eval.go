@@ -10,16 +10,14 @@ import (
 // context_strategy × cell).
 const TypeEvalCellResult = "eval.cell_result"
 
-// EvalCellResultPayload is the journal-native shape of an eval cell
-// result. The fields mirror internal/eval/v2.CellResult exactly so a
-// downstream consumer (the eval projector, future eval tooling) can read
-// the payload as-is without translation.
-//
-// Future direction: internal/eval/v2/persist*.go currently writes both
-// SQLite (fast queries) and a companion <dbDir>/cell_results.jsonl
-// (portable analysis). E2 lands the journal entry + projector
-// alongside; a follow-up unifies the storage layer once eval tooling
-// is updated to read from journal/eval/cell_result/.
+// EvalCellResultPayload is the canonical structured shape of an eval
+// result, written as an eval.cell_result entry into
+// .cortex/journal/eval/. It originally mirrored the internal/eval/v2
+// grid framework's CellResult; that framework has since been removed,
+// so this journal struct is now the de-facto canonical eval-result
+// shape. cmd/loop's emitSessionMetrics writes one per REPL session, and
+// the study eval emits an aligned study.result sharing this field
+// vocabulary (see docs/study-subagent.md §5).
 type EvalCellResultPayload struct {
 	SchemaVersion string `json:"schema_version"`
 
@@ -58,9 +56,9 @@ type EvalCellResultPayload struct {
 }
 
 // NewEvalCellResultEntry builds a journal entry for one cell result. The
-// caller is responsible for ensuring the payload validates against the
-// eval-harness contract (internal/eval/v2.CellResult.Validate); the
-// journal does not re-validate to keep the package dependency-light.
+// caller is responsible for populating a coherent payload (RunID and
+// ScenarioID are the only hard requirements); the journal does not
+// re-validate beyond those to keep the package dependency-light.
 func NewEvalCellResultEntry(p EvalCellResultPayload) (*Entry, error) {
 	if p.RunID == "" {
 		return nil, fmt.Errorf("journal: eval.cell_result requires RunID")
