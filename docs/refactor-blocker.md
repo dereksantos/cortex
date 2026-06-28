@@ -27,9 +27,17 @@ navigator/projectindex could not do at all.
    fixes it. Tried: no-markup answer discipline (fixes the answer source, not
    mid-loop reasoning), `maxRepeatedToolCalls` const-move (self-contained probe),
    no-chase nudge, thinking-off finalize (reverted — dumps raw action tokens),
-   sanctioned moved-path re-point. The probe's gold (the `parseXMLToolCalls` →
-   `Execute` dispatch path) **cannot be re-topiced without weakening the probe**,
-   which the goal forbids. This probe alone makes 6/6 impossible on this fleet.
+   sanctioned moved-path re-point, and **defanging control-token literals in tool
+   results** (`internal/tools/defang.go`). The defang FALSIFIED the "ingested-content
+   poison" hypothesis: in the isolated re-test north never read `xml_tool_calls.go`
+   yet still 500'd — confirming the markup originates in **north's own generation**
+   while reasoning about tool-call machinery, not in content it reads. LiteLLM
+   peg-parses every response from the north model group regardless of whether tools
+   are offered, so even the tools-stripped finalize 500s (`finalize_forced=true`
+   still yields `digest=0`). Six distinct fixes, same failure → irreducible
+   model+proxy defect. The probe's gold (the `parseXMLToolCalls` → `Execute`
+   dispatch path) **cannot be re-topiced without weakening the probe**, which the
+   goal forbids. This probe alone makes 6/6 impossible on this fleet.
 
 2. **journal + tool-registration probes → reasoning-spiral to the MaxTokens cap →
    empty digest.** north (thinking ON) burns its entire output budget on reasoning
