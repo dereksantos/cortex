@@ -332,6 +332,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return study(ctx, tc, deps)
 	case FunctionProjectIndex:
 		return projectIndex(tc)
+	case FunctionGrep:
+		return grep(ctx, tc)
 	case FunctionBash:
 		return bash(ctx, tc, deps)
 	case FunctionRemove:
