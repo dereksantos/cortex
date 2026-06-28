@@ -95,13 +95,11 @@ type loopStats struct {
 
 var errNoChoices = errors.New("no choices in model response")
 
-// maxRepeatedToolCalls bounds how many byte-identical consecutive tool-call
-// batches the inner loop tolerates before intervening. A weak model that gets a
-// content-free result can otherwise re-issue the same call until maxToolIterations,
-// burning the whole turn (observed: 68 identical greps in one turn, 2026-06-14).
-// On the (maxRepeatedToolCalls-1)th repeat the engine injects a nudge giving the
-// model one chance to change course; on the next it breaks and finalizes. Defined
-// here, with its sole user (the no-progress guard in runLoop).
+// maxRepeatedToolCalls bounds byte-identical consecutive tool-call batches before
+// the no-progress guard intervenes: a weak model can re-issue the same call until
+// it burns the turn (observed: 68 identical greps, 2026-06-14). On the penultimate
+// repeat the engine nudges; on the next it finalizes. Defined here with its sole
+// user (the guard in runLoop).
 const maxRepeatedToolCalls = 3
 
 // noProgressNudge is injected one repeat short of the cap so a stuck model can
@@ -174,10 +172,9 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// assistant(tool_calls) → tool(result) ordering.
 		appendMsg(msg)
 
-		// No tool calls → the model answered. That prose IS the result — unless it
-		// came back EMPTY because the model spiraled to the token clamp on this very
-		// turn (north does this on a hard finalize), in which case salvage it with one
-		// terse re-ask rather than returning nothing.
+		// No tool calls → the model answered. That prose IS the result — unless it's
+		// EMPTY because the model spiraled to the token clamp on this turn, which we
+		// salvage with one terse re-ask rather than returning nothing.
 		if len(msg.ToolCalls) == 0 {
 			answer := strings.TrimSpace(msg.Content)
 			if answer == "" && stats.MaxTokensClamped {

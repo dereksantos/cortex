@@ -180,15 +180,12 @@ func runStudyEvalNav() {
 				if row.OutputTokens > 0 {
 					row.GoalHitPer1k = row.GoalHit / (float64(row.OutputTokens) / 1000)
 				}
-				// Acceptance = goal-hit AND completed & bounded (the gate's bar): the
-				// run produced a grounded digest within the byte budget. The teeth are
-				// p.pass (the gold facts must be present — an empty or vague digest
-				// fails) and row.Bounded (brute-reading past the byte budget fails). A
-				// raw clamp normally fails too, since a reasoner that spirals to the
-				// token ceiling emits no prose — EXCEPT when the engine salvaged that
-				// empty clamp into a grounded answer (Salvaged): the delivered digest is
-				// then complete and still must carry the gold, so it passes. The clamp
-				// stays reported in the row for audit; Salvaged records the recovery.
+				// Acceptance = goal-hit AND completed & bounded. Teeth: p.pass (gold
+				// facts must be present — empty/vague fails) and row.Bounded (no
+				// brute-reading past the byte budget). A raw clamp fails too (a spiral
+				// to the token ceiling emits no prose) — EXCEPT when the engine salvaged
+				// it into a grounded answer that STILL must carry the gold (Salvaged).
+				// The clamp stays reported for audit; Salvaged records the recovery.
 				row.Pass = p.pass(digest) && row.Bounded && (!row.MaxTokensClamped || row.Salvaged)
 				if row.Pass {
 					passes++
