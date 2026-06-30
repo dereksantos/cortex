@@ -349,6 +349,57 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	})
 }
 
+// TestRunLoopDetectsStuckErrorLoop reproduces the live coder hang: the model
+// alternates a no-op edit (always "Error: …identical; nothing to change") with a
+// read (always succeeds). The byte-identical no-progress guard only sees
+// CONSECUTIVE identical batches, so the interleaved read resets it and it NEVER
+// trips — the harness thrashes to MaxIter. The error-class detector must catch the
+// recurring error (across the interleaved reads), inject an actionable redirect,
+// and escalate to a "stuck" finalize.
+func TestRunLoopDetectsStuckErrorLoop(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var i int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // finalize round
+			return fakeResp("gave up", nil, 1, 1), false, nil
+		}
+		if i++; i%2 == 1 {
+			return fakeResp("", []ToolCall{{ID: "e", Type: "function", Function: FunctionCall{
+				Name: tools.FunctionEditFile, Arguments: `{"path":"x"}`}}}, 1, 1), false, nil
+		}
+		return fakeResp("", []ToolCall{readCall("r", "x")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
+		if c.Function.Name == tools.FunctionEditFile {
+			return "Error: x edit 1: old_string and new_string are identical; nothing to change"
+		}
+		return "@x:1-5 lines"
+	})
+	_, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if stats.StopReason != "stuck" {
+		t.Errorf("stop = %q, want \"stuck\" — the error-class detector should fire on the recurring edit error", stats.StopReason)
+	}
+	if stats.Iterations >= 12 {
+		t.Errorf("ran to MaxIter %d — harness thrashed instead of redirecting", stats.Iterations)
+	}
+	foundHint := false
+	for _, m := range req.Messages {
+		if m.Role == RoleUser && strings.Contains(strings.ToLower(m.Content), "already applied") {
+			foundHint = true
+		}
+	}
+	if !foundHint {
+		t.Error("no actionable redirect (the off-ramp hint) was injected before giving up")
+	}
+}
+
 // TestRunLoopBlockingSubagentPath proves the subagent path with no second real
 // caller: runLoop driven by the real blockingSender over an httptest server (no
 // model) runs a 2-round tool loop, accounts tokens, drives the Progress sink,

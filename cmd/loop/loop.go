@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
@@ -102,6 +103,42 @@ var errNoChoices = errors.New("no choices in model response")
 // user (the guard in runLoop).
 const maxRepeatedToolCalls = 3
 
+const (
+	stuckThreshold  = 2   // same error-class seen this many times → inject a redirect
+	stuckJitterTemp = 0.5 // small perturbation applied only to the post-redirect re-sample
+)
+
+var digitRe = regexp.MustCompile(`\d+`)
+
+// errorClass reduces a tool error observation to a stable class — the leading
+// "Error: …" line with numbers neutralized — so the SAME failure recurring is
+// detectable even when read_file calls interleave (which reset the byte-identical
+// no-progress guard). Returns "" for a non-error observation.
+func errorClass(obs string) string {
+	if !strings.HasPrefix(obs, "Error:") {
+		return ""
+	}
+	line := obs
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	return digitRe.ReplaceAllString(line, "#")
+}
+
+// stuckHint maps a recurring tool-error class to an ACTIONABLE redirect — the
+// off-ramp a weak model can't infer from the raw error — with a generic wrap-up
+// fallback. The known cases are the ones observed thrashing the live loop.
+func stuckHint(class string) string {
+	switch {
+	case strings.Contains(class, "identical; nothing to change"):
+		return "Harness note: that edit is a no-op — old_string already equals new_string, so the change is most likely ALREADY APPLIED. Stop editing this region: read_file to confirm, then report what you changed. Do not re-issue the edit."
+	case strings.Contains(class, "old_string") && strings.Contains(class, "not found"):
+		return "Harness note: edit_file can't find your old_string — it must match the file EXACTLY. Re-read the span and copy the literal current text, or use a larger unique snippet."
+	default:
+		return "Harness note: the same tool error keeps recurring and you are not making progress. Stop and report what you did and what is blocking you."
+	}
+}
+
 // noProgressNudge is injected one repeat short of the cap so a stuck model can
 // change course before the guard breaks the loop. Engine-level (every caller),
 // not a main-loop special case.
@@ -135,11 +172,19 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	}
 
 	var lastSig string
-	var repeats int // consecutive batches identical to lastSig, including current
+	var repeats int             // consecutive batches identical to lastSig, including current
+	errSeen := map[string]int{} // error-class → times seen this turn (survives interleaved reads)
+	jitter := false             // perturb temperature on the next send (set when stuck)
+	baseTemp := req.Temperature // restore after a one-shot jitter
 	stop := ""
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
+		if jitter {
+			req.Temperature = stuckJitterTemp // perturb only the post-redirect re-sample
+			jitter = false
+		}
 		res, _, err := send.Send(ctx, req)
+		req.Temperature = baseTemp // one-shot: restore so the rest of the turn stays deterministic
 		if err != nil {
 			// A mid-loop model-call failure (transient backend error, or a proxy
 			// rejecting a tool-call round's grammar) shouldn't lose a run that has
@@ -198,11 +243,26 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		if ts.BeforeBatch != nil {
 			ts.BeforeBatch()
 		}
+		// hintClass carries a just-crossed stuck threshold so the off-ramp is injected
+		// AFTER all tool results (the API requires tool results to follow the
+		// assistant message before any user turn).
+		hintClass := ""
 		for _, call := range msg.ToolCalls {
 			countTool(&stats, call.Function.Name)
 			obs := ts.Dispatch.Dispatch(ctx, call)
-			if strings.HasPrefix(obs, "Error:") {
+			// Stuck detector: count by ERROR CLASS, not byte-identical call, so a
+			// recurring failure is caught even when the model interleaves read_file
+			// calls (which slip past the no-progress guard). First crossing → an
+			// actionable redirect; persisting → finalize instead of thrashing.
+			if cls := errorClass(obs); cls != "" {
 				stats.ToolErrs++
+				errSeen[cls]++
+				switch errSeen[cls] {
+				case stuckThreshold:
+					hintClass = cls
+				case stuckThreshold + 2:
+					stop = "stuck"
+				}
 			}
 			stats.ReadBytes += len(obs)
 			appendMsg(Message{Role: RoleTool, ToolCallID: call.ID, Content: obs})
@@ -215,6 +275,18 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		if err := ctx.Err(); err != nil {
 			stats.StopReason = "deadline"
 			return "", stats, err
+		}
+		// A recurring error just crossed the threshold: inject the off-ramp (after the
+		// tool results) and perturb the next sample so the model doesn't snap back to
+		// the same losing token sequence.
+		if hintClass != "" {
+			appendMsg(Message{Role: RoleUser, Content: stuckHint(hintClass)})
+			jitter = true
+		}
+		// The redirect didn't take and the same error keeps recurring — stop thrashing
+		// and finalize from what's gathered.
+		if stop == "stuck" {
+			break
 		}
 
 		// The same batch repeated past the cap: the model won't recover on its
