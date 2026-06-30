@@ -91,7 +91,10 @@ type DeleteGate interface {
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
-// study tool needs Outliner (to seed) + SubAgentRunner (to run).
+// study tool needs Outliner (to seed) + SubAgentRunner (to run). The implementors
+// are concrete types that satisfy it structurally — *CortexSession (production,
+// asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
+// below) — so the interface is never constructed; the concretes are.
 type ToolDeps interface {
 	MemoryStore
 	Summarizer
