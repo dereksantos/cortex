@@ -132,7 +132,7 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 				return nil, ctx.Err()
 			case <-time.After(time.Duration(attempt-1) * retryBackoff):
 			}
-			payload.Temperature = float64(attempt-1) * 0.4
+			payload.Temperature = r.Temperature + float64(attempt-1)*0.4
 			if nb, mErr := json.Marshal(&payload); mErr == nil {
 				b = nb
 			}

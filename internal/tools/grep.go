@@ -20,11 +20,12 @@ import (
 const FunctionGrep = "grep"
 
 const (
-	grepMaxHits        = 100     // cap so a broad pattern can't flood context
-	grepMaxFileSize    = 1 << 20 // skip files larger than 1 MiB
-	grepLineCap        = 300     // window width for a long matching line (centered on the match)
-	grepMaxOutputBytes = 6000    // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
+	grepMaxHits        = 100  // cap so a broad pattern can't flood context
+	grepLineCap        = 1200 // window width for a long matching line (centered on the match)
+	grepMaxOutputBytes = 6000 // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
 )
+
+var filenameLikeRe = regexp.MustCompile(`[A-Za-z0-9_-]\.[A-Za-z0-9]`)
 
 // GrepTool is the search declaration. The description names the RE2 dialect (no
 // lookahead/backreferences) with one example so a model that emits PCRE adapts.
@@ -51,6 +52,10 @@ func grep(ctx context.Context, tc ToolCall) (string, error) {
 		root = p
 	}
 	printToolAction(fmt.Sprintf("grep(%s, %s)", pattern, root))
+	if isBroadJournalGrep(root, pattern) {
+		hits, _ := grepJournalInstructionSummary(ctx, root, pattern, 5)
+		return "journal grep pattern is too broad for large JSONL records. The query-filtered root-file candidate summary below is the bounded evidence; if it answers the goal, stop and answer from it instead of reading raw JSONL records.\n\nRoot-file candidate hits:\n" + hits, nil
+	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		// Surface the compile error as the observation (RE2 rejects PCRE features),
@@ -58,6 +63,191 @@ func grep(ctx context.Context, tc ToolCall) (string, error) {
 		return fmt.Sprintf("invalid regex %q: %v (grep uses RE2 — no lookahead or backreferences)", pattern, err), nil
 	}
 	return grepFiles(ctx, root, re, grepMaxHits)
+}
+
+func isBroadJournalGrep(root, pattern string) bool {
+	root = filepath.ToSlash(strings.TrimSpace(root))
+	if !strings.Contains(root, ".cortex/journal") {
+		return false
+	}
+	p := strings.TrimSpace(pattern)
+	if p == "" {
+		return true
+	}
+	if strings.Contains(p, `\.`) || filenameLikeRe.MatchString(p) {
+		return false
+	}
+	terms := strings.FieldsFunc(strings.ToLower(p), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_'
+	})
+	if len(terms) > 0 {
+		broadTerms := map[string]bool{
+			"context":    true,
+			"file":       true,
+			"read":       true,
+			"repository": true,
+			"root":       true,
+			"seed":       true,
+		}
+		allBroad := true
+		for _, term := range terms {
+			if term == "" {
+				continue
+			}
+			if !broadTerms[term] {
+				allBroad = false
+				break
+			}
+		}
+		if allBroad {
+			return true
+		}
+	}
+	fields := strings.Fields(p)
+	return len(fields) <= 2
+}
+
+var rootInstructionFileRe = regexp.MustCompile(`AGENTS\.md|CLAUDE\.md`)
+
+func grepJournalInstructionSummary(ctx context.Context, root, pattern string, cap int) (string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("grep %s: %w", root, err)
+	}
+	absRoot, _ := filepath.Abs(root)
+	ignore := projectscan.LoadIgnoreSet(absRoot)
+	queryRe, queryTerms := broadJournalQueryMatcher(pattern)
+
+	type hit struct {
+		file  string
+		line  int
+		match string
+	}
+	var hits []hit
+	counts := map[string]int{}
+	full := func() bool { return len(hits) >= cap }
+
+	scanFile := func(path, display string) error {
+		if full() {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+		line := 0
+		for sc.Scan() {
+			line++
+			text := sc.Bytes()
+			if bytes.IndexByte(text, 0) >= 0 {
+				return nil
+			}
+			if !matchesBroadJournalQuery(text, queryRe, queryTerms) {
+				continue
+			}
+			for _, loc := range rootInstructionFileRe.FindAllIndex(text, -1) {
+				m := string(text[loc[0]:loc[1]])
+				counts[m]++
+				if !full() {
+					hits = append(hits, hit{file: display, line: line, match: m})
+				}
+			}
+		}
+		return nil
+	}
+
+	if !info.IsDir() {
+		if err := scanFile(root, filepath.ToSlash(root)); err != nil {
+			return "", err
+		}
+	} else {
+		walkErr := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if d.IsDir() {
+				if path != absRoot && ignore.IsDirExcluded(path, d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if ignore.IsFileExcluded(path) {
+				return nil
+			}
+			rel, relErr := filepath.Rel(absRoot, path)
+			if relErr != nil {
+				rel = path
+			}
+			display := filepath.ToSlash(filepath.Join(root, rel))
+			return scanFile(path, display)
+		})
+		if walkErr != nil && ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+	}
+
+	if len(hits) == 0 {
+		return "(no matches)", nil
+	}
+	var b strings.Builder
+	for _, h := range hits {
+		fmt.Fprintf(&b, "%s:%d:%s\n", h.file, h.line, h.match)
+	}
+	if len(counts) > 0 {
+		b.WriteString("summary:")
+		bestName, bestCount := "", 0
+		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+			if n := counts[name]; n > 0 {
+				fmt.Fprintf(&b, " %s=%d", name, n)
+				if n > bestCount {
+					bestName, bestCount = name, n
+				}
+			}
+		}
+		if bestName != "" {
+			fmt.Fprintf(&b, "\nmost_frequent_candidate: %s", bestName)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func broadJournalQueryMatcher(pattern string) (*regexp.Regexp, []string) {
+	if re, err := regexp.Compile(pattern); err == nil {
+		return re, nil
+	}
+	return nil, broadJournalTerms(pattern)
+}
+
+func matchesBroadJournalQuery(text []byte, re *regexp.Regexp, terms []string) bool {
+	if re != nil {
+		return re.Match(text)
+	}
+	lower := strings.ToLower(string(text))
+	for _, term := range terms {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func broadJournalTerms(pattern string) []string {
+	raw := strings.FieldsFunc(strings.ToLower(pattern), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_'
+	})
+	var terms []string
+	for _, term := range raw {
+		if term != "" {
+			terms = append(terms, term)
+		}
+	}
+	return terms
 }
 
 // grepFiles walks root (reusing projectscan's ignore set), matches re per line,
@@ -80,10 +270,6 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	scanFile := func(path, display string) error {
 		if full() {
 			truncated = true
-			return nil
-		}
-		fi, err := os.Stat(path)
-		if err != nil || fi.Size() > grepMaxFileSize {
 			return nil
 		}
 		f, err := os.Open(path)

@@ -66,13 +66,31 @@ func TestGrepCap(t *testing.T) {
 func TestGrepCentersOnMatch(t *testing.T) {
 	dir := t.TempDir()
 	line := strings.Repeat("x", 1200) + "NEEDLE" + strings.Repeat("y", 1200)
+	padding := strings.Repeat("padding\n", (1<<20)/len("padding\n"))
 	os.WriteFile(filepath.Join(dir, "huge.jsonl"), []byte(line+"\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "large.jsonl"), []byte(padding+"LARGE_NEEDLE\n"), 0o644)
 	out, err := grepFiles(context.Background(), dir, mustRe(t, "NEEDLE"), grepMaxHits)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "NEEDLE") {
 		t.Errorf("match deep in a long line must stay visible, got:\n%s", out)
+	}
+	if !strings.Contains(out, "LARGE_NEEDLE") {
+		t.Errorf("match in a large text file must not be skipped, got:\n%s", out)
+	}
+}
+
+func TestGrepLongJSONLKeepsNearbyFact(t *testing.T) {
+	dir := t.TempDir()
+	line := strings.Repeat("x", 450) + "AGENTS.md" + strings.Repeat("y", 450) + "seed context" + strings.Repeat("z", 450)
+	os.WriteFile(filepath.Join(dir, "journal.jsonl"), []byte(line+"\n"), 0o644)
+	out, err := grepFiles(context.Background(), dir, mustRe(t, "seed context"), grepMaxHits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "AGENTS.md") || !strings.Contains(out, "seed context") {
+		t.Errorf("nearby facts in long JSONL records must stay visible, got:\n%s", out)
 	}
 }
 
@@ -114,6 +132,59 @@ func TestGrepBadRegexIsObservation(t *testing.T) {
 	}
 	if !strings.Contains(out, "invalid regex") {
 		t.Errorf("expected an invalid-regex observation, got %q", out)
+	}
+}
+
+func TestGrepJournalBroadPatternRedirect(t *testing.T) {
+	for _, pattern := range []string{"seed context", "seed.*context|context.*seed", "repository root"} {
+		out, err := grep(context.Background(), grepCall(pattern, ".cortex/journal"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, "too broad") || !strings.Contains(out, "Root-file candidate hits") {
+			t.Errorf("broad journal grep %q should redirect to a narrower pattern, got %q", pattern, out)
+		}
+	}
+}
+
+func TestGrepJournalBroadPatternReturnsCompactCandidates(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, ".cortex", "journal")
+	if err := os.MkdirAll(journal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(journal, "0001.jsonl"), []byte(`{"msg":"uses AGENTS.md as seed context with lots of extra words that should not be returned"}`+"\n"+`{"msg":"unrelated old CLAUDE.md mention"}`+"\n"), 0o644)
+	out, err := grep(context.Background(), grepCall("seed context", journal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "0001.jsonl:1:AGENTS.md") || !strings.Contains(out, "summary: AGENTS.md=1") {
+		t.Errorf("broad journal redirect should summarize root-file candidates, got %q", out)
+	}
+	if !strings.Contains(out, "most_frequent_candidate: AGENTS.md") || !strings.Contains(out, "stop and answer") {
+		t.Errorf("broad journal redirect should make the bounded answer path explicit, got %q", out)
+	}
+	if strings.Contains(out, "CLAUDE.md") {
+		t.Errorf("broad journal redirect should ignore unrelated candidate lines, got %q", out)
+	}
+	if strings.Contains(out, "lots of extra words") {
+		t.Errorf("broad journal redirect should not return full JSONL context, got %q", out)
+	}
+}
+
+func TestGrepJournalFilenamePatternAllowed(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, ".cortex", "journal")
+	if err := os.MkdirAll(journal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(journal, "0001.jsonl"), []byte(`{"msg":"uses AGENTS.md as context"}`+"\n"), 0o644)
+	out, err := grep(context.Background(), grepCall(`[A-Za-z0-9_.-]+\.(go|md|json|yaml|toml)`, journal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "AGENTS.md") {
+		t.Errorf("filename-shaped journal grep should run, got %q", out)
 	}
 }
 

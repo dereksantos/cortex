@@ -30,11 +30,11 @@ const StudySeedBudget = 6000
 const studySystem = `You are a code researcher. You're given a GOAL and an OUTLINE of a path. Find the parts relevant to the goal, read them, and explain what you found.
 
 Your tools are read-only:
-- grep(pattern, path): find where text or a regex (RE2 — no lookahead or backreferences) occurs — returns file:line. This is your primary locator: to find where a symbol, string, or fact lives, grep for it. It searches every file under the path, so it is the way to find something across many files (a package, or a directory of logs/records) — never read those files one by one.
+- grep(pattern, path): find where text or a regex (RE2 — no lookahead or backreferences) occurs — returns file:line. This is your primary locator. Use PATH as the grep path; don't broaden to "." unless PATH is ".".
 - outline(path, budget): the structure of a file or directory — entries with line spans (a file lists its declarations; a directory lists its files). Outline a path you haven't seen to orient.
 - read_file(path, start, end): read a specific line range. Give start and end; a whole-file read of a large file is refused (outline or grep it first).
 
-Locate, then read: grep or outline to find exactly where the answer lives, then read_file only those spans. Spend your limited reads on what the goal needs. If a tool is refused or errors, adapt — don't repeat it.
+Locate, then read: grep or outline under PATH to find exactly where the answer lives, then read_file only those spans. Spend your limited reads on what the goal needs. If a tool is refused or errors, adapt — don't repeat it.
 
 Then STOP and answer the goal directly. Don't deliberate at length or keep exploring once you have the answer — a few targeted lookups are enough. You don't need to chase every referenced symbol to its definition; once you've read enough to answer what the goal asks, answer. Explain concretely how the relevant code works and how the pieces fit, naming the key symbols and citing file:line. Base your answer only on what you read; if the premise of the goal is false, say so and describe what the code actually does. Write the answer in plain prose, referring to tool calls and syntax by name — never paste literal tool-call, XML, or <function …>/<tool_call> markup into your answer. Be concise.`
 
@@ -46,6 +46,7 @@ func StudySeed(goal, path, ol string) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "GOAL: %s\nPATH: %s\n\n", goal, path)
+	fmt.Fprintf(&b, "Search scope: keep grep/outline/read_file under PATH (%s). Start with grep for symbols, strings, facts, logs, journals, or multi-file questions; use outline when structure is missing. If the goal asks what/which file, grep for filename-shaped text first (for example `[A-Za-z0-9_.-]+\\.(go|md|json|yaml|toml)`).\n\n", path)
 	if strings.TrimSpace(ol) != "" {
 		b.WriteString("OUTLINE (each unit's line span is what you read with read_file):\n\n")
 		b.WriteString(ol)

@@ -292,8 +292,8 @@ func TestRequestSeedsSystemPromptAndTools(t *testing.T) {
 	if req.Messages[0].Content != SystemPrompt {
 		t.Error("messages[0] should be the system prompt")
 	}
-	if req.Temperature != 0 {
-		t.Errorf("temperature = %v, want 0 for deterministic agent behavior", req.Temperature)
+	if req.Temperature != defaultTemperature {
+		t.Errorf("temperature = %v, want default %v", req.Temperature, defaultTemperature)
 	}
 	if len(req.Tools) == 0 {
 		t.Error("expected tools attached to the request")
@@ -459,6 +459,25 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
+	t.Run("temperature defaults globally and per-role can override", func(t *testing.T) {
+		global := 0.7
+		codeTemp := 0.2
+		c := &Config{
+			Temperature: &global,
+			Models:      map[string]ModelSpec{roleCode: {Temperature: &codeTemp}},
+		}
+		if got := c.resolveBinding(roleCode, testFleet).temperature(defaultTemperature); got != codeTemp {
+			t.Errorf("code temperature = %v, want per-role %v", got, codeTemp)
+		}
+		if got := c.resolveBinding(roleStudy, testFleet).temperature(defaultTemperature); got != global {
+			t.Errorf("study temperature = %v, want global %v", got, global)
+		}
+		var nilCfg *Config
+		if got := nilCfg.resolveBinding(roleCode, testFleet).temperature(defaultTemperature); got != defaultTemperature {
+			t.Errorf("nil config temperature = %v, want default %v", got, defaultTemperature)
+		}
+	})
+
 	t.Run("thinking off for code by default; study deliberates; config can re-enable", func(t *testing.T) {
 		var nilCfg *Config
 		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking == nil || *code.Thinking {
@@ -564,6 +583,7 @@ func TestLoadMergedConfig(t *testing.T) {
 	t.Run("project overrides user, inherits the rest", func(t *testing.T) {
 		dir := t.TempDir()
 		userPath := write(t, dir, "user.json", `{
+			"temperature": 0.6,
 			"backend": {"type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY"},
 			"models": {
 				"code":  {"model": "qwen/qwen3-coder:free"},
@@ -589,14 +609,21 @@ func TestLoadMergedConfig(t *testing.T) {
 		if cfg.Models["study"].Model != "openai/gpt-oss-20b:free" {
 			t.Errorf("study model = %q, want inherited free model", cfg.Models["study"].Model)
 		}
+		if cfg.Temperature == nil || *cfg.Temperature != 0.6 {
+			t.Errorf("temperature = %v, want inherited 0.6", cfg.Temperature)
+		}
 	})
 
 	t.Run("field-level merge within a shared role", func(t *testing.T) {
 		dir := t.TempDir()
+		userTemp := 0.8
+		projectTemp := 0.3
 		userPath := write(t, dir, "user.json", `{
-			"models": {"code": {"model": "qwen/qwen3-coder:free", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY"}}
+			"temperature": 0.8,
+			"models": {"code": {"model": "qwen/qwen3-coder:free", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY", "temperature": 0.8}}
 		}`)
 		projPath := write(t, dir, "proj.json", `{
+			"temperature": 0.3,
 			"models": {"code": {"model": "openai/gpt-oss-120b:free"}}
 		}`)
 		cfg := loadMergedConfig(userPath, projPath)
@@ -606,6 +633,12 @@ func TestLoadMergedConfig(t *testing.T) {
 		}
 		if code.Endpoint != "https://openrouter.ai/api/v1" || code.KeyEnv != "OPENROUTER_API_KEY" {
 			t.Errorf("endpoint/key_env should inherit from user: %+v", code)
+		}
+		if cfg.Temperature == nil || *cfg.Temperature != projectTemp {
+			t.Errorf("top-level temperature = %v, want project override %v", cfg.Temperature, projectTemp)
+		}
+		if code.Temperature == nil || *code.Temperature != userTemp {
+			t.Errorf("role temperature = %v, want inherited role value %v", code.Temperature, userTemp)
 		}
 	})
 
@@ -1148,17 +1181,17 @@ func TestSendPerturbsTemperatureOnRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background()); err != nil {
+	if _, err := (&AgentRequest{Model: "m", BaseURL: srv.URL, Temperature: defaultTemperature}).Send(context.Background()); err != nil {
 		t.Fatalf("expected success on the perturbed retry, got %v", err)
 	}
 	if len(temps) < 2 {
 		t.Fatalf("want at least 2 attempts, got %d", len(temps))
 	}
-	if temps[0] != 0 {
-		t.Errorf("first attempt temp = %v, want 0 (deterministic)", temps[0])
+	if temps[0] != defaultTemperature {
+		t.Errorf("first attempt temp = %v, want default %v", temps[0], defaultTemperature)
 	}
-	if temps[1] <= 0 {
-		t.Errorf("retry temp = %v, want > 0 (perturbed to escape the 500)", temps[1])
+	if temps[1] <= temps[0] {
+		t.Errorf("retry temp = %v, want > first attempt %v (perturbed to escape the 500)", temps[1], temps[0])
 	}
 }
 

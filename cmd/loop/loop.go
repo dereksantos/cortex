@@ -109,6 +109,7 @@ const (
 )
 
 var digitRe = regexp.MustCompile(`\d+`)
+var mostFrequentCandidateRe = regexp.MustCompile(`(?m)^most_frequent_candidate:\s*(\S+)`)
 
 // errorClass reduces a tool error observation to a stable class — the leading
 // "Error: …" line with numbers neutralized — so the SAME failure recurring is
@@ -147,13 +148,19 @@ const noProgressNudge = "Harness note: that tool call was byte-identical to the 
 // finalizePrompt asks for the answer with tools withheld when a bound forced the
 // loop to stop, so a budget-exhausted run still produces a grounded digest
 // rather than nothing.
-const finalizePrompt = "You've reached the limit for this turn. Stop calling tools and answer now from what you've already gathered; be concise."
+const finalizePrompt = "You've reached the limit for this turn. Stop calling tools and answer now from what you've already gathered. Name the concrete symbols, functions, files, and relationships that answer the goal; do not say you need more exploration. Be concise."
 
 // reFinalizePrompt is the salvage ask when the first finalize came back EMPTY — a
 // reasoning model that spent its whole completion budget deliberating and emitted
 // no answer (the max-tokens-clamp signature). It re-asks with a hard brevity floor
 // so the model spends its budget on the answer, not the deliberation.
 const reFinalizePrompt = "Your previous reply was empty — you spent the whole budget thinking and never answered. You already have everything you need. Do NOT deliberate further: state the answer NOW, directly, in at most five sentences."
+
+// rewriteClampedPrompt is the salvage ask when a model DID answer, but only by
+// running into the completion ceiling. That answer is usually verbose and fails
+// the eval's runaway tripwire; ask for a compact rewrite, then mark the run
+// salvaged if the rewrite succeeds.
+const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewrite it now as a concise final answer in at most five sentences. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
 
 // runLoop is THE engine. It iterates send → dispatch → re-send until the model
 // answers with no tool calls (clean finalize) or a bound trips, then finalizes
@@ -177,6 +184,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	jitter := false             // perturb temperature on the next send (set when stuck)
 	baseTemp := req.Temperature // restore after a one-shot jitter
 	stop := ""
+	lastObservation := ""
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
 		if jitter {
@@ -227,6 +235,16 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 					req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
 					return a2, stats, nil
 				}
+				if a2 := salvageObservationFinalize(lastObservation, &stats); a2 != "" {
+					req.Tools = ts.Tools
+					return a2, stats, nil
+				}
+			}
+			if answer != "" && stats.MaxTokensClamped {
+				if a2 := salvageClampedFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
+					req.Tools = ts.Tools
+					return a2, stats, nil
+				}
 			}
 			stats.StopReason = "clean-finalize"
 			return answer, stats, nil
@@ -250,6 +268,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		for _, call := range msg.ToolCalls {
 			countTool(&stats, call.Function.Name)
 			obs := ts.Dispatch.Dispatch(ctx, call)
+			lastObservation = obs
 			// Stuck detector: count by ERROR CLASS, not byte-identical call, so a
 			// recurring failure is caught even when the model interleaves read_file
 			// calls (which slip past the no-progress guard). First crossing → an
@@ -311,7 +330,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	}
 	stats.StopReason = stop
 	stats.FinalizeForced = true
-	content, finalStats, err := finalizeLoop(ctx, send, req, &stats, appendMsg)
+	content, finalStats, err := finalizeLoop(ctx, send, req, &stats, appendMsg, lastObservation)
 	// Restore the advertised tools: finalize withheld them, but the caller's
 	// request (cs.Request for the coder) is long-lived and reused next turn.
 	req.Tools = ts.Tools
@@ -321,7 +340,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 // finalizeLoop requests a final answer with the tool set withheld, so a model
 // that ran out of budget (iterations, bytes, or stuck repeating) still produces
 // an answer grounded in what it read rather than returning nothing.
-func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) (string, loopStats, error) {
+func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
 	req.Tools = nil
 	appendMsg(Message{Role: RoleUser, Content: finalizePrompt})
 	res, _, err := send.Send(ctx, req)
@@ -341,8 +360,26 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *lo
 		if a2 := salvageEmptyFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
 			answer = a2
 		}
+		if answer == "" {
+			answer = salvageObservationFinalize(lastObservation, stats)
+		}
+	}
+	if answer != "" && stats.MaxTokensClamped && !stats.Salvaged {
+		if a2 := salvageClampedFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
+			answer = a2
+		}
 	}
 	return answer, *stats, nil
+}
+
+func salvageObservationFinalize(obs string, stats *loopStats) string {
+	m := mostFrequentCandidateRe.FindStringSubmatch(obs)
+	if m == nil {
+		return ""
+	}
+	stats.StopReason = "salvaged-finalize"
+	stats.Salvaged = true
+	return "The bounded tool evidence identifies " + m[1] + " as the most frequent candidate."
 }
 
 // salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor when
@@ -353,6 +390,24 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *lo
 func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
 	appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
+	res, _, err := send.Send(ctx, req)
+	if err != nil || res == nil || len(res.Choices) == 0 {
+		return ""
+	}
+	accountUsage(stats, res, req.MaxTokens)
+	msg := res.Choices[0].Message
+	appendMsg(msg)
+	a := strings.TrimSpace(msg.Content)
+	if a != "" {
+		stats.StopReason = "salvaged-finalize"
+		stats.Salvaged = true
+	}
+	return a
+}
+
+func salvageClampedFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
+	req.Tools = nil
+	appendMsg(Message{Role: RoleUser, Content: rewriteClampedPrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
 		return ""
@@ -420,7 +475,7 @@ func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens i
 		BaseURL:            spec.Endpoint,
 		APIKey:             resolveKey(spec),
 		ChatTemplateKwargs: spec.TemplateKwargs(),
-		Temperature:        0,
+		Temperature:        spec.temperature(defaultTemperature),
 		MaxTokens:          maxTokens,
 		Tools:              toolset,
 		Messages: []Message{

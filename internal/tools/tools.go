@@ -329,15 +329,11 @@ var Study = Subagent{
 	Role:   "study",
 	System: studySystem,
 	Tools:  []Tool{OutlineTool, GrepTool, ReadFile},
-	// MaxTokens is task-fit, not the model max — but it must clear a REASONING
-	// model's deliberation plus its final digest in one completion, or the answer
-	// is truncated mid-thought (north clamped at 12k on a false-premise probe and
-	// returned an empty digest). 24k is the runaway backstop without guillotining a
-	// thinking model's answer: a HEALTHY north finalizes in ~1.3k output, so the cap
-	// only bites a SPIRALING north — and the spiral fills whatever ceiling it's given
-	// (raising 24k→32k just lengthened the spiral 270s→390s and starved the serial
-	// fleet, without making the clamped probes pass — see project_study_eval_backend_500).
-	Bounds: agent.Bounds{MaxTokens: 24_000, MaxIter: 10, ReadBudgetBytes: 96_000},
+	// MaxTokens is task-fit, not the model max. Keep it low enough that a
+	// reasoning-model spiral reaches the clamp quickly and leaves wall-clock room
+	// for runLoop's salvage re-ask, while still clearing the normal concise digest
+	// path (~1–3k output in the live eval).
+	Bounds: agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
 }
 
 // --- Dispatcher ---------------------------------------------------------

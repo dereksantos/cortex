@@ -265,8 +265,9 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 // forced finalize returns EMPTY because the model burned its whole completion
 // budget thinking (the max-tokens clamp), the engine re-asks ONCE with a hard
 // brevity floor and returns the salvaged answer — the dodge for a reasoning model
-// (north) that over-deliberates a finalize and emits no prose. A non-empty first
-// finalize must NOT trigger the retry (the gate stays off for healthy runs).
+// (north) that over-deliberates a finalize and emits no prose. A non-empty
+// clamped answer is also salvaged into a concise rewrite; a non-clamped answer
+// must NOT trigger the retry (the gate stays off for healthy runs).
 func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	t.Run("empty clamped finalize is salvaged", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
@@ -322,14 +323,95 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 			t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
 		}
 	})
-	t.Run("non-empty finalize does not retry", func(t *testing.T) {
+	t.Run("empty clamped finish can salvage from explicit tool candidate", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil { // both finalize and salvage re-ask fail empty at clamp
+				return fakeResp("", nil, 1, 100), false, nil
+			}
+			if len(r.Messages) == 1 {
+				return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+			}
+			return fakeResp("", nil, 1, 100), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string {
+			return "Root-file candidate hits:\nx:1:AGENTS.md\nsummary: AGENTS.md=3\nmost_frequent_candidate: AGENTS.md"
+		})
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if !strings.Contains(content, "AGENTS.md") || stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
+			t.Errorf("content=%q stop=%q salvaged=%v, want AGENTS.md/salvaged-finalize/true", content, stats.StopReason, stats.Salvaged)
+		}
+	})
+	t.Run("non-empty clamped finalize is rewritten", func(t *testing.T) {
 		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 		var finalizes int
 		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
 			if r.Tools == nil {
 				finalizes++
-				return fakeResp("clean answer", nil, 1, 100), false, nil // clamp but NON-empty
+				if finalizes == 1 {
+					return fakeResp("runaway but factual answer", nil, 1, 100), false, nil // clamp + non-empty
+				}
+				return fakeResp("concise answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "concise answer" {
+			t.Errorf("content = %q, want concise answer", content)
+		}
+		if stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
+			t.Errorf("stop=%q salvaged=%v, want salvaged-finalize/true", stats.StopReason, stats.Salvaged)
+		}
+		if finalizes != 2 {
+			t.Errorf("finalize calls = %d, want 2 (one clamped + one rewrite)", finalizes)
+		}
+	})
+	t.Run("natural non-empty clamped finish is rewritten", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var sends int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			sends++
+			if r.Tools == nil {
+				return fakeResp("concise answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("runaway but factual answer", nil, 1, 100), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "concise answer" || stats.StopReason != "salvaged-finalize" || !stats.Salvaged {
+			t.Errorf("content=%q stop=%q salvaged=%v, want concise answer/salvaged-finalize/true", content, stats.StopReason, stats.Salvaged)
+		}
+		if sends != 2 {
+			t.Errorf("sends = %d, want 2 (one clamped + one rewrite)", sends)
+		}
+	})
+	t.Run("non-clamped finalize does not retry", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizes++
+				return fakeResp("clean answer", nil, 1, 99), false, nil
 			}
 			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
 		})
@@ -340,11 +422,8 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
-		if content != "clean answer" {
-			t.Errorf("content = %q, want clean answer", content)
-		}
-		if finalizes != 1 {
-			t.Errorf("finalize calls = %d, want 1 (no salvage on non-empty)", finalizes)
+		if content != "clean answer" || finalizes != 1 {
+			t.Errorf("content=%q finalizes=%d, want clean answer/1", content, finalizes)
 		}
 	})
 }
@@ -471,6 +550,15 @@ func TestRequestForSetsMaxTokens(t *testing.T) {
 		r := requestFor(ModelSpec{Model: "m", MaxTokens: 4321}, "sys", "seed", nil, 0)
 		if r.MaxTokens != 4321 {
 			t.Errorf("max_tokens = %d, want role override 4321", r.MaxTokens)
+		}
+	})
+	t.Run("temperature default and override", func(t *testing.T) {
+		if got := requestFor(spec, "sys", "seed", nil, 0).Temperature; got != defaultTemperature {
+			t.Errorf("temperature = %v, want default %v", got, defaultTemperature)
+		}
+		temp := 0.25
+		if got := requestFor(ModelSpec{Model: "m", Temperature: &temp}, "sys", "seed", nil, 0).Temperature; got != temp {
+			t.Errorf("temperature = %v, want override %v", got, temp)
 		}
 	})
 }

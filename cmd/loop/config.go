@@ -14,6 +14,8 @@ import (
 // defaultEndpoint is a NEUTRAL local fallback — the conventional LiteLLM port.
 const defaultEndpoint = "http://localhost:4000"
 
+const defaultTemperature = 1.0
+
 // Model roles. The harness routes each kind of work to a model binding.
 const (
 	roleCode     = "code"
@@ -75,18 +77,26 @@ var thinkingOff = false
 
 // ModelSpec is one role's binding: where to send, which model, and context size.
 type ModelSpec struct {
-	Endpoint   string `json:"endpoint"`
-	Model      string `json:"model"`
-	Window     int    `json:"window"`
-	MaxTokens  int    `json:"max_tokens"`
-	KeyEnv     string `json:"key_env"`
-	KeyService string `json:"key_service"`
-	Thinking   *bool  `json:"thinking"`
+	Endpoint    string   `json:"endpoint"`
+	Model       string   `json:"model"`
+	Window      int      `json:"window"`
+	MaxTokens   int      `json:"max_tokens"`
+	Temperature *float64 `json:"temperature"`
+	KeyEnv      string   `json:"key_env"`
+	KeyService  string   `json:"key_service"`
+	Thinking    *bool    `json:"thinking"`
 }
 
 func (s ModelSpec) maxOut(def int) int {
 	if s.MaxTokens > 0 {
 		return s.MaxTokens
+	}
+	return def
+}
+
+func (s ModelSpec) temperature(def float64) float64 {
+	if s.Temperature != nil {
+		return *s.Temperature
 	}
 	return def
 }
@@ -212,9 +222,10 @@ type Backend struct {
 }
 
 type Config struct {
-	Backend Backend              `json:"backend"`
-	Models  map[string]ModelSpec `json:"models"`
-	Tools   ToolConfig           `json:"tools"`
+	Backend     Backend              `json:"backend"`
+	Models      map[string]ModelSpec `json:"models"`
+	Tools       ToolConfig           `json:"tools"`
+	Temperature *float64             `json:"temperature"`
 }
 
 type ToolConfig struct {
@@ -246,6 +257,9 @@ func (c *Config) backendEndpoint() string {
 func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	pol := rolePolicies[role]
 	spec := ModelSpec{Endpoint: c.backendEndpoint()}
+	if c != nil && c.Temperature != nil {
+		spec.Temperature = c.Temperature
+	}
 	if pol.thinkingOff {
 		spec.Thinking = &thinkingOff
 	}
@@ -257,6 +271,9 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			}
 			if m.Window > 0 {
 				spec.Window = m.Window
+			}
+			if m.Temperature != nil {
+				spec.Temperature = m.Temperature
 			}
 			if m.KeyEnv != "" {
 				spec.KeyEnv = m.KeyEnv
@@ -379,6 +396,9 @@ func mergeConfig(base, over *Config) *Config {
 	out.Backend = mergeBackend(base.Backend, over.Backend)
 	out.Models = mergeModels(base.Models, over.Models)
 	out.Tools = mergeTools(base.Tools, over.Tools)
+	if over.Temperature != nil {
+		out.Temperature = over.Temperature
+	}
 	return &out
 }
 
@@ -425,6 +445,9 @@ func mergeSpec(base, over ModelSpec) ModelSpec {
 	}
 	if over.Window > 0 {
 		base.Window = over.Window
+	}
+	if over.Temperature != nil {
+		base.Temperature = over.Temperature
 	}
 	if over.KeyEnv != "" {
 		base.KeyEnv = over.KeyEnv

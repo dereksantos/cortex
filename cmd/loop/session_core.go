@@ -23,7 +23,7 @@ func (a CortexArgs) Request() *AgentRequest {
 	return &AgentRequest{
 		Model:       defaultModel,
 		Messages:    []Message{{Role: RoleSystem, Content: content}},
-		Temperature: 0,
+		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,
 	}
@@ -111,6 +111,7 @@ func NewCortexSession() *CortexSession {
 	req.APIKey = resolveKey(code)
 	req.ChatTemplateKwargs = code.TemplateKwargs()
 	req.MaxTokens = code.maxOut(codeMaxOutputTokens)
+	req.Temperature = code.temperature(defaultTemperature)
 
 	if cfg.isOpenRouter() {
 		req.Usage = &usageInclude{Include: true}

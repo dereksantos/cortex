@@ -65,7 +65,7 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 		Timeout:            10 * time.Minute,
 	})
 	p.SetModel(cs.Study.Model)
-	p.SetTemperature(0)
+	p.SetTemperature(cs.Study.temperature(defaultTemperature))
 	p.SetMaxTokens(maxTokens)
 	return p
 }
@@ -83,7 +83,7 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 		Timeout:            10 * time.Minute,
 	})
 	p.SetModel(cs.Study.Model)
-	p.SetTemperature(0)
+	p.SetTemperature(cs.Study.temperature(defaultTemperature))
 	return p
 }
 
