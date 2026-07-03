@@ -446,9 +446,9 @@ func countTool(s *loopStats, name string) {
 	switch name {
 	case tools.FunctionReadFile:
 		s.Reads++
-	case "grep":
+	case tools.FunctionGrep:
 		s.Greps++
-	case "outline":
+	case tools.FunctionOutline:
 		s.Outlines++
 	}
 }

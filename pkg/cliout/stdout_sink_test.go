@@ -89,7 +89,7 @@ func TestStdoutSink_ReadLine_HandlesCRLF(t *testing.T) {
 func TestStdoutSink_Event_ToolCall_AlwaysShown(t *testing.T) {
 	s, out, _ := newTestSink(t, "", false /* not verbose */)
 	s.Event("coding.tool_call", map[string]any{"name": "read_file", "args": `{"path":"a"}`})
-	if !strings.Contains(out.String(), "⚙ read_file") {
+	if !strings.Contains(out.String(), "▸ read_file") {
 		t.Errorf("tool_call should render in non-verbose; got %q", out.String())
 	}
 }
@@ -149,9 +149,9 @@ func TestStdoutSink_ConcurrentWritesDontInterleaveLines(t *testing.T) {
 	if len(lines) != 2*n {
 		t.Fatalf("expected %d lines, got %d", 2*n, len(lines))
 	}
-	// Every line must be intact: pure "AAAA" or the "⚙ BBBB" shape.
+	// Every line must be intact: pure "AAAA" or the "▸ BBBB" shape.
 	for i, ln := range lines {
-		if ln != "AAAA" && !strings.Contains(ln, "⚙ BBBB") {
+		if ln != "AAAA" && !strings.Contains(ln, "▸ BBBB") {
 			t.Errorf("line %d corrupted: %q", i, ln)
 		}
 	}

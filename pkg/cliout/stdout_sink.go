@@ -248,7 +248,7 @@ func renderEvent(w io.Writer, kind string, payload any, verbose bool) {
 	case "coding.tool_call":
 		// Always surfaced: the per-tool-call line is the user-facing
 		// "what is the agent doing" signal. Concise format.
-		fmt.Fprintf(w, "  ⚙ %v\n", m["name"])
+		fmt.Fprintf(w, "  ▸ %v\n", m["name"])
 
 	case "coding.tool_result":
 		// Verbose-only: tool results are a token cost line; the
