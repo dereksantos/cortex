@@ -37,6 +37,33 @@
 > - The recall parser tolerates bracketed citations (`[@session/…]`) — models
 >   paste them as rendered.
 >
+> Deltas from the 2026-07-05 self-review (all covered by the context eval,
+> `cmd/loop/context_eval_test.go`):
+> - **`PrefixEnd` — the pre-turn prefix region.** `wireMessages` originally
+>   omitted `Messages[1:TailFrom]` wholesale, silently dropping content that
+>   was *below the working set's base* and therefore never outlined: the
+>   Compact summary, and the whole history of a legacy/invalid-stamp resume
+>   (which sent only the system message + new input). The wire now carries
+>   `Messages[1:PrefixEnd]` (= `WorkingSet.Base()`) unconditionally as part of
+>   the append-stable prefix; only `[PrefixEnd, TailFrom)` — the region the
+>   outline actually stands in for — is omitted.
+> - **Replay accepts stamp sequences starting at any K.** Compact continues
+>   the session's turn numbering, so a post-Compact transcript's first stamp
+>   is not 1; requiring 1 sent every such transcript to the hydrated fallback.
+>   `Clear` now also resets numbering (a cleared session is a fresh
+>   conversation).
+> - **Outline labels are demotion ordinals, not `len(outline)+1`.** Folds
+>   shrink the outline slice, so length-based numbering regressed and produced
+>   duplicate `t<n>` labels. Labels now come from the working set's monotonic
+>   demoted count and match the transcript stamps on the replay path.
+> - **The fold's citation invariant is enforced mechanically.** The fold goal
+>   asks the summarizer to keep citations; `restoreCitations` now guarantees
+>   it — any coordinate missing from the digest is appended verbatim, so
+>   demotion stays lossless regardless of summarizer quality.
+> - **`recall` is gated at `min(CurationBudgetTokens, W/3)`** — a recall
+>   bigger than the tail's drain target would flood the hydrated tail and
+>   immediately re-demote.
+>
 > **Owner.** `cmd/loop` (turn assembly) + `internal/cache` (the working-set
 > model — the sketch file becomes the package).
 
@@ -286,6 +313,16 @@ P1 is worth shipping alone. P2 is the architecture; P3 makes demotion safe to
 be aggressive about; P4 only matters for genuinely long-haul sessions.
 
 ## Evals
+
+The deterministic core is automated as **the context eval**
+(`cmd/loop/context_eval_test.go`, plain `go test`): scripted sessions through
+the real `Turn()` loop asserting, at every seam (demotion, fold — including a
+deliberately lossy summarizer, Compact, Clear, resume), that (a) every message
+is on the wire or reachable via a resolvable citation, (b) the wire stays
+within the zone budgets, (c) ordinary turns re-prefill only the new suffix
+under an LCP-cache model while demotion turns stay ≤ the zone budgets, and
+(d) outline labels stay unique and monotonic. The live-model evals below
+remain manual:
 
 - **Prefill per turn** (the headline): tokens re-prefilled per turn (derivable
   from `LastPromptTokens` vs prior turn + backend cache stats where available),
