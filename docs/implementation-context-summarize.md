@@ -125,6 +125,20 @@ func contextSummarize(tc ToolCall, deps ToolDeps) (string, error) {
     ), nil
 }
 
+// checkConfig checks if context_summarize is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextSummarize != nil {
+            if !*session.config.Tools.EnableContextSummarize {
+                return false, "context_summarize is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
+
 // citationToFilename converts a citation to a safe filename.
 func citationToFilename(citation string) string {
     // Replace @, /, # with safe characters
@@ -159,6 +173,13 @@ const (
 func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
     // ... existing cases ...
     case FunctionContextSummarize:
+        enabled, msg, err := checkConfig(tc, deps)
+        if !enabled {
+            if err != nil {
+                return "", err
+            }
+            return msg, nil
+        }
         return contextSummarize(tc, deps)
     // ... other cases ...
 }

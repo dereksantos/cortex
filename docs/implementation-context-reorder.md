@@ -126,6 +126,20 @@ func (cs *CortexSession) ReorderTail(metric string) []TurnSpan {
     
     return newOrder
 }
+
+// checkConfig checks if context_reorder is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextReorder != nil {
+            if !*session.config.Tools.EnableContextReorder {
+                return false, "context_reorder is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
 ```
 
 ---
@@ -140,6 +154,14 @@ const FunctionContextReorder = "context_reorder"
 // contextReorder reorders the hydrated tail by relevance score.
 // This only rearranges order—it does not evict or compress.
 func contextReorder(tc ToolCall, deps ToolDeps) (string, error) {
+    // Check if tool is enabled via config
+    if enabled, msg, err := checkConfig(tc, deps); !enabled {
+        if err != nil {
+            return "", err
+        }
+        return msg, nil
+    }
+    
     // Parse argument
     by, err := tc.StringArg("by")
     if err != nil {

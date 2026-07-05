@@ -96,6 +96,20 @@ func contextMerge(tc ToolCall, deps ToolDeps) (string, error) {
         startOrdinal, endOrdinal, mergedCitation, turnsMerged,
     ), nil
 }
+
+// checkConfig checks if context_merge is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextMerge != nil {
+            if !*session.config.Tools.EnableContextMerge {
+                return false, "context_merge is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
 ```
 
 ---

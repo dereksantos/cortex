@@ -93,6 +93,20 @@ func (cs *CortexSession) RemoveOutlineEntry(citation string) bool {
 func (cs *CortexSession) OutlineEvictionCount() int {
     return cs.outlineEvictionCount
 }
+
+// checkConfig checks if context_evict is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextEvict != nil {
+            if !*session.config.Tools.EnableContextEvict {
+                return false, "context_evict is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
 ```
 
 **CortexSession struct extension**:
@@ -120,6 +134,14 @@ const FunctionContextEvict = "context_evict"
 // The entry is already demoted (in the journal), so this only affects
 // the hydrated tail and outline. It is idempotent.
 func contextEvict(tc ToolCall, deps ToolDeps) (string, error) {
+    // Check if tool is enabled via config
+    if enabled, msg, err := checkConfig(tc, deps); !enabled {
+        if err != nil {
+            return "", err
+        }
+        return msg, nil
+    }
+    
     // Parse citation
     citation, err := tc.StringArg("citation")
     if err != nil {

@@ -130,6 +130,39 @@ func (cs *CortexSession) AdjustWatermarks(highDelta, lowDelta int) (int, int, er
     return newHigh, newLow, nil
 }
 
+// checkConfig checks if context_adjust_watermarks is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextAdjustWatermarks != nil {
+            if !*session.config.Tools.EnableContextAdjustWatermarks {
+                return false, "context_adjust_watermarks is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
+
+// GetWindow returns the total window size.
+func (cs *CortexSession) GetWindow() int {
+    return cs.windowSize()
+}
+
+// checkConfig checks if context_adjust_watermarks is enabled via config.
+// Returns (enabled, message). If disabled, returns (false, message) with explanation.
+func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
+    // Get session config
+    if session, ok := deps.(*CortexSession); ok && session.config != nil {
+        if session.config.Tools.EnableContextAdjustWatermarks != nil {
+            if !*session.config.Tools.EnableContextAdjustWatermarks {
+                return false, "context_adjust_watermarks is disabled in .cortex/config.json", nil
+            }
+        }
+    }
+    return true, "", nil
+}
+
 // GetWindow returns the total window size.
 func (cs *CortexSession) GetWindow() int {
     return cs.windowSize()
@@ -148,6 +181,14 @@ const FunctionContextAdjustWatermarks = "context_adjust_watermarks"
 // contextAdjustWatermarks dynamically adjusts the working set watermarks.
 // This is bounded (±W/4 to prevent abuse) and maintains the invariant lowWM <= highWM.
 func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
+    // Check if tool is enabled via config
+    if enabled, msg, err := checkConfig(tc, deps); !enabled {
+        if err != nil {
+            return "", err
+        }
+        return msg, nil
+    }
+    
     // Parse arguments
     highDelta, _ := tc.IntArg("high_delta")
     lowDelta, _ := tc.IntArg("low_delta")
