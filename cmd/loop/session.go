@@ -62,6 +62,57 @@ func (cs *CortexSession) StartTranscript() {
 	}
 }
 
+// showLoadedContext prints a human-readable summary of what context was loaded.
+// Call this right after ResumeTranscript to make the loaded session visible.
+func (cs *CortexSession) showLoadedContext(id string) {
+	dir := sessionsDir()
+	
+	// Get session info for display
+	infos, _ := listSessions(dir, 1)
+	var info sessionInfo
+	if len(infos) > 0 {
+		info = infos[0]
+	}
+	
+	// Calculate demotion state
+	demotedTurns := 0
+	hydratedTurns := 0
+	totalTurns := 0
+	if cs.ws != nil {
+		demotedTurns = cs.ws.Demoted()
+		totalTurns = cs.ws.TotalTurns()
+		hydratedTurns = totalTurns - demotedTurns
+	}
+	
+	// Build context summary
+	msgCount := len(cs.Request.Messages)
+	
+	// Only show demotion info if we have turns (not a fresh session)
+	if totalTurns > 0 {
+		fmt.Printf("%s  %d turns (%d demoted, %d hydrated tail)\n",
+			withColor("context:", green),
+			totalTurns, demotedTurns, hydratedTurns)
+	}
+	
+	// Show message count
+	fmt.Printf("%s  %d messages\n",
+		withColor("messages:", green),
+		msgCount)
+	
+	// Show session age if available
+	if info.ModTime.IsZero() {
+		fmt.Printf("%s  %s\n",
+			withColor("session:", gray),
+			withColor(id, cyan))
+	} else {
+		age := relTime(info.ModTime)
+		fmt.Printf("%s  %s (%s old)\n",
+			withColor("session:", gray),
+			withColor(id, cyan),
+			withColor(age, gray))
+	}
+}
+
 func (cs *CortexSession) ResumeTranscript(id string) error {
 	dir := sessionsDir()
 	if id == "" {

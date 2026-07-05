@@ -70,6 +70,8 @@ func runTurnCLI(args []string) {
 		if err := session.ResumeTranscript(sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "resume %s: %v — starting fresh\n", sessionID, err)
 			session.StartTranscript()
+		} else {
+			session.showLoadedContext(sessionID)
 		}
 	} else {
 		session.StartTranscript()

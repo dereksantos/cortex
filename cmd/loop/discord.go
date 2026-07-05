@@ -77,6 +77,8 @@ func runDiscordCLI() error {
 		if err := session.ResumeTranscript(sid); err != nil {
 			log.Printf("resume %s: %v — starting fresh", sid, err)
 			session.StartTranscript()
+		} else {
+			session.showLoadedContext(session.SessionID)
 		}
 	} else {
 		session.StartTranscript()

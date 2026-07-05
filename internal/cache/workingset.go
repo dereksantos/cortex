@@ -107,3 +107,8 @@ func (ws *WorkingSet) DemoteBatch() []TurnSpan {
 func (ws *WorkingSet) Demoted() int {
 	return ws.frontier
 }
+
+// TotalTurns returns the total number of turns tracked.
+func (ws *WorkingSet) TotalTurns() int {
+	return len(ws.turns)
+}

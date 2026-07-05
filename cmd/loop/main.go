@@ -280,7 +280,7 @@ func main() {
 			fmt.Printf("resume: %v — starting fresh\n", err)
 			session.StartTranscript()
 		} else {
-			fmt.Printf("%s\n", withColor(fmt.Sprintf("resumed %s (%d messages)", session.SessionID, len(session.Request.Messages)), gray))
+			session.showLoadedContext(session.SessionID)
 		}
 	} else {
 		session.StartTranscript()
