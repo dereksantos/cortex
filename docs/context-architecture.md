@@ -13,8 +13,29 @@
 > [`memory-tools.md`](memory-tools.md) (durable memory is model-driven tools;
 > this doc is only about the *session window*, not durable memory).
 >
-> **Status.** Design. Supersedes size-triggered `Compact` as the long-session
-> strategy once P2 ships; `Compact` survives until then.
+> **Status.** **IMPLEMENTED (P1–P4, 2026-07-03)** — built via the loop harness
+> itself (Qwen3-Coder-Next doing the edits from piecewise specs). All phases
+> live: index off the fold, `internal/cache` working set + two-zone wire
+> assembly, transcript turn-stamping + resume replay, `recall(citation)`,
+> outline fold. Deltas from this design, discovered in implementation:
+> - **Citations are message-index ranges** (`@session/<id>#m<start>-<end>`,
+>   resolved through `loadTranscript`), not file line ranges — line numbers
+>   drift with non-message entries; message indexes are what resume replays.
+> - **`Compact` is kept as an unreachable safety net**, not deleted: with the
+>   tail bounded at W/2 and the outline at W/8, the 80% trigger can't fire in
+>   normal operation, but it still guards pathological single-turn blowups.
+> - **Turn spans are stamped** (`turn` field on transcript message entries)
+>   rather than re-derived: salvage prompts make derivation ambiguous. Legacy
+>   unstamped transcripts resume with history hydrated (demotes nothing).
+> - **Live retention results (qwen3-coder-q3):** recall works when the outline
+>   signals relevance (graded probe passes: truncated codeword recovered
+>   unprompted after adding a grounding principle — "the outline is an index,
+>   not the content; never guess at content it only points to" — which also
+>   stopped an observed confabulation). Blind recall of facts with zero
+>   visible trace remains beyond this model's initiative: it answers honestly
+>   that it doesn't know. That's the accepted floor, per the design's bet.
+> - The recall parser tolerates bracketed citations (`[@session/…]`) — models
+>   paste them as rendered.
 >
 > **Owner.** `cmd/loop` (turn assembly) + `internal/cache` (the working-set
 > model — the sketch file becomes the package).

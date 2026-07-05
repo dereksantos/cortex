@@ -41,10 +41,16 @@ the repo root into its seed if present.
 
 Three capabilities distinguish it:
 
-1. **Working memory.** When the context window fills (~80%, `compactThreshold`,
-   or on `/compact`), the conversation is folded into a digest by the
-   sequential chunk-and-fold summarizer (`cmd/loop/summarize.go`) and the
-   session continues from that instead of truncating.
+1. **Working memory.** The window is a two-zone cache over the immutable
+   transcript ([`docs/context-architecture.md`](docs/context-architecture.md)):
+   an append-stable prefix (system + a deterministic outline of demoted turns +
+   the memory index) and a watermarked hydrated tail (last turns verbatim,
+   drains W/2→W/3). Old turns demote mechanically to outline lines with
+   `@session/…#m…-…` citations; `recall(citation)` fetches the raw messages
+   back; the outline folds via the summarizer only past W/8
+   (`cmd/loop/demote.go`, `internal/cache/`). Prompt size stays bounded
+   forever — the old ~80% `Compact` (chunk-and-fold summarize,
+   `cmd/loop/summarize.go`, `/compact`) survives only as a safety net.
 2. **Model-driven memory + per-turn capture.** The agent curates durable
    free-form notes through the `memory_write/read/search/forget` tools
    (`internal/memory`); the note index is injected at turn start
@@ -86,7 +92,9 @@ mechanical capture/retract pipeline.
 
 Registered in `internal/tools/tools.go` (`All` + dispatch in
 `tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `outline`,
-`grep`, `bash`, `remove_path`, and the model-driven memory tools
+`grep`, `bash`, `remove_path`, `recall` (resolves a session-outline citation
+to the verbatim demoted messages; coder-only — not in the Study profile), and
+the model-driven memory tools
 `memory_write`, `memory_read`, `memory_search`, `memory_forget`
 (`internal/memory`). (`project_index` was replaced by `outline` + `grep`.)
 
