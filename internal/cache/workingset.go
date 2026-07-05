@@ -70,6 +70,13 @@ func (ws *WorkingSet) TailTokens() int {
 	return tokens
 }
 
+// Base returns the message-log index where turn content begins. Messages
+// before it (system, a compaction summary, unstamped resumed history) are
+// outside the working set entirely: never demoted, always sent.
+func (ws *WorkingSet) Base() int {
+	return ws.base
+}
+
 // FrontierMsg returns the message-log index where the hydrated tail begins.
 // Returns base when frontier == 0, else turns[frontier-1].End.
 func (ws *WorkingSet) FrontierMsg() int {

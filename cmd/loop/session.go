@@ -269,6 +269,7 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	cs.outline = nil
 	cs.outlineFolded = ""
 	cs.Request.OutlineBlock = ""
+	cs.Request.PrefixEnd = 0
 	cs.Request.TailFrom = 0
 	cs.LastPromptTokens = 0
 	return nil
@@ -313,7 +314,10 @@ func (cs *CortexSession) Clear() {
 	cs.outline = nil
 	cs.outlineFolded = ""
 	cs.Request.OutlineBlock = ""
+	cs.Request.PrefixEnd = 0
 	cs.Request.TailFrom = 0
+	// A cleared session is a fresh conversation: stamp its transcript from 1.
+	cs.turns = 0
 	cs.LastPromptTokens = 0
 	cs.StartTranscript()
 }

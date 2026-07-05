@@ -51,9 +51,16 @@ type AgentRequest struct {
 	// Like EphemeralSystem it is wire-only: never stored in Messages, never persisted.
 	OutlineBlock string `json:"-"`
 
+	// PrefixEnd is the message-log index where demotable turn content begins
+	// (WorkingSet.Base). Messages[1:PrefixEnd] precede any turn the working set
+	// tracks — a Compact summary, or a resumed history the replay could not
+	// stamp into spans — and are ALWAYS sent, as part of the stable prefix.
+	// 0 or 1 means turn content starts right after the system message.
+	PrefixEnd int `json:"-"`
+
 	// TailFrom is the message-log index where the hydrated tail begins (WorkingSet.FrontierMsg).
-	// Messages[1:TailFrom] are demoted — represented by OutlineBlock — and are NOT sent.
-	// 0 or 1 means nothing is demoted.
+	// Messages[PrefixEnd:TailFrom] are demoted — represented by OutlineBlock — and are NOT sent.
+	// TailFrom <= PrefixEnd means nothing is demoted.
 	TailFrom int `json:"-"`
 
 	// Stream and StreamOptions are set only on the streaming payload (SendStream);
@@ -79,30 +86,44 @@ type streamOptions struct {
 }
 
 // wireMessages returns the messages to send, assembled in a two-zone layout:
-// - element 0: r.Messages[0] (the system message)
-// - if r.OutlineBlock != "": Message{Role: RoleUser, Content: r.OutlineBlock}
-// - if r.EphemeralSystem != "": Message{Role: RoleUser, Content: r.EphemeralSystem} (after outline)
-// - then the tail: r.Messages[TailFrom:] (or r.Messages[1:] if TailFrom <= 1)
+//   - element 0: r.Messages[0] (the system message)
+//   - then r.Messages[1:PrefixEnd]: pre-turn content (Compact summary, unstamped
+//     resumed history) — never demoted, part of the append-stable prefix
+//   - if r.OutlineBlock != "": Message{Role: RoleUser, Content: r.OutlineBlock}
+//   - if r.EphemeralSystem != "": Message{Role: RoleUser, Content: r.EphemeralSystem} (after outline)
+//   - then the tail: r.Messages[TailFrom:] — the demoted region [PrefixEnd, TailFrom)
+//     is what the outline stands in for
+//
 // The stored Messages are never mutated, so nothing accumulates and the transcript stays clean.
 // Returns r.Messages unchanged if there's nothing to insert or demote.
 func (r *AgentRequest) wireMessages() []Message {
-	// Early return if no demotion or ephemeral content
-	if r.OutlineBlock == "" && r.EphemeralSystem == "" && r.TailFrom <= 1 {
-		return r.Messages
-	}
 	if len(r.Messages) == 0 {
 		return r.Messages
 	}
 
-	// Determine tail start: use TailFrom if > 1, otherwise 1
+	prefixEnd := r.PrefixEnd
+	if prefixEnd < 1 {
+		prefixEnd = 1
+	}
+	if prefixEnd > len(r.Messages) {
+		prefixEnd = len(r.Messages)
+	}
 	start := r.TailFrom
-	if start < 1 {
-		start = 1
+	if start < prefixEnd {
+		start = prefixEnd
+	}
+	if start > len(r.Messages) {
+		start = len(r.Messages)
 	}
 
-	// Build the output slice
-	out := make([]Message, 0, 1+len(r.Messages[start:]))
+	// Early return when nothing is demoted and nothing is injected.
+	if r.OutlineBlock == "" && r.EphemeralSystem == "" && start <= prefixEnd {
+		return r.Messages
+	}
+
+	out := make([]Message, 0, 2+prefixEnd+len(r.Messages[start:]))
 	out = append(out, r.Messages[0]) // system message
+	out = append(out, r.Messages[1:prefixEnd]...)
 
 	if r.OutlineBlock != "" {
 		out = append(out, Message{Role: RoleUser, Content: r.OutlineBlock})

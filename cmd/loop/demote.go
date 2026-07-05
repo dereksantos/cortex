@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
@@ -11,9 +12,11 @@ import (
 // replayWorkingSet rebuilds the demotion state from a resumed transcript.
 // turns[i] is the 1-based ordinal stamped on msgs[i] when it was written (0 =
 // seed/system). A well-formed history is an unstamped prefix followed by
-// ordinals running 1,2,3… — replayed into exact spans. Anything else (a
-// legacy unstamped file, a gap) falls back to keeping the whole history
-// hydrated: safe, just demotes nothing until new turns accumulate.
+// consecutive ordinals K,K+1,… — replayed into exact spans (K need not be 1:
+// a transcript Compact starts continues the session's numbering). Anything
+// else (a legacy unstamped file, a gap) falls back to keeping the whole
+// history hydrated — base = len(msgs), so wireMessages sends it all as
+// pre-turn prefix and only new turns demote.
 // Returns the working set and the highest ordinal seen, so the session can
 // continue numbering (cs.turns) without colliding with existing stamps.
 func (cs *CortexSession) replayWorkingSet(msgs []Message, turns []int) (*cache.WorkingSet, int) {
@@ -33,20 +36,8 @@ func (cs *CortexSession) replayWorkingSet(msgs []Message, turns []int) (*cache.W
 		return cs.newWorkingSet(len(msgs)), 0
 	}
 
-	// Validate in ONE pass before building anything
-	// turns[base] must be 1; from base on, stamps must be non-decreasing and increase only by exactly 1
-	// No zero stamp may appear after base
-	if turns[base] != 1 {
-		// Invalid: first non-zero stamp is not 1
-		maxStamp := 0
-		for _, t := range turns {
-			if t > maxStamp {
-				maxStamp = t
-			}
-		}
-		return cs.newWorkingSet(len(msgs)), maxStamp
-	}
-
+	// Validate in ONE pass before building anything: from base on, stamps must
+	// be non-decreasing, increase only by exactly 1, and never return to zero.
 	valid := true
 	for i := base + 1; i < len(turns); i++ {
 		if turns[i] == 0 {
@@ -156,8 +147,30 @@ func (cs *CortexSession) foldOutlineIfNeeded(ctx context.Context) {
 	if err != nil || strings.TrimSpace(digest) == "" {
 		return
 	}
-	cs.outlineFolded = strings.TrimSpace(digest)
+	cs.outlineFolded = restoreCitations(content, strings.TrimSpace(digest))
 	cs.outline = append([]cache.OutlineEntry(nil), cs.outline[n:]...)
+}
+
+// foldCitationRe matches the transcript coordinates outline entries carry.
+var foldCitationRe = regexp.MustCompile(`@session/[A-Za-z0-9-]+#m\d+-\d+`)
+
+// restoreCitations enforces the fold's losslessness invariant mechanically:
+// any citation present in the folded material but missing from the digest is
+// appended, so demoted turns stay reachable via recall no matter what the
+// summarizer did (the fold goal asks it to keep them; this guarantees it).
+func restoreCitations(content, digest string) string {
+	var missing []string
+	seen := map[string]bool{}
+	for _, c := range foldCitationRe.FindAllString(content, -1) {
+		if !seen[c] && !strings.Contains(digest, c) {
+			missing = append(missing, "["+c+"]")
+		}
+		seen[c] = true
+	}
+	if len(missing) == 0 {
+		return digest
+	}
+	return digest + "\nOther folded turns (recall for detail): " + strings.Join(missing, " ")
 }
 
 // turnOutlineEntry converts a completed turn (slice of messages) into a
@@ -168,11 +181,8 @@ func turnOutlineEntry(turn int, span cache.TurnSpan, msgs []Message, sessionID s
 	if len(msgs) > 0 && msgs[0].Role == "user" {
 		userContent = msgs[0].Content
 	}
-	if len(userContent) > outlineUserCap {
-		r := []rune(userContent)
-		if len(r) > outlineUserCap {
-			userContent = string(r[:outlineUserCap]) + "… (truncated; recall the citation below for the rest)"
-		}
+	if r := []rune(userContent); len(r) > outlineUserCap {
+		userContent = string(r[:outlineUserCap]) + "… (truncated; recall the citation below for the rest)"
 	}
 
 	// Build map from ToolCallID to ok/err by scanning RoleTool messages
@@ -245,6 +255,6 @@ func estTurnTokens(msgs []Message) int {
 	return cache.TokensOf(sum)
 }
 
-// outlineUserCap is the maximum bytes for a demoted user message to stay verbatim.
+// outlineUserCap is the maximum runes for a demoted user message to stay verbatim.
 // Beyond this, the outline keeps the head and the citation covers the rest.
 const outlineUserCap = 500

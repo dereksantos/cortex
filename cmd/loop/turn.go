@@ -50,13 +50,18 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	}
 	// Demote-then-send: if the hydrated tail has outgrown its watermark, move
 	// the oldest turns into the outline zone (docs/context-architecture.md).
-	for _, span := range cs.ws.DemoteBatch() {
-		cs.outline = append(cs.outline, turnOutlineEntry(len(cs.outline)+1, span, cs.Request.Messages[span.Start:span.End], cs.SessionID))
+	// Labels count demoted turns monotonically (folds shrink cs.outline, so
+	// its length regresses and cannot number entries).
+	batch := cs.ws.DemoteBatch()
+	for i, span := range batch {
+		ordinal := cs.ws.Demoted() - len(batch) + i + 1
+		cs.outline = append(cs.outline, turnOutlineEntry(ordinal, span, cs.Request.Messages[span.Start:span.End], cs.SessionID))
 	}
 	cs.foldOutlineIfNeeded(ctx)
 	if len(cs.outline) > 0 || cs.outlineFolded != "" {
 		cs.Request.OutlineBlock = cs.renderOutlineBlock()
 	}
+	cs.Request.PrefixEnd = cs.ws.Base()
 	cs.Request.TailFrom = cs.ws.FrontierMsg()
 
 	// Record the turn's span at exit no matter how the turn ends (error,

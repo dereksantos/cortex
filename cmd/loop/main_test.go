@@ -2432,8 +2432,13 @@ func TestFoldOutline(t *testing.T) {
 		ctx := context.Background()
 		cs.foldOutlineIfNeeded(ctx)
 
-		if cs.outlineFolded != "FOLDED [@session/s#m1-2]" {
-			t.Errorf("cs.outlineFolded = %q, want %q", cs.outlineFolded, "FOLDED [@session/s#m1-2]")
+		// The stub digest kept entry 1's citation but dropped entry 2's; the
+		// citation guard must restore the missing one.
+		if !strings.HasPrefix(cs.outlineFolded, "FOLDED [@session/s#m1-2]") {
+			t.Errorf("cs.outlineFolded = %q, want prefix %q", cs.outlineFolded, "FOLDED [@session/s#m1-2]")
+		}
+		if !strings.Contains(cs.outlineFolded, "[@session/s#m2-3]") {
+			t.Errorf("cs.outlineFolded = %q, want the dropped citation [@session/s#m2-3] restored", cs.outlineFolded)
 		}
 		if len(cs.outline) != 2 {
 			t.Errorf("len(cs.outline) = %d, want 2", len(cs.outline))

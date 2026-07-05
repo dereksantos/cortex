@@ -229,9 +229,16 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 		b.WriteString("\n\n")
 	}
 
+	// Gate at the curation budget, scaled down to the tail's low watermark on
+	// small windows: a recall bigger than the tail's drain target would flood
+	// the hydrated tail and immediately re-demote.
+	gate := tools.CurationBudgetTokens
+	if w := cs.windowSize() / 3; w < gate {
+		gate = w
+	}
 	rendered := b.String()
-	if len(rendered)/4 > tools.CurationBudgetTokens {
-		return fmt.Sprintf("recall of %s is ~%d tokens — over the %d-token curation budget. Study the transcript instead: study(%s, <your question>)", citation, len(rendered)/4, tools.CurationBudgetTokens, filepath.Join(sessionsDir(), id+".jsonl")), nil
+	if len(rendered)/4 > gate {
+		return fmt.Sprintf("recall of %s is ~%d tokens — over the %d-token recall budget. Study the transcript instead: study(%s, <your question>)", citation, len(rendered)/4, gate, filepath.Join(sessionsDir(), id+".jsonl")), nil
 	}
 
 	return rendered, nil
