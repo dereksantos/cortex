@@ -158,6 +158,37 @@ func NewCortexSession() *CortexSession {
 	return cs
 }
 
+// IsToolEnabled reports whether a context window tool is enabled via config.
+func (cs *CortexSession) IsToolEnabled(toolName string) bool {
+	if cs.Config == nil {
+		return true // default: all tools enabled
+	}
+	// Check if Tools has any config set (all pointers are nil means defaults)
+	t := &cs.Config.Tools
+	if t.EnableContextSummarize == nil &&
+		t.EnableContextEvict == nil &&
+		t.EnableContextMerge == nil &&
+		t.EnableContextReorder == nil &&
+		t.EnableContextAdjustWatermarks == nil &&
+		t.AllowDelete == nil &&
+		t.DeleteRoot == "" {
+		return true // default: all tools enabled
+	}
+	switch toolName {
+	case "context_summarize":
+		return t.EnableContextSummarize == nil || *t.EnableContextSummarize
+	case "context_evict":
+		return t.EnableContextEvict == nil || *t.EnableContextEvict
+	case "context_merge":
+		return t.EnableContextMerge == nil || *t.EnableContextMerge
+	case "context_reorder":
+		return t.EnableContextReorder == nil || *t.EnableContextReorder
+	case "context_adjust_watermarks":
+		return t.EnableContextAdjustWatermarks == nil || *t.EnableContextAdjustWatermarks
+	}
+	return true // unknown tools enabled by default
+}
+
 func toolsExcept(ts []Tool, name string) []Tool {
 	out := make([]Tool, 0, len(ts))
 	for _, t := range ts {

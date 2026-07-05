@@ -94,6 +94,12 @@ type DeleteGate interface {
 	AllowDelete() (root string, allowed bool)
 }
 
+// ConfigProvider exposes tool enable/disable configuration.
+// Tools can query this to check if they are enabled via config.
+type ConfigProvider interface {
+	IsToolEnabled(toolName string) bool
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -113,6 +119,8 @@ type ToolDeps interface {
 	// Recaller resolves an outline citation back to the raw transcript messages
 	// it stands for (docs/context-architecture.md: demotion is recoverable).
 	Recaller
+	// ConfigProvider exposes tool enable/disable configuration.
+	ConfigProvider
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -159,6 +167,7 @@ func (headlessDeps) MemoryForget(string) (string, error) {
 func (headlessDeps) Recall(string) (string, error) {
 	return "", errors.New("recall unavailable: no session")
 }
+func (headlessDeps) IsToolEnabled(string) bool { return true }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -371,6 +380,12 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if deps == nil {
 		deps = headlessDeps{}
 	}
+
+	// Check if tool is enabled via config
+	if !deps.IsToolEnabled(tc.Function.Name) {
+		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), nil
+	}
+
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:

@@ -77,6 +77,9 @@ const FunctionContextSummarize = "context_summarize"
 // It uses the existing Summarizer interface (sequential chunk-and-fold)
 // and preserves the citation mechanically.
 func contextSummarize(tc ToolCall, deps ToolDeps) (string, error) {
+    // Check if tool is enabled via config (handled at dispatcher level)
+    // No need to duplicate check here - Execute() handles it
+    
     // Parse arguments
     citation, err := tc.StringArg("citation")
     if err != nil {
