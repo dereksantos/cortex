@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -95,6 +96,10 @@ func (cs *CortexSession) AllowDelete() (string, bool) { return cs.deleteRoot, cs
 
 func (cs *CortexSession) Quiet() bool { return cs.quiet }
 
+// citationRe parses the outline citation coordinate: @session/<id>#m<start>-<end>,
+// a half-open message-index range into that session transcript.
+var citationRe = regexp.MustCompile(`^@session/([A-Za-z0-9-]+)#m(\d+)-(\d+)$`)
+
 const memUnavailable = "memory is unavailable in this session (no .cortex workspace)"
 
 func (cs *CortexSession) MemoryWrite(name, content string) (string, error) {
@@ -178,6 +183,58 @@ func renderMemoryHits(hits []memory.NoteMeta) string {
 		fmt.Fprintf(&b, "- %s — %s%s\n", m.Name, m.Hook, when)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// Recall resolves an outline citation to the verbatim transcript messages it
+// stands for — the recovery path that makes demotion lossless
+// (docs/context-architecture.md). Deterministic: no model call.
+func (cs *CortexSession) Recall(citation string) (string, error) {
+	// Outline renders citations in brackets (e.g., "[@session/...]"), so strip them.
+	trimmed := strings.Trim(strings.TrimSpace(citation), "[]")
+	m := citationRe.FindStringSubmatch(trimmed)
+	if m == nil {
+		return fmt.Sprintf("unrecognized citation %q (expected @session/<id>#m<start>-<end>, as shown in the session outline)", citation), nil
+	}
+
+	id := m[1]
+	start, err := strconv.Atoi(m[2])
+	if err != nil {
+		return "", fmt.Errorf("recall %s: invalid start index: %w", citation, err)
+	}
+	end, err := strconv.Atoi(m[3])
+	if err != nil {
+		return "", fmt.Errorf("recall %s: invalid end index: %w", citation, err)
+	}
+
+	msgs, _, err := loadTranscript(filepath.Join(sessionsDir(), id+".jsonl"))
+	if err != nil {
+		return "", fmt.Errorf("recall %s: %w", citation, err)
+	}
+
+	if start < 0 || end > len(msgs) || start >= end {
+		return fmt.Sprintf("citation %s is out of range for that transcript (%d messages)", citation, len(msgs)), nil
+	}
+
+	var b strings.Builder
+	for _, msg := range msgs[start:end] {
+		b.WriteString(msg.Role)
+		b.WriteString("\n")
+		b.WriteString(msg.Content)
+		if len(msg.ToolCalls) > 0 {
+			for _, call := range msg.ToolCalls {
+				b.WriteString("\n  ▸ ")
+				b.WriteString(call.ActivityLabel())
+			}
+		}
+		b.WriteString("\n\n")
+	}
+
+	rendered := b.String()
+	if len(rendered)/4 > tools.CurationBudgetTokens {
+		return fmt.Sprintf("recall of %s is ~%d tokens — over the %d-token curation budget. Study the transcript instead: study(%s, <your question>)", citation, len(rendered)/4, tools.CurationBudgetTokens, filepath.Join(sessionsDir(), id+".jsonl")), nil
+	}
+
+	return rendered, nil
 }
 
 func (cs *CortexSession) gateShell(ctx context.Context, command string) (string, bool) {

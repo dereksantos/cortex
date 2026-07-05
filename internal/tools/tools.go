@@ -57,6 +57,12 @@ type MemoryStore interface {
 	MemoryForget(name string) (result string, err error)
 }
 
+// Recaller resolves an outline citation back to the raw transcript messages
+// it stands for (docs/context-architecture.md: demotion is recoverable).
+type Recaller interface {
+	Recall(citation string) (string, error)
+}
+
 // Summarizer reduces a free-text file (no structural map) to a digest via
 // sequential chunk-and-fold. Used by oversized shell-output study; permanent,
 // unrelated to the study subagent. The compressed flag is unused there.
@@ -104,6 +110,9 @@ type ToolDeps interface {
 	DeleteGate
 	// Quiet reports whether terminal emission is suppressed (headless mode).
 	Quiet() bool
+	// Recaller resolves an outline citation back to the raw transcript messages
+	// it stands for (docs/context-architecture.md: demotion is recoverable).
+	Recaller
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -147,6 +156,9 @@ func (headlessDeps) MemorySearch(string) (string, error) {
 func (headlessDeps) MemoryForget(string) (string, error) {
 	return "", errors.New("memory unavailable: no session")
 }
+func (headlessDeps) Recall(string) (string, error) {
+	return "", errors.New("recall unavailable: no session")
+}
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -161,6 +173,7 @@ const (
 	FunctionMemoryRead   = "memory_read"
 	FunctionMemorySearch = "memory_search"
 	FunctionMemoryForget = "memory_forget"
+	FunctionRecall       = "recall"
 )
 
 // objectSchema builds a JSON Schema "object" with the given properties and
@@ -314,10 +327,16 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 		"name": stringProp("The note's name, as shown in the memory index."),
 	}, "name"))
 
+var RecallTool = newTool(FunctionRecall,
+	"Fetch the verbatim messages behind a session-outline citation (the [@session/…#m…-…] coordinates on demoted turns). Use it when the outline line is not enough and you need the raw detail of an older turn.",
+	objectSchema(map[string]any{
+		"citation": stringProp("The citation exactly as it appears in the outline, e.g. @session/20260701-143210#m12-19."),
+	}, "citation"))
+
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
-	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool}
+	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -378,6 +397,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return memorySearch(tc, deps)
 	case FunctionMemoryForget:
 		return memoryForget(tc, deps)
+	case FunctionRecall:
+		return recall(tc, deps)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -500,6 +521,15 @@ func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	printToolAction(fmt.Sprintf("memory_forget(%s)", name))
 	return deps.MemoryForget(name)
+}
+
+func recall(tc ToolCall, deps ToolDeps) (string, error) {
+	citation, err := tc.StringArg("citation")
+	if err != nil {
+		return "", err
+	}
+	printToolAction(fmt.Sprintf("recall(%s)", citation))
+	return deps.Recall(citation)
 }
 
 // --- read_file ----------------------------------------------------------

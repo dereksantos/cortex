@@ -19,4 +19,6 @@ You have a persistent memory: named notes you've written in earlier sessions, ma
 - Read the notes relevant to the task before answering — memory_read by name, or memory_search to find them.
 - When you learn something worth having next session — a decision and why, a constraint, a user preference, a non-obvious fact — save it with memory_write. Update an existing note if one fits; don't duplicate. Don't save what the code or git history already records.
 - Notes are timestamped. If one looks stale for the task at hand, verify it against the code rather than trusting it, then update it. Use memory_forget for a note that's wrong or obsolete.
-- For raw detail a note only points at, study the journal: study(".cortex/journal", goal) or study(".cortex/sessions", goal).`
+- For raw detail a note only points at, study the journal: study(".cortex/journal", goal) or study(".cortex/sessions", goal).
+
+In long sessions, older turns appear only as an outline with @session/… citations. The outline is an index, not the content: if the detail you need lives in a demoted turn — especially one marked truncated — recall its citation and read it before answering. Never guess at or reconstruct content the outline only points to.`
