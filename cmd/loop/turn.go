@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/dereksantos/cortex/internal/cache"
 )
 
 func (cs *CortexSession) startActivity(label string) {
@@ -35,7 +37,37 @@ type TurnResult struct {
 }
 
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
+	// Stamp transcript entries with this turn's ordinal (resume replays them
+	// into spans); cleared on exit so seed/compaction writes stay unstamped.
+	cs.turnNo = cs.turns + 1
+	defer func() { cs.turnNo = 0 }()
+
 	turnStart := len(cs.Request.Messages)
+	// Lazy init covers sessions built without NewCortexSession (tests, adapters):
+	// the working set engages wherever turn content happens to start.
+	if cs.ws == nil {
+		cs.ws = cs.newWorkingSet(turnStart)
+	}
+	// Demote-then-send: if the hydrated tail has outgrown its watermark, move
+	// the oldest turns into the outline zone (docs/context-architecture.md).
+	for _, span := range cs.ws.DemoteBatch() {
+		cs.outline = append(cs.outline, turnOutlineEntry(len(cs.outline)+1, span, cs.Request.Messages[span.Start:span.End], cs.SessionID))
+	}
+	cs.foldOutlineIfNeeded(ctx)
+	if len(cs.outline) > 0 || cs.outlineFolded != "" {
+		cs.Request.OutlineBlock = cs.renderOutlineBlock()
+	}
+	cs.Request.TailFrom = cs.ws.FrontierMsg()
+
+	// Record the turn's span at exit no matter how the turn ends (error,
+	// interrupt, panic): AddTurn enforces contiguity, so every appended
+	// message must land in a span.
+	defer func() {
+		if end := len(cs.Request.Messages); end > turnStart {
+			cs.ws.AddTurn(cache.TurnSpan{Start: turnStart, End: end, Tokens: estTurnTokens(cs.Request.Messages[turnStart:end])})
+		}
+	}()
+
 	cs.Append(Message{Role: RoleUser, Content: input})
 	cs.turnIntent = input
 

@@ -42,7 +42,14 @@ func (cs *CortexSession) Summarize(ctx context.Context, path, goal string, windo
 	if err != nil {
 		return "", false, fmt.Errorf("summarize read %s: %w", path, err)
 	}
-	content := string(data)
+	return cs.SummarizeText(ctx, string(data), goal, window)
+}
+
+// SummarizeText reduces content (already in memory) to a digest toward goal,
+// returning the digest and whether folding was needed (compressed=false means
+// the content fit a single chunk — for compaction, "nothing to compress").
+// window is the consumer's token budget; <=0 falls back to the study window.
+func (cs *CortexSession) SummarizeText(ctx context.Context, content, goal string, window int) (digest string, compressed bool, err error) {
 	if strings.TrimSpace(content) == "" {
 		return "", false, nil
 	}
@@ -64,7 +71,7 @@ func (cs *CortexSession) Summarize(ctx context.Context, path, goal string, windo
 
 	// Map: summarize each chunk in order.
 	if !cs.quiet {
-		fmt.Println(withColor(fmt.Sprintf("  ▸ summarize(%s) via %s (%d chunks)", path, cs.Study.Model, len(chunks)), green))
+		fmt.Println(withColor(fmt.Sprintf("  ▸ summarize via %s (%d chunks)", cs.Study.Model, len(chunks)), green))
 	}
 	partials := make([]string, 0, len(chunks))
 	for i, ch := range chunks {

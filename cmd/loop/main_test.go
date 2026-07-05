@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 
@@ -1821,7 +1823,7 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		}
 	})
 
-	t.Run("ephemeral rides the user message; system prefix is byte-stable", func(t *testing.T) {
+	t.Run("ephemeral is inserted at index 1; system prefix is byte-stable", func(t *testing.T) {
 		req.EphemeralSystem = "# memory\n- [decision] use pgx"
 		wire := req.wireMessages()
 
@@ -1830,12 +1832,15 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		if wire[0].Content != sys {
 			t.Error("system message must stay byte-identical (prefix cache stability)")
 		}
-		// The note rides the last user message instead.
-		if !strings.Contains(wire[1].Content, "use pgx") {
-			t.Error("wire user message should carry the ephemeral note")
+		// The note has a fixed cache-stable slot at index 1 instead of riding the user message.
+		if wire[1].Role != RoleUser || wire[1].Content != req.EphemeralSystem {
+			t.Error("ephemeral should be inserted as its own user message at index 1")
 		}
-		if !strings.HasPrefix(wire[1].Content, userOrig) {
-			t.Error("wire user message should keep the original prompt as prefix")
+		if wire[2].Content != userOrig {
+			t.Error("original user message should be shifted to index 2, unchanged")
+		}
+		if len(wire) != len(req.Messages)+1 {
+			t.Error("wire should have exactly one extra message")
 		}
 		// Storage is never mutated.
 		if req.Messages[0].Content != sys || req.Messages[1].Content != userOrig {
@@ -1843,18 +1848,92 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		}
 	})
 
-	t.Run("folds onto the LAST user message as the tool loop appends", func(t *testing.T) {
+	t.Run("stays at index 1 as the tool loop appends", func(t *testing.T) {
 		// Mid tool-loop: assistant + tool messages follow the user turn. The note
-		// must still land on the user message (a stable position), not the tail.
+		// must stay at index 1 (a stable position), not move with the user message.
 		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}})
 		req.Messages = append(req.Messages, Message{Role: RoleTool, ToolCallID: "1", Content: "tool output"})
 		req.EphemeralSystem = "ctx"
 		wire := req.wireMessages()
-		if !strings.Contains(wire[1].Content, "ctx") {
-			t.Error("note should fold onto the user message even mid-tool-loop")
+		if wire[1].Content != "ctx" {
+			t.Error("note should stay at index 1 (fixed cache-stable slot)")
+		}
+		if wire[2].Content != userOrig {
+			t.Error("original user message should be shifted to index 2")
 		}
 		if strings.Contains(wire[len(wire)-1].Content, "ctx") {
 			t.Error("note must not land on the trailing tool message")
+		}
+		if len(wire) != len(req.Messages)+1 {
+			t.Error("wire should have exactly one extra message")
+		}
+	})
+}
+
+func TestWireMessagesTwoZones(t *testing.T) {
+	req := &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "u1"}, {Role: "assistant", Content: "a1"}, {Role: RoleUser, Content: "u2"}, {Role: "assistant", Content: "a2"}}}
+
+	t.Run("demoted turns are replaced by the outline", func(t *testing.T) {
+		req.OutlineBlock = "OUTLINE"
+		req.EphemeralSystem = "INDEX"
+		req.TailFrom = 3
+
+		wire := req.wireMessages()
+		if len(wire) != 5 {
+			t.Errorf("wire length = %d, want 5", len(wire))
+		}
+		if wire[0].Content != "sys" {
+			t.Errorf("wire[0] = %q, want %q", wire[0].Content, "sys")
+		}
+		if wire[1].Role != RoleUser || wire[1].Content != "OUTLINE" {
+			t.Errorf("wire[1] = {%q,%q}, want {%q,%q}", wire[1].Role, wire[1].Content, RoleUser, "OUTLINE")
+		}
+		if wire[2].Role != RoleUser || wire[2].Content != "INDEX" {
+			t.Errorf("wire[2] = {%q,%q}, want {%q,%q}", wire[2].Role, wire[2].Content, RoleUser, "INDEX")
+		}
+		if wire[3].Content != "u2" {
+			t.Errorf("wire[3] = %q, want %q", wire[3].Content, "u2")
+		}
+		if wire[4].Content != "a2" {
+			t.Errorf("wire[4] = %q, want %q", wire[4].Content, "a2")
+		}
+		// Stored Messages must not be mutated
+		if len(req.Messages) != 5 || req.Messages[1].Content != "u1" {
+			t.Errorf("stored Messages[1] = %q, want %q (not mutated)", req.Messages[1].Content, "u1")
+		}
+	})
+
+	t.Run("tail-only demotion without outline still drops demoted messages", func(t *testing.T) {
+		req.OutlineBlock = ""
+		req.EphemeralSystem = ""
+		req.TailFrom = 3
+
+		wire := req.wireMessages()
+		if len(wire) != 3 {
+			t.Errorf("wire length = %d, want 3", len(wire))
+		}
+		if wire[0].Content != "sys" {
+			t.Errorf("wire[0] = %q, want %q", wire[0].Content, "sys")
+		}
+		if wire[1].Content != "u2" {
+			t.Errorf("wire[1] = %q, want %q", wire[1].Content, "u2")
+		}
+		if wire[2].Content != "a2" {
+			t.Errorf("wire[2] = %q, want %q", wire[2].Content, "a2")
+		}
+	})
+
+	t.Run("zero values are a no-op", func(t *testing.T) {
+		req.OutlineBlock = ""
+		req.EphemeralSystem = ""
+		req.TailFrom = 0
+
+		wire := req.wireMessages()
+		if len(wire) != len(req.Messages) {
+			t.Errorf("wire length = %d, want %d", len(wire), len(req.Messages))
+		}
+		if wire[1].Content != "u1" {
+			t.Errorf("wire[1] = %q, want %q", wire[1].Content, "u1")
 		}
 	})
 }
@@ -1936,12 +2015,15 @@ func TestLoadTranscriptBackCompat(t *testing.T) {
 	path := filepath.Join(dir, "20260101-000000.jsonl")
 	os.WriteFile(path, []byte(legacy), 0644)
 
-	msgs, err := loadTranscript(path)
+	msgs, turns, err := loadTranscript(path)
 	if err != nil {
 		t.Fatalf("loadTranscript: %v", err)
 	}
 	if len(msgs) != 1 || msgs[0].Content != "legacy turn" {
 		t.Errorf("legacy (kind-less) entry should replay as a core message, got %+v", msgs)
+	}
+	if len(turns) != 1 || turns[0] != 0 {
+		t.Errorf("legacy entry should have turn=0 stamp, got %v", turns)
 	}
 }
 
@@ -2028,6 +2110,77 @@ func TestTurnAccumulatesTokens(t *testing.T) {
 	}
 	if cs.tokensIn != 12 || cs.tokensOut != 3 {
 		t.Errorf("accumulated tokens = %d in / %d out, want 12/3", cs.tokensIn, cs.tokensOut)
+	}
+}
+
+func TestTurnDemotesOldTurnsToOutline(t *testing.T) {
+	quickRetries(t)
+	var got [][]Message
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []Message `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		got = append(got, req.Messages)
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	// Window 60 → demotion watermarks high=30/low=20 tokens (newWorkingSet).
+	cs := &CortexSession{Window: 60, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+
+	// Turn 1 is ~40 tokens (162 chars / 4): over the high watermark, but the
+	// most-recent-turn invariant blocks demoting the only turn. Turn 2 doubles
+	// the tail; at turn 3 start, turn 1 demotes (turn 2 stays: same invariant).
+	for _, input := range []string{strings.Repeat("alpha ", 27), strings.Repeat("bravo ", 27), "charlie"} {
+		if _, err := cs.Turn(context.Background(), input); err != nil {
+			t.Fatalf("turn %q: %v", input[:5], err)
+		}
+	}
+
+	if len(got) != 3 {
+		t.Fatalf("server saw %d requests, want 3", len(got))
+	}
+	wire := got[2]
+	if wire[0].Content != "s" {
+		t.Errorf("wire[0] = %q, want the system message", wire[0].Content)
+	}
+	if wire[1].Role != RoleUser || !strings.HasPrefix(wire[1].Content, outlineHeader) {
+		t.Errorf("wire[1] should be the outline zone, got role=%q content=%q", wire[1].Role, wire[1].Content)
+	}
+	if !strings.Contains(wire[1].Content, "alpha") || !strings.Contains(wire[1].Content, "t1 · user:") {
+		t.Errorf("outline should carry the demoted turn 1 entry, got %q", wire[1].Content)
+	}
+	for i, m := range wire[2:] {
+		if strings.Contains(m.Content, "alpha") {
+			t.Errorf("wire[%d] still carries raw turn-1 content after demotion", i+2)
+		}
+	}
+	hydrated := false
+	for _, m := range wire[2:] {
+		if strings.Contains(m.Content, "bravo") {
+			hydrated = true
+		}
+	}
+	if !hydrated {
+		t.Error("turn 2 should still ride the wire verbatim")
+	}
+	kept := false
+	for _, m := range cs.Request.Messages {
+		if strings.Contains(m.Content, "alpha") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Error("demotion must be wire-only: the stored log keeps turn 1 verbatim")
+	}
+	if cs.Request.TailFrom <= 1 {
+		t.Errorf("TailFrom = %d, want > 1 after demotion", cs.Request.TailFrom)
 	}
 }
 
@@ -2122,4 +2275,231 @@ func TestEmitSessionMetricsUnpersistedNoOp(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(contextDir(), "journal", "eval")); err == nil {
 		t.Error("unpersisted session should not write an eval entry")
 	}
+}
+
+func TestResumeReplaysWorkingSet(t *testing.T) {
+	t.Run("stamped transcript replays spans", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Chdir(tmp)
+		dir := sessionsDir()
+		os.MkdirAll(dir, 0755)
+
+		// Build transcript with turn stamps
+		var lines []string
+		lines = append(lines, `{"kind":"message","role":"system","content":"s"}`)
+		lines = append(lines, `{"kind":"message","turn":1,"role":"user","content":"first question"}`)
+		lines = append(lines, `{"kind":"message","turn":1,"role":"assistant","content":"first answer"}`)
+		lines = append(lines, `{"kind":"message","turn":2,"role":"user","content":"second question"}`)
+		lines = append(lines, `{"kind":"message","turn":2,"role":"assistant","content":"second answer"}`)
+
+		path := filepath.Join(dir, "test-session.jsonl")
+		content := strings.Join(lines, "\n") + "\n"
+		os.WriteFile(path, []byte(content), 0644)
+
+		cs := &CortexSession{Window: 1000, Request: &AgentRequest{Messages: []Message{}}}
+		if err := cs.ResumeTranscript("test-session"); err != nil {
+			t.Fatalf("ResumeTranscript: %v", err)
+		}
+		defer cs.transcript.Close()
+
+		// Verify messages loaded
+		if len(cs.Request.Messages) != 5 {
+			t.Errorf("len(cs.Request.Messages) = %d, want 5", len(cs.Request.Messages))
+		}
+
+		// Verify turns count
+		if cs.turns != 2 {
+			t.Errorf("cs.turns = %d, want 2", cs.turns)
+		}
+
+		// Verify working set: frontier should be at 1 (after seed/system message)
+		frontier := cs.ws.FrontierMsg()
+		if frontier != 1 {
+			t.Errorf("cs.ws.FrontierMsg() = %d, want 1", frontier)
+		}
+
+		// Verify TailTokens > 0 (spans were recorded)
+		if cs.ws.TailTokens() == 0 {
+			t.Error("cs.ws.TailTokens() = 0, want > 0")
+		}
+	})
+
+	t.Run("legacy unstamped transcript stays hydrated", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Chdir(tmp)
+		dir := sessionsDir()
+		os.MkdirAll(dir, 0755)
+
+		// Build transcript without turn stamps
+		var lines []string
+		lines = append(lines, `{"kind":"message","role":"system","content":"s"}`)
+		lines = append(lines, `{"kind":"message","role":"user","content":"first question"}`)
+		lines = append(lines, `{"kind":"message","role":"assistant","content":"first answer"}`)
+		lines = append(lines, `{"kind":"message","role":"user","content":"second question"}`)
+		lines = append(lines, `{"kind":"message","role":"assistant","content":"second answer"}`)
+
+		path := filepath.Join(dir, "legacy-session.jsonl")
+		content := strings.Join(lines, "\n") + "\n"
+		os.WriteFile(path, []byte(content), 0644)
+
+		cs := &CortexSession{Window: 1000, Request: &AgentRequest{Messages: []Message{}}}
+		if err := cs.ResumeTranscript("legacy-session"); err != nil {
+			t.Fatalf("ResumeTranscript: %v", err)
+		}
+		defer cs.transcript.Close()
+
+		// Verify messages loaded
+		if len(cs.Request.Messages) != 5 {
+			t.Errorf("len(cs.Request.Messages) = %d, want 5", len(cs.Request.Messages))
+		}
+
+		// Verify turns count is 0 for unstamped
+		if cs.turns != 0 {
+			t.Errorf("cs.turns = %d, want 0", cs.turns)
+		}
+
+		// Verify no spans recorded
+		if cs.ws.TailTokens() != 0 {
+			t.Errorf("cs.ws.TailTokens() = %d, want 0", cs.ws.TailTokens())
+		}
+
+		// Verify frontier equals message count
+		if cs.ws.FrontierMsg() != len(cs.Request.Messages) {
+			t.Errorf("cs.ws.FrontierMsg() = %d, want %d", cs.ws.FrontierMsg(), len(cs.Request.Messages))
+		}
+	})
+
+	t.Run("gapped stamps fall back safely", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Chdir(tmp)
+		dir := sessionsDir()
+		os.MkdirAll(dir, 0755)
+
+		// Build transcript with gapped stamps (turn 1, then turn 3)
+		var lines []string
+		lines = append(lines, `{"kind":"message","role":"system","content":"s"}`)
+		lines = append(lines, `{"kind":"message","turn":1,"role":"user","content":"first question"}`)
+		lines = append(lines, `{"kind":"message","turn":1,"role":"assistant","content":"first answer"}`)
+		lines = append(lines, `{"kind":"message","turn":3,"role":"user","content":"third question"}`)
+		lines = append(lines, `{"kind":"message","turn":3,"role":"assistant","content":"third answer"}`)
+
+		path := filepath.Join(dir, "gapped-session.jsonl")
+		content := strings.Join(lines, "\n") + "\n"
+		os.WriteFile(path, []byte(content), 0644)
+
+		cs := &CortexSession{Window: 1000, Request: &AgentRequest{Messages: []Message{}}}
+		if err := cs.ResumeTranscript("gapped-session"); err != nil {
+			t.Fatalf("ResumeTranscript: %v", err)
+		}
+		defer cs.transcript.Close()
+
+		// Verify no spans recorded due to invalid sequence
+		if cs.ws.TailTokens() != 0 {
+			t.Errorf("cs.ws.TailTokens() = %d, want 0", cs.ws.TailTokens())
+		}
+
+		// Verify frontier equals message count
+		if cs.ws.FrontierMsg() != len(cs.Request.Messages) {
+			t.Errorf("cs.ws.FrontierMsg() = %d, want %d", cs.ws.FrontierMsg(), len(cs.Request.Messages))
+		}
+
+		// Verify turns is the max stamp (3)
+		if cs.turns != 3 {
+			t.Errorf("cs.turns = %d, want 3", cs.turns)
+		}
+	})
+}
+
+func TestFoldOutline(t *testing.T) {
+	newFoldSession := func() *CortexSession {
+		cs := &CortexSession{Window: 800, Request: &AgentRequest{}} // budget = 800/8 = 100 tokens
+		for i := 1; i <= 4; i++ {
+			cs.outline = append(cs.outline, cache.OutlineEntry{Turn: i, User: strings.Repeat(fmt.Sprintf("entry%d ", i), 40), Citation: fmt.Sprintf("@session/s#m%d-%d", i, i+1)})
+		}
+		return cs
+	}
+
+	t.Run("over budget folds the oldest half", func(t *testing.T) {
+		var recordedContent string
+		orig := foldSummarize
+		foldSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
+			recordedContent = content
+			return "FOLDED [@session/s#m1-2]", true, nil
+		}
+		defer func() { foldSummarize = orig }()
+
+		cs := newFoldSession()
+		ctx := context.Background()
+		cs.foldOutlineIfNeeded(ctx)
+
+		if cs.outlineFolded != "FOLDED [@session/s#m1-2]" {
+			t.Errorf("cs.outlineFolded = %q, want %q", cs.outlineFolded, "FOLDED [@session/s#m1-2]")
+		}
+		if len(cs.outline) != 2 {
+			t.Errorf("len(cs.outline) = %d, want 2", len(cs.outline))
+		}
+		if len(cs.outline) >= 2 {
+			if cs.outline[0].Turn != 3 || cs.outline[1].Turn != 4 {
+				t.Errorf("remaining turns = %d, %d, want 3, 4", cs.outline[0].Turn, cs.outline[1].Turn)
+			}
+		}
+		if !strings.Contains(recordedContent, "entry1") || !strings.Contains(recordedContent, "entry2") {
+			t.Errorf("recordedContent missing entry1 or entry2")
+		}
+		if strings.Contains(recordedContent, "entry4") {
+			t.Errorf("recordedContent should not contain entry4")
+		}
+
+		rendered := cs.renderOutlineBlock()
+		if !strings.HasPrefix(rendered, outlineHeader) {
+			t.Errorf("renderOutlineBlock() prefix does not match outlineHeader")
+		}
+		if !strings.Contains(rendered, "FOLDED") || !strings.Contains(rendered, "entry4") {
+			t.Errorf("renderOutlineBlock() should contain both 'FOLDED' and 'entry4'")
+		}
+	})
+
+	t.Run("under budget never calls the summarizer", func(t *testing.T) {
+		called := false
+		orig := foldSummarize
+		foldSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
+			called = true
+			return "", true, nil
+		}
+		defer func() { foldSummarize = orig }()
+
+		cs := &CortexSession{Window: 800, Request: &AgentRequest{}}
+		cs.outline = append(cs.outline, cache.OutlineEntry{Turn: 1, User: "tiny", Citation: "@session/s#m1-2"})
+
+		ctx := context.Background()
+		cs.foldOutlineIfNeeded(ctx)
+
+		if called {
+			t.Errorf("foldSummarize should not have been called")
+		}
+		if cs.outlineFolded != "" {
+			t.Errorf("cs.outlineFolded = %q, want empty", cs.outlineFolded)
+		}
+	})
+
+	t.Run("summarizer failure leaves the outline intact", func(t *testing.T) {
+		orig := foldSummarize
+		foldSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
+			return "", false, fmt.Errorf("boom")
+		}
+		defer func() { foldSummarize = orig }()
+
+		cs := newFoldSession()
+		initialLen := len(cs.outline)
+
+		ctx := context.Background()
+		cs.foldOutlineIfNeeded(ctx)
+
+		if cs.outlineFolded != "" {
+			t.Errorf("cs.outlineFolded = %q, want empty", cs.outlineFolded)
+		}
+		if len(cs.outline) != initialLen {
+			t.Errorf("len(cs.outline) = %d, want %d (unchanged)", len(cs.outline), initialLen)
+		}
+	})
 }

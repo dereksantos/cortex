@@ -36,12 +36,25 @@ type AgentRequest struct {
 	// APIKey is the Bearer token for endpoints that need one (e.g. OpenRouter).
 	// Empty for local endpoints. Not serialized.
 	APIKey string `json:"-"`
-	// EphemeralSystem is per-turn context (e.g. retrieved memory) merged into
-	// the system message ONLY for the wire payload — never stored in Messages,
-	// so it doesn't accumulate across turns or persist. Set before a turn,
-	// cleared after. The durable record of what was retrieved lives in the
-	// transcript as a separate labelled entry, not here.
+	// EphemeralSystem is per-turn context (e.g. retrieved memory) inserted as
+	// a fixed-position message right after the system message for the wire
+	// payload — never stored in Messages, so it doesn't accumulate across turns
+	// or persist. Set before a turn, cleared after. The durable record of what
+	// was retrieved lives in the transcript as a separate labelled entry, not
+	// here. This note is inserted as a cache-stable slot that only changes
+	// when the note content changes.
 	EphemeralSystem string `json:"-"`
+
+	// OutlineBlock is rendered outline of demoted turns (zone A of docs/context-architecture.md),
+	// inserted as a fixed-position user message right after the system message.
+	// Grows only by append (cache-stable). Empty until the first demotion.
+	// Like EphemeralSystem it is wire-only: never stored in Messages, never persisted.
+	OutlineBlock string `json:"-"`
+
+	// TailFrom is the message-log index where the hydrated tail begins (WorkingSet.FrontierMsg).
+	// Messages[1:TailFrom] are demoted — represented by OutlineBlock — and are NOT sent.
+	// 0 or 1 means nothing is demoted.
+	TailFrom int `json:"-"`
 
 	// Stream and StreamOptions are set only on the streaming payload (SendStream);
 	// omitempty keeps the blocking request byte-identical to before.
@@ -65,22 +78,42 @@ type streamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
-// wireMessages returns the messages to send: Messages as-is, or — when an
-// ephemeral per-turn note is set — a copy with that note folded onto the LAST
-// USER message. The stored Messages are never mutated, so nothing accumulates
-// and the transcript stays clean.
+// wireMessages returns the messages to send, assembled in a two-zone layout:
+// - element 0: r.Messages[0] (the system message)
+// - if r.OutlineBlock != "": Message{Role: RoleUser, Content: r.OutlineBlock}
+// - if r.EphemeralSystem != "": Message{Role: RoleUser, Content: r.EphemeralSystem} (after outline)
+// - then the tail: r.Messages[TailFrom:] (or r.Messages[1:] if TailFrom <= 1)
+// The stored Messages are never mutated, so nothing accumulates and the transcript stays clean.
+// Returns r.Messages unchanged if there's nothing to insert or demote.
 func (r *AgentRequest) wireMessages() []Message {
-	if r.EphemeralSystem == "" || len(r.Messages) == 0 {
+	// Early return if no demotion or ephemeral content
+	if r.OutlineBlock == "" && r.EphemeralSystem == "" && r.TailFrom <= 1 {
 		return r.Messages
 	}
-	out := make([]Message, len(r.Messages))
-	copy(out, r.Messages)
-	for i := len(out) - 1; i >= 0; i-- {
-		if out[i].Role == RoleUser {
-			out[i].Content = out[i].Content + "\n\n" + r.EphemeralSystem
-			return out
-		}
+	if len(r.Messages) == 0 {
+		return r.Messages
 	}
+
+	// Determine tail start: use TailFrom if > 1, otherwise 1
+	start := r.TailFrom
+	if start < 1 {
+		start = 1
+	}
+
+	// Build the output slice
+	out := make([]Message, 0, 1+len(r.Messages[start:]))
+	out = append(out, r.Messages[0]) // system message
+
+	if r.OutlineBlock != "" {
+		out = append(out, Message{Role: RoleUser, Content: r.OutlineBlock})
+	}
+
+	if r.EphemeralSystem != "" {
+		out = append(out, Message{Role: RoleUser, Content: r.EphemeralSystem})
+	}
+
+	out = append(out, r.Messages[start:]...)
+
 	return out
 }
 

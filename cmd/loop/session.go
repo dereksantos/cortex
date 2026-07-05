@@ -19,6 +19,7 @@ const (
 type sessionEntry struct {
 	TS   time.Time `json:"ts"`
 	Kind string    `json:"kind,omitempty"`
+	Turn int       `json:"turn,omitempty"`
 	Message
 
 	From     string  `json:"from,omitempty"`
@@ -70,7 +71,7 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 		}
 	}
 	path := filepath.Join(dir, id+".jsonl")
-	msgs, err := loadTranscript(path)
+	msgs, turns, err := loadTranscript(path)
 	if err != nil {
 		return err
 	}
@@ -82,6 +83,9 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 		return fmt.Errorf("reopen %s: %w", path, err)
 	}
 	cs.Request.Messages = msgs
+	cs.ws, cs.turns = cs.replayWorkingSet(msgs, turns)
+	cs.outline = nil
+	cs.outlineFolded = ""
 	cs.SessionID = id
 	cs.transcript = f
 	return nil
@@ -126,7 +130,7 @@ func listSessions(dir string, limit int) ([]sessionInfo, error) {
 		if fi, ferr := e.Info(); ferr == nil {
 			info.ModTime = fi.ModTime()
 		}
-		if msgs, lerr := loadTranscript(filepath.Join(dir, name)); lerr == nil {
+		if msgs, _, lerr := loadTranscript(filepath.Join(dir, name)); lerr == nil {
 			for _, m := range msgs {
 				if m.Role != RoleUser && m.Role != "assistant" {
 					continue
@@ -181,25 +185,27 @@ func invokedName() string {
 	return "loop"
 }
 
-func loadTranscript(path string) ([]Message, error) {
+func loadTranscript(path string) ([]Message, []int, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read session: %w", err)
+		return nil, nil, fmt.Errorf("read session: %w", err)
 	}
 	var msgs []Message
+	var turns []int
 	for i, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var e sessionEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
+			return nil, nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
 		}
 		if e.Kind == "" || e.Kind == kindMessage {
 			msgs = append(msgs, e.Message)
+			turns = append(turns, e.Turn)
 		}
 	}
-	return msgs, nil
+	return msgs, turns, nil
 }
 
 func (cs *CortexSession) writeEntry(e sessionEntry) {
@@ -215,7 +221,7 @@ func (cs *CortexSession) writeEntry(e sessionEntry) {
 }
 
 func (cs *CortexSession) writeTranscript(m Message) {
-	cs.writeEntry(sessionEntry{Kind: kindMessage, Message: m})
+	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: m})
 }
 
 var compactSummarize = func(ctx context.Context, cs *CortexSession, path string, window int) (string, bool, error) {
@@ -259,6 +265,11 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 	cs.StartTranscript()
 	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from})
 	cs.Append(summary)
+	cs.ws = cs.newWorkingSet(2)
+	cs.outline = nil
+	cs.outlineFolded = ""
+	cs.Request.OutlineBlock = ""
+	cs.Request.TailFrom = 0
 	cs.LastPromptTokens = 0
 	return nil
 }
@@ -298,6 +309,11 @@ func (cs *CortexSession) Clear() {
 	cs.Request.APIKey = old.APIKey
 	cs.Request.ChatTemplateKwargs = old.ChatTemplateKwargs
 	cs.Request.MaxTokens = old.MaxTokens
+	cs.ws = cs.newWorkingSet(1)
+	cs.outline = nil
+	cs.outlineFolded = ""
+	cs.Request.OutlineBlock = ""
+	cs.Request.TailFrom = 0
 	cs.LastPromptTokens = 0
 	cs.StartTranscript()
 }

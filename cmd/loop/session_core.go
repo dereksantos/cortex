@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/capture"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
@@ -47,9 +48,13 @@ type CortexSession struct {
 	transcript       *os.File
 	capturer         *capture.Capture
 	memory           *memory.Store
+	ws               *cache.WorkingSet
+	outline          []cache.OutlineEntry
+	outlineFolded    string // digest of previously folded outline entries (P4); rides the front of the outline zone
 
 	sessionStart  time.Time
 	turns         int
+	turnNo        int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
 	tokensIn      int
 	tokensOut     int
 	costUSD       float64
@@ -85,6 +90,14 @@ func (cs *CortexSession) windowSize() int {
 		return cs.Window
 	}
 	return fallbackWindow
+}
+
+// newWorkingSet builds the demotion policy for the current window: the
+// hydrated tail may grow to half the window and drains to a third
+// (docs/context-architecture.md budgets). base is the message-log index
+// where turn content starts.
+func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
+	return cache.New(base, cs.windowSize()/2, cs.windowSize()/3)
 }
 
 func NewCortexSession() *CortexSession {
@@ -129,7 +142,7 @@ func NewCortexSession() *CortexSession {
 		req.Tools = toolsExcept(req.Tools, FunctionRemove)
 	}
 
-	return &CortexSession{
+	cs := &CortexSession{
 		Args:         &args,
 		Request:      req,
 		Config:       cfg,
@@ -140,6 +153,8 @@ func NewCortexSession() *CortexSession {
 		allowDelete:  allowDelete,
 		sessionStart: time.Now(),
 	}
+	cs.ws = cs.newWorkingSet(1)
+	return cs
 }
 
 func toolsExcept(ts []Tool, name string) []Tool {
