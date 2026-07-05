@@ -231,6 +231,13 @@ type Config struct {
 type ToolConfig struct {
 	AllowDelete *bool  `json:"allow_delete"`
 	DeleteRoot  string `json:"delete_root"`
+
+	// Context window modification tools
+	EnableContextSummarize     *bool `json:"enable_context_summarize"`
+	EnableContextEvict         *bool `json:"enable_context_evict"`
+	EnableContextMerge         *bool `json:"enable_context_merge"`
+	EnableContextReorder       *bool `json:"enable_context_reorder"`
+	EnableContextAdjustWatermarks *bool `json:"enable_context_adjust_watermarks"`
 }
 
 func (c *Config) isOpenRouter() bool {
