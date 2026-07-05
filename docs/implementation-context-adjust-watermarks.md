@@ -499,21 +499,21 @@ func BenchmarkContextAdjustWatermarks_LargeDelta(b *testing.B) {
 
 ---
 
-## 10. Rollout Plan
+## 10. Configuration via .cortex/config.json
 
-**Canary**:
-1. Enable tool for selected sessions
-2. Monitor usage patterns
-3. Verify no regressions
+The tool is enabled by default when the config section exists. To disable:
 
-**Full rollout**:
-1. Add to system prompt
-2. Add to toolset
-3. Monitor for 24 hours
+```json
+{
+  "tools": {
+    "enable_context_adjust_watermarks": false
+  }
+}
+```
 
-**Fallback**:
-- If issues detected, remove from toolset
-- Tool remains in codebase (easy to re-enable)
+**Configuration key**: `tools.enable_context_adjust_watermarks`
+
+**Default**: enabled (when key omitted or `true`)
 
 ---
 

@@ -423,6 +423,37 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 
 ---
 
+## 4. Configuration via .cortex/config.json
+
+Each tool is controlled by a boolean flag in `.cortex/config.json` under `tools`:
+
+| Tool | Config Key | Default |
+|------|------------|---------|
+| `context_summarize` | `tools.enable_context_summarize` | enabled |
+| `context_evict` | `tools.enable_context_evict` | enabled |
+| `context_merge` | `tools.enable_context_merge` | enabled |
+| `context_reorder` | `tools.enable_context_reorder` | enabled |
+| `context_adjust_watermarks` | `tools.enable_context_adjust_watermarks` | enabled |
+
+**Example configuration**:
+```json
+{
+  "tools": {
+    "enable_context_summarize": true,
+    "enable_context_evict": false,
+    "enable_context_merge": true
+  }
+}
+```
+
+**Design rationale**:
+- No canary rollout needed (no production users yet)
+- Config-driven enable/disable for easy experimentation
+- Each tool is independently configurable
+- Default behavior: enabled when key omitted or explicitly `true`
+
+---
+
 ## 5. Implementation Plan
 
 ### Phase 1: Core Infrastructure (1-2 weeks)
@@ -505,7 +536,9 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 **Phase 3**:
 - Documentation complete
 - System prompt updated
-- Rollout plan approved
+- Configuration added to `.cortex/config.json`
+
+**Configuration**: Each tool is controlled by `tools.enable_context_*` in `.cortex/config.json`. Defaults to enabled when key omitted or `true`.
 
 ---
 
@@ -540,4 +573,4 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 1. Review this research artifact
 2. Prioritize tools for implementation (start with `context_summarize`)
 3. Begin Phase 1: Core Infrastructure
-4. Schedule implementation review
+4. Add configuration keys to `.cortex/config.json`
