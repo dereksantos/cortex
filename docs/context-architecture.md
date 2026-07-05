@@ -321,12 +321,33 @@ deliberately lossy summarizer, Compact, Clear, resume), that (a) every message
 is on the wire or reachable via a resolvable citation, (b) the wire stays
 within the zone budgets, (c) ordinary turns re-prefill only the new suffix
 under an LCP-cache model while demotion turns stay ≤ the zone budgets, and
-(d) outline labels stay unique and monotonic. The live-model evals below
-remain manual:
+(d) outline labels stay unique and monotonic.
 
-- **Prefill per turn** (the headline): tokens re-prefilled per turn (derivable
-  from `LastPromptTokens` vs prior turn + backend cache stats where available),
-  slope over a 100-turn scripted session on a 32k window.
+The model- and backend-dependent half is automated as **the live context
+eval** (`cmd/loop/context_eval_live_test.go`, env-gated:
+`CORTEX_LIVE_FLEET=1 go test ./cmd/loop -run ContextEval_Live -v -timeout 1500s`,
+fleet/model/window tunable via `CORTEX_CTX_EVAL_*`). It drives a scripted
+session on a real backend: plants a codeword past the outline's verbatim cap,
+fills until it demotes, and grades retention twice — **graded** (outline hint
+live → hard gate: the model must recall and answer) and **post-fold** (floor
+gate: correct or honest miss passes, a confabulated codeword fails). Per turn
+it reports `prompt_tokens` and the provider's `cached_tokens`
+(`usage.prompt_tokens_details`, which llama.cpp reports through LiteLLM — now
+threaded through as `LastCachedTokens`), gating that prompt size stays within
+envelope + watermark + outline cap + hysteresis overshoot and that the prefix
+is actually reused. First results on the fleet's 80b qwen
+(qwen3-coder-q3, 2026-07-05, two consecutive passes): ordinary turns evaluate
+only the ~445 new tokens (full prefix cache hit), demotion turns re-prefill a
+bounded ~3.3k, the graded probe fires a real `recall(@session/…)` and answers
+correctly, and prompt size sawtooths flat. One finding fed back into the
+harness: the first fold digest dropped the *gist* of the folded turn (citation
+kept, topic lost — turning graded probes blind), so `outlineFoldGoal` now
+demands a per-turn what-it-was-about clause alongside every citation.
+
+Not yet automated:
+
+- **Prefill slope at scale**: the live eval covers ~13 turns; the 100-turn
+  slope on a 32k window remains a manual run.
 - **Session length on a fixed window** before quality degrades — the
   `working-memory.md` "forever" metric, now with a flat cost curve.
 - **Retention QA**: post-demotion questions about demoted turns; pass =

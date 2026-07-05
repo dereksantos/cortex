@@ -34,6 +34,7 @@ type CortexSession struct {
 	Args             *CortexArgs
 	Request          *AgentRequest
 	LastPromptTokens int
+	LastCachedTokens int
 	Window           int
 	Study            ModelSpec
 	Fleet            Fleet

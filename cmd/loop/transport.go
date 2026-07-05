@@ -345,6 +345,25 @@ type Usage struct {
 	CompletionTokens int     `json:"completion_tokens"`
 	TotalTokens      int     `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	// PromptTokensDetails carries the provider's prompt-cache report
+	// (llama.cpp and OpenAI-compatible backends set cached_tokens; absent
+	// elsewhere). cached_tokens out of prompt_tokens were served from cache —
+	// the direct measure of the two-zone layout's prefix stability.
+	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// promptTokensDetails is the OpenAI-compatible usage sub-object.
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+// CachedPromptTokens returns the provider-reported cached prompt tokens, or 0
+// when the backend doesn't report caching.
+func (u Usage) CachedPromptTokens() int {
+	if u.PromptTokensDetails == nil {
+		return 0
+	}
+	return u.PromptTokensDetails.CachedTokens
 }
 
 // Choice represents the model response(s).

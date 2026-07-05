@@ -107,7 +107,7 @@ const outlineHeader = "Session so far — older turns, demoted to this outline. 
 // outlineFoldGoal directs the summarizer when the outline zone outgrows its
 // budget. Citations MUST survive the fold — they are what keeps demotion
 // lossless (recall resolves them).
-const outlineFoldGoal = "Fold these demoted-turn outline entries into one compact digest. Keep every [@session/…#m…-…] citation verbatim — never drop, merge, or rewrite the coordinates. Prefer dropping prose over dropping citations."
+const outlineFoldGoal = "Fold these demoted-turn outline entries into one compact digest. For every turn keep a short clause saying what it was about (its topic and any fact it recorded — enough that a reader knows which turn to recall), followed by its [@session/…#m…-…] citation verbatim — never drop, merge, or rewrite the coordinates. Compress by shortening clauses, not by omitting turns."
 
 // foldSummarize is the seam tests stub (mirrors compactSummarize in session.go).
 var foldSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {

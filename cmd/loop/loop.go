@@ -80,6 +80,7 @@ type loopStats struct {
 	OutputTokens     int
 	Cost             float64
 	LastPromptTokens int    // most recent prompt_tokens (the live context gauge)
+	LastCachedTokens int    // most recent provider-reported cached prompt tokens (0 if unreported)
 	PeakOutputTokens int    // max completion tokens on any single request
 	MaxTokensClamped bool   // any request hit Bounds.MaxTokens (runaway tripwire)
 	Salvaged         bool   // an empty clamped finish was recovered by one terse re-ask
@@ -431,6 +432,7 @@ func accountUsage(s *loopStats, res *AgentResponse, maxTokens int) {
 	s.OutputTokens += res.Usage.CompletionTokens
 	s.Cost += res.Usage.Cost
 	s.LastPromptTokens = res.Usage.PromptTokens
+	s.LastCachedTokens = res.Usage.CachedPromptTokens()
 	if res.Usage.CompletionTokens > s.PeakOutputTokens {
 		s.PeakOutputTokens = res.Usage.CompletionTokens
 	}

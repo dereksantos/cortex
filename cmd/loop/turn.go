@@ -96,6 +96,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	cs.tokensOut += stats.OutputTokens
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
+	cs.LastCachedTokens = stats.LastCachedTokens
 
 	if err != nil {
 		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
