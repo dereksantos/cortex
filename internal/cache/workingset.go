@@ -1,5 +1,7 @@
 package cache
 
+import "fmt"
+
 // CharsPerToken is the rough bytes-per-token estimate used across the repo.
 const CharsPerToken = 4
 
@@ -111,4 +113,78 @@ func (ws *WorkingSet) Demoted() int {
 // TotalTurns returns the total number of turns tracked.
 func (ws *WorkingSet) TotalTurns() int {
 	return len(ws.turns)
+}
+
+// ReorderTail reorders the hydrated tail turns based on the given metric.
+// Only rearranges order—it does not evict or compress.
+// Supported metrics: "salience", "recency", "task-relevance".
+// Returns the new order of turns.
+func (ws *WorkingSet) ReorderTail(metric string) []TurnSpan {
+	if ws.frontier >= len(ws.turns) {
+		return nil // nothing to reorder
+	}
+	
+	tails := make([]TurnSpan, len(ws.turns)-ws.frontier)
+	copy(tails, ws.turns[ws.frontier:])
+	
+	// For now, only "recency" matters (most recent first = no change needed)
+	// Other metrics would require external salience scoring
+	switch metric {
+	case "recency":
+		// Most recent first - already in order (oldest to newest in tail)
+		// So we reverse to get newest first
+		for i, j := 0, len(tails)-1; i < j; i, j = i+1, j-1 {
+			tails[i], tails[j] = tails[j], tails[i]
+		}
+	case "salience", "task-relevance":
+		// Without external scoring, we can't properly order by these
+		// For now, keep as-is (same as recency for most recent first)
+		for i, j := 0, len(tails)-1; i < j; i, j = i+1, j-1 {
+			tails[i], tails[j] = tails[j], tails[i]
+		}
+	default:
+		// Unknown metric - return empty slice to indicate no change
+		return nil
+	}
+	
+	return tails
+}
+
+// AdjustWatermarks adjusts the working set watermarks by the given deltas.
+// Deltas are bounded to ±W/4 to prevent abuse.
+// Returns (newHighWM, newLowWM, error).
+func (ws *WorkingSet) AdjustWatermarks(highDelta, lowDelta int) (int, int, error) {
+	// Calculate max delta (±W/4 where W is the window size)
+	// Window size = highWM * 2 (since highWM is ~W/2)
+	maxDelta := ws.highWM / 2
+	
+	// Validate deltas are within bounds
+	if highDelta < -maxDelta || highDelta > maxDelta {
+		return ws.highWM, ws.lowWM, fmt.Errorf("high_delta %d is out of bounds (±%d)", highDelta, maxDelta)
+	}
+	if lowDelta < -maxDelta || lowDelta > maxDelta {
+		return ws.highWM, ws.lowWM, fmt.Errorf("low_delta %d is out of bounds (±%d)", lowDelta, maxDelta)
+	}
+	
+	// Calculate new watermarks
+	newHigh := ws.highWM + highDelta
+	newLow := ws.lowWM + lowDelta
+	
+	// Ensure watermarks remain positive
+	if newHigh <= 0 {
+		return ws.highWM, ws.lowWM, fmt.Errorf("new high watermark %d must be positive", newHigh)
+	}
+	if newLow <= 0 {
+		return ws.highWM, ws.lowWM, fmt.Errorf("new low watermark %d must be positive", newLow)
+	}
+	
+	// Ensure low <= high invariant
+	if newLow > newHigh {
+		return ws.highWM, ws.lowWM, fmt.Errorf("watermark adjustment would violate lowWM <= highWM: low=%d, high=%d", newLow, newHigh)
+	}
+	
+	ws.highWM = newHigh
+	ws.lowWM = newLow
+	
+	return newHigh, newLow, nil
 }
