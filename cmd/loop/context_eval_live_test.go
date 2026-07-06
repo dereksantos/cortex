@@ -15,9 +15,9 @@ package main
 //
 //	CORTEX_LIVE_FLEET=1 go test ./cmd/loop/ -run ContextEval_Live -v -timeout 1800s
 //
-// Tunables (defaults target the chatterbox fleet's 80b qwen):
+// Tunables (defaults target the fleet's 80b qwen):
 //
-//	CORTEX_CTX_EVAL_ENDPOINT  backend base URL   (default http://chatterbox:4000)
+//	CORTEX_CTX_EVAL_ENDPOINT  backend base URL   (default http://localhost:4000)
 //	CORTEX_CTX_EVAL_MODEL     coder model tag    (default qwen3-coder-q3)
 //	CORTEX_CTX_EVAL_STUDY     summarizer tag     (default glm-4.7-flash)
 //	CORTEX_CTX_EVAL_WINDOW    session window     (default 4096; smaller = faster)
@@ -93,7 +93,7 @@ func TestContextEval_Live(t *testing.T) {
 	if os.Getenv("CORTEX_LIVE_FLEET") == "" {
 		t.Skip("set CORTEX_LIVE_FLEET=1 to run the live context eval")
 	}
-	endpoint := liveEnv("CORTEX_CTX_EVAL_ENDPOINT", "http://chatterbox:4000")
+	endpoint := liveEnv("CORTEX_CTX_EVAL_ENDPOINT", "http://localhost:4000")
 	model := liveEnv("CORTEX_CTX_EVAL_MODEL", "qwen3-coder-q3")
 	study := liveEnv("CORTEX_CTX_EVAL_STUDY", "glm-4.7-flash")
 	// Defaults sized so the first demotion batch (~4 outline entries) fits the
