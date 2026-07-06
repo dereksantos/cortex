@@ -189,6 +189,30 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	return true // unknown tools enabled by default
 }
 
+// ValidateToolCall provides dynamic validation for tool calls beyond config.
+// Returns (true, "") if valid, (false, message) if invalid.
+func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
+	switch tc.Function.Name {
+	case "context_adjust_watermarks":
+		// Validate watermarks are within bounds (±W/4)
+		if cs != nil {
+			w := cs.windowSize()
+			bound := w / 4
+			if highDelta, _ := tc.IntArg("high_delta"); highDelta != 0 {
+				if highDelta < -bound || highDelta > bound {
+					return false, fmt.Sprintf("high_delta %d is out of bounds (±%d for window size %d)", highDelta, bound, w)
+				}
+			}
+			if lowDelta, _ := tc.IntArg("low_delta"); lowDelta != 0 {
+				if lowDelta < -bound || lowDelta > bound {
+					return false, fmt.Sprintf("low_delta %d is out of bounds (±%d for window size %d)", lowDelta, bound, w)
+				}
+			}
+		}
+	}
+	return true, ""
+}
+
 func toolsExcept(ts []Tool, name string) []Tool {
 	out := make([]Tool, 0, len(ts))
 	for _, t := range ts {

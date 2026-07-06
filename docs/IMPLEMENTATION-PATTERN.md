@@ -118,7 +118,68 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 }
 ```
 
-### Add Tool Declarations to `internal/tools/tools.go`
+---
+
+## 4. Tool Validation
+
+### Add Validator Interface
+
+Tools can implement dynamic validation beyond config enable/disable:
+
+```go
+type Validator interface {
+    ValidateToolCall(tc ToolCall) (bool, string)
+}
+```
+
+**Example**: Watermark deltas must be within ±W/4:
+
+```go
+func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
+    switch tc.Function.Name {
+    case "context_adjust_watermarks":
+        w := cs.windowSize()
+        bound := w / 4
+        if highDelta, _ := tc.IntArg("high_delta"); highDelta != 0 {
+            if highDelta < -bound || highDelta > bound {
+                return false, fmt.Sprintf("high_delta %d is out of bounds (±%d)", highDelta, bound)
+            }
+        }
+        if lowDelta, _ := tc.IntArg("low_delta"); lowDelta != 0 {
+            if lowDelta < -bound || lowDelta > bound {
+                return false, fmt.Sprintf("low_delta %d is out of bounds (±%d)", lowDelta, bound)
+            }
+        }
+    }
+    return true, ""
+}
+```
+
+### Update Execute Dispatcher
+
+```go
+func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+    // ... existing code ...
+    
+    // Check if tool is enabled via config
+    if !deps.IsToolEnabled(tc.Function.Name) {
+        return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), nil
+    }
+    
+    // Validate tool call (dynamic checks)
+    if deps != nil {
+        if ok, msg := deps.ValidateToolCall(tc); !ok {
+            return msg, nil
+        }
+    }
+    
+    // ... switch on tool name ...
+}
+```
+
+---
+
+## 5. Unit Tests
 
 ```go
 var ContextSummarizeTool = newTool(FunctionContextSummarize,

@@ -100,6 +100,13 @@ type ConfigProvider interface {
 	IsToolEnabled(toolName string) bool
 }
 
+// Validator provides optional validation for tool calls beyond config enable/disable.
+// If ValidateToolCall returns (false, msg), the tool call is rejected with msg as the observation.
+// This is for dynamic validation (e.g., watermark deltas must be within bounds).
+type Validator interface {
+	ValidateToolCall(tc ToolCall) (bool, string)
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -121,6 +128,8 @@ type ToolDeps interface {
 	Recaller
 	// ConfigProvider exposes tool enable/disable configuration.
 	ConfigProvider
+	// Validator provides optional validation for tool calls beyond config.
+	Validator
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -168,6 +177,7 @@ func (headlessDeps) Recall(string) (string, error) {
 	return "", errors.New("recall unavailable: no session")
 }
 func (headlessDeps) IsToolEnabled(string) bool { return true }
+func (headlessDeps) ValidateToolCall(tc ToolCall) (bool, string) { return true, "" }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -345,7 +355,8 @@ var RecallTool = newTool(FunctionRecall,
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
-	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool}
+	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool,
+	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -384,6 +395,13 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// Check if tool is enabled via config
 	if !deps.IsToolEnabled(tc.Function.Name) {
 		return fmt.Sprintf("%s is disabled in .cortex/config.json", tc.Function.Name), nil
+	}
+
+	// Validate tool call (dynamic checks beyond config)
+	if deps != nil {
+		if ok, msg := deps.ValidateToolCall(tc); !ok {
+			return msg, nil
+		}
 	}
 
 	name := tc.Function.Name
