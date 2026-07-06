@@ -213,6 +213,30 @@ func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
 	return true, ""
 }
 
+// GetOutline returns the current outline entries.
+// Used by context tools to read the outline.
+func (cs *CortexSession) GetOutline() []cache.OutlineEntry {
+	return cs.outline
+}
+
+// RemoveOutlineEntry removes an outline entry by citation.
+// Returns true if the entry was found and removed.
+// This is idempotent (safe to call multiple times).
+func (cs *CortexSession) RemoveOutlineEntry(citation string) bool {
+	for i := 0; i < len(cs.outline); i++ {
+		if cs.outline[i].Citation == citation {
+			cs.outline = append(cs.outline[:i], cs.outline[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// OutlineLen returns the number of outline entries.
+func (cs *CortexSession) OutlineLen() int {
+	return len(cs.outline)
+}
+
 func toolsExcept(ts []Tool, name string) []Tool {
 	out := make([]Tool, 0, len(ts))
 	for _, t := range ts {

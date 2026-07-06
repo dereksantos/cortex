@@ -62,6 +62,8 @@ func contextSummarize(tc ToolCall, deps ToolDeps) (string, error) {
         return "", fmt.Errorf("citation is required: %w", err)
     }
     
+    // Validate watermark deltas happens at dispatcher level (ValidateToolCall)
+    
     // Implementation here
     return "compressed context", nil
 }
@@ -73,6 +75,10 @@ func contextEvict(tc ToolCall, deps ToolDeps) (string, error) {
     if err != nil {
         return "", fmt.Errorf("citation is required: %w", err)
     }
+    
+    // Outline modification is available via deps interface methods:
+    // deps.(OutlineModifier).RemoveOutlineEntry(citation)
+    // deps.(OutlineModifier).OutlineLen()
     
     // Implementation here
     return "evicted entry", nil

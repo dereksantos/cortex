@@ -197,6 +197,7 @@ var (
 	_ tools.DeleteGate     = (*CortexSession)(nil)
 	_ tools.ConfigProvider = (*CortexSession)(nil)
 	_ tools.Validator      = (*CortexSession)(nil)
+	_ tools.OutlineModifier = (*CortexSession)(nil)
 )
 
 // --- Memory ----------------------------------------------------------------

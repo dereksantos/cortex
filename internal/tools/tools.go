@@ -107,6 +107,13 @@ type Validator interface {
 	ValidateToolCall(tc ToolCall) (bool, string)
 }
 
+// OutlineModifier provides methods to modify the outline.
+// This is implemented by *CortexSession.
+type OutlineModifier interface {
+	RemoveOutlineEntry(citation string) bool
+	OutlineLen() int
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -130,6 +137,8 @@ type ToolDeps interface {
 	ConfigProvider
 	// Validator provides optional validation for tool calls beyond config.
 	Validator
+	// OutlineModifier provides methods to modify the outline.
+	OutlineModifier
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -178,6 +187,8 @@ func (headlessDeps) Recall(string) (string, error) {
 }
 func (headlessDeps) IsToolEnabled(string) bool { return true }
 func (headlessDeps) ValidateToolCall(tc ToolCall) (bool, string) { return true, "" }
+func (headlessDeps) RemoveOutlineEntry(string) bool { return false }
+func (headlessDeps) OutlineLen() int { return 0 }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -432,6 +443,16 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return memoryForget(tc, deps)
 	case FunctionRecall:
 		return recall(tc, deps)
+	case FunctionContextSummarize:
+		return contextSummarize(tc, deps)
+	case FunctionContextEvict:
+		return contextEvict(tc, deps)
+	case FunctionContextMerge:
+		return contextMerge(tc, deps)
+	case FunctionContextReorder:
+		return contextReorder(tc, deps)
+	case FunctionContextAdjustWatermarks:
+		return contextAdjustWatermarks(tc, deps)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
