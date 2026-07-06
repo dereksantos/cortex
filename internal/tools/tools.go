@@ -67,7 +67,10 @@ type Recaller interface {
 // sequential chunk-and-fold. Used by oversized shell-output study; permanent,
 // unrelated to the study subagent. The compressed flag is unused there.
 type Summarizer interface {
+	// Summarize reduces a file to a digest toward goal.
 	Summarize(ctx context.Context, path, goal string, window int) (digest string, compressed bool, err error)
+	// SummarizeText reduces content (already in memory) to a digest toward goal.
+	SummarizeText(ctx context.Context, content, goal string, window int) (digest string, compressed bool, err error)
 }
 
 // Outliner renders the structural map of a path (the study tool's seed + the
@@ -155,6 +158,9 @@ func (headlessDeps) RunSubagent(context.Context, Subagent, string) (string, erro
 	return "", errors.New("study unavailable: no session")
 }
 func (headlessDeps) Summarize(context.Context, string, string, int) (string, bool, error) {
+	return "", false, errors.New("summarize unavailable: no session")
+}
+func (headlessDeps) SummarizeText(context.Context, string, string, int) (string, bool, error) {
 	return "", false, errors.New("summarize unavailable: no session")
 }
 func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool) {
