@@ -115,6 +115,11 @@ func (ws *WorkingSet) TotalTurns() int {
 	return len(ws.turns)
 }
 
+// GetWatermarks returns the current high and low watermarks.
+func (ws *WorkingSet) GetWatermarks() (int, int) {
+	return ws.highWM, ws.lowWM
+}
+
 // ReorderTail reorders the hydrated tail turns based on the given metric.
 // Only rearranges order—it does not evict or compress.
 // Supported metrics: "salience", "recency", "task-relevance".

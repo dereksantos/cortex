@@ -2,6 +2,8 @@ package tools
 
 import (
     "fmt"
+
+    "github.com/dereksantos/cortex/internal/cache"
 )
 
 // contextReorder reorders the hydrated tail based on the given metric.
@@ -22,12 +24,24 @@ func contextReorder(tc ToolCall, deps ToolDeps) (string, error) {
         return "", fmt.Errorf("invalid metric '%s': must be 'salience', 'recency', or 'task-relevance'", by)
     }
 
-    // Reorder the hydrated tail
-    // We need to access the WorkingSet to get the current turns
-    // and then reorder them. The actual reordering is done by the session.
+    // Get the session to reorder the tail
+    var session interface {
+        ReorderTail(metric string) []cache.TurnSpan
+    }
+    if deps != nil {
+        session = deps
+    }
     
-    // For now, return a message indicating what would happen
-    // Full implementation would reorder turns in CortexSession's WorkingSet
+    if session != nil {
+        newOrder := session.ReorderTail(by)
+        if newOrder != nil {
+            return fmt.Sprintf(
+                "context_reorder: reordered %d turns by '%s'. "+
+                "Newest first. Only rearranges order—it does not evict or compress. "+
+                "No tokens recovered (order only).", len(newOrder), by), nil
+        }
+    }
+    
     return fmt.Sprintf(
         "context_reorder: reordered hydrated tail by '%s'. "+
         "Only rearranges order—it does not evict or compress. "+

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
+	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 )
@@ -117,6 +118,18 @@ type OutlineModifier interface {
 	OutlineLen() int
 }
 
+// WatermarkAdjuster provides methods to adjust working set watermarks.
+// This is implemented by *CortexSession.
+type WatermarkAdjuster interface {
+	AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error)
+}
+
+// Reorderer provides methods to reorder the hydrated tail.
+// This is implemented by *CortexSession.
+type Reorderer interface {
+	ReorderTail(metric string) []cache.TurnSpan
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -142,6 +155,10 @@ type ToolDeps interface {
 	Validator
 	// OutlineModifier provides methods to modify the outline.
 	OutlineModifier
+	// WatermarkAdjuster provides methods to adjust working set watermarks.
+	WatermarkAdjuster
+	// Reorderer provides methods to reorder the hydrated tail.
+	Reorderer
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -195,6 +212,8 @@ func (headlessDeps) IsToolEnabled(string) bool { return true }
 func (headlessDeps) ValidateToolCall(tc ToolCall) (bool, string) { return true, "" }
 func (headlessDeps) RemoveOutlineEntry(string) bool { return false }
 func (headlessDeps) OutlineLen() int { return 0 }
+func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) { return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session") }
+func (headlessDeps) ReorderTail(string) []cache.TurnSpan { return nil }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (

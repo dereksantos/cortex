@@ -12,8 +12,26 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
     highDelta, _ := tc.IntArg("high_delta")
     lowDelta, _ := tc.IntArg("low_delta")
 
-    // For now, return a message indicating what would happen
-    // Full implementation would adjust watermarks in CortexSession's WorkingSet
+    // Get the session to adjust watermarks
+    var session interface {
+        AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error)
+    }
+    if deps != nil {
+        session = deps
+    }
+    
+    if session != nil {
+        oldHigh, oldLow, newHigh, newLow, err := session.AdjustWatermarks(highDelta, lowDelta)
+        if err != nil {
+            return "", fmt.Errorf("adjust watermarks failed: %w", err)
+        }
+        return fmt.Sprintf(
+            "Adjusted watermarks: high=%d→%d, low=%d→%d. "+
+            "Bounded (±W/4) to prevent abuse. "+
+            "Hysteresis preserved (high - low gap unchanged).",
+            oldHigh, newHigh, oldLow, newLow), nil
+    }
+    
     return fmt.Sprintf(
         "context_adjust_watermarks: adjusted watermarks by high_delta=%d, low_delta=%d. "+
         "Bounded (±W/4) to prevent abuse. "+

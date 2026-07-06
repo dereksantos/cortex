@@ -237,6 +237,27 @@ func (cs *CortexSession) OutlineLen() int {
 	return len(cs.outline)
 }
 
+// ReorderTail reorders the hydrated tail turns based on the given metric.
+// Only rearranges order—it does not evict or compress.
+// Returns the new order of turns in the tail.
+func (cs *CortexSession) ReorderTail(metric string) []cache.TurnSpan {
+	if cs.ws == nil {
+		return nil
+	}
+	return cs.ws.ReorderTail(metric)
+}
+
+// AdjustWatermarks adjusts the working set watermarks by the given deltas.
+// Bounded (±W/4) to prevent abuse. Returns (oldHigh, oldLow, newHigh, newLow, error).
+func (cs *CortexSession) AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error) {
+    if cs.ws == nil {
+        return 0, 0, 0, 0, fmt.Errorf("working set not available")
+    }
+    oldHigh, oldLow := cs.ws.GetWatermarks()
+    newHigh, newLow, err := cs.ws.AdjustWatermarks(highDelta, lowDelta)
+    return oldHigh, oldLow, newHigh, newLow, err
+}
+
 func toolsExcept(ts []Tool, name string) []Tool {
 	out := make([]Tool, 0, len(ts))
 	for _, t := range ts {
