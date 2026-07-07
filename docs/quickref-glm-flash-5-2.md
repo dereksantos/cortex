@@ -32,6 +32,7 @@ Format: `provider/model-name`
 | Backend Type | `openrouter` |
 | Endpoint | `https://openrouter.ai/api/v1` |
 | Model ID | `zhipu/glm-flash-5-2` |
+| Context Window | 1M tokens |
 | API Key Env | `OPEN_ROUTER_API_KEY` |
 
 ## Common Commands

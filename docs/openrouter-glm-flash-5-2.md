@@ -39,7 +39,8 @@ Create `~/.cortex/config.json` (or `.cortex/config.json` in your project):
   },
   "models": {
     "code": {
-      "model": "zhipu/glm-flash-5-2"
+      "model": "zhipu/glm-flash-5-2",
+      "window": 1048576
     },
     "study": {
       "model": "zhipu/glm-flash-5-2"
@@ -142,7 +143,7 @@ And set `OPEN_ROUTER_API_KEY` in your environment.
 **GLM Flash 5.2 on OpenRouter:**
 - Model ID: `zhipu/glm-flash-5-2`
 - Provider: Zhipu (GLM series)
-- Context Window: Up to 128K tokens
+- Context Window: Up to 1M tokens
 - Best for: Fast coding tasks, general reasoning
 
 ## Troubleshooting
