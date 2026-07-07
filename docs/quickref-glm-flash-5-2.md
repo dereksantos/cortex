@@ -3,13 +3,13 @@
 ## TL;DR
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPEN_ROUTER_API_KEY="sk-or-v1-..."
 cat > ~/.cortex/config.json <<'EOF'
 {
   "backend": {
     "type": "openrouter",
     "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
+    "key_env": "OPEN_ROUTER_API_KEY"
   },
   "models": {
     "code": {"model": "zhipu/glm-flash-5-2"}
@@ -32,7 +32,7 @@ Format: `provider/model-name`
 | Backend Type | `openrouter` |
 | Endpoint | `https://openrouter.ai/api/v1` |
 | Model ID | `zhipu/glm-flash-5-2` |
-| API Key Env | `OPENROUTER_API_KEY` |
+| API Key Env | `OPEN_ROUTER_API_KEY` |
 
 ## Common Commands
 
@@ -41,11 +41,11 @@ Format: `provider/model-name`
 open https://openrouter.ai/keys
 
 # Set key (one-time per session)
-export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPEN_ROUTER_API_KEY="sk-or-v1-..."
 
 # Verify key works
 curl https://openrouter.ai/api/v1/models \
-  -H "Authorization: Bearer $OPENROUTER_API_KEY" | jq
+  -H "Authorization: Bearer $OPEN_ROUTER_API_KEY" | jq
 
 # Start Cortex
 ./bin/loop
@@ -71,7 +71,7 @@ curl https://openrouter.ai/api/v1/models \
 
 | Error | Fix |
 |-------|-----|
-| `OPENROUTER_API_KEY not set` | `export OPENROUTER_API_KEY=...` |
+| `OPEN_ROUTER_API_KEY not set` | `export OPEN_ROUTER_API_KEY=...` |
 | `no LLM client available` | Verify API key with curl |
 | `model not found` | Check `zhipu/glm-flash-5-2` exists on OpenRouter |
 

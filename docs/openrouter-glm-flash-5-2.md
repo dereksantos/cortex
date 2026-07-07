@@ -18,7 +18,7 @@ go build -o bin/loop ./cmd/loop
 ### 2. Set Your OpenRouter API Key
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export OPEN_ROUTER_API_KEY="sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 For persistent setup, add this to your shell profile:
@@ -35,7 +35,7 @@ Create `~/.cortex/config.json` (or `.cortex/config.json` in your project):
   "backend": {
     "type": "openrouter",
     "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
+    "key_env": "OPEN_ROUTER_API_KEY"
   },
   "models": {
     "code": {
@@ -53,7 +53,7 @@ Create `~/.cortex/config.json` (or `.cortex/config.json` in your project):
 
 - `backend.type`: Set to `"openrouter"` to use the OpenRouter gateway
 - `backend.endpoint`: OpenRouter's API endpoint (default: `https://openrouter.ai/api/v1`)
-- `backend.key_env`: Environment variable containing your API key (default: `"OPENROUTER_API_KEY"`)
+- `backend.key_env`: Environment variable containing your API key (default: `"OPEN_ROUTER_API_KEY"`)
 - `models.code.model`: The model to use for coding tasks (the main agent)
 - `models.study.model`: The model to use for study/compaction tasks
 - `temperature`: Global temperature override (optional, default: 1.0)
@@ -93,7 +93,7 @@ You can use different models for coding and study tasks:
   "backend": {
     "type": "openrouter",
     "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
+    "key_env": "OPEN_ROUTER_API_KEY"
   },
   "models": {
     "code": {
@@ -130,12 +130,12 @@ For development only, you can embed the key in config:
   "backend": {
     "type": "openrouter",
     "endpoint": "https://openrouter.ai/api/v1",
-    "key_env": "OPENROUTER_API_KEY"
+    "key_env": "OPEN_ROUTER_API_KEY"
   }
 }
 ```
 
-And set `OPENROUTER_API_KEY` in your environment.
+And set `OPEN_ROUTER_API_KEY` in your environment.
 
 ## Model Details
 
@@ -147,25 +147,25 @@ And set `OPENROUTER_API_KEY` in your environment.
 
 ## Troubleshooting
 
-### "OPENROUTER_API_KEY not set"
+### "OPEN_ROUTER_API_KEY not set"
 
 Make sure you've set the environment variable:
 ```bash
-echo $OPENROUTER_API_KEY
+echo $OPEN_ROUTER_API_KEY
 ```
 
 ### "no LLM client available"
 
 Verify your API key is valid:
 ```bash
-curl -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/models | jq
+curl -H "Authorization: Bearer $OPEN_ROUTER_API_KEY" https://openrouter.ai/api/v1/models | jq
 ```
 
 ### "model not found"
 
 Check available models:
 ```bash
-curl -H "Authorization: Bearer $OPENROUTER_API_KEY" https://openrouter.ai/api/v1/models | jq '.data[] | select(.id | contains("glm"))'
+curl -H "Authorization: Bearer $OPEN_ROUTER_API_KEY" https://openrouter.ai/api/v1/models | jq '.data[] | select(.id | contains("glm"))'
 ```
 
 ### Wrong model being used
@@ -184,7 +184,7 @@ Switch if needed:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENROUTER_API_KEY` | Your OpenRouter API key | Required |
+| `OPEN_ROUTER_API_KEY` | Your OpenRouter API key | Required |
 | `CORTEX_BACKEND` | Override backend endpoint | - |
 | `CORTEX_HOME` | Custom config directory | `~/.cortex` |
 | `CORTEX_LOOP_RENDER` | Disable markdown rendering | - |
@@ -213,7 +213,7 @@ This overrides only the model, keeping other settings from user config or defaul
 {
   "backend": {
     "type": "openrouter",
-    "key_env": "OPENROUTER_API_KEY"
+    "key_env": "OPEN_ROUTER_API_KEY"
   },
   "models": {
     "code": {
