@@ -205,6 +205,16 @@ func (a *Anchor) SetActivity(label string) {
 	a.refreshStatusLocked()
 }
 
+// SetPrompt updates the prompt text and redraws the anchor. This allows the
+// prompt to reflect live changes, such as an updated context gauge.
+// Safe from any goroutine.
+func (a *Anchor) SetPrompt(prompt string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.prompt = prompt
+	a.drawLocked()
+}
+
 // Stop halts the editor goroutines, erases the pinned block, and returns the
 // current line so the caller can seed the next prompt with it.
 func (a *Anchor) Stop() string {

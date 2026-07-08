@@ -101,12 +101,14 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 		onStatusUpdate = func(lastPromptTokens, maxTokens int) {
 			// Update the session's token count for display
 			cs.LastPromptTokens = lastPromptTokens
-			// Force a redraw of the prompt line
+			// Force a redraw of the prompt line with updated context gauge
+			cs.live.SetPrompt(cs.Prompt())
 			cs.live.SetActivity("")
 		}
 		// After each tool result is appended, force a prompt redraw
 		// to update the context gauge with the current context size
 		onAfterToolResult = func() {
+			cs.live.SetPrompt(cs.Prompt())
 			cs.live.SetActivity("")
 		}
 	}

@@ -279,3 +279,23 @@ func TestAnchorApplyEventEditsBuffer(t *testing.T) {
 		t.Errorf("inert key changed buffer to %q", got)
 	}
 }
+
+func TestAnchorSetPromptRedraws(t *testing.T) {
+	a, out := newTestAnchor("> ", "", 80)
+	a.mu.Lock()
+	a.drawLocked()
+	a.mu.Unlock()
+	out.Reset()
+
+	// Simulate an updated prompt with a different context gauge
+	newPrompt := "> [500/128k] "
+	a.SetPrompt(newPrompt)
+
+	got := stripANSI(out.String())
+	if !strings.Contains(got, "> [500/128k] ") {
+		t.Errorf("SetPrompt did not update prompt text; visible = %q", got)
+	}
+	if a.prompt != newPrompt {
+		t.Errorf("prompt field = %q, want %q", a.prompt, newPrompt)
+	}
+}
