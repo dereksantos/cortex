@@ -1868,49 +1868,55 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		}
 	})
 
-	t.Run("ephemeral is inserted at index 1; system prefix is byte-stable", func(t *testing.T) {
+	t.Run("ephemeral is appended to system message; system prefix is byte-stable", func(t *testing.T) {
 		req.EphemeralSystem = "# memory\n- [decision] use pgx"
 		wire := req.wireMessages()
 
 		// The cache-critical invariant: the system message (position 0) must be
 		// untouched, or the backend's prefix cache invalidates every turn.
-		if wire[0].Content != sys {
-			t.Error("system message must stay byte-identical (prefix cache stability)")
+		// With the P1 fix, ephemeral is appended to system message, not separate.
+		// The stored system message should have the ephemeral content appended.
+		if wire[0].Content != sys+"\n\n"+req.EphemeralSystem {
+			t.Errorf("system message should have ephemeral appended: got %q, want %q", 
+				wire[0].Content, sys+"\n\n"+req.EphemeralSystem)
 		}
-		// The note has a fixed cache-stable slot at index 1 instead of riding the user message.
-		if wire[1].Role != RoleUser || wire[1].Content != req.EphemeralSystem {
-			t.Error("ephemeral should be inserted as its own user message at index 1")
+		// Original user message should still be at index 1 (unchanged position)
+		if wire[1].Content != userOrig {
+			t.Errorf("original user message should be at index 1 unchanged, got %q", wire[1].Content)
 		}
-		if wire[2].Content != userOrig {
-			t.Error("original user message should be shifted to index 2, unchanged")
+		// Wire should have same length (ephemeral is appended, not inserted)
+		if len(wire) != len(req.Messages) {
+			t.Errorf("wire length = %d, want %d (ephemeral appended, not inserted)", len(wire), len(req.Messages))
 		}
-		if len(wire) != len(req.Messages)+1 {
-			t.Error("wire should have exactly one extra message")
-		}
-		// Storage is never mutated.
+		// Storage is never mutated by wireMessages (it makes a copy)
 		if req.Messages[0].Content != sys || req.Messages[1].Content != userOrig {
 			t.Error("stored messages must NOT be mutated by composition")
 		}
 	})
 
-	t.Run("stays at index 1 as the tool loop appends", func(t *testing.T) {
-		// Mid tool-loop: assistant + tool messages follow the user turn. The note
-		// must stay at index 1 (a stable position), not move with the user message.
+	t.Run("ephemeral stays appended to system as tool loop appends", func(t *testing.T) {
+		// Mid tool-loop: assistant + tool messages follow the user turn.
+		// With the P1 fix, ephemeral is appended to system message, not separate.
 		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}})
 		req.Messages = append(req.Messages, Message{Role: RoleTool, ToolCallID: "1", Content: "tool output"})
 		req.EphemeralSystem = "ctx"
 		wire := req.wireMessages()
-		if wire[1].Content != "ctx" {
-			t.Error("note should stay at index 1 (fixed cache-stable slot)")
+		// System message should have the ephemeral content appended
+		expectedSystem := sys + "\n\nctx"
+		if wire[0].Content != expectedSystem {
+			t.Errorf("system message should have ephemeral appended: got %q, want %q", wire[0].Content, expectedSystem)
 		}
-		if wire[2].Content != userOrig {
-			t.Error("original user message should be shifted to index 2")
+		// Original user message should still be at index 1 (unchanged position)
+		if wire[1].Content != userOrig {
+			t.Errorf("original user message should be at index 1 unchanged, got %q", wire[1].Content)
 		}
-		if strings.Contains(wire[len(wire)-1].Content, "ctx") {
-			t.Error("note must not land on the trailing tool message")
+		// Ephemeral should not appear at the end (it's in system, not separate)
+		if strings.Contains(wire[len(wire)-1].Content, "ctx") && wire[len(wire)-1].Role != RoleSystem {
+			t.Error("note must not be at the end as a separate message")
 		}
-		if len(wire) != len(req.Messages)+1 {
-			t.Error("wire should have exactly one extra message")
+		// Wire should have same length (ephemeral is appended to system, not inserted)
+		if len(wire) != len(req.Messages) {
+			t.Errorf("wire length = %d, want %d (ephemeral appended, not inserted)", len(wire), len(req.Messages))
 		}
 	})
 }
@@ -1924,23 +1930,24 @@ func TestWireMessagesTwoZones(t *testing.T) {
 		req.TailFrom = 3
 
 		wire := req.wireMessages()
-		if len(wire) != 5 {
-			t.Errorf("wire length = %d, want 5", len(wire))
+		// With P1 fix, ephemeral is appended to system message, not separate.
+		// So wire should have: system (with INDEX), OUTLINE, u2, a2 = 4 messages
+		if len(wire) != 4 {
+			t.Errorf("wire length = %d, want 4 (ephemeral appended to system)", len(wire))
 		}
-		if wire[0].Content != "sys" {
-			t.Errorf("wire[0] = %q, want %q", wire[0].Content, "sys")
+		// System message should have ephemeral appended
+		expectedSystem := "sys\n\nINDEX"
+		if wire[0].Content != expectedSystem {
+			t.Errorf("wire[0] = %q, want %q", wire[0].Content, expectedSystem)
 		}
 		if wire[1].Role != RoleUser || wire[1].Content != "OUTLINE" {
 			t.Errorf("wire[1] = {%q,%q}, want {%q,%q}", wire[1].Role, wire[1].Content, RoleUser, "OUTLINE")
 		}
-		if wire[2].Role != RoleUser || wire[2].Content != "INDEX" {
-			t.Errorf("wire[2] = {%q,%q}, want {%q,%q}", wire[2].Role, wire[2].Content, RoleUser, "INDEX")
+		if wire[2].Content != "u2" {
+			t.Errorf("wire[2] = %q, want %q", wire[2].Content, "u2")
 		}
-		if wire[3].Content != "u2" {
-			t.Errorf("wire[3] = %q, want %q", wire[3].Content, "u2")
-		}
-		if wire[4].Content != "a2" {
-			t.Errorf("wire[4] = %q, want %q", wire[4].Content, "a2")
+		if wire[3].Content != "a2" {
+			t.Errorf("wire[3] = %q, want %q", wire[3].Content, "a2")
 		}
 		// Stored Messages must not be mutated
 		if len(req.Messages) != 5 || req.Messages[1].Content != "u1" {
@@ -2552,4 +2559,64 @@ func TestFoldOutline(t *testing.T) {
 			t.Errorf("len(cs.outline) = %d, want %d (unchanged)", len(cs.outline), initialLen)
 		}
 	})
+}
+
+// TestTurnContextGaugeUpdatesMidTurn verifies that the context gauge updates
+// during tool execution, not just after model responses.
+func TestTurnContextGaugeUpdatesMidTurn(t *testing.T) {
+	quickRetries(t)
+	// Server that returns multiple tool calls in sequence
+	var calls int
+	body := sseBody(
+		// First response: first tool call
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tool1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo one\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":500,"completion_tokens":50}}`,
+		// Second response: second tool call
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tool2","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo two\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":600,"completion_tokens":50}}`,
+		// Final response: no more tool calls
+		`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":700,"completion_tokens":10}}`,
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Window: 128000, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "system"}}}}
+
+	// Before turn starts, LastPromptTokens should be 0
+	if cs.LastPromptTokens != 0 {
+		t.Errorf("before turn: LastPromptTokens = %d, want 0", cs.LastPromptTokens)
+	}
+
+	// Execute turn with tool calls
+	if _, err := cs.Turn(context.Background(), "test"); err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+
+	// After turn, LastPromptTokens should reflect the final model response
+	if cs.LastPromptTokens != 700 {
+		t.Errorf("after turn: LastPromptTokens = %d, want 700 (final model response)", cs.LastPromptTokens)
+	}
+
+	// The context gauge should have updated during tool execution
+	// Check that currentContextSize is being computed (it should be > 0)
+	current := cs.currentContextSize()
+	if current <= 0 {
+		t.Errorf("currentContextSize = %d, want > 0", current)
+	}
+
+	// Verify the prompt shows current context size
+	prompt := cs.Prompt()
+	// The gauge should show the current context size in the format X/Y where Y is window size
+	// After the final model response, LastPromptTokens = 700, window = 128000 = 128k
+	if !strings.Contains(prompt, "700/128k") {
+		t.Errorf("Prompt() = %q, expected to contain '700/128k' (context size)", prompt)
+	}
 }

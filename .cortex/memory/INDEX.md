@@ -1,7 +1,10 @@
 # Memory index
-- context-display-update-timing — Context ratio display update flow: (updated 2026-07-08)
+- tool-calling-can-blow-context-window — Context auto-compact only fires at turn boundaries, not mid-turn when tool calls… (updated 2026-07-08)
+- working-memory-memory-index-caching — Issue 1: Memory index breaks cache every turn - FIXED (P1) (updated 2026-07-08)
+- context-display-update-timing — Issue 2: Context gauge doesn't update during tool execution - FIXED (updated 2026-07-08)
+- context-tools-comprehensive-status — Context Memory Tools - Comprehensive Status Report (2026-07-08) (updated 2026-07-08)
+- context-tools-status — Context Memory Tools Status (2026-07-08): (updated 2026-07-08)
 - working-memory-compact-boundary — WorkingMemory compacts at TURN BOUNDARIES, not mid-turn. (updated 2026-07-08)
-- tool-calling-can-blow-context-window — Issue: Context auto-compact only fires at turn boundaries, not mid-turn when too… (updated 2026-07-08)
 - roadmap-priorities-2026-07-08 — Roadmap priorities updated 2026-07-08: (1) Working memory incremental study comp… (updated 2026-07-08)
 - summarize-summarizetext-split — Updated Summarize in cmd/loop/summarize.go to split into two functions: Summariz… (updated 2026-07-03)
 - test-resumereplaysworkingset-added — Added TestResumeReplaysWorkingSet test function to cmd/loop/main_test.go with th… (updated 2026-07-03)

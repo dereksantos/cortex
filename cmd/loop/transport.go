@@ -117,20 +117,24 @@ func (r *AgentRequest) wireMessages() []Message {
 	}
 
 	// Early return when nothing is demoted and nothing is injected.
-	if r.OutlineBlock == "" && r.EphemeralSystem == "" && start <= prefixEnd {
+	// Note: EphemeralSystem is handled below even when no demotion occurs,
+	// so we don't early-return just for that case.
+	if r.OutlineBlock == "" && start <= prefixEnd && r.EphemeralSystem == "" {
 		return r.Messages
 	}
 
 	out := make([]Message, 0, 2+prefixEnd+len(r.Messages[start:]))
-	out = append(out, r.Messages[0]) // system message
+	// Copy the system message and append ephemeral if present
+	sysMsg := r.Messages[0]
+	if r.EphemeralSystem != "" {
+		sysMsg.Content += "\n\n" + r.EphemeralSystem
+	}
+	out = append(out, sysMsg)
+	
 	out = append(out, r.Messages[1:prefixEnd]...)
 
 	if r.OutlineBlock != "" {
 		out = append(out, Message{Role: RoleUser, Content: r.OutlineBlock})
-	}
-
-	if r.EphemeralSystem != "" {
-		out = append(out, Message{Role: RoleUser, Content: r.EphemeralSystem})
 	}
 
 	out = append(out, r.Messages[start:]...)
