@@ -119,6 +119,15 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 	// tool-arguments fragment — never trips the 64KB scanner token cap.
 	r := bufio.NewReader(resp.Body)
 	for {
+		// Check context cancellation before each read. Without this, a cancelled
+		// context does not interrupt ReadString because the context is only
+		// attached to the request, not to the body reader.
+		select {
+		case <-ctx.Done():
+			return StreamResult{}, ctx.Err()
+		default:
+		}
+
 		line, err := r.ReadString('\n')
 		if line != "" {
 			data, ok := parseSSEData(line)

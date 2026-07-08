@@ -1263,6 +1263,51 @@ func TestSendHonorsContextCancel(t *testing.T) {
 	}
 }
 
+// TestSendStreamHonorsContextCancel proves that SendStream respects context
+// cancellation during an in-flight SSE stream. This is the streaming path
+// that was missing cancellation support.
+func TestSendStreamHonorsContextCancel(t *testing.T) {
+	quickRetries(t)
+	// Track when client disconnects
+	clientDisconnected := make(chan struct{}, 1)
+	// Server that sends one SSE chunk then waits to see if client disconnects
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// Wait to see if client disconnects
+		select {
+		case <-clientDisconnected:
+			t.Logf("Server: client disconnected")
+		case <-time.After(2 * time.Second):
+			t.Logf("Server: no disconnect within 2s")
+		}
+	}))
+	defer func() {
+		select {
+		case clientDisconnected <- struct{}{}:
+		default:
+		}
+		srv.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	t.Logf("Starting SendStream with %v timeout", 50*time.Millisecond)
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).SendStream(ctx, nil, nil)
+	elapsed := time.Since(start)
+	t.Logf("SendStream returned after %v with err=%v", elapsed, err)
+
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("SendStream took %v after cancel; should return promptly", elapsed)
+	}
+}
+
 // toolResults filters a turn's messages down to the role:"tool" entries.
 func toolResults(msgs []Message) []Message {
 	var out []Message

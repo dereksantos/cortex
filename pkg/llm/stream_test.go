@@ -2,10 +2,12 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sseServer returns a test server that writes the given raw SSE body with a 200
@@ -184,5 +186,60 @@ func TestParseSSEData(t *testing.T) {
 		if ok != tt.wantOK || got != tt.wantData {
 			t.Errorf("parseSSEData(%q) = (%q,%v), want (%q,%v)", tt.line, got, ok, tt.wantData, tt.wantOK)
 		}
+	}
+}
+
+// TestStreamChatCancelHonored proves that context cancellation interrupts
+// an in-flight SSE stream. Without the fix, the test times out because
+// ReadString doesn't respect ctx.Done(). With the fix, StreamChat returns
+// promptly when the context is cancelled.
+func TestStreamChatCancelHonored(t *testing.T) {
+	// Track if the server saw the client disconnect
+	disconnected := make(chan struct{}, 1)
+	
+	// Server that sends one chunk then waits to see if client disconnects
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Logf("Server: request received")
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Send one chunk then stop - the client will block on ReadString
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"))
+		w.(http.Flusher).Flush() // Force flush to ensure client receives it
+		t.Logf("Server: chunk sent, now waiting for disconnect")
+		
+		// Wait to see if client disconnects or timeout
+		select {
+		case <-disconnected:
+			t.Logf("Server: client disconnected")
+		case <-time.After(2 * time.Second):
+			t.Logf("Server: no disconnect within timeout")
+		}
+	}))
+	defer func() {
+		// Signal disconnection if not already done
+		select {
+		case disconnected <- struct{}{}:
+		default:
+		}
+		srv.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	t.Logf("Client: starting StreamChat")
+	_, err := StreamChat(ctx, srv.Client(), srv.URL, "", []byte(`{}`), nil, nil)
+	elapsed := time.Since(start)
+	t.Logf("Client: StreamChat returned after %v with err=%v", elapsed, err)
+
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context error, got %v", err)
+	}
+	// Should return within ~100ms, not hang forever
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("StreamChat took %v after cancel; should return promptly (~100ms)", elapsed)
 	}
 }
