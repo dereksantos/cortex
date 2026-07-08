@@ -275,4 +275,21 @@ func (cs *CortexSession) PrintArgs() {
 func (cs *CortexSession) Append(message Message) {
 	cs.Request.Messages = append(cs.Request.Messages, message)
 	cs.writeTranscript(message)
+	// Update LastPromptTokens to reflect current context size
+	// This ensures the display gauge updates as tool results are appended
+	cs.LastPromptTokens = cs.currentContextSize()
+}
+
+// currentContextSize estimates the current context size from all messages.
+// It sums len(Content) for each message plus len(Function.Name)+len(Function.Arguments)
+// for each ToolCall, then converts to tokens using cache.TokensOf.
+func (cs *CortexSession) currentContextSize() int {
+	sum := 0
+	for _, msg := range cs.Request.Messages {
+		sum += len(msg.Content)
+		for _, call := range msg.ToolCalls {
+			sum += len(call.Function.Name) + len(call.Function.Arguments)
+		}
+	}
+	return cache.TokensOf(sum)
 }

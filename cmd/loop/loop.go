@@ -56,10 +56,13 @@ func (f DispatchFunc) Dispatch(ctx context.Context, call ToolCall) string { retu
 // Toolset is what the engine advertises to the model plus how it runs the calls.
 // BeforeBatch is an optional per-batch display hook (the coder prints a blank
 // line separating prose from its tool actions); nil for subagents and tests.
+// AfterToolResult is an optional callback invoked after each tool result is
+// appended, allowing the caller to update display with current context state.
 type Toolset struct {
-	Tools       []Tool
-	Dispatch    AgentDispatcher
-	BeforeBatch func()
+	Tools         []Tool
+	Dispatch      AgentDispatcher
+	BeforeBatch   func()
+	AfterToolResult func()
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
@@ -293,6 +296,9 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			}
 			stats.ReadBytes += len(obs)
 			appendMsg(Message{Role: RoleTool, ToolCallID: call.ID, Content: obs})
+			if ts.AfterToolResult != nil {
+				ts.AfterToolResult()
+			}
 			if p != nil {
 				p(progressLine(call))
 			}

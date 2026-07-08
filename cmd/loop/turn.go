@@ -92,6 +92,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	
 	// Update display during the loop for interactive REPL
 	var onStatusUpdate func(int, int)
+	var onAfterToolResult func()
 	if cs.live != nil {
 		onStatusUpdate = func(lastPromptTokens, maxTokens int) {
 			// Update the session's token count for display
@@ -99,7 +100,13 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 			// Force a redraw of the prompt line
 			cs.live.SetActivity("")
 		}
+		// After each tool result is appended, force a prompt redraw
+		// to update the context gauge with the current context size
+		onAfterToolResult = func() {
+			cs.live.SetActivity("")
+		}
 	}
+	ts.AfterToolResult = onAfterToolResult
 	
 	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""

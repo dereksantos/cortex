@@ -43,6 +43,7 @@ func (m Message) Print() {
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
+	// Use LastPromptTokens which is updated in Append() to reflect current context
 	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
 	cost := ""
 	if cs.costUSD > 0 {
