@@ -89,7 +89,19 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxToolIterations}
-	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append)
+	
+	// Update display during the loop for interactive REPL
+	var onStatusUpdate func(int, int)
+	if cs.live != nil {
+		onStatusUpdate = func(lastPromptTokens, maxTokens int) {
+			// Update the session's token count for display
+			cs.LastPromptTokens = lastPromptTokens
+			// Force a redraw of the prompt line
+			cs.live.SetActivity("")
+		}
+	}
+	
+	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens

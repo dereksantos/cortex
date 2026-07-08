@@ -55,7 +55,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	req := requestFor(spec, sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
-	digest, stats, err := runLoop(ctx, cs.blockingSender(), req, ts, sa.Bounds, nil, appendMsg)
+	digest, stats, err := runLoop(ctx, cs.blockingSender(), req, ts, sa.Bounds, nil, appendMsg, nil)
 	// Fold the subagent's billed usage into the session totals (it does not set
 	// LastPromptTokens — that gauge belongs to the coder's own context).
 	cs.tokensIn += stats.InputTokens

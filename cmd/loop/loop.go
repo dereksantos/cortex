@@ -172,7 +172,9 @@ const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewr
 // appendMsg records each message: the coder passes cs.Append (grows the live
 // history and writes the transcript); a subagent passes a plain slice append on
 // its own request. req is the caller's request, re-sent (grown) each round.
-func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message)) (string, loopStats, error) {
+// onStatusUpdate is an optional callback invoked after each iteration to update
+// the display with the current context usage (for interactive REPL).
+func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b Bounds, p Progress, appendMsg func(Message), onStatusUpdate func(lastPromptTokens int, maxTokens int)) (string, loopStats, error) {
 	var stats loopStats
 	req.Tools = ts.Tools
 	if b.MaxTokens > 0 {
@@ -212,6 +214,11 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			return "", stats, errNoChoices
 		}
 		accountUsage(&stats, res, req.MaxTokens)
+
+		// Update display with current context usage (for interactive REPL)
+		if onStatusUpdate != nil {
+			onStatusUpdate(stats.LastPromptTokens, req.MaxTokens)
+		}
 
 		msg := res.Choices[0].Message
 		// Recover Qwen-native XML tool calls the proxy didn't normalize, so a

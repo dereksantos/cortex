@@ -63,7 +63,7 @@ func TestCoderLoopCharacterization(t *testing.T) {
 
 	ts := Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp}
 	content, stats, err := runLoop(context.Background(), send, req,
-		ts, Bounds{MaxTokens: 1000, MaxIter: 100}, nil, appendMsg)
+		ts, Bounds{MaxTokens: 1000, MaxIter: 100}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestCoderLoopNoProgressFinalizes(t *testing.T) {
 
 	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg)
+		Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRunLoopBytesBudgetFinalizes(t *testing.T) {
 
 	_, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: 100, ReadBudgetBytes: 8000}, nil, appendMsg)
+		Bounds{MaxTokens: 100, MaxIter: 100, ReadBudgetBytes: 8000}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRunLoopMaxIterFinalizes(t *testing.T) {
 	disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 	content, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: 4}, nil, appendMsg)
+		Bounds{MaxTokens: 100, MaxIter: 4}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 		disp := DispatchFunc(func(_ context.Context, _ ToolCall) string { return "obs" })
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 100}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("mid-loop error should finalize, not abort: %v", err)
 		}
@@ -254,7 +254,7 @@ func TestRunLoopMidLoopErrorFinalizes(t *testing.T) {
 		})
 		_, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: DispatchFunc(func(context.Context, ToolCall) string { return "" })},
-			Bounds{MaxTokens: 100, MaxIter: 100}, nil, func(m Message) { req.Messages = append(req.Messages, m) })
+			Bounds{MaxTokens: 100, MaxIter: 100}, nil, func(m Message) { req.Messages = append(req.Messages, m) }, nil)
 		if err == nil || stats.StopReason != "error" {
 			t.Errorf("a first-send failure must abort: err=%v stop=%q", err, stats.StopReason)
 		}
@@ -286,7 +286,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -315,7 +315,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -340,7 +340,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		})
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -365,7 +365,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -393,7 +393,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 		content, stats, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -418,7 +418,7 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
 		content, _, err := runLoop(context.Background(), send, req,
 			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
-			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg)
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
 		if err != nil {
 			t.Fatalf("runLoop: %v", err)
 		}
@@ -458,7 +458,7 @@ func TestRunLoopDetectsStuckErrorLoop(t *testing.T) {
 	})
 	_, stats, err := runLoop(context.Background(), send, req,
 		Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
-		Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg)
+		Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
@@ -508,7 +508,7 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 		Toolset{Tools: req.Tools, Dispatch: disp},
 		Bounds{MaxTokens: 1000, MaxIter: 10, ReadBudgetBytes: 96000},
 		func(line string) { progress = append(progress, line) },
-		func(m Message) { req.Messages = append(req.Messages, m) })
+		func(m Message) { req.Messages = append(req.Messages, m) }, nil)
 	if err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
