@@ -21,11 +21,11 @@ The project was recently slimmed to center on `cmd/loop`. The prior
   retrieval injection.
 - **Working memory v1** — context compaction via the `study` engine at
   ~80% window (and on `/compact`); the session continues from a curated
-  digest with cited `file:line` ranges.
+  digest with cited `file:line` ranges. **Incremental compaction is the next target.**
 - **`study` tool** — size-adaptive, goal-curated reading of files/dirs;
   `loop study-eval` measures its latency / coverage / groundedness.
 - **Tool surface** — `read_file`, `write_file`, `edit_file`, `study`,
-  `project_index`, `bash` (risk-gated), `remove_path` (workspace-confined).
+  `bash` (risk-gated), `remove_path` (workspace-confined).
 - **Layered config + multi-backend** — `pkg/llm` providers (Anthropic,
   Ollama, OpenRouter, OpenAI-compatible); per-role `code` / `study` models.
 - **Headless + adapters** — `loop turn` (one-shot), `loop change` (git
@@ -34,16 +34,14 @@ The project was recently slimmed to center on `cmd/loop`. The prior
 ## Near-term
 
 Detailed plan and dependency order: [`docs/roadmap-2026-06-23.md`](docs/roadmap-2026-06-23.md).
-Recommended sequence (each a green-build checkpoint):
 
-1. **System prompt: small batches + tidy-first** — cheapest, highest signal. *(landed)*
-2. **Extract `cmd/loop/tools`** — pure move, no behavior change. *(landed)*
-3. **Diffs in `edit_file` + edit UX** — visible, small.
-4. **Extract `cmd/loop/transport`** — wire types out of `main.go`.
-5. **`web_search` tool** — read-only HTTP + text extraction, in the clean tools package.
-6. **Extract `cmd/loop/fleet`** (config/models) then **`cmd/loop/session`** (the big move).
-7. **Working memory: incremental study compaction** — `CompactRecent` +
-   a clean session-state layer + manifest.
+**New recommended sequence (2026-07-08 update):**
+
+1. **Working memory: incremental study compaction** — `CompactRecent` + session-state layer + manifest. *(priority: autonomy-focused, tidy first)*
+2. **`web_search` tool** — read-only HTTP + text extraction, in the clean tools package. *(priority: external information access)*
+3. **System prompt: small batches + tidy-first** — cheapest, highest signal. *(landed)*
+4. **Documentation audit and digestion** — review and consolidate docs, update README.
+5. **Cognition/DAG revival** — bring back from git history, rethink and simplify.
 
 `cmd/loop/main.go` is ~3.6k lines; the loop-extraction work is now specified by
 [`docs/engine-unification.md`](docs/engine-unification.md) (one `runLoop` engine
@@ -64,12 +62,10 @@ and [`docs/working-memory-study.md`](docs/working-memory-study.md).
 
 ## Deliberately deferred
 
-- A `loop` distribution pipeline (Homebrew / release CI) — rebuild when
-  `loop` is ready to ship.
+- Diffs in `edit_file` + edit UX — display-layer only, doesn't enable autonomy.
 - A real browser / JS rendering for web search — read-only HTTP first.
-- Merging in the streaming/distillation/retrieval depth from the removed
-  harness — tidy first, reconsider later.
+- Merging in the streaming/distillation/retrieval depth from the removed harness — tidy first, reconsider later.
 
 ---
 
-*Living document. Grounded in the codebase as of 2026-06.*
+*Living document. Grounded in the codebase as of 2026-07.*
