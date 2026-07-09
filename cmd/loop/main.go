@@ -220,6 +220,16 @@ var (
 // startActivity/stopActivity drive the anchored status spinner around a unit of
 // work. No-op outside the anchored REPL (raw-streaming and headless modes have
 // no pinned status row to animate).
+
+// printAvailableTools prints the list of available tools to stdout.
+func printAvailableTools() {
+	fmt.Println(withColor("Available tools:", cyan))
+	for _, tool := range tools.All {
+		fmt.Printf("  • %s\n", tool.Function.Name)
+	}
+	fmt.Println()
+}
+
 func main() {
 	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
 	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
@@ -271,6 +281,11 @@ func main() {
 	}
 
 	session := NewCortexSession()
+
+	// Print available tools on launch for interactive REPL mode only
+	if len(os.Args) == 1 {
+		printAvailableTools()
+	}
 
 	// `loop resume [id]` continues a prior session (the latest when no id is
 	// given); otherwise every REPL session persists under a fresh transcript.
