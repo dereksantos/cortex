@@ -164,30 +164,18 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	if cs.Config == nil {
 		return true // default: all tools enabled
 	}
-	// Check if Tools has any config set (all pointers are nil means defaults)
+	// nil pointers mean defaults: enabled.
 	t := &cs.Config.Tools
-	if t.EnableContextSummarize == nil &&
-		t.EnableContextEvict == nil &&
-		t.EnableContextMerge == nil &&
-		t.EnableContextReorder == nil &&
-		t.EnableContextAdjustWatermarks == nil &&
-		t.EnableWeb == nil &&
-		t.AllowDelete == nil &&
-		t.DeleteRoot == "" {
-		return true // default: all tools enabled
-	}
 	switch toolName {
 	case tools.FunctionWebSearch, tools.FunctionFetchURL:
 		return t.EnableWeb == nil || *t.EnableWeb
-	case "context_summarize":
+	case tools.FunctionContextSummarize:
 		return t.EnableContextSummarize == nil || *t.EnableContextSummarize
-	case "context_evict":
+	case tools.FunctionContextEvict:
 		return t.EnableContextEvict == nil || *t.EnableContextEvict
-	case "context_merge":
+	case tools.FunctionContextMerge:
 		return t.EnableContextMerge == nil || *t.EnableContextMerge
-	case "context_reorder":
-		return t.EnableContextReorder == nil || *t.EnableContextReorder
-	case "context_adjust_watermarks":
+	case tools.FunctionContextAdjustWatermarks:
 		return t.EnableContextAdjustWatermarks == nil || *t.EnableContextAdjustWatermarks
 	}
 	return true // unknown tools enabled by default
@@ -239,16 +227,6 @@ func (cs *CortexSession) RemoveOutlineEntry(citation string) bool {
 // OutlineLen returns the number of outline entries.
 func (cs *CortexSession) OutlineLen() int {
 	return len(cs.outline)
-}
-
-// ReorderTail reorders the hydrated tail turns based on the given metric.
-// Only rearranges order—it does not evict or compress.
-// Returns the new order of turns in the tail.
-func (cs *CortexSession) ReorderTail(metric string) []cache.TurnSpan {
-	if cs.ws == nil {
-		return nil
-	}
-	return cs.ws.ReorderTail(metric)
 }
 
 // AdjustWatermarks adjusts the working set watermarks by the given deltas.

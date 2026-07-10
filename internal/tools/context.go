@@ -4,7 +4,6 @@ const (
 	FunctionContextSummarize        = "context_summarize"
 	FunctionContextEvict            = "context_evict"
 	FunctionContextMerge            = "context_merge"
-	FunctionContextReorder          = "context_reorder"
 	FunctionContextAdjustWatermarks = "context_adjust_watermarks"
 )
 
@@ -42,15 +41,6 @@ var ContextMergeTool = newTool(FunctionContextMerge,
 		"range_end":   stringProp("End citation of range, e.g., @session/20260701-143210#t5"),
 	}, "range_start", "range_end"))
 
-// ContextReorderTool reorders the hydrated tail based on the given metric.
-// Only rearranges order—it does not evict or compress.
-var ContextReorderTool = newTool(FunctionContextReorder,
-	"Reorders the hydrated tail based on the given metric. Only rearranges order—it does not evict or compress. "+
-		"Use this when certain turns are more relevant to the current goal and should be kept closer to the front.",
-	objectSchema(map[string]any{
-		"by": stringProp("Metric to sort by: 'salience', 'recency', or 'task-relevance'"),
-	}, "by"))
-
 // ContextAdjustWatermarksTool dynamically adjusts the working set watermarks.
 // Bounded (±W/4) to prevent abuse.
 var ContextAdjustWatermarksTool = newTool(FunctionContextAdjustWatermarks,
@@ -69,7 +59,6 @@ func AllContextTools() []Tool {
 		ContextSummarizeTool,
 		ContextEvictTool,
 		ContextMergeTool,
-		ContextReorderTool,
 		ContextAdjustWatermarksTool,
 	}
 }

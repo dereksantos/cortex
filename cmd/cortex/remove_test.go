@@ -81,17 +81,17 @@ func TestConfigToolMerges(t *testing.T) {
 	t.Run("tool options merge independently", func(t *testing.T) {
 		yes, no := true, false
 		base := ToolConfig{
-			AllowDelete:          &yes,
-			EnableWeb:            &yes,
-			EnableContextEvict:   &no,
-			EnableContextReorder: &yes,
+			AllowDelete:        &yes,
+			EnableWeb:          &yes,
+			EnableContextEvict: &no,
+			EnableContextMerge: &yes,
 		}
 		over := ToolConfig{
 			EnableWeb:                     &no,
 			EnableContextAdjustWatermarks: &no,
 		}
 		got := mergeTools(base, over)
-		if got.AllowDelete != &yes || got.EnableContextEvict != &no || got.EnableContextReorder != &yes {
+		if got.AllowDelete != &yes || got.EnableContextEvict != &no || got.EnableContextMerge != &yes {
 			t.Fatalf("base options were lost: %#v", got)
 		}
 		if got.EnableWeb != &no || got.EnableContextAdjustWatermarks != &no {

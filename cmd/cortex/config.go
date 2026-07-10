@@ -237,7 +237,6 @@ type ToolConfig struct {
 	EnableContextSummarize        *bool `json:"enable_context_summarize"`
 	EnableContextEvict            *bool `json:"enable_context_evict"`
 	EnableContextMerge            *bool `json:"enable_context_merge"`
-	EnableContextReorder          *bool `json:"enable_context_reorder"`
 	EnableContextAdjustWatermarks *bool `json:"enable_context_adjust_watermarks"`
 }
 
@@ -487,9 +486,6 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	}
 	if over.EnableContextMerge != nil {
 		base.EnableContextMerge = over.EnableContextMerge
-	}
-	if over.EnableContextReorder != nil {
-		base.EnableContextReorder = over.EnableContextReorder
 	}
 	if over.EnableContextAdjustWatermarks != nil {
 		base.EnableContextAdjustWatermarks = over.EnableContextAdjustWatermarks

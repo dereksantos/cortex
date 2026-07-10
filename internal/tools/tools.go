@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
-	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 )
@@ -124,12 +123,6 @@ type WatermarkAdjuster interface {
 	AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error)
 }
 
-// Reorderer provides methods to reorder the hydrated tail.
-// This is implemented by *CortexSession.
-type Reorderer interface {
-	ReorderTail(metric string) []cache.TurnSpan
-}
-
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -157,8 +150,6 @@ type ToolDeps interface {
 	OutlineModifier
 	// WatermarkAdjuster provides methods to adjust working set watermarks.
 	WatermarkAdjuster
-	// Reorderer provides methods to reorder the hydrated tail.
-	Reorderer
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -215,7 +206,6 @@ func (headlessDeps) OutlineLen() int                             { return 0 }
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
 }
-func (headlessDeps) ReorderTail(string) []cache.TurnSpan { return nil }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -410,7 +400,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
-	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool}
+	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -502,8 +492,6 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return contextEvict(tc, deps)
 	case FunctionContextMerge:
 		return contextMerge(tc, deps)
-	case FunctionContextReorder:
-		return contextReorder(tc, deps)
 	case FunctionContextAdjustWatermarks:
 		return contextAdjustWatermarks(tc, deps)
 	}
