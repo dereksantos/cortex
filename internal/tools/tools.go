@@ -407,7 +407,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
-var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
+var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
 	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool}
 
@@ -425,7 +425,15 @@ var Study = Subagent{
 	// reasoning-model spiral reaches the clamp quickly and leaves wall-clock room
 	// for runLoop's salvage re-ask, while still clearing the normal concise digest
 	// path (~1–3k output in the live eval).
-	Bounds: agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
+	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
+	Declaration: StudyTool,
+}
+
+// init registers Study on the shared subagent registry so Execute's generic
+// dispatch (see Lookup in Execute) resolves the "study" tool name back to this
+// profile — the same path any future inheritor (reflect, dream) will use.
+func init() {
+	Register(Study)
 }
 
 // --- Dispatcher ---------------------------------------------------------
@@ -465,8 +473,6 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return writeFile(tc)
 	case FunctionEditFile:
 		return editFile(tc)
-	case FunctionStudy:
-		return study(ctx, tc, deps)
 	case FunctionOutline:
 		return outlineTool(tc)
 	case FunctionGrep:
@@ -499,6 +505,11 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return contextReorder(tc, deps)
 	case FunctionContextAdjustWatermarks:
 		return contextAdjustWatermarks(tc, deps)
+	}
+	// Any registered subagent tool (study, and future inheritors reflect/dream)
+	// shares this one dispatch path via the name→profile registry.
+	if sa, ok := Lookup(name); ok {
+		return runSubagent(ctx, tc, deps, sa)
 	}
 	return "", fmt.Errorf(`no available tools matching name "%s"`, name)
 }
@@ -552,12 +563,13 @@ func outlineTool(tc ToolCall) (string, error) {
 	return outline.Render(path, budget)
 }
 
-// --- study --------------------------------------------------------------
+// --- subagent tools (study, and future inheritors reflect/dream) --------
 
-// study is the entry point: seed the subagent with the goal + an outline of the
-// target, then run the Study profile on the shared engine via SubAgentRunner.
-// An empty digest is reported explicitly so the coder never gets a silent "".
-func study(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
+// runSubagent is the shared entry point for any registered Subagent tool:
+// seed the profile with the goal + an outline of the target, then run it on
+// the shared engine via SubAgentRunner. An empty digest is reported explicitly
+// so the caller never gets a silent "".
+func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -567,12 +579,12 @@ func study(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	digest, err := deps.RunSubagent(ctx, Study, StudySeed(goal, path, ol))
+	digest, err := deps.RunSubagent(ctx, sa, StudySeed(goal, path, ol))
 	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(digest) == "" {
-		return "study produced no digest for " + path, nil
+		return fmt.Sprintf("%s produced no digest for %s", sa.Name, path), nil
 	}
 	return digest, nil
 }

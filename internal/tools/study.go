@@ -3,24 +3,70 @@ package tools
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/dereksantos/cortex/internal/agent"
 )
 
-// study.go defines the Study subagent profile: inert data (name, role, system
-// prompt, offered tools, bounds) run on the one shared engine via SubAgentRunner.
-// Study is the only profile today; adding another (e.g. Reflect) is a `var`.
-// See docs/study-subagent.md §1.
+// study.go defines the Subagent shape and the name→profile registry that lets
+// every inheritor (study today; reflect/dream later) share ONE dispatch path
+// in Execute, instead of a bespoke switch case per profile. Study is the only
+// registered profile today; adding another (e.g. Reflect) is a `var` + a
+// Register call. See docs/study-subagent.md §1.
 
 // Subagent is a read-only (or otherwise scoped) agent profile: the variation a
 // caller injects into the shared engine. Tools is both what's offered to the
 // model and the execution allowlist.
 type Subagent struct {
 	Name   string       // banner / telemetry label
-	Role   string       // model-role binding the runner resolves (e.g. "study")
+	Role   string       // model-role binding the runner resolves (e.g. "study"); also the tool's dispatch name, i.e. Function.Name on Declaration
 	System string       // system prompt
 	Tools  []Tool       // offered == execution allowlist
 	Bounds agent.Bounds // MaxTokens (mandatory), MaxIter, ReadBudgetBytes
+
+	// Declaration is this profile's own dispatchable tool (name/description/
+	// schema) — what goes in a tool set like All. Kept explicit per profile
+	// (not auto-generated) so each inheritor's description stays hand-tuned.
+	Declaration Tool
+}
+
+// AsTool returns the profile's dispatchable tool declaration.
+func (sa Subagent) AsTool() Tool {
+	return sa.Declaration
+}
+
+// subagentRegistry maps a tool name (Subagent.Role) back to its profile, so
+// Execute can resolve any registered subagent tool through one shared path
+// instead of a per-profile switch case.
+type subagentRegistry struct {
+	mu       sync.Mutex
+	profiles map[string]Subagent
+}
+
+var registered = &subagentRegistry{profiles: make(map[string]Subagent)}
+
+// Register installs a subagent profile under its Role so the shared dispatch
+// path (runSubagent) can resolve a tool call back to its profile. Panics on a
+// duplicate or empty Role — that's a wiring bug, not a runtime condition.
+func Register(sa Subagent) {
+	if strings.TrimSpace(sa.Role) == "" {
+		panic("tools.Register: subagent has empty Role")
+	}
+	registered.mu.Lock()
+	defer registered.mu.Unlock()
+	if _, dup := registered.profiles[sa.Role]; dup {
+		panic("tools.Register: duplicate subagent " + sa.Role)
+	}
+	registered.profiles[sa.Role] = sa
+}
+
+// Lookup resolves a tool name back to its subagent profile (study, ...) for
+// the shared dispatch path. Returns the zero profile + false if unregistered.
+func Lookup(name string) (Subagent, bool) {
+	registered.mu.Lock()
+	defer registered.mu.Unlock()
+	p, ok := registered.profiles[name]
+	return p, ok
 }
 
 // StudySeedBudget is the outline budget for the study seed: enough structure to
