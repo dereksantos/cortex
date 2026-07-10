@@ -120,6 +120,11 @@ func (ws *WorkingSet) GetWatermarks() (int, int) {
 	return ws.highWM, ws.lowWM
 }
 
+// TurnSpans returns a copy of all completed turn spans in append order.
+func (ws *WorkingSet) TurnSpans() []TurnSpan {
+	return append([]TurnSpan(nil), ws.turns...)
+}
+
 // RestoreState restores a previously persisted demotion frontier and watermarks.
 // It validates the complete snapshot before mutating the working set.
 func (ws *WorkingSet) RestoreState(frontier, highWM, lowWM int) error {

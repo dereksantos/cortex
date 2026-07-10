@@ -204,6 +204,16 @@ func TestFrontierMsg(t *testing.T) {
 	})
 }
 
+func TestTurnSpansReturnsCopy(t *testing.T) {
+	ws := New(1, 100, 60)
+	ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 20})
+	got := ws.TurnSpans()
+	got[0].End = 99
+	if ws.TurnSpans()[0].End != 3 {
+		t.Fatal("TurnSpans exposed mutable working-set state")
+	}
+}
+
 func TestRestoreState(t *testing.T) {
 	ws := New(1, 100, 60)
 	ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 20})

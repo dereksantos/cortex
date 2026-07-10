@@ -1542,30 +1542,41 @@ func TestStudyWindowEnvOverride(t *testing.T) {
 }
 
 // stubCompactSummarize replaces the compaction summarizer call (no model, no
-// network) for the duration of a test, recording the path and window it was
+// network) for the duration of a test, recording the content and window it was
 // given. compressed=true marks a real compaction; false → nothing to compact.
-func stubCompactSummarize(t *testing.T, digest string, compressed bool, err error) (gotPath *string, gotWindow *int) {
+func stubCompactSummarize(t *testing.T, digest string, compressed bool, err error) (gotContent *string, gotWindow *int) {
 	t.Helper()
 	saved := compactSummarize
 	t.Cleanup(func() { compactSummarize = saved })
-	gotPath, gotWindow = new(string), new(int)
-	compactSummarize = func(_ context.Context, _ *CortexSession, path string, window int) (string, bool, error) {
-		*gotPath, *gotWindow = path, window
+	gotContent, gotWindow = new(string), new(int)
+	compactSummarize = func(_ context.Context, _ *CortexSession, content string, window int) (string, bool, error) {
+		*gotContent, *gotWindow = content, window
 		return digest, compressed, err
 	}
-	return gotPath, gotWindow
+	return gotContent, gotWindow
+}
+
+func appendTestTurn(cs *CortexSession, ordinal int, user, assistant string) {
+	cs.turnNo = ordinal
+	start := len(cs.Request.Messages)
+	cs.Append(Message{Role: RoleUser, Content: user})
+	cs.Append(Message{Role: "assistant", Content: assistant})
+	cs.ws.AddTurn(cache.TurnSpan{Start: start, End: len(cs.Request.Messages), Tokens: estTurnTokens(cs.Request.Messages[start:])})
+	cs.turns = ordinal
+	cs.turnNo = 0
 }
 
 func TestCompactRebuildsHistory(t *testing.T) {
-	gotPath, gotWindow := stubCompactSummarize(t,
+	gotContent, gotWindow := stubCompactSummarize(t,
 		"user is hardening the loop; edited cmd/loop/main.go; tests pass", true, nil)
 
 	cs := newTestSession(t)
 	cs.Window = 64000
 	cs.Study.Window = 32768
 	cs.LastPromptTokens = 60000
-	cs.Append(Message{Role: RoleUser, Content: "long conversation"})
-	cs.Append(Message{Role: "assistant", Content: "lots of work"})
+	cs.ws = cs.newWorkingSet(1)
+	appendTestTurn(cs, 1, "long conversation", "lots of work")
+	appendTestTurn(cs, 2, "newest task context", "current answer")
 	oldID := cs.SessionID
 	sys := cs.Request.Messages[0]
 
@@ -1574,19 +1585,19 @@ func TestCompactRebuildsHistory(t *testing.T) {
 	}
 	defer cs.transcript.Close()
 
-	// Studied the right transcript with the consumer-derived budget:
-	// min(codeWindow/4=16000, studyWindow=32768) = 16000.
-	if !strings.HasSuffix(*gotPath, oldID+".jsonl") {
-		t.Errorf("studied %q, want the old transcript %s.jsonl", *gotPath, oldID)
+	// Only the eligible old prefix was summarized; the newest complete turn
+	// remains verbatim.
+	if !strings.Contains(*gotContent, "long conversation") || strings.Contains(*gotContent, "newest task context") {
+		t.Errorf("summarized content = %q, want only the old completed prefix", *gotContent)
 	}
 	if *gotWindow != 16000 {
 		t.Errorf("study window = %d, want 16000 (codeWindow/4)", *gotWindow)
 	}
 
-	// History = original system seed + one digest message.
+	// History = original system seed + one state digest + newest raw turn.
 	msgs := cs.Request.Messages
-	if len(msgs) != 2 {
-		t.Fatalf("compacted history has %d messages, want 2", len(msgs))
+	if len(msgs) != 4 {
+		t.Fatalf("compacted history has %d messages, want 4", len(msgs))
 	}
 	if msgs[0].Content != sys.Content || msgs[0].Role != RoleSystem {
 		t.Error("system seed should survive compaction unchanged")
@@ -1595,9 +1606,13 @@ func TestCompactRebuildsHistory(t *testing.T) {
 		t.Errorf("digest message = %+v", msgs[1])
 	}
 
-	// Gauge reset; new transcript with a new id; old transcript intact.
-	if cs.LastPromptTokens != 0 {
-		t.Errorf("LastPromptTokens = %d, want 0 after compaction", cs.LastPromptTokens)
+	if msgs[2].Content != "newest task context" || msgs[3].Content != "current answer" {
+		t.Errorf("newest turn was not retained verbatim: %+v", msgs[2:])
+	}
+
+	// Gauge now reflects the retained state instead of pretending context is empty.
+	if cs.LastPromptTokens == 0 {
+		t.Error("LastPromptTokens should reflect compacted state")
 	}
 	if cs.SessionID == oldID {
 		t.Error("compaction should start a NEW session id")
@@ -1612,8 +1627,28 @@ func TestCompactRebuildsHistory(t *testing.T) {
 		t.Fatalf("resume after compact: %v", err)
 	}
 	defer resumed.transcript.Close()
-	if len(resumed.Request.Messages) != 2 || !strings.Contains(resumed.Request.Messages[1].Content, "hardening the loop") {
-		t.Errorf("resume should restore the compacted state, got %d messages", len(resumed.Request.Messages))
+	if len(resumed.Request.Messages) != 4 || !strings.Contains(resumed.Request.Messages[1].Content, "hardening the loop") || resumed.Request.Messages[2].Content != "newest task context" {
+		t.Errorf("resume should restore digest plus newest raw turn, got %d messages", len(resumed.Request.Messages))
+	}
+}
+
+func TestCompactFoldsExistingStateLayer(t *testing.T) {
+	gotContent, _ := stubCompactSummarize(t, "updated state", true, nil)
+	cs := newTestSession(t)
+	cs.Request.Messages = append(cs.Request.Messages, Message{Role: RoleUser, Content: "[Session state]\nprior-decision-marker"})
+	cs.writeTranscript(cs.Request.Messages[1])
+	cs.ws = cs.newWorkingSet(2)
+	appendTestTurn(cs, 1, "older raw turn", "older answer")
+	appendTestTurn(cs, 2, "newest raw turn", "newest answer")
+
+	if err := cs.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(*gotContent, "prior-decision-marker") || !strings.Contains(*gotContent, "older raw turn") {
+		t.Fatalf("compaction input lost layered state: %q", *gotContent)
+	}
+	if strings.Contains(*gotContent, "newest raw turn") {
+		t.Fatalf("compaction input included newest turn: %q", *gotContent)
 	}
 }
 
@@ -1628,7 +1663,9 @@ func TestCompactErrors(t *testing.T) {
 	t.Run("uncompressed is refused — nothing to compress", func(t *testing.T) {
 		stubCompactSummarize(t, "", false, nil) // fit a single chunk → nothing to compact
 		cs := newTestSession(t)
-		cs.Append(Message{Role: RoleUser, Content: "short"})
+		cs.ws = cs.newWorkingSet(1)
+		appendTestTurn(cs, 1, "old "+strings.Repeat("x", 3000), "old answer")
+		appendTestTurn(cs, 2, "current", "current answer")
 		before := len(cs.Request.Messages)
 
 		err := cs.Compact(context.Background())
@@ -1643,7 +1680,9 @@ func TestCompactErrors(t *testing.T) {
 	t.Run("empty digest leaves history unchanged", func(t *testing.T) {
 		stubCompactSummarize(t, "  ", true, nil) // compressed but empty
 		cs := newTestSession(t)
-		cs.Append(Message{Role: RoleUser, Content: "work"})
+		cs.ws = cs.newWorkingSet(1)
+		appendTestTurn(cs, 1, "old "+strings.Repeat("x", 3000), "old answer")
+		appendTestTurn(cs, 2, "current", "current answer")
 		before := len(cs.Request.Messages)
 
 		if err := cs.Compact(context.Background()); err == nil {
@@ -1877,7 +1916,7 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		// With the P1 fix, ephemeral is appended to system message, not separate.
 		// The stored system message should have the ephemeral content appended.
 		if wire[0].Content != sys+"\n\n"+req.EphemeralSystem {
-			t.Errorf("system message should have ephemeral appended: got %q, want %q", 
+			t.Errorf("system message should have ephemeral appended: got %q, want %q",
 				wire[0].Content, sys+"\n\n"+req.EphemeralSystem)
 		}
 		// Original user message should still be at index 1 (unchanged position)

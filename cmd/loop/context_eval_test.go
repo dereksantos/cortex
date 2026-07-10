@@ -338,7 +338,7 @@ func TestContextEvalCompactSeam(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
 	origCompact := compactSummarize
-	compactSummarize = func(ctx context.Context, cs *CortexSession, path string, window int) (string, bool, error) {
+	compactSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
 		return "COMPACT-DIGEST-marker of the session so far", true, nil
 	}
 	defer func() { compactSummarize = origCompact }()

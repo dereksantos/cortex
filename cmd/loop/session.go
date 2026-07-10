@@ -343,24 +343,62 @@ func (cs *CortexSession) restoreSessionState(state sessionState) error {
 	return nil
 }
 
-var compactSummarize = func(ctx context.Context, cs *CortexSession, path string, window int) (string, bool, error) {
-	return cs.Summarize(ctx, path, compactGoal, window)
+var compactSummarize = func(ctx context.Context, cs *CortexSession, content string, window int) (string, bool, error) {
+	return cs.SummarizeText(ctx, content, compactGoal, window)
 }
 
 func (cs *CortexSession) contextRatio() float64 {
 	return float64(cs.LastPromptTokens) / float64(cs.windowSize())
 }
 
+func (cs *CortexSession) compactPrefix() (end int, content string, ok bool) {
+	if cs.ws == nil {
+		return 0, "", false
+	}
+	spans := cs.ws.TurnSpans()
+	// Keep the newest completed turn verbatim. Compacting only older complete
+	// turns preserves the active seam and cannot split a tool-call sequence.
+	if len(spans) < 2 {
+		return 0, "", false
+	}
+	end = spans[len(spans)-2].End
+	if end <= cs.ws.Base() || end > len(cs.Request.Messages) {
+		return 0, "", false
+	}
+	var b strings.Builder
+	// Include the existing state layer (messages before base, excluding the
+	// system seed) so repeated compactions fold old state into the new digest
+	// instead of discarding it. Eligibility is still determined only by
+	// completed working-set turns.
+	for _, msg := range cs.Request.Messages[1:end] {
+		b.WriteString(msg.Role)
+		b.WriteString("\n")
+		b.WriteString(msg.Content)
+		for _, call := range msg.ToolCalls {
+			fmt.Fprintf(&b, "\n  tool %s %s", call.Function.Name, call.Function.Arguments)
+		}
+		b.WriteString("\n\n")
+	}
+	return end, b.String(), true
+}
+
 func (cs *CortexSession) Compact(ctx context.Context) error {
 	if cs.transcript == nil || cs.SessionID == "" {
 		return fmt.Errorf("no transcript to compact (unpersisted session)")
 	}
-	path := filepath.Join(sessionsDir(), cs.SessionID+".jsonl")
+	if cs.ws == nil {
+		return fmt.Errorf("working set unavailable; nothing to compact yet")
+	}
+	base := cs.ws.Base()
+	end, content, ok := cs.compactPrefix()
+	if !ok {
+		return fmt.Errorf("fewer than two completed turns; nothing to compact yet")
+	}
 	window := cs.windowSize() / 4
 	if sw := cs.studyWindow(); sw < window {
 		window = sw
 	}
-	digest, compressed, err := compactSummarize(ctx, cs, path, window)
+	digest, compressed, err := compactSummarize(ctx, cs, content, window)
 	if err != nil {
 		return fmt.Errorf("compact: %w", err)
 	}
@@ -372,25 +410,39 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 		return fmt.Errorf("compact: summarizer returned an empty digest")
 	}
 
+	from := cs.SessionID
+	// Build the replacement completely before touching the live session. The
+	// raw source transcript remains immutable and is linked by the compaction
+	// entry, so recall citations into it remain valid.
 	sys := cs.Request.Messages[0]
 	summary := Message{
 		Role:    RoleUser,
-		Content: "[Compacted session — summary of the conversation so far. Continue from this state.]\n\n" + digest,
+		Content: "[Session state — compacted summary of earlier completed turns from @session/" + from + ". Continue from this state; use study on that transcript if raw detail is needed.]\n\n" + digest,
 	}
-	from := cs.SessionID
+	kept := append([]Message(nil), cs.Request.Messages[end:]...)
+	keptTurns := make([]int, len(kept))
+	for i := range keptTurns {
+		keptTurns[i] = cs.turns
+	}
+	coverage := float64(end-base) / float64(len(cs.Request.Messages)-base)
 	cs.transcript.Close()
 	cs.transcript = nil
-	cs.Request.Messages = []Message{sys}
+	cs.Request.Messages = []Message{sys, summary}
 	cs.StartTranscript()
-	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from})
-	cs.Append(summary)
-	cs.ws = cs.newWorkingSet(2)
+	cs.writeEntry(sessionEntry{Kind: kindCompaction, From: from, Coverage: coverage})
+	for i, msg := range kept {
+		cs.turnNo = keptTurns[i]
+		cs.Append(msg)
+	}
+	cs.turnNo = 0
+	cs.ws, _ = cs.replayWorkingSet(cs.Request.Messages, append([]int{0, 0}, keptTurns...))
 	cs.outline = nil
 	cs.outlineFolded = ""
 	cs.Request.OutlineBlock = ""
-	cs.Request.PrefixEnd = 0
-	cs.Request.TailFrom = 0
-	cs.LastPromptTokens = 0
+	cs.Request.PrefixEnd = cs.ws.Base()
+	cs.Request.TailFrom = cs.ws.FrontierMsg()
+	cs.LastPromptTokens = cs.currentContextSize()
+	cs.writeSessionState()
 	return nil
 }
 
