@@ -2,9 +2,25 @@
 
 > **Purpose.** Design a set of tools that allow the LLM running the Cortex agent loop to modify its own context window, enabling smarter context management and self-compression while preserving safety invariants.
 >
-> **Status.** Research artifact — foundation for implementation planning.
+> **Status. SHIPPED (2026-07-10), with one cut.** Four tools are live in the
+> coder's toolset (`internal/tools/context*.go`, seams on `CortexSession` in
+> `cmd/cortex/session_core.go`, config gates `tools.enable_context_*`):
+> `context_summarize`, `context_evict`, `context_merge`,
+> `context_adjust_watermarks`. **`context_reorder` was cut**: the wire is
+> assembled from the raw message log, so reordering turn spans could never
+> change what the model sees — and a real reorder would violate this doc's own
+> invariant #2 (never restructure in place) and break the LCP prompt cache.
 >
-> **Owner.** Context architecture team + agent loop engineers.
+> As-built deltas from the design below: citations are the real
+> `@session/<id>#m<start>-<end>` message-range coordinates (not `#t<ordinal>`);
+> `context_merge` replaces the range with one merged entry carrying a single
+> **spanning** citation `#m<firstStart>-<lastEnd>` — turn spans partition the
+> message log, so recall of the span resolves every original message; all
+> mutations are **session-local working-set state** — they revert on resume,
+> because the frontier is derived by replaying policy over the transcript (the
+> window is a cache, not a record — `context-architecture.md`), which stands in
+> for the "all changes journaled" line below. Tests:
+> `internal/tools/context_tools_test.go`, `cmd/cortex/context_tools_test.go`.
 
 ---
 
@@ -313,7 +329,12 @@ func contextMerge(tc ToolCall, deps ToolDeps) (string, error) {
 
 ---
 
-### 4.5 Tool 4: `context_reorder(by="salience|recency|task-relevance")`
+### 4.5 Tool 4: `context_reorder(by="salience|recency|task-relevance")` — CUT
+
+> **Not built** (see Status). The wire layout is derived from the raw message
+> log, so span reordering is unobservable by construction; an observable
+> reorder would violate invariant #2 and the prompt-cache economics. Kept for
+> the record.
 
 **Purpose**: Reorder hydrated tail by relevance score.
 
@@ -432,7 +453,6 @@ Each tool is controlled by a boolean flag in `.cortex/config.json` under `tools`
 | `context_summarize` | `tools.enable_context_summarize` | enabled |
 | `context_evict` | `tools.enable_context_evict` | enabled |
 | `context_merge` | `tools.enable_context_merge` | enabled |
-| `context_reorder` | `tools.enable_context_reorder` | enabled |
 | `context_adjust_watermarks` | `tools.enable_context_adjust_watermarks` | enabled |
 
 **Example configuration**:
