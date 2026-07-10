@@ -231,12 +231,13 @@ type Config struct {
 type ToolConfig struct {
 	AllowDelete *bool  `json:"allow_delete"`
 	DeleteRoot  string `json:"delete_root"`
+	EnableWeb   *bool  `json:"enable_web"`
 
 	// Context window modification tools
-	EnableContextSummarize     *bool `json:"enable_context_summarize"`
-	EnableContextEvict         *bool `json:"enable_context_evict"`
-	EnableContextMerge         *bool `json:"enable_context_merge"`
-	EnableContextReorder       *bool `json:"enable_context_reorder"`
+	EnableContextSummarize        *bool `json:"enable_context_summarize"`
+	EnableContextEvict            *bool `json:"enable_context_evict"`
+	EnableContextMerge            *bool `json:"enable_context_merge"`
+	EnableContextReorder          *bool `json:"enable_context_reorder"`
 	EnableContextAdjustWatermarks *bool `json:"enable_context_adjust_watermarks"`
 }
 
@@ -474,6 +475,24 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	}
 	if over.DeleteRoot != "" {
 		base.DeleteRoot = over.DeleteRoot
+	}
+	if over.EnableWeb != nil {
+		base.EnableWeb = over.EnableWeb
+	}
+	if over.EnableContextSummarize != nil {
+		base.EnableContextSummarize = over.EnableContextSummarize
+	}
+	if over.EnableContextEvict != nil {
+		base.EnableContextEvict = over.EnableContextEvict
+	}
+	if over.EnableContextMerge != nil {
+		base.EnableContextMerge = over.EnableContextMerge
+	}
+	if over.EnableContextReorder != nil {
+		base.EnableContextReorder = over.EnableContextReorder
+	}
+	if over.EnableContextAdjustWatermarks != nil {
+		base.EnableContextAdjustWatermarks = over.EnableContextAdjustWatermarks
 	}
 	return base
 }

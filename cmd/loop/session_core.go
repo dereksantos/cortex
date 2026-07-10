@@ -12,6 +12,7 @@ import (
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/tools"
 )
 
 type CortexArgs []string
@@ -170,11 +171,14 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 		t.EnableContextMerge == nil &&
 		t.EnableContextReorder == nil &&
 		t.EnableContextAdjustWatermarks == nil &&
+		t.EnableWeb == nil &&
 		t.AllowDelete == nil &&
 		t.DeleteRoot == "" {
 		return true // default: all tools enabled
 	}
 	switch toolName {
+	case tools.FunctionWebSearch, tools.FunctionFetchURL:
+		return t.EnableWeb == nil || *t.EnableWeb
 	case "context_summarize":
 		return t.EnableContextSummarize == nil || *t.EnableContextSummarize
 	case "context_evict":
@@ -250,12 +254,12 @@ func (cs *CortexSession) ReorderTail(metric string) []cache.TurnSpan {
 // AdjustWatermarks adjusts the working set watermarks by the given deltas.
 // Bounded (±W/4) to prevent abuse. Returns (oldHigh, oldLow, newHigh, newLow, error).
 func (cs *CortexSession) AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error) {
-    if cs.ws == nil {
-        return 0, 0, 0, 0, fmt.Errorf("working set not available")
-    }
-    oldHigh, oldLow := cs.ws.GetWatermarks()
-    newHigh, newLow, err := cs.ws.AdjustWatermarks(highDelta, lowDelta)
-    return oldHigh, oldLow, newHigh, newLow, err
+	if cs.ws == nil {
+		return 0, 0, 0, 0, fmt.Errorf("working set not available")
+	}
+	oldHigh, oldLow := cs.ws.GetWatermarks()
+	newHigh, newLow, err := cs.ws.AdjustWatermarks(highDelta, lowDelta)
+	return oldHigh, oldLow, newHigh, newLow, err
 }
 
 func toolsExcept(ts []Tool, name string) []Tool {

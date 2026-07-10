@@ -78,6 +78,38 @@ func TestConfigToolMerges(t *testing.T) {
 		}
 	})
 
+	t.Run("tool options merge independently", func(t *testing.T) {
+		yes, no := true, false
+		base := ToolConfig{
+			AllowDelete:          &yes,
+			EnableWeb:            &yes,
+			EnableContextEvict:   &no,
+			EnableContextReorder: &yes,
+		}
+		over := ToolConfig{
+			EnableWeb:                     &no,
+			EnableContextAdjustWatermarks: &no,
+		}
+		got := mergeTools(base, over)
+		if got.AllowDelete != &yes || got.EnableContextEvict != &no || got.EnableContextReorder != &yes {
+			t.Fatalf("base options were lost: %#v", got)
+		}
+		if got.EnableWeb != &no || got.EnableContextAdjustWatermarks != &no {
+			t.Fatalf("override options were not applied: %#v", got)
+		}
+	})
+
+	t.Run("web tools share one execution gate", func(t *testing.T) {
+		no := false
+		cs := &CortexSession{Config: &Config{Tools: ToolConfig{EnableWeb: &no}}}
+		if cs.IsToolEnabled(tools.FunctionWebSearch) || cs.IsToolEnabled(tools.FunctionFetchURL) {
+			t.Fatal("web tools should be disabled")
+		}
+		if !cs.IsToolEnabled(tools.FunctionReadFile) {
+			t.Fatal("unrelated tools should remain enabled")
+		}
+	})
+
 	t.Run("toolsExcept drops the named tool", func(t *testing.T) {
 		out := toolsExcept(toolSet, FunctionRemove)
 		for _, tl := range out {
