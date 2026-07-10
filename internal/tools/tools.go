@@ -114,6 +114,10 @@ type Validator interface {
 // This is implemented by *CortexSession.
 type OutlineModifier interface {
 	RemoveOutlineEntry(citation string) bool
+	// MergeOutlineEntries replaces the contiguous outline entries from
+	// startCitation through endCitation with one merged entry and returns its
+	// spanning citation (which recall resolves to all the original messages).
+	MergeOutlineEntries(startCitation, endCitation string) (string, error)
 	OutlineLen() int
 }
 
@@ -203,6 +207,9 @@ func (headlessDeps) IsToolEnabled(string) bool                   { return true }
 func (headlessDeps) ValidateToolCall(tc ToolCall) (bool, string) { return true, "" }
 func (headlessDeps) RemoveOutlineEntry(string) bool              { return false }
 func (headlessDeps) OutlineLen() int                             { return 0 }
+func (headlessDeps) MergeOutlineEntries(string, string) (string, error) {
+	return "", errors.New("outline unavailable: no session")
+}
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
 }
@@ -487,7 +494,7 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	case FunctionWebSearch:
 		return webSearch(ctx, tc)
 	case FunctionContextSummarize:
-		return contextSummarize(tc, deps)
+		return contextSummarize(ctx, tc, deps)
 	case FunctionContextEvict:
 		return contextEvict(tc, deps)
 	case FunctionContextMerge:

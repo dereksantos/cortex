@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
@@ -205,12 +206,6 @@ func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
 	return true, ""
 }
 
-// GetOutline returns the current outline entries.
-// Used by context tools to read the outline.
-func (cs *CortexSession) GetOutline() []cache.OutlineEntry {
-	return cs.outline
-}
-
 // RemoveOutlineEntry removes an outline entry by citation.
 // Returns true if the entry was found and removed.
 // This is idempotent (safe to call multiple times).
@@ -222,6 +217,76 @@ func (cs *CortexSession) RemoveOutlineEntry(citation string) bool {
 		}
 	}
 	return false
+}
+
+// MergeOutlineEntries replaces the contiguous outline entries from
+// startCitation through endCitation with a single merged entry. The merged
+// entry carries ONE spanning citation — @session/<id>#m<firstStart>-<lastEnd>
+// — so recall still resolves every original message (turn spans partition the
+// message log, so the span between two outline citations is contiguous even
+// if an entry in between was evicted). Returns the spanning citation.
+func (cs *CortexSession) MergeOutlineEntries(startCitation, endCitation string) (string, error) {
+	sm := citationRe.FindStringSubmatch(startCitation)
+	em := citationRe.FindStringSubmatch(endCitation)
+	if sm == nil || em == nil {
+		return "", fmt.Errorf("citations must be @session/<id>#m<start>-<end> coordinates, as shown in the outline")
+	}
+	if sm[1] != em[1] {
+		return "", fmt.Errorf("citations reference different sessions (%s vs %s)", sm[1], em[1])
+	}
+
+	startIdx, endIdx := -1, -1
+	for i, e := range cs.outline {
+		if e.Citation == startCitation {
+			startIdx = i
+		}
+		if e.Citation == endCitation {
+			endIdx = i
+		}
+	}
+	if startIdx == -1 {
+		return "", fmt.Errorf("start citation %s not found in the outline", startCitation)
+	}
+	if endIdx == -1 {
+		return "", fmt.Errorf("end citation %s not found in the outline", endCitation)
+	}
+	if endIdx <= startIdx {
+		return "", fmt.Errorf("range_end must come after range_start in the outline")
+	}
+
+	spanning := fmt.Sprintf("@session/%s#m%s-%s", sm[1], sm[2], em[3])
+	merged := mergeOutlineEntries(cs.outline[startIdx:endIdx+1], spanning)
+	cs.outline = append(cs.outline[:startIdx], append([]cache.OutlineEntry{merged}, cs.outline[endIdx+1:]...)...)
+	return spanning, nil
+}
+
+// mergeOutlineEntries folds a run of outline entries into one: user heads join
+// on newlines (bounded by outlineUserCap), actions concatenate in order, and
+// the reply head keeps the last non-empty one — the state the run ended in.
+func mergeOutlineEntries(entries []cache.OutlineEntry, citation string) cache.OutlineEntry {
+	users := make([]string, 0, len(entries))
+	var actions []string
+	replyHead := ""
+	for _, e := range entries {
+		if e.User != "" {
+			users = append(users, e.User)
+		}
+		actions = append(actions, e.Actions...)
+		if e.ReplyHead != "" {
+			replyHead = e.ReplyHead
+		}
+	}
+	user := strings.Join(users, "\n")
+	if r := []rune(user); len(r) > outlineUserCap {
+		user = string(r[:outlineUserCap]) + "… (truncated; recall the citation below for the rest)"
+	}
+	return cache.OutlineEntry{
+		Turn:      entries[0].Turn,
+		User:      user,
+		Actions:   actions,
+		ReplyHead: replyHead,
+		Citation:  citation,
+	}
 }
 
 // OutlineLen returns the number of outline entries.

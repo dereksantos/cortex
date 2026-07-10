@@ -9,7 +9,7 @@ import (
 // contextSummarize compresses a demoted turn into a compact digest.
 // Uses the existing Summarizer interface (sequential chunk-and-fold)
 // and preserves citations mechanically.
-func contextSummarize(tc ToolCall, deps ToolDeps) (string, error) {
+func contextSummarize(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// Parse arguments
 	citation, err := tc.StringArg("citation")
 	if err != nil {
@@ -33,7 +33,7 @@ func contextSummarize(tc ToolCall, deps ToolDeps) (string, error) {
 	}
 
 	// Use SummarizeText for in-memory content
-	digest, compressed, err := deps.SummarizeText(context.Background(), rawDetail, goal, budget)
+	digest, compressed, err := deps.SummarizeText(ctx, rawDetail, goal, budget)
 	if err != nil {
 		return "", fmt.Errorf("summarize failed: %w", err)
 	}
