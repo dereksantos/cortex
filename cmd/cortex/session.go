@@ -17,6 +17,7 @@ const (
 	kindMessage    = "message"
 	kindCompaction = "compaction"
 	kindState      = "state"
+	kindContext    = "context"
 	stateVersion   = 1
 )
 
@@ -32,15 +33,33 @@ type sessionState struct {
 	OutlineFolded string               `json:"outline_folded,omitempty"`
 }
 
+// contextSample is one measured-vs-estimated context-fill reading, taken after
+// every model round-trip (loop.go's onStatusUpdate). LastPromptTokens is the
+// real usage.prompt_tokens the provider billed for that call; TailTokensEst is
+// what the demotion heuristic (estTurnTokens/TailTokens, chars/4) believes the
+// tail is at the same instant. The two are otherwise never compared anywhere:
+// demotion fires purely off the estimate (internal/cache.WorkingSet.DemoteBatch),
+// so without this sample there is no record of how far the estimate actually
+// drifted from what was billed at any given moment in a turn.
+type contextSample struct {
+	Iteration        int `json:"iteration"`          // model round-trip number within this turn (1-based)
+	LastPromptTokens int `json:"last_prompt_tokens"` // actual, from the provider's usage.prompt_tokens
+	MaxTokens        int `json:"max_tokens"`         // the completion cap requested for this call
+	TailTokensEst    int `json:"tail_tokens_est"`    // estTurnTokens/TailTokens heuristic, same instant
+	HighWatermark    int `json:"high_watermark"`
+	Window           int `json:"window"`
+}
+
 type sessionEntry struct {
 	TS   time.Time `json:"ts"`
 	Kind string    `json:"kind,omitempty"`
 	Turn int       `json:"turn,omitempty"`
 	Message
 
-	From     string        `json:"from,omitempty"`
-	Coverage float64       `json:"coverage,omitempty"`
-	State    *sessionState `json:"state,omitempty"`
+	From     string         `json:"from,omitempty"`
+	Coverage float64        `json:"coverage,omitempty"`
+	State    *sessionState  `json:"state,omitempty"`
+	Context  *contextSample `json:"context,omitempty"`
 }
 
 func contextDir() string {
@@ -317,6 +336,25 @@ func (cs *CortexSession) writeSessionState() {
 		TotalTurns: cs.ws.TotalTurns(), HighWatermark: high, LowWatermark: low,
 		LastTurn: cs.turns, Outline: append([]cache.OutlineEntry(nil), cs.outline...),
 		OutlineFolded: cs.outlineFolded,
+	}})
+}
+
+// writeContextSample records one measured-vs-estimated context-fill reading.
+// tailEstNow is the caller's estTurnTokens/TailTokens estimate at the same
+// instant lastPromptTokens was billed — callers mid-turn must include the
+// in-progress turn's own not-yet-AddTurn'd messages, since cs.ws.TailTokens()
+// alone only covers turns already recorded.
+func (cs *CortexSession) writeContextSample(iteration, lastPromptTokens, maxTokens, tailEstNow int) {
+	if cs.transcript == nil {
+		return
+	}
+	high := 0
+	if cs.ws != nil {
+		high, _ = cs.ws.GetWatermarks()
+	}
+	cs.writeEntry(sessionEntry{Kind: kindContext, Turn: cs.turnNo, Context: &contextSample{
+		Iteration: iteration, LastPromptTokens: lastPromptTokens, MaxTokens: maxTokens,
+		TailTokensEst: tailEstNow, HighWatermark: high, Window: cs.windowSize(),
 	}})
 }
 

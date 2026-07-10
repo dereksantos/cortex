@@ -94,17 +94,28 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxToolIterations}
 
-	// Update display during the loop for interactive REPL
-	var onStatusUpdate func(int, int)
-	var onAfterToolResult func()
-	if cs.live != nil {
-		onStatusUpdate = func(lastPromptTokens, maxTokens int) {
-			// Update the session's token count for display
-			cs.LastPromptTokens = lastPromptTokens
+	// Sample actual-vs-estimated context fill on every model round-trip (not
+	// just interactively): the transcript otherwise has no record of how far
+	// the char/4 demotion estimate drifts from what the provider actually
+	// billed at any given moment mid-turn. See contextSample in session.go.
+	iter := 0
+	onStatusUpdate := func(lastPromptTokens, maxTokens int) {
+		iter++
+		// Update the session's token count for display
+		cs.LastPromptTokens = lastPromptTokens
+		tailEstNow := 0
+		if cs.ws != nil {
+			tailEstNow = cs.ws.TailTokens() + estTurnTokens(cs.Request.Messages[turnStart:])
+		}
+		cs.writeContextSample(iter, lastPromptTokens, maxTokens, tailEstNow)
+		if cs.live != nil {
 			// Force a redraw of the prompt line with updated context gauge
 			cs.live.SetPrompt(cs.Prompt())
 			cs.live.SetActivity("")
 		}
+	}
+	var onAfterToolResult func()
+	if cs.live != nil {
 		// After each tool result is appended, force a prompt redraw
 		// to update the context gauge with the current context size
 		onAfterToolResult = func() {
