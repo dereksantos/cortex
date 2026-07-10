@@ -210,8 +210,8 @@ Read the full designs in
   bounded public web access.
 - **Remember:** `memory_*` tools curate durable notes; `recall` recovers exact
   demoted conversation turns.
-- **Curate context:** `context_*` tools let the agent summarize, evict, merge,
-  reorder, or tune the active working set within bounded limits.
+- **Curate context:** `context_*` tools let the agent summarize, evict, and
+  merge outline entries and tune the demotion watermarks within bounded limits.
 
 The Study subagent is intentionally narrower than the coder: it can only use
 `outline`, `grep`, and targeted `read_file`. It cannot edit, run commands,
@@ -238,7 +238,6 @@ access the parent conversation, write memory, or recursively invoke Study.
 | `context_summarize` | Compress a demoted turn while preserving its citation. |
 | `context_evict` | Remove an outline entry from the active working set, not the transcript. |
 | `context_merge` | Merge consecutive demoted turns deterministically. |
-| `context_reorder` | Reorder the hydrated tail by salience, recency, or task relevance. |
 | `context_adjust_watermarks` | Apply bounded working-set watermark adjustments. |
 
 </details>
@@ -308,9 +307,9 @@ does not set one. Model roles may override the backend endpoint and key source.
 - **Deletion:** `tools.allow_delete: false` disables `remove_path`;
   `tools.delete_root` changes its confinement root.
 - **Web:** `tools.enable_web: false` disables both public-web tools.
-- **Context controls:** all five are enabled by default and can be disabled
+- **Context controls:** all four are enabled by default and can be disabled
   independently with `tools.enable_context_summarize`,
-  `enable_context_evict`, `enable_context_merge`, `enable_context_reorder`, and
+  `enable_context_evict`, `enable_context_merge`, and
   `enable_context_adjust_watermarks`.
 
 Useful environment variables include `CORTEX_BACKEND`, `CORTEX_HOME`,

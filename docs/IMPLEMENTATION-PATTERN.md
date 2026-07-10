@@ -2,6 +2,11 @@
 
 This document describes how to add context window modification tools using the clean config-based enable/disable pattern.
 
+> **Note (2026-07-10).** The tools shipped; `context_reorder` was cut (see
+> [`context-window-modification-tools.md`](context-window-modification-tools.md)).
+> The code listings here show the pattern, not the live code — the source in
+> `internal/tools/context*.go` and `cmd/cortex/session_core.go` is authoritative.
+
 ## 1. Tool Configuration
 
 ### Add Config Keys to `cmd/cortex/config.go`
@@ -15,7 +20,6 @@ type ToolConfig struct {
     EnableContextSummarize     *bool `json:"enable_context_summarize"`
     EnableContextEvict         *bool `json:"enable_context_evict"`
     EnableContextMerge         *bool `json:"enable_context_merge"`
-    EnableContextReorder       *bool `json:"enable_context_reorder"`
     EnableContextAdjustWatermarks *bool `json:"enable_context_adjust_watermarks"`
 }
 ```
@@ -28,7 +32,6 @@ type ToolConfig struct {
     "enable_context_summarize": true,
     "enable_context_evict": true,
     "enable_context_merge": true,
-    "enable_context_reorder": true,
     "enable_context_adjust_watermarks": true
   }
 }
@@ -50,7 +53,6 @@ const (
     FunctionContextSummarize     = "context_summarize"
     FunctionContextEvict         = "context_evict"
     FunctionContextMerge         = "context_merge"
-    FunctionContextReorder       = "context_reorder"
     FunctionContextAdjustWatermarks = "context_adjust_watermarks"
 )
 
@@ -99,18 +101,6 @@ func contextMerge(tc ToolCall, deps ToolDeps) (string, error) {
     
     // Implementation here
     return "merged entries", nil
-}
-
-// contextReorder reorders hydrated tail.
-// Config check happens at dispatcher level.
-func contextReorder(tc ToolCall, deps ToolDeps) (string, error) {
-    by, err := tc.StringArg("by")
-    if err != nil {
-        return "", fmt.Errorf("by is required: %w", err)
-    }
-    
-    // Implementation here
-    return "reordered tail", nil
 }
 
 // contextAdjustWatermarks adjusts working set watermarks.
@@ -209,12 +199,6 @@ var ContextMergeTool = newTool(FunctionContextMerge,
         "range_end":   stringProp("End citation of range, e.g., @session/20260701-143210#t5"),
     }, "range_start", "range_end"))
 
-var ContextReorderTool = newTool(FunctionContextReorder,
-    "Reorders the hydrated tail based on the given metric. Only rearranges order—it does not evict or compress.",
-    objectSchema(map[string]any{
-        "by": stringProp("Metric to sort by: 'salience', 'recency', or 'task-relevance'"),
-    }, "by"))
-
 var ContextAdjustWatermarksTool = newTool(FunctionContextAdjustWatermarks,
     "Dynamically adjusts the working set watermarks by the given deltas. Bounded (±W/4) to prevent abuse.",
     objectSchema(map[string]any{
@@ -229,7 +213,7 @@ var ContextAdjustWatermarksTool = newTool(FunctionContextAdjustWatermarks,
 var All = []Tool{
     ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
     MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool,
-    ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool,
+    ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool,
 }
 ```
 
@@ -283,8 +267,6 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
         return contextEvict(tc, deps)
     case FunctionContextMerge:
         return contextMerge(tc, deps)
-    case FunctionContextReorder:
-        return contextReorder(tc, deps)
     case FunctionContextAdjustWatermarks:
         return contextAdjustWatermarks(tc, deps)
     }
@@ -306,7 +288,6 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
     if t.EnableContextSummarize == nil &&
         t.EnableContextEvict == nil &&
         t.EnableContextMerge == nil &&
-        t.EnableContextReorder == nil &&
         t.EnableContextAdjustWatermarks == nil &&
         t.AllowDelete == nil &&
         t.DeleteRoot == "" {
@@ -319,8 +300,6 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
         return t.EnableContextEvict == nil || *t.EnableContextEvict
     case "context_merge":
         return t.EnableContextMerge == nil || *t.EnableContextMerge
-    case "context_reorder":
-        return t.EnableContextReorder == nil || *t.EnableContextReorder
     case "context_adjust_watermarks":
         return t.EnableContextAdjustWatermarks == nil || *t.EnableContextAdjustWatermarks
     }
