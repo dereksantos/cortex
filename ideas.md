@@ -74,10 +74,10 @@ What's the context difficulty and scope the agent is dealing with. Perhaps apply
 
 ## Editor integration via ACP
 
-Make `loop` speak ACP (Agent Client Protocol) so Cortex drops into existing
+Make Cortex speak ACP (Agent Client Protocol) so Cortex drops into existing
 Neovim front-ends (agentic.nvim, CodeCompanion) as a back-end — no bespoke
 `cortex.nvim` plugin to write or maintain. Work lives in a Go ACP adapter over
-the existing `Session.Turn` / `loop turn` seam, not in Lua.
+the existing `Session.Turn` / `cortex turn` seam, not in Lua.
 
 The differentiator: every Neovim AI plugin today assumes a frontier model
 behind it. Cortex's thesis — small/local models + working memory + journal — is

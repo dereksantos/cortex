@@ -86,7 +86,7 @@ func (ws *WorkingSet) GetWatermarks() (high, low int) {
 
 ## 4. CortexSession Extension
 
-**File**: `cmd/loop/main.go` (CortexSession methods)
+**File**: `cmd/cortex/main.go` (CortexSession methods)
 
 ```go
 // AdjustWatermarks adjusts the working set watermarks by the given deltas.
@@ -350,7 +350,7 @@ func TestContextAdjustWatermarks_DefaultValues(t *testing.T) {
 
 ## 7. Integration Tests
 
-**File**: `cmd/loop/context_tools_integration_test.go` (add tests)
+**File**: `cmd/cortex/context_tools_integration_test.go` (add tests)
 
 ```go
 func TestContextAdjustWatermarks_Integration(t *testing.T) {

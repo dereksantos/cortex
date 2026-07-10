@@ -9,7 +9,7 @@ import (
 )
 
 // confine.go holds the study subagent's two read-path guards, applied in the
-// study dispatcher (cmd/loop) before a tool executes — once, for every
+// study dispatcher (cmd/cortex) before a tool executes — once, for every
 // path-taking tool — so the tools themselves stay caller-agnostic. See
 // docs/study-subagent.md §1 and §4.
 

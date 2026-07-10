@@ -10,7 +10,7 @@ import (
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
-// TestConfinedPath and TestConfinedPathSymlinkEscape moved to cmd/loop/tools,
+// TestConfinedPath and TestConfinedPathSymlinkEscape moved to cmd/cortex/tools,
 // alongside the unexported confinedPath helper they exercise.
 
 func TestRemovePathTool(t *testing.T) {

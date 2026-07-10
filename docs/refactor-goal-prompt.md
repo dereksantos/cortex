@@ -17,7 +17,7 @@ Per docs/eval-design-example.md, the gate is EXPECTED TO FAIL on every intermedi
    `scripts/verify-study.sh` (all sections green; use --diff-base <branch-point> for the LOC band) + `go test ./...` green + the behavior-preservation characterization test (TestCoderLoopCharacterization) exists. Grows monotonically from ~7/45 toward all-green as phases land.
 
 ø — AGENTIC (the behavior is correct; LIVE model, model-decided):
-   `loop study-eval` drives the real Study subagent over the frozen probes on the live fleet and self-decides via exit code. The END-STATE bar (phase 5 onward): ø is GREEN ⟺ `loop study-eval` EXITS 0 = every probe passes at n=1 on the configured study model, all completed & bounded. THE MODEL IS AVAILABLE — backend + role bindings are already in ~/.cortex/config.json (study draws from the reasoner/study model, deliberating with thinking ON; do not touch config). Run it for real; do not stub, skip, or treat it as optional.
+   `cortex study-eval` drives the real Study subagent over the frozen probes on the live fleet and self-decides via exit code. The END-STATE bar (phase 5 onward): ø is GREEN ⟺ `cortex study-eval` EXITS 0 = every probe passes at n=1 on the configured study model, all completed & bounded. THE MODEL IS AVAILABLE — backend + role bindings are already in ~/.cortex/config.json (study draws from the reasoner/study model, deliberating with thinking ON; do not touch config). Run it for real; do not stub, skip, or treat it as optional.
 
 THE GATE RULE: GREEN-AT-THE-END is the bar that matters, not green-at-the-start. After each phase, run BOTH layers to track progress. Only when Δ all-green AND ø exit 0 simultaneously (at the end) is the work complete. Before the new Study exists, ø is not yet a pass/fail gate (see below) — do not block on it.
 
@@ -27,12 +27,12 @@ THE GATE RULE: GREEN-AT-THE-END is the bar that matters, not green-at-the-start.
 - Study phase 5: rebuild the driver on RunSubagent; ø NOW becomes the real HARD gate and must reach exit 0 — every probe passes at n=1, all completed & bounded. This is reachable BECAUSE grep removes the over-read that fails probe 6 on the old navigator (the flight check hit 3/3 on the earlier probe set, confirming a working impl exits 0). If a probe fails or a run isn't completed/bounded, your Study implementation or prompt is not good enough yet — ITERATE. Do NOT lower T, weaken probes, or defer. (Re-pointing a probe's moved path — see PROBE-PATH RE-POINT below — is allowed; that is fixing a moved path, not weakening.)
 - End state: Δ all-green AND ø exit 0 ⇒ done.
 
-PROBE-PATH RE-POINT (sanctioned; do this at phase 5 — it is NOT "weakening probes"): engine phase 3 renames `cmd/loop/tools` → `internal/tools`, which MOVES two frozen-probe targets out from under their current paths. When you retarget the driver onto RunSubagent, re-point the probes whose targets the refactor moved: studyProbes path `"cmd/loop/tools/tools.go"` → `"internal/tools/tools.go"`; and re-scope the multi-hop probe (path `"cmd/loop"`, gold `{parseXMLToolCalls, Execute}`) so `Execute` stays reachable now that it lives in `internal/tools` (widen its study root, or split the hop across the two packages). Goals and gold facts stay frozen — only the moved path strings change.
+PROBE-PATH RE-POINT (sanctioned; do this at phase 5 — it is NOT "weakening probes"): engine phase 3 renames `cmd/cortex/tools` → `internal/tools`, which MOVES two frozen-probe targets out from under their current paths. When you retarget the driver onto RunSubagent, re-point the probes whose targets the refactor moved: studyProbes path `"cmd/cortex/tools/tools.go"` → `"internal/tools/tools.go"`; and re-scope the multi-hop probe (path `"cmd/cortex"`, gold `{parseXMLToolCalls, Execute}`) so `Execute` stays reachable now that it lives in `internal/tools` (widen its study root, or split the hop across the two packages). Goals and gold facts stay frozen — only the moved path strings change.
 
 PER-PHASE LOOP (every phase, no exceptions):
 1. Implement exactly that phase's tracker scope.
 2. Keep the tree green: `go build ./...`, `go vet ./...`, `./scripts/check.sh`, `go test ./...` all pass. No phase leaves the tree broken.
-3. Run the gate: `scripts/verify-study.sh` (confirm the checks that phase should flip are green) and, whenever ø is present (i.e. not the phase-4 absent window), `loop study-eval` — before phase 5, confirm the 5/6 baseline HOLDS (regression check, not exit 0); at phase 5 and after, confirm exit 0.
+3. Run the gate: `scripts/verify-study.sh` (confirm the checks that phase should flip are green) and, whenever ø is present (i.e. not the phase-4 absent window), `cortex study-eval` — before phase 5, confirm the 5/6 baseline HOLDS (regression check, not exit 0); at phase 5 and after, confirm exit 0.
 4. Commit, message ending with:
    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
@@ -44,10 +44,10 @@ INVARIANTS (verify-study.sh enforces these):
 - Every model request carries a finite max_tokens (Bounds.MaxTokens, threaded through requestFor; subsumes/DELETES applyOutputCap — never two cap sites). Every Subagent profile + the coder Turn set a nonzero MaxTokens.
 - Deletions reach 0 refs: navigator.go, internal/projectindex/, runNavigator, nav* symbols, Navigate, project_index tool (study phase 4). Migrate memory_tools_test.go off projectindex onto internal/outline.
 - Study.Tools == {outline, grep, read_file} (no recursion, no bash); no `search` tool; memory_* unchanged.
-- internal/agent imports only pkg/llm; no internal/* package imports internal/tools; cmd/loop has no sub-packages after phase 3.
+- internal/agent imports only pkg/llm; no internal/* package imports internal/tools; cmd/cortex has no sub-packages after phase 3.
 
 GIT: create a dedicated branch `loop/engine-study-refactor` off the current HEAD; do all work there; commit after each phase. DO NOT git push and DO NOT open a PR (no push without explicit consent). Leave untracked files (e.g. ideas.md) alone.
 
-DONE ⟺ Δ fully green AND ø green: `scripts/verify-study.sh` passes every section (run with --diff-base <branch-point> for the LOC band), `go test ./...` is green, and `loop study-eval` EXITS 0 (every probe passing at n=1, all completed & bounded). Print a final summary: phases landed, verify-study.sh pass count, net source/test LOC delta, and the per-probe ø results (goal-hit, stop-reason, per-tool counts, latency).
+DONE ⟺ Δ fully green AND ø green: `scripts/verify-study.sh` passes every section (run with --diff-base <branch-point> for the LOC band), `go test ./...` is green, and `cortex study-eval` EXITS 0 (every probe passing at n=1, all completed & bounded). Print a final summary: phases landed, verify-study.sh pass count, net source/test LOC delta, and the per-probe ø results (goal-hit, stop-reason, per-tool counts, latency).
 
 IF GENUINELY BLOCKED (a doc instruction is impossible against the real code, or a contradiction the Decisions log doesn't resolve — NOT "a probe failed," which means iterate): stop, leave the tree green and committed at the last good phase, and write a concise blocker note (what, where, what you tried). The docs were reviewed to have no such blockers.

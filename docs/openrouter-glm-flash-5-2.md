@@ -12,7 +12,7 @@ This guide explains how to configure Cortex to use Zhipu's GLM Flash 5.2 model t
 ### 1. Build Cortex
 
 ```bash
-go build -o bin/loop ./cmd/loop
+go build -o bin/cortex ./cmd/cortex
 ```
 
 ### 2. Set Your OpenRouter API Key
@@ -64,7 +64,7 @@ Create `~/.cortex/config.json` (or `.cortex/config.json` in your project):
 Start Cortex REPL:
 
 ```bash
-./bin/loop
+./bin/cortex
 ```
 
 In the REPL, check available models:
@@ -236,7 +236,7 @@ This overrides only the model, keeping other settings from user config or defaul
 
 After configuration:
 
-1. Start using Cortex: `./bin/loop`
+1. Start using Cortex: `./bin/cortex`
 2. Try the study tool: `/study <file-or-directory>`
 3. Read files: `read_file(<path>)`
 4. Edit files with the agent: make changes directly

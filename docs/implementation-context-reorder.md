@@ -89,7 +89,7 @@ func (ws *WorkingSet) getHydratedTail() []TurnSpan {
 
 ## 4. CortexSession Extension
 
-**File**: `cmd/loop/main.go` (CortexSession methods)
+**File**: `cmd/cortex/main.go` (CortexSession methods)
 
 ```go
 // GetHydratedTail returns the current hydrated tail turns.
@@ -321,7 +321,7 @@ func TestContextReorder_Deterministic(t *testing.T) {
 
 ## 7. Integration Tests
 
-**File**: `cmd/loop/context_tools_integration_test.go` (add tests)
+**File**: `cmd/cortex/context_tools_integration_test.go` (add tests)
 
 ```go
 func TestContextReorder_Integration(t *testing.T) {

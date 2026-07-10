@@ -1,7 +1,7 @@
 # Enhanced Web Search Tool Plan with MECE Verification & Quality Assurance
 
 ## Overview
-Add a `web_search` tool to the loop system that performs read-only web searches and content extraction. This tool will be part of the `cmd/loop/tools` package and follow the existing tool patterns, with comprehensive verification and quality assurance throughout implementation.
+Add a `web_search` tool to the loop system that performs read-only web searches and content extraction. This tool will be part of the `cmd/cortex/tools` package and follow the existing tool patterns, with comprehensive verification and quality assurance throughout implementation.
 
 ## Requirements
 
@@ -549,7 +549,7 @@ web_search (ToolCall)
 
 ### File Organization
 ```
-cmd/loop/tools/
+cmd/cortex/tools/
 ├── web_search.go          # Main tool implementation
 ├── web_search_test.go     # Unit tests
 └── web_search_integration_test.go  # Integration tests

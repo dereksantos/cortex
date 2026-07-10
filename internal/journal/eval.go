@@ -15,7 +15,7 @@ const TypeEvalCellResult = "eval.cell_result"
 // .cortex/journal/eval/. It originally mirrored the internal/eval/v2
 // grid framework's CellResult; that framework has since been removed,
 // so this journal struct is now the de-facto canonical eval-result
-// shape. cmd/loop's emitSessionMetrics writes one per REPL session, and
+// shape. cmd/cortex's emitSessionMetrics writes one per REPL session, and
 // the study eval emits an aligned study.result sharing this field
 // vocabulary (see docs/study-subagent.md §5).
 type EvalCellResultPayload struct {

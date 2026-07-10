@@ -5,7 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] / [0.2.0-alpha]
+## [Unreleased]
+
+The active product is now the experimental Cortex coding harness. The daemon,
+dashboard, broad `cortex` CLI, automatic retrieval/distillation pipeline, and
+Claude Code host integration described by the earlier 0.2.0-alpha work were
+removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.md).
+
+### Added
+- Persistent, resumable Cortex REPL and headless/Discord adapters.
+- Bounded two-zone session context with citation-grounded demotion, outline
+  folding, persistent restoration, and exact-message `recall`.
+- Model-driven durable memory through `memory_write`, `memory_read`,
+  `memory_search`, and `memory_forget`.
+- Bounded read-only Study subagent over `outline`, `grep`, and targeted
+  `read_file`.
+- Public, coder-only `web_search` and SSRF-safe `fetch_url` tools.
+- Model-directed context working-set controls for summarizing, evicting,
+  merging, reordering, and adjusting watermarks.
+- Layered user/project config and Anthropic, Ollama, OpenRouter, and generic
+  OpenAI-compatible backends.
+
+### Changed
+- The project now centers on the `cmd/cortex` binary and one shared bounded agent
+  loop for coder and Study roles.
+- Session context uses mechanical two-zone demotion rather than automatic
+  retrieval/distillation as its hot path.
+- Go 1.26 is required.
+
+### Fixed
+- Prompt-cache stability across memory-index updates and incremental context
+  demotion.
+- Web fetching rejects local/private destinations, unsafe redirects, and
+  unbounded response bodies.
+
+---
+
+## [0.2.0-alpha] - historical, pre-slim-down
+
+> The features in this section describe the former daemon/dashboard product,
+> not the current Cortex interface. See [`docs/archive.md`](docs/archive.md).
 
 ### Added
 - **Multi-project support** via single global daemon at `~/.cortex/`

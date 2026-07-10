@@ -19,16 +19,16 @@ import (
 
 // Discord adapter. Cortex knows Discord and nothing else: this file is the only
 // place that imports discordgo, and there is no awareness of any orchestration
-// layer above it — such a layer wraps the whole `loop discord` process
+// layer above it — such a layer wraps the whole `cortex discord` process
 // externally without cortex referencing it.
 //
-// `loop discord` runs the bot inside the loop binary, so it holds an in-memory
+// `cortex discord` runs the bot inside the Cortex binary, so it holds an in-memory
 // CortexSession and calls session.Turn directly — no subprocess, no per-message
 // cold start. A mutex serializes turns, which is what enforces "one session /
 // one change at a time" and bounds cost.
 //
 // Session lifecycle is decided, not hardcoded: at ingress a small-model
-// classifier (classifyRoute, on the loop's own reasoner) routes each message to
+// classifier (classifyRoute, on the Cortex process's own reasoner) routes each message to
 // either CONTINUE the current change or START a new one. Biased to continue — a reset
 // is cheap because per-turn capture already persisted durable facts to .cortex/,
 // so retrieval carries the relevant context into a fresh session. !new / !continue
@@ -58,7 +58,7 @@ type discordBot struct {
 	change    string // active change branch, "" when none has been cut
 }
 
-// runDiscordCLI implements `loop discord`: connect to Discord and drive the
+// runDiscordCLI implements `cortex discord`: connect to Discord and drive the
 // session. Token comes from DISCORD_BOT_TOKEN (env, like the OpenRouter key); an
 // optional DISCORD_CHANNEL_ID restricts the bot to one channel, and
 // DISCORD_SESSION_ID resumes a specific prior session.

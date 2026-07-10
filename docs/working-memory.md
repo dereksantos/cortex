@@ -13,7 +13,7 @@
 > change on top of the existing `decide.route_message` node and
 > `Compact`; Phases 2-3 build the working-set machinery.
 >
-> **Owner.** `cmd/loop/` (foreground turn loop + Think/Dream hosting) +
+> **Owner.** `cmd/cortex/` (foreground turn loop + Think/Dream hosting) +
 > `pkg/cognition/dag/ops/` (scoring + triage + compress nodes).
 >
 > **Builds on.** [`salience-budgets.md`](salience-budgets.md) (the
@@ -132,7 +132,7 @@ to or wholesale-replaces. Working memory needs items to be
 | Background execution | Think (active) / Dream (idle) | exists |
 | **Item-level working-set model** (metadata, pinning, atomic groups) | — | **new** |
 | **Keep/compress/evict triage policy** | a new `decide` node | **new** |
-| **The continuous loop driver + hysteresis** | `cmd/loop` Think hook | **new** |
+| **The continuous loop driver + hysteresis** | `cmd/cortex` Think hook | **new** |
 
 ### Where it runs
 

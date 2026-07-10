@@ -1,185 +1,425 @@
-# Cortex / `loop`
+# Cortex
 
 [![CI](https://github.com/dereksantos/cortex/actions/workflows/test.yml/badge.svg)](https://github.com/dereksantos/cortex/actions/workflows/test.yml)
-[![Go Version](https://img.shields.io/badge/go-1.25%2B-00ADD8)](go.mod)
+[![Go Version](https://img.shields.io/badge/go-1.26-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**An interactive coding agent for small and local models, with working
-memory built in.** `loop` is a single-binary REPL coding harness: it runs
-an agentic tool loop, captures what each turn did, and curates its own
-context window so a long session stays coherent without blowing the
-context budget. It's designed to get good work out of small/local models
-by managing context for them, not by reaching for a bigger model.
+**A coding agent built for long-running sessions and small models.**
 
-> **Status: Experimental.** Research-grade and in daily use on the author's
-> machine, not a polished product. Expect rough edges and breaking changes.
-> The project was recently slimmed to center on `cmd/loop`; the prior
-> `cortex` CLI, eval framework, and Claude-Code host integration were
-> removed (preserved in [`docs/archive.md`](docs/archive.md) and git
-> history).
+Cortex is a local-first coding harness that actively manages its own working
+memory. Recent work stays verbatim, older turns become a cited outline, and the
+original conversation remains available on demand. Durable decisions live in
+notes the agent curates itself.
 
-## What `loop` does
+The goal: let a capable small or local model keep working coherently without
+repeatedly starting over—or reaching for a larger model to compensate for a
+poorly managed context window.
 
-The core loop: **read input → run agentic tool calls → capture the turn →
-curate context → reply.** Three things make it more than a thin wrapper:
+[`Quick start`](#quick-start) · [`How memory works`](#how-working-memory-works) ·
+[`Project status`](#project-status) · [`Roadmap`](ROADMAP.md)
 
-- **Working memory.** Instead of truncating history when the context
-  window fills, `loop` *studies* the conversation into a curated digest
-  (salience-ranked, with cited `file:line` ranges) and continues from
-  that. Compaction fires automatically at ~80% context, or on `/compact`.
-- **Per-turn capture.** Every turn records what it touched — files edited,
-  commands run, the final answer — to an append-only journal, mechanically
-  and without blocking the turn. A background pass distills durable
-  insights. Retrieval injects relevant prior context at turn start.
-- **The `study` tool.** A size-adaptive reader: small targets are inlined
-  whole; large files/directories are chunked, boundary-snapped, and
-  curated against your goal so the model sees signal, not raw bytes.
+> **Experimental:** Cortex is research-grade software used daily by its author.
+> The core harness works, but configuration, compatibility, and memory policy
+> are still evolving.
+
+## See it work
+
+A long-running session does not have to carry every old message in the model's
+active context. When an earlier turn matters again, Cortex gives the agent a
+route back to the exact source:
+
+```text
+you     Fix the cache invalidation bug we discussed earlier.
+
+cortex  The relevant implementation turn is now in the session outline:
+        [@session/20260710-143210#m42-58]
+
+        I'll recall it before changing the cache behavior.
+
+tool    recall @session/20260710-143210#m42-58
+
+cortex  The earlier decision was to preserve the stable prompt prefix and
+        invalidate only the memory-index suffix. I'll verify that invariant
+        against the current code before editing it.
+```
+
+The outline is compact context, not lossy storage. The append-only transcript
+remains the source of truth.
+
+## Why Cortex?
+
+Most coding agents eventually make a blunt trade: keep expanding the prompt,
+truncate old work, summarize the whole conversation, or move to a model with a
+larger window. Cortex explores a different approach: **treat the context window
+as a managed cache over durable history.**
+
+| A typical long session | Cortex |
+|---|---|
+| The transcript grows until it is truncated | The active working set stays bounded |
+| A broad summary replaces exact history | Outline entries retain citations to exact messages |
+| Old details are injected speculatively | The agent recalls relevant detail on demand |
+| Durable memory is extracted automatically | The agent deliberately curates named notes |
+| Large repositories are poured into context | A bounded Study subagent reads targeted spans |
+| A bigger model compensates for context pressure | Context management is designed to help smaller models |
+
+Cortex is not trying to hide all state behind embeddings. Its transcript,
+journal, memory notes, and citations are inspectable files under `.cortex/`.
 
 ## Quick start
 
-**Prerequisites:** Go 1.25+ and a model backend — a local OpenAI-compatible
-endpoint (Ollama at `:11434`, LiteLLM at `:4000`, LM Studio, vLLM), or an
-OpenRouter / Anthropic key.
+You need Go 1.26 and an OpenAI-compatible model endpoint. The examples below
+cover a local Ollama server and hosted models through OpenRouter.
+
+### 1. Build
 
 ```bash
-go build -o bin/loop ./cmd/loop      # build
-
-# point at a backend (any one of):
-export CORTEX_BACKEND=http://localhost:11434      # local OpenAI-compatible
-export OPENROUTER_API_KEY=...                      # or a hosted backend
-
-./bin/loop                            # interactive REPL (fresh session)
-./bin/loop resume                     # resume the latest session
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
+go build -o bin/cortex ./cmd/cortex
 ```
 
-Sessions persist to `.cortex/sessions/<id>.jsonl`. The agent reads an
-`AGENTS.md` from the repo root if present, and has access to the tools
-below.
+### 2. Choose a backend
+
+#### Local: Ollama
+
+Pull a model and create a project-local configuration. Pin both roles because
+Ollama does not expose Cortex's optional fleet-discovery metadata.
+
+```bash
+ollama pull qwen2.5-coder:7b
+mkdir -p .cortex
+cat > .cortex/config.json <<'JSON'
+{
+  "backend": {
+    "endpoint": "http://localhost:11434/v1"
+  },
+  "models": {
+    "code":  { "model": "qwen2.5-coder:7b", "window": 32768 },
+    "study": { "model": "qwen2.5-coder:7b", "window": 32768 }
+  }
+}
+JSON
+```
+
+#### Hosted: OpenRouter
+
+Keep the key in the environment; the config stores only its variable name.
+Replace the model IDs with the models you want for coding and Study.
+
+```bash
+export OPENROUTER_API_KEY='...'
+mkdir -p .cortex
+cat > .cortex/config.json <<'JSON'
+{
+  "backend": {
+    "type": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "key_env": "OPENROUTER_API_KEY"
+  },
+  "models": {
+    "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
+    "study": { "model": "deepseek/deepseek-r1" }
+  }
+}
+JSON
+```
+
+### 3. Start a session
+
+```bash
+./bin/cortex
+```
+
+A useful first prompt:
+
+```text
+Study this repository, explain its architecture, and identify the smallest
+high-value improvement. Don't change anything yet.
+```
+
+Sessions persist to `.cortex/sessions/<id>.jsonl` and can be resumed later:
+
+```bash
+./bin/cortex resume
+```
+
+### Let Cortex introduce itself
+
+Yes—the README can be an input surface for Cortex. Once a backend is configured,
+ask the Study subagent to turn this document into a personal onboarding guide:
+
+```bash
+./bin/cortex study README.md \
+  "Explain how to start Cortex with my backend, then suggest a safe first task"
+```
+
+Or let the coding agent read the README, inspect the checkout, and guide the
+next step interactively:
+
+```bash
+./bin/cortex turn \
+  "Read README.md, inspect this checkout, and tell me whether I am ready to run Cortex. Do not change anything."
+```
+
+That is the practical limit of a static GitHub README—it cannot launch a local
+binary itself, but it can be both the manual and the agent's grounded onboarding
+source.
+
+## How working memory works
+
+```mermaid
+flowchart LR
+    U[User turn] --> A[Coding agent]
+    H[Recent turns<br/>verbatim] --> A
+    O[Older turns<br/>cited outline] --> A
+    O -->|recall citation| T[Append-only transcript]
+    T -->|exact messages| A
+    N[Durable named notes] -->|note index| A
+    A -->|memory tools| N
+    A --> J[Per-turn journal]
+    A --> S[Bounded Study subagent]
+    S --> R[Targeted repository reads]
+```
+
+Cortex separates three things that are often conflated:
+
+1. **Transcript — exact session history.** Every message is persisted. Context
+   demotion does not delete it.
+2. **Working set — what the model sees now.** A cache-stable prefix contains the
+   system prompt, cited outline, and memory index. A watermarked tail keeps
+   recent turns verbatim. Whole old turns demote mechanically under pressure.
+3. **Named notes — durable cross-session memory.** The model decides what is
+   worth saving and uses `memory_write`, `memory_read`, `memory_search`, and
+   `memory_forget` to maintain free-form notes.
+
+`recall` bridges the working set back to the transcript. `/compact` remains a
+manual summarization safety net, not the primary memory mechanism.
+
+Read the full designs in
+[`docs/context-architecture.md`](docs/context-architecture.md) and
+[`docs/memory-tools.md`](docs/memory-tools.md).
+
+## What Cortex can do
+
+- **Navigate:** `outline`, `grep`, `read_file`, and the goal-directed `study`
+  subagent find relevant code without dumping a repository into context.
+- **Change:** `write_file`, `edit_file`, and workspace-confined `remove_path`
+  make reviewable edits.
+- **Verify:** `bash` runs builds and tests behind a command-risk gate.
+- **Research:** coder-only `web_search` and SSRF-safe `fetch_url` provide
+  bounded public web access.
+- **Remember:** `memory_*` tools curate durable notes; `recall` recovers exact
+  demoted conversation turns.
+- **Curate context:** `context_*` tools let the agent summarize, evict, merge,
+  reorder, or tune the active working set within bounded limits.
+
+The Study subagent is intentionally narrower than the coder: it can only use
+`outline`, `grep`, and targeted `read_file`. It cannot edit, run commands,
+access the parent conversation, write memory, or recursively invoke Study.
+
+<details>
+<summary><strong>Complete tool reference</strong></summary>
+
+| Tool | Purpose |
+|---|---|
+| `read_file` | Read a file or exact line range; large targets redirect to Study or a Go declaration skeleton. |
+| `write_file` | Create or overwrite a file. |
+| `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. |
+| `study` | Produce a goal-curated digest of a large file or directory. |
+| `outline` | Map project/file structure without reading all contents. |
+| `grep` | Return bounded `file:line:text` content matches. |
+| `bash` | Run a shell command through the risk gate. |
+| `remove_path` | Delete within the workspace; root, `.git`, and `.cortex` are refused. |
+| `web_search` | Search the public web for ranked titles, URLs, and snippets. |
+| `fetch_url` | Fetch bounded text from a public HTTP(S) URL; private/local destinations are refused. |
+| `memory_write`, `memory_read` | Create/update a durable named note, or read one in full. |
+| `memory_search`, `memory_forget` | Find notes by keyword, or remove an obsolete note. |
+| `recall` | Fetch exact messages behind a session-outline citation. |
+| `context_summarize` | Compress a demoted turn while preserving its citation. |
+| `context_evict` | Remove an outline entry from the active working set, not the transcript. |
+| `context_merge` | Merge consecutive demoted turns deterministically. |
+| `context_reorder` | Reorder the hydrated tail by salience, recency, or task relevance. |
+| `context_adjust_watermarks` | Apply bounded working-set watermark adjustments. |
+
+</details>
 
 ## Commands
 
-```bash
-loop                       # interactive REPL (default)
-loop resume [id]           # resume a prior session (default: latest)
-loop turn [--session id] [--json] <input...>
-                           # headless single turn — for drivers/scripts; session id echoed to stderr
-loop study <path> [goal...] [passes]
-                           # one-off study of a file/dir; prints a curated digest
-loop change <start|commit|status>
-                           # git change lifecycle — one reviewable change at a time (local git only)
-loop discord               # run as a Discord bot (token from DISCORD_BOT_TOKEN)
-loop study-eval [code-grid|wm]
-                           # measure the study tool's latency / coverage / groundedness
+<details>
+<summary><strong>CLI and REPL reference</strong></summary>
+
+```text
+cortex                            interactive REPL
+cortex resume [id]                  resume a session; defaults to latest
+cortex turn [--session id] [--json] <input...>
+                                  run one headless turn
+cortex study <path> [goal...]       run the read-only Study subagent
+cortex change <start|commit|status> local one-change-at-a-time git lifecycle
+cortex discord                      run the Discord adapter
+cortex study-eval [code-grid|wm]    run Study evaluation probes
 ```
 
-### REPL slash commands
-
-| Command | Purpose |
+| REPL command | Purpose |
 |---|---|
-| `/compact` | Distill the conversation into a curated digest now (also auto-fires at ~80% context) |
-| `/clear` | Reset to a fresh session (system prompt + `AGENTS.md`) |
-| `/remember <text>` | Store an explicit, high-precision memory |
-| `/sessions` | List saved sessions and their ids |
-| `/model [name]` | Show role bindings, or switch the coding model |
-| `/quit`, `/exit` | Exit (also Ctrl-D); prints a resume command |
+| `/compact` | Summarize the conversation now as a safety net. |
+| `/clear` | Start a fresh session. |
+| `/sessions` | List persisted session IDs. |
+| `/model [name]` | Show role bindings or switch the coding model for this session. |
+| `/quit`, `/exit` | Exit; Ctrl-D also works. |
 
-## Tools the agent has
+Durable memory is model-driven rather than a slash command. Ask naturally to
+remember or forget something and the agent will use the `memory_*` tools.
 
-Registered in [`internal/tools/tools.go`](internal/tools/tools.go):
-
-| Tool | What it does |
-|---|---|
-| `read_file` | Read a whole file. Large Go files return a declaration skeleton; large non-Go files redirect to `study`. |
-| `write_file` | Write/create a file (parent dirs implied). |
-| `edit_file` | Exact-match replace, whitespace-tolerant retry; supports atomic multi-edit. Preferred over `write_file` for edits. |
-| `study` | Goal-curated reader for large files/directories; returns a grounded digest. |
-| `outline` | Structural map of a project/file without reading all contents. |
-| `grep` | Search project contents and return bounded `file:line:text` matches. |
-| `web_search` | Search the public web for ranked titles, URLs, and snippets. |
-| `fetch_url` | Fetch bounded readable text from a public HTTP(S) URL; local/private addresses are refused. |
-| `bash` | Run a shell command, gated by a risk classifier (see below). |
-| `remove_path` | Delete a file/dir, confined to the workspace (`.git`/`.cortex`/root refused). |
-
-**Shell-risk gate** (`internal/shellrisk`): commands are classified Safe
-(run immediately), Risky (prompt for approval, judged in the context of
-your current request), or Blocked (refused). In headless/piped sessions,
-Risky is treated as Blocked.
+</details>
 
 ## Configuration
 
-Config is layered, lowest to highest precedence:
-`~/.cortex/config.json` (user, set once) → `./.cortex/config.json`
-(project, overrides field-by-field) → `CORTEX_BACKEND` env.
+Configuration layers from user defaults to project overrides:
+
+1. `~/.cortex/config.json` (or `$CORTEX_HOME/config.json`)
+2. the nearest project `.cortex/config.json`
+
+Fields merge individually. `CORTEX_BACKEND` supplies the endpoint when config
+does not set one. Model roles may override the backend endpoint and key source.
 
 ```json
 {
-  "backend": { "type": "openrouter", "endpoint": "https://openrouter.ai/api/v1", "key_env": "OPENROUTER_API_KEY" },
+  "backend": {
+    "type": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "key_env": "OPENROUTER_API_KEY"
+  },
   "models": {
     "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
     "study": { "model": "deepseek/deepseek-r1" }
   },
-  "tools": { "allow_delete": true, "enable_web": true }
+  "tools": {
+    "allow_delete": true,
+    "enable_web": true
+  }
 }
 ```
 
-- **Roles**: `code` (the agent) and `study` (curation/compaction). Each may
-  pin its own `endpoint`, `model`, context `window`, and `thinking`
-  override.
-- **Auth** is resolved at call time from `key_env` (an env-var *name* — the
-  portable default) or `key_service` (a macOS keychain item). Secrets are
-  never written to config.
-- **Deletion**: set `tools.allow_delete: false` to drop the `remove_path`
-  tool; `tools.delete_root` confines it (default: cwd).
-- **Web access**: set `tools.enable_web: false` to disable execution of both
-  `web_search` and `fetch_url`. They are coder-only and are not available to
-  the read-only study subagent.
+- **Roles:** `code` drives the coding agent; `study` drives Study and
+  summarization. Each can set `endpoint`, `model`, `window`, `max_tokens`,
+  `temperature`, `thinking`, and its key source.
+- **Secrets:** `key_env` names an environment variable; `key_service` names a
+  macOS Keychain item. Secret values do not belong in config.
+- **Deletion:** `tools.allow_delete: false` disables `remove_path`;
+  `tools.delete_root` changes its confinement root.
+- **Web:** `tools.enable_web: false` disables both public-web tools.
+- **Context controls:** all five are enabled by default and can be disabled
+  independently with `tools.enable_context_summarize`,
+  `enable_context_evict`, `enable_context_merge`, `enable_context_reorder`, and
+  `enable_context_adjust_watermarks`.
 
-Useful env vars: `CORTEX_BACKEND`, `CORTEX_HOME` (override config home),
-`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`, `NO_COLOR`,
-`CORTEX_LOOP_RENDER=0` (disable markdown rendering). Study experiment
-knobs: `CORTEX_STUDY_{CURATE,DIRECTED,AST}`, `CORTEX_LOOP_STUDY_WINDOW`.
+Useful environment variables include `CORTEX_BACKEND`, `CORTEX_HOME`,
+`CORTEX_LOOP_STREAM`, `CORTEX_LOOP_RENDER`, `NO_COLOR`, and
+`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`.
 
-## Project structure
+## Safety and privacy
 
-```
-cortex/
-├── cmd/loop/            # the loop binary
-│   ├── main.go          # REPL, session, turn loop, dispatch
-│   ├── change.go        # git change lifecycle
-│   ├── discord.go       # Discord adapter
-│   ├── study_eval.go    # study-tool eval harness
-│   ├── tool_deps.go      # session implementation of tool dependency seams
-│   └── ui/              # rendering helpers
-├── internal/
-│   ├── capture/         # fast per-turn event capture
-│   ├── journal/         # append-only event log (source of truth)
-│   ├── storage/         # local store (dormant — kept for a future semantic Reflect)
-│   ├── projectindex/    # structural project mapping
-│   ├── shellrisk/       # command risk classifier
-│   └── projectscan/ lineedit/
-└── pkg/
-    ├── config/          # layered config
-    ├── llm/             # providers (Anthropic, Ollama, OpenRouter, OpenAI-compatible)
-    ├── events/ secret/ cliout/
-```
+Cortex is local-first, not local-only: using a hosted model sends prompts and
+selected tool results to that provider. Runtime state remains inspectable under
+`.cortex/` and is excluded from git by default.
+
+- Shell commands are classified as **Safe**, **Risky**, or **Blocked**. Risky
+  commands require interactive approval and are refused in headless sessions.
+- File deletion is workspace-confined; the workspace root, `.git`, and
+  `.cortex` cannot be removed through `remove_path`.
+- `fetch_url` accepts public HTTP(S) destinations only, rechecks redirects, and
+  bounds response bodies.
+- Study is read-only and independently bounded by iterations, output tokens,
+  cumulative bytes read, deadlines, and no-progress detection.
+- Session context demotion is recoverable: exact history stays in the local
+  transcript even after it leaves the model's active working set.
+
+See [`SECURITY.md`](SECURITY.md) for vulnerability reporting.
+
+## Evidence, not promises
+
+The working-memory thesis is still being evaluated. Current deterministic tests
+exercise the real turn path and assert that:
+
+- every session message is either active or recoverable by citation;
+- the working set remains within its configured budget;
+- demotion preserves whole tool-call/result groups;
+- outline labels and citations survive folding and resume;
+- ordinary turns preserve a stable prompt prefix for cache reuse;
+- memory notes survive across sessions and support update and forget behavior;
+- Study remains read-only and inside its tool, iteration, token, and byte bounds.
+
+Environment-gated live evaluations additionally probe cited recall, bounded
+prompt growth, memory behavior, and Study groundedness against real models.
+The published design notes also record the limits: context runs are still
+short, Study reliability varies by model/backend, and blind recall is harder
+when no visible outline clue signals relevance.
+
+Start with [`docs/context-architecture.md`](docs/context-architecture.md),
+[`docs/memory-tools.md`](docs/memory-tools.md), and
+[`docs/study-subagent.md`](docs/study-subagent.md) for methodology and results.
+
+## Project status
+
+**Working today**
+
+- interactive, headless, resumable, and Discord-driven sessions;
+- bounded two-zone context with exact-message recall;
+- durable model-curated notes and append-only turn capture;
+- coding, navigation, shell, public-web, and context-curation tools;
+- separate code and Study model bindings across OpenAI-compatible backends.
+
+**Still evolving**
+
+- installation and release packaging;
+- model/backend compatibility and reliable tool calling;
+- long-horizon retention and recall evaluation;
+- configuration stability and context-management policy;
+- the next cognition/Think/Dream layer, if evidence justifies reviving it.
+
+**Deliberately deferred**
+
+- a full browser or JavaScript-rendering web tool;
+- automatic restoration of the removed retrieval/rerank/distill pipeline;
+- claiming broad model-quality wins before longer evaluations exist.
+
+The former daemon, dashboard, broad `cortex` CLI, and Claude Code host
+integration were removed when the project narrowed around Cortex. Their history
+is preserved in [`docs/archive.md`](docs/archive.md).
 
 ## Development
 
 ```bash
-go build ./cmd/loop          # build
-go test ./...                # tests (standard library only — no testify)
-./scripts/check.sh           # gofmt + go vet + golangci-lint
+go build ./cmd/cortex
+go test ./...
+go vet ./...
+./scripts/check.sh          # formatting, vet, and golangci-lint
+```
+
+The main architectural seams are:
+
+```text
+cmd/cortex/          binary, REPL/adapters, session composition, shared loop
+internal/agent/    tool-call vocabulary and loop bounds
+internal/cache/    bounded two-zone session working set
+internal/tools/    tool declarations, dispatch, and implementations
+internal/outline/  structural project/file mapping
+internal/memory/   durable model-curated note store
+internal/journal/  append-only event log
+pkg/llm/           Anthropic, Ollama, OpenRouter, OpenAI-compatible providers
+pkg/config/        layered configuration
 ```
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — guide for AI assistants working in this repo
-- [ROADMAP.md](ROADMAP.md) — direction and status
-- [docs/working-memory.md](docs/working-memory.md) — the working-memory design
-- [docs/working-memory-study.md](docs/working-memory-study.md) — study-as-working-memory
-- [docs/loop-production-harness.md](docs/loop-production-harness.md) — the plan to harden `loop`
-- [docs/archive.md](docs/archive.md) — what the system was before centering on `loop`
+- [`CLAUDE.md`](CLAUDE.md) — operational guide for agents and contributors
+- [`ROADMAP.md`](ROADMAP.md) — current direction and status
+- [`docs/context-architecture.md`](docs/context-architecture.md) — two-zone context and citation recall
+- [`docs/memory-tools.md`](docs/memory-tools.md) — model-driven durable memory
+- [`docs/engine-unification.md`](docs/engine-unification.md) — shared agent-loop design and shipped tracker
+- [`docs/study-subagent.md`](docs/study-subagent.md) — bounded read-only Study architecture
+- [`docs/archive.md`](docs/archive.md) — the system before Cortex centered on Cortex
 
 ## License
 
-MIT
+[MIT](LICENSE)

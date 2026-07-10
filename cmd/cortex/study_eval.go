@@ -20,7 +20,7 @@ import (
 // probe passes only on goal-hit AND a completed & bounded run (over-reading hits
 // the read-budget stop; a runaway clamps — both fail) — goal-hit alone is fooled
 // by a brute-reader. HARD gate: exit non-zero unless every probe passes, so an
-// autonomous run reads the verdict from the exit code. Run: `loop study-eval`.
+// autonomous run reads the verdict from the exit code. Run: `cortex study-eval`.
 
 // StudyProbe is one frozen acceptance case: a path to study, a goal, and the gold
 // facts a correct digest must contain. Note records what the probe discriminates.
@@ -50,7 +50,7 @@ func (p StudyProbe) pass(digest string) bool {
 // paths engine phase 3 MOVED are re-pointed here (path strings only — goals and
 // gold facts stay frozen): tools.go → internal/tools/tools.go, and the multi-hop
 // root widened to "." so Execute (now in internal/tools) stays reachable
-// alongside parseXMLToolCalls (cmd/loop).
+// alongside parseXMLToolCalls (cmd/cortex).
 var studyProbes = []StudyProbe{
 	{
 		Path: "pkg/llm",
@@ -59,11 +59,11 @@ var studyProbes = []StudyProbe{
 		Note: "needle: locate one symbol in a package — new study greps to file:line, old must scan an outline",
 	},
 	{
-		Path:    "cmd/loop/loop.go",
+		Path:    "cmd/cortex/loop.go",
 		Goal:    "How does the agent's inner tool loop stop a model that keeps re-issuing the same tool call?",
 		Gold:    []string{"maxRepeatedToolCalls", "nudge", "repeat"},
 		MinGold: 2,
-		Note:    "bounded: the no-progress guard sits in one region of the engine — new outlines then reads a span. Path re-pointed cmd/loop/main.go → cmd/loop/loop.go: the guard (the nudge + repeat counter) MOVED from Resolve into runLoop in the engine refactor (engine-unification.md, 'nudge moves into the engine'). A moved-target re-point, gold frozen.",
+		Note:    "bounded: the no-progress guard sits in one region of the engine — new outlines then reads a span. Path re-pointed cmd/cortex/main.go → cmd/cortex/loop.go: the guard (the nudge + repeat counter) MOVED from Resolve into runLoop in the engine refactor (engine-unification.md, 'nudge moves into the engine'). A moved-target re-point, gold frozen.",
 	},
 	{
 		Path:    "internal/shellrisk",
@@ -83,14 +83,14 @@ var studyProbes = []StudyProbe{
 		Goal:    "Name two things and explain how they connect: the function that parses tool calls out of the model's response, and the method that dispatches/executes a tool call. Trace a call from the model's output to execution and back.",
 		Gold:    []string{"parseXMLToolCalls", "Execute"},
 		MinGold: 2,
-		Note:    "multi-hop: the answer spans cmd/loop (parseXMLToolCalls) and internal/tools (Execute) — needs grep to jump across packages + targeted reads in both. Root widened from cmd/loop to '.' after phase 3 moved Execute into internal/tools (a moved-path re-point, not a weakening).",
+		Note:    "multi-hop: the answer spans cmd/cortex (parseXMLToolCalls) and internal/tools (Execute) — needs grep to jump across packages + targeted reads in both. Root widened from cmd/cortex to '.' after phase 3 moved Execute into internal/tools (a moved-path re-point, not a weakening).",
 	},
 	{
 		Path:    "internal/tools/tools.go",
 		Goal:    "What tools are available to the agent and how are they registered and dispatched?",
 		Gold:    []string{"Execute", "All"},
 		MinGold: 2,
-		Note:    "smoke floor: kept as a no-regression check; path re-pointed from cmd/loop/tools/tools.go after the phase-3 rename",
+		Note:    "smoke floor: kept as a no-regression check; path re-pointed from cmd/cortex/tools/tools.go after the phase-3 rename",
 	},
 }
 

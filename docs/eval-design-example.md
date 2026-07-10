@@ -31,7 +31,7 @@
    │            │                                              │           │
    │   Δ  deterministic            ø  agentic (LIVE model)     │           │
    │   ──────────────────          ───────────────────────    │           │
-   │   verify-study.sh             loop study-eval            │           │
+   │   verify-study.sh             cortex study-eval            │           │
    │     §1 deletions→0 refs         real Study subagent      │           │
    │     §2 engine+seams exist       over frozen probes       │           │
    │     §3 study primitives         on the live fleet        │           │
@@ -93,7 +93,7 @@ are green at the end.
   band. Same answer every run. The only layer that can be fully built **before**
   the code.
 
-- **ø — agentic (the behavior is correct).** `loop study-eval` on the **live
+- **ø — agentic (the behavior is correct).** `cortex study-eval` on the **live
   fleet**: the real `Study` subagent reads frozen probes and answers;
   `countGoalHits` scores whether the must-mention facts are in the digest, and
   the engine's own accounting confirms each run `completed & bounded`. Pinned
@@ -124,7 +124,7 @@ named here** — it lives only in the untracked user config (`~/.cortex/config.j
   `xlam-1b-fc-r`, `embedder`, `reranker` (and variants).
 - **`north` is a reasoning model** (returns `reasoning_content`); a bare
   round-trip answered in ~0.4s.
-- **ø flight result.** `loop study-eval` on `north` with study deliberating
+- **ø flight result.** `cortex study-eval` on `north` with study deliberating
   (thinking ON), over the current pre-refactor navigator path: **pass 3/3,
   median ~33s, 0 errors → exit 0.** With thinking forced OFF it was 2/3 — the
   main.go probe returned a thin ~156-char digest; enabling reasoning lifted it
@@ -151,5 +151,5 @@ named here** — it lives only in the untracked user config (`~/.cortex/config.j
 ```bash
 scripts/verify-study.sh                 # Δ: structural contract (current tree)
 scripts/verify-study.sh --diff-base REF # Δ: + net-LOC band + scoped-diff vs REF
-loop study-eval                         # ø: live-model goal-hit gate (exit code = verdict)
+cortex study-eval                         # ø: live-model goal-hit gate (exit code = verdict)
 ```

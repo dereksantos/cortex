@@ -257,7 +257,7 @@ func TestBashTool(t *testing.T) {
 }
 
 // TestDefaultStudyPasses, TestSpillShellOutput, TestConfinedPath, and
-// TestConfinedPathSymlinkEscape now live in cmd/loop/tools, next to the
+// TestConfinedPathSymlinkEscape now live in cmd/cortex/tools, next to the
 // (unexported) helpers they cover.
 
 func TestExecuteUnknownTool(t *testing.T) {
@@ -1569,7 +1569,7 @@ func appendTestTurn(cs *CortexSession, ordinal int, user, assistant string) {
 
 func TestCompactRebuildsHistory(t *testing.T) {
 	gotContent, gotWindow := stubCompactSummarize(t,
-		"user is hardening the loop; edited cmd/loop/main.go; tests pass", true, nil)
+		"user is hardening the loop; edited cmd/cortex/main.go; tests pass", true, nil)
 
 	cs := newTestSession(t)
 	cs.Window = 64000

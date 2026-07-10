@@ -1,9 +1,9 @@
-# Archive — what Cortex was, before centering on `cmd/loop`
+# Archive — what Cortex was, before centering on `cmd/cortex`
 
 > This document preserves the architecture and intent of the system as it
 > existed up to June 2026, before the project was deliberately slimmed to
-> center on the `cmd/loop` coding harness. The code described here was
-> removed in the `cleanup: center the project on cmd/loop` commit and lives
+> center on the `cmd/cortex` coding harness. The code described here was
+> removed in the `cleanup: center the project on cmd/cortex` commit and lives
 > on in git history (branch `main` at and before that commit). Nothing here
 > is current guidance — it is a record so the reasoning isn't lost.
 >
@@ -17,11 +17,11 @@ research apparatus around them:
 
 - **`cmd/cortex`** — the original harness + the `cortex` CLI (install,
   hooks, slash commands, search/insights/status, journal CLI, eval CLI).
-- **`cmd/loop`** — a newer, focused interactive coding agent.
+- **`cmd/cortex`** — a newer, focused interactive coding agent.
 
 Plus a ~27k-LOC eval framework, benchmark wrappers, a duplicate LLM layer,
-and ~40 design docs. Roughly 47% of the Go code did not support `cmd/loop`.
-The decision was to keep `cmd/loop` as the single harness and remove
+and ~40 design docs. Roughly 47% of the Go code did not support `cmd/cortex`.
+The decision was to keep `cmd/cortex` as the single harness and remove
 everything that only existed to serve `cmd/cortex` or the eval framework —
 recoverable from history if any of it is needed again.
 
@@ -33,7 +33,7 @@ of `pkg/llm`), `internal/web`, `pkg/models`, `pkg/registry`, `pkg/system`,
 the `test/` eval/e2e scaffolding (~1,900 files), the Homebrew formula, the
 Claude-Code plugin manifest, and the cortex-only scripts/CI workflows.
 
-**Kept** (because `cmd/loop` uses them): `internal/{capture, journal,
+**Kept** (because `cmd/cortex` uses them): `internal/{capture, journal,
 storage, study, measure, projectindex, projectscan, shellrisk, lineedit,
 cognition, cognition/fractal}` and `pkg/{cliout, cognition, cognition/dag,
 cognition/dag/ops, cognition/prompts, config, events, llm, secret}`.
@@ -59,7 +59,7 @@ strategy was built around three claims (detailed in the since-removed
 
 The working-memory direction (retained in `working-memory.md`,
 `working-memory-study.md`) is the live continuation of claims 1–2 inside
-`cmd/loop`.
+`cmd/cortex`.
 
 ## The capture pipeline
 
@@ -76,7 +76,7 @@ Capture → Filter → Store → Retrieve → Inject
 - **Retrieve**: fast mechanical lookup (embeddings) + optional LLM rerank.
 - **Inject**: format context for the active model.
 
-`cmd/loop` retains a focused form of this: per-turn structural capture +
+`cmd/cortex` retains a focused form of this: per-turn structural capture +
 async distillation into the journal, and turn-start retrieval injected via
 an ephemeral system block (see CLAUDE.md).
 
@@ -114,7 +114,7 @@ injection queue.
 
 Append-only JSONL per writer-class is canonical; the storage layer
 (in-memory indexes + projection JSONL) is regeneratable from the journal.
-See `journal.md` (retained). Eight writer-classes existed; `cmd/loop`
+See `journal.md` (retained). Eight writer-classes existed; `cmd/cortex`
 exercises `capture`, `observation`, and the feedback/think paths.
 
 | Class | Entry types | fsync |
@@ -145,7 +145,7 @@ The removed `cmd/cortex` binary exposed:
   `PostToolUse` hooks + `/cortex*` slash commands + a status line, declared
   in `.claude-plugin/plugin.json`.
 
-`cmd/loop` replaces the coding-harness verbs with its own (see README);
+`cmd/cortex` replaces the coding-harness verbs with its own (see README);
 the capture/journal/search *libraries* survive, but the standalone CLI
 over them and the Claude-Code host wiring were removed.
 
@@ -167,7 +167,7 @@ results to SQLite + `cell_results.jsonl`. The **Agentic Benefit Ratio**
 later retired in favor of the budget–quality curve; the pre-DAG baseline
 of ABR 0.586 was recorded in `eval-journal.md` (now in git history).
 
-`cmd/loop` keeps a small, focused replacement: `loop study-eval` measures
+`cmd/cortex` keeps a small, focused replacement: `cortex study-eval` measures
 the study tool's latency / coverage / groundedness over a fixture set.
 
 ## DAG protocol + cognition stack (removed 2026-06-27)
@@ -186,7 +186,7 @@ stack was deleted: `pkg/cognition/dag` (engine + op registry), the
 `internal/study` (the blind-sampling study engine the DAG's structural ops
 imported). `internal/cognition` could not be left dormant — it was built on the
 DAG types and stopped compiling without them. The route-message classifier was
-reimplemented as a ~70-line standalone LLM call in `cmd/loop/discord.go`
+reimplemented as a ~70-line standalone LLM call in `cmd/cortex/discord.go`
 (`classifyRoute`/`parseRouteDecision`), preserving the bias-to-continue
 fail-safe. Net: −18,350 src / −11,029 test LOC. The capture/storage write-side
 (`internal/storage`, `capture.NewWithStorage`) is kept dormant as the substrate
@@ -200,7 +200,7 @@ a future semantic `Reflect` profile would project into (see
 - **Claude-Code plugin** (`.claude-plugin/plugin.json`) — hooks + slash
   commands + status line shelling out to `cortex`.
 - **CI**: `release.yml` (cross-platform `cortex` binaries) and `eval.yml`
-  (eval runs). `test.yml` was repointed to build `cmd/loop`.
+  (eval runs). `test.yml` was repointed to build `cmd/cortex`.
 
-No `loop` distribution pipeline exists yet; rebuild one when `loop` is
+No Cortex distribution pipeline exists yet; rebuild one when Cortex is
 ready to ship.

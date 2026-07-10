@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// One change at a time. The persistent loop works on a single branch dedicated
+// One change at a time. The persistent Cortex process works on a single branch dedicated
 // to the active change, so edits stay isolated and reviewable and the "one
 // PR/change at a time" invariant holds. These are the harness-level git
 // primitives an external driver runs around an agent turn; the agent still edits
@@ -17,7 +17,7 @@ import (
 // automated path — a driver surfaces the branch name and a human (or a
 // separately-consented step) does the push.
 
-const changeBranchPrefix = "loop/"
+const changeBranchPrefix = "cortex/"
 
 // gitCmd runs git in the current working directory and returns trimmed combined
 // output. On failure the error carries the command and git's own message, so a
@@ -45,12 +45,12 @@ func currentBranch() (string, error) {
 	return gitCmd("rev-parse", "--abbrev-ref", "HEAD")
 }
 
-// onChangeBranch reports whether HEAD is one of the loop's change branches.
+// onChangeBranch reports whether HEAD is one of the Cortex's change branches.
 func onChangeBranch(branch string) bool {
 	return strings.HasPrefix(branch, changeBranchPrefix)
 }
 
-// startChange creates and checks out loop/<slug> off the current HEAD. It
+// startChange creates and checks out cortex/<slug> off the current HEAD. It
 // refuses when the worktree is dirty: one change at a time means the previous
 // change must be committed (or discarded) before the next one begins, so a
 // half-finished change never bleeds into the new branch.
@@ -78,7 +78,7 @@ func commitChange(message string) (string, error) {
 		return "", err
 	}
 	if !onChangeBranch(branch) {
-		return "", fmt.Errorf("not on a change branch (on %q) — run `loop change start <name>` first", branch)
+		return "", fmt.Errorf("not on a change branch (on %q) — run `cortex change start <name>` first", branch)
 	}
 	clean, err := gitClean()
 	if err != nil {
@@ -123,18 +123,18 @@ func slugifyChange(name string) string {
 	return s
 }
 
-// runChangeCLI implements `loop change <start|commit|status>` — the one-change-
+// runChangeCLI implements `cortex change <start|commit|status>` — the one-change-
 // at-a-time git lifecycle a driver runs around an agent turn. All operations
 // are local; the branch is left for a consented push step.
 func runChangeCLI(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: loop change <start <name> | commit <message> | status>")
+		return fmt.Errorf("usage: cortex change <start <name> | commit <message> | status>")
 	}
 	switch args[0] {
 	case "start":
 		name := strings.TrimSpace(strings.Join(args[1:], " "))
 		if name == "" {
-			return fmt.Errorf("usage: loop change start <name>")
+			return fmt.Errorf("usage: cortex change start <name>")
 		}
 		branch, err := startChange(name)
 		if err != nil {
@@ -145,7 +145,7 @@ func runChangeCLI(args []string) error {
 	case "commit":
 		message := strings.TrimSpace(strings.Join(args[1:], " "))
 		if message == "" {
-			return fmt.Errorf("usage: loop change commit <message>")
+			return fmt.Errorf("usage: cortex change commit <message>")
 		}
 		head, err := commitChange(message)
 		if err != nil {

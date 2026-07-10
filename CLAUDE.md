@@ -1,6 +1,6 @@
-# Cortex / `loop`
+# Cortex
 
-An interactive coding agent (`cmd/loop`) for small and local models, with
+An interactive coding agent (`cmd/cortex`) for small and local models, with
 working memory built in. The project was deliberately slimmed to center on
 this one binary; the prior `cortex` CLI, eval framework, and Claude-Code
 host integration were removed — see [`docs/archive.md`](docs/archive.md)
@@ -15,7 +15,7 @@ for what existed before and why it went.
 > [`docs/working-memory.md`](docs/working-memory.md),
 > [`docs/working-memory-study.md`](docs/working-memory-study.md) — which is kept
 > for history. The harness hardening plan is
-> [`docs/loop-production-harness.md`](docs/loop-production-harness.md).
+> [`docs/cortex-production-harness.md`](docs/cortex-production-harness.md).
 >
 > The **loop/study refactor is SHIPPED** (was specified by
 > [`docs/engine-unification.md`](docs/engine-unification.md) +
@@ -27,7 +27,7 @@ for what existed before and why it went.
 > `internal/agent`, the tool surface in `internal/tools`, the structural map in
 > `internal/outline`. Everything below describes today's (post-refactor) code.
 
-## What `loop` is
+## What Cortex is
 
 A single long-lived REPL process. The turn loop:
 
@@ -48,9 +48,9 @@ Three capabilities distinguish it:
    drains W/2→W/3). Old turns demote mechanically to outline lines with
    `@session/…#m…-…` citations; `recall(citation)` fetches the raw messages
    back; the outline folds via the summarizer only past W/8
-   (`cmd/loop/demote.go`, `internal/cache/`). Prompt size stays bounded
+   (`cmd/cortex/demote.go`, `internal/cache/`). Prompt size stays bounded
    forever — the old ~80% `Compact` (chunk-and-fold summarize,
-   `cmd/loop/summarize.go`, `/compact`) survives only as a safety net.
+   `cmd/cortex/summarize.go`, `/compact`) survives only as a safety net.
 2. **Model-driven memory + per-turn capture.** The agent curates durable
    free-form notes through the `memory_write/read/search/forget` tools
    (`internal/memory`); the note index is injected at turn start
@@ -60,7 +60,7 @@ Three capabilities distinguish it:
    `study(.cortex/journal)` reads on demand. See
    [`docs/memory-tools.md`](docs/memory-tools.md).
 3. **`study` — a bounded read-only subagent.** `study(path, goal)` runs the
-   `Study` profile on the shared `runLoop` engine (`cmd/loop/study.go`): seeded
+   `Study` profile on the shared `runLoop` engine (`cmd/cortex/study.go`): seeded
    with a structural `outline` of the target plus the goal, it works a small
    bounded loop — `outline`, `grep`, `read_file` — to locate exactly the
    goal-relevant code, read those spans, and report a digest. It does not see the
@@ -73,16 +73,16 @@ Three capabilities distinguish it:
 
 | Command | Purpose |
 |---|---|
-| `loop` | Interactive REPL (default) |
-| `loop resume [id]` | Resume a prior session (default: latest) |
-| `loop turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
-| `loop study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
-| `loop change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
-| `loop discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
-| `loop study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
+| `cortex` | Interactive REPL (default) |
+| `cortex resume [id]` | Resume a prior session (default: latest) |
+| `cortex turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
+| `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
+| `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
+| `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
+| `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 
 REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
-`/quit`. Dispatch is in `cmd/loop/main.go` (subcommands ~`:3354`, slash
+`/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands ~`:3354`, slash
 commands ~`:3544`). Memory is model-driven — ask in natural language
 ("remember that …" / "forget the … note") and the agent calls the memory
 tools; the old `/remember` and `/forget` slash commands were removed with the
@@ -185,17 +185,17 @@ and the test suite green.
 ## Build & test
 
 ```bash
-go build ./cmd/loop          # build the binary
+go build ./cmd/cortex          # build the binary
 go test ./...                # full suite
 ./scripts/check.sh           # fmt + vet + lint
 ```
 
 ## Key files
 
-- `cmd/loop/main.go` — REPL, `CortexSession` (composition root), `Turn`, dispatch, config
-- `cmd/loop/loop.go` — the `runLoop` engine + the `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` seams + `requestFor`
-- `cmd/loop/study.go` — the `Study` subagent wiring (`RunSubagent`, `dispatcherFor`, `Outline`) + telemetry
-- `cmd/loop/summarize.go` — free-text summarizer (compaction + shell-output)
+- `cmd/cortex/main.go` — REPL, `CortexSession` (composition root), `Turn`, dispatch, config
+- `cmd/cortex/loop.go` — the `runLoop` engine + the `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` seams + `requestFor`
+- `cmd/cortex/study.go` — the `Study` subagent wiring (`RunSubagent`, `dispatcherFor`, `Outline`) + telemetry
+- `cmd/cortex/summarize.go` — free-text summarizer (compaction + shell-output)
 - `internal/agent/` — the shared tool-call vocabulary (`Tool`, `ToolCall`, `Bounds`); imports only the stdlib
 - `internal/tools/` — the agent's tool surface (`Execute`, the tool decls, `grep`, the `Study` profile, `ConfinePath`/`TargetedRead`)
 - `internal/outline/` — the structural map (`Outline`/`Render`; `go/ast` + regex tiers, breadth-first to budget)

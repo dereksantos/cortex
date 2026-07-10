@@ -88,7 +88,7 @@ Deterministic, no LLM. One entry per demoted turn:
 
 ```
 t12 · user: "make the study eval deterministic"
-      edit cmd/loop/study_eval.go · bash go test ./cmd/loop [ok]
+      edit cmd/cortex/study_eval.go · bash go test ./cmd/cortex [ok]
       ⤷ "pinned temperature; reps now stable"
       [@session/20260701-143210#t12]
 ```

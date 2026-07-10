@@ -39,7 +39,7 @@
 > working-memory triage nodes in `pkg/cognition/dag/ops/`.
 >
 > **Builds on.** [`working-memory.md`](working-memory.md) (the keep/compress/evict
-> triage), and the prefix-cache work in `cmd/loop` (tail-injection + cache_control).
+> triage), and the prefix-cache work in `cmd/cortex` (tail-injection + cache_control).
 
 ---
 
@@ -103,7 +103,7 @@ from pass 2 on and grows with the investigation.
 | Leads / Focus / Deepen affordances for directed sampling | `Deepen{Densify, Target{Focus}}`, `Lead` | exists |
 | Prompt assembly seam | `BuildInferPrompt` (`infer.go:72`) | exists |
 | keep/compress/evict triage over findings | working-memory triage node (`value.score` + `attend.compress`) | exists (compose) |
-| `cache_control` on a stable prefix | `cmd/loop` Anthropic path | exists (port) |
+| `cache_control` on a stable prefix | `cmd/cortex` Anthropic path | exists (port) |
 | **Findings field on `InferInput` + prefix placement** | `infer.go` | **new** |
 | **Window budget split** (findings vs sample) | `study.go` / `sampleAndInfer` | **new** |
 | **Curation of the findings block** | study loop ↔ triage | **new** |
@@ -199,7 +199,7 @@ over a multi-pass run** vs today's independent-passes baseline. Supporting:
 Two coupled additions after observing a REPL transcript where the coder studied
 `main.go` (58% digest) and then `read_file`'d the whole 155 KB file anyway:
 
-- **Fixed curation budget** (`curationBudgetTokens`, cmd/loop). `read_file`
+- **Fixed curation budget** (`curationBudgetTokens`, cmd/cortex). `read_file`
   redirects to study above a *fixed* token threshold, NOT a fraction of the
   coder window. Sizing the trigger to the window let a big-window model read
   everything raw, defeating curation — the whole point is to spend the coder's

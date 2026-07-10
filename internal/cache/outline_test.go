@@ -15,12 +15,12 @@ func TestOutlineEntryRender(t *testing.T) {
 			entry: OutlineEntry{
 				Turn:      5,
 				User:      "What does this code do?",
-				Actions:   []string{"edit cmd/loop/study_eval.go [ok]", "read internal/cache/outline.go [ok]"},
+				Actions:   []string{"edit cmd/cortex/study_eval.go [ok]", "read internal/cache/outline.go [ok]"},
 				ReplyHead: "This function processes the input and returns a formatted string.",
 				Citation:  "@session/20260701-143210:L120-134",
 			},
 			want: `t5 · user: What does this code do?
-      edit cmd/loop/study_eval.go [ok] · read internal/cache/outline.go [ok]
+      edit cmd/cortex/study_eval.go [ok] · read internal/cache/outline.go [ok]
       ⤷ This function processes the input and returns a formatted string.
       [@session/20260701-143210:L120-134]`,
 		},

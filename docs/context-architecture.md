@@ -1,6 +1,6 @@
-# Context Architecture — a cache-friendly working set for `loop`
+# Context Architecture — a cache-friendly working set for Cortex
 
-> **Purpose.** Define how `cmd/loop` assembles the wire context so a session
+> **Purpose.** Define how `cmd/cortex` assembles the wire context so a session
 > can run indefinitely on a fixed window with **bounded per-turn prefill and
 > maximal prompt-cache reuse** — no 80% compaction cliff, no lossy whole-history
 > digest, no model call on the hot path.
@@ -13,7 +13,7 @@
 > [`memory-tools.md`](memory-tools.md) (durable memory is model-driven tools;
 > this doc is only about the *session window*, not durable memory).
 >
-> **Status.** **IMPLEMENTED (P1–P4, 2026-07-03)** — built via the loop harness
+> **Status.** **IMPLEMENTED (P1–P4, 2026-07-03)** — built via the Cortex harness
 > itself (Qwen3-Coder-Next doing the edits from piecewise specs). All phases
 > live: index off the fold, `internal/cache` working set + two-zone wire
 > assembly, transcript turn-stamping + resume replay, `recall(citation)`,
@@ -38,7 +38,7 @@
 >   paste them as rendered.
 >
 > Deltas from the 2026-07-05 self-review (all covered by the context eval,
-> `cmd/loop/context_eval_test.go`):
+> `cmd/cortex/context_eval_test.go`):
 > - **`PrefixEnd` — the pre-turn prefix region.** `wireMessages` originally
 >   omitted `Messages[1:TailFrom]` wholesale, silently dropping content that
 >   was *below the working set's base* and therefore never outlined: the
@@ -64,7 +64,7 @@
 >   bigger than the tail's drain target would flood the hydrated tail and
 >   immediately re-demote.
 >
-> **Owner.** `cmd/loop` (turn assembly) + `internal/cache` (the working-set
+> **Owner.** `cmd/cortex` (turn assembly) + `internal/cache` (the working-set
 > model — the sketch file becomes the package).
 
 ---
@@ -74,7 +74,7 @@
 The provider prompt cache (llama.cpp LCP automatically; Anthropic via
 `cache_control`; OpenRouter provider-dependent) reuses the **longest common
 prefix** of consecutive requests. Anything that changes a byte mid-history
-re-prefills everything after it. Audit of today's `cmd/loop`:
+re-prefills everything after it. Audit of today's `cmd/cortex`:
 
 | Behavior | Cache effect |
 |---|---|
@@ -171,7 +171,7 @@ One entry per demoted turn, rendered mechanically — the same shape
 
 ```
 t12 · user: "make the study eval deterministic"          ← verbatim (principle 1)
-      edit cmd/loop/study_eval.go · bash go test ./cmd/loop [ok]
+      edit cmd/cortex/study_eval.go · bash go test ./cmd/cortex [ok]
       ⤷ "pinned temperature; reps now stable"            ← reply head
       [@session/20260701-143210#t12]                     ← the citation
 ```
@@ -257,8 +257,8 @@ window.
 | Piece | Home | Status |
 |---|---|---|
 | Working-set model: item log, frontier, outline renderer, `Hydrate(budget)`, watermark policy | `internal/cache` (the sketch file becomes the package; stdlib-only, like `internal/agent`) | **new** |
-| Turn assembly calls demote-then-send; `wireMessages` emits the two zones | `cmd/loop` (`Turn`, `transport.go`) | **change** |
-| Memory index → fixed prefix slot | `cmd/loop/turn.go` / `transport.go` | **change** (small, cache-positive on its own) |
+| Turn assembly calls demote-then-send; `wireMessages` emits the two zones | `cmd/cortex` (`Turn`, `transport.go`) | **change** |
+| Memory index → fixed prefix slot | `cmd/cortex/turn.go` / `transport.go` | **change** (small, cache-positive on its own) |
 | Outline entry renderer | reuse `captureTurn`'s distillation | **reuse** |
 | `recall(citation)` | `internal/tools` + a `ToolDeps` method | **new (trivial)** |
 | Outline fold | existing `Summarize` | **reuse** |
@@ -315,7 +315,7 @@ be aggressive about; P4 only matters for genuinely long-haul sessions.
 ## Evals
 
 The deterministic core is automated as **the context eval**
-(`cmd/loop/context_eval_test.go`, plain `go test`): scripted sessions through
+(`cmd/cortex/context_eval_test.go`, plain `go test`): scripted sessions through
 the real `Turn()` loop asserting, at every seam (demotion, fold — including a
 deliberately lossy summarizer, Compact, Clear, resume), that (a) every message
 is on the wire or reachable via a resolvable citation, (b) the wire stays
@@ -324,8 +324,8 @@ under an LCP-cache model while demotion turns stay ≤ the zone budgets, and
 (d) outline labels stay unique and monotonic.
 
 The model- and backend-dependent half is automated as **the live context
-eval** (`cmd/loop/context_eval_live_test.go`, env-gated:
-`CORTEX_LIVE_FLEET=1 go test ./cmd/loop -run ContextEval_Live -v -timeout 1500s`,
+eval** (`cmd/cortex/context_eval_live_test.go`, env-gated:
+`CORTEX_LIVE_FLEET=1 go test ./cmd/cortex -run ContextEval_Live -v -timeout 1500s`,
 fleet/model/window tunable via `CORTEX_CTX_EVAL_*`). It drives a scripted
 session on a real backend: plants a codeword past the outline's verbatim cap,
 fills until it demotes, and grades retention twice — **graded** (outline hint

@@ -3,7 +3,7 @@
 // its files/subdirs; a file lists its top-level units; every entry carries a
 // locator — a child path to outline deeper, or a line span to read_file.
 // Deterministic, no model; a leaf primitive (stdlib + projectscan only, never
-// cmd/loop). See docs/study-subagent.md §2.
+// cmd/cortex). See docs/study-subagent.md §2.
 package outline
 
 import (

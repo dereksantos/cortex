@@ -310,7 +310,7 @@ func indexSlash(s string) int {
 // DORMANT (2026-06-27): these knobs drove the cognition subsystem — Think /
 // Dream / Digest proactive analysis and the retrieval pipeline that consumed
 // Capture / Search — which was deleted with the cognition DAG (see
-// docs/archive.md). Nothing in cmd/loop reads any of these fields today; they
+// docs/archive.md). Nothing in cmd/cortex reads any of these fields today; they
 // are still parsed from config (and the presets in presets.go still build them)
 // so existing config files don't error, but they are inert.
 //

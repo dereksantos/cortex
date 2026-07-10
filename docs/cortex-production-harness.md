@@ -1,6 +1,6 @@
 # Loop → Production Harness
 
-What `cmd/loop` needs to become a production-ready coding harness for local and
+What `cmd/cortex` needs to become a production-ready coding harness for local and
 open-source models — broken into mutually exclusive, collectively exhaustive
 parts, with an explicit "what we don't build" list. Informed by pi.dev,
 opencode, and Claude Code (research notes summarized at the bottom).
@@ -13,7 +13,7 @@ opencode, and Claude Code (research notes summarized at the bottom).
 
 ## Where the loop stands today
 
-~1,200 lines in `cmd/loop/main.go`, plus tests and the study-eval runner:
+~1,200 lines in `cmd/cortex/main.go`, plus tests and the study-eval runner:
 
 - Single bounded agent loop (`Resolve`): send → execute tool calls → feed
   results back → repeat, capped at 100 iterations. Tool errors are
@@ -119,7 +119,7 @@ sessions feel like they lost the thread.
 
 **Need:**
 - ~~Session transcript persistence~~ — done: every REPL session appends each
-  message ambiently to its transcript; `loop resume [id]` continues the
+  message ambiently to its transcript; `cortex resume [id]` continues the
   latest (or a named) session.
 - Capture at turn end — the write side of the learning loop (retrieval is the
   read side; without capture the shelf is empty). Two tiers:

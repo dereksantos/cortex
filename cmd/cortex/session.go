@@ -256,7 +256,7 @@ func invokedName() string {
 			return b
 		}
 	}
-	return "loop"
+	return "cortex"
 }
 
 func loadTranscript(path string) ([]Message, []int, error) {

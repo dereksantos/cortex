@@ -60,7 +60,7 @@ func runTurnCLI(args []string) {
 		}
 	}
 	if input == "" {
-		fmt.Fprintln(os.Stderr, "usage: loop turn [--session <id>] [--json] <input>")
+		fmt.Fprintln(os.Stderr, "usage: cortex turn [--session <id>] [--json] <input>")
 		os.Exit(2)
 	}
 

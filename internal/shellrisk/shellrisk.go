@@ -1,4 +1,4 @@
-// Package shellrisk is the risk gate for the loop harness's run_shell tool.
+// Package shellrisk is the risk gate for the Cortex harness's run_shell tool.
 //
 // It replaces the static binary allowlist with a three-tier assessment so
 // the agent can run anything that isn't risky without a hand-maintained

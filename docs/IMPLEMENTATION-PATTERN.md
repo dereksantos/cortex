@@ -4,7 +4,7 @@ This document describes how to add context window modification tools using the c
 
 ## 1. Tool Configuration
 
-### Add Config Keys to `cmd/loop/config.go`
+### Add Config Keys to `cmd/cortex/config.go`
 
 ```go
 type ToolConfig struct {
@@ -294,7 +294,7 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 
 ## 4. Session Extension
 
-### Add `IsToolEnabled()` to `CortexSession` in `cmd/loop/session_core.go`
+### Add `IsToolEnabled()` to `CortexSession` in `cmd/cortex/session_core.go`
 
 ```go
 // IsToolEnabled reports whether a context window tool is enabled via config.
@@ -330,7 +330,7 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 
 ## 5. Interface Assertion
 
-### Add ConfigProvider assertion in `cmd/loop/main.go`
+### Add ConfigProvider assertion in `cmd/cortex/main.go`
 
 ```go
 var (
@@ -360,7 +360,7 @@ var (
 | Benefit | Explanation |
 |---------|-------------|
 | Single source of truth | Config check in `Execute()` |
-| Clean separation | `internal/tools` doesn't import `cmd/loop` |
+| Clean separation | `internal/tools` doesn't import `cmd/cortex` |
 | Easy to extend | New tools follow same pattern |
 | Testable | Easy to stub `ConfigProvider` in tests |
 | Safe | Headless mode defaults to enabled |

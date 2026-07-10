@@ -16,7 +16,7 @@ func TestSlugifyChange(t *testing.T) {
 		{"collapses runs", "fix   the:: login!!", "fix-the-login"},
 		{"trims edges", "  --Fix Login--  ", "fix-login"},
 		{"keeps digits", "issue 42 retry", "issue-42-retry"},
-		{"strips punctuation", "feat: add `loop turn`", "feat-add-loop-turn"},
+		{"strips punctuation", "feat: add `cortex turn`", "feat-add-cortex-turn"},
 		{"empty falls back", "", "change"},
 		{"punctuation only falls back", "!!!", "change"},
 	}
@@ -29,18 +29,18 @@ func TestSlugifyChange(t *testing.T) {
 	}
 }
 
-// onChangeBranch gates automated commits: only loop/* branches are change
+// onChangeBranch gates automated commits: only cortex/* branches are change
 // branches, so a commit can't accidentally land on main or a feature branch.
 func TestOnChangeBranch(t *testing.T) {
 	tests := []struct {
 		branch string
 		want   bool
 	}{
-		{"loop/fix-login", true},
-		{"loop/change", true},
+		{"cortex/fix-login", true},
+		{"cortex/change", true},
 		{"main", false},
 		{"major-rework", false},
-		{"feature/loop-thing", false},
+		{"feature/cortex-thing", false},
 		{"HEAD", false},
 		{"", false},
 	}

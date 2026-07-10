@@ -288,7 +288,7 @@ func TestContextSummarize_DefaultBudget(t *testing.T) {
 
 ## 7. Integration Tests
 
-**File**: `cmd/loop/context_tools_integration_test.go` (new file)
+**File**: `cmd/cortex/context_tools_integration_test.go` (new file)
 
 ```go
 package main

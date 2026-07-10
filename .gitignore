@@ -236,10 +236,10 @@ dist/
 *.zip
 .claude/
 
-# Loop scratchpad (live REPL build progress, not source of truth)
+# Cortex scratchpad (live REPL build progress, not source of truth)
 PROGRESS-REPL.md
 # Aider session artifacts (when used as a side-by-side tool)
 .aider*
 
-# compiled loop harness binary
-/loop
+# compiled Cortex harness binary
+/cortex

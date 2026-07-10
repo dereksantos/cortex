@@ -18,7 +18,7 @@ import (
 // model saves durable facts, recalls them in a fresh session, updates a stale
 // note, and reaches for the journal when no note holds a detail.
 //
-//	CORTEX_LIVE_FLEET=1 go test ./cmd/loop/ -run Memory.*_Live -v -timeout 1800s
+//	CORTEX_LIVE_FLEET=1 go test ./cmd/cortex/ -run Memory.*_Live -v -timeout 1800s
 //
 // Each scenario runs in its OWN isolated workspace/.cortex, so one scenario's
 // notes never perturb another's prompts (acceptance tests one behavior at a
@@ -164,7 +164,7 @@ func containsFold(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }
 
-// lastReply extracts the {"reply":...} JSON the `loop turn --json` path prints on
+// lastReply extracts the {"reply":...} JSON the `cortex turn --json` path prints on
 // its final stdout line (tool-action chatter, if any, precedes it).
 func lastReply(t *testing.T, out []byte) string {
 	t.Helper()

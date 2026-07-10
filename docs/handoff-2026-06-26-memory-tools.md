@@ -63,7 +63,7 @@ DONE (commit `287d949`):
 
 NEXT (P1 remaining):
 1. **Memory tools** (task: "P1: memory tools"). Add `memory_write/read/search/
-   forget` to `cmd/loop/tools/tools.go`: declarations (`newTool`, see `StudyTool`
+   forget` to `cmd/cortex/tools/tools.go`: declarations (`newTool`, see `StudyTool`
    ~`:175`), add to `All` (~`:212`), dispatch in `ToolCall.Execute` (~`:239`).
    Wire to the store via the `ToolDeps` interface (~`:31`) — add methods like
    `MemoryWrite/Read/Search/Forget`, implement on `CortexSession`, no-op on
@@ -82,7 +82,7 @@ P3 (rip out the mechanical pipeline — see below), P4 (tool-native no-mock eval
 ## P3 — the mechanical machinery to REMOVE (much built earlier this session)
 
 Once tools work, delete from the hot path (keep journal + embedder + navigator):
-- `cmd/loop/main.go`: `retrieve()`, `formatRetrieved`/`formatRetrievedAt`/
+- `cmd/cortex/main.go`: `retrieve()`, `formatRetrieved`/`formatRetrievedAt`/
   `relAge` (freshness injection), the `EphemeralSystem` retrieval wiring in
   `Turn`, `noteTurn`/`distillPending` (auto-distill), `recordRetrieval`.
 - `internal/cognition`: Reflex/Reflect/Resolve usage; `weightByProvenance`
@@ -99,7 +99,7 @@ deleting recent green code.
 ## Key findings / gotchas
 
 - **Doc-count can't demonstrate staleness.** The live eval
-  (`cmd/loop/memory_freshness_live_test.go`, UNTRACKED) proved the model
+  (`cmd/cortex/memory_freshness_live_test.go`, UNTRACKED) proved the model
   *re-derives* file counts via `project_index`/`find` and is never misled by a
   stale "936" memory. Staleness only bites for **non-re-derivable** facts
   (decisions, preferences, history). Re-target P4 evals accordingly. (That file
@@ -116,8 +116,8 @@ deleting recent green code.
 ## Entry points
 
 - `internal/memory/store.go` — the note store (done).
-- `cmd/loop/tools/tools.go` — tool registry (`All`, `Execute`, `ToolDeps`).
-- `cmd/loop/main.go` — `EnableRetrieval` (~`:2108`), `Turn` (~`:3175`),
+- `cmd/cortex/tools/tools.go` — tool registry (`All`, `Execute`, `ToolDeps`).
+- `cmd/cortex/main.go` — `EnableRetrieval` (~`:2108`), `Turn` (~`:3175`),
   `systemMessage` (~`:977`), slash dispatch (~`:3640`).
 - `docs/memory-tools.md` — the design.
 

@@ -8,7 +8,7 @@ import (
 // OutlineEntry is the demoted form of one turn, rendered mechanically — no LLM.
 // Turn is 1-based. User is the user message verbatim (the caller truncates huge
 // pastes before building the entry). Actions are one-line tool summaries like
-// "edit cmd/loop/study_eval.go [ok]". ReplyHead is the first line of the final
+// "edit cmd/cortex/study_eval.go [ok]". ReplyHead is the first line of the final
 // assistant reply. Citation is a deterministic transcript coordinate like
 // "@session/20260701-143210:L120-134".
 type OutlineEntry struct {

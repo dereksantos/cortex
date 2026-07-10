@@ -116,7 +116,7 @@ func checkConfig(tc ToolCall, deps ToolDeps) (bool, string, error) {
 
 ## 4. CortexSession Extension
 
-**File**: `cmd/loop/main.go` (CortexSession methods)
+**File**: `cmd/cortex/main.go` (CortexSession methods)
 
 ```go
 // MergeOutlineEntries merges consecutive outline entries into a single entry.
@@ -360,7 +360,7 @@ func TestContextMerge_Deterministic(t *testing.T) {
 
 ## 6. Integration Tests
 
-**File**: `cmd/loop/context_tools_integration_test.go` (add tests)
+**File**: `cmd/cortex/context_tools_integration_test.go` (add tests)
 
 ```go
 func TestContextMerge_Integration(t *testing.T) {

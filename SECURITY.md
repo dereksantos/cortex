@@ -21,7 +21,7 @@ You can expect an initial response within 7 days. We'll work with you on a fix a
 ## Scope
 
 In scope:
-- The `loop` CLI and its agentic turn loop
+- The `cortex` CLI and its agentic turn loop
 - The shell-risk gate (`internal/shellrisk`) — i.e. a command that should
   be classified Risky/Blocked but runs as Safe, or any bypass of the
   approval prompt
@@ -41,4 +41,4 @@ Out of scope:
   approved anyway — the risk gate mitigates but cannot eliminate this;
   review what the agent proposes
 - Issues that require local code execution as the same user already
-  running `loop`
+  running `cortex`

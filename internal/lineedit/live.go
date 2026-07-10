@@ -46,7 +46,7 @@ type Anchor struct {
 var anchorSpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 // dim wraps s in the bright-black SGR so the status row reads as transient
-// metadata. lineedit keeps its own copy rather than importing the cmd/loop
+// metadata. lineedit keeps its own copy rather than importing the cmd/cortex
 // palette (that would invert the dependency).
 const (
 	ansiDim   = "\033[90m"

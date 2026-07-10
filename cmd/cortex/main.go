@@ -20,7 +20,7 @@ import (
 )
 
 /*
-TODO (production sequence in docs/loop-production-harness.md):
+TODO (production sequence in docs/cortex-production-harness.md):
 [x] Scanner animation v1
 [x] System prompt
 [x] Tool calling v1 (read_file, write_file, bash allowlist)
@@ -188,15 +188,15 @@ type ToolFunction = tools.ToolFunction
 // satisfies each narrow tool role-interface. A missing method fails HERE with a
 // clear location instead of at a distant dispatch call.
 var (
-	_ tools.ToolDeps       = (*CortexSession)(nil)
-	_ tools.MemoryStore    = (*CortexSession)(nil)
-	_ tools.Summarizer     = (*CortexSession)(nil)
-	_ tools.Outliner       = (*CortexSession)(nil)
-	_ tools.SubAgentRunner = (*CortexSession)(nil)
-	_ tools.ShellGate      = (*CortexSession)(nil)
-	_ tools.DeleteGate     = (*CortexSession)(nil)
-	_ tools.ConfigProvider = (*CortexSession)(nil)
-	_ tools.Validator      = (*CortexSession)(nil)
+	_ tools.ToolDeps        = (*CortexSession)(nil)
+	_ tools.MemoryStore     = (*CortexSession)(nil)
+	_ tools.Summarizer      = (*CortexSession)(nil)
+	_ tools.Outliner        = (*CortexSession)(nil)
+	_ tools.SubAgentRunner  = (*CortexSession)(nil)
+	_ tools.ShellGate       = (*CortexSession)(nil)
+	_ tools.DeleteGate      = (*CortexSession)(nil)
+	_ tools.ConfigProvider  = (*CortexSession)(nil)
+	_ tools.Validator       = (*CortexSession)(nil)
 	_ tools.OutlineModifier = (*CortexSession)(nil)
 )
 
@@ -231,15 +231,15 @@ func printAvailableTools() {
 }
 
 func main() {
-	// Study-eval mode: `loop study-eval` runs study over a fixture set and scores
-	// latency / coverage / groundedness. `loop study-eval code-grid` runs the
+	// Study-eval mode: `cortex study-eval` runs study over a fixture set and scores
+	// latency / coverage / groundedness. `cortex study-eval code-grid` runs the
 	// 2×2 granularity × numbering isolation experiment on the code fixture.
 	if len(os.Args) >= 2 && os.Args[1] == "study-eval" {
 		runStudyEvalNav()
 		return
 	}
 
-	// Direct study mode: `loop study <path> [goal...]`. The navigator subagent
+	// Direct study mode: `cortex study <path> [goal...]`. The navigator subagent
 	// reads what the goal needs; there are no deepening passes to configure.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
 		rest := os.Args[2:]
@@ -247,7 +247,7 @@ func main() {
 		return
 	}
 
-	// Headless single-turn mode: `loop turn [--session <id>] [--json] <input…>`
+	// Headless single-turn mode: `cortex turn [--session <id>] [--json] <input…>`
 	// (or the input on stdin). Runs exactly one Turn over a fresh or resumed
 	// session and prints the model's reply — the seam a headless driver or Discord
 	// adapter shells into. Pass the persistent session's id to keep the same
@@ -258,7 +258,7 @@ func main() {
 		return
 	}
 
-	// One-change-at-a-time git lifecycle: `loop change <start|commit|status>`.
+	// One-change-at-a-time git lifecycle: `cortex change <start|commit|status>`.
 	// A driver runs these around an agent turn so each change lands on its own
 	// branch, isolated and reviewable. Local only — see change.go.
 	if len(os.Args) >= 2 && os.Args[1] == "change" {
@@ -269,7 +269,7 @@ func main() {
 		return
 	}
 
-	// Discord adapter: `loop discord` connects to Discord and drives one
+	// Discord adapter: `cortex discord` connects to Discord and drives one
 	// persistent session in-process. The only Discord-aware entry point — see
 	// discord.go. Token + scope come from the environment.
 	if len(os.Args) >= 2 && os.Args[1] == "discord" {
@@ -287,7 +287,7 @@ func main() {
 		printAvailableTools()
 	}
 
-	// `loop resume [id]` continues a prior session (the latest when no id is
+	// `cortex resume [id]` continues a prior session (the latest when no id is
 	// given); otherwise every REPL session persists under a fresh transcript.
 	if len(os.Args) >= 2 && os.Args[1] == "resume" {
 		id := ""
@@ -346,8 +346,8 @@ func main() {
 			// Stray stdlib-logger output (any subsystem that calls log.Printf)
 			// goes to stderr, which in an interactive session lands on top of
 			// the prompt. Divert it to a file so the terminal stays clean
-			// (tail -f .cortex/loop.log for debugging).
-			if lf, err := os.OpenFile(filepath.Join(contextDir(), "loop.log"),
+			// (tail -f .cortex/cortex.log for debugging).
+			if lf, err := os.OpenFile(filepath.Join(contextDir(), "cortex.log"),
 				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 				log.SetOutput(lf)
 				defer lf.Close()

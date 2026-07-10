@@ -15,13 +15,13 @@ lineedit/live.go:263 (a.cancel())
     ↓
 lineedit/live.go:169 (cancel the turn context)
     ↓
-cmd/loop/turn.go:39 (Turn(ctx context.Context, ...))
+cmd/cortex/turn.go:39 (Turn(ctx context.Context, ...))
     ↓
-cmd/loop/loop.go:177 (runLoop(ctx context.Context, ...))
+cmd/cortex/loop.go:177 (runLoop(ctx context.Context, ...))
     ↓
-cmd/loop/streaming.go:231 (cs.send(ctx context.Context))
+cmd/cortex/streaming.go:231 (cs.send(ctx context.Context))
     ↓
-cmd/loop/transport.go:231 (cs.Request.SendStream(ctx, ...))
+cmd/cortex/transport.go:231 (cs.Request.SendStream(ctx, ...))
     ↓
 pkg/llm/stream.go:86 (StreamChat(ctx context.Context, ...))
     ↓
@@ -33,7 +33,7 @@ StreamChat returns with ctx.Err()
 ### 2. Blocking Path (sendOnce) - **WORKING**
 
 ```go
-// cmd/loop/transport.go:207
+// cmd/cortex/transport.go:207
 func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (...) {
     req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
     // ... ctx is properly attached to the request
@@ -54,7 +54,7 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (.
 ### 3. Streaming Path (SendStream → StreamChat) - **FIXED**
 
 ```go
-// cmd/loop/transport.go:231
+// cmd/cortex/transport.go:231
 func (r *AgentRequest) SendStream(ctx context.Context, ...) (*AgentResponse, error) {
     hc := llm.StreamHTTPClient(requestTimeout)
     // ...
@@ -94,20 +94,20 @@ func StreamChat(ctx context.Context, hc *http.Client, ...) (StreamResult, error)
 
 ### Current Tests
 
-1. **`TestSenderCancelClosesConnection`** (cmd/loop/loop_test.go:574)
+1. **`TestSenderCancelClosesConnection`** (cmd/cortex/loop_test.go:574)
    - Tests the blocking path (`sendOnce`)
    - Proves cancel closes the connection
    - ✅ **PASSES** - this path works correctly
 
-2. **`TestSendHonorsContextCancel`** (cmd/loop/main_test.go:1244)
+2. **`TestSendHonorsContextCancel`** (cmd/cortex/main_test.go:1244)
    - Tests blocking `Send()` with a timeout context
    - ✅ **PASSES** - blocking path respects context
 
-3. **`TestCoderDispatchInterruptedAppendsAllResults`** (cmd/loop/main_test.go:1280)
+3. **`TestCoderDispatchInterruptedAppendsAllResults`** (cmd/cortex/main_test.go:1280)
    - Tests tool dispatch when context is already cancelled
    - ✅ **PASSES** - handles already-cancelled context
 
-4. **`TestSendStreamHonorsContextCancel`** (cmd/loop/main_test.go:1266)
+4. **`TestSendStreamHonorsContextCancel`** (cmd/cortex/main_test.go:1266)
    - Tests `SendStream()` with a mid-stream cancel
    - ✅ **PASSES** - streaming path now respects context cancellation
 
@@ -137,10 +137,10 @@ All cancellation tests now pass, proving that context cancellation properly inte
 
 | File | Function | Role | Cancellation Status |
 |------|----------|------|---------------------|
-| `cmd/loop/turn.go` | `Turn` | Entry point | ✅ Passes ctx |
-| `cmd/loop/loop.go` | `runLoop` | Engine loop | ✅ Checks ctx.Err() |
-| `cmd/loop/streaming.go` | `send` | Session.send wrapper | ✅ Passes ctx |
-| `cmd/loop/transport.go` | `SendStream` | HTTP request builder | ✅ Passes ctx |
+| `cmd/cortex/turn.go` | `Turn` | Entry point | ✅ Passes ctx |
+| `cmd/cortex/loop.go` | `runLoop` | Engine loop | ✅ Checks ctx.Err() |
+| `cmd/cortex/streaming.go` | `send` | Session.send wrapper | ✅ Passes ctx |
+| `cmd/cortex/transport.go` | `SendStream` | HTTP request builder | ✅ Passes ctx |
 | `pkg/llm/stream.go` | `StreamChat` | SSE reader | ✅ Context check added |
 | `pkg/llm/registry.go` | `StreamHTTPClient` | Client factory | ✅ Works with ctx |
 
@@ -181,7 +181,7 @@ This pattern:
 
 Run the cancellation tests:
 ```bash
-go test ./cmd/loop/ -run "Cancel" -v
+go test ./cmd/cortex/ -run "Cancel" -v
 go test ./pkg/llm/ -run "Cancel" -v
 ```
 

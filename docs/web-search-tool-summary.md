@@ -136,9 +136,9 @@ A safe, read-only web search tool that performs searches and extracts content fr
 | Phase 6 | Week 11-12 | Tool production-ready | Final quality audit |
 
 ## Files to Create
-- `cmd/loop/tools/web_search.go` - Main implementation
-- `cmd/loop/tools/web_search_test.go` - Unit tests  
-- `cmd/loop/tools/web_search_integration_test.go` - Integration tests
+- `cmd/cortex/tools/web_search.go` - Main implementation
+- `cmd/cortex/tools/web_search_test.go` - Unit tests
+- `cmd/cortex/tools/web_search_integration_test.go` - Integration tests
 
 ## Risk Assessment
 

@@ -1,7 +1,7 @@
 // Package tools holds the tool surface the loop exposes to the model: the
 // tool declarations, the ToolCall dispatcher, and each tool's implementation.
 //
-// The tools are extracted from cmd/loop/main.go as a pure move — no behavior
+// The tools are extracted from cmd/cortex/main.go as a pure move — no behavior
 // change. The session coupling (study engine, shell-risk gate, delete
 // confinement, retrieval) is exposed through the ToolDeps interface so the
 // tools package doesn't import the session package (which would be a cycle,

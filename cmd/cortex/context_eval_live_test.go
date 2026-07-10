@@ -13,7 +13,7 @@ package main
 //     llama.cpp reports through LiteLLM)?
 //   - Bounded prompt: does prompt_tokens stay flat once demotion engages?
 //
-//	CORTEX_LIVE_FLEET=1 go test ./cmd/loop/ -run ContextEval_Live -v -timeout 1800s
+//	CORTEX_LIVE_FLEET=1 go test ./cmd/cortex/ -run ContextEval_Live -v -timeout 1800s
 //
 // Tunables (defaults target the fleet's 80b qwen):
 //

@@ -84,7 +84,7 @@ the need. Start without it.
 ## Phased plan — DONE
 
 - **P1 — tools + storage + index. ✅** `memory_write/read/search/forget` in
-  `cmd/loop/tools/tools.go` (dispatch → `CortexSession` via `ToolDeps`), the
+  `cmd/cortex/tools/tools.go` (dispatch → `CortexSession` via `ToolDeps`), the
   `internal/memory` note store (`.cortex/memory/<name>.md` + `INDEX.md`), index
   injection at turn start (`memoryIndexNote`, folded onto the user turn via
   `EphemeralSystem`), and the memory-principles block in the seed system prompt.

@@ -62,8 +62,8 @@ present_test() { # label  regex
 ############################################################################
 hdr "1. Deletions — the old navigator + project_index must be GONE (→ 0 refs)"
 ############################################################################
-file_absent cmd/loop/navigator.go
-file_absent cmd/loop/navigator_test.go
+file_absent cmd/cortex/navigator.go
+file_absent cmd/cortex/navigator_test.go
 file_absent internal/projectindex
 absent "no runNavigator"        '\brunNavigator\b'
 absent "no navMap/navTools/navMaxDepth/navAllowed" '\b(navMap|navTools|navMaxDepth|navAllowed)\b'
@@ -147,8 +147,8 @@ import_only() { # label  pkg  allowed-internal-prefix
 }
 # internal/agent may only reach pkg/llm (no cortex session / tools-by-name).
 import_only "internal/agent → pkg/llm only" "$MOD/internal/agent" "^$MOD/pkg/llm$"
-# internal/outline must not import cmd/loop (it's a leaf primitive).
-import_only "internal/outline imports no cmd/loop" "$MOD/internal/outline" "^$MOD/(internal/.*|pkg/.*)$"
+# internal/outline must not import cmd/cortex (it's a leaf primitive).
+import_only "internal/outline imports no cmd/cortex" "$MOD/internal/outline" "^$MOD/(internal/.*|pkg/.*)$"
 
 ############################################################################
 hdr "6. Build / vet / tests + eval gate (the green-at-every-phase invariant)"

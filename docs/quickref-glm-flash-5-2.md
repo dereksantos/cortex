@@ -16,7 +16,7 @@ cat > ~/.cortex/config.json <<'EOF'
   }
 }
 EOF
-./bin/loop
+./bin/cortex
 ```
 
 ## Model ID on OpenRouter
@@ -49,7 +49,7 @@ curl https://openrouter.ai/api/v1/models \
   -H "Authorization: Bearer $OPEN_ROUTER_API_KEY" | jq
 
 # Start Cortex
-./bin/loop
+./bin/cortex
 
 # Check current model (in REPL)
 /model

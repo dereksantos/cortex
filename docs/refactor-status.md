@@ -11,9 +11,9 @@ exactly per the docs, phase by phase.
 
 ## ø live gate — GREEN ✅
 
-`loop study-eval` = **6/6, errors 0, EXIT 0**, reproduced on two consecutive
+`cortex study-eval` = **6/6, errors 0, EXIT 0**, reproduced on two consecutive
 fresh-fleet runs. All six probes pass at n=1, completed & bounded: pkg/llm (15s),
-cmd/loop/loop.go (15s), internal/shellrisk (11s), .cortex/journal (32s, gold found
+cmd/cortex/loop.go (15s), internal/shellrisk (11s), .cortex/journal (32s, gold found
 clean), multi-hop "." (15–24s, no peg-500), internal/tools/tools.go (salvaged
 finalize, gold 2/2). The keystones were grep match-centering (#4) and the grep
 output ceiling 12k→6k (#6), which together broke the

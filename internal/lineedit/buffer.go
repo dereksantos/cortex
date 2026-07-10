@@ -1,4 +1,4 @@
-// Package lineedit is a small raw-mode line editor for the loop REPL: cursor
+// Package lineedit is a small raw-mode line editor for the Cortex REPL: cursor
 // movement, emacs-style editing, bracketed paste, and (via Terminal) ESC- or
 // Ctrl-C-to-interrupt a running turn. It owns the TTY in "cbreak" mode —
 // byte-at-a-time input with no echo — while leaving output post-processing on

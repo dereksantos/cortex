@@ -62,7 +62,7 @@ func (ws *WorkingSet) EvictOutlineEntry(citation string) bool {
 
 ## 4. CortexSession Extension
 
-**File**: `cmd/loop/main.go` (CortexSession methods)
+**File**: `cmd/cortex/main.go` (CortexSession methods)
 
 ```go
 // RemoveOutlineEntry removes an outline entry by citation.
@@ -340,7 +340,7 @@ func TestContextEvict_ParseCitation(t *testing.T) {
 
 ## 7. Integration Tests
 
-**File**: `cmd/loop/context_tools_integration_test.go` (add tests)
+**File**: `cmd/cortex/context_tools_integration_test.go` (add tests)
 
 ```go
 func TestContextEvict_Integration(t *testing.T) {

@@ -253,7 +253,7 @@ files/subdirs; a file lists its top-level units. Every entry carries a
 
 A **fresh `internal/outline` package**, not a wrapper over `projectindex` (three
 callers — `navigator.go`, `tools.go`, and `memory_tools_test.go` (which builds a
-`projectindex` over `.cortex/journal`) — all inside `cmd/loop`, so fully
+`projectindex` over `.cortex/journal`) — all inside `cmd/cortex`, so fully
 replaceable; the test migrates onto `internal/outline` in phase 4). The
 AST/regex *knowledge* in `projectindex/outline.go` is re-expressed as small,
 named functions, not imported.
@@ -291,7 +291,7 @@ reliable on a large package.
 func Resolve(ctx context.Context) error      L2853-2932
 type CortexSession struct                     L1099-1198
 func (cs *CortexSession) RunSubagent          L2640-2660
-… +37 more — outline("cmd/loop/main.go", 8000) to expand
+… +37 more — outline("cmd/cortex/main.go", 8000) to expand
 ```
 
 - `budget` units = tokens (≈4 bytes/token). Seed default `studySeedBudget`; the
@@ -491,7 +491,7 @@ added field discriminates that failure:
   ~15-min *tail* event a mean would launder, and a harness for local models lives
   or dies on determinism (2/3 ≠ 3/3).
 - **Defer panel-gold.** Vendored snapshot + panel-consensus `Gold` +
-  `loop study-eval gold` is its own mini-project — add only if keyword proves
+  `cortex study-eval gold` is its own mini-project — add only if keyword proves
   coarse. Likewise **read precision** (useful-bytes ÷ read-bytes) needs gold spans —
   defer with panel-gold.
 - **Telemetry, always-on.** Emit each study run's `StudyEvalResult`-shaped stats
@@ -513,13 +513,13 @@ added field discriminates that failure:
 
 The codebase already has a structured eval sink: **`journal.EvalCellResultPayload`**
 (`internal/journal/eval.go`), written as an `eval.cell_result` entry into
-`.cortex/journal/eval/` — `emitSessionMetrics()` (`cmd/loop/main.go:2432`) already
+`.cortex/journal/eval/` — `emitSessionMetrics()` (`cmd/cortex/main.go:2432`) already
 emits one per REPL session. (Its comment still says it "mirrors
 `internal/eval/v2.CellResult`"; that grid framework was **deleted** — the journal
 struct is now the de-facto canonical one, and the comment is stale.
 `pkg/cliout`'s `source`-discriminated `.cortex/db/cell_results.jsonl` union is a
-**second, dormant** sink from the old `cortex` CLI — **not** wired into `loop`;
-align to the journal one, the path `loop` actually writes.)
+**second, dormant** sink from the old `cortex` CLI — **not** wired into Cortex;
+align to the journal one, the path Cortex actually writes.)
 
 `StudyEvalResult` should **not** be its own bespoke stdout-only shape (today's
 `studyEvalRow` `fmt.Println`s JSONL with off-vocabulary names —
@@ -601,22 +601,22 @@ A separate cleanup may later remove the unused projection; out of scope here.
 pkg/llm/            wire protocol: providers, chat/stream, usage          (exists)
 internal/agent/     THE engine + seams + shared data types               (NEW, phase 3)
                     (Tool, ToolCall, Request, Response, Message; see engine-unification.md)
-internal/outline/   structural primitive: Entry, Outline, Render          (NEW; replaces projectindex's three cmd/loop callers)
+internal/outline/   structural primitive: Entry, Outline, Render          (NEW; replaces projectindex's three cmd/cortex callers)
 internal/memory/    notes store (unchanged — memory_* tools)              (exists)
 internal/journal/   append-only journal (study reads it as a path)        (exists)
-internal/tools/     Tool decls, Execute, pure tools (grep, outline-tool,   (was cmd/loop/tools;
+internal/tools/     Tool decls, Execute, pure tools (grep, outline-tool,   (was cmd/cortex/tools;
                     read_file); role-interfaces (ToolDeps split into       MOVES in phase 3)
                     MemoryStore/Outliner/SubAgentRunner/…); ConfinePath
-cmd/loop/           package main ONLY: REPL + CortexSession (the composition (exists, SHRINKS;
+cmd/cortex/           package main ONLY: REPL + CortexSession (the composition (exists, SHRINKS;
                     root — implements the tool role-interfaces, BUILDS the   no sub-packages
                     agent seams, OWNS the substrate), Turn, config, Study    after phase 3)
-                    wiring  ·  cmd/loop/ui folds away in phase 3
+                    wiring  ·  cmd/cortex/ui folds away in phase 3
 
 dependency arrows (no cycles):
-  cmd/loop ──► internal/tools ──► internal/agent ──► pkg/llm
+  cmd/cortex ──► internal/tools ──► internal/agent ──► pkg/llm
   internal/tools ──► internal/agent   (for the moved data types: Tool, ToolCall,
                                        Request, Response, Message — phase 3)
-  cmd/loop ──► internal/{tools,outline,memory,journal}
+  cmd/cortex ──► internal/{tools,outline,memory,journal}
   internal/agent ──► pkg/llm only   (never internal/tools — the types move INTO agent)
   (invariant) no internal/* package imports internal/tools — only main + the
               inverted type arrow touch the tool surface
@@ -633,7 +633,7 @@ green. Flip ☐→☑ on land.
 all **zero-network**, so the full build-out runs unattended. Goal-hit thresholds
 are **pinned in code** (`StudyProbe.need()` / `pass()`; `verify-study.sh` asserts
 the `passes != total` hard gate), not left to judgment. The **only** model-gated
-steps are the live `loop study-eval` fleet numbers (phase 5) and a manual smoke
+steps are the live `cortex study-eval` fleet numbers (phase 5) and a manual smoke
 `study` — an ops sign-off **after** the code lands, **not** a blocker for marking a
 phase ☑.
 
@@ -642,8 +642,8 @@ phase ☑.
 | 1 | `internal/outline` | `Entry`/`Outline`/`Render`; breadth-first to budget; truncate deep-only (names always listed); go/ast + regex + wholeFile listers | unit tests: budget breadth-first, child-name retention, tree collapse | ☑ |
 | 2 | `grep` tool | pure-Go `grepFiles` (walk + `projectscan` ignore + RE2 + caps + ctx-checks); confinement; `GrepTool` decl | unit tests: cap, binary-skip, ignore-set, bad-regex error, escape rejected | ☑ |
 | 3 | targeted + confined `read_file` | `maxReadLines`; `TargetedRead`; `ConfinePath` (allows `.cortex/journal`, blocks escapes) | unit tests: floor, refuse, clamp, abs/`..` rejected, journal allowed | ☑ |
-| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **retarget the eval driver** — `study_eval.go` already holds the discriminating `StudyProbe` set + `pass()` scorer + per-probe timeout (the old `navEvalCases` were replaced 2026-06-28); when `runNavigator` is deleted here, point `runStudyEvalNav` at `RunSubagent` (phase 5 finishes the scorer wiring). Keep `countGoalHits`/`StudyProbe` | `loop study` works on the new path; old nav code + `projectindex` gone (incl. the test caller); `study_eval.go` calls `RunSubagent`, not `runNavigator`; suite green | ☑ |
-| 5 | eval + telemetry | retarget the driver from `runNavigator` to `RunSubagent` (the discriminating `StudyProbe` set, `pass()` scorer, and per-probe timeout already exist in `study_eval.go`); **re-point the two frozen probes whose targets engine phase 3 MOVED** — `Path: "cmd/loop/tools/tools.go"` → `"internal/tools/tools.go"`, and re-scope the multi-hop probe (`Path: "cmd/loop"`, gold `{parseXMLToolCalls, Execute}`) so `Execute` stays reachable now that it lives in `internal/tools` (widen its study root or split the hop). Goals + gold facts stay frozen — only the moved path strings change; this is fixing a moved path, NOT weakening; **wire the full mechanical scorer from the engine's usage + budget accounting — the real discriminator, not optional: `StopReason`/`Iterations`/`FinalizeForced`, per-tool `Outlines`/`Greps`/`Reads`/`ToolErrs`, `ReadBytes`/`Bounded`, and `InputTokens`/`OutputTokens`/`PeakOutputTokens`/`MaxTokensClamped`**; derived goal-hit-per-1k-output + grep-vs-read ratio; model × probe table with `k/n` pass-rate + p50/p95 latency; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `loop study-eval` reports goal-hit **AND** the full mechanical block per probe (stop-reason, per-tool counts, tokens incl. peak, bounded); accept when goal-hit ≥ T, `StopReason == clean-finalize`, all `Bounded`, no `MaxTokensClamped`, across the fleet. **Goal-hit alone is insufficient** — flight check 2026-06-28: the old navigator passed the needle/bounded probes by brute-reading (4 reads / ~800 lines / 0 greps on a single-region goal); ø only gains teeth when the stop-reason + per-tool + bounded scorers fire | ☑ |
+| 4 | `Study` profile + wiring | `Subagent`/`SubAgentRunner`, `dispatcherFor`, `RunSubagent`, `Study` tool entry, empty-digest guard; **delete** `runNavigator`/`navMap`/`navTools`/`navMaxDepth`/`Navigate`/`project_index` tool **and `projectindex/`**, migrating `memory_tools_test.go` off `projectindex.Build` onto `internal/outline`; **retarget the eval driver** — `study_eval.go` already holds the discriminating `StudyProbe` set + `pass()` scorer + per-probe timeout (the old `navEvalCases` were replaced 2026-06-28); when `runNavigator` is deleted here, point `runStudyEvalNav` at `RunSubagent` (phase 5 finishes the scorer wiring). Keep `countGoalHits`/`StudyProbe` | `cortex study` works on the new path; old nav code + `projectindex` gone (incl. the test caller); `study_eval.go` calls `RunSubagent`, not `runNavigator`; suite green | ☑ |
+| 5 | eval + telemetry | retarget the driver from `runNavigator` to `RunSubagent` (the discriminating `StudyProbe` set, `pass()` scorer, and per-probe timeout already exist in `study_eval.go`); **re-point the two frozen probes whose targets engine phase 3 MOVED** — `Path: "cmd/cortex/tools/tools.go"` → `"internal/tools/tools.go"`, and re-scope the multi-hop probe (`Path: "cmd/cortex"`, gold `{parseXMLToolCalls, Execute}`) so `Execute` stays reachable now that it lives in `internal/tools` (widen its study root or split the hop). Goals + gold facts stay frozen — only the moved path strings change; this is fixing a moved path, NOT weakening; **wire the full mechanical scorer from the engine's usage + budget accounting — the real discriminator, not optional: `StopReason`/`Iterations`/`FinalizeForced`, per-tool `Outlines`/`Greps`/`Reads`/`ToolErrs`, `ReadBytes`/`Bounded`, and `InputTokens`/`OutputTokens`/`PeakOutputTokens`/`MaxTokensClamped`**; derived goal-hit-per-1k-output + grep-vs-read ratio; model × probe table with `k/n` pass-rate + p50/p95 latency; rename `CORTEX_NAV_REPS`→`CORTEX_STUDY_REPS`; always-on run stats → journal | `cortex study-eval` reports goal-hit **AND** the full mechanical block per probe (stop-reason, per-tool counts, tokens incl. peak, bounded); accept when goal-hit ≥ T, `StopReason == clean-finalize`, all `Bounded`, no `MaxTokensClamped`, across the fleet. **Goal-hit alone is insufficient** — flight check 2026-06-28: the old navigator passed the needle/bounded probes by brute-reading (4 reads / ~800 lines / 0 greps on a single-region goal); ø only gains teeth when the stop-reason + per-tool + bounded scorers fire | ☑ |
 | 6 | docs / CLAUDE.md | point `study` at this design (`study-navigator.md` already removed 2026-06-27); update tool list (no project_index, no memory_search change) | docs match shipped code | ☑ |
 
 `internal/outline`, `grep`, and targeted/confined `read_file` (phases 1–3) are
@@ -663,7 +663,7 @@ pre-deletion 41,468 / 26,304).
 
 | Phase | Add (src) | Delete (src) | Key fact to verify |
 |---|---|---|---|
-| 1 `internal/outline` | +350…450 | 0 | new pkg; no `cmd/loop` import |
+| 1 `internal/outline` | +350…450 | 0 | new pkg; no `cmd/cortex` import |
 | 2 `grep` | +120…160 | 0 | ctx-aware, confined; reuses `projectscan` ignore set |
 | 3 targeted+confined `read_file` | +60…90 | 0 | one `maxReadLines`; `ConfinePath` allows `.cortex/journal` |
 | 4 `Study` profile + **deletions** | +100…130 | **−1150…−1300** | delete `navigator.go` (~283) + `projectindex/` (~895) + `project_index` tool; migrate the test caller |
@@ -685,10 +685,10 @@ not removed; −1800 = deletions ran but new code missing.** Net test **≈ +200
   `RunSubagent`, `Study` (script §3, §4).
 - **Tool surface:** `Study.Tools == {outline, grep, read_file}` (no `study`
   recursion, no `bash`); **no `search` tool**; `memory_*` unchanged (script §4).
-- **Import graph:** `internal/outline` imports no `cmd/loop` (script §5).
+- **Import graph:** `internal/outline` imports no `cmd/cortex` (script §5).
 - **Confinement test:** `read_file`/`grep` reject abs/`..` escapes but **allow
   `.cortex/journal`** (unit test, phase 3).
-- **Eval gate:** `loop study-eval` reports goal-hit ≥ T with all probes
+- **Eval gate:** `cortex study-eval` reports goal-hit ≥ T with all probes
   completed & bounded across the fleet (phase 5).
 
 ## Decisions log
@@ -774,8 +774,8 @@ _Append-only._
   0–3 + study 1–3 (navigator untouched) ø is a **regression detector — the 5/6
   baseline must hold, not exit 0**; it becomes the real hard gate only at phase 5,
   where the new `Study` drives it to 6/6 exit 0. Separately, engine phase 3
-  renames `cmd/loop/tools` → `internal/tools`, which MOVES two frozen-probe
-  targets (`tools.go` itself, and `Execute` out of the `cmd/loop` multi-hop
+  renames `cmd/cortex/tools` → `internal/tools`, which MOVES two frozen-probe
+  targets (`tools.go` itself, and `Execute` out of the `cmd/cortex` multi-hop
   scope). Phase 5 must **re-point those moved paths** (path strings only; goals +
   gold facts stay frozen) — re-pointing a moved target is not "weakening a probe".
   refactor-goal-prompt.md + eval-design-example.md updated to match.
