@@ -290,6 +290,18 @@ Phase 3 is the only file-move and comes last, after the seam is proven in place.
 It is also the package-topology phase: the type move, the `cmd/cortex/tools`→`internal/tools`
 rename, and the `cmd/cortex/ui` fold all ride together so the import-path churn is paid once.
 
+**As-built divergence (record, not a TODO).** Only parts (b) and (c) of phase 3
+landed: `cmd/cortex/tools` → `internal/tools` (the rename + import-path churn) and
+the `cmd/cortex/ui` fold (the dir no longer exists, folded into `cmd/cortex`). Part
+(a) — moving the wire types `AgentRequest`/`AgentResponse`/`Message` into
+`internal/agent` — did **not** land. They remain in `cmd/cortex/transport.go`
+(`AgentRequest` ~L17, `AgentResponse` ~L335, `Message` ~L379), and `internal/agent`
+holds only the tool vocabulary (`Tool`/`ToolCall`/`FunctionCall`) imported by
+`internal/tools`. The exit criteria that referenced the inverted type arrow are
+satisfied by the tool vocabulary move; the request/response `Message` types were
+simply never relocated (no cycle risk either way, since `internal/agent` still
+imports only `pkg/llm`). The phase is marked ☑ for the topology work that shipped.
+
 ## Verification
 
 Run `scripts/verify-study.sh` after each phase — it's the executable form of the

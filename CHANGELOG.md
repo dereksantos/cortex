@@ -21,8 +21,9 @@ removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.
 - Bounded read-only Study subagent over `outline`, `grep`, and targeted
   `read_file`.
 - Public, coder-only `web_search` and SSRF-safe `fetch_url` tools.
-- Model-directed context working-set controls for summarizing, evicting,
-  merging, reordering, and adjusting watermarks.
+- Model-directed context working-set controls for evicting, merging, and
+  adjusting watermarks, plus an optional `budget` on `recall` for a compact
+  digest (replacing `context_summarize`).
 - Layered user/project config and Anthropic, Ollama, OpenRouter, and generic
   OpenAI-compatible backends.
 
