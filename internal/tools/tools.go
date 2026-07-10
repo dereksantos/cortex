@@ -232,6 +232,7 @@ const (
 	FunctionMemoryForget = "memory_forget"
 	FunctionRecall       = "recall"
 	FunctionFetchURL     = "fetch_url"
+	FunctionWebSearch    = "web_search"
 )
 
 // objectSchema builds a JSON Schema "object" with the given properties and
@@ -397,10 +398,17 @@ var FetchURLTool = newTool(FunctionFetchURL,
 		"url": stringProp("The public http or https URL to fetch."),
 	}, "url"))
 
+var WebSearchTool = newTool(FunctionWebSearch,
+	"Search the public web and return compact ranked results with titles, URLs, and snippets. Use fetch_url to read a promising result in full.",
+	objectSchema(map[string]any{
+		"query":       stringProp("Search terms."),
+		"max_results": map[string]any{"type": "integer", "description": "Maximum results to return (default 5, maximum 10)."},
+	}, "query"))
+
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
-	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, FetchURLTool,
+	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
 	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
@@ -479,6 +487,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return recall(tc, deps)
 	case FunctionFetchURL:
 		return fetchURL(ctx, tc)
+	case FunctionWebSearch:
+		return webSearch(ctx, tc)
 	case FunctionContextSummarize:
 		return contextSummarize(tc, deps)
 	case FunctionContextEvict:
