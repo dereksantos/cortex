@@ -97,9 +97,8 @@ to the verbatim demoted messages; coder-only — not in the Study profile), and
 the model-driven memory tools
 `memory_write`, `memory_read`, `memory_search`, `memory_forget`
 (`internal/memory`), and the context self-curation tools
-`context_summarize`, `context_evict`, `context_merge`,
-`context_adjust_watermarks`. (`project_index` was replaced by `outline` +
-`grep`.)
+`context_evict`, `context_merge`, `context_adjust_watermarks`.
+(`project_index` was replaced by `outline` + `grep`.)
 
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
@@ -114,11 +113,12 @@ the model-driven memory tools
   `fetch_url` blocks local/private destinations and unsafe redirects. Both are
   coder-only and can be disabled with `tools.enable_web: false`.
 - The context tools let the model curate its own working set on top of the
-  mechanical demotion policy: summarize a demoted turn (cheaper than `recall`),
-  evict or merge outline entries (merge installs one spanning
-  `#m<first>-<last>` citation, so recall stays lossless), and shift the
-  demotion watermarks (±W/4). Session-local — the state reverts on resume;
-  per-tool gates `tools.enable_context_*`. See
+  mechanical demotion policy: evict or merge outline entries (merge installs
+  one spanning `#m<first>-<last>` citation, so recall stays lossless) and
+  shift the demotion watermarks (±W/4). `recall` takes an optional `budget`
+  for a compact digest instead of the raw messages (this subsumed
+  `context_summarize`). Session-local — the state reverts on resume; per-tool
+  gates `tools.enable_context_*`. See
   [`docs/context-window-modification-tools.md`](docs/context-window-modification-tools.md).
 
 ## Configuration

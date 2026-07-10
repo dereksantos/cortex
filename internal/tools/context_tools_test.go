@@ -74,23 +74,24 @@ func TestContextToolsExecute(t *testing.T) {
 		want    []string // substrings the observation must contain
 		wantErr string   // substring the error must contain ("" = no error)
 	}{
+		// "SHOULD NOT APPEAR" digests guard the paths that must skip the summarizer.
 		{
-			name: "summarize returns digest and keeps the citation",
-			call: contextCall(FunctionContextSummarize, `{"citation":"`+citation+`"}`),
-			deps: &fakeContextDeps{recalled: "raw turn text", digest: "the digest"},
-			want: []string{"the digest", citation}, // digest lacks the citation → appended mechanically
+			name: "recall with budget digests and keeps the citation",
+			call: contextCall(FunctionRecall, `{"citation":"`+citation+`","budget":8}`),
+			deps: &fakeContextDeps{recalled: strings.Repeat("raw turn text ", 20), digest: "the digest"},
+			want: []string{"digest of " + citation, "the digest", "[" + citation + "]"}, // digest lacks the citation → appended mechanically
 		},
 		{
-			name:    "summarize requires citation",
-			call:    contextCall(FunctionContextSummarize, `{}`),
-			deps:    &fakeContextDeps{},
-			wantErr: "citation is required",
+			name: "recall with budget passes through content already within it",
+			call: contextCall(FunctionRecall, `{"citation":"`+citation+`","budget":100}`),
+			deps: &fakeContextDeps{recalled: "short raw", digest: "SHOULD NOT APPEAR"},
+			want: []string{"short raw"},
 		},
 		{
-			name:    "summarize surfaces recall failure",
-			call:    contextCall(FunctionContextSummarize, `{"citation":"`+citation+`"}`),
-			deps:    &fakeContextDeps{},
-			wantErr: "recall failed",
+			name: "recall without budget returns the raw messages",
+			call: contextCall(FunctionRecall, `{"citation":"`+citation+`"}`),
+			deps: &fakeContextDeps{recalled: strings.Repeat("raw turn text ", 20), digest: "SHOULD NOT APPEAR"},
+			want: []string{"raw turn text"},
 		},
 		{
 			name: "evict reports a removed entry",
@@ -159,6 +160,9 @@ func TestContextToolsExecute(t *testing.T) {
 					t.Errorf("observation %q missing %q", out, w)
 				}
 			}
+			if strings.Contains(out, "SHOULD NOT APPEAR") {
+				t.Errorf("observation %q includes a digest from a path that must not summarize", out)
+			}
 		})
 	}
 }
@@ -167,7 +171,6 @@ func TestContextToolsExecute(t *testing.T) {
 // rather than pretend to act.
 func TestContextToolsHeadless(t *testing.T) {
 	for name, args := range map[string]string{
-		FunctionContextSummarize:        `{"citation":"@session/x#m1-2"}`,
 		FunctionContextMerge:            `{"range_start":"@session/x#m1-2","range_end":"@session/x#m3-4"}`,
 		FunctionContextAdjustWatermarks: `{"high_delta":10,"low_delta":10}`,
 	} {

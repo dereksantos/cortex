@@ -23,10 +23,11 @@ The project was recently slimmed to center on `cmd/cortex`. The prior
   a citation-grounded outline, recent turns remain verbatim, outline layers fold
   under pressure, and append-only state restores the same frontier on resume.
   `recall` retrieves exact demoted transcript messages.
-- **Model-driven context curation** — `context_summarize` / `context_evict` /
-  `context_merge` / `context_adjust_watermarks` let the agent compress, drop,
-  group, and re-budget its own outline and demotion thresholds on top of the
-  mechanical policy (session-local; per-tool config gates). See
+- **Model-driven context curation** — `context_evict` / `context_merge` /
+  `context_adjust_watermarks` let the agent drop, group, and re-budget its
+  own outline and demotion thresholds on top of the mechanical policy, and
+  `recall(budget)` returns a compact digest of a demoted turn instead of the
+  raw messages (session-local; per-tool config gates). See
   [`docs/context-window-modification-tools.md`](docs/context-window-modification-tools.md).
 - **`study` tool** — size-adaptive, goal-curated reading of files/dirs;
   `cortex study-eval` measures its latency / coverage / groundedness.

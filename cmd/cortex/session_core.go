@@ -170,8 +170,6 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	switch toolName {
 	case tools.FunctionWebSearch, tools.FunctionFetchURL:
 		return t.EnableWeb == nil || *t.EnableWeb
-	case tools.FunctionContextSummarize:
-		return t.EnableContextSummarize == nil || *t.EnableContextSummarize
 	case tools.FunctionContextEvict:
 		return t.EnableContextEvict == nil || *t.EnableContextEvict
 	case tools.FunctionContextMerge:

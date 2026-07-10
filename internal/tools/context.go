@@ -1,24 +1,10 @@
 package tools
 
 const (
-	FunctionContextSummarize        = "context_summarize"
 	FunctionContextEvict            = "context_evict"
 	FunctionContextMerge            = "context_merge"
 	FunctionContextAdjustWatermarks = "context_adjust_watermarks"
 )
-
-// ContextSummarizeTool compresses a demoted turn into a compact digest.
-// Uses the existing Summarizer interface (sequential chunk-and-fold)
-// and preserves citations mechanically.
-var ContextSummarizeTool = newTool(FunctionContextSummarize,
-	"Compresses a demoted turn into a compact digest. The digest keeps the citation so the "+
-		"original messages stay reachable. Use this instead of recall when you need the gist of "+
-		"an old turn without pulling its full raw messages into context.",
-	objectSchema(map[string]any{
-		"citation": stringProp("The citation to summarize, exactly as shown in the outline, e.g., @session/20260701-143210#m12-19"),
-		"goal":     stringProp("Optional: What should the summary focus on? Default: the turn's key facts and decisions."),
-		"budget":   map[string]any{"type": "integer", "description": "Token budget for the summary (default 512)"},
-	}, "citation"))
 
 // ContextEvictTool removes an outline entry from the working set.
 // The entry is already demoted (in the journal), so this only affects the hydrated tail and outline.
@@ -56,7 +42,6 @@ var ContextAdjustWatermarksTool = newTool(FunctionContextAdjustWatermarks,
 // This is a helper for tests and documentation generation.
 func AllContextTools() []Tool {
 	return []Tool{
-		ContextSummarizeTool,
 		ContextEvictTool,
 		ContextMergeTool,
 		ContextAdjustWatermarksTool,

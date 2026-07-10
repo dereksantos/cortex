@@ -2,14 +2,18 @@
 
 > **Purpose.** Design a set of tools that allow the LLM running the Cortex agent loop to modify its own context window, enabling smarter context management and self-compression while preserving safety invariants.
 >
-> **Status. SHIPPED (2026-07-10), with one cut.** Four tools are live in the
-> coder's toolset (`internal/tools/context*.go`, seams on `CortexSession` in
-> `cmd/cortex/session_core.go`, config gates `tools.enable_context_*`):
-> `context_summarize`, `context_evict`, `context_merge`,
+> **Status. SHIPPED (2026-07-10), with one cut and one fold.** Three tools are
+> live in the coder's toolset (`internal/tools/context*.go`, seams on
+> `CortexSession` in `cmd/cortex/session_core.go`, config gates
+> `tools.enable_context_*`): `context_evict`, `context_merge`,
 > `context_adjust_watermarks`. **`context_reorder` was cut**: the wire is
 > assembled from the raw message log, so reordering turn spans could never
 > change what the model sees — and a real reorder would violate this doc's own
 > invariant #2 (never restructure in place) and break the LCP prompt cache.
+> **`context_summarize` was folded into `recall`** as an optional `budget`
+> argument (a compressed recall is the same operation with the same input —
+> one fewer declaration, and the capability lives where the model already
+> looks for old context).
 >
 > As-built deltas from the design below: citations are the real
 > `@session/<id>#m<start>-<end>` message-range coordinates (not `#t<ordinal>`);
@@ -155,7 +159,11 @@ When the model needs demoted context again, it calls `recall(citation)`:
 - All tools are read-only (no write/edit/bash/remove)
 - All tools use existing interfaces (no new infrastructure)
 
-### 4.2 Tool 1: `context_summarize(citation, goal, budget)`
+### 4.2 Tool 1: `context_summarize(citation, goal, budget)` — FOLDED INTO `recall`
+
+> **Not a separate tool** (see Status). Shipped as `recall(citation, budget,
+> goal)` — with a budget, recall returns a summarizer digest (citation kept
+> mechanically) instead of the raw messages. Kept for the record.
 
 **Purpose**: Compress demoted context when the model needs to recover space.
 
@@ -450,7 +458,6 @@ Each tool is controlled by a boolean flag in `.cortex/config.json` under `tools`
 
 | Tool | Config Key | Default |
 |------|------------|---------|
-| `context_summarize` | `tools.enable_context_summarize` | enabled |
 | `context_evict` | `tools.enable_context_evict` | enabled |
 | `context_merge` | `tools.enable_context_merge` | enabled |
 | `context_adjust_watermarks` | `tools.enable_context_adjust_watermarks` | enabled |

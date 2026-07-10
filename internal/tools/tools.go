@@ -385,9 +385,11 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 	}, "name"))
 
 var RecallTool = newTool(FunctionRecall,
-	"Fetch the verbatim messages behind a session-outline citation (the [@session/…#m…-…] coordinates on demoted turns). Use it when the outline line is not enough and you need the raw detail of an older turn.",
+	"Fetch the verbatim messages behind a session-outline citation (the [@session/…#m…-…] coordinates on demoted turns). Use it when the outline line is not enough and you need the raw detail of an older turn. Pass budget to get a compact digest instead of the raw messages when the gist is enough.",
 	objectSchema(map[string]any{
 		"citation": stringProp("The citation exactly as it appears in the outline, e.g. @session/20260701-143210#m12-19."),
+		"budget":   map[string]any{"type": "integer", "description": "Optional: return a digest at roughly this many tokens instead of the raw messages."},
+		"goal":     stringProp("Optional, with budget: what the digest should focus on. Default: the turn's key facts and decisions."),
 	}, "citation"))
 
 var FetchURLTool = newTool(FunctionFetchURL,
@@ -407,7 +409,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
-	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
+	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -488,13 +490,11 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	case FunctionMemoryForget:
 		return memoryForget(tc, deps)
 	case FunctionRecall:
-		return recall(tc, deps)
+		return recall(ctx, tc, deps)
 	case FunctionFetchURL:
 		return fetchURL(ctx, tc)
 	case FunctionWebSearch:
 		return webSearch(ctx, tc)
-	case FunctionContextSummarize:
-		return contextSummarize(ctx, tc, deps)
 	case FunctionContextEvict:
 		return contextEvict(tc, deps)
 	case FunctionContextMerge:
@@ -631,13 +631,44 @@ func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
 	return deps.MemoryForget(name)
 }
 
-func recall(tc ToolCall, deps ToolDeps) (string, error) {
+// recall resolves an outline citation to its verbatim messages. With a budget
+// it returns a summarizer digest at roughly that many tokens instead — a
+// compressed recall for when the gist is enough (this subsumed the separate
+// context_summarize tool). The citation always survives the digest.
+func recall(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	citation, err := tc.StringArg("citation")
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("recall(%s)", citation))
-	return deps.Recall(citation)
+	budget, _ := tc.IntArg("budget")
+	if budget <= 0 {
+		printToolAction(fmt.Sprintf("recall(%s)", citation))
+		return deps.Recall(citation)
+	}
+
+	printToolAction(fmt.Sprintf("recall(%s, budget=%d)", citation, budget))
+	raw, err := deps.Recall(citation)
+	if err != nil {
+		return "", err
+	}
+	// Already within budget: nothing to compress (this also passes through
+	// Recall's friendly not-found messages untouched).
+	if len(raw)/4 <= budget {
+		return raw, nil
+	}
+	goal, _ := tc.StringArg("goal")
+	if goal == "" {
+		goal = "What are the key facts and decisions in this turn?"
+	}
+	digest, _, err := deps.SummarizeText(ctx, raw, goal, budget)
+	if err != nil {
+		return "", fmt.Errorf("summarize failed: %w", err)
+	}
+	if !strings.Contains(digest, citation) {
+		digest += fmt.Sprintf("\n\n[%s]", citation)
+	}
+	return fmt.Sprintf("digest of %s (~%d-token budget; recall without budget for the raw messages):\n\n%s",
+		citation, budget, digest), nil
 }
 
 // --- read_file ----------------------------------------------------------
