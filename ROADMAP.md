@@ -19,13 +19,15 @@ The project was recently slimmed to center on `cmd/loop`. The prior
 - **`loop` REPL** — agentic tool loop, persistent resumable sessions,
   per-turn journal capture, async insight distillation, turn-start
   retrieval injection.
-- **Working memory v1** — context compaction via the `study` engine at
-  ~80% window (and on `/compact`); the session continues from a curated
-  digest with cited `file:line` ranges. **Incremental compaction is the next target.**
+- **Working memory** — bounded two-zone context: old complete turns demote to
+  a citation-grounded outline, recent turns remain verbatim, outline layers fold
+  under pressure, and append-only state restores the same frontier on resume.
+  `recall` retrieves exact demoted transcript messages.
 - **`study` tool** — size-adaptive, goal-curated reading of files/dirs;
   `loop study-eval` measures its latency / coverage / groundedness.
-- **Tool surface** — `read_file`, `write_file`, `edit_file`, `study`,
-  `bash` (risk-gated), `remove_path` (workspace-confined).
+- **Tool surface** — project read/write/search tools, risk-gated shell,
+  workspace-confined deletion, durable memory/recall, and coder-only public
+  `web_search` + SSRF-safe `fetch_url`.
 - **Layered config + multi-backend** — `pkg/llm` providers (Anthropic,
   Ollama, OpenRouter, OpenAI-compatible); per-role `code` / `study` models.
 - **Headless + adapters** — `loop turn` (one-shot), `loop change` (git
@@ -37,8 +39,11 @@ Detailed plan and dependency order: [`docs/roadmap-2026-06-23.md`](docs/roadmap-
 
 **New recommended sequence (2026-07-08 update):**
 
-1. **Working memory: incremental study compaction** — `CompactRecent` + session-state layer + manifest. *(priority: autonomy-focused, tidy first)*
-2. **`web_search` tool** — read-only HTTP + text extraction, in the clean tools package. *(priority: external information access)*
+1. **Working memory: incremental/layered context** — two-zone demotion,
+   citation recall, outline folding, persistent state, and cache-stable memory
+   injection. *(landed)*
+2. **Public web access** — coder-only `web_search` + SSRF-safe `fetch_url`,
+   bounded read-only HTTP and text extraction. *(landed)*
 3. **System prompt: small batches + tidy-first** — cheapest, highest signal. *(landed)*
 4. **Documentation audit and digestion** — review and consolidate docs, update README.
 5. **Cognition/DAG revival** — bring back from git history, rethink and simplify.

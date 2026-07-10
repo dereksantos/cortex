@@ -85,15 +85,18 @@ loop study-eval [code-grid|wm]
 
 ## Tools the agent has
 
-Registered in [`cmd/loop/tools/tools.go`](cmd/loop/tools/tools.go):
+Registered in [`internal/tools/tools.go`](internal/tools/tools.go):
 
 | Tool | What it does |
 |---|---|
 | `read_file` | Read a whole file. Large Go files return a declaration skeleton; large non-Go files redirect to `study`. |
 | `write_file` | Write/create a file (parent dirs implied). |
 | `edit_file` | Exact-match replace, whitespace-tolerant retry; supports atomic multi-edit. Preferred over `write_file` for edits. |
-| `study` | Size-adaptive, goal-curated reader for files/directories; returns cited `file:line` digests. |
-| `project_index` | Structural map of a project/file (tree + per-file funcs/types with line numbers) without reading contents. |
+| `study` | Goal-curated reader for large files/directories; returns a grounded digest. |
+| `outline` | Structural map of a project/file without reading all contents. |
+| `grep` | Search project contents and return bounded `file:line:text` matches. |
+| `web_search` | Search the public web for ranked titles, URLs, and snippets. |
+| `fetch_url` | Fetch bounded readable text from a public HTTP(S) URL; local/private addresses are refused. |
 | `bash` | Run a shell command, gated by a risk classifier (see below). |
 | `remove_path` | Delete a file/dir, confined to the workspace (`.git`/`.cortex`/root refused). |
 
@@ -115,7 +118,7 @@ Config is layered, lowest to highest precedence:
     "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
     "study": { "model": "deepseek/deepseek-r1" }
   },
-  "tools": { "allow_delete": true }
+  "tools": { "allow_delete": true, "enable_web": true }
 }
 ```
 
@@ -127,6 +130,9 @@ Config is layered, lowest to highest precedence:
   never written to config.
 - **Deletion**: set `tools.allow_delete: false` to drop the `remove_path`
   tool; `tools.delete_root` confines it (default: cwd).
+- **Web access**: set `tools.enable_web: false` to disable execution of both
+  `web_search` and `fetch_url`. They are coder-only and are not available to
+  the read-only study subagent.
 
 Useful env vars: `CORTEX_BACKEND`, `CORTEX_HOME` (override config home),
 `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`, `NO_COLOR`,
@@ -142,7 +148,7 @@ cortex/
 │   ├── change.go        # git change lifecycle
 │   ├── discord.go       # Discord adapter
 │   ├── study_eval.go    # study-tool eval harness
-│   ├── tools/           # the agent's tool surface
+│   ├── tool_deps.go      # session implementation of tool dependency seams
 │   └── ui/              # rendering helpers
 ├── internal/
 │   ├── capture/         # fast per-turn event capture

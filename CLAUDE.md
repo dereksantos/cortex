@@ -92,7 +92,7 @@ mechanical capture/retract pipeline.
 
 Registered in `internal/tools/tools.go` (`All` + dispatch in
 `tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `outline`,
-`grep`, `bash`, `remove_path`, `recall` (resolves a session-outline citation
+`grep`, `bash`, `remove_path`, `web_search`, `fetch_url`, `recall` (resolves a session-outline citation
 to the verbatim demoted messages; coder-only — not in the Study profile), and
 the model-driven memory tools
 `memory_write`, `memory_read`, `memory_search`, `memory_forget`
@@ -107,6 +107,9 @@ the model-driven memory tools
   Blocked.
 - `remove_path` is workspace-confined (`.git`/`.cortex`/root refused);
   disabled by `tools.allow_delete: false`.
+- `web_search` and `fetch_url` provide bounded, read-only public web access;
+  `fetch_url` blocks local/private destinations and unsafe redirects. Both are
+  coder-only and can be disabled with `tools.enable_web: false`.
 
 ## Configuration
 
