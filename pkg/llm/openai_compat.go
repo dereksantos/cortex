@@ -262,12 +262,17 @@ type compatChoice struct {
 }
 
 type compatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     int                  `json:"prompt_tokens"`
+	CompletionTokens int                  `json:"completion_tokens"`
+	TotalTokens      int                  `json:"total_tokens"`
+	PromptDetails    *compatPromptDetails `json:"prompt_tokens_details,omitempty"`
 	// Cost is the request's dollar cost, returned by OpenRouter when the request
 	// sets usage:{include:true}. Zero for backends that don't report it.
 	Cost float64 `json:"cost"`
+}
+
+type compatPromptDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // Attribution headers identify Cortex to OpenRouter (used for app rankings and

@@ -36,13 +36,12 @@ type AgentRequest struct {
 	// APIKey is the Bearer token for endpoints that need one (e.g. OpenRouter).
 	// Empty for local endpoints. Not serialized.
 	APIKey string `json:"-"`
-	// EphemeralSystem is per-turn context (e.g. retrieved memory) inserted as
-	// a fixed-position message right after the system message for the wire
-	// payload — never stored in Messages, so it doesn't accumulate across turns
-	// or persist. Set before a turn, cleared after. The durable record of what
-	// was retrieved lives in the transcript as a separate labelled entry, not
-	// here. This note is inserted as a cache-stable slot that only changes
-	// when the note content changes.
+	// EphemeralSystem is per-turn context (for example, the memory index),
+	// inserted as a fixed-position message between the stable prefix/outline and
+	// hydrated tail. It is never folded into the system message: doing so would
+	// invalidate the provider cache from byte zero. When unchanged, this slot
+	// and the tail remain cacheable; when memory changes, only the suffix after
+	// the stable prefix must be re-prefilled.
 	EphemeralSystem string `json:"-"`
 
 	// OutlineBlock is rendered outline of demoted turns (zone A of docs/context-architecture.md),
@@ -116,25 +115,21 @@ func (r *AgentRequest) wireMessages() []Message {
 		start = len(r.Messages)
 	}
 
-	// Early return when nothing is demoted and nothing is injected.
-	// Note: EphemeralSystem is handled below even when no demotion occurs,
-	// so we don't early-return just for that case.
+	// Early return when nothing is demoted or injected.
 	if r.OutlineBlock == "" && start <= prefixEnd && r.EphemeralSystem == "" {
 		return r.Messages
 	}
 
-	out := make([]Message, 0, 2+prefixEnd+len(r.Messages[start:]))
-	// Copy the system message and append ephemeral if present
-	sysMsg := r.Messages[0]
-	if r.EphemeralSystem != "" {
-		sysMsg.Content += "\n\n" + r.EphemeralSystem
-	}
-	out = append(out, sysMsg)
-	
+	out := make([]Message, 0, 3+prefixEnd+len(r.Messages[start:]))
+	out = append(out, r.Messages[0])
 	out = append(out, r.Messages[1:prefixEnd]...)
 
 	if r.OutlineBlock != "" {
 		out = append(out, Message{Role: RoleUser, Content: r.OutlineBlock})
+	}
+
+	if r.EphemeralSystem != "" {
+		out = append(out, Message{Role: RoleUser, Content: r.EphemeralSystem})
 	}
 
 	out = append(out, r.Messages[start:]...)
@@ -318,6 +313,9 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 			CompletionTokens: res.Stats.OutputTokens,
 			TotalTokens:      res.Stats.TotalTokens(),
 			Cost:             res.Stats.CostUSD,
+			PromptTokensDetails: &promptTokensDetails{
+				CachedTokens: res.Stats.CachedInputTokens,
+			},
 		},
 	}
 }

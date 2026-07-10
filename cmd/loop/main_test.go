@@ -17,6 +17,7 @@ import (
 	"github.com/dereksantos/cortex/internal/shellrisk"
 
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // TestMain disables the self-contained local embedder for the whole package so
@@ -1894,6 +1895,15 @@ func TestBashGrepNoMatch(t *testing.T) {
 	}
 }
 
+func TestAssembleStreamResponsePreservesCachedTokens(t *testing.T) {
+	res := assembleStreamResponse(llm.StreamResult{Stats: llm.GenerationStats{
+		InputTokens: 100, OutputTokens: 20, CachedInputTokens: 75,
+	}})
+	if got := res.Usage.CachedPromptTokens(); got != 75 {
+		t.Fatalf("cached prompt tokens = %d, want 75", got)
+	}
+}
+
 func TestWireMessagesComposesEphemerally(t *testing.T) {
 	req := CortexArgs{}.Request() // system message only
 	sys := req.Messages[0].Content
@@ -1907,55 +1917,37 @@ func TestWireMessagesComposesEphemerally(t *testing.T) {
 		}
 	})
 
-	t.Run("ephemeral is appended to system message; system prefix is byte-stable", func(t *testing.T) {
+	t.Run("ephemeral occupies a separate slot after the stable prefix", func(t *testing.T) {
 		req.EphemeralSystem = "# memory\n- [decision] use pgx"
 		wire := req.wireMessages()
 
-		// The cache-critical invariant: the system message (position 0) must be
-		// untouched, or the backend's prefix cache invalidates every turn.
-		// With the P1 fix, ephemeral is appended to system message, not separate.
-		// The stored system message should have the ephemeral content appended.
-		if wire[0].Content != sys+"\n\n"+req.EphemeralSystem {
-			t.Errorf("system message should have ephemeral appended: got %q, want %q",
-				wire[0].Content, sys+"\n\n"+req.EphemeralSystem)
+		if wire[0].Content != sys {
+			t.Errorf("system message changed: got %q, want %q", wire[0].Content, sys)
 		}
-		// Original user message should still be at index 1 (unchanged position)
-		if wire[1].Content != userOrig {
-			t.Errorf("original user message should be at index 1 unchanged, got %q", wire[1].Content)
+		if len(wire) != len(req.Messages)+1 {
+			t.Fatalf("wire length = %d, want %d", len(wire), len(req.Messages)+1)
 		}
-		// Wire should have same length (ephemeral is appended, not inserted)
-		if len(wire) != len(req.Messages) {
-			t.Errorf("wire length = %d, want %d (ephemeral appended, not inserted)", len(wire), len(req.Messages))
+		if wire[1].Role != RoleUser || wire[1].Content != req.EphemeralSystem {
+			t.Errorf("wire[1] = %+v, want ephemeral user slot", wire[1])
 		}
-		// Storage is never mutated by wireMessages (it makes a copy)
+		if wire[2].Content != userOrig {
+			t.Errorf("original user message moved incorrectly: %q", wire[2].Content)
+		}
 		if req.Messages[0].Content != sys || req.Messages[1].Content != userOrig {
-			t.Error("stored messages must NOT be mutated by composition")
+			t.Error("stored messages must not be mutated by composition")
 		}
 	})
 
-	t.Run("ephemeral stays appended to system as tool loop appends", func(t *testing.T) {
-		// Mid tool-loop: assistant + tool messages follow the user turn.
-		// With the P1 fix, ephemeral is appended to system message, not separate.
+	t.Run("ephemeral slot remains fixed while the tool loop appends", func(t *testing.T) {
 		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}})
 		req.Messages = append(req.Messages, Message{Role: RoleTool, ToolCallID: "1", Content: "tool output"})
 		req.EphemeralSystem = "ctx"
 		wire := req.wireMessages()
-		// System message should have the ephemeral content appended
-		expectedSystem := sys + "\n\nctx"
-		if wire[0].Content != expectedSystem {
-			t.Errorf("system message should have ephemeral appended: got %q, want %q", wire[0].Content, expectedSystem)
+		if wire[0].Content != sys || wire[1].Content != "ctx" || wire[2].Content != userOrig {
+			t.Fatalf("wire prefix = %+v, want stable system, ephemeral slot, original user", wire[:3])
 		}
-		// Original user message should still be at index 1 (unchanged position)
-		if wire[1].Content != userOrig {
-			t.Errorf("original user message should be at index 1 unchanged, got %q", wire[1].Content)
-		}
-		// Ephemeral should not appear at the end (it's in system, not separate)
-		if strings.Contains(wire[len(wire)-1].Content, "ctx") && wire[len(wire)-1].Role != RoleSystem {
-			t.Error("note must not be at the end as a separate message")
-		}
-		// Wire should have same length (ephemeral is appended to system, not inserted)
-		if len(wire) != len(req.Messages) {
-			t.Errorf("wire length = %d, want %d (ephemeral appended, not inserted)", len(wire), len(req.Messages))
+		if wire[len(wire)-1].Content != "tool output" {
+			t.Error("tool-loop append missing from wire tail")
 		}
 	})
 }
@@ -1969,24 +1961,18 @@ func TestWireMessagesTwoZones(t *testing.T) {
 		req.TailFrom = 3
 
 		wire := req.wireMessages()
-		// With P1 fix, ephemeral is appended to system message, not separate.
-		// So wire should have: system (with INDEX), OUTLINE, u2, a2 = 4 messages
-		if len(wire) != 4 {
-			t.Errorf("wire length = %d, want 4 (ephemeral appended to system)", len(wire))
+		// Wire: system, outline, index slot, u2, a2.
+		if len(wire) != 5 {
+			t.Errorf("wire length = %d, want 5", len(wire))
 		}
-		// System message should have ephemeral appended
-		expectedSystem := "sys\n\nINDEX"
-		if wire[0].Content != expectedSystem {
-			t.Errorf("wire[0] = %q, want %q", wire[0].Content, expectedSystem)
+		if wire[0].Content != "sys" {
+			t.Errorf("wire[0] = %q, want stable system", wire[0].Content)
 		}
 		if wire[1].Role != RoleUser || wire[1].Content != "OUTLINE" {
 			t.Errorf("wire[1] = {%q,%q}, want {%q,%q}", wire[1].Role, wire[1].Content, RoleUser, "OUTLINE")
 		}
-		if wire[2].Content != "u2" {
-			t.Errorf("wire[2] = %q, want %q", wire[2].Content, "u2")
-		}
-		if wire[3].Content != "a2" {
-			t.Errorf("wire[3] = %q, want %q", wire[3].Content, "a2")
+		if wire[2].Content != "INDEX" || wire[3].Content != "u2" || wire[4].Content != "a2" {
+			t.Errorf("wire suffix = %+v, want index, u2, a2", wire[2:])
 		}
 		// Stored Messages must not be mutated
 		if len(req.Messages) != 5 || req.Messages[1].Content != "u1" {

@@ -388,6 +388,36 @@ func TestContextEvalCompactSeam(t *testing.T) {
 	}, "resumed post-compact turn")
 }
 
+func TestTurnMemoryIndexKeepsSystemStable(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 4000)
+	cs.EnableMemory()
+	if _, err := cs.MemoryWrite("cache-marker", "A durable cache marker."); err != nil {
+		t.Fatal(err)
+	}
+	system := cs.Request.Messages[0].Content
+	var wires [][]Message
+
+	for i := 0; i < 2; i++ {
+		if _, err := cs.Turn(context.Background(), fmt.Sprintf("turn %d", i+1)); err != nil {
+			t.Fatal(err)
+		}
+		if cs.Request.Messages[0].Content != system {
+			t.Fatalf("turn %d mutated the cache-critical system message", i+1)
+		}
+		wire := backend.lastWire()
+		wires = append(wires, wire)
+		if len(wire) < 2 || !strings.Contains(wire[1].Content, "cache-marker") {
+			t.Fatalf("turn %d did not put memory index in the fixed wire slot: %+v", i+1, wire)
+		}
+	}
+	if got := rePrefillChars(wires[0], wires[1]); got > len("turn 2")+64 {
+		t.Fatalf("unchanged memory index caused %d chars of re-prefill, want append-only suffix", got)
+	}
+}
+
 func TestContextEvalResumeRestoresDemotionState(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())

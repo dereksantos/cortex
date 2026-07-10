@@ -26,7 +26,7 @@ func TestStreamChat_ContentAndUsage(t *testing.T) {
 		`data: {"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}`,
 		`data: {"choices":[{"delta":{"content":", "}}]}`,
 		`data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}`,
-		`data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15,"prompt_tokens_details":{"cached_tokens":9}}}`,
 		`data: [DONE]`,
 		``,
 	}, "\n\n")
@@ -50,8 +50,8 @@ func TestStreamChat_ContentAndUsage(t *testing.T) {
 	if res.FinishReason != "stop" {
 		t.Errorf("finish_reason = %q, want stop", res.FinishReason)
 	}
-	if res.Stats.InputTokens != 12 || res.Stats.OutputTokens != 3 {
-		t.Errorf("stats = %+v, want in=12 out=3", res.Stats)
+	if res.Stats.InputTokens != 12 || res.Stats.OutputTokens != 3 || res.Stats.CachedInputTokens != 9 {
+		t.Errorf("stats = %+v, want in=12 out=3 cached=9", res.Stats)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestParseSSEData(t *testing.T) {
 func TestStreamChatCancelHonored(t *testing.T) {
 	// Track if the server saw the client disconnect
 	disconnected := make(chan struct{}, 1)
-	
+
 	// Server that sends one chunk then waits to see if client disconnects
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Logf("Server: request received")
@@ -205,7 +205,7 @@ func TestStreamChatCancelHonored(t *testing.T) {
 		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"))
 		w.(http.Flusher).Flush() // Force flush to ensure client receives it
 		t.Logf("Server: chunk sent, now waiting for disconnect")
-		
+
 		// Wait to see if client disconnects or timeout
 		select {
 		case <-disconnected:

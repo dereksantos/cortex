@@ -77,13 +77,12 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	cs.Append(Message{Role: RoleUser, Content: input})
 	cs.turnIntent = input
 
-	// P1 fix: move memory index from EphemeralSystem (which breaks caching)
-	// to the fixed system message prefix. This keeps the system message stable
-	// across turns, allowing cache reuse.
+	// Put the memory index in its fixed wire slot. Never mutate the stored
+	// system message: that would invalidate the prompt cache from byte zero and
+	// append duplicate indexes on every turn.
 	note := cs.memoryIndexNote()
+	cs.Request.EphemeralSystem = note
 	if note != "" {
-		// Append to system message (index 0) - this is the fixed prefix
-		cs.Request.Messages[0].Content += "\n\n" + note
 		cs.injections++
 		cs.injectedChars += len(note)
 	}

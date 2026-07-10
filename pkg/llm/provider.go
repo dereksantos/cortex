@@ -38,8 +38,9 @@ Respond concisely. Future AI assistants will use your extracted context to give 
 
 // GenerationStats holds token usage statistics from an LLM call.
 type GenerationStats struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens       int `json:"input_tokens"`
+	OutputTokens      int `json:"output_tokens"`
+	CachedInputTokens int `json:"cached_input_tokens,omitempty"`
 	// CostUSD is the request's dollar cost when the backend reports it
 	// (OpenRouter with usage accounting); zero otherwise.
 	CostUSD float64 `json:"cost_usd,omitempty"`
