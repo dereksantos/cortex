@@ -208,11 +208,13 @@ func (headlessDeps) MemoryForget(string) (string, error) {
 func (headlessDeps) Recall(string) (string, error) {
 	return "", errors.New("recall unavailable: no session")
 }
-func (headlessDeps) IsToolEnabled(string) bool { return true }
+func (headlessDeps) IsToolEnabled(string) bool                   { return true }
 func (headlessDeps) ValidateToolCall(tc ToolCall) (bool, string) { return true, "" }
-func (headlessDeps) RemoveOutlineEntry(string) bool { return false }
-func (headlessDeps) OutlineLen() int { return 0 }
-func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) { return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session") }
+func (headlessDeps) RemoveOutlineEntry(string) bool              { return false }
+func (headlessDeps) OutlineLen() int                             { return 0 }
+func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
+	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
+}
 func (headlessDeps) ReorderTail(string) []cache.TurnSpan { return nil }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
@@ -229,6 +231,7 @@ const (
 	FunctionMemorySearch = "memory_search"
 	FunctionMemoryForget = "memory_forget"
 	FunctionRecall       = "recall"
+	FunctionFetchURL     = "fetch_url"
 )
 
 // objectSchema builds a JSON Schema "object" with the given properties and
@@ -388,10 +391,16 @@ var RecallTool = newTool(FunctionRecall,
 		"citation": stringProp("The citation exactly as it appears in the outline, e.g. @session/20260701-143210#m12-19."),
 	}, "citation"))
 
+var FetchURLTool = newTool(FunctionFetchURL,
+	"Fetch readable text from a public HTTP(S) URL. Responses are size-bounded; HTML scripts and styles are removed. Private and local network addresses are refused.",
+	objectSchema(map[string]any{
+		"url": stringProp("The public http or https URL to fetch."),
+	}, "url"))
+
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, StudyTool, OutlineTool, GrepTool, Bash, RemoveTool,
-	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool,
+	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, FetchURLTool,
 	ContextSummarizeTool, ContextEvictTool, ContextMergeTool, ContextReorderTool, ContextAdjustWatermarksTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
@@ -468,6 +477,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return memoryForget(tc, deps)
 	case FunctionRecall:
 		return recall(tc, deps)
+	case FunctionFetchURL:
+		return fetchURL(ctx, tc)
 	case FunctionContextSummarize:
 		return contextSummarize(tc, deps)
 	case FunctionContextEvict:
