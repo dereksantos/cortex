@@ -957,16 +957,23 @@ func TestReadFileSizeGuard(t *testing.T) {
 	// session window — so a big-window coder still curates large files.
 	cs := &CortexSession{Window: 131072}
 
-	t.Run("oversized read is refused and redirects to study", func(t *testing.T) {
+	t.Run("oversized non-Go file returns a structural skeleton, not an error", func(t *testing.T) {
+		// outline.Render's regex/prose/positional tiers cover any language, not
+		// just go/ast — a too-large file of ANY kind gets curated, never a
+		// dead-end error redirecting the model to study as the only option.
 		big := filepath.Join(dir, "big.txt")
-		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644) // over the budget
+		size := (curationBudgetTokens + 1000) * 4
+		os.WriteFile(big, make([]byte, size), 0644) // over the budget
 		args, _ := json.Marshal(map[string]string{"path": big})
-		_, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
-		if err == nil {
-			t.Fatal("expected size-guard error")
+		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), cs)
+		if err != nil {
+			t.Fatalf("oversized non-Go file should get a skeleton, not an error: %v", err)
 		}
-		if !strings.Contains(err.Error(), "study") {
-			t.Errorf("guard should redirect to study, got %q", err)
+		if !strings.Contains(out, "too large") || !strings.Contains(out, "study") {
+			t.Errorf("skeleton should explain how to get content; got head: %.160q", out)
+		}
+		if len(out) >= size {
+			t.Error("skeleton path leaked raw file content")
 		}
 	})
 
@@ -1003,13 +1010,19 @@ func TestReadFileSizeGuard(t *testing.T) {
 	})
 
 	t.Run("budget is fixed, not window-scaled", func(t *testing.T) {
-		// A file over the budget is refused even with a huge window (the bug this
-		// fixes: a big window used to push the threshold past the file size).
+		// A file over the budget is curated (skeleton, never a raw dump) even
+		// with a huge window (the bug this fixes: a big window used to push the
+		// threshold past the file size).
 		big := filepath.Join(dir, "big2.txt")
-		os.WriteFile(big, make([]byte, (curationBudgetTokens+1000)*4), 0644)
+		size := (curationBudgetTokens + 1000) * 4
+		os.WriteFile(big, make([]byte, size), 0644)
 		args, _ := json.Marshal(map[string]string{"path": big})
-		if _, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000}); err == nil {
-			t.Error("a huge window must not exempt a large file from curation")
+		out, err := tools.Execute(context.Background(), tc(FunctionReadFile, string(args)), &CortexSession{Window: 1_000_000})
+		if err != nil {
+			t.Fatalf("a huge window must not turn curation into an error path: %v", err)
+		}
+		if len(out) >= size {
+			t.Error("a huge window must not exempt a large file from curation (raw content leaked)")
 		}
 	})
 }

@@ -51,6 +51,64 @@ func TestReadFileRange(t *testing.T) {
 	}
 }
 
+// TestReadFileTooLargeNonGoGetsSkeleton proves the too-large redirect is
+// language-agnostic: a big Python file gets outline.Render's regex-tier
+// skeleton (real "def "-headed sections), not the old Go-only gate's flat
+// "use study(...) instead" error.
+func TestReadFileTooLargeNonGoGetsSkeleton(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "big.py")
+	var sb strings.Builder
+	for i := 0; i < 1200; i++ {
+		fmt.Fprintf(&sb, "def handler_%d(request):\n    return process(%d, request)\n\n", i, i)
+	}
+	if sb.Len() <= CurationBudgetTokens*4 {
+		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, file)}}
+	out, err := readFile(tc, headlessDeps{})
+	if err != nil {
+		t.Fatalf("expected a skeleton, not an error: %v", err)
+	}
+	if !strings.Contains(out, "too large to read whole") {
+		t.Errorf("missing the too-large notice; got:\n%s", out)
+	}
+	if !strings.Contains(out, "def handler_0") {
+		t.Errorf("expected the Python declaration regex tier to fire (a \"def handler_0\" entry); got:\n%s", out)
+	}
+}
+
+// TestReadFileTooLargeNoStructureStillGetsSkeleton proves the positional-floor
+// tier still hands back something for a too-large file with no recognizable
+// declarations/headings/paragraphs at all — never a dead-end error.
+func TestReadFileTooLargeNoStructureStillGetsSkeleton(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "big.log")
+	var sb strings.Builder
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&sb, "line of unstructured log content %d filler filler filler\n", i)
+	}
+	if sb.Len() <= CurationBudgetTokens*4 {
+		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
+	}
+	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, file)}}
+	out, err := readFile(tc, headlessDeps{})
+	if err != nil {
+		t.Fatalf("expected the positional-floor skeleton, not an error: %v", err)
+	}
+	if !strings.Contains(out, "lines 1-") {
+		t.Errorf("expected a positional-floor entry (\"lines 1-N\"); got:\n%s", out)
+	}
+}
+
 func TestSpillShellOutput(t *testing.T) {
 	t.Chdir(t.TempDir())
 	out := []byte(strings.Repeat("log line\n", 100))

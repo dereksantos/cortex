@@ -270,10 +270,11 @@ func newTool(name, desc string, params map[string]any) Tool {
 
 var ReadFile = newTool(FunctionReadFile,
 	"Read a file, or an exact line range of one. With just a path: the whole "+
-		"file (a too-large Go file returns its declaration skeleton instead, a "+
-		"too-large non-Go file redirects to study). With start/end: exactly those "+
-		"1-indexed lines, which bypasses the size limit — the precise way to pull "+
-		"one declaration after a project_index/study points you at its line span.",
+		"file, unless it's too large — then its structural outline (declarations/"+
+		"headings/sections with line spans, whatever the file type supports) comes "+
+		"back instead. With start/end: exactly those 1-indexed lines, which bypasses "+
+		"the size limit — the precise way to pull one declaration after a "+
+		"skeleton/outline/study points you at its line span.",
 	objectSchema(map[string]any{
 		"path":  stringProp("Path to the file to read, relative to the working directory."),
 		"start": map[string]any{"type": "integer", "description": "Optional: 1-indexed first line to read. When set, only the line range is returned (the size limit does not apply)."},
@@ -678,16 +679,19 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// curation (2026-06-20). (~4 bytes/token.)
 	if info, statErr := os.Stat(path); statErr == nil {
 		if estTokens := int(info.Size()) / 4; estTokens > CurationBudgetTokens {
-			// Read the map before the territory: a too-large Go file hands back
-			// its declaration skeleton so the model can orient and target a
-			// region (study for content, bash sed for an exact range) instead of
-			// dead-ending. Non-Go (no skeleton) still redirects to study.
-			if skel := goFileSkeleton(path); skel != "" {
+			// Read the map before the territory: a too-large file (any language —
+			// outline.Render's regex/prose/positional tiers cover what go/ast
+			// doesn't) hands back its structural skeleton so the model can orient
+			// and target a region (read_file(start,end), study for curated
+			// content, or bash sed for an exact range) instead of dead-ending.
+			if skel := fileSkeleton(path); skel != "" {
 				printToolAction(fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
-				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its declaration skeleton is below; "+
-					"use study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` to read an exact line range.\n\n%s",
-					path, estTokens, path, path, skel), nil
+				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its structural outline is below; "+
+					"read_file(%q, start, end) an exact span, study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` for a raw range.\n\n%s",
+					path, estTokens, path, path, path, skel), nil
 			}
+			// outline.Render itself failed (e.g. an unreadable path) — the same
+			// error readFile would hit trying to read it directly.
 			return "", fmt.Errorf("%s is %d bytes (~%d tokens) — too large to read whole; use study(%q, goal) instead",
 				path, info.Size(), estTokens, path)
 		}
@@ -749,13 +753,13 @@ func readRange(path string, start, end int) (string, error) {
 // explode the context. ~24 KB ≈ 6k tokens, ample for a real code span.
 const maxReadBytes = 24000
 
-// goFileSkeleton returns the declaration outline of a Go file (every top-level
-// unit with line spans), or "" for non-Go or unparseable files — the orientation
-// a too-large read_file hands back in place of the content.
-func goFileSkeleton(path string) string {
-	if !strings.HasSuffix(path, ".go") {
-		return ""
-	}
+// fileSkeleton returns the structural outline of any file (outline.Render:
+// go/ast for Go, a declaration/heading regex for other languages, a prose
+// paragraph split, or a positional line-window floor when nothing else
+// applies) — the orientation a too-large read_file hands back in place of the
+// content. "" only if outline.Render itself errors (unreadable path); the
+// positional floor means a real file otherwise always yields something.
+func fileSkeleton(path string) string {
 	skel, err := outline.Render(path, 8000)
 	if err != nil || strings.TrimSpace(skel) == "" {
 		return ""
