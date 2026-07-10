@@ -59,9 +59,9 @@ func (f DispatchFunc) Dispatch(ctx context.Context, call ToolCall) string { retu
 // AfterToolResult is an optional callback invoked after each tool result is
 // appended, allowing the caller to update display with current context state.
 type Toolset struct {
-	Tools         []Tool
-	Dispatch      AgentDispatcher
-	BeforeBatch   func()
+	Tools           []Tool
+	Dispatch        AgentDispatcher
+	BeforeBatch     func()
 	AfterToolResult func()
 }
 
