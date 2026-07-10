@@ -70,6 +70,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	defer func() {
 		if end := len(cs.Request.Messages); end > turnStart {
 			cs.ws.AddTurn(cache.TurnSpan{Start: turnStart, End: end, Tokens: estTurnTokens(cs.Request.Messages[turnStart:end])})
+			cs.writeSessionState()
 		}
 	}()
 
@@ -93,7 +94,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxToolIterations}
-	
+
 	// Update display during the loop for interactive REPL
 	var onStatusUpdate func(int, int)
 	var onAfterToolResult func()
@@ -113,7 +114,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 		}
 	}
 	ts.AfterToolResult = onAfterToolResult
-	
+
 	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++

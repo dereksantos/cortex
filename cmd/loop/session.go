@@ -9,12 +9,28 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/cache"
 )
 
 const (
 	kindMessage    = "message"
 	kindCompaction = "compaction"
+	kindState      = "state"
+	stateVersion   = 1
 )
+
+type sessionState struct {
+	Version       int                  `json:"version"`
+	Base          int                  `json:"base"`
+	Frontier      int                  `json:"frontier"`
+	TotalTurns    int                  `json:"total_turns"`
+	HighWatermark int                  `json:"high_watermark"`
+	LowWatermark  int                  `json:"low_watermark"`
+	LastTurn      int                  `json:"last_turn"`
+	Outline       []cache.OutlineEntry `json:"outline,omitempty"`
+	OutlineFolded string               `json:"outline_folded,omitempty"`
+}
 
 type sessionEntry struct {
 	TS   time.Time `json:"ts"`
@@ -22,8 +38,9 @@ type sessionEntry struct {
 	Turn int       `json:"turn,omitempty"`
 	Message
 
-	From     string  `json:"from,omitempty"`
-	Coverage float64 `json:"coverage,omitempty"`
+	From     string        `json:"from,omitempty"`
+	Coverage float64       `json:"coverage,omitempty"`
+	State    *sessionState `json:"state,omitempty"`
 }
 
 func contextDir() string {
@@ -66,14 +83,14 @@ func (cs *CortexSession) StartTranscript() {
 // Call this right after ResumeTranscript to make the loaded session visible.
 func (cs *CortexSession) showLoadedContext(id string) {
 	dir := sessionsDir()
-	
+
 	// Get session info for display
 	infos, _ := listSessions(dir, 1)
 	var info sessionInfo
 	if len(infos) > 0 {
 		info = infos[0]
 	}
-	
+
 	// Calculate demotion state
 	demotedTurns := 0
 	hydratedTurns := 0
@@ -83,22 +100,22 @@ func (cs *CortexSession) showLoadedContext(id string) {
 		totalTurns = cs.ws.TotalTurns()
 		hydratedTurns = totalTurns - demotedTurns
 	}
-	
+
 	// Build context summary
 	msgCount := len(cs.Request.Messages)
-	
+
 	// Only show demotion info if we have turns (not a fresh session)
 	if totalTurns > 0 {
 		fmt.Printf("%s  %d turns (%d demoted, %d hydrated tail)\n",
 			withColor("context:", green),
 			totalTurns, demotedTurns, hydratedTurns)
 	}
-	
+
 	// Show message count
 	fmt.Printf("%s  %d messages\n",
 		withColor("messages:", green),
 		msgCount)
-	
+
 	// Show session age if available
 	if info.ModTime.IsZero() {
 		fmt.Printf("%s  %s\n",
@@ -122,7 +139,7 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 		}
 	}
 	path := filepath.Join(dir, id+".jsonl")
-	msgs, turns, err := loadTranscript(path)
+	msgs, turns, state, err := loadSession(path)
 	if err != nil {
 		return err
 	}
@@ -137,6 +154,12 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 	cs.ws, cs.turns = cs.replayWorkingSet(msgs, turns)
 	cs.outline = nil
 	cs.outlineFolded = ""
+	if state != nil {
+		// A process can stop after appending part of a turn but before its state
+		// checkpoint. In that case the latest checkpoint is stale: replay the
+		// transcript conservatively rather than making the session unresumable.
+		_ = cs.restoreSessionState(*state)
+	}
 	cs.SessionID = id
 	cs.transcript = f
 	return nil
@@ -181,7 +204,7 @@ func listSessions(dir string, limit int) ([]sessionInfo, error) {
 		if fi, ferr := e.Info(); ferr == nil {
 			info.ModTime = fi.ModTime()
 		}
-		if msgs, _, lerr := loadTranscript(filepath.Join(dir, name)); lerr == nil {
+		if msgs, _, _, lerr := loadSession(filepath.Join(dir, name)); lerr == nil {
 			for _, m := range msgs {
 				if m.Role != RoleUser && m.Role != "assistant" {
 					continue
@@ -237,26 +260,35 @@ func invokedName() string {
 }
 
 func loadTranscript(path string) ([]Message, []int, error) {
+	msgs, turns, _, err := loadSession(path)
+	return msgs, turns, err
+}
+
+func loadSession(path string) ([]Message, []int, *sessionState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read session: %w", err)
+		return nil, nil, nil, fmt.Errorf("read session: %w", err)
 	}
 	var msgs []Message
 	var turns []int
+	var state *sessionState
 	for i, line := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		var e sessionEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return nil, nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
+			return nil, nil, nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
 		}
 		if e.Kind == "" || e.Kind == kindMessage {
 			msgs = append(msgs, e.Message)
 			turns = append(turns, e.Turn)
+		} else if e.Kind == kindState && e.State != nil {
+			copy := *e.State
+			state = &copy
 		}
 	}
-	return msgs, turns, nil
+	return msgs, turns, state, nil
 }
 
 func (cs *CortexSession) writeEntry(e sessionEntry) {
@@ -273,6 +305,42 @@ func (cs *CortexSession) writeEntry(e sessionEntry) {
 
 func (cs *CortexSession) writeTranscript(m Message) {
 	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: m})
+}
+
+func (cs *CortexSession) writeSessionState() {
+	if cs.ws == nil || cs.transcript == nil {
+		return
+	}
+	high, low := cs.ws.GetWatermarks()
+	cs.writeEntry(sessionEntry{Kind: kindState, State: &sessionState{
+		Version: stateVersion, Base: cs.ws.Base(), Frontier: cs.ws.Demoted(),
+		TotalTurns: cs.ws.TotalTurns(), HighWatermark: high, LowWatermark: low,
+		LastTurn: cs.turns, Outline: append([]cache.OutlineEntry(nil), cs.outline...),
+		OutlineFolded: cs.outlineFolded,
+	}})
+}
+
+func (cs *CortexSession) restoreSessionState(state sessionState) error {
+	if state.Version != stateVersion {
+		return fmt.Errorf("unsupported version %d", state.Version)
+	}
+	if state.Base != cs.ws.Base() || state.TotalTurns != cs.ws.TotalTurns() {
+		return fmt.Errorf("snapshot does not match transcript (base %d/%d, turns %d/%d)", state.Base, cs.ws.Base(), state.TotalTurns, cs.ws.TotalTurns())
+	}
+	if state.LastTurn != cs.turns {
+		return fmt.Errorf("snapshot last turn %d does not match transcript %d", state.LastTurn, cs.turns)
+	}
+	if err := cs.ws.RestoreState(state.Frontier, state.HighWatermark, state.LowWatermark); err != nil {
+		return err
+	}
+	cs.outline = append([]cache.OutlineEntry(nil), state.Outline...)
+	cs.outlineFolded = state.OutlineFolded
+	if len(cs.outline) > 0 || cs.outlineFolded != "" {
+		cs.Request.OutlineBlock = cs.renderOutlineBlock()
+	}
+	cs.Request.PrefixEnd = cs.ws.Base()
+	cs.Request.TailFrom = cs.ws.FrontierMsg()
+	return nil
 }
 
 var compactSummarize = func(ctx context.Context, cs *CortexSession, path string, window int) (string, bool, error) {

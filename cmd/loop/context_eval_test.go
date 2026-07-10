@@ -388,6 +388,48 @@ func TestContextEvalCompactSeam(t *testing.T) {
 	}, "resumed post-compact turn")
 }
 
+func TestContextEvalResumeRestoresDemotionState(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	backend := newContextEvalBackend(t)
+	cs := newContextEvalSession(t, backend, 1000)
+
+	for i := 1; i <= 4; i++ {
+		input := fmt.Sprintf("turn-%d %s", i, strings.Repeat("x", 700))
+		if _, err := cs.Turn(context.Background(), input); err != nil {
+			t.Fatalf("turn %d: %v", i, err)
+		}
+	}
+	// Demotion runs at turn start, so one more turn applies the threshold
+	// crossed by the fourth completed turn.
+	if _, err := cs.Turn(context.Background(), "trigger demotion"); err != nil {
+		t.Fatal(err)
+	}
+	if cs.ws.Demoted() == 0 || len(cs.outline) == 0 {
+		t.Fatalf("test setup did not demote: frontier=%d outline=%d", cs.ws.Demoted(), len(cs.outline))
+	}
+	wantDemoted := cs.ws.Demoted()
+	wantOutline := cache.RenderOutline(cs.outline)
+	id := cs.SessionID
+	cs.transcript.Close()
+	cs.transcript = nil
+
+	resumed := &CortexSession{Window: 1000, Request: &AgentRequest{Model: "m", BaseURL: backend.srv.URL}}
+	if err := resumed.ResumeTranscript(id); err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.transcript.Close()
+	if resumed.ws.Demoted() != wantDemoted {
+		t.Fatalf("restored frontier = %d, want %d", resumed.ws.Demoted(), wantDemoted)
+	}
+	if got := cache.RenderOutline(resumed.outline); got != wantOutline {
+		t.Fatalf("restored outline mismatch\ngot:  %s\nwant: %s", got, wantOutline)
+	}
+	if resumed.Request.TailFrom != resumed.ws.FrontierMsg() || resumed.Request.OutlineBlock == "" {
+		t.Fatal("restored wire layout was not initialized")
+	}
+}
+
 // TestContextEvalLegacyResumeHydrates checks the fallback contract: a
 // transcript without turn stamps resumes with its whole history on the wire.
 func TestContextEvalLegacyResumeHydrates(t *testing.T) {

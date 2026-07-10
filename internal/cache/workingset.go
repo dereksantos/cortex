@@ -120,6 +120,21 @@ func (ws *WorkingSet) GetWatermarks() (int, int) {
 	return ws.highWM, ws.lowWM
 }
 
+// RestoreState restores a previously persisted demotion frontier and watermarks.
+// It validates the complete snapshot before mutating the working set.
+func (ws *WorkingSet) RestoreState(frontier, highWM, lowWM int) error {
+	if frontier < 0 || frontier > len(ws.turns) {
+		return fmt.Errorf("workingset: frontier %d is outside [0,%d]", frontier, len(ws.turns))
+	}
+	if highWM <= 0 || lowWM <= 0 || lowWM > highWM {
+		return fmt.Errorf("workingset: restored watermarks must be positive and lowWM <= highWM")
+	}
+	ws.frontier = frontier
+	ws.highWM = highWM
+	ws.lowWM = lowWM
+	return nil
+}
+
 // ReorderTail reorders the hydrated tail turns based on the given metric.
 // Only rearranges order—it does not evict or compress.
 // Supported metrics: "salience", "recency", "task-relevance".
@@ -128,10 +143,10 @@ func (ws *WorkingSet) ReorderTail(metric string) []TurnSpan {
 	if ws.frontier >= len(ws.turns) {
 		return nil // nothing to reorder
 	}
-	
+
 	tails := make([]TurnSpan, len(ws.turns)-ws.frontier)
 	copy(tails, ws.turns[ws.frontier:])
-	
+
 	// For now, only "recency" matters (most recent first = no change needed)
 	// Other metrics would require external salience scoring
 	switch metric {
@@ -151,7 +166,7 @@ func (ws *WorkingSet) ReorderTail(metric string) []TurnSpan {
 		// Unknown metric - return empty slice to indicate no change
 		return nil
 	}
-	
+
 	return tails
 }
 
@@ -162,7 +177,7 @@ func (ws *WorkingSet) AdjustWatermarks(highDelta, lowDelta int) (int, int, error
 	// Calculate max delta (±W/4 where W is the window size)
 	// Window size = highWM * 2 (since highWM is ~W/2)
 	maxDelta := ws.highWM / 2
-	
+
 	// Validate deltas are within bounds
 	if highDelta < -maxDelta || highDelta > maxDelta {
 		return ws.highWM, ws.lowWM, fmt.Errorf("high_delta %d is out of bounds (±%d)", highDelta, maxDelta)
@@ -170,11 +185,11 @@ func (ws *WorkingSet) AdjustWatermarks(highDelta, lowDelta int) (int, int, error
 	if lowDelta < -maxDelta || lowDelta > maxDelta {
 		return ws.highWM, ws.lowWM, fmt.Errorf("low_delta %d is out of bounds (±%d)", lowDelta, maxDelta)
 	}
-	
+
 	// Calculate new watermarks
 	newHigh := ws.highWM + highDelta
 	newLow := ws.lowWM + lowDelta
-	
+
 	// Ensure watermarks remain positive
 	if newHigh <= 0 {
 		return ws.highWM, ws.lowWM, fmt.Errorf("new high watermark %d must be positive", newHigh)
@@ -182,14 +197,14 @@ func (ws *WorkingSet) AdjustWatermarks(highDelta, lowDelta int) (int, int, error
 	if newLow <= 0 {
 		return ws.highWM, ws.lowWM, fmt.Errorf("new low watermark %d must be positive", newLow)
 	}
-	
+
 	// Ensure low <= high invariant
 	if newLow > newHigh {
 		return ws.highWM, ws.lowWM, fmt.Errorf("watermark adjustment would violate lowWM <= highWM: low=%d, high=%d", newLow, newHigh)
 	}
-	
+
 	ws.highWM = newHigh
 	ws.lowWM = newLow
-	
+
 	return newHigh, newLow, nil
 }

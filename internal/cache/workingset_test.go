@@ -204,6 +204,48 @@ func TestFrontierMsg(t *testing.T) {
 	})
 }
 
+func TestRestoreState(t *testing.T) {
+	ws := New(1, 100, 60)
+	ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 20})
+	ws.AddTurn(TurnSpan{Start: 3, End: 5, Tokens: 20})
+
+	if err := ws.RestoreState(1, 120, 80); err != nil {
+		t.Fatal(err)
+	}
+	if ws.Demoted() != 1 || ws.FrontierMsg() != 3 {
+		t.Fatalf("restored frontier = %d / msg %d, want 1 / 3", ws.Demoted(), ws.FrontierMsg())
+	}
+	if high, low := ws.GetWatermarks(); high != 120 || low != 80 {
+		t.Fatalf("restored watermarks = %d/%d, want 120/80", high, low)
+	}
+}
+
+func TestRestoreStateRejectsInvalidSnapshotWithoutMutation(t *testing.T) {
+	ws := New(1, 100, 60)
+	ws.AddTurn(TurnSpan{Start: 1, End: 2, Tokens: 20})
+
+	for _, tc := range []struct {
+		name                string
+		frontier, high, low int
+	}{
+		{"negative frontier", -1, 100, 60},
+		{"frontier past turns", 2, 100, 60},
+		{"invalid watermarks", 0, 50, 60},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ws.RestoreState(tc.frontier, tc.high, tc.low); err == nil {
+				t.Fatal("RestoreState succeeded")
+			}
+			if ws.Demoted() != 0 {
+				t.Fatalf("frontier mutated to %d", ws.Demoted())
+			}
+			if high, low := ws.GetWatermarks(); high != 100 || low != 60 {
+				t.Fatalf("watermarks mutated to %d/%d", high, low)
+			}
+		})
+	}
+}
+
 func TestReorderTail(t *testing.T) {
 	t.Run("recency reorders tail newest first", func(t *testing.T) {
 		ws := New(1, 1000, 600)
@@ -211,28 +253,28 @@ func TestReorderTail(t *testing.T) {
 		ws.AddTurn(TurnSpan{Start: 3, End: 5, Tokens: 200})
 		ws.AddTurn(TurnSpan{Start: 5, End: 7, Tokens: 300})
 		// Total 600 tokens, all in tail (frontier=0)
-		
+
 		reordered := ws.ReorderTail("recency")
-		
+
 		if len(reordered) != 3 {
 			t.Errorf("ReorderTail len = %d, want 3", len(reordered))
 		}
 		// With recency (newest first), the order should be reversed
 		// Original: [100, 200, 300], Reversed: [300, 200, 100]
 		if reordered[0].Tokens != 300 || reordered[1].Tokens != 200 || reordered[2].Tokens != 100 {
-			t.Errorf("ReorderTail order = [%d,%d,%d], want [300,200,100]", 
+			t.Errorf("ReorderTail order = [%d,%d,%d], want [300,200,100]",
 				reordered[0].Tokens, reordered[1].Tokens, reordered[2].Tokens)
 		}
 	})
-	
+
 	t.Run("salience reorders tail (same as recency for now)", func(t *testing.T) {
 		ws := New(1, 1000, 600)
 		ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 100})
 		ws.AddTurn(TurnSpan{Start: 3, End: 5, Tokens: 200})
 		ws.AddTurn(TurnSpan{Start: 5, End: 7, Tokens: 300})
-		
+
 		reordered := ws.ReorderTail("salience")
-		
+
 		if len(reordered) != 3 {
 			t.Errorf("ReorderTail len = %d, want 3", len(reordered))
 		}
@@ -241,18 +283,18 @@ func TestReorderTail(t *testing.T) {
 			t.Errorf("First token is %d, want 300", reordered[0].Tokens)
 		}
 	})
-	
+
 	t.Run("unknown metric returns nil", func(t *testing.T) {
 		ws := New(1, 1000, 600)
 		ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 100})
-		
+
 		reordered := ws.ReorderTail("unknown-metric")
-		
+
 		if reordered != nil {
 			t.Errorf("ReorderTail with unknown metric should return nil, got %v", reordered)
 		}
 	})
-	
+
 	t.Run("tail with one turn returns that turn", func(t *testing.T) {
 		ws := New(1, 500, 400)
 		ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 100})
@@ -261,31 +303,31 @@ func TestReorderTail(t *testing.T) {
 		ws.AddTurn(TurnSpan{Start: 5, End: 7, Tokens: 100})
 		// Demote turns - will leave at least one in tail
 		ws.DemoteBatch()
-		
+
 		reordered := ws.ReorderTail("recency")
-		
+
 		// Should return the remaining turn(s) in tail
 		if len(reordered) == 0 {
 			t.Errorf("ReorderTail with non-empty tail should not return nil")
 		}
 	})
-	
+
 	t.Run("fully demoted (only one turn) returns that one turn", func(t *testing.T) {
 		ws := New(1, 100, 50)
 		ws.AddTurn(TurnSpan{Start: 1, End: 3, Tokens: 100})
-		
+
 		// TailTokens is 100, above highWM=100? No, it equals.
 		// Let's adjust: make it larger
-		ws.highWM = 50  // Override for test
-		ws.lowWM = 30   // Override for test
-		
+		ws.highWM = 50 // Override for test
+		ws.lowWM = 30  // Override for test
+
 		// With only 1 turn and highWM=50, TailTokens=100 > 50
 		// But loop condition is ws.frontier < len(ws.turns)-1 which is 0 < 0 = false
 		// So no demotion happens, and we can't test the "empty tail" case this way
-		
+
 		// Actually, with only 1 turn, it can never be demoted
 		reordered := ws.ReorderTail("recency")
-		
+
 		// Should return that one turn
 		if len(reordered) != 1 {
 			t.Errorf("ReorderTail with 1 turn should return 1 item, got %d", len(reordered))
@@ -296,9 +338,9 @@ func TestReorderTail(t *testing.T) {
 func TestAdjustWatermarks(t *testing.T) {
 	t.Run("valid deltas adjust watermarks", func(t *testing.T) {
 		ws := New(1, 1000, 600)
-		
+
 		newHigh, newLow, err := ws.AdjustWatermarks(100, 50)
-		
+
 		if err != nil {
 			t.Errorf("AdjustWatermarks unexpected error: %v", err)
 		}
@@ -315,12 +357,12 @@ func TestAdjustWatermarks(t *testing.T) {
 			t.Errorf("ws.lowWM = %d, want 650", ws.lowWM)
 		}
 	})
-	
+
 	t.Run("negative deltas work", func(t *testing.T) {
 		ws := New(1, 1000, 600)
-		
+
 		newHigh, newLow, err := ws.AdjustWatermarks(-200, -100)
-		
+
 		if err != nil {
 			t.Errorf("AdjustWatermarks unexpected error: %v", err)
 		}
@@ -331,34 +373,34 @@ func TestAdjustWatermarks(t *testing.T) {
 			t.Errorf("newLow = %d, want 500", newLow)
 		}
 	})
-	
+
 	t.Run("exceeding bounds returns error", func(t *testing.T) {
 		ws := New(1, 1000, 600)
-		
+
 		// Max delta is 500 (W/4 where W=2000)
 		_, _, err := ws.AdjustWatermarks(600, 0)
-		
+
 		if err == nil {
 			t.Error("AdjustWatermarks should return error for out-of-bounds delta")
 		}
 	})
-	
+
 	t.Run("violating low <= high returns error", func(t *testing.T) {
 		ws := New(1, 1000, 600)
-		
+
 		// This would make low > high: 600 + 500 = 1100 > 1000 - 100 = 900
 		_, _, err := ws.AdjustWatermarks(-100, 500)
-		
+
 		if err == nil {
 			t.Error("AdjustWatermarks should return error when low > high")
 		}
 	})
-	
+
 	t.Run("zero deltas work", func(t *testing.T) {
 		ws := New(1, 1000, 600)
-		
+
 		newHigh, newLow, err := ws.AdjustWatermarks(0, 0)
-		
+
 		if err != nil {
 			t.Errorf("AdjustWatermarks unexpected error: %v", err)
 		}
