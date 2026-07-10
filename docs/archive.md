@@ -193,6 +193,19 @@ fail-safe. Net: −18,350 src / −11,029 test LOC. The capture/storage write-si
 a future semantic `Reflect` profile would project into (see
 `docs/study-subagent.md`).
 
+## Roadmap planning doc (archived 2026-07-10)
+
+`docs/roadmap-2026-06-23.md` was the first tidy pass over four roadmap items
+(web search, tidy-first extraction, working memory, edit-diff UX), grounded in
+the codebase as it stood on 2026-06-23 — a 4,371-line `cmd/cortex/main.go`
+monolith with a parallel `internal/harness`. Everything it planned either
+shipped in a different shape or was deliberately deferred: the extraction was
+superseded by `engine-unification.md` + `study-subagent.md` (shipped); the
+working-memory item landed as the two-zone context architecture
+(`context-architecture.md`); web search and the small-batches system prompt
+landed as specified; the edit-diff UX remains deferred. The live roadmap is
+the root [`ROADMAP.md`](../ROADMAP.md); the doc is in git history.
+
 ## Distribution (removed)
 
 - **Homebrew** (`Formula/cortex.rb`) — `--HEAD` installs of the `cortex`

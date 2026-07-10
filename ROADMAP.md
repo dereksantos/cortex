@@ -35,7 +35,9 @@ The project was recently slimmed to center on `cmd/cortex`. The prior
 
 ## Near-term
 
-Detailed plan and dependency order: [`docs/roadmap-2026-06-23.md`](docs/roadmap-2026-06-23.md).
+(The original planning doc, `docs/roadmap-2026-06-23.md`, is archived — see
+[`docs/archive.md`](docs/archive.md); everything it planned shipped in a
+different shape or is recorded below.)
 
 **New recommended sequence (2026-07-08 update):**
 
