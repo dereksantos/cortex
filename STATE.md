@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 8
+Updated: 2026-07-11 · Iteration: 9
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -60,9 +60,11 @@ M2 — Landscape scan (M1 complete)
       `21f6c7f` — `TestScanHarnesses`, `TestScanRuntimes`,
       `TestScanProjects`, `TestScanComposesAllFamilies`
       (internal/landscape/landscape_test.go).
-- [ ] M2.2 Every filesystem visit filtered through
+- [x] M2.2 Every filesystem visit filtered through
       `projectscan.IgnoreSet`; a fixture with a planted secret path
-      proves it never appears in any scan result.
+      proves it never appears in any scan result. `569269c` —
+      `TestScanProjectsFiltersThroughIgnoreSet`
+      (internal/landscape/landscape_test.go).
 - [ ] M2.3 Content-non-leak sentinel: fixture file bodies carry a
       unique sentinel string; serializing the full scan result (structs,
       `--json` output, and the `landscape.scan` journal event) contains
@@ -83,23 +85,31 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.2: filter every filesystem visit in `internal/landscape`'s
-scanners through `projectscan.IgnoreSet` (`LoadIgnoreSet(root)` —
-`internal/projectscan/ignore.go`); add a fixture with a planted secret
-path (e.g. `id_rsa`, `.env`, or a `.aws/credentials`-style path under a
-project root) and prove it never appears in any `Scan` result field
-(`Tools`, `Runtimes`, `Projects`, or a project's `Markers`). `ScanProjects`
-is the scanner most exposed to arbitrary user-tree content (it
-`filepath.WalkDir`s recursively) — thread `IgnoreSet.IsDirExcluded` into
-its walk callback to prune hard-excluded/gitignored directories, and
-`IgnoreSet.IsFileExcluded`/`IsHardExcludedFile` before treating any
-path as a marker. `ScanHarnesses`/`ScanRuntimes` check a small fixed
-list of well-known relative paths directly under `root` (not a general
-walk), so the secret-leak fixture for those two families should target
-`ScanProjects`'s walk, which is where an IgnoreSet gap would actually
-surface. Note IgnoreSet is real-filesystem based (`LoadIgnoreSet(root
-string)`, absolute paths) — matches `Scan`'s already-real-FS design, no
-adapter needed.
+Start M2.3: content-non-leak sentinel. Plant a unique sentinel string
+in fixture FILE BODIES (not just paths/names — M2.2 already proved
+path-level exclusion) under a project that IS reported by `Scan`
+(e.g. the body of a tracked, non-excluded file sitting next to a
+detected project's `.git`/marker), then serialize the full scan
+result three ways and assert the sentinel appears in NONE of them:
+(1) the `landscape.Result` struct (already effectively proven by
+M2.2's JSON-marshal check, but M2.3 wants an explicit file-body case —
+`Result`'s fields are just names/paths so this should already hold,
+which is itself the thing to assert/document); (2) `--json` CLI output
+(doesn't exist yet — M2.5 builds the `cortex scan` subcommand; if M2.3
+lands first, either stub a minimal JSON-rendering func now and let
+M2.5 build the CLI around it, or note in Decisions that the `--json`
+leg of this sentinel test is deferred to ride M2.5's CLI, with M2.3
+covering the struct + `landscape.scan` journal-event legs only — pick
+whichever keeps M2.3 landable in one iteration); (3) the
+`landscape.scan` journal event body (doesn't exist yet either — M2.7
+is the one that persists this event; same fork: either stub the event
+payload now or defer that leg's assertion to M2.7, recording the
+choice in Decisions). Given M2.3 depends on artifacts M2.5/M2.7 haven't
+built yet, the likely honest move is: assert what CAN be asserted today
+(struct-level non-leak, explicit and file-body-flavored, as a permanent
+regression guard) and record in Decisions Log exactly which legs of
+M2.3's DoD ride later increments and why — do not fabricate a
+`--json` renderer or journal event just to tick the box prematurely.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -298,6 +308,34 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   confirmed `go test ./internal/landscape/...` fails to build (10
   `undefined` errors against `landscape_test.go`), moved it back and
   reran green.
+
+- 2026-07-11: M2.2 landed by threading `projectscan.LoadIgnoreSet(root)`
+  into `ScanProjects`'s `filepath.WalkDir` callback only —
+  `ScanHarnesses`/`ScanRuntimes` were left untouched per the prior
+  iteration's Next Up analysis (they check a small fixed relative-path
+  list directly under `root`, not a general walk, so there's no
+  equivalent leak surface to filter). Two IgnoreSet entry points used:
+  `IsDirExcluded(path, name)` before descending into any directory
+  (`path != root` guard so the scan root's own name is never
+  self-excluding), pruning both hard-excluded names (node_modules,
+  vendor, .venv, build output, …) and `.gitignore` matches; and, per
+  candidate marker path, `IsDirExcluded`/`IsFileExcluded` chosen by
+  `os.Stat`'s `IsDir()` (directory markers `.cursor`/`.cortex` vs. file
+  markers `AGENTS.md`/`CLAUDE.md`) before counting it. `IgnoreSet` is
+  loaded once per `ScanProjects` call (not per-directory) since it's
+  documented read-only/shareable after construction and rooted at the
+  same `root` the walk uses. `TestScanProjectsFiltersThroughIgnoreSet`
+  plants two nested "hidden" projects (one under `node_modules`, one
+  under a root-`.gitignore`'d `vault/` directory), each with a distinct
+  planted secret file (`id_rsa`, `.env`) beside its marker, exercised
+  through the public `Scan()` composition and asserted absent both
+  structurally (`findProject`) and via a full `json.Marshal` substring
+  check — covering the M2.2 DoD's "any scan result field" wording in
+  one test. Load-bearing check done: reverted `ScanProjects` to the
+  pre-fix walk (and removed the now-unused `projectscan` import) —
+  confirmed the test fails, reporting both nested projects and every
+  planted string present in the marshaled JSON — then restored the fix
+  and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
