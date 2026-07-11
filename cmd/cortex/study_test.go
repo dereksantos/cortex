@@ -135,3 +135,41 @@ func TestSubagentDepthPolicy(t *testing.T) {
 		}
 	})
 }
+
+// TestSubagentModelBinding covers subagentRequest's binding rules: study
+// stays on the study role's spec; any other profile (agent) inherits the
+// coder's live request — so it follows /model switches and defaults to the
+// model that spawned it; a per-call Subagent.Model pins just the model name
+// on that binding; and with no live coder request the study spec is the
+// fallback (headless drivers, test fixtures).
+func TestSubagentModelBinding(t *testing.T) {
+	study := ModelSpec{Model: "study-m", Endpoint: "http://study.example"}
+	coder := &AgentRequest{Model: "coder-live", BaseURL: "http://coder.example", APIKey: "sk-live", Temperature: 0.3}
+	tests := []struct {
+		name      string
+		cs        *CortexSession
+		sa        tools.Subagent
+		wantModel string
+		wantBase  string
+		wantKey   string
+	}{
+		{"study role draws the study binding", &CortexSession{Study: study, Request: coder}, tools.Subagent{Role: roleStudy}, "study-m", "http://study.example", ""},
+		{"agent role inherits the coder's live request", &CortexSession{Study: study, Request: coder}, tools.Subagent{Role: "agent"}, "coder-live", "http://coder.example", "sk-live"},
+		{"per-call model override pins the model only", &CortexSession{Study: study, Request: coder}, tools.Subagent{Role: "agent", Model: "pinned-m"}, "pinned-m", "http://coder.example", "sk-live"},
+		{"no live request falls back to the study binding", &CortexSession{Study: study}, tools.Subagent{Role: "agent"}, "study-m", "http://study.example", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := tt.cs.subagentRequest(tt.sa, "seed")
+			if req.Model != tt.wantModel {
+				t.Errorf("Model = %q, want %q", req.Model, tt.wantModel)
+			}
+			if req.BaseURL != tt.wantBase {
+				t.Errorf("BaseURL = %q, want %q", req.BaseURL, tt.wantBase)
+			}
+			if req.APIKey != tt.wantKey {
+				t.Errorf("APIKey = %q, want %q", req.APIKey, tt.wantKey)
+			}
+		})
+	}
+}

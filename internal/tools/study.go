@@ -36,6 +36,13 @@ type Subagent struct {
 	// pre-seam behavior.
 	Seed func(goal, path, outline string) string
 
+	// Model is a per-invocation model override, stamped by the dispatcher from
+	// the tool call's optional "model" argument onto the profile copy it hands
+	// RunSubagent. Registered profiles leave it empty — then the runner's
+	// default binding decides (the study role's spec for Study; the coder's
+	// own live model for agent).
+	Model string
+
 	// DepthCap is how many additional levels of subagent nesting a run of this
 	// profile is allowed to spawn, counted from ITS OWN invocation (depth 0):
 	// 0 (the zero value, Study's setting) means a running instance of this

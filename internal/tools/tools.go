@@ -328,8 +328,9 @@ var AgentTool = newTool(FunctionAgent,
 		"commands — use it to delegate a self-contained change you don't need to "+
 		"drive step by step yourself. The more specific the goal, the tighter the scope.",
 	objectSchema(map[string]any{
-		"path": stringProp("Path to the file or directory the work is scoped to."),
-		"goal": stringProp("The unit of work to do — what to change, and how to verify it."),
+		"path":  stringProp("Path to the file or directory the work is scoped to."),
+		"goal":  stringProp("The unit of work to do — what to change, and how to verify it."),
+		"model": stringProp("Model to run the subagent on; omit to run it as the model you are currently running as."),
 	}, "path"))
 
 var OutlineTool = newTool(FunctionOutline,
@@ -607,7 +608,8 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	if err != nil {
 		return "", err
 	}
-	goal, _ := tc.StringArg("goal") // optional
+	goal, _ := tc.StringArg("goal")     // optional
+	sa.Model, _ = tc.StringArg("model") // optional per-call override; see Subagent.Model
 	ol, err := deps.Outline(path, StudySeedBudget)
 	if err != nil {
 		return "", err

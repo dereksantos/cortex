@@ -223,7 +223,9 @@ The `agent` subagent is broader than Study — it can write, edit, and run
 `bash` — but stays bounded: it is capped to one level of nesting, any Risky
 shell command inside it is treated as Blocked (no interactive operator on
 that seam), and it excludes the same session-scoped tools Study excludes
-(`recall`, the memory tools, the context tools). See
+(`recall`, the memory tools, the context tools). By default it runs as the
+same model the coder is currently running as (following `/model` switches);
+an optional `model` argument pins a different model for one call. See
 [`docs/agent-tool.md`](docs/agent-tool.md) for the design decisions and
 `tools.enable_agent` in Configuration to disable it.
 

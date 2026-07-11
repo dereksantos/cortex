@@ -20,10 +20,33 @@ func (cs *CortexSession) Outline(path string, budget int) (string, error) {
 	return outline.Render(path, budget)
 }
 
-// specForRole resolves a subagent profile's model binding. Today every profile
-// (only Study) draws from the study binding (the reasoner tag, thinking ON).
+// specForRole resolves a subagent profile's config-bound model spec. Only the
+// study role has a binding of its own (the reasoner tag, thinking ON); it is
+// also the fallback for any profile when there is no live coder request to
+// inherit from — see subagentRequest.
 func (cs *CortexSession) specForRole(role string) ModelSpec {
 	return cs.Study
+}
+
+// subagentRequest builds a profile's opening request. Study draws from the
+// study role binding; any other profile (agent) inherits the coder's live
+// request — model, endpoint, key, and template kwargs, so it follows /model
+// switches and defaults to running as the model that spawned it. A per-call
+// sa.Model (the agent tool's optional "model" argument) then pins just the
+// model name on that binding.
+func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
+	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
+	if sa.Role != roleStudy && cs.Request != nil {
+		req.Model = cs.Request.Model
+		req.BaseURL = cs.Request.BaseURL
+		req.APIKey = cs.Request.APIKey
+		req.ChatTemplateKwargs = cs.Request.ChatTemplateKwargs
+		req.Temperature = cs.Request.Temperature
+	}
+	if sa.Model != "" {
+		req.Model = sa.Model
+	}
+	return req
 }
 
 // root is the workspace root the study door-guard (ConfinePath) confines reads
@@ -76,11 +99,10 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 		return "", loopStats{}, fmt.Errorf("%s: subagent depth cap %d exceeded (called at depth %d)", sa.Name, sa.DepthCap, depth)
 	}
 	ctx = withSubagentDepth(ctx, depth+1)
-	spec := cs.specForRole(sa.Role)
+	req := cs.subagentRequest(sa, seed)
 	if !cs.quiet {
-		fmt.Println(withColor(fmt.Sprintf("  ▸ %s via %s", sa.Name, spec.Model), green))
+		fmt.Println(withColor(fmt.Sprintf("  ▸ %s via %s", sa.Name, req.Model), green))
 	}
-	req := requestFor(spec, sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	digest, stats, err := runLoop(ctx, cs.blockingSender(), req, ts, sa.Bounds, nil, appendMsg, nil)

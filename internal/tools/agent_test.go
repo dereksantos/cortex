@@ -117,3 +117,37 @@ func TestExecuteRefusesDisabledAgent(t *testing.T) {
 		t.Error("disabled agent tool should not return the subagent's digest")
 	}
 }
+
+// TestAgentModelArg covers the per-call model override: the agent tool's
+// optional "model" argument is stamped onto the profile copy handed to
+// RunSubagent (where the runner pins it over its default binding — the
+// coder's own live model); omitting it leaves the default in force.
+func TestAgentModelArg(t *testing.T) {
+	if props, ok := AgentTool.Function.Parameters["properties"].(map[string]any); !ok || props["model"] == nil {
+		t.Error(`AgentTool schema should declare the optional "model" argument`)
+	}
+
+	tests := []struct {
+		name string
+		args string
+		want string
+	}{
+		{"model arg stamps the profile copy", `{"path":".","goal":"g","model":"qwen3-coder"}`, "qwen3-coder"},
+		{"omitted model leaves the runner default", `{"path":".","goal":"g"}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := &fakeSubagentDeps{outline: "OUTLINE", digest: "DIGEST"}
+			tc := agent.ToolCall{Function: agent.FunctionCall{
+				Name:      FunctionAgent,
+				Arguments: tt.args,
+			}}
+			if _, err := Execute(context.Background(), tc, deps); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if deps.gotModel != tt.want {
+				t.Errorf("RunSubagent got Model %q, want %q", deps.gotModel, tt.want)
+			}
+		})
+	}
+}

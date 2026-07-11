@@ -68,3 +68,20 @@ DECISION: `agent` excludes `recall`, `memory_write`, `memory_read`,
 `agent` itself as callable tools beyond what its depth cap (1, per §3 slice
 2) allows, so nesting is bounded by the shared depth-cap mechanism rather
 than by toolset omission alone.
+
+## 4. Model binding (addendum, 2026-07-11)
+
+The first cut ran every subagent on the study role's binding — wrong default
+for an *implementation* subagent: the work delegated to `agent` is the same
+kind of work the coder itself does, so it should default to the same
+capability tier, not the (often smaller) reading model. The runner therefore
+builds the `agent` profile's request off the coder's live request — model,
+endpoint, key, template kwargs — so it tracks `/model` switches; Study keeps
+the study role binding. The tool also takes an optional `model` argument so
+the coder can deliberately route one bounded task to a different model
+(e.g. a cheaper one for mechanical edits) without a config change.
+
+DECISION: `agent` defaults to the model the coder is currently running as
+(inherited from the live request, follows `/model`); an optional per-call
+`model` argument pins just the model name on that binding. Study is
+unchanged on the study role.

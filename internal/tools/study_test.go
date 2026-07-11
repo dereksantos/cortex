@@ -62,10 +62,11 @@ func TestRegisterEmptyRolePanics(t *testing.T) {
 // path calls — a minimal double, not a full session.
 type fakeSubagentDeps struct {
 	headlessDeps
-	outline string
-	digest  string
-	gotRole string
-	gotSeed string
+	outline  string
+	digest   string
+	gotRole  string
+	gotSeed  string
+	gotModel string
 }
 
 func (f *fakeSubagentDeps) Outline(path string, budget int) (string, error) {
@@ -75,6 +76,7 @@ func (f *fakeSubagentDeps) Outline(path string, budget int) (string, error) {
 func (f *fakeSubagentDeps) RunSubagent(ctx context.Context, sa Subagent, seed string) (string, error) {
 	f.gotRole = sa.Role
 	f.gotSeed = seed
+	f.gotModel = sa.Model
 	return f.digest, nil
 }
 

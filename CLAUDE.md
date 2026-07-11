@@ -91,7 +91,7 @@ mechanical capture/retract pipeline.
 ## The agent's tools
 
 Registered in `internal/tools/tools.go` (`All` + dispatch in
-`tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `outline`,
+`tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `agent`, `outline`,
 `grep`, `bash`, `remove_path`, `web_search`, `fetch_url`, `recall` (resolves a session-outline citation
 to the verbatim demoted messages; coder-only — not in the Study profile), and
 the model-driven memory tools
@@ -100,6 +100,10 @@ the model-driven memory tools
 `context_evict`, `context_merge`, `context_adjust_watermarks`.
 (`project_index` was replaced by `outline` + `grep`.)
 
+- `agent` is a general implementation subagent (`docs/agent-tool.md`):
+  Study's read set plus `write_file`/`edit_file`/`bash`, depth cap 1, Risky
+  shell treated as Blocked inside it. Runs as the coder's current model by
+  default (optional per-call `model` arg); config gate `tools.enable_agent`.
 - `read_file` refuses files over `CurationBudgetTokens` (16000) and
   redirects to `study`; large Go files return a declaration skeleton.
 - `edit_file` is exact-match-first, whitespace-tolerant on retry; prefer it
