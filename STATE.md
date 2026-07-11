@@ -1,7 +1,7 @@
 # STATE.md — ralph/roadmap loop memory
 
 ## Current milestone
-M4 — Agent slice 3b: the `agent` profile
+M5 — README pass
 
 ## Checklist
 - [x] M0: GOAL.md + STATE.md committed on ralph/roadmap; verify green at baseline
@@ -50,11 +50,28 @@ M4 — Agent slice 3b: the `agent` profile
       unchanged. Verified revert-fails: stashing just the `tool_deps.go`
       change makes the new subagent-depth subtest fail with exactly the
       `confirmRisky must not be invoked` assertion. (this commit)
-- [ ] M4.3: `TestAgentToolEndToEnd` — scripted-`Sender` loop test (pattern:
-      `cmd/cortex/study_test.go`'s cap-1 case) driving a full coder turn that
-      calls `agent`, whose own loop dispatches ≥1 tool (e.g. `edit_file` or
-      `bash`) before finalizing, and the digest lands back in the coder's
-      turn. Mark ROADMAP.md item 6 *(landed)* in this commit (last M4 piece).
+- [x] M4.3: `TestAgentToolEndToEnd` (`cmd/cortex/agent_test.go`) — scripted-
+      `Sender` loop test (pattern: `study_test.go`'s cap-1 recursion case)
+      driving a real `cs.Turn()` that calls `agent`; the `agent` subagent's
+      own loop dispatches a `bash` call before finalizing; the digest lands
+      back on the coder's own tool result and its finalize reply carries it.
+      Four scripted round-trips (coder ask, subagent ask, subagent finalize,
+      coder finalize), asserted by count and by wire content at each step.
+      The dispatched tool is a Risky `bash` command via a `classifyShell`
+      stub, exercised along the real path (`coderDispatcher` →
+      `tools.Execute` → `runSubagent` → `runSubagentStats` → `runLoop` →
+      `dispatcherFor` → `bash` → `gateShell`), not a hand-built ctx — so a
+      regression in `Agent.Tools` (e.g. `bash` dropped) fails this test too
+      (verified by hand: temporarily removing `Bash` from `tools.Agent.Tools`
+      fails the test's blocked-message assertion with the dispatcher's
+      "not available here" refusal instead). `confirmRisky` is wired to
+      `t.Fatal` if invoked, as a defense-in-depth check — session is `quiet`,
+      which alone keeps Risky treated as Blocked regardless of depth (the
+      pure depth-vs-quiet distinction for M4.2 is `TestBashShellSyntax`'s job
+      in `main_test.go`; this test is integration coverage of the composed
+      path, not a second unit test of the depth branch). ROADMAP.md item 6
+      marked `*(landed 2026-07-11: ...)*` in this commit — M4 is complete.
+      (this commit)
 
 ## How to run / verify (quickref — keep short)
 ./scripts/check.sh && go build ./... && go test ./...
@@ -124,20 +141,38 @@ M4 — Agent slice 3b: the `agent` profile
   `subagentDepth`/`withSubagentDepth` (`study.go`) and the ctx threading
   through `dispatcherFor` → `tools.Execute` → `bash` → `deps.GateShell`
   already existed from M2's depth-cap work.
+- 2026-07-11: M4.3 closes M4 — the whole `agent` tool subsystem (GOAL.md §3,
+  ROADMAP.md item 6) is landed. `TestAgentToolEndToEnd` deliberately does NOT
+  re-prove the M4.2 depth-vs-quiet distinction in isolation (a `quiet`
+  session already forces Risky→Blocked regardless of depth, so that specific
+  branch's uniqueness is `TestBashShellSyntax`'s job) — its value is proving
+  the full composed path (`agent` dispatch → subagent `runLoop` → `bash` →
+  `gateShell`) actually wires together end to end, which it caught failing
+  (dispatcher refusal, not the risk gate) when `bash` was hand-removed from
+  `Agent.Tools` as a manual revert check.
 
 ## Known Issues
 (none)
 
 ## Next Up
-Start M4.3: `TestAgentToolEndToEnd`, a scripted-`Sender` loop test (pattern:
-`cmd/cortex/study_test.go`'s cap-1 recursion case in `TestSubagentDepthPolicy`)
-driving a full coder turn that calls the `agent` tool, whose own loop
-dispatches at least one tool (e.g. `edit_file` or `bash` — now that M4.2 is
-in, a Risky `bash` call inside this test's `agent` instance should assert the
-headless-blocked shape, not an interactive prompt, giving the test double
-duty) before finalizing, with the digest landing back in the coder's turn.
-Mark ROADMAP.md item 6 *(landed)* in this same commit — GOAL.md §3 slice 3b's
-acceptance bullets are one unit, so M4 is not complete (and M5's README pass,
-which depends on M4 having landed per GOAL.md §4, cannot start) until this
-lands. Look for the roadmap file (`ROADMAP.md` at repo root, referenced
-throughout GOAL.md) to find item 6's exact current wording before editing it.
+Start M5 (README pass, GOAL.md §4) — first enumerate its acceptance bullets
+as unchecked checklist increments (GOAL.md §7 step 4: "at milestone start,
+first enumerate its DoD items as unchecked increments"), then pick the first
+one. GOAL.md §4's acceptance is all grep-on-README.md: (a) documents every
+command — `cortex`, `resume`, `turn`, `study`, `change`, `discord`,
+`study-eval`; (b) mentions the memory tools (`memory_write` or "memory
+tools"), `study`, `recall`, the context tools (`context_evict` or "context
+tools"), and `web_search`/`fetch_url`; (c) mentions the `agent` tool (M4
+landed, so this applies now); (d) zero references to removed surfaces —
+`project_index`, `/remember`, `/forget`, `cortex daemon`, `pkg/cognition`.
+Read README.md fully against CLAUDE.md (the reference for current product
+surface) before editing — likely several of (a)/(b) already hold and only a
+subset needs adding, plus (c) the `agent` tool mention and scrubbing any (d)
+leftovers. Since acceptance is pure grep with no build/test surface, "extend
+the harness so reverting would fail a check" for M5 likely means adding a
+lightweight `TestReadmeSurface` (or similar) in `cmd/cortex` that runs those
+same greps against README.md — GOAL.md doesn't mandate a test file
+specifically for M5 (unlike M1/M2/M4's explicit `Test...` names), but §2's
+"never weaken or delete a check" and the pillar "tests are the spec" argue
+for making the grep acceptance an actual `go test` check rather than a
+one-time manual pass that could regress silently on a later README edit.

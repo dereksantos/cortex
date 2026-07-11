@@ -82,7 +82,11 @@ different shape or is recorded below.)
    Phase 4 names for any second surface. *(landed 2026-07-11: shared
    `internal/fslock` package used by both transcripts and the journal;
    two-openers, release hand-off, and real cross-process collision tests)*
-6. **General `agent` tool** — a dispatchable subagent the coder can hand a
+6. **General `agent` tool** *(landed 2026-07-11: all three slices —
+   per-profile seeding, explicit depth policy, and the registered `agent`
+   profile per `docs/agent-tool.md`'s three decisions — plus
+   `TestAgentToolEndToEnd`, a scripted-`Sender` end-to-end loop test)* — a
+   dispatchable subagent the coder can hand a
    goal to, built on the registered `Subagent` profile system
    (`internal/tools/study.go`) rather than beside it. The registry was built
    for inheritors (`tools.go:433` — "the same path any future inheritor …
