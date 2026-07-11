@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 15
+Updated: 2026-07-11 · Iteration: 16
 
 ## Current milestone
 M3 — Workspace threading + project registry (M1, M2 complete)
@@ -121,8 +121,9 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       `TestNewWorkspaceResolvesRelativeRootToAbsolute`,
       `TestWorkspaceFromCWDFallsBackToWorkingDirWhenNoCortexDirFound`
       (cmd/cortex/workspace_test.go).
-- [ ] M3.2 `ConfinePath` escape attempts against a non-CWD root refused
-      (table of traversal and symlink cases).
+- [x] M3.2 `ConfinePath` escape attempts against a non-CWD root refused
+      (table of traversal and symlink cases). `9d4c9a2` —
+      `TestNewWorkspaceConfinePathRejectsEscapes` (cmd/cortex/workspace_test.go).
 - [ ] M3.3 `internal/registry`: CRUD round-trip on `projects.json` under
       a temp home; unknown-name lookup returns a typed error.
 - [ ] M3.4 `cortex project add/list/remove` wired to the registry
@@ -132,23 +133,11 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       via the registry and runs against that root (fixture-repo test).
 
 ## Next Up
-Start M3.2: `ConfinePath` escape attempts against a non-CWD root refused
-(table of traversal and symlink cases). `Workspace.ConfinePath` (new in
-M3.1, cmd/cortex/workspace.go) already delegates to
-`internal/tools.ConfinePath(call, w.Root)`, and
-`TestWorkspaceFromCWDMatchesExplicitRootConfinement` already covers one
-plain `../../../etc/passwd`-style escape against BOTH an implicit and an
-explicit `Workspace` — M3.2 needs a genuine TABLE (not just one case):
-absolute paths, `..`-prefixed relative paths, deeper traversal
-(`sub/../../..`), and symlink cases (a symlink inside the root pointing
-outside it — internal/tools/confine_test.go's existing
-`TestConfinePathRejectsEscapes` has no symlink case yet either, worth
-checking whether `ConfinePath`'s `filepath.Clean`+`filepath.Rel` guard
-actually resolves symlinks before the containment check, since `Abs`+
-`Clean` alone do NOT follow symlinks — this may be a real gap to close,
-not just a test to add). Build the table against `NewWorkspace(root)`
-(the M3.5-relevant non-CWD-root leg) specifically, per GOAL.md's M3.2
-wording.
+Start M3.3: `internal/registry` CRUD round-trip on `projects.json` under a
+temp home (routes through `internal/userhome` per GOAL.md's package-layout
+list); unknown-name lookup returns a typed error (mirror `ErrNoScanRoots`'s
+sentinel-error pattern from M2.5's `scan.go`). No existing registry code in
+the tree yet — this is a from-scratch new package.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -615,6 +604,39 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   diff --name-only <genesis>..HEAD -- '*_test.go'` lists only the new
   `workspace_test.go` (not present at genesis) — no pre-existing test
   file was touched.
+
+- 2026-07-11: M3.2 landed the escape-attempt table in
+  `cmd/cortex/workspace_test.go` (`TestNewWorkspaceConfinePathRejectsEscapes`,
+  new — `workspace_test.go` itself postdates genesis, so extending it isn't a
+  standing-regression-guard violation; the pre-existing
+  `internal/tools/confine_test.go` was left untouched) built specifically
+  against `NewWorkspace(root)` per GOAL.md's M3.2 wording, covering: absolute
+  paths, `..`-prefixed relatives, double-parent, deep traversal that
+  collapses through the root's parent, and — the case the prior iteration's
+  Next Up flagged as a suspected real gap — a symlink planted inside root
+  pointing to a sibling temp dir, exercised both against an existing and a
+  nonexistent target file. The symlink subtests genuinely failed against the
+  pre-fix `ConfinePath` (confirmed by running the new test before touching
+  `confine.go`): `filepath.Abs`+`Clean`+`Rel` is purely lexical and never
+  touches the filesystem, so `root/escape/secret.txt` where `escape` is a
+  symlink to an outside directory passed the old containment check (the
+  joined path is lexically still under root even though it resolves
+  elsewhere). Fixed in `internal/tools/confine.go` by adding a second
+  containment check on REAL paths: a new `resolveSymlinks(path)` helper
+  walks up to the deepest existing ancestor via `filepath.EvalSymlinks`
+  (which itself requires the full path to exist) when the target doesn't
+  exist yet, then rejoins the missing tail literally — needed because
+  `ConfinePath` must still bound-check paths for tools whose target hasn't
+  been created (the nonexistent-symlink-target subtest exercises exactly
+  this). Kept the original lexical check in place rather than replacing it
+  (belt-and-suspenders; the two are redundant for the non-symlink cases but
+  cheap, and only the resolved check is new/load-bearing for symlinks).
+  Confirmed no behavior change for every pre-existing `confine_test.go` case
+  (all four still pass unmodified) and for `TestWorkspaceFromCWDMatchesExplicitRootConfinement`'s
+  existing single-escape case. Load-bearing check done as above (red before
+  the `confine.go` fix, specifically on the two symlink subtests only —
+  the four non-symlink subtests already passed pre-fix, which is expected
+  since they don't touch the new code path).
 
 ## Known Issues (append-only)
 - (none yet)
