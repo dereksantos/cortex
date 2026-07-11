@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 16
+Updated: 2026-07-11 · Iteration: 17
 
 ## Current milestone
 M3 — Workspace threading + project registry (M1, M2 complete)
@@ -124,8 +124,13 @@ M3 — Workspace threading + project registry (M1, M2 complete)
 - [x] M3.2 `ConfinePath` escape attempts against a non-CWD root refused
       (table of traversal and symlink cases). `9d4c9a2` —
       `TestNewWorkspaceConfinePathRejectsEscapes` (cmd/cortex/workspace_test.go).
-- [ ] M3.3 `internal/registry`: CRUD round-trip on `projects.json` under
-      a temp home; unknown-name lookup returns a typed error.
+- [x] M3.3 `internal/registry`: CRUD round-trip on `projects.json` under
+      a temp home; unknown-name lookup returns a typed error. `4bc0e87` —
+      `TestFileRegistryCRUDRoundTrip`,
+      `TestFileRegistryLookupUnknownNameReturnsTypedError`,
+      `TestFileRegistryRemoveUnknownNameReturnsTypedError`,
+      `TestFileRegistryLookupOnMissingFileReturnsTypedError`
+      (internal/registry/registry_test.go).
 - [ ] M3.4 `cortex project add/list/remove` wired to the registry
       (CLI-level tests); `cortex scan --register` feeds discovered
       projects in.
@@ -133,11 +138,12 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       via the registry and runs against that root (fixture-repo test).
 
 ## Next Up
-Start M3.3: `internal/registry` CRUD round-trip on `projects.json` under a
-temp home (routes through `internal/userhome` per GOAL.md's package-layout
-list); unknown-name lookup returns a typed error (mirror `ErrNoScanRoots`'s
-sentinel-error pattern from M2.5's `scan.go`). No existing registry code in
-the tree yet — this is a from-scratch new package.
+Start M3.4: `cortex project add/list/remove` wired to `internal/registry`
+(CLI-level tests, mirroring `cortex scan`'s command-parsing style in
+`cmd/cortex/scan.go`/`main.go`'s subcommand dispatch); `cortex scan
+--register` feeds discovered projects (M2.1's `landscape.ScanProjects`
+results, keyed by directory basename or similar) into the registry via
+`Save`. `internal/registry.New()`/`Registry` (M3.3) is ready to consume.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -637,6 +643,44 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   the `confine.go` fix, specifically on the two symlink subtests only —
   the four non-symlink subtests already passed pre-fix, which is expected
   since they don't touch the new code path).
+
+- 2026-07-11: M3.3 landed `internal/registry` (`registry.go`) as a plain
+  `[]Project` array serialized whole to `projects.json` under
+  `internal/userhome` — no per-project subdirectory or index file, matching
+  D5's "pointer-only, rebuildable" framing and keeping CRUD a simple
+  read-all/mutate/write-all cycle (the registry is expected to stay small:
+  one entry per locally registered project, not a scale concern). Exposed
+  BOTH a `Registry` interface (`List`/`Lookup`/`Save`/`Remove`) — per
+  docs/cortex-web.md's explicit "Registry is an interface (lookup/list/
+  save)" — and the concrete `*FileRegistry` implementing it, pinned by a
+  compile-time `var _ Registry = (*FileRegistry)(nil)` assertion in the
+  test file so a future signature drift is caught immediately; M3.4/M3.5
+  should accept `Registry` (the interface) in their function signatures,
+  not `*FileRegistry`, so CLI-level tests can fake it instead of touching
+  disk. `Save` upserts by `Name` (update in place if found, else append) —
+  GOAL.md's M3.3 wording is silent on upsert-vs-append-only, but "CRUD"
+  implies update, and `cortex project add` (M3.4) re-running on an already-
+  registered name should update rather than error or duplicate. Chose
+  `ErrProjectNotFound` (checked via `errors.Is`, message includes the
+  name via `%w: %s`) mirroring `ErrNoScanRoots`'s exact sentinel-error
+  shape from M2.5's `scan.go` — established convention for "typed error"
+  across this codebase rather than a custom struct type. A registry file
+  that doesn't exist yet is NOT an error anywhere (`List` returns empty,
+  `Lookup`/`Remove` return `ErrProjectNotFound` same as an existing-but-
+  empty file) — deliberate: `cortex project list` before any project has
+  ever been registered must not surface a spurious "file not found," and
+  `internal/registry` has no `Init`/bootstrap step other tools need to call
+  first. Added `NewAt(path string) *FileRegistry` (bypasses
+  `internal/userhome`) alongside `New()` even though M3.3's own tests don't
+  need it — flagged here rather than left undiscovered: M3.4/M3.5's CLI
+  tests will likely want a registry rooted at an arbitrary temp path
+  without going through `$CORTEX_HOME`, and `internal/userhome`'s own
+  precedent (`Path(elem...)` is a thin wrapper over `Dir()`) suggested
+  exposing the explicit-path constructor alongside the resolved one now
+  rather than reopening this file later. Load-bearing check done: moved
+  `registry.go` out of the tree, confirmed `go test ./internal/registry/...`
+  fails to build (10 `undefined` errors against `registry_test.go`),
+  restored and reran the full verify suite green.
 
 ## Known Issues (append-only)
 - (none yet)
