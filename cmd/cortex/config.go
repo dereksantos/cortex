@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/userhome"
 )
 
 // defaultEndpoint is a NEUTRAL local fallback — the conventional LiteLLM port.
@@ -381,14 +383,11 @@ func readConfigFile(path string) *Config {
 }
 
 func userConfigPath() string {
-	if h := os.Getenv("CORTEX_HOME"); h != "" {
-		return filepath.Join(h, "config.json")
-	}
-	home, err := os.UserHomeDir()
+	p, err := userhome.Path("config.json")
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".cortex", "config.json")
+	return p
 }
 
 func mergeConfig(base, over *Config) *Config {
