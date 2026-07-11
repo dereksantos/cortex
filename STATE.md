@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 17
+Updated: 2026-07-11 · Iteration: 18
 
 ## Current milestone
 M3 — Workspace threading + project registry (M1, M2 complete)
@@ -131,19 +131,31 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       `TestFileRegistryRemoveUnknownNameReturnsTypedError`,
       `TestFileRegistryLookupOnMissingFileReturnsTypedError`
       (internal/registry/registry_test.go).
-- [ ] M3.4 `cortex project add/list/remove` wired to the registry
+- [x] M3.4 `cortex project add/list/remove` wired to the registry
       (CLI-level tests); `cortex scan --register` feeds discovered
-      projects in.
+      projects in. `c58285c` —
+      `TestAddProjectSavesToRegistry`,
+      `TestAddProjectResolvesRelativeRootToAbsolute`,
+      `TestAddProjectRejectsEmptyArgs`,
+      `TestRemoveProjectRemovesFromRegistry`,
+      `TestRemoveProjectUnknownNamePropagatesTypedError`,
+      `TestRenderProjectListGolden`, `TestRenderProjectListEmptyGolden`,
+      `TestRegisterDiscoveredProjectsFeedsRegistry`,
+      `TestRegisterDiscoveredProjectsUpsertsOnRerun`
+      (cmd/cortex/project_test.go).
 - [ ] M3.5 `--project <name>` on `turn`, `resume`, and `study` resolves
       via the registry and runs against that root (fixture-repo test).
 
 ## Next Up
-Start M3.4: `cortex project add/list/remove` wired to `internal/registry`
-(CLI-level tests, mirroring `cortex scan`'s command-parsing style in
-`cmd/cortex/scan.go`/`main.go`'s subcommand dispatch); `cortex scan
---register` feeds discovered projects (M2.1's `landscape.ScanProjects`
-results, keyed by directory basename or similar) into the registry via
-`Save`. `internal/registry.New()`/`Registry` (M3.3) is ready to consume.
+Start M3.5: `--project <name>` on `turn`, `resume`, and `study` resolving
+via `internal/registry.New().Lookup(name)` (M3.3/M3.4 ready to consume)
+to build a `Workspace` (`cmd/cortex/workspace.go`'s `NewWorkspace(root)`,
+M3.1) and run against that root instead of CWD. `runTurnCLI` (main.go)
+is the CLI entry point to extend for `turn`; `resume` and `study` have
+their own dispatch branches in main.go's argument parsing — a
+fixture-repo test (registered via a temp registry, run `--project` from
+an unrelated CWD) is the equivalence proof, mirroring M3.1's
+CWD-vs-explicit-root pattern.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -681,6 +693,46 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `registry.go` out of the tree, confirmed `go test ./internal/registry/...`
   fails to build (10 `undefined` errors against `registry_test.go`),
   restored and reran the full verify suite green.
+
+- 2026-07-11: M3.4 landed `cmd/cortex/project.go` (`cortex project
+  add/list/remove`) plus `--register` on `cortex scan`. Followed
+  M2.5/M2.6's established "CLI-level tests" precedent literally: none of
+  `runProjectCLI`/`runScanCLI` (the `os.Exit`-driving dispatch wrappers)
+  are directly unit-tested; the pure functions they compose
+  (`addProject`, `removeProject`, `renderProjectList`,
+  `registerDiscoveredProjects`) carry the coverage, matching how
+  `resolveScanRoots`/`buildScanReport`/`renderScanReport` were tested for
+  M2.5 rather than `runScanCLI` itself — GOAL.md's "CLI-level tests"
+  wording is read as "tests of the logic behind the CLI command," not
+  "tests that invoke `main()`." All four (`add`/`list`/`remove`/
+  `--register`) were additionally exercised manually end-to-end against
+  a real built binary + `$CORTEX_HOME`-redirected temp dir (add, list,
+  scan --register upserting a second discovered entry, remove both,
+  confirm `projects.json` empties to `[]`) — not just fixture tests —
+  since this increment's whole value is a real shell-usable command
+  surface. `addProject` resolves its `root` argument via `filepath.Abs`
+  (relative to CWD) before persisting, since a user typing `cortex
+  project add blog .` expects the stored root to survive a later `cd`;
+  `TestAddProjectResolvesRelativeRootToAbsolute` uses `t.Chdir`
+  (Go 1.24+, already precedented in `workspace_test.go`) to pin this
+  deterministically rather than asserting only on already-absolute
+  `t.TempDir()` paths. `registerDiscoveredProjects` keys registry entries
+  by `filepath.Base(landscape.Project.Path)` (the discovered project
+  directory's own name) and treats a registration failure as a
+  non-fatal warning on `cortex scan --register` (the scan result itself,
+  already computed, is still valid and printed either way) — same
+  best-effort-telemetry posture M2.7's `recordLandscapeScan` established
+  for the journal write, chosen over making `--register` fatal since a
+  user running `--register` still wants to see what was found even if
+  the registry file happens to be momentarily unwritable. Reused
+  `Registry.Save`'s documented upsert-by-name semantics (M3.3) directly
+  for re-running `--register` over an unchanged tree — no new dedup
+  logic needed, pinned by `TestRegisterDiscoveredProjectsUpsertsOnRerun`.
+  Load-bearing check done: moved `project.go` out of the tree, confirmed
+  `go vet ./cmd/cortex/...` fails to build (`main.go:272: undefined:
+  runProjectCLI` — main.go's new dispatch branch depends on it, which
+  transitively also fails every test in the package including the new
+  ones), restored and reran the full verify suite green.
 
 ## Known Issues (append-only)
 - (none yet)
