@@ -258,6 +258,14 @@ func main() {
 		return
 	}
 
+	// Landscape scan: `cortex scan [--json] [--root <path>]` (Phase 2 /
+	// M2.5). Uses persisted scan.roots or --root; refuses (never a blind
+	// $HOME sweep) when neither is available — see scan.go.
+	if len(os.Args) >= 2 && os.Args[1] == "scan" {
+		runScanCLI(os.Args[2:])
+		return
+	}
+
 	// One-change-at-a-time git lifecycle: `cortex change <start|commit|status>`.
 	// A driver runs these around an agent turn so each change lands on its own
 	// branch, isolated and reviewable. Local only — see change.go.
