@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 const (
@@ -72,6 +73,24 @@ func contextDir() string {
 
 func sessionsDir() string { return filepath.Join(contextDir(), "sessions") }
 
+// openTranscript opens a session file and takes an exclusive cross-process
+// lock on it (see internal/fslock). A second process that tries to open the
+// same session gets a clear "session busy" error instead of silently
+// interleaving appends with this one. The lock is released when the returned
+// *os.File is closed.
+func openTranscript(path string, flag int, perm os.FileMode) (*os.File, error) {
+	f, err := fslock.OpenExclusive(path, flag, perm)
+	if err != nil {
+		// Surface the busy case distinctly so callers (and users) can tell a
+		// genuine lock collision apart from an ordinary open failure.
+		if errors.Is(err, fslock.ErrBusy) {
+			return nil, fmt.Errorf("session %s is busy (another process has it open): %w", filepath.Base(path), fslock.ErrBusy)
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
 func (cs *CortexSession) StartTranscript() {
 	dir := sessionsDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -82,7 +101,7 @@ func (cs *CortexSession) StartTranscript() {
 	var f *os.File
 	for i := 2; ; i++ {
 		var err error
-		f, err = os.OpenFile(filepath.Join(dir, id+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		f, err = openTranscript(filepath.Join(dir, id+".jsonl"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 		if err == nil {
 			break
 		}
@@ -158,16 +177,18 @@ func (cs *CortexSession) ResumeTranscript(id string) error {
 		}
 	}
 	path := filepath.Join(dir, id+".jsonl")
+	f, err := openTranscript(path, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("reopen %s: %w", path, err)
+	}
 	msgs, turns, state, err := loadSession(path)
 	if err != nil {
+		f.Close()
 		return err
 	}
 	if len(msgs) == 0 {
+		f.Close()
 		return fmt.Errorf("session %s is empty", id)
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("reopen %s: %w", path, err)
 	}
 	cs.Request.Messages = msgs
 	cs.ws, cs.turns = cs.replayWorkingSet(msgs, turns)

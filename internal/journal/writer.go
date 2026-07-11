@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // FsyncMode controls how aggressively a Writer fsyncs to disk.
@@ -107,7 +109,7 @@ func (w *Writer) recover() error {
 	if err != nil {
 		return fmt.Errorf("journal: open %s for append: %w", path, err)
 	}
-	if err := acquireExclusiveLock(int(f.Fd())); err != nil {
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("journal: lock %s: %w", path, err)
 	}
@@ -129,7 +131,7 @@ func (w *Writer) openSegment(n int) error {
 	if err != nil {
 		return fmt.Errorf("journal: open %s: %w", path, err)
 	}
-	if err := acquireExclusiveLock(int(f.Fd())); err != nil {
+	if err := fslock.Lock(int(f.Fd())); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("journal: lock %s: %w", path, err)
 	}

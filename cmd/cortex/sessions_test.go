@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 func writeTestSession(t *testing.T, dir, id string, lines ...string) {
@@ -107,5 +111,48 @@ func TestFirstLine(t *testing.T) {
 	}
 	if got := firstLine("line one\nline two"); got != "line one" {
 		t.Errorf("got %q, want first line", got)
+	}
+}
+
+// TestResumeRejectsLockedSession proves the single-writer guarantee end to
+// end: while one session holds the exclusive lock on a transcript, a second
+// session that tries to resume the same file gets a clear busy error instead
+// of silently interleaving appends. The lock is released when the first
+// session's artifact (its *os.File) is closed.
+func TestResumeRejectsLockedSession(t *testing.T) {
+	cs := newTestSession(t)
+	cs.Append(Message{Role: RoleUser, Content: "first life"})
+	id := cs.SessionID // cs.transcript still open → holds the lock
+
+	intruder := &CortexSession{Request: CortexArgs{}.Request()}
+	err := intruder.ResumeTranscript(id)
+	if !errors.Is(err, fslock.ErrBusy) {
+		t.Fatalf("second resume err = %v, want fslock.ErrBusy", err)
+	}
+	if intruder.transcript != nil {
+		t.Fatal("intruder must not have opened the transcript")
+	}
+	if !strings.Contains(err.Error(), "busy") {
+		t.Errorf("error message %q does not mention the session is busy", err.Error())
+	}
+}
+
+// TestResumeAfterCloseSucceeds proves the lock is a held-file lock: once the
+// first session closes its transcript, a second session can resume the same
+// file. This is the legitimate hand-off (process exits, a new one resumes).
+func TestResumeAfterCloseSucceeds(t *testing.T) {
+	cs := newTestSession(t)
+	cs.Append(Message{Role: RoleUser, Content: "first life"})
+	id := cs.SessionID
+	cs.transcript.Close()
+	cs.transcript = nil
+
+	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	if err := resumed.ResumeTranscript(id); err != nil {
+		t.Fatalf("resume after close: %v", err)
+	}
+	defer resumed.transcript.Close()
+	if got := resumed.Request.Messages[len(resumed.Request.Messages)-1].Content; got != "first life" {
+		t.Errorf("resumed last message = %q, want %q", got, "first life")
 	}
 }

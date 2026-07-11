@@ -1435,6 +1435,7 @@ func TestTranscriptRoundTrip(t *testing.T) {
 	cs.Append(Message{Role: RoleTool, ToolCallID: "c1", Content: "ok"})
 
 	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.Close() // release the lock so a second session can resume the file
 	if err := resumed.ResumeTranscript(""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -1468,18 +1469,20 @@ func TestResumeAppendsToSameFile(t *testing.T) {
 	cs.Append(Message{Role: RoleUser, Content: "first life"})
 
 	resumed := &CortexSession{Request: CortexArgs{}.Request()}
+	cs.Close() // hand the lock to the resuming session
 	if err := resumed.ResumeTranscript(""); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	defer resumed.transcript.Close()
 	resumed.Append(Message{Role: RoleUser, Content: "second life"})
 
-	again := &CortexSession{Request: CortexArgs{}.Request()}
-	if err := again.ResumeTranscript(""); err != nil {
+	cs2 := &CortexSession{Request: CortexArgs{}.Request()}
+	resumed.Close() // and to the third
+	if err := cs2.ResumeTranscript(""); err != nil {
 		t.Fatalf("second resume: %v", err)
 	}
-	defer again.transcript.Close()
-	last := again.Request.Messages[len(again.Request.Messages)-1]
+	defer cs2.transcript.Close()
+	last := cs2.Request.Messages[len(cs2.Request.Messages)-1]
 	if last.Content != "second life" {
 		t.Errorf("post-resume append did not persist; last message = %q", last.Content)
 	}
@@ -1636,6 +1639,7 @@ func TestCompactRebuildsHistory(t *testing.T) {
 	}
 
 	// The new transcript must resume to exactly the compacted state.
+	cs.Close() // release the lock before reopening the same file
 	resumed := &CortexSession{Request: CortexArgs{}.Request()}
 	if err := resumed.ResumeTranscript(cs.SessionID); err != nil {
 		t.Fatalf("resume after compact: %v", err)
