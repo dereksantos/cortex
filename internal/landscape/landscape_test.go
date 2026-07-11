@@ -231,6 +231,45 @@ func TestScanProjectsFiltersThroughIgnoreSet(t *testing.T) {
 	}
 }
 
+// TestScanResultDoesNotLeakFileBodyContent is the M2.3 content-non-leak
+// sentinel: a unique string lives in the BODY of a marker file belonging
+// to a project Scan legitimately reports (not an excluded/hidden one —
+// M2.2 already proved path-level exclusion; this proves that even a
+// visible, reported project's file contents never ride along).
+// Detection throughout this package is existence-only (os.Stat, never
+// os.ReadFile/os.Open-and-read) and Result's fields are exclusively
+// names and paths (Tool.Name/Path, Runtime.Name/Path,
+// Project.Path/Markers — Markers is a list of marker FILENAMES, never
+// file bodies), so serializing the full Result can never surface a
+// sentinel planted only in file content. This test pins that invariant
+// as a permanent regression guard.
+func TestScanResultDoesNotLeakFileBodyContent(t *testing.T) {
+	const sentinel = "SENTINEL-M2-3-FILE-BODY-CONTENT-7f3a9c21"
+
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj-reported")
+	mustMkdirAll(t, filepath.Join(proj, ".git"))
+	// The marker file IS reported (its name lands in Project.Markers);
+	// its body must not be.
+	mustWriteFile(t, filepath.Join(proj, "AGENTS.md"), sentinel)
+
+	result, err := Scan(root, Caps{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if findProject(result.Projects, proj) == nil {
+		t.Fatalf("Scan(%q).Projects = %+v, want an entry for %s (this test needs the project to be REPORTED, not excluded)", root, result.Projects, proj)
+	}
+
+	blob, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("failed to marshal scan result: %v", err)
+	}
+	if strings.Contains(string(blob), sentinel) {
+		t.Errorf("Scan(%q) result leaks file body content %q: %s", root, sentinel, string(blob))
+	}
+}
+
 // --- fixture + assertion helpers ---
 
 func mustMkdirAll(t *testing.T, path string) {
