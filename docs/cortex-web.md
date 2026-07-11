@@ -81,12 +81,21 @@ Scope:
 
 - **Backend bootstrap chain** — when no config resolves a working backend:
   existing config → key env vars / keychain → probe local Ollama
-  (`localhost:11434`) → guided OpenRouter setup defaulting to a `:free` model.
-  Wire the `pkg/llm` resolution into the session path instead of duplicating
-  it. Honest constraint: nothing is keyless except local Ollama, so "free
-  model" = free *tier* (OpenRouter `:free` ids) behind a one-minute key
-  paste, or a detected local model. The chain is a `BackendResolver` interface
-  with fake probes in tests.
+  (`localhost:11434`) → guided OpenRouter setup. Wire the `pkg/llm`
+  resolution into the session path instead of duplicating it. Honest
+  constraint: nothing is keyless except local Ollama, so "free model" = free
+  *tier* behind a one-minute key paste, or a detected local model. The chain
+  is a `BackendResolver` interface with fake probes in tests.
+- **Free-model default = `openrouter/free`** — OpenRouter's auto-router over
+  the free pool, which filters per-request for required capabilities
+  (tool calling included). Decided over pinning a specific `:free` id because
+  the free catalog churns (qwen3-coder`:free` was delisted June 2026).
+  Bootstrap ends with a **one-shot tool-call smoke probe** (free models vary
+  in tool-calling quality); on failure, report and fall back to the next
+  chain entry rather than seating a broken default.
+- **Key storage** — guided setup writes the pasted key to the macOS keychain
+  (`key_service`, via `security add-generic-password`) on darwin; `key_env`
+  instructions elsewhere. Never to disk, per the existing auth invariant.
 - **First-run detection** — no `~/.cortex/config.json` and no prior sessions.
   Persist the resolved backend to the user config so it's a one-time cost.
 - **Greeting turn** — on first run, after `StartTranscript()` +
@@ -118,8 +127,13 @@ Scope:
     `~/.aider*`, `~/.continue`, `~/.config/github-copilot`, MCP config files.
   - *Local model runtimes*: `~/.ollama` (+ live probe), LM Studio, llama.cpp
     artifacts.
-  - *Projects*: git repos under configured roots (e.g. `~/eng`) with AI
-    markers — `AGENTS.md`, `CLAUDE.md`, `.cursor/`, `.cortex/`.
+  - *Projects*: git repos under the configured roots with AI markers —
+    `AGENTS.md`, `CLAUDE.md`, `.cursor/`, `.cortex/`.
+  - *Scan roots (decided)*: the greeting conversation **asks** where the
+    user's code lives (suggesting detected candidates like `~/eng`) and
+    persists the answer to user config — consent and configuration are one
+    conversational moment. Headless `cortex scan` uses the persisted roots or
+    an explicit `--root`; there is no blind `$HOME` sweep.
   - Design: `Scanner` interface per probe family, each returning typed
     structs (`Tool`, `Runtime`, `Project`); a composing `Scan(root)` walks
     with depth/entry caps and a hard timeout. Accept `fs.FS`, return structs —
@@ -127,9 +141,19 @@ Scope:
 - **Surfaces**: `cortex scan [--json]` subcommand (report to stdout), and a
   `scan_landscape` coder tool (gated `tools.enable_scan`, home-scoped,
   read-only) so the greeting conversation can run it on user consent.
-- **Persistence**: scan result → a journal event (`landscape.scan`) and a
-  summary memory note, so later sessions know the landscape without
-  re-scanning.
+- **Persistence**: scan result → a `landscape.scan` event in the
+  **user-level journal** (see "Machine-level state", below) plus a summary
+  memory note, so later sessions know the landscape without re-scanning.
+
+**Machine-level state (decided).** The web track introduces state that
+belongs to the machine, not any repo — landscape results, the project
+registry, loop specs and run history. Layout is hybrid: **rebuildable
+pointers/specs as plain JSON under `~/.cortex/`** (`projects.json`,
+`loops.json` — pointer lists don't merit event-sourcing ceremony), and
+**events to a user-level journal instance at `~/.cortex/journal/`**
+(`landscape.scan`, `loop.run`) reusing the existing flock'd JSONL
+infrastructure. Same journal-is-canonical-for-events doctrine, now at both
+scopes; per-project journals are untouched.
 
 Privacy stance (invariant): read-only; **names and paths only, never file
 contents**; local-only per `journal.AssertLocalOnly`; runs only on explicit
@@ -160,9 +184,11 @@ Scope:
   red/green against the *existing* session and tool tests first, then adds
   the parameter.
 - **Project registry** — `~/.cortex/projects.json`: name, root, last-session,
-  notes. Fed by Phase 2's project discovery (`cortex scan --register` or a
-  confirm step) and by hand (`cortex project add/list/remove`). `Registry` is
-  an interface (lookup/list/save); file-backed struct implementation.
+  notes. Plain JSON (decided): the registry is pointer-only and trivially
+  rebuildable from a scan, so it stays a file, not a journal class. Fed by
+  Phase 2's project discovery (`cortex scan --register` or a confirm step)
+  and by hand (`cortex project add/list/remove`). `Registry` is an interface
+  (lookup/list/save); file-backed struct implementation.
 - **`--project <name>`** on `turn`, `resume`, `study`: resolve via registry →
   construct the Workspace → run. Per-project `.cortex/` stays inside each
   project (sessions, journal, config) — the registry holds pointers only,
@@ -184,8 +210,11 @@ surface) needs, usable from `curl` on day one.
 
 Scope:
 
-- **`cmd/cortex serve`** — foreground HTTP server, localhost-bound, bearer
-  token generated at start (printed + written under `~/.cortex`). Endpoints
+- **`cmd/cortex serve`** — foreground HTTP server, localhost-bound (default
+  port **7433**, flag-overridable), bearer token generated at start (printed
+  + written under `~/.cortex`). **Stdlib `net/http` + SSE only** (decided):
+  zero new dependencies; `gorilla/websocket` in `go.mod` is transitive and
+  stays unused. Endpoints
   (v0): projects (list, from registry), sessions per project (list/create/
   resume — transcripts are already on disk), `POST …/turn` (runs
   `session.Turn`), SSE stream of turn progress (rendered from the existing
@@ -195,10 +224,13 @@ Scope:
   turn at a time per session, different sessions concurrent — safe because
   they share nothing in-process). Idle sessions evict; resume re-hydrates
   from the transcript.
-- **Single-writer session lock** — per-session-file flock (the journal
-  already has per-segment flock; sessions have nothing). Second opener gets a
-  clear "session busy in another process" error. This fixes today's latent
-  REPL-vs-adapter corruption and is a prerequisite for *any* second surface.
+- **Single-writer session lock** — per-session-file lock; second opener gets
+  a clear "session busy in another process" error. Implementation (decided):
+  extract the journal's portable `acquireExclusiveLock`
+  (`internal/journal/lock_unix.go` / `lock_windows.go`) into a shared
+  internal package and reuse it — sessions get the same guarantee segments
+  already have. This fixes today's latent REPL-vs-adapter corruption and is a
+  prerequisite for *any* second surface.
 - Design: handlers accept small interfaces (`SessionManager`, `Registry`)
   and are `httptest`-testable without a model; the live loop behind a scripted
   `Sender` fake as in existing loop tests.
@@ -221,10 +253,13 @@ Scope:
 - **Views**: project dashboard (registry + per-project session list + change
   status), session view (transcript render + input box + live SSE progress),
   landscape view (Phase 2 report, rendered).
-- **Implementation posture**: served by `cortex serve` from `go:embed` static
-  assets; plain HTML/JS or a minimal build step — the binary stays
-  self-contained, no node toolchain required to *run* cortex. Talks only to
-  the Phase 4 API (no privileged back-channel — keeps the API honest).
+- **Implementation posture (decided): no-build vanilla JS.** Hand-written
+  HTML/CSS/JS served by `cortex serve` from `go:embed` — no node toolchain,
+  no build step, no vendored framework; the binary stays self-contained and
+  the Go view-model boundary carries the logic. Talks only to the Phase 4
+  API (no privileged back-channel — keeps the API honest). If the DOM code
+  ever outgrows this, revisiting the posture is a deliberate doc change, not
+  a drive-by dependency.
 - Loop management screens land in Phase 6 with the loops themselves.
 
 Tests: Go-side — embedded-asset serving, transcript-to-view-model rendering
@@ -240,18 +275,24 @@ the web app.
 
 Scope:
 
-- **Loop spec** — `~/.cortex/loops.json` (or a journal class): name, project,
-  prompt, cadence (interval/cron) or manual trigger, bounds (max turns, token
-  budget), enabled flag.
+- **Loop spec** — `~/.cortex/loops.json` (plain JSON, per the machine-level
+  state decision): name, project, prompt, trigger, bounds, enabled flag.
+- **Triggers (decided): intervals + manual only in v1** — every-N
+  minutes/hours/days plus a run-now action. `time.Ticker` + persisted
+  next-run; no cron parser, no new deps. Cron syntax can layer on later
+  without breaking the spec format. Provisional bounds, tuned from run
+  history once real loops exist: **cadence floor 15 minutes, default daily,
+  per-run cap 25 turns + a token budget, overlap suppression** (a firing is
+  skipped, and journaled as skipped, while the previous run is live).
 - **Scheduler in the serve process** — ticks while `cortex serve` runs; each
   firing = a fresh headless session in the target project via the Phase 3/4
   machinery (fresh-session-per-piece, per the loop-harness working style).
   Serve down ⇒ loops pause; state on disk ⇒ nothing lost; next start resumes
   the schedule. No separate daemon — always-on is launchd/`brew services`
   around `cortex serve` if wanted.
-- **Run history + management UI** — journal events per run (`loop.run` with
-  outcome, cost, change ref); UI to create/enable/disable loops and read run
-  history. Guardrails: loops run headless, so `shellrisk` Risky ⇒ Blocked
+- **Run history + management UI** — a `loop.run` event per run (outcome,
+  cost, change ref) in the user-level journal; UI to create/enable/disable
+  loops and read run history. Guardrails: loops run headless, so `shellrisk` Risky ⇒ Blocked
   already applies; per-loop budget caps enforced by the scheduler.
 
 Explicitly out: multi-machine execution, parallel runs of one loop,
@@ -282,9 +323,11 @@ lacks is the interactive shell around the turn:
   retiring its bespoke mutex + session-swap logic (`discord.go`). One adapter
   pattern, tested once. (This resolves the former open question below.)
 - **Command parity** — discord-native equivalents of the REPL slash commands
-  (`/compact`, `/clear`, `/sessions`, `/model`) via discord slash commands or
-  message prefixes; session pick/resume instead of the route-classifier-only
-  lifecycle; `--project` targeting once Phase 3 lands.
+  (`/compact`, `/clear`, `/sessions`, `/model`) as **native discord
+  application commands** (decided — `discordgo v0.29` supports them, and the
+  registration ceremony is one startup call per guild; discoverable + typed
+  args beat message-prefix parsing); session pick/resume instead of the
+  route-classifier-only lifecycle; `--project` targeting once Phase 3 lands.
 - **Interactive risk approval** — today headless treats `shellrisk` Risky as
   Blocked; discord has a human present, so Risky becomes an approval prompt
   (reply/reaction with a timeout that falls back to Blocked). This is the one
@@ -320,13 +363,25 @@ touches discord itself.
   JSONL, journal is canonical / serve owns no state.
 - `./scripts/check.sh` green at every phase boundary.
 
-## Open questions
+## Decision log (2026-07-10)
 
-- Phase 1 free-model default: which OpenRouter `:free` id to pin as the
-  guided-setup default (needs a current-catalog check at build time).
-- Phase 2 project-scan roots: fixed default (`~/eng`?) vs. asked during the
-  greeting conversation.
-- Phase 6 cadence floor and default budgets — decide from real usage after
-  Phase 5.
-- Phase 7 command surface: discord native slash commands (registration
-  ceremony, per-guild) vs. plain message prefixes — decide when it starts.
+No open questions remain; every decision is woven into its phase above and
+indexed here. Anything that later proves wrong gets changed by editing this
+doc, not by drive-by divergence.
+
+| # | Decision | Resolution |
+|---|---|---|
+| D1 | P1 free-model default | `openrouter/free` auto-router (filters for tool calling) + a one-shot tool-call smoke probe at bootstrap; no pinned `:free` id — the free catalog churns |
+| D2 | P1 key storage | macOS keychain (`key_service`) on darwin; `key_env` elsewhere; never on disk |
+| D3 | P2 scan roots | asked during the greeting and persisted to user config; `--root` for headless; no blind `$HOME` sweep |
+| D4 | Machine-level state | hybrid: rebuildable specs as plain JSON under `~/.cortex/` (`projects.json`, `loops.json`); events (`landscape.scan`, `loop.run`) to a user-level journal at `~/.cortex/journal/` |
+| D5 | P3 registry format | plain JSON file (pointer-only, rebuildable from scan) |
+| D6 | P4 HTTP stack | stdlib `net/http` + SSE; zero new dependencies |
+| D7 | P4 port + auth | default `localhost:7433`, flag-overridable; generated bearer token printed + written under `~/.cortex` |
+| D8 | P4 session lock | extract `internal/journal`'s portable `acquireExclusiveLock` into a shared internal package; per-session-file lock |
+| D9 | P5 UI stack | no-build vanilla JS via `go:embed`; no node toolchain, no vendored framework |
+| D10 | P6 triggers | intervals + manual run-now in v1; no cron parser; cron syntax may layer on later |
+| D11 | P6 bounds (provisional) | cadence floor 15 min, default daily, 25-turn + token cap per run, overlap suppression; tune from `loop.run` history |
+| D12 | P7 command surface | native discord application commands via `discordgo v0.29`; per-guild registration at startup |
+| D13 | Daemon | none — `cortex serve` foreground adapter; always-on = launchd/`brew services` around it (top of doc) |
+| D14 | P7 timing | after the coding-harness roadmap completes; re-based on the Phase 4 `SessionManager` |
