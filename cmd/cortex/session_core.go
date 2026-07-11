@@ -55,6 +55,12 @@ type CortexSession struct {
 	outline          []cache.OutlineEntry
 	outlineFolded    string // digest of previously folded outline entries (P4); rides the front of the outline zone
 
+	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
+	// first-run greeting fires; the REPL read loop's next call to
+	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the
+	// answer to "where does your code live" and persists it.
+	awaitingScanRootsReply bool
+
 	sessionStart  time.Time
 	turns         int
 	turnNo        int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)

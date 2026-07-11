@@ -458,6 +458,13 @@ func main() {
 			continue
 		}
 
+		// M1.7: if a first-run greeting just asked where the user's code
+		// lives, this is that answer — capture and persist it before running
+		// the turn normally (the reply still gets an ordinary response too).
+		if _, err := session.MaybeCaptureScanRoots(input); err != nil {
+			fmt.Fprintf(os.Stderr, "scan roots: %v\n", err)
+		}
+
 		// Run the turn. The whole per-turn pipeline lives in Turn now — the same
 		// entry point a headless driver calls; the REPL owns only the cancelable
 		// ctx, display, and compaction. Three input modes:

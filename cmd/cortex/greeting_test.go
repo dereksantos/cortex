@@ -154,7 +154,8 @@ func TestGreetingWritesMarkerOnlyAfterSuccess(t *testing.T) {
 // greeting: "golden-pinned so any change is a visible diff requiring a
 // Decisions entry") and asserts it states principles rather than a task
 // recipe: no imperative command list, just an introduction plus a
-// consent-gated offer.
+// consent-gated offer. M1.7 extended the text to also ask where the user's
+// code lives (D3's ask half); the golden value below reflects that.
 func TestGreetingPromptGolden(t *testing.T) {
 	const want = `This is the user's first time running you. Introduce yourself in a ` +
 		`few short sentences: who you are (a coding agent with working memory ` +
@@ -162,12 +163,19 @@ func TestGreetingPromptGolden(t *testing.T) {
 		`offer only, that you can look over their local AI landscape ` +
 		`(installed harnesses, runtimes, other projects on this machine) if ` +
 		`they'd like — make clear it's read-only and only happens if they say ` +
-		`yes. Keep it brief and warm; don't recite a menu of commands or tools.`
+		`yes. Also ask where their code generally lives on this machine (for ` +
+		`example ~/code or ~/projects), so you'll know where to look later if ` +
+		`they ever want that survey — this is just information gathering, not ` +
+		`the survey itself. Keep it brief and warm; don't recite a menu of ` +
+		`commands or tools.`
 
 	if greetingPrompt != want {
 		t.Errorf("greetingPrompt changed (golden pin):\ngot:  %q\nwant: %q", greetingPrompt, want)
 	}
 	if !strings.Contains(greetingPrompt, "if") {
 		t.Error("greetingPrompt should gate the landscape offer on consent (\"if\"), not command it unconditionally")
+	}
+	if !strings.Contains(greetingPrompt, "where their code") {
+		t.Error("greetingPrompt should ask where the user's code lives (GOAL.md M1.7 / D3's ask half)")
 	}
 }

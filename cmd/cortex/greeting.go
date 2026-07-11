@@ -1,4 +1,4 @@
-// greeting.go — the first-run greeting turn (Phase 1 / M1.5).
+// greeting.go — the first-run greeting turn (Phase 1 / M1.5, M1.7).
 //
 // On first run (IsFirstRun, M1.4), MaybeGreet runs one synthetic
 // session.Turn with greetingPrompt and writes the greeting marker so later
@@ -6,6 +6,14 @@
 // principles — never a task recipe — and consent to scan the user's AI
 // landscape is the user's conversational reply each time, not this text or
 // any flag. The scan itself is Phase 2; Phase 1 only ships the invitation.
+//
+// M1.7 (D3's ask-and-persist half): the same greeting also asks where the
+// user's code lives, and arms cs.awaitingScanRootsReply so the REPL's next
+// real input — the human's actual answer — is captured by
+// MaybeCaptureScanRoots (scanroots.go) and persisted to user config. Only
+// the asking lives here; parsing/persisting the answer is deliberately
+// plain text processing, not another model round-trip (see scanroots.go's
+// doc comment).
 package main
 
 import (
@@ -23,7 +31,11 @@ const greetingPrompt = `This is the user's first time running you. Introduce you
 	`offer only, that you can look over their local AI landscape ` +
 	`(installed harnesses, runtimes, other projects on this machine) if ` +
 	`they'd like — make clear it's read-only and only happens if they say ` +
-	`yes. Keep it brief and warm; don't recite a menu of commands or tools.`
+	`yes. Also ask where their code generally lives on this machine (for ` +
+	`example ~/code or ~/projects), so you'll know where to look later if ` +
+	`they ever want that survey — this is just information gathering, not ` +
+	`the survey itself. Keep it brief and warm; don't recite a menu of ` +
+	`commands or tools.`
 
 // MaybeGreet fires the greeting turn exactly once. Non-first runs (per
 // IsFirstRun) are a no-op. The marker is written only after Turn returns
@@ -35,7 +47,14 @@ func MaybeGreet(ctx context.Context, cs *CortexSession) error {
 	if _, err := cs.Turn(ctx, greetingPrompt); err != nil {
 		return err
 	}
-	return writeGreetingMarker()
+	if err := writeGreetingMarker(); err != nil {
+		return err
+	}
+	// M1.7: the greeting just asked where the user's code lives; arm the
+	// flag so the REPL's next real input (the human's actual reply, not
+	// another model call) is captured and persisted as scan roots.
+	cs.awaitingScanRootsReply = true
+	return nil
 }
 
 // writeGreetingMarker records that the greeting has fired by creating the
