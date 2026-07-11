@@ -76,16 +76,12 @@ different shape or is recorded below.)
 4. **Documentation audit and digestion** — see the disposition table below.
    *(largely done 2026-07-10; remaining: a README pass against the current
    product surface)*
-5. **Single-writer session lock** — per-session-file flock so a second
-   process gets a clear "session busy" error instead of silently
-   interleaving appends. Fixes a latent corruption path that exists today
-   (REPL and `cortex discord` can open the same transcript; the discord
-   mutex is in-process only), and is the prerequisite the web track's
-   Phase 4 names for any second surface. Pattern to copy: the journal's
-   per-segment flock (`internal/journal/lock_unix.go`). Target: the
-   transcript open in `cmd/cortex/session.go` (~`:85`, currently
-   `O_CREATE|O_EXCL` only). Test: two openers, second gets the busy error;
-   lock released on close.
+5. **Single-writer session lock** — cross-process flock on the session
+   transcript so a second process gets a clear "session busy" error instead
+   of silently interleaving appends; the prerequisite the web track's
+   Phase 4 names for any second surface. *(landed 2026-07-11: shared
+   `internal/fslock` package used by both transcripts and the journal;
+   two-openers, release hand-off, and real cross-process collision tests)*
 6. **General `agent` tool** — a dispatchable subagent the coder can hand a
    goal to, built on the registered `Subagent` profile system
    (`internal/tools/study.go`) rather than beside it. The registry was built
