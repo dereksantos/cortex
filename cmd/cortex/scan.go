@@ -18,6 +18,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/landscape"
+	"github.com/dereksantos/cortex/internal/registry"
 )
 
 // ErrNoScanRoots is returned by resolveScanRoots when neither an
@@ -177,6 +178,7 @@ func renderScanReport(r ScanReport) string {
 func runScanCLI(args []string) {
 	asJSON := false
 	root := ""
+	register := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--json":
@@ -186,6 +188,8 @@ func runScanCLI(args []string) {
 				root = args[i+1]
 				i++
 			}
+		case "--register":
+			register = true
 		}
 	}
 
@@ -211,6 +215,18 @@ func runScanCLI(args []string) {
 	// user home) must not block the scan result itself.
 	if err := recordLandscapeScan(report); err != nil {
 		fmt.Fprintln(os.Stderr, "scan: warning: failed to record landscape.scan event:", err)
+	}
+
+	// --register feeds discovered projects into the registry (M3.4). A
+	// registration failure is a warning, not fatal — the scan result
+	// itself is still valid and printed either way.
+	if register {
+		reg, err := registry.New()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scan: warning: failed to open project registry:", err)
+		} else if err := registerDiscoveredProjects(reg, report.Projects); err != nil {
+			fmt.Fprintln(os.Stderr, "scan: warning: failed to register discovered projects:", err)
+		}
 	}
 
 	if asJSON {

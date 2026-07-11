@@ -266,6 +266,13 @@ func main() {
 		return
 	}
 
+	// Project registry: `cortex project add/list/remove` (Phase 3 / M3.4).
+	// See project.go.
+	if len(os.Args) >= 2 && os.Args[1] == "project" {
+		runProjectCLI(os.Args[2:])
+		return
+	}
+
 	// One-change-at-a-time git lifecycle: `cortex change <start|commit|status>`.
 	// A driver runs these around an agent turn so each change lands on its own
 	// branch, isolated and reviewable. Local only — see change.go.
