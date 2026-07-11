@@ -14,8 +14,10 @@
 // chain is pure logic over probe results — table-driven tests fake
 // every stage, no real network/keychain calls (GOAL.md §3 P1).
 //
-// This file defines the chain only; wiring it into NewCortexSession
-// and persisting the result (M1.3) land in later increments.
+// This file defines the chain only. Persisting a resolved backend to
+// the user config, and the ConfigProbe that reads it back (M1.3), live
+// in bootstrap_persist.go. Wiring the chain into NewCortexSession lands
+// in a later increment.
 package main
 
 import (
