@@ -239,11 +239,17 @@ func main() {
 		return
 	}
 
-	// Direct study mode: `cortex study <path> [goal...]`. The navigator subagent
-	// reads what the goal needs; there are no deepening passes to configure.
+	// Direct study mode: `cortex study [--project <name>] <path> [goal...]`.
+	// The navigator subagent reads what the goal needs; there are no
+	// deepening passes to configure. --project (M3.5) resolves via the
+	// registry and runs against that project's root instead of the CWD.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
-		rest := os.Args[2:]
-		runStudyCLI(rest[0], strings.Join(rest[1:], " "))
+		project, rest := parseProjectFlag(os.Args[2:])
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: cortex study [--project <name>] <path> [goal...]")
+			os.Exit(2)
+		}
+		runStudyCLI(project, rest[0], strings.Join(rest[1:], " "))
 		return
 	}
 
@@ -302,12 +308,22 @@ func main() {
 		printAvailableTools()
 	}
 
-	// `cortex resume [id]` continues a prior session (the latest when no id is
-	// given); otherwise every REPL session persists under a fresh transcript.
+	// `cortex resume [--project <name>] [id]` continues a prior session (the
+	// latest when no id is given); otherwise every REPL session persists
+	// under a fresh transcript. --project (M3.5) resolves via the registry
+	// and re-targets the session at that project's root, so the resumed (or
+	// fresh) session's ContextDir/SessionsDir/instructions/confinement all
+	// follow the project instead of the CWD.
 	if len(os.Args) >= 2 && os.Args[1] == "resume" {
+		project, rest := parseProjectFlag(os.Args[2:])
+		if project != "" {
+			if err := applyProjectFlag(session, project); err != nil {
+				fmt.Fprintf(os.Stderr, "project %s: %v\n", project, err)
+			}
+		}
 		id := ""
-		if len(os.Args) >= 3 {
-			id = os.Args[2]
+		if len(rest) >= 1 {
+			id = rest[0]
 		}
 		if err := session.ResumeTranscript(id); err != nil {
 			fmt.Printf("resume: %v — starting fresh\n", err)

@@ -19,17 +19,27 @@ import (
 type CortexArgs []string
 
 func (a CortexArgs) Request() *AgentRequest {
-	content := SystemPrompt
-	if inst := projectInstructions(); inst != "" {
-		content += "\n\n# Project instructions (AGENTS.md)\n\n" + inst
-	}
 	return &AgentRequest{
 		Model:       defaultModel,
-		Messages:    []Message{{Role: RoleSystem, Content: content}},
+		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(projectInstructions())}},
 		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,
 	}
+}
+
+// systemPromptContent builds the system message content: the base
+// SystemPrompt plus an optional "# Project instructions (AGENTS.md)"
+// section when instructions is non-empty. Shared by CortexArgs.Request()
+// (CWD-implicit, via projectInstructions()) and applyProjectByName
+// (project_workspace.go, M3.5's --project, via Workspace.Instructions())
+// so the two stay provably identical modulo their instructions source.
+func systemPromptContent(instructions string) string {
+	content := SystemPrompt
+	if instructions != "" {
+		content += "\n\n# Project instructions (AGENTS.md)\n\n" + instructions
+	}
+	return content
 }
 
 type CortexSession struct {
