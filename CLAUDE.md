@@ -82,8 +82,8 @@ Three capabilities distinguish it:
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 
 REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
-`/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands ~`:3354`, slash
-commands ~`:3544`). Memory is model-driven — ask in natural language
+`/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands ~`:237`, slash
+commands ~`:400`). Memory is model-driven — ask in natural language
 ("remember that …" / "forget the … note") and the agent calls the memory
 tools; the old `/remember` and `/forget` slash commands were removed with the
 mechanical capture/retract pipeline.

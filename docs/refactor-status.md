@@ -1,5 +1,12 @@
 # Refactor status — BOTH gates green (Δ 51/51, ø 6/6 exit 0, reproduced)
 
+> **Historical record (2026-07).** The engine-unification + study-subagent
+> refactor shipped and is on the main line; the branch details below are a
+> snapshot of the gate run that proved it. The specs are
+> [`engine-unification.md`](engine-unification.md) and
+> [`study-subagent.md`](study-subagent.md); the goal prompt that drove the
+> session is [`refactor-goal-prompt.md`](refactor-goal-prompt.md).
+
 **Branch `loop/engine-study-refactor`** (off `8d10b1b`, NOT pushed).
 
 ## Δ deterministic gate — fully green ✅

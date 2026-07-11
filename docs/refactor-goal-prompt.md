@@ -1,3 +1,8 @@
+> **Historical artifact (2026-07).** The goal prompt that drove the
+> autonomous refactor session; the refactor shipped (gate record:
+> [`refactor-status.md`](refactor-status.md)). Kept as a worked example of a
+> harness-executable goal prompt.
+
 Implement the engine-unification + study-subagent refactor end-to-end, in one autonomous session, until BOTH layers of the verification gate are fully green. The design docs are authoritative — follow them exactly; do not redesign.
 
 AUTHORITATIVE DOCS (read all four before starting; re-read the relevant phase + the eval design before each phase):

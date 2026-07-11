@@ -5,6 +5,24 @@ open-source models — broken into mutually exclusive, collectively exhaustive
 parts, with an explicit "what we don't build" list. Informed by pi.dev,
 opencode, and Claude Code (research notes summarized at the bottom).
 
+> **Status (2026-07-10): historical in part.** This plan drove the 2026-06
+> hardening and much of it shipped, but it predates two later shifts, so read
+> it against [`../CLAUDE.md`](../CLAUDE.md) and [`../ROADMAP.md`](../ROADMAP.md):
+> the retrieval-injection / distillation work parts 4 and 6 record as "done"
+> was subsequently **removed** by the memory-as-tools pivot
+> ([`memory-tools.md`](memory-tools.md)) — `internal/cognition` and
+> `pkg/cognition` no longer exist ([`archive.md`](archive.md)) — and part 5's
+> "no permission popups" stance was superseded by the `internal/shellrisk`
+> classifier (Safe runs / Risky prompts / Blocked refuses). The "where the
+> loop stands" snapshot is stale too (`main.go` is ~500 lines post-refactor;
+> the tool surface is ~19 tools incl. `grep`, `outline`, memory, and the
+> context tools). Still load-bearing: the six-part MECE framing and the
+> consolidated **don't-build list** at the bottom — minus its
+> "subagents/task tool" entry, superseded 2026-07-11: the Cortex-native
+> answer it deferred to (the registered `Subagent` profile system) shipped,
+> and a general `agent` tool is now on the roadmap
+> ([`../ROADMAP.md`](../ROADMAP.md), near-term #6).
+
 > Guiding bias: pi.dev's philosophy — "primitives, not features." The loop is
 > already the right shape (single bounded agent loop, small tool set, one wire
 > protocol). Production readiness is mostly hardening and persistence, not
