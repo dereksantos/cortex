@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 10
+Updated: 2026-07-11 · Iteration: 11
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -69,9 +69,11 @@ M2 — Landscape scan (M1 complete)
       journal-event legs deferred to M2.5/M2.7 per Decisions Log below).
       `d457260` — `TestScanResultDoesNotLeakFileBodyContent`
       (internal/landscape/landscape_test.go).
-- [ ] M2.4 Caps enforced: fixtures exceeding max depth / max entries /
+- [x] M2.4 Caps enforced: fixtures exceeding max depth / max entries /
       a near-zero timeout each terminate cleanly (three tests) with
-      truncation reported in the result — never silent.
+      truncation reported in the result — never silent. `e07dd80` —
+      `TestScanProjectsCapsMaxDepth`, `TestScanProjectsCapsMaxEntries`,
+      `TestScanProjectsCapsTimeout` (internal/landscape/landscape_test.go).
 - [ ] M2.5 `cortex scan [--json] [--root <path>]`: uses persisted
       roots, `--root` overrides, neither ⇒ typed refusal (all three
       paths tested); golden-file text report; JSON round-trip.
@@ -85,23 +87,24 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.4: caps enforcement. `landscape.Caps{MaxDepth, MaxEntries,
-Timeout}` already exists in the `Scan`/`ScanHarnesses`/`ScanRuntimes`/
-`ScanProjects` signatures (landed by M2.1) but is currently unenforced —
-extend those same functions (no API change) to respect each bound, and
-write three tests, each terminating cleanly with truncation REPORTED in
-the result (never silent): (1) a fixture tree deeper than `MaxDepth`
-under `ScanProjects`'s walk; (2) a fixture tree with more entries than
-`MaxEntries`; (3) a near-zero `Timeout` against a large-enough fixture
-to guarantee the deadline trips mid-walk. "Truncation reported" likely
-needs a new field on `Result` (e.g. `Truncated bool` or a richer
-per-cap indicator) since today's `Result` has none — pick a shape and
-record the choice in Decisions Log. `MaxDepth`/`MaxEntries` apply
-naturally to `ScanProjects`'s `filepath.WalkDir`; whether they also
-bound `ScanHarnesses`/`ScanRuntimes` (currently a small fixed-list
-existence check, not a walk) is worth a quick judgment call — those two
-have no unbounded surface today so capping them may be a no-op, note
-whichever conclusion is reached.
+Start M2.5: `cortex scan [--json] [--root <path>]` subcommand. Wire it
+to use persisted `scan.roots` (M1.7's `PersistScanRoots`/config key)
+for project scanning, let `--root` override, and refuse with a typed
+error when neither is present (never a blind `$HOME` sweep — all three
+paths need a test). Reconcile `internal/landscape.Scan`'s single-root
+signature with production's two distinct real roots per M2.1's
+Decisions note: harnesses/runtimes probe the OS `$HOME`
+(`os.UserHomeDir()`), while projects walk the persisted/explicit scan
+root(s) — M2.5 is where that split actually gets resolved (Scan(root,
+caps) may need to become two calls from the CLI layer, one per root
+kind, rather than a single Scan(root) invocation; note whichever shape
+is chosen in Decisions Log). Add a golden-file text report renderer and
+a `--json` round-trip test (`internal/landscape.Result` already
+marshals cleanly per M2.2/M2.3's tests). The `--json` leg of M2.3's
+deferred content-non-leak proof can be closed out here too if it's a
+natural fit (marshal the same Result the text report renders, assert
+no sentinel/secret leaks through the new surface) — otherwise leave it
+noted as still-deferred to M2.7's journal-event leg.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -360,6 +363,46 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   internal/landscape/landscape.go` to revert before committing (no
   production code changed by this increment — landscape.go's diff
   after revert is empty; only the test file was added).
+
+- 2026-07-11: M2.4 landed cap enforcement in `ScanProjects` only
+  (`ScanHarnesses`/`ScanRuntimes` untouched — conclusion reached: both
+  check a small fixed-length list of well-known relative paths directly
+  under root with no recursion, so none of `MaxDepth`/`MaxEntries`/
+  `Timeout` has a meaningful bound to apply there; capping them would be
+  a no-op with no test able to observe it, the exact anti-pattern
+  GOAL.md §1 warns against). Truncation shape chosen: a single
+  `Truncated bool` on `Result` (not a richer per-cap indicator) — GOAL.md
+  M2.4's wording ("truncation reported... never silent") doesn't ask
+  which cap tripped, just that truncation is visible, and a bool is the
+  smallest shape satisfying that. This required changing
+  `ProjectScanner.Scan` and `ScanProjects` to return a third `bool`
+  value (`(([]Project, bool, error)`) — a signature change, but the
+  prior iteration's "no API change" note was about the `Caps` parameter
+  already existing, not about return arity; reporting truncation at all
+  needs *some* new return surface, and threading a bool through the one
+  Scanner interface that can actually trip a cap is the minimal one.
+  `MaxEntries` counts every `WalkDir` callback invocation (files and
+  dirs alike, matching "entries visited" literally) and stops the whole
+  walk via `filepath.SkipAll` once exceeded, not just the current
+  subtree. `MaxDepth` is checked only for directories (files can't be
+  descended into) via a new `walkDepth(root, path)` helper (root itself
+  = depth 0). `Timeout` is checked at the top of every callback via a
+  precomputed deadline (`time.Now().Add(caps.Timeout)`) — the
+  `TestScanProjectsCapsTimeout` test uses `time.Nanosecond` deliberately
+  (guaranteed already-elapsed by the time the walk's first callback
+  fires on any real machine) rather than a larger "should be tight
+  enough" duration, to keep the test deterministic across CI/disk
+  speeds instead of racing wall-clock scan time against a fixed bound.
+  A zero `Caps{}` value still applies no bound (every cap check is
+  guarded by `> 0`/`!deadline.IsZero()`), so all of M2.1–M2.3's existing
+  tests needed no behavior changes — only a mechanical `found, _, err :=`
+  three-value update at their `ScanProjects` call sites. Load-bearing
+  check done: temporarily gutted all three cap checks in `ScanProjects`
+  down to an unconditional `entriesVisited++` (keeping the signature
+  compiling), confirmed all three new tests fail with the expected
+  "truncated = false, want true" / "contains ... want ... pruned"
+  messages, then restored the real implementation from a pre-edit copy
+  and reran the full package green.
 
 ## Known Issues (append-only)
 - (none yet)
