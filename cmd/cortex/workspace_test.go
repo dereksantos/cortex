@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,6 +130,61 @@ func TestWorkspaceFromCWDMatchesExplicitRootConfinement(t *testing.T) {
 	if _, err := explicit.ConfinePath(escape); err == nil {
 		t.Error("explicit ConfinePath allowed an escape attempt")
 	}
+}
+
+// TestNewWorkspaceConfinePathRejectsEscapes is M3.2's table: escape attempts
+// against a NON-CWD root (NewWorkspace(root), the leg M3.5's --project will
+// use) covering absolute paths, ..-prefixed relative paths, deeper
+// traversal, and — the real gap the prior iteration's Next Up flagged —
+// symlinks planted inside the root that resolve to a location outside it.
+// ConfinePath's Abs+Clean+Rel guard is purely lexical and does not follow
+// symlinks, so a symlink escape must be caught by resolving the real
+// filesystem path before the containment check.
+func TestNewWorkspaceConfinePathRejectsEscapes(t *testing.T) {
+	root := newFixtureRepo(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatalf("write outside secret: %v", err)
+	}
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"absolute path", "/etc/passwd"},
+		{"parent-relative", "../secret"},
+		{"double parent-relative", "../../secret"},
+		{"deep traversal below root", "sub/pkg/../../../etc/passwd"},
+		{"deep traversal collapses to root parent", "sub/../../.."},
+		{"symlink escape to existing file", "escape/secret.txt"},
+		{"symlink escape to nonexistent file", "escape/does-not-exist"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			call := ToolCall{Function: FunctionCall{Name: "read_file", Arguments: `{"path":` + jsonQuote(tc.path) + `}`}}
+			if _, err := ws.ConfinePath(call); err == nil {
+				t.Errorf("ConfinePath(%q) against non-CWD root should be rejected as an escape", tc.path)
+			}
+		})
+	}
+}
+
+// jsonQuote is a tiny helper so the table above can embed arbitrary path
+// strings (some containing backslash-free but quote-sensitive characters on
+// Windows-style separators is not a concern here) into a literal JSON args
+// string without importing encoding/json just for this.
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func TestNewWorkspaceResolvesRelativeRootToAbsolute(t *testing.T) {
