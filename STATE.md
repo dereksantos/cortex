@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 3
+Updated: 2026-07-11 · Iteration: 4
 
 ## Current milestone
 M1 — First-run bootstrap + greeting
@@ -24,8 +24,11 @@ M1 — First-run bootstrap + greeting
       `TestPersistBackendRoundTrip`, `TestFileConfigProbeMissingOrEmptyMisses`,
       `TestBackendResolverChainSecondRunShortCircuitsOnPersistedConfig`
       (cmd/cortex/bootstrap_persist_test.go).
-- [ ] M1.4 First-run detection per GOAL.md §3 (user-home artifacts
+- [x] M1.4 First-run detection per GOAL.md §3 (user-home artifacts
       only; greeting marker; CORTEX_HOME and CWD both isolated).
+      `0d1a62c` — `TestIsFirstRunMarkerAbsentTrue`,
+      `TestIsFirstRunConfigPresentFalse`, `TestIsFirstRunMarkerPresentFalse`,
+      `TestIsFirstRunIgnoresSessions` (cmd/cortex/firstrun_test.go).
 - [ ] M1.5 Greeting fires exactly once on first run via scripted
       Sender; none otherwise; greeting text golden-pinned.
 - [ ] M1.6 Keychain read/write behind pkg/secret interface with fake;
@@ -34,14 +37,17 @@ M1 — First-run bootstrap + greeting
       config (scripted-Sender test).
 
 ## Next Up
-Start M1.4: first-run detection per GOAL.md §3 (first-run ⇔ no
-config.json under the user home AND no greeting marker under the user
-home; sessions play no part). Tests should cover marker-absent ⇒ true,
-config-present ⇒ false, marker-present ⇒ false, isolating both
-`$CORTEX_HOME` and CWD (temp workspace) per case. No wiring into
-`NewCortexSession`/`main.go` yet — that's M1.5's greeting-turn job; M1.4
-is the detection predicate + its tests only. Land in a new
-cmd/cortex/firstrun*.go.
+Start M1.5: greeting turn fires exactly once on first run via the
+scripted `Sender` seam (in `cmd/cortex/firstrun.go` or a new
+`greeting.go`, wired into `main.go` after `StartTranscript()` +
+`EnableMemory()` and before the read loop, per docs/cortex-web.md Phase
+1). Use `IsFirstRun()` (M1.4) to gate it; on firing, run one synthetic
+`session.Turn(ctx, greetingPrompt)` and write the greeting marker
+(`greetingMarkerPath()`, already defined) so subsequent runs don't
+re-fire. Greeting text must be golden-pinned (principles, not a task
+recipe, per GOAL.md §3 P1 greeting) and non-first runs must fire none.
+M1.7 (ask for scan roots) is a separate later increment — M1.5 is just
+the fire-once mechanics + golden text.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -105,6 +111,21 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   source files out of the package (`bootstrap_persist.go`,
   `configwrite.go`) and confirming every new test fails to build, then
   restoring them.
+
+- 2026-07-11: M1.4 landed `IsFirstRun()` in `cmd/cortex/firstrun.go` as a
+  pure predicate over two user-home paths (`userConfigPath()` from M1.1,
+  and a new `greetingMarkerPath()` resolving `"greeted"` through
+  `internal/userhome.Path`) — no wiring into `NewCortexSession`/`main.go`
+  (that's M1.5). The marker file itself is not written by any code yet;
+  M1.5's greeting turn writes it on first fire. Per GOAL.md §3 P1
+  first-run, `docs/cortex-web.md`'s "no `~/.cortex/config.json` and no
+  prior sessions" text is superseded — sessions are project-scoped and
+  play no part; `TestIsFirstRunIgnoresSessions` pins that a populated
+  `.cortex/sessions/` under a CWD-isolated workspace does not flip the
+  verdict. Load-bearing check: moved `firstrun.go` out of the tree,
+  confirmed `go test ./cmd/cortex/... -run TestIsFirstRun` fails to
+  build (5 `undefined` errors against `firstrun_test.go`), moved it back
+  and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
