@@ -410,7 +410,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
-	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
+	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool, ScanLandscapeTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -502,6 +502,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return contextMerge(tc, deps)
 	case FunctionContextAdjustWatermarks:
 		return contextAdjustWatermarks(tc, deps)
+	case FunctionScanLandscape:
+		return scanLandscape()
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.

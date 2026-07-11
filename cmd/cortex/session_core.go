@@ -150,6 +150,9 @@ func NewCortexSession() *CortexSession {
 	if !allowDelete {
 		req.Tools = toolsExcept(req.Tools, FunctionRemove)
 	}
+	if !cfg.scanEnabled() {
+		req.Tools = toolsExcept(req.Tools, tools.FunctionScanLandscape)
+	}
 
 	cs := &CortexSession{
 		Args:         &args,
@@ -176,6 +179,8 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	switch toolName {
 	case tools.FunctionWebSearch, tools.FunctionFetchURL:
 		return t.EnableWeb == nil || *t.EnableWeb
+	case tools.FunctionScanLandscape:
+		return t.EnableScan == nil || *t.EnableScan
 	case tools.FunctionContextEvict:
 		return t.EnableContextEvict == nil || *t.EnableContextEvict
 	case tools.FunctionContextMerge:

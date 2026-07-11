@@ -234,6 +234,7 @@ type ToolConfig struct {
 	AllowDelete *bool  `json:"allow_delete"`
 	DeleteRoot  string `json:"delete_root"`
 	EnableWeb   *bool  `json:"enable_web"`
+	EnableScan  *bool  `json:"enable_scan"`
 
 	// Context window modification tools
 	EnableContextEvict            *bool `json:"enable_context_evict"`
@@ -250,6 +251,16 @@ func (c *Config) deleteEnabled() bool {
 		return true
 	}
 	return *c.Tools.AllowDelete
+}
+
+// scanEnabled reports whether the scan_landscape coder tool is enabled
+// (GOAL.md M2.6: tools.enable_scan is an availability kill-switch, default
+// enabled — absent or nil means the tool stays registered).
+func (c *Config) scanEnabled() bool {
+	if c == nil || c.Tools.EnableScan == nil {
+		return true
+	}
+	return *c.Tools.EnableScan
 }
 
 func (c *Config) backendEndpoint() string {
@@ -475,6 +486,9 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	}
 	if over.EnableWeb != nil {
 		base.EnableWeb = over.EnableWeb
+	}
+	if over.EnableScan != nil {
+		base.EnableScan = over.EnableScan
 	}
 	if over.EnableContextEvict != nil {
 		base.EnableContextEvict = over.EnableContextEvict
