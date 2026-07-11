@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 12
+Updated: 2026-07-11 · Iteration: 13
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -84,9 +84,16 @@ M2 — Landscape scan (M1 complete)
       `TestRenderScanReportGolden`,
       `TestRenderScanReportGoldenEmptyAndTruncated`,
       `TestScanReportJSONRoundTrip` (cmd/cortex/scan_test.go).
-- [ ] M2.6 `scan_landscape` coder tool registered, gated by
+- [x] M2.6 `scan_landscape` coder tool registered, gated by
       `tools.enable_scan` (absent ⇒ registered, false ⇒ absent — both
-      tested), home-scoped and read-only.
+      tested), home-scoped and read-only. `f27d027` —
+      `TestScanLandscapeIsRegisteredForCoderOnly`,
+      `TestScanLandscapeReportsHarnessesAndRuntimesUnderHome`,
+      `TestScanLandscapeReportsNoneWhenNothingDetected`,
+      `TestScanLandscapeNeverWalksProjectsUnderHome`
+      (internal/tools/scan_landscape_test.go), `TestScanEnabled`,
+      `TestScanLandscapeToolRegistrationGate`,
+      `TestIsToolEnabledScanGate` (cmd/cortex/scan_landscape_tool_test.go).
 - [ ] M2.7 Scan persists a `landscape.scan` event to the user-level
       journal under the user home (temp-home test); the coder tool
       additionally writes the `landscape` memory note to the current
@@ -94,21 +101,24 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.6: `scan_landscape` coder tool. Register it in
-`internal/tools` (the tool decl + dispatch, matching the existing
-tool-registration pattern in `internal/tools/tools.go`), gated by
-`tools.enable_scan` (absent ⇒ registered/available, `false` ⇒ absent —
-both need a test, mirroring how other gated tools like `enable_delete`/
-`enable_web` are tested). It should be home-scoped and read-only: reuse
-`buildScanReport`/`resolveScanRoots`-equivalent logic from
-`cmd/cortex/scan.go` (M2.5) rather than re-implementing root
-resolution — note in Decisions Log whether that logic gets exported
-from `cmd/cortex` or duplicated/relocated, since `internal/tools`
-importing `cmd/cortex` would be a reverse-dependency the package layout
-likely doesn't want (check for an import cycle before deciding the
-shape). M2.7 (next after) is what actually wires the journal event +
-memory note this tool's *result* should feed — M2.6 itself is just
-registration + gating + read-only execution, per the DoD wording.
+Start M2.7: persist a `landscape.scan` event to the user-level journal
+under the user home (temp-home test) for both `cortex scan` (M2.5) and
+the `scan_landscape` coder tool (M2.6); the coder tool additionally
+writes a `landscape` memory note to the CURRENT project's memory store
+(fixed name, per GOAL.md §3 P2 — a temp-workspace test should assert a
+fixture-derived string lands in the note); headless `cortex scan`
+writes no note (assert its absence). The journal write needs a
+user-level journal handle resolved through `internal/userhome` (M1.1) —
+check whether `internal/journal`'s existing constructor already accepts
+an arbitrary root or needs a small extension; reuse it rather than
+inventing a second journal-writing path. The memory-note write from
+`scan_landscape` needs a path to the CURRENT project's `internal/memory`
+store, which `internal/tools/scan_landscape.go`'s scanLandscape() does
+not have today (it only resolves the home dir) — this will likely need
+a MemoryStore-shaped dependency threaded in similarly to how memory_write
+gets `deps ToolDeps` (scanLandscape currently takes no args/deps; M2.7
+will need to add `deps ToolDeps` to its signature and update the
+Execute dispatch call site in internal/tools/tools.go accordingly).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -443,6 +453,56 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   len(roots) == 0`), confirmed `TestResolveScanRootsRefusesWhenNeither`
   fails both its sub-assertions, reverted from a pre-edit copy and
   reran the full package green.
+
+- 2026-07-11: M2.6 landed `internal/tools/scan_landscape.go` calling
+  `landscape.ScanHarnesses`/`landscape.ScanRuntimes` directly against a
+  resolved home directory (`homeDirFunc`, overridable in tests — defaults
+  to `os.UserHomeDir`), NOT `cmd/cortex/scan.go`'s `buildScanReport`/
+  `resolveScanRoots`: confirmed via `go list -deps` that `internal/tools`
+  importing `cmd/cortex` would create a cycle (`cmd/cortex` already
+  imports `internal/tools` for the tool declarations), so the tool calls
+  `internal/landscape` directly — a clean leaf import, same tier as
+  `internal/outline`/`internal/shellrisk` which `internal/tools` already
+  imports. Deliberately calls ONLY `ScanHarnesses`/`ScanRuntimes`, never
+  `ScanProjects`/`landscape.Scan`: running `ScanProjects` with the home
+  directory itself as root would be exactly the blind-`$HOME`-sweep
+  GOAL.md's D3 forbids (project discovery is scan-roots-gated, per M2.5's
+  `resolveScanRoots`/`ErrNoScanRoots`) — `TestScanLandscapeNeverWalksProjectsUnderHome`
+  pins this by planting a `.git`+`AGENTS.md` project directly under the
+  fixture home and asserting it never appears in the tool's output.
+  "Registered, gated ... absent ⇒ registered, false ⇒ absent" (GOAL.md's
+  exact wording) is implemented as the DELETE pattern, not the WEB
+  pattern: researched both existing gates first and found `enable_web`
+  only gates *execution* (inside `Execute`'s `IsToolEnabled` check) while
+  the declaration stays in `internal/tools.All`/`req.Tools` always,
+  whereas `allow_delete` truly removes the tool from `req.Tools` via
+  `toolsExcept` in `NewCortexSession`. GOAL.md's "absent" language means
+  truly absent from the registered set, so `scan_landscape` gets BOTH:
+  `toolsExcept(req.Tools, tools.FunctionScanLandscape)` in
+  `NewCortexSession` when `!cfg.scanEnabled()` (the real removal) plus an
+  `IsToolEnabled` case (defense in depth, matching `EnableWeb`'s existing
+  shape, in case a tool call reaches `Execute` some other way). New
+  `Config.scanEnabled()` method mirrors `deleteEnabled()` exactly (nil
+  config or nil field ⇒ true; explicit false ⇒ false); `EnableScan *bool`
+  added to `ToolConfig` alongside `EnableWeb`, wired into `mergeTools`.
+  `scan_landscape` is coder-only (not in `Study.Tools`), matching
+  `web_search`/`fetch_url`'s "privacy/consent-sensitive tools aren't
+  available to the read-only subagent" precedent — GOAL.md doesn't say
+  this explicitly for M2.6 but the docs/cortex-web.md framing ("so the
+  greeting conversation can run it on user consent") implies a
+  human-in-the-loop coder action, not something the bounded study
+  subagent should reach for on its own. `scanLandscape()` takes no
+  `ToolCall`/`ToolDeps` params today (zero-arg tool, `objectSchema(map[string]any{})`)
+  since M2.6 is scan+render only; M2.7 will need to add a `deps ToolDeps`
+  param when it wires the memory-note write (see Next Up) — flagged
+  there so the next iteration doesn't design around the wrong signature.
+  Load-bearing check done: moved `internal/tools/scan_landscape.go` out
+  of the tree, confirmed `go test ./internal/tools/...` fails to build
+  (11 `undefined` errors spanning `tools.go`'s `All`/`Execute` references
+  and every new test), restored and reran green; also confirmed the two
+  `cmd/cortex` gating tests fail to build against the pre-edit `Config`/
+  `ToolConfig` (8 `undefined` errors: `scanEnabled`, `EnableScan`) before
+  landing those changes.
 
 ## Known Issues (append-only)
 - (none yet)
