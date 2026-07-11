@@ -120,7 +120,9 @@ different shape or is recorded below.)
    threading + registry, per [`docs/cortex-web.md`](docs/cortex-web.md)
    (authoritative and self-contained; sliced to the bar above at
    implementation time, one slice per seam).
-8. **Think/Dream evaluation — design gate.** `pkg/cognition` /
+8. **Think/Dream evaluation — design gate** *(design doc written — decision
+   pending owner review: [`docs/think-dream-eval.md`](docs/think-dream-eval.md),
+   2026-07-11)*. `pkg/cognition` /
    `internal/cognition` were deleted outright (see
    [`docs/archive.md`](docs/archive.md)); there is nothing to switch back
    on — only git history to mine for ideas. Before any implementation: a

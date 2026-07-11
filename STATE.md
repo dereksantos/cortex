@@ -1,7 +1,7 @@
 # STATE.md — ralph/roadmap loop memory
 
 ## Current milestone
-M6 — Think/Dream design doc
+M6 — Think/Dream design doc (COMPLETE — GOAL.md §6 ladder fully checked)
 
 ## Checklist
 - [x] M0: GOAL.md + STATE.md committed on ralph/roadmap; verify green at baseline
@@ -94,6 +94,30 @@ M6 — Think/Dream design doc
       ROADMAP.md item 4 updated from "remaining: a README pass" to
       *(landed 2026-07-11: ...)* in this commit — M5 is complete. (this
       commit)
+- [x] M6: `docs/think-dream-eval.md` written — all four required `##`
+      headings (`Decision question`, `Prior art in git history`, `The eval`,
+      `Go / no-go criteria`); prior art grounded in three real commits
+      (`7471bf1` wire-to-fleet → `0b2c97d`/`d709a2b` REPL-idle-hook dispatch
+      → `b63a83d` deletion nine days later, one live consumer reimplemented
+      in ~70 lines) plus `docs/memory-tools.md`'s explicit hedge line ("a
+      later nudge... only if evals show the need"); the eval section designs
+      a two-layer (Δ mechanism-bounds / ø ARM-FOREGROUND-vs-ARM-BACKGROUND
+      NEEDLE-A lift with a precision-floor and bounded-cost gate) measurable
+      pass/fail eval, not implemented (GOAL.md §1 non-goal honored — doc
+      only). Verdict recommended: no-go-by-omission until the eval is
+      actually run, with an explicit "Blocked" row naming the exact failure
+      mode `b63a83d` already lived through (no named consumer). (this
+      commit)
+- [x] M6: harness — `cmd/cortex/think_dream_eval_doc_test.go`
+      `TestThinkDreamDesignDoc` mirrors `TestReadmeSurface`'s shape: reads
+      `docs/think-dream-eval.md` via `findUp`, asserts all four required
+      headings present. Verified revert-fails by hand: renaming just the
+      `## Go / no-go criteria` heading in the working copy (then restoring
+      from a scratch backup) makes the subtest fail with the missing-heading
+      message before the restore. ROADMAP.md item 8 marked *(design doc
+      written — decision pending owner review: `docs/think-dream-eval.md`,
+      2026-07-11)* in this commit — M6 is complete, GOAL.md §6's ladder is
+      fully checked. (this commit)
 
 ## How to run / verify (quickref — keep short)
 ./scripts/check.sh && go build ./... && go test ./...
@@ -184,34 +208,38 @@ M6 — Think/Dream design doc
   ROADMAP.md item 4 ticked *(landed 2026-07-11: ...)* in the same commit —
   the only ROADMAP.md edit GOAL.md §2 permits ("ticking items landed by
   this loop").
+- 2026-07-11: M6 lands as one commit, not split increments — the whole
+  deliverable is a single design doc plus one harness test, small enough
+  (per GOAL.md §5's own scope: four headings, no code) that splitting would
+  be artificial, matching the M3/M5 precedent (design-note milestones land
+  whole). GOAL.md §5's "measurable outcomes (pass/fail assertions, not
+  judgments)" requirement is satisfied by the eval section's four numbered
+  gates (G1–G4) with machine-decided columns, not prose judgments — mirrors
+  `eval-context-pivot.md`'s G1–G6 table shape exactly. The doc's own
+  recommended verdict is "no-go-by-omission" (nothing is implemented, and
+  ROADMAP.md item 8 already forbids implementation until the doc exists) —
+  this is a design/eval-spec deliverable, not a decision the loop is
+  authorized to render; GOAL.md §5's acceptance is "design doc written —
+  decision pending owner review", which is exactly what ROADMAP.md item 8
+  now says. GOAL.md §6's full milestone ladder (M0–M6) is now checked, so
+  this commit also writes `LOOP-COMPLETE` as GOAL.md §6 instructs.
 
 ## Known Issues
 (none)
 
 ## Next Up
-Start M6 (Think/Dream design doc, GOAL.md §5) — write
-`docs/think-dream-eval.md` answering the roadmap's design gate: would a
-simplified background-curation (Think/Dream) layer improve long-horizon
-curation beyond what the memory tools + context tools already deliver, and
-what eval would prove it. This is a document-only milestone (GOAL.md §1
-non-goals: "No Think/Dream *implementation*"). Required section headings
-(exact, `##` level, per GOAL.md §5): `## Decision question`,
-`## Prior art in git history`, `## The eval`, `## Go / no-go criteria`. The
-eval section must define measurable pass/fail assertions (not judgments),
-styled like `docs/eval-context-pivot.md` (the worked example named in
-GOAL.md). Before writing, read `docs/archive.md` (what was removed and why
-— `pkg/cognition`, the mechanical retrieve/rerank/Dream pipeline,
-`internal/study`'s deleted engine) and `docs/memory-tools.md` (what already
-exists today that a Think/Dream layer would have to improve on) so the
-"prior art" section is grounded in this repo's actual history, not a
-generic literature summary. Acceptance (GOAL.md §5, all grep-checkable):
-file exists; all four `##` headings present; ROADMAP.md item 8 marked
-*(design doc written — decision pending owner review)* in the same commit.
-Per GOAL.md §7 step 4, enumerate these DoD items as unchecked checklist
-increments before picking the first one; a lightweight
-`TestThinkDreamDesignDoc` (mirroring `TestReadmeSurface`'s shape) checking
-the four headings exist is the natural harness extension so a later edit
-that drops a heading fails a check. Once M6's DoD is checked, GOAL.md §6
-says write `LOOP-COMPLETE` as the first line of this section — that will be
-the following iteration's final act once the doc and ROADMAP.md tick both
-land green.
+LOOP-COMPLETE
+
+GOAL.md §6's milestone ladder (M0–M6) is fully checked as of this commit:
+M1/M2 (agent tool slices 1–2), M3 (agent-tool design note), M4.1–M4.3 (agent
+profile registered + shellrisk depth gate + end-to-end test), M5 (README
+pass), M6 (Think/Dream design doc, `docs/think-dream-eval.md`, ROADMAP.md
+item 8 marked *(design doc written — decision pending owner review)*). Every
+milestone's acceptance criteria in GOAL.md §3–§5 has a passing check in the
+verify command (`./scripts/check.sh && go build ./... && go test ./...`),
+which was green at the time of this commit. Per GOAL.md §6, this token is
+the loop's stop signal — no further increments are picked by this loop.
+Remaining work (M6's actual go/no-go decision on whether to build Think/
+Dream; the Δ/ø eval `docs/think-dream-eval.md` designs but does not
+implement) is explicitly owner review, per GOAL.md §5's acceptance wording
+and the doc's own status line — not further loop iterations.
