@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/projectscan"
 )
 
 // Tool is a detected AI agent harness or editor integration.
@@ -154,7 +156,17 @@ func ScanRuntimes(root string, caps Caps) ([]Runtime, error) {
 // aborting the whole walk: a partial landscape beats a crashed one.
 // A detected repo is not descended into further — nested
 // repos-within-repos are out of scope for this scanner.
+//
+// Every directory visited is filtered through a projectscan.IgnoreSet
+// rooted at root: hard-excluded names (node_modules, vendor, .venv,
+// build output, …) and .gitignore matches prune the walk before it
+// descends, so a project nested under an excluded/ignored path is
+// never discovered or reported. Each candidate marker path is
+// filtered too (IsDirExcluded for directory markers like .cursor/
+// .cortex, IsFileExcluded for file markers like AGENTS.md), so a
+// marker that itself lives under excluded content is never counted.
 func ScanProjects(root string, caps Caps) ([]Project, error) {
+	ignores := projectscan.LoadIgnoreSet(root)
 	var found []Project
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -163,14 +175,27 @@ func ScanProjects(root string, caps Caps) ([]Project, error) {
 		if !d.IsDir() {
 			return nil
 		}
+		if path != root && ignores.IsDirExcluded(path, d.Name()) {
+			return fs.SkipDir
+		}
 		if _, statErr := os.Stat(filepath.Join(path, ".git")); statErr != nil {
 			return nil
 		}
 		var markers []string
 		for _, m := range aiMarkers {
-			if _, statErr := os.Stat(filepath.Join(path, m)); statErr == nil {
-				markers = append(markers, m)
+			markerPath := filepath.Join(path, m)
+			info, statErr := os.Stat(markerPath)
+			if statErr != nil {
+				continue
 			}
+			if info.IsDir() {
+				if ignores.IsDirExcluded(markerPath, info.Name()) {
+					continue
+				}
+			} else if ignores.IsFileExcluded(markerPath) {
+				continue
+			}
+			markers = append(markers, m)
 		}
 		if len(markers) == 0 {
 			return nil

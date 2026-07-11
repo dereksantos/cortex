@@ -1,8 +1,10 @@
 package landscape
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -168,6 +170,64 @@ func TestScanComposesAllFamilies(t *testing.T) {
 	}
 	if findProject(result.Projects, proj) == nil {
 		t.Errorf("Scan(%q).Projects = %+v, want an entry for %s", root, result.Projects, proj)
+	}
+}
+
+// TestScanProjectsFiltersThroughIgnoreSet plants a secret path inside
+// both a hard-excluded directory (node_modules) and a .gitignore'd
+// directory, each nesting an otherwise-detectable project (a ".git"
+// entry plus an AI marker). Neither nested project — nor the secret
+// file planted alongside its marker — may appear anywhere in the scan
+// result: this is the M2.2 "planted secret path never leaks" proof,
+// exercised through the public Scan composition so it covers every
+// result field (Tools, Runtimes, Projects, and each Project's Markers).
+func TestScanProjectsFiltersThroughIgnoreSet(t *testing.T) {
+	root := t.TempDir()
+
+	// Positive control: an ordinary project outside any excluded path.
+	visible := filepath.Join(root, "proj-visible")
+	mustMkdirAll(t, filepath.Join(visible, ".git"))
+	mustWriteFile(t, filepath.Join(visible, "AGENTS.md"), "sentinel")
+
+	// Hard-excluded: nested project under node_modules, with a planted
+	// secret file alongside its marker.
+	hardExcluded := filepath.Join(root, "node_modules", "proj-hidden")
+	mustMkdirAll(t, filepath.Join(hardExcluded, ".git"))
+	mustWriteFile(t, filepath.Join(hardExcluded, "AGENTS.md"), "sentinel")
+	mustWriteFile(t, filepath.Join(hardExcluded, "id_rsa"), "PLANTED-SECRET-RSA")
+
+	// .gitignore'd: nested project under a directory the root's
+	// .gitignore excludes, with a different planted secret file.
+	mustWriteFile(t, filepath.Join(root, ".gitignore"), "vault/\n")
+	gitignored := filepath.Join(root, "vault", "proj-hidden2")
+	mustMkdirAll(t, filepath.Join(gitignored, ".git"))
+	mustWriteFile(t, filepath.Join(gitignored, "CLAUDE.md"), "sentinel")
+	mustWriteFile(t, filepath.Join(gitignored, ".env"), "PLANTED-SECRET-ENV")
+
+	result, err := Scan(root, Caps{})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+
+	if findProject(result.Projects, visible) == nil {
+		t.Errorf("Scan(%q).Projects = %+v, want an entry for the visible project %s", root, result.Projects, visible)
+	}
+	if p := findProject(result.Projects, hardExcluded); p != nil {
+		t.Errorf("Scan(%q).Projects contains hard-excluded project %+v, want it pruned (node_modules)", root, p)
+	}
+	if p := findProject(result.Projects, gitignored); p != nil {
+		t.Errorf("Scan(%q).Projects contains gitignored project %+v, want it pruned (vault/)", root, p)
+	}
+
+	blob, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("failed to marshal scan result: %v", err)
+	}
+	serialized := string(blob)
+	for _, forbidden := range []string{"node_modules", "proj-hidden", "vault", "id_rsa", ".env", "PLANTED-SECRET"} {
+		if strings.Contains(serialized, forbidden) {
+			t.Errorf("Scan(%q) result leaks %q: %s", root, forbidden, serialized)
+		}
 	}
 }
 
