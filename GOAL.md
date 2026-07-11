@@ -501,3 +501,9 @@ casualty). Owner amendments land as dated entries here:
   screen under Phase 6; GOAL.md M5 is correspondingly four screens and
   the loops screen is M6.7. The non-goals line "the specced screens"
   spans both.
+- **A3 (2026-07-11).** This machine has no `timeout`/`gtimeout` binary
+  (macOS, no coreutils). The verify command is amended to
+  `sh -c './scripts/check.sh && go test ./... -timeout 8m'` — no outer
+  wall-clock wrapper; `go test -timeout 8m` remains the enforced bound.
+  A verify invocation that hangs past ~15 minutes of wall clock should
+  be treated as red and abandoned (attempt line), not waited out.
