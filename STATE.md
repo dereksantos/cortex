@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 4
+Updated: 2026-07-11 · Iteration: 5
 
 ## Current milestone
 M1 — First-run bootstrap + greeting
@@ -29,25 +29,29 @@ M1 — First-run bootstrap + greeting
       `0d1a62c` — `TestIsFirstRunMarkerAbsentTrue`,
       `TestIsFirstRunConfigPresentFalse`, `TestIsFirstRunMarkerPresentFalse`,
       `TestIsFirstRunIgnoresSessions` (cmd/cortex/firstrun_test.go).
-- [ ] M1.5 Greeting fires exactly once on first run via scripted
-      Sender; none otherwise; greeting text golden-pinned.
+- [x] M1.5 Greeting fires exactly once on first run via scripted
+      Sender; none otherwise; greeting text golden-pinned. `6f9e8ff` —
+      `TestGreetingFiresOnceOnFirstRun`, `TestGreetingSkippedWhenNotFirstRun`,
+      `TestGreetingWritesMarkerOnlyAfterSuccess`, `TestGreetingPromptGolden`
+      (cmd/cortex/greeting_test.go).
 - [ ] M1.6 Keychain read/write behind pkg/secret interface with fake;
       meta-test fails on "security" as exec arg in any _test.go.
 - [ ] M1.7 Greeting asks for scan roots and persists them to user
       config (scripted-Sender test).
 
 ## Next Up
-Start M1.5: greeting turn fires exactly once on first run via the
-scripted `Sender` seam (in `cmd/cortex/firstrun.go` or a new
-`greeting.go`, wired into `main.go` after `StartTranscript()` +
-`EnableMemory()` and before the read loop, per docs/cortex-web.md Phase
-1). Use `IsFirstRun()` (M1.4) to gate it; on firing, run one synthetic
-`session.Turn(ctx, greetingPrompt)` and write the greeting marker
-(`greetingMarkerPath()`, already defined) so subsequent runs don't
-re-fire. Greeting text must be golden-pinned (principles, not a task
-recipe, per GOAL.md §3 P1 greeting) and non-first runs must fire none.
-M1.7 (ask for scan roots) is a separate later increment — M1.5 is just
-the fire-once mechanics + golden text.
+Start M1.6: keychain read/write behind a `pkg/secret` interface with a
+fake, plus the meta-test (run by verify) that fails if the literal
+`"security"` appears as an exec argument in any `_test.go` in the repo
+(GOAL.md M1.6 / §3 P1 backend chain). `pkg/secret` is NOT covered by the
+`pkg/llm` edit freeze (GOAL.md §1 non-goals) — the keychain write lands
+there. Wire `guidedOpenRouterSetup`/the guided-setup chain stage (M1.2,
+`cmd/cortex/bootstrap.go`) to use it for `key_service` writes on darwin.
+The meta-test should grep `_test.go` sources for `"security"` as an
+`exec.Command`/`exec.CommandContext` argument (string literal), not just
+the substring, to avoid false positives against comments — decide the
+exact matching rule as part of this increment and record it in the
+Decisions Log.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -126,6 +130,30 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   confirmed `go test ./cmd/cortex/... -run TestIsFirstRun` fails to
   build (5 `undefined` errors against `firstrun_test.go`), moved it back
   and reran green.
+
+- 2026-07-11: M1.5 landed `MaybeGreet` (`cmd/cortex/greeting.go`), wired
+  into `main.go` between `session.EnableMemory()` and the read loop,
+  under its own `signal.NotifyContext` (mirrors `compactNow`'s pattern) so
+  Ctrl-C during a slow first greeting doesn't hang startup. `greetingPrompt`
+  is a literal Go string constant asserted byte-for-byte in
+  `TestGreetingPromptGolden` — no separate golden-file mechanism existed
+  in the repo yet, so this establishes "golden-pinned" as "exact string
+  compared in a test" for future increments (M1.7's follow-on greeting
+  text, any Phase 5 view templates) rather than inventing a
+  golden-file-on-disk convention GOAL.md doesn't ask for. Marker is
+  written only after `Turn` returns success (tested via a 500-response
+  scripted backend: `TestGreetingWritesMarkerOnlyAfterSuccess`), so a
+  greeting that fails (no backend reachable yet on a truly fresh machine)
+  retries on the next launch rather than silently suppressing itself
+  forever. Test harness reuses the scripted-Sender-via-httptest pattern
+  from `context_eval_test.go` (`cs.quiet = true` routes through
+  `cs.Request.Send`, an ordinary HTTP call, so an `httptest.Server` is the
+  "scripted Sender" for a full `Turn()`-level test) rather than
+  `SenderFunc`+`runLoop` directly (that pattern is used by tests that
+  don't need `Turn`'s transcript/marker side effects). Load-bearing check:
+  moved `greeting.go` out of the tree, confirmed all four new tests fail
+  to build (7 `undefined` errors against `greeting_test.go`), moved it
+  back and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
