@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 13
+Updated: 2026-07-11 · Iteration: 14
 
 ## Current milestone
-M2 — Landscape scan (M1 complete)
+M3 — Workspace threading + project registry (M1, M2 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -94,31 +94,54 @@ M2 — Landscape scan (M1 complete)
       (internal/tools/scan_landscape_test.go), `TestScanEnabled`,
       `TestScanLandscapeToolRegistrationGate`,
       `TestIsToolEnabledScanGate` (cmd/cortex/scan_landscape_tool_test.go).
-- [ ] M2.7 Scan persists a `landscape.scan` event to the user-level
+- [x] M2.7 Scan persists a `landscape.scan` event to the user-level
       journal under the user home (temp-home test); the coder tool
       additionally writes the `landscape` memory note to the current
       project's store (temp-workspace test asserts a fixture-derived
-      string); headless scan writes no note (asserted).
+      string); headless scan writes no note (asserted). `cdc0533` —
+      `TestAppendLandscapeScanWritesEntryToUserLevelJournal`,
+      `TestAppendLandscapeScanIsolatedByCortexHome`
+      (internal/journal/landscape_test.go),
+      `TestRecordLandscapeScanWritesJournalEvent`,
+      `TestScanCLISourceNeverImportsMemory` (cmd/cortex/scan_test.go),
+      `TestScanLandscapeWritesLandscapeMemoryNote`,
+      `TestScanLandscapeMemoryWriteFailurePropagates`,
+      `TestScanLandscapeWritesLandscapeScanJournalEvent`
+      (internal/tools/scan_landscape_test.go). **M2 complete.**
+
+### M3 — Workspace threading + project registry (P3)
+- [ ] M3.1 `Workspace` threaded through session construction,
+      `contextDir`, instructions discovery, and `ConfinePath` in a
+      behavior-preserving commit: existing suite green plus equivalence
+      tests (same fixture repo via CWD vs explicit root ⇒ identical
+      context dir, instructions, confinement verdicts).
+- [ ] M3.2 `ConfinePath` escape attempts against a non-CWD root refused
+      (table of traversal and symlink cases).
+- [ ] M3.3 `internal/registry`: CRUD round-trip on `projects.json` under
+      a temp home; unknown-name lookup returns a typed error.
+- [ ] M3.4 `cortex project add/list/remove` wired to the registry
+      (CLI-level tests); `cortex scan --register` feeds discovered
+      projects in.
+- [ ] M3.5 `--project <name>` on `turn`, `resume`, and `study` resolves
+      via the registry and runs against that root (fixture-repo test).
 
 ## Next Up
-Start M2.7: persist a `landscape.scan` event to the user-level journal
-under the user home (temp-home test) for both `cortex scan` (M2.5) and
-the `scan_landscape` coder tool (M2.6); the coder tool additionally
-writes a `landscape` memory note to the CURRENT project's memory store
-(fixed name, per GOAL.md §3 P2 — a temp-workspace test should assert a
-fixture-derived string lands in the note); headless `cortex scan`
-writes no note (assert its absence). The journal write needs a
-user-level journal handle resolved through `internal/userhome` (M1.1) —
-check whether `internal/journal`'s existing constructor already accepts
-an arbitrary root or needs a small extension; reuse it rather than
-inventing a second journal-writing path. The memory-note write from
-`scan_landscape` needs a path to the CURRENT project's `internal/memory`
-store, which `internal/tools/scan_landscape.go`'s scanLandscape() does
-not have today (it only resolves the home dir) — this will likely need
-a MemoryStore-shaped dependency threaded in similarly to how memory_write
-gets `deps ToolDeps` (scanLandscape currently takes no args/deps; M2.7
-will need to add `deps ToolDeps` to its signature and update the
-Execute dispatch call site in internal/tools/tools.go accordingly).
+Start M3.1: thread a `Workspace` (root + derived paths) through session
+construction, `contextDir`, instructions discovery, and `ConfinePath` as
+a pure, behavior-preserving commit (GOAL.md §3 P3 — "the refactor lands
+FIRST as a pure no-behavior-change commit proven by the existing suite
+plus new equivalence tests; only then do `--project` flags build on
+it"). Locate the current `contextDir()`/instructions-discovery/
+`ConfinePath` call sites (grep for `ConfinePath` across cmd/cortex and
+internal/tools, and for `contextDir()`/`findUp` in cmd/cortex) before
+designing the `Workspace` struct's shape — this is a refactor of
+existing CWD-relative resolution into an explicit root-carrying type,
+not new functionality, so start by reading how many distinct places
+currently call CWD-adjacent resolution logic. The equivalence test
+should run the SAME fixture repo two ways (ambient CWD vs an explicit
+root once `Workspace` exists) and assert identical context dir /
+instructions / confinement verdicts — M3.2's escape-attempt table
+naturally follows once `Workspace`-scoped `ConfinePath` exists.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -503,6 +526,41 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `cmd/cortex` gating tests fail to build against the pre-edit `Config`/
   `ToolConfig` (8 `undefined` errors: `scanEnabled`, `EnableScan`) before
   landing those changes.
+
+- 2026-07-11: M2.7 landed `internal/journal`'s first user-level journal
+  instance (`AppendLandscapeScan`, `internal/journal/landscape.go`) by
+  having the journal package itself depend on `internal/userhome` to
+  resolve the class dir (`journal → userhome`, both leaf-ish packages,
+  no cycle) — chosen over duplicating the userhome-resolution +
+  `journal.NewWriter` open/append/close sequence separately in both
+  `cmd/cortex/scan.go` and `internal/tools/scan_landscape.go` (which
+  can't import each other per M2.6's cycle note), since a single shared
+  helper is the one-write-path GOAL.md pillar 3 asks for. `scanLandscape`
+  widened from a zero-arg function to `scanLandscape(deps MemoryStore)`
+  (Interface-Segregated, not the full `ToolDeps`) so it can call
+  `deps.MemoryWrite("landscape", result)` identically to the
+  `memory_write` tool's own dispatch; the `Execute` switch call site
+  changed to `scanLandscape(deps)`. Journal writes on both legs are
+  best-effort (swallowed on error — telemetry, matches
+  `emitSessionMetrics`'s existing convention); the memory-note write
+  propagates its error (matches `memoryWrite`'s existing contract) —
+  `TestScanLandscapeMemoryWriteFailurePropagates` pins this asymmetry.
+  "Headless scan writes no note" is proved by construction (`scan.go`
+  never imports `internal/memory`) plus a source-text meta-test
+  (`TestScanCLISourceNeverImportsMemory`), mirroring the AST-scan idiom
+  `pkg/secret`'s M1.6 meta-test established for a different forbidden
+  call. `internal/tools/scan_landscape_test.go` and
+  `cmd/cortex/scan_test.go` are both modified here but neither existed
+  at the branch genesis commit (confirmed via `git cat-file -e
+  <genesis>:<path>`, both fail — "did not exist at genesis") so this is
+  not a standing-regression-guard violation. Load-bearing checks done:
+  (1) moved `internal/journal/landscape.go` out of the tree — confirmed
+  `go vet` fails to build all three of `internal/journal`,
+  `internal/tools`, and `cmd/cortex` (the three dependents), restored;
+  (2) temporarily removed `scanLandscape`'s `deps.MemoryWrite` call —
+  confirmed `TestScanLandscapeWritesLandscapeMemoryNote` and
+  `TestScanLandscapeMemoryWriteFailurePropagates` both fail, restored
+  from a pre-edit copy and reran the full suite green.
 
 ## Known Issues (append-only)
 - (none yet)
