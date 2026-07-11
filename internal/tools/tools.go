@@ -428,6 +428,7 @@ var Study = Subagent{
 	// path (~1–3k output in the live eval).
 	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
 	Declaration: StudyTool,
+	Seed:        StudySeed,
 }
 
 // init registers Study on the shared subagent registry so Execute's generic
@@ -576,7 +577,11 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	if err != nil {
 		return "", err
 	}
-	digest, err := deps.RunSubagent(ctx, sa, StudySeed(goal, path, ol))
+	seedFn := sa.Seed
+	if seedFn == nil {
+		seedFn = StudySeed
+	}
+	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
 	if err != nil {
 		return "", err
 	}

@@ -65,6 +65,7 @@ type fakeSubagentDeps struct {
 	outline string
 	digest  string
 	gotRole string
+	gotSeed string
 }
 
 func (f *fakeSubagentDeps) Outline(path string, budget int) (string, error) {
@@ -73,6 +74,7 @@ func (f *fakeSubagentDeps) Outline(path string, budget int) (string, error) {
 
 func (f *fakeSubagentDeps) RunSubagent(ctx context.Context, sa Subagent, seed string) (string, error) {
 	f.gotRole = sa.Role
+	f.gotSeed = seed
 	return f.digest, nil
 }
 
@@ -125,4 +127,43 @@ func TestExecuteUnknownToolStillErrors(t *testing.T) {
 	if err.Error() != want {
 		t.Errorf("got error %q, want %q", err.Error(), want)
 	}
+}
+
+// TestProfileSeedSeam covers GOAL.md §3 slice 1: seed construction moved from
+// a hardwired StudySeed call in runSubagent onto a per-profile Seed field.
+func TestProfileSeedSeam(t *testing.T) {
+	const goal, path, ol = "find the bug", "internal/tools", "OUTLINE-FIXTURE"
+
+	t.Run("study seed byte-identical to StudySeed", func(t *testing.T) {
+		got := Study.Seed(goal, path, ol)
+		want := StudySeed(goal, path, ol)
+		if got != want {
+			t.Errorf("Study.Seed(...) = %q, want byte-identical to StudySeed(...) = %q", got, want)
+		}
+	})
+
+	t.Run("custom profile seed overrides StudySeed", func(t *testing.T) {
+		const customSeed = "CUSTOM SEED, NOT STUDY'S"
+		Register(Subagent{
+			Name: "custom-seed-agent",
+			Role: "test-custom-seed-agent",
+			Seed: func(goal, path, outline string) string { return customSeed },
+		})
+
+		deps := &fakeSubagentDeps{outline: ol, digest: "DIGEST"}
+		tc := agent.ToolCall{Function: agent.FunctionCall{
+			Name:      "test-custom-seed-agent",
+			Arguments: fmt.Sprintf(`{"path":%q,"goal":%q}`, path, goal),
+		}}
+
+		if _, err := Execute(context.Background(), tc, deps); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if deps.gotSeed != customSeed {
+			t.Errorf("RunSubagent got seed %q, want the profile's own seed %q", deps.gotSeed, customSeed)
+		}
+		if studySeed := StudySeed(goal, path, ol); deps.gotSeed == studySeed {
+			t.Error("RunSubagent got StudySeed's output, want the custom profile's own seed")
+		}
+	})
 }

@@ -28,6 +28,13 @@ type Subagent struct {
 	// schema) — what goes in a tool set like All. Kept explicit per profile
 	// (not auto-generated) so each inheritor's description stays hand-tuned.
 	Declaration Tool
+
+	// Seed builds the subagent's opening user message from the goal, path, and
+	// structural outline runSubagent assembled. A profile supplies its own to
+	// vary the seed shape (e.g. a future reflect/dream profile); a nil Seed
+	// falls back to StudySeed in runSubagent, so leaving it unset preserves the
+	// pre-seam behavior.
+	Seed func(goal, path, outline string) string
 }
 
 // AsTool returns the profile's dispatchable tool declaration.
