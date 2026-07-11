@@ -13,6 +13,8 @@ func contextEvict(tc ToolCall, deps ToolDeps) (string, error) {
 		return "", fmt.Errorf("citation is required: %w", err)
 	}
 
+	printToolAction(fmt.Sprintf("context_evict(%s)", citation))
+
 	if !deps.RemoveOutlineEntry(citation) {
 		return fmt.Sprintf("outline entry %q not found (already evicted or invalid citation)", citation), nil
 	}

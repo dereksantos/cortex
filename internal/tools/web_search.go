@@ -46,6 +46,8 @@ func webSearch(ctx context.Context, tc ToolCall) (string, error) {
 		return fmt.Sprintf("max_results must be between 1 and %d", maximumSearchMax), nil
 	}
 
+	printToolAction(fmt.Sprintf("web_search(%s)", args.Query))
+
 	form := url.Values{"q": []string{args.Query}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, searchEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {

@@ -45,6 +45,8 @@ func fetchURL(ctx context.Context, tc ToolCall) (string, error) {
 		return "fetch_url refused: " + err.Error(), nil
 	}
 
+	printToolAction(fmt.Sprintf("fetch_url(%s)", u.String()))
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", fmt.Errorf("build fetch request: %w", err)
