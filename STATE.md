@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 18
+Updated: 2026-07-11 · Iteration: 19
 
 ## Current milestone
-M3 — Workspace threading + project registry (M1, M2 complete)
+M4 — `cortex serve` (P4) (M1, M2, M3 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -143,19 +143,53 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       `TestRegisterDiscoveredProjectsFeedsRegistry`,
       `TestRegisterDiscoveredProjectsUpsertsOnRerun`
       (cmd/cortex/project_test.go).
-- [ ] M3.5 `--project <name>` on `turn`, `resume`, and `study` resolves
+- [x] M3.5 `--project <name>` on `turn`, `resume`, and `study` resolves
       via the registry and runs against that root (fixture-repo test).
+      `fc50be5` — `TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD`,
+      `TestApplyProjectByNameUnknownProjectReturnsTypedError`,
+      `TestApplyProjectFlagNoopWhenNameEmpty`,
+      `TestParseProjectFlagExtractsNameAndRest`
+      (cmd/cortex/project_workspace_test.go). **M3 complete.**
+
+### M4 — `cortex serve` (P4)
+- [ ] M4.1 `cortex serve` starts on 7433 (flag-overridable); the real
+      listener's address satisfies `ip.IsLoopback()` (test on the
+      constructed server, not httptest); bearer token generated, written
+      to `<userhome>/serve.token` mode 0600 (path + mode + content
+      asserted); tokenless and wrong-token requests get 401.
+- [ ] M4.2 Endpoints per spec: projects list, sessions list/create/resume,
+      `POST …/turn`, SSE progress, landscape, models (read merged config +
+      fleet; scoped write user/project/session via read-modify-write —
+      unknown-field survival test; key material absent from every
+      response, asserted).
+- [ ] M4.3 Session manager: two turns on one session serialize; turns on
+      two sessions interleave (concurrency test, scripted senders).
+- [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
+      pattern) attempting the same session gets the typed busy error.
+      (`internal/fslock` itself pre-dates the loop — this item is the
+      serve integration + the two-process test only; see amendment A1.)
+- [ ] M4.5 SSE event order and shape golden-tested via the `Progress`
+      seam; a test asserts the serve `http.Server` sets no `WriteTimeout`.
+- [ ] M4.6 Serve owns no state: kill + restart re-derives every list from
+      disk (restart the manager, listings identical).
+- [ ] M4.7 Idle sessions evict; a subsequent request re-hydrates from the
+      transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M3.5: `--project <name>` on `turn`, `resume`, and `study` resolving
-via `internal/registry.New().Lookup(name)` (M3.3/M3.4 ready to consume)
-to build a `Workspace` (`cmd/cortex/workspace.go`'s `NewWorkspace(root)`,
-M3.1) and run against that root instead of CWD. `runTurnCLI` (main.go)
-is the CLI entry point to extend for `turn`; `resume` and `study` have
-their own dispatch branches in main.go's argument parsing — a
-fixture-repo test (registered via a temp registry, run `--project` from
-an unrelated CWD) is the equivalence proof, mirroring M3.1's
-CWD-vs-explicit-root pattern.
+Start M4.1: `cortex serve` — a foreground HTTP server dispatched from
+main.go the same way `study`/`turn`/`project`/`scan`/`change`/`discord`
+are (new `case "serve"` branch + `runServeCLI(args []string)` in a new
+`cmd/cortex/serve.go`), binding loopback-only on port 7433
+(flag-overridable via `--port`), generating a bearer token written to
+`<userhome>/serve.token` (internal/userhome, M1.1) mode 0600. Test the
+constructed `*http.Server`'s real listener address against
+`netip.Addr.IsLoopback()` (per GOAL.md M4.1's wording: "the real
+listener's address... not httptest") plus tokenless/wrong-token 401s on
+at least one placeholder route via `httptest`. No endpoints yet beyond
+whatever minimal route proves the auth middleware — M4.2 builds the real
+surface. `internal/fslock`'s mode-0600 write pattern (used for session
+locks) is precedent for the token file; `pkg/secret`'s meta-test
+(M1.6) is precedent for "assert the file/permission shape in a test."
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -733,6 +767,66 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   runProjectCLI` — main.go's new dispatch branch depends on it, which
   transitively also fails every test in the package including the new
   ones), restored and reran the full verify suite green.
+
+- 2026-07-11: M3.5 landed `--project <name>` on `turn`, `resume`, and
+  `study` via a new `cmd/cortex/project_workspace.go`: `parseProjectFlag`
+  (extracts `--project <name>` from any position in a command's args, pure
+  and shared by all three entry points so each composes it with its own
+  flags/positionals independently), `applyProjectByName(cs, reg, name)`
+  (resolves via `registry.Registry.Lookup`, builds `NewWorkspace(p.Root)`,
+  and re-targets an already-constructed session: `cs.workspace` AND
+  `cs.deleteRoot` both become the project root — NOT just `cs.workspace`,
+  because `cs.root()` (study.go, M3.1) checks `deleteRoot` FIRST and
+  `NewCortexSession()` always sets it to `abs(".")` by default, so leaving
+  it alone would make study's `ConfinePath` confinement silently stay
+  pinned to CWD while `ContextDir()`/`SessionsDir()` correctly followed the
+  project — confirmed this was the real gap by reading `study.go`'s `root()`
+  precedence chain before writing the fix, not by trial and error), and
+  `applyProjectFlag(cs, name)` (the no-op-when-empty convenience wrapper
+  each CLI entry point actually calls, opening the registry itself so the
+  pure `applyProjectByName` stays fake-registry-testable). Extracted
+  `systemPromptContent(instructions string) string` out of
+  `CortexArgs.Request()` (session_core.go) — a pure behavior-preserving
+  refactor (same `projectInstructions()` call, same string-building, just
+  factored out) so `--project`'s workspace-aware instructions
+  (`ws.Instructions()`) and the CWD-implicit path build the identical
+  system-prompt shape from one source, closing the gap M3.1's Decisions Log
+  flagged ("still used by CortexArgs.Request() until --project wiring lands
+  in M3.5"). Deliberately did NOT change `Request()`'s own signature or its
+  `projectInstructions()` call — only `applyProjectByName` rebuilds
+  `cs.Request.Messages[0].Content` post-construction — since a signature
+  change would touch ~30 existing zero-arg `Request()` call sites for zero
+  behavioral payoff (same reasoning M3.1 used to defer the change here, but
+  applied conservatively: the *shared body* moved, not the call sites).
+  `study`'s CLI dispatch (main.go) now reads
+  `cortex study [--project <name>] <path> [goal...]`; `resume`'s reads
+  `cortex resume [--project <name>] [id]`; `turn`'s gained a `--project`
+  case alongside its existing `--session`/`--json` switch
+  (`cmd/cortex/cli.go`). Test mirrors M3.1's CWD-vs-explicit-root
+  equivalence pattern exactly, per the prior Next Up note: register a
+  fixture repo (reusing `workspace_test.go`'s `newFixtureRepo`/
+  `resolvedPath` helpers, same package) under a name via
+  `registry.NewAt(tempPath)`, apply it from an *unrelated* CWD (`t.Chdir`
+  into an empty temp dir with no `.cortex`/`AGENTS.md` anywhere up its
+  chain), then assert the result matches what `WorkspaceFromCWD()` would
+  give had the process actually launched from inside the fixture — Root,
+  ContextDir, `cs.root()` (the confinement root), and the system prompt
+  carrying the fixture's AGENTS.md content, all compared. Manually verified
+  end-to-end against a real built binary (mirrors M3.4's precedent): `cortex
+  project add blog <fixture>` then, from `/tmp` (unrelated CWD), `cortex
+  study --project blog . "..."` and `cortex turn --project blog "hi"` both
+  resolved the project and proceeded to the network boundary (refused only
+  by "connection refused" against a nonexistent local backend — expected,
+  no live-model calls in this environment); `cortex turn --project
+  doesnotexist "hi"` failed fast on `registry.ErrProjectNotFound` before
+  any network attempt, confirmed by exit code 1 and no dial-attempt log
+  line. Load-bearing check done: moved `project_workspace.go` out of the
+  tree, confirmed `go vet ./cmd/cortex/...` fails to build
+  (`cli.go:32: undefined: applyProjectFlag`), restored and reran the full
+  verify suite green. Standing-regression-guard check done: no
+  genesis-present `_test.go` file appears in `git diff --name-only
+  <genesis>..HEAD -- '*_test.go'` (only the new `project_workspace_test.go`
+  does).
 
 ## Known Issues (append-only)
 - (none yet)
