@@ -218,7 +218,14 @@ Scope:
   (v0): projects (list, from registry), sessions per project (list/create/
   resume — transcripts are already on disk), `POST …/turn` (runs
   `session.Turn`), SSE stream of turn progress (rendered from the existing
-  `Progress` seam), landscape (Phase 2's persisted result).
+  `Progress` seam), landscape (Phase 2's persisted result), and models —
+  read the merged config + discovered fleet, and write role bindings at an
+  explicit scope: user (`~/.cortex/config.json`), project
+  (`./.cortex/config.json`, field-by-field like `loadMergedConfig`), or
+  session (in-memory only, reverts on resume — the API form of `/model`).
+  Keys are never readable through the API — only their source
+  (keychain/env); re-keying re-runs the Phase 1 bootstrap chain and smoke
+  probe.
 - **Session manager** — an in-process map of live `*CortexSession` keyed by
   session id, each guarded per-session (the discord mutex generalized: one
   turn at a time per session, different sessions concurrent — safe because
@@ -252,7 +259,10 @@ Scope:
 
 - **Views**: project dashboard (registry + per-project session list + change
   status), session view (transcript render + input box + live SSE progress),
-  landscape view (Phase 2 report, rendered).
+  landscape view (Phase 2 report, rendered), and a models view — role
+  bindings (code/study/reason/fast/embed) across the three scopes with a
+  scope switcher, an effective-model column showing where each binding
+  resolves from, and the discovered fleet (`/model/info`) to pick from.
 - **Implementation posture (decided): no-build vanilla JS.** Hand-written
   HTML/CSS/JS served by `cortex serve` from `go:embed` — no node toolchain,
   no build step, no vendored framework; the binary stays self-contained and
