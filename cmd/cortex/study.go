@@ -44,10 +44,38 @@ func (cs *CortexSession) RunSubagent(ctx context.Context, sa tools.Subagent, see
 	return digest, err
 }
 
+// subagentDepthKey is the context key carrying how many subagent-call levels
+// deep the current invocation already is. An unset (e.g. background) ctx
+// reads as depth 0 — a fresh call from the coder's own tool dispatch or the
+// study-eval driver. Threaded through runSubagentStats, the one function
+// every subagent invocation funnels through (RunSubagent and study-eval both
+// call it), so a subagent's own tool loop calling ANOTHER subagent tool sees
+// one level deeper than its parent — see Subagent.DepthCap.
+type subagentDepthKey struct{}
+
+func subagentDepth(ctx context.Context) int {
+	d, _ := ctx.Value(subagentDepthKey{}).(int)
+	return d
+}
+
+func withSubagentDepth(ctx context.Context, d int) context.Context {
+	return context.WithValue(ctx, subagentDepthKey{}, d)
+}
+
 // runSubagentStats is RunSubagent with the engine's run stats exposed — the eval
 // reads them for the mechanical scorer (study phase 5); normal callers use
-// RunSubagent and discard them.
+// RunSubagent and discard them. This is the shared enforcement point for
+// Subagent.DepthCap: a call at a depth beyond the profile's cap is refused
+// before any model round-trip, so a cap-0 profile (Study) can never spawn a
+// subagent, and a future cap-1 profile can spawn exactly one nested level —
+// that child's own subagent calls land here again one level deeper and get
+// refused in turn.
 func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent, seed string) (string, loopStats, error) {
+	depth := subagentDepth(ctx)
+	if depth > sa.DepthCap {
+		return "", loopStats{}, fmt.Errorf("%s: subagent depth cap %d exceeded (called at depth %d)", sa.Name, sa.DepthCap, depth)
+	}
+	ctx = withSubagentDepth(ctx, depth+1)
 	spec := cs.specForRole(sa.Role)
 	if !cs.quiet {
 		fmt.Println(withColor(fmt.Sprintf("  ▸ %s via %s", sa.Name, spec.Model), green))

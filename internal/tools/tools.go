@@ -429,6 +429,7 @@ var Study = Subagent{
 	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
 	Declaration: StudyTool,
 	Seed:        StudySeed,
+	DepthCap:    0, // cannot spawn subagents — see GOAL.md §3 slice 2 / Subagent.DepthCap.
 }
 
 // init registers Study on the shared subagent registry so Execute's generic

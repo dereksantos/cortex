@@ -35,6 +35,18 @@ type Subagent struct {
 	// falls back to StudySeed in runSubagent, so leaving it unset preserves the
 	// pre-seam behavior.
 	Seed func(goal, path, outline string) string
+
+	// DepthCap is how many additional levels of subagent nesting a run of this
+	// profile is allowed to spawn, counted from ITS OWN invocation (depth 0):
+	// 0 (the zero value, Study's setting) means a running instance of this
+	// profile can never itself dispatch a subagent tool call — the old blanket
+	// "subagents can't recurse" rule, now explicit instead of an accident of
+	// Study's toolset never offering one. A future cap-1 profile may dispatch
+	// one nested subagent; that child's own subagent calls are refused, since
+	// they would be depth 2. Enforced in the shared runner
+	// (cmd/cortex CortexSession.runSubagentStats), not per-profile, so the
+	// cap holds even if a profile's Tools includes a subagent tool.
+	DepthCap int
 }
 
 // AsTool returns the profile's dispatchable tool declaration.
