@@ -74,8 +74,10 @@ different shape or is recorded below.)
 3. **System prompt: small batches + tidy-first** — cheapest, highest signal.
    *(landed; extended 2026-07-10 with the no-hoarding memory default)*
 4. **Documentation audit and digestion** — see the disposition table below.
-   *(largely done 2026-07-10; remaining: a README pass against the current
-   product surface)*
+   *(landed 2026-07-11: README pass against the current product surface —
+   the `agent` subagent tool and its config gate documented, tool reference
+   and Configuration sections updated, `cmd/cortex/readme_test.go` pins
+   command/tool coverage and the zero-removed-surfaces check)*
 5. **Single-writer session lock** — cross-process flock on the session
    transcript so a second process gets a clear "session busy" error instead
    of silently interleaving appends; the prerequisite the web track's

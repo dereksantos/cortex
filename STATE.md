@@ -1,7 +1,7 @@
 # STATE.md — ralph/roadmap loop memory
 
 ## Current milestone
-M5 — README pass
+M6 — Think/Dream design doc
 
 ## Checklist
 - [x] M0: GOAL.md + STATE.md committed on ralph/roadmap; verify green at baseline
@@ -72,6 +72,28 @@ M5 — README pass
       path, not a second unit test of the depth branch). ROADMAP.md item 6
       marked `*(landed 2026-07-11: ...)*` in this commit — M4 is complete.
       (this commit)
+- [x] M5(a): commands documented — README.md's Commands section already
+      listed `cortex`, `resume`, `turn`, `study`, `change`, `discord`,
+      `study-eval` before this iteration; verified by grep, no edit needed
+- [x] M5(b): memory tools/`study`/`recall`/context tools/`web_search`/
+      `fetch_url` already mentioned before this iteration; verified by grep,
+      no edit needed
+- [x] M5(c): `agent` tool documented — added a "Delegate" bullet under "What
+      Cortex can do", a table row in the "Complete tool reference", a
+      paragraph contrasting it with Study (depth cap, Risky→Blocked,
+      excluded session-scoped tools) linking `docs/agent-tool.md`, and a
+      `tools.enable_agent` bullet in Configuration
+- [x] M5(d): zero references to removed surfaces (`project_index`,
+      `/remember`, `/forget`, `cortex daemon`, `pkg/cognition`) — verified
+      by grep, none present, no edit needed
+- [x] M5: harness — `cmd/cortex/readme_test.go` `TestReadmeSurface` encodes
+      all four GOAL.md §4 grep-acceptance bullets as real subtests reading
+      README.md via `findUp("README.md")`; reverting just the README.md
+      change (verified by hand: `git stash -- README.md` + rerun) fails the
+      `mentions_the_agent_tool` subtest, proving the check has teeth.
+      ROADMAP.md item 4 updated from "remaining: a README pass" to
+      *(landed 2026-07-11: ...)* in this commit — M5 is complete. (this
+      commit)
 
 ## How to run / verify (quickref — keep short)
 ./scripts/check.sh && go build ./... && go test ./...
@@ -150,29 +172,46 @@ M5 — README pass
   `gateShell`) actually wires together end to end, which it caught failing
   (dispatcher refusal, not the risk gate) when `bash` was hand-removed from
   `Agent.Tools` as a manual revert check.
+- 2026-07-11: M5 closes with a single commit rather than split increments —
+  reading README.md against CLAUDE.md before editing showed (a)/(b)/(d) of
+  GOAL.md §4's acceptance already held (verified by grep, no edit needed);
+  only (c) — the `agent` tool mention — needed real content, and it's small
+  enough (a bullet, a table row, a paragraph, a config line) plus the
+  `TestReadmeSurface` harness to land as one increment rather than forcing
+  an artificial split. `TestReadmeSurface` locates README.md via the
+  existing `findUp` helper (`cmd/cortex/config.go`, already used for
+  `AGENTS.md`) so it works regardless of `go test`'s package-dir cwd.
+  ROADMAP.md item 4 ticked *(landed 2026-07-11: ...)* in the same commit —
+  the only ROADMAP.md edit GOAL.md §2 permits ("ticking items landed by
+  this loop").
 
 ## Known Issues
 (none)
 
 ## Next Up
-Start M5 (README pass, GOAL.md §4) — first enumerate its acceptance bullets
-as unchecked checklist increments (GOAL.md §7 step 4: "at milestone start,
-first enumerate its DoD items as unchecked increments"), then pick the first
-one. GOAL.md §4's acceptance is all grep-on-README.md: (a) documents every
-command — `cortex`, `resume`, `turn`, `study`, `change`, `discord`,
-`study-eval`; (b) mentions the memory tools (`memory_write` or "memory
-tools"), `study`, `recall`, the context tools (`context_evict` or "context
-tools"), and `web_search`/`fetch_url`; (c) mentions the `agent` tool (M4
-landed, so this applies now); (d) zero references to removed surfaces —
-`project_index`, `/remember`, `/forget`, `cortex daemon`, `pkg/cognition`.
-Read README.md fully against CLAUDE.md (the reference for current product
-surface) before editing — likely several of (a)/(b) already hold and only a
-subset needs adding, plus (c) the `agent` tool mention and scrubbing any (d)
-leftovers. Since acceptance is pure grep with no build/test surface, "extend
-the harness so reverting would fail a check" for M5 likely means adding a
-lightweight `TestReadmeSurface` (or similar) in `cmd/cortex` that runs those
-same greps against README.md — GOAL.md doesn't mandate a test file
-specifically for M5 (unlike M1/M2/M4's explicit `Test...` names), but §2's
-"never weaken or delete a check" and the pillar "tests are the spec" argue
-for making the grep acceptance an actual `go test` check rather than a
-one-time manual pass that could regress silently on a later README edit.
+Start M6 (Think/Dream design doc, GOAL.md §5) — write
+`docs/think-dream-eval.md` answering the roadmap's design gate: would a
+simplified background-curation (Think/Dream) layer improve long-horizon
+curation beyond what the memory tools + context tools already deliver, and
+what eval would prove it. This is a document-only milestone (GOAL.md §1
+non-goals: "No Think/Dream *implementation*"). Required section headings
+(exact, `##` level, per GOAL.md §5): `## Decision question`,
+`## Prior art in git history`, `## The eval`, `## Go / no-go criteria`. The
+eval section must define measurable pass/fail assertions (not judgments),
+styled like `docs/eval-context-pivot.md` (the worked example named in
+GOAL.md). Before writing, read `docs/archive.md` (what was removed and why
+— `pkg/cognition`, the mechanical retrieve/rerank/Dream pipeline,
+`internal/study`'s deleted engine) and `docs/memory-tools.md` (what already
+exists today that a Think/Dream layer would have to improve on) so the
+"prior art" section is grounded in this repo's actual history, not a
+generic literature summary. Acceptance (GOAL.md §5, all grep-checkable):
+file exists; all four `##` headings present; ROADMAP.md item 8 marked
+*(design doc written — decision pending owner review)* in the same commit.
+Per GOAL.md §7 step 4, enumerate these DoD items as unchecked checklist
+increments before picking the first one; a lightweight
+`TestThinkDreamDesignDoc` (mirroring `TestReadmeSurface`'s shape) checking
+the four headings exist is the natural harness extension so a later edit
+that drops a heading fails a check. Once M6's DoD is checked, GOAL.md §6
+says write `LOOP-COMPLETE` as the first line of this section — that will be
+the following iteration's final act once the doc and ROADMAP.md tick both
+land green.

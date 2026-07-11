@@ -212,10 +212,20 @@ Read the full designs in
   demoted conversation turns.
 - **Curate context:** `context_*` tools let the agent evict and merge outline
   entries and tune the demotion watermarks within bounded limits.
+- **Delegate:** the `agent` subagent takes on one bounded unit of
+  implementation work — it reads, edits, and verifies (via `bash`) against a
+  goal, then reports back what it did.
 
 The Study subagent is intentionally narrower than the coder: it can only use
 `outline`, `grep`, and targeted `read_file`. It cannot edit, run commands,
 access the parent conversation, write memory, or recursively invoke Study.
+The `agent` subagent is broader than Study — it can write, edit, and run
+`bash` — but stays bounded: it is capped to one level of nesting, any Risky
+shell command inside it is treated as Blocked (no interactive operator on
+that seam), and it excludes the same session-scoped tools Study excludes
+(`recall`, the memory tools, the context tools). See
+[`docs/agent-tool.md`](docs/agent-tool.md) for the design decisions and
+`tools.enable_agent` in Configuration to disable it.
 
 <details>
 <summary><strong>Complete tool reference</strong></summary>
@@ -226,6 +236,7 @@ access the parent conversation, write memory, or recursively invoke Study.
 | `write_file` | Create or overwrite a file. |
 | `edit_file` | Apply exact, whitespace-tolerant, or atomic multi-edits. |
 | `study` | Produce a goal-curated digest of a large file or directory. |
+| `agent` | Hand off one bounded implementation task (read, edit, verify via `bash`) to a subagent; unlike `study`, it can write files and run commands. |
 | `outline` | Map project/file structure without reading all contents. |
 | `grep` | Return bounded `file:line:text` content matches. |
 | `bash` | Run a shell command through the risk gate. |
@@ -309,6 +320,8 @@ does not set one. Model roles may override the backend endpoint and key source.
 - **Context controls:** all three are enabled by default and can be disabled
   independently with `tools.enable_context_evict`, `enable_context_merge`,
   and `enable_context_adjust_watermarks`.
+- **Agent:** `tools.enable_agent: false` disables the `agent` subagent tool
+  (enabled by default).
 
 Useful environment variables include `CORTEX_BACKEND`, `CORTEX_HOME`,
 `CORTEX_LOOP_STREAM`, `CORTEX_LOOP_RENDER`, `NO_COLOR`, and
