@@ -2,10 +2,12 @@ package landscape
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestScanHarnesses(t *testing.T) {
@@ -99,7 +101,7 @@ func TestScanProjects(t *testing.T) {
 		mustMkdirAll(t, filepath.Join(proj, ".git"))
 		mustWriteFile(t, filepath.Join(proj, "AGENTS.md"), "sentinel")
 
-		found, err := ScanProjects(root, Caps{})
+		found, _, err := ScanProjects(root, Caps{})
 		if err != nil {
 			t.Fatalf("ScanProjects returned error: %v", err)
 		}
@@ -116,7 +118,7 @@ func TestScanProjects(t *testing.T) {
 		root := t.TempDir()
 		proj := filepath.Join(root, "proj2")
 		mustMkdirAll(t, proj) // no .git, no markers
-		found, err := ScanProjects(root, Caps{})
+		found, _, err := ScanProjects(root, Caps{})
 		if err != nil {
 			t.Fatalf("ScanProjects returned error: %v", err)
 		}
@@ -136,7 +138,7 @@ func TestScanProjects(t *testing.T) {
 		if err := os.Symlink(filepath.Join(proj, "nonexistent-target"), filepath.Join(proj, ".git")); err != nil {
 			t.Fatalf("failed to plant broken-symlink fixture: %v", err)
 		}
-		found, err := ScanProjects(root, Caps{})
+		found, _, err := ScanProjects(root, Caps{})
 		if err != nil {
 			t.Fatalf("ScanProjects returned error on broken .git symlink: %v", err)
 		}
@@ -144,6 +146,89 @@ func TestScanProjects(t *testing.T) {
 			t.Errorf("ScanProjects(%q) = %+v, want no entry for %s (broken .git symlink)", root, found, proj)
 		}
 	})
+}
+
+// TestScanProjectsCapsMaxDepth plants a project within the depth cap and
+// one beyond it; the deep one must be pruned (walk never descends past
+// MaxDepth) while the shallow one is still found, and Truncated reports
+// the prune happened — never silent.
+func TestScanProjectsCapsMaxDepth(t *testing.T) {
+	root := t.TempDir()
+
+	shallow := filepath.Join(root, "shallow")
+	mustMkdirAll(t, filepath.Join(shallow, ".git"))
+	mustWriteFile(t, filepath.Join(shallow, "AGENTS.md"), "sentinel")
+
+	// a(depth1)/b(depth2)/c(depth3)/proj(depth4): with MaxDepth=2, "c"
+	// (depth3 > 2) is pruned before the walk ever reaches proj.
+	deep := filepath.Join(root, "a", "b", "c", "proj")
+	mustMkdirAll(t, filepath.Join(deep, ".git"))
+	mustWriteFile(t, filepath.Join(deep, "AGENTS.md"), "sentinel")
+
+	found, truncated, err := ScanProjects(root, Caps{MaxDepth: 2})
+	if err != nil {
+		t.Fatalf("ScanProjects returned error: %v", err)
+	}
+	if !truncated {
+		t.Errorf("ScanProjects(%q, MaxDepth=2) truncated = false, want true (depth cap should have tripped)", root)
+	}
+	if findProject(found, shallow) == nil {
+		t.Errorf("ScanProjects(%q, MaxDepth=2) = %+v, want shallow project %s still found (within the cap)", root, found, shallow)
+	}
+	if p := findProject(found, deep); p != nil {
+		t.Errorf("ScanProjects(%q, MaxDepth=2) contains %+v, want deep project %s pruned by the depth cap", root, p, deep)
+	}
+}
+
+// TestScanProjectsCapsMaxEntries plants enough sibling directories that a
+// small MaxEntries trips before the walk reaches a project placed last in
+// lexical (and therefore walk) order; the walk must stop cleanly rather
+// than silently continuing past the cap.
+func TestScanProjectsCapsMaxEntries(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 20; i++ {
+		mustMkdirAll(t, filepath.Join(root, fmt.Sprintf("dummy%02d", i)))
+	}
+	proj := filepath.Join(root, "zzz-project")
+	mustMkdirAll(t, filepath.Join(proj, ".git"))
+	mustWriteFile(t, filepath.Join(proj, "AGENTS.md"), "sentinel")
+
+	found, truncated, err := ScanProjects(root, Caps{MaxEntries: 5})
+	if err != nil {
+		t.Fatalf("ScanProjects returned error: %v", err)
+	}
+	if !truncated {
+		t.Errorf("ScanProjects(%q, MaxEntries=5) truncated = false, want true (entries cap should have tripped)", root)
+	}
+	if p := findProject(found, proj); p != nil {
+		t.Errorf("ScanProjects(%q, MaxEntries=5) contains %+v, want %s pruned by the entries cap (it sorts lexically last)", root, p, proj)
+	}
+}
+
+// TestScanProjectsCapsTimeout uses a near-zero Timeout, which is
+// guaranteed to already be past deadline by the time the walk's first
+// directory is visited (any real machine takes longer than 1ns to reach
+// that point) — deterministic on any CI/disk speed, unlike a
+// larger-but-still-tight timeout racing a small fixture's walk duration.
+func TestScanProjectsCapsTimeout(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 10; i++ {
+		mustMkdirAll(t, filepath.Join(root, fmt.Sprintf("dummy%02d", i), "nested"))
+	}
+	proj := filepath.Join(root, "zzz-project")
+	mustMkdirAll(t, filepath.Join(proj, ".git"))
+	mustWriteFile(t, filepath.Join(proj, "AGENTS.md"), "sentinel")
+
+	found, truncated, err := ScanProjects(root, Caps{Timeout: time.Nanosecond})
+	if err != nil {
+		t.Fatalf("ScanProjects returned error: %v", err)
+	}
+	if !truncated {
+		t.Errorf("ScanProjects(%q, Timeout=1ns) truncated = false, want true (deadline should already have passed)", root)
+	}
+	if p := findProject(found, proj); p != nil {
+		t.Errorf("ScanProjects(%q, Timeout=1ns) contains %+v, want %s never reached", root, p, proj)
+	}
 }
 
 func TestScanComposesAllFamilies(t *testing.T) {
