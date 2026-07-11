@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 11
+Updated: 2026-07-11 · Iteration: 12
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -74,9 +74,16 @@ M2 — Landscape scan (M1 complete)
       truncation reported in the result — never silent. `e07dd80` —
       `TestScanProjectsCapsMaxDepth`, `TestScanProjectsCapsMaxEntries`,
       `TestScanProjectsCapsTimeout` (internal/landscape/landscape_test.go).
-- [ ] M2.5 `cortex scan [--json] [--root <path>]`: uses persisted
+- [x] M2.5 `cortex scan [--json] [--root <path>]`: uses persisted
       roots, `--root` overrides, neither ⇒ typed refusal (all three
       paths tested); golden-file text report; JSON round-trip.
+      `b9257b0` — `TestResolveScanRootsFlagOverrides`,
+      `TestResolveScanRootsUsesPersisted`,
+      `TestResolveScanRootsRefusesWhenNeither`,
+      `TestBuildScanReportAggregatesAcrossRoots`,
+      `TestRenderScanReportGolden`,
+      `TestRenderScanReportGoldenEmptyAndTruncated`,
+      `TestScanReportJSONRoundTrip` (cmd/cortex/scan_test.go).
 - [ ] M2.6 `scan_landscape` coder tool registered, gated by
       `tools.enable_scan` (absent ⇒ registered, false ⇒ absent — both
       tested), home-scoped and read-only.
@@ -87,24 +94,21 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.5: `cortex scan [--json] [--root <path>]` subcommand. Wire it
-to use persisted `scan.roots` (M1.7's `PersistScanRoots`/config key)
-for project scanning, let `--root` override, and refuse with a typed
-error when neither is present (never a blind `$HOME` sweep — all three
-paths need a test). Reconcile `internal/landscape.Scan`'s single-root
-signature with production's two distinct real roots per M2.1's
-Decisions note: harnesses/runtimes probe the OS `$HOME`
-(`os.UserHomeDir()`), while projects walk the persisted/explicit scan
-root(s) — M2.5 is where that split actually gets resolved (Scan(root,
-caps) may need to become two calls from the CLI layer, one per root
-kind, rather than a single Scan(root) invocation; note whichever shape
-is chosen in Decisions Log). Add a golden-file text report renderer and
-a `--json` round-trip test (`internal/landscape.Result` already
-marshals cleanly per M2.2/M2.3's tests). The `--json` leg of M2.3's
-deferred content-non-leak proof can be closed out here too if it's a
-natural fit (marshal the same Result the text report renders, assert
-no sentinel/secret leaks through the new surface) — otherwise leave it
-noted as still-deferred to M2.7's journal-event leg.
+Start M2.6: `scan_landscape` coder tool. Register it in
+`internal/tools` (the tool decl + dispatch, matching the existing
+tool-registration pattern in `internal/tools/tools.go`), gated by
+`tools.enable_scan` (absent ⇒ registered/available, `false` ⇒ absent —
+both need a test, mirroring how other gated tools like `enable_delete`/
+`enable_web` are tested). It should be home-scoped and read-only: reuse
+`buildScanReport`/`resolveScanRoots`-equivalent logic from
+`cmd/cortex/scan.go` (M2.5) rather than re-implementing root
+resolution — note in Decisions Log whether that logic gets exported
+from `cmd/cortex` or duplicated/relocated, since `internal/tools`
+importing `cmd/cortex` would be a reverse-dependency the package layout
+likely doesn't want (check for an import cycle before deciding the
+shape). M2.7 (next after) is what actually wires the journal event +
+memory note this tool's *result* should feed — M2.6 itself is just
+registration + gating + read-only execution, per the DoD wording.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -403,6 +407,42 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   "truncated = false, want true" / "contains ... want ... pruned"
   messages, then restored the real implementation from a pre-edit copy
   and reran the full package green.
+
+- 2026-07-11: M2.5 landed `cortex scan [--json] [--root <path>]`
+  (`cmd/cortex/scan.go`), resolving the "two distinct real roots" split
+  M2.1's Decisions note deferred here: `buildScanReport(homeDir, roots,
+  caps)` calls `landscape.ScanHarnesses`/`ScanRuntimes` once against
+  `os.UserHomeDir()` and `landscape.ScanProjects` once per entry in
+  `roots` (M1.7's persisted `scan.roots`, or a single-element override
+  from `--root`), aggregating into a new CLI-level `ScanReport` — chose
+  a new aggregate type over changing `landscape.Scan`'s signature since
+  `internal/landscape`'s own tests (M2.1-M2.4) already pin `Scan(root,
+  caps)` as single-root and GOAL.md's package-layout section describes
+  it that way; the two-root-kind composition is CLI-layer concern only.
+  `resolveScanRoots`/`readScanRoots` reuse `readJSONDoc` (M1.3's
+  read-modify-write helper) directly against the `scan.roots` key
+  `PersistScanRoots` (M1.7) writes — no new config-reading abstraction.
+  Typed refusal is `ErrNoScanRoots`, a package-level sentinel checked
+  via `errors.Is` (both "file doesn't exist" and "file exists but has
+  no scan key" refuse identically — tested). `renderScanReport`'s exact
+  text layout is golden-pinned the same way `greetingPrompt` is (a Go
+  string literal compared byte-for-byte in a test), continuing M1.5's
+  established "golden-pinned = literal string in a test" convention
+  rather than inventing an on-disk golden-file mechanism. Also closed
+  M2.3's deferred `--json` content-non-leak leg here (`TestScanReport
+  JSONRoundTrip` plants a sentinel in a marker file's body and asserts
+  it's absent from the marshaled `ScanReport` JSON) — natural fit since
+  `--json` is exactly the new surface this increment adds; the
+  `landscape.scan` journal-event leg remains deferred to M2.7 as noted
+  at M2.3's ticking. Manually verified end-to-end against the real
+  filesystem (not just fixtures): `cortex scan` with no config refuses;
+  `cortex scan --root <fixture>` against the real `$HOME` correctly
+  found this machine's actual `~/.claude`/`~/.codex`/`~/.ollama`
+  alongside the fixture project. Load-bearing check done: forced
+  `resolveScanRoots` to never return `ErrNoScanRoots` (`if false &&
+  len(roots) == 0`), confirmed `TestResolveScanRootsRefusesWhenNeither`
+  fails both its sub-assertions, reverted from a pre-edit copy and
+  reran the full package green.
 
 ## Known Issues (append-only)
 - (none yet)
