@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 5
+Updated: 2026-07-11 · Iteration: 6
 
 ## Current milestone
 M1 — First-run bootstrap + greeting
@@ -34,24 +34,28 @@ M1 — First-run bootstrap + greeting
       `TestGreetingFiresOnceOnFirstRun`, `TestGreetingSkippedWhenNotFirstRun`,
       `TestGreetingWritesMarkerOnlyAfterSuccess`, `TestGreetingPromptGolden`
       (cmd/cortex/greeting_test.go).
-- [ ] M1.6 Keychain read/write behind pkg/secret interface with fake;
+- [x] M1.6 Keychain read/write behind pkg/secret interface with fake;
       meta-test fails on "security" as exec arg in any _test.go.
+      `88c7efa` — `TestFakeStoreRoundTrip`, `TestFakeStoreSetOverwrites`,
+      `TestFakeStoreInjectedErrors` (pkg/secret/store_test.go),
+      `TestNoRealSecurityBinaryInvokedByTests`,
+      `TestFileInvokesSecurityBinaryDetectsLiteral` (pkg/secret/meta_test.go).
 - [ ] M1.7 Greeting asks for scan roots and persists them to user
       config (scripted-Sender test).
 
 ## Next Up
-Start M1.6: keychain read/write behind a `pkg/secret` interface with a
-fake, plus the meta-test (run by verify) that fails if the literal
-`"security"` appears as an exec argument in any `_test.go` in the repo
-(GOAL.md M1.6 / §3 P1 backend chain). `pkg/secret` is NOT covered by the
-`pkg/llm` edit freeze (GOAL.md §1 non-goals) — the keychain write lands
-there. Wire `guidedOpenRouterSetup`/the guided-setup chain stage (M1.2,
-`cmd/cortex/bootstrap.go`) to use it for `key_service` writes on darwin.
-The meta-test should grep `_test.go` sources for `"security"` as an
-`exec.Command`/`exec.CommandContext` argument (string literal), not just
-the substring, to avoid false positives against comments — decide the
-exact matching rule as part of this increment and record it in the
-Decisions Log.
+Start M1.7: extend the greeting turn (`cmd/cortex/greeting.go`, M1.5) to
+ask where the user's code lives and persist the answer as scan roots to
+user config (GOAL.md M1.7 / §3 P1 first-run — "D3's ask-and-persist
+half; M2.5 consumes it"). Reuse the read-modify-write helpers from M1.3
+(`cmd/cortex/configwrite.go`: `readJSONDoc`/`writeJSONDoc`/`setJSONPath`)
+for the persist step rather than inventing a new write path — likely a
+new top-level config key (e.g. `scan.roots` or similar; GOAL.md doesn't
+pin the key name, so choose one and record it in the Decisions Log since
+M2.5 depends on it). Test via the scripted-Sender-via-httptest pattern
+established in `greeting_test.go` (M1.5's Decisions entry) — script a
+reply naming a path, assert it lands in the persisted config. This is
+the last M1 item; M1 completes with it.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -154,6 +158,37 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   moved `greeting.go` out of the tree, confirmed all four new tests fail
   to build (7 `undefined` errors against `greeting_test.go`), moved it
   back and reran green.
+
+- 2026-07-11: M1.6 landed `pkg/secret.Store` (`Get`/`Set`) alongside the
+  pre-existing `OpenRouterKey`/`LookupOpenRouterKey`/`MustOpenRouterKey`
+  functions (untouched — `pkg/llm/client.go` depends on
+  `secret.OpenRouterKey` and the `pkg/llm` provider-internals freeze
+  means that call site isn't touched; `pkg/secret` itself is explicitly
+  exempt from the freeze per GOAL.md §1). `darwinStore`/`unsupportedStore`
+  implement `Store` (`keychain_darwin.go`/`keychain_other.go`, same
+  build-tag split as the existing read path); `Set` shells `security
+  add-generic-password -U` (update-in-place, avoids a duplicate-entry
+  error on re-run) and deliberately omits stderr from its wrapped error
+  since `security` can echo the `-w` value into diagnostics. `Fake` is
+  the in-memory test double (`store.go`); no test constructs
+  `darwinStore`/`unsupportedStore` directly — GOAL.md's "no test invokes
+  the real `security` binary" bars it. Matching rule for the meta-test
+  (GOAL.md left it open): parse every `_test.go` with `go/parser` and
+  flag a call to `exec.Command`/`exec.CommandContext` (via `ast.Inspect`,
+  matching on the `exec.` selector) carrying a string-literal argument
+  whose *unquoted* value is exactly `"security"` — an AST walk avoids
+  both false positives (comments, the `"security"` tag-string literals
+  already in `internal/storage/storage_test.go` and `pkg/llm/llm_test.go`,
+  a `const bin = "security"` passed by variable) and reliance on build
+  tags (parser doesn't evaluate `//go:build`, so a violation hidden
+  behind a platform constraint still trips it). Repo root is found by
+  walking up from `os.Getwd()` to the nearest `go.mod`. Load-bearing
+  checks (both done): (1) moved `store.go` out of the tree — confirmed
+  `go test ./pkg/secret/...` fails to build (6 `undefined` errors across
+  `store_test.go` and `keychain_darwin.go`), restored; (2) planted a
+  synthetic `zz_violation_test.go` with `exec.Command("security", ...)`
+  — confirmed `TestNoRealSecurityBinaryInvokedByTests` fails and reports
+  the planted file's path, removed it, reran green.
 
 ## Known Issues (append-only)
 - (none yet)
