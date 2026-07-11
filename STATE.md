@@ -32,29 +32,24 @@ M4 — Agent slice 3b: the `agent` profile
       `IsToolEnabled("agent")` is false without calling `RunSubagent`);
       `cmd/cortex/context_tools_test.go` `TestIsToolEnabledAgentGate` (nil/
       false/no-config, plus `mergeTools` override) (this commit)
-- [ ] M4.2: wire the shellrisk Risky→Blocked-in-subagent decision (design doc
-      decision 2). Finding from M4.1's research: `cs.gateShell`
-      (`cmd/cortex/tool_deps.go`) is called unchanged when `agent`'s `bash`
-      tool dispatches — `dispatcherFor` (`cmd/cortex/study.go`) hands the same
-      `*CortexSession` through as `ToolDeps`, so a Risky verdict inside a
-      running `agent` instance currently hits the SAME interactive-confirm
-      branch (`cs.confirmRisky`) the coder's own top-level `bash` uses — no
-      subagent/headless distinction is applied yet. The fix does not need new
-      plumbing: `ctx` already carries `subagentDepth(ctx)` (set by
-      `runSubagentStats` before every subagent's `runLoop`, and threaded
-      through `dispatcherFor` → `tools.Execute` → `bash` → `deps.GateShell`
-      unchanged) — `depth 0` means "called at the coder's own top level",
-      `depth ≥ 1` means "called from inside a running subagent". Change
-      `gateShell` (`cmd/cortex/tool_deps.go:247`) so the Risky branch's
-      interactive-confirm path (`cs.confirmRisky != nil && !cs.quiet`) is
-      gated additionally on `subagentDepth(ctx) == 0`; at depth ≥ 1 it falls
-      straight to the same "blocked, no interactive approval available"
-      message `headlessDeps.GateShell` already returns. Test: a case in
-      `cmd/cortex/study_test.go` or a new `shellrisk_subagent_test.go` that
-      drives `cs.gateShell` (or `GateShell`) with `withSubagentDepth(ctx, 1)`
-      and a Risky-classifying stub, asserting no `confirmRisky` prompt fires
-      and the observation matches the headless-blocked shape; a depth-0
-      control case proves interactive confirm is unchanged for the coder.
+- [x] M4.2: wired the shellrisk Risky→Blocked-in-subagent decision (design
+      doc decision 2). `gateShell` (`cmd/cortex/tool_deps.go:247`) gates the
+      Risky branch's interactive-confirm path on `subagentDepth(ctx) == 0` in
+      addition to the existing `cs.confirmRisky != nil && !cs.quiet` check —
+      at depth ≥ 1 it now falls straight to the same "blocked (risk: ...). No
+      interactive approval is available..." message `headlessDeps.GateShell`
+      already returns for Risky, no new plumbing (context already carried
+      `subagentDepth` end to end via `dispatcherFor` → `tools.Execute` →
+      `bash` → `deps.GateShell`). Tests added to `TestBashShellSyntax`
+      (`cmd/cortex/main_test.go`): "risky command blocked inside a subagent
+      regardless of confirmRisky" drives `tools.Execute` with
+      `withSubagentDepth(ctx, 1)` and a `confirmRisky` stub that `t.Fatal`s
+      if invoked, asserting the headless-blocked message fires and the
+      command never runs; "risky command at depth 0 still uses interactive
+      confirm" is the control proving the coder's own top-level path is
+      unchanged. Verified revert-fails: stashing just the `tool_deps.go`
+      change makes the new subagent-depth subtest fail with exactly the
+      `confirmRisky must not be invoked` assertion. (this commit)
 - [ ] M4.3: `TestAgentToolEndToEnd` — scripted-`Sender` loop test (pattern:
       `cmd/cortex/study_test.go`'s cap-1 case) driving a full coder turn that
       calls `agent`, whose own loop dispatches ≥1 tool (e.g. `edit_file` or
@@ -120,27 +115,29 @@ M4 — Agent slice 3b: the `agent` profile
   `MaxIter: 12` since edit+verify needs more rounds than read-only research;
   not benchmarked, revisit if `TestAgentToolEndToEnd` (M4.3) or a later live
   probe shows it's wrong in either direction.
+- 2026-07-11: M4.2 lands decision 2 as a one-line gate: `gateShell`'s existing
+  Risky fallback branch already had the exact right text (byte-identical to
+  `headlessDeps.GateShell`'s Risky message, both built from the same
+  `shellrisk.Level`/`v.Reason` shape) — so the fix is adding
+  `subagentDepth(ctx) == 0 &&` to the interactive-confirm branch's condition,
+  not writing new blocked-message code. No new plumbing:
+  `subagentDepth`/`withSubagentDepth` (`study.go`) and the ctx threading
+  through `dispatcherFor` → `tools.Execute` → `bash` → `deps.GateShell`
+  already existed from M2's depth-cap work.
 
 ## Known Issues
 (none)
 
 ## Next Up
-Start M4.2 (shellrisk Risky→Blocked inside a subagent, GOAL.md §3 slice 3a
-decision 2). The checklist above records the exact finding and fix: change
-`cmd/cortex/tool_deps.go`'s `gateShell` (~line 247) so the Risky branch only
-takes the interactive `cs.confirmRisky` path when `subagentDepth(ctx) == 0`;
-at any deeper depth it must fall straight to the same headless-blocked
-message `headlessDeps.GateShell` already returns for Risky (no interactive
-approval available). `subagentDepth`/`withSubagentDepth` already exist in
-`cmd/cortex/study.go` and the ctx already carries the right depth by the time
-it reaches `GateShell` — no new plumbing needed, only the added depth check.
-Write a test driving `cs.gateShell` (or the `GateShell` method) at
-`subagentDepth(ctx) == 1` with a Risky-classifying `classifyShell` stub and a
-`confirmRisky` that would panic/fail the test if invoked, asserting the
-observation matches the headless-blocked shape; pair it with a depth-0
-control case proving the coder's own interactive confirm is unchanged. After
-M4.2 is green, M4.3 is `TestAgentToolEndToEnd` (a scripted-`Sender` loop test
-per the checklist's M4.3 note) plus marking ROADMAP.md item 6 *(landed)* in
-that same commit — do not mark ROADMAP.md until M4.3's acceptance is met in
-full (GOAL.md §3 slice 3b's acceptance bullets are one unit, not per-sub-
-increment).
+Start M4.3: `TestAgentToolEndToEnd`, a scripted-`Sender` loop test (pattern:
+`cmd/cortex/study_test.go`'s cap-1 recursion case in `TestSubagentDepthPolicy`)
+driving a full coder turn that calls the `agent` tool, whose own loop
+dispatches at least one tool (e.g. `edit_file` or `bash` — now that M4.2 is
+in, a Risky `bash` call inside this test's `agent` instance should assert the
+headless-blocked shape, not an interactive prompt, giving the test double
+duty) before finalizing, with the digest landing back in the coder's turn.
+Mark ROADMAP.md item 6 *(landed)* in this same commit — GOAL.md §3 slice 3b's
+acceptance bullets are one unit, so M4 is not complete (and M5's README pass,
+which depends on M4 having landed per GOAL.md §4, cannot start) until this
+lands. Look for the roadmap file (`ROADMAP.md` at repo root, referenced
+throughout GOAL.md) to find item 6's exact current wording before editing it.

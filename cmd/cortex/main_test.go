@@ -1867,6 +1867,43 @@ func TestBashShellSyntax(t *testing.T) {
 			t.Errorf("expected a blocked message when headless, got %q", got)
 		}
 	})
+
+	// M4.2: a subagent (e.g. the `agent` profile) has no human operator
+	// mid-loop — Risky must fall straight to the headless-blocked shape, never
+	// the interactive confirm prompt, regardless of confirmRisky/quiet.
+	t.Run("risky command blocked inside a subagent regardless of confirmRisky", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool {
+			t.Fatal("confirmRisky must not be invoked for a subagent-depth call")
+			return true
+		}}
+		ctx := withSubagentDepth(context.Background(), 1)
+		args, _ := json.Marshal(map[string]string{"command": "echo nested | cat"})
+		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "nested\n") {
+			t.Errorf("subagent-depth risky command should not run: %q", got)
+		}
+		if !strings.Contains(strings.ToLower(got), "no interactive approval") {
+			t.Errorf("expected the headless-blocked message, got %q", got)
+		}
+	})
+
+	// Control: an explicit depth-0 context (the coder's own top-level call)
+	// keeps the interactive confirm path unchanged.
+	t.Run("risky command at depth 0 still uses interactive confirm", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, confirmRisky: func(string) bool { return true }}
+		ctx := withSubagentDepth(context.Background(), 0)
+		args, _ := json.Marshal(map[string]string{"command": "echo depth-zero | cat"})
+		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "depth-zero") {
+			t.Errorf("approved depth-0 risky command should have run: %q", got)
+		}
+	})
 }
 
 // Regression: a quoted grep pattern must actually match. Before the tokenizer

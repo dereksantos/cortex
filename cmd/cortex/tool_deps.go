@@ -261,7 +261,10 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	case shellrisk.Blocked:
 		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
 	default:
-		if cs != nil && !cs.quiet && cs.confirmRisky != nil {
+		// A subagent (depth >= 1) has no human operator mid-loop — Risky is
+		// treated as Blocked, same as a headless session. Only the coder's own
+		// top-level bash call (depth 0) gets the interactive confirm prompt.
+		if subagentDepth(ctx) == 0 && cs != nil && !cs.quiet && cs.confirmRisky != nil {
 			q := fmt.Sprintf("\n⚠ risky command — %s\n    %s\n  run it? [y/N] ", v.Reason, command)
 			if cs.confirmRisky(q) {
 				return "", true
