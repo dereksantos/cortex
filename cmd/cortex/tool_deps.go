@@ -170,7 +170,7 @@ func (cs *CortexSession) memoryIndexNote() string {
 		idx = idx[:memoryIndexCap] + "\n… (index truncated; memory_search to find the rest)"
 	}
 	return "These are notes you saved in earlier sessions. Read the relevant ones with " +
-		"memory_read before answering; update them with memory_write when something changes.\n\n" + idx
+		"memory_read before answering.\n\n" + idx
 }
 
 func renderMemoryHits(hits []memory.NoteMeta) string {

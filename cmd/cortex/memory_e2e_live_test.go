@@ -16,7 +16,8 @@ import (
 // binary and drives it across real sessions against the live fleet, with a real
 // .cortex/memory/ on disk. It asserts the *behavior* the pivot promises — the
 // model saves durable facts, recalls them in a fresh session, updates a stale
-// note, and reaches for the journal when no note holds a detail.
+// note, reaches for the journal when no note holds a detail, and leaves
+// mundane turns unnoted (the write-eagerness gate).
 //
 //	CORTEX_LIVE_FLEET=1 go test ./cmd/cortex/ -run Memory.*_Live -v -timeout 1800s
 //
@@ -101,6 +102,25 @@ func TestMemoryEndToEnd_Live(t *testing.T) {
 		}
 	})
 
+	// --- (d) no hoarding: a mundane turn must NOT produce a note ---------------
+	// The inverse gate for write-eagerness tuning: routine work — a small task
+	// with an incidental, re-derivable detail — leaves memory empty. Guards the
+	// other direction from (a): saving must be the exception, not a per-turn
+	// reflex. If this fails while (a) passes, the write bar is too low; if (a)
+	// fails while this passes, it's too high.
+	t.Run("mundane_turn_writes_no_note", func(t *testing.T) {
+		memDir, runTurn := scenario(t)
+		reply, _ := runTurn("d-mundane",
+			"Create a file named greeting.txt containing exactly the line: hello world. "+
+				"I picked .txt over .md since it's just a scratch file.")
+		if n := noteCount(t, memDir); n != 0 {
+			t.Fatalf("FAILURE: a mundane turn produced %d memory note(s) in %s — "+
+				"the write bar is too low (nothing in that turn changes future behavior). Reply: %s",
+				n, memDir, oneLine(reply))
+		}
+		t.Logf("PASS: mundane turn wrote no notes. Reply: %s", oneLine(reply))
+	})
+
 	// --- (c) study(journal) for a detail no note holds ------------------------
 	// The fact is stated conversationally and never written as a note or a file,
 	// so the ONLY durable record is the per-turn journal capture. Recalling it in
@@ -137,6 +157,23 @@ func mentionsHour(s, h string) bool {
 		}
 	}
 	return false
+}
+
+// noteCount returns how many note files exist under dir (0 if the memory
+// directory was never created — the expected state after a mundane turn).
+func noteCount(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() != "INDEX.md" {
+			n++
+		}
+	}
+	return n
 }
 
 // memoryMentions reports whether any note file under dir contains substr

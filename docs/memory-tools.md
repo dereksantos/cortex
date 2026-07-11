@@ -46,13 +46,22 @@ always-on, no model call.
 ```
 You have a memory: named notes you've written, listed in the index below.
 - Read the notes relevant to the task before answering.
-- When you learn something worth having next session — a decision and its why,
-  a constraint, a user preference, a non-obvious fact — write a note
-  (memory_write). Update the existing note if one fits; don't duplicate.
+- Saving is rare; most turns produce nothing worth a note. The journal already
+  records every turn mechanically, and the code and git history record
+  themselves. Write a note (memory_write) only for what would change how you
+  act in a future session and that none of those records can give you — a
+  decision and its why, a standing constraint, a user preference. If in
+  doubt, don't save. Update the existing note if one fits; don't duplicate.
 - Notes are timestamped. If one looks stale for what you're doing, verify it
   rather than trusting it.
 - For detail a note only points at, study the journal.
 ```
+
+(Tuned 2026-07-10: the original affirmative "when you learn something, save
+it" read as a per-turn duty and produced hoarding. The default is now
+not-saving; `TestMemoryEndToEnd_Live/mundane_turn_writes_no_note` is the
+negative gate, alongside the existing recall scenarios that keep the bar
+from rising too high.)
 
 ## What's removed vs kept
 

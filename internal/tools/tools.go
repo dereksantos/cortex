@@ -354,10 +354,11 @@ var RemoveTool = newTool(FunctionRemove,
 // mechanical seam is the index injected at turn start. See docs/memory-tools.md.
 
 var MemoryWriteTool = newTool(FunctionMemoryWrite,
-	"Save a durable note to memory — something worth having in a future session: a "+
-		"decision and why, a constraint, a user preference, a non-obvious fact. Pick a "+
-		"short kebab-case name; writing an existing name updates that note (don't "+
-		"duplicate). Notes are timestamped automatically.",
+	"Save a durable note — only for what would change how you act in a future session "+
+		"and that the code, git history, and journal don't already record: a decision and "+
+		"its why, a standing constraint, a user preference. Rare by design; most turns "+
+		"produce nothing worth saving. Pick a short kebab-case name; writing an existing "+
+		"name updates that note (don't duplicate). Notes are timestamped automatically.",
 	objectSchema(map[string]any{
 		"name":    stringProp("Short kebab-case identifier for the note, e.g. 'auth-token-rotation'. Reusing a name updates that note."),
 		"content": stringProp("The note body — free-form prose. State the fact and, where it helps, a pointer to the source (a file path, a journal turn)."),
