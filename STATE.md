@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 14
+Updated: 2026-07-11 · Iteration: 15
 
 ## Current milestone
 M3 — Workspace threading + project registry (M1, M2 complete)
@@ -110,11 +110,17 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       (internal/tools/scan_landscape_test.go). **M2 complete.**
 
 ### M3 — Workspace threading + project registry (P3)
-- [ ] M3.1 `Workspace` threaded through session construction,
+- [x] M3.1 `Workspace` threaded through session construction,
       `contextDir`, instructions discovery, and `ConfinePath` in a
       behavior-preserving commit: existing suite green plus equivalence
       tests (same fixture repo via CWD vs explicit root ⇒ identical
-      context dir, instructions, confinement verdicts).
+      context dir, instructions, confinement verdicts). `8c9e800` —
+      `TestWorkspaceFromCWDMatchesExplicitRootContextDir`,
+      `TestWorkspaceFromCWDMatchesExplicitRootInstructions`,
+      `TestWorkspaceFromCWDMatchesExplicitRootConfinement`,
+      `TestNewWorkspaceResolvesRelativeRootToAbsolute`,
+      `TestWorkspaceFromCWDFallsBackToWorkingDirWhenNoCortexDirFound`
+      (cmd/cortex/workspace_test.go).
 - [ ] M3.2 `ConfinePath` escape attempts against a non-CWD root refused
       (table of traversal and symlink cases).
 - [ ] M3.3 `internal/registry`: CRUD round-trip on `projects.json` under
@@ -126,22 +132,23 @@ M3 — Workspace threading + project registry (M1, M2 complete)
       via the registry and runs against that root (fixture-repo test).
 
 ## Next Up
-Start M3.1: thread a `Workspace` (root + derived paths) through session
-construction, `contextDir`, instructions discovery, and `ConfinePath` as
-a pure, behavior-preserving commit (GOAL.md §3 P3 — "the refactor lands
-FIRST as a pure no-behavior-change commit proven by the existing suite
-plus new equivalence tests; only then do `--project` flags build on
-it"). Locate the current `contextDir()`/instructions-discovery/
-`ConfinePath` call sites (grep for `ConfinePath` across cmd/cortex and
-internal/tools, and for `contextDir()`/`findUp` in cmd/cortex) before
-designing the `Workspace` struct's shape — this is a refactor of
-existing CWD-relative resolution into an explicit root-carrying type,
-not new functionality, so start by reading how many distinct places
-currently call CWD-adjacent resolution logic. The equivalence test
-should run the SAME fixture repo two ways (ambient CWD vs an explicit
-root once `Workspace` exists) and assert identical context dir /
-instructions / confinement verdicts — M3.2's escape-attempt table
-naturally follows once `Workspace`-scoped `ConfinePath` exists.
+Start M3.2: `ConfinePath` escape attempts against a non-CWD root refused
+(table of traversal and symlink cases). `Workspace.ConfinePath` (new in
+M3.1, cmd/cortex/workspace.go) already delegates to
+`internal/tools.ConfinePath(call, w.Root)`, and
+`TestWorkspaceFromCWDMatchesExplicitRootConfinement` already covers one
+plain `../../../etc/passwd`-style escape against BOTH an implicit and an
+explicit `Workspace` — M3.2 needs a genuine TABLE (not just one case):
+absolute paths, `..`-prefixed relative paths, deeper traversal
+(`sub/../../..`), and symlink cases (a symlink inside the root pointing
+outside it — internal/tools/confine_test.go's existing
+`TestConfinePathRejectsEscapes` has no symlink case yet either, worth
+checking whether `ConfinePath`'s `filepath.Clean`+`filepath.Rel` guard
+actually resolves symlinks before the containment check, since `Abs`+
+`Clean` alone do NOT follow symlinks — this may be a real gap to close,
+not just a test to add). Build the table against `NewWorkspace(root)`
+(the M3.5-relevant non-CWD-root leg) specifically, per GOAL.md's M3.2
+wording.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -561,6 +568,53 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   confirmed `TestScanLandscapeWritesLandscapeMemoryNote` and
   `TestScanLandscapeMemoryWriteFailurePropagates` both fail, restored
   from a pre-edit copy and reran the full suite green.
+
+- 2026-07-11: M3.1 landed `Workspace{Root}` (`cmd/cortex/workspace.go`)
+  with two constructors — `WorkspaceFromCWD()` (reuses the pre-existing
+  `findUp(".cortex")` upward search verbatim, so it's bit-identical to
+  today's `contextDir()`) and `NewWorkspace(root string)` (explicit root,
+  no search — the leg `--project`/M3.5 needs). Deliberately did NOT
+  change `CortexArgs.Request()`'s signature to thread a `Workspace`
+  through it (it currently calls the free, CWD-implicit
+  `projectInstructions()`): `CortexArgs{}.Request()` is called zero-arg
+  in ~30 existing test files across the package, and forcing a
+  `Workspace` parameter through it now would be a mechanical, purely
+  test-plumbing change with zero behavioral payoff until M3.5 actually
+  has a non-CWD root to feed it — better to make that signature change
+  once, at M3.5, alongside the real `--project` wiring, than twice.
+  Extracted a shared `readInstructions(path string) string` body
+  (`config.go`) so `projectInstructions()` (free, `findUp`-based) and
+  the new `Workspace.Instructions()` (explicit path, no search) are
+  PROVABLY the same logic, not just tested-to-currently-agree — a test
+  additionally asserts they return identical output for the same
+  resolved path. `CortexSession` gained a `workspace *Workspace` field
+  (set via `WorkspaceFromCWD()` in `NewCortexSession`) plus
+  `cs.ContextDir()`/`cs.SessionsDir()` methods that fall back to the old
+  free functions when `cs.workspace == nil` — every hand-constructed
+  `&CortexSession{...}` literal in the existing test suite (no test
+  calls `NewCortexSession()` directly, confirmed via grep) leaves
+  `workspace` nil, so those tests are provably unaffected; only the real
+  `NewCortexSession()` path (exercised by manual `go build`/run, not by
+  any test) gets the new resolution. Updated the `cs`-receiver call
+  sites that had CWD-relative resolution inlined (`session.go` ×4,
+  `session_runtime.go` ×3, `tool_deps.go`'s `Recall` ×2, `main.go` ×2)
+  to go through `cs.ContextDir()`/`cs.SessionsDir()` instead of the free
+  functions directly — confirmed via `grep -n "cs \*CortexSession"`
+  immediately preceding each edited line before editing, not just by
+  pattern-matching the call text. `study.go`'s `root()` (the
+  `ConfinePath` root for the Study subagent) gained a
+  `cs.workspace.Root` fallback BELOW `deleteRoot` (which
+  `NewCortexSession` always sets to `abs(".")` by default) — a no-op
+  for every normally-constructed session; only affects a
+  hand-constructed session with neither `deleteRoot` nor `workspace`
+  set, where it still falls through to the pre-existing literal `"."`.
+  Load-bearing check done: moved `workspace.go` out of the tree,
+  confirmed `go vet ./cmd/cortex/...` fails to build
+  (`session_core.go:44: undefined: Workspace`), restored and reran the
+  full verify suite green. Standing-regression-guard check done: `git
+  diff --name-only <genesis>..HEAD -- '*_test.go'` lists only the new
+  `workspace_test.go` (not present at genesis) — no pre-existing test
+  file was touched.
 
 ## Known Issues (append-only)
 - (none yet)
