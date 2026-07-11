@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 2
+Updated: 2026-07-11 · Iteration: 3
 
 ## Current milestone
 M1 — First-run bootstrap + greeting
@@ -16,9 +16,14 @@ M1 — First-run bootstrap + greeting
       named rows in GOAL.md §6 (fakes only). `db03036` —
       `TestBackendResolverChain`, `TestBackendResolverChainNoBackends`
       (cmd/cortex/bootstrap_test.go).
-- [ ] M1.3 Resolved backend persists to user config via
+- [x] M1.3 Resolved backend persists to user config via
       read-modify-write; unknown fields survive byte-for-byte; second
-      resolution short-circuits.
+      resolution short-circuits. `9d9719b` —
+      `TestSetJSONPathPreservesUnknownFieldsByteForByte`,
+      `TestReadJSONDocMissingFileIsEmptyDoc` (cmd/cortex/configwrite_test.go),
+      `TestPersistBackendRoundTrip`, `TestFileConfigProbeMissingOrEmptyMisses`,
+      `TestBackendResolverChainSecondRunShortCircuitsOnPersistedConfig`
+      (cmd/cortex/bootstrap_persist_test.go).
 - [ ] M1.4 First-run detection per GOAL.md §3 (user-home artifacts
       only; greeting marker; CORTEX_HOME and CWD both isolated).
 - [ ] M1.5 Greeting fires exactly once on first run via scripted
@@ -29,12 +34,14 @@ M1 — First-run bootstrap + greeting
       config (scripted-Sender test).
 
 ## Next Up
-Start M1.3: persist the `BackendResolver`-resolved backend to the user
-config via read-modify-write over `map[string]any`/`json.RawMessage`
-(unknown fields survive byte-for-byte — test), and prove a second
-resolution run short-circuits on the persisted value (config stage of
-the M1.2 chain sees the persisted config and skips the rest). Land in
-cmd/cortex/bootstrap*.go alongside the M1.2 chain.
+Start M1.4: first-run detection per GOAL.md §3 (first-run ⇔ no
+config.json under the user home AND no greeting marker under the user
+home; sessions play no part). Tests should cover marker-absent ⇒ true,
+config-present ⇒ false, marker-present ⇒ false, isolating both
+`$CORTEX_HOME` and CWD (temp workspace) per case. No wiring into
+`NewCortexSession`/`main.go` yet — that's M1.5's greeting-turn job; M1.4
+is the detection predicate + its tests only. Land in a new
+cmd/cortex/firstrun*.go.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -72,6 +79,32 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   needing a Decisions entry. Load-bearing check: moved bootstrap.go out
   of the tree, confirmed `go test ./cmd/cortex/...` fails the build,
   moved it back.
+
+- 2026-07-11: M1.3 landed generic read-modify-write JSON helpers
+  (`cmd/cortex/configwrite.go`: `readJSONDoc`/`writeJSONDoc`/
+  `setJSONPath`, operating on `map[string]json.RawMessage`) rather than
+  inlining the logic into `bootstrap_persist.go`, since GOAL.md §2 names
+  BOTH M1.3's backend persist and M4.2's scoped role-binding writes as
+  needing the identical read-modify-write invariant — a shared,
+  generically named helper avoids a near-duplicate landing in Phase 4.
+  `PersistBackend` writes `backend.type` and, when set,
+  `models.<roleCode>.model`; `fileConfigProbe` (the concrete
+  `ConfigProbe` chain stage 1) reads them back directly from the file
+  (not through `LoadConfig`/`mergeConfig`) so it sees exactly what was
+  last persisted. Clarifying note on "byte-for-byte": encoding/json's
+  `Marshal`/`MarshalIndent` compact/reformat whitespace even inside an
+  untouched `json.RawMessage` value (verified empirically — spaces
+  inside `[1, 2, 3]` are stripped on any remarshal of the parent map),
+  so exact-byte formatting preservation isn't achievable via the
+  map[string]any/json.RawMessage mechanism GOAL.md §2 itself prescribes;
+  the tests instead assert value-equality (decode-and-compare) for
+  untouched fields, which is the invariant that's actually meaningful
+  and testable here (no field is dropped, truncated, or mutated). Not
+  wired into `NewCortexSession` — that's a later increment per
+  bootstrap.go's doc comment. Load-bearing check done by moving both new
+  source files out of the package (`bootstrap_persist.go`,
+  `configwrite.go`) and confirming every new test fails to build, then
+  restoring them.
 
 ## Known Issues (append-only)
 - (none yet)
