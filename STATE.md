@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 9
+Updated: 2026-07-11 · Iteration: 10
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -65,10 +65,10 @@ M2 — Landscape scan (M1 complete)
       proves it never appears in any scan result. `569269c` —
       `TestScanProjectsFiltersThroughIgnoreSet`
       (internal/landscape/landscape_test.go).
-- [ ] M2.3 Content-non-leak sentinel: fixture file bodies carry a
-      unique sentinel string; serializing the full scan result (structs,
-      `--json` output, and the `landscape.scan` journal event) contains
-      it nowhere.
+- [x] M2.3 Content-non-leak sentinel (struct leg landed; `--json` and
+      journal-event legs deferred to M2.5/M2.7 per Decisions Log below).
+      `d457260` — `TestScanResultDoesNotLeakFileBodyContent`
+      (internal/landscape/landscape_test.go).
 - [ ] M2.4 Caps enforced: fixtures exceeding max depth / max entries /
       a near-zero timeout each terminate cleanly (three tests) with
       truncation reported in the result — never silent.
@@ -85,31 +85,23 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.3: content-non-leak sentinel. Plant a unique sentinel string
-in fixture FILE BODIES (not just paths/names — M2.2 already proved
-path-level exclusion) under a project that IS reported by `Scan`
-(e.g. the body of a tracked, non-excluded file sitting next to a
-detected project's `.git`/marker), then serialize the full scan
-result three ways and assert the sentinel appears in NONE of them:
-(1) the `landscape.Result` struct (already effectively proven by
-M2.2's JSON-marshal check, but M2.3 wants an explicit file-body case —
-`Result`'s fields are just names/paths so this should already hold,
-which is itself the thing to assert/document); (2) `--json` CLI output
-(doesn't exist yet — M2.5 builds the `cortex scan` subcommand; if M2.3
-lands first, either stub a minimal JSON-rendering func now and let
-M2.5 build the CLI around it, or note in Decisions that the `--json`
-leg of this sentinel test is deferred to ride M2.5's CLI, with M2.3
-covering the struct + `landscape.scan` journal-event legs only — pick
-whichever keeps M2.3 landable in one iteration); (3) the
-`landscape.scan` journal event body (doesn't exist yet either — M2.7
-is the one that persists this event; same fork: either stub the event
-payload now or defer that leg's assertion to M2.7, recording the
-choice in Decisions). Given M2.3 depends on artifacts M2.5/M2.7 haven't
-built yet, the likely honest move is: assert what CAN be asserted today
-(struct-level non-leak, explicit and file-body-flavored, as a permanent
-regression guard) and record in Decisions Log exactly which legs of
-M2.3's DoD ride later increments and why — do not fabricate a
-`--json` renderer or journal event just to tick the box prematurely.
+Start M2.4: caps enforcement. `landscape.Caps{MaxDepth, MaxEntries,
+Timeout}` already exists in the `Scan`/`ScanHarnesses`/`ScanRuntimes`/
+`ScanProjects` signatures (landed by M2.1) but is currently unenforced —
+extend those same functions (no API change) to respect each bound, and
+write three tests, each terminating cleanly with truncation REPORTED in
+the result (never silent): (1) a fixture tree deeper than `MaxDepth`
+under `ScanProjects`'s walk; (2) a fixture tree with more entries than
+`MaxEntries`; (3) a near-zero `Timeout` against a large-enough fixture
+to guarantee the deadline trips mid-walk. "Truncation reported" likely
+needs a new field on `Result` (e.g. `Truncated bool` or a richer
+per-cap indicator) since today's `Result` has none — pick a shape and
+record the choice in Decisions Log. `MaxDepth`/`MaxEntries` apply
+naturally to `ScanProjects`'s `filepath.WalkDir`; whether they also
+bound `ScanHarnesses`/`ScanRuntimes` (currently a small fixed-list
+existence check, not a walk) is worth a quick judgment call — those two
+have no unbounded surface today so capping them may be a no-op, note
+whichever conclusion is reached.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -336,6 +328,38 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   confirmed the test fails, reporting both nested projects and every
   planted string present in the marshaled JSON — then restored the fix
   and reran green.
+
+- 2026-07-11: M2.3 landed the struct-level leg only —
+  `TestScanResultDoesNotLeakFileBodyContent` plants a unique sentinel in
+  the BODY of an AI marker file (AGENTS.md) belonging to a project
+  `Scan` legitimately REPORTS (not an excluded/hidden one — M2.2 already
+  proved path-level exclusion; this test proves that even a visible,
+  reported project's file *contents* never ride along), then asserts
+  `json.Marshal(result)` contains it nowhere. The DoD's other two legs
+  — `--json` CLI output and the `landscape.scan` journal event — don't
+  have artifacts to test against yet (M2.5 builds the `cortex scan`
+  subcommand and its `--json` renderer; M2.7 persists the journal
+  event); fabricating either now to force-tick a three-leg box would be
+  the "landing code whose behavior no test would notice reverting"
+  anti-pattern GOAL.md §1 warns against, since there'd be no real
+  renderer/event alongside the assertion. Ticking M2.3 on the struct leg
+  is deliberate: `Result`'s only fields are names/paths (Tool.Name/Path,
+  Runtime.Name/Path, Project.Path/Markers — Markers is a list of marker
+  *filenames*, never bodies) and every Scanner in the package uses
+  `os.Stat` exclusively, never `os.ReadFile`/`os.Open`-and-read, so the
+  struct-level guarantee is the one place content-leaking is
+  structurally possible today; M2.5 and M2.7 will each additionally
+  serialize `Result` through a new surface (JSON text, journal payload)
+  that is trivially "no more than what's already in `Result`," so this
+  sentinel is the load-bearing proof and those two future increments
+  inherit it rather than needing an independent re-proof. Load-bearing
+  check done: temporarily teed a marker file's content into
+  `Project.Markers` inside `ScanProjects` (simulating a content-leak
+  regression), confirmed `TestScanResultDoesNotLeakFileBodyContent`
+  fails and reports the leaked sentinel, then `git checkout --
+  internal/landscape/landscape.go` to revert before committing (no
+  production code changed by this increment — landscape.go's diff
+  after revert is empty; only the test file was added).
 
 ## Known Issues (append-only)
 - (none yet)
