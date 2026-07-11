@@ -309,6 +309,17 @@ func main() {
 	session.EnableMemory()
 	defer session.Close()
 
+	// First-run greeting (Phase 1 / M1.5): fires exactly once, before the
+	// read loop, so the very first thing a fresh machine sees from `cortex`
+	// is the introduction rather than a bare prompt. A failed greeting
+	// (e.g. no backend reachable yet) is reported but does not block the
+	// REPL — the marker is only written on success, so it retries next launch.
+	greetCtx, stopGreet := signal.NotifyContext(context.Background(), os.Interrupt)
+	if err := MaybeGreet(greetCtx, session); err != nil {
+		fmt.Fprintf(os.Stderr, "greeting: %v\n", err)
+	}
+	stopGreet()
+
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
 	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
 	// `printf … | loop` — falls back to the plain scanner unchanged.
