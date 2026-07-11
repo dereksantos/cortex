@@ -125,6 +125,32 @@ func TestIsToolEnabledConfigGate(t *testing.T) {
 	}
 }
 
+// TestIsToolEnabledAgentGate covers GOAL.md §3 slice 3b's config gate: the
+// agent tool follows the same nil-means-enabled pattern as
+// EnableWeb/EnableContext* (docs/IMPLEMENTATION-PATTERN.md) — a missing
+// enable_agent key must not disable a shipped tool.
+func TestIsToolEnabledAgentGate(t *testing.T) {
+	no := false
+	off := &CortexSession{Config: &Config{Tools: ToolConfig{EnableAgent: &no}}}
+	if off.IsToolEnabled("agent") {
+		t.Error("agent should be disabled when EnableAgent is explicitly false")
+	}
+	if !(&CortexSession{Config: &Config{}}).IsToolEnabled("agent") {
+		t.Error("agent should default to enabled when EnableAgent is nil")
+	}
+	if !(&CortexSession{}).IsToolEnabled("agent") {
+		t.Error("no config at all should mean agent is enabled")
+	}
+
+	// mergeTools threads a project-level override over the user-level default,
+	// same as every other *bool tool gate.
+	yes := true
+	merged := mergeTools(ToolConfig{EnableAgent: &yes}, ToolConfig{EnableAgent: &no})
+	if merged.EnableAgent == nil || *merged.EnableAgent {
+		t.Error("mergeTools should let the override (project config) turn EnableAgent off")
+	}
+}
+
 func TestAdjustWatermarksBounds(t *testing.T) {
 	cs := &CortexSession{Window: 4000}
 	cs.ws = cs.newWorkingSet(1)
