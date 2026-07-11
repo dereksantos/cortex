@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 1
+Updated: 2026-07-11 · Iteration: 2
 
 ## Current milestone
 M1 — First-run bootstrap + greeting
@@ -12,8 +12,10 @@ M1 — First-run bootstrap + greeting
       `TestDirCortexHomeRedirect`, `TestDirFallsBackToDotCortexUnderHome`,
       `TestPathJoinsUnderResolvedDir` (internal/userhome/userhome_test.go),
       `TestUserConfigPathRoutesThroughUserhome` (cmd/cortex/config_test.go).
-- [ ] M1.2 BackendResolver interface + chain, table-driven over the
-      named rows in GOAL.md §6 (fakes only).
+- [x] M1.2 BackendResolver interface + chain, table-driven over the
+      named rows in GOAL.md §6 (fakes only). `db03036` —
+      `TestBackendResolverChain`, `TestBackendResolverChainNoBackends`
+      (cmd/cortex/bootstrap_test.go).
 - [ ] M1.3 Resolved backend persists to user config via
       read-modify-write; unknown fields survive byte-for-byte; second
       resolution short-circuits.
@@ -27,12 +29,12 @@ M1 — First-run bootstrap + greeting
       config (scripted-Sender test).
 
 ## Next Up
-Start M1.2: define the `BackendResolver` interface + chain in
-cmd/cortex/bootstrap*.go (new files), table-driven over the named rows
-in GOAL.md §6 M1.2 (config-hit short-circuit; config-miss+env key;
-keychain hit; all-keys-miss+ollama-up; all-down⇒guided openrouter/free;
-smoke-probe failure at each seated stage falls through), fakes only —
-no real network/keychain calls in tests.
+Start M1.3: persist the `BackendResolver`-resolved backend to the user
+config via read-modify-write over `map[string]any`/`json.RawMessage`
+(unknown fields survive byte-for-byte — test), and prove a second
+resolution run short-circuits on the persisted value (config stage of
+the M1.2 chain sees the persisted config and skips the rest). Land in
+cmd/cortex/bootstrap*.go alongside the M1.2 chain.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -58,6 +60,18 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   → `go test` fails to build `internal/userhome` and `config_test.go`'s
   behavior assertion no longer has the routed implementation; `git
   stash pop` restored state before committing.
+- 2026-07-11: M1.2 landed the `BackendResolver` chain in
+  `cmd/cortex/bootstrap.go` as pure logic over five small interfaces
+  (`ConfigProbe`, `KeyProbe`, `OllamaProbe`, `GuidedSetup`,
+  `SmokeProbe`) — no wiring into `NewCortexSession` yet (deferred to
+  M1.3, which also does the config persistence GOAL.md's M1.2 row
+  doesn't ask for). Chain order and per-stage `Source` strings
+  ("config", "openrouter-env", "openrouter-keychain", "ollama-local",
+  "openrouter-guided") are the contract M1.3's persistence and M1.5's
+  greeting wiring build on — treat renaming them as a breaking change
+  needing a Decisions entry. Load-bearing check: moved bootstrap.go out
+  of the tree, confirmed `go test ./cmd/cortex/...` fails the build,
+  moved it back.
 
 ## Known Issues (append-only)
 - (none yet)
