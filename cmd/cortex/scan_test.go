@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/landscape"
+	"github.com/dereksantos/cortex/internal/userhome"
 )
 
 // TestResolveScanRootsFlagOverrides pins that an explicit --root wins
@@ -227,6 +230,70 @@ func TestScanReportJSONRoundTrip(t *testing.T) {
 	}
 	if len(round.Projects[0].Markers) != 1 || round.Projects[0].Markers[0] != "AGENTS.md" {
 		t.Errorf("round-tripped Markers = %v, want [AGENTS.md]", round.Projects[0].Markers)
+	}
+}
+
+// TestRecordLandscapeScanWritesJournalEvent pins M2.7's `cortex scan` leg:
+// the exact write recordLandscapeScan performs (the call runScanCLI makes
+// right after buildScanReport) lands a landscape.scan event in the
+// user-level journal, resolved through internal/userhome — not any
+// project's .cortex/journal.
+func TestRecordLandscapeScanWritesJournalEvent(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	report := ScanReport{
+		Roots:     []string{"/home/derek/eng"},
+		Tools:     []landscape.Tool{{Name: "claude", Path: "/home/derek/.claude"}},
+		Runtimes:  []landscape.Runtime{{Name: "ollama", Path: "/home/derek/.ollama"}},
+		Projects:  []landscape.Project{{Path: "/home/derek/eng/cortex", Markers: []string{"AGENTS.md"}}},
+		Truncated: false,
+	}
+	if err := recordLandscapeScan(report); err != nil {
+		t.Fatalf("recordLandscapeScan: %v", err)
+	}
+
+	dir, err := userhome.Path("journal", "landscape")
+	if err != nil {
+		t.Fatalf("userhome.Path: %v", err)
+	}
+	r, err := journal.NewReader(dir)
+	if err != nil {
+		t.Fatalf("journal.NewReader: %v", err)
+	}
+	defer r.Close()
+
+	e, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	got, err := journal.ParseLandscapeScan(e)
+	if err != nil {
+		t.Fatalf("ParseLandscapeScan: %v", err)
+	}
+	if got.ToolCount != 1 || got.RuntimeCount != 1 || got.ProjectCount != 1 || got.Truncated {
+		t.Errorf("payload = %+v, want counts 1/1/1, truncated=false", *got)
+	}
+	if len(got.Roots) != 1 || got.Roots[0] != "/home/derek/eng" {
+		t.Errorf("payload.Roots = %v, want [/home/derek/eng]", got.Roots)
+	}
+	if _, err := r.Next(); err != io.EOF {
+		t.Errorf("second Next() error = %v, want io.EOF (exactly one entry)", err)
+	}
+}
+
+// TestScanCLISourceNeverImportsMemory is a mechanical meta-test (same
+// idiom as pkg/secret's TestNoRealSecurityBinaryInvokedByTests, M1.6):
+// headless `cortex scan` must write NO memory note (GOAL.md M2.7) — only
+// the coder-only scan_landscape tool does. Asserted by construction: the
+// CLI's own source file never imports internal/memory, so there is no
+// code path by which it could write one.
+func TestScanCLISourceNeverImportsMemory(t *testing.T) {
+	src, err := os.ReadFile("scan.go")
+	if err != nil {
+		t.Fatalf("ReadFile scan.go: %v", err)
+	}
+	if strings.Contains(string(src), `"github.com/dereksantos/cortex/internal/memory"`) {
+		t.Error("scan.go imports internal/memory — headless cortex scan must never write a memory note (GOAL.md M2.7)")
 	}
 }
 

@@ -503,7 +503,7 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	case FunctionContextAdjustWatermarks:
 		return contextAdjustWatermarks(tc, deps)
 	case FunctionScanLandscape:
-		return scanLandscape()
+		return scanLandscape(deps)
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.

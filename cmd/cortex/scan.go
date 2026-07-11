@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/landscape"
 )
 
@@ -114,6 +115,22 @@ func buildScanReport(homeDir string, roots []string, caps landscape.Caps) (ScanR
 	return ScanReport{Roots: roots, Tools: tools, Runtimes: runtimes, Projects: projects, Truncated: truncated}, nil
 }
 
+// recordLandscapeScan persists a landscape.scan event to the user-level
+// journal (userhome-rooted, independent of any project's .cortex/journal)
+// for one completed scan. Names/counts only, per LandscapeScanPayload's own
+// content-non-leak doc. Deliberately does NOT touch internal/memory —
+// headless `cortex scan` writes no memory note (GOAL.md M2.7; the coder-only
+// scan_landscape tool is the one that does, see internal/tools/scan_landscape.go).
+func recordLandscapeScan(r ScanReport) error {
+	return journal.AppendLandscapeScan(journal.LandscapeScanPayload{
+		Roots:        r.Roots,
+		ToolCount:    len(r.Tools),
+		RuntimeCount: len(r.Runtimes),
+		ProjectCount: len(r.Projects),
+		Truncated:    r.Truncated,
+	})
+}
+
 // renderScanReport renders a ScanReport as the text report `cortex
 // scan` prints by default (golden-pinned by TestRenderScanReportGolden
 // — treat any change to this layout as a Decisions-Log-worthy
@@ -188,6 +205,12 @@ func runScanCLI(args []string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scan:", err)
 		os.Exit(1)
+	}
+
+	// Best-effort telemetry: a journal write failure (e.g. an unwritable
+	// user home) must not block the scan result itself.
+	if err := recordLandscapeScan(report); err != nil {
+		fmt.Fprintln(os.Stderr, "scan: warning: failed to record landscape.scan event:", err)
 	}
 
 	if asJSON {

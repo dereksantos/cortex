@@ -5,8 +5,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/landscape"
 )
+
+// landscapeMemoryNoteName is the fixed note name the scan_landscape tool
+// writes to the CURRENT project's memory store (GOAL.md §3 P2: "only the
+// scan_landscape coder tool writes one (fixed name `landscape`)").
+const landscapeMemoryNoteName = "landscape"
 
 // FunctionScanLandscape is the tool name for the coder-only landscape survey
 // (GOAL.md M2.6). It is home-scoped and read-only: it checks only well-known
@@ -31,8 +37,16 @@ var ScanLandscapeTool = newTool(FunctionScanLandscape,
 
 // scanLandscape probes the resolved home directory for known agent harnesses
 // and local model runtimes and renders a compact text summary. It takes no
-// tool-call arguments; ToolCall carries none for this tool.
-func scanLandscape() (string, error) {
+// tool-call arguments; ToolCall carries none for this tool. deps is narrowed
+// to MemoryStore (Interface Segregation, per this package's doc comment) —
+// scanLandscape needs only MemoryWrite, not the full ToolDeps surface.
+//
+// Unlike headless `cortex scan` (cmd/cortex/scan.go), this coder-only tool
+// additionally writes a fixed-name "landscape" note to the CURRENT project's
+// memory store — GOAL.md §3 P2's "only the scan_landscape coder tool writes
+// one" — via the same deps.MemoryWrite path the memory_write tool uses, so
+// the note is written identically to a model-driven write.
+func scanLandscape(deps MemoryStore) (string, error) {
 	home, err := homeDirFunc()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
@@ -46,7 +60,20 @@ func scanLandscape() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("scan runtimes: %w", err)
 	}
-	return renderLandscapeSurvey(found, runtimes), nil
+	result := renderLandscapeSurvey(found, runtimes)
+
+	// Best-effort telemetry: a journal write failure (e.g. an unwritable
+	// user home) must not block the tool result.
+	_ = journal.AppendLandscapeScan(journal.LandscapeScanPayload{
+		ToolCount:    len(found),
+		RuntimeCount: len(runtimes),
+	})
+
+	if _, err := deps.MemoryWrite(landscapeMemoryNoteName, result); err != nil {
+		return "", fmt.Errorf("write landscape memory note: %w", err)
+	}
+
+	return result, nil
 }
 
 // renderLandscapeSurvey formats the harness/runtime findings as compact text
