@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 7
+Updated: 2026-07-11 · Iteration: 8
 
 ## Current milestone
 M2 — Landscape scan (M1 complete)
@@ -54,9 +54,12 @@ M2 — Landscape scan (M1 complete)
       **M1 complete.**
 
 ### M2 — Landscape scan (P2)
-- [ ] M2.1 `internal/landscape`: per-family `Scanner` implementations
+- [x] M2.1 `internal/landscape`: per-family `Scanner` implementations
       (harnesses, runtimes, projects) composed by `Scan(root, caps)`;
       temp-dir fixture per family covering present / absent / malformed.
+      `21f6c7f` — `TestScanHarnesses`, `TestScanRuntimes`,
+      `TestScanProjects`, `TestScanComposesAllFamilies`
+      (internal/landscape/landscape_test.go).
 - [ ] M2.2 Every filesystem visit filtered through
       `projectscan.IgnoreSet`; a fixture with a planted secret path
       proves it never appears in any scan result.
@@ -80,19 +83,23 @@ M2 — Landscape scan (M1 complete)
       string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M2.1: build `internal/landscape` with per-family `Scanner`
-implementations (harnesses, runtimes, projects) composed by
-`Scan(root, caps)` (GOAL.md M2.1 / §3 P2 scanner — "walks the real
-filesystem... Probes return typed structs"). Design per docs/cortex-web.md
-Phase 2: a `Scanner` interface per probe family, each returning typed
-structs (`Tool`, `Runtime`, `Project`); fixtures are temp-dir trees (no
-real `$HOME` in tests), one fixture per family covering present / absent /
-malformed. M2.2 (IgnoreSet filtering) and M2.4 (caps) build on this same
-`Scan` entry point but are separate checklist items — land the minimal
-per-family scan first. `scan.roots` (M1.7's persisted config key, plural
-paths under `{"scan":{"roots":[...]}}`) is what M2.5's `cortex scan`
-subcommand will read; M2.1 itself can take `root` as a plain parameter and
-doesn't need to touch config.
+Start M2.2: filter every filesystem visit in `internal/landscape`'s
+scanners through `projectscan.IgnoreSet` (`LoadIgnoreSet(root)` —
+`internal/projectscan/ignore.go`); add a fixture with a planted secret
+path (e.g. `id_rsa`, `.env`, or a `.aws/credentials`-style path under a
+project root) and prove it never appears in any `Scan` result field
+(`Tools`, `Runtimes`, `Projects`, or a project's `Markers`). `ScanProjects`
+is the scanner most exposed to arbitrary user-tree content (it
+`filepath.WalkDir`s recursively) — thread `IgnoreSet.IsDirExcluded` into
+its walk callback to prune hard-excluded/gitignored directories, and
+`IgnoreSet.IsFileExcluded`/`IsHardExcludedFile` before treating any
+path as a marker. `ScanHarnesses`/`ScanRuntimes` check a small fixed
+list of well-known relative paths directly under `root` (not a general
+walk), so the secret-leak fixture for those two families should target
+`ScanProjects`'s walk, which is where an IgnoreSet gap would actually
+surface. Note IgnoreSet is real-filesystem based (`LoadIgnoreSet(root
+string)`, absolute paths) — matches `Scan`'s already-real-FS design, no
+adapter needed.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -257,6 +264,39 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `scanroots.go` out of the tree, confirmed `go vet ./cmd/cortex/...` and
   `go build ./cmd/cortex/...` both fail (`session.MaybeCaptureScanRoots
   undefined`, referenced from `main.go`'s read loop), moved it back and
+  reran green.
+
+- 2026-07-11: M2.1 landed `internal/landscape` (`landscape.go`) with
+  three named Scanner interfaces (`HarnessScanner`, `RuntimeScanner`,
+  `ProjectScanner`) — literal per-family "Scanner implementations" per
+  GOAL.md's M2.1 wording — each with a default concrete implementation
+  (`wellKnownHarnessScanner`/`wellKnownRuntimeScanner`/
+  `gitMarkerProjectScanner`) backing the package-level
+  `ScanHarnesses`/`ScanRuntimes`/`ScanProjects` funcs, composed by
+  `Scan(root, caps) (Result, error)`. Detection is existence-only
+  (`os.Stat`, never file contents) for harnesses/runtimes (fixed
+  relative-path list under `root`, e.g. `.claude`, `.ollama`) and a
+  `filepath.WalkDir` for projects (a `.git` entry plus ≥1 AI marker
+  among `AGENTS.md`/`CLAUDE.md`/`.cursor`/`.cortex`; matched repos are
+  not descended into further). `Caps{MaxDepth,MaxEntries,Timeout}` is
+  in the signature but deliberately unenforced here — M2.4 extends
+  these same functions without an API change, matching the prior
+  iteration's Next Up note. Malformed-fixture choice: a broken symlink
+  standing in for the well-known path / `.git` entry, which resolves
+  to a "not found" `os.Stat` error and is thus treated as absent —
+  chosen over chmod-based permission fixtures for cross-platform/CI
+  portability. `root` here is a generic "home-equivalent" directory
+  usable for both harness/runtime AND project detection against a
+  single fixture tree; reconciling this with production's two distinct
+  real roots (the OS `$HOME` for harnesses/runtimes vs. `scan.roots`
+  persisted config for projects) is explicitly deferred to M2.5's CLI
+  wiring, not resolved here. `internal/userhome` (Cortex's own
+  `$CORTEX_HOME`-or-`~/.cortex` state dir) is NOT the same concept as
+  the OS home directory this package's harness/runtime probes target —
+  worth flagging so a later iteration doesn't conflate the two.
+  Load-bearing check done: moved `landscape.go` out of the tree,
+  confirmed `go test ./internal/landscape/...` fails to build (10
+  `undefined` errors against `landscape_test.go`), moved it back and
   reran green.
 
 ## Known Issues (append-only)
