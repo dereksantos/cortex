@@ -41,6 +41,7 @@ type CortexSession struct {
 	Study            ModelSpec
 	Fleet            Fleet
 	Config           *Config
+	workspace        *Workspace
 	deleteRoot       string
 	allowDelete      bool
 	quiet            bool
@@ -158,6 +159,7 @@ func NewCortexSession() *CortexSession {
 		Args:         &args,
 		Request:      req,
 		Config:       cfg,
+		workspace:    WorkspaceFromCWD(),
 		Window:       code.Window,
 		Study:        study,
 		Fleet:        fleet,

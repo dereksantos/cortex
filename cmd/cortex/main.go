@@ -336,7 +336,7 @@ func main() {
 	if lineedit.IsInteractive(os.Stdin) {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
-			editor.SetHistory(lineedit.LoadHistory(filepath.Join(contextDir(), "history")))
+			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
 			defer editor.Close()
 			// Risky-command confirmation reads a y/N line from the editor. Tool
 			// calls run synchronously on this goroutine between ReadLine calls,
@@ -366,7 +366,7 @@ func main() {
 			// goes to stderr, which in an interactive session lands on top of
 			// the prompt. Divert it to a file so the terminal stays clean
 			// (tail -f .cortex/cortex.log for debugging).
-			if lf, err := os.OpenFile(filepath.Join(contextDir(), "cortex.log"),
+			if lf, err := os.OpenFile(filepath.Join(session.ContextDir(), "cortex.log"),
 				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 				log.SetOutput(lf)
 				defer lf.Close()

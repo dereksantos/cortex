@@ -27,10 +27,19 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 }
 
 // root is the workspace root the study door-guard (ConfinePath) confines reads
-// to — the delete root when set, else the working directory.
+// to — the delete root when set (NewCortexSession always sets one), else the
+// session's resolved Workspace, else the working directory. deleteRoot keeps
+// priority: it is independently configurable (tools.delete_root) and today
+// always populated by NewCortexSession, so this is a no-op fallback change
+// for every session built the normal way — it only affects hand-constructed
+// sessions with neither field set (in which case behavior is unchanged: "."
+// still means the working directory).
 func (cs *CortexSession) root() string {
 	if cs.deleteRoot != "" {
 		return cs.deleteRoot
+	}
+	if cs.workspace != nil {
+		return cs.workspace.Root
 	}
 	return "."
 }

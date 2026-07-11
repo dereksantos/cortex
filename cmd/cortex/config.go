@@ -350,6 +350,15 @@ func projectInstructions() string {
 	if path == "" {
 		return ""
 	}
+	return readInstructions(path)
+}
+
+// readInstructions reads and trims an AGENTS.md at an exact path (no
+// upward search), truncating at maxInstructionBytes — the shared body
+// projectInstructions() (CWD-implicit, via findUp) and
+// Workspace.Instructions() (explicit root, workspace.go) both use, so the
+// two stay provably identical for the same resolved path.
+func readInstructions(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
