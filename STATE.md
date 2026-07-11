@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 6
+Updated: 2026-07-11 · Iteration: 7
 
 ## Current milestone
-M1 — First-run bootstrap + greeting
+M2 — Landscape scan (M1 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -40,22 +40,59 @@ M1 — First-run bootstrap + greeting
       `TestFakeStoreInjectedErrors` (pkg/secret/store_test.go),
       `TestNoRealSecurityBinaryInvokedByTests`,
       `TestFileInvokesSecurityBinaryDetectsLiteral` (pkg/secret/meta_test.go).
-- [ ] M1.7 Greeting asks for scan roots and persists them to user
-      config (scripted-Sender test).
+- [x] M1.7 Greeting asks for scan roots and persists them to user
+      config (scripted-Sender test). `e8e5324` —
+      `TestGreetingPromptGolden` (extended golden pin, asks where code
+      lives), `TestMaybeGreetArmsAwaitingScanRootsReply` (scripted-Sender
+      greeting harness, end-to-end through persist),
+      `TestParseScanRootsReplyExtractsPaths`,
+      `TestPersistScanRootsRoundTrip`,
+      `TestMaybeCaptureScanRootsNoopWhenNotAwaiting`,
+      `TestMaybeCaptureScanRootsPersistsAndClearsFlag`,
+      `TestMaybeCaptureScanRootsDeclineClearsFlagWithoutPersisting`
+      (cmd/cortex/scanroots_test.go, cmd/cortex/greeting_test.go).
+      **M1 complete.**
+
+### M2 — Landscape scan (P2)
+- [ ] M2.1 `internal/landscape`: per-family `Scanner` implementations
+      (harnesses, runtimes, projects) composed by `Scan(root, caps)`;
+      temp-dir fixture per family covering present / absent / malformed.
+- [ ] M2.2 Every filesystem visit filtered through
+      `projectscan.IgnoreSet`; a fixture with a planted secret path
+      proves it never appears in any scan result.
+- [ ] M2.3 Content-non-leak sentinel: fixture file bodies carry a
+      unique sentinel string; serializing the full scan result (structs,
+      `--json` output, and the `landscape.scan` journal event) contains
+      it nowhere.
+- [ ] M2.4 Caps enforced: fixtures exceeding max depth / max entries /
+      a near-zero timeout each terminate cleanly (three tests) with
+      truncation reported in the result — never silent.
+- [ ] M2.5 `cortex scan [--json] [--root <path>]`: uses persisted
+      roots, `--root` overrides, neither ⇒ typed refusal (all three
+      paths tested); golden-file text report; JSON round-trip.
+- [ ] M2.6 `scan_landscape` coder tool registered, gated by
+      `tools.enable_scan` (absent ⇒ registered, false ⇒ absent — both
+      tested), home-scoped and read-only.
+- [ ] M2.7 Scan persists a `landscape.scan` event to the user-level
+      journal under the user home (temp-home test); the coder tool
+      additionally writes the `landscape` memory note to the current
+      project's store (temp-workspace test asserts a fixture-derived
+      string); headless scan writes no note (asserted).
 
 ## Next Up
-Start M1.7: extend the greeting turn (`cmd/cortex/greeting.go`, M1.5) to
-ask where the user's code lives and persist the answer as scan roots to
-user config (GOAL.md M1.7 / §3 P1 first-run — "D3's ask-and-persist
-half; M2.5 consumes it"). Reuse the read-modify-write helpers from M1.3
-(`cmd/cortex/configwrite.go`: `readJSONDoc`/`writeJSONDoc`/`setJSONPath`)
-for the persist step rather than inventing a new write path — likely a
-new top-level config key (e.g. `scan.roots` or similar; GOAL.md doesn't
-pin the key name, so choose one and record it in the Decisions Log since
-M2.5 depends on it). Test via the scripted-Sender-via-httptest pattern
-established in `greeting_test.go` (M1.5's Decisions entry) — script a
-reply naming a path, assert it lands in the persisted config. This is
-the last M1 item; M1 completes with it.
+Start M2.1: build `internal/landscape` with per-family `Scanner`
+implementations (harnesses, runtimes, projects) composed by
+`Scan(root, caps)` (GOAL.md M2.1 / §3 P2 scanner — "walks the real
+filesystem... Probes return typed structs"). Design per docs/cortex-web.md
+Phase 2: a `Scanner` interface per probe family, each returning typed
+structs (`Tool`, `Runtime`, `Project`); fixtures are temp-dir trees (no
+real `$HOME` in tests), one fixture per family covering present / absent /
+malformed. M2.2 (IgnoreSet filtering) and M2.4 (caps) build on this same
+`Scan` entry point but are separate checklist items — land the minimal
+per-family scan first. `scan.roots` (M1.7's persisted config key, plural
+paths under `{"scan":{"roots":[...]}}`) is what M2.5's `cortex scan`
+subcommand will read; M2.1 itself can take `root` as a plain parameter and
+doesn't need to touch config.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -189,6 +226,38 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   synthetic `zz_violation_test.go` with `exec.Command("security", ...)`
   — confirmed `TestNoRealSecurityBinaryInvokedByTests` fails and reports
   the planted file's path, removed it, reran green.
+
+- 2026-07-11: M1.7 landed the ask half by extending the golden-pinned
+  `greetingPrompt` (asks where the user's code lives, e.g. `~/code` or
+  `~/projects`) and the persist half as plain deterministic text parsing
+  in a new `cmd/cortex/scanroots.go` — deliberately NOT a second LLM
+  round-trip. Reasoning: the model already asked the question in its own
+  reply during the single greeting `Turn`; the *answer* is the real
+  human's next line of chat input in the REPL's read loop, which the
+  model never sees until the next ordinary turn anyway, so there is no
+  natural second scripted-backend exchange to hook — "script a reply
+  naming a path" (this file's prior Next Up note) is satisfied instead by
+  `TestMaybeGreetArmsAwaitingScanRootsReply`, which drives the real
+  scripted-Sender-via-httptest greeting harness from `greeting_test.go`
+  end-to-end through the capture/persist step. Mechanism: `MaybeGreet`
+  arms a new `CortexSession.awaitingScanRootsReply` bool after a
+  successful first-run greeting; `main.go`'s read loop calls the new
+  `(*CortexSession).MaybeCaptureScanRoots(input)` on the very next line of
+  real input, before running it as an ordinary turn (so the human's
+  message is captured AND still gets a normal reply — nothing is
+  swallowed). `parseScanRootsReply` extracts path-like tokens (leading
+  `~`, `/`, or `./`/`../`, trailing sentence punctuation trimmed) from
+  free text via regexp, so "sure, it's at ~/eng and ~/code, thanks!" and a
+  bare "~/eng" both work; "no thanks" finds nothing and is treated as a
+  clean decline (flag still clears — asked once, not re-asked every
+  launch). Chose config key `scan.roots` (`{"scan":{"roots":[...]}}`,
+  JSON array of strings) via the M1.3 read-modify-write helpers
+  (`PersistScanRoots` in scanroots.go, same shape as `PersistBackend`) —
+  M2.5 will read this same key. Load-bearing check done: moved
+  `scanroots.go` out of the tree, confirmed `go vet ./cmd/cortex/...` and
+  `go build ./cmd/cortex/...` both fail (`session.MaybeCaptureScanRoots
+  undefined`, referenced from `main.go`'s read loop), moved it back and
+  reran green.
 
 ## Known Issues (append-only)
 - (none yet)
