@@ -16,3 +16,20 @@ var errKeychainUnsupported = errors.New("keychain not supported on this platform
 func LookupOpenRouterKey() (string, error) {
 	return "", errKeychainUnsupported
 }
+
+// unsupportedStore implements Store as an always-error stub on
+// platforms without a wired secret-store backend.
+type unsupportedStore struct{}
+
+// NewStore returns the non-darwin Store stub.
+func NewStore() Store { return unsupportedStore{} }
+
+// Get implements Store.
+func (unsupportedStore) Get(service string) (string, error) {
+	return "", errKeychainUnsupported
+}
+
+// Set implements Store.
+func (unsupportedStore) Set(service, account, value string) error {
+	return errKeychainUnsupported
+}
