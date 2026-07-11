@@ -74,15 +74,21 @@ different shape or is recorded below.)
 3. **System prompt: small batches + tidy-first** — cheapest, highest signal.
    *(landed; extended 2026-07-10 with the no-hoarding memory default)*
 4. **Documentation audit and digestion** — see the disposition table below.
-   *(largely done 2026-07-10; remaining: a README pass against the current
-   product surface)*
+   *(landed 2026-07-11: README pass against the current product surface —
+   the `agent` subagent tool and its config gate documented, tool reference
+   and Configuration sections updated, `cmd/cortex/readme_test.go` pins
+   command/tool coverage and the zero-removed-surfaces check)*
 5. **Single-writer session lock** — cross-process flock on the session
    transcript so a second process gets a clear "session busy" error instead
    of silently interleaving appends; the prerequisite the web track's
    Phase 4 names for any second surface. *(landed 2026-07-11: shared
    `internal/fslock` package used by both transcripts and the journal;
    two-openers, release hand-off, and real cross-process collision tests)*
-6. **General `agent` tool** — a dispatchable subagent the coder can hand a
+6. **General `agent` tool** *(landed 2026-07-11: all three slices —
+   per-profile seeding, explicit depth policy, and the registered `agent`
+   profile per `docs/agent-tool.md`'s three decisions — plus
+   `TestAgentToolEndToEnd`, a scripted-`Sender` end-to-end loop test)* — a
+   dispatchable subagent the coder can hand a
    goal to, built on the registered `Subagent` profile system
    (`internal/tools/study.go`) rather than beside it. The registry was built
    for inheritors (`tools.go:433` — "the same path any future inheritor …
@@ -114,7 +120,9 @@ different shape or is recorded below.)
    threading + registry, per [`docs/cortex-web.md`](docs/cortex-web.md)
    (authoritative and self-contained; sliced to the bar above at
    implementation time, one slice per seam).
-8. **Think/Dream evaluation — design gate.** `pkg/cognition` /
+8. **Think/Dream evaluation — design gate** *(design doc written — decision
+   pending owner review: [`docs/think-dream-eval.md`](docs/think-dream-eval.md),
+   2026-07-11)*. `pkg/cognition` /
    `internal/cognition` were deleted outright (see
    [`docs/archive.md`](docs/archive.md)); there is nothing to switch back
    on — only git history to mine for ideas. Before any implementation: a

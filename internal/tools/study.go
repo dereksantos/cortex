@@ -28,6 +28,25 @@ type Subagent struct {
 	// schema) — what goes in a tool set like All. Kept explicit per profile
 	// (not auto-generated) so each inheritor's description stays hand-tuned.
 	Declaration Tool
+
+	// Seed builds the subagent's opening user message from the goal, path, and
+	// structural outline runSubagent assembled. A profile supplies its own to
+	// vary the seed shape (e.g. a future reflect/dream profile); a nil Seed
+	// falls back to StudySeed in runSubagent, so leaving it unset preserves the
+	// pre-seam behavior.
+	Seed func(goal, path, outline string) string
+
+	// DepthCap is how many additional levels of subagent nesting a run of this
+	// profile is allowed to spawn, counted from ITS OWN invocation (depth 0):
+	// 0 (the zero value, Study's setting) means a running instance of this
+	// profile can never itself dispatch a subagent tool call — the old blanket
+	// "subagents can't recurse" rule, now explicit instead of an accident of
+	// Study's toolset never offering one. A future cap-1 profile may dispatch
+	// one nested subagent; that child's own subagent calls are refused, since
+	// they would be depth 2. Enforced in the shared runner
+	// (cmd/cortex CortexSession.runSubagentStats), not per-profile, so the
+	// cap holds even if a profile's Tools includes a subagent tool.
+	DepthCap int
 }
 
 // AsTool returns the profile's dispatchable tool declaration.
@@ -83,6 +102,24 @@ Your tools are read-only:
 Locate, then read: grep or outline under PATH to find exactly where the answer lives, then read_file only those spans. Spend your limited reads on what the goal needs. If a tool is refused or errors, adapt — don't repeat it.
 
 Then STOP and answer the goal directly. Don't deliberate at length or keep exploring once you have the answer — a few targeted lookups are enough. You don't need to chase every referenced symbol to its definition; once you've read enough to answer what the goal asks, answer. Explain concretely how the relevant code works and how the pieces fit, naming the key symbols and citing file:line. Base your answer only on what you read; if the premise of the goal is false, say so and describe what the code actually does. Write the answer in plain prose, referring to tool calls and syntax by name — never paste literal tool-call, XML, or <function …>/<tool_call> markup into your answer. Be concise.`
+
+// agentSystem is the Agent profile's system prompt (docs/agent-tool.md): a
+// bounded implementation subagent, not a read-only researcher. It gets
+// write_file/edit_file/bash on top of Study's read/search tools, and is
+// expected to verify its own change before reporting back.
+const agentSystem = `You are a coding agent handed one bounded unit of implementation work. You're given a GOAL and an OUTLINE of a path. Do the work end to end: locate the relevant code, make the change, and verify it.
+
+Your tools:
+- grep(pattern, path): find where text or a regex (RE2 — no lookahead or backreferences) occurs — returns file:line. Use PATH as the grep path unless PATH is ".".
+- outline(path, budget): the structure of a file or directory — entries with line spans. Outline a path you haven't seen to orient.
+- read_file(path, start, end): read a specific line range; a whole-file read of a large file is refused (outline or grep it first).
+- write_file(path, content): write a new file or overwrite one — prefer edit_file for changes to an existing file.
+- edit_file(path, old_string, new_string): exact-match edit, whitespace-tolerant on retry.
+- bash(command): run a shell command — build it, test it, inspect it. Risky commands are refused outright; there is no one to ask for approval in this loop, so don't attempt anything destructive or irreversible.
+
+Locate, then change, then verify: use grep/outline to find exactly where the goal's work belongs, make the change, then run the relevant build/test command with bash to confirm it before you stop. If a tool is refused or errors, adapt — don't repeat it.
+
+Then STOP and report what you changed and how you verified it. Be concise and concrete: name the files and the change, and state the verification result (what you ran, what it showed). If the goal can't be completed with your tools, say so and explain what's blocking it rather than guessing. Write the report in plain prose — never paste literal tool-call, XML, or <function …>/<tool_call> markup into it.`
 
 // studySeed builds the subagent's opening user message: the goal, the path, and
 // the structural outline it starts from.

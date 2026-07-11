@@ -232,6 +232,10 @@ type ToolConfig struct {
 	AllowDelete *bool  `json:"allow_delete"`
 	DeleteRoot  string `json:"delete_root"`
 	EnableWeb   *bool  `json:"enable_web"`
+	// EnableAgent gates the general `agent` implementation subagent (GOAL.md §3
+	// slice 3b, docs/agent-tool.md). Nil means enabled — a missing config key
+	// must not disable a shipped tool, matching the EnableContext* precedent.
+	EnableAgent *bool `json:"enable_agent"`
 
 	// Context window modification tools
 	EnableContextEvict            *bool `json:"enable_context_evict"`
@@ -476,6 +480,9 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	}
 	if over.EnableWeb != nil {
 		base.EnableWeb = over.EnableWeb
+	}
+	if over.EnableAgent != nil {
+		base.EnableAgent = over.EnableAgent
 	}
 	if over.EnableContextEvict != nil {
 		base.EnableContextEvict = over.EnableContextEvict

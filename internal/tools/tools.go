@@ -220,6 +220,7 @@ const (
 	FunctionWriteFile    = "write_file"
 	FunctionEditFile     = "edit_file"
 	FunctionStudy        = "study"
+	FunctionAgent        = "agent"
 	FunctionBash         = "bash"
 	FunctionRemove       = "remove_path"
 	FunctionOutline      = "outline"
@@ -320,6 +321,17 @@ var StudyTool = newTool(FunctionStudy,
 		"goal": stringProp("What you want to learn — the subagent reads the parts relevant to this and answers it."),
 	}, "path"))
 
+var AgentTool = newTool(FunctionAgent,
+	"Hand off one bounded unit of implementation work to a subagent: it reads, "+
+		"edits, and verifies (build/test via bash) against your goal, then reports "+
+		"what it did. Unlike study (read-only), agent can write files and run "+
+		"commands — use it to delegate a self-contained change you don't need to "+
+		"drive step by step yourself. The more specific the goal, the tighter the scope.",
+	objectSchema(map[string]any{
+		"path": stringProp("Path to the file or directory the work is scoped to."),
+		"goal": stringProp("The unit of work to do — what to change, and how to verify it."),
+	}, "path"))
+
 var OutlineTool = newTool(FunctionOutline,
 	"Map a path structurally without reading its contents, filled breadth-first to "+
 		"a token budget. A directory lists its files/subdirs; a file lists its "+
@@ -408,7 +420,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 
 // All is the coder's full tool set, in declaration order. project_index is gone
 // — outline (the structural map) and grep (the content locator) replace it.
-var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
+var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), Agent.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
 	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
 
@@ -428,13 +440,37 @@ var Study = Subagent{
 	// path (~1–3k output in the live eval).
 	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
 	Declaration: StudyTool,
+	Seed:        StudySeed,
+	DepthCap:    0, // cannot spawn subagents — see GOAL.md §3 slice 2 / Subagent.DepthCap.
 }
 
-// init registers Study on the shared subagent registry so Execute's generic
-// dispatch (see Lookup in Execute) resolves the "study" tool name back to this
-// profile — the same path any future inheritor (reflect, dream) will use.
+// Agent is the general implementation-work subagent profile — GOAL.md §3
+// slice 3b, decisions settled in docs/agent-tool.md. Unlike Study (read-only:
+// outline/grep/read_file), Agent can write/edit and run bash: it does one
+// bounded unit of implementation work end to end (locate, change, verify),
+// not just report on it. Its toolset is exactly docs/agent-tool.md decision
+// 1's list — no study or agent tool is offered, so today's DepthCap: 1 (per
+// decision 3) has no reachable recursion path yet; it's the cap a future
+// tool grant would be bounded by, not a currently-exercised one. MaxTokens is
+// mandatory (the runaway backstop), same as Study.
+var Agent = Subagent{
+	Name:        "agent",
+	Role:        "agent",
+	System:      agentSystem,
+	Tools:       []Tool{OutlineTool, GrepTool, ReadFile, WriteFile, EditFile, Bash},
+	Bounds:      agent.Bounds{MaxTokens: 8_192, MaxIter: 20, ReadBudgetBytes: 128_000},
+	Declaration: AgentTool,
+	Seed:        StudySeed,
+	DepthCap:    1, // may spawn one nested subagent — see docs/agent-tool.md decision 3.
+}
+
+// init registers Study and Agent on the shared subagent registry so Execute's
+// generic dispatch (see Lookup in Execute) resolves their tool names back to
+// the right profile — the same path any future inheritor (reflect, dream)
+// will use.
 func init() {
 	Register(Study)
+	Register(Agent)
 }
 
 // --- Dispatcher ---------------------------------------------------------
@@ -576,7 +612,11 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	if err != nil {
 		return "", err
 	}
-	digest, err := deps.RunSubagent(ctx, sa, StudySeed(goal, path, ol))
+	seedFn := sa.Seed
+	if seedFn == nil {
+		seedFn = StudySeed
+	}
+	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
 	if err != nil {
 		return "", err
 	}
