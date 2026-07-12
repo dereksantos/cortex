@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 40
+Updated: 2026-07-12 · Iteration: 41
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
@@ -364,7 +364,26 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
         "Cortex web UI" marker preserved in app.js).
   - [ ] M5.3c Session screen: transcript render (`buildTranscriptViewModel`)
         + input box + live SSE progress against the M4.2b3 stream
-        endpoint.
+        endpoint. **Split (2026-07-12, this iteration) into:**
+    - [x] M5.3c1 `GET /api/projects/{name}/sessions/{id}` endpoint wiring
+          `buildTranscriptViewModel` into the HTTP surface (Go-only, no
+          screen JS/HTML yet — mirrors M5.3b's own first concern:
+          "there is no endpoint yet"). `5298e62` —
+          `TestGetSessionEndpointReturnsTranscriptViewModel`,
+          `TestGetSessionEndpointUnknownProjectReturns404`,
+          `TestGetSessionEndpointUnknownSessionIDReturns404`,
+          `TestGetSessionEndpointRequiresAuth`
+          (cmd/cortex/serve_transcript_test.go).
+    - [ ] M5.3c2 Session screen static render: routing (how the page picks
+          project+session id — URL query params, following app.js's
+          existing `?token=` precedent) + fetch/render of the transcript
+          via M5.3c1's endpoint into a `#session` container.
+    - [ ] M5.3c3 Input box: a text field + submit posting a new turn via
+          `POST .../turn` (serve_turn.go), then re-rendering.
+    - [ ] M5.3c4 Live SSE progress: switch the input box's turn submission
+          to `POST .../turn/stream` (serve_stream.go) and render
+          `progress`/`result`/`error` events as they arrive (`EventSource`
+          vs. `fetch` + streaming reader — pick one, record why).
   - [ ] M5.3d Landscape screen: renders `buildLandscapeViewModel`
         (M5.2c, a `ScanReport` pass-through) via `GET /api/landscape`.
   - [ ] M5.3e Models screen: renders `buildModelsViewModel` (M5.2d) —
@@ -375,31 +394,25 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3c: the session screen. Renders `buildTranscriptViewModel`
-(M5.2b, cmd/cortex/webui_transcript.go) plus an input box and live SSE
-progress against the M4.2b3 stream endpoint
-(`POST /api/projects/{name}/sessions/{id}/turn/stream`). Precedent from
-M5.3b (this iteration): (1) there is no `/api/transcript`-shaped
-endpoint yet — like the dashboard, `buildTranscriptViewModel` isn't
-wired to HTTP; add a `GET /api/projects/{name}/sessions/{id}` (or
-similar) endpoint returning it, following `serve_dashboard.go`'s
-pattern (thin handler calling the existing pure builder, `writeJSON`).
-(2) Auth is solved: `authMiddleware` now only gates `/api/...` paths
-(cmd/cortex/serve.go) — the static shell (`/`, `/app.js`, `/app.css`)
-serves without a token; JS reads the token from a `?token=` query param
-(`authToken()` in app.js) and attaches it to every `/api/...` fetch via
-`apiFetch()` — reuse that helper rather than re-deriving the pattern.
-(3) Testing convention is set (Decisions Log below): Go-side httptest
-coverage for the new endpoint, plus structural source-content
-assertions over the embedded JS/HTML (e.g. app.js contains the SSE
-`EventSource`/`fetch` call and `index.html` has a session container) —
-no executed-DOM assertions, no JS test runner exists in this repo.
-Novel piece M5.3c adds beyond M5.3b's pattern: SSE consumption from JS
-(`EventSource` against the stream endpoint, or `fetch` + a streaming
-reader — pick one and record why in the Decisions Log) and an input box
-POSTing a new turn. Watch the M5.3a size caps
-(`TestWebUIJavaScriptSizeCaps`) as JS grows — current total is well
-under 1200 but SSE handling will add real lines.
+Start M5.3c2: the session screen's static render. `GET
+/api/projects/{name}/sessions/{id}` (M5.3c1, cmd/cortex/serve_transcript.go)
+now returns `buildTranscriptViewModel`'s JSON — this sub-item wires it into
+the page: (1) routing — decide how the page knows which project+session to
+show (a `?project=<name>&session=<id>` query param is the natural extension
+of app.js's existing `?token=` precedent — `authToken()`'s
+`URLSearchParams(window.location.search)` pattern generalizes directly; no
+router/framework, per D9); (2) add a `#session` container to index.html
+(sibling to `#dashboard`, mirroring the guarded-`getElementById` pattern
+`loadDashboard()` already establishes — a `loadSession()` that no-ops when
+`#session` or the query params are absent); (3) render transcript entries
+(role/content, tool_calls) via plain DOM writes, `textContent` only (never
+innerHTML with response data — same posture as `renderDashboard`). Testing
+convention (Decisions Log below, set at M5.3b): Go-side httptest coverage
+for the endpoint (already done at M5.3c1) plus structural source-content
+assertions over the embedded JS/HTML — no executed-DOM assertions. Input
+box (M5.3c3) and live SSE (M5.3c4) are separate, later sub-items — this one
+is read-only render only. Watch the M5.3a size caps
+(`TestWebUIJavaScriptSizeCaps`) as app.js grows.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1966,6 +1979,33 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken fails to build
   (unused "strings" import once the code using it is removed),
   restored.
+
+- 2026-07-12: M5.3c split into M5.3c1 (transcript endpoint) through M5.3c4
+  (live SSE), following the M5.3b Next Up note's own observation that the
+  session screen bundles a genuinely novel piece (SSE consumption in JS)
+  on top of the now-familiar endpoint+static-render+input-box shape the
+  dashboard screen established — splitting on that seam (endpoint / static
+  render / mutation / streaming) keeps each sub-item a single new
+  capability rather than a fatter one-shot dashboard-style landing. Landed
+  M5.3c1 in the same iteration (precedent: M5.3's own split iteration also
+  landed M5.3a). `handleGetSession` (serve_transcript.go) is deliberately
+  independent of `SessionManager` — like `handleListProjectSessions`
+  (M4.2a), it reads the on-disk transcript directly via
+  `reg.Lookup`→`NewWorkspace`→`SessionsDir()`+`"<id>.jsonl"` (the same
+  join `session.go`'s `StartTranscript`/`ResumeTranscript` and
+  `tool_deps.go` already use — no new helper introduced, matching GOAL.md
+  §1's "reuse the seam"), so a transcript is viewable whether or not the
+  SessionManager currently holds that session live. `buildTranscriptViewModel`
+  wraps `loadSession`'s `os.ReadFile` error with two layers of `%w`, so
+  `errors.Is(err, os.ErrNotExist)` still resolves correctly through the
+  chain to a 404 for an unknown session id (verified, not assumed — see
+  load-bearing check below). Load-bearing check done: removed the
+  `mux.HandleFunc("GET /api/projects/{name}/sessions/{id}", ...)`
+  registration line, confirmed `TestGetSessionEndpointReturnsTranscriptViewModel`
+  fails (404 instead of 200, since an unregistered path falls through to
+  the catch-all "/" handler) while the negative-path tests still pass
+  incidentally (they expect 404/401 anyway), restored the line and reran
+  green — the positive-path test is what's load-bearing here.
 
 ## Known Issues (append-only)
 - (none yet)
