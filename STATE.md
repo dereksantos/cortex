@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 19
+Updated: 2026-07-11 · Iteration: 20
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -152,11 +152,18 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       (cmd/cortex/project_workspace_test.go). **M3 complete.**
 
 ### M4 — `cortex serve` (P4)
-- [ ] M4.1 `cortex serve` starts on 7433 (flag-overridable); the real
+- [x] M4.1 `cortex serve` starts on 7433 (flag-overridable); the real
       listener's address satisfies `ip.IsLoopback()` (test on the
       constructed server, not httptest); bearer token generated, written
       to `<userhome>/serve.token` mode 0600 (path + mode + content
-      asserted); tokenless and wrong-token requests get 401.
+      asserted); tokenless and wrong-token requests get 401. `0d928a0` —
+      `TestServePortFromArgsDefaultsTo7433`,
+      `TestServePortFromArgsFlagOverrides`,
+      `TestNewServeServerListenerIsLoopback`,
+      `TestGenerateServeTokenIsNonEmptyAndUnique`,
+      `TestWriteServeTokenModeAndContent`,
+      `TestServeAuthMiddlewareRejectsTokenlessAndWrongToken`
+      (cmd/cortex/serve_test.go).
 - [ ] M4.2 Endpoints per spec: projects list, sessions list/create/resume,
       `POST …/turn`, SSE progress, landscape, models (read merged config +
       fleet; scoped write user/project/session via read-modify-write —
@@ -176,20 +183,25 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.1: `cortex serve` — a foreground HTTP server dispatched from
-main.go the same way `study`/`turn`/`project`/`scan`/`change`/`discord`
-are (new `case "serve"` branch + `runServeCLI(args []string)` in a new
-`cmd/cortex/serve.go`), binding loopback-only on port 7433
-(flag-overridable via `--port`), generating a bearer token written to
-`<userhome>/serve.token` (internal/userhome, M1.1) mode 0600. Test the
-constructed `*http.Server`'s real listener address against
-`netip.Addr.IsLoopback()` (per GOAL.md M4.1's wording: "the real
-listener's address... not httptest") plus tokenless/wrong-token 401s on
-at least one placeholder route via `httptest`. No endpoints yet beyond
-whatever minimal route proves the auth middleware — M4.2 builds the real
-surface. `internal/fslock`'s mode-0600 write pattern (used for session
-locks) is precedent for the token file; `pkg/secret`'s meta-test
-(M1.6) is precedent for "assert the file/permission shape in a test."
+Start M4.2: the real `cortex serve` endpoint surface on top of M4.1's
+listener + `authMiddleware` + `newServeMux` — projects (list, from
+`internal/registry`), sessions per project (list/create/resume —
+transcripts already on disk under `internal/fslock`), `POST …/turn`
+(runs `session.Turn`), SSE stream of turn progress (render from the
+existing `Progress` seam), landscape (read Phase 2's persisted
+`landscape.scan` result), and models (read merged config + fleet; scoped
+role-binding writes at user/project/session via the M1.3 read-modify-
+write helpers — unknown-field survival test; key material must never
+appear in any response, asserted). All routes register on `newServeMux`
+and inherit `authMiddleware` for free. `SessionManager`/`Registry`
+should be small interfaces per GOAL.md §3 P4 so handlers are
+`httptest`-testable without a model — M4.3's concurrency test and
+M4.4's cross-process lock test will build directly on whatever
+`SessionManager` shape lands here, so get its method set right the
+first time (`Get(id)`/`Create(...)`/`List()` at minimum). Note M4.2 is
+large — GOAL.md §7 step 4 permits splitting into M4.2a/M4.2b/... by
+endpoint group if one iteration can't land it whole (e.g. 4.2a
+projects+sessions read paths, 4.2b turn+SSE, 4.2c landscape+models).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -827,6 +839,44 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   genesis-present `_test.go` file appears in `git diff --name-only
   <genesis>..HEAD -- '*_test.go'` (only the new `project_workspace_test.go`
   does).
+
+- 2026-07-11: M4.1 landed `cmd/cortex/serve.go` — `newServeServer(addr,
+  handler)` binds via `net.Listen("tcp", addr)` itself (not
+  `(*http.Server).ListenAndServe`) so the real, already-bound
+  `net.Listener` is available to assert loopback-ness against directly,
+  per GOAL.md's explicit "test on the constructed server, not httptest"
+  wording — `TestNewServeServerListenerIsLoopback` parses
+  `ln.Addr().String()` via `netip.ParseAddrPort` and checks
+  `.Addr().IsLoopback()`. `generateServeToken` mirrors
+  `pkg/cliout/envelope.go`'s existing `crypto/rand`+`encoding/hex`
+  pattern (32 random bytes, hex-encoded) rather than inventing a new
+  token shape. `writeServeToken` reuses `configwrite.go`'s `0o600`
+  user-only-write posture (the closest existing precedent — grepped for
+  `0600`/`0o600` across the repo first; `internal/fslock` itself writes
+  lock files at `0o644`, so "fslock's mode-0600 pattern" in the prior
+  Next Up note was inaccurate — configwrite.go is the real precedent,
+  noted here so a later iteration doesn't go looking for a 0600 write in
+  fslock and not find it). `authMiddleware` checks the literal
+  `"Bearer " + token` string (no separate scheme-parsing) — GOAL.md M4.1
+  only requires reject/accept, not partial-header diagnostics.
+  `newServeMux` registers exactly one placeholder route
+  (`/api/health`) solely to prove the middleware end-to-end; M4.2 adds
+  the real surface (a Decisions entry flagged this explicitly so M4.2
+  doesn't mistake `/api/health` for part of the spec's endpoint list).
+  Token is regenerated fresh every `cortex serve` run (not persisted
+  across restarts) — GOAL.md's wording ("bearer token generated at
+  start") matches this, and D6/D7 in docs/cortex-web.md say nothing
+  about token stability across restarts. Manually verified end-to-end
+  against a real built binary + `$CORTEX_HOME`-redirected temp dir:
+  `cortex serve --port 17433` bound loopback, wrote `serve.token` mode
+  0600, and `curl` against `/api/health` returned 401 with no
+  Authorization header, 401 with a wrong bearer value, and 200 with the
+  correct token read back from the written file. Load-bearing check
+  done: moved `serve.go` out of the tree, confirmed `go vet
+  ./cmd/cortex/...` fails to build (`main.go:296: undefined:
+  runServeCLI`), restored and reran the full verify suite green.
+  Standing-regression-guard check done: `serve_test.go` is new (not
+  present at genesis, not a modification of any pre-existing test file).
 
 ## Known Issues (append-only)
 - (none yet)
