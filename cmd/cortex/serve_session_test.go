@@ -11,9 +11,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/registry"
 )
+
+// fakeClock is a manually-advanced clock for the M4.7 idle-eviction tests —
+// tests never sleep (matches M6.2's later "injected clock" convention this
+// increment establishes first).
+type fakeClock struct{ now time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
 
 // hermeticSessionFactory returns a sessionFactory that never touches real
 // config or the network (CortexArgs{}.Request() ignores its receiver; no
@@ -119,6 +128,96 @@ func TestSessionManagerResumeUnknownIDReturnsError(t *testing.T) {
 
 	if _, err := mgr.Resume("blog", "does-not-exist"); err == nil {
 		t.Fatal("Resume(unknown id) = nil error, want an error")
+	}
+}
+
+// TestSessionManagerEvictsIdleSessionAndResumeRehydrates covers M4.7: a
+// session idle past the (shrunk, test-only) threshold is evicted from the
+// live map on the next Get(), and a subsequent Resume() re-hydrates it from
+// the on-disk transcript exactly like the M4.6-proven restart path does —
+// eviction is just "the manager forgot it was live," not data loss.
+func TestSessionManagerEvictsIdleSessionAndResumeRehydrates(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	clock := &fakeClock{now: time.Now()}
+	mgr.SetClock(clock.Now)
+	mgr.SetIdleTimeout(time.Second)
+
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantMessages := len(created.cs.Request.Messages)
+
+	if _, ok := mgr.Get(created.ID()); !ok {
+		t.Fatal("Get() evicted the session before the idle threshold elapsed")
+	}
+
+	clock.Advance(2 * time.Second)
+
+	if _, ok := mgr.Get(created.ID()); ok {
+		t.Fatal("Get() still returns the session past the idle threshold, want eviction")
+	}
+
+	resumed, err := mgr.Resume("blog", created.ID())
+	if err != nil {
+		t.Fatalf("Resume after eviction: %v", err)
+	}
+	if resumed.ID() != created.ID() {
+		t.Errorf("resumed id = %q, want %q", resumed.ID(), created.ID())
+	}
+	if got := len(resumed.cs.Request.Messages); got != wantMessages {
+		t.Errorf("resumed session has %d messages, want %d (rehydrated from transcript)", got, wantMessages)
+	}
+}
+
+// TestSessionManagerZeroIdleTimeoutNeverEvicts pins the default (unset)
+// behavior every pre-M4.7 test already relies on: idleTimeout's zero value
+// disables eviction entirely, so SetIdleTimeout/SetClock are opt-in and
+// every existing NewSessionManager(reg, factory) call site is unaffected.
+func TestSessionManagerZeroIdleTimeoutNeverEvicts(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	clock := &fakeClock{now: time.Now()}
+	mgr.SetClock(clock.Now)
+
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	clock.Advance(365 * 24 * time.Hour)
+
+	if _, ok := mgr.Get(created.ID()); !ok {
+		t.Fatal("Get() evicted the session even though no idle timeout was set")
+	}
+}
+
+// TestSessionManagerTouchExtendsIdleWindow proves Touch (called by
+// handleTurn/handleTurnStream on every request against a live session)
+// resets the idle clock, so a session under continuous use is never evicted
+// out from under an in-flight conversation.
+func TestSessionManagerTouchExtendsIdleWindow(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	clock := &fakeClock{now: time.Now()}
+	mgr.SetClock(clock.Now)
+	mgr.SetIdleTimeout(2 * time.Second)
+
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	clock.Advance(1500 * time.Millisecond)
+	mgr.Touch(created.ID())
+	clock.Advance(1500 * time.Millisecond) // 3s since Create, but only 1.5s since Touch
+
+	if _, ok := mgr.Get(created.ID()); !ok {
+		t.Fatal("Touch() did not extend the idle window; session was evicted early")
 	}
 }
 

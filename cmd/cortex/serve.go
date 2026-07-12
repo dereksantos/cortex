@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/registry"
 	"github.com/dereksantos/cortex/internal/userhome"
@@ -22,6 +23,12 @@ import (
 // defaultServePort is the default `cortex serve` bind port (flag-overridable
 // via --port). See GOAL.md §6 M4.1 / docs/cortex-web.md D7.
 const defaultServePort = 7433
+
+// defaultSessionIdleTimeout is how long a live session may go untouched
+// (no Create/Resume/turn) before SessionManager evicts it from memory
+// (GOAL.md §6 M4.7); the next request against that id transparently
+// re-hydrates from the on-disk transcript, same as a restart (M4.6).
+const defaultSessionIdleTimeout = 30 * time.Minute
 
 // servePortFromArgs parses `--port <n>` out of a `cortex serve` argument
 // list, defaulting to defaultServePort when absent or malformed.
@@ -148,6 +155,7 @@ func runServeCLI(args []string) {
 		os.Exit(1)
 	}
 	mgr := NewSessionManager(reg, newProductionSession)
+	mgr.SetIdleTimeout(defaultSessionIdleTimeout)
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

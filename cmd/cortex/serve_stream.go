@@ -56,6 +56,7 @@ func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 			http.Error(w, "session not found: "+id, http.StatusNotFound)
 			return
 		}
+		mgr.Touch(id) // M4.7: a live request resets the idle-eviction clock
 
 		var body turnRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

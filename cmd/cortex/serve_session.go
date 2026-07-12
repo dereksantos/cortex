@@ -12,6 +12,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/registry"
 )
@@ -31,8 +32,9 @@ type sessionFactory func() *CortexSession
 // mutex generalized). Held by handleTurn (serve_turn.go, M4.2b2) for the
 // duration of session.Turn.
 type managedSession struct {
-	cs *CortexSession
-	mu sync.Mutex
+	cs          *CortexSession
+	mu          sync.Mutex
+	lastTouched time.Time
 }
 
 // ID is the session's transcript id (cs.SessionID).
@@ -44,17 +46,72 @@ func (ms *managedSession) ID() string { return ms.cs.SessionID }
 // and applyProjectByName (project_workspace.go, M3.5) to target a freshly
 // built session at it — no new resolution logic.
 type SessionManager struct {
-	mu         sync.Mutex
-	sessions   map[string]*managedSession
-	reg        registry.Registry
-	newSession sessionFactory
+	mu          sync.Mutex
+	sessions    map[string]*managedSession
+	reg         registry.Registry
+	newSession  sessionFactory
+	idleTimeout time.Duration    // 0 (the zero value) disables eviction — opt-in via SetIdleTimeout
+	now         func() time.Time // overridden by SetClock in tests; defaults to time.Now
 }
 
 // NewSessionManager constructs a SessionManager backed by reg for project
 // resolution, using newSession to build each live *CortexSession before
-// it's targeted at a project.
+// it's targeted at a project. Idle eviction (M4.7) is disabled by default —
+// call SetIdleTimeout to enable it.
 func NewSessionManager(reg registry.Registry, newSession sessionFactory) *SessionManager {
-	return &SessionManager{sessions: make(map[string]*managedSession), reg: reg, newSession: newSession}
+	return &SessionManager{
+		sessions:   make(map[string]*managedSession),
+		reg:        reg,
+		newSession: newSession,
+		now:        time.Now,
+	}
+}
+
+// SetIdleTimeout arms eviction: a session untouched (no Create/Resume/Touch)
+// for at least d is dropped from the live map the next time it's looked up
+// via Get or Resume, falling back to the on-disk transcript exactly like a
+// restart (M4.6) does. d <= 0 disables eviction (the default).
+func (m *SessionManager) SetIdleTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.idleTimeout = d
+}
+
+// SetClock overrides the manager's notion of "now" for eviction checks —
+// tests inject a fakeClock.Now so idle-eviction assertions never sleep.
+func (m *SessionManager) SetClock(now func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.now = now
+}
+
+// Touch resets id's idle clock. Called by handleTurn/handleTurnStream
+// (serve_turn.go, serve_stream.go) on every request against a live session,
+// so a session under continuous use is never evicted mid-conversation.
+// No-op if id isn't currently live.
+func (m *SessionManager) Touch(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ms, ok := m.sessions[id]; ok {
+		ms.lastTouched = m.now()
+	}
+}
+
+// evictIfIdleLocked drops id from the live map if it's idle-timed-out.
+// Caller must hold m.mu.
+func (m *SessionManager) evictIfIdleLocked(id string) {
+	if m.idleTimeout <= 0 {
+		return
+	}
+	ms, ok := m.sessions[id]
+	if !ok {
+		return
+	}
+	if m.now().Sub(ms.lastTouched) < m.idleTimeout {
+		return
+	}
+	ms.cs.Close()
+	delete(m.sessions, id)
 }
 
 // Create starts a brand-new session against project's workspace and tracks
@@ -69,8 +126,8 @@ func (m *SessionManager) Create(project string) (*managedSession, error) {
 	if cs.SessionID == "" {
 		return nil, fmt.Errorf("failed to start a new session transcript for project %q", project)
 	}
-	ms := &managedSession{cs: cs}
 	m.mu.Lock()
+	ms := &managedSession{cs: cs, lastTouched: m.now()}
 	m.sessions[cs.SessionID] = ms
 	m.mu.Unlock()
 	return ms, nil
@@ -79,7 +136,8 @@ func (m *SessionManager) Create(project string) (*managedSession, error) {
 // Resume returns the already-live session for id if the manager already
 // holds it (no reopening a transcript this process already has open), else
 // re-hydrates it from the on-disk transcript under project's workspace via
-// CortexSession.ResumeTranscript.
+// CortexSession.ResumeTranscript — the same path an idle-evicted session
+// (M4.7) falls back to, since Get evicts before reporting "not held".
 func (m *SessionManager) Resume(project, id string) (*managedSession, error) {
 	if ms, ok := m.Get(id); ok {
 		return ms, nil
@@ -91,17 +149,20 @@ func (m *SessionManager) Resume(project, id string) (*managedSession, error) {
 	if err := cs.ResumeTranscript(id); err != nil {
 		return nil, fmt.Errorf("failed to resume session %q for project %q: %w", id, project, err)
 	}
-	ms := &managedSession{cs: cs}
 	m.mu.Lock()
+	ms := &managedSession{cs: cs, lastTouched: m.now()}
 	m.sessions[cs.SessionID] = ms
 	m.mu.Unlock()
 	return ms, nil
 }
 
-// Get returns the live session for id, if the manager currently holds one.
+// Get returns the live session for id, if the manager currently holds one
+// and it hasn't idle-timed-out (M4.7's eviction check runs here, lazily, so
+// no background goroutine/ticker is needed).
 func (m *SessionManager) Get(id string) (*managedSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.evictIfIdleLocked(id)
 	ms, ok := m.sessions[id]
 	return ms, ok
 }
