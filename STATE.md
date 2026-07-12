@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 39
+Updated: 2026-07-12 · Iteration: 40
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
@@ -348,11 +348,20 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
         ≤ 1200 lines, as a standing regression guard the later screen
         splits build under. `8aedc02` — `TestWebUIJavaScriptSizeCaps`
         (cmd/cortex/webui_jscap_test.go).
-  - [ ] M5.3b Dashboard screen: `index.html`/`app.js` grow real
+  - [x] M5.3b Dashboard screen: `index.html`/`app.js` grow real
         fetch/render logic for the project dashboard, replacing the
-        M5.1 placeholder — `fetch('/api/projects')` (+ per-project
-        sessions) rendered via `buildDashboardViewModel`'s JSON shape,
-        DOM writes only, no framework.
+        M5.1 placeholder. `754082c` —
+        `TestDashboardEndpointReturnsViewModel`,
+        `TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull`,
+        `TestDashboardEndpointRequiresAuth` (cmd/cortex/serve_dashboard_test.go),
+        `TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken`
+        (cmd/cortex/serve_test.go),
+        `TestDashboardScreenAppJSFetchesDashboardEndpoint`,
+        `TestDashboardScreenIndexHTMLHasDashboardContainer`
+        (cmd/cortex/webui_dashboard_screen_test.go),
+        `TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence`
+        (cmd/cortex/webui_test.go, pre-existing — reconfirmed green,
+        "Cortex web UI" marker preserved in app.js).
   - [ ] M5.3c Session screen: transcript render (`buildTranscriptViewModel`)
         + input box + live SSE progress against the M4.2b3 stream
         endpoint.
@@ -366,34 +375,31 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3b: the dashboard screen. `cmd/cortex/webui/index.html` and
-`app.js` are still M5.1's placeholders (`app.js` contains only the
-literal comment string "Cortex web UI", asserted by
-`TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence` — when app.js
-grows real content, keep that substring somewhere, e.g. a page title or
-header, or update that test alongside it; it postdates genesis so it's
-editable without a Decisions-Log correction). Add a `fetch('/api/projects')`
-call rendering `buildDashboardViewModel`'s JSON (project name, sessions,
-change status) into the DOM via plain `innerHTML`/`textContent` writes —
-no framework, no build step (GOAL.md D9). The M5.3a size-cap test
-(`TestWebUIJavaScriptSizeCaps`, cmd/cortex/webui_jscap_test.go) already
-gates growth mechanically — no new cap test needed for M5.3b, just stay
-under it. Auth: the dashboard page itself is served behind
-`authMiddleware` (M5.1 decision — same bearer-token gate as every other
-route), so the browser-side `fetch` calls need the token too; how the
-page acquires the token for its own `fetch` calls (e.g. a `?token=`
-query param read into JS, or documenting that this UI is meant to be
-opened with the token already known) is an open design question for
-this increment — no prior Decisions entry resolves it. Testing posture:
-since there's no JS engine in this repo's stdlib-only test suite, "the
-screen renders the view-model" can only be proven at the Go layer by
-structural assertions over the served HTML/JS source (e.g. the embedded
-`app.js` source contains the expected `fetch('/api/projects')` call,
-`index.html` contains the container element JS targets) — NOT by
-executing the JS and checking DOM output. Decide and record in the
-Decisions Log what "tested" means for M5.3b before or as part of
-landing it, since M5.3c/d/e will inherit whatever convention is set
-here.
+Start M5.3c: the session screen. Renders `buildTranscriptViewModel`
+(M5.2b, cmd/cortex/webui_transcript.go) plus an input box and live SSE
+progress against the M4.2b3 stream endpoint
+(`POST /api/projects/{name}/sessions/{id}/turn/stream`). Precedent from
+M5.3b (this iteration): (1) there is no `/api/transcript`-shaped
+endpoint yet — like the dashboard, `buildTranscriptViewModel` isn't
+wired to HTTP; add a `GET /api/projects/{name}/sessions/{id}` (or
+similar) endpoint returning it, following `serve_dashboard.go`'s
+pattern (thin handler calling the existing pure builder, `writeJSON`).
+(2) Auth is solved: `authMiddleware` now only gates `/api/...` paths
+(cmd/cortex/serve.go) — the static shell (`/`, `/app.js`, `/app.css`)
+serves without a token; JS reads the token from a `?token=` query param
+(`authToken()` in app.js) and attaches it to every `/api/...` fetch via
+`apiFetch()` — reuse that helper rather than re-deriving the pattern.
+(3) Testing convention is set (Decisions Log below): Go-side httptest
+coverage for the new endpoint, plus structural source-content
+assertions over the embedded JS/HTML (e.g. app.js contains the SSE
+`EventSource`/`fetch` call and `index.html` has a session container) —
+no executed-DOM assertions, no JS test runner exists in this repo.
+Novel piece M5.3c adds beyond M5.3b's pattern: SSE consumption from JS
+(`EventSource` against the stream endpoint, or `fetch` + a streaming
+reader — pick one and record why in the Decisions Log) and an input box
+POSTing a new turn. Watch the M5.3a size caps
+(`TestWebUIJavaScriptSizeCaps`) as JS grows — current total is well
+under 1200 but SSE handling will add real lines.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1904,6 +1910,62 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   Decisions entry resolves this, and it blocks any screen's fetch logic
   from actually working end-to-end once written, not just being
   tested.
+
+- 2026-07-12: M5.3b landed the dashboard screen and, with it, resolved
+  M5.1's deferred "how does the browser's fetch authenticate" question.
+  Two decisions: (1) authMiddleware now exempts non-"/api/" paths from
+  the bearer-token check (cmd/cortex/serve.go) — a plain browser
+  navigation to http://127.0.0.1:<port>/ can never attach a custom
+  Authorization header, so gating the static UI shell would make the
+  page unreachable by any normal browser action; there is no cookie/
+  session mechanism in scope to bridge that gap without a new
+  dependency. Splitting the gate at the "/api/" prefix keeps every
+  byte of real project/session/landscape/model data behind the token
+  (GOAL.md §3 P4's "token auth on every endpoint" read as every data
+  endpoint) while letting the inert HTML/CSS/JS shell load freely; no
+  existing test asserted 401 on "/" without a token, so nothing needed
+  correcting under the standing-regression guard. New test:
+  TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken
+  (cmd/cortex/serve_test.go, a file that postdates genesis, so no
+  Decisions-Log correction is required to touch it). (2) The token
+  itself rides in as a "?token=" query param the page is opened with
+  (window.location.search, read once by app.js's new authToken()
+  helper and attached as "Authorization: Bearer <token>" to every
+  subsequent /api/... fetch via a small apiFetch() wrapper) — the
+  simplest mechanism satisfying "no new deps, no framework" (GOAL.md
+  D9) that a human can act on directly from `cortex serve`'s printed
+  startup line (token: <token>) by appending it to the URL when
+  opening the page in a browser.
+  Also landed GET /api/dashboard (cmd/cortex/serve_dashboard.go)
+  wiring M5.2a's buildDashboardViewModel into the HTTP surface — no
+  such endpoint existed yet (M4.2's endpoint set predates M5.2a's
+  richer view-model; GET /api/projects, M4.2a, stays the plain
+  registry listing). Chose a dedicated endpoint over composing the
+  screen client-side from /api/projects + per-project
+  /api/projects/{name}/sessions (which the prior iteration's Next Up
+  note assumed) because that composition drops the git change-status
+  field entirely (no endpoint surfaces it) — a dedicated endpoint is
+  the literal reading of GOAL.md §6 M5.3 ("the four screens render
+  those view-models") and keeps the JS thin (one fetch, no
+  per-project fan-out).
+  Testing convention for M5.3 (binding for M5.3c/d/e too, per the
+  prior Next Up's request): Go-side httptest coverage for any new
+  endpoint a screen needs, plus structural source-content assertions
+  over the embedded FS (a Go test reads app.js/index.html via
+  fs.ReadFile(webUIFS(), ...) and asserts expected substrings — the
+  fetch call target, a container element id) — never executed-DOM/
+  JS-engine assertions, since this repo's stdlib-only test suite has
+  no JS runtime. See cmd/cortex/webui_dashboard_screen_test.go.
+  Load-bearing checks done: (1) moved serve_dashboard.go out of the
+  tree, confirmed go vet ./cmd/cortex/... fails (undefined:
+  handleDashboard), restored; (2) reverted app.js to a one-line
+  placeholder and flipped index.html's id="dashboard" to
+  id="notdashboard", confirmed both TestDashboardScreen* tests fail
+  with the expected messages, restored from backups; (3) reverted
+  authMiddleware's "/api/" exemption, confirmed
+  TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken fails to build
+  (unused "strings" import once the code using it is removed),
+  restored.
 
 ## Known Issues (append-only)
 - (none yet)
