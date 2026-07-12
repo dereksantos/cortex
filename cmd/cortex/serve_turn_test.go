@@ -219,3 +219,66 @@ func TestTurnEndpointSameSessionSerializes(t *testing.T) {
 		t.Errorf("backend saw %d requests, want 2", got)
 	}
 }
+
+// TestTurnEndpointDifferentSessionsRunConcurrently is the load-bearing test
+// for the other half of GOAL.md §3 P4's "one turn at a time per session,
+// different sessions concurrent" guarantee (M4.3): two turn requests fired
+// concurrently against TWO DIFFERENT session ids must be allowed to overlap
+// in flight, not serialize against each other. managedSession.mu is
+// per-*managedSession (serve_session.go), so two distinct managedSession
+// values never share a lock — this positively asserts that absence of
+// shared locking actually yields observed concurrency, rather than just
+// inferring it from the M4.2b2 same-session test's absence of a shared-lock
+// assertion.
+func TestTurnEndpointDifferentSessionsRunConcurrently(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	backend := newTurnTestBackend(t)
+	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	defer ts.Close()
+
+	first, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	second, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	if first.ID() == second.ID() {
+		t.Fatalf("expected two distinct session ids, got the same one twice: %q", first.ID())
+	}
+
+	var wg sync.WaitGroup
+	for _, id := range []string{first.ID(), second.ID()} {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			turnURL := ts.URL + "/api/projects/blog/sessions/" + id + "/turn"
+			req, err := http.NewRequest(http.MethodPost, turnURL, strings.NewReader(`{"input":"hi"}`))
+			if err != nil {
+				t.Errorf("NewRequest: %v", err)
+				return
+			}
+			req.Header.Set("Authorization", "Bearer tok")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("Do: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("status = %d, want 200", resp.StatusCode)
+			}
+		}(id)
+	}
+	wg.Wait()
+
+	if got := backend.maxConcurrent(); got < 2 {
+		t.Errorf("backend saw max %d concurrent requests across TWO sessions, want >= 2 (turns on different sessions must not serialize)", got)
+	}
+	if got := backend.requests(); got != 2 {
+		t.Errorf("backend saw %d requests, want 2", got)
+	}
+}
