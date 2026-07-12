@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 22
+Updated: 2026-07-12 · Iteration: 23
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -198,10 +198,15 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
           `TestCreateSessionEndpointUnknownProjectReturns404`,
           `TestCreateSessionEndpointRequiresAuth`
           (cmd/cortex/serve_session_test.go).
-    - [ ] M4.2b2 `POST …/turn` running `session.Turn` against a live
+    - [x] M4.2b2 `POST …/turn` running `session.Turn` against a live
           `managedSession`, guarded by the per-session turn-serializing
           mutex deferred here from M4.2b1 (an unused field would have
           failed check.sh's lint gate before there was a caller).
+          `eaacc18` — `TestTurnEndpointRunsTurnAgainstLiveSession`,
+          `TestTurnEndpointUnknownSessionReturns404`,
+          `TestTurnEndpointRequiresAuth`,
+          `TestTurnEndpointSameSessionSerializes`
+          (cmd/cortex/serve_turn_test.go).
     - [ ] M4.2b3 SSE progress stream rendered from the existing `Progress`
           seam (`cmd/cortex/loop.go:76`, a bare `func(line string)` — fan
           it into `data: ...\n\n` chunks); the serve `http.Server` must set
@@ -226,28 +231,32 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2b2: `POST /api/projects/{name}/sessions/{id}/turn` running
-`session.Turn` against the live `*managedSession` M4.2b1's `SessionManager`
-tracks (`Get`/`Create`/`Resume`, `cmd/cortex/serve_session.go`). Add the
-per-session turn-serializing mutex to `managedSession` now (deferred from
-M4.2b1 specifically because it had no caller yet — see that increment's
-Decisions entry) and actually lock/unlock it around the `Turn` call; a
-concurrency test proving TWO turns on the SAME session serialize can land
-here too (the cross-session-parallel half of that guarantee is M4.3's
-dedicated DoD, so a same-session-serializes test here is enough to justify
-introducing the mutex without stepping on M4.3's box). `cs.Turn(ctx, input)`
-(`cmd/cortex/turn.go:39`) is the call to make; it needs `cs.Request.BaseURL`
-(and friends) pointed at a real or scripted backend — the hermetic
-`sessionFactory` pattern M4.2b1 established
-(`cmd/cortex/serve_session_test.go`'s `hermeticSessionFactory`, mirroring
-`greeting_test.go`) is the one to extend with an `httptest.Server` backend
-per test rather than inventing a new scripted-Sender shape. Request/response
-shape: read the turn input from a JSON body (`{"input": "..."}` or similar —
-designer's call, record in Decisions), run `Turn`, return the reply
-(`TurnResult`). M4.2b3 (SSE progress) is the natural follow-on once turn
-itself works — GOAL.md §7 step 4 permits splitting M4.2b2 further if the
-turn endpoint alone plus its concurrency test is enough for one iteration.
-M4.2c (landscape + models) remains after M4.2b2/b3.
+Start M4.2b3: SSE progress stream for a turn, rendered from the existing
+`Progress` seam (`cmd/cortex/loop.go:76`, a bare `func(line string)` — fan it
+into `data: ...\n\n` chunks per GOAL.md §3 P4/M4.5). `handleTurn`
+(`cmd/cortex/serve_turn.go`, M4.2b2, just landed) currently runs
+`ms.cs.Turn(ctx, input)` and returns one JSON blob at the end; M4.2b3 needs a
+second route (or a content-negotiated variant of the same one — designer's
+call, record in Decisions) that instead streams progress lines as SSE while
+the turn is in flight, THEN a final event carrying the same
+reply/interrupted shape `turnResponse` already has. The natural seam:
+`runLoop` (loop.go) takes a `Progress` callback today — `Turn()` itself
+(`cmd/cortex/turn.go:39`) doesn't yet thread one through to `runLoop`'s call
+at line 128 (`runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil,
+cs.Append, onStatusUpdate)` — the `nil` is where a `Progress` goes, per
+loop.go's signature; check it before assuming). Threading a `Progress` into
+`Turn()` is itself a signature change every existing `Turn()` call site
+(REPL, discord, greeting, headless `turn`) would need to tolerate (nil ⇒ no
+notifications, matching today) — read `loop.go`'s `Progress` type and every
+`Turn(` call site before deciding the shape, per GOAL.md §5's "read the
+actual seam, don't guess" pattern this loop has followed all along. The
+dedicated "SSE event order and shape golden-tested" + "no WriteTimeout" test
+is M4.5's box, not M4.2b3's — M4.2b3 only needs the stream to exist and
+carry real progress + a terminal result event; M4.5 pins the exact shape.
+Setting `http.Server.WriteTimeout` to 0/unset on the serve server (it
+already is, by omission, in `newServeServer` — confirmed by reading
+`serve.go`) should stay that way; do not add a WriteTimeout while building
+this. M4.2c (landscape + models) remains after M4.2b3.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1030,6 +1039,59 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   cat-file -e <genesis>:<path>` to not exist at genesis — first landed by
   M4.1/M4.2a within this loop, not pre-existing files) plus the new
   `serve_session_test.go`; no genesis-predating test file was touched.
+
+- 2026-07-12: M4.2b2 landed `handleTurn` (`cmd/cortex/serve_turn.go`):
+  `POST /api/projects/{name}/sessions/{id}/turn` runs `ms.cs.Turn(ctx,
+  body.Input)` against the live `*managedSession` `SessionManager.Get`
+  returns for `id` — unknown/not-currently-live id is a 404 (does NOT
+  implicitly `Resume` from disk; the existing `POST .../sessions` with
+  `{"resume":"<id>"}`, M4.2b1, is the explicit way to bring a session live
+  first). Request/response shape (designer's call, GOAL.md left it open):
+  `{"input":"..."}` in, `{"reply":"...","interrupted":false}` out —
+  `turnResponse` is field-for-field identical to the pre-existing
+  `TurnResult` (turn.go) so `writeJSON(w, 200, turnResponse(result))` is a
+  direct struct conversion (golangci-lint's staticcheck S1016 requires this
+  over a field-by-field literal, matching M4.2a's `sessionSummary(info)`
+  precedent). The per-session turn-serializing mutex GOAL.md §3 P4 calls for
+  ("the discord mutex generalized: one turn at a time per session, different
+  sessions concurrent") landed on `managedSession` itself (`mu
+  sync.Mutex`, `serve_session.go`) exactly where M4.2b1's Decisions entry
+  said it would, now that `handleTurn` is the real caller (`ms.mu.Lock()` /
+  `defer ms.mu.Unlock()` around the `Turn` call, held for the whole turn —
+  not just the map lookup, since the race being guarded against is two
+  goroutines mutating `cs.Request.Messages`/`cs.ws` concurrently, not the
+  `SessionManager`'s own map, which already has its own separate `mu`).
+  `TestTurnEndpointSameSessionSerializes` is the load-bearing proof: a
+  scripted backend (`turnTestBackend`) tracks concurrent in-flight requests
+  (sleeps 20ms mid-request to give a real race a window) and asserts
+  max-concurrency 1 across two goroutines POSTing to the SAME session id.
+  Confirmed load-bearing by deleting the `ms.mu.Lock()`/`Unlock()` pair:
+  the test failed on both re-runs (`2 concurrent requests ... want 1`) and,
+  on top of that, `internal/cache.(*WorkingSet).AddTurn` PANICKED with
+  "turn spans must be contiguous" — an actual unsynchronized-mutation crash,
+  not just a slow assertion — which is strong independent evidence the
+  guarantee is real, not test-artifact luck; restored and reran green
+  (twice, plus `go test -race -count=3` on the whole
+  `TestTurnEndpoint*` group afterward — 0 races). The cross-session-PARALLEL
+  half of GOAL.md's guarantee (two DIFFERENT sessions run concurrently, not
+  serialized against each other) remains M4.3's dedicated DoD, deliberately
+  not proven here — this increment only proves the same-session-serializes
+  half, which is what justifies introducing the mutex at all. `handleTurn`
+  intentionally does not use the `{name}` path segment (no project-match
+  check against the live session) — `SessionManager` keys purely by session
+  id today and `mgr.Get(id)` is the same lookup the M4.2b1 lifecycle
+  endpoints already trust; adding a name/project cross-check would be new
+  unrequested logic with no test asking for it (GOAL.md §1's "code no test
+  would notice reverting" anti-pattern) — flagged here in case a later
+  increment decides a mismatched `{name}` should be a 404/409. Load-bearing
+  check for the new test's build-red state also done conventionally: wrote
+  the test file first (referencing `turnResponse`/`handleTurn`, neither
+  existing yet), confirmed `go test ./cmd/cortex/... -run TestTurnEndpoint`
+  failed to build (`undefined: turnResponse`), then implemented and reran
+  green. Standing-regression-guard check done: only `serve.go` (route
+  registration) and `serve_session.go` (the new `mu` field + doc comment)
+  were modified among non-test files; `serve_turn.go`/`serve_turn_test.go`
+  are new — no pre-existing test file was touched.
 
 ## Known Issues (append-only)
 - (none yet)
