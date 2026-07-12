@@ -1,13 +1,11 @@
 // serve_session.go — M4.2b1 (GOAL.md §6 M4.2, split per STATE.md into
 // M4.2b1/b2/b3): the SessionManager, an in-process map of live
-// *CortexSession keyed by session id (docs/cortex-web.md Phase 4). This
-// increment lands the create/resume lifecycle only; the per-session mutex
-// that serializes turns ("the discord mutex generalized" — one turn at a
-// time per session, different sessions concurrent) lands on managedSession
-// in M4.2b2 alongside the turn handler that actually needs it (an unused
-// field would fail check.sh's lint gate today). Owns no on-disk state of
-// its own: every session it holds is backed by the same transcript file
-// StartTranscript/ResumeTranscript already write (session.go), so a
+// *CortexSession keyed by session id (docs/cortex-web.md Phase 4).
+// managedSession's per-session turn-serializing mutex ("the discord mutex
+// generalized" — one turn at a time per session, different sessions
+// concurrent) is used by handleTurn (serve_turn.go, M4.2b2). Owns no on-disk
+// state of its own: every session it holds is backed by the same transcript
+// file StartTranscript/ResumeTranscript already write (session.go), so a
 // restarted manager (M4.6) re-derives everything from disk.
 package main
 
@@ -28,10 +26,13 @@ import (
 type sessionFactory func() *CortexSession
 
 // managedSession pairs a live *CortexSession with its manager-tracked
-// identity. See the file doc comment for why the per-session turn mutex
-// isn't here yet.
+// identity and the mutex that serializes turns on it (GOAL.md §3 P4: "one
+// turn at a time per session, different sessions concurrent" — the discord
+// mutex generalized). Held by handleTurn (serve_turn.go, M4.2b2) for the
+// duration of session.Turn.
 type managedSession struct {
 	cs *CortexSession
+	mu sync.Mutex
 }
 
 // ID is the session's transcript id (cs.SessionID).
