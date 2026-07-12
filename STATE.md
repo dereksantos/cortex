@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-11 · Iteration: 20
+Updated: 2026-07-11 · Iteration: 21
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -169,10 +169,17 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       fleet; scoped write user/project/session via read-modify-write —
       unknown-field survival test; key material absent from every
       response, asserted). **Split (2026-07-11, this iteration) into:**
-  - [ ] M4.2a Read-only project + session listing: `GET /api/projects`
+  - [x] M4.2a Read-only project + session listing: `GET /api/projects`
         (from `internal/registry`) and `GET /api/projects/{name}/sessions`
         (peek via existing `listSessions`/`loadSession` — no live
-        `*CortexSession`, no locking); unknown project ⇒ 404.
+        `*CortexSession`, no locking); unknown project ⇒ 404. `44a603e` —
+        `TestListProjectsEndpointReturnsRegisteredProjects`,
+        `TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull`,
+        `TestListProjectsEndpointRequiresAuth`,
+        `TestListProjectSessionsEndpointListsNewestFirst`,
+        `TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray`,
+        `TestListProjectSessionsEndpointUnknownProjectReturns404`
+        (cmd/cortex/serve_routes_test.go).
   - [ ] M4.2b Live session lifecycle + turn: session create/resume into an
         in-process `SessionManager` (`Get`/`Create`/`List` per the prior
         Next Up note), `POST …/turn` running `session.Turn`, SSE progress
@@ -196,25 +203,35 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2: the real `cortex serve` endpoint surface on top of M4.1's
-listener + `authMiddleware` + `newServeMux` — projects (list, from
-`internal/registry`), sessions per project (list/create/resume —
-transcripts already on disk under `internal/fslock`), `POST …/turn`
-(runs `session.Turn`), SSE stream of turn progress (render from the
-existing `Progress` seam), landscape (read Phase 2's persisted
-`landscape.scan` result), and models (read merged config + fleet; scoped
-role-binding writes at user/project/session via the M1.3 read-modify-
-write helpers — unknown-field survival test; key material must never
-appear in any response, asserted). All routes register on `newServeMux`
-and inherit `authMiddleware` for free. `SessionManager`/`Registry`
-should be small interfaces per GOAL.md §3 P4 so handlers are
-`httptest`-testable without a model — M4.3's concurrency test and
-M4.4's cross-process lock test will build directly on whatever
-`SessionManager` shape lands here, so get its method set right the
-first time (`Get(id)`/`Create(...)`/`List()` at minimum). Note M4.2 is
-large — GOAL.md §7 step 4 permits splitting into M4.2a/M4.2b/... by
-endpoint group if one iteration can't land it whole (e.g. 4.2a
-projects+sessions read paths, 4.2b turn+SSE, 4.2c landscape+models).
+Start M4.2b: session lifecycle + turn over HTTP, building on M4.2a's
+`newServeMux(reg registry.Registry)` (`cmd/cortex/serve.go`) and route
+helpers (`cmd/cortex/serve_routes.go`). Design a `SessionManager`
+interface — `Get(id)`/`Create(project, ...)`/`List()` at minimum, per the
+prior Next Up note — as an in-process map of live `*CortexSession` keyed
+by session id, one turn at a time per session (per-session mutex),
+different sessions concurrent (docs/cortex-web.md Phase 4: "the discord
+mutex generalized"). `NewCortexSession()` (session_core.go:123) is
+CLI-coupled (parses `os.Args`, prints to stdout) — it is NOT directly
+reusable from an HTTP handler; either refactor out a pure
+constructor-from-Workspace or hand-build `&CortexSession{workspace: ws,
+...}` plus wire `Request`/`ws` yourself (see M4.1/M4.2a's Decisions
+entries and the M4.2a research note below for what's pure vs
+REPL-coupled: `loadSession`/`listSessions` are pure and reusable;
+`ResumeTranscript`/`StartTranscript`/`openTranscript` are the
+locking/mutating primitives to build session create/resume on). Endpoints:
+`POST /api/projects/{name}/sessions` (create), `POST
+/api/projects/{name}/sessions/{id}/resume` (or fold resume into create
+with an optional id — designer's call, record the choice in Decisions),
+`POST .../turn` (runs `session.Turn`), and an SSE stream of turn progress
+rendered from the existing `Progress` seam (`cmd/cortex/loop.go:76`, a
+bare `func(line string)` — fan it into `data: ...\n\n` chunks; GOAL.md
+D6/M4.5 require the `http.Server` set NO `WriteTimeout` for this, which
+M4.2b should set now even though the dedicated test lands in M4.5). Note
+M4.2 is large — GOAL.md §7 step 4 permits splitting further
+(M4.2b1/M4.2b2/...) if one iteration can't land session-manager +
+create/resume + turn + SSE whole; consider landing SessionManager +
+create/resume first, turn+SSE second. M4.2c (landscape + models) remains
+after M4.2b.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -890,6 +907,44 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   runServeCLI`), restored and reran the full verify suite green.
   Standing-regression-guard check done: `serve_test.go` is new (not
   present at genesis, not a modification of any pre-existing test file).
+
+- 2026-07-11: split M4.2 into M4.2a (read-only project + session listing,
+  this iteration) / M4.2b (session lifecycle + turn + SSE) / M4.2c
+  (landscape + models) — GOAL.md §7 step 4's split allowance, following
+  the exact grouping the prior Next Up note already flagged. M4.2a landed
+  `cmd/cortex/serve_routes.go`: `handleListProjects(reg
+  registry.Registry)` and `handleListProjectSessions(reg)`, registered on
+  `newServeMux`, which now takes `reg registry.Registry` as a parameter
+  (was zero-arg in M4.1) — `runServeCLI` constructs it via
+  `registry.New()`. Session listing reuses `listSessions`/`loadSession`
+  (session.go, pre-existing, unmodified) directly against
+  `NewWorkspace(project.Root).SessionsDir()` — deliberately does NOT
+  construct a `*CortexSession` or touch `internal/fslock`, since
+  `NewCortexSession()` is CLI-coupled (parses `os.Args`) and no live
+  session or lock is needed for a read-only peek; that begins at M4.2b.
+  Introduced `sessionSummary` (serve_routes.go) as a distinct
+  JSON-tagged type rather than adding json tags to the pre-existing
+  `sessionInfo` (session.go) — keeps the wire shape decoupled from the
+  REPL-internal type and avoids touching a genesis-adjacent file for a
+  serve-only concern; `sessionInfo`→`sessionSummary` is a direct
+  identical-field-set struct conversion (`sessionSummary(info)`), which
+  golangci-lint's staticcheck (S1016) require over a field-by-field
+  literal. A project with no `.cortex/sessions/` directory yet (never
+  run) returns `[]` (checked via `errors.Is(err, os.ErrNotExist)` on
+  `listSessions`' wrapped `os.ReadDir` error) rather than an error — an
+  unstarted project having zero sessions isn't exceptional. Manually
+  verified end-to-end against a real built binary: registered a fixture
+  project via `cortex project add`, started `cortex serve`, and curled
+  `/api/projects` (200, correct root) and
+  `/api/projects/<name>/sessions` (200, correct id/messages/first from a
+  planted transcript fixture) with a valid token, 401 with none, and 404
+  for an unregistered project name. Load-bearing check done: moved
+  `serve_routes.go` out of the tree, confirmed `go vet ./cmd/cortex/...`
+  fails to build (`serve.go:107: undefined: handleListProjects`),
+  restored and reran the full verify suite green. Standing-regression-
+  guard check done: only `serve.go` (non-test) was modified among
+  genesis-predating files; `serve_routes.go`/`serve_routes_test.go` are
+  new.
 
 ## Known Issues (append-only)
 - (none yet)
