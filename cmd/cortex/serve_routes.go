@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -102,5 +103,60 @@ func handleListProjectSessions(reg registry.Registry) http.HandlerFunc {
 			out[i] = sessionSummary(info)
 		}
 		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+// createSessionRequest is the optional JSON body for POST
+// /api/projects/{name}/sessions. An absent or empty "resume" field starts a
+// brand-new session; a non-empty one re-hydrates the named session id
+// instead — GOAL.md's M4.2b Next Up note left "fold resume into create with
+// an optional id" as a designer's call; chosen here over a second dedicated
+// resume route to keep the session-lifecycle surface to one endpoint.
+type createSessionRequest struct {
+	Resume string `json:"resume,omitempty"`
+}
+
+// createSessionResponse is the wire shape POST
+// /api/projects/{name}/sessions returns for both the create and resume
+// legs.
+type createSessionResponse struct {
+	ID      string `json:"id"`
+	Resumed bool   `json:"resumed"`
+}
+
+// handleCreateSession serves POST /api/projects/{name}/sessions: creates a
+// brand-new live session against the named project (mgr.Create), or — when
+// the request body names one — resumes an existing session id (mgr.Resume).
+// M4.2b2 adds the turn handler that actually drives these sessions; this
+// increment only lands the lifecycle (create/resume, tracked live in the
+// SessionManager).
+func handleCreateSession(mgr *SessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		var body createSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		var (
+			ms      *managedSession
+			err     error
+			resumed = body.Resume != ""
+		)
+		if resumed {
+			ms, err = mgr.Resume(name, body.Resume)
+		} else {
+			ms, err = mgr.Create(name)
+		}
+		if err != nil {
+			if errors.Is(err, registry.ErrProjectNotFound) {
+				http.Error(w, "project not registered: "+name, http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to open session: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, createSessionResponse{ID: ms.ID(), Resumed: resumed})
 	}
 }
