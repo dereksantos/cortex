@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 32
+Updated: 2026-07-12 · Iteration: 33
 
 ## Current milestone
-M4 — `cortex serve` (P4) (M1, M2, M3 complete)
+M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -287,32 +287,53 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
 - [x] M4.6 Serve owns no state: kill + restart re-derives every list from
       disk (restart the manager, listings identical). `63af27f` —
       `TestServeListingsIdenticalAcrossManagerRestart` (cmd/cortex/serve_restart_test.go).
-- [ ] M4.7 Idle sessions evict; a subsequent request re-hydrates from the
-      transcript (test with a shrunk idle threshold).
+- [x] M4.7 Idle sessions evict; a subsequent request re-hydrates from the
+      transcript (test with a shrunk idle threshold). `1e88f5c` —
+      `TestSessionManagerEvictsIdleSessionAndResumeRehydrates`,
+      `TestSessionManagerZeroIdleTimeoutNeverEvicts`,
+      `TestSessionManagerTouchExtendsIdleWindow`
+      (cmd/cortex/serve_session_test.go). **M4 complete.**
+
+### M5 — Web UI (P5), four screens
+- [ ] M5.1 Assets under `cmd/cortex/webui/` served from `go:embed`;
+      route-level test proves serving with no filesystem presence.
+- [ ] M5.2 View-models built in Go and golden-tested: project dashboard,
+      session transcript (from real JSONL fixtures), landscape report,
+      models view (bindings + effective scope resolution).
+- [ ] M5.3 The four screens render those view-models; JS bounded
+      mechanically: a Go test over the embedded FS asserts each `.js`
+      file ≤ 300 lines and total JS ≤ 1200 lines.
+- [ ] M5.4 End-to-end smoke: start serve with a scripted sender ⇒ create
+      session ⇒ POST turn ⇒ SSE stream renders ⇒ transcript page shows
+      the turn. One test, full path, no live model.
 
 ## Next Up
-Start M4.7: "Idle sessions evict; a subsequent request re-hydrates from the
-transcript (test with a shrunk idle threshold)." Read `cmd/cortex/serve_session.go`
-first — `SessionManager` currently has no eviction/idle-timeout concept at
-all (its map only grows: `Create`/`Resume` insert, nothing ever deletes).
-Likely shape: (1) give `managedSession` a last-touched timestamp updated on
-`Create`/`Resume`/each turn, (2) an injected clock (matching M6.2's later
-"tests never sleep" convention — check if a shared fake-clock seam already
-exists anywhere in the repo, e.g. `internal/loops` doesn't exist yet, so this
-may be the first one) and a small idle threshold parameter so a test can
-shrink it to something like 1ms/1ns rather than a real wall-clock wait, (3)
-an eviction sweep (either lazy — checked on `Get`/`Resume` — or an explicit
-`Evict(now)` method a test calls directly; lazy-on-access avoids needing a
-background goroutine/ticker, which fits GOAL.md's "adapters over daemons,
-zero background services" pillar better than a timer loop), (4) eviction
-removes the entry from `m.sessions` (and should probably close the
-transcript file handle via whatever `Close`/similar method `CortexSession`
-already exposes, if any — check `session.go`) so the *next* request for that
-id falls through to `Resume`'s existing re-hydrate-from-transcript path
-(M4.2b1/M4.4 already proved that path works standalone). Confirm the
-eviction mechanism against `serve_turn.go`/`serve_stream.go` too — anywhere
-that currently assumes `mgr.Get` never returns a stale/evicted-but-still-
-locked session.
+Start M5.1: "Assets under `cmd/cortex/webui/` served from `go:embed`;
+route-level test proves serving with no filesystem presence." Per GOAL.md
+§2's package layout, `cmd/cortex/webui/` is new — it doesn't exist yet in
+this worktree (confirm with `ls cmd/cortex/webui` before starting; if a
+stray file is already there from a crashed prior attempt, read it first per
+step 1). Likely shape: (1) a minimal static asset (e.g. a placeholder
+`index.html`, maybe an empty `app.js`/`app.css` stub — M5.2/M5.3 fill in the
+real view-model rendering later) under `cmd/cortex/webui/`, (2) a
+`//go:embed` directive in a new `cmd/cortex/webui.go` (or similar) exposing
+an `embed.FS`, (3) at least one route registered on the existing
+`newServeMux` (serve.go) serving from that embedded FS via
+`http.FileServerFS`/`http.ServeFileFS` (stdlib, no new dependency per
+GOAL.md's no-new-deps non-goal), (4) the "no filesystem presence" test: an
+`httptest` request against the route asserting content is served correctly
+even when — per the M5.1 wording's own emphasis on go:embed's point — the
+test's working directory doesn't have the source assets available (e.g. by
+constructing the mux from a package-level `embed.FS` var and confirming the
+route doesn't depend on `os.Getwd()`/relative paths at request time; a
+concrete test technique: run the assertion from a `t.Chdir`'d-elsewhere temp
+dir, or just assert the handler never calls into `os`/`ioutil` file-reading
+by construction — read how `cmd/cortex/webui/` docs/cortex-web.md Phase 5
+describes this before deciding). Read docs/cortex-web.md's Phase 5 section
+first (GOAL.md §3 P5 already binds "hand-written HTML/CSS/JS under
+`go:embed`... rendering logic lives in golden-tested Go view-models; JS is
+fetch/render/SSE-append only, enforced mechanically" — M5.1 itself is just
+the embed+serve plumbing, not the view-models, which are M5.2).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1543,6 +1564,57 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   <genesis>:cmd/cortex/serve_restart_test.go` reports "exists on disk, but
   not in <genesis>" — a brand-new file this iteration, not an edit to a
   pre-existing test.
+
+- 2026-07-12: M4.7 landed idle-session eviction as a lazy, opt-in check
+  inside `SessionManager.Get` (no background goroutine/ticker — fits the
+  "adapters over daemons, zero background services" pillar) rather than a
+  sweep timer: `SetIdleTimeout(d)` arms it (default `d=0` disables
+  eviction, so every pre-M4.7 call site/test that never calls it is
+  provably unaffected — confirmed no `NewSessionManager` signature change
+  was needed across its ~15 call sites) and `SetClock(now func() time.Time)`
+  overrides the manager's `time.Now` for deterministic, sleep-free tests
+  (the first injected-clock seam in the repo — establishes the pattern
+  M6.2's later scheduler will reuse, per GOAL.md §3 P6's own "no test
+  sleeps" wording). `managedSession` gained a `lastTouched time.Time`
+  stamped by `Create`/`Resume`, plus a new `SessionManager.Touch(id)`
+  method wired into `handleTurn` (serve_turn.go) and `handleTurnStream`
+  (serve_stream.go) right after their existing `mgr.Get` lookup — without
+  Touch, a long *conversation* (many turns, each individually well within
+  the idle window, but the session's `lastTouched` frozen at Create time)
+  would get evicted mid-use, which is worse than the DoD's literal ask but
+  is the obviously-intended behavior ("idle" means no *requests*, not "old
+  since creation"); GOAL.md doesn't spell this out but docs/cortex-web.md
+  §232's "idle sessions evict; resume re-hydrates" framing reads as
+  activity-based idleness, not age-based. Eviction reuses `Resume`'s
+  existing rehydrate-from-transcript path unchanged (Get's eviction just
+  deletes from the map and calls `cs.Close()`; the next `Resume` call sees
+  a map-miss and falls through to `ResumeTranscript`, the exact path
+  M4.4/M4.6 already proved standalone) — zero new rehydration logic,
+  matching pillar 3's reuse-the-seam bias. Production wiring: `serve.go`
+  arms a new `defaultSessionIdleTimeout = 30 * time.Minute` constant (no
+  GOAL.md/docs value specified; picked a conservative round number rather
+  than leaving eviction permanently off in production, since an unbounded
+  live-session map is exactly the kind of unbounded-growth GOAL.md's
+  pillars implicitly warn against) — this constant itself is untested
+  (matches the file's existing convention that `runServeCLI`'s os.Exit-
+  driving wrapper is untested; the pure `SessionManager` methods it calls
+  carry the coverage). Load-bearing checks done (two, both restored from
+  the real implementation afterward and reran the full suite green): (1)
+  short-circuited `evictIfIdleLocked` to always return early — confirmed
+  `TestSessionManagerEvictsIdleSessionAndResumeRehydrates` fails ("Get()
+  still returns the session past the idle threshold") while the other two
+  new tests still pass (expected — one asserts *no* eviction, the other's
+  window never actually elapses without real eviction firing first); (2)
+  separately gutted `Touch` to a no-op — confirmed
+  `TestSessionManagerTouchExtendsIdleWindow` fails ("Touch() did not extend
+  the idle window; session was evicted early"). Standing-regression-guard
+  check done: all five touched files (`serve.go`, `serve_session.go`,
+  `serve_session_test.go`, `serve_stream.go`, `serve_turn.go`) postdate the
+  genesis commit (`git cat-file -e <genesis>:<path>` fails "not in
+  <genesis>" for all five), so extending `serve_session_test.go` is not a
+  pre-existing-test-file edit. **M4 complete** (M4.1–M4.7 all ticked); M5
+  section added to this file's checklist per GOAL.md §6's "add milestone
+  sections as the loop reaches them."
 
 ## Known Issues (append-only)
 - (none yet)
