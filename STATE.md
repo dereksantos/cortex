@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 26
+Updated: 2026-07-12 · Iteration: 27
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -245,6 +245,21 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
             `TestModelsEndpointRequiresAuth` (cmd/cortex/serve_models_test.go).
       - [ ] M4.2c2b Scoped role-binding writes at user/project/session via
             M1.3's read-modify-write helpers; unknown-field survival test.
+            **Split (2026-07-12, this iteration) into:**
+        - [x] M4.2c2b1 File-backed writes at user + project scope:
+              `PUT /api/models/{role}?scope=user|project[&project=<name>]`.
+              `a8e56bf` — `TestSetModelBindingUserScopeWritesAndUnknownFieldsSurvive`,
+              `TestSetModelBindingResponseNeverIncludesSecretValue`,
+              `TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigUntouched`,
+              `TestSetModelBindingProjectScopeMissingProjectQueryReturns400`,
+              `TestSetModelBindingProjectScopeUnknownProjectReturns404`,
+              `TestSetModelBindingUnknownRoleReturns400`,
+              `TestSetModelBindingUnsupportedScopeReturns400`,
+              `TestSetModelBindingRequiresAuth` (cmd/cortex/serve_models_test.go).
+        - [ ] M4.2c2b2 Session-scope writes: in-memory only on a live
+              `*managedSession`, reverts on resume — not persisted to disk
+              at all (confirmed against main.go's own `/model` handler,
+              which mutates only `cs.Request.Model`, no config write).
 - [ ] M4.3 Session manager: two turns on one session serialize; turns on
       two sessions interleave (concurrency test, scripted senders).
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
@@ -259,51 +274,36 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2c2b: scoped role-binding writes on `cortex serve` (the read half,
-M4.2c2a, landed this iteration as `GET /api/models`, `7c9c101`, over
-`Config.resolveBinding` + `discoverFleet` — reuse both, no parallel
-resolution logic). Support writes at three explicit scopes per
-docs/cortex-web.md's Phase 4 models paragraph: user (`~/.cortex/config.json`
-— `userConfigPath()`), project (`<project.Root>/.cortex/config.json` —
-resolve via the registry, matching `findConfigPath`'s `.cortex/config.json`
-layout, config.go), and session (in-memory only, reverts on resume —
-probably a field on `managedSession`, serve_session.go, NOT persisted to
-disk at all, matching D6/D7's "the API form of `/model`" framing — `/model`
-in the REPL doesn't touch config files either, confirm this in main.go
-before assuming). Use M1.3's read-modify-write helpers
-(`configwrite.go`'s `readJSONDoc`/`writeJSONDoc`/`setJSONPath`, the same
-ones `PersistBackend`/`PersistScanRoots` already use —
-`setJSONPath(doc, []string{"models", "<role>", "<field>"}, value)` is the
-natural per-field shape, matching how `Config.Models` is keyed in
-config.go; write whichever ModelSpec fields the request body sets, not a
-whole-object clobber, so the read-modify-write invariant holds one level
-deeper than M1.3's top-level example). GOAL.md M4.2 requires an
-unknown-field survival test (M1.3's own pattern — see
-`TestSetJSONPathPreservesUnknownFieldsByteForByte`,
-cmd/cortex/configwrite_test.go, and `TestPersistBackendRoundTrip`,
-bootstrap_persist_test.go, for the established shape) and a
-key-absence-from-response assertion — M4.2c2a's
-`TestModelsEndpointReturnsRolesAndFleet` already established the pattern
-(thread a real secret value through `key_env`, assert it's absent from the
-response body); reuse that shape for the write endpoint's response too.
-Route shape (designer's call, GOAL.md leaves it open): likely
-`PUT /api/models/{role}?scope=user|project|session` with a JSON body of the
-fields to set, matching the REST-ish `GET /api/models` this iteration
-landed; `newServeMux` will need a `projectConfigPath`-resolving path (per
-M4.2c2a's Decisions entry, the current signature has no per-project config
-path — session-scope needs a live `*managedSession` via `mgr.Get`, project-
-scope needs the registry's project root, user-scope needs the existing
-`configPath` param unchanged) — reading GOAL.md §1's "Deferred" note first
-(models-endpoint re-keying re-running the bootstrap chain is explicitly OUT
-of scope here — only read + scoped role-binding write, not re-auth) avoids
-over-building. This is plausibly still too big for one iteration (3 scopes
-× unknown-field-survival × key-absence, each wanting its own test) —
-splitting into M4.2c2b1 (user+project scope, both file-backed, same
-read-modify-write mechanism) / M4.2c2b2 (session scope, in-memory,
-different mechanism entirely) is a reasonable next split if so. After
-M4.2c2b, M4.2 as a whole is done (a/b1/b2/b3/c1/c2a/c2b all ticked) — M4.3
-(cross-session concurrency test) still needs its OWN dedicated test even
-though `TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
+Start M4.2c2b2: session-scope role-binding writes (the file-backed user+
+project half, M4.2c2b1, landed this iteration as `PUT
+/api/models/{role}?scope=user|project[&project=<name>]`, `a8e56bf`, over
+`PersistModelBinding` — a new configwrite.go-style helper mirroring
+`PersistBackend`'s read-modify-write shape, writing exactly the request
+body's fields under `models.<role>`, not a whole-object clobber). Session
+scope is a DIFFERENT mechanism entirely — in-memory only, reverts on
+resume, confirmed directly against main.go's `/model` REPL command
+(`session.SetModel`, `session_core.go:106`, mutates only
+`cs.Request.Model`, never touches a config file) — so it needs a live
+`*managedSession` via `mgr.Get(id)`/`SessionManager` (serve_session.go),
+not a file path. Likely shape: extend `handleSetModelBinding`
+(serve_models.go) with `scope=session&session=<id>` (or a
+`/api/projects/{name}/sessions/{id}/models/{role}` route — designer's
+call, GOAL.md leaves it open; pick whichever reads more naturally given
+`mgr` is already threaded into `newServeMux` for the turn/SSE routes) that
+looks up the live session and sets a field on it (probably calling
+`SetModel` directly, or a small per-role override map on `managedSession`
+if per-role overrides beyond just "code" are wanted — re-read GOAL.md §3
+P4 and the Phase 4 doc paragraph before deciding scope: it may be that
+only `code` needs a session override since that's all `/model` supports
+today, in which case a per-role map would be unrequested). No config-file
+I/O at all for this leg — the "unknown-field survival" test that mattered
+for user/project (M4.2c2b1) doesn't apply; the equivalent invariant to
+test is "reverts on resume" (a fresh `mgr.Resume(id)` after a
+session-scope write should NOT carry the override — it re-hydrates from
+the transcript, which never recorded it). After M4.2c2b2, M4.2 as a whole
+is done (a/b1/b2/b3/c1/c2a/c2b1/c2b2 all ticked) — M4.3 (cross-session
+concurrency test) still needs its OWN dedicated test even though
+`TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
 same-session half; M4.3's box is the two-DIFFERENT-sessions-run-parallel
 half, not yet proven anywhere.
 
@@ -1269,6 +1269,69 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   plus two new files (`serve_models.go`, `serve_models_test.go`) — no
   existing test file needed touching this time, since (unlike M4.2c1)
   `newServeMux`'s signature didn't change.
+
+- 2026-07-12: M4.2c2b split into M4.2c2b1 (file-backed writes at user +
+  project scope, this iteration) / M4.2c2b2 (session scope) — the prior
+  Next Up note's own analysis flagged three scopes each wanting a dedicated
+  test as likely too big for one iteration, and user/project share one
+  file-backed mechanism (read-modify-write over a config path) while
+  session is a wholly different one (a live in-memory `*managedSession`
+  field, no file I/O) — the same "independently testable units" reasoning
+  M4.2b/c/c2 were each split on. M4.2c2b1 landed `PersistModelBinding`
+  (serve_models.go) as a `PersistBackend`-shaped read-modify-write helper
+  taking `fields map[string]json.RawMessage` (decoded straight off the
+  request body) rather than a typed partial `ModelSpec` — decoding into a
+  struct would make a present-but-zero field (e.g. `"window":0`)
+  indistinguishable from an absent one, defeating "write whichever fields
+  the request body sets, not a whole-object clobber"; a raw-message map
+  preserves exactly the set of keys the client sent. Each field is written
+  individually via `setJSONPath(doc, []string{"models", role, field}, raw)`
+  — `json.RawMessage` round-trips through `json.Marshal` as its own bytes
+  (it implements `MarshalJSON`), so no re-encoding of the value itself
+  happens. Route: `PUT /api/models/{role}?scope=user|project[&project=
+  <name>]` — a single endpoint with a scope query param (not three
+  separate routes), matching the "designer's call" GOAL.md left open and
+  reading naturally alongside the existing `GET /api/models`. User scope
+  reuses the same `configPath` already threaded into `newServeMux` for
+  the read endpoint (M4.2c2a) and `/api/landscape` (M4.2c1) — no
+  `newServeMux` signature change needed this time, since project scope
+  resolves its target via the registry (`reg`, already a mux parameter)
+  rather than a new path parameter. Project scope writes
+  `<project.Root>/.cortex/config.json`, matching `findConfigPath`'s
+  on-disk layout (config.go) — confirmed via
+  `TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigUntouched`
+  that this never touches the user config file. Unknown role (checked
+  against `rolePolicies`' fixed key set, the same one `handleModels`
+  iterates) and unsupported/missing scope both refuse 400; an unregistered
+  project refuses 404 (mirrors `handleListProjectSessions`'s existing
+  `registry.ErrProjectNotFound` → 404 convention). Response is read back
+  from disk after the write (not just echoed) via a second `readJSONDoc` —
+  proves the persisted value, not just the handler's local state.
+  Key-material absence holds by the same construction as M4.2c2a
+  (`ModelSpec` only ever carries `KeyEnv`/`KeyService` source names, never
+  a resolved value) — `TestSetModelBindingResponseNeverIncludesSecretValue`
+  makes it a real assertion by threading an actual secret through a real
+  env var and asserting its absence from the response body, mirroring
+  `TestModelsEndpointReturnsRolesAndFleet`'s established shape. Confirmed
+  in main.go before assuming: the REPL's `/model` command
+  (`session.SetModel`, `session_core.go:106`) mutates only
+  `cs.Request.Model` in memory and never touches a config file — this is
+  the direct evidence session scope (M4.2c2b2) needs a completely
+  different, non-file-backed mechanism. Load-bearing check done: replaced
+  the scope `switch` with an unconditional `target := configPath` (keeping
+  `reg`/`errors`/`filepath` referenced via no-op statements to stay
+  buildable) — confirmed
+  `TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigUntouched`,
+  `TestSetModelBindingProjectScopeMissingProjectQueryReturns400`,
+  `TestSetModelBindingProjectScopeUnknownProjectReturns404`, and
+  `TestSetModelBindingUnsupportedScopeReturns400` all fail (200 where 400/
+  404/mutation-check was wanted), restored from a saved copy and reran the
+  full verify suite green. Standing-regression-guard check done: `git
+  status` before committing showed only `serve.go` (route registration,
+  non-test) and `serve_models.go` (non-test) modified, plus
+  `serve_models_test.go` extended — `serve_models.go`/`serve_models_test.go`
+  did not exist at genesis (confirmed via `git cat-file -e <genesis>:<path>`
+  failing for both), so extending the test file is not a violation.
 
 ## Known Issues (append-only)
 - (none yet)
