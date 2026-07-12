@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 31
+Updated: 2026-07-12 · Iteration: 32
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -284,27 +284,35 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       `ec0b476` — `TestTurnStreamEndpointGoldenFramesForMultiStepTurn`
       (cmd/cortex/serve_sse_golden_test.go),
       `TestNewServeServerSetsNoWriteTimeout` (cmd/cortex/serve_test.go).
-- [ ] M4.6 Serve owns no state: kill + restart re-derives every list from
-      disk (restart the manager, listings identical).
+- [x] M4.6 Serve owns no state: kill + restart re-derives every list from
+      disk (restart the manager, listings identical). `63af27f` —
+      `TestServeListingsIdenticalAcrossManagerRestart` (cmd/cortex/serve_restart_test.go).
 - [ ] M4.7 Idle sessions evict; a subsequent request re-hydrates from the
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.6: "Serve owns no state: kill + restart re-derives every list
-from disk (restart the manager, listings identical)." Likely shape: a test
-that (1) builds a `SessionManager` via `NewSessionManager(reg, factory)`
-against a real temp-home + temp-project-root fixture, (2) creates/resumes a
-couple of sessions and lists projects/sessions through the handlers, (3)
-constructs a FRESH second `SessionManager` (simulating restart — no shared
-in-memory state with the first) against the same on-disk registry/session
-files, and (4) asserts `GET /api/projects` and `GET
-/api/projects/{name}/sessions` return identical listings from both
-managers. `SessionManager`/`managedSession` already hold no state that
-doesn't already round-trip through `internal/registry` + the session
-transcript files (M4.2a/M4.2b1 built listing straight off disk peeks, not
-an in-memory index) — so this is likely another test-only increment, but
-confirm by reading `cmd/cortex/serve_session.go` and `serve_routes.go`
-first rather than assuming.
+Start M4.7: "Idle sessions evict; a subsequent request re-hydrates from the
+transcript (test with a shrunk idle threshold)." Read `cmd/cortex/serve_session.go`
+first — `SessionManager` currently has no eviction/idle-timeout concept at
+all (its map only grows: `Create`/`Resume` insert, nothing ever deletes).
+Likely shape: (1) give `managedSession` a last-touched timestamp updated on
+`Create`/`Resume`/each turn, (2) an injected clock (matching M6.2's later
+"tests never sleep" convention — check if a shared fake-clock seam already
+exists anywhere in the repo, e.g. `internal/loops` doesn't exist yet, so this
+may be the first one) and a small idle threshold parameter so a test can
+shrink it to something like 1ms/1ns rather than a real wall-clock wait, (3)
+an eviction sweep (either lazy — checked on `Get`/`Resume` — or an explicit
+`Evict(now)` method a test calls directly; lazy-on-access avoids needing a
+background goroutine/ticker, which fits GOAL.md's "adapters over daemons,
+zero background services" pillar better than a timer loop), (4) eviction
+removes the entry from `m.sessions` (and should probably close the
+transcript file handle via whatever `Close`/similar method `CortexSession`
+already exposes, if any — check `session.go`) so the *next* request for that
+id falls through to `Resume`'s existing re-hydrate-from-transcript path
+(M4.2b1/M4.4 already proved that path works standalone). Confirm the
+eviction mechanism against `serve_turn.go`/`serve_stream.go` too — anywhere
+that currently assumes `mgr.Get` never returns a stale/evicted-but-still-
+locked session.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1497,6 +1505,44 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   <genesis>:cmd/cortex/serve_test.go` reports "exists on disk, but not in
   <genesis>") — it's an M4.1-era file, not a pre-existing one, so editing
   it needs no Decisions-Log correction entry.
+
+- 2026-07-12: M4.6 landed as a test-only increment (no production code
+  changed) — confirmed the hypothesis before writing anything by reading
+  `serve_session.go`/`serve_routes.go`: both `GET /api/projects` and `GET
+  /api/projects/{name}/sessions` already read straight off disk on every
+  request (`reg.List()` against `registry.FileRegistry`, `listSessions`
+  against `Workspace.SessionsDir()`) with no in-memory cache or index —
+  `SessionManager`'s `sessions map[string]*managedSession` is consulted only
+  by `Get`/`Resume`-of-a-live-session and `handleTurn`, never by either
+  listing handler. `TestServeListingsIdenticalAcrossManagerRestart`
+  (`cmd/cortex/serve_restart_test.go`) proves this at the HTTP layer with a
+  REAL on-disk `registry.NewAt` (not `fakeRegistry` — a fake would trivially
+  "survive a restart" by construction, proving nothing): builds a first
+  `FileRegistry`+`SessionManager`+server pair against a temp-dir
+  `projects.json` and project root, creates a live session and captures both
+  listing responses, closes that server, then builds a wholly independent
+  second `FileRegistry`+`SessionManager`+server pair (fresh in-memory map,
+  no reference to the first) pointed at the identical on-disk paths, and
+  asserts both listing bodies are byte-identical across the two — plus that
+  the fresh manager's in-memory map does NOT already contain the created
+  session id (ruling out a test that accidentally shares state). This is a
+  different assertion than the pre-existing (M4.2b1)
+  `TestSessionManagerResumeRehydratesFromTranscriptAfterRestart`, which
+  proves a single individual session rehydrates after "restart" but uses
+  `fakeRegistry` and never exercises the two listing HTTP handlers GOAL.md's
+  M4.6 wording ("re-derives every list from disk... listings identical")
+  specifically names. Load-bearing check done: temporarily short-circuited
+  `registry.FileRegistry.readAll` to `return nil, nil` unconditionally
+  (simulating a regression where the registry stops reading from disk —
+  e.g. some future in-memory-cache "optimization"), confirmed
+  `TestServeListingsIdenticalAcrossManagerRestart` fails (the create-session
+  call 404s against the now-empty-looking registry, so decoding its
+  response as JSON errors), restored `registry.go` from a saved copy
+  (`/tmp/registry.go.bak`) and reran the full verify suite green. Standing-
+  regression-guard check done: `git cat-file -e
+  <genesis>:cmd/cortex/serve_restart_test.go` reports "exists on disk, but
+  not in <genesis>" — a brand-new file this iteration, not an edit to a
+  pre-existing test.
 
 ## Known Issues (append-only)
 - (none yet)
