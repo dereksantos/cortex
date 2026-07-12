@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 36
+Updated: 2026-07-12 · Iteration: 37
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
@@ -326,9 +326,12 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
         `TestBuildTranscriptViewModelOmitsSeedSystemMessage`,
         `TestBuildTranscriptViewModelMissingFileReturnsError`
         (cmd/cortex/webui_transcript_test.go).
-  - [ ] M5.2c Landscape report view-model, wrapping M2's `ScanReport`
+  - [x] M5.2c Landscape report view-model, wrapping M2's `ScanReport`
         (the same shape `cortex scan --json` / `GET /api/landscape`
-        already produce).
+        already produce). `b8d4b8a` —
+        `TestBuildLandscapeViewModelGolden`,
+        `TestBuildLandscapeViewModelNoRootsConfiguredReturnsTypedRefusal`
+        (cmd/cortex/webui_landscape_test.go).
   - [ ] M5.2d Models view-model: bindings + effective scope resolution,
         wrapping M4.2c2a's `/api/models` shape.
 - [ ] M5.3 The four screens render those view-models; JS bounded
@@ -339,25 +342,26 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.2c: "Landscape report view-model, wrapping M2's `ScanReport`." Per
-GOAL.md §2's package layout this lives in a new `cmd/cortex/webui_*.go` file
-(e.g. `webui_landscape.go`) alongside M5.2a's `webui_dashboard.go` and
-M5.2b's `webui_transcript.go`. GOAL.md's M5.2 wording says "landscape
-report" — this is the same `ScanReport` shape `cortex scan --json` prints
-(scan.go's `buildScanReport`) and `GET /api/landscape` already returns
-(M4.2c1, `serve_landscape.go`); the view-model here is likely a thin wrapper
-(or pass-through) over that existing struct rather than a new aggregation —
-read `scan.go`'s `ScanReport`/`buildScanReport` and `serve_landscape.go`
-first to see whether a wrapper adds any real value (e.g. presentation-only
-fields) or whether "view-model" here just means "the same struct, golden
-JSON-tested from a real fixture root" (mirrors M5.2a/b's convention: a real
-temp-dir fixture, `json.Marshal`, literal-string golden — no
-`testdata/*.golden` file, that mechanism doesn't exist in this repo).
-M5.2d (models, wrapping M4.2c2a's `/api/models` shape) is the remaining
-M5.2 split after this one. Keep to pure Go structs/JSON — no HTML/JS wiring
-yet (that's M5.3/M5.4). Read docs/cortex-web.md's Phase 5 section before
-starting; GOAL.md §3 P5 binds "rendering logic lives in golden-tested Go
-view-models; JS is fetch/render/SSE-append only, enforced mechanically."
+Start M5.2d: "Models view-model, wrapping M4.2c2a's `/api/models` shape
+(bindings + effective scope resolution)." This is the last M5.2 split; once
+it lands, M5.2 itself is complete and M5.3 (JS size caps over the embedded
+FS) is next. Per GOAL.md §2's package layout this lives in a new
+`cmd/cortex/webui_models.go` alongside `webui_dashboard.go`/
+`webui_transcript.go`/`webui_landscape.go`. Read `cmd/cortex/serve_models.go`
+(M4.2c2a's `handleModels` / `GET /api/models`) first — GOAL.md's M5.2
+wording explicitly calls out "bindings + effective scope resolution" as the
+view-model content (role/scope/effective-source columns), which is more
+than M5.2c's landscape screen needed: check whether `/api/models`'s existing
+response shape already carries an explicit "which scope this binding
+resolved from" field per role, or whether that's new presentation logic the
+view-model must add (in which case it's a genuine wrapper, not a
+pass-through, unlike M5.2c). Follow M5.2a/b/c's established test convention:
+real fixture (temp config + fake fleet probe), `json.Marshal`, literal-string
+golden — no `testdata/*.golden` file. Key material must stay absent from the
+view-model's JSON too, same invariant M4.2c2a's own tests already assert on
+`/api/models` — inherit rather than re-derive if the view-model wraps that
+handler's data path. Keep to pure Go structs/JSON — no HTML/JS wiring yet
+(that's M5.3/M5.4).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1752,6 +1756,38 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `webui_transcript.go` out of the tree, confirmed all three new tests
   fail to build (`undefined: buildTranscriptViewModel`), restored and
   reran green.
+
+- 2026-07-12: M5.2c landed `buildLandscapeViewModel` (`webui_landscape.go`)
+  as a genuine pass-through over `ScanReport` — resolved in favor of "no new
+  wrapper type" after reading `scan.go`'s `ScanReport`/`buildScanReport` and
+  `serve_landscape.go` per the prior iteration's Next Up question: unlike
+  M5.2a (dashboard, which composes three unrelated sources into a new shape)
+  and M5.2b (transcript, which flattens JSONL into display entries),
+  `ScanReport`'s existing fields (`Roots`, `Tools`, `Runtimes`, `Projects`,
+  `Truncated`) are already exactly names-and-paths-only per M2's
+  content-non-leak invariant and already exactly what a landscape screen
+  renders — a distinct struct would duplicate every field with zero
+  presentation-only additions, the "no test would notice reverting"
+  anti-pattern GOAL.md §1 warns against. Also refactored `handleLandscape`
+  (`serve_landscape.go`) to delegate to the new function instead of
+  duplicating `resolveScanRoots`+`buildScanReport` inline — one call path
+  for "what the landscape means," matching M4.2c1's own doc-comment intent;
+  confirmed via `serve_landscape_test.go`'s three existing httptest-level
+  tests (status codes only, no exact-JSON-shape assertions there) that the
+  minor 500-path error-message-text change (collapsed two distinct prefixes
+  into one) is not test-observed, so it's a safe consolidation. Confirmed
+  empirically (a throwaway debug test, removed before commit) that
+  `landscape.Tool`/`Runtime`/`Project` carry no JSON struct tags, so their
+  fields marshal capitalized (`"Path"`, `"Markers"`, `"Name"`) and an empty
+  `ScanHarnesses`/`ScanRuntimes` result marshals as JSON `null` (a nil Go
+  slice), not `[]` — both golden strings are written against that verified
+  behavior rather than an assumption; worth flagging for M5.2d and M5.3/M5.4
+  since any other view-model wrapping an landscape/scan-adjacent struct will
+  hit the same nil-slice-is-null behavior. Load-bearing check done: gutted
+  `buildLandscapeViewModel` to `return ScanReport{}, nil` unconditionally,
+  confirmed both new tests fail with the expected mismatches (empty JSON vs.
+  the fixture-derived golden; `nil` err vs. `ErrNoScanRoots`), restored from
+  a saved copy and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
