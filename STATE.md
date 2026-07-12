@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 24
+Updated: 2026-07-12 · Iteration: 25
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -220,7 +220,21 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
         persisted result), models (merged config + fleet read; scoped
         role-binding writes at user/project/session via M1.3's
         read-modify-write helpers — unknown-field survival test; key
-        material absent from every response, asserted).
+        material absent from every response, asserted). **Split
+        (2026-07-12, this iteration) into:**
+    - [x] M4.2c1 `GET /api/landscape`: the same `ScanReport` `cortex
+          scan --json` prints, built via scan.go's own
+          `resolveScanRoots`/`buildScanReport` (no parallel scan path);
+          no persisted scan roots ⇒ 412 (`ErrNoScanRoots`), never a
+          blind `$HOME` sweep. `dafe59d` —
+          `TestLandscapeEndpointReturnsScanReport`,
+          `TestLandscapeEndpointNoRootsConfiguredIsTypedRefusal`,
+          `TestLandscapeEndpointRequiresAuth`
+          (cmd/cortex/serve_landscape_test.go).
+    - [ ] M4.2c2 Models endpoint: merged config + fleet read; scoped
+          role-binding writes at user/project/session via M1.3's
+          read-modify-write helpers — unknown-field survival test; key
+          material absent from every response, asserted.
 - [ ] M4.3 Session manager: two turns on one session serialize; turns on
       two sessions interleave (concurrency test, scripted senders).
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
@@ -235,25 +249,42 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2c: landscape + models endpoints on `cortex serve`. Landscape:
-expose Phase 2's persisted scan result (`cmd/cortex/scan.go`'s
-`buildScanReport`/`resolveScanRoots`) as `GET /api/landscape` (or similar —
-designer's call; check whether `cmd/cortex` importing itself is fine, unlike
-M2.6's `internal/tools`-can't-import-`cmd/cortex` cycle — `serve_*.go` is
-already in `package main` alongside `scan.go`, so `buildScanReport` should be
-directly callable with no cycle). Models: read the merged config (`LoadConfig`/
-`loadMergedConfig`, main.go) + discovered fleet, and support scoped
-role-binding writes at user (`~/.cortex/config.json`)/project
-(`./.cortex/config.json`)/session (in-memory only) scope via M1.3's
-read-modify-write helpers (`configwrite.go`'s `readJSONDoc`/`writeJSONDoc`/
-`setJSONPath`, the same ones `PersistBackend`/`PersistScanRoots` already use)
-— GOAL.md M4.2 requires an unknown-field survival test (M1.3's own pattern)
-and an assertion that key material (API keys) is absent from every response.
-Read `docs/cortex-web.md`'s Phase 4 models-endpoint paragraph (~line 218) and
-GOAL.md §1's "Deferred" note (models-endpoint re-keying re-running the
-bootstrap chain is explicitly OUT of scope for M4.2c — only read + scoped
-role-binding write, not re-auth) before designing the shape. After M4.2c,
-M4.2 as a whole is done (a/b1/b2/b3/c all ticked) — M4.3 (cross-session
+Start M4.2c2: the models endpoint on `cortex serve` (the landscape half,
+M4.2c1, landed this iteration as `GET /api/landscape`, `dafe59d`). Read the
+merged config (`LoadConfig`/`loadMergedConfig`, main.go) + discovered fleet
+(`discoverFleet`, config.go — needs a backend endpoint; a scripted/fake
+fleet is the hermetic-test path, matching GOAL.md §2's "fakes only" posture),
+and support scoped role-binding writes at user (`~/.cortex/config.json`)/
+project (`./.cortex/config.json`)/session (in-memory only, reverts on
+resume — probably lives on `managedSession`, serve_session.go) scope via
+M1.3's read-modify-write helpers (`configwrite.go`'s `readJSONDoc`/
+`writeJSONDoc`/`setJSONPath`, the same ones `PersistBackend`/
+`PersistScanRoots` already use — `setJSONPath(doc, []string{"models",
+"<role>"}, spec)` is the natural shape for the write, matching how
+`Config.Models` is keyed in config.go). GOAL.md M4.2 requires an
+unknown-field survival test (M1.3's own pattern — see
+`TestSetJSONPathPreservesUnknownFieldsByteForByte`,
+cmd/cortex/configwrite_test.go, and `TestPersistBackendRoundTrip`,
+bootstrap_persist_test.go, for the established shape) and an assertion that
+key material (API keys) is absent from every response — note `ModelSpec`
+(config.go) never carries a resolved key value itself, only `KeyEnv`/
+`KeyService` (source names); the assertion is really "the response never
+calls `resolveKey`/embeds its result", worth stating explicitly in the test
+name/comment so a future change that DOES leak a resolved key trips it. Like
+M4.2c1, thread this into `newServeMux` (now `(reg, mgr, configPath,
+homeDir)`) — a project-config path is also needed for the project-scope
+write, likely a third `projectConfigPath string` param or resolved per-request
+from the registry's project root (`filepath.Join(proj.Root, ".cortex",
+"config.json")`, matching `findConfigPath`'s `.cortex/config.json` layout,
+config.go). Read `docs/cortex-web.md`'s Phase 4 models-endpoint paragraph
+(~line 218) and GOAL.md §1's "Deferred" note (models-endpoint re-keying
+re-running the bootstrap chain is explicitly OUT of scope for M4.2c2 — only
+read + scoped role-binding write, not re-auth) before designing the shape.
+This is likely too big for one iteration too (read endpoint + 3 distinct
+write scopes + unknown-field-survival + key-absence, each wanting its own
+test) — splitting into M4.2c2a (read: merged config + fleet) / M4.2c2b
+(scoped writes) is a reasonable next split if so. After M4.2c2, M4.2 as a
+whole is done (a/b1/b2/b3/c1/c2 all ticked) — M4.3 (cross-session
 concurrency test) still needs its OWN dedicated test even though
 `TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
 same-session half; M4.3's box is the two-DIFFERENT-sessions-run-parallel
@@ -1145,6 +1176,41 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   check done: `git diff --name-only <genesis>..HEAD -- '*_test.go'` — the
   new `serve_stream_test.go` is not present at genesis; no pre-existing test
   file was touched (only `turn.go`/`serve.go`, both non-test, modified).
+
+- 2026-07-12: M4.2c split into M4.2c1 (landscape, read-only) / M4.2c2
+  (models, read + 3-scope write) — the two are independently testable
+  units bundled by one GOAL.md line, and models' scoped-write surface
+  (user/project/session, unknown-field survival, key-absence assertion)
+  is clearly its own slice of work from a plain `GET`. M4.2c1 landed
+  `handleLandscape` (`cmd/cortex/serve_landscape.go`, route `GET
+  /api/landscape`) as a **thin wrapper over scan.go's own
+  `resolveScanRoots`/`buildScanReport`** — no parallel scan/report logic,
+  so `cortex serve`'s landscape view and `cortex scan --json`'s CLI
+  report share one implementation and can't drift. `ErrNoScanRoots`
+  (scan.go, M2.5) maps to 412 Precondition Failed rather than 500 — a
+  refusal the client can act on (finish onboarding / configure a root),
+  distinct from a server error. `newServeMux` grew two params
+  (`configPath`, `homeDir` — the same two inputs `resolveScanRoots`/
+  `buildScanReport` already take at the CLI level) to thread these in
+  without a global; every existing test call site across
+  serve_routes_test.go/serve_session_test.go/serve_turn_test.go/
+  serve_stream_test.go got `"", ""` appended (mechanical, they don't
+  exercise `/api/landscape`) rather than each growing its own
+  landscape-specific fixture. Test fixture note: `landscape.ScanProjects`
+  requires BOTH a `.git` dir AND an AI marker (e.g. `AGENTS.md`) to
+  count a directory as a project — a marker file alone (no `.git`) is
+  invisible to the scanner; the first test draft caught this the hard
+  way (0 projects found) before adding `.git`. Load-bearing check done:
+  removed the `mux.HandleFunc("GET /api/landscape", ...)` line, confirmed
+  `TestLandscapeEndpointReturnsScanReport` fails with a 404, restored and
+  reran green. Standing-regression-guard check done:
+  `git diff --name-only <genesis>..HEAD -- '*_test.go'` — none of the
+  four modified `serve_*_test.go` files (routes/session/turn/stream)
+  exist at the genesis commit (`git cat-file -e <genesis>:<path>` fails
+  for all four), so the mechanical `newServeMux` signature-widening edit
+  to them is not a standing-regression-guard violation; only
+  `serve_landscape_test.go` (new) carries this increment's actual new
+  assertions.
 
 ## Known Issues (append-only)
 - (none yet)
