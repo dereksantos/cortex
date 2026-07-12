@@ -10,9 +10,26 @@
 // (the SOURCE name — an env var or keychain service to read from), never a
 // resolved key value; this handler calls Config.resolveBinding, never
 // resolveKey, so there is no resolved key value in scope to leak.
+//
+// M4.2c2b1 adds PUT /api/models/{role}?scope=user|project — the file-backed
+// half of the scoped role-binding write GOAL.md §6 M4.2 / docs/
+// cortex-web.md Phase 4 call for. Session scope (in-memory only, reverts on
+// resume — confirmed against main.go's own "/model" handler, which mutates
+// only cs.Request.Model and never touches a config file) needs a live
+// *managedSession, a different mechanism entirely, and is deliberately left
+// for M4.2c2b2 (STATE.md's split) — scope=session refuses 400 here, same as
+// any other unsupported value.
 package main
 
-import "net/http"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"path/filepath"
+
+	"github.com/dereksantos/cortex/internal/registry"
+)
 
 // modelsResponse is GET /api/models' body: every known role's effective
 // binding (Config.resolveBinding over the merged config + fleet) plus the
@@ -37,5 +54,112 @@ func handleModels(configPath string) http.HandlerFunc {
 			roles[role] = cfg.resolveBinding(role, fleet)
 		}
 		writeJSON(w, http.StatusOK, modelsResponse{Roles: roles, Fleet: fleet})
+	}
+}
+
+// PersistModelBinding writes fields (JSON field names matching ModelSpec's
+// own tags — "model", "endpoint", "key_env", …) under models.<role> at
+// path, via read-modify-write (configwrite.go): every other top-level
+// field, every other role, and every field of this role NOT present in
+// fields survives untouched (GOAL.md §2) — this writes exactly the fields
+// the request body set, never a whole-object clobber.
+func PersistModelBinding(path, role string, fields map[string]json.RawMessage) error {
+	doc, err := readJSONDoc(path)
+	if err != nil {
+		return fmt.Errorf("failed to persist model binding: %w", err)
+	}
+	for field, raw := range fields {
+		if err := setJSONPath(doc, []string{"models", role, field}, raw); err != nil {
+			return fmt.Errorf("failed to persist model binding: %w", err)
+		}
+	}
+	if err := writeJSONDoc(path, doc); err != nil {
+		return fmt.Errorf("failed to persist model binding: %w", err)
+	}
+	return nil
+}
+
+// knownRole reports whether role is one of the fixed role codes config.go's
+// rolePolicies recognizes — the same set handleModels iterates.
+func knownRole(role string) bool {
+	_, ok := rolePolicies[role]
+	return ok
+}
+
+// setModelBindingResponse is PUT /api/models/{role}'s response body: the
+// resulting binding at the written scope, read back from disk (not just
+// echoed) so the client sees exactly what was persisted.
+type setModelBindingResponse struct {
+	Role    string    `json:"role"`
+	Scope   string    `json:"scope"`
+	Binding ModelSpec `json:"binding"`
+}
+
+// handleSetModelBinding serves PUT /api/models/{role}?scope=user|project
+// [&project=<name>]: a scoped role-binding write. configPath is user scope
+// (the same single path threaded into newServeMux for GET /api/models);
+// project scope resolves the named project's root via reg and writes
+// <root>/.cortex/config.json, matching findConfigPath's on-disk layout
+// (config.go). Re-keying (re-running the Phase 1 bootstrap chain) is
+// explicitly out of scope (GOAL.md §1 Deferred) — this only ever writes the
+// fields present in the request body.
+func handleSetModelBinding(configPath string, reg registry.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		role := r.PathValue("role")
+		if !knownRole(role) {
+			http.Error(w, "unknown role: "+role, http.StatusBadRequest)
+			return
+		}
+
+		var target string
+		scope := r.URL.Query().Get("scope")
+		switch scope {
+		case "user":
+			target = configPath
+		case "project":
+			name := r.URL.Query().Get("project")
+			if name == "" {
+				http.Error(w, "project scope requires ?project=<name>", http.StatusBadRequest)
+				return
+			}
+			proj, err := reg.Lookup(name)
+			if err != nil {
+				if errors.Is(err, registry.ErrProjectNotFound) {
+					http.Error(w, "project not registered: "+name, http.StatusNotFound)
+					return
+				}
+				http.Error(w, "failed to look up project: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			target = filepath.Join(proj.Root, ".cortex", "config.json")
+		default:
+			http.Error(w, "unsupported scope: "+scope+" (want user or project)", http.StatusBadRequest)
+			return
+		}
+
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+			http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := PersistModelBinding(target, role, fields); err != nil {
+			http.Error(w, "failed to persist model binding: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		doc, err := readJSONDoc(target)
+		if err != nil {
+			http.Error(w, "failed to read back persisted binding: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var models map[string]ModelSpec
+		if raw, ok := doc["models"]; ok {
+			if err := json.Unmarshal(raw, &models); err != nil {
+				http.Error(w, "failed to decode persisted models: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, setModelBindingResponse{Role: role, Scope: scope, Binding: models[role]})
 	}
 }
