@@ -153,3 +153,44 @@ func TestServeAuthMiddlewareRejectsTokenlessAndWrongToken(t *testing.T) {
 		})
 	}
 }
+
+// TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken pins the M5.3b
+// carve-out: paths outside "/api/" (the UI shell — index.html/app.js/
+// app.css) serve without a bearer token, while "/api/..." stays gated. A
+// plain browser navigation can never attach a custom Authorization header,
+// so requiring the token on "/" would make the web UI unreachable by any
+// normal browser action (GOAL.md §6 M5.3b Decisions Log).
+func TestServeAuthMiddlewareAllowsStaticAssetsWithoutToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("shell"))
+	})
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	ts := httptest.NewServer(authMiddleware("expected-token", mux))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("Get /: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET / without token: status = %d, want 200", resp.StatusCode)
+	}
+
+	resp2, err := http.Get(ts.URL + "/api/health")
+	if err != nil {
+		t.Fatalf("Get /api/health: %v", err)
+	}
+	defer resp2.Body.Close()
+	io.Copy(io.Discard, resp2.Body)
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /api/health without token: status = %d, want 401", resp2.StatusCode)
+	}
+}

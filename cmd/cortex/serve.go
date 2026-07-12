@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/registry"
@@ -87,11 +88,21 @@ func writeServeToken(token string) (string, error) {
 
 // authMiddleware rejects any request whose Authorization header is not
 // exactly "Bearer <token>" with 401, before delegating to next. Every
-// serve endpoint runs behind this (GOAL.md §3 P4: "Token auth on every
-// endpoint").
+// `/api/...` endpoint runs behind this (GOAL.md §3 P4: "Token auth on every
+// endpoint" — read as every DATA endpoint). Paths outside "/api/" (the
+// static UI shell: "/", "/index.html", "/app.js", "/app.css") are exempt —
+// M5.3b's Decisions Log: a plain browser navigation can never attach a
+// custom Authorization header, so gating the shell itself would make the
+// web UI unreachable by any normal browser action. The shell carries no
+// sensitive data (structure only); every byte of real project/session data
+// still flows exclusively through the gated "/api/..." surface.
 func authMiddleware(token string, next http.Handler) http.Handler {
 	want := "Bearer " + token
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Header.Get("Authorization") != want {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -118,7 +129,8 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // M5.1 adds "/" serving the embedded web UI assets (webui.go) — registered
 // first so the more specific "/api/..." patterns above still win (Go 1.22+
 // ServeMux precedence is longest-match, not registration order, but keeping
-// the catch-all visually first reads as "fallback" here).
+// the catch-all visually first reads as "fallback" here). M5.3b adds
+// GET /api/dashboard (serve_dashboard.go), the dashboard screen's endpoint.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
@@ -126,6 +138,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /api/dashboard", handleDashboard(reg))
 	mux.HandleFunc("GET /api/projects", handleListProjects(reg))
 	mux.HandleFunc("GET /api/projects/{name}/sessions", handleListProjectSessions(reg))
 	mux.HandleFunc("POST /api/projects/{name}/sessions", handleCreateSession(mgr))
