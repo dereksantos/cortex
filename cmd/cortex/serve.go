@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/dereksantos/cortex/internal/registry"
 	"github.com/dereksantos/cortex/internal/userhome"
 )
 
@@ -92,15 +93,19 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 	})
 }
 
-// newServeMux builds the route table. M4.1 lands a single health route
-// solely to exercise the auth middleware end-to-end; M4.2 adds the real
-// endpoint surface (projects, sessions, turn, SSE, landscape, models).
-func newServeMux() *http.ServeMux {
+// newServeMux builds the route table. M4.1 landed a single health route
+// solely to exercise the auth middleware end-to-end; M4.2a adds the
+// read-only project + session listing surface (reg is the small Registry
+// interface, so this is httptest-testable with a fake — no model needed).
+// M4.2b (turn/SSE) and M4.2c (landscape/models) extend this mux further.
+func newServeMux(reg registry.Registry) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("GET /api/projects", handleListProjects(reg))
+	mux.HandleFunc("GET /api/projects/{name}/sessions", handleListProjectSessions(reg))
 	return mux
 }
 
@@ -121,9 +126,14 @@ func runServeCLI(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	reg, err := registry.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux()))
+	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

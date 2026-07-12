@@ -168,7 +168,20 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       `POST …/turn`, SSE progress, landscape, models (read merged config +
       fleet; scoped write user/project/session via read-modify-write —
       unknown-field survival test; key material absent from every
-      response, asserted).
+      response, asserted). **Split (2026-07-11, this iteration) into:**
+  - [ ] M4.2a Read-only project + session listing: `GET /api/projects`
+        (from `internal/registry`) and `GET /api/projects/{name}/sessions`
+        (peek via existing `listSessions`/`loadSession` — no live
+        `*CortexSession`, no locking); unknown project ⇒ 404.
+  - [ ] M4.2b Live session lifecycle + turn: session create/resume into an
+        in-process `SessionManager` (`Get`/`Create`/`List` per the prior
+        Next Up note), `POST …/turn` running `session.Turn`, SSE progress
+        via the `Progress` seam.
+  - [ ] M4.2c Landscape + models endpoints: landscape (Phase 2's
+        persisted result), models (merged config + fleet read; scoped
+        role-binding writes at user/project/session via M1.3's
+        read-modify-write helpers — unknown-field survival test; key
+        material absent from every response, asserted).
 - [ ] M4.3 Session manager: two turns on one session serialize; turns on
       two sessions interleave (concurrency test, scripted senders).
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
