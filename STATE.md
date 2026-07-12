@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 28
+Updated: 2026-07-12 · Iteration: 29
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -267,8 +267,12 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
               `TestSetModelBindingSessionScopeUnsupportedRoleReturns400`
               (cmd/cortex/serve_models_test.go). **M4.2 complete
               (a/b1/b2/b3/c1/c2a/c2b1/c2b2 all ticked).**
-- [ ] M4.3 Session manager: two turns on one session serialize; turns on
-      two sessions interleave (concurrency test, scripted senders).
+- [x] M4.3 Session manager: two turns on one session serialize; turns on
+      two sessions interleave (concurrency test, scripted senders). `0db0d94`
+      — `TestTurnEndpointDifferentSessionsRunConcurrently`
+      (cmd/cortex/serve_turn_test.go); the "one session serializes" half
+      was already proven by M4.2b2's `TestTurnEndpointSameSessionSerializes`
+      (same file), so this box needed only the concurrent-sessions leg.
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
       pattern) attempting the same session gets the typed busy error.
       (`internal/fslock` itself pre-dates the loop — this item is the
@@ -281,31 +285,37 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.3: session manager concurrency — two turns on ONE session
-serialize (already proven by M4.2b2's `TestTurnEndpointSameSessionSerializes`,
-serve_turn_test.go — that box does not need re-proving) AND turns on TWO
-DIFFERENT sessions run concurrently, not serialized against each other
-(the half M4.3 actually needs a fresh test for; nothing in the suite
-proves it yet — `ms.mu` is per-`managedSession`, so two different
-`*managedSession` values already don't share a lock, but that needs a
-positive concurrency assertion, not just an absence-of-evidence
-inference). Likely shape: reuse `turnTestBackend`-style tracking
-(serve_stream_test.go / serve_turn_test.go precedent — a scripted backend
-that records concurrent in-flight request count, sleeps briefly mid-
-request to open a race window) but POST to two DIFFERENT session ids
-(both created against the same or different projects — GOAL.md's wording
-is just "two sessions concurrent", doesn't require different projects)
-from two goroutines and assert max-observed-concurrency ≥ 2 (the inverse
-of M4.2b2's `want 1` assertion). Route: reuse the plain `POST
-.../turn` endpoint (serve_turn.go) — no new production code is expected
-for M4.3 itself (the per-session mutex already has the right shape,
-`ms.mu` not a package-level lock), so this may be a test-only increment;
-confirm that assumption by writing the test FIRST against current
-`handleTurn` before assuming no implementation change is needed. After
-M4.3, M4.4 (cross-process fslock contention via the re-exec helper
-pattern) is the next box — note the amendment A1 scope-limits M4.4 to
-"serve integration + the two-process test only" since `internal/fslock`
-itself already exists.
+Start M4.4: cross-process lock contention. GOAL.md's M4.4 box + amendment
+A1 scope this to "serve integration + the two-process test only" —
+`internal/fslock` (the D8 lock) already exists and journal/sessions
+already use it; nothing here should re-extract or reimplement locking.
+Shape: a REAL second OS process (not a goroutine) must attempt to open the
+SAME session file this process already has open via the SessionManager,
+and get a typed "session busy in another process" error — use the stdlib
+re-exec-the-test-binary-via-os/exec pattern (a helper-mode env var the
+test binary checks for at TestMain/init, e.g. `GO_WANT_HELPER_PROCESS=1`,
+matching the well-known `os/exec` test idiom; grep the stdlib's own
+`exec_test.go` or prior Cortex commits for precedent before inventing the
+scaffold). Concretely: process A (in-process, via SessionManager.Create)
+starts a session and holds it open (need to find/confirm exactly where
+serve's session lifecycle actually acquires the fslock — check whether
+`StartTranscript`/`ResumeTranscript` (session.go) already call into
+`internal/fslock` today, or whether serve_session.go's managedSession
+needs to acquire it explicitly; M4.2b1's Decisions entries don't mention
+fslock at all, so this needs a fresh read of session.go/internal/fslock
+before writing the test — do not assume the wiring already exists).
+Process B is spawned via `exec.Command(os.Args[0], "-test.run=TestHelper...")`
+with the helper env var set, targeting the identical session id/path, and
+must observe the typed busy error (assert on its exit code/stderr, since
+it's a separate process — can't type-assert an error value across a
+process boundary). Likely needs a small helper subcommand or a
+`TestMain`-gated code path in the test binary itself that tries to open
+the session and prints a recognizable marker on the specific busy error
+vs. any other failure. Read GOAL.md §3 P4 and §6 M4.4 plus
+docs/cortex-web.md's Phase 4 "Single-writer session lock" paragraph again
+before starting — the lock granularity (session FILE, not session ID
+alone; a project could theoretically have two differently-cased paths to
+the same file) matters for how process B targets the same resource.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1393,6 +1403,34 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   is the only test file touched this iteration and does not exist at
   genesis (confirmed via `git cat-file -e`), so extending it is not a
   violation.
+
+- 2026-07-12: M4.3 landed as a test-only increment (no production code
+  changed) — `TestTurnEndpointDifferentSessionsRunConcurrently`
+  (`cmd/cortex/serve_turn_test.go`) proves GOAL.md §3 P4's "different
+  sessions concurrent" half by asserting `backend.maxConcurrent() >= 2`
+  across two `mgr.Create("blog")`-created sessions fired concurrently; the
+  "one session serializes" half was already proven by M4.2b2's
+  `TestTurnEndpointSameSessionSerializes` in the same file, so GOAL.md's
+  single M4.3 checklist item is satisfied by these two sibling tests
+  together — no re-proof needed for the serialize half per the prior
+  iteration's Next Up analysis. Confirmed the hypothesis that no
+  implementation change was needed BEFORE assuming it: wrote the test
+  first against the current `handleTurn`/`managedSession.mu`
+  (serve_session.go, serve_turn.go) and it passed unmodified, since
+  `managedSession.mu` is already per-`*managedSession` (a struct field,
+  not a package-level lock) — two different `Create()` calls produce two
+  distinct `managedSession` values with independent mutexes by
+  construction. Load-bearing check done: temporarily swapped
+  `ms.mu.Lock()`/`defer ms.mu.Unlock()` in `serve_turn.go`'s `handleTurn`
+  for a package-level `sync.Mutex` shared across all sessions (simulating
+  a regression to session-id-oblivious locking), confirmed
+  `TestTurnEndpointDifferentSessionsRunConcurrently` fails
+  (`backend saw max 1 concurrent requests ... want >= 2`), reverted from a
+  saved copy (`/tmp/serve_turn.go.bak`) and reran the full verify suite
+  green. Standing-regression-guard check done: `git diff --name-only
+  <genesis>..HEAD -- '*_test.go'` shows only `serve_turn_test.go` touched
+  this iteration, which postdates genesis (confirmed via `git cat-file -e
+  <genesis>:cmd/cortex/serve_turn_test.go` failing) — not a violation.
 
 ## Known Issues (append-only)
 - (none yet)
