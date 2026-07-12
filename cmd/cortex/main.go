@@ -231,6 +231,20 @@ func printAvailableTools() {
 }
 
 func main() {
+	// The tool list is opt-in: strip --tools / --show-tools (if present) and
+	// remember it so printAvailableTools runs only when explicitly requested.
+	showTools := false
+	var args []string
+	for _, a := range os.Args {
+		switch a {
+		case "--tools", "--show-tools":
+			showTools = true
+		default:
+			args = append(args, a)
+		}
+	}
+	os.Args = args
+
 	// Study-eval mode: `cortex study-eval` runs study over a fixture set and scores
 	// latency / coverage / groundedness. `cortex study-eval code-grid` runs the
 	// 2×2 granularity × numbering isolation experiment on the code fixture.
@@ -282,8 +296,9 @@ func main() {
 
 	session := NewCortexSession()
 
-	// Print available tools on launch for interactive REPL mode only
-	if len(os.Args) == 1 {
+	// Print available tools on launch only when --tools was passed; the REPL
+	// otherwise starts clean.
+	if showTools {
 		printAvailableTools()
 	}
 
