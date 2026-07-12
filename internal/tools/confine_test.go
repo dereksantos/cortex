@@ -35,6 +35,37 @@ func TestConfinePathRejectsEscapes(t *testing.T) {
 	}
 }
 
+func TestConfinePathRejectsSymlinkEscapes(t *testing.T) {
+	// A symlink planted inside root that resolves outside it must be
+	// refused: the lexical Abs+Clean+Rel guard alone never touches the
+	// filesystem, so containment has to be re-checked on real paths.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+
+	if err := os.Symlink(outside, filepath.Join(root, "dirlink")); err != nil {
+		t.Fatalf("failed to plant dir symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "filelink")); err != nil {
+		t.Fatalf("failed to plant file symlink: %v", err)
+	}
+
+	for _, tc := range []struct{ name, path string }{
+		{"through symlinked dir", "dirlink/secret.txt"},
+		{"symlinked file", "filelink"},
+		{"nonexistent under symlinked dir", "dirlink/newfile.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := readCallArgs(map[string]any{"path": tc.path})
+			if _, err := ConfinePath(call, root); err == nil {
+				t.Errorf("path %q resolves outside root via symlink and should be rejected", tc.path)
+			}
+		})
+	}
+}
+
 func TestConfinePathAllowsJournal(t *testing.T) {
 	// The journal lives inside .cortex (delete-protected) but reads must reach it.
 	root := t.TempDir()

@@ -45,7 +45,51 @@ func ConfinePath(call ToolCall, root string) (ToolCall, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return call, fmt.Errorf("path %q escapes the workspace", path)
 	}
+	// The check above is purely lexical (Abs+Clean+Rel never touches the real
+	// filesystem), so a symlink INSIDE root that points OUTSIDE it would pass:
+	// resolve real paths and re-check containment. resolveSymlinks walks up to
+	// the deepest existing ancestor when the target itself doesn't exist yet
+	// (a plain lexical join for the missing tail), so this is a no-op for the
+	// already-covered escapes above and only changes behavior when a symlink
+	// is actually in play.
+	resolvedRoot, err := resolveSymlinks(rootAbs)
+	if err != nil {
+		return call, fmt.Errorf("resolve workspace root %q: %w", root, err)
+	}
+	resolvedAbs, err := resolveSymlinks(abs)
+	if err != nil {
+		return call, fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	relResolved, err := filepath.Rel(resolvedRoot, resolvedAbs)
+	if err != nil || relResolved == ".." || strings.HasPrefix(relResolved, ".."+string(filepath.Separator)) {
+		return call, fmt.Errorf("path %q escapes the workspace", path)
+	}
 	return call, nil
+}
+
+// resolveSymlinks resolves every symlink along path against the real
+// filesystem, walking up to the deepest existing ancestor when the target
+// (or some tail of it) doesn't exist — filepath.EvalSymlinks alone requires
+// the full path to exist, but ConfinePath must still bound-check paths for
+// tools whose target hasn't been created yet.
+func resolveSymlinks(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	dir := filepath.Dir(path)
+	if dir == path {
+		// Reached the filesystem root without finding an existing ancestor.
+		return path, nil
+	}
+	resolvedDir, err := resolveSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedDir, filepath.Base(path)), nil
 }
 
 // TargetedRead enforces the span contract on a read_file call (a no-op for every
