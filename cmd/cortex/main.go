@@ -290,6 +290,13 @@ func main() {
 		return
 	}
 
+	// Local HTTP/SSE adapter: `cortex serve [--port <n>]` (Phase 4 / M4.1).
+	// Foreground, loopback-only, bearer-token-authenticated — see serve.go.
+	if len(os.Args) >= 2 && os.Args[1] == "serve" {
+		runServeCLI(os.Args[2:])
+		return
+	}
+
 	// Discord adapter: `cortex discord` connects to Discord and drives one
 	// persistent session in-process. The only Discord-aware entry point — see
 	// discord.go. Token + scope come from the environment.
