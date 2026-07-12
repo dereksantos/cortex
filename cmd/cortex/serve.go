@@ -103,7 +103,9 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // adds the SSE turn/stream handler (serve_stream.go); M4.2c1 adds the
 // landscape endpoint (configPath/homeDir — the same two inputs
 // resolveScanRoots/buildScanReport already take at the CLI level,
-// serve_landscape.go); M4.2c2 (models) extends this mux further.
+// serve_landscape.go); M4.2c2a adds the read-only models endpoint
+// (serve_models.go); M4.2c2b (scoped role-binding writes) extends this mux
+// further.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +118,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn", handleTurn(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
 	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
+	mux.HandleFunc("GET /api/models", handleModels(configPath))
 	return mux
 }
 
