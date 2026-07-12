@@ -115,8 +115,13 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // (PUT /api/models/{role}?scope=user|project); M4.2c2b2 adds
 // scope=session&session=<id>, the in-memory-only half — mgr is already
 // threaded in for the turn/SSE routes, so no signature change was needed.
+// M5.1 adds "/" serving the embedded web UI assets (webui.go) — registered
+// first so the more specific "/api/..." patterns above still win (Go 1.22+
+// ServeMux precedence is longest-match, not registration order, but keeping
+// the catch-all visually first reads as "fallback" here).
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.Handle("/", webUIHandler())
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
