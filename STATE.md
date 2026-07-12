@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 33
+Updated: 2026-07-12 · Iteration: 34
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
@@ -295,8 +295,10 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       (cmd/cortex/serve_session_test.go). **M4 complete.**
 
 ### M5 — Web UI (P5), four screens
-- [ ] M5.1 Assets under `cmd/cortex/webui/` served from `go:embed`;
-      route-level test proves serving with no filesystem presence.
+- [x] M5.1 Assets under `cmd/cortex/webui/` served from `go:embed`;
+      route-level test proves serving with no filesystem presence. `443a7ea`
+      — `TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence`
+      (cmd/cortex/webui_test.go).
 - [ ] M5.2 View-models built in Go and golden-tested: project dashboard,
       session transcript (from real JSONL fixtures), landscape report,
       models view (bindings + effective scope resolution).
@@ -308,32 +310,23 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.1: "Assets under `cmd/cortex/webui/` served from `go:embed`;
-route-level test proves serving with no filesystem presence." Per GOAL.md
-§2's package layout, `cmd/cortex/webui/` is new — it doesn't exist yet in
-this worktree (confirm with `ls cmd/cortex/webui` before starting; if a
-stray file is already there from a crashed prior attempt, read it first per
-step 1). Likely shape: (1) a minimal static asset (e.g. a placeholder
-`index.html`, maybe an empty `app.js`/`app.css` stub — M5.2/M5.3 fill in the
-real view-model rendering later) under `cmd/cortex/webui/`, (2) a
-`//go:embed` directive in a new `cmd/cortex/webui.go` (or similar) exposing
-an `embed.FS`, (3) at least one route registered on the existing
-`newServeMux` (serve.go) serving from that embedded FS via
-`http.FileServerFS`/`http.ServeFileFS` (stdlib, no new dependency per
-GOAL.md's no-new-deps non-goal), (4) the "no filesystem presence" test: an
-`httptest` request against the route asserting content is served correctly
-even when — per the M5.1 wording's own emphasis on go:embed's point — the
-test's working directory doesn't have the source assets available (e.g. by
-constructing the mux from a package-level `embed.FS` var and confirming the
-route doesn't depend on `os.Getwd()`/relative paths at request time; a
-concrete test technique: run the assertion from a `t.Chdir`'d-elsewhere temp
-dir, or just assert the handler never calls into `os`/`ioutil` file-reading
-by construction — read how `cmd/cortex/webui/` docs/cortex-web.md Phase 5
-describes this before deciding). Read docs/cortex-web.md's Phase 5 section
-first (GOAL.md §3 P5 already binds "hand-written HTML/CSS/JS under
-`go:embed`... rendering logic lives in golden-tested Go view-models; JS is
-fetch/render/SSE-append only, enforced mechanically" — M5.1 itself is just
-the embed+serve plumbing, not the view-models, which are M5.2).
+Start M5.2: "View-models built in Go and golden-tested: project dashboard,
+session transcript (from real JSONL fixtures), landscape report, models view
+(bindings + effective scope resolution)." Per GOAL.md §2's package layout
+these Go view-model builders live in `cmd/cortex/webui*.go` alongside M5.1's
+`webui.go`. Likely shape: one builder function + one golden test per screen
+(e.g. `buildDashboardViewModel(reg, mgr)`, `buildTranscriptViewModel(path)`
+reading a real `.jsonl` session fixture, `buildLandscapeViewModel(report)`
+wrapping M2's `ScanReport`, `buildModelsViewModel(cfg, fleet)` wrapping
+M4.2c2a's `/api/models` shape) — each rendering a struct (or JSON) that a
+`testdata/*.golden` file pins, following the golden-test convention already
+used at `TestRenderScanReportGolden` (cmd/cortex/scan_test.go) and
+`TestRenderProjectListGolden` (cmd/cortex/project_test.go). M5.3 (screens
+render these + JS size caps) and M5.4 (end-to-end smoke) build on this, so
+keep M5.2 to pure Go structs/JSON — no HTML/JS wiring yet. Read
+docs/cortex-web.md's Phase 5 section (already read this iteration) before
+starting; GOAL.md §3 P5 binds "rendering logic lives in golden-tested Go
+view-models; JS is fetch/render/SSE-append only, enforced mechanically."
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1615,6 +1608,29 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   pre-existing-test-file edit. **M4 complete** (M4.1–M4.7 all ticked); M5
   section added to this file's checklist per GOAL.md §6's "add milestone
   sections as the loop reaches them."
+- 2026-07-12: M5.1 landed the embed+serve plumbing only: `cmd/cortex/webui/`
+  holds placeholder `index.html`/`app.js`/`app.css`; `cmd/cortex/webui.go`
+  embeds them (`//go:embed webui`, `fs.Sub` to strip the prefix) and serves
+  via stdlib `http.FileServerFS` (no new dependency); `newServeMux` (serve.go)
+  registers it at `"/"` — Go 1.22+ ServeMux's longest-match precedence means
+  the more specific `"/api/..."` patterns still win regardless of `"/"`
+  being registered first. Left the UI route behind the SAME `authMiddleware`
+  as every other route (production wiring in `runServeCLI` wraps the whole
+  mux) rather than deciding a browser-loads-without-a-header exemption now —
+  GOAL.md §3 P4 binds "Token auth on every endpoint" and M5.1's DoD is
+  silent on auth, so carving an exemption here would be undecided scope
+  creep; the test authenticates the same way every other serve test does
+  (`Authorization: Bearer tok` on an `http.Client` request, not a real
+  browser navigation). If a real-browser flow needs unauthenticated static
+  assets (e.g. a `?token=` bootstrap pattern), that's a decision for M5.3/
+  M5.4 when there's an actual page to drive, not this plumbing increment.
+  Load-bearing check done: commented out `mux.Handle("/", webUIHandler())`
+  in serve.go, reran the new test — confirmed it fails ("got status 404,
+  want 200"); route restored, full suite green again before committing.
+  Standing-regression-guard check done: `git diff --name-only
+  <genesis>..HEAD -- '*_test.go'` lists only files that postdate genesis
+  (webui_test.go included, newly created) — no pre-existing test file
+  touched.
 
 ## Known Issues (append-only)
 - (none yet)
