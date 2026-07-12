@@ -131,6 +131,9 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // ServeMux precedence is longest-match, not registration order, but keeping
 // the catch-all visually first reads as "fallback" here). M5.3b adds
 // GET /api/dashboard (serve_dashboard.go), the dashboard screen's endpoint.
+// M5.3c1 adds GET /api/projects/{name}/sessions/{id} (serve_transcript.go),
+// the session screen's transcript endpoint — distinct from the plain listing
+// route above (an extra path segment, so ServeMux resolves them unambiguously).
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
@@ -142,6 +145,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("GET /api/projects", handleListProjects(reg))
 	mux.HandleFunc("GET /api/projects/{name}/sessions", handleListProjectSessions(reg))
 	mux.HandleFunc("POST /api/projects/{name}/sessions", handleCreateSession(mgr))
+	mux.HandleFunc("GET /api/projects/{name}/sessions/{id}", handleGetSession(reg))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn", handleTurn(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
 	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
