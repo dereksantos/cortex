@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 27
+Updated: 2026-07-12 · Iteration: 28
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -256,10 +256,17 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
               `TestSetModelBindingUnknownRoleReturns400`,
               `TestSetModelBindingUnsupportedScopeReturns400`,
               `TestSetModelBindingRequiresAuth` (cmd/cortex/serve_models_test.go).
-        - [ ] M4.2c2b2 Session-scope writes: in-memory only on a live
+        - [x] M4.2c2b2 Session-scope writes: in-memory only on a live
               `*managedSession`, reverts on resume — not persisted to disk
               at all (confirmed against main.go's own `/model` handler,
               which mutates only `cs.Request.Model`, no config write).
+              `d40b366` —
+              `TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume`,
+              `TestSetModelBindingSessionScopeUnknownSessionReturns404`,
+              `TestSetModelBindingSessionScopeMissingSessionQueryReturns400`,
+              `TestSetModelBindingSessionScopeUnsupportedRoleReturns400`
+              (cmd/cortex/serve_models_test.go). **M4.2 complete
+              (a/b1/b2/b3/c1/c2a/c2b1/c2b2 all ticked).**
 - [ ] M4.3 Session manager: two turns on one session serialize; turns on
       two sessions interleave (concurrency test, scripted senders).
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
@@ -274,38 +281,31 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2c2b2: session-scope role-binding writes (the file-backed user+
-project half, M4.2c2b1, landed this iteration as `PUT
-/api/models/{role}?scope=user|project[&project=<name>]`, `a8e56bf`, over
-`PersistModelBinding` — a new configwrite.go-style helper mirroring
-`PersistBackend`'s read-modify-write shape, writing exactly the request
-body's fields under `models.<role>`, not a whole-object clobber). Session
-scope is a DIFFERENT mechanism entirely — in-memory only, reverts on
-resume, confirmed directly against main.go's `/model` REPL command
-(`session.SetModel`, `session_core.go:106`, mutates only
-`cs.Request.Model`, never touches a config file) — so it needs a live
-`*managedSession` via `mgr.Get(id)`/`SessionManager` (serve_session.go),
-not a file path. Likely shape: extend `handleSetModelBinding`
-(serve_models.go) with `scope=session&session=<id>` (or a
-`/api/projects/{name}/sessions/{id}/models/{role}` route — designer's
-call, GOAL.md leaves it open; pick whichever reads more naturally given
-`mgr` is already threaded into `newServeMux` for the turn/SSE routes) that
-looks up the live session and sets a field on it (probably calling
-`SetModel` directly, or a small per-role override map on `managedSession`
-if per-role overrides beyond just "code" are wanted — re-read GOAL.md §3
-P4 and the Phase 4 doc paragraph before deciding scope: it may be that
-only `code` needs a session override since that's all `/model` supports
-today, in which case a per-role map would be unrequested). No config-file
-I/O at all for this leg — the "unknown-field survival" test that mattered
-for user/project (M4.2c2b1) doesn't apply; the equivalent invariant to
-test is "reverts on resume" (a fresh `mgr.Resume(id)` after a
-session-scope write should NOT carry the override — it re-hydrates from
-the transcript, which never recorded it). After M4.2c2b2, M4.2 as a whole
-is done (a/b1/b2/b3/c1/c2a/c2b1/c2b2 all ticked) — M4.3 (cross-session
-concurrency test) still needs its OWN dedicated test even though
-`TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
-same-session half; M4.3's box is the two-DIFFERENT-sessions-run-parallel
-half, not yet proven anywhere.
+Start M4.3: session manager concurrency — two turns on ONE session
+serialize (already proven by M4.2b2's `TestTurnEndpointSameSessionSerializes`,
+serve_turn_test.go — that box does not need re-proving) AND turns on TWO
+DIFFERENT sessions run concurrently, not serialized against each other
+(the half M4.3 actually needs a fresh test for; nothing in the suite
+proves it yet — `ms.mu` is per-`managedSession`, so two different
+`*managedSession` values already don't share a lock, but that needs a
+positive concurrency assertion, not just an absence-of-evidence
+inference). Likely shape: reuse `turnTestBackend`-style tracking
+(serve_stream_test.go / serve_turn_test.go precedent — a scripted backend
+that records concurrent in-flight request count, sleeps briefly mid-
+request to open a race window) but POST to two DIFFERENT session ids
+(both created against the same or different projects — GOAL.md's wording
+is just "two sessions concurrent", doesn't require different projects)
+from two goroutines and assert max-observed-concurrency ≥ 2 (the inverse
+of M4.2b2's `want 1` assertion). Route: reuse the plain `POST
+.../turn` endpoint (serve_turn.go) — no new production code is expected
+for M4.3 itself (the per-session mutex already has the right shape,
+`ms.mu` not a package-level lock), so this may be a test-only increment;
+confirm that assumption by writing the test FIRST against current
+`handleTurn` before assuming no implementation change is needed. After
+M4.3, M4.4 (cross-process fslock contention via the re-exec helper
+pattern) is the next box — note the amendment A1 scope-limits M4.4 to
+"serve integration + the two-process test only" since `internal/fslock`
+itself already exists.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1332,6 +1332,67 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `serve_models_test.go` extended — `serve_models.go`/`serve_models_test.go`
   did not exist at genesis (confirmed via `git cat-file -e <genesis>:<path>`
   failing for both), so extending the test file is not a violation.
+
+- 2026-07-12: M4.2c2b2 landed `handleSetSessionModelBinding`
+  (serve_models.go), the session-scope leg of `PUT
+  /api/models/{role}?scope=user|project|session`: `scope=session` is
+  branched off the top of `handleSetModelBinding` (before the file-backed
+  `switch`) since it shares NOTHING with the user/project legs — no
+  `configPath`/`PersistModelBinding`/`readJSONDoc` involvement at all, it
+  mutates a live `*managedSession` directly via `SessionManager.Get(id)`
+  (the same seam `handleTurn`/`handleTurnStream` already use) and calls
+  `CortexSession.SetModel` — literally the same call main.go's REPL
+  `/model` command makes (`session_core.go:106`), confirmed by reading it
+  before assuming rather than guessing at a parallel mechanism. Only
+  `role=code` is accepted at session scope (400 for any other role):
+  `SetModel` is the only session-level override the codebase has today
+  (it mutates `cs.Request.Model` alone, nothing else), so GOAL.md §3 P4's
+  models-view mention of five roles (code/study/reason/fast/embed) across
+  "the three scopes" is read as user/project scope having all five (which
+  M4.2c2a's `GET /api/models` and M4.2c2b1's file-backed write already
+  support for every role) while session scope — explicitly glossed in
+  docs/cortex-web.md Phase 4 as "the API form of `/model`" — inherits
+  `/model`'s own real limitation; inventing a per-role in-memory override
+  map on `managedSession` to accept all five roles at session scope would
+  be new, unrequested surface with no existing REPL behavior backing it
+  (the exact GOAL.md §1 "invents a parallel mechanism" anti-pattern).
+  `mgr.Get(id)` returning `false` (session not currently live in this
+  process — never created, or created then evicted/restarted-away) is a
+  404, matching `handleTurn`'s existing "unknown/not-live session id"
+  convention (M4.2b2) rather than implicitly resuming from disk — a
+  session-scope write against a session nobody has brought live via `POST
+  .../sessions` first has no live object to mutate. Held `ms.mu` (the
+  same per-session turn-serializing mutex `handleTurn`/`handleTurnStream`
+  use, M4.2b2/b3) around the `SetModel` call + read-back — small but real:
+  without it, a session-scope write racing an in-flight turn could
+  read/write `cs.Request.Model` unsynchronized with the turn loop's own
+  access to the same field. "Reverts on resume" needed no explicit
+  clear-on-resume code at all — it holds by construction, the same way
+  M4.2b1's "serve owns no state" does: `SetModel` never touches the
+  transcript file, so a second, independent `SessionManager` (standing in
+  for a restart, mirroring
+  `TestSessionManagerResumeRehydratesFromTranscriptAfterRestart`'s exact
+  pattern) resuming the id from disk simply never sees the override,
+  proven by `TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume`.
+  Modified (not just extended) `serve_models_test.go`'s pre-existing
+  `TestSetModelBindingUnsupportedScopeReturns400` to drop `"session"` from
+  its unsupported-scope table (it's supported now) — confirmed via `git
+  cat-file -e <genesis>:cmd/cortex/serve_models_test.go` failing (the file
+  postdates genesis, first landed by M4.2c2a within this loop) that this
+  is not a standing-regression-guard violation. Load-bearing check done:
+  replaced the `scope == "session"` branch with a no-op `_ = mgr` (keeping
+  the signature compiling), confirmed
+  `TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume`
+  and `TestSetModelBindingSessionScopeUnknownSessionReturns404` both fail
+  (400 where 200/404 was wanted; the missing-query and unsupported-role
+  tests still incidentally passed since they 400 either way — expected,
+  noted so a future reader isn't confused why only 2 of 4 new tests moved),
+  restored from a saved copy (`/tmp/serve_models.go.bak`) and reran the
+  full verify suite green. Standing-regression-guard check done: `git
+  diff --name-only <genesis>..HEAD -- '*_test.go'` — `serve_models_test.go`
+  is the only test file touched this iteration and does not exist at
+  genesis (confirmed via `git cat-file -e`), so extending it is not a
+  violation.
 
 ## Known Issues (append-only)
 - (none yet)
