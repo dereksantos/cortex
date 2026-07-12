@@ -99,8 +99,9 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // interface, so this is httptest-testable with a fake — no model needed).
 // M4.2b1 adds session create/resume (mgr is the SessionManager, itself
 // httptest-testable via an injected hermetic sessionFactory — see
-// serve_session.go). M4.2b2 adds the turn handler (serve_turn.go); SSE
-// (M4.2b3) and M4.2c (landscape/models) extend this mux further.
+// serve_session.go). M4.2b2 adds the turn handler (serve_turn.go); M4.2b3
+// adds the SSE turn/stream handler (serve_stream.go); M4.2c (landscape/
+// models) extends this mux further.
 func newServeMux(reg registry.Registry, mgr *SessionManager) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +112,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager) *http.ServeMux {
 	mux.HandleFunc("GET /api/projects/{name}/sessions", handleListProjectSessions(reg))
 	mux.HandleFunc("POST /api/projects/{name}/sessions", handleCreateSession(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn", handleTurn(mgr))
+	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
 	return mux
 }
 

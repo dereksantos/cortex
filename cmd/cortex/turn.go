@@ -36,7 +36,23 @@ type TurnResult struct {
 	Interrupted bool
 }
 
+// Turn runs one turn with no progress notifications — today's behavior,
+// preserved for every existing call site (REPL, discord, greeting, headless
+// `turn`). TurnWithProgress is the identical logic with a Progress sink
+// attached (M4.2b3's SSE handler is its only caller today); both delegate to
+// the unexported turn so there's exactly one implementation.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
+	return cs.turn(ctx, input, nil)
+}
+
+// TurnWithProgress is Turn with p (may be nil) wired into runLoop's existing
+// Progress seam (cmd/cortex/loop.go) — the same breadcrumb sink the REPL's
+// live display already drives, just not previously reachable from Turn().
+func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p Progress) (TurnResult, error) {
+	return cs.turn(ctx, input, p)
+}
+
+func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress) (TurnResult, error) {
 	// Stamp transcript entries with this turn's ordinal (resume replays them
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
@@ -125,7 +141,7 @@ func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, er
 	}
 	ts.AfterToolResult = onAfterToolResult
 
-	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil, cs.Append, onStatusUpdate)
+	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens

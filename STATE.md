@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 23
+Updated: 2026-07-12 · Iteration: 24
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -207,11 +207,15 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
           `TestTurnEndpointRequiresAuth`,
           `TestTurnEndpointSameSessionSerializes`
           (cmd/cortex/serve_turn_test.go).
-    - [ ] M4.2b3 SSE progress stream rendered from the existing `Progress`
+    - [x] M4.2b3 SSE progress stream rendered from the existing `Progress`
           seam (`cmd/cortex/loop.go:76`, a bare `func(line string)` — fan
           it into `data: ...\n\n` chunks); the serve `http.Server` must set
           NO `WriteTimeout` for this (GOAL.md D6/M4.5 — set it now even
-          though the dedicated test lands at M4.5).
+          though the dedicated test lands at M4.5). `<PENDING-HASH>` —
+          `TestTurnStreamEndpointStreamsProgressAndResult`,
+          `TestTurnStreamEndpointUnknownSessionReturns404`,
+          `TestTurnStreamEndpointRequiresAuth`
+          (cmd/cortex/serve_stream_test.go).
   - [ ] M4.2c Landscape + models endpoints: landscape (Phase 2's
         persisted result), models (merged config + fleet read; scoped
         role-binding writes at user/project/session via M1.3's
@@ -231,32 +235,29 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2b3: SSE progress stream for a turn, rendered from the existing
-`Progress` seam (`cmd/cortex/loop.go:76`, a bare `func(line string)` — fan it
-into `data: ...\n\n` chunks per GOAL.md §3 P4/M4.5). `handleTurn`
-(`cmd/cortex/serve_turn.go`, M4.2b2, just landed) currently runs
-`ms.cs.Turn(ctx, input)` and returns one JSON blob at the end; M4.2b3 needs a
-second route (or a content-negotiated variant of the same one — designer's
-call, record in Decisions) that instead streams progress lines as SSE while
-the turn is in flight, THEN a final event carrying the same
-reply/interrupted shape `turnResponse` already has. The natural seam:
-`runLoop` (loop.go) takes a `Progress` callback today — `Turn()` itself
-(`cmd/cortex/turn.go:39`) doesn't yet thread one through to `runLoop`'s call
-at line 128 (`runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, nil,
-cs.Append, onStatusUpdate)` — the `nil` is where a `Progress` goes, per
-loop.go's signature; check it before assuming). Threading a `Progress` into
-`Turn()` is itself a signature change every existing `Turn()` call site
-(REPL, discord, greeting, headless `turn`) would need to tolerate (nil ⇒ no
-notifications, matching today) — read `loop.go`'s `Progress` type and every
-`Turn(` call site before deciding the shape, per GOAL.md §5's "read the
-actual seam, don't guess" pattern this loop has followed all along. The
-dedicated "SSE event order and shape golden-tested" + "no WriteTimeout" test
-is M4.5's box, not M4.2b3's — M4.2b3 only needs the stream to exist and
-carry real progress + a terminal result event; M4.5 pins the exact shape.
-Setting `http.Server.WriteTimeout` to 0/unset on the serve server (it
-already is, by omission, in `newServeServer` — confirmed by reading
-`serve.go`) should stay that way; do not add a WriteTimeout while building
-this. M4.2c (landscape + models) remains after M4.2b3.
+Start M4.2c: landscape + models endpoints on `cortex serve`. Landscape:
+expose Phase 2's persisted scan result (`cmd/cortex/scan.go`'s
+`buildScanReport`/`resolveScanRoots`) as `GET /api/landscape` (or similar —
+designer's call; check whether `cmd/cortex` importing itself is fine, unlike
+M2.6's `internal/tools`-can't-import-`cmd/cortex` cycle — `serve_*.go` is
+already in `package main` alongside `scan.go`, so `buildScanReport` should be
+directly callable with no cycle). Models: read the merged config (`LoadConfig`/
+`loadMergedConfig`, main.go) + discovered fleet, and support scoped
+role-binding writes at user (`~/.cortex/config.json`)/project
+(`./.cortex/config.json`)/session (in-memory only) scope via M1.3's
+read-modify-write helpers (`configwrite.go`'s `readJSONDoc`/`writeJSONDoc`/
+`setJSONPath`, the same ones `PersistBackend`/`PersistScanRoots` already use)
+— GOAL.md M4.2 requires an unknown-field survival test (M1.3's own pattern)
+and an assertion that key material (API keys) is absent from every response.
+Read `docs/cortex-web.md`'s Phase 4 models-endpoint paragraph (~line 218) and
+GOAL.md §1's "Deferred" note (models-endpoint re-keying re-running the
+bootstrap chain is explicitly OUT of scope for M4.2c — only read + scoped
+role-binding write, not re-auth) before designing the shape. After M4.2c,
+M4.2 as a whole is done (a/b1/b2/b3/c all ticked) — M4.3 (cross-session
+concurrency test) still needs its OWN dedicated test even though
+`TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
+same-session half; M4.3's box is the two-DIFFERENT-sessions-run-parallel
+half, not yet proven anywhere.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1092,6 +1093,58 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   registration) and `serve_session.go` (the new `mu` field + doc comment)
   were modified among non-test files; `serve_turn.go`/`serve_turn_test.go`
   are new — no pre-existing test file was touched.
+
+- 2026-07-12: M4.2b3 landed `handleTurnStream` (`cmd/cortex/serve_stream.go`,
+  route `POST /api/projects/{name}/sessions/{id}/turn/stream`, registered
+  alongside the plain `POST .../turn` in `newServeMux` — a SEPARATE route
+  rather than a content-negotiated variant of the same one, the two options
+  the prior Next Up note left open: kept both endpoints simple and
+  independently curl-able (a `text/event-stream` route needs different
+  header/flush handling from the start of the response, which is awkward to
+  branch on inside one handler after the body's already been decoded) rather
+  than adding `Accept`-header dispatch logic nothing asked for. Threaded
+  `Progress` into `Turn()` per the prior Next Up note's own analysis, but
+  WITHOUT changing `Turn()`'s signature (avoiding the ~8-call-site ripple
+  the note flagged as a real cost): extracted the existing body into an
+  unexported `(cs *CortexSession) turn(ctx, input string, progress Progress)`
+  (turn.go) that both `Turn(ctx, input)` (→ `cs.turn(ctx, input, nil)`,
+  identical to today for every existing call site — REPL, discord, greeting,
+  headless `turn`, all untouched) and a new exported
+  `TurnWithProgress(ctx, input, p Progress)` (→ `cs.turn(ctx, input, p)`,
+  `handleTurnStream`'s only caller) delegate to — one implementation, two
+  call shapes, zero signature changes elsewhere. `runLoop`'s `nil` Progress
+  argument at turn.go's call site became the threaded `progress` parameter
+  directly (no wrapping). SSE wire shape (not yet golden-pinned — that's
+  M4.5's box): `event: progress\ndata: {"line":"..."}\n\n` once per tool
+  call (`progressEvent{Line string}`, JSON-marshaled from `progressLine`'s
+  existing "  ▸ name(arg)" text via loop.go's Progress seam unchanged), then
+  a terminal `event: result\ndata: {...turnResponse...}\n\n` (same struct
+  `handleTurn`, serve_turn.go, already returns as plain JSON) — or
+  `event: error\ndata: {"error":"..."}\n\n` on failure, never both. `sseEvent`
+  (serve_stream.go) is a small shared writer (marshal → `event:`/`data:`
+  lines → flush) rather than three ad-hoc `fmt.Fprintf` call sites, so the
+  wire format has exactly one implementation for M4.5 to later pin. Held the
+  SAME per-session `ms.mu` mutex `handleTurn` uses, for the same reason
+  (M4.2b2's Decisions entry) — a concurrent turn on the SAME session (stream
+  or plain) must serialize; proven directly by reusing `SessionManager`
+  unchanged, no new locking logic. Test backend
+  (`streamTurnTestSessionFactory`, serve_stream_test.go) is a genuine
+  2-round scripted `httptest.Server` (round 1 → a `bash "echo hi"` tool
+  call, round 2 → final content) run through the REAL `coderDispatcher`/
+  `tools.Execute` path — not a fake `Dispatch` — so the progress event is
+  proven against the actual seam runLoop exposes, not a synthetic call to
+  `sseEvent` directly; `echo hi` reused verbatim from
+  `TestTurnStopsRepeatedToolCalls`'s established precedent (main_test.go)
+  that this exact command classifies Safe with no `classifyShell`/reasoner
+  fake needed. Load-bearing check done: reverted turn.go's `runLoop` call to
+  pass `nil` instead of `progress` (simulating the pre-increment state),
+  confirmed `TestTurnStreamEndpointStreamsProgressAndResult` fails
+  ("no progress event seen"), restored from a saved copy and reran the full
+  verify suite green (plus `go test -run 'TestTurnStreamEndpoint|
+  TestTurnEndpoint' -race -count=2`, 0 races). Standing-regression-guard
+  check done: `git diff --name-only <genesis>..HEAD -- '*_test.go'` — the
+  new `serve_stream_test.go` is not present at genesis; no pre-existing test
+  file was touched (only `turn.go`/`serve.go`, both non-test, modified).
 
 ## Known Issues (append-only)
 - (none yet)
