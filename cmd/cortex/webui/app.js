@@ -8,6 +8,19 @@
 // registered projects (name, git branch/change status, session list) into
 // the #dashboard container built by buildDashboardViewModel
 // (cmd/cortex/webui_dashboard.go).
+//
+// M5.3c2 — the session screen: fetch('/api/projects/{name}/sessions/{id}')
+// renders the transcript (buildTranscriptViewModel,
+// cmd/cortex/webui_transcript.go) into the #session container. Read-only
+// render only — the input box (M5.3c3) and live SSE (M5.3c4) are separate,
+// later sub-items.
+
+// queryParam reads a single query-string parameter from the page URL — the
+// same window.location.search source authToken()'s "?token=" precedent
+// uses, generalized for "?project=<name>&session=<id>".
+function queryParam(name) {
+  return new URLSearchParams(window.location.search).get(name) || "";
+}
 
 // authToken resolves the bearer token the API surface requires. A plain
 // browser navigation can't attach a custom Authorization header, so the
@@ -16,7 +29,7 @@
 // every /api/... fetch this page makes (see serve.go's authMiddleware,
 // M5.3b Decisions Log).
 function authToken() {
-  return new URLSearchParams(window.location.search).get("token") || "";
+  return queryParam("token");
 }
 
 // apiFetch issues an authenticated GET against the given /api/... path.
@@ -91,4 +104,77 @@ function loadDashboard() {
     });
 }
 
+// renderSession writes a transcript view-model (transcriptViewModel's JSON
+// shape) into the #session container via plain DOM writes — textContent
+// only, never innerHTML with response data, matching renderDashboard's
+// posture (transcript content is untrusted-ish local turn history).
+function renderSession(vm, container) {
+  container.textContent = "";
+
+  const heading = document.createElement("h2");
+  heading.textContent = "Session " + vm.session_id;
+  container.appendChild(heading);
+
+  if (!vm.entries || vm.entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No turns yet.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const list = document.createElement("ul");
+  for (const e of vm.entries) {
+    const row = document.createElement("li");
+
+    const role = document.createElement("strong");
+    role.textContent = e.role + ": ";
+    row.appendChild(role);
+
+    const content = document.createElement("span");
+    content.textContent = e.content;
+    row.appendChild(content);
+
+    if (e.tool_calls && e.tool_calls.length > 0) {
+      const tools = document.createElement("div");
+      tools.textContent =
+        "tools: " + e.tool_calls.map((tc) => tc.name).join(", ");
+      row.appendChild(tools);
+    }
+
+    list.appendChild(row);
+  }
+  container.appendChild(list);
+}
+
+// loadSession no-ops when the #session container is absent (dashboard-only
+// pages) or the ?project=/&session= query params aren't both present —
+// this screen is reached by navigating with those params set, following
+// authToken()'s ?token= precedent (no router/framework, per D9).
+function loadSession() {
+  const container = document.getElementById("session");
+  const project = queryParam("project");
+  const session = queryParam("session");
+  if (!container || !project || !session) {
+    return;
+  }
+  container.textContent = "Loading session…";
+  apiFetch(
+    "/api/projects/" +
+      encodeURIComponent(project) +
+      "/sessions/" +
+      encodeURIComponent(session),
+  )
+    .then((resp) => {
+      if (!resp.ok) {
+        throw new Error("GET session: " + resp.status);
+      }
+      return resp.json();
+    })
+    .then((vm) => renderSession(vm, container))
+    .catch((err) => {
+      container.textContent = "Failed to load session: " + err.message;
+    });
+}
+
 loadDashboard();
+loadSession();
