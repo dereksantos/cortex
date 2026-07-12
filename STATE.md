@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 34
+Updated: 2026-07-12 · Iteration: 35
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
@@ -301,7 +301,27 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       (cmd/cortex/webui_test.go).
 - [ ] M5.2 View-models built in Go and golden-tested: project dashboard,
       session transcript (from real JSONL fixtures), landscape report,
-      models view (bindings + effective scope resolution).
+      models view (bindings + effective scope resolution). **Split
+      (2026-07-12, this iteration) into:**
+  - [x] M5.2a Project dashboard view-model: `buildDashboardViewModel`
+        composes `internal/registry`'s project list, the M4.2a session-list
+        seam (`listSessions`/`sessionSummary`), and a new dir-scoped git
+        change-status helper (`change.go`'s `changeStatusFor`), sorted by
+        project name; a project whose git status can't be read still
+        renders with the error surfaced per-row. `4946ee3` —
+        `TestBuildDashboardViewModelGolden`,
+        `TestBuildDashboardViewModelEmptyRegistryReturnsEmptyProjectsNotNull`,
+        `TestBuildDashboardViewModelNonGitProjectSurfacesChangeError`
+        (cmd/cortex/webui_dashboard_test.go),
+        `TestChangeStatusForReportsBranchActiveAndClean`,
+        `TestChangeStatusForNotAGitRepoReturnsError`
+        (cmd/cortex/change_status_test.go).
+  - [ ] M5.2b Session transcript view-model, from real JSONL fixtures.
+  - [ ] M5.2c Landscape report view-model, wrapping M2's `ScanReport`
+        (the same shape `cortex scan --json` / `GET /api/landscape`
+        already produce).
+  - [ ] M5.2d Models view-model: bindings + effective scope resolution,
+        wrapping M4.2c2a's `/api/models` shape.
 - [ ] M5.3 The four screens render those view-models; JS bounded
       mechanically: a Go test over the embedded FS asserts each `.js`
       file ≤ 300 lines and total JS ≤ 1200 lines.
@@ -310,23 +330,23 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.2: "View-models built in Go and golden-tested: project dashboard,
-session transcript (from real JSONL fixtures), landscape report, models view
-(bindings + effective scope resolution)." Per GOAL.md §2's package layout
-these Go view-model builders live in `cmd/cortex/webui*.go` alongside M5.1's
-`webui.go`. Likely shape: one builder function + one golden test per screen
-(e.g. `buildDashboardViewModel(reg, mgr)`, `buildTranscriptViewModel(path)`
-reading a real `.jsonl` session fixture, `buildLandscapeViewModel(report)`
-wrapping M2's `ScanReport`, `buildModelsViewModel(cfg, fleet)` wrapping
-M4.2c2a's `/api/models` shape) — each rendering a struct (or JSON) that a
-`testdata/*.golden` file pins, following the golden-test convention already
-used at `TestRenderScanReportGolden` (cmd/cortex/scan_test.go) and
-`TestRenderProjectListGolden` (cmd/cortex/project_test.go). M5.3 (screens
-render these + JS size caps) and M5.4 (end-to-end smoke) build on this, so
-keep M5.2 to pure Go structs/JSON — no HTML/JS wiring yet. Read
-docs/cortex-web.md's Phase 5 section (already read this iteration) before
-starting; GOAL.md §3 P5 binds "rendering logic lives in golden-tested Go
-view-models; JS is fetch/render/SSE-append only, enforced mechanically."
+Start M5.2b: "Session transcript view-model, from real JSONL fixtures." Per
+GOAL.md §2's package layout this lives in a new `cmd/cortex/webui_*.go` file
+alongside M5.2a's `webui_dashboard.go`. Likely shape:
+`buildTranscriptViewModel(path string)` reading a real session `.jsonl` via
+the existing `loadSession` (session.go) — render each message's role/content
+(and tool-call/tool-result turns if the transcript type distinguishes them;
+check `loadSession`'s return shape first) into a golden-tested struct, same
+"literal string in a test" golden convention M5.2a just used (no
+`testdata/*.golden` file — that mechanism doesn't exist in this repo; the
+STATE.md Decisions Log entry three notes up corrects the prior iteration's
+"testdata/*.golden" suggestion). M5.2c (landscape, wrapping M2's
+`ScanReport`) and M5.2d (models, wrapping M4.2c2a's `/api/models` shape) are
+the remaining M5.2 splits after this one. Keep to pure Go structs/JSON — no
+HTML/JS wiring yet (that's M5.3/M5.4). Read docs/cortex-web.md's Phase 5
+section before starting; GOAL.md §3 P5 binds "rendering logic lives in
+golden-tested Go view-models; JS is fetch/render/SSE-append only, enforced
+mechanically."
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1631,6 +1651,71 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   <genesis>..HEAD -- '*_test.go'` lists only files that postdate genesis
   (webui_test.go included, newly created) — no pre-existing test file
   touched.
+
+- 2026-07-12: M5.2 split into M5.2a (dashboard)/b (transcript)/c
+  (landscape)/d (models) — one view-model builder per Phase 5 screen,
+  mirroring the granularity M4.2's splits already established. M5.2a
+  landed `buildDashboardViewModel` (`cmd/cortex/webui_dashboard.go`)
+  composing three existing seams rather than inventing new ones (GOAL.md
+  pillar 3): `internal/registry.Registry.List` for the project set,
+  M4.2a's `listSessions`/`sessionSummary` (serve_routes.go) for the
+  per-project session list, and a NEW `changeStatusFor(dir string)`
+  helper in `change.go` for git change status — `cortex change status`'s
+  existing logic (`currentBranch`/`gitClean`/`onChangeBranch`) is CWD-only
+  (`gitCmd` shells out with no `Dir` set), which doesn't work for a
+  dashboard rendering arbitrary registered project roots from inside
+  `cortex serve`'s process. Rather than duplicate the git-status logic,
+  split `gitCmd` into a thin wrapper over a new `gitCmdIn(dir string,
+  args ...string)` (dir="" behaves identically to the old CWD-implicit
+  gitCmd — a behavior-preserving refactor, `cortex change`'s own three
+  existing tests stayed green untouched) and added `changeStatusFor` on
+  top of it; `currentBranch`/`gitClean`/`onChangeBranch` themselves were
+  left untouched (still CWD-based, still what `cortex change status`
+  uses) rather than rewritten to take a dir param, since GOAL.md's
+  non-goal list and pillar 5 ("small honest slices") don't ask for that
+  wider refactor and every existing call site is correctly CWD-scoped
+  already. A project whose git status errors (not a git repo, git not on
+  PATH, etc.) still renders in the dashboard with a per-row
+  `change_error` field rather than failing the whole view-model build —
+  chosen because a partially-registered or non-git project shouldn't take
+  down the dashboard for every OTHER project. Sort by project name for a
+  deterministic wire order (`registry.Registry.List` makes no ordering
+  guarantee — confirmed both `FileRegistry.List` and the test-only
+  `fakeRegistry.List`, which iterates a Go map, are unordered). Golden
+  test correction: the prior iteration's Next Up note suggested a
+  `testdata/*.golden` file; no such mechanism exists anywhere in this
+  repo (confirmed by search) — followed the ACTUAL established
+  convention instead (a literal expected string inside the Go test
+  itself, per M1.5/M2.5's Decisions entries). Two golden-adjacent
+  determinism traps found and fixed here, both worth flagging for M5.2b:
+  (1) `sessionInfo.ModTime` comes back from `os.Stat` in the host's LOCAL
+  timezone, which would make a fixed-instant fixture serialize with a
+  machine-dependent UTC offset — `buildDashboardViewModel` normalizes
+  every session's `ModTime` to UTC before it's on the wire; (2) a fixture
+  git repo with session files written directly under its `.cortex/`
+  directory reads as dirty (untracked) unless a committed `.gitignore`
+  excludes `.cortex/` first — mirrors CLAUDE.md's real
+  "`.cortex/` in `.gitignore`" invariant, so the fixture now matches how
+  a real registered project is actually set up, not a fixture-only
+  workaround. Standing-regression-guard note: `change.go` (not a test
+  file) was modified freely; new tests for it were deliberately placed in
+  a brand-new `cmd/cortex/change_status_test.go` rather than appended to
+  the genesis-predating `cmd/cortex/change_test.go`, so the guard's
+  mechanical `git diff --name-only <genesis>..HEAD -- '*_test.go'` check
+  stays clean without needing a correction-rule justification (confirmed:
+  `change_test.go` was restored byte-identical to `git show HEAD~1:...`
+  before committing). Load-bearing checks done: (1) commented out the
+  `sort.Slice` call and the `changeStatusFor` branch/active/clean
+  assignment (replaced with a no-op) — confirmed both
+  `TestBuildDashboardViewModelGolden` and
+  `TestBuildDashboardViewModelNonGitProjectSurfacesChangeError` fail with
+  the expected mismatches, then restored from a pre-edit copy; (2)
+  standing-regression-guard check via `git cat-file -e
+  <genesis>:cmd/cortex/change_status_test.go` and the same for
+  `webui_dashboard.go`/`webui_dashboard_test.go` — all three fail ("not
+  in <genesis>"), confirming none is a pre-existing file, and `git diff
+  --name-only <genesis>..HEAD -- '*_test.go'` after the commit lists no
+  genesis-present test file.
 
 ## Known Issues (append-only)
 - (none yet)
