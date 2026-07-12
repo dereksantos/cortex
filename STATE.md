@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 38
+Updated: 2026-07-12 · Iteration: 39
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
@@ -341,34 +341,59 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
         (a/b/c/d all ticked).**
 - [ ] M5.3 The four screens render those view-models; JS bounded
       mechanically: a Go test over the embedded FS asserts each `.js`
-      file ≤ 300 lines and total JS ≤ 1200 lines.
+      file ≤ 300 lines and total JS ≤ 1200 lines. **Split (2026-07-12,
+      this iteration) into:**
+  - [x] M5.3a Mechanical JS size-cap test: a Go test walks the embedded
+        webui FS and asserts each `.js` file ≤ 300 lines and the total
+        ≤ 1200 lines, as a standing regression guard the later screen
+        splits build under. `8aedc02` — `TestWebUIJavaScriptSizeCaps`
+        (cmd/cortex/webui_jscap_test.go).
+  - [ ] M5.3b Dashboard screen: `index.html`/`app.js` grow real
+        fetch/render logic for the project dashboard, replacing the
+        M5.1 placeholder — `fetch('/api/projects')` (+ per-project
+        sessions) rendered via `buildDashboardViewModel`'s JSON shape,
+        DOM writes only, no framework.
+  - [ ] M5.3c Session screen: transcript render (`buildTranscriptViewModel`)
+        + input box + live SSE progress against the M4.2b3 stream
+        endpoint.
+  - [ ] M5.3d Landscape screen: renders `buildLandscapeViewModel`
+        (M5.2c, a `ScanReport` pass-through) via `GET /api/landscape`.
+  - [ ] M5.3e Models screen: renders `buildModelsViewModel` (M5.2d) —
+        role bindings across the three scopes with a scope switcher,
+        wired to M4.2c2b's `PUT /api/models/{role}?scope=...` writes.
 - [ ] M5.4 End-to-end smoke: start serve with a scripted sender ⇒ create
       session ⇒ POST turn ⇒ SSE stream renders ⇒ transcript page shows
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3: "JS bounded mechanically: a Go test over the embedded FS
-asserts each `.js` file ≤ 300 lines and total JS ≤ 1200 lines, and the
-four screens render their view-models." M5.2 is now fully complete
-(a/b/c/d all ticked) — all four Go view-model builders exist
-(`buildDashboardViewModel`, `buildTranscriptViewModel`,
-`buildLandscapeViewModel`, `buildModelsViewModel`). M5.1 already planted placeholder assets under `cmd/cortex/webui/`
-(`index.html`, `app.css`, `app.js` — `app.js` currently just proves the
-embed mechanism, containing the literal string "Cortex web UI" per
-`TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence`); M5.3 is where
-these placeholders grow into the real four-screen app. Per GOAL.md §3
-P5: "JS is fetch/render/SSE-append only" and the size cap is "enforced
-mechanically" — write the line-count test FIRST (walk the embedded FS,
-`strings.Count(string(data), "\n")+1` per `.js` file, assert ≤300 and a
-running total ≤1200) so a red baseline exists on a repo with zero (or
-placeholder) `.js` files, then add just enough real markup/script per
-screen to render each view-model's JSON (dashboard/session/landscape/models)
-via `fetch` against the M4.2 API + `innerHTML`/DOM writes — no framework, no
-build step (GOAL.md non-goals, D9). This item is large; per GOAL.md §7 step
-4, consider splitting into per-screen sub-items (M5.3a dashboard, M5.3b
-session+SSE, M5.3c landscape, M5.3d models, or JS-size-cap-test vs.
-screens-render as the split axis instead) if one iteration can't land all
-four screens' rendering wiring at once.
+Start M5.3b: the dashboard screen. `cmd/cortex/webui/index.html` and
+`app.js` are still M5.1's placeholders (`app.js` contains only the
+literal comment string "Cortex web UI", asserted by
+`TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence` — when app.js
+grows real content, keep that substring somewhere, e.g. a page title or
+header, or update that test alongside it; it postdates genesis so it's
+editable without a Decisions-Log correction). Add a `fetch('/api/projects')`
+call rendering `buildDashboardViewModel`'s JSON (project name, sessions,
+change status) into the DOM via plain `innerHTML`/`textContent` writes —
+no framework, no build step (GOAL.md D9). The M5.3a size-cap test
+(`TestWebUIJavaScriptSizeCaps`, cmd/cortex/webui_jscap_test.go) already
+gates growth mechanically — no new cap test needed for M5.3b, just stay
+under it. Auth: the dashboard page itself is served behind
+`authMiddleware` (M5.1 decision — same bearer-token gate as every other
+route), so the browser-side `fetch` calls need the token too; how the
+page acquires the token for its own `fetch` calls (e.g. a `?token=`
+query param read into JS, or documenting that this UI is meant to be
+opened with the token already known) is an open design question for
+this increment — no prior Decisions entry resolves it. Testing posture:
+since there's no JS engine in this repo's stdlib-only test suite, "the
+screen renders the view-model" can only be proven at the Go layer by
+structural assertions over the served HTML/JS source (e.g. the embedded
+`app.js` source contains the expected `fetch('/api/projects')` call,
+`index.html` contains the container element JS targets) — NOT by
+executing the JS and checking DOM output. Decide and record in the
+Decisions Log what "tested" means for M5.3b before or as part of
+landing it, since M5.3c/d/e will inherit whatever convention is set
+here.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1842,6 +1867,43 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   fail to build (6 `undefined` errors: `buildModelsViewModel`,
   `modelBindingView`, `bindingSourceFleetAuto`, `bindingSourceUnbound`),
   restored and reran green.
+
+- 2026-07-12: M5.3 split into M5.3a (mechanical JS size-cap test) through
+  M5.3e (models screen), following the prior iteration's suggested
+  "JS-size-cap-test vs. screens-render" axis rather than a pure
+  per-screen split — the cap test is a pure Go-side regression guard
+  with no dependency on any screen's markup existing yet, so landing it
+  standalone first (rather than folding it into whichever screen lands
+  first) means it starts gating growth immediately instead of only from
+  whichever screen happens to be M5.3's first sub-item. M5.3a landed as
+  a test-only increment (no production code): `TestWebUIJavaScriptSizeCaps`
+  (cmd/cortex/webui_jscap_test.go) walks `webUIFS()` (M5.1's embedded
+  FS accessor, already exported) summing `.js` line counts, asserting
+  each file ≤300 lines and the total ≤1200. Chose `strings.Count(data,
+  "\n")+1` as the line-count method per the prior iteration's own Next
+  Up note (matches the DoD's literal phrasing). Because M5.1's
+  placeholder `app.js` is far under both caps already, there was no
+  natural implementation change to red-then-green against (unlike most
+  increments, this test needs no companion production code — the
+  embedded FS and its accessor already exist); load-bearing check done
+  the way M2.3's content-leak test did it (planted a fixture that
+  violates the invariant, confirmed the test catches it, removed the
+  fixture before committing) rather than the more common
+  revert-the-implementation pattern: (1) planted a single 321-line
+  `.js` fixture under `cmd/cortex/webui/`, confirmed the per-file leg
+  fails ("zz_oversized_fixture.js: 321 lines, want <= 300"); (2)
+  separately planted five 280-line fixtures (each under the per-file
+  cap individually, 1400 lines combined) confirmed the total leg fails
+  independently of the per-file leg ("total JS lines ... = 1409, want
+  <= 1200"); removed both fixture sets, reran green. Both legs are
+  therefore independently load-bearing, not just one covering the
+  other. Standing-regression-guard check: `webui_jscap_test.go` is a
+  brand-new file (postdates genesis), so no pre-existing test file was
+  touched. Deferred to M5.3b: how the served page's own `fetch` calls
+  authenticate against `authMiddleware`'s bearer-token gate — no prior
+  Decisions entry resolves this, and it blocks any screen's fetch logic
+  from actually working end-to-end once written, not just being
+  tested.
 
 ## Known Issues (append-only)
 - (none yet)
