@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 30
+Updated: 2026-07-12 · Iteration: 31
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -279,32 +279,32 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       serve integration + the two-process test only; see amendment A1.)
       `9621c1d` — `TestCrossProcessSessionResumeGetsBusyError`
       (cmd/cortex/serve_lock_test.go).
-- [ ] M4.5 SSE event order and shape golden-tested via the `Progress`
+- [x] M4.5 SSE event order and shape golden-tested via the `Progress`
       seam; a test asserts the serve `http.Server` sets no `WriteTimeout`.
+      `ec0b476` — `TestTurnStreamEndpointGoldenFramesForMultiStepTurn`
+      (cmd/cortex/serve_sse_golden_test.go),
+      `TestNewServeServerSetsNoWriteTimeout` (cmd/cortex/serve_test.go).
 - [ ] M4.6 Serve owns no state: kill + restart re-derives every list from
       disk (restart the manager, listings identical).
 - [ ] M4.7 Idle sessions evict; a subsequent request re-hydrates from the
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.5: SSE event order/shape golden test + a test asserting the serve
-`http.Server` sets no `WriteTimeout`. The SSE progress stream itself
-already exists (M4.2b3, `cmd/cortex/serve_stream.go`,
-`TestTurnStreamEndpointStreamsProgressAndResult` etc.) and M4.2b3's
-Decisions entry already claims "set it now even though the dedicated test
-lands at M4.5" — so this increment is likely test-only (confirm, don't
-assume): (1) a golden test pinning the exact SSE event names/order/shape
-(e.g. byte-for-byte `data: {...}\n\n` frames for a scripted multi-step
-turn, following the `greetingPrompt`/`renderScanReport` "golden-pinned =
-literal string in a test" convention already established rather than
-inventing an on-disk golden-file mechanism), and (2) a test constructing
-the real `*http.Server` `cortex serve` builds (not just an `httptest`
-wrapper, which doesn't let you inspect the configured `http.Server`) and
-asserting its `WriteTimeout` field is zero — read `cmd/cortex/serve.go`
-first to find where the `http.Server` is actually constructed (may need a
-small refactor to expose the built `*http.Server` value to a test, similar
-to how M4.1's `TestNewServeServerListenerIsLoopback` tests the real
-listener rather than an httptest one — check that test for the pattern).
+Start M4.6: "Serve owns no state: kill + restart re-derives every list
+from disk (restart the manager, listings identical)." Likely shape: a test
+that (1) builds a `SessionManager` via `NewSessionManager(reg, factory)`
+against a real temp-home + temp-project-root fixture, (2) creates/resumes a
+couple of sessions and lists projects/sessions through the handlers, (3)
+constructs a FRESH second `SessionManager` (simulating restart — no shared
+in-memory state with the first) against the same on-disk registry/session
+files, and (4) asserts `GET /api/projects` and `GET
+/api/projects/{name}/sessions` return identical listings from both
+managers. `SessionManager`/`managedSession` already hold no state that
+doesn't already round-trip through `internal/registry` + the session
+transcript files (M4.2a/M4.2b1 built listing straight off disk peeks, not
+an in-memory index) — so this is likely another test-only increment, but
+confirm by reading `cmd/cortex/serve_session.go` and `serve_routes.go`
+first rather than assuming.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1462,6 +1462,41 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   Standing-regression-guard check done: `git status` before committing
   showed only the new `cmd/cortex/serve_lock_test.go` (untracked) — no
   existing file touched at all this iteration.
+
+- 2026-07-12: M4.5 landed test-only, as the prior iteration's Next Up
+  predicted: neither of the two boxed behaviors needed production code —
+  M4.2b3 (`serve_stream.go`) already streams progress/result events in
+  order, and `newServeServer` (`serve.go`) already leaves `WriteTimeout`
+  unset by omission. Confirmed the golden test asserts something real
+  (not just presence, which M4.2b3's own test already covered) by scripting
+  a THREE-round backend — two distinct bash tool calls then a final
+  answer — so the golden literal proves ORDER across multiple progress
+  frames, not just a single one; asserted the exact byte-for-byte SSE body
+  (`event: ...\ndata: ...\n\n` × 3, nothing before the first frame or after
+  the last) against `progressLine`'s real `"  ▸ " + ActivityLabel()`
+  rendering (confirmed via a throwaway `go run` snippet that Go's
+  `json.Marshal` does NOT escape the `▸` U+25B8 arrow — only `<`, `>`, `&`,
+  and control chars get escaped by default — so the golden could use the
+  literal rune rather than a `▸` escape). `TestNewServeServerSetsNo
+  WriteTimeout` calls `newServeServer` directly (the same constructor
+  `runServeCLI` calls in production) rather than `httptest.NewServer`,
+  matching M4.1's `TestNewServeServerListenerIsLoopback` precedent noted
+  in the prior Next Up — an `httptest` server doesn't expose the
+  `*http.Server` it builds internally. Both load-bearing checks done: (1)
+  temporarily set `WriteTimeout: 5 * time.Second` in `newServeServer` —
+  confirmed `TestNewServeServerSetsNoWriteTimeout` fails reporting "5s,
+  want 0", reverted from a saved copy; (2) temporarily changed
+  `progressLine` to use `"  » "` instead of `"  ▸ "` — confirmed
+  `TestTurnStreamEndpointGoldenFramesForMultiStepTurn` fails showing the
+  mismatched frames, reverted from a saved copy; reran the full verify
+  suite green with `git diff --stat` showing zero production-file changes
+  (only the two test files this iteration touched, both non-genesis, are
+  in the commit). Standing-regression-guard check done:
+  `cmd/cortex/serve_test.go` (modified, adding the WriteTimeout test) did
+  not exist at the branch genesis commit (`git cat-file -e
+  <genesis>:cmd/cortex/serve_test.go` reports "exists on disk, but not in
+  <genesis>") — it's an M4.1-era file, not a pre-existing one, so editing
+  it needs no Decisions-Log correction entry.
 
 ## Known Issues (append-only)
 - (none yet)
