@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 25
+Updated: 2026-07-12 · Iteration: 26
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -234,7 +234,17 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
     - [ ] M4.2c2 Models endpoint: merged config + fleet read; scoped
           role-binding writes at user/project/session via M1.3's
           read-modify-write helpers — unknown-field survival test; key
-          material absent from every response, asserted.
+          material absent from every response, asserted. **Split
+          (2026-07-12, this iteration) into:**
+      - [x] M4.2c2a Read-only `GET /api/models`: merged config + discovered
+            fleet, every known role bound via `Config.resolveBinding`, key
+            material absent from the response (asserted against a real
+            secret value threaded through `key_env`). `7c9c101` —
+            `TestModelsEndpointReturnsRolesAndFleet`,
+            `TestModelsEndpointFleetUnreachableStillReturnsRoles`,
+            `TestModelsEndpointRequiresAuth` (cmd/cortex/serve_models_test.go).
+      - [ ] M4.2c2b Scoped role-binding writes at user/project/session via
+            M1.3's read-modify-write helpers; unknown-field survival test.
 - [ ] M4.3 Session manager: two turns on one session serialize; turns on
       two sessions interleave (concurrency test, scripted senders).
 - [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
@@ -249,44 +259,51 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.2c2: the models endpoint on `cortex serve` (the landscape half,
-M4.2c1, landed this iteration as `GET /api/landscape`, `dafe59d`). Read the
-merged config (`LoadConfig`/`loadMergedConfig`, main.go) + discovered fleet
-(`discoverFleet`, config.go — needs a backend endpoint; a scripted/fake
-fleet is the hermetic-test path, matching GOAL.md §2's "fakes only" posture),
-and support scoped role-binding writes at user (`~/.cortex/config.json`)/
-project (`./.cortex/config.json`)/session (in-memory only, reverts on
-resume — probably lives on `managedSession`, serve_session.go) scope via
-M1.3's read-modify-write helpers (`configwrite.go`'s `readJSONDoc`/
-`writeJSONDoc`/`setJSONPath`, the same ones `PersistBackend`/
-`PersistScanRoots` already use — `setJSONPath(doc, []string{"models",
-"<role>"}, spec)` is the natural shape for the write, matching how
-`Config.Models` is keyed in config.go). GOAL.md M4.2 requires an
+Start M4.2c2b: scoped role-binding writes on `cortex serve` (the read half,
+M4.2c2a, landed this iteration as `GET /api/models`, `7c9c101`, over
+`Config.resolveBinding` + `discoverFleet` — reuse both, no parallel
+resolution logic). Support writes at three explicit scopes per
+docs/cortex-web.md's Phase 4 models paragraph: user (`~/.cortex/config.json`
+— `userConfigPath()`), project (`<project.Root>/.cortex/config.json` —
+resolve via the registry, matching `findConfigPath`'s `.cortex/config.json`
+layout, config.go), and session (in-memory only, reverts on resume —
+probably a field on `managedSession`, serve_session.go, NOT persisted to
+disk at all, matching D6/D7's "the API form of `/model`" framing — `/model`
+in the REPL doesn't touch config files either, confirm this in main.go
+before assuming). Use M1.3's read-modify-write helpers
+(`configwrite.go`'s `readJSONDoc`/`writeJSONDoc`/`setJSONPath`, the same
+ones `PersistBackend`/`PersistScanRoots` already use —
+`setJSONPath(doc, []string{"models", "<role>", "<field>"}, value)` is the
+natural per-field shape, matching how `Config.Models` is keyed in
+config.go; write whichever ModelSpec fields the request body sets, not a
+whole-object clobber, so the read-modify-write invariant holds one level
+deeper than M1.3's top-level example). GOAL.md M4.2 requires an
 unknown-field survival test (M1.3's own pattern — see
 `TestSetJSONPathPreservesUnknownFieldsByteForByte`,
 cmd/cortex/configwrite_test.go, and `TestPersistBackendRoundTrip`,
-bootstrap_persist_test.go, for the established shape) and an assertion that
-key material (API keys) is absent from every response — note `ModelSpec`
-(config.go) never carries a resolved key value itself, only `KeyEnv`/
-`KeyService` (source names); the assertion is really "the response never
-calls `resolveKey`/embeds its result", worth stating explicitly in the test
-name/comment so a future change that DOES leak a resolved key trips it. Like
-M4.2c1, thread this into `newServeMux` (now `(reg, mgr, configPath,
-homeDir)`) — a project-config path is also needed for the project-scope
-write, likely a third `projectConfigPath string` param or resolved per-request
-from the registry's project root (`filepath.Join(proj.Root, ".cortex",
-"config.json")`, matching `findConfigPath`'s `.cortex/config.json` layout,
-config.go). Read `docs/cortex-web.md`'s Phase 4 models-endpoint paragraph
-(~line 218) and GOAL.md §1's "Deferred" note (models-endpoint re-keying
-re-running the bootstrap chain is explicitly OUT of scope for M4.2c2 — only
-read + scoped role-binding write, not re-auth) before designing the shape.
-This is likely too big for one iteration too (read endpoint + 3 distinct
-write scopes + unknown-field-survival + key-absence, each wanting its own
-test) — splitting into M4.2c2a (read: merged config + fleet) / M4.2c2b
-(scoped writes) is a reasonable next split if so. After M4.2c2, M4.2 as a
-whole is done (a/b1/b2/b3/c1/c2 all ticked) — M4.3 (cross-session
-concurrency test) still needs its OWN dedicated test even though
-`TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
+bootstrap_persist_test.go, for the established shape) and a
+key-absence-from-response assertion — M4.2c2a's
+`TestModelsEndpointReturnsRolesAndFleet` already established the pattern
+(thread a real secret value through `key_env`, assert it's absent from the
+response body); reuse that shape for the write endpoint's response too.
+Route shape (designer's call, GOAL.md leaves it open): likely
+`PUT /api/models/{role}?scope=user|project|session` with a JSON body of the
+fields to set, matching the REST-ish `GET /api/models` this iteration
+landed; `newServeMux` will need a `projectConfigPath`-resolving path (per
+M4.2c2a's Decisions entry, the current signature has no per-project config
+path — session-scope needs a live `*managedSession` via `mgr.Get`, project-
+scope needs the registry's project root, user-scope needs the existing
+`configPath` param unchanged) — reading GOAL.md §1's "Deferred" note first
+(models-endpoint re-keying re-running the bootstrap chain is explicitly OUT
+of scope here — only read + scoped role-binding write, not re-auth) avoids
+over-building. This is plausibly still too big for one iteration (3 scopes
+× unknown-field-survival × key-absence, each wanting its own test) —
+splitting into M4.2c2b1 (user+project scope, both file-backed, same
+read-modify-write mechanism) / M4.2c2b2 (session scope, in-memory,
+different mechanism entirely) is a reasonable next split if so. After
+M4.2c2b, M4.2 as a whole is done (a/b1/b2/b3/c1/c2a/c2b all ticked) — M4.3
+(cross-session concurrency test) still needs its OWN dedicated test even
+though `TestTurnEndpointSameSessionSerializes` (M4.2b2) already proves the
 same-session half; M4.3's box is the two-DIFFERENT-sessions-run-parallel
 half, not yet proven anywhere.
 
@@ -1211,6 +1228,47 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   to them is not a standing-regression-guard violation; only
   `serve_landscape_test.go` (new) carries this increment's actual new
   assertions.
+
+- 2026-07-12: M4.2c2 split into M4.2c2a (read-only `GET /api/models`, this
+  iteration) / M4.2c2b (scoped role-binding writes) — the prior Next Up
+  note's own analysis ("read endpoint + 3 distinct write scopes... each
+  wanting its own test") flagged this as likely too big, and read vs. write
+  are independently testable units, mirroring the M4.2b and M4.2c splits.
+  M4.2c2a landed `handleModels` (`cmd/cortex/serve_models.go`, route `GET
+  /api/models`) as a thin composition of two already-tested primitives —
+  `loadMergedConfig(configPath, "")` and `discoverFleet(ctx,
+  cfg.backendEndpoint())` — iterating `rolePolicies`'s keys (config.go's
+  existing canonical role set) to build a `map[string]ModelSpec` via
+  `Config.resolveBinding`, no new fleet/binding logic. `configPath` here is
+  the single path already threaded into `newServeMux` for `/api/landscape`
+  (M4.2c1) — this route has no `{name}` project segment, so "merged config"
+  means that one file only, not a user+project layer stack; a project-scoped
+  view is deferred to M4.2c2b alongside the scoped writes, which do need
+  per-project resolution. Key-absence (GOAL.md M4.2's "key material absent
+  from every response") holds by construction, not by a redaction step:
+  `ModelSpec` (config.go) only ever carries `KeyEnv`/`KeyService` — SOURCE
+  names (an env var or keychain service to read from), never a resolved key
+  value — and `handleModels` calls `Config.resolveBinding`, never
+  `resolveKey`; `TestModelsEndpointReturnsRolesAndFleet` makes this a real
+  assertion rather than a vacuous one by threading an actual secret value
+  through a real env var named by `key_env` and asserting it's absent from
+  the response body (not just checking the struct shape). Reused
+  `main_test.go`'s existing `fleetServer`/`fleetInfoJSON` test helpers
+  (already established by `TestDiscoverFleet`) rather than writing a new
+  fake `/model/info` server — same package, same pattern, no duplication.
+  `TestModelsEndpointFleetUnreachableStillReturnsRoles` pins graceful
+  degradation: `discoverFleet` already returns `nil` on an unreachable
+  backend (existing, tested behavior) and `handleModels` doesn't treat that
+  as an error — the endpoint still returns every role's binding with an
+  empty fleet, matching `Config.resolveBinding`'s own nil-fleet-safe
+  contract. Load-bearing check done: moved `serve_models.go` out of the
+  tree, confirmed `go vet ./cmd/cortex/...` fails to build (`serve.go:121:
+  undefined: handleModels`), restored and reran the full verify suite
+  green. Standing-regression-guard check done: `git status` before
+  committing showed only `serve.go` (route registration, non-test) modified
+  plus two new files (`serve_models.go`, `serve_models_test.go`) — no
+  existing test file needed touching this time, since (unlike M4.2c1)
+  `newServeMux`'s signature didn't change.
 
 ## Known Issues (append-only)
 - (none yet)
