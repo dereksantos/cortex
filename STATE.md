@@ -211,7 +211,7 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
           seam (`cmd/cortex/loop.go:76`, a bare `func(line string)` — fan
           it into `data: ...\n\n` chunks); the serve `http.Server` must set
           NO `WriteTimeout` for this (GOAL.md D6/M4.5 — set it now even
-          though the dedicated test lands at M4.5). `<PENDING-HASH>` —
+          though the dedicated test lands at M4.5). `01cabb2` —
           `TestTurnStreamEndpointStreamsProgressAndResult`,
           `TestTurnStreamEndpointUnknownSessionReturns404`,
           `TestTurnStreamEndpointRequiresAuth`
