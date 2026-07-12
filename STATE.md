@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 29
+Updated: 2026-07-12 · Iteration: 30
 
 ## Current milestone
 M4 — `cortex serve` (P4) (M1, M2, M3 complete)
@@ -273,10 +273,12 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       (cmd/cortex/serve_turn_test.go); the "one session serializes" half
       was already proven by M4.2b2's `TestTurnEndpointSameSessionSerializes`
       (same file), so this box needed only the concurrent-sessions leg.
-- [ ] M4.4 Cross-process lock: a REAL second process (re-exec helper
+- [x] M4.4 Cross-process lock: a REAL second process (re-exec helper
       pattern) attempting the same session gets the typed busy error.
       (`internal/fslock` itself pre-dates the loop — this item is the
       serve integration + the two-process test only; see amendment A1.)
+      `9621c1d` — `TestCrossProcessSessionResumeGetsBusyError`
+      (cmd/cortex/serve_lock_test.go).
 - [ ] M4.5 SSE event order and shape golden-tested via the `Progress`
       seam; a test asserts the serve `http.Server` sets no `WriteTimeout`.
 - [ ] M4.6 Serve owns no state: kill + restart re-derives every list from
@@ -285,37 +287,24 @@ M4 — `cortex serve` (P4) (M1, M2, M3 complete)
       transcript (test with a shrunk idle threshold).
 
 ## Next Up
-Start M4.4: cross-process lock contention. GOAL.md's M4.4 box + amendment
-A1 scope this to "serve integration + the two-process test only" —
-`internal/fslock` (the D8 lock) already exists and journal/sessions
-already use it; nothing here should re-extract or reimplement locking.
-Shape: a REAL second OS process (not a goroutine) must attempt to open the
-SAME session file this process already has open via the SessionManager,
-and get a typed "session busy in another process" error — use the stdlib
-re-exec-the-test-binary-via-os/exec pattern (a helper-mode env var the
-test binary checks for at TestMain/init, e.g. `GO_WANT_HELPER_PROCESS=1`,
-matching the well-known `os/exec` test idiom; grep the stdlib's own
-`exec_test.go` or prior Cortex commits for precedent before inventing the
-scaffold). Concretely: process A (in-process, via SessionManager.Create)
-starts a session and holds it open (need to find/confirm exactly where
-serve's session lifecycle actually acquires the fslock — check whether
-`StartTranscript`/`ResumeTranscript` (session.go) already call into
-`internal/fslock` today, or whether serve_session.go's managedSession
-needs to acquire it explicitly; M4.2b1's Decisions entries don't mention
-fslock at all, so this needs a fresh read of session.go/internal/fslock
-before writing the test — do not assume the wiring already exists).
-Process B is spawned via `exec.Command(os.Args[0], "-test.run=TestHelper...")`
-with the helper env var set, targeting the identical session id/path, and
-must observe the typed busy error (assert on its exit code/stderr, since
-it's a separate process — can't type-assert an error value across a
-process boundary). Likely needs a small helper subcommand or a
-`TestMain`-gated code path in the test binary itself that tries to open
-the session and prints a recognizable marker on the specific busy error
-vs. any other failure. Read GOAL.md §3 P4 and §6 M4.4 plus
-docs/cortex-web.md's Phase 4 "Single-writer session lock" paragraph again
-before starting — the lock granularity (session FILE, not session ID
-alone; a project could theoretically have two differently-cased paths to
-the same file) matters for how process B targets the same resource.
+Start M4.5: SSE event order/shape golden test + a test asserting the serve
+`http.Server` sets no `WriteTimeout`. The SSE progress stream itself
+already exists (M4.2b3, `cmd/cortex/serve_stream.go`,
+`TestTurnStreamEndpointStreamsProgressAndResult` etc.) and M4.2b3's
+Decisions entry already claims "set it now even though the dedicated test
+lands at M4.5" — so this increment is likely test-only (confirm, don't
+assume): (1) a golden test pinning the exact SSE event names/order/shape
+(e.g. byte-for-byte `data: {...}\n\n` frames for a scripted multi-step
+turn, following the `greetingPrompt`/`renderScanReport` "golden-pinned =
+literal string in a test" convention already established rather than
+inventing an on-disk golden-file mechanism), and (2) a test constructing
+the real `*http.Server` `cortex serve` builds (not just an `httptest`
+wrapper, which doesn't let you inspect the configured `http.Server`) and
+asserting its `WriteTimeout` field is zero — read `cmd/cortex/serve.go`
+first to find where the `http.Server` is actually constructed (may need a
+small refactor to expose the built `*http.Server` value to a test, similar
+to how M4.1's `TestNewServeServerListenerIsLoopback` tests the real
+listener rather than an httptest one — check that test for the pattern).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1431,6 +1420,48 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   <genesis>..HEAD -- '*_test.go'` shows only `serve_turn_test.go` touched
   this iteration, which postdates genesis (confirmed via `git cat-file -e
   <genesis>:cmd/cortex/serve_turn_test.go` failing) — not a violation.
+
+- 2026-07-12: M4.4 landed as a test-only increment (no production code
+  changed) — confirmed the hypothesis before writing anything by reading
+  `SessionManager.Resume` (serve_session.go, M4.2b1) and `session.go`
+  directly: `Resume` already calls `CortexSession.ResumeTranscript` which
+  calls `openTranscript` which calls `fslock.OpenExclusive`
+  (`internal/fslock`, the pre-existing D8 lock per amendment A1) — the
+  wiring the prior Next Up note flagged as unconfirmed was already there,
+  landed incidentally by M4.2b1 reusing `StartTranscript`/
+  `ResumeTranscript` rather than inventing a parallel serve-side open path.
+  `TestCrossProcessSessionResumeGetsBusyError`
+  (`cmd/cortex/serve_lock_test.go`) proves it end-to-end: the parent
+  process creates a session via `SessionManager.Create` and holds its
+  transcript file open (deferred close), then re-execs the test binary
+  (`os.Args[0]`, `-test.run=^TestCrossProcessSessionResumeGetsBusyError$`)
+  — the identical idiom `internal/fslock/fslock_test.go`'s
+  `TestOpenExclusive_CrossProcess` established, reused rather than
+  reinvented. The child process (env-var contract distinguishes child mode
+  from the top-level test, mirroring `fslock_test.go`'s `holdLockPath`)
+  builds its OWN fresh `SessionManager` (empty in-memory map, so
+  `Get(id)` misses and it falls through to `ResumeTranscript`) targeting
+  the same project root/session id, and asserts `errors.Is(err,
+  fslock.ErrBusy)` — printing a stdout marker and exiting 0/1 accordingly,
+  since an error value can't cross a process boundary; the parent asserts
+  on that marker string via `CombinedOutput`. Caught and fixed a real bug
+  in the test itself before trusting it: the first draft's markers were
+  `"BUSY"` (success) and `"NOT-BUSY: <err>"` (failure) — `strings.Contains`
+  for `"BUSY"` matches BOTH, since `"NOT-BUSY"` contains `"BUSY"` as a
+  substring, so the assertion would have silently passed even with no
+  contention at all. Renamed to non-overlapping markers
+  (`"RESUME-BLOCKED"` / `"RESUME-ALLOWED (want blocked): <err>"`) before
+  trusting the test. Load-bearing check done (and this substring bug is
+  exactly why the check matters): temporarily changed `openTranscript` to
+  `os.OpenFile` directly (no `fslock.OpenExclusive` call) — with the
+  original `"BUSY"`/`"NOT-BUSY"` markers this still reported PASS (the
+  substring bug masking a real regression); after the marker rename it
+  correctly failed (`RESUME-ALLOWED (want blocked): <nil>`), confirming
+  the test is load-bearing; restored `openTranscript` from a saved copy
+  (`/tmp/session.go.bak`) and reran the full verify suite green.
+  Standing-regression-guard check done: `git status` before committing
+  showed only the new `cmd/cortex/serve_lock_test.go` (untracked) — no
+  existing file touched at all this iteration.
 
 ## Known Issues (append-only)
 - (none yet)
