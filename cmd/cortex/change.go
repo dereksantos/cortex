@@ -23,7 +23,20 @@ const changeBranchPrefix = "cortex/"
 // output. On failure the error carries the command and git's own message, so a
 // caller (or the model reading a tool result) can see exactly what went wrong.
 func gitCmd(args ...string) (string, error) {
-	out, err := exec.Command("git", args...).CombinedOutput()
+	return gitCmdIn("", args...)
+}
+
+// gitCmdIn runs git in the given directory (an empty dir defaults to the
+// current process's working directory — identical to gitCmd's prior
+// behavior, so gitCmd is a thin wrapper over this) and returns trimmed
+// combined output. Split out so a caller with a project root that isn't the
+// process CWD (the M5.2 dashboard view-model, run inside `cortex serve`
+// against arbitrary registered projects) can reuse the exact same git
+// plumbing instead of a parallel implementation.
+func gitCmdIn(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
 		return trimmed, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, trimmed)
@@ -48,6 +61,27 @@ func currentBranch() (string, error) {
 // onChangeBranch reports whether HEAD is one of the Cortex's change branches.
 func onChangeBranch(branch string) bool {
 	return strings.HasPrefix(branch, changeBranchPrefix)
+}
+
+// changeStatusFor reports the same three facts `cortex change status`
+// prints (branch, active-change, clean), but scoped to an arbitrary
+// project root rather than the process's CWD — the seam the M5.2 dashboard
+// view-model reuses (GOAL.md §3 pillar 3: reuse the seam) instead of
+// re-deriving change status through a parallel mechanism. Returns whatever
+// partial results were obtained alongside the first error encountered, so a
+// caller can still render a branch name even if the porcelain-status call
+// fails.
+func changeStatusFor(dir string) (branch string, activeChange bool, clean bool, err error) {
+	branch, err = gitCmdIn(dir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", false, false, err
+	}
+	activeChange = onChangeBranch(branch)
+	out, err := gitCmdIn(dir, "status", "--porcelain")
+	if err != nil {
+		return branch, activeChange, false, err
+	}
+	return branch, activeChange, out == "", nil
 }
 
 // startChange creates and checks out cortex/<slug> off the current HEAD. It
