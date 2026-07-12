@@ -100,9 +100,11 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // M4.2b1 adds session create/resume (mgr is the SessionManager, itself
 // httptest-testable via an injected hermetic sessionFactory — see
 // serve_session.go). M4.2b2 adds the turn handler (serve_turn.go); M4.2b3
-// adds the SSE turn/stream handler (serve_stream.go); M4.2c (landscape/
-// models) extends this mux further.
-func newServeMux(reg registry.Registry, mgr *SessionManager) *http.ServeMux {
+// adds the SSE turn/stream handler (serve_stream.go); M4.2c1 adds the
+// landscape endpoint (configPath/homeDir — the same two inputs
+// resolveScanRoots/buildScanReport already take at the CLI level,
+// serve_landscape.go); M4.2c2 (models) extends this mux further.
+func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -113,6 +115,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager) *http.ServeMux {
 	mux.HandleFunc("POST /api/projects/{name}/sessions", handleCreateSession(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn", handleTurn(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
+	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
 	return mux
 }
 
@@ -140,8 +143,14 @@ func runServeCLI(args []string) {
 	}
 	mgr := NewSessionManager(reg, newProductionSession)
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr)))
+	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

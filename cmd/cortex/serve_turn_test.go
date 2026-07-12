@@ -87,7 +87,7 @@ func TestTurnEndpointRunsTurnAgainstLiveSession(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -126,7 +126,7 @@ func TestTurnEndpointRunsTurnAgainstLiveSession(t *testing.T) {
 func TestTurnEndpointUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: t.TempDir()}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/does-not-exist/turn", strings.NewReader(`{"input":"hi"}`))
@@ -149,7 +149,7 @@ func TestTurnEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -179,7 +179,7 @@ func TestTurnEndpointSameSessionSerializes(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")

@@ -77,7 +77,7 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 		"blog":   {Name: "blog", Root: "/tmp/blog"},
 		"cortex": {Name: "cortex", Root: "/tmp/cortex", Notes: "main repo"},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects", "tok")
@@ -106,7 +106,7 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 
 func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects", "tok")
@@ -119,7 +119,7 @@ func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T)
 
 func TestListProjectsEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: "/tmp/blog"}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/projects")
@@ -147,7 +147,7 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 	)
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions", "tok")
@@ -176,7 +176,7 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T) {
 	root := t.TempDir() // no .cortex/sessions dir created at all
 	reg := &fakeRegistry{projects: map[string]registry.Project{"fresh": {Name: "fresh", Root: root}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/fresh/sessions", "tok")
@@ -192,7 +192,7 @@ func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T)
 
 func TestListProjectSessionsEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/doesnotexist/sessions", "tok")
