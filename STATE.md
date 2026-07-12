@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 35
+Updated: 2026-07-12 · Iteration: 36
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
@@ -316,7 +316,16 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
         `TestChangeStatusForReportsBranchActiveAndClean`,
         `TestChangeStatusForNotAGitRepoReturnsError`
         (cmd/cortex/change_status_test.go).
-  - [ ] M5.2b Session transcript view-model, from real JSONL fixtures.
+  - [x] M5.2b Session transcript view-model: `buildTranscriptViewModel`
+        reads a real session JSONL transcript via the existing `loadSession`
+        (session.go), rendering ordered role/content entries with
+        tool-call/tool-result turns carried alongside plain ones; the seed
+        system-prompt message (always index 0 of a fresh session) is
+        omitted, matching display.go's REPL rendering convention. `286e14e`
+        — `TestBuildTranscriptViewModelGolden`,
+        `TestBuildTranscriptViewModelOmitsSeedSystemMessage`,
+        `TestBuildTranscriptViewModelMissingFileReturnsError`
+        (cmd/cortex/webui_transcript_test.go).
   - [ ] M5.2c Landscape report view-model, wrapping M2's `ScanReport`
         (the same shape `cortex scan --json` / `GET /api/landscape`
         already produce).
@@ -330,23 +339,25 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.2b: "Session transcript view-model, from real JSONL fixtures." Per
+Start M5.2c: "Landscape report view-model, wrapping M2's `ScanReport`." Per
 GOAL.md §2's package layout this lives in a new `cmd/cortex/webui_*.go` file
-alongside M5.2a's `webui_dashboard.go`. Likely shape:
-`buildTranscriptViewModel(path string)` reading a real session `.jsonl` via
-the existing `loadSession` (session.go) — render each message's role/content
-(and tool-call/tool-result turns if the transcript type distinguishes them;
-check `loadSession`'s return shape first) into a golden-tested struct, same
-"literal string in a test" golden convention M5.2a just used (no
-`testdata/*.golden` file — that mechanism doesn't exist in this repo; the
-STATE.md Decisions Log entry three notes up corrects the prior iteration's
-"testdata/*.golden" suggestion). M5.2c (landscape, wrapping M2's
-`ScanReport`) and M5.2d (models, wrapping M4.2c2a's `/api/models` shape) are
-the remaining M5.2 splits after this one. Keep to pure Go structs/JSON — no
-HTML/JS wiring yet (that's M5.3/M5.4). Read docs/cortex-web.md's Phase 5
-section before starting; GOAL.md §3 P5 binds "rendering logic lives in
-golden-tested Go view-models; JS is fetch/render/SSE-append only, enforced
-mechanically."
+(e.g. `webui_landscape.go`) alongside M5.2a's `webui_dashboard.go` and
+M5.2b's `webui_transcript.go`. GOAL.md's M5.2 wording says "landscape
+report" — this is the same `ScanReport` shape `cortex scan --json` prints
+(scan.go's `buildScanReport`) and `GET /api/landscape` already returns
+(M4.2c1, `serve_landscape.go`); the view-model here is likely a thin wrapper
+(or pass-through) over that existing struct rather than a new aggregation —
+read `scan.go`'s `ScanReport`/`buildScanReport` and `serve_landscape.go`
+first to see whether a wrapper adds any real value (e.g. presentation-only
+fields) or whether "view-model" here just means "the same struct, golden
+JSON-tested from a real fixture root" (mirrors M5.2a/b's convention: a real
+temp-dir fixture, `json.Marshal`, literal-string golden — no
+`testdata/*.golden` file, that mechanism doesn't exist in this repo).
+M5.2d (models, wrapping M4.2c2a's `/api/models` shape) is the remaining
+M5.2 split after this one. Keep to pure Go structs/JSON — no HTML/JS wiring
+yet (that's M5.3/M5.4). Read docs/cortex-web.md's Phase 5 section before
+starting; GOAL.md §3 P5 binds "rendering logic lives in golden-tested Go
+view-models; JS is fetch/render/SSE-append only, enforced mechanically."
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1716,6 +1727,31 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   in <genesis>"), confirming none is a pre-existing file, and `git diff
   --name-only <genesis>..HEAD -- '*_test.go'` after the commit lists no
   genesis-present test file.
+
+- 2026-07-12: M5.2b landed `buildTranscriptViewModel`
+  (`cmd/cortex/webui_transcript.go`) as a thin reader over the existing
+  `loadSession` (session.go) — no new parsing path, mirrors M5.2a's
+  precedent of composing existing seams rather than inventing parallel
+  ones. `transcriptEntry`'s tool-call shape (`transcriptToolCall{ID, Name,
+  Args}`) flattens `agent.ToolCall`'s nested `Function{Name,Arguments}`
+  into two top-level string fields — a presentation simplification for the
+  UI layer, not a wire-format passthrough (matches the "rendering logic
+  lives in the Go view-model" GOAL.md §3 P5 binding). Decided to OMIT the
+  seed system-prompt message (index 0 of every fresh session, written by
+  session.go's write-on-create loop) from the rendered entries rather than
+  include it with `role:"system"`: GOAL.md/docs/cortex-web.md don't specify
+  either way, but `display.go`'s `Message.gutter()` — the REPL's own
+  transcript renderer — has no `RoleSystem` case (falls through to the
+  assistant icon), so "system isn't a displayed turn" is the existing
+  convention this view-model inherits rather than diverges from; a test
+  (`TestBuildTranscriptViewModelOmitsSeedSystemMessage`) pins a
+  system-only session renders to an empty (non-nil) `Entries` slice. Turn
+  numbers come straight from `loadSession`'s parallel `turns []int` (no
+  omitempty on `transcriptEntry.Turn` — 0 is a real, meaningful turn index
+  post-filtering, not "absent"). Load-bearing check done: moved
+  `webui_transcript.go` out of the tree, confirmed all three new tests
+  fail to build (`undefined: buildTranscriptViewModel`), restored and
+  reran green.
 
 ## Known Issues (append-only)
 - (none yet)
