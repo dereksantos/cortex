@@ -45,6 +45,24 @@ func TestNewServeServerListenerIsLoopback(t *testing.T) {
 	}
 }
 
+// TestNewServeServerSetsNoWriteTimeout is M4.5's other half (GOAL.md §6 /
+// D6): the real *http.Server `cortex serve` constructs (runServeCLI calls
+// newServeServer directly — not an httptest wrapper, which doesn't expose
+// the configured *http.Server) must leave WriteTimeout unset (zero), or a
+// long-lived SSE turn/stream response (M4.2b3) would be killed mid-stream.
+func TestNewServeServerSetsNoWriteTimeout(t *testing.T) {
+	srv, ln, err := newServeServer("127.0.0.1:0", http.NewServeMux())
+	if err != nil {
+		t.Fatalf("newServeServer: %v", err)
+	}
+	defer ln.Close()
+	defer srv.Close()
+
+	if srv.WriteTimeout != 0 {
+		t.Errorf("http.Server WriteTimeout = %v, want 0 (unset) — a nonzero WriteTimeout would kill SSE streams mid-turn", srv.WriteTimeout)
+	}
+}
+
 func TestGenerateServeTokenIsNonEmptyAndUnique(t *testing.T) {
 	a, err := generateServeToken()
 	if err != nil {
