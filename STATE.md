@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 37
+Updated: 2026-07-12 · Iteration: 38
 
 ## Current milestone
-M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
+M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -332,8 +332,13 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
         `TestBuildLandscapeViewModelGolden`,
         `TestBuildLandscapeViewModelNoRootsConfiguredReturnsTypedRefusal`
         (cmd/cortex/webui_landscape_test.go).
-  - [ ] M5.2d Models view-model: bindings + effective scope resolution,
-        wrapping M4.2c2a's `/api/models` shape.
+  - [x] M5.2d Models view-model: bindings + effective scope resolution,
+        wrapping M4.2c2a's `/api/models` shape. `6725d8d` —
+        `TestBuildModelsViewModelGolden`,
+        `TestBuildModelsViewModelNilConfigEveryKnownRoleStillPresent`,
+        `TestBuildModelsViewModelRolesSortedAlphabetically`
+        (cmd/cortex/webui_models_test.go). **M5.2 complete
+        (a/b/c/d all ticked).**
 - [ ] M5.3 The four screens render those view-models; JS bounded
       mechanically: a Go test over the embedded FS asserts each `.js`
       file ≤ 300 lines and total JS ≤ 1200 lines.
@@ -342,26 +347,28 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.2d: "Models view-model, wrapping M4.2c2a's `/api/models` shape
-(bindings + effective scope resolution)." This is the last M5.2 split; once
-it lands, M5.2 itself is complete and M5.3 (JS size caps over the embedded
-FS) is next. Per GOAL.md §2's package layout this lives in a new
-`cmd/cortex/webui_models.go` alongside `webui_dashboard.go`/
-`webui_transcript.go`/`webui_landscape.go`. Read `cmd/cortex/serve_models.go`
-(M4.2c2a's `handleModels` / `GET /api/models`) first — GOAL.md's M5.2
-wording explicitly calls out "bindings + effective scope resolution" as the
-view-model content (role/scope/effective-source columns), which is more
-than M5.2c's landscape screen needed: check whether `/api/models`'s existing
-response shape already carries an explicit "which scope this binding
-resolved from" field per role, or whether that's new presentation logic the
-view-model must add (in which case it's a genuine wrapper, not a
-pass-through, unlike M5.2c). Follow M5.2a/b/c's established test convention:
-real fixture (temp config + fake fleet probe), `json.Marshal`, literal-string
-golden — no `testdata/*.golden` file. Key material must stay absent from the
-view-model's JSON too, same invariant M4.2c2a's own tests already assert on
-`/api/models` — inherit rather than re-derive if the view-model wraps that
-handler's data path. Keep to pure Go structs/JSON — no HTML/JS wiring yet
-(that's M5.3/M5.4).
+Start M5.3: "JS bounded mechanically: a Go test over the embedded FS
+asserts each `.js` file ≤ 300 lines and total JS ≤ 1200 lines, and the
+four screens render their view-models." M5.2 is now fully complete
+(a/b/c/d all ticked) — all four Go view-model builders exist
+(`buildDashboardViewModel`, `buildTranscriptViewModel`,
+`buildLandscapeViewModel`, `buildModelsViewModel`). M5.1 already planted placeholder assets under `cmd/cortex/webui/`
+(`index.html`, `app.css`, `app.js` — `app.js` currently just proves the
+embed mechanism, containing the literal string "Cortex web UI" per
+`TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence`); M5.3 is where
+these placeholders grow into the real four-screen app. Per GOAL.md §3
+P5: "JS is fetch/render/SSE-append only" and the size cap is "enforced
+mechanically" — write the line-count test FIRST (walk the embedded FS,
+`strings.Count(string(data), "\n")+1` per `.js` file, assert ≤300 and a
+running total ≤1200) so a red baseline exists on a repo with zero (or
+placeholder) `.js` files, then add just enough real markup/script per
+screen to render each view-model's JSON (dashboard/session/landscape/models)
+via `fetch` against the M4.2 API + `innerHTML`/DOM writes — no framework, no
+build step (GOAL.md non-goals, D9). This item is large; per GOAL.md §7 step
+4, consider splitting into per-screen sub-items (M5.3a dashboard, M5.3b
+session+SSE, M5.3c landscape, M5.3d models, or JS-size-cap-test vs.
+screens-render as the split axis instead) if one iteration can't land all
+four screens' rendering wiring at once.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -1788,6 +1795,53 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   confirmed both new tests fail with the expected mismatches (empty JSON vs.
   the fixture-derived golden; `nil` err vs. `ErrNoScanRoots`), restored from
   a saved copy and reran green.
+
+- 2026-07-12: M5.2d landed `buildModelsViewModel` (`webui_models.go`) as a
+  genuinely NEW shape, NOT a pass-through of `serve_models.go`'s existing
+  `modelsResponse` — resolved the prior iteration's open question
+  ("does `/api/models` already carry a per-role 'resolved from' field, or
+  is this new presentation logic") by reading `Config.resolveBinding`
+  (config.go): it collapses an explicit `models.<role>.model` config entry
+  and a `selectModel`-picked fleet candidate into the same `Model` field
+  with no trace of which happened, so "where each binding resolves from"
+  (docs/cortex-web.md Phase 5's wording) has to be computed here, fresh,
+  by checking `cfg.Models[role].Model != ""` before calling
+  `resolveBinding`. `modelsResponse`/`handleModels` are untouched by this
+  increment — this is the M5.2a/b relationship (new shape) not the M5.2c
+  one (pure wrapper); a route wiring `buildModelsViewModel` into the HTTP
+  surface, if the JS screen ends up needing one distinct from
+  `GET /api/models`, is deferred to M5.3/M5.4. Interpreted "across the
+  three scopes with a scope switcher" (docs/cortex-web.md) as UI-level
+  scope selection for M5.3 to wire against M4.2c2b's already-existing
+  `?scope=user|project|session` write endpoints — NOT something this
+  view-model builder does itself; `buildModelsViewModel(cfg, fleet)` takes
+  whichever already-resolved `*Config` the caller has, one scope at a
+  time, matching M4.2c2a's own single-config-path shape. Source values:
+  `"configured"` (explicit `models.<role>.model` present and non-empty in
+  `cfg`), `"fleet-auto"` (`resolveBinding` filled `Model` in via
+  `selectModel(fleet, role)` instead), `"unbound"` (neither). Roles
+  returned as a slice sorted alphabetically by role name (`rolePolicies`
+  is a Go map — no ordering guarantee), mirroring `dashboardViewModel`'s
+  sort-for-determinism precedent from M5.2a. `cfg` accepts nil (mirrors
+  `resolveBinding`'s own nil-receiver handling, and `loadMergedConfig` can
+  genuinely return nil when no config file exists on either layer) —
+  every role still resolves to `"fleet-auto"` or `"unbound"` correctly
+  with a nil config, pinned by
+  `TestBuildModelsViewModelNilConfigEveryKnownRoleStillPresent`. Golden
+  fixture deliberately uses a minimal one-entry fleet (`{"study-model":
+  {Role: "reasoner"}}`, `MaxInput: 0`) so `applyFleet`'s Window-fill never
+  fires — keeps the golden JSON small while still exercising all three
+  Source values in one test (role "code" configured explicitly in the
+  fixture config; roles "reason"/"study" share the "reasoner" tag and
+  both resolve to "study-model" via fleet-auto; every other role has
+  neither a config entry nor a matching fleet tag ⇒ unbound). Confirmed
+  `ModelInfo`'s fields carry no JSON struct tags (matches M5.2c's same
+  finding for `landscape.Project`), so `Fleet` marshals with capitalized
+  keys (`"MaxInput"`, `"Role"`, …) in the golden. Load-bearing check done:
+  moved `webui_models.go` out of the tree, confirmed all three new tests
+  fail to build (6 `undefined` errors: `buildModelsViewModel`,
+  `modelBindingView`, `bindingSourceFleetAuto`, `bindingSourceUnbound`),
+  restored and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
