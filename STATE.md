@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 41
+Updated: 2026-07-12 · Iteration: 42
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
@@ -374,10 +374,14 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
           `TestGetSessionEndpointUnknownSessionIDReturns404`,
           `TestGetSessionEndpointRequiresAuth`
           (cmd/cortex/serve_transcript_test.go).
-    - [ ] M5.3c2 Session screen static render: routing (how the page picks
+    - [x] M5.3c2 Session screen static render: routing (how the page picks
           project+session id — URL query params, following app.js's
           existing `?token=` precedent) + fetch/render of the transcript
-          via M5.3c1's endpoint into a `#session` container.
+          via M5.3c1's endpoint into a `#session` container. `a9866b9` —
+          `TestSessionScreenAppJSFetchesSessionEndpoint`,
+          `TestSessionScreenAppJSReadsProjectAndSessionQueryParams`,
+          `TestSessionScreenIndexHTMLHasSessionContainer`
+          (cmd/cortex/webui_session_screen_test.go).
     - [ ] M5.3c3 Input box: a text field + submit posting a new turn via
           `POST .../turn` (serve_turn.go), then re-rendering.
     - [ ] M5.3c4 Live SSE progress: switch the input box's turn submission
@@ -394,25 +398,25 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3c2: the session screen's static render. `GET
-/api/projects/{name}/sessions/{id}` (M5.3c1, cmd/cortex/serve_transcript.go)
-now returns `buildTranscriptViewModel`'s JSON — this sub-item wires it into
-the page: (1) routing — decide how the page knows which project+session to
-show (a `?project=<name>&session=<id>` query param is the natural extension
-of app.js's existing `?token=` precedent — `authToken()`'s
-`URLSearchParams(window.location.search)` pattern generalizes directly; no
-router/framework, per D9); (2) add a `#session` container to index.html
-(sibling to `#dashboard`, mirroring the guarded-`getElementById` pattern
-`loadDashboard()` already establishes — a `loadSession()` that no-ops when
-`#session` or the query params are absent); (3) render transcript entries
-(role/content, tool_calls) via plain DOM writes, `textContent` only (never
-innerHTML with response data — same posture as `renderDashboard`). Testing
-convention (Decisions Log below, set at M5.3b): Go-side httptest coverage
-for the endpoint (already done at M5.3c1) plus structural source-content
-assertions over the embedded JS/HTML — no executed-DOM assertions. Input
-box (M5.3c3) and live SSE (M5.3c4) are separate, later sub-items — this one
-is read-only render only. Watch the M5.3a size caps
-(`TestWebUIJavaScriptSizeCaps`) as app.js grows.
+Start M5.3c3: the session screen's input box. A text field + submit button
+in the `#session` container (`cmd/cortex/webui/index.html`,
+`cmd/cortex/webui/app.js`'s `renderSession`) that POSTs a new turn via
+`POST /api/projects/{name}/sessions/{id}/turn` (`cmd/cortex/serve_turn.go`,
+already live since M4.2b2) using the same `project`/`session` query params
+`loadSession()` (M5.3c2) already reads via `queryParam()`, then re-renders
+the transcript by calling `loadSession()` again (or appending the new
+entries directly — decide which when writing the code; re-fetching is
+simpler and this screen has no staleness concerns yet). Testing convention
+unchanged (Decisions Log below, set at M5.3b): structural source-content
+assertions over the embedded JS/HTML (e.g. app.js contains the turn POST
+path and a submit handler; index.html declares the input/button elements)
+— no executed-DOM assertions; the endpoint itself is already
+httptest-covered by M4.2b2's `serve_turn_test.go`. Live SSE (M5.3c4, swapping
+this POST for `/turn/stream` + `EventSource`/streaming-fetch) is the
+following sub-item — M5.3c3 can keep using the plain non-streaming POST.
+Watch the M5.3a size caps (`TestWebUIJavaScriptSizeCaps`) as app.js grows —
+currently at 180 lines (per-file cap 300, total cap 1200 across all `.js`
+under `cmd/cortex/webui/`, one file today so total == this file's count).
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2006,6 +2010,34 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   the catch-all "/" handler) while the negative-path tests still pass
   incidentally (they expect 404/401 anyway), restored the line and reran
   green — the positive-path test is what's load-bearing here.
+
+- 2026-07-12: M5.3c2 landed the session screen's static render entirely in
+  `cmd/cortex/webui/app.js`/`index.html` (no new Go). `queryParam(name)`
+  factors out `authToken()`'s prior inline
+  `new URLSearchParams(window.location.search).get(...)` so `?project=` and
+  `?session=` reuse the exact same mechanism as the established `?token=`
+  precedent (`authToken` now calls `queryParam("token")` — a pure refactor,
+  no behavior change, not separately load-bearing-checked since it's a
+  same-file same-commit inlining with no test asserting the old inline
+  form). `loadSession()` mirrors `loadDashboard()`'s guard shape exactly
+  (`getElementById` null-check ⇒ no-op) plus an additional guard on both
+  query params being non-empty, per GOAL.md's read-only-render-only scope
+  for this sub-item — a page with no `#session` container (there is none
+  yet outside this one `index.html`) or missing params does nothing, so
+  `loadSession()` is safe to call unconditionally at module load alongside
+  `loadDashboard()`. `renderSession` follows `renderDashboard`'s
+  textContent-only DOM-write posture (never innerHTML with response data).
+  Testing convention reconfirmed from M5.3b/M5.3c1: structural
+  source-content assertions over the embedded FS (fetch path present,
+  query-param keys present, container id present) — no executed-DOM
+  assertions; three new tests in a fresh `webui_session_screen_test.go`
+  (following `webui_dashboard_screen_test.go`'s file-per-screen
+  convention). Load-bearing check done: `git stash` on just the two
+  modified webui files, confirmed all three new tests fail with the
+  expected "does not fetch/read/declare" messages, `git stash pop` restored
+  them, reran the full verify suite green before committing. app.js is now
+  180 lines (per-file cap 300, well inside); no other `.js` file exists yet
+  so the 1200-line total cap isn't in play.
 
 ## Known Issues (append-only)
 - (none yet)
