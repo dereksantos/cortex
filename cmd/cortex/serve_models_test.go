@@ -298,12 +298,117 @@ func TestSetModelBindingUnsupportedScopeReturns400(t *testing.T) {
 	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir())))
 	defer ts.Close()
 
-	for _, scope := range []string{"session", "", "bogus"} {
+	for _, scope := range []string{"", "bogus"} {
 		resp := doAuthedPut(t, ts.URL+"/api/models/code?scope="+scope, "tok", `{"model":"x"}`)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("scope=%q: status = %d, want 400", scope, resp.StatusCode)
 		}
+	}
+}
+
+// M4.2c2b2 — PUT /api/models/{role}?scope=session&session=<id>: the
+// in-memory-only session-scope half (docs/cortex-web.md Phase 4: "session
+// (in-memory only, reverts on resume — the API form of /model)"). Confirmed
+// against main.go's own "/model" handler (session.SetModel,
+// session_core.go:106) that only the code role has a session-level override
+// mechanism today — SetModel mutates cs.Request.Model only, nothing else —
+// so session scope accepts role=code only; any other role at scope=session
+// is a 400, same shape as an unsupported scope.
+
+func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := created.ID()
+
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir())))
+	defer ts.Close()
+
+	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session="+id, "tok", `{"model":"session-code-model"}`)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", resp.StatusCode, body)
+	}
+	var got setModelBindingResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Scope != "session" || got.Binding.Model != "session-code-model" {
+		t.Errorf("Scope/Binding = %q/%+v, want session/Model=session-code-model", got.Scope, got.Binding)
+	}
+
+	ms, ok := mgr.Get(id)
+	if !ok {
+		t.Fatal("Get() lost the live session after a session-scope write")
+	}
+	if ms.cs.Request.Model != "session-code-model" {
+		t.Errorf("live session Request.Model = %q, want session-code-model", ms.cs.Request.Model)
+	}
+
+	// Reverts on resume: a second, independent manager (standing in for a
+	// serve restart, per M4.2b1's TestSessionManagerResumeRehydratesFromTranscriptAfterRestart
+	// precedent) resumes the same id straight from the transcript, which
+	// never recorded the in-memory-only override.
+	created.cs.transcript.Close() // simulate the process (and its transcript lock) going away
+	secondMgr := NewSessionManager(reg, hermeticSessionFactory())
+	resumed, err := secondMgr.Resume("blog", id)
+	if err != nil {
+		t.Fatalf("Resume after restart: %v", err)
+	}
+	if resumed.cs.Request.Model == "session-code-model" {
+		t.Errorf("resumed session carried the session-scope override %q, want it reverted (never persisted)", resumed.cs.Request.Model)
+	}
+}
+
+func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
+	reg := &fakeRegistry{}
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir())))
+	defer ts.Close()
+
+	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session=does-not-exist", "tok", `{"model":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestSetModelBindingSessionScopeMissingSessionQueryReturns400(t *testing.T) {
+	reg := &fakeRegistry{}
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir())))
+	defer ts.Close()
+
+	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session", "tok", `{"model":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, hermeticSessionFactory())
+	created, err := mgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir())))
+	defer ts.Close()
+
+	resp := doAuthedPut(t, ts.URL+"/api/models/study?scope=session&session="+created.ID(), "tok", `{"model":"x"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 

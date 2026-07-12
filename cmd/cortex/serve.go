@@ -105,8 +105,9 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // resolveScanRoots/buildScanReport already take at the CLI level,
 // serve_landscape.go); M4.2c2a adds the read-only models endpoint
 // (serve_models.go); M4.2c2b1 adds the file-backed scoped write
-// (PUT /api/models/{role}?scope=user|project); M4.2c2b2 (session-scope
-// writes) extends this mux further.
+// (PUT /api/models/{role}?scope=user|project); M4.2c2b2 adds
+// scope=session&session=<id>, the in-memory-only half — mgr is already
+// threaded in for the turn/SSE routes, so no signature change was needed.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +121,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
 	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
 	mux.HandleFunc("GET /api/models", handleModels(configPath))
-	mux.HandleFunc("PUT /api/models/{role}", handleSetModelBinding(configPath, reg))
+	mux.HandleFunc("PUT /api/models/{role}", handleSetModelBinding(configPath, reg, mgr))
 	return mux
 }
 

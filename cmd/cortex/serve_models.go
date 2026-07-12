@@ -13,12 +13,21 @@
 //
 // M4.2c2b1 adds PUT /api/models/{role}?scope=user|project — the file-backed
 // half of the scoped role-binding write GOAL.md §6 M4.2 / docs/
-// cortex-web.md Phase 4 call for. Session scope (in-memory only, reverts on
-// resume — confirmed against main.go's own "/model" handler, which mutates
-// only cs.Request.Model and never touches a config file) needs a live
-// *managedSession, a different mechanism entirely, and is deliberately left
-// for M4.2c2b2 (STATE.md's split) — scope=session refuses 400 here, same as
-// any other unsupported value.
+// cortex-web.md Phase 4 call for.
+//
+// M4.2c2b2 adds scope=session&session=<id> — the in-memory-only half
+// (docs/cortex-web.md Phase 4: "session (in-memory only, reverts on
+// resume — the API form of /model)"). Confirmed against main.go's own
+// "/model" handler (session.SetModel, session_core.go:106) that only
+// cs.Request.Model has a session-level override today — SetModel mutates
+// that field alone, never a config file — so session scope accepts
+// role=code only; any other role at scope=session is a 400, same shape as
+// an unsupported scope/role combination elsewhere in this handler. No
+// config-file I/O happens for this leg at all; the write lands directly on
+// the live *managedSession the SessionManager already tracks (mgr, the
+// same seam handleTurn/handleTurnStream use), so it reverts for free the
+// next time the id is resumed from its transcript (which never recorded
+// the override) — no explicit "clear on resume" logic is needed.
 package main
 
 import (
@@ -95,15 +104,17 @@ type setModelBindingResponse struct {
 	Binding ModelSpec `json:"binding"`
 }
 
-// handleSetModelBinding serves PUT /api/models/{role}?scope=user|project
-// [&project=<name>]: a scoped role-binding write. configPath is user scope
-// (the same single path threaded into newServeMux for GET /api/models);
-// project scope resolves the named project's root via reg and writes
-// <root>/.cortex/config.json, matching findConfigPath's on-disk layout
-// (config.go). Re-keying (re-running the Phase 1 bootstrap chain) is
-// explicitly out of scope (GOAL.md §1 Deferred) — this only ever writes the
-// fields present in the request body.
-func handleSetModelBinding(configPath string, reg registry.Registry) http.HandlerFunc {
+// handleSetModelBinding serves PUT /api/models/{role}?scope=user|project|
+// session[&project=<name>][&session=<id>]: a scoped role-binding write.
+// configPath is user scope (the same single path threaded into newServeMux
+// for GET /api/models); project scope resolves the named project's root via
+// reg and writes <root>/.cortex/config.json, matching findConfigPath's
+// on-disk layout (config.go); session scope (role=code only — see the
+// package doc comment) sets the live *managedSession's model via mgr,
+// in-memory only, no file I/O. Re-keying (re-running the Phase 1 bootstrap
+// chain) is explicitly out of scope (GOAL.md §1 Deferred) — the file-backed
+// scopes only ever write the fields present in the request body.
+func handleSetModelBinding(configPath string, reg registry.Registry, mgr *SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		role := r.PathValue("role")
 		if !knownRole(role) {
@@ -111,8 +122,13 @@ func handleSetModelBinding(configPath string, reg registry.Registry) http.Handle
 			return
 		}
 
-		var target string
 		scope := r.URL.Query().Get("scope")
+		if scope == "session" {
+			handleSetSessionModelBinding(w, r, role, mgr)
+			return
+		}
+
+		var target string
 		switch scope {
 		case "user":
 			target = configPath
@@ -133,7 +149,7 @@ func handleSetModelBinding(configPath string, reg registry.Registry) http.Handle
 			}
 			target = filepath.Join(proj.Root, ".cortex", "config.json")
 		default:
-			http.Error(w, "unsupported scope: "+scope+" (want user or project)", http.StatusBadRequest)
+			http.Error(w, "unsupported scope: "+scope+" (want user, project, or session)", http.StatusBadRequest)
 			return
 		}
 
@@ -162,4 +178,51 @@ func handleSetModelBinding(configPath string, reg registry.Registry) http.Handle
 		}
 		writeJSON(w, http.StatusOK, setModelBindingResponse{Role: role, Scope: scope, Binding: models[role]})
 	}
+}
+
+// handleSetSessionModelBinding is scope=session's handler, split out of
+// handleSetModelBinding since it's a wholly different mechanism (no config
+// file involved at all): resolves &session=<id> against mgr's live map and
+// mutates the *managedSession directly via CortexSession.SetModel — the
+// exact same call main.go's REPL "/model" command makes
+// (session_core.go:106), which is why session scope is documented as "the
+// API form of /model". Only role=code is accepted: SetModel is the only
+// session-level override the codebase has today (it mutates
+// cs.Request.Model alone), so any other role has no live field to write and
+// refuses 400 rather than silently no-op-ing.
+func handleSetSessionModelBinding(w http.ResponseWriter, r *http.Request, role string, mgr *SessionManager) {
+	if role != roleCode {
+		http.Error(w, "session scope supports role \""+roleCode+"\" only (no session-level override exists for role: "+role+")", http.StatusBadRequest)
+		return
+	}
+	id := r.URL.Query().Get("session")
+	if id == "" {
+		http.Error(w, "session scope requires ?session=<id>", http.StatusBadRequest)
+		return
+	}
+	ms, ok := mgr.Get(id)
+	if !ok {
+		http.Error(w, "session not live: "+id, http.StatusNotFound)
+		return
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+		http.Error(w, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var model string
+	if raw, ok := fields["model"]; ok {
+		if err := json.Unmarshal(raw, &model); err != nil {
+			http.Error(w, "failed to decode \"model\" field: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	ms.mu.Lock()
+	ms.cs.SetModel(model)
+	got := ms.cs.Request.Model
+	ms.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, setModelBindingResponse{Role: role, Scope: "session", Binding: ModelSpec{Model: got}})
 }
