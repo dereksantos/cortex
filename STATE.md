@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 42
+Updated: 2026-07-12 · Iteration: 43
 
 ## Current milestone
 M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
@@ -382,8 +382,12 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
           `TestSessionScreenAppJSReadsProjectAndSessionQueryParams`,
           `TestSessionScreenIndexHTMLHasSessionContainer`
           (cmd/cortex/webui_session_screen_test.go).
-    - [ ] M5.3c3 Input box: a text field + submit posting a new turn via
-          `POST .../turn` (serve_turn.go), then re-rendering.
+    - [x] M5.3c3 Input box: a text field + submit posting a new turn via
+          `POST .../turn` (serve_turn.go), then re-rendering. `a13f686` —
+          `TestSessionScreenAppJSPostsTurnOnSubmit`,
+          `TestSessionScreenAppJSCreatesInputAndSubmitElements`,
+          `TestSessionScreenAppJSReRendersAfterTurnSubmit`
+          (cmd/cortex/webui_session_input_test.go).
     - [ ] M5.3c4 Live SSE progress: switch the input box's turn submission
           to `POST .../turn/stream` (serve_stream.go) and render
           `progress`/`result`/`error` events as they arrive (`EventSource`
@@ -398,25 +402,30 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3c3: the session screen's input box. A text field + submit button
-in the `#session` container (`cmd/cortex/webui/index.html`,
-`cmd/cortex/webui/app.js`'s `renderSession`) that POSTs a new turn via
-`POST /api/projects/{name}/sessions/{id}/turn` (`cmd/cortex/serve_turn.go`,
-already live since M4.2b2) using the same `project`/`session` query params
-`loadSession()` (M5.3c2) already reads via `queryParam()`, then re-renders
-the transcript by calling `loadSession()` again (or appending the new
-entries directly — decide which when writing the code; re-fetching is
-simpler and this screen has no staleness concerns yet). Testing convention
+Start M5.3c4: live SSE progress for the session screen's turn submission.
+Swap `renderTurnInput`'s (`cmd/cortex/webui/app.js`, landed M5.3c3) plain
+`fetch(..., {method:"POST"})` against `POST .../turn` for a call against
+`POST /api/projects/{name}/sessions/{id}/turn/stream`
+(`cmd/cortex/serve_stream.go`, live since M4.2b3, golden-tested by M4.5's
+`TestTurnStreamEndpointGoldenFramesForMultiStepTurn`), rendering
+`progress`/`result`/`error` SSE frames as they arrive instead of waiting for
+one JSON response. Decide `EventSource` vs. `fetch` + a streaming
+`ReadableStream` reader and record why in the Decisions Log below —
+`EventSource` is GET-only (no request body, so the turn's `input` text
+can't ride along without a workaround like a query param or a
+POST-then-EventSource two-step), while `fetch` with a streamed body reader
+lets a single POST carry the JSON body AND consume the `data: ...\n\n`
+chunks emitted by `handleTurnStream` — this asymmetry is probably decisive
+but read `serve_stream.go`'s frame shape first. Testing convention
 unchanged (Decisions Log below, set at M5.3b): structural source-content
-assertions over the embedded JS/HTML (e.g. app.js contains the turn POST
-path and a submit handler; index.html declares the input/button elements)
-— no executed-DOM assertions; the endpoint itself is already
-httptest-covered by M4.2b2's `serve_turn_test.go`. Live SSE (M5.3c4, swapping
-this POST for `/turn/stream` + `EventSource`/streaming-fetch) is the
-following sub-item — M5.3c3 can keep using the plain non-streaming POST.
-Watch the M5.3a size caps (`TestWebUIJavaScriptSizeCaps`) as app.js grows —
-currently at 180 lines (per-file cap 300, total cap 1200 across all `.js`
-under `cmd/cortex/webui/`, one file today so total == this file's count).
+assertions over the embedded JS (e.g. app.js references `/turn/stream` and
+parses `data:` frames) — no executed-DOM assertions; the endpoint itself is
+already httptest-covered. Watch the M5.3a size caps
+(`TestWebUIJavaScriptSizeCaps`) as app.js grows — currently at 258 lines
+(per-file cap 300, total cap 1200 across all `.js` under
+`cmd/cortex/webui/`, one file today so total == this file's count); a
+streaming-frame parser may be the increment that finally justifies a
+second `.js` file if 300 gets tight.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2038,6 +2047,43 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   them, reran the full verify suite green before committing. app.js is now
   180 lines (per-file cap 300, well inside); no other `.js` file exists yet
   so the 1200-line total cap isn't in play.
+
+- 2026-07-12: M5.3c3 landed `renderTurnInput` (`cmd/cortex/webui/app.js`) as
+  a function separate from `renderSession`, called immediately after it
+  inside `loadSession()`'s fetch chain rather than inlined into
+  `renderSession` itself: `renderSession` clears (`container.textContent =
+  ""`) and rebuilds `#session` purely from the transcript view-model on
+  every call, so any input/button markup placed inside it would be wiped on
+  every re-render (including the very re-render the submit handler
+  triggers) — appending the input box AFTER `renderSession` runs, on every
+  `loadSession()` call, is what makes it survive. Considered and rejected:
+  static input/button markup in `index.html` outside `#session`'s cleared
+  region — rejected because the form needs the current `project`/`session`
+  query-param values closed over in its submit handler, which `loadSession`
+  already has in scope and `index.html`-level static markup would not.
+  Submit handler POSTs `{"input": text}` (matching `serve_turn.go`'s
+  `turnRequest` shape) to the same `/api/projects/{name}/sessions/{id}/turn`
+  path `apiFetch`'s GET already targets, but via a raw `fetch` (not
+  `apiFetch`, which is GET-only/no-body) carrying its own
+  `Content-Type`/`Authorization` headers; on success it clears the input and
+  calls `loadSession()` again — full re-fetch-and-rerender, not a
+  client-side entry append, per the prior iteration's Next Up note (no
+  staleness concerns yet at this screen's size). On failure the error
+  renders into a dedicated `#turn-status` span rather than blowing away the
+  transcript already on screen. Testing convention reconfirmed from
+  M5.3b/c1/c2: structural source-content assertions in a new
+  `webui_session_input_test.go` (POST path present, `"POST"` literal
+  present, `addEventListener("submit"` present; `createElement("input")`/
+  `createElement("button")` present; `loadSession()` called ≥2 times as the
+  cheapest reliable proxy for "called again after the initial page load
+  call"). Load-bearing check done: reverted `app.js` to `HEAD` (via `git
+  show HEAD:...`), confirmed all three new tests fail with the expected
+  "does not reference/create/wire" messages, restored the new version byte-
+  for-byte (diffed against the pre-revert copy) before rerunning the full
+  verify suite green and committing. app.js is now 258 lines (per-file cap
+  300 — getting close; flagged in this iteration's Next Up as the
+  increment that may finally need a second `.js` file); total-JS cap 1200
+  still has slack (one file).
 
 ## Known Issues (append-only)
 - (none yet)
