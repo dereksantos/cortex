@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 47
+Updated: 2026-07-12 · Iteration: 48
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -429,9 +429,16 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       ticked) — all four Phase 5 screens shipped.**
 
 ### M6 — Loops (P6)
-- [ ] M6.1 `internal/loops`: spec CRUD round-trip on `loops.json`;
+- [x] M6.1 `internal/loops`: spec CRUD round-trip on `loops.json`;
       validation rejects cadence below the 15-minute floor (typed
-      error).
+      error). `fc14a44` — `TestFileStoreCRUDRoundTrip`,
+      `TestFileStoreLookupUnknownNameReturnsTypedError`,
+      `TestFileStoreRemoveUnknownNameReturnsTypedError`,
+      `TestFileStoreLookupOnMissingFileReturnsTypedError`,
+      `TestFileStoreSaveRejectsCadenceBelowFifteenMinuteFloor`,
+      `TestFileStoreSaveAllowsExactlyFifteenMinuteFloor`,
+      `TestFileStoreSaveAllowsManualOnlyZeroInterval`
+      (internal/loops/loops_test.go).
 - [ ] M6.2 Scheduler on an injected clock: due ⇒ fires; not due ⇒
       doesn't; disabled ⇒ never; overlap ⇒ skips AND journals the
       skip. No test sleeps.
@@ -454,17 +461,21 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       (httptest).
 
 ## Next Up
-Start M6.1: `internal/loops` — spec CRUD round-trip on `loops.json` under a
-temp home (mirrors `internal/registry`'s M3.3 CRUD test shape, plain-JSON
-machine-level state per D4), plus validation that rejects a cadence below
-the 15-minute floor (D10) with a typed error. This is the first item of M6
-and has no dependency on any Phase 5 code — `internal/loops` is a new
-package (GOAL.md §2), so this is a from-scratch spec type + Save/Load/
-Remove round-trip, likely following `internal/registry`'s Registry
-interface shape (CRUD over a JSON file under `userConfigPath()`'s sibling
-in `internal/userhome`) but for loop specs (name, project, prompt, trigger,
-bounds, enabled flag per docs/cortex-web.md Phase 6). No scheduler, no
-firing, no serve wiring yet — those are M6.2+.
+Start M6.2: scheduler on an injected clock over `internal/loops.Spec`
+(due ⇒ fires; not due ⇒ doesn't; disabled ⇒ never; overlap ⇒ skips AND
+journals the skip; no test sleeps — inject a fake clock interface, likely
+`func() time.Time`, the way M6.6's "restart resumes" test will later
+reuse it). This is a new type in `internal/loops` (e.g. a `Scheduler`
+composing `Store.List()` with next-run derivation — GOAL.md §3 P6 says
+next-run is DERIVED from the last `loop.run` journal event's timestamp +
+interval, not a stored run-state field, so M6.2's due/not-due logic will
+need either a journal reader seam or a stubbed "last run" lookup it can
+fake in tests; the real journal wiring for `loop.run` events lands with
+M6.3's firing work, so M6.2 can take last-run-time as an injected
+function/interface rather than reading the real journal yet). No firing
+of real sessions yet (M6.3), no budget caps (M6.4), no risk posture
+(M6.5) — M6.2 is scheduling logic only: given a spec list, a clock, and a
+last-run lookup, decide which specs are due right now.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2310,6 +2321,28 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `internal/loops` (a brand-new package per GOAL.md §2) has zero
   dependency on any M5 code, so no gate-suspension or split was needed to
   start it cleanly.
+- 2026-07-12: M6.1 `internal/loops.FileStore` mirrors `internal/registry`'s
+  Registry shape verbatim (List/Lookup/Save/Remove, sorted List, same
+  ErrXNotFound-wrapped-with-name pattern, same readAll/writeAll plain-JSON
+  helpers) — GOAL.md §2's package layout calls for `internal/loops/` as a
+  new package but names no different shape, and D4/D5 already settled
+  "rebuildable specs as plain JSON" for both projects.json and loops.json,
+  so reusing the proven shape needed no new Decisions justification beyond
+  this pointer. `Spec` carries `IntervalMinutes int` (not `time.Duration`)
+  for a human-readable loops.json (D10's "every-N minutes/hours/days" reads
+  naturally as an integer minute count; a `time.Duration` field would
+  marshal as raw nanoseconds, unreadable by a human inspecting the file)
+  — 0 means manual-run-only (D10), exempt from the D11 cadence floor,
+  which non-zero values must clear (`ErrCadenceTooLow`, checked in `Save`
+  before any write, confirmed load-bearing by temporarily stubbing the
+  floor check to `if false` and observing
+  `TestFileStoreSaveRejectsCadenceBelowFifteenMinuteFloor` fail, then
+  restoring byte-for-byte). `MaxTurns`/`MaxTokens` fields are present on
+  `Spec` now (matching docs/cortex-web.md Phase 6's "bounds" field) but
+  unvalidated here — M6.4 owns enforcing them at fire time, this item only
+  had to carry the values through the round-trip. Trigger/prompt/enabled
+  fields also follow Phase 6's spec shape (name, project, prompt, trigger,
+  bounds, enabled) directly, no schema decisions needed.
 
 ## Known Issues (append-only)
 - (none yet)
