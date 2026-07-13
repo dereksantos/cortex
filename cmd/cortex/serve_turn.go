@@ -55,6 +55,10 @@ func handleTurn(mgr *SessionManager) http.HandlerFunc {
 			http.Error(w, "turn failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, turnResponse(result))
+		// Explicit field-by-field construction (not a type conversion): TurnResult
+		// carries StopReason (M6.4) that turnResponse's wire shape deliberately
+		// does not expose — a direct conversion would require identical
+		// underlying struct types.
+		writeJSON(w, http.StatusOK, turnResponse{Reply: result.Reply, Interrupted: result.Interrupted})
 	}
 }

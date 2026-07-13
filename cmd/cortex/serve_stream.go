@@ -88,6 +88,9 @@ func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 			_ = sseEvent(w, flusher, "error", map[string]string{"error": err.Error()})
 			return
 		}
-		_ = sseEvent(w, flusher, "result", turnResponse(result))
+		// Explicit field-by-field construction — see serve_turn.go's handleTurn
+		// for why this isn't a bare type conversion (TurnResult.StopReason,
+		// M6.4).
+		_ = sseEvent(w, flusher, "result", turnResponse{Reply: result.Reply, Interrupted: result.Interrupted})
 	}
 }

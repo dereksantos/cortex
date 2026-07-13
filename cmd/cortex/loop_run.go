@@ -60,10 +60,21 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	// ChangeRef stays empty rather than the firing being refused outright.
 	branch, startErr := startChangeIn(proj.Root, spec.Name)
 
-	_, turnErr := cs.Turn(ctx, spec.Prompt)
+	// D11's per-run budget caps (M6.4): spec.MaxTurns/MaxTokens (0 = the
+	// engine's normal defaults) bound the turn's tool-call iterations and
+	// cumulative token spend respectively. TurnWithBudget surfaces which
+	// bound (if any) forced the stop via TurnResult.StopReason — a
+	// bound-forced stop is not a Go error (the engine still finalizes and
+	// answers), so it must be detected here, not via turnErr.
+	result, turnErr := cs.TurnWithBudget(ctx, spec.Prompt, spec.MaxTurns, spec.MaxTokens)
 	if turnErr != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("turn: %v", turnErr)
+		return journal.AppendLoopRun(payload)
+	}
+	if result.StopReason == "max-iter" || result.StopReason == "token-budget" {
+		payload.Outcome = journal.LoopOutcomeFailed
+		payload.Reason = "budget"
 		return journal.AppendLoopRun(payload)
 	}
 

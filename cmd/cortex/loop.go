@@ -223,6 +223,16 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 			onStatusUpdate(stats.LastPromptTokens, req.MaxTokens)
 		}
 
+		// D11's per-loop-firing token budget (0 = unbounded for every other
+		// caller): stop the instant cumulative spend crosses it, before this
+		// round's response is even added to the transcript or its tool calls
+		// dispatched — a token-hungry runaway is capped by SPEND, not just
+		// round count (see Bounds.TokenBudget).
+		if b.TokenBudget > 0 && stats.InputTokens+stats.OutputTokens >= b.TokenBudget {
+			stop = "token-budget"
+			break
+		}
+
 		msg := res.Choices[0].Message
 		// Recover Qwen-native XML tool calls the proxy didn't normalize, so a
 		// call isn't silently lost (empty tool_calls reads as a final answer).

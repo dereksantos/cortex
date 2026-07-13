@@ -34,6 +34,12 @@ func toolCallSignature(calls []ToolCall) string {
 type TurnResult struct {
 	Reply       string
 	Interrupted bool
+	// StopReason is the engine's raw loopStats.StopReason for this turn
+	// (clean-finalize|salvaged-finalize|max-iter|read-budget|token-budget|
+	// no-progress|deadline|error) — surfaced so a caller enforcing its own
+	// per-run bounds (RunLoopFiring, M6.4) can tell a bound-forced stop from
+	// a clean answer without re-deriving it.
+	StopReason string
 }
 
 // Turn runs one turn with no progress notifications — today's behavior,
@@ -42,17 +48,27 @@ type TurnResult struct {
 // attached (M4.2b3's SSE handler is its only caller today); both delegate to
 // the unexported turn so there's exactly one implementation.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
-	return cs.turn(ctx, input, nil)
+	return cs.turn(ctx, input, nil, 0, 0)
 }
 
 // TurnWithProgress is Turn with p (may be nil) wired into runLoop's existing
 // Progress seam (cmd/cortex/loop.go) — the same breadcrumb sink the REPL's
 // live display already drives, just not previously reachable from Turn().
 func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p Progress) (TurnResult, error) {
-	return cs.turn(ctx, input, p)
+	return cs.turn(ctx, input, p, 0, 0)
 }
 
-func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress) (TurnResult, error) {
+// TurnWithBudget is Turn with per-run bound overrides (D11's loop-firing
+// caps, M6.4): maxIter overrides the default maxToolIterations ceiling when
+// >0 (loops.Spec.MaxTurns), and tokenBudget caps cumulative input+output
+// tokens for the turn when >0 (loops.Spec.MaxTokens, Bounds.TokenBudget).
+// Zero means "use the normal default" for either. RunLoopFiring
+// (loop_run.go) is its only caller today.
+func (cs *CortexSession) TurnWithBudget(ctx context.Context, input string, maxIter, tokenBudget int) (TurnResult, error) {
+	return cs.turn(ctx, input, nil, maxIter, tokenBudget)
+}
+
+func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress, maxIterOverride, tokenBudget int) (TurnResult, error) {
 	// Stamp transcript entries with this turn's ordinal (resume replays them
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
@@ -107,8 +123,12 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	if maxTok <= 0 {
 		maxTok = codeMaxOutputTokens
 	}
+	maxIter := maxToolIterations
+	if maxIterOverride > 0 {
+		maxIter = maxIterOverride
+	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
-	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxToolIterations}
+	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
 	// just interactively): the transcript otherwise has no record of how far
@@ -151,13 +171,13 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.LastCachedTokens = stats.LastCachedTokens
 
 	if err != nil {
-		return TurnResult{Interrupted: errors.Is(err, context.Canceled)}, err
+		return TurnResult{Interrupted: errors.Is(err, context.Canceled), StopReason: stats.StopReason}, err
 	}
 
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: lastAssistantText(turnMsgs)}, nil
+	return TurnResult{Reply: lastAssistantText(turnMsgs), StopReason: stats.StopReason}, nil
 }
 
 func lastAssistantText(turnMsgs []Message) string {

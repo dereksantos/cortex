@@ -78,6 +78,42 @@ func failingTurnTestSessionFactory(t *testing.T) sessionFactory {
 	}
 }
 
+// runawayTurnCapTestSessionFactory scripts a backend that ALWAYS answers
+// with a tool call (read_file on the fixture's own .gitignore, so nothing
+// gets dirtied) and never finalizes on its own — the "runaway session"
+// M6.4's sub-test 1 needs to prove spec.MaxTurns halts it at the
+// (small, test-fast) turn cap rather than the engine's much larger default.
+func runawayTurnCapTestSessionFactory(t *testing.T) sessionFactory {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\".gitignore\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return func() *CortexSession {
+		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+		cs.Request.BaseURL = srv.URL
+		return cs
+	}
+}
+
+// tokenReportingTestSessionFactory scripts a backend that reports a fixed
+// usage on every response (prompt_tokens+completion_tokens = 12) — M6.4's
+// sub-test 2 sets spec.MaxTokens below that so the token budget trips on
+// the very first round, before spec.MaxTurns (left generous) could ever be
+// the limiting factor.
+func tokenReportingTestSessionFactory(t *testing.T) sessionFactory {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\".gitignore\"}"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":4}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return func() *CortexSession {
+		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+		cs.Request.BaseURL = srv.URL
+		return cs
+	}
+}
+
 // readLoopRunEntries drains the user-level loop.run journal (under the
 // test's isolated CORTEX_HOME) into a plain slice of payloads, in write
 // order.
@@ -241,5 +277,73 @@ func TestRunLoopFiringUnknownProjectJournalsFailedOutcome(t *testing.T) {
 	}
 	if !strings.Contains(entries[0].Reason, "nope") {
 		t.Errorf("Reason = %q, want it to mention the unresolved project name %q", entries[0].Reason, "nope")
+	}
+}
+
+// TestRunLoopFiringRunawaySessionHaltsAtTurnCap is M6.4 sub-test 1 (D11's
+// per-run turn cap): a scripted sender that never stops issuing tool calls
+// is halted by spec.MaxTurns (set small so the test is fast) rather than
+// the engine's much larger default — proving the cap actually bounds a
+// runaway, not just that a generous default exists — and journals
+// Outcome=failed, Reason="budget" (the literal string
+// internal/journal/loop.go's LoopRunPayload doc reserves for a cap breach,
+// distinct from "overlap" and the free-text turn-error reasons).
+func TestRunLoopFiringRunawaySessionHaltsAtTurnCap(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", MaxTurns: 2}
+
+	if err := RunLoopFiring(context.Background(), spec, reg, runawayTurnCapTestSessionFactory(t)); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Outcome != journal.LoopOutcomeFailed {
+		t.Errorf("Outcome = %q, want %q", entries[0].Outcome, journal.LoopOutcomeFailed)
+	}
+	if entries[0].Reason != "budget" {
+		t.Errorf("Reason = %q, want %q", entries[0].Reason, "budget")
+	}
+	if entries[0].ChangeRef != "" {
+		t.Errorf("ChangeRef = %q, want empty (the runaway only ever read a file)", entries[0].ChangeRef)
+	}
+}
+
+// TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap is M6.4 sub-test 2 (D11's
+// per-run token budget): a scripted sender reporting a fixed token usage
+// per round trips spec.MaxTokens on the very first round — well before
+// spec.MaxTurns, left generous here — proving the token cap holds on its
+// own, independent of the iteration cap, and journals the same
+// Outcome=failed, Reason="budget" shape as the turn-cap case.
+func TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", MaxTurns: 25, MaxTokens: 10}
+
+	if err := RunLoopFiring(context.Background(), spec, reg, tokenReportingTestSessionFactory(t)); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Outcome != journal.LoopOutcomeFailed {
+		t.Errorf("Outcome = %q, want %q", entries[0].Outcome, journal.LoopOutcomeFailed)
+	}
+	if entries[0].Reason != "budget" {
+		t.Errorf("Reason = %q, want %q", entries[0].Reason, "budget")
+	}
+	if entries[0].ChangeRef != "" {
+		t.Errorf("ChangeRef = %q, want empty", entries[0].ChangeRef)
 	}
 }
