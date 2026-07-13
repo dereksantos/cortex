@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 53
+Updated: 2026-07-13 · Iteration: 54
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -482,35 +482,60 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
 - [ ] M6.7 Loops screen: view-model golden (specs + run history
       from `loop.run` events); create/enable/disable/run-now wired to
       NEW loops endpoints added to `cortex serve` in this milestone
-      (httptest).
+      (httptest). **Split (2026-07-13, this iteration) into:**
+  - [ ] M6.7a Loops view-model: a builder composing `internal/loops.
+        Store.List()` (specs) with run history grouped by name from the
+        user-level `loop.run` journal (a new production reader — the
+        existing `readLoopRunEntries` is test-only, in `loop_run_test.go`)
+        — golden test, mirroring M5.2's dashboard/landscape/models
+        view-model pattern.
+  - [ ] M6.7b `GET /api/loops` endpoint wiring M6.7a's view-model into
+        the HTTP surface (auth-gated, httptest) — Go-only, no screen yet,
+        mirroring M4.2a/M5.3c1's endpoint-first precedent.
+  - [ ] M6.7c `POST /api/loops` create endpoint via `internal/loops.
+        FileStore.Save` (httptest: happy path, cadence-floor rejection
+        surfaced as a typed 400, auth).
+  - [ ] M6.7d Enable/disable endpoints: `POST /api/loops/{name}/enable`
+        and `POST /api/loops/{name}/disable`, flipping `Spec.Enabled` via
+        `Store.Save` (httptest, unknown name ⇒ 404, auth) — combined into
+        one item since both are the same single-field toggle, mirroring
+        M4.2c2b1's combined-writes precedent.
+  - [ ] M6.7e `POST /api/loops/{name}/run-now` invoking `RunLoopFiring`
+        directly (httptest, scripted sender/fixture project, unknown name
+        ⇒ 404, auth) — completes the milestone's named DoD surface
+        (view-model golden + list/create/enable/disable/run-now wired,
+        httptest); see the 2026-07-13 Decisions entry on why the actual
+        loops-screen HTML/JS is NOT part of M6.7's literal DoD and is
+        deferred pending an owner amendment if wanted.
 
 ## Next Up
-Start M6.7: loops screen — view-model golden (specs + run history from
-`loop.run` events); create/enable/disable/run-now wired to NEW loops
-endpoints added to `cortex serve` in this milestone (httptest). This is the
-milestone's last item; M6.6 deliberately did NOT wire `Scheduler.Due` into a
-running `cortex serve` process (no serve-resident tick loop exists yet) —
-M6.7's "run-now" action and endpoint wiring is the natural place that
-finally connects `Scheduler`/`RunLoopFiring`/`internal/loops.Store` to the
-HTTP surface, mirroring M4.2's endpoint-by-endpoint pattern (list specs,
-create/enable/disable via `internal/loops.FileStore`, run-now invoking
-`RunLoopFiring` directly rather than waiting on a tick). Run history for the
-view-model reads the same user-level `loop.run` journal `readLoopRunEntries`
-(loop_run_test.go) and the new `JournalLastRun` (internal/loops/lastrun.go,
-M6.6) already read — no new journal reader needed, just a view-model
-composing `internal/loops.Store.List()` + a scan of `loop.run` entries
-grouped by name, similar in shape to M5.2a's dashboard view-model
-(`buildDashboardViewModel`, cmd/cortex/webui_dashboard.go) composing
-multiple seams into one golden-tested struct. Check whether a standing
-serve-resident scheduler tick loop (actually calling `Scheduler.Due` on an
-interval while `cortex serve` runs, per docs/cortex-web.md Phase 6's
-"ticks while cortex serve runs") is in scope for M6.7 too, or whether
-"run-now" alone (no auto-tick) satisfies the milestone's DoD as written —
-GOAL.md M6.7's item text only mentions create/enable/disable/run-now, not
-an auto-fire tick loop, so a first pass without the tick (enable/disable
-just flips the persisted flag; automatic firing stays untested/unwired) may
-be the honest small-slice reading, with a follow-on split if GOAL.md's
-intent turns out to require the live tick for M6 to be "complete."
+Start M6.7a: build the loops view-model (specs from `internal/loops.
+Store.List()` + run history from the user-level `loop.run` journal, grouped
+by name) with a golden test — see the M6.7 split recorded this iteration
+(five sub-items, M6.7a–M6.7e) and the 2026-07-13 Decisions entries for two
+rulings that govern all of them: (1) M6.7's literal DoD is view-model +
+list/create/enable/disable/run-now endpoints proven by httptest ONLY — no
+screen-render test surface is named the way M5.3's items always name one
+("JS bounded mechanically", `.js`/HTML container tests), so the actual
+loops-screen HTML/JS is NOT required to tick M6.7/M6 complete; treat it as
+owner-schedulable future work, not a gap, unless an owner amendment says
+otherwise. (2) the standing serve-resident scheduler tick (`Scheduler.Due`
+polled on an interval while `cortex serve` runs) is likewise out of M6.7's
+literal DoD (which names only create/enable/disable/run-now) — `run-now`
+(M6.7e) is a direct, synchronous `RunLoopFiring` call, not a live ticking
+loop; enable/disable (M6.7d) only flip the persisted `Spec.Enabled` flag.
+Both rulings favor the narrower, literally-verified reading per GOAL.md
+§1's "an increment the verify gate can't observe is not an increment" and
+the precedence rule (GOAL.md §6 DoD text outranks docs/cortex-web.md's
+broader Phase 6 prose). M6.7a's view-model needs a NEW production journal
+reader for `loop.run` entries (the existing `readLoopRunEntries` in
+`cmd/cortex/loop_run_test.go` is test-only and can't be imported from
+production code) — model it on `internal/loops.JournalLastRun`
+(internal/loops/lastrun.go, M6.6), which already opens the same
+`journal.NewReader` over `<userhome>/journal/loop` and parses
+`journal.ParseLoopRun` entries; the view-model reader just needs to keep
+every matching entry (not just the latest) per name instead of collapsing
+to one timestamp.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2605,6 +2630,50 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   false)` — both new tests failed (the second entry's lookup returned
   not-found, and the "restarted, too soon" Scheduler re-fired since it
   saw no history) — then restored the real implementation and reran green.
+
+- 2026-07-13: M6.7 split into M6.7a–M6.7e (this iteration's sole commit —
+  baseline verify was already green, agreeing with STATE.md, so there was
+  no code to write; per GOAL.md §7 step 4, "the split is this iteration's
+  commit"). Rationale for the five-way cut: M6.7's un-split text bundles a
+  view-model AND five distinct endpoints (list/create/enable/disable/
+  run-now) into one checklist line, which is exactly the shape M4.2
+  (endpoints) and M5.2/M5.3 (view-models/screens) were split at — M4.2 in
+  particular went as granular as one endpoint (or one tightly-related pair)
+  per commit (M4.2a, b1, b2, b3, c1, c2a, c2b1, c2b2), so a single
+  undifferentiated M6.7 attempt risked either a red-verify iteration or a
+  dishonestly-large commit; matching that established granularity keeps
+  each sub-item independently landable and revert-testable.
+  Two scope rulings recorded alongside the split, both resolving real
+  ambiguity in M6.7's wording against GOAL.md's own precedence rule
+  (§6 DoD text over docs/cortex-web.md prose) and Pillar 5 ("an increment
+  the verify gate can't observe is not an increment"):
+  (a) **The actual loops-screen HTML/JS is OUT of M6.7's literal DoD.**
+  Every M5.3 sub-item that required a rendered screen explicitly names that
+  test surface ("JS bounded mechanically", a `.js`-file walk, HTML
+  container tests, screen-specific `_screen_test.go` files — see M5.3b–e
+  above). M6.7's text names only two proofs: "view-model golden" and
+  "…wired to NEW loops endpoints… (httptest)" — httptest exercises HTTP
+  handlers, not DOM/JS, so no screen-render test is implied. "Loops
+  screen" in the item's title tracks docs/cortex-web.md's Phase 6 framing
+  and Amendment A2 (the fifth screen "lands in M6"), but the checklist
+  body — which is what ticking actually requires per §6 ("ticking requires
+  that named test to exist and pass") — is narrower. Treating this as
+  backend-only is not scope-cutting silently: it's recorded here precisely
+  so a future iteration doesn't invent unverified screen work, and so the
+  owner can amend GOAL.md if the intent was broader.
+  (b) **A standing serve-resident scheduler tick is OUT of M6.7's literal
+  DoD**, formalizing the question the M6.6 iteration's Next Up note left
+  open. GOAL.md M6.7's text names exactly four actions — create, enable,
+  disable, run-now — none of which is "the scheduler ticks automatically
+  while serve is up." `run-now` (M6.7e) is a direct synchronous
+  `RunLoopFiring` call; enable/disable (M6.7d) only persist the `Enabled`
+  flag via `Store.Save`. docs/cortex-web.md Phase 6's "ticks while cortex
+  serve runs" describes the phase's eventual shipped value, not this one
+  item's tested DoD — if the owner wants a live in-process tick loop
+  wired into `cortex serve`, that needs either a GOAL.md amendment
+  scoping it into M6.7 explicitly, or a new milestone item; it is NOT
+  silently dropped, just not claimed as done by M6.7's tests.
+  No load-bearing check applicable (no code changed this iteration).
 
 ## Known Issues (append-only)
 - (none yet)
