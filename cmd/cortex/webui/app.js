@@ -14,12 +14,16 @@
 // cmd/cortex/webui_transcript.go) into the #session container.
 //
 // M5.3c3 — the session screen's input box: a text field + submit button,
-// appended after the rendered transcript, POSTs a new turn via POST
-// /api/projects/{name}/sessions/{id}/turn (serve_turn.go) and re-renders by
-// calling loadSession() again (simpler than appending the new entries
-// directly, and this screen has no staleness concerns yet). Live SSE
-// (M5.3c4, swapping this for /turn/stream + EventSource/streaming-fetch) is
-// the following sub-item.
+// appended after the rendered transcript.
+//
+// M5.3c4 — live SSE progress: the input box now POSTs to
+// /api/projects/{name}/sessions/{id}/turn/stream (serve_stream.go) and
+// consumes the response via sse.js's streamSSE() helper, rendering
+// "progress" frames into the status span as they arrive and re-rendering
+// the transcript (loadSession() again) once the terminal "result" frame
+// lands — same "full re-fetch-and-rerender, not a client-side entry
+// append" posture M5.3c3 chose, just triggered by the SSE "result" event
+// instead of a single JSON response.
 
 // queryParam reads a single query-string parameter from the page URL — the
 // same window.location.search source authToken()'s "?token=" precedent
@@ -190,7 +194,7 @@ function renderTurnInput(container, project, session) {
         encodeURIComponent(project) +
         "/sessions/" +
         encodeURIComponent(session) +
-        "/turn",
+        "/turn/stream",
       {
         method: "POST",
         headers: {
@@ -202,13 +206,20 @@ function renderTurnInput(container, project, session) {
     )
       .then((resp) => {
         if (!resp.ok) {
-          throw new Error("POST turn: " + resp.status);
+          throw new Error("POST turn/stream: " + resp.status);
         }
-        return resp.json();
-      })
-      .then(() => {
-        input.value = "";
-        loadSession();
+        return streamSSE(resp, {
+          progress: (payload) => {
+            status.textContent = payload.line;
+          },
+          result: () => {
+            input.value = "";
+            loadSession();
+          },
+          error: (payload) => {
+            status.textContent = "Failed: " + payload.error;
+          },
+        });
       })
       .catch((err) => {
         status.textContent = "Failed to send: " + err.message;
