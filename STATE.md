@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 49
+Updated: 2026-07-12 · Iteration: 50
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -452,9 +452,14 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       `TestAppendLoopRunWritesEntryToUserLevelJournal`,
       `TestAppendLoopRunIsolatedByCortexHome`
       (internal/journal/loop_test.go).
-- [ ] M6.3 Each firing runs a fresh headless session in the target
+- [x] M6.3 Each firing runs a fresh headless session in the target
       project (fixture project + scripted sender), producing a
-      `loop.run` event with outcome + change ref.
+      `loop.run` event with outcome + change ref. `add1d6f` —
+      `TestRunLoopFiringRunsFreshHeadlessSessionAndJournalsSuccessWithChangeRef`,
+      `TestRunLoopFiringNoOpTurnJournalsSuccessWithEmptyChangeRef`,
+      `TestRunLoopFiringTurnErrorJournalsFailedOutcome`,
+      `TestRunLoopFiringUnknownProjectJournalsFailedOutcome`
+      (cmd/cortex/loop_run_test.go).
 - [ ] M6.4 Budget caps, both of D11's: a scripted runaway session
       halts at the turn cap (sub-test 1) and a token-budget breach
       halts before the turn cap (sub-test 2, fake sender reporting
@@ -471,32 +476,40 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       (httptest).
 
 ## Next Up
-Start M6.3: each firing runs a fresh headless session in the target
-project (fixture project + scripted sender), producing a `loop.run`
-event with outcome + change ref. `internal/loops.Scheduler.Due` (M6.2)
-already decides WHICH specs should fire; M6.3 is the firing itself —
-wire a `Scheduler.Due` result to actually running one headless session
-per due spec via the Phase 3/4 machinery (`internal/registry` resolves
-`Spec.Project` to a root, then a fresh session runs `Spec.Prompt`
-through `Session.Turn` or equivalent headless entry point — check
-`cmd/cortex/session_core.go`/`cmd/cortex turn` for the existing headless
-seam before inventing a new one), then calls
-`journal.AppendLoopRun` (internal/journal/loop.go, landed this
-iteration) with `Outcome: LoopOutcomeSuccess` or `LoopOutcomeFailed` and
-a `ChangeRef` (per docs/cortex-web.md Phase 6: "each run lands as a
-reviewable `cortex change`" — check `cmd/cortex/change.go` for the
-existing change-lifecycle seam `cortex change start/commit/status`
-referenced in CLAUDE.md). `LastRunLookup`'s production implementation
-(reading the last `loop.run` event per spec name from the journal,
-still stubbed as an injected function in M6.2's tests) likely lands
-here too, since M6.3 is where real firings start producing real
-`loop.run` history to derive from — GOAL.md §3 P6 says next-run is
-DERIVED, not stored. No budget caps yet (M6.4 — a scripted runaway/
-token-breach test), no risk-posture assertion yet (M6.5 — though
-headless already treats shellrisk Risky as Blocked by construction per
-M6.3's own fixture, so M6.5 is likely mostly a dedicated test rather
-than new mechanism). Fixture project + scripted Sender per GOAL.md's
-hermetic-tests rule — no live model.
+Start M6.4: budget caps, both of D11's — a scripted runaway session
+halts at the turn cap (sub-test 1) and a token-budget breach halts
+before the turn cap (sub-test 2, fake sender reporting token counts);
+both journal `failed: budget`. `RunLoopFiring` (cmd/cortex/loop_run.go,
+landed M6.3) currently runs `cs.Turn(ctx, spec.Prompt)` to completion
+unconditionally — this item adds enforcement of `Spec.MaxTurns`/
+`Spec.MaxTokens` (already present as fields on `loops.Spec`, unused
+until now) around that call, halting the turn loop and journaling
+`Outcome: LoopOutcomeFailed, Reason: "budget"` (a new reason string,
+distinct from "overlap" (M6.2) and the free-text turn-error reasons
+M6.3 produces) when either cap is breached. Check whether `Session.Turn`
+already exposes a turn-count/token-count stopping hook (it must track
+tokensIn/tokensOut per session already — `cs.tokensIn`/`cs.tokensOut` in
+session_core.go — the cap likely wants to observe those counters
+mid-turn rather than only after Turn returns, since a runaway session
+could otherwise blow through the whole budget before RunLoopFiring gets
+a chance to react) or whether MaxTurns/MaxTokens need to be threaded in
+as parameters change the loop's stopping condition directly. Fixture +
+scripted Sender per GOAL.md's hermetic-tests rule — no live model; a
+"runaway" fixture likely means a scripted backend that keeps returning
+tool calls forever (never a final content-only reply) so the cap is
+what actually stops it, not the model's own completion.
+
+Not yet done, deferred (not required by M6.3's DoD but noted for a
+future increment): `internal/loops.LastRunLookup`'s production
+implementation (reading the last `loop.run` event per spec name from
+the journal — GOAL.md §3 P6 says next-run is DERIVED, not stored) is
+still the injected function M6.2's tests use; nothing yet wires
+`Scheduler.Due` to `RunLoopFiring` end-to-end in production (no
+`cortex serve`-resident scheduler loop exists yet) — that wiring plus
+the real `LastRunLookup` may belong to M6.6 (restart-resume, which is
+explicitly about next-run derivation) or an M6.7 prerequisite; flag for
+whichever iteration first needs a real scheduler tick loop running in
+`cortex serve`.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2396,6 +2409,60 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   ./internal/journal/...` fails to build (`undefined: Clock`,
   `undefined: LoopRunPayload`), moved both back and reran the full suite
   green.
+
+- 2026-07-12: M6.3 landed `RunLoopFiring` (cmd/cortex/loop_run.go),
+  mirroring `SessionManager.Create`'s exact seam sequence
+  (`newSession()` → `applyProjectByName` → `StartTranscript`) rather than
+  inventing a parallel session-construction path, and a dir-scoped git
+  change lifecycle (`gitCleanIn`/`currentBranchIn`/`startChangeIn`/
+  `commitChangeIn` in change.go) the existing CLI-facing zero-arg
+  `gitClean`/`currentBranch`/`startChange`/`commitChange` now delegate to
+  with `dir=""` — a pure refactor (no behavior change for `cortex
+  change`'s own CLI), needed because `startChange`/`commitChange`
+  previously always ran against the process CWD, which is wrong once a
+  single long-lived process (a loop-firing driver, eventually `cortex
+  serve`) fires against many different registered projects.
+  `RunLoopFiring` always appends exactly one `loop.run` event on every
+  exit path (unresolvable project, session-construction failure, a
+  `Turn` error, or a clean success) so a firing that goes wrong stays
+  visible in run history — the function's own Go `error` return is
+  reserved for a failure to WRITE that journal event, an infra problem
+  worth surfacing to whatever drives the scheduler loop, not a normal
+  failed/errored run (which is itself a successfully-journaled outcome
+  and returns nil). ChangeRef shape chosen: `"<branch>@<short-hash>"`
+  (e.g. `cortex/nightly@abc1234`) — cheap to parse back into `cortex
+  change status`-equivalent facts later (M6.7's run-history view) without
+  a second lookup. Discovered a pre-existing gap while designing the
+  test: the ordinary tool dispatcher (internal/tools, not the study
+  door-guard `ConfinePath`) resolves `write_file`/`edit_file`/`bash`
+  paths against the process's actual working directory, NOT any
+  `Workspace` root — only `contextDir()`/instructions/`cs.root()`
+  confinement are workspace-threaded today (M3.1's own equivalence test,
+  `TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD`,
+  confirms this scope). This means a multi-project `cortex serve`
+  process today would have every live session's file-writing tool calls
+  land wherever the server process happens to be running FROM, not each
+  session's own project root — a real product gap for Phase 4/6, but
+  out of scope for M6.3's DoD (which only asks for the firing + journal
+  event, not fixing tool-execution workspace threading). Flagging here
+  for whoever next touches multi-project concurrent tool execution
+  (M6.7's create/run-now UI, or a dedicated hardening item) rather than
+  silently working around it forever — M6.3's own test sidesteps it
+  correctly and honestly via `t.Chdir(root)` before firing, matching
+  today's actual single-CWD-process assumption instead of pretending the
+  gap doesn't exist. `startChangeIn` failing (e.g. the target project's
+  tree is already dirty from an unrelated in-flight change) is handled
+  leniently: the turn still runs, `ChangeRef` just stays empty — not
+  exercised by a dedicated test this iteration (fixture always starts
+  clean); flag if a future increment needs that path asserted. Load-
+  bearing check done: moved `loop_run.go` out of the tree, confirmed `go
+  vet ./cmd/cortex/...` fails to build (`undefined: RunLoopFiring`),
+  restored it and reran the full suite green. Also fixed a lint break the
+  refactor introduced mid-iteration: `gitCmd` (the old CWD-implicit
+  wrapper) became dead code once every caller was moved onto
+  `gitCmdIn`/the new dir-scoped helpers — removed it rather than keeping
+  an unused function alive, `golangci-lint`'s `unused` check caught it
+  before the final green verify run.
 
 ## Known Issues (append-only)
 - (none yet)
