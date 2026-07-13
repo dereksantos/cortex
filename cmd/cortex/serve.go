@@ -139,7 +139,8 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // buildLoopsViewModel into the HTTP surface — loopsStore is a small
 // loops.Store interface, matching the reg/mgr precedent of threading
 // hermetically-fakeable seams rather than resolving internal/userhome
-// inside the handler.
+// inside the handler. M6.7c adds POST /api/loops (create), the write half,
+// over the same loopsStore.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
@@ -158,6 +159,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("GET /api/models", handleModels(configPath))
 	mux.HandleFunc("PUT /api/models/{role}", handleSetModelBinding(configPath, reg, mgr))
 	mux.HandleFunc("GET /api/loops", handleListLoops(loopsStore))
+	mux.HandleFunc("POST /api/loops", handleCreateLoop(loopsStore))
 	return mux
 }
 
