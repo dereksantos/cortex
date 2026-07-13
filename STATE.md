@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 60
+Updated: 2026-07-13 · Iteration: 61
 
 ## Current milestone
-M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
+None — the entire GOAL.md §6 ladder (M1–M6) is complete.
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -543,27 +543,31 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       `TestWebUIJavaScriptSizeCaps` (cmd/cortex/webui_jscap_test.go,
       pre-existing — reconfirmed green with loops.js counted in its
       whole-embedded-FS walk).
-- [ ] M6.8 serve-resident scheduler (owner amendment A4): tick goroutine
+- [x] M6.8 serve-resident scheduler (owner amendment A4): tick goroutine
       in cortex serve composing Scheduler.Due + RunLoopFiring on an
       injected clock, clean shutdown on server stop, overlap/disabled
-      never fire; fake-clock test, no sleeps.
+      never fire; fake-clock test, no sleeps. `4349930` —
+      `TestLoopSchedulerTickFiresDueEnabledSpec`,
+      `TestLoopSchedulerTickSkipsDisabledSpec`,
+      `TestLoopSchedulerTickOverlapSkipsAndJournalsSkip`,
+      `TestLoopSchedulerStartFiresOnTickAndStopsWhenTicksClosed`,
+      `TestLoopSchedulerStartStopsOnContextCancel`
+      (cmd/cortex/serve_scheduler_test.go). **M6 complete
+      (M6.1–M6.8 all ticked) — the entire GOAL.md §6 ladder (M1–M6) is
+      now complete.**
 
 ## Next Up
-Start M6.8: the serve-resident scheduler (owner amendment A4) — a tick
-goroutine started by `cortex serve` (serve.go) composing
-`internal/loops.Scheduler.Due` (M6.2) with `RunLoopFiring` (M6.3,
-cmd/cortex/loop_run.go) on an injected clock, so enabled loop specs
-actually fire while `cortex serve` is running rather than only via the
-M6.7e run-now endpoint. Requirements per GOAL.md M6.8: ticks on an
-injected clock (no test sleeps — mirror M6.2's fake-clock pattern from
-internal/loops/scheduler_test.go), stops cleanly on server shutdown, and
-never fires while a spec is disabled or an overlap condition holds
-(Scheduler.Due/overlap-skip already encode this — the new code is just the
-tick-loop wiring + shutdown plumbing, composing existing pieces rather than
-reimplementing due/overlap logic). This is the LAST unchecked item in the
-entire ladder (GOAL.md §6) — after M6.8 lands, M6 and the whole spec are
-complete; re-read GOAL.md §6 in full before starting to confirm nothing
-else was missed.
+No unchecked items remain anywhere in GOAL.md §6 (re-read in full this
+iteration to confirm — M1.1–M1.7, M2.1–M2.7, M3.1–M3.5, M4.1–M4.7,
+M5.1–M5.4, M6.1–M6.8 are all ticked). There is no next increment to
+start. A future iteration should: (1) re-run verify as the ground-truth
+check that this still holds, (2) re-read GOAL.md §6 fresh in case an
+owner amendment has added a new item since this was written (amendments
+land in §8; check for one dated after 2026-07-13), and (3) if genuinely
+nothing is left, this is a legitimate all-milestones-complete steady
+state — not a stuck loop — and the sanctioned move is a no-op
+`chore(state): reconfirm ladder complete` bookkeeping commit rather than
+inventing scope-creeping work GOAL.md doesn't ask for.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -571,6 +575,51 @@ Repo is a Go 1.26 module; the coder binary is cmd/cortex.
 Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
 
 ## Decisions Log (append-only)
+- 2026-07-13: M6.8 landed `loopScheduler` (`cmd/cortex/serve_scheduler.go`)
+  as the composition M6.2/M6.3 were built to be composed with — no new
+  logic beyond the tick-loop/overlap-tracking wiring GOAL.md's own M6.8
+  wording called out. `Scheduler.Due` needed a real `Running` function for
+  the first time (M6.2's own tests only ever inject one); a new
+  process-local `runningSet` (mutex-guarded `map[string]bool`) is the only
+  new state this item introduces — deliberately in-memory-only per GOAL.md
+  §1 pillar 2 ("serve owns zero canonical state"): nothing about "which
+  loop is currently running" needs to survive a restart, since nothing is
+  genuinely running across one. `LastRun` reuses `loops.JournalLastRun`
+  (M6.6) and the overlap-skip write reuses `journal.AppendLoopRun` (the
+  same sink M6.3's `RunLoopFiring` itself writes success/failed to) rather
+  than inventing a second event shape. Each due spec fires on its own
+  goroutine (tracked by a `sync.WaitGroup`) instead of running the tick
+  loop's firings sequentially and synchronously — a sequential design
+  would make `Running` structurally unable to ever observe true (by the
+  time `Due` runs again, the prior tick's only firing would already have
+  returned), which would make the overlap guard call sites correct but
+  unreachable in practice; async firings make a real overlap between a
+  slow firing and the next tick actually representable, which is what
+  `TestLoopSchedulerTickOverlapSkipsAndJournalsSkip` exercises: `running.
+  start(name)` runs synchronously inside `tick()`, before the firing's
+  goroutine is even spawned, so a second `tick()` call made immediately
+  after (no synchronization needed) deterministically observes the
+  overlap — no sleeps, no timeouts, anywhere in this file's 5 new tests
+  (verified green under `-race` too). `Start(ctx, ticks)` exits (closing
+  its returned channel) on either `ctx` cancellation or the `ticks`
+  channel closing — wired into `runServeCLI` (serve.go) with a real
+  `time.NewTicker(time.Minute)` (finer than `loops.CadenceFloorMinutes`'s
+  15-minute floor; the interval is a serve-side polling granularity, not
+  part of the loop spec format) and a deferred `stopSched(); <-schedStopped;
+  sched.Wait()` so an in-flight firing isn't abandoned when `runServeCLI`
+  returns — the repo has no pre-existing graceful-HTTP-shutdown path
+  (`srv.Serve` blocks until it errors; no `signal.NotifyContext` wiring
+  exists for the serve command specifically), so "stops cleanly on server
+  shutdown" is satisfied at the scope GOAL.md M6.8 actually names (the
+  scheduler's own start/stop lifecycle) rather than by inventing new HTTP
+  graceful-shutdown machinery GOAL.md never asked for in this item. Load-
+  bearing check done: moved `serve_scheduler.go` out of the tree before
+  writing `serve_scheduler_test.go`'s assertions — `go vet ./cmd/cortex/...`
+  failed with `undefined: newLoopScheduler`, confirming the tests exercise
+  the new code; restored and reran green. **This was the last unchecked
+  item in GOAL.md §6 — M1–M6 are now all complete.** Re-read GOAL.md §6 in
+  full before writing this entry to confirm nothing else was missed; found
+  nothing outstanding.
 - 2026-07-13: M6.7f landed `cmd/cortex/webui/loops.js` + a new `#loops`
   container in `index.html` (loaded after `app.js`, matching the
   landscape.js/models.js precedent), mirroring M5.3e's models-screen shape
