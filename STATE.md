@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 50
+Updated: 2026-07-12 · Iteration: 51
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -460,10 +460,14 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       `TestRunLoopFiringTurnErrorJournalsFailedOutcome`,
       `TestRunLoopFiringUnknownProjectJournalsFailedOutcome`
       (cmd/cortex/loop_run_test.go).
-- [ ] M6.4 Budget caps, both of D11's: a scripted runaway session
+- [x] M6.4 Budget caps, both of D11's: a scripted runaway session
       halts at the turn cap (sub-test 1) and a token-budget breach
       halts before the turn cap (sub-test 2, fake sender reporting
-      token counts); both journal `failed: budget`.
+      token counts); both journal `failed: budget`. `c7f13c4` —
+      `TestRunLoopTokenBudgetFinalizes` (cmd/cortex/loop_budget_test.go),
+      `TestRunLoopFiringRunawaySessionHaltsAtTurnCap`,
+      `TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap`
+      (cmd/cortex/loop_run_test.go).
 - [ ] M6.5 Risk posture: a loop firing whose scripted sender issues
       a shellrisk-Risky command is Blocked, asserted on the tool result
       and the `loop.run` event; no prompt surface is reachable.
@@ -476,28 +480,36 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       (httptest).
 
 ## Next Up
-Start M6.4: budget caps, both of D11's — a scripted runaway session
-halts at the turn cap (sub-test 1) and a token-budget breach halts
-before the turn cap (sub-test 2, fake sender reporting token counts);
-both journal `failed: budget`. `RunLoopFiring` (cmd/cortex/loop_run.go,
-landed M6.3) currently runs `cs.Turn(ctx, spec.Prompt)` to completion
-unconditionally — this item adds enforcement of `Spec.MaxTurns`/
-`Spec.MaxTokens` (already present as fields on `loops.Spec`, unused
-until now) around that call, halting the turn loop and journaling
-`Outcome: LoopOutcomeFailed, Reason: "budget"` (a new reason string,
-distinct from "overlap" (M6.2) and the free-text turn-error reasons
-M6.3 produces) when either cap is breached. Check whether `Session.Turn`
-already exposes a turn-count/token-count stopping hook (it must track
-tokensIn/tokensOut per session already — `cs.tokensIn`/`cs.tokensOut` in
-session_core.go — the cap likely wants to observe those counters
-mid-turn rather than only after Turn returns, since a runaway session
-could otherwise blow through the whole budget before RunLoopFiring gets
-a chance to react) or whether MaxTurns/MaxTokens need to be threaded in
-as parameters change the loop's stopping condition directly. Fixture +
-scripted Sender per GOAL.md's hermetic-tests rule — no live model; a
-"runaway" fixture likely means a scripted backend that keeps returning
-tool calls forever (never a final content-only reply) so the cap is
-what actually stops it, not the model's own completion.
+Start M6.5: risk posture — a loop firing whose scripted sender issues a
+shellrisk-Risky command is Blocked, asserted on the tool result AND the
+`loop.run` event; no prompt surface is reachable. GOAL.md §3 P6 says
+"headless risk posture (Risky ⇒ Blocked) is inherited, never overridden
+(M6.5 asserts it)" — check `internal/shellrisk` and how the existing
+headless `cortex turn`/`SessionManager` path already gets Risky ⇒
+Blocked (search for where `shellrisk.Risky`/`turnIntent` is consulted in
+the bash tool dispatch, cmd/cortex or internal/tools) to confirm
+`RunLoopFiring`'s fresh headless session inherits that same behavior for
+free (it's built via the same `newSession`/`applyProjectByName`
+machinery M4.2b1/M6.3 already use) rather than needing new plumbing —
+this item may turn out to be "prove it with a test", not "add new
+enforcement code". If the bash tool's `Execute` path only prompts a
+human on Risky in the REPL and there's no session-level "headless" flag
+today, that flag (defaulting Risky to Blocked for any session with no
+live/interactive prompt surface) may need to be added and threaded into
+`newProductionSession`/`RunLoopFiring`'s session construction. Assert
+BOTH: the tool result string (a refusal, not the command's output) and
+the `loop.run` event (Outcome=failed, Reason should mention risk/blocked
+— NOT "budget", a distinct case from M6.4). Fixture + scripted Sender
+per GOAL.md's hermetic-tests rule (no live model, no real risky command
+execution — the point is the command is refused before it runs).
+
+M6.4 (just landed) established the pattern worth reusing here:
+`RunLoopFiring` inspects `TurnResult.StopReason`/the turn's outcome
+after `cs.TurnWithBudget(...)` returns to decide the journaled Outcome/
+Reason — M6.5 likely follows the same shape (a Risky-blocked tool call
+finalizes the turn cleanly, no Go error, so the "was this actually
+clean?" signal has to come from somewhere other than `turnErr` again,
+possibly the tool result content itself or a new signal on TurnResult).
 
 Not yet done, deferred (not required by M6.3's DoD but noted for a
 future increment): `internal/loops.LastRunLookup`'s production
@@ -2463,6 +2475,67 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   `gitCmdIn`/the new dir-scoped helpers — removed it rather than keeping
   an unused function alive, `golangci-lint`'s `unused` check caught it
   before the final green verify run.
+
+- 2026-07-12: M6.4 landed D11's per-run budget caps in three layers.
+  (1) `agent.Bounds` gained `TokenBudget int` (cumulative input+output
+  tokens, 0 = unbounded, distinct from the existing per-request
+  `MaxTokens` completion cap) checked in `runLoop` (loop.go) immediately
+  after `accountUsage`, BEFORE this round's response is even extracted/
+  appended or its tool calls dispatched — chosen over checking after
+  dispatch (where the pre-existing `ReadBudgetBytes` check lives)
+  because a token-hungry round shouldn't get to dispatch more tool calls
+  once it's already blown the budget; the round's assistant message is
+  simply never added to the transcript, which needed no special-casing
+  since finalizeLoop's re-ask doesn't depend on it. (2) `Session.turn`
+  (turn.go) gained two override parameters (`maxIterOverride`,
+  `tokenBudget`, both 0 = "use the normal default") threaded into a new
+  `TurnWithBudget` method — `Turn`/`TurnWithProgress` pass 0/0,
+  unchanged. `TurnResult` gained `StopReason string` (the engine's raw
+  loopStats.StopReason) so a caller enforcing bounds can tell a
+  bound-forced stop from a clean answer without an error to key off —
+  necessary because a bound trip is NOT a Go error (the engine still
+  finalizes and answers); `turnErr` alone can't see it. (3)
+  `RunLoopFiring` (loop_run.go) now calls
+  `cs.TurnWithBudget(ctx, spec.Prompt, spec.MaxTurns, spec.MaxTokens)`
+  and checks `result.StopReason` for `"max-iter"` or `"token-budget"`
+  after a nil `turnErr`, journaling `Outcome: LoopOutcomeFailed,
+  Reason: "budget"` for either — matching the literal string
+  `internal/journal/loop.go`'s `LoopRunPayload` doc comment already
+  reserved. Deliberately treats BOTH bound types identically (one
+  Reason string) since GOAL.md M6.4's own wording says "both journal
+  `failed: budget`" — no need to distinguish which cap tripped in the
+  journal event itself (a future run-history UI reading `StopReason`
+  directly, if ever surfaced, could still tell them apart; not needed
+  by any current DoD).
+  Side-effect: adding a field to `TurnResult` broke two existing bare
+  type conversions (`turnResponse(result)` in serve_turn.go and
+  serve_stream.go — Go's struct-to-struct conversion requires identical
+  underlying field sequences) — fixed by making both sites construct
+  `turnResponse{Reply: result.Reply, Interrupted: result.Interrupted}`
+  explicitly instead, which also means `StopReason` is deliberately NOT
+  exposed on the wire (kept the M4.5 SSE golden test's exact JSON byte
+  shape unchanged — verified it still passes untouched).
+  Standing-regression-guard note: `loop_test.go` is genesis-present, so
+  the new engine-level `TestRunLoopTokenBudgetFinalizes` was NOT appended
+  there (an earlier draft that did so was reverted via `git checkout --
+  cmd/cortex/loop_test.go` once this was caught) — it instead lives in a
+  new file, `cmd/cortex/loop_budget_test.go`, which reuses loop_test.go's
+  `fakeResp`/`readCall` helpers (same package, no duplication). The two
+  `RunLoopFiring`-level sub-tests
+  (`TestRunLoopFiringRunawaySessionHaltsAtTurnCap`,
+  `TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap`) were added to
+  `loop_run_test.go`, which postdates genesis (landed in M6.3) — a clean
+  extension, not a violation; confirmed via
+  `git diff --name-only <genesis>..HEAD -- '*_test.go'` showing no
+  genesis-present file among this iteration's changes.
+  Load-bearing checks done: (a) `TestRunLoopTokenBudgetFinalizes` confirmed
+  red before the `Bounds.TokenBudget`/runLoop check existed (written
+  first, ran red, then the check was added). (b) `git stash push --
+  cmd/cortex/loop_run.go` (reverting only the production file, keeping
+  the new tests) reran the two `RunLoopFiring`-level tests and both
+  failed with `Outcome = "success"`/`Reason = ""` instead of
+  `"failed"`/`"budget"`, then `git stash pop` restored the fix and the
+  full suite reran green before committing.
 
 ## Known Issues (append-only)
 - (none yet)
