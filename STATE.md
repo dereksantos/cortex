@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 55
+Updated: 2026-07-13 · Iteration: 56
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -494,9 +494,12 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         `TestBuildLoopsViewModelGolden`,
         `TestBuildLoopsViewModelEmptyStoreReturnsEmptyLoopsNotNull`
         (cmd/cortex/webui_loops_test.go).
-  - [ ] M6.7b `GET /api/loops` endpoint wiring M6.7a's view-model into
+  - [x] M6.7b `GET /api/loops` endpoint wiring M6.7a's view-model into
         the HTTP surface (auth-gated, httptest) — Go-only, no screen yet,
-        mirroring M4.2a/M5.3c1's endpoint-first precedent.
+        mirroring M4.2a/M5.3c1's endpoint-first precedent. `e8dbaa3` —
+        `TestListLoopsEndpointReturnsSpecsAndRunHistory`,
+        `TestListLoopsEndpointEmptyStoreReturnsEmptyArray`,
+        `TestListLoopsEndpointRequiresAuth` (cmd/cortex/serve_loops_test.go).
   - [ ] M6.7c `POST /api/loops` create endpoint via `internal/loops.
         FileStore.Save` (httptest: happy path, cadence-floor rejection
         surfaced as a typed 400, auth).
@@ -522,18 +525,19 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7b: `GET /api/loops` endpoint wiring M6.7a's `buildLoopsViewModel`
-(cmd/cortex/webui_loops.go) into the HTTP surface (auth-gated, httptest,
-Go-only — no screen yet), mirroring M4.2a/M5.3c1's endpoint-first
-precedent. The handler needs a `loops.Store` — construct via `loops.New()`
-(userhome-resolved `loops.json`) the same way other handlers resolve their
-production seams; see serve_routes.go / serve_landscape.go for the
-existing auth-gated-handler wiring pattern (route registration in
-newServeMux). M6.7a landed this iteration (`9d47fa9`) — the view-model
-builder plus the new `loops.JournalRunHistory` production reader
-(internal/loops/history.go) are ready to compose. The 2026-07-13 Decisions
-entries from the M6.7 split still govern M6.7b–e: (1) M6.7's literal DoD is
-view-model + list/create/enable/disable/run-now endpoints proven by
+Start M6.7c: `POST /api/loops` create endpoint via `internal/loops.
+FileStore.Save` (httptest: happy path, cadence-floor rejection surfaced
+as a typed 400 via `errors.Is(err, loops.ErrCadenceTooLow)`, auth) —
+mirror M4.2c2b1's `PUT /api/models/{role}` write-endpoint pattern (decode
+a JSON body, call `Store.Save`, map the typed store error to 400 vs 500)
+over M6.7b's just-landed `loopsStore loops.Store` parameter already
+threaded through `newServeMux`/`runServeCLI` (cmd/cortex/serve.go) — no
+signature change needed, only a new `mux.HandleFunc("POST /api/loops",
+...)` line plus a handler (extend serve_loops.go or add
+serve_loops_create.go). `testLoopsStore(t)` (serve_routes_test.go) and
+`loops.NewAt` are ready for hermetic tests. The 2026-07-13 Decisions
+entries from the M6.7 split still govern M6.7c–e: (1) M6.7's literal DoD
+is view-model + list/create/enable/disable/run-now endpoints proven by
 httptest ONLY — the loops-screen HTML/JS (M6.7f) is a separate owner-
 amendment item, not part of M6.7/M6's completion gate. (2) the standing
 serve-resident scheduler tick is M6.8, also separate — `run-now` (M6.7e)
@@ -2701,6 +2705,27 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   a silently-dead line) then restored it and reran green; the golden test
   itself was written before the implementation and observed failing to
   compile (`undefined: buildLoopsViewModel`) before it existed.
+
+- 2026-07-13: M6.7b landed `GET /api/loops` (`e8dbaa3`) by threading a new
+  `loopsStore loops.Store` parameter through `newServeMux` — matching
+  M4.2c1's precedent of adding a parameter (configPath/homeDir) rather than
+  resolving the seam inside the handler, so tests stay hermetic. This
+  parameter addition is mechanical but wide: it touched all 48 existing
+  `newServeMux(...)` call sites across 12 pre-existing test files
+  (serve_dashboard_test.go, serve_e2e_test.go, serve_landscape_test.go,
+  serve_models_test.go, serve_restart_test.go, serve_routes_test.go,
+  serve_session_test.go, serve_sse_golden_test.go, serve_stream_test.go,
+  serve_transcript_test.go, serve_turn_test.go, webui_test.go), each now
+  passing a new shared helper `testLoopsStore(t)` (serve_routes_test.go,
+  backed by `loops.NewAt` on a temp-dir `loops.json` — mirrors
+  `testSessionManager`'s role for a dependency most of those tests don't
+  otherwise care about). Confirmed none of these 12 files existed at the
+  genesis commit (`git cat-file -e <genesis>:<path>` failed for all 12),
+  so the §2 standing regression guard does not apply — they were all
+  landed by later M4.2/M5 iterations, not present at genesis. Load-bearing
+  check done: removed the `mux.HandleFunc("GET /api/loops", ...)`
+  registration line only, confirmed `TestListLoopsEndpointReturnsSpecsAndRunHistory`
+  fails (404 instead of 200), restored the line and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
