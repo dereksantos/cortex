@@ -351,6 +351,18 @@ incomplete (sole exception: the gate-suspension rule, §7).
       from `loop.run` events); create/enable/disable/run-now wired to
       NEW loops endpoints added to `cortex serve` in this milestone
       (httptest).
+- [ ] **M6.7f** Loops screen render (added by owner amendment A4): a
+      `loops.js` + `#loops` container rendering the M6.7a view-model
+      with create/enable/disable/run-now controls calling the M6.7b–e
+      endpoints; structural tests mirroring the M5.3 screen items;
+      stays within the M5.3a JS size caps.
+- [ ] **M6.8** Serve-resident scheduler (added by owner amendment A4):
+      `cortex serve` starts a scheduler goroutine that ticks on an
+      injected clock, composes `Scheduler.Due` + `RunLoopFiring`, stops
+      cleanly on server shutdown, and never fires while disabled specs
+      or overlap conditions hold (fake-clock test; no test sleeps).
+      Serve-down ⇒ loops pause; restart resumes via M6.6's journal
+      derivation.
 
 ## 7. Iteration protocol
 
@@ -501,6 +513,14 @@ casualty). Owner amendments land as dated entries here:
   screen under Phase 6; GOAL.md M5 is correspondingly four screens and
   the loops screen is M6.7. The non-goals line "the specced screens"
   spans both.
+- **A4 (2026-07-13).** The iteration-54 split of M6.7 correctly read
+  the loops-screen HTML/JS and the serve-resident scheduler tick as
+  absent from M6's literal DoD — a genuine ladder gap versus
+  docs/cortex-web.md Phase 6 ("Scheduler in the serve process — ticks
+  while `cortex serve` runs"; "UI to create/enable/disable loops").
+  Added M6.7f (screen render) and M6.8 (serve-resident scheduler) to
+  Section 6; both are required for M6 completion. The owner also
+  appended both as unchecked items to STATE.md's M6 checklist.
 - **A3 (2026-07-11).** This machine has no `timeout`/`gtimeout` binary
   (macOS, no coreutils). The verify command is amended to
   `sh -c './scripts/check.sh && go test ./... -timeout 8m'` — no outer

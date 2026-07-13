@@ -507,6 +507,14 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         httptest); see the 2026-07-13 Decisions entry on why the actual
         loops-screen HTML/JS is NOT part of M6.7's literal DoD and is
         deferred pending an owner amendment if wanted.
+- [ ] M6.7f loops screen render (owner amendment A4): loops.js +
+      #loops container over the M6.7a view-model, controls calling the
+      M6.7b–e endpoints; structural tests per the M5.3 screen pattern;
+      stays within the M5.3a JS size caps.
+- [ ] M6.8 serve-resident scheduler (owner amendment A4): tick goroutine
+      in cortex serve composing Scheduler.Due + RunLoopFiring on an
+      injected clock, clean shutdown on server stop, overlap/disabled
+      never fire; fake-clock test, no sleeps.
 
 ## Next Up
 Start M6.7a: build the loops view-model (specs from `internal/loops.
@@ -543,6 +551,7 @@ Repo is a Go 1.26 module; the coder binary is cmd/cortex.
 Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
 
 ## Decisions Log (append-only)
+- 2026-07-13: OWNER: amendment A4 added M6.7f (loops screen render) and M6.8 (serve-resident scheduler) to GOAL.md §6 and this checklist — the iteration-54 rulings correctly identified a ladder gap vs docs/cortex-web.md Phase 6; both items are now required for M6 completion.
 - 2026-07-11: GOAL.md v1 finalized after a four-lens adversarial review
   (53 findings applied: canonical increment IDs, commit-before-reset
   recovery, gate-suspension escape, four-screen M5, userhome package,
