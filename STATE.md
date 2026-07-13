@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 43
+Updated: 2026-07-12 · Iteration: 44
 
 ## Current milestone
-M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
+M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -388,10 +388,17 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
           `TestSessionScreenAppJSCreatesInputAndSubmitElements`,
           `TestSessionScreenAppJSReRendersAfterTurnSubmit`
           (cmd/cortex/webui_session_input_test.go).
-    - [ ] M5.3c4 Live SSE progress: switch the input box's turn submission
+    - [x] M5.3c4 Live SSE progress: switch the input box's turn submission
           to `POST .../turn/stream` (serve_stream.go) and render
           `progress`/`result`/`error` events as they arrive (`EventSource`
-          vs. `fetch` + streaming reader — pick one, record why).
+          vs. `fetch` + streaming reader — pick one, record why). `42a2462`
+          — `TestSessionScreenAppJSPostsToTurnStreamEndpoint`,
+          `TestSSEJSParsesEventAndDataFrames`,
+          `TestSessionScreenAppJSHandlesProgressResultAndErrorEvents`,
+          `TestSessionScreenAppJSStillRerendersAfterTurnCompletes`,
+          `TestIndexHTMLLoadsSSEScriptBeforeAppJS`
+          (cmd/cortex/webui_session_stream_test.go). **M5.3c complete
+          (c1/c2/c3/c4 all ticked).**
   - [ ] M5.3d Landscape screen: renders `buildLandscapeViewModel`
         (M5.2c, a `ScanReport` pass-through) via `GET /api/landscape`.
   - [ ] M5.3e Models screen: renders `buildModelsViewModel` (M5.2d) —
@@ -402,30 +409,27 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2 complete)
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3c4: live SSE progress for the session screen's turn submission.
-Swap `renderTurnInput`'s (`cmd/cortex/webui/app.js`, landed M5.3c3) plain
-`fetch(..., {method:"POST"})` against `POST .../turn` for a call against
-`POST /api/projects/{name}/sessions/{id}/turn/stream`
-(`cmd/cortex/serve_stream.go`, live since M4.2b3, golden-tested by M4.5's
-`TestTurnStreamEndpointGoldenFramesForMultiStepTurn`), rendering
-`progress`/`result`/`error` SSE frames as they arrive instead of waiting for
-one JSON response. Decide `EventSource` vs. `fetch` + a streaming
-`ReadableStream` reader and record why in the Decisions Log below —
-`EventSource` is GET-only (no request body, so the turn's `input` text
-can't ride along without a workaround like a query param or a
-POST-then-EventSource two-step), while `fetch` with a streamed body reader
-lets a single POST carry the JSON body AND consume the `data: ...\n\n`
-chunks emitted by `handleTurnStream` — this asymmetry is probably decisive
-but read `serve_stream.go`'s frame shape first. Testing convention
-unchanged (Decisions Log below, set at M5.3b): structural source-content
-assertions over the embedded JS (e.g. app.js references `/turn/stream` and
-parses `data:` frames) — no executed-DOM assertions; the endpoint itself is
-already httptest-covered. Watch the M5.3a size caps
-(`TestWebUIJavaScriptSizeCaps`) as app.js grows — currently at 258 lines
-(per-file cap 300, total cap 1200 across all `.js` under
-`cmd/cortex/webui/`, one file today so total == this file's count); a
-streaming-frame parser may be the increment that finally justifies a
-second `.js` file if 300 gets tight.
+Start M5.3d: the landscape screen, rendering `buildLandscapeViewModel`
+(M5.2c, `cmd/cortex/webui_landscape.go`) via `GET /api/landscape`
+(`cmd/cortex/serve_landscape.go`, live since M4.2c1 — returns 412
+`ErrNoScanRoots` when no scan roots are persisted; a fixture-repo test will
+need `PersistScanRoots` or a fake registry the way `serve_landscape_test.go`
+already sets one up). Follow the M5.3b/c shape: a dedicated
+`GET /api/landscape`-consuming fetch/render pair in
+`cmd/cortex/webui/app.js` (a `loadLandscape()`/`renderLandscape()` pair
+paralleling `loadDashboard`/`renderDashboard`), a `#landscape` container in
+`index.html`, and Go httptest coverage for any new endpoint plumbing plus
+structural source-content assertions over app.js/index.html (established
+convention, Decisions Log at M5.3b, reconfirmed through M5.3c4 below) — no
+executed-DOM assertions. `GET /api/landscape` itself needs no new endpoint
+(M4.2c1 already built it) so this sub-item may be JS-only, mirroring how
+M5.3c1 needed a new endpoint but M5.3c2 didn't. Watch the M5.3a size caps
+(`TestWebUIJavaScriptSizeCaps`): app.js is 269 lines, sse.js is 51 (per-file
+cap 300 each; total 320 of 1200) — there's room, but the landscape screen's
+truncation/error-per-family rendering could push app.js past 300, at which
+point a third `.js` file (e.g. `landscape.js`, following M5.3c4's
+sse.js-as-a-second-file precedent) is the established way out rather than
+stretching the per-file cap.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2084,6 +2088,58 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   300 — getting close; flagged in this iteration's Next Up as the
   increment that may finally need a second `.js` file); total-JS cap 1200
   still has slack (one file).
+
+- 2026-07-12: M5.3c4 landed live SSE progress by adding a second `.js` file
+  (`cmd/cortex/webui/sse.js`, 51 lines) rather than growing `app.js` past
+  300 — a generic `streamSSE(response, handlers)` frame parser, kept
+  separate from `app.js` since it's a reusable low-level primitive (SSE
+  wire-format parsing) with no knowledge of the session screen, matching
+  the prior iteration's Next Up flag that a streaming-frame parser was the
+  likely trigger for a second file. Chose `fetch` + `response.body.getReader()`
+  over `EventSource` for the reason the prior Next Up note already
+  identified as decisive: `EventSource` is GET-only, and `POST
+  .../turn/stream` needs the turn's `input` text in a request body — a
+  workaround (query param, or a POST-then-EventSource two-step) would add
+  a second round-trip or leak the message into server logs/URLs for no
+  benefit, whereas a single `fetch` POST both carries the JSON body and
+  streams the response. `streamSSE` buffers decoded UTF-8 chunks and splits
+  on `"\n\n"` (the exact frame boundary `sseEvent`, serve_stream.go, emits),
+  parsing each frame's `"event: "`/`"data: "` lines and JSON-decoding the
+  payload before dispatching to `handlers[event]` — matching
+  `progressEvent`/`turnResponse`'s wire shapes already golden-pinned by
+  M4.5's `TestTurnStreamEndpointGoldenFramesForMultiStepTurn`, so no new
+  payload-shape assumptions were introduced. `renderTurnInput`'s submit
+  handler now passes `streamSSE` three handlers (`progress` writes
+  `payload.line` into `#turn-status`; `result` clears the input and calls
+  `loadSession()` again, same terminal action M5.3c3's single `.then()`
+  took; `error` writes `payload.error` into the same status span) — the
+  `.catch()`/`.finally()` wrapping the whole `fetch(...).then(...)` chain
+  is unchanged from M5.3c3, so a network-level failure (not a server-sent
+  "error" SSE frame) is still caught there. `index.html` loads `sse.js`
+  before `app.js` (script order matters — no module system, per D9) since
+  `app.js`'s submit handler calls the global `streamSSE` function `sse.js`
+  defines. Testing convention reconfirmed from M5.3b/c1/c2/c3: structural
+  source-content assertions in a new `webui_session_stream_test.go` (POST
+  target is `/turn/stream`; `sse.js` uses `getReader`/`"\n\n"`/`"event: "`/
+  `"data: "`/`JSON.parse`; `app.js` registers `progress:`/`result:`/`error:`
+  handler keys; `loadSession()` still called ≥2 times; `index.html` loads
+  `sse.js` before `app.js` by string index) — no executed-DOM assertions,
+  since this stdlib-only suite has no JS engine; the stream endpoint itself
+  is already httptest- and golden-covered (serve_stream_test.go,
+  serve_sse_golden_test.go). Load-bearing check done: reverted `app.js`/
+  `index.html` to `HEAD` (`git show HEAD:...`) and deleted `sse.js`,
+  confirmed three of the four new tests fail with the expected "does not
+  POST/parse/register/load" messages (the fourth,
+  `TestSessionScreenAppJSPostsToTurnStreamEndpoint`, passes even on the
+  reverted file because the M5.3c3-era doc comment already mentions the
+  literal string `/turn/stream` in prose describing the deferred work —
+  noted as a pre-existing weak assertion, not fixed here since the real
+  code now contains that literal too and the test remains meaningful
+  post-implementation), then restored the implementation from backups
+  (byte-for-byte, confirmed via `diff`) before rerunning the full verify
+  suite green and committing. `app.js` is now 269 lines, `sse.js` is 51
+  (per-file cap 300 each, comfortably under); total JS across
+  `cmd/cortex/webui/` is 320 of the 1200 cap.
 
 ## Known Issues (append-only)
 - (none yet)
