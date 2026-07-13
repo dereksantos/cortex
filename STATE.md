@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 58
+Updated: 2026-07-13 · Iteration: 59
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -516,13 +516,17 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         `TestSetLoopEnabledEndpointUnknownNameReturns404`,
         `TestSetLoopEnabledEndpointRequiresAuth`
         (cmd/cortex/serve_loops_test.go).
-  - [ ] M6.7e `POST /api/loops/{name}/run-now` invoking `RunLoopFiring`
+  - [x] M6.7e `POST /api/loops/{name}/run-now` invoking `RunLoopFiring`
         directly (httptest, scripted sender/fixture project, unknown name
         ⇒ 404, auth) — completes the milestone's named DoD surface
         (view-model golden + list/create/enable/disable/run-now wired,
         httptest); see the 2026-07-13 Decisions entry on why the actual
         loops-screen HTML/JS is NOT part of M6.7's literal DoD and is
-        deferred pending an owner amendment if wanted.
+        deferred pending an owner amendment if wanted. `b9a3792` —
+        `TestRunLoopEndpointFiresLoopAndReturnsRunHistory`,
+        `TestRunLoopEndpointUnknownNameReturns404`,
+        `TestRunLoopEndpointRequiresAuth` (cmd/cortex/serve_loops_test.go).
+        **M6.7 is now COMPLETE** (all five sub-items a–e landed).
 - [ ] M6.7f loops screen render (owner amendment A4): loops.js +
       #loops container over the M6.7a view-model, controls calling the
       M6.7b–e endpoints; structural tests per the M5.3 screen pattern;
@@ -533,29 +537,23 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7e: `POST /api/loops/{name}/run-now`, invoking `RunLoopFiring`
-directly (httptest, scripted sender/fixture project, unknown name ⇒ 404,
-auth) — this is the last M6.7 sub-item; landing it completes M6.7's
-named DoD surface (view-model golden + list/create/enable/disable/run-now,
-all httptest-proven). Check M6.3's `RunLoopFiring` signature
-(cmd/cortex/loop_run.go or similar — grep for where M6.3/M6.4/M6.5's
-tests construct it) for what it needs beyond a `loops.Spec`: a project
-root resolution (likely via the same `registry.Registry` `newServeMux`
-already threads in as `reg`), a scripted `Sender`/session factory for the
-httptest fixture (mirror M4.2b1's `sessionFactory` injection seam so the
-handler stays hermetically testable — no live model), and however M6.3/
-M6.4/M6.5 already surface the resulting `loop.run` outcome. Likely needs
-a new constructor parameter on `newServeMux` (or reuse of `mgr`'s
-`sessionFactory` if `RunLoopFiring` already accepts one) — check the
-M6.7b/M6.7d precedent of adding a parameter and updating all
-`newServeMux(...)` call sites via `testLoopsStore`-style shared helpers
-rather than resolving the seam inside the handler. The 2026-07-13
-Decisions entries from the M6.7 split still govern this item: (1) M6.7's
-literal DoD is view-model + list/create/enable/disable/run-now endpoints
-proven by httptest ONLY — the loops-screen HTML/JS (M6.7f) is a separate
-owner-amendment item, not part of M6.7/M6's completion gate. (2) the
-standing serve-resident scheduler tick is M6.8, also separate — run-now
-is a direct synchronous `RunLoopFiring` call, not a live ticking loop.
+Start M6.7f: the loops screen render (owner amendment A4) — a `loops.js` +
+`#loops` container under `cmd/cortex/webui/` rendering M6.7a's
+`buildLoopsViewModel` (spec + run history per loop) with create/enable/
+disable/run-now controls calling the M6.7b–e endpoints just landed
+(`GET /api/loops`, `POST /api/loops`, `POST /api/loops/{name}/enable`,
+`.../disable`, `.../run-now`). Mirror the M5.3 screen precedent: a
+`.js`-file walk + HTML container test over the embedded FS (see
+M5.3b–e's `_screen_test.go` files for the established shape — e.g.
+`serve_dashboard_test.go`/dashboard screen or the session/landscape/models
+screens for the fetch/render/SSE-append-only JS pattern), staying within
+the M5.3a JS size caps (each `.js` file ≤ 300 lines, total JS ≤ 1200
+lines — M5.3's mechanical test already covers the total; check whether
+that test needs to start counting `loops.js` explicitly or already walks
+every embedded `.js` file). This is the last checklist item besides M6.8
+(serve-resident scheduler) before M6 — and the whole ladder, since M6 is
+the final milestone in GOAL.md §6 — is complete; after M6.7f, M6.8 is the
+only remaining unchecked item.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2780,6 +2778,45 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   auth-401 tests still pass, since a wholly unregistered route also
   404s/401s — expected and consistent with M6.7b's equivalent check),
   then restored the two lines and reran the full suite green.
+
+- 2026-07-13: M6.7e landed `handleRunLoop` (`POST /api/loops/{name}/run-now`,
+  `b9a3792`), completing M6.7. Confirmed the Next Up note's speculation:
+  `RunLoopFiring` (loop_run.go, M6.3) already accepts exactly the
+  `sessionFactory` seam `SessionManager` holds (`mgr.newSession`, an
+  unexported field readable from `handleRunLoop` since both live in
+  package `main`), so no new `newServeMux` parameter was needed — unlike
+  M6.7b/M6.7d's `loopsStore` addition, which did require one because
+  `internal/loops.Store` wasn't otherwise threaded in. The handler is
+  Lookup-then-fire-then-read-back: `store.Lookup(name)` (404 via
+  `loops.ErrLoopNotFound`, matching M6.7c/d's typed-error-to-status
+  pattern), `RunLoopFiring(r.Context(), spec, reg, newSession)`, then
+  `loops.JournalRunHistory(spec.Name)` re-read fresh from the journal and
+  returned as a `loopView` (M6.7a's spec+runs shape) — so the caller sees
+  the firing's outcome (success/failed/reason) in the same response
+  without a second `GET /api/loops` round-trip, and the response is
+  provably sourced from the same journal `buildLoopsViewModel` reads, not
+  a handler-local echo. `RunLoopFiring`'s returned error is reserved for a
+  journal-WRITE failure (an infra problem); a normal failed run (bad
+  prompt, turn error, budget breach) still returns nil from
+  `RunLoopFiring` and therefore still HTTP 200s here — the caller reads
+  `Runs[0].Outcome` to see how the firing went, exactly like the
+  `loop_run_test.go` M6.3/M6.4/M6.5 tests already treat "failed" as a
+  successfully-journaled outcome, not a Go error. Test mirrors
+  `loop_run_test.go`'s scripted-Sender-via-httptest + `initGitFixture`
+  pattern (a real git-backed fixture project, `t.Chdir` into it — the
+  same pre-existing gap `loop_run_test.go` documents, that `write_file`
+  resolves paths against process CWD rather than any workspace root) and
+  `serve_loops_test.go`'s existing `doAuthedPost`/`fakeRegistry` helpers;
+  used `noopTurnTestSessionFactory` (already defined in `loop_run_test.go`,
+  same package, reused directly) since the endpoint test only needs to
+  prove the firing→response wiring, not re-prove M6.3's change-ref/budget/
+  risk-posture behavior, which already has dedicated coverage. Load-bearing
+  check done: removed the `mux.HandleFunc("POST
+  /api/loops/{name}/run-now", ...)` registration line only, confirmed
+  `TestRunLoopEndpointFiresLoopAndReturnsRunHistory` fails with 404
+  instead of 200 (the unknown-name-404 and auth-401 tests still pass, same
+  "unregistered route also 404s/401s" pattern M6.7b/d's checks noted),
+  then restored the line and reran the full suite green.
 
 ## Known Issues (append-only)
 - (none yet)
