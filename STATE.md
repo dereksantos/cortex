@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 57
+Updated: 2026-07-13 · Iteration: 58
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -507,11 +507,15 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         `TestCreateLoopEndpointCadenceBelowFloorReturns400`,
         `TestCreateLoopEndpointRequiresAuth`
         (cmd/cortex/serve_loops_test.go).
-  - [ ] M6.7d Enable/disable endpoints: `POST /api/loops/{name}/enable`
+  - [x] M6.7d Enable/disable endpoints: `POST /api/loops/{name}/enable`
         and `POST /api/loops/{name}/disable`, flipping `Spec.Enabled` via
         `Store.Save` (httptest, unknown name ⇒ 404, auth) — combined into
         one item since both are the same single-field toggle, mirroring
-        M4.2c2b1's combined-writes precedent.
+        M4.2c2b1's combined-writes precedent. `e086fab` —
+        `TestSetLoopEnabledEndpointTogglesFlag`,
+        `TestSetLoopEnabledEndpointUnknownNameReturns404`,
+        `TestSetLoopEnabledEndpointRequiresAuth`
+        (cmd/cortex/serve_loops_test.go).
   - [ ] M6.7e `POST /api/loops/{name}/run-now` invoking `RunLoopFiring`
         directly (httptest, scripted sender/fixture project, unknown name
         ⇒ 404, auth) — completes the milestone's named DoD surface
@@ -529,26 +533,29 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7d: enable/disable endpoints `POST /api/loops/{name}/enable` and
-`POST /api/loops/{name}/disable`, flipping `Spec.Enabled` via
-`Store.Lookup` + `Store.Save` (httptest: unknown name ⇒ 404 via
-`errors.Is(err, loops.ErrLoopNotFound)`, auth) — combined into one item
-since both are the same single-field toggle (mirrors M4.2c2b1's
-combined-writes precedent). Extend serve_loops.go with two handlers (or a
-single `handleSetLoopEnabled(store, enabled bool) http.HandlerFunc`
-factory feeding both routes) registered as `mux.HandleFunc("POST
-/api/loops/{name}/enable", ...)` / `.../disable` in `newServeMux`
-(cmd/cortex/serve.go) — `{name}` path-value extraction already has a
-precedent in `handleListProjectSessions`'s `r.PathValue("name")`.
-`testLoopsStore(t)` / `loops.NewAt` are ready for hermetic tests; seed a
-spec via `store.Save` before hitting the endpoint, same setup shape as
-M6.7c's tests. The 2026-07-13 Decisions entries from the M6.7 split still
-govern M6.7c–e: (1) M6.7's literal DoD is view-model +
-list/create/enable/disable/run-now endpoints proven by httptest ONLY —
-the loops-screen HTML/JS (M6.7f) is a separate owner-amendment item, not
-part of M6.7/M6's completion gate. (2) the standing serve-resident
-scheduler tick is M6.8, also separate — `run-now` (M6.7e) is a direct
-synchronous `RunLoopFiring` call, not a live ticking loop.
+Start M6.7e: `POST /api/loops/{name}/run-now`, invoking `RunLoopFiring`
+directly (httptest, scripted sender/fixture project, unknown name ⇒ 404,
+auth) — this is the last M6.7 sub-item; landing it completes M6.7's
+named DoD surface (view-model golden + list/create/enable/disable/run-now,
+all httptest-proven). Check M6.3's `RunLoopFiring` signature
+(cmd/cortex/loop_run.go or similar — grep for where M6.3/M6.4/M6.5's
+tests construct it) for what it needs beyond a `loops.Spec`: a project
+root resolution (likely via the same `registry.Registry` `newServeMux`
+already threads in as `reg`), a scripted `Sender`/session factory for the
+httptest fixture (mirror M4.2b1's `sessionFactory` injection seam so the
+handler stays hermetically testable — no live model), and however M6.3/
+M6.4/M6.5 already surface the resulting `loop.run` outcome. Likely needs
+a new constructor parameter on `newServeMux` (or reuse of `mgr`'s
+`sessionFactory` if `RunLoopFiring` already accepts one) — check the
+M6.7b/M6.7d precedent of adding a parameter and updating all
+`newServeMux(...)` call sites via `testLoopsStore`-style shared helpers
+rather than resolving the seam inside the handler. The 2026-07-13
+Decisions entries from the M6.7 split still govern this item: (1) M6.7's
+literal DoD is view-model + list/create/enable/disable/run-now endpoints
+proven by httptest ONLY — the loops-screen HTML/JS (M6.7f) is a separate
+owner-amendment item, not part of M6.7/M6's completion gate. (2) the
+standing serve-resident scheduler tick is M6.8, also separate — run-now
+is a direct synchronous `RunLoopFiring` call, not a live ticking loop.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2749,6 +2756,30 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   check done: removed the `mux.HandleFunc("GET /api/loops", ...)`
   registration line only, confirmed `TestListLoopsEndpointReturnsSpecsAndRunHistory`
   fails (404 instead of 200), restored the line and reran green.
+
+- 2026-07-13: M6.7d landed `handleSetLoopEnabled` (`POST
+  /api/loops/{name}/enable` and `.../disable`, `e086fab`) as a single
+  handler factory closing over the `enabled bool` each route wants,
+  registered as two `mux.HandleFunc` lines in `newServeMux` — this is
+  the "combined-writes precedent" the prior iteration's Next Up note
+  pointed at: one function, two routes, one item, rather than two
+  near-duplicate handlers. The flip itself is Lookup-then-Save (not a
+  narrower single-field patch): `Store` has no partial-update method,
+  and `FileStore.Save`'s upsert-by-name already rewrites the whole
+  record, so reusing it (with only `Enabled` changed on the fetched
+  spec) is the natural fit — mirrors M6.7c's read-Lookup-back-after-
+  Save shape, just Lookup-then-mutate-then-Save instead of Save-then-
+  Lookup, since here the pre-image is required to know every other
+  field to preserve. Unknown name maps `loops.ErrLoopNotFound` (via
+  `Store.Lookup`) to 404, matching M6.7c's typed-error-to-status-code
+  pattern. No new `newServeMux` parameter needed — `loopsStore` was
+  already threaded in by M6.7b. Load-bearing check done: removed both
+  new `mux.HandleFunc` registration lines only (handler function left
+  in place), confirmed `TestSetLoopEnabledEndpointTogglesFlag` fails
+  both subtests with 404 instead of 200 (the unknown-name-404 and
+  auth-401 tests still pass, since a wholly unregistered route also
+  404s/401s — expected and consistent with M6.7b's equivalent check),
+  then restored the two lines and reran the full suite green.
 
 ## Known Issues (append-only)
 - (none yet)
