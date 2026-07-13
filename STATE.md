@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 45
+Updated: 2026-07-12 · Iteration: 46
 
 ## Current milestone
-M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c/d complete)
+M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -407,35 +407,46 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c
         `TestLandscapeScreenJSHandlesNoRootsRefusal`,
         `TestLandscapeScreenJSReportsTruncation`
         (cmd/cortex/webui_landscape_screen_test.go).
-  - [ ] M5.3e Models screen: renders `buildModelsViewModel` (M5.2d) —
-        role bindings across the three scopes with a scope switcher,
-        wired to M4.2c2b's `PUT /api/models/{role}?scope=...` writes.
+  - [x] M5.3e Models screen: renders GET `/api/models` (M4.2c2a's
+        `modelsResponse` — role bindings + discovered fleet; no new
+        endpoint) — a user/project/session scope switcher plus a
+        per-role text field + Save button PUTting to M4.2c2b1/b2's
+        `PUT /api/models/{role}?scope=...[&project=...][&session=...]`,
+        then reloading. `c1add33` —
+        `TestModelsScreenJSFetchesModelsEndpoint`,
+        `TestModelsScreenIndexHTMLHasModelsContainer`,
+        `TestIndexHTMLLoadsAppJSBeforeModelsJS`,
+        `TestModelsScreenJSHasScopeSwitcherWithUserProjectSession`,
+        `TestModelsScreenJSPutsBindingOnSave`,
+        `TestModelsScreenJSReloadsAfterSave`
+        (cmd/cortex/webui_models_screen_test.go). **M5.3 complete
+        (a/b/c/d/e all ticked).**
 - [ ] M5.4 End-to-end smoke: start serve with a scripted sender ⇒ create
       session ⇒ POST turn ⇒ SSE stream renders ⇒ transcript page shows
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3e: the models screen, rendering `buildModelsViewModel` (M5.2d,
-`cmd/cortex/webui_models.go`) via `GET /api/models` (`cmd/cortex/
-serve_models.go`, live since M4.2c2a — returns role bindings + discovered
-fleet, key material always absent). This screen also needs WRITE wiring,
-unlike M5.3b/c/d which were read-only renders: M4.2c2b1/b2 already built
-`PUT /api/models/{role}?scope=user|project|session[&project=<name>][&
-session=<id>]`, so the screen needs a scope switcher (user/project/session)
-and a way to submit a new binding per role, not just a fetch/render pair.
-Follow the M5.3d precedent just landed: a dedicated `models.js` file
-(`loadModels()`/`renderModels()` plus a submit handler for the PUT), a
-`#models` container in `index.html` loaded after `app.js` (models.js will
-want `authToken()`/`apiFetch()` from app.js, same as landscape.js), and Go
-httptest-free structural source-content assertions over models.js/index.html
-(established convention, Decisions Log at M5.3b, reconfirmed through
-M5.3d). No new endpoint needed — M4.2c2a/b1/b2 already built the full
-read+write surface. Watch the M5.3a size caps (`TestWebUIJavaScriptSizeCaps`):
-after M5.3d, app.js is 269, sse.js is 51, landscape.js is 84 (total 404 of
-1200; per-file cap 300 each) — the models screen's scope-switcher UI is
-likely the most interactive one yet (three scopes, a role dropdown, a value
-input, a submit handler), so give it its own `models.js` file from the
-start rather than growing app.js.
+Start M5.4: the end-to-end smoke test — start `cortex serve` with a scripted
+`Sender` fake ⇒ create a session ⇒ POST a turn ⇒ SSE stream renders ⇒ the
+transcript page shows the turn, all in ONE test, full path, no live model.
+This is the last item in M5 — landing it completes the milestone. Likely
+shape: an `httptest.Server` wrapping `newServeMux` (same construction
+`serve_*_test.go` files already use) wired to a `SessionManager` backed by a
+scripted `Sender` (the existing loop-test fake, same one M4.3/M6.3-style
+concurrency tests use); the test drives the real HTTP surface — POST
+`/api/projects/{name}/sessions` to create, POST `.../turn/stream` to run a
+turn and consume the SSE frames via `streamSSE`-equivalent Go-side frame
+parsing (reuse `serve_sse_golden_test.go`'s frame-splitting helper if one
+exists, else the same `"\n\n"` splitting `sse.js` does), then GET
+`.../sessions/{id}` and assert the transcript view-model
+(`buildTranscriptViewModel`) reflects the turn just posted. This is
+Go-only/httptest — no browser, no JS execution; "SSE stream renders" is
+satisfied by asserting the SSE frames arrive in the expected shape (already
+golden-tested at the wire level by M4.5) and the transcript endpoint
+reflects the result afterward, not by executing sse.js/app.js (this
+stdlib-only suite has no JS engine — same limitation every M5.3 structural
+test already lives with). After M5.4 lands, M5 is complete and M6 (loops)
+starts at M6.1.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2186,6 +2197,64 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   implemented and reran green. `app.js` unchanged at 269 lines; `sse.js`
   51; `landscape.js` 84 (per-file cap 300 each, comfortably under); total
   JS across `cmd/cortex/webui/` is now 404 of the 1200 cap.
+
+- 2026-07-12: M5.3e landed the models screen as a fourth `.js` file
+  (`cmd/cortex/webui/models.js`, 186 lines) — same size-cap reasoning
+  M5.3c4/M5.3d used to split `sse.js`/`landscape.js` out, and the prior
+  iteration's Next Up note flagged this as the most interactive screen yet.
+  Unlike M5.3b/c/d (read-only renders), this screen needs a WRITE path:
+  `renderModels` builds a `user`/`project`/`session` scope `<select>` plus a
+  project-name/session-id text input pair (`renderScopeSwitcher`), backed by
+  a module-level `modelScopeState` object (not re-created on each
+  `loadModels()` re-render, since `renderModels` clears and rebuilds
+  `#models` from scratch every call — same "state must live outside the
+  cleared container" lesson M5.3c3 learned for the turn input box) seeded
+  from the `?project=`/`&session=` query params `queryParam()` (app.js)
+  already exposes, on the theory an operator arriving from the session
+  screen most likely wants to write a session-scoped binding for the
+  session they were just on. Each role gets its own text field + Save
+  button (`saveBinding`) rather than one shared submit for all roles —
+  matches `modelsResponse`'s per-role map shape and avoids a multi-field
+  form needing its own validation-which-field-changed logic. `saveBinding`
+  PUTs `{"model": value}` (the one field this screen edits — `ModelSpec`
+  has seven others, deliberately out of scope for a first cut of this
+  screen; `endpoint`/`window`/etc. editing is deferred, not asked for by
+  GOAL.md's M5.3e text) to `/api/models/{role}?scope=...` with
+  `&project=`/`&session=` appended only for those scopes, matching
+  `handleSetModelBinding`'s (serve_models.go) own required-query-param
+  branches; on success it calls `loadModels()` again — same
+  full-re-fetch-and-rerender posture M5.3c3/c4 established for the session
+  screen, not a client-side single-row patch. No new Go endpoint or
+  view-model needed: `GET /api/models` (M4.2c2a's `modelsResponse` —
+  `{roles, fleet}`) already carries everything this screen renders, and the
+  M5.2d `buildModelsViewModel`/`Source` field is NOT used here — that
+  function's own doc comment already flagged it as a distinct shape from
+  `modelsResponse` with no route wired to it, and GOAL.md's M5.3e text
+  ("role bindings across the three scopes with a scope switcher") doesn't
+  ask for the per-binding provenance label `buildModelsViewModel` computes,
+  so wiring it in was out of scope for this increment (a future increment
+  could route `buildModelsViewModel` behind its own endpoint if the
+  "effective-model column showing where each binding resolves from" text in
+  docs/cortex-web.md Phase 5 is picked up later — noted here so that's a
+  deliberate deferral, not an oversight). Testing convention reconfirmed
+  from M5.3b/c/d: structural source-content assertions in a new
+  `webui_models_screen_test.go` (`models.js` fetches `/api/models`; creates
+  a `<select>` and offers all three scope literals; PUTs to a per-role
+  `/api/models/` path with `scope=` and an `Authorization` header;
+  `index.html` declares a `#models` container and loads `app.js` before
+  `models.js` by string index; `loadModels()` called ≥2 times). Load-bearing
+  check done: `models.js` didn't exist yet and `index.html` had no `#models`
+  container (same "write test first" flow M5.3d used, not a separate revert
+  step) — confirmed all six new tests fail with "file does not exist" /
+  "does not declare" / "does not load" / "does not create" / "does not
+  offer" / "does not target" / "is only called once" messages, then
+  implemented, additionally re-verified by reverting both files to `HEAD`
+  and back (byte-for-byte diff-confirmed restore) before rerunning the full
+  verify suite green and committing. `app.js`/`sse.js`/`landscape.js`
+  unchanged at 269/51/84 lines; `models.js` is 186 (per-file cap 300,
+  comfortably under); total JS across `cmd/cortex/webui/` is now 596 of the
+  1200 cap. **M5.3 complete (a/b/c/d/e all ticked)** — only M5.4 (the
+  end-to-end smoke test) remains before M5 is done and M6 (loops) starts.
 
 ## Known Issues (append-only)
 - (none yet)
