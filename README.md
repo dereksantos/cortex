@@ -4,6 +4,11 @@
 [![Go Version](https://img.shields.io/badge/go-1.26-00ADD8)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <img src="docs/assets/gol-cortex.svg" width="760"
+       alt="The word CORTEX seeded as live cells in Conway's Game of Life, evolving into soup and then recalled back to the exact original">
+</p>
+
 **A coding agent built for long-running sessions and small models.**
 
 Cortex is a local-first coding harness that actively manages its own working
