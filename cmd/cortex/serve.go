@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -213,6 +214,26 @@ func runServeCLI(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
+	// M6.8: the serve-resident scheduler (docs/cortex-web.md Phase 6 —
+	// "Scheduler in the serve process, ticks while cortex serve runs").
+	// mgr.newSession is the same sessionFactory seam M6.7e's run-now
+	// handler already reuses — no new construction path. The tick
+	// interval (1 minute) just needs to be finer than the 15-minute
+	// cadence floor (internal/loops.CadenceFloorMinutes); it is not itself
+	// part of the spec format. Stopped when runServeCLI returns (server
+	// error or, once graceful HTTP shutdown exists, a clean stop) so the
+	// scheduler never outlives the listener.
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	schedCtx, stopSched := context.WithCancel(context.Background())
+	sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now)
+	schedStopped := sched.Start(schedCtx, ticker.C)
+	defer func() {
+		stopSched()
+		<-schedStopped
+		sched.Wait()
+	}()
 
 	fmt.Printf("cortex serve listening on http://%s (token: %s)\n", ln.Addr(), tokenPath)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
