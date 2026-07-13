@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 46
+Updated: 2026-07-12 · Iteration: 47
 
 ## Current milestone
-M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3 complete)
+M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -421,32 +421,50 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3 comp
         `TestModelsScreenJSReloadsAfterSave`
         (cmd/cortex/webui_models_screen_test.go). **M5.3 complete
         (a/b/c/d/e all ticked).**
-- [ ] M5.4 End-to-end smoke: start serve with a scripted sender ⇒ create
+- [x] M5.4 End-to-end smoke: start serve with a scripted sender ⇒ create
       session ⇒ POST turn ⇒ SSE stream renders ⇒ transcript page shows
-      the turn. One test, full path, no live model.
+      the turn. One test, full path, no live model. `ff72df8` —
+      `TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt`
+      (cmd/cortex/serve_e2e_test.go). **M5 complete (M5.1-M5.4 all
+      ticked) — all four Phase 5 screens shipped.**
+
+### M6 — Loops (P6)
+- [ ] M6.1 `internal/loops`: spec CRUD round-trip on `loops.json`;
+      validation rejects cadence below the 15-minute floor (typed
+      error).
+- [ ] M6.2 Scheduler on an injected clock: due ⇒ fires; not due ⇒
+      doesn't; disabled ⇒ never; overlap ⇒ skips AND journals the
+      skip. No test sleeps.
+- [ ] M6.3 Each firing runs a fresh headless session in the target
+      project (fixture project + scripted sender), producing a
+      `loop.run` event with outcome + change ref.
+- [ ] M6.4 Budget caps, both of D11's: a scripted runaway session
+      halts at the turn cap (sub-test 1) and a token-budget breach
+      halts before the turn cap (sub-test 2, fake sender reporting
+      token counts); both journal `failed: budget`.
+- [ ] M6.5 Risk posture: a loop firing whose scripted sender issues
+      a shellrisk-Risky command is Blocked, asserted on the tool result
+      and the `loop.run` event; no prompt surface is reachable.
+- [ ] M6.6 Restart resumes: next-run derived from the last
+      `loop.run` timestamp + interval; no double-fire across a
+      scheduler restart (fake-clock test).
+- [ ] M6.7 Loops screen: view-model golden (specs + run history
+      from `loop.run` events); create/enable/disable/run-now wired to
+      NEW loops endpoints added to `cortex serve` in this milestone
+      (httptest).
 
 ## Next Up
-Start M5.4: the end-to-end smoke test — start `cortex serve` with a scripted
-`Sender` fake ⇒ create a session ⇒ POST a turn ⇒ SSE stream renders ⇒ the
-transcript page shows the turn, all in ONE test, full path, no live model.
-This is the last item in M5 — landing it completes the milestone. Likely
-shape: an `httptest.Server` wrapping `newServeMux` (same construction
-`serve_*_test.go` files already use) wired to a `SessionManager` backed by a
-scripted `Sender` (the existing loop-test fake, same one M4.3/M6.3-style
-concurrency tests use); the test drives the real HTTP surface — POST
-`/api/projects/{name}/sessions` to create, POST `.../turn/stream` to run a
-turn and consume the SSE frames via `streamSSE`-equivalent Go-side frame
-parsing (reuse `serve_sse_golden_test.go`'s frame-splitting helper if one
-exists, else the same `"\n\n"` splitting `sse.js` does), then GET
-`.../sessions/{id}` and assert the transcript view-model
-(`buildTranscriptViewModel`) reflects the turn just posted. This is
-Go-only/httptest — no browser, no JS execution; "SSE stream renders" is
-satisfied by asserting the SSE frames arrive in the expected shape (already
-golden-tested at the wire level by M4.5) and the transcript endpoint
-reflects the result afterward, not by executing sse.js/app.js (this
-stdlib-only suite has no JS engine — same limitation every M5.3 structural
-test already lives with). After M5.4 lands, M5 is complete and M6 (loops)
-starts at M6.1.
+Start M6.1: `internal/loops` — spec CRUD round-trip on `loops.json` under a
+temp home (mirrors `internal/registry`'s M3.3 CRUD test shape, plain-JSON
+machine-level state per D4), plus validation that rejects a cadence below
+the 15-minute floor (D10) with a typed error. This is the first item of M6
+and has no dependency on any Phase 5 code — `internal/loops` is a new
+package (GOAL.md §2), so this is a from-scratch spec type + Save/Load/
+Remove round-trip, likely following `internal/registry`'s Registry
+interface shape (CRUD over a JSON file under `userConfigPath()`'s sibling
+in `internal/userhome`) but for loop specs (name, project, prompt, trigger,
+bounds, enabled flag per docs/cortex-web.md Phase 6). No scheduler, no
+firing, no serve wiring yet — those are M6.2+.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2255,6 +2273,43 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   comfortably under); total JS across `cmd/cortex/webui/` is now 596 of the
   1200 cap. **M5.3 complete (a/b/c/d/e all ticked)** — only M5.4 (the
   end-to-end smoke test) remains before M5 is done and M6 (loops) starts.
+
+- 2026-07-12: M5.4 landed the end-to-end smoke test as a NEW file,
+  `cmd/cortex/serve_e2e_test.go`, rather than folding it into an existing
+  `serve_*_test.go` (matches this repo's one-concern-per-file convention
+  every prior M4/M5 increment already followed).
+  `TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt`
+  drives the real HTTP surface exactly per the prior iteration's Next Up
+  plan: POST `/api/projects/blog/sessions` to create (through the HTTP
+  layer, not `mgr.Create` directly — the point of a smoke test is proving
+  the wiring, not re-testing `SessionManager` in isolation, which M4.2b1's
+  own suite already covers), POST `.../turn/stream` and consume the SSE
+  frames, then GET `.../sessions/{id}` and assert the transcript
+  view-model reflects the turn. Reused two existing test helpers instead
+  of re-inventing them: `streamTurnTestSessionFactory`
+  (serve_stream_test.go) for the scripted two-round backend (round 1 a
+  `bash("echo hi")` tool call, round 2 final content `"ok"`), and
+  `sseEvents` (also serve_stream_test.go) for `"\n\n"`-delimited SSE frame
+  parsing — both already proven against the real `runLoop`/`tools.Execute`
+  path by M4.2b3/M4.5, so this smoke test adds no new scripted-backend or
+  parsing code, only composition. No `streamSSE`-equivalent Go frame
+  parser needed to be written new; `sseEvents` already was one. No new
+  production code was needed either — M5.2b/M5.3c1-c4 already wired every
+  endpoint this test exercises — so this increment is test-only, and
+  "smallest implementation that passes" is the empty diff outside the
+  test file. Load-bearing check done the way a pure-composition test
+  requires (no implementation to revert): temporarily deleted the
+  tool-calls-carrying loop in `buildTranscriptViewModel`
+  (webui_transcript.go), reran the new test alone, confirmed it fails with
+  "transcript view-model is missing the assistant's bash tool call", then
+  restored the file from a backup copy (byte-for-byte diff-confirmed via
+  `git status`/`git diff` showing no changes) before rerunning the full
+  verify suite green and committing — proving the test actually notices
+  broken transcript wiring, not just that it's syntactically valid. This
+  closes M5 (M5.1-M5.4 all ticked); M6 (loops) starts at M6.1, and
+  `internal/loops` (a brand-new package per GOAL.md §2) has zero
+  dependency on any M5 code, so no gate-suspension or split was needed to
+  start it cleanly.
 
 ## Known Issues (append-only)
 - (none yet)
