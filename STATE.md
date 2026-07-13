@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 59
+Updated: 2026-07-13 · Iteration: 60
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -527,33 +527,43 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         `TestRunLoopEndpointUnknownNameReturns404`,
         `TestRunLoopEndpointRequiresAuth` (cmd/cortex/serve_loops_test.go).
         **M6.7 is now COMPLETE** (all five sub-items a–e landed).
-- [ ] M6.7f loops screen render (owner amendment A4): loops.js +
+- [x] M6.7f loops screen render (owner amendment A4): loops.js +
       #loops container over the M6.7a view-model, controls calling the
       M6.7b–e endpoints; structural tests per the M5.3 screen pattern;
-      stays within the M5.3a JS size caps.
+      stays within the M5.3a JS size caps. `bbbdf9c` —
+      `TestLoopsScreenJSFetchesLoopsEndpoint`,
+      `TestLoopsScreenIndexHTMLHasLoopsContainer`,
+      `TestIndexHTMLLoadsAppJSBeforeLoopsJS`,
+      `TestLoopsScreenJSHasCreateForm`,
+      `TestLoopsScreenJSHasEnableDisableControls`,
+      `TestLoopsScreenJSHasRunNowControl`,
+      `TestLoopsScreenJSAuthenticatesWriteRequests`,
+      `TestLoopsScreenJSReloadsAfterActions`
+      (cmd/cortex/webui_loops_screen_test.go),
+      `TestWebUIJavaScriptSizeCaps` (cmd/cortex/webui_jscap_test.go,
+      pre-existing — reconfirmed green with loops.js counted in its
+      whole-embedded-FS walk).
 - [ ] M6.8 serve-resident scheduler (owner amendment A4): tick goroutine
       in cortex serve composing Scheduler.Due + RunLoopFiring on an
       injected clock, clean shutdown on server stop, overlap/disabled
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7f: the loops screen render (owner amendment A4) — a `loops.js` +
-`#loops` container under `cmd/cortex/webui/` rendering M6.7a's
-`buildLoopsViewModel` (spec + run history per loop) with create/enable/
-disable/run-now controls calling the M6.7b–e endpoints just landed
-(`GET /api/loops`, `POST /api/loops`, `POST /api/loops/{name}/enable`,
-`.../disable`, `.../run-now`). Mirror the M5.3 screen precedent: a
-`.js`-file walk + HTML container test over the embedded FS (see
-M5.3b–e's `_screen_test.go` files for the established shape — e.g.
-`serve_dashboard_test.go`/dashboard screen or the session/landscape/models
-screens for the fetch/render/SSE-append-only JS pattern), staying within
-the M5.3a JS size caps (each `.js` file ≤ 300 lines, total JS ≤ 1200
-lines — M5.3's mechanical test already covers the total; check whether
-that test needs to start counting `loops.js` explicitly or already walks
-every embedded `.js` file). This is the last checklist item besides M6.8
-(serve-resident scheduler) before M6 — and the whole ladder, since M6 is
-the final milestone in GOAL.md §6 — is complete; after M6.7f, M6.8 is the
-only remaining unchecked item.
+Start M6.8: the serve-resident scheduler (owner amendment A4) — a tick
+goroutine started by `cortex serve` (serve.go) composing
+`internal/loops.Scheduler.Due` (M6.2) with `RunLoopFiring` (M6.3,
+cmd/cortex/loop_run.go) on an injected clock, so enabled loop specs
+actually fire while `cortex serve` is running rather than only via the
+M6.7e run-now endpoint. Requirements per GOAL.md M6.8: ticks on an
+injected clock (no test sleeps — mirror M6.2's fake-clock pattern from
+internal/loops/scheduler_test.go), stops cleanly on server shutdown, and
+never fires while a spec is disabled or an overlap condition holds
+(Scheduler.Due/overlap-skip already encode this — the new code is just the
+tick-loop wiring + shutdown plumbing, composing existing pieces rather than
+reimplementing due/overlap logic). This is the LAST unchecked item in the
+entire ladder (GOAL.md §6) — after M6.8 lands, M6 and the whole spec are
+complete; re-read GOAL.md §6 in full before starting to confirm nothing
+else was missed.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -561,6 +571,30 @@ Repo is a Go 1.26 module; the coder binary is cmd/cortex.
 Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
 
 ## Decisions Log (append-only)
+- 2026-07-13: M6.7f landed `cmd/cortex/webui/loops.js` + a new `#loops`
+  container in `index.html` (loaded after `app.js`, matching the
+  landscape.js/models.js precedent), mirroring M5.3e's models-screen shape
+  most closely since both need write actions + reload-after-write rather
+  than models.js's read-only-with-scope-switcher-plus-writes pattern is
+  actually the same shape loops needed: render the GET /api/loops
+  (loopsViewModel) response, then per-loop Enable/Disable + Run now buttons
+  POSTing to M6.7d/e's endpoints, plus a create form POSTing to M6.7c's
+  `POST /api/loops` — all four write actions call `loadLoops()` again on
+  success (full re-fetch-and-rerender, not a client-side patch, matching
+  every prior screen's posture). Added a shared `postJSON(path, body)`
+  helper (loops.js) rather than repeating the PUT-with-headers boilerplate
+  models.js's `saveBinding` inlines, since loops.js has four write call
+  sites (create/enable/disable/run-now) vs. models.js's one. No new Go
+  endpoint or view-model needed — M6.7a-e already shipped the full
+  read+write surface; this item was purely the JS/HTML render.
+  `TestWebUIJavaScriptSizeCaps` (pre-existing, M5.3a) needed no changes —
+  it already walks every `.js` file under the embedded FS rather than
+  enumerating a fixed list, so `loops.js` was automatically counted; total
+  across all five `.js` files is now 793 lines, well under the 1200-line
+  cap. Load-bearing check done: wrote
+  `webui_loops_screen_test.go` before `loops.js`/the `index.html` edit
+  existed — all 8 new tests failed red (`loops.js: file does not exist` /
+  missing `#loops` container), confirmed, then implemented and reran green.
 - 2026-07-13: M6.7c landed `handleCreateLoop` (`POST /api/loops`,
   cmd/cortex/serve_loops.go) mirroring M4.2c2b1's `PUT /api/models/{role}`
   shape exactly: decode body → `Store.Save` → typed error mapping
