@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 51
+Updated: 2026-07-13 · Iteration: 52
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -468,9 +468,11 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       `TestRunLoopFiringRunawaySessionHaltsAtTurnCap`,
       `TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap`
       (cmd/cortex/loop_run_test.go).
-- [ ] M6.5 Risk posture: a loop firing whose scripted sender issues
+- [x] M6.5 Risk posture: a loop firing whose scripted sender issues
       a shellrisk-Risky command is Blocked, asserted on the tool result
-      and the `loop.run` event; no prompt surface is reachable.
+      and the `loop.run` event; no prompt surface is reachable. `65cf70b`
+      — `TestRunLoopFiringRiskyCommandBlockedNoPromptReachable`
+      (cmd/cortex/loop_run_test.go).
 - [ ] M6.6 Restart resumes: next-run derived from the last
       `loop.run` timestamp + interval; no double-fire across a
       scheduler restart (fake-clock test).
@@ -480,48 +482,51 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       (httptest).
 
 ## Next Up
-Start M6.5: risk posture — a loop firing whose scripted sender issues a
-shellrisk-Risky command is Blocked, asserted on the tool result AND the
-`loop.run` event; no prompt surface is reachable. GOAL.md §3 P6 says
-"headless risk posture (Risky ⇒ Blocked) is inherited, never overridden
-(M6.5 asserts it)" — check `internal/shellrisk` and how the existing
-headless `cortex turn`/`SessionManager` path already gets Risky ⇒
-Blocked (search for where `shellrisk.Risky`/`turnIntent` is consulted in
-the bash tool dispatch, cmd/cortex or internal/tools) to confirm
-`RunLoopFiring`'s fresh headless session inherits that same behavior for
-free (it's built via the same `newSession`/`applyProjectByName`
-machinery M4.2b1/M6.3 already use) rather than needing new plumbing —
-this item may turn out to be "prove it with a test", not "add new
-enforcement code". If the bash tool's `Execute` path only prompts a
-human on Risky in the REPL and there's no session-level "headless" flag
-today, that flag (defaulting Risky to Blocked for any session with no
-live/interactive prompt surface) may need to be added and threaded into
-`newProductionSession`/`RunLoopFiring`'s session construction. Assert
-BOTH: the tool result string (a refusal, not the command's output) and
-the `loop.run` event (Outcome=failed, Reason should mention risk/blocked
-— NOT "budget", a distinct case from M6.4). Fixture + scripted Sender
-per GOAL.md's hermetic-tests rule (no live model, no real risky command
-execution — the point is the command is refused before it runs).
+Start M6.6: restart resumes — next-run derived from the last `loop.run`
+timestamp + interval; no double-fire across a scheduler restart (fake-clock
+test). `internal/loops.LastRunLookup` (referenced by M6.2's scheduler tests
+as an injected function) still has no production implementation reading the
+real journal — GOAL.md §3 P6 says next-run is DERIVED, not stored in
+loops.json, so this is likely where that lookup gets built for real: scan
+the user-level `loop.run` journal (`internal/journal`, same reader
+`readLoopRunEntries` in loop_run_test.go already uses) for the most recent
+entry matching a spec's name, and feed its timestamp + the spec's interval
+into `Scheduler.Due`. The test should construct two `Scheduler` instances
+(or restart one) sharing the same on-disk journal + a fake clock, fire once,
+"restart" (fresh Scheduler, same journal/clock continuation), and assert the
+second instance does NOT re-fire immediately (proving next-run survived the
+restart) while still firing again once the fake clock advances past the next
+due time. Nothing yet wires `Scheduler.Due` to `RunLoopFiring` end-to-end in
+a running process (no `cortex serve`-resident scheduler tick loop exists) —
+that real wiring may belong here or may be deferred again to M6.7 (loops
+screen, which needs run history to display) if M6.6's DoD is satisfiable
+with `LastRunLookup` + `Scheduler` alone; check GOAL.md M6.6's wording again
+before deciding whether the serve-process wiring is in scope for this item
+specifically.
 
-M6.4 (just landed) established the pattern worth reusing here:
-`RunLoopFiring` inspects `TurnResult.StopReason`/the turn's outcome
-after `cs.TurnWithBudget(...)` returns to decide the journaled Outcome/
-Reason — M6.5 likely follows the same shape (a Risky-blocked tool call
-finalizes the turn cleanly, no Go error, so the "was this actually
-clean?" signal has to come from somewhere other than `turnErr` again,
-possibly the tool result content itself or a new signal on TurnResult).
-
-Not yet done, deferred (not required by M6.3's DoD but noted for a
-future increment): `internal/loops.LastRunLookup`'s production
-implementation (reading the last `loop.run` event per spec name from
-the journal — GOAL.md §3 P6 says next-run is DERIVED, not stored) is
-still the injected function M6.2's tests use; nothing yet wires
-`Scheduler.Due` to `RunLoopFiring` end-to-end in production (no
-`cortex serve`-resident scheduler loop exists yet) — that wiring plus
-the real `LastRunLookup` may belong to M6.6 (restart-resume, which is
-explicitly about next-run derivation) or an M6.7 prerequisite; flag for
-whichever iteration first needs a real scheduler tick loop running in
-`cortex serve`.
+M6.5 landed as "prove it, don't re-plumb it" per the prior iteration's own
+hypothesis: `RunLoopFiring`'s session is built via `applyProjectByName` onto
+whatever `newSession` (the `sessionFactory` seam) returns; production wires
+`newProductionSession` (serve_session.go), which sets `quiet = true` and
+never sets `confirmRisky` — the exact same nil-approver/quiet state
+`gateShell` (cmd/cortex/tool_deps.go) already treats as "no interactive
+surface, so Risky falls through to Blocked" for ANY session, REPL or
+headless. No new enforcement code was needed; M6.5's only real work was the
+end-to-end test proving `RunLoopFiring` specifically inherits it (the
+pre-existing `TestBashShellSyntax/risky_command_blocked_when_headless` in
+main_test.go already proved the mechanism in isolation at the
+`tools.Execute` level, not through a loop firing). A blocked risky command
+does NOT fail the firing — the model receives the refusal as an ordinary
+tool result, answers normally, and `TurnWithBudget` returns cleanly with no
+Go error and no budget stop-reason — so `loop.run` journals `Outcome =
+success`, `ChangeRef = ""` (nothing was written), same as any no-op turn.
+The prior Next Up note's guess that this should be `Outcome = failed,
+Reason mentioning risk` was NOT how the existing code behaves and would have
+required inventing a new TurnResult signal with no other consumer —
+rejected as exactly the "landing code no test would notice reverting"
+anti-pattern GOAL.md §1 warns against; a blocked-but-otherwise-clean firing
+being indistinguishable from a no-op firing in the journal is the honest
+behavior to pin, not a synthetic new failure category.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2536,6 +2541,51 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   failed with `Outcome = "success"`/`Reason = ""` instead of
   `"failed"`/`"budget"`, then `git stash pop` restored the fix and the
   full suite reran green before committing.
+
+- 2026-07-13: M6.5 landed as a test-only increment — no production code
+  changed. `RunLoopFiring`'s fresh headless session already inherits
+  Risky ⇒ Blocked for free: `newProductionSession` (serve_session.go, M4)
+  sets `quiet = true` and leaves `confirmRisky` nil, and `gateShell`
+  (cmd/cortex/tool_deps.go) already treats `!cs.quiet && cs.confirmRisky
+  != nil` as the sole condition for offering an interactive risky-command
+  prompt — false in this state for ANY session, so the classifier's Risky
+  verdict falls straight to the "blocked (risk: ...)" refusal string with
+  no prompt ever attempted. This is the same mechanism the pre-existing
+  `TestBashShellSyntax/risky_command_blocked_when_headless` (main_test.go,
+  predates this loop) already proved at the bare `tools.Execute` level;
+  `TestRunLoopFiringRiskyCommandBlockedNoPromptReachable`
+  (loop_run_test.go) proves it again end-to-end through `RunLoopFiring`'s
+  real session construction, which is the specific gap GOAL.md M6.5 names.
+  Test design: the scripted sender's round 1 issues a `bash` tool call
+  (`echo pwned > sentinel.txt`) that would leave a detectable side effect
+  if it ran; the session's `classifyShell` is stubbed to return Risky
+  directly (never the live LLM classifier — keeps the run hermetic and
+  fast) and `confirmRisky` is wired to `t.Fatalf` if ever invoked, so "no
+  prompt surface is reachable" is an affirmative trap, not proved merely
+  by omission. Assertions: (1) `sentinel.txt` never appears in the
+  fixture's worktree: the command did not run; (2) the transcript's tool-
+  result message for that call contains "block" and never contains
+  "pwned": the model saw a refusal, not the command's output;
+  (3) the resulting `loop.run` event is `Outcome = success`, `ChangeRef =
+  ""` — a blocked risky command does not error or budget-fail the
+  firing (`TurnWithBudget` returns cleanly, no Go error, no
+  max-iter/token-budget stop reason), it is handled entirely at the tool-
+  dispatch layer and looks, to the journal, exactly like a no-op turn.
+  This deliberately overturns the previous iteration's Next Up guess
+  (`Outcome = failed, Reason` mentioning risk) — that would have required
+  inventing a new `TurnResult` signal with no other caller, which is the
+  "code no test would notice reverting" anti-pattern GOAL.md §1 warns
+  against; the honest, already-true behavior is what got pinned instead.
+  Load-bearing check done WITHOUT touching production security code (an
+  attempt to flip `gateShell`'s headless branch to unconditionally allow
+  was blocked by this environment's own safety classifier as a security
+  weakening, and was not pursued further per that guardrail): instead,
+  the test's own `classifyShell` stub was temporarily flipped from Risky
+  to Safe — confirmed `sentinel.txt` then gets created and the test fails
+  with "the risky command ran instead of being blocked" — proving the
+  test is actually sensitive to the classification rather than vacuously
+  passing, then reverted to Risky and the full suite reran green before
+  committing.
 
 ## Known Issues (append-only)
 - (none yet)
