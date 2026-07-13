@@ -185,3 +185,115 @@ func TestCreateLoopEndpointRequiresAuth(t *testing.T) {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// M6.7d — POST /api/loops/{name}/enable and .../disable: flip Spec.Enabled
+// via Store.Lookup + Store.Save (an upsert-by-name full rewrite, mirroring
+// M6.7c's Lookup-after-Save readback). Combined into one item since both
+// routes are the same single-field toggle, mirroring M4.2c2b1's
+// combined-writes precedent.
+
+func TestSetLoopEnabledEndpointTogglesFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "enable", path: "/enable", want: true},
+		{name: "disable", path: "/disable", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+			seed := loops.Spec{Name: "nightly", Project: "blog", Prompt: "sweep TODOs", IntervalMinutes: 60, MaxTurns: 25, Enabled: !tt.want}
+			if err := store.Save(seed); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+
+			reg := &fakeRegistry{}
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+			defer ts.Close()
+
+			resp := doAuthedPost(t, ts.URL+"/api/loops/nightly"+tt.path, "tok", "")
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, body)
+			}
+
+			var got loops.Spec
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("Unmarshal response: %v", err)
+			}
+			if got.Enabled != tt.want {
+				t.Errorf("response Enabled = %v, want %v", got.Enabled, tt.want)
+			}
+			if got.Name != "nightly" || got.Project != "blog" {
+				t.Errorf("response spec dropped fields: %+v", got)
+			}
+
+			persisted, err := store.Lookup("nightly")
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			if persisted.Enabled != tt.want {
+				t.Errorf("persisted Enabled = %v, want %v", persisted.Enabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetLoopEnabledEndpointUnknownNameReturns404(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "enable", path: "/enable"},
+		{name: "disable", path: "/disable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &fakeRegistry{}
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+			defer ts.Close()
+
+			resp := doAuthedPost(t, ts.URL+"/api/loops/ghost"+tt.path, "tok", "")
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("status = %d, want 404, body = %s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
+func TestSetLoopEnabledEndpointRequiresAuth(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "enable", path: "/enable"},
+		{name: "disable", path: "/disable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := &fakeRegistry{}
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+			defer ts.Close()
+
+			resp, err := http.Post(ts.URL+"/api/loops/nightly"+tt.path, "application/json", strings.NewReader(""))
+			if err != nil {
+				t.Fatalf("Post: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+	}
+}

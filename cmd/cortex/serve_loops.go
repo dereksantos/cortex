@@ -7,7 +7,10 @@
 // map its typed loops.ErrCadenceTooLow to 400 (vs a generic 500 for any
 // other failure), then read the persisted spec back via Store.Lookup so
 // the response reflects exactly what landed, not just what was requested.
-// Enable/disable (M6.7d) and run-now (M6.7e) are separate items.
+// M6.7d adds POST /api/loops/{name}/enable and .../disable, the single-
+// field-toggle pair — combined into one item + one handler factory since
+// both routes are the same Lookup-flip-Save shape, mirroring M4.2c2b1's
+// combined-writes precedent. Run-now (M6.7e) is a separate item.
 package main
 
 import (
@@ -61,5 +64,33 @@ func handleCreateLoop(store loops.Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusCreated, saved)
+	}
+}
+
+// handleSetLoopEnabled serves POST /api/loops/{name}/enable and
+// .../disable (via the enabled parameter this factory closes over): looks
+// up the named spec, flips Enabled, and re-saves via Store.Save — an
+// upsert-by-name full rewrite, so every other field survives unchanged.
+// An unknown name maps loops.ErrLoopNotFound to 404, matching the
+// registry-lookup precedent (e.g. handleListProjectSessions).
+func handleSetLoopEnabled(store loops.Store, enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		spec, err := store.Lookup(name)
+		if err != nil {
+			if errors.Is(err, loops.ErrLoopNotFound) {
+				http.Error(w, "loop not registered: "+name, http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to look up loop: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		spec.Enabled = enabled
+		if err := store.Save(spec); err != nil {
+			http.Error(w, "failed to save loop: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, spec)
 	}
 }
