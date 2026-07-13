@@ -19,6 +19,7 @@ import (
 	"net/http"
 
 	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/registry"
 )
 
 // handleListLoops serves GET /api/loops: every registered loop spec plus
@@ -92,5 +93,48 @@ func handleSetLoopEnabled(store loops.Store, enabled bool) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, spec)
+	}
+}
+
+// handleRunLoop serves POST /api/loops/{name}/run-now: looks up the named
+// spec and fires it synchronously via RunLoopFiring (loop_run.go, M6.3) —
+// the same firing machinery the scheduler (internal/loops.Scheduler, M6.2)
+// drives, just invoked directly instead of gated on Due. newSession is
+// mgr.newSession (the SessionManager's own sessionFactory seam,
+// serve_session.go): no new newServeMux parameter is needed since mgr is
+// already threaded in for the turn/SSE routes, and RunLoopFiring already
+// accepts exactly this seam. RunLoopFiring's returned error carries only an
+// infra failure to WRITE the loop.run journal event — a normal failed RUN
+// (bad prompt, turn error, budget breach) is itself a successfully-journaled
+// outcome and returns nil, so the response is always 200 in that case; the
+// caller reads Runs[0].Outcome to see how the firing went, matching M6.7a's
+// loopView shape rather than inventing a second one.
+func handleRunLoop(store loops.Store, reg registry.Registry, newSession sessionFactory) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		spec, err := store.Lookup(name)
+		if err != nil {
+			if errors.Is(err, loops.ErrLoopNotFound) {
+				http.Error(w, "loop not registered: "+name, http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to look up loop: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := RunLoopFiring(r.Context(), spec, reg, newSession); err != nil {
+			http.Error(w, "failed to run loop: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		runs, err := loops.JournalRunHistory(spec.Name)
+		if err != nil {
+			http.Error(w, "failed to read run history: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if runs == nil {
+			runs = []loops.RunRecord{}
+		}
+		writeJSON(w, http.StatusOK, loopView{Spec: spec, Runs: runs})
 	}
 }

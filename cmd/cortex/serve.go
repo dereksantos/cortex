@@ -141,7 +141,10 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // hermetically-fakeable seams rather than resolving internal/userhome
 // inside the handler. M6.7c adds POST /api/loops (create), the write half,
 // over the same loopsStore. M6.7d adds POST /api/loops/{name}/enable and
-// .../disable, the single-field-toggle pair.
+// .../disable, the single-field-toggle pair. M6.7e adds
+// POST /api/loops/{name}/run-now, reusing mgr.newSession as the
+// sessionFactory RunLoopFiring (loop_run.go, M6.3) needs — no new
+// newServeMux parameter, same reasoning as M4.2c2b2 above.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
@@ -163,6 +166,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/loops", handleCreateLoop(loopsStore))
 	mux.HandleFunc("POST /api/loops/{name}/enable", handleSetLoopEnabled(loopsStore, true))
 	mux.HandleFunc("POST /api/loops/{name}/disable", handleSetLoopEnabled(loopsStore, false))
+	mux.HandleFunc("POST /api/loops/{name}/run-now", handleRunLoop(loopsStore, reg, mgr.newSession))
 	return mux
 }
 

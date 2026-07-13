@@ -12,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/registry"
 )
 
 func TestListLoopsEndpointReturnsSpecsAndRunHistory(t *testing.T) {
@@ -269,6 +271,98 @@ func TestSetLoopEnabledEndpointUnknownNameReturns404(t *testing.T) {
 				t.Errorf("status = %d, want 404, body = %s", resp.StatusCode, body)
 			}
 		})
+	}
+}
+
+// M6.7e — POST /api/loops/{name}/run-now: fires the named loop synchronously
+// via RunLoopFiring (loop_run.go, M6.3), reusing the SessionManager's own
+// sessionFactory (mgr.newSession) rather than threading a new newServeMux
+// parameter — the seam RunLoopFiring already accepts, and mgr is already
+// passed into newServeMux for the turn/SSE routes. Mirrors M6.7c/d's
+// Lookup-then-act shape (404 on an unknown name, 401 unauthenticated) plus
+// loop_run_test.go's scripted-Sender-via-httptest pattern for the firing
+// itself.
+
+func TestRunLoopEndpointFiresLoopAndReturnsRunHistory(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	seed := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 60, MaxTurns: 25, Enabled: true}
+	if err := store.Save(seed); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	mgr := NewSessionManager(reg, noopTurnTestSessionFactory(t))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store)))
+	defer ts.Close()
+
+	resp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", resp.StatusCode, body)
+	}
+
+	var got loopView
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.Name != "nightly" || got.Project != "blog" {
+		t.Errorf("response spec = %+v, want name=nightly project=blog", got.Spec)
+	}
+	if len(got.Runs) != 1 {
+		t.Fatalf("Runs = %d, want 1: %+v", len(got.Runs), got.Runs)
+	}
+	if got.Runs[0].Outcome != journal.LoopOutcomeSuccess {
+		t.Errorf("Runs[0].Outcome = %q, want %q", got.Runs[0].Outcome, journal.LoopOutcomeSuccess)
+	}
+
+	// The journal is the source of truth for run history — prove the
+	// endpoint's response matches it exactly, not just its own opinion.
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("journal loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Name != "nightly" {
+		t.Errorf("journal entry Name = %q, want %q", entries[0].Name, "nightly")
+	}
+}
+
+func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	reg := &fakeRegistry{}
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	defer ts.Close()
+
+	resp := doAuthedPost(t, ts.URL+"/api/loops/ghost/run-now", "tok", "")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404, body = %s", resp.StatusCode, body)
+	}
+}
+
+func TestRunLoopEndpointRequiresAuth(t *testing.T) {
+	reg := &fakeRegistry{}
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/loops/nightly/run-now", "application/json", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
 }
 
