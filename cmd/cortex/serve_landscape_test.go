@@ -32,7 +32,7 @@ func TestLandscapeEndpointReturnsScanReport(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
@@ -57,7 +57,7 @@ func TestLandscapeEndpointNoRootsConfiguredIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
@@ -72,7 +72,7 @@ func TestLandscapeEndpointRequiresAuth(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/landscape")

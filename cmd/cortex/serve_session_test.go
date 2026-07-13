@@ -225,7 +225,7 @@ func TestCreateSessionEndpointCreatesNewSession(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions", nil)
@@ -260,7 +260,7 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -297,7 +297,7 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 func TestCreateSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/doesnotexist/sessions", nil)
@@ -319,7 +319,7 @@ func TestCreateSessionEndpointRequiresAuth(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/api/projects/blog/sessions", "application/json", nil)

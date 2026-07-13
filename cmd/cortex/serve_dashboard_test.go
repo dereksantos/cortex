@@ -24,7 +24,7 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"plain": {Name: "plain", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/dashboard", "tok")
@@ -57,7 +57,7 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 
 func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/dashboard", "tok")
@@ -76,7 +76,7 @@ func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T)
 
 func TestDashboardEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/dashboard")

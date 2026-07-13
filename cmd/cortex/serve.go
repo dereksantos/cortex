@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/loops"
 	"github.com/dereksantos/cortex/internal/registry"
 	"github.com/dereksantos/cortex/internal/userhome"
 )
@@ -134,7 +135,12 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // M5.3c1 adds GET /api/projects/{name}/sessions/{id} (serve_transcript.go),
 // the session screen's transcript endpoint — distinct from the plain listing
 // route above (an extra path segment, so ServeMux resolves them unambiguously).
-func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string) *http.ServeMux {
+// M6.7b adds GET /api/loops (serve_loops.go), wiring M6.7a's
+// buildLoopsViewModel into the HTTP surface — loopsStore is a small
+// loops.Store interface, matching the reg/mgr precedent of threading
+// hermetically-fakeable seams rather than resolving internal/userhome
+// inside the handler.
+func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +157,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
 	mux.HandleFunc("GET /api/models", handleModels(configPath))
 	mux.HandleFunc("PUT /api/models/{role}", handleSetModelBinding(configPath, reg, mgr))
+	mux.HandleFunc("GET /api/loops", handleListLoops(loopsStore))
 	return mux
 }
 
@@ -179,6 +186,12 @@ func runServeCLI(args []string) {
 	mgr := NewSessionManager(reg, newProductionSession)
 	mgr.SetIdleTimeout(defaultSessionIdleTimeout)
 
+	loopsStore, err := loops.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -186,7 +199,7 @@ func runServeCLI(args []string) {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir)))
+	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

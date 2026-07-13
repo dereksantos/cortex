@@ -50,7 +50,7 @@ func TestTurnStreamEndpointGoldenFramesForMultiStepTurn(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, twoStepStreamTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")

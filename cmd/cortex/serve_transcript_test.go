@@ -30,7 +30,7 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions/20260101-000000", "tok")
@@ -63,7 +63,7 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 
 func TestGetSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/doesnotexist/sessions/whatever", "tok")
@@ -78,7 +78,7 @@ func TestGetSessionEndpointUnknownSessionIDReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions/does-not-exist", "tok")
@@ -93,7 +93,7 @@ func TestGetSessionEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "")))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/projects/blog/sessions/whatever")
