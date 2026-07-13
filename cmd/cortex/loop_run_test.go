@@ -13,12 +13,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loops"
 	"github.com/dereksantos/cortex/internal/registry"
+	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/userhome"
 )
 
@@ -112,6 +115,52 @@ func tokenReportingTestSessionFactory(t *testing.T) sessionFactory {
 		cs.Request.BaseURL = srv.URL
 		return cs
 	}
+}
+
+// riskyBashTurnTestSessionFactory scripts a two-round turn: round 1 issues a
+// bash tool call whose command is classified Risky by a fake classifyShell
+// stub (never the live LLM classifier — keeps the test hermetic, matching
+// TestBashShellSyntax's stubRisky pattern in main_test.go) and would, if it
+// actually ran, write a sentinel file into the target project's worktree;
+// round 2 answers with a final reply once the tool result comes back.
+// confirmRisky is wired to fail the test outright if ever invoked — M6.5's
+// "no prompt surface is reachable" proved affirmatively (production's
+// newProductionSession never sets confirmRisky either, so the zero value
+// alone would already prove the point structurally via a nil-func panic,
+// but a wired trap gives a much clearer failure if that ever regresses).
+// Returns the factory plus an accessor for the last session it constructed,
+// so the caller can inspect the session's own transcript after the firing.
+func riskyBashTurnTestSessionFactory(t *testing.T) (sessionFactory, func() *CortexSession) {
+	t.Helper()
+	var round int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		round++
+		if round == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo pwned > sentinel.txt\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"could not run that command"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
+	}))
+	t.Cleanup(srv.Close)
+	stubRisky := func(_ context.Context, _ string) (shellrisk.Level, string, error) {
+		return shellrisk.Risky, "test: risky", nil
+	}
+	var last *CortexSession
+	factory := func() *CortexSession {
+		cs := &CortexSession{
+			quiet:         true,
+			classifyShell: stubRisky,
+			confirmRisky: func(q string) bool {
+				t.Fatalf("prompt surface reached in a headless loop firing: %q", q)
+				return false
+			},
+			Request: CortexArgs{}.Request(),
+		}
+		cs.Request.BaseURL = srv.URL
+		last = cs
+		return cs
+	}
+	return factory, func() *CortexSession { return last }
 }
 
 // readLoopRunEntries drains the user-level loop.run journal (under the
@@ -345,5 +394,73 @@ func TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap(t *testing.T) {
 	}
 	if entries[0].ChangeRef != "" {
 		t.Errorf("ChangeRef = %q, want empty", entries[0].ChangeRef)
+	}
+}
+
+// TestRunLoopFiringRiskyCommandBlockedNoPromptReachable is M6.5's DoD: a
+// loop firing whose scripted sender issues a shellrisk-Risky command is
+// Blocked — the command never actually runs (asserted via the sentinel file
+// it would have written) and the tool result the model sees back is a
+// refusal, not the command's output — while the firing itself still
+// completes and journals a normal loop.run event, proving a blocked command
+// doesn't crash or budget-fail the firing; it's handled entirely at the
+// tool-dispatch layer. Per GOAL.md §3 P6 / docs/cortex-web.md Phase 6
+// ("loops run headless, so shellrisk Risky ⇒ Blocked already applies"),
+// this is the "prove it, don't re-plumb it" case the prior iteration's Next
+// Up note flagged as the likely shape: newProductionSession's quiet=true
+// plus an unset confirmRisky is the exact mechanism
+// TestBashShellSyntax/risky_command_blocked_when_headless (main_test.go)
+// already proves at the bare tools.Execute level; this test proves the same
+// thing end-to-end through RunLoopFiring's real session construction.
+func TestRunLoopFiringRiskyCommandBlockedNoPromptReachable(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
+
+	factory, lastSession := riskyBashTurnTestSessionFactory(t)
+	if err := RunLoopFiring(context.Background(), spec, reg, factory); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "sentinel.txt")); !os.IsNotExist(err) {
+		t.Fatalf("sentinel.txt stat err=%v — the risky command ran instead of being blocked", err)
+	}
+
+	cs := lastSession()
+	if cs == nil || cs.SessionID == "" {
+		t.Fatal("session factory did not record a started session")
+	}
+	msgs, _, err := loadTranscript(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadTranscript: %v", err)
+	}
+	var toolResult string
+	for _, m := range msgs {
+		if m.Role == RoleTool && m.ToolCallID == "c1" {
+			toolResult = m.Content
+		}
+	}
+	if toolResult == "" {
+		t.Fatal("no tool result recorded for the bash call")
+	}
+	if !strings.Contains(strings.ToLower(toolResult), "block") {
+		t.Errorf("tool result = %q, want a block refusal", toolResult)
+	}
+	if strings.Contains(toolResult, "pwned") {
+		t.Errorf("tool result = %q, contains the command's would-be output — it ran instead of being blocked", toolResult)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Outcome != journal.LoopOutcomeSuccess {
+		t.Errorf("Outcome = %q, want %q (a blocked tool call is handled cleanly, not a firing failure)", entries[0].Outcome, journal.LoopOutcomeSuccess)
+	}
+	if entries[0].ChangeRef != "" {
+		t.Errorf("ChangeRef = %q, want empty (the blocked command never dirtied the worktree)", entries[0].ChangeRef)
 	}
 }
