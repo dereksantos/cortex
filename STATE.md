@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 48
+Updated: 2026-07-12 · Iteration: 49
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -439,9 +439,19 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       `TestFileStoreSaveAllowsExactlyFifteenMinuteFloor`,
       `TestFileStoreSaveAllowsManualOnlyZeroInterval`
       (internal/loops/loops_test.go).
-- [ ] M6.2 Scheduler on an injected clock: due ⇒ fires; not due ⇒
+- [x] M6.2 Scheduler on an injected clock: due ⇒ fires; not due ⇒
       doesn't; disabled ⇒ never; overlap ⇒ skips AND journals the
-      skip. No test sleeps.
+      skip. No test sleeps. `3fa50df` —
+      `TestSchedulerDueFiresWhenIntervalElapsed`,
+      `TestSchedulerNotDueSkipsWhenIntervalNotElapsed`,
+      `TestSchedulerDisabledNeverFires`,
+      `TestSchedulerManualOnlyNeverAutoDue`,
+      `TestSchedulerOverlapSkipsAndJournalsSkip`,
+      `TestSchedulerOverlapPropagatesOnSkipError`
+      (internal/loops/scheduler_test.go),
+      `TestAppendLoopRunWritesEntryToUserLevelJournal`,
+      `TestAppendLoopRunIsolatedByCortexHome`
+      (internal/journal/loop_test.go).
 - [ ] M6.3 Each firing runs a fresh headless session in the target
       project (fixture project + scripted sender), producing a
       `loop.run` event with outcome + change ref.
@@ -461,21 +471,32 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       (httptest).
 
 ## Next Up
-Start M6.2: scheduler on an injected clock over `internal/loops.Spec`
-(due ⇒ fires; not due ⇒ doesn't; disabled ⇒ never; overlap ⇒ skips AND
-journals the skip; no test sleeps — inject a fake clock interface, likely
-`func() time.Time`, the way M6.6's "restart resumes" test will later
-reuse it). This is a new type in `internal/loops` (e.g. a `Scheduler`
-composing `Store.List()` with next-run derivation — GOAL.md §3 P6 says
-next-run is DERIVED from the last `loop.run` journal event's timestamp +
-interval, not a stored run-state field, so M6.2's due/not-due logic will
-need either a journal reader seam or a stubbed "last run" lookup it can
-fake in tests; the real journal wiring for `loop.run` events lands with
-M6.3's firing work, so M6.2 can take last-run-time as an injected
-function/interface rather than reading the real journal yet). No firing
-of real sessions yet (M6.3), no budget caps (M6.4), no risk posture
-(M6.5) — M6.2 is scheduling logic only: given a spec list, a clock, and a
-last-run lookup, decide which specs are due right now.
+Start M6.3: each firing runs a fresh headless session in the target
+project (fixture project + scripted sender), producing a `loop.run`
+event with outcome + change ref. `internal/loops.Scheduler.Due` (M6.2)
+already decides WHICH specs should fire; M6.3 is the firing itself —
+wire a `Scheduler.Due` result to actually running one headless session
+per due spec via the Phase 3/4 machinery (`internal/registry` resolves
+`Spec.Project` to a root, then a fresh session runs `Spec.Prompt`
+through `Session.Turn` or equivalent headless entry point — check
+`cmd/cortex/session_core.go`/`cmd/cortex turn` for the existing headless
+seam before inventing a new one), then calls
+`journal.AppendLoopRun` (internal/journal/loop.go, landed this
+iteration) with `Outcome: LoopOutcomeSuccess` or `LoopOutcomeFailed` and
+a `ChangeRef` (per docs/cortex-web.md Phase 6: "each run lands as a
+reviewable `cortex change`" — check `cmd/cortex/change.go` for the
+existing change-lifecycle seam `cortex change start/commit/status`
+referenced in CLAUDE.md). `LastRunLookup`'s production implementation
+(reading the last `loop.run` event per spec name from the journal,
+still stubbed as an injected function in M6.2's tests) likely lands
+here too, since M6.3 is where real firings start producing real
+`loop.run` history to derive from — GOAL.md §3 P6 says next-run is
+DERIVED, not stored. No budget caps yet (M6.4 — a scripted runaway/
+token-breach test), no risk-posture assertion yet (M6.5 — though
+headless already treats shellrisk Risky as Blocked by construction per
+M6.3's own fixture, so M6.5 is likely mostly a dedicated test rather
+than new mechanism). Fixture project + scripted Sender per GOAL.md's
+hermetic-tests rule — no live model.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2343,6 +2364,38 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   had to carry the values through the round-trip. Trigger/prompt/enabled
   fields also follow Phase 6's spec shape (name, project, prompt, trigger,
   bounds, enabled) directly, no schema decisions needed.
+- 2026-07-12: M6.2 landed `Scheduler.Due` (internal/loops/scheduler.go) as
+  pure scheduling logic over three injected seams (`Clock`, `LastRunLookup`,
+  `RunningCheck`) plus an `OnSkip` callback, per the prior iteration's Next
+  Up analysis — no real session firing (M6.3), no budget caps (M6.4). Also
+  landed `internal/journal`'s `loop.run` event type (loop.go, mirroring
+  landscape.go's user-level-journal convention exactly: same
+  `userhome.Path("journal", <class>)` resolution, same `FsyncPerBatch`
+  choice) now rather than deferring it to M6.3, because M6.2's own DoD line
+  ("overlap ⇒ skips AND journals the skip") is not satisfiable by
+  scheduling logic alone — it needs an actual persisted event, not just an
+  in-memory decision. Chose one `loop.run` event type carrying an
+  `Outcome` enum (`success`/`failed`/`skipped`) rather than a separate
+  `loop.skip` type, since GOAL.md M6.7's run-history view-model reads "run
+  history from `loop.run` events" as one stream; M6.3/M6.4 will reuse the
+  same type for real firings' success/failed outcomes rather than
+  inventing a second one. `OnSkip` is injected (not a hard call to
+  `journal.AppendLoopRun` inside `Due`) so the pure scheduling-decision
+  tests don't need `CORTEX_HOME` isolation; one dedicated test
+  (`TestSchedulerOverlapSkipsAndJournalsSkip`) wires the real
+  `journal.AppendLoopRun` as `OnSkip` and reads the persisted entry back,
+  proving the skip is actually journaled end-to-end, not just decided in
+  memory — same isolation pattern as `internal/journal`'s existing
+  landscape tests. `LastRunLookup`/`RunningCheck` remain injected functions
+  (not reading the real journal or tracking real in-flight sessions) since
+  that wiring is M6.3's firing machinery, which doesn't exist yet — a
+  fabricated "real" implementation now would have no caller and no way to
+  be proven correct beyond what the injected-fake tests already show.
+  Load-bearing check done: moved `scheduler.go` and the new `loop.go` out
+  of their packages, confirmed `go vet ./internal/loops/...
+  ./internal/journal/...` fails to build (`undefined: Clock`,
+  `undefined: LoopRunPayload`), moved both back and reran the full suite
+  green.
 
 ## Known Issues (append-only)
 - (none yet)
