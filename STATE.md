@@ -1,8 +1,8 @@
 # STATE — cortex web loop
-Updated: 2026-07-12 · Iteration: 44
+Updated: 2026-07-12 · Iteration: 45
 
 ## Current milestone
-M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c complete)
+M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c/d complete)
 
 ## Checklist (all milestones, append-only — completed milestones stay)
 ### M1 — First-run bootstrap + greeting
@@ -399,8 +399,14 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c
           `TestIndexHTMLLoadsSSEScriptBeforeAppJS`
           (cmd/cortex/webui_session_stream_test.go). **M5.3c complete
           (c1/c2/c3/c4 all ticked).**
-  - [ ] M5.3d Landscape screen: renders `buildLandscapeViewModel`
+  - [x] M5.3d Landscape screen: renders `buildLandscapeViewModel`
         (M5.2c, a `ScanReport` pass-through) via `GET /api/landscape`.
+        `2105e35` — `TestLandscapeScreenJSFetchesLandscapeEndpoint`,
+        `TestLandscapeScreenIndexHTMLHasLandscapeContainer`,
+        `TestIndexHTMLLoadsAppJSBeforeLandscapeJS`,
+        `TestLandscapeScreenJSHandlesNoRootsRefusal`,
+        `TestLandscapeScreenJSReportsTruncation`
+        (cmd/cortex/webui_landscape_screen_test.go).
   - [ ] M5.3e Models screen: renders `buildModelsViewModel` (M5.2d) —
         role bindings across the three scopes with a scope switcher,
         wired to M4.2c2b's `PUT /api/models/{role}?scope=...` writes.
@@ -409,27 +415,27 @@ M5 — Web UI (P5), four screens (M1, M2, M3, M4 complete; M5.1, M5.2, M5.3a/b/c
       the turn. One test, full path, no live model.
 
 ## Next Up
-Start M5.3d: the landscape screen, rendering `buildLandscapeViewModel`
-(M5.2c, `cmd/cortex/webui_landscape.go`) via `GET /api/landscape`
-(`cmd/cortex/serve_landscape.go`, live since M4.2c1 — returns 412
-`ErrNoScanRoots` when no scan roots are persisted; a fixture-repo test will
-need `PersistScanRoots` or a fake registry the way `serve_landscape_test.go`
-already sets one up). Follow the M5.3b/c shape: a dedicated
-`GET /api/landscape`-consuming fetch/render pair in
-`cmd/cortex/webui/app.js` (a `loadLandscape()`/`renderLandscape()` pair
-paralleling `loadDashboard`/`renderDashboard`), a `#landscape` container in
-`index.html`, and Go httptest coverage for any new endpoint plumbing plus
-structural source-content assertions over app.js/index.html (established
-convention, Decisions Log at M5.3b, reconfirmed through M5.3c4 below) — no
-executed-DOM assertions. `GET /api/landscape` itself needs no new endpoint
-(M4.2c1 already built it) so this sub-item may be JS-only, mirroring how
-M5.3c1 needed a new endpoint but M5.3c2 didn't. Watch the M5.3a size caps
-(`TestWebUIJavaScriptSizeCaps`): app.js is 269 lines, sse.js is 51 (per-file
-cap 300 each; total 320 of 1200) — there's room, but the landscape screen's
-truncation/error-per-family rendering could push app.js past 300, at which
-point a third `.js` file (e.g. `landscape.js`, following M5.3c4's
-sse.js-as-a-second-file precedent) is the established way out rather than
-stretching the per-file cap.
+Start M5.3e: the models screen, rendering `buildModelsViewModel` (M5.2d,
+`cmd/cortex/webui_models.go`) via `GET /api/models` (`cmd/cortex/
+serve_models.go`, live since M4.2c2a — returns role bindings + discovered
+fleet, key material always absent). This screen also needs WRITE wiring,
+unlike M5.3b/c/d which were read-only renders: M4.2c2b1/b2 already built
+`PUT /api/models/{role}?scope=user|project|session[&project=<name>][&
+session=<id>]`, so the screen needs a scope switcher (user/project/session)
+and a way to submit a new binding per role, not just a fetch/render pair.
+Follow the M5.3d precedent just landed: a dedicated `models.js` file
+(`loadModels()`/`renderModels()` plus a submit handler for the PUT), a
+`#models` container in `index.html` loaded after `app.js` (models.js will
+want `authToken()`/`apiFetch()` from app.js, same as landscape.js), and Go
+httptest-free structural source-content assertions over models.js/index.html
+(established convention, Decisions Log at M5.3b, reconfirmed through
+M5.3d). No new endpoint needed — M4.2c2a/b1/b2 already built the full
+read+write surface. Watch the M5.3a size caps (`TestWebUIJavaScriptSizeCaps`):
+after M5.3d, app.js is 269, sse.js is 51, landscape.js is 84 (total 404 of
+1200; per-file cap 300 each) — the models screen's scope-switcher UI is
+likely the most interactive one yet (three scopes, a role dropdown, a value
+input, a submit handler), so give it its own `models.js` file from the
+start rather than growing app.js.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2140,6 +2146,46 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   suite green and committing. `app.js` is now 269 lines, `sse.js` is 51
   (per-file cap 300 each, comfortably under); total JS across
   `cmd/cortex/webui/` is 320 of the 1200 cap.
+
+- 2026-07-12: M5.3d landed the landscape screen as a third `.js` file
+  (`cmd/cortex/webui/landscape.js`, 84 lines) rather than growing `app.js`
+  further — following the same size-cap reasoning M5.3c4 used to split out
+  `sse.js`, and matching the prior iteration's Next Up note that flagged
+  this exact outcome ahead of time. `renderLandscape`/`renderLandscapeSection`
+  render `GET /api/landscape`'s `ScanReport` JSON (`roots`/`tools`/
+  `runtimes`/`projects`/`truncated` — confirmed field-by-field against
+  `cmd/cortex/scan.go`'s `ScanReport` struct tags and
+  `internal/landscape.Tool`/`Runtime`/`Project`, which carry NO json tags
+  and so serialize as capitalized `Name`/`Path`/`Markers` — verified against
+  `webui_landscape_test.go`'s existing golden JSON rather than guessing)
+  into a `#landscape` container: a roots summary line, then three titled
+  sections (Tools/Runtimes/Projects) each with an empty-state "None found."
+  message, plus a truncation warning when `report.truncated` is true.
+  `loadLandscape()` treats HTTP 412 (the `ErrNoScanRoots` typed refusal
+  `handleLandscape`, serve_landscape.go, returns when no scan roots are
+  persisted) as a distinct "no scan roots configured yet" message rather
+  than a generic fetch-failure string, since it's an expected
+  not-yet-onboarded state (M1.7's greeting hasn't asked yet), not an error.
+  `landscape.js` reuses `authToken()`/`apiFetch()` from `app.js` as plain
+  global functions (no module system, per D9), so `index.html` loads
+  `app.js` before `landscape.js` — mirrors M5.3c4's `sse.js`-before-`app.js`
+  ordering requirement, just the dependency direction reversed (here
+  `landscape.js` depends on `app.js`, not the other way around). No new Go
+  endpoint or view-model needed — `GET /api/landscape` (M4.2c1) and
+  `buildLandscapeViewModel` (M5.2c) were already complete; this increment
+  is JS/HTML-only, same shape as M5.3c2. Testing convention reconfirmed
+  from M5.3b/c/d: structural source-content assertions in a new
+  `webui_landscape_screen_test.go` (`landscape.js` fetches `/api/landscape`,
+  handles `412`, surfaces `truncated`; `index.html` declares a `#landscape`
+  container and loads `app.js` before `landscape.js` by string index) — no
+  executed-DOM assertions. Load-bearing check done: ran the five new tests
+  before creating `landscape.js`/before editing `index.html` (files did not
+  exist yet, so this is the "write test first" TDD flow itself, not a
+  separate revert-and-recheck step) — confirmed all five fail with "file
+  does not exist" / "does not declare" / "does not load" messages, then
+  implemented and reran green. `app.js` unchanged at 269 lines; `sse.js`
+  51; `landscape.js` 84 (per-file cap 300 each, comfortably under); total
+  JS across `cmd/cortex/webui/` is now 404 of the 1200 cap.
 
 ## Known Issues (append-only)
 - (none yet)
