@@ -11,9 +11,15 @@
 //
 // M5.3c2 — the session screen: fetch('/api/projects/{name}/sessions/{id}')
 // renders the transcript (buildTranscriptViewModel,
-// cmd/cortex/webui_transcript.go) into the #session container. Read-only
-// render only — the input box (M5.3c3) and live SSE (M5.3c4) are separate,
-// later sub-items.
+// cmd/cortex/webui_transcript.go) into the #session container.
+//
+// M5.3c3 — the session screen's input box: a text field + submit button,
+// appended after the rendered transcript, POSTs a new turn via POST
+// /api/projects/{name}/sessions/{id}/turn (serve_turn.go) and re-renders by
+// calling loadSession() again (simpler than appending the new entries
+// directly, and this screen has no staleness concerns yet). Live SSE
+// (M5.3c4, swapping this for /turn/stream + EventSource/streaming-fetch) is
+// the following sub-item.
 
 // queryParam reads a single query-string parameter from the page URL — the
 // same window.location.search source authToken()'s "?token=" precedent
@@ -146,6 +152,75 @@ function renderSession(vm, container) {
   container.appendChild(list);
 }
 
+// renderTurnInput appends a text field + submit button to the #session
+// container for posting a new turn (M5.3c3). Kept separate from
+// renderSession, which is driven purely by the transcript view-model and
+// has no notion of producing new turns — renderSession clears and rebuilds
+// the container on every load, so this is called AFTER it on each render
+// rather than lived as static markup in index.html.
+function renderTurnInput(container, project, session) {
+  const form = document.createElement("form");
+  form.id = "turn-form";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "turn-input";
+  input.placeholder = "Say something…";
+  form.appendChild(input);
+
+  const button = document.createElement("button");
+  button.type = "submit";
+  button.textContent = "Send";
+  form.appendChild(button);
+
+  const status = document.createElement("span");
+  status.id = "turn-status";
+  form.appendChild(status);
+
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const text = input.value.trim();
+    if (!text) {
+      return;
+    }
+    status.textContent = "Sending…";
+    button.disabled = true;
+    fetch(
+      "/api/projects/" +
+        encodeURIComponent(project) +
+        "/sessions/" +
+        encodeURIComponent(session) +
+        "/turn",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + authToken(),
+        },
+        body: JSON.stringify({ input: text }),
+      },
+    )
+      .then((resp) => {
+        if (!resp.ok) {
+          throw new Error("POST turn: " + resp.status);
+        }
+        return resp.json();
+      })
+      .then(() => {
+        input.value = "";
+        loadSession();
+      })
+      .catch((err) => {
+        status.textContent = "Failed to send: " + err.message;
+      })
+      .finally(() => {
+        button.disabled = false;
+      });
+  });
+
+  container.appendChild(form);
+}
+
 // loadSession no-ops when the #session container is absent (dashboard-only
 // pages) or the ?project=/&session= query params aren't both present —
 // this screen is reached by navigating with those params set, following
@@ -170,7 +245,10 @@ function loadSession() {
       }
       return resp.json();
     })
-    .then((vm) => renderSession(vm, container))
+    .then((vm) => {
+      renderSession(vm, container);
+      renderTurnInput(container, project, session);
+    })
     .catch((err) => {
       container.textContent = "Failed to load session: " + err.message;
     });
