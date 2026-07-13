@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 54
+Updated: 2026-07-13 · Iteration: 55
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -483,12 +483,17 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       from `loop.run` events); create/enable/disable/run-now wired to
       NEW loops endpoints added to `cortex serve` in this milestone
       (httptest). **Split (2026-07-13, this iteration) into:**
-  - [ ] M6.7a Loops view-model: a builder composing `internal/loops.
+  - [x] M6.7a Loops view-model: a builder composing `internal/loops.
         Store.List()` (specs) with run history grouped by name from the
         user-level `loop.run` journal (a new production reader — the
         existing `readLoopRunEntries` is test-only, in `loop_run_test.go`)
         — golden test, mirroring M5.2's dashboard/landscape/models
-        view-model pattern.
+        view-model pattern. `9d47fa9` —
+        `TestJournalRunHistoryReturnsEveryMatchingEntryInWriteOrder`
+        (internal/loops/history_test.go),
+        `TestBuildLoopsViewModelGolden`,
+        `TestBuildLoopsViewModelEmptyStoreReturnsEmptyLoopsNotNull`
+        (cmd/cortex/webui_loops_test.go).
   - [ ] M6.7b `GET /api/loops` endpoint wiring M6.7a's view-model into
         the HTTP surface (auth-gated, httptest) — Go-only, no screen yet,
         mirroring M4.2a/M5.3c1's endpoint-first precedent.
@@ -517,33 +522,22 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7a: build the loops view-model (specs from `internal/loops.
-Store.List()` + run history from the user-level `loop.run` journal, grouped
-by name) with a golden test — see the M6.7 split recorded this iteration
-(five sub-items, M6.7a–M6.7e) and the 2026-07-13 Decisions entries for two
-rulings that govern all of them: (1) M6.7's literal DoD is view-model +
-list/create/enable/disable/run-now endpoints proven by httptest ONLY — no
-screen-render test surface is named the way M5.3's items always name one
-("JS bounded mechanically", `.js`/HTML container tests), so the actual
-loops-screen HTML/JS is NOT required to tick M6.7/M6 complete; treat it as
-owner-schedulable future work, not a gap, unless an owner amendment says
-otherwise. (2) the standing serve-resident scheduler tick (`Scheduler.Due`
-polled on an interval while `cortex serve` runs) is likewise out of M6.7's
-literal DoD (which names only create/enable/disable/run-now) — `run-now`
-(M6.7e) is a direct, synchronous `RunLoopFiring` call, not a live ticking
-loop; enable/disable (M6.7d) only flip the persisted `Spec.Enabled` flag.
-Both rulings favor the narrower, literally-verified reading per GOAL.md
-§1's "an increment the verify gate can't observe is not an increment" and
-the precedence rule (GOAL.md §6 DoD text outranks docs/cortex-web.md's
-broader Phase 6 prose). M6.7a's view-model needs a NEW production journal
-reader for `loop.run` entries (the existing `readLoopRunEntries` in
-`cmd/cortex/loop_run_test.go` is test-only and can't be imported from
-production code) — model it on `internal/loops.JournalLastRun`
-(internal/loops/lastrun.go, M6.6), which already opens the same
-`journal.NewReader` over `<userhome>/journal/loop` and parses
-`journal.ParseLoopRun` entries; the view-model reader just needs to keep
-every matching entry (not just the latest) per name instead of collapsing
-to one timestamp.
+Start M6.7b: `GET /api/loops` endpoint wiring M6.7a's `buildLoopsViewModel`
+(cmd/cortex/webui_loops.go) into the HTTP surface (auth-gated, httptest,
+Go-only — no screen yet), mirroring M4.2a/M5.3c1's endpoint-first
+precedent. The handler needs a `loops.Store` — construct via `loops.New()`
+(userhome-resolved `loops.json`) the same way other handlers resolve their
+production seams; see serve_routes.go / serve_landscape.go for the
+existing auth-gated-handler wiring pattern (route registration in
+newServeMux). M6.7a landed this iteration (`9d47fa9`) — the view-model
+builder plus the new `loops.JournalRunHistory` production reader
+(internal/loops/history.go) are ready to compose. The 2026-07-13 Decisions
+entries from the M6.7 split still govern M6.7b–e: (1) M6.7's literal DoD is
+view-model + list/create/enable/disable/run-now endpoints proven by
+httptest ONLY — the loops-screen HTML/JS (M6.7f) is a separate owner-
+amendment item, not part of M6.7/M6's completion gate. (2) the standing
+serve-resident scheduler tick is M6.8, also separate — `run-now` (M6.7e)
+is a direct synchronous `RunLoopFiring` call, not a live ticking loop.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2683,6 +2677,30 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   scoping it into M6.7 explicitly, or a new milestone item; it is NOT
   silently dropped, just not claimed as done by M6.7's tests.
   No load-bearing check applicable (no code changed this iteration).
+
+- 2026-07-13: M6.7a landed (`9d47fa9`). Two design choices worth recording:
+  (a) the new production reader `loops.JournalRunHistory` (internal/
+  loops/history.go) is a sibling to M6.6's `JournalLastRun`, not a
+  refactor of it — same journal, same per-name filter, but keeps every
+  matching entry (chronological write order) instead of collapsing to one
+  timestamp; `JournalLastRun` is untouched, avoiding risk to the M6.2/M6.6
+  scheduler tests that depend on its exact (zero, false) "never run"
+  signal. (b) `loopView` (cmd/cortex/webui_loops.go) embeds `loops.Spec`
+  directly rather than re-declaring its fields on a wrapper struct — same
+  "don't wrap a shape that already has exactly the fields a screen needs"
+  reasoning M5.2c recorded for the landscape view-model — so `Runs` is the
+  only field the view-model adds. Test-fixture note for future iterations
+  touching `loop.run` golden JSON: `journal.AppendLoopRun` always stamps
+  `time.Now()` when `Entry.TS` is zero (journal/writer.go's `Append`), so
+  a byte-pinned golden needs `journal.NewLoopRunEntry` + a manually-set
+  `entry.TS` + a direct `journal.NewWriter`/`Append` call instead (see
+  `writeLoopRunAt` in webui_loops_test.go) — `AppendLoopRun` alone can't
+  produce a deterministic timestamp. Load-bearing check done: reverted the
+  `sort.Slice` call in `buildLoopsViewModel` (caused an `"sort" imported
+  and not used` build failure confirming the code path is exercised, not
+  a silently-dead line) then restored it and reran green; the golden test
+  itself was written before the implementation and observed failing to
+  compile (`undefined: buildLoopsViewModel`) before it existed.
 
 ## Known Issues (append-only)
 - (none yet)
