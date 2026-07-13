@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 52
+Updated: 2026-07-13 · Iteration: 53
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -473,60 +473,44 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       and the `loop.run` event; no prompt surface is reachable. `65cf70b`
       — `TestRunLoopFiringRiskyCommandBlockedNoPromptReachable`
       (cmd/cortex/loop_run_test.go).
-- [ ] M6.6 Restart resumes: next-run derived from the last
+- [x] M6.6 Restart resumes: next-run derived from the last
       `loop.run` timestamp + interval; no double-fire across a
-      scheduler restart (fake-clock test).
+      scheduler restart (fake-clock test). `b990801` —
+      `TestJournalLastRunReturnsMostRecentMatchingName`,
+      `TestSchedulerRestartAcrossProcessDoesNotDoubleFire`
+      (internal/loops/lastrun_test.go).
 - [ ] M6.7 Loops screen: view-model golden (specs + run history
       from `loop.run` events); create/enable/disable/run-now wired to
       NEW loops endpoints added to `cortex serve` in this milestone
       (httptest).
 
 ## Next Up
-Start M6.6: restart resumes — next-run derived from the last `loop.run`
-timestamp + interval; no double-fire across a scheduler restart (fake-clock
-test). `internal/loops.LastRunLookup` (referenced by M6.2's scheduler tests
-as an injected function) still has no production implementation reading the
-real journal — GOAL.md §3 P6 says next-run is DERIVED, not stored in
-loops.json, so this is likely where that lookup gets built for real: scan
-the user-level `loop.run` journal (`internal/journal`, same reader
-`readLoopRunEntries` in loop_run_test.go already uses) for the most recent
-entry matching a spec's name, and feed its timestamp + the spec's interval
-into `Scheduler.Due`. The test should construct two `Scheduler` instances
-(or restart one) sharing the same on-disk journal + a fake clock, fire once,
-"restart" (fresh Scheduler, same journal/clock continuation), and assert the
-second instance does NOT re-fire immediately (proving next-run survived the
-restart) while still firing again once the fake clock advances past the next
-due time. Nothing yet wires `Scheduler.Due` to `RunLoopFiring` end-to-end in
-a running process (no `cortex serve`-resident scheduler tick loop exists) —
-that real wiring may belong here or may be deferred again to M6.7 (loops
-screen, which needs run history to display) if M6.6's DoD is satisfiable
-with `LastRunLookup` + `Scheduler` alone; check GOAL.md M6.6's wording again
-before deciding whether the serve-process wiring is in scope for this item
-specifically.
-
-M6.5 landed as "prove it, don't re-plumb it" per the prior iteration's own
-hypothesis: `RunLoopFiring`'s session is built via `applyProjectByName` onto
-whatever `newSession` (the `sessionFactory` seam) returns; production wires
-`newProductionSession` (serve_session.go), which sets `quiet = true` and
-never sets `confirmRisky` — the exact same nil-approver/quiet state
-`gateShell` (cmd/cortex/tool_deps.go) already treats as "no interactive
-surface, so Risky falls through to Blocked" for ANY session, REPL or
-headless. No new enforcement code was needed; M6.5's only real work was the
-end-to-end test proving `RunLoopFiring` specifically inherits it (the
-pre-existing `TestBashShellSyntax/risky_command_blocked_when_headless` in
-main_test.go already proved the mechanism in isolation at the
-`tools.Execute` level, not through a loop firing). A blocked risky command
-does NOT fail the firing — the model receives the refusal as an ordinary
-tool result, answers normally, and `TurnWithBudget` returns cleanly with no
-Go error and no budget stop-reason — so `loop.run` journals `Outcome =
-success`, `ChangeRef = ""` (nothing was written), same as any no-op turn.
-The prior Next Up note's guess that this should be `Outcome = failed,
-Reason mentioning risk` was NOT how the existing code behaves and would have
-required inventing a new TurnResult signal with no other consumer —
-rejected as exactly the "landing code no test would notice reverting"
-anti-pattern GOAL.md §1 warns against; a blocked-but-otherwise-clean firing
-being indistinguishable from a no-op firing in the journal is the honest
-behavior to pin, not a synthetic new failure category.
+Start M6.7: loops screen — view-model golden (specs + run history from
+`loop.run` events); create/enable/disable/run-now wired to NEW loops
+endpoints added to `cortex serve` in this milestone (httptest). This is the
+milestone's last item; M6.6 deliberately did NOT wire `Scheduler.Due` into a
+running `cortex serve` process (no serve-resident tick loop exists yet) —
+M6.7's "run-now" action and endpoint wiring is the natural place that
+finally connects `Scheduler`/`RunLoopFiring`/`internal/loops.Store` to the
+HTTP surface, mirroring M4.2's endpoint-by-endpoint pattern (list specs,
+create/enable/disable via `internal/loops.FileStore`, run-now invoking
+`RunLoopFiring` directly rather than waiting on a tick). Run history for the
+view-model reads the same user-level `loop.run` journal `readLoopRunEntries`
+(loop_run_test.go) and the new `JournalLastRun` (internal/loops/lastrun.go,
+M6.6) already read — no new journal reader needed, just a view-model
+composing `internal/loops.Store.List()` + a scan of `loop.run` entries
+grouped by name, similar in shape to M5.2a's dashboard view-model
+(`buildDashboardViewModel`, cmd/cortex/webui_dashboard.go) composing
+multiple seams into one golden-tested struct. Check whether a standing
+serve-resident scheduler tick loop (actually calling `Scheduler.Due` on an
+interval while `cortex serve` runs, per docs/cortex-web.md Phase 6's
+"ticks while cortex serve runs") is in scope for M6.7 too, or whether
+"run-now" alone (no auto-tick) satisfies the milestone's DoD as written —
+GOAL.md M6.7's item text only mentions create/enable/disable/run-now, not
+an auto-fire tick loop, so a first pass without the tick (enable/disable
+just flips the persisted flag; automatic firing stays untested/unwired) may
+be the honest small-slice reading, with a follow-on split if GOAL.md's
+intent turns out to require the live tick for M6 to be "complete."
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -2586,6 +2570,41 @@ Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
   test is actually sensitive to the classification rather than vacuously
   passing, then reverted to Risky and the full suite reran green before
   committing.
+
+- 2026-07-13: M6.6 landed `internal/loops.JournalLastRun`
+  (internal/loops/lastrun.go) as the production `LastRunLookup`
+  implementation — a pure read over the real user-level `loop.run`
+  journal (the same one `AppendLoopRun`/`RunLoopFiring`, M6.3, writes to),
+  scanning every entry (any outcome) for the most recent timestamp
+  matching a spec's name. Placed in `internal/loops` rather than
+  `cmd/cortex` (unlike M6.3's `RunLoopFiring`, which needs `CortexSession`
+  machinery) because `internal/loops`'s own test file
+  (`scheduler_test.go`'s `TestSchedulerOverlapSkipsAndJournalsSkip`)
+  already imports `internal/journal` directly to compose `OnSkip` against
+  the real journal — this package already depends on journal in practice,
+  so a real `LastRunLookup` living there too is the natural home, not a
+  new cross-package pattern. `TestSchedulerRestartAcrossProcessDoesNotDoubleFire`
+  proves the DoD with three independent `Scheduler` instances sharing one
+  on-disk journal (CORTEX_HOME-isolated) and a clock ANCHORED near
+  `time.Now()` at test start rather than a fixed arbitrary date — chosen
+  because the journal's `TS` field is stamped by the real writer's
+  `time.Now().UTC()` (`AppendLoopRun` doesn't accept an injected
+  timestamp, and adding one wasn't needed: anchoring the fake clock to
+  real "now" once, then only ever advancing it via `Add`, keeps the
+  interval math meaningful against real journal timestamps without any
+  test ever sleeping or the production journal API growing a
+  test-only knob). Deliberately did NOT wire `Scheduler.Due` into a
+  running `cortex serve` process — no serve-resident tick loop exists yet,
+  and GOAL.md M6.6's DoD text ("next-run derived… no double-fire across a
+  scheduler restart") is satisfied by the lookup + Scheduler-level proof
+  alone; the prior iteration's own Next Up note flagged this as an open
+  question and this iteration resolved it in favor of the narrower reading
+  (auto-tick wiring deferred to M6.7, which needs the loops screen's
+  create/enable/disable/run-now endpoints regardless). Load-bearing check
+  done: swapped `JournalLastRun` for a stub always returning `(zero,
+  false)` — both new tests failed (the second entry's lookup returned
+  not-found, and the "restarted, too soon" Scheduler re-fired since it
+  saw no history) — then restored the real implementation and reran green.
 
 ## Known Issues (append-only)
 - (none yet)
