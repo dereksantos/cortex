@@ -1,5 +1,5 @@
 # STATE — cortex web loop
-Updated: 2026-07-13 · Iteration: 56
+Updated: 2026-07-13 · Iteration: 57
 
 ## Current milestone
 M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
@@ -500,9 +500,13 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
         `TestListLoopsEndpointReturnsSpecsAndRunHistory`,
         `TestListLoopsEndpointEmptyStoreReturnsEmptyArray`,
         `TestListLoopsEndpointRequiresAuth` (cmd/cortex/serve_loops_test.go).
-  - [ ] M6.7c `POST /api/loops` create endpoint via `internal/loops.
+  - [x] M6.7c `POST /api/loops` create endpoint via `internal/loops.
         FileStore.Save` (httptest: happy path, cadence-floor rejection
-        surfaced as a typed 400, auth).
+        surfaced as a typed 400, auth). `a08c417` —
+        `TestCreateLoopEndpointCreatesLoop`,
+        `TestCreateLoopEndpointCadenceBelowFloorReturns400`,
+        `TestCreateLoopEndpointRequiresAuth`
+        (cmd/cortex/serve_loops_test.go).
   - [ ] M6.7d Enable/disable endpoints: `POST /api/loops/{name}/enable`
         and `POST /api/loops/{name}/disable`, flipping `Spec.Enabled` via
         `Store.Save` (httptest, unknown name ⇒ 404, auth) — combined into
@@ -525,23 +529,26 @@ M6 — Loops (P6) (M1, M2, M3, M4, M5 complete)
       never fire; fake-clock test, no sleeps.
 
 ## Next Up
-Start M6.7c: `POST /api/loops` create endpoint via `internal/loops.
-FileStore.Save` (httptest: happy path, cadence-floor rejection surfaced
-as a typed 400 via `errors.Is(err, loops.ErrCadenceTooLow)`, auth) —
-mirror M4.2c2b1's `PUT /api/models/{role}` write-endpoint pattern (decode
-a JSON body, call `Store.Save`, map the typed store error to 400 vs 500)
-over M6.7b's just-landed `loopsStore loops.Store` parameter already
-threaded through `newServeMux`/`runServeCLI` (cmd/cortex/serve.go) — no
-signature change needed, only a new `mux.HandleFunc("POST /api/loops",
-...)` line plus a handler (extend serve_loops.go or add
-serve_loops_create.go). `testLoopsStore(t)` (serve_routes_test.go) and
-`loops.NewAt` are ready for hermetic tests. The 2026-07-13 Decisions
-entries from the M6.7 split still govern M6.7c–e: (1) M6.7's literal DoD
-is view-model + list/create/enable/disable/run-now endpoints proven by
-httptest ONLY — the loops-screen HTML/JS (M6.7f) is a separate owner-
-amendment item, not part of M6.7/M6's completion gate. (2) the standing
-serve-resident scheduler tick is M6.8, also separate — `run-now` (M6.7e)
-is a direct synchronous `RunLoopFiring` call, not a live ticking loop.
+Start M6.7d: enable/disable endpoints `POST /api/loops/{name}/enable` and
+`POST /api/loops/{name}/disable`, flipping `Spec.Enabled` via
+`Store.Lookup` + `Store.Save` (httptest: unknown name ⇒ 404 via
+`errors.Is(err, loops.ErrLoopNotFound)`, auth) — combined into one item
+since both are the same single-field toggle (mirrors M4.2c2b1's
+combined-writes precedent). Extend serve_loops.go with two handlers (or a
+single `handleSetLoopEnabled(store, enabled bool) http.HandlerFunc`
+factory feeding both routes) registered as `mux.HandleFunc("POST
+/api/loops/{name}/enable", ...)` / `.../disable` in `newServeMux`
+(cmd/cortex/serve.go) — `{name}` path-value extraction already has a
+precedent in `handleListProjectSessions`'s `r.PathValue("name")`.
+`testLoopsStore(t)` / `loops.NewAt` are ready for hermetic tests; seed a
+spec via `store.Save` before hitting the endpoint, same setup shape as
+M6.7c's tests. The 2026-07-13 Decisions entries from the M6.7 split still
+govern M6.7c–e: (1) M6.7's literal DoD is view-model +
+list/create/enable/disable/run-now endpoints proven by httptest ONLY —
+the loops-screen HTML/JS (M6.7f) is a separate owner-amendment item, not
+part of M6.7/M6's completion gate. (2) the standing serve-resident
+scheduler tick is M6.8, also separate — `run-now` (M6.7e) is a direct
+synchronous `RunLoopFiring` call, not a live ticking loop.
 
 ## How to Run / Verify
 timeout 900 sh -c './scripts/check.sh && go test ./... -timeout 8m'
@@ -549,6 +556,22 @@ Repo is a Go 1.26 module; the coder binary is cmd/cortex.
 Product spec: docs/cortex-web.md. Loop spec: GOAL.md (read fully first).
 
 ## Decisions Log (append-only)
+- 2026-07-13: M6.7c landed `handleCreateLoop` (`POST /api/loops`,
+  cmd/cortex/serve_loops.go) mirroring M4.2c2b1's `PUT /api/models/{role}`
+  shape exactly: decode body → `Store.Save` → typed error mapping
+  (`errors.Is(err, loops.ErrCadenceTooLow)` ⇒ 400, anything else ⇒ 500) →
+  read the persisted value back via `Store.Lookup` rather than echoing the
+  request, so the response can't drift from what's actually on disk. No
+  name-emptiness validation was added — GOAL.md's M6.7c wording asks only
+  for "happy path, cadence-floor rejection, auth", and `FileStore.Save`
+  already has no analogous check for empty names to preserve; scope-
+  creeping a new validation rule not requested by the spec was avoided.
+  Load-bearing check done: ran the two content-asserting tests
+  (`TestCreateLoopEndpointCreatesLoop`,
+  `TestCreateLoopEndpointCadenceBelowFloorReturns400`) before adding the
+  route/handler — both failed with 404 (route not yet registered, prior to
+  `handleCreateLoop`/`mux.HandleFunc` landing), confirming they exercise
+  the new code; implemented, reran, both green.
 - 2026-07-13: OWNER: amendment A4 added M6.7f (loops screen render) and M6.8 (serve-resident scheduler) to GOAL.md §6 and this checklist — the iteration-54 rulings correctly identified a ladder gap vs docs/cortex-web.md Phase 6; both items are now required for M6 completion.
 - 2026-07-11: GOAL.md v1 finalized after a four-lens adversarial review
   (53 findings applied: canonical increment IDs, commit-before-reset
