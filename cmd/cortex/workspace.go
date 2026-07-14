@@ -22,6 +22,12 @@ import (
 type Workspace struct {
 	// Root is the absolute workspace root directory.
 	Root string
+	// Explicit records that Root was given outright (NewWorkspace — the
+	// --project / serve / loop-firing leg) rather than derived from the
+	// working directory. Only explicit workspaces anchor tool execution
+	// (CortexSession.Workdir): a CWD-derived workspace must keep today's
+	// CWD-relative tool behavior byte-identical.
+	Explicit bool
 }
 
 // NewWorkspace resolves an explicit workspace root (absolute or relative to
@@ -33,7 +39,7 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace root %q: %w", root, err)
 	}
-	return &Workspace{Root: abs}, nil
+	return &Workspace{Root: abs, Explicit: true}, nil
 }
 
 // WorkspaceFromCWD resolves a Workspace the way every existing CWD-implicit

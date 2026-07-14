@@ -42,7 +42,7 @@ var GrepTool = newTool(FunctionGrep,
 
 // grep dispatches the grep tool: parse pattern + path, run the scan. A regex that
 // fails to compile returns its error as the observation so the model retries.
-func grep(ctx context.Context, tc ToolCall) (string, error) {
+func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	pattern, err := tc.StringArg("pattern")
 	if err != nil {
 		return "", err
@@ -52,8 +52,12 @@ func grep(ctx context.Context, tc ToolCall) (string, error) {
 		root = p
 	}
 	printToolAction(fmt.Sprintf("grep(%s, %s)", pattern, root))
+	// Filesystem access goes through the session's workdir anchor (the "."
+	// default included); the display line above keeps the relative path. The
+	// broad-journal heuristic keys on the RELATIVE root — the shape the model
+	// wrote — so it runs before anchoring (workdir.go).
 	if isBroadJournalGrep(root, pattern) {
-		hits, _ := grepJournalInstructionSummary(ctx, root, pattern, 5)
+		hits, _ := grepJournalInstructionSummary(ctx, resolveWorkdir(deps, root), pattern, 5)
 		return "journal grep pattern is too broad for large JSONL records. The query-filtered root-file candidate summary below is the bounded evidence; if it answers the goal, stop and answer from it instead of reading raw JSONL records.\n\nRoot-file candidate hits:\n" + hits, nil
 	}
 	re, err := regexp.Compile(pattern)
@@ -62,7 +66,7 @@ func grep(ctx context.Context, tc ToolCall) (string, error) {
 		// not a harness failure — the model fixes the pattern and retries.
 		return fmt.Sprintf("invalid regex %q: %v (grep uses RE2 — no lookahead or backreferences)", pattern, err), nil
 	}
-	return grepFiles(ctx, root, re, grepMaxHits)
+	return grepFiles(ctx, resolveWorkdir(deps, root), re, grepMaxHits)
 }
 
 func isBroadJournalGrep(root, pattern string) bool {
