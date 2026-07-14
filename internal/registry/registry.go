@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/dereksantos/cortex/internal/userhome"
 )
@@ -143,7 +144,22 @@ func (r *FileRegistry) readAll() ([]Project, error) {
 	if err := json.Unmarshal(data, &projects); err != nil {
 		return nil, fmt.Errorf("failed to parse %s: %w", r.path, err)
 	}
-	return projects, nil
+	// A root-less entry is not a project in THIS schema. The retired
+	// daemon-era registry (deleted May 2026) shared this filename with a
+	// different shape (id/path/git_remote — no "root"), so a machine that
+	// ran it still has those entries on disk; surfacing them would hand
+	// callers hundreds of ghosts whose empty roots resolve to the process
+	// CWD. Reads skip them; note the next Save/Remove rewrites the file
+	// through this filtered view, dropping legacy entries for good — the
+	// registry is doctrinally pointer-only and rebuildable from a scan, so
+	// that loss is acceptable and deliberate.
+	kept := projects[:0]
+	for _, p := range projects {
+		if strings.TrimSpace(p.Root) != "" {
+			kept = append(kept, p)
+		}
+	}
+	return kept, nil
 }
 
 // writeAll persists the full project list to disk, creating the parent

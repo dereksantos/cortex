@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/dereksantos/cortex/internal/registry"
 )
@@ -58,6 +59,15 @@ func buildDashboardViewModel(reg registry.Registry) (dashboardViewModel, error) 
 
 	vm := dashboardViewModel{Projects: make([]dashboardProject, 0, len(projects))}
 	for _, p := range projects {
+		// Defense in depth against any Registry implementation handing back
+		// a root-less entry (the legacy daemon-era projects.json schema had
+		// no "root"): NewWorkspace("") resolves to the process CWD, which
+		// would run git and read sessions against whatever directory hosts
+		// the serve process. FileRegistry already filters these at read
+		// time; skip here for every other implementation.
+		if strings.TrimSpace(p.Root) == "" {
+			continue
+		}
 		dp := dashboardProject{Name: p.Name, Root: p.Root, Sessions: []sessionSummary{}}
 
 		ws, err := NewWorkspace(p.Root)

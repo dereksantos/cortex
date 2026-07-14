@@ -116,3 +116,21 @@ func TestBuildDashboardViewModelNonGitProjectSurfacesChangeError(t *testing.T) {
 		t.Error("Sessions = nil, want an empty (non-nil) slice")
 	}
 }
+
+// A root-less project (any Registry implementation could hand one back —
+// the legacy daemon-era projects.json schema had no "root" field) must be
+// skipped, never resolved: NewWorkspace("") lands on the process CWD, so a
+// ghost entry would run git and read sessions against whatever directory
+// hosts the serve process.
+func TestBuildDashboardViewModelSkipsRootlessEntries(t *testing.T) {
+	reg := &fakeRegistry{projects: map[string]registry.Project{
+		"ghost": {Name: "ghost", Root: ""},
+	}}
+	vm, err := buildDashboardViewModel(reg)
+	if err != nil {
+		t.Fatalf("buildDashboardViewModel: %v", err)
+	}
+	if len(vm.Projects) != 0 {
+		t.Errorf("root-less entries must be skipped, got %+v", vm.Projects)
+	}
+}
