@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dereksantos/cortex/internal/userhome"
 )
 
 // defaultEndpoint is a NEUTRAL local fallback — the conventional LiteLLM port.
@@ -236,6 +238,10 @@ type ToolConfig struct {
 	// slice 3b, docs/agent-tool.md). Nil means enabled — a missing config key
 	// must not disable a shipped tool, matching the EnableContext* precedent.
 	EnableAgent *bool `json:"enable_agent"`
+	// EnableScan gates the scan_landscape coder tool (cortex-web M2.6). Nil
+	// means enabled: it is an availability kill-switch, not consent — consent
+	// stays the user's in-conversation reply.
+	EnableScan *bool `json:"enable_scan"`
 
 	// Context window modification tools
 	EnableContextEvict            *bool `json:"enable_context_evict"`
@@ -252,6 +258,16 @@ func (c *Config) deleteEnabled() bool {
 		return true
 	}
 	return *c.Tools.AllowDelete
+}
+
+// scanEnabled reports whether the scan_landscape coder tool is enabled
+// (GOAL.md M2.6: tools.enable_scan is an availability kill-switch, default
+// enabled — absent or nil means the tool stays registered).
+func (c *Config) scanEnabled() bool {
+	if c == nil || c.Tools.EnableScan == nil {
+		return true
+	}
+	return *c.Tools.EnableScan
 }
 
 func (c *Config) backendEndpoint() string {
@@ -341,6 +357,15 @@ func projectInstructions() string {
 	if path == "" {
 		return ""
 	}
+	return readInstructions(path)
+}
+
+// readInstructions reads and trims an AGENTS.md at an exact path (no
+// upward search), truncating at maxInstructionBytes — the shared body
+// projectInstructions() (CWD-implicit, via findUp) and
+// Workspace.Instructions() (explicit root, workspace.go) both use, so the
+// two stay provably identical for the same resolved path.
+func readInstructions(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -385,14 +410,11 @@ func readConfigFile(path string) *Config {
 }
 
 func userConfigPath() string {
-	if h := os.Getenv("CORTEX_HOME"); h != "" {
-		return filepath.Join(h, "config.json")
-	}
-	home, err := os.UserHomeDir()
+	p, err := userhome.Path("config.json")
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".cortex", "config.json")
+	return p
 }
 
 func mergeConfig(base, over *Config) *Config {
@@ -483,6 +505,9 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	}
 	if over.EnableAgent != nil {
 		base.EnableAgent = over.EnableAgent
+	}
+	if over.EnableScan != nil {
+		base.EnableScan = over.EnableScan
 	}
 	if over.EnableContextEvict != nil {
 		base.EnableContextEvict = over.EnableContextEvict

@@ -23,8 +23,16 @@ func compactNow(session *CortexSession, reason string) {
 	fmt.Println(withColor("compacted → session "+session.SessionID, gray))
 }
 
-func runStudyCLI(path, goal string) {
+// runStudyCLI runs one-off study. project, when non-empty, resolves via the
+// registry and re-targets the session at that project's root before
+// studying (M3.5) — otherwise study runs against the CWD-implicit workspace
+// exactly as before.
+func runStudyCLI(project, path, goal string) {
 	session := NewCortexSession()
+	if err := applyProjectFlag(session, project); err != nil {
+		fmt.Println("study error:", err)
+		return
+	}
 	args, _ := json.Marshal(map[string]any{"path": path, "goal": goal})
 	call := ToolCall{Function: FunctionCall{Name: FunctionStudy, Arguments: string(args)}}
 	out, err := tools.Execute(context.Background(), call, session)
@@ -37,7 +45,7 @@ func runStudyCLI(path, goal string) {
 }
 
 func runTurnCLI(args []string) {
-	sessionID, asJSON := "", false
+	sessionID, asJSON, project := "", false, ""
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -48,6 +56,11 @@ func runTurnCLI(args []string) {
 			}
 		case "--json":
 			asJSON = true
+		case "--project":
+			if i+1 < len(args) {
+				project = args[i+1]
+				i++
+			}
 		default:
 			rest = append(rest, args[i])
 		}
@@ -60,11 +73,15 @@ func runTurnCLI(args []string) {
 		}
 	}
 	if input == "" {
-		fmt.Fprintln(os.Stderr, "usage: cortex turn [--session <id>] [--json] <input>")
+		fmt.Fprintln(os.Stderr, "usage: cortex turn [--session <id>] [--project <name>] [--json] <input>")
 		os.Exit(2)
 	}
 
 	session := NewCortexSession()
+	if err := applyProjectFlag(session, project); err != nil {
+		fmt.Fprintf(os.Stderr, "project %s: %v\n", project, err)
+		os.Exit(1)
+	}
 	session.quiet = true
 	if sessionID != "" {
 		if err := session.ResumeTranscript(sessionID); err != nil {

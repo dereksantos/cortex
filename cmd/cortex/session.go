@@ -73,6 +73,28 @@ func contextDir() string {
 
 func sessionsDir() string { return filepath.Join(contextDir(), "sessions") }
 
+// ContextDir returns the session's workspace .cortex directory. Sessions
+// built via NewCortexSession carry a resolved Workspace (WorkspaceFromCWD,
+// bit-identical to the free contextDir() above); hand-constructed sessions
+// (tests build *CortexSession{} literals directly, bypassing
+// NewCortexSession) fall back to the free, CWD-implicit function so their
+// existing behavior is unchanged.
+func (cs *CortexSession) ContextDir() string {
+	if cs.workspace != nil {
+		return cs.workspace.ContextDir()
+	}
+	return contextDir()
+}
+
+// SessionsDir returns the session's workspace sessions directory — see
+// ContextDir's fallback note.
+func (cs *CortexSession) SessionsDir() string {
+	if cs.workspace != nil {
+		return cs.workspace.SessionsDir()
+	}
+	return sessionsDir()
+}
+
 // openTranscript opens a session file and takes an exclusive cross-process
 // lock on it (see internal/fslock). A second process that tries to open the
 // same session gets a clear "session busy" error instead of silently
@@ -92,7 +114,7 @@ func openTranscript(path string, flag int, perm os.FileMode) (*os.File, error) {
 }
 
 func (cs *CortexSession) StartTranscript() {
-	dir := sessionsDir()
+	dir := cs.SessionsDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return
 	}
@@ -120,7 +142,7 @@ func (cs *CortexSession) StartTranscript() {
 // showLoadedContext prints a human-readable summary of what context was loaded.
 // Call this right after ResumeTranscript to make the loaded session visible.
 func (cs *CortexSession) showLoadedContext(id string) {
-	dir := sessionsDir()
+	dir := cs.SessionsDir()
 
 	// Get session info for display
 	infos, _ := listSessions(dir, 1)
@@ -169,7 +191,7 @@ func (cs *CortexSession) showLoadedContext(id string) {
 }
 
 func (cs *CortexSession) ResumeTranscript(id string) error {
-	dir := sessionsDir()
+	dir := cs.SessionsDir()
 	if id == "" {
 		var err error
 		if id, err = latestSessionID(dir); err != nil {
@@ -506,7 +528,7 @@ func (cs *CortexSession) Compact(ctx context.Context) error {
 }
 
 func (cs *CortexSession) printSessions() {
-	infos, err := listSessions(sessionsDir(), 15)
+	infos, err := listSessions(cs.SessionsDir(), 15)
 	if err != nil || len(infos) == 0 {
 		fmt.Println(withColor("no sessions found", gray))
 		return

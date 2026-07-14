@@ -19,11 +19,21 @@ import (
 
 const changeBranchPrefix = "cortex/"
 
-// gitCmd runs git in the current working directory and returns trimmed combined
-// output. On failure the error carries the command and git's own message, so a
-// caller (or the model reading a tool result) can see exactly what went wrong.
-func gitCmd(args ...string) (string, error) {
-	out, err := exec.Command("git", args...).CombinedOutput()
+// gitCmdIn runs git in the given directory (an empty dir defaults to the
+// current process's working directory) and returns trimmed combined
+// output. On failure the error carries the command and git's own message,
+// so a caller (or the model reading a tool result) can see exactly what
+// went wrong. Every change-lifecycle helper below (gitCleanIn,
+// currentBranchIn, startChangeIn, commitChangeIn) goes through this one
+// entry point — a caller with a project root that isn't the process CWD
+// (M5.2's dashboard view-model, M6.3's per-project loop firing) reuses the
+// exact same git plumbing instead of a parallel implementation; the
+// zero-arg CWD-implicit wrappers (gitClean, currentBranch, startChange,
+// commitChange — `cortex change`'s own CLI) pass "" through.
+func gitCmdIn(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
 	trimmed := strings.TrimSpace(string(out))
 	if err != nil {
 		return trimmed, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, trimmed)
@@ -31,18 +41,31 @@ func gitCmd(args ...string) (string, error) {
 	return trimmed, nil
 }
 
-// gitClean reports whether the worktree has no staged or unstaged changes.
-func gitClean() (bool, error) {
-	out, err := gitCmd("status", "--porcelain")
+// gitCleanIn reports whether dir's worktree has no staged or unstaged
+// changes. An empty dir defaults to the process's working directory
+// (matching gitCmdIn's own convention).
+func gitCleanIn(dir string) (bool, error) {
+	out, err := gitCmdIn(dir, "status", "--porcelain")
 	if err != nil {
 		return false, err
 	}
 	return out == "", nil
 }
 
+// gitClean reports whether the worktree has no staged or unstaged changes.
+func gitClean() (bool, error) {
+	return gitCleanIn("")
+}
+
+// currentBranchIn returns dir's checked-out branch name (or "HEAD" when
+// detached). An empty dir defaults to the process's working directory.
+func currentBranchIn(dir string) (string, error) {
+	return gitCmdIn(dir, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
 // currentBranch returns the checked-out branch name (or "HEAD" when detached).
 func currentBranch() (string, error) {
-	return gitCmd("rev-parse", "--abbrev-ref", "HEAD")
+	return currentBranchIn("")
 }
 
 // onChangeBranch reports whether HEAD is one of the Cortex's change branches.
@@ -50,12 +73,37 @@ func onChangeBranch(branch string) bool {
 	return strings.HasPrefix(branch, changeBranchPrefix)
 }
 
-// startChange creates and checks out cortex/<slug> off the current HEAD. It
-// refuses when the worktree is dirty: one change at a time means the previous
-// change must be committed (or discarded) before the next one begins, so a
-// half-finished change never bleeds into the new branch.
-func startChange(name string) (string, error) {
-	clean, err := gitClean()
+// changeStatusFor reports the same three facts `cortex change status`
+// prints (branch, active-change, clean), but scoped to an arbitrary
+// project root rather than the process's CWD — the seam the M5.2 dashboard
+// view-model reuses (GOAL.md §3 pillar 3: reuse the seam) instead of
+// re-deriving change status through a parallel mechanism. Returns whatever
+// partial results were obtained alongside the first error encountered, so a
+// caller can still render a branch name even if the porcelain-status call
+// fails.
+func changeStatusFor(dir string) (branch string, activeChange bool, clean bool, err error) {
+	branch, err = gitCmdIn(dir, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", false, false, err
+	}
+	activeChange = onChangeBranch(branch)
+	out, err := gitCmdIn(dir, "status", "--porcelain")
+	if err != nil {
+		return branch, activeChange, false, err
+	}
+	return branch, activeChange, out == "", nil
+}
+
+// startChangeIn creates and checks out cortex/<slug> off dir's current HEAD.
+// It refuses when dir's worktree is dirty: one change at a time means the
+// previous change must be committed (or discarded) before the next one
+// begins, so a half-finished change never bleeds into the new branch. An
+// empty dir defaults to the process's working directory — the seam M6.3's
+// per-project loop firing (loop_run.go) reuses to scope change creation to
+// the target project's root instead of the process CWD (GOAL.md §3 pillar
+// 3: reuse the seam over inventing a parallel per-project git mechanism).
+func startChangeIn(dir, name string) (string, error) {
+	clean, err := gitCleanIn(dir)
 	if err != nil {
 		return "", err
 	}
@@ -63,38 +111,55 @@ func startChange(name string) (string, error) {
 		return "", fmt.Errorf("worktree has uncommitted changes — commit or discard the current change before starting a new one")
 	}
 	branch := changeBranchPrefix + slugifyChange(name)
-	if _, err := gitCmd("checkout", "-b", branch); err != nil {
+	if _, err := gitCmdIn(dir, "checkout", "-b", branch); err != nil {
 		return "", err
 	}
 	return branch, nil
 }
 
-// commitChange stages everything and commits on the active change branch. It
-// requires being on a change branch (so an automated commit can't land on main
-// or a feature branch by accident) and refuses an empty commit. Local only.
-func commitChange(message string) (string, error) {
-	branch, err := currentBranch()
+// startChange creates and checks out cortex/<slug> off the current HEAD. It
+// refuses when the worktree is dirty: one change at a time means the previous
+// change must be committed (or discarded) before the next one begins, so a
+// half-finished change never bleeds into the new branch.
+func startChange(name string) (string, error) {
+	return startChangeIn("", name)
+}
+
+// commitChangeIn stages everything and commits on dir's active change
+// branch. It requires being on a change branch (so an automated commit
+// can't land on main or a feature branch by accident) and refuses an empty
+// commit. Local only. An empty dir defaults to the process's working
+// directory.
+func commitChangeIn(dir, message string) (string, error) {
+	branch, err := currentBranchIn(dir)
 	if err != nil {
 		return "", err
 	}
 	if !onChangeBranch(branch) {
 		return "", fmt.Errorf("not on a change branch (on %q) — run `cortex change start <name>` first", branch)
 	}
-	clean, err := gitClean()
+	clean, err := gitCleanIn(dir)
 	if err != nil {
 		return "", err
 	}
 	if clean {
 		return "", fmt.Errorf("nothing to commit on %s", branch)
 	}
-	if _, err := gitCmd("add", "-A"); err != nil {
+	if _, err := gitCmdIn(dir, "add", "-A"); err != nil {
 		return "", err
 	}
-	if _, err := gitCmd("commit", "-m", message); err != nil {
+	if _, err := gitCmdIn(dir, "commit", "-m", message); err != nil {
 		return "", err
 	}
-	head, _ := gitCmd("rev-parse", "--short", "HEAD")
+	head, _ := gitCmdIn(dir, "rev-parse", "--short", "HEAD")
 	return head, nil
+}
+
+// commitChange stages everything and commits on the active change branch. It
+// requires being on a change branch (so an automated commit can't land on main
+// or a feature branch by accident) and refuses an empty commit. Local only.
+func commitChange(message string) (string, error) {
+	return commitChangeIn("", message)
 }
 
 // slugifyChange turns a free-text change name into a safe branch suffix:

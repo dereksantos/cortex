@@ -19,17 +19,27 @@ import (
 type CortexArgs []string
 
 func (a CortexArgs) Request() *AgentRequest {
-	content := SystemPrompt
-	if inst := projectInstructions(); inst != "" {
-		content += "\n\n# Project instructions (AGENTS.md)\n\n" + inst
-	}
 	return &AgentRequest{
 		Model:       defaultModel,
-		Messages:    []Message{{Role: RoleSystem, Content: content}},
+		Messages:    []Message{{Role: RoleSystem, Content: systemPromptContent(projectInstructions())}},
 		Temperature: defaultTemperature,
 		Tools:       toolSet,
 		MaxTokens:   codeMaxOutputTokens,
 	}
+}
+
+// systemPromptContent builds the system message content: the base
+// SystemPrompt plus an optional "# Project instructions (AGENTS.md)"
+// section when instructions is non-empty. Shared by CortexArgs.Request()
+// (CWD-implicit, via projectInstructions()) and applyProjectByName
+// (project_workspace.go, M3.5's --project, via Workspace.Instructions())
+// so the two stay provably identical modulo their instructions source.
+func systemPromptContent(instructions string) string {
+	content := SystemPrompt
+	if instructions != "" {
+		content += "\n\n# Project instructions (AGENTS.md)\n\n" + instructions
+	}
+	return content
 }
 
 type CortexSession struct {
@@ -41,6 +51,7 @@ type CortexSession struct {
 	Study            ModelSpec
 	Fleet            Fleet
 	Config           *Config
+	workspace        *Workspace
 	deleteRoot       string
 	allowDelete      bool
 	quiet            bool
@@ -54,6 +65,12 @@ type CortexSession struct {
 	ws               *cache.WorkingSet
 	outline          []cache.OutlineEntry
 	outlineFolded    string // digest of previously folded outline entries (P4); rides the front of the outline zone
+
+	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
+	// first-run greeting fires; the REPL read loop's next call to
+	// MaybeCaptureScanRoots (scanroots.go) treats that reply as the
+	// answer to "where does your code live" and persists it.
+	awaitingScanRootsReply bool
 
 	sessionStart  time.Time
 	turns         int
@@ -144,11 +161,15 @@ func NewCortexSession() *CortexSession {
 	if !allowDelete {
 		req.Tools = toolsExcept(req.Tools, FunctionRemove)
 	}
+	if !cfg.scanEnabled() {
+		req.Tools = toolsExcept(req.Tools, tools.FunctionScanLandscape)
+	}
 
 	cs := &CortexSession{
 		Args:         &args,
 		Request:      req,
 		Config:       cfg,
+		workspace:    WorkspaceFromCWD(),
 		Window:       code.Window,
 		Study:        study,
 		Fleet:        fleet,
@@ -172,6 +193,8 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 		return t.EnableWeb == nil || *t.EnableWeb
 	case tools.FunctionAgent:
 		return t.EnableAgent == nil || *t.EnableAgent
+	case tools.FunctionScanLandscape:
+		return t.EnableScan == nil || *t.EnableScan
 	case tools.FunctionContextEvict:
 		return t.EnableContextEvict == nil || *t.EnableContextEvict
 	case tools.FunctionContextMerge:

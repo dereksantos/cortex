@@ -17,7 +17,7 @@ import (
 )
 
 func (cs *CortexSession) EnableMemory() {
-	dir := contextDir()
+	dir := cs.ContextDir()
 	if mem, err := memory.New(dir); err == nil {
 		cs.memory = mem
 	}
@@ -125,7 +125,7 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		ToolName:   "loop",
 		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
 		ToolResult: summary,
-		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: contextDir()},
+		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: cs.ContextDir()},
 		Metadata:   map[string]any{"verified": turnUsedTools(turnMsgs)},
 	}); err == nil {
 		cs.captures++
@@ -190,7 +190,7 @@ func (cs *CortexSession) emitSessionMetrics() {
 		return
 	}
 	w, err := journal.NewWriter(journal.WriterOpts{
-		ClassDir: filepath.Join(contextDir(), "journal", "eval"),
+		ClassDir: filepath.Join(cs.ContextDir(), "journal", "eval"),
 		Fsync:    journal.FsyncPerBatch,
 	})
 	if err != nil {

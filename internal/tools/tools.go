@@ -423,7 +423,7 @@ var WebSearchTool = newTool(FunctionWebSearch,
 // — outline (the structural map) and grep (the content locator) replace it.
 var All = []Tool{ReadFile, WriteFile, EditFile, Study.AsTool(), Agent.AsTool(), OutlineTool, GrepTool, Bash, RemoveTool,
 	MemoryWriteTool, MemoryReadTool, MemorySearchTool, MemoryForgetTool, RecallTool, WebSearchTool, FetchURLTool,
-	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool}
+	ContextEvictTool, ContextMergeTool, ContextAdjustWatermarksTool, ScanLandscapeTool}
 
 // Study is the one subagent profile today (the profile shape + runner live in
 // study.go). Read-only: outline/grep/read_file only — no write/edit/bash/remove,
@@ -508,13 +508,13 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	case FunctionReadFile:
 		return readFile(tc, deps)
 	case FunctionWriteFile:
-		return writeFile(tc)
+		return writeFile(tc, deps)
 	case FunctionEditFile:
-		return editFile(tc)
+		return editFile(tc, deps)
 	case FunctionOutline:
-		return outlineTool(tc)
+		return outlineTool(tc, deps)
 	case FunctionGrep:
-		return grep(ctx, tc)
+		return grep(ctx, tc, deps)
 	case FunctionBash:
 		return bash(ctx, tc, deps)
 	case FunctionRemove:
@@ -539,6 +539,8 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return contextMerge(tc, deps)
 	case FunctionContextAdjustWatermarks:
 		return contextAdjustWatermarks(tc, deps)
+	case FunctionScanLandscape:
+		return scanLandscape(deps)
 	}
 	// Any registered subagent tool (study, and future inheritors reflect/dream)
 	// shares this one dispatch path via the name→profile registry.
@@ -584,7 +586,7 @@ const outlineDefaultBudget = 4000
 
 // outlineTool renders the structural map of a path (internal/outline). The path
 // arg is optional (default "."); budget controls how much structure to expand.
-func outlineTool(tc ToolCall) (string, error) {
+func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 	path := "."
 	if p, _ := tc.StringArg("path"); strings.TrimSpace(p) != "" {
 		path = p
@@ -594,7 +596,7 @@ func outlineTool(tc ToolCall) (string, error) {
 		budget = n
 	}
 	printToolAction(fmt.Sprintf("outline(%s)", path))
-	return outline.Render(path, budget)
+	return outline.Render(resolveWorkdir(deps, path), budget)
 }
 
 // --- subagent tools (study, and future inheritors reflect/dream) --------
@@ -731,6 +733,9 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Filesystem access goes through the session's workdir anchor; messages
+	// keep the model-visible relative path (workdir.go).
+	fsPath := resolveWorkdir(deps, path)
 	// Ranged read: exact 1-indexed lines, bypassing the size gate (a range is
 	// bounded). This is the navigator's precise pull — project_index/study hands
 	// back a line span, and read_file(path, start, end) reads exactly it.
@@ -739,21 +744,21 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		if !hasEnd || end < start {
 			end = start + DefaultRangeLines - 1
 		}
-		return readRange(path, start, end)
+		return readRange(fsPath, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
 	// raw dump. Decoupled from the coder's window on purpose — sizing the trigger
 	// to the window let a big-window model read everything raw, defeating
 	// curation (2026-06-20). (~4 bytes/token.)
-	if info, statErr := os.Stat(path); statErr == nil {
+	if info, statErr := os.Stat(fsPath); statErr == nil {
 		if estTokens := int(info.Size()) / 4; estTokens > CurationBudgetTokens {
 			// Read the map before the territory: a too-large file (any language —
 			// outline.Render's regex/prose/positional tiers cover what go/ast
 			// doesn't) hands back its structural skeleton so the model can orient
 			// and target a region (read_file(start,end), study for curated
 			// content, or bash sed for an exact range) instead of dead-ending.
-			if skel := fileSkeleton(path); skel != "" {
+			if skel := fileSkeleton(fsPath); skel != "" {
 				printToolAction(fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
 				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its structural outline is below; "+
 					"read_file(%q, start, end) an exact span, study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` for a raw range.\n\n%s",
@@ -766,7 +771,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		}
 	}
 	printToolAction(fmt.Sprintf("read_file(%s)", path))
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
@@ -838,7 +843,7 @@ func fileSkeleton(path string) string {
 
 // --- write_file ---------------------------------------------------------
 
-func writeFile(tc ToolCall) (string, error) {
+func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
 	if err != nil {
 		return "", err
@@ -848,7 +853,9 @@ func writeFile(tc ToolCall) (string, error) {
 		return "", err
 	}
 	printToolAction(fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	// Filesystem access goes through the session's workdir anchor; messages
+	// keep the model-visible relative path (workdir.go).
+	if err := os.WriteFile(resolveWorkdir(deps, path), []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
@@ -870,7 +877,7 @@ type editOp struct {
 // whitespace-tolerant (so a model that mis-indents old_string still lands the
 // edit). replace_all relaxes uniqueness for renames; an `edits` array applies
 // several changes atomically — if any fails the file is left untouched.
-func editFile(tc ToolCall) (string, error) {
+func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	var a struct {
 		Path       string   `json:"path"`
 		OldString  string   `json:"old_string"`
@@ -896,11 +903,14 @@ func editFile(tc ToolCall) (string, error) {
 		printToolAction(fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
 	}
 
-	info, err := os.Stat(a.Path)
+	// Filesystem access goes through the session's workdir anchor; messages
+	// keep the model-visible relative path (workdir.go).
+	fsPath := resolveWorkdir(deps, a.Path)
+	info, err := os.Stat(fsPath)
 	if err != nil {
 		return "", fmt.Errorf("stat %s: %w", a.Path, err)
 	}
-	data, err := os.ReadFile(a.Path)
+	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", a.Path, err)
 	}
@@ -920,7 +930,7 @@ func editFile(tc ToolCall) (string, error) {
 		total += n
 	}
 
-	if err := os.WriteFile(a.Path, []byte(content), info.Mode()); err != nil {
+	if err := os.WriteFile(fsPath, []byte(content), info.Mode()); err != nil {
 		return "", fmt.Errorf("write %s: %w", a.Path, err)
 	}
 	if multi {
@@ -1253,7 +1263,14 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// Full shell semantics via `bash -c`: pipes, redirects, and chaining all
 	// work. The risk gate above (with its non-negotiable deny-floor) is what
 	// keeps this safe now that a command is no longer a single inert binary.
-	out, runErr := exec.CommandContext(ctx, "bash", "-c", command).CombinedOutput()
+	// The command runs in the session's workdir when one is anchored — a
+	// serve/loop-hosted session's shell must act in ITS project, not wherever
+	// the hosting process was started (workdir.go).
+	shellCmd := exec.CommandContext(ctx, "bash", "-c", command)
+	if wd := workdirOf(deps); wd != "" {
+		shellCmd.Dir = wd
+	}
+	out, runErr := shellCmd.CombinedOutput()
 	result := string(out)
 	// Oversized output is studied, not lost: the full output spills to
 	// .cortex/shell/ and the model gets a cited digest plus the spill path

@@ -253,11 +253,17 @@ func main() {
 		return
 	}
 
-	// Direct study mode: `cortex study <path> [goal...]`. The navigator subagent
-	// reads what the goal needs; there are no deepening passes to configure.
+	// Direct study mode: `cortex study [--project <name>] <path> [goal...]`.
+	// The navigator subagent reads what the goal needs; there are no
+	// deepening passes to configure. --project (M3.5) resolves via the
+	// registry and runs against that project's root instead of the CWD.
 	if len(os.Args) >= 3 && os.Args[1] == "study" {
-		rest := os.Args[2:]
-		runStudyCLI(rest[0], strings.Join(rest[1:], " "))
+		project, rest := parseProjectFlag(os.Args[2:])
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: cortex study [--project <name>] <path> [goal...]")
+			os.Exit(2)
+		}
+		runStudyCLI(project, rest[0], strings.Join(rest[1:], " "))
 		return
 	}
 
@@ -272,6 +278,21 @@ func main() {
 		return
 	}
 
+	// Landscape scan: `cortex scan [--json] [--root <path>]` (Phase 2 /
+	// M2.5). Uses persisted scan.roots or --root; refuses (never a blind
+	// $HOME sweep) when neither is available — see scan.go.
+	if len(os.Args) >= 2 && os.Args[1] == "scan" {
+		runScanCLI(os.Args[2:])
+		return
+	}
+
+	// Project registry: `cortex project add/list/remove` (Phase 3 / M3.4).
+	// See project.go.
+	if len(os.Args) >= 2 && os.Args[1] == "project" {
+		runProjectCLI(os.Args[2:])
+		return
+	}
+
 	// One-change-at-a-time git lifecycle: `cortex change <start|commit|status>`.
 	// A driver runs these around an agent turn so each change lands on its own
 	// branch, isolated and reviewable. Local only — see change.go.
@@ -280,6 +301,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// Local HTTP/SSE adapter: `cortex serve [--port <n>]` (Phase 4 / M4.1).
+	// Foreground, loopback-only, bearer-token-authenticated — see serve.go.
+	if len(os.Args) >= 2 && os.Args[1] == "serve" {
+		runServeCLI(os.Args[2:])
 		return
 	}
 
@@ -302,12 +330,22 @@ func main() {
 		printAvailableTools()
 	}
 
-	// `cortex resume [id]` continues a prior session (the latest when no id is
-	// given); otherwise every REPL session persists under a fresh transcript.
+	// `cortex resume [--project <name>] [id]` continues a prior session (the
+	// latest when no id is given); otherwise every REPL session persists
+	// under a fresh transcript. --project (M3.5) resolves via the registry
+	// and re-targets the session at that project's root, so the resumed (or
+	// fresh) session's ContextDir/SessionsDir/instructions/confinement all
+	// follow the project instead of the CWD.
 	if len(os.Args) >= 2 && os.Args[1] == "resume" {
+		project, rest := parseProjectFlag(os.Args[2:])
+		if project != "" {
+			if err := applyProjectFlag(session, project); err != nil {
+				fmt.Fprintf(os.Stderr, "project %s: %v\n", project, err)
+			}
+		}
 		id := ""
-		if len(os.Args) >= 3 {
-			id = os.Args[2]
+		if len(rest) >= 1 {
+			id = rest[0]
 		}
 		if err := session.ResumeTranscript(id); err != nil {
 			fmt.Printf("resume: %v — starting fresh\n", err)
@@ -324,6 +362,17 @@ func main() {
 	session.EnableMemory()
 	defer session.Close()
 
+	// First-run greeting (Phase 1 / M1.5): fires exactly once, before the
+	// read loop, so the very first thing a fresh machine sees from `cortex`
+	// is the introduction rather than a bare prompt. A failed greeting
+	// (e.g. no backend reachable yet) is reported but does not block the
+	// REPL — the marker is only written on success, so it retries next launch.
+	greetCtx, stopGreet := signal.NotifyContext(context.Background(), os.Interrupt)
+	if err := MaybeGreet(greetCtx, session); err != nil {
+		fmt.Fprintf(os.Stderr, "greeting: %v\n", err)
+	}
+	stopGreet()
+
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
 	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
 	// `printf … | loop` — falls back to the plain scanner unchanged.
@@ -332,7 +381,7 @@ func main() {
 	if lineedit.IsInteractive(os.Stdin) {
 		if t, err := lineedit.Open(os.Stdin, os.Stdout); err == nil {
 			editor = t
-			editor.SetHistory(lineedit.LoadHistory(filepath.Join(contextDir(), "history")))
+			editor.SetHistory(lineedit.LoadHistory(filepath.Join(session.ContextDir(), "history")))
 			defer editor.Close()
 			// Risky-command confirmation reads a y/N line from the editor. Tool
 			// calls run synchronously on this goroutine between ReadLine calls,
@@ -362,7 +411,7 @@ func main() {
 			// goes to stderr, which in an interactive session lands on top of
 			// the prompt. Divert it to a file so the terminal stays clean
 			// (tail -f .cortex/cortex.log for debugging).
-			if lf, err := os.OpenFile(filepath.Join(contextDir(), "cortex.log"),
+			if lf, err := os.OpenFile(filepath.Join(session.ContextDir(), "cortex.log"),
 				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
 				log.SetOutput(lf)
 				defer lf.Close()
@@ -460,6 +509,13 @@ func main() {
 				fmt.Printf("code model → %s\n", name)
 			}
 			continue
+		}
+
+		// M1.7: if a first-run greeting just asked where the user's code
+		// lives, this is that answer — capture and persist it before running
+		// the turn normally (the reply still gets an ordinary response too).
+		if _, err := session.MaybeCaptureScanRoots(input); err != nil {
+			fmt.Fprintf(os.Stderr, "scan roots: %v\n", err)
 		}
 
 		// Run the turn. The whole per-turn pipeline lives in Turn now — the same

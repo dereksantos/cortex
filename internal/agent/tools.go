@@ -17,10 +17,16 @@ import (
 // is the primary runaway backstop — the one thing that holds when cancellation
 // fails (the 2026-06-28 north runaway, docs/engine-unification.md); MaxIter caps
 // the rounds; ReadBudgetBytes caps accumulated tool output (0 = unbounded).
+// TokenBudget caps CUMULATIVE input+output tokens across the whole run
+// (0 = unbounded) — distinct from the per-request MaxTokens completion cap;
+// it is the D11 per-loop-firing token budget (docs/cortex-web.md Phase 6,
+// GOAL.md M6.4), checked every round so a token-hungry runaway halts by
+// spend before it can exhaust MaxIter.
 type Bounds struct {
 	MaxTokens       int
 	MaxIter         int
 	ReadBudgetBytes int
+	TokenBudget     int
 }
 
 // Tool is the OpenAI-format tool declaration passed in the tools array.

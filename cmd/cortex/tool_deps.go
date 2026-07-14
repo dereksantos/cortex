@@ -96,6 +96,17 @@ func (cs *CortexSession) AllowDelete() (string, bool) { return cs.deleteRoot, cs
 
 func (cs *CortexSession) Quiet() bool { return cs.quiet }
 
+// Workdir implements tools.Workdirer: an explicit-root workspace (--project,
+// serve, loop firings) anchors relative tool paths and the shell's working
+// directory to ITS project. CWD-derived workspaces return "" so the REPL's
+// CWD-relative tool behavior stays byte-identical.
+func (cs *CortexSession) Workdir() string {
+	if cs.workspace != nil && cs.workspace.Explicit {
+		return cs.workspace.Root
+	}
+	return ""
+}
+
 // citationRe parses the outline citation coordinate: @session/<id>#m<start>-<end>,
 // a half-open message-index range into that session transcript.
 var citationRe = regexp.MustCompile(`^@session/([A-Za-z0-9-]+)#m(\d+)-(\d+)$`)
@@ -206,7 +217,7 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 		return "", fmt.Errorf("recall %s: invalid end index: %w", citation, err)
 	}
 
-	msgs, _, err := loadTranscript(filepath.Join(sessionsDir(), id+".jsonl"))
+	msgs, _, err := loadTranscript(filepath.Join(cs.SessionsDir(), id+".jsonl"))
 	if err != nil {
 		return "", fmt.Errorf("recall %s: %w", citation, err)
 	}
@@ -238,7 +249,7 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 	}
 	rendered := b.String()
 	if len(rendered)/4 > gate {
-		return fmt.Sprintf("recall of %s is ~%d tokens — over the %d-token recall budget. Study the transcript instead: study(%s, <your question>)", citation, len(rendered)/4, gate, filepath.Join(sessionsDir(), id+".jsonl")), nil
+		return fmt.Sprintf("recall of %s is ~%d tokens — over the %d-token recall budget. Study the transcript instead: study(%s, <your question>)", citation, len(rendered)/4, gate, filepath.Join(cs.SessionsDir(), id+".jsonl")), nil
 	}
 
 	return rendered, nil

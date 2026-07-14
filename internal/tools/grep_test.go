@@ -22,7 +22,7 @@ func TestGrepFindsMatches(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package p\nfunc Resolve() {}\nvar x = 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := grep(context.Background(), grepCall("func.*Resolve", dir))
+	out, err := grep(context.Background(), grepCall("func.*Resolve", dir), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestGrepFindsMatches(t *testing.T) {
 func TestGrepNoMatches(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.go"), []byte("nothing here\n"), 0o644)
-	out, _ := grep(context.Background(), grepCall("zzz_no_such", dir))
+	out, _ := grep(context.Background(), grepCall("zzz_no_such", dir), headlessDeps{})
 	if !strings.Contains(out, "no matches") {
 		t.Errorf("expected (no matches), got %q", out)
 	}
@@ -126,7 +126,7 @@ func TestGrepBadRegexIsObservation(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x\n"), 0o644)
 	// A PCRE lookahead — invalid in RE2. Must come back as an observation the
 	// model can fix, not a tool error.
-	out, err := grep(context.Background(), grepCall("(?=foo)", dir))
+	out, err := grep(context.Background(), grepCall("(?=foo)", dir), headlessDeps{})
 	if err != nil {
 		t.Fatalf("bad regex should be an observation, not an error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestGrepBadRegexIsObservation(t *testing.T) {
 
 func TestGrepJournalBroadPatternRedirect(t *testing.T) {
 	for _, pattern := range []string{"seed context", "seed.*context|context.*seed", "repository root"} {
-		out, err := grep(context.Background(), grepCall(pattern, ".cortex/journal"))
+		out, err := grep(context.Background(), grepCall(pattern, ".cortex/journal"), headlessDeps{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -154,7 +154,7 @@ func TestGrepJournalBroadPatternReturnsCompactCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(journal, "0001.jsonl"), []byte(`{"msg":"uses AGENTS.md as seed context with lots of extra words that should not be returned"}`+"\n"+`{"msg":"unrelated old CLAUDE.md mention"}`+"\n"), 0o644)
-	out, err := grep(context.Background(), grepCall("seed context", journal))
+	out, err := grep(context.Background(), grepCall("seed context", journal), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestGrepJournalFilenamePatternAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(journal, "0001.jsonl"), []byte(`{"msg":"uses AGENTS.md as context"}`+"\n"), 0o644)
-	out, err := grep(context.Background(), grepCall(`[A-Za-z0-9_.-]+\.(go|md|json|yaml|toml)`, journal))
+	out, err := grep(context.Background(), grepCall(`[A-Za-z0-9_.-]+\.(go|md|json|yaml|toml)`, journal), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestGrepSingleFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "one.go")
 	os.WriteFile(p, []byte("alpha\nbeta\n"), 0o644)
-	out, _ := grep(context.Background(), grepCall("beta", p))
+	out, _ := grep(context.Background(), grepCall("beta", p), headlessDeps{})
 	if !strings.Contains(out, "one.go:2:beta") {
 		t.Errorf("single-file grep = %q", out)
 	}
