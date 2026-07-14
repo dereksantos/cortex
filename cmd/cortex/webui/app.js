@@ -35,11 +35,35 @@ function queryParam(name) {
 // authToken resolves the bearer token the API surface requires. A plain
 // browser navigation can't attach a custom Authorization header, so the
 // token rides in as a "?token=" query param on the page URL (the value
-// `cortex serve`'s startup line prints) — read once here and reused for
-// every /api/... fetch this page makes (see serve.go's authMiddleware,
-// M5.3b Decisions Log).
+// `cortex serve` prints and auto-opens). A tokened visit is REMEMBERED in
+// localStorage so later plain localhost visits keep working until the
+// token rotates (the Jupyter posture; see serve.go's resolveServeToken).
 function authToken() {
-  return queryParam("token");
+  const fromQuery = queryParam("token");
+  if (fromQuery) {
+    try {
+      localStorage.setItem("cortex.token", fromQuery);
+    } catch (e) {
+      /* storage unavailable: fall through to the query value */
+    }
+    return fromQuery;
+  }
+  try {
+    return localStorage.getItem("cortex.token") || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// renderNoTokenBanner explains the one recoverable setup state — no token
+// anywhere — instead of letting every screen surface a raw 401.
+function renderNoTokenBanner() {
+  const banner = document.createElement("p");
+  banner.className = "no-token-banner";
+  banner.textContent =
+    "No access token — open this page via the URL `cortex serve` prints " +
+    "(it ends in ?token=…); the page remembers it afterwards.";
+  document.body.prepend(banner);
 }
 
 // apiFetch issues an authenticated GET against the given /api/... path.
@@ -265,5 +289,8 @@ function loadSession() {
     });
 }
 
+if (!authToken()) {
+  renderNoTokenBanner();
+}
 loadDashboard();
-loadSession();
+loadSession();\n

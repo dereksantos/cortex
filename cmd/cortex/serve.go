@@ -13,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -60,15 +62,92 @@ func newServeServer(addr string, handler http.Handler) (*http.Server, net.Listen
 	return srv, ln, nil
 }
 
-// generateServeToken returns a fresh random bearer token (hex-encoded), a
-// new one each call — `cortex serve` mints one per foreground run rather
-// than reusing a stored value.
+// generateServeToken returns a fresh random bearer token (hex-encoded).
+// Reuse-vs-mint policy lives in resolveServeToken; this is the pure minter.
 func generateServeToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("failed to generate serve token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// resolveServeToken returns the serve bearer token and its file path,
+// REUSING the stored <userhome>/serve.token when it holds a usable value —
+// so a bookmarked tokened URL keeps working across restarts (the Jupyter
+// posture: one long-lived local secret, 0600, rather than one per run).
+// A missing or unusable file gets a freshly minted token written in place.
+func resolveServeToken() (string, string, error) {
+	path, err := userhome.Path("serve.token")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve serve.token path: %w", err)
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		stored := strings.TrimSpace(string(data))
+		if len(stored) == 64 && isHex(stored) {
+			return stored, path, nil
+		}
+	}
+	token, err := generateServeToken()
+	if err != nil {
+		return "", "", err
+	}
+	written, err := writeServeToken(token)
+	if err != nil {
+		return "", "", err
+	}
+	return token, written, nil
+}
+
+func isHex(s string) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// serveURL is the ready-to-open page URL: the UI shell plus the ?token=
+// query param authToken() reads (app.js) — what the startup line prints
+// and maybeOpenBrowser launches.
+func serveURL(addr, token string) string {
+	return fmt.Sprintf("http://%s/?token=%s", addr, token)
+}
+
+// serveOpenFromArgs parses the open-browser preference from a
+// `cortex serve` argument list: opening the tokened URL is the DEFAULT
+// (the token dance should cost zero keystrokes); --no-open suppresses it
+// for headless and scripted runs.
+func serveOpenFromArgs(args []string) bool {
+	for _, a := range args {
+		if a == "--no-open" {
+			return false
+		}
+	}
+	return true
+}
+
+// openBrowser launches the platform browser opener, injectable for tests.
+// Fire-and-forget: Start, not Run — serve must not block on the browser.
+var openBrowser = func(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		return fmt.Errorf("no browser opener for %s", runtime.GOOS)
+	}
+	return cmd.Start()
+}
+
+// maybeOpenBrowser opens url when open is set; a failed launch is a hint,
+// not a fatal — the URL is printed either way.
+func maybeOpenBrowser(open bool, url string) {
+	if !open {
+		return
+	}
+	if err := openBrowser(url); err != nil {
+		fmt.Fprintf(os.Stderr, "could not open a browser (%v) — open %s yourself\n", err, url)
+	}
 }
 
 // writeServeToken writes token to <userhome>/serve.token, mode 0600
@@ -178,12 +257,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 // writeServeToken, authMiddleware, newServeMux) carry the coverage.
 func runServeCLI(args []string) {
 	port := servePortFromArgs(args)
-	token, err := generateServeToken()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	tokenPath, err := writeServeToken(token)
+	token, tokenPath, err := resolveServeToken()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -235,7 +309,9 @@ func runServeCLI(args []string) {
 		sched.Wait()
 	}()
 
-	fmt.Printf("cortex serve listening on http://%s (token: %s)\n", ln.Addr(), tokenPath)
+	pageURL := serveURL(ln.Addr().String(), token)
+	fmt.Printf("cortex serve listening — open %s\n(token file: %s; --no-open to suppress the browser)\n", pageURL, tokenPath)
+	maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
