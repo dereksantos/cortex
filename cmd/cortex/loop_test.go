@@ -23,6 +23,28 @@ func fakeResp(content string, calls []ToolCall, in, out int) *AgentResponse {
 	}
 }
 
+// TestAccountUsageReasoningTokens covers item 3's plumbing: accountUsage
+// sums each response's reasoning-token usage into loopStats, zero when a
+// response doesn't report it (Usage.ReasoningTokens() defaults to 0 when
+// CompletionTokensDetails is nil).
+func TestAccountUsageReasoningTokens(t *testing.T) {
+	s := &loopStats{}
+	withReasoning := &AgentResponse{Usage: Usage{
+		PromptTokens: 10, CompletionTokens: 50,
+		CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 30},
+	}}
+	withoutReasoning := &AgentResponse{Usage: Usage{PromptTokens: 5, CompletionTokens: 5}}
+
+	accountUsage(s, withReasoning, 0)
+	if s.ReasoningTokens != 30 {
+		t.Fatalf("ReasoningTokens after first response = %d, want 30", s.ReasoningTokens)
+	}
+	accountUsage(s, withoutReasoning, 0)
+	if s.ReasoningTokens != 30 {
+		t.Errorf("ReasoningTokens after second (unreported) response = %d, want 30 (unchanged)", s.ReasoningTokens)
+	}
+}
+
 func readCall(id, path string) ToolCall {
 	args, _ := json.Marshal(map[string]any{"path": path})
 	return ToolCall{ID: id, Type: "function", Function: FunctionCall{Name: tools.FunctionReadFile, Arguments: string(args)}}

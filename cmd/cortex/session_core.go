@@ -58,13 +58,21 @@ type CortexSession struct {
 	confirmRisky     func(question string) bool
 	classifyShell    shellrisk.ClassifyFn
 	turnIntent       string
-	SessionID        string
-	transcript       *os.File
-	capturer         *capture.Capture
-	memory           *memory.Store
-	ws               *cache.WorkingSet
-	outline          []cache.OutlineEntry
-	outlineFolded    string // digest of previously folded outline entries (P4); rides the front of the outline zone
+	// onThinking, when set, is invoked with active=true on the first
+	// reasoning delta of a model call and active=false once its answer
+	// content starts (or the call ends without one) — the served-session SSE
+	// handler's hook (serve_stream.go) so the web UI gets a "thinking" event
+	// instead of dead air while a quiet session deliberates. nil (the
+	// default, including every non-served session) leaves send()'s quiet
+	// path on the plain blocking Send it already used.
+	onThinking    func(active bool)
+	SessionID     string
+	transcript    *os.File
+	capturer      *capture.Capture
+	memory        *memory.Store
+	ws            *cache.WorkingSet
+	outline       []cache.OutlineEntry
+	outlineFolded string // digest of previously folded outline entries (P4); rides the front of the outline zone
 
 	// awaitingScanRootsReply is armed by MaybeGreet (M1.7) right after a
 	// first-run greeting fires; the REPL read loop's next call to
@@ -72,15 +80,16 @@ type CortexSession struct {
 	// answer to "where does your code live" and persists it.
 	awaitingScanRootsReply bool
 
-	sessionStart  time.Time
-	turns         int
-	turnNo        int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
-	tokensIn      int
-	tokensOut     int
-	costUSD       float64
-	injectedChars int
-	captures      int
-	injections    int
+	sessionStart    time.Time
+	turns           int
+	turnNo          int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
+	tokensIn        int
+	tokensOut       int
+	reasoningTokens int // completion_tokens_details.reasoning_tokens summed across the session (0 if never reported)
+	costUSD         float64
+	injectedChars   int
+	captures        int
+	injections      int
 
 	md      *markdownRenderer
 	mdWidth int

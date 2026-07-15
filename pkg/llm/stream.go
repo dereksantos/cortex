@@ -31,8 +31,12 @@ type streamDelta struct {
 	// ReasoningContent is the model's chain-of-thought, emitted by
 	// always-thinking models (e.g. gpt-oss) before the answer. Display-only:
 	// callers surface it as live progress but never store or re-send it.
-	ReasoningContent string                `json:"reasoning_content"`
-	ToolCalls        []StreamToolCallDelta `json:"tool_calls"`
+	ReasoningContent string `json:"reasoning_content"`
+	// Reasoning is OpenRouter's field name for the same chain-of-thought
+	// channel. Backends emit one or the other, never (observed) both; when
+	// ReasoningContent is empty StreamChat falls back to this.
+	Reasoning string                `json:"reasoning"`
+	ToolCalls []StreamToolCallDelta `json:"tool_calls"`
 }
 
 // StreamToolCallDelta is a fragment of a tool call. Across chunks the same
@@ -113,6 +117,7 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 	var content strings.Builder
 	var reasoning strings.Builder
 	var tools toolCallAccumulator
+	var fence thinkFenceFilter
 	var res StreamResult
 
 	// bufio.Reader (not Scanner) so a single oversized delta line — a big
@@ -142,10 +147,15 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 						if chunk.Usage.PromptDetails != nil {
 							cached = chunk.Usage.PromptDetails.CachedTokens
 						}
+						reasoningTok := 0
+						if chunk.Usage.CompletionDetails != nil {
+							reasoningTok = chunk.Usage.CompletionDetails.ReasoningTokens
+						}
 						res.Stats = GenerationStats{
 							InputTokens:       chunk.Usage.PromptTokens,
 							OutputTokens:      chunk.Usage.CompletionTokens,
 							CachedInputTokens: cached,
+							ReasoningTokens:   reasoningTok,
 							CostUSD:           chunk.Usage.Cost,
 						}
 					}
@@ -154,15 +164,28 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 							res.FinishReason = ch.FinishReason
 						}
 						if ch.Delta.Content != "" {
-							content.WriteString(ch.Delta.Content)
-							if onContent != nil {
-								onContent(ch.Delta.Content)
+							fc, fr := fence.feed(ch.Delta.Content)
+							if fc != "" {
+								content.WriteString(fc)
+								if onContent != nil {
+									onContent(fc)
+								}
+							}
+							if fr != "" {
+								reasoning.WriteString(fr)
+								if onReasoning != nil {
+									onReasoning(fr)
+								}
 							}
 						}
-						if ch.Delta.ReasoningContent != "" {
-							reasoning.WriteString(ch.Delta.ReasoningContent)
+						rc := ch.Delta.ReasoningContent
+						if rc == "" {
+							rc = ch.Delta.Reasoning
+						}
+						if rc != "" {
+							reasoning.WriteString(rc)
 							if onReasoning != nil {
-								onReasoning(ch.Delta.ReasoningContent)
+								onReasoning(rc)
 							}
 						}
 						tools.add(ch.Delta.ToolCalls)
@@ -175,6 +198,24 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 				break
 			}
 			return StreamResult{}, fmt.Errorf("stream: read: %w", err)
+		}
+	}
+
+	// Drain whatever the fence filter was still holding back (an unclosed
+	// <think> at the max-tokens clamp, or an undecided short prefix that never
+	// resolved either way) so nothing is silently dropped.
+	if fc, fr := fence.flush(); fc != "" || fr != "" {
+		if fc != "" {
+			content.WriteString(fc)
+			if onContent != nil {
+				onContent(fc)
+			}
+		}
+		if fr != "" {
+			reasoning.WriteString(fr)
+			if onReasoning != nil {
+				onReasoning(fr)
+			}
 		}
 	}
 

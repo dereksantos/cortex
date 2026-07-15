@@ -23,6 +23,8 @@ func TestEvalCellResult_RoundTrip(t *testing.T) {
 		TestsFailed:          0,
 		TaskSuccess:          true,
 		TaskSuccessCriterion: "all_tests_pass",
+		Thinking:             "off",
+		ReasoningTokens:      317,
 	}
 	e, err := NewEvalCellResultEntry(p)
 	if err != nil {
@@ -43,6 +45,12 @@ func TestEvalCellResult_RoundTrip(t *testing.T) {
 	}
 	if !got.TaskSuccess {
 		t.Errorf("TaskSuccess = false, want true")
+	}
+	if got.Thinking != "off" {
+		t.Errorf("Thinking = %q, want %q", got.Thinking, "off")
+	}
+	if got.ReasoningTokens != 317 {
+		t.Errorf("ReasoningTokens = %d, want 317", got.ReasoningTokens)
 	}
 }
 

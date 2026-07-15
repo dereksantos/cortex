@@ -307,6 +307,7 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 			Index:        0,
 			Message:      Message{Role: "assistant", Content: res.Content, ToolCalls: calls},
 			FinishReason: res.FinishReason,
+			Reasoning:    res.Reasoning,
 		}},
 		Usage: Usage{
 			PromptTokens:     res.Stats.InputTokens,
@@ -315,6 +316,9 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 			Cost:             res.Stats.CostUSD,
 			PromptTokensDetails: &promptTokensDetails{
 				CachedTokens: res.Stats.CachedInputTokens,
+			},
+			CompletionTokensDetails: &completionTokensDetails{
+				ReasoningTokens: res.Stats.ReasoningTokens,
 			},
 		},
 	}
@@ -352,11 +356,21 @@ type Usage struct {
 	// elsewhere). cached_tokens out of prompt_tokens were served from cache —
 	// the direct measure of the two-zone layout's prefix stability.
 	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	// CompletionTokensDetails carries a reasoning model's token split: how
+	// many of CompletionTokens were spent on chain-of-thought vs the visible
+	// answer. Absent (nil) on backends/models that don't report it.
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // promptTokensDetails is the OpenAI-compatible usage sub-object.
 type promptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// completionTokensDetails is the OpenAI-compatible usage sub-object carrying
+// a reasoning model's token split.
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // CachedPromptTokens returns the provider-reported cached prompt tokens, or 0
@@ -368,11 +382,87 @@ func (u Usage) CachedPromptTokens() int {
 	return u.PromptTokensDetails.CachedTokens
 }
 
+// ReasoningTokens returns the provider-reported reasoning-token count, or 0
+// when the backend doesn't report it.
+func (u Usage) ReasoningTokens() int {
+	if u.CompletionTokensDetails == nil {
+		return 0
+	}
+	return u.CompletionTokensDetails.ReasoningTokens
+}
+
 // Choice represents the model response(s).
 type Choice struct {
 	Index        int     `json:"index"`
 	Message      Message `json:"message"`
 	FinishReason string  `json:"finish_reason"`
+	// Reasoning is the model's chain-of-thought for this choice, parsed off
+	// the wire response's message.reasoning_content / message.reasoning (a
+	// reasoning model's blocking-path fields) plus any leading
+	// <think>...</think> fence stripped out of Message.Content — display/
+	// telemetry-only, mirroring what the streaming path already exposes on
+	// StreamResult.Reasoning. json:"-" so it is never re-serialized: the
+	// custom UnmarshalJSON below is what actually populates it from the wire,
+	// and Message itself carries no reasoning field at all, so a stored or
+	// re-marshaled Message can never leak fence bytes or a reasoning field
+	// (see TestChoiceReasoningNeverRoundTrips).
+	Reasoning string `json:"-"`
+}
+
+// wireChoice mirrors the raw JSON shape of one choice in a blocking
+// chat-completions response, with the message-level reasoning fields that
+// Message itself deliberately omits.
+type wireChoice struct {
+	Index   int `json:"index"`
+	Message struct {
+		Role       string     `json:"role"`
+		Content    string     `json:"content"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+		// ReasoningContent / Reasoning are the blocking-path counterparts of
+		// streamDelta's fields in pkg/llm/stream.go (reasoning_content is the
+		// common name; reasoning is OpenRouter's).
+		ReasoningContent string `json:"reasoning_content"`
+		Reasoning        string `json:"reasoning"`
+	} `json:"message"`
+	FinishReason string `json:"finish_reason"`
+}
+
+// UnmarshalJSON captures the message-level reasoning_content/reasoning fields
+// (silently dropped by decoding straight into Message, which has no such
+// field) into Choice.Reasoning, and strips a leading <think>...</think> fence
+// out of Message.Content into the same field via llm.StripLeadingThinkFence —
+// blocking-path parity for what pkg/llm/stream.go's thinkFenceFilter already
+// does per-delta on the streaming path.
+func (c *Choice) UnmarshalJSON(data []byte) error {
+	var wire wireChoice
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("unmarshal choice: %w", err)
+	}
+	c.Index = wire.Index
+	c.FinishReason = wire.FinishReason
+
+	content, fenceReasoning := llm.StripLeadingThinkFence(wire.Message.Content)
+	c.Message = Message{
+		Role:       wire.Message.Role,
+		Content:    content,
+		ToolCalls:  wire.Message.ToolCalls,
+		ToolCallID: wire.Message.ToolCallID,
+	}
+
+	reasoning := wire.Message.ReasoningContent
+	if reasoning == "" {
+		reasoning = wire.Message.Reasoning
+	}
+	if fenceReasoning != "" {
+		if reasoning != "" {
+			reasoning += fenceReasoning
+		} else {
+			reasoning = fenceReasoning
+		}
+	}
+	c.Reasoning = reasoning
+	return nil
 }
 
 // Message contains a single prompt and the role.

@@ -110,6 +110,22 @@ func (m ModelSpec) TemplateKwargs() map[string]any {
 	return nil
 }
 
+// thinkingLabel resolves a request's chat_template_kwargs into the
+// eval-telemetry "thinking" attribution: "off" when enable_thinking is
+// explicitly suppressed (ModelSpec.Thinking == false, via TemplateKwargs
+// above), "on" otherwise — either the model always reasons, or thinking is
+// left at its default. Takes the built kwargs map (not the spec) so it works
+// uniformly for both a live ModelSpec and a request inherited/overridden
+// elsewhere (subagentRequest).
+func thinkingLabel(kwargs map[string]any) string {
+	if v, ok := kwargs["enable_thinking"]; ok {
+		if b, ok2 := v.(bool); ok2 && !b {
+			return "off"
+		}
+	}
+	return "on"
+}
+
 type ModelInfo struct {
 	MaxInput     int
 	Role         string

@@ -37,6 +37,15 @@ type streamPrinter struct {
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
 	onStatus func(on bool, tail string)
+	// start is when the model call began — the base for the elapsed-seconds
+	// shown in the live "thinking… Ns · tail" label (onReasoning) and the
+	// turn-end "thought Ns · tok" stat (thoughtStat). Zero (test-constructed
+	// printers that skip it) reads as 0s rather than a nonsensical duration.
+	start time.Time
+	// crumbed is set once breadcrumb has printed the reasoning trace for this
+	// step, so thoughtStat knows not to add a second, redundant gray line for
+	// the same event.
+	crumbed bool
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -54,21 +63,41 @@ func reasoningTail(s string, width int) string {
 	return string(r)
 }
 
+// elapsedTail prefixes the reasoning tail with the whole seconds elapsed
+// since start, e.g. "12s · reasoning excerpt", or just "12s" before any
+// reasoning text has arrived. A zero start (a printer built without one, e.g.
+// tests) reads as 0s rather than a nonsensical multi-year duration.
+func elapsedTail(start time.Time, tail string) string {
+	secs := 0
+	if !start.IsZero() {
+		if d := time.Since(start); d > 0 {
+			secs = int(d.Seconds())
+		}
+	}
+	if tail == "" {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%ds · %s", secs, tail)
+}
+
 // onReasoning is the StreamChat reasoning callback: it feeds the spinner a dim
-// live tail of the chain-of-thought. Reasoning is never printed to the
-// transcript — once the answer starts, emit stops the spinner and the ticker is
-// erased. No-op after the answer has begun (or with no spinner, e.g. tests).
+// live tail of the chain-of-thought, prefixed with elapsed seconds so a long
+// deliberation reads as "thinking… 12s · …" rather than sitting silent.
+// Reasoning is never printed to the transcript — once the answer starts, emit
+// stops the spinner and the ticker is erased. No-op after the answer has
+// begun (or with no spinner, e.g. tests).
 func (p *streamPrinter) onReasoning(s string) {
 	if p.began {
 		return
 	}
 	p.reason.WriteString(s)
 	tail := reasoningTail(p.reason.String(), reasoningTailWidth)
+	et := elapsedTail(p.start, tail)
 	switch {
 	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking… "+tail, gray))
+		p.spinner.SetLabel(withColor("thinking… "+et, gray))
 	case p.onStatus != nil:
-		p.onStatus(true, tail)
+		p.onStatus(true, et)
 	}
 }
 
@@ -211,6 +240,60 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
 		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
+	p.crumbed = true // thoughtStat: skip, this step's trace already showed
+}
+
+// thoughtStatMinSeconds / thoughtStatMinTokens gate the turn-end thought-stat
+// line to "meaningful" deliberation — a two-second or 200-token chain of
+// thought is worth a line, a token or two of filler narration isn't.
+const (
+	thoughtStatMinSeconds = 2
+	thoughtStatMinTokens  = 200
+)
+
+// estimatedReasoningTokens approximates a reasoning-token count from the
+// accumulated trace length when the backend didn't report
+// completion_tokens_details.reasoning_tokens — the same chars/4 heuristic
+// used elsewhere in the session for untokenized text (see
+// emitSessionMetrics's InjectedContextTokens: cs.injectedChars / 4).
+func estimatedReasoningTokens(trace string) int {
+	return len(trace) / 4
+}
+
+// thoughtStat prints one dim gutter line summarizing how long and how much a
+// model call spent deliberating — "thought 14s · 1.1k tok" — mirroring
+// breadcrumb's format. Uses res.Usage's reported reasoning-token count when
+// the backend provides one, otherwise estimates from the accumulated trace
+// length. No-op with no reasoning at all, when neither the elapsed-time nor
+// token threshold is met (a quick deliberation isn't worth a dedicated
+// line), or when breadcrumb already printed the trace for this same step (one
+// gray gutter line per step, not two). Callers only construct a streamPrinter
+// outside quiet mode, so this is implicitly never shown headless.
+func (p *streamPrinter) thoughtStat(res *AgentResponse) {
+	if p.crumbed {
+		return
+	}
+	trace := p.reason.String()
+	if trace == "" {
+		return
+	}
+	var elapsed time.Duration
+	if !p.start.IsZero() {
+		elapsed = time.Since(p.start)
+	}
+	tok := 0
+	if res != nil {
+		tok = res.Usage.ReasoningTokens()
+	}
+	if tok == 0 {
+		tok = estimatedReasoningTokens(trace)
+	}
+	if elapsed < thoughtStatMinSeconds*time.Second && tok <= thoughtStatMinTokens {
+		return
+	}
+	line := fmt.Sprintf("thought %ds · %s tok", int(elapsed.Seconds()), humanK(tok))
+	fmt.Fprintf(p.writer(), "%s%s\n",
+		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap
@@ -230,9 +313,17 @@ func collapseLine(s string, cap int) string {
 // is fully stopped and the line is clean before this returns.
 func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed bool, err error) {
 	// Headless: no spinner, no live token echo — the caller reads the reply
-	// from TurnResult and owns all output.
+	// from TurnResult and owns all output. Plain blocking Send, UNLESS a
+	// served session has wired onThinking (serve_stream.go) to signal the web
+	// UI while it deliberates — then stream instead so the reasoning/content
+	// transition is observable, still without printing anything to a
+	// terminal that doesn't exist.
 	if cs.quiet {
-		res, err = cs.Request.Send(ctx)
+		if cs.onThinking == nil {
+			res, err = cs.Request.Send(ctx)
+			return res, false, err
+		}
+		res, err = cs.sendQuietObserved(ctx)
 		return res, false, err
 	}
 	// Anchored REPL: no standalone spinner — the "thinking" indicator lives on
@@ -240,11 +331,12 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	// the anchor's pipe). Always streaming here (anchored mode requires it).
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
-		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking}
+		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking, start: time.Now()}
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.finish()
 		cs.live.SetThinking(false, "")
-		p.breadcrumb(res) // persist the reasoning trace of a silent tool step
+		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
+		p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -254,14 +346,43 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 		return res, false, err
 	}
-	p := &streamPrinter{spinner: s, md: cs.markdown()}
+	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now()}
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.finish()
 	if !p.began {
 		s.Stop() // stop before the breadcrumb so the line is clean
 	}
-	p.breadcrumb(res) // persist the reasoning trace of a silent tool step
+	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
+	p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
 	return res, true, err
+}
+
+// sendQuietObserved runs one model call over SSE with no terminal echo at
+// all (quiet mode), but throttles cs.onThinking(true)/(false) around the
+// reasoning phase: true on the first reasoning delta, false once answer
+// content starts (or once, at the end, if the call produced reasoning but no
+// content — e.g. a tool-call-only step). Never forwards the reasoning or
+// content text itself, only the on/off transition — see docs on
+// CortexSession.onThinking (session_core.go).
+func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse, error) {
+	thinking := false
+	onReasoning := func(string) {
+		if !thinking {
+			thinking = true
+			cs.onThinking(true)
+		}
+	}
+	onContent := func(string) {
+		if thinking {
+			thinking = false
+			cs.onThinking(false)
+		}
+	}
+	res, err := cs.Request.SendStream(ctx, onContent, onReasoning)
+	if thinking {
+		cs.onThinking(false)
+	}
+	return res, err
 }
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and

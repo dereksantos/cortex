@@ -39,6 +39,17 @@ type EvalCellResultPayload struct {
 	Seed        *int64  `json:"seed,omitempty"`
 	Temperature float64 `json:"temperature"`
 
+	// Thinking is the resolved thinking-config for the model that ran this
+	// cell: "off" when the role's chat_template_kwargs explicitly suppress
+	// built-in reasoning (ModelSpec.Thinking == false), "on" otherwise.
+	// Empty when the caller didn't resolve a config (e.g. a non-thinking-
+	// aware harness).
+	Thinking string `json:"thinking,omitempty"`
+	// ReasoningTokens is the reasoning-model chain-of-thought token count
+	// (completion_tokens_details.reasoning_tokens), summed across the cell's
+	// model calls. Zero when the backend didn't report it.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+
 	TokensIn              int     `json:"tokens_in"`
 	TokensOut             int     `json:"tokens_out"`
 	InjectedContextTokens int     `json:"injected_context_tokens"`

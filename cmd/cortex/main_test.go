@@ -888,6 +888,30 @@ func TestTemplateKwargs(t *testing.T) {
 	}
 }
 
+// thinkingLabel is the eval-telemetry attribution derived from a built
+// kwargs map (ModelSpec.TemplateKwargs' output) — "off" only when
+// enable_thinking is explicitly false, "on" for every other shape (nil, an
+// unrelated kwargs map, or enable_thinking=true).
+func TestThinkingLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		kwargs map[string]any
+		want   string
+	}{
+		{"nil kwargs: on", nil, "on"},
+		{"enable_thinking=false: off", map[string]any{"enable_thinking": false}, "off"},
+		{"enable_thinking=true: on", map[string]any{"enable_thinking": true}, "on"},
+		{"unrelated kwargs: on", map[string]any{"some_other_key": "x"}, "on"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := thinkingLabel(tt.kwargs); got != tt.want {
+				t.Errorf("thinkingLabel(%v) = %q, want %q", tt.kwargs, got, tt.want)
+			}
+		})
+	}
+}
+
 // The wire body must omit chat_template_kwargs when unset (universal
 // compatibility) and carry it when the code role disables thinking.
 func TestRequestMarshalsTemplateKwargs(t *testing.T) {
@@ -2395,6 +2419,67 @@ func TestEmitSessionMetrics(t *testing.T) {
 	}
 	if !strings.Contains(p.Notes, "injections=1") || !strings.Contains(p.Notes, "captures=2") {
 		t.Errorf("notes = %q", p.Notes)
+	}
+}
+
+// TestEmitSessionMetricsThinkingAttribution covers item 3: the resolved
+// thinking config and accumulated reasoning-token count land in the emitted
+// eval.cell_result row.
+func TestEmitSessionMetricsThinkingAttribution(t *testing.T) {
+	tests := []struct {
+		name            string
+		kwargs          map[string]any
+		reasoningTokens int
+		wantThinking    string
+	}{
+		{
+			name:            "thinking explicitly suppressed",
+			kwargs:          map[string]any{"enable_thinking": false},
+			reasoningTokens: 512,
+			wantThinking:    "off",
+		},
+		{
+			name:            "no suppression: default on",
+			kwargs:          nil,
+			reasoningTokens: 0,
+			wantThinking:    "on",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			cs := &CortexSession{Request: CortexArgs{}.Request(), sessionStart: time.Now()}
+			cs.Request.ChatTemplateKwargs = tt.kwargs
+			cs.StartTranscript()
+			t.Cleanup(func() {
+				if cs.transcript != nil {
+					cs.transcript.Close()
+				}
+			})
+			cs.reasoningTokens = tt.reasoningTokens
+
+			cs.emitSessionMetrics()
+
+			r, err := journal.NewReader(filepath.Join(contextDir(), "journal", "eval"))
+			if err != nil {
+				t.Fatalf("reader: %v", err)
+			}
+			defer r.Close()
+			e, err := r.Next()
+			if err != nil || e == nil {
+				t.Fatalf("expected one entry, got err=%v entry=%v", err, e)
+			}
+			p, perr := journal.ParseEvalCellResult(e)
+			if perr != nil {
+				t.Fatalf("parse: %v", perr)
+			}
+			if p.Thinking != tt.wantThinking {
+				t.Errorf("Thinking = %q, want %q", p.Thinking, tt.wantThinking)
+			}
+			if p.ReasoningTokens != tt.reasoningTokens {
+				t.Errorf("ReasoningTokens = %d, want %d", p.ReasoningTokens, tt.reasoningTokens)
+			}
+		})
 	}
 }
 

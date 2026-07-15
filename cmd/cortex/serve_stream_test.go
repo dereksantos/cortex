@@ -28,16 +28,29 @@ import (
 // exactly one real Progress line through the full coderDispatcher/tools.Execute
 // path (not a fake Dispatch), so the SSE handler is proven against the real
 // seam runLoop already exposes.
+//
+// The backend replies over SSE (not a single blocking JSON body): the
+// turn/stream endpoint wires CortexSession.onThinking (serve_stream.go,
+// item 6), which routes every model call in a served session through
+// SendStream even in quiet mode — see cs.sendQuietObserved (streaming.go).
 func streamTurnTestSessionFactory(t *testing.T) sessionFactory {
 	t.Helper()
 	var round int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		round++
+		w.Header().Set("Content-Type", "text/event-stream")
 		if round == 1 {
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+			_, _ = w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}`,
+			)))
 			return
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
+		_, _ = w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":6,"completion_tokens":3}}`,
+		)))
 	}))
 	t.Cleanup(srv.Close)
 	return func() *CortexSession {

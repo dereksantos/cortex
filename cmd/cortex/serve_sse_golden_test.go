@@ -23,18 +23,34 @@ import (
 // content — driving TWO real Progress lines (in order) through the full
 // coderDispatcher/tools.Execute path before the terminal result, the exact
 // multi-step shape M4.2b3's single-tool-call factory didn't exercise.
+//
+// SSE (not blocking JSON) — see streamTurnTestSessionFactory's doc
+// (serve_stream_test.go) for why every model call in a served session now
+// streams even in quiet mode.
 func twoStepStreamTestSessionFactory(t *testing.T) sessionFactory {
 	t.Helper()
 	var round int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		round++
+		w.Header().Set("Content-Type", "text/event-stream")
 		switch round {
 		case 1:
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+			_, _ = w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}`,
+			)))
 		case 2:
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c2","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo bye\"}"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`))
+			_, _ = w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c2","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo bye\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}`,
+			)))
 		default:
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":3}}`))
+			_, _ = w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":6,"completion_tokens":3}}`,
+			)))
 		}
 	}))
 	t.Cleanup(srv.Close)

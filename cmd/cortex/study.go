@@ -119,6 +119,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	// LastPromptTokens — that gauge belongs to the coder's own context).
 	cs.tokensIn += stats.InputTokens
 	cs.tokensOut += stats.OutputTokens
+	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
 	return digest, stats, err
 }

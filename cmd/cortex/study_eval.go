@@ -131,11 +131,18 @@ type studyEvalRow struct {
 	PeakOutputTokens int     `json:"peak_output_tokens"`
 	MaxTokensClamped bool    `json:"max_tokens_clamped"`
 	Salvaged         bool    `json:"salvaged"`
-	GoalHitPer1k     float64 `json:"goal_hit_per_1k_out"`
-	Pass             bool    `json:"pass"`
-	DigestChars      int     `json:"digest_chars"`
-	Note             string  `json:"note"`
-	Error            string  `json:"error,omitempty"`
+	// Thinking and ReasoningTokens are the eval-telemetry reasoning-model
+	// attribution (same json vocabulary as journal.EvalCellResultPayload —
+	// see docs/study-subagent.md §5's alignment plan): Thinking is the
+	// resolved study-role thinking config ("on"/"off"); ReasoningTokens sums
+	// completion_tokens_details.reasoning_tokens across the run's requests.
+	Thinking        string  `json:"thinking,omitempty"`
+	ReasoningTokens int     `json:"reasoning_tokens,omitempty"`
+	GoalHitPer1k    float64 `json:"goal_hit_per_1k_out"`
+	Pass            bool    `json:"pass"`
+	DigestChars     int     `json:"digest_chars"`
+	Note            string  `json:"note"`
+	Error           string  `json:"error,omitempty"`
 }
 
 // runStudyEvalNav is the ø acceptance test: drive the Study subagent over each
@@ -158,7 +165,14 @@ func runStudyEvalNav() {
 	passes, total, errs := 0, 0, 0
 	for pi, p := range studyProbes {
 		for rep := 0; rep < reps; rep++ {
-			row := studyEvalRow{Path: p.Path, Model: session.Study.Model, Rep: rep, GoldNeed: p.need(), Note: p.Note}
+			row := studyEvalRow{
+				Path:     p.Path,
+				Model:    session.Study.Model,
+				Rep:      rep,
+				GoldNeed: p.need(),
+				Note:     p.Note,
+				Thinking: thinkingLabel(session.Study.TemplateKwargs()),
+			}
 			start := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			ol, _ := session.Outline(p.Path, tools.StudySeedBudget)
@@ -230,6 +244,7 @@ func fillMechanical(row *studyEvalRow, stats loopStats) {
 	row.PeakOutputTokens = stats.PeakOutputTokens
 	row.MaxTokensClamped = stats.MaxTokensClamped
 	row.Salvaged = stats.Salvaged
+	row.ReasoningTokens = stats.ReasoningTokens
 }
 
 func max1(n int) int {

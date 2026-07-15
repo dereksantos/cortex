@@ -166,6 +166,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.turns++
 	cs.tokensIn += stats.InputTokens
 	cs.tokensOut += stats.OutputTokens
+	cs.reasoningTokens += stats.ReasoningTokens
 	cs.costUSD += stats.Cost
 	cs.LastPromptTokens = stats.LastPromptTokens
 	cs.LastCachedTokens = stats.LastCachedTokens

@@ -55,6 +55,48 @@ func TestStreamChat_ContentAndUsage(t *testing.T) {
 	}
 }
 
+// TestStreamChat_ReasoningTokenUsage covers item 2: a reasoning model's
+// completion_tokens_details.reasoning_tokens usage sub-field, mirroring the
+// existing prompt_tokens_details.cached_tokens handling.
+func TestStreamChat_ReasoningTokenUsage(t *testing.T) {
+	tests := []struct {
+		name          string
+		usageFrame    string
+		wantReasoning int
+	}{
+		{
+			name:          "reasoning_tokens reported",
+			usageFrame:    `{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":28}}}`,
+			wantReasoning: 28,
+		},
+		{
+			name:          "completion_tokens_details absent: zero",
+			usageFrame:    `{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":40}}`,
+			wantReasoning: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.Join([]string{
+				`data: {"choices":[{"delta":{"content":"hi"}}]}`,
+				`data: ` + tt.usageFrame,
+				`data: [DONE]`,
+				``,
+			}, "\n\n")
+			srv := sseServer(t, http.StatusOK, body)
+			defer srv.Close()
+
+			res, err := StreamChat(context.Background(), srv.Client(), srv.URL, "", []byte(`{}`), nil, nil)
+			if err != nil {
+				t.Fatalf("StreamChat: %v", err)
+			}
+			if res.Stats.ReasoningTokens != tt.wantReasoning {
+				t.Errorf("ReasoningTokens = %d, want %d", res.Stats.ReasoningTokens, tt.wantReasoning)
+			}
+		})
+	}
+}
+
 func TestStreamChat_ReasoningSeparateFromContent(t *testing.T) {
 	// Always-thinking models stream reasoning_content before content. The two
 	// streams must stay separate: reasoning to onReasoning, answer to onContent.
