@@ -383,15 +383,15 @@ doc, not by drive-by divergence.
 |---|---|---|
 | D1 | P1 free-model default | `openrouter/free` auto-router (filters for tool calling) + a one-shot tool-call smoke probe at bootstrap; no pinned `:free` id — the free catalog churns |
 | D2 | P1 key storage | macOS keychain (`key_service`) on darwin; `key_env` elsewhere; never on disk |
-| D3 | P2 scan roots | asked during the greeting and persisted to user config; `--root` for headless; no blind `$HOME` sweep |
+| D3 | P2 scan roots | asked during the greeting and persisted to user config; `--root` for headless; no blind `$HOME` sweep. **Rev 2 (2026-07-14, as-built):** an explicit `--root` also persists (same intent as answering the greeting); `GET /api/landscape` falls back to the latest journaled `landscape.scan` when no roots are persisted (`source: "journal"`), and `POST /api/landscape/rescan` re-scans on demand — 412 only when neither roots nor a journaled scan exist |
 | D4 | Machine-level state | hybrid: rebuildable specs as plain JSON under `~/.cortex/` (`projects.json`, `loops.json`); events (`landscape.scan`, `loop.run`) to a user-level journal at `~/.cortex/journal/` |
 | D5 | P3 registry format | plain JSON file (pointer-only, rebuildable from scan) |
 | D6 | P4 HTTP stack | stdlib `net/http` + SSE; zero new dependencies |
 | D7 | P4 port + auth | default `localhost:7433`, flag-overridable; generated bearer token printed + written under `~/.cortex` |
 | D8 | P4 session lock | extract `internal/journal`'s portable `acquireExclusiveLock` into a shared internal package; per-session-file lock |
 | D9 | P5 UI stack | no-build vanilla JS via `go:embed`; no node toolchain, no vendored framework |
-| D10 | P6 triggers | intervals + manual run-now in v1; no cron parser; cron syntax may layer on later |
-| D11 | P6 bounds (provisional) | cadence floor 15 min, default daily, 25-turn + token cap per run, overlap suppression; tune from `loop.run` history |
+| D10 | P6 triggers | intervals + manual run-now in v1; no cron parser; cron syntax may layer on later. **Rev 2 (2026-07-14, loops v2, as-built):** self-pacing borrowed from Claude Code's `/loop` skill — a firing may end its reply with `NEXT: <n>m — <reason>` (one-gap override, clamped [floor, 24h], reason journaled and shown in the UI) or `DONE — <reason>` (loop disables itself, reason persisted to the spec) |
+| D11 | P6 bounds (provisional) | ~~cadence floor 15 min~~ → **floor 5 min** (loops v2), default daily, 25-turn + token cap per run, overlap suppression; tune from `loop.run` history. **Rev 2:** three consecutive `failed` runs auto-disable the loop (`DisabledReason: "3 consecutive failures"`, streak resets on success) — the ralph three-strike discipline applied to loops |
 | D12 | P7 command surface | native discord application commands via `discordgo v0.29`; per-guild registration at startup |
 | D13 | Daemon | none — `cortex serve` foreground adapter; always-on = launchd/`brew services` around it (top of doc) |
 | D14 | P7 timing | after the coding-harness roadmap completes; re-based on the Phase 4 `SessionManager` |
