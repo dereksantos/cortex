@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,6 +121,110 @@ func TestTurnEndpointRunsTurnAgainstLiveSession(t *testing.T) {
 	}
 	if backend.requests() != 1 {
 		t.Errorf("backend saw %d requests, want 1", backend.requests())
+	}
+}
+
+// TestTurnEndpointResumesSessionNotLiveOnThisManager is the regression test
+// for the "Failed to send: POST turn/stream: 404" bug found by live browser
+// testing: navigating the web UI straight to an on-disk session URL (e.g.
+// after a `cortex serve` restart, or any request landing on a process that
+// never created/resumed this id itself) 404'd instead of transparently
+// resuming — even though M4.7's idle-eviction design already promises "a
+// subsequent request re-hydrates from the transcript" and GET
+// .../sessions/{id} (serve_transcript.go) already reads on-disk sessions
+// fine. Reproduces the gap directly: a session is created on one
+// SessionManager, its transcript lock released (simulating that process
+// going away — the same technique
+// TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume,
+// serve_models_test.go, uses), and the turn is POSTed through a completely
+// FRESH SessionManager/mux that never held the id live.
+func TestTurnEndpointResumesSessionNotLiveOnThisManager(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+
+	firstBackend := newTurnTestBackend(t)
+	firstMgr := NewSessionManager(reg, turnTestSessionFactory(firstBackend))
+	created, err := firstMgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := created.ID()
+	created.cs.transcript.Close() // simulate the creating process (and its fslock) going away
+
+	secondBackend := newTurnTestBackend(t)
+	secondMgr := NewSessionManager(reg, turnTestSessionFactory(secondBackend))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, secondMgr, "", "", testLoopsStore(t))))
+	defer ts.Close()
+
+	if _, ok := secondMgr.Get(id); ok {
+		t.Fatalf("secondMgr already held %q live before the request — test setup is wrong", id)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/"+id+"/turn", strings.NewReader(`{"input":"hello"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200, body=%s", resp.StatusCode, body)
+	}
+	var got turnResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Reply != "ok" {
+		t.Errorf("reply = %q, want %q", got.Reply, "ok")
+	}
+	if secondBackend.requests() != 1 {
+		t.Errorf("secondBackend saw %d requests, want 1", secondBackend.requests())
+	}
+	if _, ok := secondMgr.Get(id); !ok {
+		t.Error("session was not tracked live on secondMgr after the transparent resume")
+	}
+}
+
+// TestTurnEndpointResumeBusyReturns409 covers the other branch
+// GetOrResume's error mapping introduces: a transcript another process
+// currently holds the fslock on (rather than one that's simply missing)
+// must not collapse into the same 404 as "no such session" — it's a
+// distinct, retryable 409.
+func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
+	root := t.TempDir()
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+
+	holderMgr := NewSessionManager(reg, hermeticSessionFactory())
+	created, err := holderMgr.Create("blog")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := created.ID()
+	// Deliberately do NOT close created.cs.transcript — holderMgr keeps the
+	// fslock held, standing in for a second live `cortex serve`/REPL process
+	// still holding this session open.
+
+	freshMgr := NewSessionManager(reg, hermeticSessionFactory())
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, freshMgr, "", "", testLoopsStore(t))))
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/"+id+"/turn", strings.NewReader(`{"input":"hi"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status = %d, want 409, body=%s", resp.StatusCode, body)
 	}
 }
 

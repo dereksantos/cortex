@@ -156,6 +156,25 @@ func (m *SessionManager) Resume(project, id string) (*managedSession, error) {
 	return ms, nil
 }
 
+// GetOrResume returns id's live session if the manager already holds it,
+// else transparently resumes it from the on-disk transcript under project
+// (Resume) — the same fallback M4.7's idle-eviction already promises ("a
+// subsequent request re-hydrates from the transcript"), extended to cover a
+// session id this serve process's manager never held live at all (e.g. a
+// browser client that navigates straight to an old session URL after a
+// restart or against a fresh serve process — the turn/turn-stream handlers,
+// serve_turn.go/serve_stream.go, used to 404 this case instead of resuming
+// it). Callers distinguish the resulting error with errors.Is: a wrapped
+// os.ErrNotExist means the transcript genuinely doesn't exist (404); a
+// wrapped fslock.ErrBusy means another process currently holds it open
+// (409); anything else (e.g. an unregistered project) is a 500.
+func (m *SessionManager) GetOrResume(project, id string) (*managedSession, error) {
+	if ms, ok := m.Get(id); ok {
+		return ms, nil
+	}
+	return m.Resume(project, id)
+}
+
 // Get returns the live session for id, if the manager currently holds one
 // and it hasn't idle-timed-out (M4.7's eviction check runs here, lazily, so
 // no background goroutine/ticker is needed).

@@ -8,7 +8,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // turnRequest is the JSON body for POST
@@ -28,15 +32,27 @@ type turnResponse struct {
 // for id, holding that session's mutex for the duration so a second
 // concurrent turn on the SAME session serializes behind it instead of
 // racing cs.Request.Messages (GOAL.md §3 P4). An id the manager doesn't
-// currently hold live (never created/resumed on this process) is a 404 —
-// this endpoint does not implicitly resume from disk; POST .../sessions
-// with {"resume": "<id>"} (M4.2b1) does that.
+// currently hold live is transparently resumed from its on-disk transcript
+// (SessionManager.GetOrResume, serve_session.go) — the same rehydrate path
+// M4.7 idle-eviction already relies on, extended to cover a session this
+// serve process never had live at all (e.g. a browser client navigating
+// straight to an old session URL). Only a transcript that genuinely doesn't
+// exist on disk is a 404; another process holding the transcript's lock is
+// a 409.
 func handleTurn(mgr *SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		ms, ok := mgr.Get(id)
-		if !ok {
-			http.Error(w, "session not found: "+id, http.StatusNotFound)
+		ms, err := mgr.GetOrResume(r.PathValue("name"), id)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "session not found: "+id, http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, fslock.ErrBusy) {
+				http.Error(w, "session busy: "+err.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, "failed to resume session: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		mgr.Touch(id) // M4.7: a live request resets the idle-eviction clock

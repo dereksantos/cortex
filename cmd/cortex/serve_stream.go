@@ -14,8 +14,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+
+	"github.com/dereksantos/cortex/internal/fslock"
 )
 
 // progressEvent is the SSE "progress" event payload: one per tool call,
@@ -42,18 +46,29 @@ func sseEvent(w http.ResponseWriter, flusher http.Flusher, event string, payload
 }
 
 // handleTurnStream serves POST /api/projects/{name}/sessions/{id}/turn/stream:
-// the same live-session lookup and turn-serializing mutex as handleTurn
-// (serve_turn.go, M4.2b2) — an id the manager doesn't currently hold live is
-// a 404, and a second concurrent turn on the SAME session blocks behind this
-// one's mutex exactly as the plain POST .../turn endpoint does — but streams
-// each Progress line as an SSE "progress" event while the turn runs, then a
-// final "result" event (or "error" on failure).
+// the same live-session lookup (mgr.GetOrResume, transparently resuming from
+// the on-disk transcript when this serve process doesn't already hold id
+// live — serve_session.go, serve_turn.go's handleTurn doc) and
+// turn-serializing mutex as handleTurn — a second concurrent turn on the
+// SAME session blocks behind this one's mutex exactly as the plain
+// POST .../turn endpoint does — but streams each Progress line as an SSE
+// "progress" event while the turn runs, then a final "result" event (or
+// "error" on failure). A transcript that genuinely doesn't exist is a 404;
+// another process holding its lock is a 409.
 func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		ms, ok := mgr.Get(id)
-		if !ok {
-			http.Error(w, "session not found: "+id, http.StatusNotFound)
+		ms, err := mgr.GetOrResume(r.PathValue("name"), id)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				http.Error(w, "session not found: "+id, http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, fslock.ErrBusy) {
+				http.Error(w, "session busy: "+err.Error(), http.StatusConflict)
+				return
+			}
+			http.Error(w, "failed to resume session: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		mgr.Touch(id) // M4.7: a live request resets the idle-eviction clock
