@@ -35,7 +35,7 @@ func TestLandscapeEndpointReturnsScanReport(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
@@ -64,7 +64,7 @@ func TestLandscapeEndpointNoRootsConfiguredIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
@@ -95,7 +95,7 @@ func TestLandscapeEndpointFallsBackToJournalWhenNoRootsPersisted(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
@@ -133,7 +133,7 @@ func TestLandscapeEndpointReturnsScanReportIsLiveSource(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	before := time.Now().Add(-time.Second)
@@ -174,7 +174,7 @@ func TestLandscapeRescanEndpointRunsScanAndAppendsJournalEvent(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/landscape/rescan", "tok", "")
@@ -212,7 +212,7 @@ func TestLandscapeRescanEndpointNoRootsIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/landscape/rescan", "tok", "")
@@ -229,7 +229,7 @@ func TestLandscapeRescanEndpointRequiresAuth(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/api/landscape/rescan", "application/json", nil)
@@ -247,7 +247,7 @@ func TestLandscapeEndpointRequiresAuth(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/landscape")

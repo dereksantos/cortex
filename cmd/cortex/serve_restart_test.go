@@ -34,7 +34,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	mgr1 := NewSessionManager(reg1, hermeticSessionFactory())
-	ts1 := httptest.NewServer(authMiddleware("tok", newServeMux(reg1, mgr1, "", "", testLoopsStore(t))))
+	ts1 := httptest.NewServer(authMiddleware("tok", newServeMux(reg1, mgr1, "", "", testLoopsStore(t), newRunningSet())))
 
 	// Create a session while the "first process" is live, so there is
 	// something for the second process to re-derive from disk.
@@ -65,7 +65,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	// pointed at the very same on-disk projects.json and project root.
 	reg2 := registry.NewAt(regPath)
 	mgr2 := NewSessionManager(reg2, hermeticSessionFactory())
-	ts2 := httptest.NewServer(authMiddleware("tok", newServeMux(reg2, mgr2, "", "", testLoopsStore(t))))
+	ts2 := httptest.NewServer(authMiddleware("tok", newServeMux(reg2, mgr2, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts2.Close()
 
 	projectsAfter := bodyString(t, doAuthedGet(t, ts2.URL+"/api/projects", "tok"))

@@ -44,6 +44,23 @@ func (rs *runningSet) start(name string) {
 	rs.name[name] = true
 }
 
+// tryStart atomically claims name if it isn't already running, reporting
+// whether the claim succeeded — the Check-then-start pair a caller like
+// handleRunLoop needs is otherwise racy (two concurrent run-now requests
+// could both observe Check==false before either calls start). The
+// scheduler's own tick doesn't need this: Scheduler.Due already serializes
+// the Running check and the start call within a single tick() pass (no
+// concurrent tick() calls), so tick keeps using start directly.
+func (rs *runningSet) tryStart(name string) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.name[name] {
+		return false
+	}
+	rs.name[name] = true
+	return true
+}
+
 func (rs *runningSet) finish(name string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -69,10 +86,13 @@ type loopScheduler struct {
 // clock as the Scheduler's injected Clock. LastRun and the overlap-skip
 // journal write are wired to the real user-level loop.run journal
 // (loops.JournalLastRun, M6.6; journal.AppendLoopRun, the same sink M6.3's
-// RunLoopFiring itself writes to) — Running is wired to this scheduler's
-// own in-memory running set, the only piece of new state M6.8 introduces.
-func newLoopScheduler(store loops.Store, reg registry.Registry, newSession sessionFactory, clock loops.Clock) *loopScheduler {
-	running := newRunningSet()
+// RunLoopFiring itself writes to) — Running is wired to running, the
+// in-memory overlap guard. running is caller-constructed (not built here)
+// so production (serve.go's runServeCLI) can share the exact same instance
+// with the run-now HTTP handler (newServeMux → handleRunLoop): a run-now
+// firing and a scheduler tick must observe each other's in-flight state,
+// not two independent guards that can't see one another.
+func newLoopScheduler(store loops.Store, reg registry.Registry, newSession sessionFactory, clock loops.Clock, running *runningSet) *loopScheduler {
 	ls := &loopScheduler{store: store, reg: reg, newSession: newSession, running: running}
 	ls.sched = &loops.Scheduler{
 		Clock:   clock,

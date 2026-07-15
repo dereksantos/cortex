@@ -109,7 +109,17 @@ func handleSetLoopEnabled(store loops.Store, enabled bool) http.HandlerFunc {
 // outcome and returns nil, so the response is always 200 in that case; the
 // caller reads Runs[0].Outcome to see how the firing went, matching M6.7a's
 // loopView shape rather than inventing a second one.
-func handleRunLoop(store loops.Store, reg registry.Registry, newSession sessionFactory) http.HandlerFunc {
+//
+// running is the same overlap guard (serve_scheduler.go) the tick scheduler
+// gates on — production (serve.go's runServeCLI) constructs a single
+// runningSet and passes it to both newServeMux (here) and newLoopScheduler,
+// so a UI-triggered run-now and a scheduler tick can never fire the same
+// loop concurrently: a run-now checks/claims the guard itself (the
+// scheduler's tick already relies on Scheduler.Due consulting Running,
+// which is wired to the exact same instance's Check), and a loop already
+// in flight — from either side — makes run-now respond 409 rather than
+// double-firing it.
+func handleRunLoop(store loops.Store, reg registry.Registry, newSession sessionFactory, running *runningSet) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		spec, err := store.Lookup(name)
@@ -121,6 +131,12 @@ func handleRunLoop(store loops.Store, reg registry.Registry, newSession sessionF
 			http.Error(w, "failed to look up loop: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		if !running.tryStart(name) {
+			http.Error(w, "loop is already running: "+name, http.StatusConflict)
+			return
+		}
+		defer running.finish(name)
 
 		if err := RunLoopFiring(r.Context(), spec, reg, store, newSession); err != nil {
 			http.Error(w, "failed to run loop: "+err.Error(), http.StatusInternalServerError)

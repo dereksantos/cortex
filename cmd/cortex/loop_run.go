@@ -27,8 +27,16 @@ import (
 // loopSelfPacingInstruction is appended to every loop firing's prompt
 // (D11's self-pacing tuning, borrowed from Claude Code's /loop skill): it
 // states the capability as a principle, not a recipe — the model decides
-// whether and how to use it.
-const loopSelfPacingInstruction = "You may end your final reply's last line with `NEXT: <n>m — <reason>` to schedule your own next run, or `DONE — <reason>` once this loop's work is complete."
+// whether and how to use it. It leads with "this prompt recurs on a
+// schedule" because a bare "you may end with NEXT or DONE" reads, to a
+// small model, as describing a one-shot prompt: nothing tells it the SAME
+// prompt fires again later, so a firing that finished its visible work for
+// THIS turn can reasonably (and wrongly) answer DONE even though the loop's
+// standing purpose is ongoing — observed live as a firing ending "DONE —
+// this was a read-only summarization request...". DONE means the LOOP is
+// permanently finished and must never fire again, not that this reply is
+// done.
+const loopSelfPacingInstruction = "This prompt recurs on a schedule, so finishing one firing does not mean the loop is done. End your final reply's last line with `NEXT: <n>m — <reason>` to adjust the next firing, or `DONE — <reason>` only if the loop's standing purpose is permanently complete and it should never fire again."
 
 // maxNextMinutes is the self-pacing NEXT marker's clamp ceiling (24h) —
 // paired with loops.CadenceFloorMinutes as the clamp floor.

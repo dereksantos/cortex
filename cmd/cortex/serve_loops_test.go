@@ -26,7 +26,7 @@ func TestListLoopsEndpointReturnsSpecsAndRunHistory(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
@@ -73,7 +73,7 @@ func TestListLoopsEndpointRowsCarryD11SelfPacingFields(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
@@ -99,7 +99,7 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
@@ -118,7 +118,7 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 
 func TestListLoopsEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/loops")
@@ -155,7 +155,7 @@ func doAuthedPost(t *testing.T, url, token, body string) *http.Response {
 func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"nightly","project":"blog","prompt":"sweep TODOs","interval_minutes":60,"max_turns":25,"enabled":true}`)
@@ -189,7 +189,7 @@ func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":3}`)
@@ -212,7 +212,7 @@ func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 
 func TestCreateLoopEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/api/loops", "application/json", strings.NewReader(`{"name":"x"}`))
@@ -249,7 +249,7 @@ func TestSetLoopEnabledEndpointTogglesFlag(t *testing.T) {
 			}
 
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
 			defer ts.Close()
 
 			resp := doAuthedPost(t, ts.URL+"/api/loops/nightly"+tt.path, "tok", "")
@@ -295,7 +295,7 @@ func TestSetLoopEnabledEndpointUnknownNameReturns404(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 			defer ts.Close()
 
 			resp := doAuthedPost(t, ts.URL+"/api/loops/ghost"+tt.path, "tok", "")
@@ -333,7 +333,7 @@ func TestRunLoopEndpointFiresLoopAndReturnsRunHistory(t *testing.T) {
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, noopTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store)))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
@@ -371,10 +371,83 @@ func TestRunLoopEndpointFiresLoopAndReturnsRunHistory(t *testing.T) {
 	}
 }
 
+// TestRunLoopEndpointOverlapReturns409 proves run-now itself respects the
+// overlap guard: a second run-now request against a loop whose first
+// run-now firing is still in flight gets 409, not a concurrent second
+// firing. This is the live bug's direct repro — a UI Run-now click and the
+// scheduler's next tick (or, as here, two Run-now clicks) racing the same
+// loop — fixed by handleRunLoop (serve_loops.go) claiming the shared
+// runningSet via tryStart before calling RunLoopFiring.
+func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	seed := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 60, MaxTurns: 25, Enabled: true}
+	if err := store.Save(seed); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, newRunningSet())))
+	defer ts.Close()
+
+	firstDone := make(chan *http.Response, 1)
+	go func() {
+		firstDone <- doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	}()
+	// The first request's firing has reached the scripted backend, so
+	// handleRunLoop's running.tryStart has already claimed the guard —
+	// deterministic, no sleep.
+	<-started
+
+	secondResp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	defer secondResp.Body.Close()
+	secondBody, err := io.ReadAll(secondResp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if secondResp.StatusCode != http.StatusConflict {
+		t.Fatalf("second run-now status = %d, want 409, body = %s", secondResp.StatusCode, secondBody)
+	}
+	if !strings.Contains(string(secondBody), "already running") {
+		t.Errorf("second run-now body = %q, want it to say the loop is already running", secondBody)
+	}
+
+	close(release)
+	firstResp := <-firstDone
+	defer firstResp.Body.Close()
+	if firstResp.StatusCode != http.StatusOK {
+		t.Fatalf("first run-now status = %d, want 200", firstResp.StatusCode)
+	}
+
+	// The guard clears after completion: a third run-now must succeed
+	// rather than staying wedged at 409.
+	thirdResp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	defer thirdResp.Body.Close()
+	if thirdResp.StatusCode != http.StatusOK {
+		t.Errorf("third run-now (after guard clears) status = %d, want 200", thirdResp.StatusCode)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 2 {
+		t.Fatalf("loop.run entries = %d, want 2 (first and third firings; the rejected second never journals): %+v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if e.Outcome != journal.LoopOutcomeSuccess {
+			t.Errorf("entry outcome = %q, want %q", e.Outcome, journal.LoopOutcomeSuccess)
+		}
+	}
+}
+
 func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPost(t, ts.URL+"/api/loops/ghost/run-now", "tok", "")
@@ -390,7 +463,7 @@ func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 
 func TestRunLoopEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/api/loops/nightly/run-now", "application/json", strings.NewReader(""))
@@ -414,7 +487,7 @@ func TestSetLoopEnabledEndpointRequiresAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t))))
+			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
 			defer ts.Close()
 
 			resp, err := http.Post(ts.URL+"/api/loops/nightly"+tt.path, "application/json", strings.NewReader(""))

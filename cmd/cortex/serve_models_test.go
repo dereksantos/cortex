@@ -30,7 +30,7 @@ func TestModelsEndpointReturnsRolesAndFleet(t *testing.T) {
 	t.Setenv("CORTEX_TEST_MODELS_KEY", "super-secret-value")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/models", "tok")
@@ -73,7 +73,7 @@ func TestModelsEndpointFleetUnreachableStillReturnsRoles(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedGet(t, ts.URL+"/api/models", "tok")
@@ -97,7 +97,7 @@ func TestModelsEndpointRequiresAuth(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/api/models")
@@ -140,7 +140,7 @@ func TestSetModelBindingUserScopeWritesAndUnknownFieldsSurvive(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=user", "tok", `{"model":"new-code-model","endpoint":"http://x.example"}`)
@@ -191,7 +191,7 @@ func TestSetModelBindingResponseNeverIncludesSecretValue(t *testing.T) {
 	t.Setenv("CORTEX_TEST_SET_MODEL_KEY", "super-secret-write-value")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=user", "tok", `{"key_env":"CORTEX_TEST_SET_MODEL_KEY"}`)
@@ -216,7 +216,7 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 	projectRoot := t.TempDir()
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: projectRoot}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/study?scope=project&project=blog", "tok", `{"model":"proj-study-model"}`)
@@ -259,7 +259,7 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 
 func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=project", "tok", `{"model":"x"}`)
@@ -271,7 +271,7 @@ func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) 
 
 func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=project&project=doesnotexist", "tok", `{"model":"x"}`)
@@ -283,7 +283,7 @@ func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 
 func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/not-a-real-role?scope=user", "tok", `{"model":"x"}`)
@@ -295,7 +295,7 @@ func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 
 func TestSetModelBindingUnsupportedScopeReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	for _, scope := range []string{"", "bogus"} {
@@ -326,7 +326,7 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 	}
 	id := created.ID()
 
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session="+id, "tok", `{"model":"session-code-model"}`)
@@ -371,7 +371,7 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 
 func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session=does-not-exist", "tok", `{"model":"x"}`)
@@ -383,7 +383,7 @@ func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 
 func TestSetModelBindingSessionScopeMissingSessionQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session", "tok", `{"model":"x"}`)
@@ -402,7 +402,7 @@ func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	resp := doAuthedPut(t, ts.URL+"/api/models/study?scope=session&session="+created.ID(), "tok", `{"model":"x"}`)
@@ -414,7 +414,7 @@ func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
 
 func TestSetModelBindingRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/models/code?scope=user", strings.NewReader(`{"model":"x"}`))

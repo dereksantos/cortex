@@ -225,7 +225,7 @@ func authMiddleware(token string, next http.Handler) http.Handler {
 // POST /api/loops/{name}/run-now, reusing mgr.newSession as the
 // sessionFactory RunLoopFiring (loop_run.go, M6.3) needs — no new
 // newServeMux parameter, same reasoning as M4.2c2b2 above.
-func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store) *http.ServeMux {
+func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store, running *runningSet) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +247,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/loops", handleCreateLoop(loopsStore))
 	mux.HandleFunc("POST /api/loops/{name}/enable", handleSetLoopEnabled(loopsStore, true))
 	mux.HandleFunc("POST /api/loops/{name}/disable", handleSetLoopEnabled(loopsStore, false))
-	mux.HandleFunc("POST /api/loops/{name}/run-now", handleRunLoop(loopsStore, reg, mgr.newSession))
+	mux.HandleFunc("POST /api/loops/{name}/run-now", handleRunLoop(loopsStore, reg, mgr.newSession, running))
 	return mux
 }
 
@@ -283,8 +283,16 @@ func runServeCLI(args []string) {
 		os.Exit(1)
 	}
 
+	// The overlap guard (runningSet) is constructed once here and shared
+	// between the run-now HTTP handler (newServeMux → handleRunLoop) and the
+	// tick scheduler (newLoopScheduler below) — a single source of truth for
+	// "is this loop currently firing", so a UI-triggered run-now and a
+	// scheduler tick can never fire the same loop concurrently either
+	// direction.
+	running := newRunningSet()
+
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore)))
+	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore, running)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -302,7 +310,7 @@ func runServeCLI(args []string) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	schedCtx, stopSched := context.WithCancel(context.Background())
-	sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now)
+	sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now, running)
 	schedStopped := sched.Start(schedCtx, ticker.C)
 	defer func() {
 		stopSched()

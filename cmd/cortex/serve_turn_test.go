@@ -88,7 +88,7 @@ func TestTurnEndpointRunsTurnAgainstLiveSession(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -153,7 +153,7 @@ func TestTurnEndpointResumesSessionNotLiveOnThisManager(t *testing.T) {
 
 	secondBackend := newTurnTestBackend(t)
 	secondMgr := NewSessionManager(reg, turnTestSessionFactory(secondBackend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, secondMgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, secondMgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	if _, ok := secondMgr.Get(id); ok {
@@ -209,7 +209,7 @@ func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
 	// still holding this session open.
 
 	freshMgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, freshMgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, freshMgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/"+id+"/turn", strings.NewReader(`{"input":"hi"}`))
@@ -231,7 +231,7 @@ func TestTurnEndpointResumeBusyReturns409(t *testing.T) {
 func TestTurnEndpointUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: t.TempDir()}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/does-not-exist/turn", strings.NewReader(`{"input":"hi"}`))
@@ -254,7 +254,7 @@ func TestTurnEndpointRequiresAuth(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -284,7 +284,7 @@ func TestTurnEndpointSameSessionSerializes(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -340,7 +340,7 @@ func TestTurnEndpointDifferentSessionsRunConcurrently(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	backend := newTurnTestBackend(t)
 	mgr := NewSessionManager(reg, turnTestSessionFactory(backend))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	first, err := mgr.Create("blog")

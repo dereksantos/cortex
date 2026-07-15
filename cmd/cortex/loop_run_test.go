@@ -490,6 +490,33 @@ func TestRunLoopFiringRiskyCommandBlockedNoPromptReachable(t *testing.T) {
 	}
 }
 
+// TestLoopSelfPacingInstructionStatesTheLoopRecurs is a golden pin on
+// loopSelfPacingInstruction's wording: a bare "you may end with NEXT or
+// DONE" reads, to a small model, as describing a one-shot prompt — nothing
+// tells it the SAME prompt fires again later, so a firing that finished its
+// visible work reasonably answers DONE even though the loop's standing
+// purpose (e.g. "keep sweeping TODOs") is ongoing. This was observed live:
+// a firing ended "DONE — this was a read-only summarization request..."
+// after just one firing. The instruction must say the prompt recurs (so
+// DONE reads as "this loop should never fire again", not "this reply is
+// finished") and must stay to two short sentences — a principle, not a
+// task-shape recipe (project convention: system-prompt additions state
+// principles, never prescriptive recipes).
+func TestLoopSelfPacingInstructionStatesTheLoopRecurs(t *testing.T) {
+	want := "This prompt recurs on a schedule, so finishing one firing does not mean the loop is done. End your final reply's last line with `NEXT: <n>m — <reason>` to adjust the next firing, or `DONE — <reason>` only if the loop's standing purpose is permanently complete and it should never fire again."
+	if loopSelfPacingInstruction != want {
+		t.Errorf("loopSelfPacingInstruction =\n%q\nwant\n%q", loopSelfPacingInstruction, want)
+	}
+
+	lower := strings.ToLower(loopSelfPacingInstruction)
+	if !strings.Contains(lower, "recur") && !strings.Contains(lower, "schedule") {
+		t.Error("loopSelfPacingInstruction must tell the model this prompt recurs — otherwise a firing that finished its visible work reads as the whole loop being done")
+	}
+	if sentences := strings.Count(loopSelfPacingInstruction, ". ") + 1; sentences > 2 {
+		t.Errorf("loopSelfPacingInstruction has %d sentences, want at most 2 (kept brief, per project convention)", sentences)
+	}
+}
+
 // TestParseLoopMarker is D11's self-pacing marker grammar table: NEXT,
 // DONE, malformed (ignored, not an error), and absent, plus the
 // [loops.CadenceFloorMinutes, maxNextMinutes] clamp.

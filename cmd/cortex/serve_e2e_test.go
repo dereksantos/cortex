@@ -27,7 +27,7 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	// 1. Create a session over the real HTTP surface (not mgr.Create

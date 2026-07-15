@@ -36,6 +36,32 @@ func blockingTurnTestSessionFactory(t *testing.T, release <-chan struct{}) sessi
 	}
 }
 
+// blockingTurnTestSessionFactoryStarted is blockingTurnTestSessionFactory
+// plus a started signal: the backend closes started the instant its HTTP
+// handler is entered, before blocking on release. Since RunLoopFiring calls
+// running.tryStart/start (loop_run.go) synchronously before it ever issues
+// the turn's backend call, a test observing <-started already knows the
+// overlap guard has been claimed — no sleep needed to make "a firing is in
+// flight" deterministic from the outside.
+func blockingTurnTestSessionFactoryStarted(t *testing.T, started chan<- struct{}, release <-chan struct{}) sessionFactory {
+	t.Helper()
+	var once bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !once {
+			once = true
+			close(started)
+		}
+		<-release
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return func() *CortexSession {
+		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+		cs.Request.BaseURL = srv.URL
+		return cs
+	}
+}
+
 // TestLoopSchedulerTickFiresDueEnabledSpec proves tick() composes
 // Scheduler.Due with RunLoopFiring: an enabled spec with no prior run is
 // due immediately (first-ever run), and firing it journals success.
@@ -52,7 +78,7 @@ func TestLoopSchedulerTickFiresDueEnabledSpec(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now })
+	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now }, newRunningSet())
 
 	if err := sched.tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
@@ -84,7 +110,7 @@ func TestLoopSchedulerTickSkipsDisabledSpec(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now })
+	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now }, newRunningSet())
 
 	if err := sched.tick(context.Background()); err != nil {
 		t.Fatalf("tick: %v", err)
@@ -118,7 +144,7 @@ func TestLoopSchedulerTickOverlapSkipsAndJournalsSkip(t *testing.T) {
 
 	release := make(chan struct{})
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	sched := newLoopScheduler(store, reg, blockingTurnTestSessionFactory(t, release), func() time.Time { return now })
+	sched := newLoopScheduler(store, reg, blockingTurnTestSessionFactory(t, release), func() time.Time { return now }, newRunningSet())
 
 	if err := sched.tick(context.Background()); err != nil {
 		t.Fatalf("first tick: %v", err)
@@ -174,7 +200,7 @@ func TestLoopSchedulerStartFiresOnTickAndStopsWhenTicksClosed(t *testing.T) {
 	}
 
 	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
-	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now })
+	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now }, newRunningSet())
 
 	ticks := make(chan time.Time, 1)
 	stopped := sched.Start(context.Background(), ticks)
@@ -196,7 +222,7 @@ func TestLoopSchedulerStartStopsOnContextCancel(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), time.Now)
+	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), time.Now, newRunningSet())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ticks := make(chan time.Time)
@@ -208,5 +234,87 @@ func TestLoopSchedulerStartStopsOnContextCancel(t *testing.T) {
 	entries := readLoopRunEntries(t)
 	if len(entries) != 0 {
 		t.Fatalf("loop.run entries = %d, want 0 (no tick ever fired): %+v", len(entries), entries)
+	}
+}
+
+// TestLoopSchedulerTickSkipsWhileRunNowInFlight proves the overlap guard is
+// shared, not scheduler-local: a run-now firing (POST /api/loops/{name}/
+// run-now, serve_loops.go's handleRunLoop) claims the SAME runningSet a
+// scheduler tick consults via Scheduler.Due's Running check — production
+// (serve.go's runServeCLI) constructs exactly one runningSet and threads it
+// into both newServeMux and newLoopScheduler, and this test wires the two
+// the same way rather than each getting its own independent guard (which
+// would let the live double-firing bug back in). Mirrors
+// TestLoopSchedulerTickOverlapSkipsAndJournalsSkip's assertions, just with
+// the "occupier" being a run-now HTTP request instead of a prior tick.
+func TestLoopSchedulerTickSkipsWhileRunNowInFlight(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 15, Enabled: true}
+	if err := store.Save(spec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	running := newRunningSet()
+	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, running)))
+	defer ts.Close()
+
+	runNowDone := make(chan *http.Response, 1)
+	go func() {
+		runNowDone <- doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	}()
+	// <-started only closes once the run-now firing's turn call has actually
+	// reached the scripted backend — which happens strictly after
+	// handleRunLoop's running.tryStart, so the tick below deterministically
+	// observes the loop as running with no sleep needed.
+	<-started
+
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	sched := newLoopScheduler(store, reg, noopTurnTestSessionFactory(t), func() time.Time { return now }, running)
+	if err := sched.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	sched.Wait()
+
+	close(release)
+	resp := <-runNowDone
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("run-now status = %d, want 200", resp.StatusCode)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 2 {
+		t.Fatalf("loop.run entries = %d, want 2 (one success from run-now, one overlap skip from the tick): %+v", len(entries), entries)
+	}
+	var success, skipped int
+	for _, e := range entries {
+		switch e.Outcome {
+		case journal.LoopOutcomeSuccess:
+			success++
+		case journal.LoopOutcomeSkipped:
+			skipped++
+			if e.Reason != "overlap" {
+				t.Errorf("skipped entry Reason = %q, want %q", e.Reason, "overlap")
+			}
+		default:
+			t.Errorf("unexpected outcome %q", e.Outcome)
+		}
+	}
+	if success != 1 || skipped != 1 {
+		t.Errorf("success=%d skipped=%d, want 1 and 1", success, skipped)
+	}
+
+	// The guard clears once the run-now firing completes: a fresh run-now
+	// against the same loop must succeed rather than staying wedged at 409.
+	if running.Check(spec.Name) {
+		t.Errorf("running.Check(%q) = true after completion, want false (guard must clear)", spec.Name)
 	}
 }
