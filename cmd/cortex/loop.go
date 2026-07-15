@@ -96,6 +96,10 @@ type loopStats struct {
 	Reads     int
 	ToolErrs  int // observations that came back as a brief "Error: …"
 	ReadBytes int // accumulated tool output (the bounded-ness axis)
+
+	// ReasoningTokens sums completion_tokens_details.reasoning_tokens across
+	// every request in the run (0 when the backend never reports it).
+	ReasoningTokens int
 }
 
 var errNoChoices = errors.New("no choices in model response")
@@ -454,6 +458,7 @@ func accountUsage(s *loopStats, res *AgentResponse, maxTokens int) {
 	s.InputTokens += res.Usage.PromptTokens
 	s.OutputTokens += res.Usage.CompletionTokens
 	s.Cost += res.Usage.Cost
+	s.ReasoningTokens += res.Usage.ReasoningTokens()
 	s.LastPromptTokens = res.Usage.PromptTokens
 	s.LastCachedTokens = res.Usage.CachedPromptTokens()
 	if res.Usage.CompletionTokens > s.PeakOutputTokens {

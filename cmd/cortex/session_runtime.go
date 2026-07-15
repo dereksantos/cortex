@@ -177,6 +177,8 @@ func (cs *CortexSession) emitSessionMetrics() {
 		ContextStrategy:       cs.contextStrategy(),
 		CortexVersion:         version(),
 		Temperature:           cs.Request.Temperature,
+		Thinking:              thinkingLabel(cs.Request.ChatTemplateKwargs),
+		ReasoningTokens:       cs.reasoningTokens,
 		TokensIn:              cs.tokensIn,
 		TokensOut:             cs.tokensOut,
 		InjectedContextTokens: cs.injectedChars / 4,

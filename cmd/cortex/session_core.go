@@ -72,15 +72,16 @@ type CortexSession struct {
 	// answer to "where does your code live" and persists it.
 	awaitingScanRootsReply bool
 
-	sessionStart  time.Time
-	turns         int
-	turnNo        int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
-	tokensIn      int
-	tokensOut     int
-	costUSD       float64
-	injectedChars int
-	captures      int
-	injections    int
+	sessionStart    time.Time
+	turns           int
+	turnNo          int // 1-based ordinal of the in-flight turn; 0 between turns (stamped into transcript entries)
+	tokensIn        int
+	tokensOut       int
+	reasoningTokens int // completion_tokens_details.reasoning_tokens summed across the session (0 if never reported)
+	costUSD         float64
+	injectedChars   int
+	captures        int
+	injections      int
 
 	md      *markdownRenderer
 	mdWidth int
