@@ -6,6 +6,115 @@ import (
 	"time"
 )
 
+// resWithoutTools builds an assistant response with no tool calls — the
+// "answered directly, took a while to think first" case thoughtStat targets.
+func resWithoutToolsThinking() *AgentResponse {
+	return &AgentResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: "the answer"}}}}
+}
+
+// TestThoughtStat covers item 5: a turn-end "thought Ns · tok" gutter line
+// when reasoning occurred and was substantial (elapsed or token threshold),
+// using the reported reasoning-token count when available and falling back
+// to a length-based estimate otherwise.
+func TestThoughtStat(t *testing.T) {
+	tests := []struct {
+		name        string
+		reasoning   string
+		elapsed     time.Duration
+		res         *AgentResponse
+		wantPrinted bool
+		wantSubstr  string // substring the printed line must contain, when wantPrinted
+	}{
+		{
+			name:        "no reasoning: nothing printed",
+			reasoning:   "",
+			elapsed:     10 * time.Second,
+			res:         resWithoutToolsThinking(),
+			wantPrinted: false,
+		},
+		{
+			name:        "brief reasoning under both thresholds: nothing printed",
+			reasoning:   "ok",
+			elapsed:     500 * time.Millisecond,
+			res:         resWithoutToolsThinking(),
+			wantPrinted: false,
+		},
+		{
+			name:        "elapsed threshold met: printed with estimated tokens",
+			reasoning:   strings.Repeat("a", 40), // 40 chars / 4 = 10 estimated tokens
+			elapsed:     5 * time.Second,
+			res:         resWithoutToolsThinking(),
+			wantPrinted: true,
+			wantSubstr:  "thought 5s",
+		},
+		{
+			name:      "reported reasoning tokens used over the estimate",
+			reasoning: "brief",
+			elapsed:   3 * time.Second,
+			res: &AgentResponse{
+				Choices: []Choice{{Message: Message{Role: "assistant", Content: "the answer"}}},
+				Usage:   Usage{CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 1500}},
+			},
+			wantPrinted: true,
+			wantSubstr:  "1.5k tok",
+		},
+		{
+			name:        "token threshold met alone (elapsed under 2s)",
+			reasoning:   strings.Repeat("a", 4000), // 4000/4 = 1000 estimated tokens
+			elapsed:     1 * time.Second,
+			res:         resWithoutToolsThinking(),
+			wantPrinted: true,
+			wantSubstr:  "1k tok",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			p := &streamPrinter{out: &buf, start: time.Now().Add(-tt.elapsed)}
+			p.reason.WriteString(tt.reasoning)
+			p.thoughtStat(tt.res)
+
+			out := buf.String()
+			if tt.wantPrinted && out == "" {
+				t.Fatalf("expected a thought-stat line, got nothing")
+			}
+			if !tt.wantPrinted && out != "" {
+				t.Fatalf("expected no thought-stat line, got %q", out)
+			}
+			if tt.wantPrinted {
+				plain := stripANSI(out)
+				if !strings.Contains(plain, tt.wantSubstr) {
+					t.Errorf("thought-stat = %q, want substring %q", plain, tt.wantSubstr)
+				}
+				if strings.Count(plain, "\n") != 1 {
+					t.Errorf("thought-stat must be exactly one line, got %q", plain)
+				}
+			}
+		})
+	}
+}
+
+// TestThoughtStatSkippedWhenBreadcrumbPrinted: thoughtStat is a no-op once
+// breadcrumb has already shown the reasoning trace for the same step — one
+// gray gutter line per step, not two redundant ones.
+func TestThoughtStatSkippedWhenBreadcrumbPrinted(t *testing.T) {
+	var buf strings.Builder
+	p := &streamPrinter{out: &buf, start: time.Now().Add(-10 * time.Second)}
+	p.onReasoning(strings.Repeat("a", 4000)) // well past both thresholds
+	res := resWithTools()                    // has tool calls, no prose printed -> breadcrumb fires
+
+	p.breadcrumb(res)
+	if !p.crumbed {
+		t.Fatalf("breadcrumb should have printed for a silent tool step")
+	}
+	before := buf.String()
+	p.thoughtStat(res)
+	if buf.String() != before {
+		t.Errorf("thoughtStat should have been skipped after breadcrumb printed; added %q",
+			strings.TrimPrefix(buf.String(), before))
+	}
+}
+
 // TestElapsedTail covers the "thinking… Ns · tail" label formatting shared by
 // both display modes (the standalone spinner and the anchored status row).
 func TestElapsedTail(t *testing.T) {

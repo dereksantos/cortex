@@ -42,6 +42,10 @@ type streamPrinter struct {
 	// turn-end "thought Ns · tok" stat (thoughtStat). Zero (test-constructed
 	// printers that skip it) reads as 0s rather than a nonsensical duration.
 	start time.Time
+	// crumbed is set once breadcrumb has printed the reasoning trace for this
+	// step, so thoughtStat knows not to add a second, redundant gray line for
+	// the same event.
+	crumbed bool
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -236,6 +240,60 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
 		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
+	p.crumbed = true // thoughtStat: skip, this step's trace already showed
+}
+
+// thoughtStatMinSeconds / thoughtStatMinTokens gate the turn-end thought-stat
+// line to "meaningful" deliberation — a two-second or 200-token chain of
+// thought is worth a line, a token or two of filler narration isn't.
+const (
+	thoughtStatMinSeconds = 2
+	thoughtStatMinTokens  = 200
+)
+
+// estimatedReasoningTokens approximates a reasoning-token count from the
+// accumulated trace length when the backend didn't report
+// completion_tokens_details.reasoning_tokens — the same chars/4 heuristic
+// used elsewhere in the session for untokenized text (see
+// emitSessionMetrics's InjectedContextTokens: cs.injectedChars / 4).
+func estimatedReasoningTokens(trace string) int {
+	return len(trace) / 4
+}
+
+// thoughtStat prints one dim gutter line summarizing how long and how much a
+// model call spent deliberating — "thought 14s · 1.1k tok" — mirroring
+// breadcrumb's format. Uses res.Usage's reported reasoning-token count when
+// the backend provides one, otherwise estimates from the accumulated trace
+// length. No-op with no reasoning at all, when neither the elapsed-time nor
+// token threshold is met (a quick deliberation isn't worth a dedicated
+// line), or when breadcrumb already printed the trace for this same step (one
+// gray gutter line per step, not two). Callers only construct a streamPrinter
+// outside quiet mode, so this is implicitly never shown headless.
+func (p *streamPrinter) thoughtStat(res *AgentResponse) {
+	if p.crumbed {
+		return
+	}
+	trace := p.reason.String()
+	if trace == "" {
+		return
+	}
+	var elapsed time.Duration
+	if !p.start.IsZero() {
+		elapsed = time.Since(p.start)
+	}
+	tok := 0
+	if res != nil {
+		tok = res.Usage.ReasoningTokens()
+	}
+	if tok == 0 {
+		tok = estimatedReasoningTokens(trace)
+	}
+	if elapsed < thoughtStatMinSeconds*time.Second && tok <= thoughtStatMinTokens {
+		return
+	}
+	line := fmt.Sprintf("thought %ds · %s tok", int(elapsed.Seconds()), humanK(tok))
+	fmt.Fprintf(p.writer(), "%s%s\n",
+		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap
@@ -269,7 +327,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.finish()
 		cs.live.SetThinking(false, "")
-		p.breadcrumb(res) // persist the reasoning trace of a silent tool step
+		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
+		p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -285,7 +344,8 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	if !p.began {
 		s.Stop() // stop before the breadcrumb so the line is clean
 	}
-	p.breadcrumb(res) // persist the reasoning trace of a silent tool step
+	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
+	p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
 	return res, true, err
 }
 
