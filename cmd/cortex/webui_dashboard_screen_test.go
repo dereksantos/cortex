@@ -38,3 +38,25 @@ func TestDashboardScreenIndexHTMLHasDashboardContainer(t *testing.T) {
 		t.Error("index.html does not declare a #dashboard container for the screen's rendered output")
 	}
 }
+
+// TestDashboardScreenOpenSessionButtonCreatesSession pins that the "Open
+// session" button POSTs /api/projects/{name}/sessions to create a fresh
+// session (handleCreateSession, serve_routes.go) and navigates to its
+// session view — not a plain <a href> to a pre-existing session, the old
+// behavior it replaced.
+func TestDashboardScreenOpenSessionButtonCreatesSession(t *testing.T) {
+	data, err := fs.ReadFile(webUIFS(), "dashboard.js")
+	if err != nil {
+		t.Fatalf("ReadFile(dashboard.js): %v", err)
+	}
+	src := string(data)
+	if !strings.Contains(src, `"/sessions",`) {
+		t.Error("dashboard.js does not POST to /api/projects/{name}/sessions to create a session")
+	}
+	if !strings.Contains(src, `method: "POST"`) {
+		t.Error("dashboard.js's Open session button is not a POST")
+	}
+	if !strings.Contains(src, "window.location.href") || !strings.Contains(src, "&session=") {
+		t.Error("dashboard.js does not navigate to the new session's view (?project=&session=)")
+	}
+}

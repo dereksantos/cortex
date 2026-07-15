@@ -3,6 +3,7 @@ package journal
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/userhome"
 )
@@ -86,5 +87,50 @@ func TestAppendLandscapeScanIsolatedByCortexHome(t *testing.T) {
 	defer rB.Close()
 	if _, err := rB.Next(); err != io.EOF {
 		t.Errorf("homeB journal Next() error = %v, want io.EOF (homeA's write must not leak into homeB)", err)
+	}
+}
+
+// TestLatestLandscapeScanNoJournalReturnsNotFound pins the "never scanned"
+// case: a CORTEX_HOME with no landscape journal at all yields found=false
+// and a nil error, not a failure GET /api/landscape's fallback would have
+// to distinguish from "found nothing".
+func TestLatestLandscapeScanNoJournalReturnsNotFound(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	_, _, found, err := LatestLandscapeScan()
+	if err != nil {
+		t.Fatalf("LatestLandscapeScan: %v", err)
+	}
+	if found {
+		t.Error("found = true with no journal written, want false")
+	}
+}
+
+// TestLatestLandscapeScanReturnsMostRecentEntry pins the "keep the latest
+// by timestamp" behavior: two appended events, the newer one (later
+// Entry.TS, regardless of append order into a fresh writer per event) wins.
+func TestLatestLandscapeScanReturnsMostRecentEntry(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	if err := AppendLandscapeScan(LandscapeScanPayload{Roots: []string{"/old/root"}, ToolCount: 1}); err != nil {
+		t.Fatalf("AppendLandscapeScan (first): %v", err)
+	}
+	time.Sleep(2 * time.Millisecond) // ensure a distinct, later Entry.TS
+	if err := AppendLandscapeScan(LandscapeScanPayload{Roots: []string{"/new/root"}, ToolCount: 2}); err != nil {
+		t.Fatalf("AppendLandscapeScan (second): %v", err)
+	}
+
+	payload, ts, found, err := LatestLandscapeScan()
+	if err != nil {
+		t.Fatalf("LatestLandscapeScan: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if ts.IsZero() {
+		t.Error("ts is zero, want the event's timestamp")
+	}
+	if len(payload.Roots) != 1 || payload.Roots[0] != "/new/root" || payload.ToolCount != 2 {
+		t.Errorf("payload = %+v, want the second (more recent) event", payload)
 	}
 }

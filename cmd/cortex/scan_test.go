@@ -75,6 +75,75 @@ func TestResolveScanRootsRefusesWhenNeither(t *testing.T) {
 	}
 }
 
+// TestResolveAndPersistScanRootsPersistsExplicitFlag pins the fix for the
+// "scan ran, roots never persisted" gap: an explicit --root is the user
+// telling cortex where their code lives, so `cortex scan --root <path>`
+// must land scan.roots in user config exactly like answering the
+// greeting does — and other, unrelated top-level config fields must
+// survive the read-modify-write untouched.
+func TestResolveAndPersistScanRootsPersistsExplicitFlag(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	path := userConfigPath()
+	if err := os.WriteFile(path, []byte(`{"tools": {"allow_delete": false}}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	roots, err := resolveAndPersistScanRoots(path, "/explicit/root")
+	if err != nil {
+		t.Fatalf("resolveAndPersistScanRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != "/explicit/root" {
+		t.Errorf("roots = %v, want [/explicit/root]", roots)
+	}
+
+	doc, err := readJSONDoc(path)
+	if err != nil {
+		t.Fatalf("readJSONDoc: %v", err)
+	}
+	if !jsonEqual(t, doc["tools"], []byte(`{"allow_delete": false}`)) {
+		t.Errorf("tools field mutated: %s", doc["tools"])
+	}
+	var scan struct {
+		Roots []string `json:"roots"`
+	}
+	if err := json.Unmarshal(doc["scan"], &scan); err != nil {
+		t.Fatalf("unmarshal scan: %v", err)
+	}
+	if len(scan.Roots) != 1 || scan.Roots[0] != "/explicit/root" {
+		t.Errorf("scan.roots = %v, want [/explicit/root]", scan.Roots)
+	}
+}
+
+// TestResolveAndPersistScanRootsNoFlagDoesNotRewrite pins that resolving
+// from already-persisted config (no --root given) is read-only: nothing
+// new gets written when there's nothing new to say.
+func TestResolveAndPersistScanRootsNoFlagDoesNotRewrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := PersistScanRoots(path, []string{"/persisted/root"}); err != nil {
+		t.Fatalf("PersistScanRoots: %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	roots, err := resolveAndPersistScanRoots(path, "")
+	if err != nil {
+		t.Fatalf("resolveAndPersistScanRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0] != "/persisted/root" {
+		t.Errorf("roots = %v, want [/persisted/root]", roots)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("config file rewritten with no --root flag:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 // TestBuildScanReportAggregatesAcrossRoots plants a harness/runtime
 // fixture at homeDir and two separate project roots, and asserts
 // buildScanReport aggregates project findings from BOTH roots while

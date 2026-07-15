@@ -55,6 +55,29 @@ func resolveScanRoots(configPath, rootFlag string) ([]string, error) {
 	return roots, nil
 }
 
+// resolveAndPersistScanRoots resolves scan roots per resolveScanRoots'
+// existing precedence, and — when the caller passed an explicit --root —
+// persists the resolved roots to configPath via PersistScanRoots (the same
+// read-modify-write helper M1.7's greeting-reply capture uses). An explicit
+// --root is the user telling cortex where their code lives, the same
+// intent as answering the greeting's "where does your code live" question:
+// without this, `cortex scan --register --root ~/eng` runs and journals a
+// scan, but GET /api/landscape still 412s forever because scan.roots was
+// never written. Roots resolved from already-persisted config (no --root
+// given) are left untouched — nothing new to write.
+func resolveAndPersistScanRoots(configPath, rootFlag string) ([]string, error) {
+	roots, err := resolveScanRoots(configPath, rootFlag)
+	if err != nil {
+		return nil, err
+	}
+	if rootFlag != "" {
+		if err := PersistScanRoots(configPath, roots); err != nil {
+			return nil, fmt.Errorf("failed to persist scan roots: %w", err)
+		}
+	}
+	return roots, nil
+}
+
 // readScanRoots reads the scan.roots array persisted by
 // PersistScanRoots (scanroots.go). A missing file, or a file with no
 // scan.roots key, yields an empty, non-error result — the "not
@@ -193,7 +216,7 @@ func runScanCLI(args []string) {
 		}
 	}
 
-	roots, err := resolveScanRoots(userConfigPath(), root)
+	roots, err := resolveAndPersistScanRoots(userConfigPath(), root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "scan:", err)
 		os.Exit(1)

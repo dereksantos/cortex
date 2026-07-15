@@ -97,30 +97,57 @@ function renderSessionList(card, p) {
   }
 }
 
+// openSessionButton builds the "Open session" button for one project card:
+// POSTs /api/projects/{name}/sessions (no "resume" body → handleCreateSession
+// starts a brand-new live session, serve_routes.go) and navigates to its
+// session view on success — replacing the old plain <a href> to an
+// existing session, so the button always works even for a project with no
+// sessions yet. Disabled with "Opening…" while the request is in flight;
+// a failure re-enables it with the error surfaced via title (no extra DOM
+// churn on the card for a rare path).
+function openSessionButton(name) {
+  const btn = el("button", { type: "button", className: "btn primary", textContent: "Open session" });
+  btn.addEventListener("click", () => {
+    btn.disabled = true;
+    btn.textContent = "Opening…";
+    fetch("/api/projects/" + encodeURIComponent(name) + "/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
+      body: "{}",
+    })
+      .then((resp) => {
+        if (!resp.ok) {
+          throw new Error("POST create session: " + resp.status);
+        }
+        return resp.json();
+      })
+      .then((created) => {
+        window.location.href = "?project=" + encodeURIComponent(name) + "&session=" + encodeURIComponent(created.id);
+      })
+      .catch((err) => {
+        btn.disabled = false;
+        btn.textContent = "Open session";
+        btn.title = "Failed: " + err.message;
+      });
+  });
+  return btn;
+}
+
 // renderProjectCard builds one .pcard: name, root, change chip, session
-// count + an "Open session" link to the first non-empty session (falling
-// back to any session if every one is empty), and the redesigned session
-// list.
+// count + the "Open session" button (always creates a fresh session), and
+// the redesigned session list.
 function renderProjectCard(p) {
   const sessions = p.sessions || [];
-  const nonEmpty = sessions.filter((s) => s.messages > 0);
   const top = el("div", { className: "pcard-top" }, [
     el("span", { className: "pname", textContent: p.name }),
     changeChip(p),
     el("span", { className: "path", textContent: p.root }),
   ]);
 
-  const metaKids = [el("span", { textContent: sessions.length + " session" + (sessions.length === 1 ? "" : "s") })];
-  const openTarget = nonEmpty[0] || sessions[0];
-  if (openTarget) {
-    metaKids.push(
-      el("a", {
-        className: "btn primary",
-        href: "?project=" + encodeURIComponent(p.name) + "&session=" + encodeURIComponent(openTarget.id),
-        textContent: "Open session",
-      }),
-    );
-  }
+  const metaKids = [
+    el("span", { textContent: sessions.length + " session" + (sessions.length === 1 ? "" : "s") }),
+    openSessionButton(p.name),
+  ];
   const card = el("div", { className: "pcard" }, [top, el("div", { className: "pmeta" }, metaKids)]);
   renderSessionList(card, p);
   return card;

@@ -240,6 +240,7 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn", handleTurn(mgr))
 	mux.HandleFunc("POST /api/projects/{name}/sessions/{id}/turn/stream", handleTurnStream(mgr))
 	mux.HandleFunc("GET /api/landscape", handleLandscape(configPath, homeDir))
+	mux.HandleFunc("POST /api/landscape/rescan", handleLandscapeRescan(configPath, homeDir))
 	mux.HandleFunc("GET /api/models", handleModels(configPath))
 	mux.HandleFunc("PUT /api/models/{role}", handleSetModelBinding(configPath, reg, mgr))
 	mux.HandleFunc("GET /api/loops", handleListLoops(loopsStore))

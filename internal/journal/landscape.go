@@ -3,6 +3,7 @@ package journal
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/userhome"
 )
@@ -74,4 +75,50 @@ func AppendLandscapeScan(p LandscapeScanPayload) error {
 		return fmt.Errorf("journal: append landscape.scan: %w", err)
 	}
 	return nil
+}
+
+// LatestLandscapeScan reads the user-level landscape journal (the same
+// class dir AppendLandscapeScan writes) and returns the most recent
+// landscape.scan event's payload and timestamp. Mirrors
+// internal/loops/lastrun.go's JournalLastRun scanning pattern: walk every
+// entry, keep the latest by Entry.TS, degrade quietly (found=false, nil
+// error) rather than fail on a torn or malformed entry mid-stream — a
+// best-effort "what did we last see" read, not a strict decode. found is
+// false when the journal has never been written or carries no
+// landscape.scan entry at all; GET /api/landscape's fallback
+// (serve_landscape.go) treats that the same as "no scan roots configured
+// yet".
+func LatestLandscapeScan() (LandscapeScanPayload, time.Time, bool, error) {
+	dir, err := userhome.Path("journal", "landscape")
+	if err != nil {
+		return LandscapeScanPayload{}, time.Time{}, false, fmt.Errorf("journal: resolve user-level landscape journal dir: %w", err)
+	}
+	r, err := NewReader(dir)
+	if err != nil {
+		return LandscapeScanPayload{}, time.Time{}, false, fmt.Errorf("journal: open user-level landscape journal: %w", err)
+	}
+	defer r.Close()
+
+	var latest LandscapeScanPayload
+	var latestTS time.Time
+	found := false
+	for {
+		e, err := r.Next()
+		if err != nil {
+			break // EOF, or a torn/malformed tail — either way, stop with what we have.
+		}
+		if e.Type != TypeLandscapeScan {
+			continue
+		}
+		p, err := ParseLandscapeScan(e)
+		if err != nil {
+			continue
+		}
+		if !found || e.TS.After(latestTS) {
+			latest = *p
+			latestTS = e.TS
+			found = true
+		}
+	}
+	return latest, latestTS, found, nil
 }

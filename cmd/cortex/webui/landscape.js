@@ -71,10 +71,53 @@ function renderNoRootsCard(container) {
   );
 }
 
-// renderLandscape writes a ScanReport (GET /api/landscape's JSON shape)
-// into the #landscape container via plain DOM writes — textContent only,
-// never innerHTML, matching app.js's untrusted-ish-local-string posture.
-function renderLandscape(report, container) {
+// postJSON issues an authenticated POST with no body against an /api/...
+// path. apiFetch (app.js) is GET-only; this screen is the only one that
+// needs a POST (the Rescan button below), so the helper lives here rather
+// than growing app.js's shared surface.
+function postJSON(path) {
+  return fetch(path, { method: "POST", headers: { Authorization: "Bearer " + authToken() } });
+}
+
+// fmtScannedAt renders a report's scanned_at (an RFC3339 string) as a local
+// date+time; falls back to the raw string if it doesn't parse.
+function fmtScannedAt(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+// renderLandscapeHead builds the header row above the report: mono
+// "roots:" + one chip per root, a "from last scan" mute chip when the
+// report came from the journal fallback (no roots persisted yet, GET
+// /api/landscape read the most recent landscape.scan event instead of
+// scanning live), a muted "scanned <time>" note, and the Rescan button.
+// onRescan is wired by loadLandscape below so this stays a pure render.
+function renderLandscapeHead(report, onRescan) {
+  const roots = report.roots || [];
+  const rootChips = roots.length
+    ? roots.map((r) => el("span", { className: "chip mute", textContent: r }))
+    : [el("span", { className: "dim", textContent: "(none)" })];
+
+  const kids = [el("span", { className: "mono dim", textContent: "roots:" }), ...rootChips];
+  if (report.source === "journal") {
+    kids.push(el("span", { className: "chip mute", textContent: "from last scan" }));
+  }
+  if (report.scanned_at) {
+    kids.push(el("span", { className: "dim status-text", textContent: "scanned " + fmtScannedAt(report.scanned_at) }));
+  }
+
+  const rescanBtn = el("button", { className: "btn primary", textContent: "Rescan" });
+  rescanBtn.addEventListener("click", () => onRescan(rescanBtn));
+  kids.push(rescanBtn);
+
+  return el("div", { className: "land-head" }, kids);
+}
+
+// renderLandscape writes a landscape report (GET /api/landscape's or POST
+// /api/landscape/rescan's JSON shape) into the #landscape container via
+// plain DOM writes — textContent only, never innerHTML, matching app.js's
+// untrusted-ish-local-string posture.
+function renderLandscape(report, container, onRescan) {
   container.textContent = "";
 
   if (report.truncated) {
@@ -83,13 +126,7 @@ function renderLandscape(report, container) {
     );
   }
 
-  const roots = report.roots || [];
-  const rootChips = roots.length
-    ? roots.map((r) => el("span", { className: "chip mute", textContent: r }))
-    : [el("span", { className: "dim", textContent: "(none)" })];
-  container.appendChild(
-    el("div", { className: "land-head" }, [el("span", { className: "mono dim", textContent: "roots:" }), ...rootChips]),
-  );
+  container.appendChild(renderLandscapeHead(report, onRescan));
 
   container.appendChild(
     el("div", { className: "lgrid" }, [
@@ -100,9 +137,30 @@ function renderLandscape(report, container) {
   container.appendChild(renderProjectsBox(report.projects));
 }
 
+// runRescan disables the Rescan button, POSTs /api/landscape/rescan, and
+// re-renders the container with the fresh (always source:"live") report on
+// success — or restores the button with an inline error on failure.
+function runRescan(container, btn) {
+  btn.disabled = true;
+  btn.textContent = "Scanning…";
+  postJSON("/api/landscape/rescan")
+    .then((resp) => {
+      if (!resp.ok) {
+        throw new Error("POST /api/landscape/rescan: " + resp.status);
+      }
+      return resp.json();
+    })
+    .then((report) => renderLandscape(report, container, (b) => runRescan(container, b)))
+    .catch((err) => {
+      btn.disabled = false;
+      btn.textContent = "Rescan";
+      container.appendChild(el("p", { className: "load-note", textContent: "Rescan failed: " + err.message }));
+    });
+}
+
 // loadLandscape no-ops when the #landscape container is absent/hidden. A
-// 412 response means ErrNoScanRoots — onboarding hasn't asked where the
-// user's code lives yet — surfaced as a distinct message.
+// 412 response means ErrNoScanRoots — no roots persisted AND nothing has
+// ever been journaled — surfaced as a distinct empty-state card.
 function loadLandscape() {
   const container = document.getElementById("landscape");
   if (!container) {
@@ -122,7 +180,7 @@ function loadLandscape() {
     })
     .then((report) => {
       if (report) {
-        renderLandscape(report, container);
+        renderLandscape(report, container, (btn) => runRescan(container, btn));
       }
     })
     .catch((err) => {
