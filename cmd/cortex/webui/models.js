@@ -1,13 +1,15 @@
 // models.js — the models screen. Fetches GET /api/models (serve_models.go
-// — returns modelsResponse: every known role's effective binding plus the
-// discovered fleet, key material always absent) and renders it into the
-// #models container using the design-system .scopes/.seg/table.loops/
-// .lbox classes from app.css: a scope switcher (user/project/session) plus
-// a per-role text field + Save button that PUTs a new binding via PUT
-// /api/models/{role}?scope=user|project|session[&project=][&session=].
-// Reuses el()/authToken()/apiFetch()/queryParam() from app.js as plain
-// global functions — no module system, index.html loads app.js before
-// this file.
+// — returns modelsResponse: every known role's effective binding, a
+// per-role Source ("configured"/"fleet-auto"/"unbound"), and the discovered
+// fleet, key material always absent) and renders it into the #models
+// container using the design-system .scopes/.seg/table.loops/.lbox classes
+// from app.css: a scope switcher (user/project/session, with the
+// project/session inputs shown only when the selected scope needs them)
+// plus a per-role text field + SET BY chip + Save button that PUTs a new
+// binding via PUT /api/models/{role}?scope=user|project|session[&project=]
+// [&session=]. Reuses el()/authToken()/apiFetch()/queryParam() from app.js
+// as plain global functions — no module system, index.html loads app.js
+// before this file.
 
 // modelScopeState survives across loadModels() re-renders so the
 // operator's scope choice isn't lost after a save. Seeded from the
@@ -18,6 +20,15 @@ const modelScopeState = {
   project: queryParam("project"),
   session: queryParam("session"),
 };
+
+// scopeInputVisibility shows the project input only for scope=project and
+// the session input only for scope=session — a bare user-scope save has no
+// use for either, and showing both unconditionally (the old behavior) reads
+// as "fill in both fields" even when the selected scope only consults one.
+function scopeInputVisibility(scope, projectWrap, sessionWrap) {
+  projectWrap.style.display = scope === "project" ? "" : "none";
+  sessionWrap.style.display = scope === "session" ? "" : "none";
+}
 
 // renderScopeSwitcher appends the scope <select> plus project/session text
 // inputs, wiring their values into modelScopeState so the per-role save
@@ -34,26 +45,31 @@ function renderScopeSwitcher(container) {
     select.appendChild(opt);
   }
   select.value = modelScopeState.scope;
-  select.addEventListener("change", () => {
-    modelScopeState.scope = select.value;
-  });
 
-  const projectInput = el("input", { type: "text", placeholder: "project name (scope=project)", value: modelScopeState.project });
+  const projectInput = el("input", { type: "text", placeholder: "project name", value: modelScopeState.project });
   projectInput.addEventListener("input", () => {
     modelScopeState.project = projectInput.value;
   });
+  const projectWrap = el("span", {}, [projectInput]);
 
-  const sessionInput = el("input", { type: "text", placeholder: "session id (scope=session)", value: modelScopeState.session });
+  const sessionInput = el("input", { type: "text", placeholder: "session id", value: modelScopeState.session });
   sessionInput.addEventListener("input", () => {
     modelScopeState.session = sessionInput.value;
+  });
+  const sessionWrap = el("span", {}, [sessionInput]);
+
+  scopeInputVisibility(modelScopeState.scope, projectWrap, sessionWrap);
+  select.addEventListener("change", () => {
+    modelScopeState.scope = select.value;
+    scopeInputVisibility(select.value, projectWrap, sessionWrap);
   });
 
   container.appendChild(
     el("div", { className: "scopes" }, [
       el("span", { className: "mono dim", textContent: "scope:" }),
       select,
-      projectInput,
-      sessionInput,
+      projectWrap,
+      sessionWrap,
     ]),
   );
 }
@@ -88,9 +104,19 @@ function saveBinding(role, value, status) {
     });
 }
 
+// sourceChip renders a role binding's Source (config.go's bindingSource*
+// constants: "configured"/"fleet-auto"/"unbound") as a chip — configured is
+// an explicit choice (amb, the same "operator set this" color the change
+// chip uses), fleet-auto is a quiet default (mute), unbound is worth
+// flagging (bad, since a turn in that role has nothing to call).
+function sourceChip(source) {
+  const cls = source === "configured" ? "amb" : source === "fleet-auto" ? "mute" : "bad";
+  return el("span", { className: "chip " + cls, textContent: source || "unbound" });
+}
+
 // renderRoleRow appends one <tr> for a role: name, its bound model as a
-// text field, a Save button, and status.
-function renderRoleRow(table, role, binding) {
+// text field, the SET BY source chip, a Save button, and status.
+function renderRoleRow(table, role, binding, source) {
   const input = el("input", { type: "text", value: binding.model || "" });
   const status = el("span", { className: "status-text" });
   const button = el("button", { type: "button", className: "btn", textContent: "Save" });
@@ -100,6 +126,7 @@ function renderRoleRow(table, role, binding) {
     el("tr", {}, [
       el("td", { className: "mono strong", textContent: role }),
       el("td", {}, [input]),
+      el("td", {}, [sourceChip(source)]),
       el("td", {}, [button, status]),
     ]),
   );
@@ -123,11 +150,12 @@ function renderModels(vm, container) {
   renderScopeSwitcher(container);
 
   const table = el("table", { className: "loops" }, [
-    el("tr", {}, ["role", "binding", ""].map((h) => el("th", { textContent: h }))),
+    el("tr", {}, ["role", "binding", "set by", ""].map((h) => el("th", { textContent: h }))),
   ]);
   const roleNames = Object.keys(vm.roles || {}).sort();
+  const sources = vm.sources || {};
   for (const role of roleNames) {
-    renderRoleRow(table, role, vm.roles[role] || {});
+    renderRoleRow(table, role, vm.roles[role] || {}, sources[role]);
   }
   container.appendChild(table);
 

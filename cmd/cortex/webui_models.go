@@ -38,6 +38,25 @@ const (
 	bindingSourceUnbound    = "unbound"    // neither a config entry nor a fleet candidate
 )
 
+// bindingSource reports where a resolved binding's Model field came from:
+// "configured" when cfg has an explicit non-empty models.<role>.model entry,
+// "fleet-auto" when resolveBinding filled the model in from the fleet
+// instead, "unbound" when neither produced one. cfg may be nil
+// (resolveBinding itself handles it — a missing config file is not an error
+// at this layer). Shared by buildModelsViewModel and GET /api/models
+// (serve_models.go) so the two "set by" presentations never drift.
+func bindingSource(cfg *Config, role string, spec ModelSpec) string {
+	if cfg != nil {
+		if m, ok := cfg.Models[role]; ok && m.Model != "" {
+			return bindingSourceConfigured
+		}
+	}
+	if spec.Model != "" {
+		return bindingSourceFleetAuto
+	}
+	return bindingSourceUnbound
+}
+
 // modelBindingView is one role's effective binding plus its source.
 type modelBindingView struct {
 	Role    string    `json:"role"`
@@ -71,18 +90,7 @@ func buildModelsViewModel(cfg *Config, fleet Fleet) modelsViewModel {
 	vm := modelsViewModel{Bindings: make([]modelBindingView, 0, len(roles)), Fleet: fleet}
 	for _, role := range roles {
 		spec := cfg.resolveBinding(role, fleet)
-
-		source := bindingSourceUnbound
-		if cfg != nil {
-			if m, ok := cfg.Models[role]; ok && m.Model != "" {
-				source = bindingSourceConfigured
-			}
-		}
-		if source == bindingSourceUnbound && spec.Model != "" {
-			source = bindingSourceFleetAuto
-		}
-
-		vm.Bindings = append(vm.Bindings, modelBindingView{Role: role, Binding: spec, Source: source})
+		vm.Bindings = append(vm.Bindings, modelBindingView{Role: role, Binding: spec, Source: bindingSource(cfg, role, spec)})
 	}
 	return vm
 }

@@ -41,11 +41,15 @@ import (
 )
 
 // modelsResponse is GET /api/models' body: every known role's effective
-// binding (Config.resolveBinding over the merged config + fleet) plus the
-// discovered fleet itself.
+// binding (Config.resolveBinding over the merged config + fleet), a
+// per-role Source naming where that binding came from (bindingSource,
+// webui_models.go — "configured"/"fleet-auto"/"unbound", the same
+// presentation logic buildModelsViewModel uses), plus the discovered fleet
+// itself.
 type modelsResponse struct {
-	Roles map[string]ModelSpec `json:"roles"`
-	Fleet Fleet                `json:"fleet"`
+	Roles   map[string]ModelSpec `json:"roles"`
+	Sources map[string]string    `json:"sources"`
+	Fleet   Fleet                `json:"fleet"`
 }
 
 // handleModels serves GET /api/models. configPath is the same single
@@ -59,10 +63,13 @@ func handleModels(configPath string) http.HandlerFunc {
 		cfg := loadMergedConfig(configPath, "")
 		fleet := discoverFleet(r.Context(), cfg.backendEndpoint())
 		roles := make(map[string]ModelSpec, len(rolePolicies))
+		sources := make(map[string]string, len(rolePolicies))
 		for role := range rolePolicies {
-			roles[role] = cfg.resolveBinding(role, fleet)
+			spec := cfg.resolveBinding(role, fleet)
+			roles[role] = spec
+			sources[role] = bindingSource(cfg, role, spec)
 		}
-		writeJSON(w, http.StatusOK, modelsResponse{Roles: roles, Fleet: fleet})
+		writeJSON(w, http.StatusOK, modelsResponse{Roles: roles, Sources: sources, Fleet: fleet})
 	}
 }
 

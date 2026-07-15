@@ -100,6 +100,18 @@ function renderRunLog(container, loops) {
   container.appendChild(el("div", { className: "runlog" }, [el("h4", { textContent: "run history · loop.run" }), ...rows]));
 }
 
+// labeledField wraps an input with a small uppercase mono label above it
+// (and an optional hint line below), so the create form's fields are
+// identifiable without relying on a placeholder alone (a numeric interval
+// field's placeholder gets clipped long before "0 = manual" is legible).
+function labeledField(labelText, input, hint) {
+  const kids = [el("label", { className: "field-label mono", textContent: labelText }), input];
+  if (hint) {
+    kids.push(el("span", { className: "field-hint mono dim", textContent: hint }));
+  }
+  return el("div", { className: "field" }, kids);
+}
+
 // renderCreateForm appends a name/project/prompt/interval create form,
 // POSTing to /api/loops and re-rendering on success. Built via a direct
 // createElement("form") call (not the el() helper) — a plain <form> is
@@ -109,14 +121,15 @@ function renderCreateForm(container) {
   form.className = "loop-create";
   form.appendChild(el("h4", { textContent: "Create a loop" }));
 
-  const nameInput = el("input", { type: "text", placeholder: "name" });
-  const projectInput = el("input", { type: "text", placeholder: "project" });
-  const promptInput = el("input", { type: "text", placeholder: "prompt" });
-  const intervalInput = el("input", { type: "number", placeholder: "interval minutes (0 = manual)" });
+  const nameInput = el("input", { type: "text", placeholder: "nightly-links" });
+  const projectInput = el("input", { type: "text", placeholder: "blog" });
+  const promptInput = el("input", { type: "text", placeholder: "check for broken links and fix them" });
+  const intervalInput = el("input", { type: "number", placeholder: "0" });
   const status = el("span", { className: "status-text" });
-  for (const field of [nameInput, projectInput, promptInput, intervalInput]) {
-    form.appendChild(field);
-  }
+  form.appendChild(labeledField("NAME", nameInput));
+  form.appendChild(labeledField("PROJECT", projectInput));
+  form.appendChild(labeledField("PROMPT", promptInput));
+  form.appendChild(labeledField("INTERVAL", intervalInput, "minutes · 0 = manual · min 15"));
   form.appendChild(el("button", { type: "submit", className: "btn primary", textContent: "Create loop" }));
   form.appendChild(status);
 
@@ -146,7 +159,9 @@ function renderLoops(vm, container) {
 
   const loops = vm.loops || [];
   if (loops.length === 0) {
-    container.appendChild(el("p", { className: "empty-note", textContent: "No loops registered yet." }));
+    container.appendChild(
+      el("div", { className: "lbox" }, [el("p", { className: "dim", textContent: "No loops registered yet." })]),
+    );
   } else {
     const table = el("table", { className: "loops" }, [
       el("tr", {}, [

@@ -6,6 +6,19 @@
 // (projects/landscape/loops/models, plus the session screen reached via
 // ?project=&session=) is a query-param + class toggle via plain <a href>
 // navigation, not a router.
+//
+// This file keeps the core el()/authToken()/apiFetch() helpers plus the
+// dashboard and session fetch calls (loadDashboard/loadSession) — several
+// structural tests read their endpoint URLs directly out of app.js's
+// source, so those two fetches stay here. The turn composer
+// (renderTurnInput, tested the same way) also stays here. Dashboard/session
+// *rendering* (renderDashboard, renderSession, tool-result formatting) is
+// split into dashboard.js/session.js to keep this file under the per-file
+// JS size cap (webui_jscap_test.go) — both are loaded right after this file
+// and, since renderDashboard/renderSession are only ever called from inside
+// a fetch().then() callback (which can't run until every synchronous
+// <script> tag — including dashboard.js/session.js — has already
+// executed), the split is safe without a module system.
 
 // el creates an element, assigns props, and appends children (strings
 // become text nodes) — keeps the render functions below terse.
@@ -77,69 +90,8 @@ function showScreen() {
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.screen === active));
 }
 
-// changeChip describes a project's git change/clean state for its card.
-function changeChip(p) {
-  const cls = p.change_error ? "bad" : p.active_change ? "amb" : p.clean ? "ok" : "mute";
-  const text = p.change_error
-    ? "change status: " + p.change_error
-    : p.active_change
-      ? "change open · " + p.branch
-      : p.clean
-        ? "clean · " + p.branch
-        : p.branch + " · dirty";
-  return el("span", { className: "chip " + cls, textContent: text });
-}
-
-// renderProjectCard builds one .pcard: name, root, change chip, session
-// count + link, and a session list linking into the session screen.
-function renderProjectCard(p) {
-  const sessions = p.sessions || [];
-  const top = el("div", { className: "pcard-top" }, [
-    el("span", { className: "pname", textContent: p.name }),
-    changeChip(p),
-    el("span", { className: "path", textContent: p.root }),
-  ]);
-
-  const metaKids = [el("span", { textContent: sessions.length + " session" + (sessions.length === 1 ? "" : "s") })];
-  if (sessions.length > 0) {
-    metaKids.push(
-      el("a", {
-        className: "btn primary",
-        href: "?project=" + encodeURIComponent(p.name) + "&session=" + encodeURIComponent(sessions[0].id),
-        textContent: "Open session",
-      }),
-    );
-  }
-  const card = el("div", { className: "pcard" }, [top, el("div", { className: "pmeta" }, metaKids)]);
-
-  if (sessions.length > 0) {
-    const items = sessions.map((s) =>
-      el("li", {}, [
-        el("a", {
-          href: "?project=" + encodeURIComponent(p.name) + "&session=" + encodeURIComponent(s.id),
-          textContent: s.id,
-        }),
-        el("span", { className: "dim", textContent: " · " + s.messages + " msgs" }),
-      ]),
-    );
-    card.appendChild(el("ul", { className: "psessions" }, items));
-  }
-  return card;
-}
-
-// renderDashboard writes a dashboard view-model (dashboardViewModel's JSON
-// shape) into the #dashboard container via plain DOM writes — textContent
-// only, never innerHTML with response data, since project names/paths are
-// untrusted-ish local-filesystem strings.
-function renderDashboard(vm, container) {
-  container.textContent = "";
-  if (!vm.projects || vm.projects.length === 0) {
-    container.appendChild(el("p", { className: "empty-note", textContent: "No registered projects yet." }));
-    return;
-  }
-  container.appendChild(el("div", { className: "cards" }, vm.projects.map(renderProjectCard)));
-}
-
+// loadDashboard fetches GET /api/dashboard and hands the view-model to
+// renderDashboard (dashboard.js).
 function loadDashboard() {
   const container = document.getElementById("dashboard");
   if (!container) {
@@ -158,47 +110,11 @@ function loadDashboard() {
     });
 }
 
-// renderEntry appends one transcript entry as a .msg bubble, plus a
-// .toolfeed block naming any tool calls it carries.
-function renderEntry(container, e) {
-  const cls = e.role === "assistant" ? "agent" : e.role === "tool" ? "tool" : "user";
-  container.appendChild(
-    el("div", { className: "msg " + cls }, [
-      el("div", { className: "who", textContent: e.role }),
-      el("div", { className: "bubble", textContent: e.content }),
-    ]),
-  );
-  if (e.tool_calls && e.tool_calls.length > 0) {
-    const lines = e.tool_calls.map((tc) =>
-      el("div", {}, [el("span", { className: "t", textContent: tc.name }), " " + tc.args]),
-    );
-    container.appendChild(el("div", { className: "toolfeed" }, lines));
-  }
-}
-
-// renderSession writes a transcript view-model (transcriptViewModel's JSON
-// shape) into the #session container via plain DOM writes — textContent
-// only, never innerHTML with response data (transcript content is
-// untrusted-ish local turn history).
-function renderSession(vm, container) {
-  container.textContent = "";
-  container.appendChild(
-    el("div", { className: "sess-head" }, [
-      el("span", { className: "crumb" }, ["session ", el("b", { textContent: vm.session_id })]),
-    ]),
-  );
-  if (!vm.entries || vm.entries.length === 0) {
-    container.appendChild(el("p", { className: "empty-note", textContent: "No turns yet." }));
-    return;
-  }
-  for (const e of vm.entries) {
-    renderEntry(container, e);
-  }
-}
-
 // renderTurnInput appends a .composer text field + submit button to the
 // #session container for posting a new turn, called AFTER renderSession
-// on every render since renderSession clears and rebuilds the container.
+// (session.js) on every render since renderSession clears and rebuilds the
+// container. Renders in normal document flow at the bottom of the
+// transcript — no sticky positioning needed, the container just scrolls.
 function renderTurnInput(container, project, session) {
   const form = document.createElement("form");
   form.className = "composer";
@@ -264,7 +180,8 @@ function renderTurnInput(container, project, session) {
 }
 
 // loadSession no-ops when the #session container is absent or the
-// ?project=/&session= query params aren't both present.
+// ?project=/&session= query params aren't both present. Rendering
+// (renderSession) lives in session.js.
 function loadSession() {
   const container = document.getElementById("session");
   const project = queryParam("project");

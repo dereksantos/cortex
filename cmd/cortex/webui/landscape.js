@@ -46,6 +46,31 @@ function renderProjectsBox(projects) {
   ]);
 }
 
+// renderNoRootsCard replaces the bare 412-text-in-the-corner rendering with
+// a styled .lbox empty state: what happened, why, and the exact command to
+// fix it, plus a pointer to the other way roots get set (the greeting
+// conversation).
+function renderNoRootsCard(container) {
+  container.textContent = "";
+  container.appendChild(
+    el("div", { className: "lbox" }, [
+      el("h4", { textContent: "No scan roots configured" }),
+      el("p", {
+        className: "dim",
+        textContent: "Cortex hasn't been told where your code lives yet, so there's nothing to scan.",
+      }),
+      el("p", {}, [
+        "Fix it: ",
+        el("code", { className: "codechip", textContent: "cortex scan --register --root ~/eng" }),
+      ]),
+      el("p", {
+        className: "dim",
+        textContent: "The greeting conversation can also set scan roots for you, the first time you talk to cortex.",
+      }),
+    ]),
+  );
+}
+
 // renderLandscape writes a ScanReport (GET /api/landscape's JSON shape)
 // into the #landscape container via plain DOM writes — textContent only,
 // never innerHTML, matching app.js's untrusted-ish-local-string posture.
@@ -87,14 +112,19 @@ function loadLandscape() {
   apiFetch("/api/landscape")
     .then((resp) => {
       if (resp.status === 412) {
-        throw new Error("no scan roots configured yet");
+        renderNoRootsCard(container);
+        return null;
       }
       if (!resp.ok) {
         throw new Error("GET /api/landscape: " + resp.status);
       }
       return resp.json();
     })
-    .then((report) => renderLandscape(report, container))
+    .then((report) => {
+      if (report) {
+        renderLandscape(report, container);
+      }
+    })
     .catch((err) => {
       container.textContent = "Failed to load landscape: " + err.message;
     });

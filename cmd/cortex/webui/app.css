@@ -385,18 +385,70 @@ button {
   border-top: 1px solid var(--line-soft);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
-.psessions a {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--info);
+.srow {
+  display: block;
+  padding: 5px 6px;
+  margin: 0 -6px;
+  border-radius: 5px;
   text-decoration: none;
+  color: inherit;
 }
 
-.psessions a:hover {
-  text-decoration: underline;
+.srow:hover {
+  background: var(--panel-2);
+}
+
+.srow-first {
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.srow-meta {
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 1px;
+}
+
+.srow-empty {
+  display: block;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  font-size: 11px;
+  color: var(--faint);
+  text-decoration: none;
+  border-radius: 5px;
+}
+
+.srow-empty:hover {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.more-sessions,
+.empty-sessions {
+  margin-top: 4px;
+}
+
+.more-sessions summary,
+.empty-sessions summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  padding: 4px 0;
+}
+
+.more-sessions summary:hover,
+.empty-sessions summary:hover {
+  color: var(--ink);
+}
+
+.more-sessions .psessions,
+.empty-sessions .psessions {
+  border-top: 0;
+  margin-top: 2px;
+  padding-top: 0;
 }
 
 .rail {
@@ -513,6 +565,42 @@ button {
 .toolfeed .t {
   color: var(--accent);
   font-weight: 600;
+}
+
+/* tool-result output: collapsed by default for long dumps (outline/grep/
+   read_file output can run thousands of chars), open inline for short
+   ones — see session.js's renderToolResult. */
+.toolresult {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+  margin: 0 0 14px;
+  font-family: var(--mono);
+}
+
+.toolresult summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 11.5px;
+  color: var(--muted);
+  list-style: revert;
+}
+
+.toolresult summary:hover {
+  color: var(--ink);
+}
+
+.toolresult-body {
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .ctxmeter {
@@ -647,6 +735,15 @@ table.loops td {
   color: var(--ok);
 }
 
+.codechip {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 4px;
+  padding: 2px 7px;
+}
+
 /* ---------- models ---------- */
 .scopes {
   display: flex;
@@ -772,6 +869,23 @@ table.loops td {
   text-transform: uppercase;
   color: var(--faint);
   font-weight: 600;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.field-label {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.field-hint {
+  font-size: 10px;
 }
 
 @media (max-width: 760px) {
