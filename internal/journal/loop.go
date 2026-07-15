@@ -31,12 +31,24 @@ const (
 // didn't succeed ("overlap", "budget", or an error summary) — never file
 // contents or prompt text, keeping the same names-only leak posture M2.3
 // established for landscape events.
+//
+// NextMinutes/NextReason/Done are the D11 self-pacing tuning: a NEXT/DONE
+// marker RunLoopFiring parsed off the model's own final reply (see
+// cmd/cortex/loop_run.go's standing self-pacing instruction). NextMinutes
+// is 0 when no NEXT marker fired (the spec's own interval applies, same as
+// before); Done means the loop declared its work complete — the scheduler
+// (internal/loops.Scheduler.Due) never auto-fires it again, and the spec
+// store disables it (DisabledReason "done: <reason>"). NextReason carries
+// whichever marker's reason text fired, empty when neither did.
 type LoopRunPayload struct {
-	Name      string `json:"name"`
-	Project   string `json:"project"`
-	Outcome   string `json:"outcome"`
-	Reason    string `json:"reason,omitempty"`
-	ChangeRef string `json:"change_ref,omitempty"`
+	Name        string `json:"name"`
+	Project     string `json:"project"`
+	Outcome     string `json:"outcome"`
+	Reason      string `json:"reason,omitempty"`
+	ChangeRef   string `json:"change_ref,omitempty"`
+	NextMinutes int    `json:"next_minutes,omitempty"`
+	NextReason  string `json:"next_reason,omitempty"`
+	Done        bool   `json:"done,omitempty"`
 }
 
 // NewLoopRunEntry builds a journal entry for one loop.run event.

@@ -17,15 +17,23 @@ import (
 )
 
 // CadenceFloorMinutes is the minimum non-zero interval a loop may run on
-// (D11 — "cadence floor 15 minutes"). An IntervalMinutes of 0 means
-// manual-run-only, not a cadence, so it is exempt from the floor.
-const CadenceFloorMinutes = 15
+// (D11 — tuned down from the original 15-minute floor to 5 minutes). An
+// IntervalMinutes of 0 means manual-run-only, not a cadence, so it is
+// exempt from the floor.
+const CadenceFloorMinutes = 5
 
 // Spec is one loop definition (docs/cortex-web.md Phase 6): a named,
 // project-scoped recurring headless run. Triggers are intervals-or-manual
 // only in v1 (D10 — no cron parser); IntervalMinutes 0 means manual
 // run-now only. MaxTurns/MaxTokens are the per-run budget caps (D11),
 // enforced by the scheduler (M6.4), not validated here beyond presence.
+// DisabledReason is the D11 self-pacing/strike-out tuning's terminal-state
+// marker: set alongside Enabled=false when a DONE marker (see
+// cmd/cortex/loop_run.go) or three consecutive failed runs auto-disable
+// the loop, so the UI (and a human re-enabling it) can tell "I turned this
+// off" from "the loop declared itself done" or "it kept failing" apart.
+// Empty for a loop nobody/nothing has disabled, or one a human disabled by
+// hand via the enable/disable toggle (which never sets this field).
 type Spec struct {
 	Name            string `json:"name"`
 	Project         string `json:"project"`
@@ -34,6 +42,7 @@ type Spec struct {
 	MaxTurns        int    `json:"max_turns,omitempty"`
 	MaxTokens       int    `json:"max_tokens,omitempty"`
 	Enabled         bool   `json:"enabled"`
+	DisabledReason  string `json:"disabled_reason,omitempty"`
 }
 
 // ErrLoopNotFound is returned by Lookup and Remove when no loop with the
@@ -43,7 +52,7 @@ var ErrLoopNotFound = errors.New("loop not registered")
 
 // ErrCadenceTooLow is returned by Save when a spec's non-zero
 // IntervalMinutes is below CadenceFloorMinutes (D11).
-var ErrCadenceTooLow = errors.New("loop interval below the 15-minute cadence floor")
+var ErrCadenceTooLow = errors.New("loop interval below the 5-minute cadence floor")
 
 // Store is the CRUD seam over the loop spec store, mirroring
 // internal/registry's Registry shape. FileStore is the file-backed

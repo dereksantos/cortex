@@ -57,6 +57,23 @@ func TestIndexHTMLLoadsAppJSBeforeLoopsJS(t *testing.T) {
 	}
 }
 
+// TestLoopsScreenJSCadenceHintReflectsFiveMinuteFloor is D11's floor
+// tuning's UI hint half: the create form's interval hint must say the new
+// 5-minute floor, not the retired 15-minute one.
+func TestLoopsScreenJSCadenceHintReflectsFiveMinuteFloor(t *testing.T) {
+	data, err := fs.ReadFile(webUIFS(), "loops.js")
+	if err != nil {
+		t.Fatalf("ReadFile(loops.js): %v", err)
+	}
+	src := string(data)
+	if strings.Contains(src, "min 15") {
+		t.Error("loops.js still says \"min 15\" — the cadence floor moved to 5 minutes")
+	}
+	if !strings.Contains(src, "min 5") {
+		t.Error("loops.js does not say \"min 5\" — the create form's interval hint must reflect the new floor")
+	}
+}
+
 func TestLoopsScreenJSHasCreateForm(t *testing.T) {
 	data, err := fs.ReadFile(webUIFS(), "loops.js")
 	if err != nil {
@@ -102,6 +119,43 @@ func TestLoopsScreenJSAuthenticatesWriteRequests(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "Authorization") {
 		t.Error("loops.js does not authenticate its write requests")
+	}
+}
+
+// TestLoopsScreenJSHasNextRunColumn is D11's self-pacing tuning's read
+// side: the loops table must surface next_run/next_reason somewhere in its
+// render, not just fetch them.
+func TestLoopsScreenJSHasNextRunColumn(t *testing.T) {
+	data, err := fs.ReadFile(webUIFS(), "loops.js")
+	if err != nil {
+		t.Fatalf("ReadFile(loops.js): %v", err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "next_run") {
+		t.Error("loops.js does not reference next_run — the loops screen must show the derived next-run instant")
+	}
+	if !strings.Contains(src, "next_reason") {
+		t.Error("loops.js does not reference next_reason")
+	}
+}
+
+// TestLoopsScreenJSChipsDisabledTerminalStates is D11's three-strike/DONE
+// tuning's read side: a disabled loop's chip must distinguish "done" from
+// "3 strikes" from a plain human-disabled loop, per disabled_reason.
+func TestLoopsScreenJSChipsDisabledTerminalStates(t *testing.T) {
+	data, err := fs.ReadFile(webUIFS(), "loops.js")
+	if err != nil {
+		t.Fatalf("ReadFile(loops.js): %v", err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "disabled_reason") {
+		t.Error("loops.js does not reference disabled_reason")
+	}
+	if !strings.Contains(src, "3 strikes") {
+		t.Error("loops.js does not render a \"3 strikes\" chip for the auto-disable case")
+	}
+	if !strings.Contains(src, `"done"`) {
+		t.Error("loops.js does not render a \"done\" chip for the DONE terminal state")
 	}
 }
 

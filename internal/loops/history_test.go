@@ -57,3 +57,30 @@ func TestJournalRunHistoryReturnsEveryMatchingEntryInWriteOrder(t *testing.T) {
 		t.Errorf("JournalRunHistory(someone-else) = %+v, err = %v, want empty, nil (never ran)", got, err)
 	}
 }
+
+// TestJournalRunHistoryCarriesSelfPacingMarkerFields is D11's tuning: the
+// NEXT/DONE marker fields (NextMinutes/NextReason/Done) round-trip through
+// JournalRunHistory exactly like Outcome/Reason/ChangeRef already do — the
+// loops screen's run-history rows (cmd/cortex/webui/loops.js) need
+// NextReason to show a marker's reason alongside its outcome.
+func TestJournalRunHistoryCarriesSelfPacingMarkerFields(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	if err := journal.AppendLoopRun(journal.LoopRunPayload{
+		Name: "nightly", Outcome: journal.LoopOutcomeSuccess,
+		NextMinutes: 20, NextReason: "waiting on CI", Done: false,
+	}); err != nil {
+		t.Fatalf("AppendLoopRun: %v", err)
+	}
+
+	got, err := JournalRunHistory("nightly")
+	if err != nil {
+		t.Fatalf("JournalRunHistory: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("JournalRunHistory(nightly) = %d entries, want 1", len(got))
+	}
+	if got[0].NextMinutes != 20 || got[0].NextReason != "waiting on CI" || got[0].Done {
+		t.Errorf("got[0] = %+v, want NextMinutes=20 NextReason=%q Done=false", got[0], "waiting on CI")
+	}
+}

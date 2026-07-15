@@ -9,7 +9,6 @@ package loops
 
 import (
 	"io"
-	"time"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/userhome"
@@ -17,23 +16,25 @@ import (
 
 // JournalLastRun implements LastRunLookup against the real user-level
 // loop.run journal: it scans every loop.run entry (of any outcome —
-// success, failed, or skipped all count as "it ran") and returns the most
-// recent timestamp among those matching name. A journal that has never
-// been written (no prior firing, ever, for this or any loop) or that has
-// no entry for this name reports (zero, false) — the same "first-ever
-// run" signal Scheduler.Due already treats as due immediately.
-func JournalLastRun(name string) (time.Time, bool) {
+// success, failed, or skipped all count as "it ran") and returns the
+// scheduling-relevant info (LastRunInfo) from the single most recent entry
+// matching name — NOT aggregated across entries, so a NEXT/DONE marker only
+// ever reflects what the LATEST firing actually said. A journal that has
+// never been written (no prior firing, ever, for this or any loop) or that
+// has no entry for this name reports (zero value, false) — the same
+// "first-ever run" signal Scheduler.Due already treats as due immediately.
+func JournalLastRun(name string) (LastRunInfo, bool) {
 	dir, err := userhome.Path("journal", "loop")
 	if err != nil {
-		return time.Time{}, false
+		return LastRunInfo{}, false
 	}
 	r, err := journal.NewReader(dir)
 	if err != nil {
-		return time.Time{}, false
+		return LastRunInfo{}, false
 	}
 	defer r.Close()
 
-	var last time.Time
+	var last LastRunInfo
 	var found bool
 	for {
 		e, err := r.Next()
@@ -53,8 +54,8 @@ func JournalLastRun(name string) (time.Time, bool) {
 		if p.Name != name {
 			continue
 		}
-		if !found || e.TS.After(last) {
-			last = e.TS
+		if !found || e.TS.After(last.At) {
+			last = LastRunInfo{At: e.TS, NextMinutes: p.NextMinutes, Done: p.Done}
 			found = true
 		}
 	}

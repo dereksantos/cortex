@@ -57,6 +57,43 @@ func TestListLoopsEndpointReturnsSpecsAndRunHistory(t *testing.T) {
 	}
 }
 
+// TestListLoopsEndpointRowsCarryD11SelfPacingFields is D11's self-pacing/
+// terminal-state tuning's read side: GET /api/loops rows must carry
+// next_run, next_reason, and disabled_reason — the webui/loops.js columns
+// that read them.
+func TestListLoopsEndpointRowsCarryD11SelfPacingFields(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	if err := store.Save(loops.Spec{Name: "nightly", Project: "blog", Prompt: "sweep TODOs", IntervalMinutes: 60, Enabled: true}); err != nil {
+		t.Fatalf("Save(nightly): %v", err)
+	}
+	if err := store.Save(loops.Spec{Name: "flaky", Project: "blog", Prompt: "sweep TODOs", IntervalMinutes: 60, Enabled: false, DisabledReason: "3 consecutive failures"}); err != nil {
+		t.Fatalf("Save(flaky): %v", err)
+	}
+
+	reg := &fakeRegistry{}
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
+	defer ts.Close()
+
+	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	// next_run is always present (empty string when there's no future
+	// instant to name); disabled_reason and next_reason are omitempty like
+	// every other optional field on this shape, so pin their presence via
+	// a loop that actually has one set, not an unconditional substring.
+	if !strings.Contains(string(body), `"next_run"`) {
+		t.Errorf("GET /api/loops body missing field \"next_run\": %s", body)
+	}
+	if !strings.Contains(string(body), `"disabled_reason":"3 consecutive failures"`) {
+		t.Errorf("GET /api/loops body missing disabled_reason for the auto-disabled loop: %s", body)
+	}
+}
+
 func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 
@@ -155,7 +192,7 @@ func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store)))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":5}`)
+	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":3}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

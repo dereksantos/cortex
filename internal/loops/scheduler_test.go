@@ -23,11 +23,11 @@ func TestSchedulerDueFiresWhenIntervalElapsed(t *testing.T) {
 
 	sch := &Scheduler{
 		Clock: fixedClock(now),
-		LastRun: func(name string) (time.Time, bool) {
+		LastRun: func(name string) (LastRunInfo, bool) {
 			if name == "nightly" {
-				return now.Add(-61 * time.Minute), true
+				return LastRunInfo{At: now.Add(-61 * time.Minute)}, true
 			}
-			return time.Time{}, false
+			return LastRunInfo{}, false
 		},
 		Running: func(string) bool { return false },
 	}
@@ -51,8 +51,8 @@ func TestSchedulerNotDueSkipsWhenIntervalNotElapsed(t *testing.T) {
 	skipCalls := 0
 	sch := &Scheduler{
 		Clock: fixedClock(now),
-		LastRun: func(string) (time.Time, bool) {
-			return now.Add(-10 * time.Minute), true
+		LastRun: func(string) (LastRunInfo, bool) {
+			return LastRunInfo{At: now.Add(-10 * time.Minute)}, true
 		},
 		Running: func(string) bool { return false },
 		OnSkip:  func(Spec, string) error { skipCalls++; return nil },
@@ -79,8 +79,8 @@ func TestSchedulerDisabledNeverFires(t *testing.T) {
 	skipCalls := 0
 	sch := &Scheduler{
 		Clock: fixedClock(now),
-		LastRun: func(string) (time.Time, bool) {
-			return now.Add(-2 * time.Hour), true
+		LastRun: func(string) (LastRunInfo, bool) {
+			return LastRunInfo{At: now.Add(-2 * time.Hour)}, true
 		},
 		Running: func(string) bool { return false },
 		OnSkip:  func(Spec, string) error { skipCalls++; return nil },
@@ -107,7 +107,7 @@ func TestSchedulerManualOnlyNeverAutoDue(t *testing.T) {
 
 	sch := &Scheduler{
 		Clock:   fixedClock(now),
-		LastRun: func(string) (time.Time, bool) { return time.Time{}, false },
+		LastRun: func(string) (LastRunInfo, bool) { return LastRunInfo{}, false },
 		Running: func(string) bool { return false },
 	}
 
@@ -134,8 +134,8 @@ func TestSchedulerOverlapSkipsAndJournalsSkip(t *testing.T) {
 
 	sch := &Scheduler{
 		Clock: fixedClock(now),
-		LastRun: func(string) (time.Time, bool) {
-			return now.Add(-2 * time.Hour), true
+		LastRun: func(string) (LastRunInfo, bool) {
+			return LastRunInfo{At: now.Add(-2 * time.Hour)}, true
 		},
 		Running: func(name string) bool { return name == "nightly" },
 		OnSkip: func(spec Spec, reason string) error {
@@ -188,8 +188,8 @@ func TestSchedulerOverlapPropagatesOnSkipError(t *testing.T) {
 
 	sch := &Scheduler{
 		Clock: fixedClock(now),
-		LastRun: func(string) (time.Time, bool) {
-			return now.Add(-2 * time.Hour), true
+		LastRun: func(string) (LastRunInfo, bool) {
+			return LastRunInfo{At: now.Add(-2 * time.Hour)}, true
 		},
 		Running: func(string) bool { return true },
 		OnSkip:  func(Spec, string) error { return boom },
@@ -198,5 +198,100 @@ func TestSchedulerOverlapPropagatesOnSkipError(t *testing.T) {
 	_, err := sch.Due([]Spec{nightly})
 	if !errors.Is(err, boom) {
 		t.Errorf("Due() error = %v, want errors.Is(err, boom)", err)
+	}
+}
+
+// TestSchedulerHonorsNextMinutesMarker is D11's self-pacing tuning: a
+// NEXT marker on the last run overrides the spec's own IntervalMinutes for
+// this one gap — a spec whose 60m interval would otherwise not be due yet
+// IS due because the last run asked for a much shorter 10m gap, and a
+// sibling spec whose last run asked for a much LONGER gap than its
+// interval is correctly held back past where the bare interval alone
+// would have made it due.
+func TestSchedulerHonorsNextMinutesMarker(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	shorter := Spec{Name: "shorter", Project: "blog", IntervalMinutes: 60, Enabled: true}
+	longer := Spec{Name: "longer", Project: "blog", IntervalMinutes: 60, Enabled: true}
+
+	sch := &Scheduler{
+		Clock: fixedClock(now),
+		LastRun: func(name string) (LastRunInfo, bool) {
+			switch name {
+			case "shorter":
+				// Last ran 15m ago; the bare 60m interval wouldn't be due
+				// yet, but the NEXT marker asked for only 10m.
+				return LastRunInfo{At: now.Add(-15 * time.Minute), NextMinutes: 10}, true
+			case "longer":
+				// Last ran 90m ago; the bare 60m interval would already be
+				// due, but the NEXT marker asked for a full 180m.
+				return LastRunInfo{At: now.Add(-90 * time.Minute), NextMinutes: 180}, true
+			}
+			return LastRunInfo{}, false
+		},
+		Running: func(string) bool { return false },
+	}
+
+	due, err := sch.Due([]Spec{shorter, longer})
+	if err != nil {
+		t.Fatalf("Due() error = %v", err)
+	}
+	if len(due) != 1 || due[0].Name != "shorter" {
+		t.Fatalf("Due() = %v, want only [shorter] (NEXT marker overrides the spec interval both ways)", due)
+	}
+}
+
+// TestSchedulerDoneMarkerNeverFiresAgain is D11's terminal-state tuning:
+// a last run whose DONE marker fired excludes the spec from Due even
+// though it is (perhaps racily) still Enabled=true and its bare interval
+// has long since elapsed — Due is the scheduling authority and doesn't
+// trust the spec store to have already caught up with the disable.
+func TestSchedulerDoneMarkerNeverFiresAgain(t *testing.T) {
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	finished := Spec{Name: "finished", Project: "blog", IntervalMinutes: 60, Enabled: true}
+
+	sch := &Scheduler{
+		Clock: fixedClock(now),
+		LastRun: func(string) (LastRunInfo, bool) {
+			return LastRunInfo{At: now.Add(-24 * time.Hour), Done: true}, true
+		},
+		Running: func(string) bool { return false },
+	}
+
+	due, err := sch.Due([]Spec{finished})
+	if err != nil {
+		t.Fatalf("Due() error = %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("Due() = %v, want none (DONE marker means never again)", due)
+	}
+}
+
+// TestNextRunAtClampsToKnownNeverCases proves NextRunAt's ok=false cases
+// (manual-only, no prior run, DONE) and the NEXT-marker-overrides-interval
+// case buildLoopsViewModel (cmd/cortex/webui_loops.go) relies on to show
+// the loops screen's "next run" column.
+func TestNextRunAtClampsToKnownNeverCases(t *testing.T) {
+	at := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+
+	if _, ok := NextRunAt(Spec{IntervalMinutes: 0}, LastRunInfo{At: at}, true); ok {
+		t.Error("NextRunAt(manual-only) ok = true, want false")
+	}
+	if _, ok := NextRunAt(Spec{IntervalMinutes: 60}, LastRunInfo{}, false); ok {
+		t.Error("NextRunAt(no prior run) ok = true, want false")
+	}
+	if _, ok := NextRunAt(Spec{IntervalMinutes: 60}, LastRunInfo{At: at, Done: true}, true); ok {
+		t.Error("NextRunAt(done) ok = true, want false")
+	}
+
+	want := at.Add(90 * time.Minute)
+	got, ok := NextRunAt(Spec{IntervalMinutes: 60}, LastRunInfo{At: at, NextMinutes: 90}, true)
+	if !ok || !got.Equal(want) {
+		t.Errorf("NextRunAt(NEXT marker) = %v, %v, want %v, true", got, ok, want)
+	}
+
+	want = at.Add(60 * time.Minute)
+	got, ok = NextRunAt(Spec{IntervalMinutes: 60}, LastRunInfo{At: at}, true)
+	if !ok || !got.Equal(want) {
+		t.Errorf("NextRunAt(no marker) = %v, %v, want %v, true (falls back to the spec interval)", got, ok, want)
 	}
 }

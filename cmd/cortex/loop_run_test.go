@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +59,29 @@ func noopTurnTestSessionFactory(t *testing.T) sessionFactory {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"nothing to do"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return func() *CortexSession {
+		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+		cs.Request.BaseURL = srv.URL
+		return cs
+	}
+}
+
+// markerReplyTurnTestSessionFactory scripts a single-round turn whose final
+// reply is exactly content — used to drive D11's self-pacing NEXT/DONE
+// marker parsing (parseLoopMarker) through a real RunLoopFiring firing.
+// Builds the scripted body via json.Marshal (not a hand-escaped literal)
+// so content can freely contain newlines and the marker grammar's em dash.
+func markerReplyTurnTestSessionFactory(t *testing.T, content string) sessionFactory {
+	t.Helper()
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("json.Marshal(content): %v", err)
+	}
+	body := fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, encoded)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
 	return func() *CortexSession {
@@ -218,7 +243,7 @@ func TestRunLoopFiringRunsFreshHeadlessSessionAndJournalsSuccessWithChangeRef(t 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, writeFileTurnTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, writeFileTurnTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -255,7 +280,7 @@ func TestRunLoopFiringNoOpTurnJournalsSuccessWithEmptyChangeRef(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, noopTurnTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, noopTurnTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -284,7 +309,7 @@ func TestRunLoopFiringTurnErrorJournalsFailedOutcome(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, failingTurnTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, failingTurnTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -313,7 +338,7 @@ func TestRunLoopFiringUnknownProjectJournalsFailedOutcome(t *testing.T) {
 	reg := &fakeRegistry{}
 	spec := loops.Spec{Name: "nightly", Project: "nope", Prompt: "leave a note"}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, writeFileTurnTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, writeFileTurnTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -345,7 +370,7 @@ func TestRunLoopFiringRunawaySessionHaltsAtTurnCap(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", MaxTurns: 2}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, runawayTurnCapTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, runawayTurnCapTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -378,7 +403,7 @@ func TestRunLoopFiringTokenBudgetHaltsBeforeTurnCap(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", MaxTurns: 25, MaxTokens: 10}
 
-	if err := RunLoopFiring(context.Background(), spec, reg, tokenReportingTestSessionFactory(t)); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, tokenReportingTestSessionFactory(t)); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -421,7 +446,7 @@ func TestRunLoopFiringRiskyCommandBlockedNoPromptReachable(t *testing.T) {
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
 
 	factory, lastSession := riskyBashTurnTestSessionFactory(t)
-	if err := RunLoopFiring(context.Background(), spec, reg, factory); err != nil {
+	if err := RunLoopFiring(context.Background(), spec, reg, nil, factory); err != nil {
 		t.Fatalf("RunLoopFiring: %v", err)
 	}
 
@@ -462,5 +487,244 @@ func TestRunLoopFiringRiskyCommandBlockedNoPromptReachable(t *testing.T) {
 	}
 	if entries[0].ChangeRef != "" {
 		t.Errorf("ChangeRef = %q, want empty (the blocked command never dirtied the worktree)", entries[0].ChangeRef)
+	}
+}
+
+// TestParseLoopMarker is D11's self-pacing marker grammar table: NEXT,
+// DONE, malformed (ignored, not an error), and absent, plus the
+// [loops.CadenceFloorMinutes, maxNextMinutes] clamp.
+func TestParseLoopMarker(t *testing.T) {
+	tests := []struct {
+		name       string
+		reply      string
+		wantOK     bool
+		wantDone   bool
+		wantMin    int
+		wantReason string
+	}{
+		{name: "next marker", reply: "Looked around.\nNEXT: 30m — waiting on CI", wantOK: true, wantMin: 30, wantReason: "waiting on CI"},
+		{name: "done marker", reply: "All TODOs cleared.\nDONE — nothing left to do", wantOK: true, wantDone: true, wantReason: "nothing left to do"},
+		{name: "trailing blank lines and whitespace tolerated", reply: "NEXT: 15m — pad the tail   \n\n   \n", wantOK: true, wantMin: 15, wantReason: "pad the tail"},
+		{name: "ascii hyphen tolerated in place of em dash", reply: "DONE - hyphen instead of em dash", wantOK: true, wantDone: true, wantReason: "hyphen instead of em dash"},
+		{name: "case insensitive keyword", reply: "next: 10m — lowercase keyword", wantOK: true, wantMin: 10, wantReason: "lowercase keyword"},
+		{name: "next clamps below the cadence floor", reply: "NEXT: 1m — too soon", wantOK: true, wantMin: loops.CadenceFloorMinutes, wantReason: "too soon"},
+		{name: "next clamps above 24h", reply: "NEXT: 999999m — way too long", wantOK: true, wantMin: maxNextMinutes, wantReason: "way too long"},
+		{name: "malformed: non-numeric minutes", reply: "NEXT: soon — reason", wantOK: false},
+		{name: "malformed: done with no reason", reply: "DONE", wantOK: false},
+		{name: "malformed: next missing the dash", reply: "NEXT: 30m waiting on CI", wantOK: false},
+		{name: "absent: ordinary final reply", reply: "All done, no marker here.", wantOK: false},
+		{name: "absent: empty reply", reply: "", wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := parseLoopMarker(tt.reply)
+			if ok != tt.wantOK {
+				t.Fatalf("parseLoopMarker(%q) ok = %v, want %v (got %+v)", tt.reply, ok, tt.wantOK, got)
+			}
+			if !ok {
+				return
+			}
+			if got.Done != tt.wantDone {
+				t.Errorf("Done = %v, want %v", got.Done, tt.wantDone)
+			}
+			if got.NextMinutes != tt.wantMin {
+				t.Errorf("NextMinutes = %d, want %d", got.NextMinutes, tt.wantMin)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestRunLoopFiringDoneMarkerJournalsAndDisablesLoop is D11's terminal-state
+// tuning's DONE leg: a firing whose final reply carries a DONE marker
+// journals Done=true plus the reason, and disables the spec in the store
+// with DisabledReason "done: <reason>" — the same event, no second write.
+func TestRunLoopFiringDoneMarkerJournalsAndDisablesLoop(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 60, Enabled: true}
+	if err := store.Save(spec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	factory := markerReplyTurnTestSessionFactory(t, "Swept every TODO.\nDONE — nothing left to do")
+	if err := RunLoopFiring(context.Background(), spec, reg, store, factory); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if !entries[0].Done {
+		t.Errorf("Done = false, want true")
+	}
+	if entries[0].NextReason != "nothing left to do" {
+		t.Errorf("NextReason = %q, want %q", entries[0].NextReason, "nothing left to do")
+	}
+
+	saved, err := store.Lookup("nightly")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if saved.Enabled {
+		t.Error("Enabled = true, want false (a DONE marker disables the loop)")
+	}
+	if saved.DisabledReason != "done: nothing left to do" {
+		t.Errorf("DisabledReason = %q, want %q", saved.DisabledReason, "done: nothing left to do")
+	}
+}
+
+// TestRunLoopFiringNextMarkerJournalsWithoutDisabling proves the NEXT leg
+// stays distinct from DONE: the marker's minutes/reason land on the
+// journal event, but the loop stays enabled — self-pacing reschedules, it
+// doesn't terminate.
+func TestRunLoopFiringNextMarkerJournalsWithoutDisabling(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 60, Enabled: true}
+	if err := store.Save(spec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	factory := markerReplyTurnTestSessionFactory(t, "Still waiting on CI.\nNEXT: 20m — waiting on CI")
+	if err := RunLoopFiring(context.Background(), spec, reg, store, factory); err != nil {
+		t.Fatalf("RunLoopFiring: %v", err)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 1 {
+		t.Fatalf("loop.run entries = %d, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Done {
+		t.Error("Done = true, want false (a NEXT marker is not a terminal state)")
+	}
+	if entries[0].NextMinutes != 20 {
+		t.Errorf("NextMinutes = %d, want 20", entries[0].NextMinutes)
+	}
+	if entries[0].NextReason != "waiting on CI" {
+		t.Errorf("NextReason = %q, want %q", entries[0].NextReason, "waiting on CI")
+	}
+
+	saved, err := store.Lookup("nightly")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !saved.Enabled {
+		t.Error("Enabled = false, want true (a NEXT marker must not disable the loop)")
+	}
+	if saved.DisabledReason != "" {
+		t.Errorf("DisabledReason = %q, want empty", saved.DisabledReason)
+	}
+}
+
+// TestRunLoopFiringThreeConsecutiveFailuresAutoDisables is D11's
+// three-strike tuning: two failures in a row leave the loop enabled, and
+// exactly the third consecutive failure flips it off with DisabledReason
+// "3 consecutive failures" — fake-clock-free (no sleeps): the streak is
+// derived straight from the journal's write order by ConsecutiveFailures.
+func TestRunLoopFiringThreeConsecutiveFailuresAutoDisables(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	reg := &fakeRegistry{}
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	spec := loops.Spec{Name: "flaky", Project: "nope", Prompt: "leave a note", IntervalMinutes: 60, Enabled: true}
+	if err := store.Save(spec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// fakeRegistry has no "nope" project registered, so every firing fails
+	// at project-resolution — a fast, deterministic way to get repeated
+	// "failed" outcomes without a scripted backend per attempt. The
+	// session factory must never even be invoked (RunLoopFiring resolves
+	// the project before constructing a session).
+	unreachableFactory := func() *CortexSession {
+		t.Fatal("session factory invoked despite an unresolved project")
+		return nil
+	}
+	for i := 1; i <= 2; i++ {
+		if err := RunLoopFiring(context.Background(), spec, reg, store, unreachableFactory); err != nil {
+			t.Fatalf("RunLoopFiring #%d: %v", i, err)
+		}
+		saved, err := store.Lookup("flaky")
+		if err != nil {
+			t.Fatalf("Lookup after failure #%d: %v", i, err)
+		}
+		if !saved.Enabled {
+			t.Fatalf("after %d consecutive failures, Enabled = false, want still true (only 3 strikes disables)", i)
+		}
+	}
+
+	if err := RunLoopFiring(context.Background(), spec, reg, store, unreachableFactory); err != nil {
+		t.Fatalf("RunLoopFiring #3: %v", err)
+	}
+
+	entries := readLoopRunEntries(t)
+	if len(entries) != 3 {
+		t.Fatalf("loop.run entries = %d, want 3", len(entries))
+	}
+	for i, e := range entries {
+		if e.Outcome != journal.LoopOutcomeFailed {
+			t.Errorf("entries[%d].Outcome = %q, want %q", i, e.Outcome, journal.LoopOutcomeFailed)
+		}
+	}
+
+	saved, err := store.Lookup("flaky")
+	if err != nil {
+		t.Fatalf("Lookup after 3rd failure: %v", err)
+	}
+	if saved.Enabled {
+		t.Error("Enabled = true after 3 consecutive failures, want false")
+	}
+	if saved.DisabledReason != "3 consecutive failures" {
+		t.Errorf("DisabledReason = %q, want %q", saved.DisabledReason, "3 consecutive failures")
+	}
+}
+
+// TestRunLoopFiringSuccessResetsFailureStreak proves a success between two
+// failures resets the three-strike counter: two failures, a success, then
+// two more failures must NOT disable the loop (only 2 consecutive at the
+// end), matching loops.ConsecutiveFailures' own reset behavior.
+func TestRunLoopFiringSuccessResetsFailureStreak(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	root := initGitFixture(t, "main", false)
+	t.Chdir(root)
+
+	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
+	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
+	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note", IntervalMinutes: 60, Enabled: true}
+	if err := store.Save(spec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	run := func(factory sessionFactory) {
+		t.Helper()
+		if err := RunLoopFiring(context.Background(), spec, reg, store, factory); err != nil {
+			t.Fatalf("RunLoopFiring: %v", err)
+		}
+	}
+
+	run(failingTurnTestSessionFactory(t))
+	run(failingTurnTestSessionFactory(t))
+	run(noopTurnTestSessionFactory(t)) // success — resets the streak
+	run(failingTurnTestSessionFactory(t))
+	run(failingTurnTestSessionFactory(t))
+
+	saved, err := store.Lookup("nightly")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !saved.Enabled {
+		t.Errorf("Enabled = false, want true (the success in the middle should have reset the streak, leaving only 2 trailing failures)")
 	}
 }

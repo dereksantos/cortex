@@ -122,7 +122,7 @@ func handleRunLoop(store loops.Store, reg registry.Registry, newSession sessionF
 			return
 		}
 
-		if err := RunLoopFiring(r.Context(), spec, reg, newSession); err != nil {
+		if err := RunLoopFiring(r.Context(), spec, reg, store, newSession); err != nil {
 			http.Error(w, "failed to run loop: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

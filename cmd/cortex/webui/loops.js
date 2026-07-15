@@ -33,6 +33,43 @@ function outcomeChip(run) {
   return el("span", { className: "chip " + cls, textContent: text });
 }
 
+// relativeish renders an RFC3339 instant as a short "in Nm/Nh/Nd" — good
+// enough for a glance, not a full calendar widget.
+function relativeish(iso) {
+  const mins = Math.round((new Date(iso).getTime() - Date.now()) / 60000);
+  if (mins <= 0) return "due now";
+  if (mins < 60) return "in " + mins + "m";
+  const hours = Math.round(mins / 60);
+  return hours < 24 ? "in " + hours + "h" : "in " + Math.round(hours / 24) + "d";
+}
+
+// nextRunCell renders a loop's derived next_run/next_reason (D11
+// self-pacing) — an em dash when the loop will never auto-fire again
+// (manual-only, DONE, or no run history yet).
+function nextRunCell(loop) {
+  if (!loop.next_run) {
+    return el("span", { className: "mono dim", textContent: "—" });
+  }
+  const text = relativeish(loop.next_run) + (loop.next_reason ? " · " + loop.next_reason : "");
+  return el("span", { className: "mono dim", textContent: text });
+}
+
+// disabledChip distinguishes WHY a disabled loop stopped firing (D11's
+// terminal-state tuning): "done" (it finished on its own), "3 strikes"
+// (auto-disabled after repeated failures), or plain "disabled" (a human
+// flipped the toggle) — null for an enabled loop (no chip to show).
+function disabledChip(loop) {
+  if (loop.enabled) return null;
+  const reason = loop.disabled_reason || "";
+  if (reason.indexOf("done:") === 0) {
+    return el("span", { className: "chip ok", textContent: "done" });
+  }
+  if (reason === "3 consecutive failures") {
+    return el("span", { className: "chip bad", textContent: "3 strikes" });
+  }
+  return el("span", { className: "chip mute", textContent: "disabled" });
+}
+
 // renderLoopRow appends one <tr> for a loop: name/project/trigger/bounds,
 // last-run outcome chip, an enable/disable toggle, and a run-now button.
 function renderLoopRow(table, loop) {
@@ -67,6 +104,7 @@ function renderLoopRow(table, loop) {
       });
   });
 
+  const chip = disabledChip(loop);
   table.appendChild(
     el("tr", {}, [
       el("td", { className: "mono strong", textContent: loop.name }),
@@ -74,7 +112,8 @@ function renderLoopRow(table, loop) {
       el("td", { className: "mono", textContent: interval }),
       el("td", { className: "mono dim", textContent: bounds }),
       el("td", {}, [outcomeChip((loop.runs || [])[0])]),
-      el("td", {}, [toggle]),
+      el("td", {}, [nextRunCell(loop)]),
+      el("td", {}, chip ? [toggle, chip] : [toggle]),
       el("td", {}, [runBtn, status]),
     ]),
   );
@@ -85,12 +124,9 @@ function renderRunLog(container, loops) {
   const rows = [];
   for (const loop of loops) {
     for (const r of loop.runs || []) {
+      const text = " " + r.outcome + (r.reason ? " (" + r.reason + ")" : "") + (r.next_reason ? " → " + r.next_reason : "");
       rows.push(
-        el("div", { className: "lrow" }, [
-          el("b", { textContent: loop.name }),
-          " " + r.outcome + (r.reason ? " (" + r.reason + ")" : ""),
-          el("span", { className: "when", textContent: r.timestamp }),
-        ]),
+        el("div", { className: "lrow" }, [el("b", { textContent: loop.name }), text, el("span", { className: "when", textContent: r.timestamp })]),
       );
     }
   }
@@ -129,7 +165,7 @@ function renderCreateForm(container) {
   form.appendChild(labeledField("NAME", nameInput));
   form.appendChild(labeledField("PROJECT", projectInput));
   form.appendChild(labeledField("PROMPT", promptInput));
-  form.appendChild(labeledField("INTERVAL", intervalInput, "minutes · 0 = manual · min 15"));
+  form.appendChild(labeledField("INTERVAL", intervalInput, "minutes · 0 = manual · min 5"));
   form.appendChild(el("button", { type: "submit", className: "btn primary", textContent: "Create loop" }));
   form.appendChild(status);
 
@@ -170,6 +206,7 @@ function renderLoops(vm, container) {
         "trigger",
         "bounds",
         "last run",
+        "next run",
         "",
         "",
       ].map((h) => el("th", { textContent: h }))),

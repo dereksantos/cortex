@@ -156,7 +156,7 @@ func TestFileStoreLookupOnMissingFileReturnsTypedError(t *testing.T) {
 	}
 }
 
-func TestFileStoreSaveRejectsCadenceBelowFifteenMinuteFloor(t *testing.T) {
+func TestFileStoreSaveRejectsCadenceBelowFiveMinuteFloor(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CORTEX_HOME", tmp)
 
@@ -165,7 +165,7 @@ func TestFileStoreSaveRejectsCadenceBelowFifteenMinuteFloor(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	tooFast := Spec{Name: "tooFast", Project: "blog", Prompt: "spam it", IntervalMinutes: 5, Enabled: true}
+	tooFast := Spec{Name: "tooFast", Project: "blog", Prompt: "spam it", IntervalMinutes: 3, Enabled: true}
 	err = st.Save(tooFast)
 	if err == nil {
 		t.Fatal("Save(tooFast) error = nil, want ErrCadenceTooLow")
@@ -180,7 +180,7 @@ func TestFileStoreSaveRejectsCadenceBelowFifteenMinuteFloor(t *testing.T) {
 	}
 }
 
-func TestFileStoreSaveAllowsExactlyFifteenMinuteFloor(t *testing.T) {
+func TestFileStoreSaveAllowsExactlyFiveMinuteFloor(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("CORTEX_HOME", tmp)
 

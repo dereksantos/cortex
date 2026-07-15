@@ -18,12 +18,21 @@ import (
 
 // RunRecord is one loop.run journal entry for a single named loop —
 // Timestamp comes from the journal entry envelope (journal.Entry.TS, set
-// at append time), the rest from the entry's LoopRunPayload.
+// at append time), the rest from the entry's LoopRunPayload. NextMinutes/
+// NextReason/Done mirror the D11 self-pacing marker fields
+// (internal/journal/loop.go's LoopRunPayload) so the loops screen's
+// run-history rows can show a NEXT/DONE marker's reason alongside its
+// outcome, and buildLoopsViewModel (cmd/cortex/webui_loops.go) can derive
+// next_run from the same data this reader already fetches, without a
+// second journal pass.
 type RunRecord struct {
-	Timestamp time.Time `json:"timestamp"`
-	Outcome   string    `json:"outcome"`
-	Reason    string    `json:"reason,omitempty"`
-	ChangeRef string    `json:"change_ref,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	Outcome     string    `json:"outcome"`
+	Reason      string    `json:"reason,omitempty"`
+	ChangeRef   string    `json:"change_ref,omitempty"`
+	NextMinutes int       `json:"next_minutes,omitempty"`
+	NextReason  string    `json:"next_reason,omitempty"`
+	Done        bool      `json:"done,omitempty"`
 }
 
 // JournalRunHistory returns every loop.run entry matching name, in the
@@ -62,10 +71,13 @@ func JournalRunHistory(name string) ([]RunRecord, error) {
 			continue
 		}
 		out = append(out, RunRecord{
-			Timestamp: e.TS,
-			Outcome:   p.Outcome,
-			Reason:    p.Reason,
-			ChangeRef: p.ChangeRef,
+			Timestamp:   e.TS,
+			Outcome:     p.Outcome,
+			Reason:      p.Reason,
+			ChangeRef:   p.ChangeRef,
+			NextMinutes: p.NextMinutes,
+			NextReason:  p.NextReason,
+			Done:        p.Done,
 		})
 	}
 	return out, nil

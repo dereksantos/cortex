@@ -16,6 +16,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/dereksantos/cortex/internal/loops"
 )
@@ -23,10 +24,18 @@ import (
 // loopView is one registered loop's spec plus its full run history.
 // Embeds loops.Spec directly rather than duplicating its fields — mirrors
 // M5.2c's landscape view-model precedent of not wrapping a shape that
-// already has exactly the fields a screen needs.
+// already has exactly the fields a screen needs. NextRun/NextReason are
+// the D11 self-pacing tuning's read side: NextRun is an RFC3339 instant
+// (empty string when the loop will never auto-fire again — manual-only, a
+// DONE terminal state, or no run history yet) derived via
+// loops.NextRunAt, the exact same rule Scheduler.Due itself applies, so
+// the UI never shows an opinion the scheduler could contradict.
+// NextReason is the most recent run's NEXT/DONE marker reason, if any.
 type loopView struct {
 	loops.Spec
-	Runs []loops.RunRecord `json:"runs"`
+	Runs       []loops.RunRecord `json:"runs"`
+	NextRun    string            `json:"next_run"`
+	NextReason string            `json:"next_reason,omitempty"`
 }
 
 // loopsViewModel is the full loops screen.
@@ -55,7 +64,21 @@ func buildLoopsViewModel(store loops.Store) (loopsViewModel, error) {
 		if runs == nil {
 			runs = []loops.RunRecord{}
 		}
-		vm.Loops = append(vm.Loops, loopView{Spec: s, Runs: runs})
+
+		var info loops.LastRunInfo
+		hasLast := len(runs) > 0
+		nextReason := ""
+		if hasLast {
+			last := runs[len(runs)-1]
+			info = loops.LastRunInfo{At: last.Timestamp, NextMinutes: last.NextMinutes, Done: last.Done}
+			nextReason = last.NextReason
+		}
+		nextRun := ""
+		if when, ok := loops.NextRunAt(s, info, hasLast); ok {
+			nextRun = when.UTC().Format(time.RFC3339)
+		}
+
+		vm.Loops = append(vm.Loops, loopView{Spec: s, Runs: runs, NextRun: nextRun, NextReason: nextReason})
 	}
 	return vm, nil
 }

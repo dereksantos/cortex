@@ -71,11 +71,11 @@ func TestBuildLoopsViewModelGolden(t *testing.T) {
 	}
 
 	want := `{"loops":[` +
-		`{"name":"manual-only","project":"cortex","prompt":"run the eval","enabled":false,"runs":[]},` +
+		`{"name":"manual-only","project":"cortex","prompt":"run the eval","enabled":false,"runs":[],"next_run":""},` +
 		`{"name":"nightly","project":"blog","prompt":"sweep TODOs","interval_minutes":60,"max_turns":25,"enabled":true,"runs":[` +
 		`{"timestamp":"2026-01-01T00:00:00Z","outcome":"failed","reason":"budget"},` +
 		`{"timestamp":"2026-01-01T01:00:00Z","outcome":"success","change_ref":"cortex/fix-todos"}` +
-		`]}` +
+		`],"next_run":"2026-01-01T02:00:00Z"}` +
 		`]}`
 	if string(got) != want {
 		t.Errorf("loops view-model JSON =\n%s\nwant\n%s", got, want)

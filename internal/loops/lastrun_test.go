@@ -45,12 +45,42 @@ func TestJournalLastRunReturnsMostRecentMatchingName(t *testing.T) {
 	if !found {
 		t.Fatalf("JournalLastRun(nightly) after two entries: found = false, want true")
 	}
-	if second.Before(first) {
-		t.Errorf("second last-run TS %v is before first %v, want the most recent", second, first)
+	if second.At.Before(first.At) {
+		t.Errorf("second last-run TS %v is before first %v, want the most recent", second.At, first.At)
 	}
 
 	if _, found := JournalLastRun("someone-else"); found {
 		t.Errorf("JournalLastRun(someone-else): found = true, want false (never ran)")
+	}
+}
+
+// TestJournalLastRunReportsOnlyTheLatestEntrysMarker is D11's self-pacing
+// tuning: NextMinutes/Done must come from the single most recent entry,
+// never aggregated or carried forward from an earlier one — an older DONE
+// followed by a newer ordinary run must NOT still report Done=true.
+func TestJournalLastRunReportsOnlyTheLatestEntrysMarker(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	if err := journal.AppendLoopRun(journal.LoopRunPayload{Name: "nightly", Outcome: journal.LoopOutcomeSuccess, Done: true, NextReason: "shipped"}); err != nil {
+		t.Fatalf("AppendLoopRun(done): %v", err)
+	}
+	info, found := JournalLastRun("nightly")
+	if !found || !info.Done {
+		t.Fatalf("JournalLastRun(nightly) after DONE = %+v, found=%v, want Done=true", info, found)
+	}
+
+	if err := journal.AppendLoopRun(journal.LoopRunPayload{Name: "nightly", Outcome: journal.LoopOutcomeSuccess, NextMinutes: 30}); err != nil {
+		t.Fatalf("AppendLoopRun(next): %v", err)
+	}
+	info, found = JournalLastRun("nightly")
+	if !found {
+		t.Fatal("JournalLastRun(nightly) after NEXT: found = false, want true")
+	}
+	if info.Done {
+		t.Error("JournalLastRun(nightly) after a newer NEXT run still reports Done=true, want false — must not carry forward the older DONE")
+	}
+	if info.NextMinutes != 30 {
+		t.Errorf("NextMinutes = %d, want 30", info.NextMinutes)
 	}
 }
 

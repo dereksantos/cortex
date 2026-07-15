@@ -115,7 +115,7 @@ func (ls *loopScheduler) tick(ctx context.Context) error {
 		go func(spec loops.Spec) {
 			defer ls.wg.Done()
 			defer ls.running.finish(spec.Name)
-			_ = RunLoopFiring(ctx, spec, ls.reg, ls.newSession)
+			_ = RunLoopFiring(ctx, spec, ls.reg, ls.store, ls.newSession)
 		}(spec)
 	}
 	return nil

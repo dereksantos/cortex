@@ -15,11 +15,74 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loops"
 	"github.com/dereksantos/cortex/internal/registry"
 )
+
+// loopSelfPacingInstruction is appended to every loop firing's prompt
+// (D11's self-pacing tuning, borrowed from Claude Code's /loop skill): it
+// states the capability as a principle, not a recipe — the model decides
+// whether and how to use it.
+const loopSelfPacingInstruction = "You may end your final reply's last line with `NEXT: <n>m — <reason>` to schedule your own next run, or `DONE — <reason>` once this loop's work is complete."
+
+// maxNextMinutes is the self-pacing NEXT marker's clamp ceiling (24h) —
+// paired with loops.CadenceFloorMinutes as the clamp floor.
+const maxNextMinutes = 24 * 60
+
+var (
+	loopDoneMarkerRe = regexp.MustCompile(`(?i)^DONE\s*(?:—|-)\s*(.+)$`)
+	loopNextMarkerRe = regexp.MustCompile(`(?i)^NEXT:\s*(\d+)\s*m\s*(?:—|-)\s*(.+)$`)
+)
+
+// loopMarker is a parsed NEXT/DONE self-pacing marker off a loop firing's
+// final reply.
+type loopMarker struct {
+	Done        bool
+	NextMinutes int
+	Reason      string
+}
+
+// parseLoopMarker looks for a NEXT/DONE self-pacing marker on reply's
+// tail — the last non-empty line, whitespace-trimmed. A malformed or
+// absent marker reports ok=false rather than an error: a model that
+// forgets or garbles the marker just falls back to the spec's own cadence
+// (Scheduler.Due picks that up automatically since NextMinutes stays 0),
+// it never fails the firing. A NEXT marker's minutes are clamped to
+// [loops.CadenceFloorMinutes, maxNextMinutes].
+func parseLoopMarker(reply string) (loopMarker, bool) {
+	lines := strings.Split(reply, "\n")
+	var tail string
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			tail = t
+			break
+		}
+	}
+	if tail == "" {
+		return loopMarker{}, false
+	}
+	if m := loopDoneMarkerRe.FindStringSubmatch(tail); m != nil {
+		return loopMarker{Done: true, Reason: strings.TrimSpace(m[1])}, true
+	}
+	if m := loopNextMarkerRe.FindStringSubmatch(tail); m != nil {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return loopMarker{}, false
+		}
+		if n < loops.CadenceFloorMinutes {
+			n = loops.CadenceFloorMinutes
+		} else if n > maxNextMinutes {
+			n = maxNextMinutes
+		}
+		return loopMarker{NextMinutes: n, Reason: strings.TrimSpace(m[2])}, true
+	}
+	return loopMarker{}, false
+}
 
 // RunLoopFiring runs one due loop.Spec firing to completion and always
 // appends exactly one loop.run journal event (journal.AppendLoopRun) — on
@@ -30,25 +93,29 @@ import (
 // scheduler's driving loop, should surface); a failed or errored RUN is
 // itself a normal, successfully-journaled outcome and returns nil.
 //
+// store persists the D11 terminal states finalizeLoopFiring derives from
+// the outcome (a DONE marker, or a third consecutive failure) — may be nil
+// where a caller doesn't care about that half (it just skips it).
+//
 // newSession is the sessionFactory seam (serve_session.go): production
 // wires newProductionSession (real config/backend resolution, matching
 // runTurnCLI/SessionManager.Create); tests inject a hermetic session
 // pointed at a scripted httptest backend.
-func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, newSession sessionFactory) error {
+func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, store loops.Store, newSession sessionFactory) error {
 	payload := journal.LoopRunPayload{Name: spec.Name, Project: spec.Project}
 
 	proj, err := reg.Lookup(spec.Project)
 	if err != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("resolve project %q: %v", spec.Project, err)
-		return journal.AppendLoopRun(payload)
+		return finalizeLoopFiring(spec, store, payload)
 	}
 
 	cs := newSession()
 	if err := applyProjectByName(cs, reg, spec.Project); err != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("apply project: %v", err)
-		return journal.AppendLoopRun(payload)
+		return finalizeLoopFiring(spec, store, payload)
 	}
 	cs.StartTranscript()
 	defer cs.Close()
@@ -66,16 +133,17 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	// bound (if any) forced the stop via TurnResult.StopReason — a
 	// bound-forced stop is not a Go error (the engine still finalizes and
 	// answers), so it must be detected here, not via turnErr.
-	result, turnErr := cs.TurnWithBudget(ctx, spec.Prompt, spec.MaxTurns, spec.MaxTokens)
+	prompt := spec.Prompt + "\n\n" + loopSelfPacingInstruction
+	result, turnErr := cs.TurnWithBudget(ctx, prompt, spec.MaxTurns, spec.MaxTokens)
 	if turnErr != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("turn: %v", turnErr)
-		return journal.AppendLoopRun(payload)
+		return finalizeLoopFiring(spec, store, payload)
 	}
 	if result.StopReason == "max-iter" || result.StopReason == "token-budget" {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = "budget"
-		return journal.AppendLoopRun(payload)
+		return finalizeLoopFiring(spec, store, payload)
 	}
 
 	if startErr == nil {
@@ -87,5 +155,61 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	}
 
 	payload.Outcome = journal.LoopOutcomeSuccess
-	return journal.AppendLoopRun(payload)
+	// D11 self-pacing: a clean finish's own final reply may carry a
+	// NEXT/DONE marker (loopSelfPacingInstruction). Only checked on the
+	// success path — a turn that errored or hit a budget cap never reaches
+	// here, so there's no organically-produced reply to trust a marker
+	// from.
+	if marker, ok := parseLoopMarker(result.Reply); ok {
+		payload.NextReason = marker.Reason
+		if marker.Done {
+			payload.Done = true
+		} else {
+			payload.NextMinutes = marker.NextMinutes
+		}
+	}
+	return finalizeLoopFiring(spec, store, payload)
+}
+
+// finalizeLoopFiring appends payload as the firing's loop.run journal
+// event, then applies whatever terminal state the outcome implies: a DONE
+// marker or a third consecutive "failed" outcome (loops.ConsecutiveFailures,
+// D11) disables the spec in store so the scheduler stops driving it —
+// both journaled by the very event finalizeLoopFiring just wrote, never a
+// second invented one. store may be nil (some callers don't care about
+// terminal-state persistence); a nil store just skips that half.
+func finalizeLoopFiring(spec loops.Spec, store loops.Store, payload journal.LoopRunPayload) error {
+	if err := journal.AppendLoopRun(payload); err != nil {
+		return fmt.Errorf("failed to journal loop.run for %q: %w", spec.Name, err)
+	}
+	if store == nil {
+		return nil
+	}
+	switch {
+	case payload.Done:
+		disableLoop(store, spec.Name, "done: "+payload.NextReason)
+	case payload.Outcome == journal.LoopOutcomeFailed:
+		if n, err := loops.ConsecutiveFailures(spec.Name); err == nil && n >= 3 {
+			disableLoop(store, spec.Name, "3 consecutive failures")
+		}
+	}
+	return nil
+}
+
+// disableLoop flips the named spec's Enabled to false and stamps
+// DisabledReason, via a fresh Store.Lookup so any other field a concurrent
+// writer (the web UI's create/edit) changed survives the rewrite — mirrors
+// handleSetLoopEnabled's lookup-flip-save shape (serve_loops.go). Best
+// effort: a lookup or save failure here is not surfaced as a
+// RunLoopFiring error (the firing itself already succeeded and is already
+// journaled) — it just leaves the loop enabled for the scheduler to
+// reconsider next tick.
+func disableLoop(store loops.Store, name, reason string) {
+	spec, err := store.Lookup(name)
+	if err != nil {
+		return
+	}
+	spec.Enabled = false
+	spec.DisabledReason = reason
+	_ = store.Save(spec)
 }
