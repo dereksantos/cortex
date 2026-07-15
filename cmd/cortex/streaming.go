@@ -37,6 +37,11 @@ type streamPrinter struct {
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
 	onStatus func(on bool, tail string)
+	// start is when the model call began — the base for the elapsed-seconds
+	// shown in the live "thinking… Ns · tail" label (onReasoning) and the
+	// turn-end "thought Ns · tok" stat (thoughtStat). Zero (test-constructed
+	// printers that skip it) reads as 0s rather than a nonsensical duration.
+	start time.Time
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -54,21 +59,41 @@ func reasoningTail(s string, width int) string {
 	return string(r)
 }
 
+// elapsedTail prefixes the reasoning tail with the whole seconds elapsed
+// since start, e.g. "12s · reasoning excerpt", or just "12s" before any
+// reasoning text has arrived. A zero start (a printer built without one, e.g.
+// tests) reads as 0s rather than a nonsensical multi-year duration.
+func elapsedTail(start time.Time, tail string) string {
+	secs := 0
+	if !start.IsZero() {
+		if d := time.Since(start); d > 0 {
+			secs = int(d.Seconds())
+		}
+	}
+	if tail == "" {
+		return fmt.Sprintf("%ds", secs)
+	}
+	return fmt.Sprintf("%ds · %s", secs, tail)
+}
+
 // onReasoning is the StreamChat reasoning callback: it feeds the spinner a dim
-// live tail of the chain-of-thought. Reasoning is never printed to the
-// transcript — once the answer starts, emit stops the spinner and the ticker is
-// erased. No-op after the answer has begun (or with no spinner, e.g. tests).
+// live tail of the chain-of-thought, prefixed with elapsed seconds so a long
+// deliberation reads as "thinking… 12s · …" rather than sitting silent.
+// Reasoning is never printed to the transcript — once the answer starts, emit
+// stops the spinner and the ticker is erased. No-op after the answer has
+// begun (or with no spinner, e.g. tests).
 func (p *streamPrinter) onReasoning(s string) {
 	if p.began {
 		return
 	}
 	p.reason.WriteString(s)
 	tail := reasoningTail(p.reason.String(), reasoningTailWidth)
+	et := elapsedTail(p.start, tail)
 	switch {
 	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking… "+tail, gray))
+		p.spinner.SetLabel(withColor("thinking… "+et, gray))
 	case p.onStatus != nil:
-		p.onStatus(true, tail)
+		p.onStatus(true, et)
 	}
 }
 
@@ -240,7 +265,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	// the anchor's pipe). Always streaming here (anchored mode requires it).
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
-		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking}
+		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking, start: time.Now()}
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.finish()
 		cs.live.SetThinking(false, "")
@@ -254,7 +279,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop()
 		return res, false, err
 	}
-	p := &streamPrinter{spinner: s, md: cs.markdown()}
+	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now()}
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 	p.finish()
 	if !p.began {
