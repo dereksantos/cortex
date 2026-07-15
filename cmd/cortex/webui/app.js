@@ -293,4 +293,4 @@ if (!authToken()) {
   renderNoTokenBanner();
 }
 loadDashboard();
-loadSession();\n
+loadSession();
