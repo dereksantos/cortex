@@ -46,7 +46,7 @@ func TestTurnStreamEndpointEmitsThinkingStartAndStop(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, reasoningTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -139,7 +139,7 @@ func TestTurnEndpointDoesNotStreamOrSignalThinking(t *testing.T) {
 		return cs
 	}
 	mgr := NewSessionManager(reg, factory)
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t))))
+	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
