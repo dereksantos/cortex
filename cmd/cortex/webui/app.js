@@ -1,43 +1,32 @@
 // Cortex web UI — fetch/render/SSE-append only (GOAL.md §3 P5). No
-// framework, no build step (D9); every screen talks only to the Phase 4
-// API, and rendering logic itself lives in the Go view-model builders
-// (cmd/cortex/webui*.go) — this file just fetches JSON and writes it into
-// the DOM.
-//
-// M5.3b — the dashboard screen: fetch('/api/dashboard') renders the
-// registered projects (name, git branch/change status, session list) into
-// the #dashboard container built by buildDashboardViewModel
-// (cmd/cortex/webui_dashboard.go).
-//
-// M5.3c2 — the session screen: fetch('/api/projects/{name}/sessions/{id}')
-// renders the transcript (buildTranscriptViewModel,
-// cmd/cortex/webui_transcript.go) into the #session container.
-//
-// M5.3c3 — the session screen's input box: a text field + submit button,
-// appended after the rendered transcript.
-//
-// M5.3c4 — live SSE progress: the input box now POSTs to
-// /api/projects/{name}/sessions/{id}/turn/stream (serve_stream.go) and
-// consumes the response via sse.js's streamSSE() helper, rendering
-// "progress" frames into the status span as they arrive and re-rendering
-// the transcript (loadSession() again) once the terminal "result" frame
-// lands — same "full re-fetch-and-rerender, not a client-side entry
-// append" posture M5.3c3 chose, just triggered by the SSE "result" event
-// instead of a single JSON response.
+// framework, no build step (D9); rendering logic lives in the Go
+// view-model builders (cmd/cortex/webui*.go) — this file just fetches JSON
+// and writes it into the DOM using the design-system classes from app.css
+// (adopted from the docs/cortex-web.md mockup). Screen switching
+// (projects/landscape/loops/models, plus the session screen reached via
+// ?project=&session=) is a query-param + class toggle via plain <a href>
+// navigation, not a router.
 
-// queryParam reads a single query-string parameter from the page URL — the
-// same window.location.search source authToken()'s "?token=" precedent
-// uses, generalized for "?project=<name>&session=<id>".
+// el creates an element, assigns props, and appends children (strings
+// become text nodes) — keeps the render functions below terse.
+function el(tag, props, children) {
+  const e = document.createElement(tag);
+  if (props) {
+    Object.assign(e, props);
+  }
+  for (const c of children || []) {
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+
+// queryParam reads a single query-string parameter from the page URL.
 function queryParam(name) {
   return new URLSearchParams(window.location.search).get(name) || "";
 }
 
-// authToken resolves the bearer token the API surface requires. A plain
-// browser navigation can't attach a custom Authorization header, so the
-// token rides in as a "?token=" query param on the page URL (the value
-// `cortex serve` prints and auto-opens). A tokened visit is REMEMBERED in
-// localStorage so later plain localhost visits keep working until the
-// token rotates (the Jupyter posture; see serve.go's resolveServeToken).
+// authToken resolves the bearer token: "?token=" on the page URL `cortex
+// serve` prints, remembered in localStorage so later plain visits work.
 function authToken() {
   const fromQuery = queryParam("token");
   if (fromQuery) {
@@ -58,19 +47,84 @@ function authToken() {
 // renderNoTokenBanner explains the one recoverable setup state — no token
 // anywhere — instead of letting every screen surface a raw 401.
 function renderNoTokenBanner() {
-  const banner = document.createElement("p");
-  banner.className = "no-token-banner";
-  banner.textContent =
-    "No access token — open this page via the URL `cortex serve` prints " +
-    "(it ends in ?token=…); the page remembers it afterwards.";
-  document.body.prepend(banner);
+  document.body.prepend(
+    el("p", {
+      className: "no-token-banner",
+      textContent:
+        "No access token — open this page via the URL `cortex serve` prints " +
+        "(it ends in ?token=…); the page remembers it afterwards.",
+    }),
+  );
 }
 
 // apiFetch issues an authenticated GET against the given /api/... path.
 function apiFetch(path) {
-  return fetch(path, {
-    headers: { Authorization: "Bearer " + authToken() },
-  });
+  return fetch(path, { headers: { Authorization: "Bearer " + authToken() } });
+}
+
+// activeScreen/showScreen are the entire "router": a query-param read plus
+// a class toggle on the matching #screen-* section and nav link.
+function activeScreen() {
+  if (queryParam("project") && queryParam("session")) {
+    return "session";
+  }
+  return queryParam("screen") || "projects";
+}
+
+function showScreen() {
+  const active = activeScreen();
+  document.querySelectorAll(".screen").forEach((s) => s.classList.toggle("active", s.dataset.screen === active));
+  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.screen === active));
+}
+
+// changeChip describes a project's git change/clean state for its card.
+function changeChip(p) {
+  const cls = p.change_error ? "bad" : p.active_change ? "amb" : p.clean ? "ok" : "mute";
+  const text = p.change_error
+    ? "change status: " + p.change_error
+    : p.active_change
+      ? "change open · " + p.branch
+      : p.clean
+        ? "clean · " + p.branch
+        : p.branch + " · dirty";
+  return el("span", { className: "chip " + cls, textContent: text });
+}
+
+// renderProjectCard builds one .pcard: name, root, change chip, session
+// count + link, and a session list linking into the session screen.
+function renderProjectCard(p) {
+  const sessions = p.sessions || [];
+  const top = el("div", { className: "pcard-top" }, [
+    el("span", { className: "pname", textContent: p.name }),
+    changeChip(p),
+    el("span", { className: "path", textContent: p.root }),
+  ]);
+
+  const metaKids = [el("span", { textContent: sessions.length + " session" + (sessions.length === 1 ? "" : "s") })];
+  if (sessions.length > 0) {
+    metaKids.push(
+      el("a", {
+        className: "btn primary",
+        href: "?project=" + encodeURIComponent(p.name) + "&session=" + encodeURIComponent(sessions[0].id),
+        textContent: "Open session",
+      }),
+    );
+  }
+  const card = el("div", { className: "pcard" }, [top, el("div", { className: "pmeta" }, metaKids)]);
+
+  if (sessions.length > 0) {
+    const items = sessions.map((s) =>
+      el("li", {}, [
+        el("a", {
+          href: "?project=" + encodeURIComponent(p.name) + "&session=" + encodeURIComponent(s.id),
+          textContent: s.id,
+        }),
+        el("span", { className: "dim", textContent: " · " + s.messages + " msgs" }),
+      ]),
+    );
+    card.appendChild(el("ul", { className: "psessions" }, items));
+  }
+  return card;
 }
 
 // renderDashboard writes a dashboard view-model (dashboardViewModel's JSON
@@ -80,44 +134,10 @@ function apiFetch(path) {
 function renderDashboard(vm, container) {
   container.textContent = "";
   if (!vm.projects || vm.projects.length === 0) {
-    const empty = document.createElement("p");
-    empty.textContent = "No registered projects yet.";
-    container.appendChild(empty);
+    container.appendChild(el("p", { className: "empty-note", textContent: "No registered projects yet." }));
     return;
   }
-
-  const list = document.createElement("ul");
-  for (const p of vm.projects) {
-    const row = document.createElement("li");
-
-    const name = document.createElement("strong");
-    name.textContent = p.name;
-    row.appendChild(name);
-
-    const root = document.createElement("span");
-    root.textContent = " (" + p.root + ")";
-    row.appendChild(root);
-
-    const status = document.createElement("div");
-    if (p.change_error) {
-      status.textContent = "change status: " + p.change_error;
-    } else {
-      status.textContent =
-        "branch " +
-        p.branch +
-        (p.active_change ? " · active change" : "") +
-        (p.clean ? " · clean" : " · dirty");
-    }
-    row.appendChild(status);
-
-    const sessions = document.createElement("div");
-    const count = p.sessions ? p.sessions.length : 0;
-    sessions.textContent = count + " session" + (count === 1 ? "" : "s");
-    row.appendChild(sessions);
-
-    list.appendChild(row);
-  }
-  container.appendChild(list);
+  container.appendChild(el("div", { className: "cards" }, vm.projects.map(renderProjectCard)));
 }
 
 function loadDashboard() {
@@ -138,71 +158,65 @@ function loadDashboard() {
     });
 }
 
-// renderSession writes a transcript view-model (transcriptViewModel's JSON
-// shape) into the #session container via plain DOM writes — textContent
-// only, never innerHTML with response data, matching renderDashboard's
-// posture (transcript content is untrusted-ish local turn history).
-function renderSession(vm, container) {
-  container.textContent = "";
-
-  const heading = document.createElement("h2");
-  heading.textContent = "Session " + vm.session_id;
-  container.appendChild(heading);
-
-  if (!vm.entries || vm.entries.length === 0) {
-    const empty = document.createElement("p");
-    empty.textContent = "No turns yet.";
-    container.appendChild(empty);
-    return;
+// renderEntry appends one transcript entry as a .msg bubble, plus a
+// .toolfeed block naming any tool calls it carries.
+function renderEntry(container, e) {
+  const cls = e.role === "assistant" ? "agent" : e.role === "tool" ? "tool" : "user";
+  container.appendChild(
+    el("div", { className: "msg " + cls }, [
+      el("div", { className: "who", textContent: e.role }),
+      el("div", { className: "bubble", textContent: e.content }),
+    ]),
+  );
+  if (e.tool_calls && e.tool_calls.length > 0) {
+    const lines = e.tool_calls.map((tc) =>
+      el("div", {}, [el("span", { className: "t", textContent: tc.name }), " " + tc.args]),
+    );
+    container.appendChild(el("div", { className: "toolfeed" }, lines));
   }
-
-  const list = document.createElement("ul");
-  for (const e of vm.entries) {
-    const row = document.createElement("li");
-
-    const role = document.createElement("strong");
-    role.textContent = e.role + ": ";
-    row.appendChild(role);
-
-    const content = document.createElement("span");
-    content.textContent = e.content;
-    row.appendChild(content);
-
-    if (e.tool_calls && e.tool_calls.length > 0) {
-      const tools = document.createElement("div");
-      tools.textContent =
-        "tools: " + e.tool_calls.map((tc) => tc.name).join(", ");
-      row.appendChild(tools);
-    }
-
-    list.appendChild(row);
-  }
-  container.appendChild(list);
 }
 
-// renderTurnInput appends a text field + submit button to the #session
-// container for posting a new turn (M5.3c3). Kept separate from
-// renderSession, which is driven purely by the transcript view-model and
-// has no notion of producing new turns — renderSession clears and rebuilds
-// the container on every load, so this is called AFTER it on each render
-// rather than lived as static markup in index.html.
+// renderSession writes a transcript view-model (transcriptViewModel's JSON
+// shape) into the #session container via plain DOM writes — textContent
+// only, never innerHTML with response data (transcript content is
+// untrusted-ish local turn history).
+function renderSession(vm, container) {
+  container.textContent = "";
+  container.appendChild(
+    el("div", { className: "sess-head" }, [
+      el("span", { className: "crumb" }, ["session ", el("b", { textContent: vm.session_id })]),
+    ]),
+  );
+  if (!vm.entries || vm.entries.length === 0) {
+    container.appendChild(el("p", { className: "empty-note", textContent: "No turns yet." }));
+    return;
+  }
+  for (const e of vm.entries) {
+    renderEntry(container, e);
+  }
+}
+
+// renderTurnInput appends a .composer text field + submit button to the
+// #session container for posting a new turn, called AFTER renderSession
+// on every render since renderSession clears and rebuilds the container.
 function renderTurnInput(container, project, session) {
   const form = document.createElement("form");
+  form.className = "composer";
   form.id = "turn-form";
 
   const input = document.createElement("input");
   input.type = "text";
   input.id = "turn-input";
-  input.placeholder = "Say something…";
+  input.placeholder = "Message cortex…";
   form.appendChild(input);
 
   const button = document.createElement("button");
   button.type = "submit";
+  button.className = "btn primary";
   button.textContent = "Send";
   form.appendChild(button);
 
-  const status = document.createElement("span");
-  status.id = "turn-status";
+  const status = el("span", { className: "status-text", id: "turn-status" });
   form.appendChild(status);
 
   form.addEventListener("submit", (ev) => {
@@ -214,17 +228,10 @@ function renderTurnInput(container, project, session) {
     status.textContent = "Sending…";
     button.disabled = true;
     fetch(
-      "/api/projects/" +
-        encodeURIComponent(project) +
-        "/sessions/" +
-        encodeURIComponent(session) +
-        "/turn/stream",
+      "/api/projects/" + encodeURIComponent(project) + "/sessions/" + encodeURIComponent(session) + "/turn/stream",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + authToken(),
-        },
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
         body: JSON.stringify({ input: text }),
       },
     )
@@ -256,10 +263,8 @@ function renderTurnInput(container, project, session) {
   container.appendChild(form);
 }
 
-// loadSession no-ops when the #session container is absent (dashboard-only
-// pages) or the ?project=/&session= query params aren't both present —
-// this screen is reached by navigating with those params set, following
-// authToken()'s ?token= precedent (no router/framework, per D9).
+// loadSession no-ops when the #session container is absent or the
+// ?project=/&session= query params aren't both present.
 function loadSession() {
   const container = document.getElementById("session");
   const project = queryParam("project");
@@ -268,12 +273,7 @@ function loadSession() {
     return;
   }
   container.textContent = "Loading session…";
-  apiFetch(
-    "/api/projects/" +
-      encodeURIComponent(project) +
-      "/sessions/" +
-      encodeURIComponent(session),
-  )
+  apiFetch("/api/projects/" + encodeURIComponent(project) + "/sessions/" + encodeURIComponent(session))
     .then((resp) => {
       if (!resp.ok) {
         throw new Error("GET session: " + resp.status);
@@ -292,5 +292,6 @@ function loadSession() {
 if (!authToken()) {
   renderNoTokenBanner();
 }
+showScreen();
 loadDashboard();
 loadSession();

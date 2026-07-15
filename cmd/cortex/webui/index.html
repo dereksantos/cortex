@@ -6,14 +6,33 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <div id="app">
-    <h1>Cortex</h1>
-    <div id="dashboard">Loading projects…</div>
-    <div id="session"></div>
-    <div id="landscape"></div>
-    <div id="models"></div>
-    <div id="loops"></div>
+  <div class="topbar">
+    <span class="wordmark">cortex</span>
+    <nav class="nav" id="nav">
+      <a href="?screen=projects" data-screen="projects">projects</a>
+      <a href="?screen=landscape" data-screen="landscape">landscape</a>
+      <a href="?screen=loops" data-screen="loops">loops</a>
+      <a href="?screen=models" data-screen="models">models</a>
+    </nav>
+    <span class="serve"><span class="pulse"></span> serve</span>
   </div>
+  <main class="body" id="app">
+    <section class="screen" id="screen-projects" data-screen="projects">
+      <div id="dashboard">Loading projects…</div>
+    </section>
+    <section class="screen" id="screen-session" data-screen="session">
+      <div id="session"></div>
+    </section>
+    <section class="screen" id="screen-landscape" data-screen="landscape">
+      <div id="landscape"></div>
+    </section>
+    <section class="screen" id="screen-loops" data-screen="loops">
+      <div id="loops"></div>
+    </section>
+    <section class="screen" id="screen-models" data-screen="models">
+      <div id="models"></div>
+    </section>
+  </main>
   <script src="/sse.js"></script>
   <script src="/app.js"></script>
   <script src="/landscape.js"></script>
