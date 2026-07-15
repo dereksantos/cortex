@@ -317,6 +317,9 @@ func assembleStreamResponse(res llm.StreamResult) *AgentResponse {
 			PromptTokensDetails: &promptTokensDetails{
 				CachedTokens: res.Stats.CachedInputTokens,
 			},
+			CompletionTokensDetails: &completionTokensDetails{
+				ReasoningTokens: res.Stats.ReasoningTokens,
+			},
 		},
 	}
 }
@@ -353,11 +356,21 @@ type Usage struct {
 	// elsewhere). cached_tokens out of prompt_tokens were served from cache —
 	// the direct measure of the two-zone layout's prefix stability.
 	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	// CompletionTokensDetails carries a reasoning model's token split: how
+	// many of CompletionTokens were spent on chain-of-thought vs the visible
+	// answer. Absent (nil) on backends/models that don't report it.
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // promptTokensDetails is the OpenAI-compatible usage sub-object.
 type promptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// completionTokensDetails is the OpenAI-compatible usage sub-object carrying
+// a reasoning model's token split.
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // CachedPromptTokens returns the provider-reported cached prompt tokens, or 0
@@ -367,6 +380,15 @@ func (u Usage) CachedPromptTokens() int {
 		return 0
 	}
 	return u.PromptTokensDetails.CachedTokens
+}
+
+// ReasoningTokens returns the provider-reported reasoning-token count, or 0
+// when the backend doesn't report it.
+func (u Usage) ReasoningTokens() int {
+	if u.CompletionTokensDetails == nil {
+		return 0
+	}
+	return u.CompletionTokensDetails.ReasoningTokens
 }
 
 // Choice represents the model response(s).

@@ -41,6 +41,10 @@ type GenerationStats struct {
 	InputTokens       int `json:"input_tokens"`
 	OutputTokens      int `json:"output_tokens"`
 	CachedInputTokens int `json:"cached_input_tokens,omitempty"`
+	// ReasoningTokens is how many of OutputTokens a reasoning model spent on
+	// chain-of-thought (completion_tokens_details.reasoning_tokens), as
+	// opposed to the visible answer. Zero when the backend doesn't report it.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 	// CostUSD is the request's dollar cost when the backend reports it
 	// (OpenRouter with usage accounting); zero otherwise.
 	CostUSD float64 `json:"cost_usd,omitempty"`

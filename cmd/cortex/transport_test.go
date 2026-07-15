@@ -84,6 +84,65 @@ func TestChoiceReasoningParsedFromBlockingResponse(t *testing.T) {
 	}
 }
 
+// TestUsageReasoningTokens covers item 2's blocking-path parity: a reasoning
+// model's completion_tokens_details.reasoning_tokens usage sub-field,
+// mirroring the existing prompt_tokens_details.cached_tokens handling.
+func TestUsageReasoningTokens(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantReasoning int
+	}{
+		{
+			name:          "reasoning_tokens reported",
+			body:          `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":37}}}`,
+			wantReasoning: 37,
+		},
+		{
+			name:          "completion_tokens_details absent: zero",
+			body:          `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":50}}`,
+			wantReasoning: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := blockingServer(t, tt.body)
+			defer srv.Close()
+
+			res, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background())
+			if err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if got := res.Usage.ReasoningTokens(); got != tt.wantReasoning {
+				t.Errorf("Usage.ReasoningTokens() = %d, want %d", got, tt.wantReasoning)
+			}
+		})
+	}
+}
+
+// TestSendStreamReasoningTokenUsage proves the streaming path's assembled
+// AgentResponse carries the reasoning-token usage split through
+// assembleStreamResponse.
+func TestSendStreamReasoningTokenUsage(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","content":"hi"}}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":50,"completion_tokens_details":{"reasoning_tokens":37}}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n\n")
+	srv := httptest.NewServer(sseHandler(body))
+	defer srv.Close()
+
+	req := &AgentRequest{Model: "m", BaseURL: srv.URL}
+	res, err := req.SendStream(context.Background(), nil, nil)
+	if err != nil {
+		t.Fatalf("SendStream: %v", err)
+	}
+	if got := res.Usage.ReasoningTokens(); got != 37 {
+		t.Errorf("Usage.ReasoningTokens() = %d, want 37", got)
+	}
+}
+
 // TestChoiceReasoningNeverRoundTrips is the design-constraint test: whatever
 // reasoning the blocking path parses off the wire must never come back out
 // when the stored Message is marshaled again — not as fence bytes left in

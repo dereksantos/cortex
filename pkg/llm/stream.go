@@ -147,10 +147,15 @@ func StreamChat(ctx context.Context, hc *http.Client, url, apiKey string, body [
 						if chunk.Usage.PromptDetails != nil {
 							cached = chunk.Usage.PromptDetails.CachedTokens
 						}
+						reasoningTok := 0
+						if chunk.Usage.CompletionDetails != nil {
+							reasoningTok = chunk.Usage.CompletionDetails.ReasoningTokens
+						}
 						res.Stats = GenerationStats{
 							InputTokens:       chunk.Usage.PromptTokens,
 							OutputTokens:      chunk.Usage.CompletionTokens,
 							CachedInputTokens: cached,
+							ReasoningTokens:   reasoningTok,
 							CostUSD:           chunk.Usage.Cost,
 						}
 					}

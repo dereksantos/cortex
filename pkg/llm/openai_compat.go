@@ -262,10 +262,11 @@ type compatChoice struct {
 }
 
 type compatUsage struct {
-	PromptTokens     int                  `json:"prompt_tokens"`
-	CompletionTokens int                  `json:"completion_tokens"`
-	TotalTokens      int                  `json:"total_tokens"`
-	PromptDetails    *compatPromptDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens      int                      `json:"prompt_tokens"`
+	CompletionTokens  int                      `json:"completion_tokens"`
+	TotalTokens       int                      `json:"total_tokens"`
+	PromptDetails     *compatPromptDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionDetails *compatCompletionDetails `json:"completion_tokens_details,omitempty"`
 	// Cost is the request's dollar cost, returned by OpenRouter when the request
 	// sets usage:{include:true}. Zero for backends that don't report it.
 	Cost float64 `json:"cost"`
@@ -273,6 +274,13 @@ type compatUsage struct {
 
 type compatPromptDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+}
+
+// compatCompletionDetails carries a reasoning model's token split: how many
+// of CompletionTokens were spent on chain-of-thought vs the visible answer.
+// Absent (nil) on backends/models that don't report it.
+type compatCompletionDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // Attribution headers identify Cortex to OpenRouter (used for app rankings and
