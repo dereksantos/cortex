@@ -29,6 +29,17 @@ type progressEvent struct {
 	Line string `json:"line"`
 }
 
+// thinkingEvent is the SSE "thinking" event payload: Active=true when the
+// model starts deliberating (its first reasoning delta), Active=false once
+// its answer content starts (or the call ends without any). Never carries
+// the reasoning text itself — a served (quiet) session has nowhere to print
+// a live ticker, so this is the web UI's only signal that something is
+// happening instead of dead air (see CortexSession.onThinking, streaming.go's
+// sendQuietObserved).
+type thinkingEvent struct {
+	Active bool `json:"active"`
+}
+
 // sseEvent writes one Server-Sent Event (an "event:" line naming the type, a
 // "data:" line carrying JSON, and the blank line that closes it) and flushes
 // so the client sees it immediately rather than buffered behind later
@@ -97,6 +108,17 @@ func handleTurnStream(mgr *SessionManager) http.HandlerFunc {
 		progress := func(line string) {
 			_ = sseEvent(w, flusher, "progress", progressEvent{Line: line})
 		}
+
+		// Wired only for the duration of this request: ms.cs.send() (quiet
+		// path, streaming.go) calls this on the reasoning/content transition
+		// so the web UI sees a "thinking" event instead of dead air while the
+		// model deliberates. Cleared unconditionally after so a later request
+		// against the same live session never fires into this request's
+		// closed response writer.
+		ms.cs.onThinking = func(active bool) {
+			_ = sseEvent(w, flusher, "thinking", thinkingEvent{Active: active})
+		}
+		defer func() { ms.cs.onThinking = nil }()
 
 		result, err := ms.cs.TurnWithProgress(r.Context(), body.Input, progress)
 		if err != nil {

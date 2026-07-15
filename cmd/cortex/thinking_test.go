@@ -1,10 +1,77 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestSendQuietObservedSignalsThinkingOnOff covers item 6's transport-level
+// piece: cs.send() in quiet mode with onThinking set streams instead of
+// blocking, and calls onThinking(true) on the first reasoning delta,
+// onThinking(false) once content starts — exactly once each, never
+// forwarding the reasoning/content text itself.
+func TestSendQuietObservedSignalsThinkingOnOff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","reasoning_content":"thinking "}}]}`,
+			`{"choices":[{"delta":{"reasoning_content":"some more"}}]}`,
+			`{"choices":[{"delta":{"content":"the answer"},"finish_reason":"stop"}]}`,
+		)))
+	}))
+	defer srv.Close()
+
+	var calls []bool
+	cs := &CortexSession{
+		quiet:      true,
+		Request:    CortexArgs{}.Request(),
+		onThinking: func(active bool) { calls = append(calls, active) },
+	}
+	cs.Request.BaseURL = srv.URL
+
+	res, streamed, err := cs.send(context.Background())
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if streamed {
+		t.Error("streamed = true, want false (quiet mode never echoes to a terminal)")
+	}
+	if len(res.Choices) == 0 || res.Choices[0].Message.Content != "the answer" {
+		t.Errorf("reply = %+v, want content %q", res.Choices, "the answer")
+	}
+	if want := []bool{true, false}; len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+		t.Errorf("onThinking calls = %v, want %v", calls, want)
+	}
+}
+
+// TestSendQuietWithoutOnThinkingStaysBlocking: a quiet session with no
+// onThinking hook (every non-served session, and a served session outside
+// handleTurnStream) must not switch transport — proven by a backend that
+// only serves a single blocking JSON body with no SSE framing.
+func TestSendQuietWithoutOnThinkingStaysBlocking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
+	cs.Request.BaseURL = srv.URL
+
+	res, streamed, err := cs.send(context.Background())
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if streamed {
+		t.Error("streamed = true, want false")
+	}
+	if len(res.Choices) == 0 || res.Choices[0].Message.Content != "ok" {
+		t.Errorf("reply = %+v, want content %q (blocking Send parsed the plain JSON body)", res.Choices, "ok")
+	}
+}
 
 // resWithoutTools builds an assistant response with no tool calls — the
 // "answered directly, took a while to think first" case thoughtStat targets.

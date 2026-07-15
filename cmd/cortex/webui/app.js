@@ -156,6 +156,9 @@ function renderTurnInput(container, project, session) {
           throw new Error("POST turn/stream: " + resp.status);
         }
         return streamSSE(resp, {
+          thinking: (payload) => {
+            status.textContent = payload.active ? "Thinking…" : "";
+          },
           progress: (payload) => {
             status.textContent = payload.line;
           },

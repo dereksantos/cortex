@@ -313,9 +313,17 @@ func collapseLine(s string, cap int) string {
 // is fully stopped and the line is clean before this returns.
 func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed bool, err error) {
 	// Headless: no spinner, no live token echo — the caller reads the reply
-	// from TurnResult and owns all output.
+	// from TurnResult and owns all output. Plain blocking Send, UNLESS a
+	// served session has wired onThinking (serve_stream.go) to signal the web
+	// UI while it deliberates — then stream instead so the reasoning/content
+	// transition is observable, still without printing anything to a
+	// terminal that doesn't exist.
 	if cs.quiet {
-		res, err = cs.Request.Send(ctx)
+		if cs.onThinking == nil {
+			res, err = cs.Request.Send(ctx)
+			return res, false, err
+		}
+		res, err = cs.sendQuietObserved(ctx)
 		return res, false, err
 	}
 	// Anchored REPL: no standalone spinner — the "thinking" indicator lives on
@@ -347,6 +355,34 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
 	p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
 	return res, true, err
+}
+
+// sendQuietObserved runs one model call over SSE with no terminal echo at
+// all (quiet mode), but throttles cs.onThinking(true)/(false) around the
+// reasoning phase: true on the first reasoning delta, false once answer
+// content starts (or once, at the end, if the call produced reasoning but no
+// content — e.g. a tool-call-only step). Never forwards the reasoning or
+// content text itself, only the on/off transition — see docs on
+// CortexSession.onThinking (session_core.go).
+func (cs *CortexSession) sendQuietObserved(ctx context.Context) (*AgentResponse, error) {
+	thinking := false
+	onReasoning := func(string) {
+		if !thinking {
+			thinking = true
+			cs.onThinking(true)
+		}
+	}
+	onContent := func(string) {
+		if thinking {
+			thinking = false
+			cs.onThinking(false)
+		}
+	}
+	res, err := cs.Request.SendStream(ctx, onContent, onReasoning)
+	if thinking {
+		cs.onThinking(false)
+	}
+	return res, err
 }
 
 // runAnchoredTurn runs one turn with the prompt pinned to the bottom row and

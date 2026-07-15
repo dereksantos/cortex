@@ -56,7 +56,7 @@ func TestSessionScreenAppJSHandlesProgressResultAndErrorEvents(t *testing.T) {
 		t.Fatalf("ReadFile(app.js): %v", err)
 	}
 	src := string(data)
-	for _, event := range []string{"progress", "result", "error"} {
+	for _, event := range []string{"thinking", "progress", "result", "error"} {
 		if !strings.Contains(src, event+":") {
 			t.Errorf("app.js does not register a %q SSE event handler", event)
 		}
