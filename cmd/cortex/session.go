@@ -561,6 +561,9 @@ func (cs *CortexSession) Clear() {
 	cs.Request.BaseURL = old.BaseURL
 	cs.Request.APIKey = old.APIKey
 	cs.Request.ChatTemplateKwargs = old.ChatTemplateKwargs
+	cs.Request.Reasoning = old.Reasoning
+	cs.Request.Dialect = old.Dialect
+	cs.Request.Effort = old.Effort
 	cs.Request.MaxTokens = old.MaxTokens
 	cs.ws = cs.newWorkingSet(1)
 	cs.outline = nil

@@ -69,6 +69,21 @@ type AgentRequest struct {
 	// Usage opts into OpenRouter's cost reporting (usage:{include:true}); set
 	// only for OpenRouter so local backends never see an unknown field.
 	Usage *usageInclude `json:"usage,omitempty"`
+	// Reasoning is OpenRouter's request-body `reasoning: {...}` field
+	// (docs/thinking-models.md §2); set only for OpenRouter, mirroring how
+	// Usage above is OpenRouter-only — local backends speak
+	// ChatTemplateKwargs instead (see llm.Translate).
+	Reasoning *llm.Reasoning `json:"reasoning,omitempty"`
+
+	// Dialect and Effort are wire-invisible (json:"-"): which provider
+	// dialect this request's effort fields were translated for, and the
+	// resolved Effort itself. Recorded by applyEffort (effort.go) so a later
+	// in-flight mutation (disableEffortForSend, escalateEffortOnce) can
+	// recompute the SAME dialect's wire fields for a one-shot override,
+	// rather than inferring the dialect from which field happens to be set
+	// (an OpenRouter request with effort "on" leaves Reasoning nil too).
+	Dialect llm.Dialect `json:"-"`
+	Effort  llm.Effort  `json:"-"`
 }
 
 // usageInclude is OpenRouter's request-side flag to return dollar cost in the

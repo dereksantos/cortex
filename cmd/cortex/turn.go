@@ -128,7 +128,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 		maxIter = maxIterOverride
 	}
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
-	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget}
+	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not
 	// just interactively): the transcript otherwise has no record of how far

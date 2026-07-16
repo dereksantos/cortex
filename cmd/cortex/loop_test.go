@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 var errFake = errors.New("fake send failure")
@@ -519,7 +520,7 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 	defer srv.Close()
 
 	cs := &CortexSession{}
-	req := requestFor(ModelSpec{Model: "m", Endpoint: srv.URL}, "sys", "seed", []Tool{tools.ReadFile}, 1000)
+	req := requestFor(ModelSpec{Model: "m", Endpoint: srv.URL}, "sys", "seed", []Tool{tools.ReadFile}, 1000, llm.DialectTemplateKwargs)
 	var seen []string
 	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
 		seen = append(seen, c.Function.Name)
@@ -554,13 +555,13 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 func TestRequestForSetsMaxTokens(t *testing.T) {
 	spec := ModelSpec{Model: "m", Endpoint: "http://x"}
 	t.Run("explicit", func(t *testing.T) {
-		r := requestFor(spec, "sys", "seed", nil, 5000)
+		r := requestFor(spec, "sys", "seed", nil, 5000, llm.DialectTemplateKwargs)
 		if r.MaxTokens != 5000 {
 			t.Errorf("max_tokens = %d, want 5000", r.MaxTokens)
 		}
 	})
 	t.Run("fallback when zero", func(t *testing.T) {
-		r := requestFor(spec, "sys", "seed", nil, 0)
+		r := requestFor(spec, "sys", "seed", nil, 0, llm.DialectTemplateKwargs)
 		if r.MaxTokens <= 0 {
 			t.Errorf("max_tokens = %d, want a positive fallback (never unbounded)", r.MaxTokens)
 		}
@@ -569,17 +570,17 @@ func TestRequestForSetsMaxTokens(t *testing.T) {
 		}
 	})
 	t.Run("role override", func(t *testing.T) {
-		r := requestFor(ModelSpec{Model: "m", MaxTokens: 4321}, "sys", "seed", nil, 0)
+		r := requestFor(ModelSpec{Model: "m", MaxTokens: 4321}, "sys", "seed", nil, 0, llm.DialectTemplateKwargs)
 		if r.MaxTokens != 4321 {
 			t.Errorf("max_tokens = %d, want role override 4321", r.MaxTokens)
 		}
 	})
 	t.Run("temperature default and override", func(t *testing.T) {
-		if got := requestFor(spec, "sys", "seed", nil, 0).Temperature; got != defaultTemperature {
+		if got := requestFor(spec, "sys", "seed", nil, 0, llm.DialectTemplateKwargs).Temperature; got != defaultTemperature {
 			t.Errorf("temperature = %v, want default %v", got, defaultTemperature)
 		}
 		temp := 0.25
-		if got := requestFor(ModelSpec{Model: "m", Temperature: &temp}, "sys", "seed", nil, 0).Temperature; got != temp {
+		if got := requestFor(ModelSpec{Model: "m", Temperature: &temp}, "sys", "seed", nil, 0, llm.DialectTemplateKwargs).Temperature; got != temp {
 			t.Errorf("temperature = %v, want override %v", got, temp)
 		}
 	})
@@ -631,4 +632,323 @@ func TestSenderCancelClosesConnection(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Send did not return promptly after cancel — ctx not threaded into the HTTP request")
 	}
+}
+
+// TestDeliberationClamped covers the P4 detection function
+// (docs/thinking-models.md §4): finish_reason "length" AND either the
+// reasoning/completion split shows reasoning dominated (>= 80%), or —
+// unreported — empty content with a non-empty reasoning trace.
+func TestDeliberationClamped(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *AgentResponse
+		want bool
+	}{
+		{
+			name: "length finish, reasoning dominates the split: clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "a partial an"}}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 90}},
+			},
+			want: true,
+		},
+		{
+			name: "length finish, reasoning below the fraction: not clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "a long finished answer"}}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 10}},
+			},
+			want: false,
+		},
+		{
+			name: "length finish, no split reported, empty content + reasoning trace: clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Reasoning: "still thinking about it"}},
+				Usage:   Usage{CompletionTokens: 100},
+			},
+			want: true,
+		},
+		{
+			name: "length finish, no split reported, content present: not clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "an answer"}, Reasoning: "some reasoning"}},
+				Usage:   Usage{CompletionTokens: 100},
+			},
+			want: false,
+		},
+		{
+			name: "finish_reason stop: never clamped regardless of usage",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "stop"}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 99}},
+			},
+			want: false,
+		},
+		{
+			name: "no choices: false",
+			res:  &AgentResponse{Choices: nil},
+			want: false,
+		},
+		{
+			name: "nil response: false",
+			res:  nil,
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deliberationClamped(tt.res); got != tt.want {
+				t.Errorf("deliberationClamped() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSalvageDisablesEffortOnDeliberationClamp covers P4's detection wiring:
+// a deliberation-clamped forced finalize is attributed on stats
+// (DeliberationClamped) and the salvage re-ask goes out effort-off,
+// restoring afterward (the same one-shot pattern as the existing
+// temperature jitter). P5a (TestFinalizeSendsAlwaysGoEffortOff below)
+// generalizes the effort-off mutation itself to EVERY finalize/salvage send
+// unconditionally, so this test's own assertions no longer distinguish
+// "clamped" from "not" for the mutation — only for the DeliberationClamped
+// attribution, which stays meaningful for eval/telemetry purposes.
+func TestSalvageDisablesEffortOnDeliberationClamp(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	var salvageSawEffortOff bool
+	var finalizes int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil {
+			finalizes++
+			if finalizes == 1 {
+				// The forced finalize round itself hits the deliberation-clamp
+				// signature: length finish, reasoning ate ~90% of the completion,
+				// empty visible content.
+				return &AgentResponse{
+					Choices: []Choice{{FinishReason: "length", Message: Message{Content: ""}}},
+					Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 90}},
+				}, false, nil
+			}
+			// The salvage re-ask: observe the wire fields it was actually sent with.
+			salvageSawEffortOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		}
+		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "salvaged answer" {
+		t.Errorf("content = %q, want salvaged answer", content)
+	}
+	if !stats.DeliberationClamped {
+		t.Error("stats.DeliberationClamped = false, want true")
+	}
+	if !salvageSawEffortOff {
+		t.Error("the salvage re-ask did not go out with effort off")
+	}
+	if req.Effort.Level != llm.EffortOn {
+		t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+	}
+}
+
+// TestFinalizeSendsAlwaysGoEffortOff covers P5a: docs/thinking-models.md §5
+// generalizes P4's clamp-gated salvage fix to EVERY finalize send
+// (tools withheld), unconditionally — including the primary finalizeLoop ask
+// itself, which P4 never touched, and a salvage re-ask that follows a
+// perfectly healthy (non-deliberation) clamp. Effort is always restored to
+// its pre-finalize value once runLoop returns.
+func TestFinalizeSendsAlwaysGoEffortOff(t *testing.T) {
+	t.Run("the primary finalize ask goes out effort-off with no clamp involved at all", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+		var finalizeSawEffortOff bool
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizeSawEffortOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+				return fakeResp("a clean forced answer", nil, 1, 10), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, _, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 1}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "a clean forced answer" {
+			t.Errorf("content = %q, want a clean forced answer", content)
+		}
+		if !finalizeSawEffortOff {
+			t.Error("the primary finalize ask did not go out with effort off")
+		}
+		if req.Effort.Level != llm.EffortOn {
+			t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+		}
+	})
+
+	t.Run("a non-deliberation clamp's salvage re-ask ALSO goes out effort-off now", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+		var salvageEffort llm.Effort
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizes++
+				if finalizes == 1 {
+					// Clamped (out == MaxTokens) but NOT a deliberation clamp: no
+					// finish_reason "length", no reasoning-token report.
+					return fakeResp("a verbose but non-empty answer", nil, 1, 100), false, nil
+				}
+				salvageEffort = r.Effort
+				return fakeResp("concise answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "concise answer" {
+			t.Errorf("content = %q, want concise answer", content)
+		}
+		if stats.DeliberationClamped {
+			t.Error("stats.DeliberationClamped = true, want false (no length finish_reason) — attribution stays narrow")
+		}
+		if salvageEffort.Level != llm.EffortOff {
+			t.Errorf("salvage re-ask effort = %+v, want off (P5a: every finalize send, unconditionally)", salvageEffort)
+		}
+		if req.Effort.Level != llm.EffortOn {
+			t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+		}
+	})
+}
+
+// stuckErrorScripted builds the scripted stuck-error-loop Sender +
+// Dispatch shared by the escalation tests below: it alternates a failing
+// edit_file (always "…identical; nothing to change") with a succeeding
+// read_file, driving the SAME recurring-error-class path
+// TestRunLoopDetectsStuckErrorLoop exercises, and records the Effort level
+// each tool-call round (req.Tools != nil) actually sent.
+func stuckErrorScripted(observed *[]llm.EffortLevel) (Sender, AgentDispatcher) {
+	var i int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // finalize round
+			return fakeResp("gave up", nil, 1, 1), false, nil
+		}
+		*observed = append(*observed, r.Effort.Level)
+		if i++; i%2 == 1 {
+			return fakeResp("", []ToolCall{{ID: "e", Type: "function", Function: FunctionCall{
+				Name: tools.FunctionEditFile, Arguments: `{"path":"x"}`}}}, 1, 1), false, nil
+		}
+		return fakeResp("", []ToolCall{readCall("r", "x")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
+		if c.Function.Name == tools.FunctionEditFile {
+			return "Error: x edit 1: old_string and new_string are identical; nothing to change"
+		}
+		return "@x:1-5 lines"
+	})
+	return send, disp
+}
+
+// TestStuckGuardEscalatesEffortOnce covers P5c: opt-in (Bounds.EscalateEffort,
+// mirroring tools.enable_effort_escalation) one-shot effort escalation
+// alongside the stuck guard's existing temperature jitter. Off by default
+// (the zero value): the same scripted stuck run leaves effort untouched
+// unless EscalateEffort is set. When set, exactly the one post-redirect
+// re-sample carries the escalated "high" effort, and it's restored
+// immediately after — same one-shot pattern as the temperature jitter it
+// rides alongside. An explicitly suppressed effort (off) never escalates —
+// the redirect must not override a role's "don't reason" policy.
+func TestStuckGuardEscalatesEffortOnce(t *testing.T) {
+	t.Run("disabled by default: effort untouched through a stuck run", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var observed []llm.EffortLevel
+		send, disp := stuckErrorScripted(&observed)
+		_, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 12}, nil, appendMsg, nil) // EscalateEffort left false
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if stats.StopReason != "stuck" {
+			t.Fatalf("stop = %q, want stuck", stats.StopReason)
+		}
+		for i, lvl := range observed {
+			if lvl != llm.EffortOn {
+				t.Errorf("round %d effort = %q, want on (escalation disabled)", i, lvl)
+			}
+		}
+	})
+
+	t.Run("enabled: exactly the post-redirect re-sample escalates to high, then restores", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var observed []llm.EffortLevel
+		send, disp := stuckErrorScripted(&observed)
+		_, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 12, EscalateEffort: true}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if stats.StopReason != "stuck" {
+			t.Fatalf("stop = %q, want stuck", stats.StopReason)
+		}
+		highCount := 0
+		for _, lvl := range observed {
+			if lvl == llm.EffortHigh {
+				highCount++
+			} else if lvl != llm.EffortOn {
+				t.Errorf("unexpected effort level observed: %q", lvl)
+			}
+		}
+		if highCount != 1 {
+			t.Errorf("high-effort rounds = %d, want exactly 1 (one-shot)", highCount)
+		}
+		if req.Effort.Level != llm.EffortOn {
+			t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+		}
+	})
+
+	t.Run("an explicitly off effort never escalates, even when enabled", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+		var observed []llm.EffortLevel
+		send, disp := stuckErrorScripted(&observed)
+		_, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile, tools.EditFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 12, EscalateEffort: true}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if stats.StopReason != "stuck" {
+			t.Fatalf("stop = %q, want stuck", stats.StopReason)
+		}
+		for i, lvl := range observed {
+			if lvl != llm.EffortOff {
+				t.Errorf("round %d effort = %q, want off (explicit off must never escalate)", i, lvl)
+			}
+		}
+	})
 }

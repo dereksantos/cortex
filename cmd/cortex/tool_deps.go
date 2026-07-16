@@ -53,6 +53,16 @@ type FunctionCall = tools.FunctionCall
 var parseXMLToolCalls = tools.ParseXMLToolCalls
 var stripToolMarkup = tools.StripToolMarkup
 
+// effortOffKwargs is pinned (not routed through cs.Study.TemplateKwargs) at
+// the fast-role sub-LLM call sites below — docs/thinking-models.md's third
+// open decision, resolved yes: the summarizer and shell-risk judge are
+// formatting/classification asks, not the study role's own deliberate work,
+// so they must never inherit the study binding's "on" default. This is the
+// 37.8s-incident fix (pkg/llm/provider_factory.go's factory-routed calls ran
+// a hybrid model with thinking left on and burned a 30s deadline on
+// reasoning_content) applied at cmd/cortex's two analogous call sites.
+var effortOffKwargs, _ = llm.Translate(llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
+
 func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient {
 	base := strings.TrimRight(cs.Study.Endpoint, "/")
 	if !strings.HasSuffix(base, "/v1") {
@@ -62,7 +72,7 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 		Name:               "study",
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
-		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+		ChatTemplateKwargs: effortOffKwargs,
 		Timeout:            10 * time.Minute,
 	})
 	p.SetModel(cs.Study.Model)
@@ -80,7 +90,7 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 		Name:               "shell-classifier",
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
-		ChatTemplateKwargs: cs.Study.TemplateKwargs(),
+		ChatTemplateKwargs: effortOffKwargs,
 		Timeout:            10 * time.Minute,
 	})
 	p.SetModel(cs.Study.Model)
