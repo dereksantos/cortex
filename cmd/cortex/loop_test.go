@@ -633,3 +633,166 @@ func TestSenderCancelClosesConnection(t *testing.T) {
 		t.Fatal("Send did not return promptly after cancel — ctx not threaded into the HTTP request")
 	}
 }
+
+// TestDeliberationClamped covers the P4 detection function
+// (docs/thinking-models.md §4): finish_reason "length" AND either the
+// reasoning/completion split shows reasoning dominated (>= 80%), or —
+// unreported — empty content with a non-empty reasoning trace.
+func TestDeliberationClamped(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *AgentResponse
+		want bool
+	}{
+		{
+			name: "length finish, reasoning dominates the split: clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "a partial an"}}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 90}},
+			},
+			want: true,
+		},
+		{
+			name: "length finish, reasoning below the fraction: not clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "a long finished answer"}}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 10}},
+			},
+			want: false,
+		},
+		{
+			name: "length finish, no split reported, empty content + reasoning trace: clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Reasoning: "still thinking about it"}},
+				Usage:   Usage{CompletionTokens: 100},
+			},
+			want: true,
+		},
+		{
+			name: "length finish, no split reported, content present: not clamped",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "length", Message: Message{Content: "an answer"}, Reasoning: "some reasoning"}},
+				Usage:   Usage{CompletionTokens: 100},
+			},
+			want: false,
+		},
+		{
+			name: "finish_reason stop: never clamped regardless of usage",
+			res: &AgentResponse{
+				Choices: []Choice{{FinishReason: "stop"}},
+				Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 99}},
+			},
+			want: false,
+		},
+		{
+			name: "no choices: false",
+			res:  &AgentResponse{Choices: nil},
+			want: false,
+		},
+		{
+			name: "nil response: false",
+			res:  nil,
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deliberationClamped(tt.res); got != tt.want {
+				t.Errorf("deliberationClamped() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSalvageDisablesEffortOnDeliberationClamp covers P4's actual fix: when
+// the clamp that triggered the salvage re-ask carries the deliberation
+// signature, the re-ask goes out with effort OFF for that one send, and the
+// original effort is restored afterward (the same one-shot pattern as the
+// existing temperature jitter). A clamp WITHOUT the deliberation signature
+// (a verbose-but-not-reasoning-dominated answer) must leave effort
+// untouched — the gate stays narrow.
+func TestSalvageDisablesEffortOnDeliberationClamp(t *testing.T) {
+	t.Run("deliberation clamp: salvage re-ask goes out effort-off, then restores", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+		var salvageSawEffortOff bool
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizes++
+				if finalizes == 1 {
+					// The forced finalize round itself hits the deliberation-clamp
+					// signature: length finish, reasoning ate ~90% of the completion,
+					// empty visible content.
+					return &AgentResponse{
+						Choices: []Choice{{FinishReason: "length", Message: Message{Content: ""}}},
+						Usage:   Usage{CompletionTokens: 100, CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 90}},
+					}, false, nil
+				}
+				// The salvage re-ask: observe the wire fields it was actually sent with.
+				salvageSawEffortOff = r.Effort.Level == llm.EffortOff && r.ChatTemplateKwargs["enable_thinking"] == false
+				return fakeResp("salvaged answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "salvaged answer" {
+			t.Errorf("content = %q, want salvaged answer", content)
+		}
+		if !stats.DeliberationClamped {
+			t.Error("stats.DeliberationClamped = false, want true")
+		}
+		if !salvageSawEffortOff {
+			t.Error("the salvage re-ask did not go out with effort off")
+		}
+		if req.Effort.Level != llm.EffortOn {
+			t.Errorf("req.Effort after runLoop = %+v, want restored to on", req.Effort)
+		}
+	})
+
+	t.Run("non-deliberation clamp: salvage re-ask leaves effort untouched", func(t *testing.T) {
+		req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+		applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+		var salvageEffort llm.Effort
+		var finalizes int
+		send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+			if r.Tools == nil {
+				finalizes++
+				if finalizes == 1 {
+					// Clamped (out == MaxTokens) but NOT a deliberation clamp: no
+					// finish_reason "length", no reasoning-token report.
+					return fakeResp("a verbose but non-empty answer", nil, 1, 100), false, nil
+				}
+				salvageEffort = r.Effort
+				return fakeResp("concise answer", nil, 1, 5), false, nil
+			}
+			return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+		})
+		disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+		content, stats, err := runLoop(context.Background(), send, req,
+			Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+			Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+		if err != nil {
+			t.Fatalf("runLoop: %v", err)
+		}
+		if content != "concise answer" {
+			t.Errorf("content = %q, want concise answer", content)
+		}
+		if stats.DeliberationClamped {
+			t.Error("stats.DeliberationClamped = true, want false (no length finish_reason)")
+		}
+		if salvageEffort.Level != llm.EffortOn {
+			t.Errorf("salvage re-ask effort = %+v, want untouched (on)", salvageEffort)
+		}
+	})
+}

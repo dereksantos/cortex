@@ -1,6 +1,10 @@
 package main
 
-import "github.com/dereksantos/cortex/pkg/llm"
+import (
+	"strings"
+
+	"github.com/dereksantos/cortex/pkg/llm"
+)
 
 // effort.go wires docs/thinking-models.md's Effort vocabulary (pkg/llm/effort.go)
 // into the composition root: which dialect a session speaks, and how a
@@ -28,4 +32,45 @@ func applyEffort(req *AgentRequest, dialect llm.Dialect, effort llm.Effort) {
 	req.Dialect = dialect
 	req.Effort = effort
 	req.ChatTemplateKwargs, req.Reasoning = llm.Translate(dialect, effort)
+}
+
+// deliberationClampReasoningFraction is the ~80% threshold
+// docs/thinking-models.md §4 sets for "the reasoning trace consumed most of
+// the completion."
+const deliberationClampReasoningFraction = 0.8
+
+// deliberationClamped reports whether res looks like a reasoning model that
+// burned its whole completion budget deliberating and never got to (or
+// barely got to) the visible answer — the max-tokens-clamp deliberation
+// signature docs/thinking-models.md §4 describes: the completion hit the
+// length ceiling AND either the server-reported reasoning/completion split
+// shows reasoning dominated, or — when the server never reports that split —
+// the visible content is empty while a reasoning trace is present.
+func deliberationClamped(res *AgentResponse) bool {
+	if res == nil || len(res.Choices) == 0 {
+		return false
+	}
+	c := res.Choices[0]
+	if c.FinishReason != "length" {
+		return false
+	}
+	if out := res.Usage.CompletionTokens; out > 0 {
+		if rt := res.Usage.ReasoningTokens(); rt > 0 {
+			return float64(rt) >= deliberationClampReasoningFraction*float64(out)
+		}
+	}
+	return strings.TrimSpace(c.Message.Content) == "" && strings.TrimSpace(c.Reasoning) != ""
+}
+
+// disableEffortForSend mutates req's effort wire fields to OFF for exactly
+// the next send, returning a restore func — the same one-shot pattern
+// stuckJitterTemp already uses for temperature. Used by the salvage re-asks
+// (docs/thinking-models.md §4): a re-ask that already showed the model
+// burning its whole budget on deliberation must not repeat that.
+func disableEffortForSend(req *AgentRequest) func() {
+	prevKwargs, prevReasoning, prevEffort := req.ChatTemplateKwargs, req.Reasoning, req.Effort
+	applyEffort(req, req.Dialect, llm.Effort{Level: llm.EffortOff})
+	return func() {
+		req.ChatTemplateKwargs, req.Reasoning, req.Effort = prevKwargs, prevReasoning, prevEffort
+	}
 }

@@ -101,6 +101,14 @@ type loopStats struct {
 	// ReasoningTokens sums completion_tokens_details.reasoning_tokens across
 	// every request in the run (0 when the backend never reports it).
 	ReasoningTokens int
+	// DeliberationClamped is set when any request in the run hit the
+	// max-tokens-clamp deliberation signature (docs/thinking-models.md §4:
+	// finish_reason "length" and either the reasoning/completion split shows
+	// reasoning dominated, or — unreported — empty content with a non-empty
+	// reasoning trace). Drives the salvage-effort-off mutation
+	// (salvageEmptyFinalize/salvageClampedFinalize) and is kept for eval
+	// attribution.
+	DeliberationClamped bool
 }
 
 var errNoChoices = errors.New("no choices in model response")
@@ -415,9 +423,16 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 // a finish came back EMPTY because a reasoning model burned its whole budget
 // deliberating (the max-tokens clamp → no prose). Returns the salvaged answer (and
 // stamps stop_reason + Salvaged) or "". Gated by the empty-clamp signature at both
-// call sites, so a healthy run (always prose) never triggers it.
+// call sites, so a healthy run (always prose) never triggers it. When the clamp
+// that triggered this re-ask was itself a deliberation clamp
+// (stats.DeliberationClamped — docs/thinking-models.md §4), the re-ask goes out
+// with effort OFF for this one send: pleading for brevity while still letting
+// the model reason is the exact failure this turns into an actual control.
 func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
+	if stats.DeliberationClamped {
+		defer disableEffortForSend(req)()
+	}
 	appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
@@ -434,8 +449,15 @@ func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, s
 	return a
 }
 
+// salvageClampedFinalize is salvageEmptyFinalize's counterpart for a
+// NON-empty clamped answer (verbose but present prose that ran into the
+// completion ceiling): same effort-off treatment when the clamp was a
+// deliberation clamp.
 func salvageClampedFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
+	if stats.DeliberationClamped {
+		defer disableEffortForSend(req)()
+	}
 	appendMsg(Message{Role: RoleUser, Content: rewriteClampedPrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
@@ -467,6 +489,9 @@ func accountUsage(s *loopStats, res *AgentResponse, maxTokens int) {
 	}
 	if maxTokens > 0 && res.Usage.CompletionTokens >= maxTokens {
 		s.MaxTokensClamped = true
+	}
+	if deliberationClamped(res) {
+		s.DeliberationClamped = true
 	}
 }
 
