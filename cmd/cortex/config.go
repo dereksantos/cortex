@@ -330,6 +330,13 @@ type ToolConfig struct {
 	EnableContextEvict            *bool `json:"enable_context_evict"`
 	EnableContextMerge            *bool `json:"enable_context_merge"`
 	EnableContextAdjustWatermarks *bool `json:"enable_context_adjust_watermarks"`
+
+	// EnableEffortEscalation gates the stuck-guard's one-shot reasoning-effort
+	// escalation (docs/thinking-models.md §5c): nil/false means disabled — an
+	// opt-in engine behavior change (per the doc: "opt-in"), unlike the
+	// nil-means-enabled Enable* fields above, which gate already-shipped
+	// tools rather than a new default-off behavior.
+	EnableEffortEscalation *bool `json:"enable_effort_escalation"`
 }
 
 func (c *Config) isOpenRouter() bool {
@@ -603,5 +610,15 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	if over.EnableContextAdjustWatermarks != nil {
 		base.EnableContextAdjustWatermarks = over.EnableContextAdjustWatermarks
 	}
+	if over.EnableEffortEscalation != nil {
+		base.EnableEffortEscalation = over.EnableEffortEscalation
+	}
 	return base
+}
+
+// effortEscalationEnabled reports whether the stuck-guard's one-shot effort
+// escalation is enabled (docs/thinking-models.md §5c) — opt-in, defaulting
+// off when the config or the flag itself is absent.
+func (c *Config) effortEscalationEnabled() bool {
+	return c != nil && c.Tools.EnableEffortEscalation != nil && *c.Tools.EnableEffortEscalation
 }

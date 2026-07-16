@@ -27,6 +27,12 @@ type Bounds struct {
 	MaxIter         int
 	ReadBudgetBytes int
 	TokenBudget     int
+	// EscalateEffort opts a run into the stuck-guard's one-shot
+	// reasoning-effort escalation (docs/thinking-models.md §5c), mirrored
+	// from the session's tools.enable_effort_escalation config flag — false
+	// (the zero value) matches every existing Bounds literal, so escalation
+	// is off by default everywhere until a caller explicitly opts in.
+	EscalateEffort bool
 }
 
 // Tool is the OpenAI-format tool declaration passed in the tools array.

@@ -497,6 +497,17 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
+	// P5b: hard-code defaults to "high" effort (docs/thinking-models.md §5b) —
+	// a nil fleet so no thinking_mode degradation obscures the pure role
+	// default (testFleet's coder80 entry happens to report Thinking:false,
+	// which would otherwise drop it, correctly, per applyFleet's "none"
+	// degradation — a separate, already-covered concern).
+	t.Run("hard-code defaults to high effort", func(t *testing.T) {
+		if got := (&Config{}).resolveBinding(roleHardCode, nil); got.Thinking.Level != llm.EffortHigh {
+			t.Errorf("hard-code Thinking = %+v, want high", got.Thinking)
+		}
+	})
+
 	t.Run("non-thinking selected model carries no enable_thinking kwarg", func(t *testing.T) {
 		// fast → qwen3-4b (thinking:false, thinking_mode derives "none"): the
 		// off-policy default is dropped entirely (degradeForThinkingMode: a

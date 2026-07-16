@@ -64,12 +64,32 @@ func deliberationClamped(res *AgentResponse) bool {
 
 // disableEffortForSend mutates req's effort wire fields to OFF for exactly
 // the next send, returning a restore func — the same one-shot pattern
-// stuckJitterTemp already uses for temperature. Used by the salvage re-asks
-// (docs/thinking-models.md §4): a re-ask that already showed the model
-// burning its whole budget on deliberation must not repeat that.
+// stuckJitterTemp already uses for temperature. Used by every finalize send
+// (docs/thinking-models.md §5a): a formatting ask (tools withheld) should
+// never spend its budget deliberating.
 func disableEffortForSend(req *AgentRequest) func() {
 	prevKwargs, prevReasoning, prevEffort := req.ChatTemplateKwargs, req.Reasoning, req.Effort
 	applyEffort(req, req.Dialect, llm.Effort{Level: llm.EffortOff})
+	return func() {
+		req.ChatTemplateKwargs, req.Reasoning, req.Effort = prevKwargs, prevReasoning, prevEffort
+	}
+}
+
+// escalateEffortOnce bumps req's effort one tier for exactly the next send,
+// returning a restore func — the stuck-guard's post-redirect re-sample
+// (docs/thinking-models.md §5c), gated behind tools.enable_effort_escalation.
+// An explicitly suppressed effort (off) STAYS off: the redirect is not
+// license to override a role's explicit "don't reason" policy. Otherwise it
+// escalates to "high" — a real wire change on a levels-capable dialect
+// (OpenRouter) and a no-op on chat_template_kwargs, where levels degrade to
+// "on" (llm.Translate) — exactly the tier rule docs/thinking-models.md §5c
+// states, with no dialect special-casing needed here.
+func escalateEffortOnce(req *AgentRequest) func() {
+	if req.Effort.Level == llm.EffortOff {
+		return func() {}
+	}
+	prevKwargs, prevReasoning, prevEffort := req.ChatTemplateKwargs, req.Reasoning, req.Effort
+	applyEffort(req, req.Dialect, llm.Effort{Level: llm.EffortHigh})
 	return func() {
 		req.ChatTemplateKwargs, req.Reasoning, req.Effort = prevKwargs, prevReasoning, prevEffort
 	}

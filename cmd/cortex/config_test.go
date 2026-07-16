@@ -80,3 +80,44 @@ func TestExistingThinkingFalseConfigByteForByte(t *testing.T) {
 		t.Errorf("kwargs = %s, want {\"enable_thinking\":false} (byte-for-byte with today's behavior)", b)
 	}
 }
+
+// TestEffortEscalationEnabled covers P5c's opt-in gate
+// (docs/thinking-models.md §5c): nil config, nil flag, and an explicit false
+// all default to disabled; only an explicit true enables it.
+func TestEffortEscalationEnabled(t *testing.T) {
+	yes, no := true, false
+	var nilCfg *Config
+	tests := []struct {
+		name string
+		cfg  *Config
+		want bool
+	}{
+		{"nil config: disabled", nilCfg, false},
+		{"empty config: disabled", &Config{}, false},
+		{"explicit false: disabled", &Config{Tools: ToolConfig{EnableEffortEscalation: &no}}, false},
+		{"explicit true: enabled", &Config{Tools: ToolConfig{EnableEffortEscalation: &yes}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.effortEscalationEnabled(); got != tt.want {
+				t.Errorf("effortEscalationEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMergeToolsEffortEscalation covers the project-over-user merge for the
+// new flag, matching the existing Enable* merge convention (remove_test.go's
+// TestMergeTools-equivalent coverage).
+func TestMergeToolsEffortEscalation(t *testing.T) {
+	yes, no := true, false
+	got := mergeTools(ToolConfig{EnableEffortEscalation: &yes}, ToolConfig{EnableEffortEscalation: &no})
+	if got.EnableEffortEscalation == nil || *got.EnableEffortEscalation {
+		t.Errorf("EnableEffortEscalation = %v, want the project-level override (false) to win", got.EnableEffortEscalation)
+	}
+	// An absent override leaves the base value intact.
+	got2 := mergeTools(ToolConfig{EnableEffortEscalation: &yes}, ToolConfig{})
+	if got2.EnableEffortEscalation == nil || !*got2.EnableEffortEscalation {
+		t.Errorf("EnableEffortEscalation = %v, want the base value preserved", got2.EnableEffortEscalation)
+	}
+}

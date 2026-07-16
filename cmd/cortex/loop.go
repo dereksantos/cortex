@@ -206,12 +206,22 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	lastObservation := ""
 	for i := 0; i < b.MaxIter; i++ {
 		stats.Iterations = i + 1
+		var restoreEffort func()
 		if jitter {
 			req.Temperature = stuckJitterTemp // perturb only the post-redirect re-sample
+			if b.EscalateEffort {
+				// P5c: escalate effort one tier alongside the temperature
+				// jitter for this single post-redirect re-sample, opt-in via
+				// tools.enable_effort_escalation (docs/thinking-models.md §5c).
+				restoreEffort = escalateEffortOnce(req)
+			}
 			jitter = false
 		}
 		res, _, err := send.Send(ctx, req)
 		req.Temperature = baseTemp // one-shot: restore so the rest of the turn stays deterministic
+		if restoreEffort != nil {
+			restoreEffort()
+		}
 		if err != nil {
 			// A mid-loop model-call failure (transient backend error, or a proxy
 			// rejecting a tool-call round's grammar) shouldn't lose a run that has
@@ -376,9 +386,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 
 // finalizeLoop requests a final answer with the tool set withheld, so a model
 // that ran out of budget (iterations, bytes, or stuck repeating) still produces
-// an answer grounded in what it read rather than returning nothing.
+// an answer grounded in what it read rather than returning nothing. Every
+// finalize send (including this one) always goes out with effort OFF
+// (docs/thinking-models.md §5a): tools are withheld, so this is a pure
+// formatting ask — generalizes P4's clamp-gated salvage-only fix to every
+// finalize send, unconditionally.
 func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
 	req.Tools = nil
+	defer disableEffortForSend(req)()
 	appendMsg(Message{Role: RoleUser, Content: finalizePrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil {
@@ -423,16 +438,17 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 // a finish came back EMPTY because a reasoning model burned its whole budget
 // deliberating (the max-tokens clamp → no prose). Returns the salvaged answer (and
 // stamps stop_reason + Salvaged) or "". Gated by the empty-clamp signature at both
-// call sites, so a healthy run (always prose) never triggers it. When the clamp
-// that triggered this re-ask was itself a deliberation clamp
-// (stats.DeliberationClamped — docs/thinking-models.md §4), the re-ask goes out
-// with effort OFF for this one send: pleading for brevity while still letting
-// the model reason is the exact failure this turns into an actual control.
+// call sites, so a healthy run (always prose) never triggers it. Like every
+// finalize send (docs/thinking-models.md §5a), this re-ask always goes out
+// with effort OFF — P4 introduced this gated on stats.DeliberationClamped;
+// P5a generalizes it to every finalize/salvage send unconditionally, since
+// tools are withheld here too and pleading for brevity while still letting
+// the model reason was the exact failure this turns into an actual control.
+// stats.DeliberationClamped is still recorded (accountUsage) for eval
+// attribution even though it no longer gates this mutation.
 func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
-	if stats.DeliberationClamped {
-		defer disableEffortForSend(req)()
-	}
+	defer disableEffortForSend(req)()
 	appendMsg(Message{Role: RoleUser, Content: reFinalizePrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
@@ -451,13 +467,10 @@ func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, s
 
 // salvageClampedFinalize is salvageEmptyFinalize's counterpart for a
 // NON-empty clamped answer (verbose but present prose that ran into the
-// completion ceiling): same effort-off treatment when the clamp was a
-// deliberation clamp.
+// completion ceiling): same unconditional effort-off treatment (§5a).
 func salvageClampedFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
-	if stats.DeliberationClamped {
-		defer disableEffortForSend(req)()
-	}
+	defer disableEffortForSend(req)()
 	appendMsg(Message{Role: RoleUser, Content: rewriteClampedPrompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil || res == nil || len(res.Choices) == 0 {
