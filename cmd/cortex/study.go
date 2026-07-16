@@ -6,6 +6,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/outline"
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // study.go wires the study subagent onto the unified engine. The study tool
@@ -30,14 +31,21 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 
 // subagentRequest builds a profile's opening request. Study draws from the
 // study role binding; any other profile (agent) inherits the coder's live
-// request — model, endpoint, key, and template kwargs, so it follows /model
-// switches and defaults to running as the model that spawned it. A per-call
-// sa.Model (the agent tool's optional "model" argument) then pins just the
-// model name on that binding.
+// request — model, endpoint, key, and effort wire fields, so it follows
+// /model switches and defaults to running as the model that spawned it. A
+// per-call sa.Model (the agent tool's optional "model" argument) then pins
+// just the model name on that binding — and when that pin actually diverges
+// from the inherited model, the inherited effort wire fields are cleared
+// rather than silently carried over to a different model
+// (docs/thinking-models.md known seam bug #2): they're re-derived to "on"
+// only if the fleet says the pinned model can actually reason
+// (hybrid/levels/always), else left neutral (send nothing).
 func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
 	dialect := dialectFor(cs.Config.isOpenRouter())
 	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
+	inheritedModel := ""
 	if sa.Role != roleStudy && cs.Request != nil {
+		inheritedModel = cs.Request.Model
 		req.Model = cs.Request.Model
 		req.BaseURL = cs.Request.BaseURL
 		req.APIKey = cs.Request.APIKey
@@ -49,6 +57,13 @@ func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentR
 	}
 	if sa.Model != "" {
 		req.Model = sa.Model
+		if inheritedModel != "" && sa.Model != inheritedModel {
+			effort := llm.Effort{}
+			if mode := cs.Fleet[sa.Model].thinkingMode(); mode == "hybrid" || mode == "levels" || mode == "always" {
+				effort = llm.Effort{Level: llm.EffortOn}
+			}
+			applyEffort(req, dialect, effort)
+		}
 	}
 	return req
 }

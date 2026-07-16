@@ -14,6 +14,7 @@ import (
 	"github.com/dereksantos/cortex/internal/memory"
 	"github.com/dereksantos/cortex/internal/shellrisk"
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 type CortexArgs []string
@@ -112,7 +113,34 @@ func (cs *CortexSession) markdown() *markdownRenderer {
 	return cs.md
 }
 
-func (cs *CortexSession) SetModel(model string) { cs.Request.Model = model }
+// SetModel switches the coder's live model, re-resolving everything that
+// binding carries — effort wire fields and the context window — rather than
+// leaving them stale from the model it's replacing
+// (docs/thinking-models.md known seam bug #1: /model, and the web UI's
+// session override (serve_models.go's handleSetSessionModelBinding, which
+// calls this same method), used to swap only the model name, so a switch to
+// a hybrid reasoner could silently keep running with the old model's
+// enable_thinking=false, or vice versa). When the discovered Fleet is nil or
+// doesn't know the new model, effort clears to neutral (send nothing) and
+// the window falls back (cs.windowSize()'s fallbackWindow) rather than
+// carrying over the old binding's — the fleet has nothing to say about an
+// unknown model, so nothing should be asserted on its behalf.
+func (cs *CortexSession) SetModel(model string) {
+	cs.Request.Model = model
+	dialect := dialectFor(cs.Config.isOpenRouter())
+	var effort llm.Effort
+	window := 0
+	if info, ok := cs.Fleet[model]; ok {
+		// Re-validate the CURRENT effort intent against the new model's
+		// thinking_mode, rather than resetting to some role default: /model
+		// is a session-local override outside the role-binding system, so
+		// there is no role policy to fall back to here.
+		effort = degradeForThinkingMode(cs.Request.Effort, info.thinkingMode())
+		window = info.MaxInput
+	}
+	applyEffort(cs.Request, dialect, effort)
+	cs.Window = window
+}
 
 func (cs *CortexSession) windowSize() int {
 	if cs.Window > 0 {

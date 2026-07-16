@@ -1053,6 +1053,66 @@ func TestSetModel(t *testing.T) {
 	}
 }
 
+// TestSetModelReResolvesEffortAndWindow covers P3's seam fix
+// (docs/thinking-models.md known seam bug #1): SetModel used to swap only
+// the model name, leaving effort wire fields and the window stale from the
+// OLD binding. It must now re-derive both for the NEW model via the
+// discovered Fleet, and clear to neutral when the fleet doesn't know it.
+func TestSetModelReResolvesEffortAndWindow(t *testing.T) {
+	fleet := Fleet{
+		"hybrid-model": {MaxInput: 65536, Thinking: true},  // hybrid
+		"plain-model":  {MaxInput: 16384, Thinking: false}, // none
+	}
+	t.Run("switching to a fleet-known hybrid model re-derives the window", func(t *testing.T) {
+		s := &CortexSession{Request: &AgentRequest{Model: "coder"}, Fleet: fleet}
+		s.SetModel("hybrid-model")
+		if s.Window != 65536 {
+			t.Errorf("Window = %d, want 65536 (from the fleet)", s.Window)
+		}
+	})
+	t.Run("prior explicit off degrades to unset for a non-thinking model", func(t *testing.T) {
+		s := &CortexSession{Request: &AgentRequest{Model: "coder"}, Fleet: fleet}
+		applyEffort(s.Request, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
+		s.SetModel("plain-model")
+		if !s.Request.Effort.IsZero() {
+			t.Errorf("Effort = %+v, want unset (plain-model can't honor any ask)", s.Request.Effort)
+		}
+		if s.Request.ChatTemplateKwargs != nil {
+			t.Errorf("ChatTemplateKwargs = %v, want nil", s.Request.ChatTemplateKwargs)
+		}
+	})
+	t.Run("prior effort survives and stays on for a hybrid model", func(t *testing.T) {
+		s := &CortexSession{Request: &AgentRequest{Model: "coder"}, Fleet: fleet}
+		applyEffort(s.Request, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		s.SetModel("hybrid-model")
+		if s.Request.Effort.Level != llm.EffortOn {
+			t.Errorf("Effort = %+v, want on", s.Request.Effort)
+		}
+	})
+	t.Run("fleet nil clears effort to neutral and window to fallback", func(t *testing.T) {
+		s := &CortexSession{Request: &AgentRequest{Model: "coder"}}
+		applyEffort(s.Request, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOff})
+		s.SetModel("anything")
+		if !s.Request.Effort.IsZero() {
+			t.Errorf("Effort = %+v, want unset (fleet unknown)", s.Request.Effort)
+		}
+		if s.Request.ChatTemplateKwargs != nil {
+			t.Errorf("ChatTemplateKwargs = %v, want nil", s.Request.ChatTemplateKwargs)
+		}
+		if s.Window != 0 {
+			t.Errorf("Window = %d, want 0 (falls back via windowSize())", s.Window)
+		}
+	})
+	t.Run("fleet known but model absent clears effort to neutral", func(t *testing.T) {
+		s := &CortexSession{Request: &AgentRequest{Model: "coder"}, Fleet: fleet}
+		applyEffort(s.Request, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+		s.SetModel("mystery-model")
+		if !s.Request.Effort.IsZero() {
+			t.Errorf("Effort = %+v, want unset (model not in fleet)", s.Request.Effort)
+		}
+	})
+}
+
 func TestReadFileSizeGuard(t *testing.T) {
 	dir := t.TempDir()
 	// The curation budget is fixed (curationBudgetTokens), independent of the
