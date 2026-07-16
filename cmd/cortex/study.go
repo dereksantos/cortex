@@ -35,12 +35,16 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 // sa.Model (the agent tool's optional "model" argument) then pins just the
 // model name on that binding.
 func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
-	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens)
+	dialect := dialectFor(cs.Config.isOpenRouter())
+	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
 	if sa.Role != roleStudy && cs.Request != nil {
 		req.Model = cs.Request.Model
 		req.BaseURL = cs.Request.BaseURL
 		req.APIKey = cs.Request.APIKey
+		req.Dialect = cs.Request.Dialect
+		req.Effort = cs.Request.Effort
 		req.ChatTemplateKwargs = cs.Request.ChatTemplateKwargs
+		req.Reasoning = cs.Request.Reasoning
 		req.Temperature = cs.Request.Temperature
 	}
 	if sa.Model != "" {

@@ -45,10 +45,20 @@ func TestBuildModelsViewModelGolden(t *testing.T) {
 	}
 
 	want := `{"bindings":[` +
-		row("code", "coder-explicit", "false", "configured") + "," +
+		row("code", "coder-explicit", `"off"`, "configured") + "," +
 		row("embed", "", "null", "unbound") + "," +
-		row("fast", "", "false", "unbound") + "," +
-		row("hard-code", "", "null", "unbound") + "," +
+		row("fast", "", `"off"`, "unbound") + "," +
+		// hard-code defaults to "high", but the fixture fleet's study-model
+		// entry doesn't mark itself thinking-capable (Thinking: false, no
+		// ThinkingMode), and hard-code doesn't resolve to that model anyway
+		// (no "coder" role tag in fixedRoleFleet) — so it stays unbound with
+		// no model, and TemplateKwargs' degradation never even runs; the
+		// role default rides straight through.
+		row("hard-code", "", `"high"`, "unbound") + "," +
+		// reason/study default to "on", but fixedRoleFleet's study-model entry
+		// doesn't mark thinking capability (Thinking: false, no
+		// ThinkingMode) — applyFleet's "none" degradation drops the "on"
+		// default to unset (null), same as it would drop an explicit "off".
 		row("reason", "study-model", "null", "fleet-auto") + "," +
 		row("rerank", "", "null", "unbound") + "," +
 		row("study", "study-model", "null", "fleet-auto") + "," +

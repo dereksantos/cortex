@@ -151,7 +151,7 @@ func NewCortexSession() *CortexSession {
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
 	req.APIKey = resolveKey(code)
-	req.ChatTemplateKwargs = code.TemplateKwargs()
+	applyEffort(req, dialectFor(cfg.isOpenRouter()), code.Thinking)
 	req.MaxTokens = code.maxOut(codeMaxOutputTokens)
 	req.Temperature = code.temperature(defaultTemperature)
 

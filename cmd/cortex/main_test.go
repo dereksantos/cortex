@@ -481,26 +481,28 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("thinking off for code by default; study deliberates; config can re-enable", func(t *testing.T) {
+	t.Run("thinking off for code by default; study deliberates on; config can re-enable", func(t *testing.T) {
 		var nilCfg *Config
-		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking == nil || *code.Thinking {
-			t.Errorf("code Thinking = %v, want false", code.Thinking)
+		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking.Level != llm.EffortOff {
+			t.Errorf("code Thinking = %+v, want off", code.Thinking)
 		}
-		// study draws from the reasoner tag and deliberates: no forced-off kwarg.
-		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking != nil {
-			t.Errorf("study Thinking = %v, want nil (reasoner thinks by default)", study.Thinking)
+		// study draws from the reasoner tag and deliberates: an explicit "on"
+		// default now, rather than the old implicit nil.
+		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking.Level != llm.EffortOn {
+			t.Errorf("study Thinking = %+v, want on (reasoner thinks by default)", study.Thinking)
 		}
-		on := true
-		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: &on}}}
-		if got := c.resolveBinding(roleCode, testFleet); got.Thinking == nil || !*got.Thinking {
-			t.Errorf("config thinking=true should win, got %v", got.Thinking)
+		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: llm.Effort{Level: llm.EffortOn}}}}
+		if got := c.resolveBinding(roleCode, testFleet); got.Thinking.Level != llm.EffortOn {
+			t.Errorf("config thinking=on should win, got %+v", got.Thinking)
 		}
 	})
 
 	t.Run("non-thinking selected model carries no enable_thinking kwarg", func(t *testing.T) {
-		// fast → qwen3-4b (thinking:false): the off-policy kwarg is dropped.
-		if got := (&Config{}).resolveBinding(roleFast, testFleet); got.Thinking != nil {
-			t.Errorf("fast/qwen3-4b should not carry the kwarg, got %v", got.Thinking)
+		// fast → qwen3-4b (thinking:false, thinking_mode derives "none"): the
+		// off-policy default is dropped entirely (degradeForThinkingMode: a
+		// "none" model can't honor ANY ask).
+		if got := (&Config{}).resolveBinding(roleFast, testFleet); !got.Thinking.IsZero() {
+			t.Errorf("fast/qwen3-4b should not carry the kwarg, got %+v", got.Thinking)
 		}
 	})
 
@@ -508,14 +510,13 @@ func TestResolveBinding(t *testing.T) {
 		// qwen3-4b is reported thinking:false by the backend, but it thinks by
 		// default and needs enable_thinking=false. A config override must NOT be
 		// stripped by applyFleet (the regression that made study run it slow).
-		off := false
-		c := &Config{Models: map[string]ModelSpec{roleStudy: {Model: "qwen3-4b", Thinking: &off}}}
+		c := &Config{Models: map[string]ModelSpec{roleStudy: {Model: "qwen3-4b", Thinking: llm.Effort{Level: llm.EffortOff}}}}
 		got := c.resolveBinding(roleStudy, testFleet)
 		if got.Model != "qwen3-4b" {
 			t.Fatalf("model = %q, want qwen3-4b", got.Model)
 		}
-		if got.Thinking == nil || *got.Thinking {
-			t.Errorf("config thinking=false must survive applyFleet, got %v", got.Thinking)
+		if got.Thinking.Level != llm.EffortOff {
+			t.Errorf("config thinking=off must survive applyFleet, got %+v", got.Thinking)
 		}
 		if kw := got.TemplateKwargs(); kw["enable_thinking"] != false {
 			t.Errorf("TemplateKwargs should send enable_thinking=false, got %v", kw)
@@ -679,8 +680,33 @@ func TestLoadMergedConfig(t *testing.T) {
 const fleetInfoJSON = `{"data":[
   {"model_name":"coder","litellm_params":{"model":"openai/coder"},"model_info":{"max_input_tokens":131072,"role":"coder","silicon":"igpu","thinking":true,"swap_group":"igpu-8080","always_warm":false,"experimental":false,"input_cost_per_token":0}},
   {"model_name":"reasoner-npu","model_info":{"max_input_tokens":32768,"role":"reasoner","silicon":"npu","thinking":true,"swap_group":null,"always_warm":true}},
-  {"model_name":"reranker","model_info":{"max_input_tokens":8192,"role":"reranker","silicon":"cpu","thinking":null}}
+  {"model_name":"reranker","model_info":{"max_input_tokens":8192,"role":"reranker","silicon":"cpu","thinking":null}},
+  {"model_name":"or-levels","model_info":{"max_input_tokens":8192,"role":"reasoner","thinking_mode":"levels"}}
 ]}`
+
+// TestModelInfoThinkingMode covers the fleet's optional thinking_mode
+// descriptor (docs/thinking-models.md §2): parsed verbatim when the fleet
+// sends one, derived from the legacy bool (true→hybrid, false→none) when it
+// doesn't.
+func TestModelInfoThinkingMode(t *testing.T) {
+	tests := []struct {
+		name string
+		info ModelInfo
+		want string
+	}{
+		{"explicit levels", ModelInfo{ThinkingMode: "levels"}, "levels"},
+		{"legacy true derives hybrid", ModelInfo{Thinking: true}, "hybrid"},
+		{"legacy false derives none", ModelInfo{Thinking: false}, "none"},
+		{"explicit wins over legacy bool", ModelInfo{Thinking: true, ThinkingMode: "always"}, "always"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.info.thinkingMode(); got != tt.want {
+				t.Errorf("thinkingMode() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 func fleetServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
@@ -714,6 +740,9 @@ func TestDiscoverFleet(t *testing.T) {
 		}
 		if rr := f["reranker"]; rr.MaxInput != 8192 || rr.Thinking {
 			t.Errorf("reranker = %+v", rr)
+		}
+		if lv := f["or-levels"]; lv.ThinkingMode != "levels" {
+			t.Errorf("or-levels ThinkingMode = %q, want levels", lv.ThinkingMode)
 		}
 	})
 
@@ -792,10 +821,11 @@ func TestBackendEndpoint(t *testing.T) {
 }
 
 func TestApplyFleet(t *testing.T) {
-	off := false
 	fleet := Fleet{
-		"coder":    {MaxInput: 131072, Thinking: true},
-		"qwen3-4b": {MaxInput: 131072, Thinking: false},
+		"coder":     {MaxInput: 131072, Thinking: true},       // hybrid
+		"qwen3-4b":  {MaxInput: 131072, Thinking: false},      // none
+		"or-model":  {MaxInput: 8192, ThinkingMode: "levels"}, // explicit thinking_mode
+		"always-on": {MaxInput: 8192, ThinkingMode: "always"}, // can't stop reasoning
 	}
 	t.Run("fills an unset window from discovery", func(t *testing.T) {
 		got := applyFleet(ModelSpec{Model: "coder"}, fleet)
@@ -809,20 +839,38 @@ func TestApplyFleet(t *testing.T) {
 			t.Errorf("window = %d, want pinned 8000", got.Window)
 		}
 	})
-	t.Run("keeps enable_thinking for a thinking model", func(t *testing.T) {
-		got := applyFleet(ModelSpec{Model: "coder", Thinking: &off}, fleet)
-		if got.Thinking == nil || *got.Thinking {
-			t.Errorf("thinking spec should survive for a thinking model, got %v", got.Thinking)
+	t.Run("keeps enable_thinking for a hybrid model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "coder", Thinking: llm.Effort{Level: llm.EffortOff}}, fleet)
+		if got.Thinking.Level != llm.EffortOff {
+			t.Errorf("thinking spec should survive for a hybrid model, got %+v", got.Thinking)
 		}
 	})
 	t.Run("drops enable_thinking for a non-thinking model", func(t *testing.T) {
-		got := applyFleet(ModelSpec{Model: "qwen3-4b", Thinking: &off}, fleet)
-		if got.Thinking != nil {
-			t.Errorf("non-thinking model should not carry the kwarg, got %v", got.Thinking)
+		got := applyFleet(ModelSpec{Model: "qwen3-4b", Thinking: llm.Effort{Level: llm.EffortOff}}, fleet)
+		if !got.Thinking.IsZero() {
+			t.Errorf("non-thinking model should not carry the kwarg, got %+v", got.Thinking)
+		}
+	})
+	t.Run("a level degrades to on for a hybrid model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "coder", Thinking: llm.Effort{Level: llm.EffortHigh}}, fleet)
+		if got.Thinking.Level != llm.EffortOn {
+			t.Errorf("thinking = %+v, want degraded to on (hybrid has no real levels)", got.Thinking)
+		}
+	})
+	t.Run("a level survives for a levels-capable model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "or-model", Thinking: llm.Effort{Level: llm.EffortHigh}}, fleet)
+		if got.Thinking.Level != llm.EffortHigh {
+			t.Errorf("thinking = %+v, want high (unchanged)", got.Thinking)
+		}
+	})
+	t.Run("off degrades to on for an always-reasoning model", func(t *testing.T) {
+		got := applyFleet(ModelSpec{Model: "always-on", Thinking: llm.Effort{Level: llm.EffortOff}}, fleet)
+		if got.Thinking.Level != llm.EffortOn {
+			t.Errorf("thinking = %+v, want degraded to on (can't stop reasoning)", got.Thinking)
 		}
 	})
 	t.Run("unknown model and nil fleet pass through untouched", func(t *testing.T) {
-		in := ModelSpec{Model: "mystery", Window: 4096, Thinking: &off}
+		in := ModelSpec{Model: "mystery", Window: 4096, Thinking: llm.Effort{Level: llm.EffortOff}}
 		if got := applyFleet(in, fleet); got != in {
 			t.Errorf("unknown model mutated: %+v", got)
 		}
@@ -859,18 +907,19 @@ func TestSharedSwapGroup(t *testing.T) {
 	})
 }
 
-// TemplateKwargs: thinking=false is the only case that emits kwargs — nil and
-// true both defer to the model's template default.
+// TemplateKwargs: thinking=off is the only case that emits kwargs — unset,
+// on, and every level/budget all defer to the model's template default
+// (docs/thinking-models.md §2: this dialect has no representation for them).
 func TestTemplateKwargs(t *testing.T) {
-	off, on := false, true
 	tests := []struct {
 		name     string
-		thinking *bool
+		thinking llm.Effort
 		want     bool // kwargs expected?
 	}{
-		{"nil defers to template default", nil, false},
-		{"true defers to template default", &on, false},
-		{"false emits enable_thinking=false", &off, true},
+		{"unset defers to template default", llm.Effort{}, false},
+		{"on defers to template default", llm.Effort{Level: llm.EffortOn}, false},
+		{"off emits enable_thinking=false", llm.Effort{Level: llm.EffortOff}, true},
+		{"high degrades to on: no kwarg", llm.Effort{Level: llm.EffortHigh}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -883,6 +932,35 @@ func TestTemplateKwargs(t *testing.T) {
 			}
 			if v, ok := kw["enable_thinking"].(bool); !ok || v {
 				t.Errorf("TemplateKwargs() = %v, want enable_thinking=false", kw)
+			}
+		})
+	}
+}
+
+// TestModelSpecReasoning covers the OpenRouter dialect counterpart to
+// TemplateKwargs.
+func TestModelSpecReasoning(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking llm.Effort
+		want     *llm.Reasoning
+	}{
+		{"unset: nil", llm.Effort{}, nil},
+		{"on: nil (model default)", llm.Effort{Level: llm.EffortOn}, nil},
+		{"off: enabled false", llm.Effort{Level: llm.EffortOff}, &llm.Reasoning{}},
+		{"high: effort high", llm.Effort{Level: llm.EffortHigh}, &llm.Reasoning{Effort: "high"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ModelSpec{Thinking: tt.thinking}.Reasoning()
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("Reasoning() = %+v, want %+v", got, tt.want)
+			}
+			if got == nil {
+				return
+			}
+			if got.Effort != tt.want.Effort {
+				t.Errorf("Reasoning().Effort = %q, want %q", got.Effort, tt.want.Effort)
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // loop.go is THE agent engine: one tool-iteration loop (`runLoop`) plus the two
@@ -490,29 +491,33 @@ func progressLine(call ToolCall) string {
 }
 
 // requestFor assembles a model request from a spec — the single build site where
-// model/base/key/template-kwargs are set, and the single place a finite
+// model/base/key/effort wire fields are set, and the single place a finite
 // max_tokens is stamped (subsuming the deleted per-payload output-cap helper).
 // maxTokens must
 // be >0; it falls back to the role/default cap only when a caller passes 0, so no
-// request path is ever unbounded. Used by every subagent caller (the coder reuses
-// its long-lived cs.Request instead, which carries the same stamp from init).
-func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens int) *AgentRequest {
+// request path is ever unbounded. dialect selects the effort translation
+// (docs/thinking-models.md §2 — llm.DialectTemplateKwargs or
+// llm.DialectOpenRouter, the caller's session.isOpenRouter()). Used by every
+// subagent caller (the coder reuses its long-lived cs.Request instead, which
+// carries the same stamp from init).
+func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens int, dialect llm.Dialect) *AgentRequest {
 	if maxTokens <= 0 {
 		maxTokens = spec.maxOut(defaultAgentMaxTokens)
 	}
-	return &AgentRequest{
-		Model:              spec.Model,
-		BaseURL:            spec.Endpoint,
-		APIKey:             resolveKey(spec),
-		ChatTemplateKwargs: spec.TemplateKwargs(),
-		Temperature:        spec.temperature(defaultTemperature),
-		MaxTokens:          maxTokens,
-		Tools:              toolset,
+	req := &AgentRequest{
+		Model:       spec.Model,
+		BaseURL:     spec.Endpoint,
+		APIKey:      resolveKey(spec),
+		Temperature: spec.temperature(defaultTemperature),
+		MaxTokens:   maxTokens,
+		Tools:       toolset,
 		Messages: []Message{
 			{Role: RoleSystem, Content: system},
 			{Role: RoleUser, Content: seed},
 		},
 	}
+	applyEffort(req, dialect, spec.Thinking)
+	return req
 }
 
 // blockingSender is the subagent / non-streaming round-trip: one plain blocking

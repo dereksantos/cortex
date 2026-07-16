@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/userhome"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // defaultEndpoint is a NEUTRAL local fallback — the conventional LiteLLM port.
@@ -34,15 +35,19 @@ type rolePolicy struct {
 	tag                string
 	preferExperimental bool
 	preferSwapFree     bool
-	thinkingOff        bool
+	// effort is the role's default reasoning-effort intent
+	// (docs/thinking-models.md §1); the zero value (llm.EffortUnset) means
+	// "no policy opinion" — resolveBinding leaves the binding at whatever a
+	// config override or applyFleet degradation settles on.
+	effort llm.Effort
 }
 
 var rolePolicies = map[string]rolePolicy{
-	roleCode:     {tag: "coder", thinkingOff: true},
-	roleHardCode: {tag: "coder", preferExperimental: true},
-	roleReason:   {tag: "reasoner", preferSwapFree: true},
-	roleFast:     {tag: "fast", thinkingOff: true},
-	roleStudy:    {tag: "reasoner", preferSwapFree: true},
+	roleCode:     {tag: "coder", effort: llm.Effort{Level: llm.EffortOff}},
+	roleHardCode: {tag: "coder", preferExperimental: true, effort: llm.Effort{Level: llm.EffortHigh}},
+	roleReason:   {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
+	roleFast:     {tag: "fast", effort: llm.Effort{Level: llm.EffortOff}},
+	roleStudy:    {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
 	roleEmbed:    {tag: "embedder"},
 	roleRerank:   {tag: "reranker"},
 	roleTools:    {tag: "tool"},
@@ -74,9 +79,6 @@ func selectModel(fleet Fleet, role string) string {
 
 const fallbackWindow = 32768
 
-// thinkingOff exists so role bindings can take a *bool address.
-var thinkingOff = false
-
 // ModelSpec is one role's binding: where to send, which model, and context size.
 type ModelSpec struct {
 	Endpoint    string   `json:"endpoint"`
@@ -86,7 +88,12 @@ type ModelSpec struct {
 	Temperature *float64 `json:"temperature"`
 	KeyEnv      string   `json:"key_env"`
 	KeyService  string   `json:"key_service"`
-	Thinking    *bool    `json:"thinking"`
+	// Thinking is the resolved reasoning-effort intent for this binding
+	// (docs/thinking-models.md §1). JSON-compatible with the legacy bool
+	// (false→off, true→on), a level string ("off"/"on"/"low"/"medium"/
+	// "high"), or {"budget": N} — see llm.Effort's UnmarshalJSON. The zero
+	// value means "unset" (JSON key absent).
+	Thinking llm.Effort `json:"thinking"`
 }
 
 func (s ModelSpec) maxOut(def int) int {
@@ -103,11 +110,21 @@ func (s ModelSpec) temperature(def float64) float64 {
 	return def
 }
 
+// TemplateKwargs translates m.Thinking to the chat_template_kwargs dialect
+// (llama.cpp/LiteLLM — docs/thinking-models.md §2). Routed through
+// llm.Translate so this and the OpenRouter dialect (Reasoning, below) share
+// one translation function.
 func (m ModelSpec) TemplateKwargs() map[string]any {
-	if m.Thinking != nil && !*m.Thinking {
-		return map[string]any{"enable_thinking": false}
-	}
-	return nil
+	kwargs, _ := llm.Translate(llm.DialectTemplateKwargs, m.Thinking)
+	return kwargs
+}
+
+// Reasoning translates m.Thinking to OpenRouter's request-body `reasoning`
+// dialect (docs/thinking-models.md §2). nil when there's nothing to say
+// (unset or "on" — model default).
+func (m ModelSpec) Reasoning() *llm.Reasoning {
+	_, reasoning := llm.Translate(llm.DialectOpenRouter, m.Thinking)
+	return reasoning
 }
 
 // thinkingLabel resolves a request's chat_template_kwargs into the
@@ -127,13 +144,32 @@ func thinkingLabel(kwargs map[string]any) string {
 }
 
 type ModelInfo struct {
-	MaxInput     int
-	Role         string
-	Silicon      string
-	Thinking     bool
+	MaxInput int
+	Role     string
+	Silicon  string
+	Thinking bool
+	// ThinkingMode is the fleet's optional "none"|"hybrid"|"levels"|"always"
+	// descriptor (docs/thinking-models.md §2) — omitempty so the JSON shape
+	// is unchanged for every fleet response that doesn't send it (kept
+	// empty; thinkingMode() derives it from the legacy Thinking bool).
+	ThinkingMode string `json:",omitempty"`
 	SwapGroup    string
 	AlwaysWarm   bool
 	Experimental bool
+}
+
+// thinkingMode resolves the model's effective thinking_mode: the fleet's
+// explicit value when it sent one, else derived from the legacy Thinking
+// bool (true→hybrid, false→none) — so a /model/info response that only ever
+// sends `"thinking": true/false` (today's shape) still degrades correctly.
+func (info ModelInfo) thinkingMode() string {
+	if info.ThinkingMode != "" {
+		return info.ThinkingMode
+	}
+	if info.Thinking {
+		return "hybrid"
+	}
+	return "none"
 }
 
 type Fleet map[string]ModelInfo
@@ -164,9 +200,14 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 				Role           string `json:"role"`
 				Silicon        string `json:"silicon"`
 				Thinking       bool   `json:"thinking"`
-				SwapGroup      string `json:"swap_group"`
-				AlwaysWarm     bool   `json:"always_warm"`
-				Experimental   bool   `json:"experimental"`
+				// ThinkingMode is the optional "none"|"hybrid"|"levels"|
+				// "always" descriptor (docs/thinking-models.md §2); a fleet
+				// that only sends the legacy bool leaves this empty and
+				// ModelInfo.thinkingMode() derives it (true→hybrid).
+				ThinkingMode string `json:"thinking_mode"`
+				SwapGroup    string `json:"swap_group"`
+				AlwaysWarm   bool   `json:"always_warm"`
+				Experimental bool   `json:"experimental"`
 			} `json:"model_info"`
 		} `json:"data"`
 	}
@@ -180,12 +221,40 @@ func discoverFleet(ctx context.Context, endpoint string) Fleet {
 			Role:         m.ModelInfo.Role,
 			Silicon:      m.ModelInfo.Silicon,
 			Thinking:     m.ModelInfo.Thinking,
+			ThinkingMode: m.ModelInfo.ThinkingMode,
 			SwapGroup:    m.ModelInfo.SwapGroup,
 			AlwaysWarm:   m.ModelInfo.AlwaysWarm,
 			Experimental: m.ModelInfo.Experimental,
 		}
 	}
 	return f
+}
+
+// degradeForThinkingMode refuses an effort ask a model's thinking_mode can't
+// satisfy (docs/thinking-models.md §2): "none" can't reason at all, so ANY
+// ask — including an explicit "off", which would just be a no-op kwarg — is
+// dropped to unset; "hybrid" (an on/off toggle, no real levels) degrades a
+// level or budget ask to plain "on"; "always" (can never stop reasoning)
+// degrades an explicit "off" ask to "on"; "levels" (and any unrecognized
+// mode) needs no degradation.
+func degradeForThinkingMode(e llm.Effort, mode string) llm.Effort {
+	switch mode {
+	case "none":
+		return llm.Effort{}
+	case "hybrid":
+		if e.Level == llm.EffortLow || e.Level == llm.EffortMedium || e.Level == llm.EffortHigh ||
+			(e.Level == llm.EffortUnset && e.Budget > 0) {
+			return llm.Effort{Level: llm.EffortOn}
+		}
+		return e
+	case "always":
+		if e.Level == llm.EffortOff {
+			return llm.Effort{Level: llm.EffortOn}
+		}
+		return e
+	default: // "levels", or an unrecognized mode: no degradation
+		return e
+	}
 }
 
 func applyFleet(spec ModelSpec, fleet Fleet) ModelSpec {
@@ -196,9 +265,7 @@ func applyFleet(spec ModelSpec, fleet Fleet) ModelSpec {
 	if info.MaxInput > 0 && spec.Window == 0 {
 		spec.Window = info.MaxInput
 	}
-	if !info.Thinking {
-		spec.Thinking = nil
-	}
+	spec.Thinking = degradeForThinkingMode(spec.Thinking, info.thinkingMode())
 	return spec
 }
 
@@ -298,12 +365,9 @@ func (c *Config) backendEndpoint() string {
 
 func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	pol := rolePolicies[role]
-	spec := ModelSpec{Endpoint: c.backendEndpoint()}
+	spec := ModelSpec{Endpoint: c.backendEndpoint(), Thinking: pol.effort}
 	if c != nil && c.Temperature != nil {
 		spec.Temperature = c.Temperature
-	}
-	if pol.thinkingOff {
-		spec.Thinking = &thinkingOff
 	}
 	if c != nil {
 		if m, ok := c.Models[role]; ok {
@@ -323,7 +387,7 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 			if m.KeyService != "" {
 				spec.KeyService = m.KeyService
 			}
-			if m.Thinking != nil {
+			if !m.Thinking.IsZero() {
 				spec.Thinking = m.Thinking
 			}
 		}
@@ -339,7 +403,12 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	}
 	spec = applyFleet(spec, fleet)
 	if c != nil {
-		if m, ok := c.Models[role]; ok && m.Thinking != nil {
+		// Re-stamp an EXPLICIT config override after applyFleet's
+		// thinking_mode degradation: a user who pinned "thinking" for this
+		// role always wins, even over a fleet that reports the model can't
+		// honor it (docs/thinking-models.md known regression: a config
+		// override must not be silently stripped).
+		if m, ok := c.Models[role]; ok && !m.Thinking.IsZero() {
 			spec.Thinking = m.Thinking
 		}
 	}
@@ -503,7 +572,7 @@ func mergeSpec(base, over ModelSpec) ModelSpec {
 	if over.KeyService != "" {
 		base.KeyService = over.KeyService
 	}
-	if over.Thinking != nil {
+	if !over.Thinking.IsZero() {
 		base.Thinking = over.Thinking
 	}
 	return base

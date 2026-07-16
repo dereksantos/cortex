@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dereksantos/cortex/internal/tools"
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 var errFake = errors.New("fake send failure")
@@ -519,7 +520,7 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 	defer srv.Close()
 
 	cs := &CortexSession{}
-	req := requestFor(ModelSpec{Model: "m", Endpoint: srv.URL}, "sys", "seed", []Tool{tools.ReadFile}, 1000)
+	req := requestFor(ModelSpec{Model: "m", Endpoint: srv.URL}, "sys", "seed", []Tool{tools.ReadFile}, 1000, llm.DialectTemplateKwargs)
 	var seen []string
 	disp := DispatchFunc(func(_ context.Context, c ToolCall) string {
 		seen = append(seen, c.Function.Name)
@@ -554,13 +555,13 @@ func TestRunLoopBlockingSubagentPath(t *testing.T) {
 func TestRequestForSetsMaxTokens(t *testing.T) {
 	spec := ModelSpec{Model: "m", Endpoint: "http://x"}
 	t.Run("explicit", func(t *testing.T) {
-		r := requestFor(spec, "sys", "seed", nil, 5000)
+		r := requestFor(spec, "sys", "seed", nil, 5000, llm.DialectTemplateKwargs)
 		if r.MaxTokens != 5000 {
 			t.Errorf("max_tokens = %d, want 5000", r.MaxTokens)
 		}
 	})
 	t.Run("fallback when zero", func(t *testing.T) {
-		r := requestFor(spec, "sys", "seed", nil, 0)
+		r := requestFor(spec, "sys", "seed", nil, 0, llm.DialectTemplateKwargs)
 		if r.MaxTokens <= 0 {
 			t.Errorf("max_tokens = %d, want a positive fallback (never unbounded)", r.MaxTokens)
 		}
@@ -569,17 +570,17 @@ func TestRequestForSetsMaxTokens(t *testing.T) {
 		}
 	})
 	t.Run("role override", func(t *testing.T) {
-		r := requestFor(ModelSpec{Model: "m", MaxTokens: 4321}, "sys", "seed", nil, 0)
+		r := requestFor(ModelSpec{Model: "m", MaxTokens: 4321}, "sys", "seed", nil, 0, llm.DialectTemplateKwargs)
 		if r.MaxTokens != 4321 {
 			t.Errorf("max_tokens = %d, want role override 4321", r.MaxTokens)
 		}
 	})
 	t.Run("temperature default and override", func(t *testing.T) {
-		if got := requestFor(spec, "sys", "seed", nil, 0).Temperature; got != defaultTemperature {
+		if got := requestFor(spec, "sys", "seed", nil, 0, llm.DialectTemplateKwargs).Temperature; got != defaultTemperature {
 			t.Errorf("temperature = %v, want default %v", got, defaultTemperature)
 		}
 		temp := 0.25
-		if got := requestFor(ModelSpec{Model: "m", Temperature: &temp}, "sys", "seed", nil, 0).Temperature; got != temp {
+		if got := requestFor(ModelSpec{Model: "m", Temperature: &temp}, "sys", "seed", nil, 0, llm.DialectTemplateKwargs).Temperature; got != temp {
 			t.Errorf("temperature = %v, want override %v", got, temp)
 		}
 	})

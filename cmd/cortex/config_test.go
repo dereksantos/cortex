@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // TestUserConfigPathRoutesThroughUserhome pins that userConfigPath() is
@@ -17,5 +21,62 @@ func TestUserConfigPathRoutesThroughUserhome(t *testing.T) {
 	want := filepath.Join(tmp, "config.json")
 	if got != want {
 		t.Errorf("userConfigPath() = %q, want %q", got, want)
+	}
+}
+
+// TestModelSpecThinkingJSONCompat covers ModelSpec.Thinking's JSON
+// compatibility (docs/thinking-models.md §1): a config file's "thinking" key
+// accepts the legacy bool, a level string, or {"budget": N} — the whole
+// point being that an existing config keeps parsing exactly as it did
+// before this field's type changed from *bool to llm.Effort.
+func TestModelSpecThinkingJSONCompat(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want llm.Effort
+	}{
+		{"absent key: unset", `{}`, llm.Effort{}},
+		{"legacy false", `{"thinking": false}`, llm.Effort{Level: llm.EffortOff}},
+		{"legacy true", `{"thinking": true}`, llm.Effort{Level: llm.EffortOn}},
+		{"level string", `{"thinking": "high"}`, llm.Effort{Level: llm.EffortHigh}},
+		{"budget object", `{"thinking": {"budget": 8192}}`, llm.Effort{Budget: 8192}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var spec ModelSpec
+			if err := json.Unmarshal([]byte(tt.json), &spec); err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tt.json, err)
+			}
+			if spec.Thinking != tt.want {
+				t.Errorf("Thinking = %+v, want %+v", spec.Thinking, tt.want)
+			}
+		})
+	}
+}
+
+// TestExistingThinkingFalseConfigByteForByte pins the P2 compatibility
+// requirement end to end: a full config file with "thinking": false for the
+// code role must produce EXACTLY today's {"enable_thinking": false} kwargs
+// once resolved through resolveBinding — the whole config→binding→wire path,
+// not just the Effort type in isolation (see
+// pkg/llm.TestTranslateExistingConfigByteForByte for that narrower version).
+func TestExistingThinkingFalseConfigByteForByte(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"models":{"code":{"model":"some-model","thinking":false}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg := readConfigFile(path)
+	if cfg == nil {
+		t.Fatal("readConfigFile returned nil")
+	}
+	spec := cfg.resolveBinding(roleCode, nil)
+	kw := spec.TemplateKwargs()
+	b, err := json.Marshal(kw)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `{"enable_thinking":false}` {
+		t.Errorf("kwargs = %s, want {\"enable_thinking\":false} (byte-for-byte with today's behavior)", b)
 	}
 }

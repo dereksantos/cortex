@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/dereksantos/cortex/pkg/llm"
+)
 
 func TestCountGoalHits(t *testing.T) {
 	text := "The Resolve loop dispatches tool calls to Execute."
@@ -69,7 +73,7 @@ func TestAgentRequestOutputCapped(t *testing.T) {
 		t.Errorf("coder request MaxTokens = %d, want %d", got, codeMaxOutputTokens)
 	}
 	// requestFor never emits an unbounded request: a 0 falls back to the default.
-	if got := requestFor(ModelSpec{}, "s", "g", nil, 0).MaxTokens; got != defaultAgentMaxTokens {
+	if got := requestFor(ModelSpec{}, "s", "g", nil, 0, llm.DialectTemplateKwargs).MaxTokens; got != defaultAgentMaxTokens {
 		t.Errorf("unset cap → %d, want backstop %d", got, defaultAgentMaxTokens)
 	}
 	// ModelSpec.maxOut: a config override wins, else the role default.
