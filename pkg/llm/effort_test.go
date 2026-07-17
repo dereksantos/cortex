@@ -116,10 +116,12 @@ func TestEffortBudgetTier(t *testing.T) {
 }
 
 // TestTranslateTemplateKwargs covers the chat_template_kwargs dialect
-// (llama.cpp/LiteLLM): only "off" emits a kwarg; levels and budgets — which
-// this dialect has no representation for — degrade to "on" (no kwarg at
-// all), same as the byte-for-byte-compatible legacy behavior.
+// (llama.cpp/LiteLLM): off and on are both said affirmatively (on-as-omission
+// is indistinguishable from off on hosted defaults that resolve to no
+// reasoning); levels and budgets — which this dialect has no representation
+// for — degrade to the affirmative on. Only unset sends nothing.
 func TestTranslateTemplateKwargs(t *testing.T) {
+	on := map[string]any{"enable_thinking": true}
 	tests := []struct {
 		name string
 		e    Effort
@@ -127,11 +129,11 @@ func TestTranslateTemplateKwargs(t *testing.T) {
 	}{
 		{"unset: no kwarg", Effort{}, nil},
 		{"off: enable_thinking=false", Effort{Level: EffortOff}, map[string]any{"enable_thinking": false}},
-		{"on: no kwarg", Effort{Level: EffortOn}, nil},
-		{"low degrades to on: no kwarg", Effort{Level: EffortLow}, nil},
-		{"medium degrades to on: no kwarg", Effort{Level: EffortMedium}, nil},
-		{"high degrades to on: no kwarg", Effort{Level: EffortHigh}, nil},
-		{"bare budget degrades to on: no kwarg", Effort{Budget: 4096}, nil},
+		{"on: enable_thinking=true", Effort{Level: EffortOn}, on},
+		{"low degrades to affirmative on", Effort{Level: EffortLow}, on},
+		{"medium degrades to affirmative on", Effort{Level: EffortMedium}, on},
+		{"high degrades to affirmative on", Effort{Level: EffortHigh}, on},
+		{"bare budget degrades to affirmative on", Effort{Budget: 4096}, on},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,8 +152,9 @@ func TestTranslateTemplateKwargs(t *testing.T) {
 }
 
 // TestTranslateOpenRouter covers the OpenRouter reasoning dialect: off →
-// {enabled:false}, levels → {effort:"..."}, a bare budget → {max_tokens:N},
-// unset/on → no reasoning field at all (model default).
+// {enabled:false}, on → {enabled:true} (affirmative — hosted defaults often
+// resolve to no reasoning), levels → {effort:"..."}, a bare budget →
+// {max_tokens:N}, unset → no reasoning field at all (model default).
 func TestTranslateOpenRouter(t *testing.T) {
 	tests := []struct {
 		name string
@@ -159,7 +162,7 @@ func TestTranslateOpenRouter(t *testing.T) {
 		want *Reasoning
 	}{
 		{"unset: nil", Effort{}, nil},
-		{"on: nil (model default)", Effort{Level: EffortOn}, nil},
+		{"on: enabled true", Effort{Level: EffortOn}, &Reasoning{Enabled: &trueVal}},
 		{"off: enabled false", Effort{Level: EffortOff}, &Reasoning{Enabled: &falseVal}},
 		{"low: effort low", Effort{Level: EffortLow}, &Reasoning{Effort: "low"}},
 		{"medium: effort medium", Effort{Level: EffortMedium}, &Reasoning{Effort: "medium"}},

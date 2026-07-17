@@ -481,19 +481,27 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
-	t.Run("thinking off for code by default; study deliberates on; config can re-enable", func(t *testing.T) {
+	t.Run("thinking on for code by default; fleet degrades non-thinkers; config can disable", func(t *testing.T) {
 		var nilCfg *Config
-		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking.Level != llm.EffortOff {
-			t.Errorf("code Thinking = %+v, want off", code.Thinking)
+		// Pure role default (nil fleet): code deliberates by default —
+		// Derek's 2026-07-17 call; effort-off is opt-in via config.
+		if code := nilCfg.resolveBinding(roleCode, nil); code.Thinking.Level != llm.EffortOn {
+			t.Errorf("code Thinking = %+v, want on by default", code.Thinking)
+		}
+		// testFleet's coder model IS thinking-capable (hybrid), so the "on"
+		// default survives fleet resolution. (The degrade-to-unset path for a
+		// non-thinking fleet model is covered by the webui models golden.)
+		if code := nilCfg.resolveBinding(roleCode, testFleet); code.Thinking.Level != llm.EffortOn {
+			t.Errorf("code Thinking = %+v, want on (hybrid fleet model keeps it)", code.Thinking)
 		}
 		// study draws from the reasoner tag and deliberates: an explicit "on"
 		// default now, rather than the old implicit nil.
 		if study := nilCfg.resolveBinding(roleStudy, testFleet); study.Thinking.Level != llm.EffortOn {
 			t.Errorf("study Thinking = %+v, want on (reasoner thinks by default)", study.Thinking)
 		}
-		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: llm.Effort{Level: llm.EffortOn}}}}
-		if got := c.resolveBinding(roleCode, testFleet); got.Thinking.Level != llm.EffortOn {
-			t.Errorf("config thinking=on should win, got %+v", got.Thinking)
+		c := &Config{Models: map[string]ModelSpec{roleCode: {Thinking: llm.Effort{Level: llm.EffortOff}}}}
+		if got := c.resolveBinding(roleCode, testFleet); got.Thinking.Level != llm.EffortOff {
+			t.Errorf("config thinking=off should win, got %+v", got.Thinking)
 		}
 	})
 
@@ -918,31 +926,32 @@ func TestSharedSwapGroup(t *testing.T) {
 	})
 }
 
-// TemplateKwargs: thinking=off is the only case that emits kwargs — unset,
-// on, and every level/budget all defer to the model's template default
-// (docs/thinking-models.md §2: this dialect has no representation for them).
+// TemplateKwargs: off and on are both said affirmatively; levels degrade to
+// the affirmative on (this dialect can't represent them); only unset defers
+// to the model's template default (docs/thinking-models.md §2).
 func TestTemplateKwargs(t *testing.T) {
+	enabled := func(b bool) *bool { return &b }
 	tests := []struct {
 		name     string
 		thinking llm.Effort
-		want     bool // kwargs expected?
+		want     *bool // nil: no kwargs; else the expected enable_thinking
 	}{
-		{"unset defers to template default", llm.Effort{}, false},
-		{"on defers to template default", llm.Effort{Level: llm.EffortOn}, false},
-		{"off emits enable_thinking=false", llm.Effort{Level: llm.EffortOff}, true},
-		{"high degrades to on: no kwarg", llm.Effort{Level: llm.EffortHigh}, false},
+		{"unset defers to template default", llm.Effort{}, nil},
+		{"on emits enable_thinking=true", llm.Effort{Level: llm.EffortOn}, enabled(true)},
+		{"off emits enable_thinking=false", llm.Effort{Level: llm.EffortOff}, enabled(false)},
+		{"high degrades to affirmative on", llm.Effort{Level: llm.EffortHigh}, enabled(true)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			kw := ModelSpec{Thinking: tt.thinking}.TemplateKwargs()
-			if !tt.want {
+			if tt.want == nil {
 				if kw != nil {
 					t.Errorf("TemplateKwargs() = %v, want nil", kw)
 				}
 				return
 			}
-			if v, ok := kw["enable_thinking"].(bool); !ok || v {
-				t.Errorf("TemplateKwargs() = %v, want enable_thinking=false", kw)
+			if v, ok := kw["enable_thinking"].(bool); !ok || v != *tt.want {
+				t.Errorf("TemplateKwargs() = %v, want enable_thinking=%v", kw, *tt.want)
 			}
 		})
 	}
@@ -957,7 +966,7 @@ func TestModelSpecReasoning(t *testing.T) {
 		want     *llm.Reasoning
 	}{
 		{"unset: nil", llm.Effort{}, nil},
-		{"on: nil (model default)", llm.Effort{Level: llm.EffortOn}, nil},
+		{"on: enabled true (affirmative)", llm.Effort{Level: llm.EffortOn}, &llm.Reasoning{}},
 		{"off: enabled false", llm.Effort{Level: llm.EffortOff}, &llm.Reasoning{}},
 		{"high: effort high", llm.Effort{Level: llm.EffortHigh}, &llm.Reasoning{Effort: "high"}},
 	}

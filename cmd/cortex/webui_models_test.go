@@ -45,7 +45,10 @@ func TestBuildModelsViewModelGolden(t *testing.T) {
 	}
 
 	want := `{"bindings":[` +
-		row("code", "coder-explicit", `"off"`, "configured") + "," +
+		// code defaults to "on" (2026-07-17: deliberation on by default);
+		// coder-explicit isn't in the fixture fleet, so no degradation runs
+		// and the role default rides through.
+		row("code", "coder-explicit", `"on"`, "configured") + "," +
 		row("embed", "", "null", "unbound") + "," +
 		row("fast", "", `"off"`, "unbound") + "," +
 		// hard-code defaults to "high", but the fixture fleet's study-model

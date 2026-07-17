@@ -30,8 +30,11 @@ const (
 	EffortUnset EffortLevel = ""
 	// EffortOff suppresses reasoning.
 	EffortOff EffortLevel = "off"
-	// EffortOn requests the model's default reasoning behavior — today's
-	// implicit state, now sayable.
+	// EffortOn AFFIRMATIVELY enables reasoning at the model's default depth
+	// (enable_thinking:true / reasoning:{enabled:true}). It is not an
+	// omission: hosted defaults often resolve to no reasoning, so "on" must
+	// be said on the wire to mean anything. EffortUnset is the
+	// send-nothing/model-default state.
 	EffortOn EffortLevel = "on"
 	// EffortLow/EffortMedium/EffortHigh are effort levels for dialects that
 	// have them (OpenRouter's reasoning.effort); dialects without levels
@@ -164,7 +167,10 @@ type Reasoning struct {
 	MaxTokens int `json:"max_tokens,omitempty"`
 }
 
-var falseVal = false
+var (
+	falseVal = false
+	trueVal  = true
+)
 
 // Translate converts a resolved Effort into the wire fields for one dialect:
 // chat_template_kwargs (kwargs, non-nil only for DialectTemplateKwargs) and
@@ -176,24 +182,36 @@ var falseVal = false
 func Translate(d Dialect, e Effort) (kwargs map[string]any, reasoning *Reasoning) {
 	switch d {
 	case DialectTemplateKwargs:
-		if e.Level == EffortOff {
+		switch {
+		case e.Level == EffortOff:
 			return map[string]any{"enable_thinking": false}, nil
+		case e.Level == EffortUnset && e.Budget == 0:
+			// Unset: send nothing — the model's own default.
+			return nil, nil
+		default:
+			// On, every level, and a bare budget all AFFIRMATIVELY enable —
+			// this dialect has no representation for levels or budgets
+			// (docs/thinking-models.md §2 dialect table), so they degrade to
+			// an explicit on. "On" must be affirmative, not omitted: many
+			// hosted defaults resolve to no reasoning (measured on
+			// tencent/hy3 via OpenRouter, 2026-07-17), which made
+			// on-as-omission indistinguishable from off.
+			return map[string]any{"enable_thinking": true}, nil
 		}
-		// Unset, on, every level, and a bare budget all degrade to "on" —
-		// this dialect has no representation for levels or budgets
-		// (docs/thinking-models.md §2 dialect table), so the model just
-		// runs its own default reasoning behavior.
-		return nil, nil
 	case DialectOpenRouter:
 		switch {
 		case e.Level == EffortOff:
 			return nil, &Reasoning{Enabled: &falseVal}
+		case e.Level == EffortOn:
+			// Affirmative enable at the model's default depth. Verified safe
+			// on non-reasoning models (OpenRouter ignores it, 2026-07-17).
+			return nil, &Reasoning{Enabled: &trueVal}
 		case e.Level == EffortLow || e.Level == EffortMedium || e.Level == EffortHigh:
 			return nil, &Reasoning{Effort: string(e.Level)}
 		case e.Level == EffortUnset && e.Budget > 0:
 			return nil, &Reasoning{MaxTokens: e.Budget}
 		default:
-			// EffortUnset or EffortOn: no reasoning field at all — model default.
+			// EffortUnset: no reasoning field at all — model default.
 			return nil, nil
 		}
 	default:

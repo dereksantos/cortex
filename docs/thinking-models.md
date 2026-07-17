@@ -86,7 +86,14 @@ existing bool (accept both; bool maps to `"off"`/`"on"`):
 ```
 
 - `"off"` — suppress thinking.
-- `"on"` — model default (today's implicit state, now sayable).
+- `"on"` — affirmatively enable at the model's default depth
+  (`enable_thinking: true` / `reasoning: {enabled: true}`). Not an omission:
+  hosted defaults often resolve to no reasoning (measured on tencent/hy3 via
+  OpenRouter, 2026-07-17), so on-as-omission was indistinguishable from off.
+  Unset is the send-nothing/model-default state. As of 2026-07-17 the `code`
+  role defaults to `on` — deliberation by default; effort-off is opt-in via
+  config (`fast` stays off; the summarizer/shell-risk call sites stay pinned
+  off).
 - `"low" | "medium" | "high"` — effort levels, for dialects that have them.
 - `{ "budget": N }` — token budget, for dialects that have that.
 

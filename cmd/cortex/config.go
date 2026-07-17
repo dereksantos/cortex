@@ -43,7 +43,7 @@ type rolePolicy struct {
 }
 
 var rolePolicies = map[string]rolePolicy{
-	roleCode:     {tag: "coder", effort: llm.Effort{Level: llm.EffortOff}},
+	roleCode:     {tag: "coder", effort: llm.Effort{Level: llm.EffortOn}},
 	roleHardCode: {tag: "coder", preferExperimental: true, effort: llm.Effort{Level: llm.EffortHigh}},
 	roleReason:   {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
 	roleFast:     {tag: "fast", effort: llm.Effort{Level: llm.EffortOff}},
