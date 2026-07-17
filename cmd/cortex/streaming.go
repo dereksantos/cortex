@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/lineedit"
@@ -46,6 +47,78 @@ type streamPrinter struct {
 	// step, so thoughtStat knows not to add a second, redundant gray line for
 	// the same event.
 	crumbed bool
+
+	// The label ticker refreshes "thinking… Ns" once a second on wall-clock,
+	// so the elapsed counter advances even when no reasoning deltas arrive —
+	// an effort-off model, or a long queue/prefill wait, would otherwise sit
+	// on a bare static "thinking…" forever. tickMu guards tickTail/tickDone
+	// AND serializes sink writes against stopTicker, so once stopTicker
+	// returns no straggler tick can redraw over a cleared status line.
+	tickMu   sync.Mutex
+	tickTail string        // latest reasoning tail, shown after the seconds
+	tickDone bool          // set by stopTicker; blocks further label writes
+	tickStop chan struct{} // closed by stopTicker to end the goroutine
+}
+
+// labelTickInterval is the wall-clock refresh period of the "thinking… Ns"
+// label. A var so tests can shrink it.
+var labelTickInterval = time.Second
+
+// startTicker begins the once-per-second label refresh. No-op without a
+// display sink (test-constructed printers).
+func (p *streamPrinter) startTicker() {
+	if p.spinner == nil && p.onStatus == nil {
+		return
+	}
+	p.tickStop = make(chan struct{})
+	go func() {
+		t := time.NewTicker(labelTickInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-p.tickStop:
+				return
+			case <-t.C:
+				p.refreshLabel("")
+			}
+		}
+	}()
+}
+
+// stopTicker ends the refresh goroutine and blocks any further label writes.
+// Idempotent, and safe without a prior startTicker.
+func (p *streamPrinter) stopTicker() {
+	p.tickMu.Lock()
+	defer p.tickMu.Unlock()
+	if p.tickDone {
+		return
+	}
+	p.tickDone = true
+	if p.tickStop != nil {
+		close(p.tickStop)
+	}
+}
+
+// refreshLabel renders "thinking… Ns · tail" to whichever sink exists. tail
+// carries new reasoning text from onReasoning; empty means a pure clock tick
+// reusing the last tail. All sink writes go through here, under tickMu, so
+// they serialize with stopTicker.
+func (p *streamPrinter) refreshLabel(tail string) {
+	p.tickMu.Lock()
+	defer p.tickMu.Unlock()
+	if p.tickDone {
+		return
+	}
+	if tail != "" {
+		p.tickTail = tail
+	}
+	et := elapsedTail(p.start, p.tickTail)
+	switch {
+	case p.spinner != nil:
+		p.spinner.SetLabel(withColor("thinking… "+et, gray))
+	case p.onStatus != nil:
+		p.onStatus(true, et)
+	}
 }
 
 // reasoningTailWidth caps the live "thinking…" ticker to one line on typical
@@ -91,14 +164,7 @@ func (p *streamPrinter) onReasoning(s string) {
 		return
 	}
 	p.reason.WriteString(s)
-	tail := reasoningTail(p.reason.String(), reasoningTailWidth)
-	et := elapsedTail(p.start, tail)
-	switch {
-	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking… "+et, gray))
-	case p.onStatus != nil:
-		p.onStatus(true, et)
-	}
+	p.refreshLabel(reasoningTail(p.reason.String(), reasoningTailWidth))
 }
 
 // writer returns the configured sink, defaulting to stdout.
@@ -142,6 +208,9 @@ func (p *streamPrinter) begin() {
 	if p.began {
 		return
 	}
+	// Stop the label ticker before clearing either sink: stopTicker holds
+	// tickMu, so after it returns no straggler tick can redraw the status.
+	p.stopTicker()
 	if p.spinner != nil {
 		p.spinner.Stop()
 	}
@@ -332,7 +401,9 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
 		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking, start: time.Now()}
+		p.startTicker()
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
+		p.stopTicker() // before the clear below, so no straggler tick redraws
 		p.finish()
 		cs.live.SetThinking(false, "")
 		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
@@ -347,7 +418,9 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		return res, false, err
 	}
 	p := &streamPrinter{spinner: s, md: cs.markdown(), start: time.Now()}
+	p.startTicker()
 	res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
+	p.stopTicker() // before the spinner stops, so no straggler tick relabels
 	p.finish()
 	if !p.began {
 		s.Stop() // stop before the breadcrumb so the line is clean

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -254,5 +255,61 @@ func TestOnReasoningNoopAfterAnswerBegan(t *testing.T) {
 	p.onReasoning("late reasoning that should be ignored")
 	if calls != 1 {
 		t.Errorf("onStatus called %d times after a post-answer onReasoning, want still 1", calls)
+	}
+}
+
+// TestLabelTickerAdvancesWithoutReasoning: the elapsed counter must advance on
+// wall-clock even when NO reasoning deltas ever arrive — an effort-off model,
+// or a long queue/prefill wait, is exactly when the user most needs to see
+// time passing. Also asserts stopTicker halts updates, so begin()'s status
+// clear can never be overdrawn by a straggler tick.
+func TestLabelTickerAdvancesWithoutReasoning(t *testing.T) {
+	old := labelTickInterval
+	labelTickInterval = 10 * time.Millisecond
+	defer func() { labelTickInterval = old }()
+
+	var mu sync.Mutex
+	var tails []string
+	p := &streamPrinter{
+		onStatus: func(on bool, tail string) {
+			if !on {
+				return
+			}
+			mu.Lock()
+			tails = append(tails, tail)
+			mu.Unlock()
+		},
+		start: time.Now().Add(-7 * time.Second),
+	}
+	p.startTicker()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(tails)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ticker produced no status updates without reasoning deltas")
+		}
+		time.Sleep(labelTickInterval / 2)
+	}
+	p.stopTicker()
+
+	mu.Lock()
+	last := tails[len(tails)-1]
+	before := len(tails)
+	mu.Unlock()
+	if !strings.HasPrefix(last, "7s") && !strings.HasPrefix(last, "8s") {
+		t.Errorf("ticker tail = %q, want an elapsed-seconds prefix (~7s)", last)
+	}
+
+	time.Sleep(5 * labelTickInterval)
+	mu.Lock()
+	after := len(tails)
+	mu.Unlock()
+	if after != before {
+		t.Errorf("ticker still updating after stopTicker: %d -> %d status calls", before, after)
 	}
 }
