@@ -258,6 +258,45 @@ func TestOnReasoningNoopAfterAnswerBegan(t *testing.T) {
 	}
 }
 
+// TestCurrentThought: the live ticker shows the model's latest reasoning
+// SENTENCE (head-truncated), not a raw trailing-runes window that cuts
+// mid-word — the model's own sentences are the real-time summary.
+func TestCurrentThought(t *testing.T) {
+	tests := []struct {
+		name  string
+		trace string
+		width int
+		want  string
+	}{
+		{"single incomplete sentence shows as-is",
+			"I need a fleet of free models on open router", 80,
+			"I need a fleet of free models on open router"},
+		{"latest complete sentence wins over earlier ones",
+			"First I looked at the config. Now checking the fleet discovery path", 80,
+			"Now checking the fleet discovery path"},
+		{"just-started stub falls back to previous sentence",
+			"The registry owns this mapping. So the", 80,
+			"The registry owns this mapping"},
+		{"newline-delimited step lines segment too",
+			"Step 1: read the config\nStep 2: trace the request build", 80,
+			"Step 2: trace the request build"},
+		{"long thought truncates from the head, keeping the start",
+			"Now I am going to look very carefully at the resolveBinding function in config", 20,
+			"Now I am going to lo…"},
+		{"whitespace collapses",
+			"thinking   about\n\n", 80,
+			"thinking about"},
+		{"empty trace stays empty", "", 80, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := currentThought(tt.trace, tt.width); got != tt.want {
+				t.Errorf("currentThought(%q) = %q, want %q", tt.trace, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestLabelTickerAdvancesWithoutReasoning: the elapsed counter must advance on
 // wall-clock even when NO reasoning deltas ever arrive — an effort-off model,
 // or a long queue/prefill wait, is exactly when the user most needs to see

@@ -125,16 +125,46 @@ func (p *streamPrinter) refreshLabel(tail string) {
 // terminals — we show the most recent runes, not the whole chain-of-thought.
 const reasoningTailWidth = 80
 
-// reasoningTail collapses whitespace and returns the last width runes, so the
-// ticker stays a single, bounded line as reasoning streams.
-func reasoningTail(s string, width int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	r := []rune(s)
-	if len(r) > width {
-		r = r[len(r)-width:]
+// currentThought returns the model's most recent thought as a readable
+// phrase: the last sentence (or step line) of the reasoning trace, truncated
+// from the head so its start — the readable part — survives. A raw
+// trailing-runes window cuts mid-word and reads like teletype; a model's own
+// reasoning sentences are natural one-line summaries of what it is doing, so
+// sentence alignment is the cheap real-time "summarization". When the
+// in-progress sentence has barely started, the previous complete one is shown
+// instead of a two-word stub.
+func currentThought(s string, width int) string {
+	segs := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n' || r == ';'
+	})
+	cur := ""
+	for i := len(segs) - 1; i >= 0; i-- {
+		seg := strings.Join(strings.Fields(segs[i]), " ")
+		if seg == "" {
+			continue
+		}
+		if cur == "" {
+			cur = seg
+			// A stub of a just-started sentence: prefer the previous
+			// complete thought, which still describes what's happening.
+			if len([]rune(seg)) >= currentThoughtMinRunes {
+				break
+			}
+			continue
+		}
+		cur = seg
+		break
 	}
-	return string(r)
+	r := []rune(cur)
+	if len(r) > width {
+		return strings.TrimRight(string(r[:width]), " ") + "…"
+	}
+	return cur
 }
+
+// currentThoughtMinRunes is the length below which an in-progress sentence
+// reads as a stub and the previous complete sentence is shown instead.
+const currentThoughtMinRunes = 12
 
 // elapsedTail prefixes the reasoning tail with the whole seconds elapsed
 // since start, e.g. "12s · reasoning excerpt", or just "12s" before any
@@ -164,7 +194,7 @@ func (p *streamPrinter) onReasoning(s string) {
 		return
 	}
 	p.reason.WriteString(s)
-	p.refreshLabel(reasoningTail(p.reason.String(), reasoningTailWidth))
+	p.refreshLabel(currentThought(p.reason.String(), reasoningTailWidth))
 }
 
 // writer returns the configured sink, defaulting to stdout.
