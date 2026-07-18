@@ -8,9 +8,14 @@
 > on the main line; full gate green; branch `Cortex` backed up to the
 > chatterbox remote.
 >
-> "Completion" here means three things, in order: the docs tell the truth,
-> the core thesis is *measured* (not just built), and the remaining
-> checklist features land. Explicitly **out of scope** (unchanged gates):
+> Amended same day with findings from Derek's own cortex analysis sessions
+> (`.cortex/sessions/20260717-003116` role/config launch pass,
+> `20260717-004933` long-horizon eval pass) — see Tracks B and E.
+>
+> "Completion" here means four things, in order: the docs tell the truth,
+> the core thesis is *measured* (not just built), the remaining
+> checklist features land, and the harness is launch-ready for outside
+> users. Explicitly **out of scope** (unchanged gates):
 > Think/Dream/Reflect (blocked — no product surface named,
 > `docs/think-dream-eval.md`), the Curate concept (parked), semantic
 > `memory_search` (evidence-gated), fine-tuning.
@@ -35,7 +40,12 @@ building on it.
       `cmd/cortex/tool_deps.go`, not `cmd/cortex/tools/`.
 - [ ] A4. Prune/mark the stale lower half of
       `docs/context-window-modification-tools.md` (the §5/§7/§8 plan text
-      that predates the SHIPPED banner and contradicts it).
+      that predates the SHIPPED banner and contradicts it). Also update
+      `docs/eval-context-pivot.md`'s central prior — "the tools have never
+      been observed firing live" (2026-07-11) is falsified: sessions
+      2026-06-11→07-17 show `recall`×1324, `context_merge`×499,
+      `context_evict`×435, `context_adjust_watermarks`×462, plus
+      `coding.context_rewrite`×328 in the journal.
 - [ ] A5. Dead code: delete `pkg/cliout` (zero importers); delete the
       obsolete `transport.go:19` rename-TODO; delete local branch
       `loop/wire-cognition-fleet` (fully merged); dedupe the doubled
@@ -59,10 +69,19 @@ performance claims until receipts exist.
       at dispatch but leaves the tool declaration on the wire
       (`IsToolEnabled` / `session_core.go`). Gates must strip declarations
       too — ARM-OFF in B4 depends on it.
-- [ ] B2. Context-pivot Δ eval: build
-      `cmd/cortex/context_pivot_eval_test.go` per
-      `docs/eval-context-pivot.md` (composed-migration invariants;
-      offline, deterministic, expected green).
+- [ ] B2. Context-pivot **live benefit eval first** (priority reordered by
+      the 2026-07-17 session evidence): the ø volition question is
+      effectively answered — the tools fire live — so the open question is
+      the *benefit arm*: does curation causally improve retention? Build
+      `cmd/cortex/context_pivot_eval_live_test.go` (gated
+      `CORTEX_LIVE_FLEET=1`) reusing `context_eval_live_test.go`'s helpers
+      (`fillerInput`, `factInput`, `recallCalledSince`, `codewordish`,
+      `cacheOutlineText`): three needles (A-dead, A-keep, B), pivot turn,
+      ARM-ON vs ARM-OFF where the control arm strips the three context-tool
+      declarations from `Request.Tools` directly (honest control even
+      before B1 lands); report the L0–L3 conversion rung + retention grades
+      per model. The offline Δ layer
+      (`context_pivot_eval_test.go`) follows as the deterministic guard.
 - [ ] B3. Eval 6b — the cold-vs-warm learning-loop runner (the unmeasured
       raison d'être: does accumulated memory make the agent better?).
       Design first per the harness doc, then build: two-arm run of the
@@ -71,10 +90,8 @@ performance claims until receipts exist.
       `ContextStrategy=cold|warm`; reuse the `memory_e2e_live_test.go`
       harness patterns; gate live runs behind `CORTEX_LIVE_FLEET=1`.
       Probe-before-long-run applies (minutes-scale sanity rep first).
-- [ ] B4. ø context-pivot live eval: the L0–L3 volition ladder + ARM-OFF
-      two-arm gate run (n≥3), per the doc's build order — only after B2 is
-      green. This also answers the open empirical question: the shipped
-      `context_*` tools have never been observed firing live.
+- [ ] B4. ø context-pivot gate run at n≥3 on the live fleet once B2's
+      scenario is stable, recording receipts in the journal.
 - [ ] B5. Thinking-models fleet probe: sanity-check the level→budget tier
       strawman (low=1k/med=4k/high=16k); verify `fast`-role sub-calls pin
       effort off; only after the probe, decide on escalation defaults
@@ -91,8 +108,11 @@ topics, fleet slot contention (`docs/refactor-status.md`).
 ## Track C — Completion features (checklist debt)
 
 - [ ] C1. `cortex model` — catalog + suggest model/role setups from system
-      resources (`cmd/cortex/main.go:45`), building on the existing
-      `pkg/llm/recommend.go` recommender.
+      resources (`cmd/cortex/main.go:45`). Decision first: `pkg/llm`'s
+      `Recommend()` engine is currently dead code (nothing calls it, and it
+      defines a second parallel `Role` type — part of the role sprawl, per
+      the 2026-07-17 session) — either wire it as this command's engine or
+      delete it and build lean; don't leave it dormant.
 - [ ] C2. Code-model learned-window calibration: extend `learnedWindows`
       beyond the study model (`cmd/cortex/tool_deps.go:39`) so the code
       role self-calibrates on overflow; compaction remains the fallback.
@@ -125,15 +145,47 @@ study-eval rows visible via jq over the journal.
 **Gate D:** full gate green; a browser-verified serve session and a live
 Discord round-trip after D3.
 
+## Track E — Launch readiness (Derek's stated end-goal, 2026-07-17 session)
+
+The 00:31 session's goal: "get this project live and publicly ready as a
+coding harness that can be used reliably." Its analysis (grounded in
+code): `cmd/cortex/config.go` defines **8 roles** (`code`, `hard-code`,
+`reason`, `fast`, `study`, `embed`, `rerank`, `tools`) but only
+`code`+`study` are on live paths; `discoverFleet` reads a LiteLLM
+`/model/info` endpoint OpenRouter doesn't serve, so raw-OpenRouter users
+must pin models by hand. The session's recommendation (two forks left
+unconfirmed there; adopted here):
+
+- [ ] E1. Role collapse: the configurable surface becomes `code`+`study`
+      defined as *agent roles* under an `agent`-shaped config (same model
+      by default); the other six roles are removed or demoted to
+      internal/reserved. Lands together with D1 (they touch the same
+      config seams).
+- [ ] E2. Curated OpenRouter free-model default fleet (fork A — curated
+      list shipped in config/docs, not live auto-discovery): works
+      without a LiteLLM proxy, zero-cost first run.
+- [ ] E3. Invariant pruning + a configuration doc: one page that tells an
+      outside user exactly what to set (backend, key, two roles) and what
+      every `tools.*` gate does.
+- [ ] E4. Release surface: versioned build, install instructions
+      (`go install` at minimum), and a first-run smoke path (`cortex` →
+      bootstrap → one green turn on the free fleet).
+
+**Gate E:** a fresh machine + an OpenRouter key reaches a green first
+turn with no hand-edited config beyond the key; README quickstart matches
+reality.
+
 ## Sequencing
 
-A → B are strictly ordered (truth base, then proof). C and D can proceed
-in parallel once B1–B3 are underway; D3 lands last. Big mechanical tracks
-(D1/D2) are candidates for the loop harness / a ralph loop; B needs
-hands-on design.
+A → B are strictly ordered (truth base, then proof). C, D, and E can
+proceed in parallel once B1–B3 are underway; E1 lands with D1; D3 lands
+last. Big mechanical tracks (D1/D2) are candidates for the loop harness /
+a ralph loop; B and E1/E2 need hands-on design.
 
 ## Definition of done
 
-All four gates green; no doc contradicts the code; the cold-vs-warm and
+All five gates green; no doc contradicts the code; the cold-vs-warm and
 context-pivot numbers exist in the journal with receipts; the remaining
-`main.go` checklist items are either done or explicitly retired here.
+`main.go` checklist items are either done or explicitly retired here; a
+stranger with an OpenRouter key can install, bootstrap, and complete a
+green turn.
