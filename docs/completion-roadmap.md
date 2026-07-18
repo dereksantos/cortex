@@ -162,8 +162,14 @@ unconfirmed there; adopted here):
       internal/reserved. Lands together with D1 (they touch the same
       config seams).
 - [ ] E2. Curated OpenRouter free-model default fleet (fork A — curated
-      list shipped in config/docs, not live auto-discovery): works
-      without a LiteLLM proxy, zero-cost first run.
+      list shipped in config/docs): works without a LiteLLM proxy,
+      zero-cost first run. **Decision (2026-07-18):** curated is primary;
+      auto-discovery is a *fallback layer on top*, not the default — when
+      a curated model is unavailable (404/410/rate-limited at first use),
+      fall back to discovering `:free` models via OpenRouter's
+      `/api/v1/models` (the existing `pkg/llm/openrouter.go ListModels`
+      path) and pick a substitute; surface the substitution to the user
+      and journal it. Deterministic first, adaptive on failure.
 - [ ] E3. Invariant pruning + a configuration doc: one page that tells an
       outside user exactly what to set (backend, key, two roles) and what
       every `tools.*` gate does.
