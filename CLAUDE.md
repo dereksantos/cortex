@@ -125,8 +125,9 @@ the model-driven memory tools
   one spanning `#m<first>-<last>` citation, so recall stays lossless) and
   shift the demotion watermarks (±W/4). `recall` takes an optional `budget`
   for a compact digest instead of the raw messages (this subsumed
-  `context_summarize`). Session-local — the state reverts on resume; per-tool
-  gates `tools.enable_context_*`. See
+  `context_summarize`). Curation persists across resume (per-turn session
+  snapshot — decision 2026-07-18; the transcript remains the lossless
+  record); per-tool gates `tools.enable_context_*`. See
   [`docs/context-window-modification-tools.md`](docs/context-window-modification-tools.md).
 
 ## Configuration

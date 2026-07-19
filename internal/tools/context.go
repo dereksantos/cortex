@@ -11,7 +11,7 @@ const (
 var ContextEvictTool = newTool(FunctionContextEvict,
 	"Removes an entry from the session outline. The turn's raw messages stay in the transcript "+
 		"(a later recall of the citation still works), so this is safe — use it to drop outline "+
-		"entries that are clearly irrelevant to the ongoing work. Reverts on session resume.",
+		"entries that are clearly irrelevant to the ongoing work. Persists across session resume.",
 	objectSchema(map[string]any{
 		"citation": stringProp("The citation to evict, exactly as shown in the outline, e.g., @session/20260701-143210#m12-19"),
 	}, "citation"))
@@ -32,7 +32,7 @@ var ContextMergeTool = newTool(FunctionContextMerge,
 var ContextAdjustWatermarksTool = newTool(FunctionContextAdjustWatermarks,
 	"Adjusts the working-set watermarks (token thresholds where old turns demote to the outline) "+
 		"by the given deltas, bounded to ±W/4. Raise them to keep more recent turns verbatim during "+
-		"a dense task; lower them to demote more aggressively. Reverts on session resume.",
+		"a dense task; lower them to demote more aggressively. Persists across session resume.",
 	objectSchema(map[string]any{
 		"high_delta": map[string]any{"type": "integer", "description": "Change to high watermark (default: 0)"},
 		"low_delta":  map[string]any{"type": "integer", "description": "Change to low watermark (default: 0)"},

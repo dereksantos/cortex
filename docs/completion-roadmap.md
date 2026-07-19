@@ -96,7 +96,7 @@ performance claims until receipts exist.
       strawman (low=1k/med=4k/high=16k); verify `fast`-role sub-calls pin
       effort off; only after the probe, decide on escalation defaults
       (`docs/thinking-models.md` open decisions).
-- [ ] B7. (Found during B2, 2026-07-18) Resume-revert contradiction:
+- [x] B7. (Found during B2, 2026-07-18; DECIDED persist-by-design, docs fixed) Resume-revert contradiction:
       `context_evict/merge/adjust_watermarks` mutations do NOT revert on
       session resume — `writeSessionState`/`restoreSessionState`
       (`cmd/cortex/session.go`) snapshots the outline + watermarks per

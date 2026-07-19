@@ -20,10 +20,16 @@
 > `context_merge` replaces the range with one merged entry carrying a single
 > **spanning** citation `#m<firstStart>-<lastEnd>` — turn spans partition the
 > message log, so recall of the span resolves every original message; all
-> mutations are **session-local working-set state** — they revert on resume,
-> because the frontier is derived by replaying policy over the transcript (the
-> window is a cache, not a record — `context-architecture.md`), which stands in
-> for the "all changes journaled" line below. Tests:
+> mutations **persist across resume, by design** (decision 2026-07-18,
+> completion-roadmap B7): `writeSessionState`/`restoreSessionState`
+> (`cmd/cortex/session.go`) snapshot the outline + watermarks each turn and
+> replay the snapshot on resume, so deliberate curation survives — the ø
+> pivot eval showed models do real migration work through these tools, and
+> discarding it on resume would undo exactly that. The transcript stays the
+> lossless record (recall always resolves), so nothing is destroyed —
+> curation shapes the cache, the journal keeps the truth. An earlier
+> revision of this note claimed revert-on-resume; that described the
+> pre-snapshot design, never the shipped behavior. Tests:
 > `internal/tools/context_tools_test.go`, `cmd/cortex/context_tools_test.go`.
 
 ---
