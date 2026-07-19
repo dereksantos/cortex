@@ -17,7 +17,8 @@
 > `pkg/cognition/dag/ops/` (scoring + triage + compress nodes).
 >
 > **Builds on.** [`salience-budgets.md`](salience-budgets.md) (the
-> compressor and its token/intent contract), [`journal.md`](journal.md)
+> compressor and its token/intent contract; not present in this repo — the
+> link predates this doc's archival and was already dead), [`journal.md`](../journal.md)
 > (the durable store eviction demotes to), and the Think/Dream
 > background modes in `CLAUDE.md`.
 

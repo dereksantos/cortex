@@ -4,7 +4,7 @@
 > **Purpose**: Dynamically adjust working set watermarks
 > **Status**: **SHIPPED (2026-07)** — historical plan. The live source in
 > `internal/tools/context_adjust_watermarks.go` is authoritative; the as-built
-> record is [`context-window-modification-tools.md`](context-window-modification-tools.md).
+> record is [`context-window-modification-tools.md`](../context-window-modification-tools.md).
 
 ---
 

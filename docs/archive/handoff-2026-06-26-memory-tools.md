@@ -21,12 +21,12 @@ The session started by *wiring up* a mechanical memory/retrieval pipeline, kept
 hitting its failure modes (stale memory served as fact; memory ≈ transcript),
 and ended with a **pivot**: memory should be **tools the model drives**, not a
 mechanical retrieval/distill pipeline. The live design is
-[`docs/memory-tools.md`](memory-tools.md). **P1 is underway** — the note store
+[`docs/memory-tools.md`](../memory-tools.md). **P1 is underway** — the note store
 (`internal/memory`) is built and committed; tools + index injection are next.
 
 ## The live direction (read this first)
 
-[`docs/memory-tools.md`](memory-tools.md): memory = a small tool surface over
+[`docs/memory-tools.md`](../memory-tools.md): memory = a small tool surface over
 free-form named notes.
 - Tools: `memory_write(name, content)`, `memory_read(name)`,
   `memory_search(query)`, `memory_forget(name)`, plus `study(journal)` (run the
@@ -40,8 +40,8 @@ free-form named notes.
   relevant ones; write a durable note when you learn something; notes are
   timestamped — verify if stale; `study(journal)` for raw detail.
 
-Supersedes the mechanical memory line (`docs/memory-distillation.md`,
-`docs/working-memory*.md`) — kept for history.
+Supersedes the mechanical memory line (`memory-distillation.md`,
+`working-memory*.md`, both now in this archive directory) — kept for history.
 
 ## Decisions locked
 

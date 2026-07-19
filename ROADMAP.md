@@ -108,7 +108,7 @@ different shape or is recorded below.)
    3. **The `agent` profile** — register a general profile with its own
       system prompt, tool allowlist, and mandatory `Bounds`; config-gated
       (`tools.enable_agent`) per the established pattern
-      ([`docs/IMPLEMENTATION-PATTERN.md`](docs/IMPLEMENTATION-PATTERN.md)).
+      ([`docs/archive/IMPLEMENTATION-PATTERN.md`](docs/archive/IMPLEMENTATION-PATTERN.md)).
       Decisions to settle at this slice (small design note first): toolset
       scope (write/edit and bash, or read-only-plus-write?), how `shellrisk`
       Risky resolves inside a subagent (no human mid-loop → treat as
@@ -143,11 +143,11 @@ share one bounded agent-loop engine, with the tool vocabulary in
 | Doc | Disposition |
 |---|---|
 | [`docs/cortex-production-harness.md`](docs/cortex-production-harness.md) | Kept with a status note: parts 4/6 record the pre-pivot mechanical retrieval/distillation pipeline (since removed); the MECE framing and don't-build list remain live reference. |
-| [`docs/IMPLEMENTATION-PATTERN.md`](docs/IMPLEMENTATION-PATTERN.md) | Kept as the config-gated-tool pattern guide; note updated for the `context_summarize` → `recall(budget)` fold. |
-| `docs/implementation-context-{evict,merge,adjust-watermarks}.md` | Historical plans, marked shipped; `internal/tools/context*.go` is authoritative. |
-| `docs/implementation-context-summarize.md` | Historical, marked folded into `recall(budget)`. |
-| `docs/implementation-context-reorder.md` | Already marked cut (tool was unshippable by construction). |
-| `docs/refactor-status.md`, `docs/refactor-goal-prompt.md` | Historical records of the shipped engine+study refactor, marked as such. |
+| [`docs/archive/IMPLEMENTATION-PATTERN.md`](docs/archive/IMPLEMENTATION-PATTERN.md) | Kept as the config-gated-tool pattern guide; note updated for the `context_summarize` → `recall(budget)` fold. |
+| `docs/archive/implementation-context-{evict,merge,adjust-watermarks}.md` | Historical plans, marked shipped; `internal/tools/context*.go` is authoritative. |
+| `docs/archive/implementation-context-summarize.md` | Historical, marked folded into `recall(budget)`. |
+| `docs/archive/implementation-context-reorder.md` | Already marked cut (tool was unshippable by construction). |
+| `docs/archive/refactor-status.md`, `docs/archive/refactor-goal-prompt.md` | Historical records of the shipped engine+study refactor, marked as such. |
 | `CLAUDE.md` | Stale dispatch line refs corrected. |
 | `ideas.md` | Folded into this roadmap ("Someday" below + web track pointer) and removed. |
 

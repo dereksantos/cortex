@@ -1,3 +1,7 @@
+> Historical ralph-loop scaffolding for the cortex-web build (2026-07),
+> kept for provenance. Not project status — the web track it drove
+> (M1–M6) shipped and merged; see `docs/completion-roadmap.md`.
+
 # GOAL — Cortex Web track (ralph loop)
 
 Immutable specification for a memoryless build loop. Each iteration: read

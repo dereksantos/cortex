@@ -57,8 +57,8 @@ strategy was built around three claims (detailed in the since-removed
    complexity — cheap tasks → small graphs, complex tasks → larger graphs,
    quality flattening at a knee. Metric: the budget–quality curve.
 
-The working-memory direction (retained in `working-memory.md`,
-`working-memory-study.md`) is the live continuation of claims 1–2 inside
+The working-memory direction (retained in `archive/working-memory.md`,
+`archive/working-memory-study.md`) is the live continuation of claims 1–2 inside
 `cmd/cortex`.
 
 ## The capture pipeline

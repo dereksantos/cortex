@@ -11,9 +11,9 @@ for what existed before and why it went.
 > drives** (`memory_write/read/search/forget` + `study(journal)`) over free-form
 > named notes + an injected index — NOT a mechanical retrieval/distill pipeline.
 > It supersedes the mechanical memory line —
-> [`docs/memory-distillation.md`](docs/memory-distillation.md),
-> [`docs/working-memory.md`](docs/working-memory.md),
-> [`docs/working-memory-study.md`](docs/working-memory-study.md) — which is kept
+> [`docs/archive/memory-distillation.md`](docs/archive/memory-distillation.md),
+> [`docs/archive/working-memory.md`](docs/archive/working-memory.md),
+> [`docs/archive/working-memory-study.md`](docs/archive/working-memory-study.md) — which is kept
 > for history. The harness hardening plan is
 > [`docs/cortex-production-harness.md`](docs/cortex-production-harness.md).
 >

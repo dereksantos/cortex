@@ -97,7 +97,7 @@ doesn't bear directly on background-vs-foreground.
 
 ## The eval
 
-Two-layer house pattern (`docs/eval-design-example.md`): **Δ deterministic**
+Two-layer house pattern (`docs/archive/eval-design-example.md`): **Δ deterministic**
 (the background mechanism, once built, behaves — budget bounds hold, no
 model needed) and **ø agentic** (a live model's background pass produces
 curation a foreground-only session would have missed, and that curation

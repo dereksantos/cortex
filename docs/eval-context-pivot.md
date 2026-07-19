@@ -5,7 +5,7 @@
 > ([`context-window-modification-tools.md`](context-window-modification-tools.md)):
 > `context_evict`, `context_merge`, `context_adjust_watermarks`, plus
 > `recall(citation, budget)`. Follows the two-layer house pattern
-> ([`eval-design-example.md`](eval-design-example.md)): Δ deterministic +
+> ([`archive/eval-design-example.md`](archive/eval-design-example.md)): Δ deterministic +
 > ø agentic, `pass ⟺ Δ green ∧ ø green`.
 
 ## The question
@@ -278,7 +278,7 @@ CORTEX_LIVE_FLEET=1 go test ./cmd/cortex -run PivotEval_Live -v -timeout 1800s  
 
 - [`context-window-modification-tools.md`](context-window-modification-tools.md) — the tools under test, as built
 - [`context-architecture.md`](context-architecture.md) — the two-zone working set the migration operates on
-- [`eval-design-example.md`](eval-design-example.md) — the Δ/ø house pattern
+- [`archive/eval-design-example.md`](archive/eval-design-example.md) — the Δ/ø house pattern
 - `cmd/cortex/context_eval_test.go`, `context_eval_live_test.go` — the invariant helpers and needle machinery this reuses
 - `cmd/cortex/context_tools_test.go`, `internal/tools/context_tools_test.go` — per-tool mechanics already covered (not re-tested here)
 

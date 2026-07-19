@@ -6,7 +6,7 @@
 > assembled from the raw message log (`transport.wireMessages`), so reordering
 > turn spans is unobservable by construction, and an observable reorder would
 > violate the append-only invariant and the LCP prompt cache. See the status
-> note in [`context-window-modification-tools.md`](context-window-modification-tools.md).
+> note in [`context-window-modification-tools.md`](../context-window-modification-tools.md).
 > Kept for the record.
 
 ---

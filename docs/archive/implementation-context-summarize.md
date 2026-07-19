@@ -5,7 +5,7 @@
 > **Status**: **FOLDED INTO `recall(budget)` (2026-07-10)** — the standalone
 > tool was cut; its digest behavior lives on as `recall`'s optional `budget`
 > parameter. Historical plan; the as-built record is
-> [`context-window-modification-tools.md`](context-window-modification-tools.md).
+> [`context-window-modification-tools.md`](../context-window-modification-tools.md).
 
 ---
 

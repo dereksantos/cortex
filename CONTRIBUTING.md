@@ -1,377 +1,118 @@
 # Contributing to Cortex
 
-Thank you for your interest in contributing to Cortex! This document provides guidelines and information for contributors.
+Thanks for looking at Cortex. This is research-grade software used daily by
+its author — contributions are welcome, but keep changes small and
+reviewable; see below for what the gate expects.
 
-## 🌟 Ways to Contribute
+## What Cortex is
 
-- **Bug Reports**: Found a bug? Please report it!
-- **Feature Requests**: Have an idea for improvement? We'd love to hear it!
-- **Code Contributions**: Submit pull requests with bug fixes or new features
-- **Documentation**: Help improve our documentation
-- **Testing**: Test the system in different environments
-- **Community**: Help answer questions and support other users
+Cortex is a local-first coding harness built around one binary,
+`cmd/cortex`: a coding agent for small and local models with working memory
+built in. It manages a bounded, two-zone context window (recent turns
+verbatim, older turns demoted to a cited outline, recallable on demand),
+lets the model curate its own durable notes through memory tools
+(`memory_write/read/search/forget`), and runs a bounded read-only `study`
+subagent for locating code without blowing the context budget. See the
+top of `CLAUDE.md` for the full picture and `docs/archive.md` for what
+existed before the project was slimmed down to this scope.
 
-## 🚀 Getting Started
+## Development setup
 
-### Development Setup
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/dereksantos/cortex.git
-   cd cortex
-   ```
-
-2. **Install dependencies**
-   ```bash
-   go mod download
-   ```
-
-3. **Build and test**
-   ```bash
-   go build -o cortex ./cmd/cortex
-   go test ./...
-   ./cortex --help
-   ```
-
-4. **Activate the git hooks** (one-time per clone)
-   ```bash
-   git config core.hooksPath .githooks
-   # optional but recommended for the pre-push lint gate:
-   brew install golangci-lint
-   # or: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-   ```
-   Two hooks land:
-   - **pre-commit** runs `gofmt -l` + `go vet` on staged Go files
-     (fast — runs every commit). Blocks commits with formatting
-     errors or vet diagnostics.
-   - **pre-push** runs `golangci-lint` + `go test ./...` (slower —
-     runs once per push, the right gate for staticcheck-level
-     issues that CI would otherwise catch with a 2-minute round
-     trip). Skipped with a warning if `golangci-lint` isn't
-     installed locally.
-
-   Bypass for genuine emergencies: `git commit --no-verify` or
-   `git push --no-verify`. Prefer fixing the issue — `gofmt -w .`
-   almost always does it. Same checks available as
-   `./scripts/check.sh {fmt,vet,lint,all}` for manual runs.
-
-### Development Environment
-
-- **Go**: 1.25+ required (see `go.mod`)
-- **Code Style**: Use `gofmt` for formatting, `golint` for linting (enforced by `.githooks/pre-commit` once activated)
-- **Testing**: Standard Go testing with `go test`
-- **Tools**: [Ollama](https://ollama.ai) for testing LLM features
-- **Linting**: `golangci-lint` is the heavyweight check. The hook skips it (too slow for every commit); CI enforces. Local opt-in: `./scripts/check.sh lint`.
-
-## 🔧 Development Workflow
-
-### Making Changes
-
-1. **Create a feature branch**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Make your changes**
-   - Write clean, readable code
-   - Add tests for new functionality
-   - Update documentation as needed
-   - Follow existing code patterns
-
-3. **Run quality checks**
-   ```bash
-   go fmt ./...     # Format code
-   go vet ./...     # Check for issues
-   go test ./...    # Run tests
-   ```
-
-4. **Commit your changes**
-   ```bash
-   git add .
-   git commit -m "feat: add new feature description"
-   ```
-
-5. **Push and create PR**
-   ```bash
-   git push origin feature/your-feature-name
-   # Create pull request on GitHub
-   ```
-
-### Commit Message Convention
-
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-- `feat:` New features
-- `fix:` Bug fixes
-- `docs:` Documentation changes
-- `style:` Code style changes (formatting, etc.)
-- `refactor:` Code refactoring
-- `test:` Adding or modifying tests
-- `chore:` Maintenance tasks
-
-Examples:
-```
-feat: add cross-repository context bridging
-fix: resolve queue processing deadlock
-docs: update installation instructions
-```
-
-## 🧪 Testing
-
-### Running Tests
+Requires Go 1.26 (see `go.mod`).
 
 ```bash
-# Run all tests
+git clone https://github.com/dereksantos/cortex.git
+cd cortex
+go build ./cmd/cortex
 go test ./...
-
-# Run with coverage
-go test -cover ./...
-
-# Run specific package tests
-go test ./internal/storage
-
-# Run with verbose output
-go test -v ./...
 ```
 
-### Writing Tests
+Optional one-time git hooks (`git config core.hooksPath .githooks`): a fast
+`pre-commit` (gofmt + go vet on staged files) and a `pre-push` that runs
+`golangci-lint` + `go test ./...`. Bypass only for real emergencies
+(`--no-verify`); prefer fixing the underlying issue.
 
-- Place tests alongside source files (`*_test.go`)
-- Use descriptive test names: `TestCaptureShouldFilterRoutineCommands`
-- Use table-driven tests when appropriate
-- Mock external dependencies (Ollama, file system)
-- Include both unit and integration tests
-- Aim for high coverage on critical paths
+### The gate
 
-Example test structure:
-```go
-func TestCaptureShouldSkipRoutineCommands(t *testing.T) {
-    capture := capture.New(config.Default())
+`./scripts/check.sh all` runs gofmt + `go vet` + `golangci-lint` — this is
+the same check CI runs and is authoritative. Individual stages:
+`./scripts/check.sh {fmt,vet,lint}`. Before opening a PR:
 
-    event := &events.Event{
-        ToolName: "Bash",
-        ToolInput: map[string]interface{}{
-            "command": "ls -la",
-        },
-    }
-
-    if !event.ShouldCapture([]string{"node_modules"}) {
-        t.Error("Expected routine command to be filtered")
-    }
-}
+```bash
+go build ./cmd/cortex
+go test ./...
+./scripts/check.sh all
 ```
 
-## 📐 Code Style Guidelines
+All three must be clean. `golangci-lint` is skipped locally with a warning
+if not installed (`brew install golangci-lint` or
+`go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`);
+CI always runs it.
 
-### Go Code Style
+## Testing constraints
 
-- **Formatting**: Use `gofmt` - no exceptions
-- **Naming**: Follow Go conventions (MixedCaps for exported, mixedCaps for unexported)
-- **Comments**: Document all exported functions, types, and packages
-- **Error Handling**: Always check errors, return them up the call stack
-- **Simplicity**: Prefer simple, clear code over clever code
+- Standard library `testing` only — no testify, no other assertion
+  libraries. Use `t.Errorf` / `t.Fatalf` / `t.Fatal`.
+- Table-driven tests with `t.Run` subtests where the cases share shape.
+- Setup/teardown via `defer` (e.g. `defer os.RemoveAll(tempDir)`).
+- Tests that require a live model fleet are env-gated (e.g.
+  `CORTEX_LIVE_FLEET=1`) and are not part of the default `go test ./...`
+  run or a PR requirement — see below.
 
-### Example Function
+## Code conventions
 
-```go
-// ProcessInsightBatch processes a batch of insights for storage.
-// It filters insights below the importance threshold and returns
-// only those that should be stored.
-func ProcessInsightBatch(insights []*Insight, threshold float64) ([]*ProcessedInsight, error) {
-    if threshold < 0 || threshold > 1 {
-        return nil, fmt.Errorf("threshold must be between 0 and 1, got %.2f", threshold)
-    }
+- **Error handling**: wrap with context — `fmt.Errorf("failed to X: %w", err)`.
+- **Naming**: constructors are `NewXxx(cfg *config.Config)`; interfaces are
+  nouns (`Provider`, `Storage`), never `IProvider`-style.
+- **Package structure**: `cmd/` is entry points, `internal/` is private
+  implementation, `pkg/` is public API. There is exactly one LLM layer,
+  `pkg/llm` — go through its `Provider` interface (Anthropic, Ollama,
+  OpenRouter, OpenAI-compatible) rather than adding a parallel client.
+- Follow `gofmt`; keep functions and packages narrow rather than clever.
 
-    var processed []*ProcessedInsight
+## Where things live
 
-    for _, insight := range insights {
-        if insight.Importance >= threshold {
-            p, err := NewProcessedInsight(insight)
-            if err != nil {
-                return nil, fmt.Errorf("failed to process insight: %w", err)
-            }
-            processed = append(processed, p)
-        }
-    }
+`CLAUDE.md`'s "Key files" section is the map: the turn loop
+(`cmd/cortex/loop.go`), the `study` subagent (`cmd/cortex/study.go`), the
+tool-call vocabulary (`internal/agent`), the tool surface
+(`internal/tools`), the structural map (`internal/outline`), the
+append-only journal (`internal/journal`), the shell-risk classifier
+(`internal/shellrisk`), LLM providers (`pkg/llm`), and layered config
+(`pkg/config`). For what to set and how to run it, see
+`docs/configuration.md`. Read `CLAUDE.md` in full before making
+non-trivial changes — it is the authoritative description of today's
+architecture, kept current as the code moves.
 
-    return processed, nil
-}
-```
+## Making a change
 
-### Documentation Style
+1. Branch from `main`.
+2. Keep the change small and reviewable — one concern per PR.
+3. Add or update tests for the behavior you touched (table-driven, stdlib
+   only, per above).
+4. Update the relevant doc if the change affects documented behavior
+   (`CLAUDE.md`, `docs/*.md`, `README.md`).
+5. Run `go build ./cmd/cortex && go test ./... && ./scripts/check.sh all`
+   and confirm it's clean.
+6. Open a PR with a clear description of what changed and why. Live-fleet
+   evals (anything gated on `CORTEX_LIVE_FLEET=1` or similar) are not
+   required for a PR to merge — the deterministic suite is the bar.
 
-- **README**: Keep main README concise and focused
-- **Docstrings**: Explain the "why" not just the "what"
-- **Code Comments**: Use sparingly, prefer self-documenting code
-- **Type Hints**: Comprehensive type annotations
+Commit messages: short, imperative, and specific about the change; a
+`type: summary` prefix (`fix:`, `feat:`, `docs:`, `refactor:`, `test:`,
+`chore:`) is a reasonable convention but not enforced.
 
-## 🏗️ Architecture Guidelines
+## Privacy
 
-### Package Structure
+The journal (`.cortex/journal/`) is local-only by design — nothing in it
+leaves the machine as part of normal operation. `journal.AssertLocalOnly`
+exists as a code-review tripwire: if you add a code path that sends
+journal data outbound, expect it to be flagged. `.cortex/` is gitignored;
+don't check in session transcripts, journal segments, or config containing
+keys.
 
-```
-cortex/
-├── cmd/cortex/          # CLI entry point
-├── internal/            # Internal packages
-│   ├── capture/         # Event capture (<10ms)
-│   ├── storage/         # SQLite + event sourcing
-│   ├── queue/           # File-based queue
-│   └── processor/       # Async LLM processor
-├── pkg/                 # Public packages
-│   ├── events/          # Event format
-│   ├── config/          # Configuration
-│   └── llm/             # Ollama client
-├── integrations/        # AI tool adapters
-│   └── claude/          # Claude Code integration
-├── scripts/             # Build/release scripts
-└── Formula/             # Homebrew formula
-```
+## Reporting bugs and requesting features
 
-### Design Principles
-
-1. **Simplicity**: Prefer simple, direct solutions
-2. **Performance**: <10ms event capture requirement
-3. **Error Handling**: Graceful degradation, silent failure for hooks
-4. **Privacy**: All processing is local (Ollama)
-5. **Single Binary**: Zero dependencies for end users
-
-### Adding New Features
-
-1. **Core Features**: Add to appropriate `internal/` package
-2. **CLI Commands**: Add to `cmd/cortex/main.go`
-3. **AI Tool Integrations**: Add to `integrations/`
-4. **Public APIs**: Add to `pkg/` (used by integrations)
-
-## 🐛 Bug Reports
-
-### Before Reporting
-
-1. **Search existing issues** to avoid duplicates
-2. **Test with latest version** to ensure bug still exists
-3. **Minimal reproduction case** helps us fix faster
-
-### Bug Report Template
-
-```markdown
-**Bug Description**
-Clear description of the issue
-
-**Steps to Reproduce**
-1. Step one
-2. Step two
-3. Step three
-
-**Expected Behavior**
-What should happen
-
-**Actual Behavior**
-What actually happens
-
-**Environment**
-- OS: [e.g., macOS 12.0]
-- Go Version: [e.g., 1.21.0]
-- Cortex Version: [e.g., 0.1.0]
-- Claude Code Version: [if applicable]
-
-**Additional Context**
-Logs, screenshots, or other helpful information
-```
-
-## 💡 Feature Requests
-
-### Feature Request Template
-
-```markdown
-**Feature Description**
-Clear description of the proposed feature
-
-**Use Case**
-Why is this feature needed? What problem does it solve?
-
-**Proposed Solution**
-How should this feature work?
-
-**Alternatives Considered**
-Other approaches you've thought about
-
-**Additional Context**
-Mock-ups, examples, or other helpful information
-```
-
-## 📚 Documentation
-
-### Types of Documentation
-
-1. **API Documentation**: Docstrings in code
-2. **User Guide**: How to use features
-3. **Architecture**: System design and decisions
-4. **Contributing**: This document
-
-### Documentation Guidelines
-
-- **User-Focused**: Write for the user, not the developer
-- **Examples**: Include practical examples
-- **Up-to-Date**: Keep docs synchronized with code
-- **Clear Structure**: Use headings and organization
-
-## 🔍 Code Review Process
-
-### For Contributors
-
-- **Small PRs**: Keep pull requests focused and small
-- **Clear Description**: Explain what and why, not just how
-- **Tests Included**: New features need tests
-- **Documentation Updated**: Update docs for user-facing changes
-
-### Review Criteria
-
-- **Functionality**: Does it work as intended?
-- **Quality**: Is the code clean and maintainable?
-- **Performance**: Does it meet performance requirements?
-- **Security**: Are there any security concerns?
-- **Documentation**: Is it properly documented?
-
-## 🌍 Community
-
-### Communication Channels
-
-- **GitHub Issues**: Bug reports and feature requests
-- **GitHub Discussions**: General discussion and questions
-- **Pull Requests**: Code contributions and reviews
-
-### Code of Conduct
-
-- **Be Respectful**: Treat everyone with respect and kindness
-- **Be Constructive**: Provide helpful feedback and suggestions
-- **Be Patient**: Remember that everyone is learning
-- **Be Inclusive**: Welcome contributors of all backgrounds and skill levels
-
-## 🚀 Release Process
-
-### Versioning
-
-We follow [Semantic Versioning](https://semver.org/):
-- **MAJOR**: Incompatible API changes
-- **MINOR**: New functionality, backwards compatible
-- **PATCH**: Bug fixes, backwards compatible
-
-### Release Checklist
-
-1. Update version in `cmd/cortex/main.go`
-2. Update `CHANGELOG.md`
-3. Run full test suite (`go test ./...`)
-4. Build for all platforms (`scripts/build-all.sh`)
-5. Create release PR
-6. Tag release after merge
-7. GitHub Actions will create release and build artifacts
-
-## 📞 Getting Help
-
-If you need help with contributing:
-
-1. **Check Documentation**: Look at existing docs first
-2. **Search Issues**: Someone might have asked already
-3. **Ask Questions**: Use GitHub Discussions for questions
-4. **Be Specific**: Provide context and details
-
-Thank you for contributing to Cortex! 🎉
+Use the GitHub issue templates under `.github/ISSUE_TEMPLATE/`. Include
+your Cortex version/commit, OS, and backend/model configuration — the
+environment fields on the bug template match what `cortex --version` and
+your config actually report.

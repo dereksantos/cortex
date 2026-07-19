@@ -1,3 +1,7 @@
+> **SHIPPED.** `web_search` landed lean as `internal/tools/web_search.go`,
+> not the full plan summarized below. This doc is the pre-build plan, kept
+> for history — check the code for what actually exists.
+
 # Enhanced Web Search Tool - Summary
 
 ## Simple Brief
@@ -39,7 +43,7 @@ A safe, read-only web search tool that performs searches and extracts content fr
 **Focus: Connect with study philosophy with comprehensive verification**
 > **Boundary (2026-06-27):** `web_search` stays a **main-loop tool**; it is NOT
 > added to `Study.Tools` (closed `{outline, grep, read_file}` — see
-> [`study-subagent.md`](study-subagent.md)). Integration = results into
+> [`study-subagent.md`](../study-subagent.md)). Integration = results into
 > memory/findings, not web access for the study subagent.
 - **4A**: Findings prefix creation and caching
 - **4B**: Index building and search functionality

@@ -6,9 +6,9 @@
 > digest, no model call on the hot path.
 >
 > **Inputs.** The sketch in `internal/cache/cache.go`, the working-memory line
-> ([`working-memory.md`](working-memory.md) — window = cache, journal = memory,
+> ([`archive/working-memory.md`](archive/working-memory.md) — window = cache, journal = memory,
 > eviction = demotion, hysteresis) and its proven instance
-> ([`working-memory-study.md`](working-memory-study.md) P4 — an append-stable
+> ([`archive/working-memory-study.md`](archive/working-memory-study.md) P4 — an append-stable
 > prefix + volatile tail gave 0 prefix breaks live), and
 > [`memory-tools.md`](memory-tools.md) (durable memory is model-driven tools;
 > this doc is only about the *session window*, not durable memory).

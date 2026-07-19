@@ -1,3 +1,7 @@
+> **SHIPPED.** `web_search` landed lean as `internal/tools/web_search.go`,
+> not the full MECE plan below. This doc is the pre-build plan, kept for
+> history — check the code for what actually exists.
+
 # Enhanced Web Search Tool Plan with MECE Verification & Quality Assurance
 
 ## Overview
@@ -266,7 +270,7 @@ func TestRateLimiting(t *testing.T) {
 **Focus: Connect with study philosophy with comprehensive verification**
 
 > **Boundary (2026-06-27):** `web_search` is a **main-loop tool only**. Do NOT add
-> it to the study subagent's tool set — per [`study-subagent.md`](study-subagent.md)
+> it to the study subagent's tool set — per [`study-subagent.md`](../study-subagent.md)
 > §1, `Study.Tools` is a closed `{outline, grep, read_file}` and "no `search` tool"
 > is a verified invariant (`verify-study.sh`). "Study integration" here means web
 > results flow into memory/findings the coder can later recall, never that the

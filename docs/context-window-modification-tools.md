@@ -604,7 +604,7 @@ Each tool is controlled by a boolean flag in `.cortex/config.json` under `tools`
 ## 9. References
 
 - `docs/context-architecture.md` — Current two-zone layout
-- `docs/working-memory.md` — Working set model
+- `docs/archive/working-memory.md` — Working set model
 - `docs/memory-tools.md` — Model-driven memory tools
 - `docs/study-subagent.md` — Bounded subagent design
 - `internal/tools/tools.go` — Existing tool declarations

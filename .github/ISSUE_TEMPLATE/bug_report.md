@@ -15,11 +15,11 @@ A clear description of the bug.
 **Expected behavior**
 
 **Environment**
-- Cortex version / commit:
+- Cortex version (`cortex --version`):
 - OS:
-- Go version (`go version`):
-- LLM provider (Ollama / Anthropic / none):
-- Claude Code version (if relevant):
+- Backend type (litellm / openrouter / anthropic / ollama / other):
+- Model bindings (`cortex model`, or the `models.code` / `models.study` entries in your config):
+- Context window size, if you overrode it:
 
 **Logs**
-Relevant output from `~/.cortex/logs/` or `cortex status`. Redact anything sensitive.
+Relevant output or session transcript from `.cortex/sessions/`. Redact anything sensitive (API keys, private code).

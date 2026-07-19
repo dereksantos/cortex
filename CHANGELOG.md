@@ -5,15 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — 2026-07: the Cortex slimdown
 
-The active product is now the experimental Cortex coding harness. The daemon,
+The active product is a single binary, `cmd/cortex`: an interactive coding
+agent for small and local models with working memory built in. The daemon,
 dashboard, broad `cortex` CLI, automatic retrieval/distillation pipeline, and
 Claude Code host integration described by the earlier 0.2.0-alpha work were
-removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.md).
+removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.md)
+for what existed before and why it went.
 
 ### Added
-- Persistent, resumable Cortex REPL and headless/Discord adapters.
+- Persistent, resumable Cortex REPL, a headless `turn` driver, a `cortex serve`
+  web UI, and a Discord adapter.
 - Bounded two-zone session context with citation-grounded demotion, outline
   folding, persistent restoration, and exact-message `recall`.
 - Model-driven durable memory through `memory_write`, `memory_read`,

@@ -4,7 +4,7 @@
 > **Purpose**: Remove outline entry from working set when context is tight
 > **Status**: **SHIPPED (2026-07)** — historical plan. The live source in
 > `internal/tools/context_evict.go` is authoritative; the as-built record is
-> [`context-window-modification-tools.md`](context-window-modification-tools.md).
+> [`context-window-modification-tools.md`](../context-window-modification-tools.md).
 
 ---
 

@@ -4,7 +4,7 @@ This document describes how to add context window modification tools using the c
 
 > **Note (2026-07-10).** The tools shipped; `context_reorder` was cut and
 > `context_summarize` was folded into `recall(budget)` (see
-> [`context-window-modification-tools.md`](context-window-modification-tools.md)).
+> [`context-window-modification-tools.md`](../context-window-modification-tools.md)).
 > The code listings here show the pattern, not the live code — the source in
 > `internal/tools/context*.go` and `cmd/cortex/session_core.go` is authoritative.
 

@@ -114,7 +114,7 @@ performance claims until receipts exist.
 **Gate B:** Δ suites green offline in CI; live gates recorded with
 receipts (cell_results + a short eval-journal entry per run). Known
 external risks, not blockers to building: LiteLLM peg-500 on tool-call
-topics, fleet slot contention (`docs/refactor-status.md`).
+topics, fleet slot contention (`docs/archive/refactor-status.md`).
 
 ## Track C — Completion features (checklist debt)
 

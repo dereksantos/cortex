@@ -7,7 +7,7 @@ pipeline that reasons on the model's behalf. The model is better at deciding
 what's relevant, what's worth saving, and whether a note is stale than any
 recency/contradiction heuristic we can hand-code. This supersedes the mechanical
 memory line (Reflex/Reflect/Resolve, recency weighting, contradiction→retraction,
-freshness injection, auto-distill) — see [`memory-distillation.md`](memory-distillation.md)
+freshness injection, auto-distill) — see [`archive/memory-distillation.md`](archive/memory-distillation.md)
 for the design that mechanical approach was heading toward.
 
 It's the agentic-memory pattern, and it's how Claude Code's own memory works: a

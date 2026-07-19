@@ -1,3 +1,6 @@
+> **Historical.** Post-fix writeup of a cancellation bug and its resolution;
+> kept for provenance, not a live architecture reference.
+
 # Cancellation Architecture Analysis
 
 ## Executive Summary

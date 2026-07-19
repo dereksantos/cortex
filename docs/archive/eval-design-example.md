@@ -1,8 +1,8 @@
 # The refactor eval: two layers, one gate
 
 > Verification design for the engine-unification + study-subagent refactor
-> ([`engine-unification.md`](engine-unification.md),
-> [`study-subagent.md`](study-subagent.md)). The eval is built **first** and is
+> ([`engine-unification.md`](../engine-unification.md),
+> [`study-subagent.md`](../study-subagent.md)). The eval is built **first** and is
 > **expected to fail** on every intermediate commit — it is a contract, not a
 > smoke test. Parts come online as phases land (partial green); the autonomous
 > run earns its pause only when **both** layers are fully green.
