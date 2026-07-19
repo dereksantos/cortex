@@ -262,3 +262,37 @@ else ever lands.
 - **Whether `fast`-role sub-calls (summarizer, shell-risk judge) should pin
   `off` at the call site** rather than relying on role policy — the 37.8s
   incident says yes; do it in P2 while the call sites are open.
+
+## B5 fleet probe — receipts (2026-07-18)
+
+Report-only probe (roadmap Track B5) on the chatterbox fleet; sanity
+measurements, not benchmarks. Three verdicts against this doc's open
+decisions:
+
+1. **Level→budget tiers (low=1k/med=4k/high=16k): unreachable on the
+   local fleet's dialect.** `DialectTemplateKwargs` has no wire form for
+   a level or budget — `Translate` collapses on/low/medium/high to the
+   same `{"enable_thinking": true}` (confirmed live on `coder`: byte-
+   identical wire, noise-level latency spread 17.1–17.3s easy /
+   38.0–39.4s hard). The strawman only has a wire home in
+   `DialectOpenRouter`, untested beyond unit tests. Decision stays open
+   pending an OpenRouter-backend probe.
+2. **Sub-call pin-off: in place functionally, one caveat.** Summarizer +
+   shell-risk judge hardcode `enable_thinking:false` at client
+   construction (tool_deps.go), independent of the study role's ON
+   default — but the pin is template-kwargs-only; on an OpenRouter
+   backend it would go silently inert (no `Reasoning{Enabled:false}`
+   equivalent at those two sites). Study subagent deliberately NOT
+   pinned (the 2026-06-28 falsification stands).
+3. **Escalation defaults (P5): HOLD — fleet-shaped, not design-shaped.**
+   The engine mechanics (finalize-off, stuck-escalate, SetModel
+   re-resolve, model-pin re-derive) all verified shipped. But live: the
+   cuda-8090 reasoning models (gpt-oss-20b/120b, glm-4.7-flash, north)
+   produced no observable reasoning channel under either dialect, and
+   on `coder` (igpu, reasoning confirmed via streaming) every non-off
+   tier hit the token cap with EMPTY visible content — the original
+   budget-burn failure mode — while `reasoning_tokens` stayed 0 on the
+   blocking path, so the harness cannot even see it happen.
+   Prerequisites before enabling: fleet serving exposes
+   reasoning_content/reasoning_tokens on the cuda group, and blocking-
+   path reasoning accounting parity (P1 gap, now live-confirmed).

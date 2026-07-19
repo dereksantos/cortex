@@ -92,7 +92,7 @@ performance claims until receipts exist.
       Probe-before-long-run applies (minutes-scale sanity rep first).
 - [x] B4. ø context-pivot gate run at n≥3 on the live fleet once B2's
       scenario is stable, recording receipts in the journal.
-- [ ] B5. Thinking-models fleet probe: sanity-check the level→budget tier
+- [x] B5. Thinking-models fleet probe: sanity-check the level→budget tier
       strawman (low=1k/med=4k/high=16k); verify `fast`-role sub-calls pin
       effort off; only after the probe, decide on escalation defaults
       (`docs/thinking-models.md` open decisions).
