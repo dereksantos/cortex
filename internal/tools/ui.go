@@ -9,14 +9,12 @@ import (
 	"os"
 )
 
-// Display glyphs.
-const (
-	PromptGlyph = "❯"
-	IconCortex  = "◆" // assistant / cortex
-	IconTool    = "▸" // tool action
-	IconUser    = "❯" // user
-	IconThought = "✻" // reasoning breadcrumb (a persisted trace of a tool step)
-)
+// PromptGlyph is the input affordance at the end of the status line and the
+// REPL's plain marker for a user-originated line. The REPL is glyph-free by
+// decision (2026-07-19): ANSI color carries the role distinction that the
+// old icon set (❯◆▸✻) used to carry, so only this single ASCII marker
+// remains.
+const PromptGlyph = ">"
 
 // ANSI color codes.
 const (

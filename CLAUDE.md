@@ -85,12 +85,26 @@ Three capabilities distinguish it:
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
-REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
-`/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands ~`:237`, slash
-commands ~`:400`). Memory is model-driven — ask in natural language
-("remember that …" / "forget the … note") and the agent calls the memory
-tools; the old `/remember` and `/forget` slash commands were removed with the
-mechanical capture/retract pipeline.
+REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
+`/model [name]`, `/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands
+~`:237`, slash commands ~`:400`). `/help` lists the commands; `/context`
+(`cmd/cortex/context_cmd.go`) renders a plain-text map of the two-zone
+context window (docs/context-architecture.md) for the current session —
+stable prefix (system prompt, outline, memory index) vs. hydrated tail
+(recent turns, watermarks), plus the last request's prompt/cache usage.
+Memory is model-driven — ask in natural language ("remember that …" /
+"forget the … note") and the agent calls the memory tools; the old
+`/remember` and `/forget` slash commands were removed with the mechanical
+capture/retract pipeline.
+
+The REPL is plain-text by decision (2026-07-19): no icon set (the old
+❯◆▸✻⤷⚠✦ glyphs are gone), ANSI color and the context gauge are kept. Tool
+actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
+`printToolAction`); role lines are colored by their timestamp instead of a
+per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
+is a static label with only its elapsed-seconds tick moving (no animated
+spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
+the anchored status row (`internal/lineedit/live.go`).
 
 ## The agent's tools
 

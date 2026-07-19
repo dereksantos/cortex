@@ -524,6 +524,11 @@ func countTool(s *loopStats, name string) {
 
 // progressLine renders a one-line breadcrumb for a tool call, shown live via the
 // Progress sink so a blocking subagent isn't silent.
+//
+// NOTE: left glyphed (▸), unlike internal/tools.printToolAction's REPL
+// "tool: " rework (2026-07-19 de-glyph decision) — this string is also the
+// SSE progress payload's `line` field (serve_stream.go, asserted verbatim by
+// a golden test in the serve surface, which this change does not touch).
 func progressLine(call ToolCall) string {
 	return "  ▸ " + call.ActivityLabel()
 }

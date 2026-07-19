@@ -259,21 +259,27 @@ func TestStripToolMarkup(t *testing.T) {
 	}
 }
 
+// TestMessageRender covers the de-glyphed gutter (2026-07-19): there is no
+// per-role icon anymore, so render() is checked for the timestamp + content
+// only, plus that gutter() still resolves the expected role color.
 func TestMessageRender(t *testing.T) {
 	ts := time.Date(2026, 6, 8, 14, 23, 1, 0, time.UTC)
 	tests := []struct {
-		role string
-		icon string
+		role  string
+		color string
 	}{
-		{"assistant", iconCortex},
-		{RoleSystem, iconCortex}, // default branch
-		{RoleTool, iconTool},
-		{RoleUser, iconUser},
+		{"assistant", blue},
+		{RoleSystem, blue}, // default branch
+		{RoleTool, green},
+		{RoleUser, cyan},
 	}
 	for _, tt := range tests {
 		m := Message{Role: tt.role, Content: "hello"}
+		if got := m.gutter(); got != tt.color {
+			t.Errorf("gutter(role=%s) color = %q, want %q", tt.role, got, tt.color)
+		}
 		got := m.render(ts)
-		for _, want := range []string{tt.icon, "14:23:01", "hello"} {
+		for _, want := range []string{"14:23:01", "hello"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("render(role=%s) = %q, missing %q", tt.role, got, want)
 			}

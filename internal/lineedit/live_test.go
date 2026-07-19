@@ -67,7 +67,7 @@ func TestAnchorThinkingStatusRow(t *testing.T) {
 	a.mu.Unlock()
 
 	a.SetThinking(true, "verifying the token")
-	if got := stripANSI(out.String()); !strings.Contains(got, "thinking…") || !strings.Contains(got, "verifying the token") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "thinking...") || !strings.Contains(got, "verifying the token") {
 		t.Errorf("status row missing thinking tail; visible = %q", got)
 	}
 	if a.rows != 2 {
@@ -98,9 +98,8 @@ func TestAnchorActivityStatusRow(t *testing.T) {
 		t.Errorf("rows = %d, want 2 (status + input)", a.rows)
 	}
 
-	// A tick advances the glyph while activity is set.
+	// A tick repaints the status row while activity is set.
 	a.mu.Lock()
-	a.spinIdx++
 	a.refreshStatusLocked()
 	a.mu.Unlock()
 
@@ -110,7 +109,11 @@ func TestAnchorActivityStatusRow(t *testing.T) {
 	}
 }
 
-func TestAnchorTickAnimates(t *testing.T) {
+// TestAnchorTickRepaints covers the de-glyphed status row (2026-07-19): there
+// is no animated frame to cycle anymore, so the tick loop's job is just to
+// keep repainting the current activity label on cadence without dropping it
+// or crashing across several ticks.
+func TestAnchorTickRepaints(t *testing.T) {
 	a, out := newTestAnchor("> ", "", 80)
 	a.stop = make(chan struct{})
 	a.mu.Lock()
@@ -124,26 +127,18 @@ func TestAnchorTickAnimates(t *testing.T) {
 	close(a.stop)
 	<-done
 
-	glyphs := map[rune]bool{}
-	for _, r := range stripANSI(out.String()) {
-		for _, g := range anchorSpinner {
-			if r == g {
-				glyphs[r] = true
-			}
-		}
-	}
-	if len(glyphs) < 2 {
-		t.Errorf("spinner did not animate: saw %d distinct glyphs, want >=2", len(glyphs))
+	if got := stripANSI(out.String()); !strings.Contains(got, "study(main.go)") {
+		t.Errorf("status row missing activity label after ticking; visible = %q", got)
 	}
 }
 
 func TestSplitConfirm(t *testing.T) {
-	q := "\n⚠ risky command — installs software globally\n    npm install -g wrangler\n  run it? [y/N] "
+	q := "\nrisky: installs software globally\n    npm install -g wrangler\n  run it? [y/N] "
 	body, ask := splitConfirm(q)
 	if ask != "run it? [y/N]" {
 		t.Errorf("ask = %q, want %q", ask, "run it? [y/N]")
 	}
-	if len(body) != 2 || !strings.Contains(body[0], "risky command") || !strings.Contains(body[1], "npm install") {
+	if len(body) != 2 || !strings.Contains(body[0], "risky:") || !strings.Contains(body[1], "npm install") {
 		t.Errorf("body = %q, want the warning + command lines", body)
 	}
 }
@@ -193,7 +188,7 @@ func TestAnchorConfirmAnswers(t *testing.T) {
 			a.cancel = func() { canceled = true }
 
 			result := make(chan bool, 1)
-			go func() { result <- a.Confirm("\n⚠ risky\n    cmd\n  run it? [y/N] ") }()
+			go func() { result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y/N] ") }()
 
 			// Spin until Confirm has registered its pending state, then feed the key.
 			deadline := time.Now().Add(time.Second)
@@ -234,7 +229,7 @@ func TestAnchorConfirmIgnoresUnrelatedKeys(t *testing.T) {
 	a.stop = make(chan struct{})
 
 	result := make(chan bool, 1)
-	go func() { result <- a.Confirm("\n⚠ risky\n    cmd\n  run it? [y/N] ") }()
+	go func() { result <- a.Confirm("\nrisky: reason\n    cmd\n  run it? [y/N] ") }()
 	deadline := time.Now().Add(time.Second)
 	for {
 		a.mu.Lock()

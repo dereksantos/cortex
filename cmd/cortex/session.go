@@ -536,7 +536,7 @@ func (cs *CortexSession) printSessions() {
 	for _, s := range infos {
 		marker := "  "
 		if s.ID == cs.SessionID {
-			marker = withColor("✦ ", green)
+			marker = withColor("> ", green)
 		}
 		preview := s.First
 		if preview == "" {

@@ -16,7 +16,7 @@ import (
 // pinned row; input and status redraws write straight to the real terminal,
 // which is why Anchor keeps its own out handle rather than touching os.Stdout.
 //
-// Layout is at most two rows: an optional status row ("⠹ thinking…") directly
+// Layout is at most two rows: an optional status row ("thinking... 3s") directly
 // above the input row. Both the input (single-row, horizontally scrolled by
 // renderLine) and the status are one terminal row each, so erasing the block is
 // a fixed, wrap-free cursor move.
@@ -33,17 +33,13 @@ type Anchor struct {
 
 	cancel context.CancelFunc // cancels the turn ctx on ESC / Ctrl-C
 
-	activity string // label shown after the spinner glyph; "" hides the status row
-	spinIdx  int
+	activity string // status-row label; "" hides the row
 
 	confirm *confirmState // in-flight y/N question, served by the key loop
 
 	stop chan struct{}
 	done chan struct{} // closed when both the key loop and ticker have exited
 }
-
-// anchorSpinner is the status-row glyph cycle (matches the standalone Spinner).
-var anchorSpinner = []rune("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 
 // dim wraps s in the bright-black SGR so the status row reads as transient
 // metadata. lineedit keeps its own copy rather than importing the cmd/cortex
@@ -126,8 +122,8 @@ func (a *Anchor) Confirm(question string) bool {
 
 // splitConfirm separates a multi-line confirm prompt into the context lines
 // (shown in scrollback) and the final ask (shown on the status row). The input
-// is the gateShell question: a blank lead, a "⚠ risky command" line, the
-// command, then "run it? [y/N]".
+// is the gateShell question: a blank lead, a "risky: ..." line, the command,
+// then "run it? [y/N]".
 func splitConfirm(q string) (body []string, ask string) {
 	lines := strings.Split(strings.Trim(q, "\n"), "\n")
 	ask = strings.TrimSpace(lines[len(lines)-1])
@@ -182,12 +178,12 @@ func (a *Anchor) EmitLine(s string) {
 	a.drawLocked()
 }
 
-// SetThinking drives the status row while the model generates. on=true shows a
-// spinning "thinking…" with the latest reasoning tail; on=false clears it.
+// SetThinking drives the status row while the model generates. on=true shows
+// "thinking..." with the latest reasoning tail; on=false clears it.
 func (a *Anchor) SetThinking(on bool, tail string) {
 	label := ""
 	if on {
-		label = "thinking…"
+		label = "thinking..."
 		if tail != "" {
 			label += " " + tail
 		}
@@ -195,9 +191,11 @@ func (a *Anchor) SetThinking(on bool, tail string) {
 	a.SetActivity(label)
 }
 
-// SetActivity shows a spinning status row labeled label (e.g. a running tool
-// like "study(main.go)"); "" hides the row. The tick loop animates the glyph
-// while a label is set. Safe from any goroutine.
+// SetActivity shows a status row labeled label (e.g. a running tool like
+// "study(main.go)"); "" hides the row. The tick loop repaints the row on a
+// fixed cadence while a label is set — there's no glyph to animate, so a
+// caller's own elapsed-seconds text (SetThinking's tail) is what moves.
+// Safe from any goroutine.
 func (a *Anchor) SetActivity(label string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -332,7 +330,9 @@ func (a *Anchor) applyEvent(ev keyEvent) {
 	a.refreshInputLocked()
 }
 
-// tickLoop animates the status spinner while an activity is set.
+// tickLoop repaints the status row on a fixed cadence while an activity is
+// set, so an external caller's own elapsed-seconds label update (SetThinking)
+// shows up promptly even between explicit SetActivity calls.
 func (a *Anchor) tickLoop() {
 	ticker := time.NewTicker(90 * time.Millisecond)
 	defer ticker.Stop()
@@ -343,7 +343,6 @@ func (a *Anchor) tickLoop() {
 		case <-ticker.C:
 			a.mu.Lock()
 			if a.activity != "" {
-				a.spinIdx++
 				a.refreshStatusLocked()
 			}
 			a.mu.Unlock()
@@ -352,10 +351,11 @@ func (a *Anchor) tickLoop() {
 }
 
 // refreshStatusLocked recomputes the status row text and redraws the block.
+// No glyph to cycle — the caller's own label text (e.g. "thinking... 3s") is
+// the only thing that changes between ticks.
 func (a *Anchor) refreshStatusLocked() {
 	if a.activity != "" {
-		glyph := string(anchorSpinner[a.spinIdx%len(anchorSpinner)])
-		a.status = dim(glyph + " " + a.activity)
+		a.status = dim(a.activity)
 	} else {
 		a.status = ""
 	}

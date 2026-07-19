@@ -129,7 +129,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	ctx = withSubagentDepth(ctx, depth+1)
 	req := cs.subagentRequest(sa, seed)
 	if !cs.quiet {
-		fmt.Println(withColor(fmt.Sprintf("  ▸ %s via %s", sa.Name, req.Model), green))
+		fmt.Println(withColor(fmt.Sprintf("  run: %s via %s", sa.Name, req.Model), green))
 	}
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }

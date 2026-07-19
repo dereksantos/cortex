@@ -21,7 +21,7 @@ func TestOutlineEntryRender(t *testing.T) {
 			},
 			want: `t5 · user: What does this code do?
       edit cmd/cortex/study_eval.go [ok] · read internal/cache/outline.go [ok]
-      ⤷ This function processes the input and returns a formatted string.
+      reply: This function processes the input and returns a formatted string.
       [@session/20260701-143210:L120-134]`,
 		},
 		{
@@ -34,7 +34,7 @@ func TestOutlineEntryRender(t *testing.T) {
 				Citation:  "@session/20260701-143210:L10-20",
 			},
 			want: `t1 · user: Hello
-      ⤷ Hi there!
+      reply: Hi there!
       [@session/20260701-143210:L10-20]`,
 		},
 		{
@@ -100,12 +100,12 @@ func TestRenderOutline(t *testing.T) {
 			},
 			want: `t1 · user: First message
       action1 [ok]
-      ⤷ First reply
+      reply: First reply
       [@session/20260701-143210:L10-20]
 
 t2 · user: Second message
       action2 [ok]
-      ⤷ Second reply
+      reply: Second reply
       [@session/20260701-143210:L30-40]`,
 		},
 		{

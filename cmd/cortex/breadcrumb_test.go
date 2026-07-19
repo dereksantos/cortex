@@ -1,9 +1,15 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// timestampPrefixRe matches the "HH:MM:SS  " gutter prefix that replaced the
+// per-role icon (2026-07-19 de-glyph decision, display.go's gutterPrefix):
+// the timestamp's color is now the only thing marking a note/thought line.
+var timestampPrefixRe = regexp.MustCompile(`^\d{2}:\d{2}:\d{2}\s+`)
 
 // resWithTools builds an assistant response carrying a tool call, the case where
 // a step makes progress without emitting answer prose.
@@ -29,8 +35,8 @@ func TestBreadcrumbPersistsSilentToolStep(t *testing.T) {
 	p.breadcrumb(resWithTools())
 
 	out := stripANSI(buf.String())
-	if !strings.Contains(out, iconThought) {
-		t.Errorf("breadcrumb should carry the thought gutter %q, got %q", iconThought, out)
+	if !timestampPrefixRe.MatchString(out) {
+		t.Errorf("breadcrumb should carry the timestamp gutter, got %q", out)
 	}
 	if !strings.Contains(out, "read the go.mod file") {
 		t.Errorf("breadcrumb should trace the reasoning, got %q", out)
@@ -85,7 +91,7 @@ func TestCollapseLine(t *testing.T) {
 	}
 	long := strings.Repeat("a", 200)
 	got := collapseLine(long, 140)
-	if !strings.HasSuffix(got, "…") || len([]rune(got)) != 141 {
-		t.Errorf("collapseLine should cap at 140 runes + ellipsis, got %d runes", len([]rune(got)))
+	if !strings.HasSuffix(got, "...") || len([]rune(got)) != 143 {
+		t.Errorf("collapseLine should cap at 140 runes + ASCII ellipsis, got %d runes", len([]rune(got)))
 	}
 }

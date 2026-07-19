@@ -230,9 +230,31 @@ var (
 func printAvailableTools() {
 	fmt.Println(withColor("Available tools:", cyan))
 	for _, tool := range tools.All {
-		fmt.Printf("  • %s\n", tool.Function.Name)
+		fmt.Printf("  - %s\n", tool.Function.Name)
 	}
 	fmt.Println()
+}
+
+// helpLines is the /help body: every slash command, one line each, plain
+// text — kept as a var (not inlined) so TestHelp can assert every command
+// name appears without hardcoding the exact prose.
+var helpLines = []string{
+	"/help              show this list",
+	"/context           show the current session's context-window map",
+	"/compact           distill the session via study, freeing context",
+	"/clear             reset the conversation and start a fresh session",
+	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
+	"/model [name]      show the code/study model bindings, or switch the coding model",
+	"/quit              exit (Ctrl-D and /exit also work)",
+}
+
+// printHelp lists the slash commands, plain text, one per line — matching
+// the REPL's plain style (no icons; ANSI color only).
+func printHelp() {
+	fmt.Println(withColor("Commands:", cyan))
+	for _, line := range helpLines {
+		fmt.Println("  " + line)
+	}
 }
 
 func main() {
@@ -385,7 +407,7 @@ func main() {
 			id = rest[0]
 		}
 		if err := session.ResumeTranscript(id); err != nil {
-			fmt.Printf("resume: %v — starting fresh\n", err)
+			fmt.Printf("resume: %v - starting fresh\n", err)
 			session.StartTranscript()
 		} else {
 			session.showLoadedContext(session.SessionID)
@@ -409,6 +431,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "greeting: %v\n", err)
 	}
 	stopGreet()
+
+	// One static hint after the greeting, every run (not just first-run) — the
+	// discoverability surface for /help now that the REPL carries no icon set
+	// to hint at itself visually.
+	fmt.Println(withColor("type /help for commands", gray))
 
 	// Interactive terminals get the raw-mode line editor (arrows, editing,
 	// bracketed paste, ESC-to-interrupt). Piped/redirected input — tests, CI,
@@ -514,7 +541,7 @@ func main() {
 		// /clear resets the conversation; /compact distills it via study.
 		if input == "/clear" {
 			session.Clear()
-			fmt.Println(withColor("cleared → session "+session.SessionID, gray))
+			fmt.Println(withColor("cleared -> session "+session.SessionID, gray))
 			continue
 		}
 		if input == "/compact" {
@@ -526,6 +553,18 @@ func main() {
 		// inside the REPL (resuming still happens at startup).
 		if input == "/sessions" {
 			session.printSessions()
+			continue
+		}
+
+		// /help lists the slash commands; /context renders the two-zone
+		// context-window map for the current session (a teaching surface as
+		// well as a debugging one — see contextReport's doc comment).
+		if input == "/help" {
+			printHelp()
+			continue
+		}
+		if input == "/context" {
+			fmt.Println(session.contextReport())
 			continue
 		}
 
@@ -543,7 +582,7 @@ func main() {
 					session.Study.Model, session.Study.Endpoint)
 			} else {
 				session.SetModel(name)
-				fmt.Printf("code model → %s\n", name)
+				fmt.Printf("code model -> %s\n", name)
 			}
 			continue
 		}

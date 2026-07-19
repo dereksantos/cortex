@@ -13,14 +13,14 @@ import (
 )
 
 func compactNow(session *CortexSession, reason string) {
-	fmt.Println(withColor(reason+" — compacting via study…", yellow))
+	fmt.Println(withColor(reason+" - compacting via study...", yellow))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := session.Compact(ctx); err != nil {
 		fmt.Printf("compact: %v\n", err)
 		return
 	}
-	fmt.Println(withColor("compacted → session "+session.SessionID, gray))
+	fmt.Println(withColor("compacted -> session "+session.SessionID, gray))
 }
 
 // runStudyCLI runs one-off study. project, when non-empty, resolves via the
@@ -85,7 +85,7 @@ func runTurnCLI(args []string) {
 	session.quiet = true
 	if sessionID != "" {
 		if err := session.ResumeTranscript(sessionID); err != nil {
-			fmt.Fprintf(os.Stderr, "resume %s: %v — starting fresh\n", sessionID, err)
+			fmt.Fprintf(os.Stderr, "resume %s: %v - starting fresh\n", sessionID, err)
 			session.StartTranscript()
 		} else {
 			session.showLoadedContext(sessionID)

@@ -34,13 +34,13 @@ type streamPrinter struct {
 	md         *markdownRenderer // nil → raw token streaming; set → block-buffered render
 	pending    string            // md path: prose not yet flushed as a complete block
 	gutterOpen bool              // md path: gutter printed, first block not yet joined to it
-	// onStatus drives a "thinking…" indicator when there's no standalone spinner
+	// onStatus drives a "thinking..." indicator when there's no standalone spinner
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
 	onStatus func(on bool, tail string)
 	// start is when the model call began — the base for the elapsed-seconds
-	// shown in the live "thinking… Ns · tail" label (onReasoning) and the
-	// turn-end "thought Ns · tok" stat (thoughtStat). Zero (test-constructed
+	// shown in the live "thinking... Ns | tail" label (onReasoning) and the
+	// turn-end "thought Ns | tok" stat (thoughtStat). Zero (test-constructed
 	// printers that skip it) reads as 0s rather than a nonsensical duration.
 	start time.Time
 	// crumbed is set once breadcrumb has printed the reasoning trace for this
@@ -48,10 +48,10 @@ type streamPrinter struct {
 	// the same event.
 	crumbed bool
 
-	// The label ticker refreshes "thinking… Ns" once a second on wall-clock,
+	// The label ticker refreshes "thinking... Ns" once a second on wall-clock,
 	// so the elapsed counter advances even when no reasoning deltas arrive —
 	// an effort-off model, or a long queue/prefill wait, would otherwise sit
-	// on a bare static "thinking…" forever. tickMu guards tickTail/tickDone
+	// on a bare static "thinking..." forever. tickMu guards tickTail/tickDone
 	// AND serializes sink writes against stopTicker, so once stopTicker
 	// returns no straggler tick can redraw over a cleared status line.
 	tickMu   sync.Mutex
@@ -60,7 +60,7 @@ type streamPrinter struct {
 	tickStop chan struct{} // closed by stopTicker to end the goroutine
 }
 
-// labelTickInterval is the wall-clock refresh period of the "thinking… Ns"
+// labelTickInterval is the wall-clock refresh period of the "thinking... Ns"
 // label. A var so tests can shrink it.
 var labelTickInterval = time.Second
 
@@ -99,7 +99,7 @@ func (p *streamPrinter) stopTicker() {
 	}
 }
 
-// refreshLabel renders "thinking… Ns · tail" to whichever sink exists. tail
+// refreshLabel renders "thinking... Ns | tail" to whichever sink exists. tail
 // carries new reasoning text from onReasoning; empty means a pure clock tick
 // reusing the last tail. All sink writes go through here, under tickMu, so
 // they serialize with stopTicker.
@@ -115,13 +115,13 @@ func (p *streamPrinter) refreshLabel(tail string) {
 	et := elapsedTail(p.start, p.tickTail)
 	switch {
 	case p.spinner != nil:
-		p.spinner.SetLabel(withColor("thinking… "+et, gray))
+		p.spinner.SetLabel(withColor("thinking... "+et, gray))
 	case p.onStatus != nil:
 		p.onStatus(true, et)
 	}
 }
 
-// reasoningTailWidth caps the live "thinking…" ticker to one line on typical
+// reasoningTailWidth caps the live "thinking..." ticker to one line on typical
 // terminals — we show the most recent runes, not the whole chain-of-thought.
 const reasoningTailWidth = 80
 
@@ -157,7 +157,7 @@ func currentThought(s string, width int) string {
 	}
 	r := []rune(cur)
 	if len(r) > width {
-		return strings.TrimRight(string(r[:width]), " ") + "…"
+		return strings.TrimRight(string(r[:width]), " ") + "..."
 	}
 	return cur
 }
@@ -167,7 +167,7 @@ func currentThought(s string, width int) string {
 const currentThoughtMinRunes = 12
 
 // elapsedTail prefixes the reasoning tail with the whole seconds elapsed
-// since start, e.g. "12s · reasoning excerpt", or just "12s" before any
+// since start, e.g. "12s | reasoning excerpt", or just "12s" before any
 // reasoning text has arrived. A zero start (a printer built without one, e.g.
 // tests) reads as 0s rather than a nonsensical multi-year duration.
 func elapsedTail(start time.Time, tail string) string {
@@ -180,12 +180,12 @@ func elapsedTail(start time.Time, tail string) string {
 	if tail == "" {
 		return fmt.Sprintf("%ds", secs)
 	}
-	return fmt.Sprintf("%ds · %s", secs, tail)
+	return fmt.Sprintf("%ds | %s", secs, tail)
 }
 
 // onReasoning is the StreamChat reasoning callback: it feeds the spinner a dim
 // live tail of the chain-of-thought, prefixed with elapsed seconds so a long
-// deliberation reads as "thinking… 12s · …" rather than sitting silent.
+// deliberation reads as "thinking... 12s | ..." rather than sitting silent.
 // Reasoning is never printed to the transcript — once the answer starts, emit
 // stops the spinner and the ticker is erased. No-op after the answer has
 // begun (or with no spinner, e.g. tests).
@@ -247,8 +247,7 @@ func (p *streamPrinter) begin() {
 	if p.onStatus != nil {
 		p.onStatus(false, "") // answer started — clear the thinking status
 	}
-	icon, color := Message{Role: "assistant"}.gutter()
-	fmt.Fprint(p.writer(), gutterPrefix(icon, color, time.Now()))
+	fmt.Fprint(p.writer(), gutterPrefix(Message{Role: "assistant"}.gutter(), time.Now()))
 	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
 }
@@ -320,8 +319,8 @@ const breadcrumbCap = 140
 // breadcrumb persists a one-line trace of the model's reasoning when a step made
 // tool calls but produced no answer prose. Models like north/glm stream their
 // "let me do X" narration as reasoning_content, which onReasoning only shows on
-// the transient "thinking…" ticker — so without this the narration flashes by
-// and vanishes, leaving only the ▸ tool-action lines. No-op when prose was
+// the transient "thinking..." ticker — so without this the narration flashes by
+// and vanishes, leaving only the "tool: " action lines. No-op when prose was
 // printed (it already persisted), when there were no tool calls (a final answer
 // path), or when there was no reasoning. Prints to writer() (the anchor pipe in
 // anchored mode, real stdout otherwise — the spinner is already stopped by the
@@ -338,7 +337,7 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 		return
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
+		gutterPrefix(gray, time.Now()), withColor(line, gray))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
 }
 
@@ -360,7 +359,7 @@ func estimatedReasoningTokens(trace string) int {
 }
 
 // thoughtStat prints one dim gutter line summarizing how long and how much a
-// model call spent deliberating — "thought 14s · 1.1k tok" — mirroring
+// model call spent deliberating — "thought 14s | 1.1k tok" — mirroring
 // breadcrumb's format. Uses res.Usage's reported reasoning-token count when
 // the backend provides one, otherwise estimates from the accumulated trace
 // length. No-op with no reasoning at all, when neither the elapsed-time nor
@@ -390,9 +389,9 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 	if elapsed < thoughtStatMinSeconds*time.Second && tok <= thoughtStatMinTokens {
 		return
 	}
-	line := fmt.Sprintf("thought %ds · %s tok", int(elapsed.Seconds()), humanK(tok))
+	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(iconThought, gray, time.Now()), withColor(line, gray))
+		gutterPrefix(gray, time.Now()), withColor(line, gray))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap
@@ -400,7 +399,7 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 func collapseLine(s string, cap int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if r := []rune(s); len(r) > cap {
-		return strings.TrimRight(string(r[:cap]), " ") + "…"
+		return strings.TrimRight(string(r[:cap]), " ") + "..."
 	}
 	return s
 }
@@ -437,7 +436,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		p.finish()
 		cs.live.SetThinking(false, "")
 		p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-		p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
+		p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
 		return res, true, err
 	}
 	s := NewSpinner()
@@ -456,7 +455,7 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 		s.Stop() // stop before the breadcrumb so the line is clean
 	}
 	p.breadcrumb(res)  // persist the reasoning trace of a silent tool step
-	p.thoughtStat(res) // else: a turn-end "thought Ns · tok" stat, if reasoning was substantial
+	p.thoughtStat(res) // else: a turn-end "thought Ns | tok" stat, if reasoning was substantial
 	return res, true, err
 }
 

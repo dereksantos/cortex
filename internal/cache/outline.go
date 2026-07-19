@@ -23,9 +23,19 @@ type OutlineEntry struct {
 // Line 1: "t<Turn> · user: " + the User text. If User contains newlines, keep
 // them verbatim but indent every continuation line with exactly six spaces.
 // Line 2 (only if len(Actions) > 0): six spaces + Actions joined with " · ".
-// Line 3 (only if ReplyHead != ""): six spaces + "⤷ " + ReplyHead.
+// Line 3 (only if ReplyHead != ""): six spaces + "reply: " + ReplyHead.
 // Line 4 (only if Citation != ""): six spaces + "[" + Citation + "]".
 // No trailing newline.
+//
+// NOTE (2026-07-19 de-glyph): line 3's marker changed from "⤷ " to the plain
+// word prefix "reply: ". This text is WIRE content — it rides the outline
+// block in the system prefix, not just a display string — so a session
+// resumed from a transcript written before this change will show the old
+// "⤷ " marker for turns demoted under the prior build and "reply: " for
+// everything demoted from here on. That one-time mixed prefix within an
+// old session's outline is an accepted, cosmetic side effect: the outline
+// is deterministic going forward, and citations (the only thing recall
+// depends on) are unaffected either way.
 func (e OutlineEntry) Render() string {
 	lines := []string{}
 
@@ -46,7 +56,7 @@ func (e OutlineEntry) Render() string {
 
 	// Line 3: ReplyHead if not empty
 	if e.ReplyHead != "" {
-		lines = append(lines, "      ⤷ "+e.ReplyHead)
+		lines = append(lines, "      reply: "+e.ReplyHead)
 	}
 
 	// Line 4: Citation if not empty

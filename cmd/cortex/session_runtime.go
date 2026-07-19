@@ -150,10 +150,10 @@ func (cs *CortexSession) sessionSummary() string {
 	dur := time.Since(cs.sessionStart).Round(time.Second)
 	cost := ""
 	if cs.costUSD > 0 {
-		cost = " · " + humanCost(cs.costUSD)
+		cost = " | " + humanCost(cs.costUSD)
 	}
-	header := fmt.Sprintf("%d turns · %s", cs.turns, dur)
-	body := fmt.Sprintf("%s in / %s out%s · %d captured · %d memory injections",
+	header := fmt.Sprintf("%d turns | %s", cs.turns, dur)
+	body := fmt.Sprintf("%s in / %s out%s | %d captured | %d memory injections",
 		humanK(cs.tokensIn), humanK(cs.tokensOut), cost,
 		cs.captures, cs.injections)
 	return header + "\n" + body

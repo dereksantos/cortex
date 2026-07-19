@@ -5,35 +5,30 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/dereksantos/cortex/internal/tools"
 )
 
-const (
-	iconCortex  = tools.IconCortex
-	iconTool    = tools.IconTool
-	iconUser    = tools.IconUser
-	iconThought = tools.IconThought
-)
-
-func (m Message) gutter() (icon, color string) {
+// gutter reports the role color for a message line. The REPL is glyph-free
+// by decision (2026-07-19): there is no per-role icon anymore, so the
+// timestamp itself carries the color that used to sit on the dropped icon
+// (❯◆▸✻) — gray is reserved for secondary/note lines (streaming.go's
+// breadcrumb and thought-stat).
+func (m Message) gutter() (color string) {
 	switch m.Role {
 	case RoleUser:
-		return iconUser, cyan
+		return cyan
 	case RoleTool:
-		return iconTool, green
+		return green
 	default:
-		return iconCortex, blue
+		return blue
 	}
 }
 
-func gutterPrefix(icon, color string, ts time.Time) string {
-	return fmt.Sprintf("%s %s  ", withColor(icon, color), withColor(ts.Format("15:04:05"), gray))
+func gutterPrefix(color string, ts time.Time) string {
+	return fmt.Sprintf("%s  ", withColor(ts.Format("15:04:05"), color))
 }
 
 func (m Message) render(ts time.Time) string {
-	icon, color := m.gutter()
-	return gutterPrefix(icon, color, ts) + m.Content
+	return gutterPrefix(m.gutter(), ts) + m.Content
 }
 
 func (m Message) Print() {
@@ -42,12 +37,12 @@ func (m Message) Print() {
 
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
-	status := withColor(fmt.Sprintf("cortex %s · %s · ", version(), cs.Request.Model), gray)
+	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
 	// Use LastPromptTokens which is updated in Append() to reflect current context
 	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
 	cost := ""
 	if cs.costUSD > 0 {
-		cost = withColor(" · "+humanCost(cs.costUSD), gray)
+		cost = withColor(" | "+humanCost(cs.costUSD), gray)
 	}
 	return fmt.Sprintf("%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
 }

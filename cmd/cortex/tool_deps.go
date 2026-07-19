@@ -303,7 +303,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 			return blocked, false
 		}
 		if !cs.quiet && cs.confirmRisky != nil {
-			q := fmt.Sprintf("\n⚠ risky command — %s\n    %s\n  run it? [y/N] ", v.Reason, command)
+			q := fmt.Sprintf("\nrisky: %s\n    %s\n  run it? [y/N] ", v.Reason, command)
 			if cs.confirmRisky(q) {
 				return "", true
 			}

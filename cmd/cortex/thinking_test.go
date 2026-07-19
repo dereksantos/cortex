@@ -80,7 +80,7 @@ func resWithoutToolsThinking() *AgentResponse {
 	return &AgentResponse{Choices: []Choice{{Message: Message{Role: "assistant", Content: "the answer"}}}}
 }
 
-// TestThoughtStat covers item 5: a turn-end "thought Ns · tok" gutter line
+// TestThoughtStat covers item 5: a turn-end "thought Ns | tok" gutter line
 // when reasoning occurred and was substantial (elapsed or token threshold),
 // using the reported reasoning-token count when available and falling back
 // to a length-based estimate otherwise.
@@ -183,8 +183,8 @@ func TestThoughtStatSkippedWhenBreadcrumbPrinted(t *testing.T) {
 	}
 }
 
-// TestElapsedTail covers the "thinking… Ns · tail" label formatting shared by
-// both display modes (the standalone spinner and the anchored status row).
+// TestElapsedTail covers the "thinking... Ns | tail" label formatting shared
+// by both display modes (the standalone spinner and the anchored status row).
 func TestElapsedTail(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -193,9 +193,9 @@ func TestElapsedTail(t *testing.T) {
 		want  string
 	}{
 		{"zero start (unset, e.g. tests): reads as 0s, no tail", time.Time{}, "", "0s"},
-		{"zero start with tail", time.Time{}, "hello", "0s · hello"},
+		{"zero start with tail", time.Time{}, "hello", "0s | hello"},
 		{"elapsed, no tail yet", time.Now().Add(-12 * time.Second), "", "12s"},
-		{"elapsed with tail", time.Now().Add(-3 * time.Second), "reasoning excerpt", "3s · reasoning excerpt"},
+		{"elapsed with tail", time.Now().Add(-3 * time.Second), "reasoning excerpt", "3s | reasoning excerpt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -282,7 +282,7 @@ func TestCurrentThought(t *testing.T) {
 			"Step 2: trace the request build"},
 		{"long thought truncates from the head, keeping the start",
 			"Now I am going to look very carefully at the resolveBinding function in config", 20,
-			"Now I am going to lo…"},
+			"Now I am going to lo..."},
 		{"whitespace collapses",
 			"thinking   about\n\n", 80,
 			"thinking about"},

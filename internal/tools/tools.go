@@ -595,15 +595,17 @@ const CurationBudgetTokens = 16000
 // `cat` of a huge file (or `find` over a big tree) can't blow the window.
 const MaxToolOutput = 10000
 
-// printToolAction prints an indented, iconned tool-action line under the
-// current cortex turn, e.g. "  ▸ read_file(go.mod)". The tool name shows in
-// green; its argument list is dimmed so the verb reads first.
+// printToolAction prints an indented, word-tagged tool-action line under the
+// current cortex turn, e.g. "  tool: read_file(go.mod)". The tool name shows
+// in green; its argument list is dimmed so the verb reads first. Plain
+// ASCII by decision (2026-07-19) — the REPL dropped its icon set, so the
+// "tool:" tag itself (not a color) carries the meaning under NO_COLOR too.
 func printToolAction(action string) {
 	name, args := action, ""
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
 	}
-	line := Color(IconTool+" "+name, Green)
+	line := Color("tool: "+name, Green)
 	if args != "" {
 		line += Color(args, Gray)
 	}
