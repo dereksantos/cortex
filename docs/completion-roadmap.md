@@ -143,15 +143,27 @@ study-eval rows visible via jq over the journal.
       (`session_runtime.go`, `internal/capture`, `internal/storage`,
       `pkg/llm`) onto the live layered config or a trimmed core, ending
       the two-config-systems split.
-- [ ] D2. Extract the serve/webui surface (~50 files of
-      `cmd/cortex`'s 123) into an internal package; `cmd/cortex` stays the
-      composition root. Behavior-preserving; REPL byte-identical.
+- [x] D2. **Audited 2026-07-18: NO MOVE — verdict recorded, move
+      re-scoped.** A compiler-driven dependency audit (scratch-package
+      compile of all 49 serve*/webui* files) showed the extraction is not
+      one clean slice: the handlers reach six shared package-main
+      subsystems (config, scan, workspace, session-listing, change
+      status, loop firing) that are themselves not importable, so a move
+      today means either relocating those first or duplicating ~5 DTOs +
+      ~20 wrappers (the half-broken outcome). Prerequisite ladder for a
+      future pass, in order: (1) Session/SessionFactory interfaces in
+      internal/serve satisfied by *CortexSession; (2) relocate config.go,
+      scan.go, workspace.go, configwrite.go + the data half of session.go
+      into internal packages (independently low-risk, no CortexSession
+      dependency); (3) RunLoopFiring/changeStatusFor follow; (4) then the
+      serve/webui move is mechanical. Steps 1–4 are OPTIONAL post-
+      completion architecture work, not launch-blocking.
 - [ ] D3. Web Phase 7 — Discord parity (`docs/cortex-web.md`, decision
       D14's gate has now effectively fired): rebase `discord.go` onto the
       Phase-4 SessionManager, native application commands, interactive
       risk approval (Risky prompts instead of headless-Blocked), progress
-      as message edits + interrupt. Do this after D2 so it rebases onto
-      the extracted package once, not twice.
+      as message edits + interrupt. (The D2 audit confirmed this does not
+      depend on the extraction — all in package main.)
 
 **Gate D:** full gate green; a browser-verified serve session and a live
 Discord round-trip after D3.
