@@ -193,10 +193,10 @@ unconfirmed there; adopted here):
       `/api/v1/models` (the existing `pkg/llm/openrouter.go ListModels`
       path) and pick a substitute; surface the substitution to the user
       and journal it. Deterministic first, adaptive on failure.
-- [ ] E3. Invariant pruning + a configuration doc: one page that tells an
+- [x] E3. Invariant pruning + a configuration doc: one page that tells an
       outside user exactly what to set (backend, key, two roles) and what
       every `tools.*` gate does.
-- [ ] E4. Release surface: versioned build, install instructions
+- [x] E4. Release surface: versioned build, install instructions
       (`go install` at minimum), and a first-run smoke path (`cortex` →
       bootstrap → one green turn on the free fleet).
 
