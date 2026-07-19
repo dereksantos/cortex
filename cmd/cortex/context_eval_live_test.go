@@ -76,17 +76,139 @@ func fillerInput(i int) string {
 	return b.String()
 }
 
-// factInput plants the codeword beyond the outline's verbatim cap (500 runes):
-// after demotion, the outline shows only the preamble hint, and the codeword is
-// reachable solely through recall.
-func factInput() string {
+// factInputWithCodeword plants codeword beyond the outline's verbatim cap
+// (500 runes): after demotion, the outline shows only the preamble hint, and
+// the codeword is reachable solely through recall. Generalizes factInput
+// (below) to a caller-supplied codeword — the pivot eval's A-keep needle
+// reuses this exact "deploy codeword" framing per docs/eval-context-pivot.md's
+// scenario ("we'll still need the deploy codeword").
+func factInputWithCodeword(codeword string) string {
 	var b strings.Builder
 	b.WriteString("Please note this project brief; the deploy codeword is stated at the very end of this message and you will be asked for it later. ")
 	for s := 0; s < 8; s++ {
 		fmt.Fprintf(&b, "Brief section %d: the rollout gates on the staging soak, the canary dashboards, and the signed manifest from the release captain. ", s)
 	}
-	fmt.Fprintf(&b, "The deploy codeword is %s. Acknowledge with just: OK — do not repeat the brief or the codeword.", liveCodeword)
+	fmt.Fprintf(&b, "The deploy codeword is %s. Acknowledge with just: OK — do not repeat the brief or the codeword.", codeword)
 	return b.String()
+}
+
+// factInput plants the fixed liveCodeword — TestContextEval_Live's original,
+// unparameterized form.
+func factInput() string {
+	return factInputWithCodeword(liveCodeword)
+}
+
+// turnStat is one turn's reported measurements — shared by every live eval
+// that drives cs.Turn() and wants the same prompt/cached/demoted/elapsed
+// columns (context eval, pivot eval).
+type turnStat struct {
+	label     string
+	prompt    int
+	cached    int
+	demoted   int
+	elapsedMS int64
+}
+
+// runLiveTurn executes one turn against cs, appends its stat to *stats, and
+// returns the reply. Shared so every live eval reports the same columns.
+func runLiveTurn(t *testing.T, cs *CortexSession, stats *[]turnStat, label, input string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	start := time.Now()
+	res, err := cs.Turn(ctx, input)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	*stats = append(*stats, turnStat{
+		label:     label,
+		prompt:    cs.LastPromptTokens,
+		cached:    cs.LastCachedTokens,
+		demoted:   cs.ws.Demoted(),
+		elapsedMS: time.Since(start).Milliseconds(),
+	})
+	return res.Reply
+}
+
+// reportTurnStats logs the standard per-turn table every live eval shares.
+func reportTurnStats(t *testing.T, model string, window int, stats []turnStat) {
+	t.Helper()
+	t.Logf("model=%s window=%d turns=%d", model, window, len(stats))
+	t.Logf("%-16s %8s %8s %10s %8s %9s", "turn", "prompt", "cached", "evaluated", "demoted", "elapsed")
+	for _, s := range stats {
+		t.Logf("%-16s %8d %8d %10d %8d %8dms", s.label, s.prompt, s.cached, s.prompt-s.cached, s.demoted, s.elapsedMS)
+	}
+}
+
+// toolCallsSince returns every tool call issued in messages from index from
+// onward — the raw material for recallCalledSince and the pivot eval's
+// context-tool activity report.
+func toolCallsSince(cs *CortexSession, from int) []ToolCall {
+	var calls []ToolCall
+	for _, m := range cs.Request.Messages[from:] {
+		calls = append(calls, m.ToolCalls...)
+	}
+	return calls
+}
+
+// recallCalledSince reports whether recall fired anywhere in
+// cs.Request.Messages[from:].
+func recallCalledSince(cs *CortexSession, from int) bool {
+	for _, call := range toolCallsSince(cs, from) {
+		if call.Function.Name == "recall" {
+			return true
+		}
+	}
+	return false
+}
+
+// floorGrade applies the design's accepted floor when a graded probe had no
+// live outline hint to work from: a correct answer or an honest miss both
+// pass; a confabulated codeword-shaped string fails.
+func floorGrade(t *testing.T, label, reply, codeword string) {
+	t.Helper()
+	if strings.Contains(reply, codeword) {
+		return
+	}
+	if fake := codewordish.FindString(reply); fake != "" {
+		t.Errorf("%s FAILED: confabulated codeword %q (want %s or an honest miss)", label, fake, codeword)
+	} else {
+		t.Logf("%s: honest miss (accepted floor)", label)
+	}
+}
+
+// assertPromptBounded enforces the design's bounded-prompt gate: prompt_tokens
+// stays within envelope + tail high watermark + outline cap + one turn of
+// hysteresis overshoot (demotion runs at turn START, so the tail may exceed
+// the watermark by the last completed turn).
+func assertPromptBounded(t *testing.T, stats []turnStat, window int) {
+	t.Helper()
+	if len(stats) == 0 {
+		return
+	}
+	envelope := stats[0].prompt
+	overshoot := 900 // ≈ one filler turn (~450 tok) + probe turns + estimate error
+	budget := envelope + window/2 + window/8 + overshoot
+	for _, s := range stats {
+		if s.prompt > budget {
+			t.Errorf("bounded FAILED: %s prompt=%d tokens, over budget %d (envelope %d + W/2 + W/8 + overshoot)", s.label, s.prompt, budget, envelope)
+		}
+	}
+}
+
+// assertCacheReused enforces the design's cache-sanity gate: the backend must
+// reuse the prefix on at least one post-first turn.
+func assertCacheReused(t *testing.T, stats []turnStat) {
+	t.Helper()
+	reused := false
+	for _, s := range stats[1:] {
+		if s.cached > 0 {
+			reused = true
+		}
+	}
+	if !reused {
+		t.Errorf("cache sanity FAILED: no request after the first reported cached prompt tokens (prefix never reused)")
+	}
 }
 
 func TestContextEval_Live(t *testing.T) {
@@ -124,41 +246,9 @@ func TestContextEval_Live(t *testing.T) {
 	}
 	defer cs.transcript.Close()
 
-	type turnStat struct {
-		label     string
-		prompt    int
-		cached    int
-		demoted   int
-		elapsedMS int64
-	}
 	var stats []turnStat
 	runTurn := func(label, input string) string {
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
-		defer cancel()
-		start := time.Now()
-		res, err := cs.Turn(ctx, input)
-		if err != nil {
-			t.Fatalf("%s: %v", label, err)
-		}
-		stats = append(stats, turnStat{
-			label:     label,
-			prompt:    cs.LastPromptTokens,
-			cached:    cs.LastCachedTokens,
-			demoted:   cs.ws.Demoted(),
-			elapsedMS: time.Since(start).Milliseconds(),
-		})
-		return res.Reply
-	}
-
-	recallCalledSince := func(from int) bool {
-		for _, m := range cs.Request.Messages[from:] {
-			for _, call := range m.ToolCalls {
-				if call.Function.Name == "recall" {
-					return true
-				}
-			}
-		}
-		return false
+		return runLiveTurn(t, cs, &stats, label, input)
 	}
 
 	// --- phase 1: plant the fact, filler turns until it demotes --------------
@@ -189,7 +279,7 @@ func TestContextEval_Live(t *testing.T) {
 	// --- phase 1 probe: graded retention (outline hint → recall) -------------
 	preProbe := len(cs.Request.Messages)
 	gradedReply := runTurn("probe-graded", "What is the deploy codeword from the project brief earlier in this session?")
-	gradedRecall := recallCalledSince(preProbe)
+	gradedRecall := recallCalledSince(cs, preProbe)
 
 	// --- phase 2: keep filling until the fact entry folds into the digest ----
 	folded := false
@@ -205,33 +295,16 @@ func TestContextEval_Live(t *testing.T) {
 	if folded {
 		preProbe = len(cs.Request.Messages)
 		postReply = runTurn("probe-postfold", "Earlier in this session I gave you a deploy codeword. What was it? Answer with just the codeword.")
-		postRecall = recallCalledSince(preProbe)
+		postRecall = recallCalledSince(cs, preProbe)
 	}
 
 	// --- report ---------------------------------------------------------------
-	t.Logf("model=%s window=%d turns=%d", model, window, len(stats))
-	t.Logf("%-14s %8s %8s %10s %8s %9s", "turn", "prompt", "cached", "evaluated", "demoted", "elapsed")
-	for _, s := range stats {
-		t.Logf("%-14s %8d %8d %10d %8d %8dms", s.label, s.prompt, s.cached, s.prompt-s.cached, s.demoted, s.elapsedMS)
-	}
+	reportTurnStats(t, model, window, stats)
 	t.Logf("graded probe: %q (recall called: %v, hint visible: %v, leak: %v)", strings.TrimSpace(gradedReply), gradedRecall, hintVisible, leak)
 	if folded {
 		t.Logf("post-fold probe: %q (recall called: %v)", strings.TrimSpace(postReply), postRecall)
 	} else {
 		t.Logf("post-fold probe skipped: the fact entry never folded within the turn budget")
-	}
-
-	// floorGrade applies the design's accepted floor when the outline gave no
-	// hint: correct answers and honest misses pass, confabulation fails.
-	floorGrade := func(label, reply string) {
-		if strings.Contains(reply, liveCodeword) {
-			return
-		}
-		if fake := codewordish.FindString(reply); fake != "" {
-			t.Errorf("%s FAILED: confabulated codeword %q (want %s or an honest miss)", label, fake, liveCodeword)
-		} else {
-			t.Logf("%s: honest miss (accepted floor)", label)
-		}
 	}
 
 	// --- gates ------------------------------------------------------------------
@@ -243,38 +316,22 @@ func TestContextEval_Live(t *testing.T) {
 			t.Errorf("graded retention FAILED: probe reply %q does not contain the codeword %s", strings.TrimSpace(gradedReply), liveCodeword)
 		}
 	} else {
-		floorGrade("graded-degraded-to-blind retention", gradedReply)
+		floorGrade(t, "graded-degraded-to-blind retention", gradedReply, liveCodeword)
 	}
 
 	// G1b post-fold retention (floor): once the hint is folded away, a correct
 	// answer or an honest miss both pass — the accepted floor per the design.
 	if folded {
-		floorGrade("post-fold retention", postReply)
+		floorGrade(t, "post-fold retention", postReply, liveCodeword)
 	}
 
 	// G2 bounded: prompt_tokens stays within envelope + tail high watermark +
-	// outline cap + one turn of hysteresis overshoot (demotion runs at turn
-	// START, so the tail may exceed the watermark by the last completed turn).
-	envelope := stats[0].prompt
-	overshoot := 900 // ≈ one filler turn (~450 tok) + probe turns + estimate error
-	budget := envelope + window/2 + window/8 + overshoot
-	for _, s := range stats {
-		if s.prompt > budget {
-			t.Errorf("bounded FAILED: %s prompt=%d tokens, over budget %d (envelope %d + W/2 + W/8 + overshoot)", s.label, s.prompt, budget, envelope)
-		}
-	}
+	// outline cap + one turn of hysteresis overshoot.
+	assertPromptBounded(t, stats, window)
 
 	// G3 cache sanity: the backend must reuse the prefix on at least one
 	// post-first turn — zero reuse everywhere means the two-zone layout is not
 	// prefix-stable on the real wire. (Exact ratios are reported, not gated:
 	// a shared fleet can evict between requests.)
-	reused := false
-	for _, s := range stats[1:] {
-		if s.cached > 0 {
-			reused = true
-		}
-	}
-	if !reused {
-		t.Errorf("cache sanity FAILED: no request after the first reported cached prompt tokens (prefix never reused)")
-	}
+	assertCacheReused(t, stats)
 }
