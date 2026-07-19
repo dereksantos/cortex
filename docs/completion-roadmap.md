@@ -184,7 +184,7 @@ unconfirmed there; adopted here):
       by default); the other six roles are removed or demoted to
       internal/reserved. Lands together with D1 (they touch the same
       config seams).
-- [ ] E2. Curated OpenRouter free-model default fleet (fork A — curated
+- [x] E2. Curated OpenRouter free-model default fleet (fork A — curated
       list shipped in config/docs): works without a LiteLLM proxy,
       zero-cost first run. **Decision (2026-07-18):** curated is primary;
       auto-discovery is a *fallback layer on top*, not the default — when
