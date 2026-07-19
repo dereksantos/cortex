@@ -354,6 +354,12 @@ cortex model [--json]                catalog code/study role bindings + what
                                   models block sized to this machine's RAM
 ```
 
+`cortex serve` hosts a local web UI over your projects and sessions —
+here rendering a real session (the agent reading `main.go`, adding a
+helper, and writing table-driven tests):
+
+![The cortex serve web UI showing a session transcript with tool calls](docs/assets/webui-session.jpg)
+
 | REPL command | Purpose |
 |---|---|
 | `/compact` | Summarize the conversation now as a safety net. |
