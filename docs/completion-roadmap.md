@@ -25,20 +25,20 @@
 The audit found the code moved past several docs. Fix the record before
 building on it.
 
-- [ ] A1. Document `cortex serve` + the web UI: add to README's command
+- [x] A1. Document `cortex serve` + the web UI: add to README's command
       reference and CLAUDE.md's command table (update
       `readme_test.go` TestReadmeSurface accordingly). Align the env-var
       lists between README and CLAUDE.md (`CORTEX_LOOP_STREAM` vs
       `CORTEX_LOOP_STUDY_WINDOW`/`CORTEX_STUDY_REPS` drift).
-- [ ] A2. Fix the stale checklist in `cmd/cortex/main.go:22-48`: Tier-2
+- [x] A2. Fix the stale checklist in `cmd/cortex/main.go:22-48`: Tier-2
       distillation and Fast/Reflex retrieval are marked `[x]` but were
       *removed* by the memory-tools pivot — annotate as removed, and point
       the checklist's remaining `[ ]` items at this roadmap.
-- [ ] A3. `docs/memory-tools.md` corrections: `memory_forget` is a hard
+- [x] A3. `docs/memory-tools.md` corrections: `memory_forget` is a hard
       delete (idempotent), not an "append-only reversible retraction
       marker"; tool code lives in `internal/tools/tools.go` +
       `cmd/cortex/tool_deps.go`, not `cmd/cortex/tools/`.
-- [ ] A4. Prune/mark the stale lower half of
+- [x] A4. Prune/mark the stale lower half of
       `docs/context-window-modification-tools.md` (the §5/§7/§8 plan text
       that predates the SHIPPED banner and contradicts it). Also update
       `docs/eval-context-pivot.md`'s central prior — "the tools have never
@@ -46,11 +46,11 @@ building on it.
       2026-06-11→07-17 show `recall`×1324, `context_merge`×499,
       `context_evict`×435, `context_adjust_watermarks`×462, plus
       `coding.context_rewrite`×328 in the journal.
-- [ ] A5. Dead code: delete `pkg/cliout` (zero importers); delete the
+- [x] A5. Dead code: delete `pkg/cliout` (zero importers); delete the
       obsolete `transport.go:19` rename-TODO; delete local branch
       `loop/wire-cognition-fleet` (fully merged); dedupe the doubled
       `/cortex` entry in `.gitignore`.
-- [ ] A6. CI: add `Cortex` to `.github/workflows/test.yml` branch triggers
+- [x] A6. CI: add `Cortex` to `.github/workflows/test.yml` branch triggers
       (takes effect whenever the branch reaches GitHub; harmless
       otherwise) and wire `scripts/verify-study.sh` in, per
       `docs/engine-unification.md`'s pending "wire into CI" note.
