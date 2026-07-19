@@ -90,7 +90,7 @@ performance claims until receipts exist.
       `ContextStrategy=cold|warm`; reuse the `memory_e2e_live_test.go`
       harness patterns; gate live runs behind `CORTEX_LIVE_FLEET=1`.
       Probe-before-long-run applies (minutes-scale sanity rep first).
-- [ ] B4. ø context-pivot gate run at n≥3 on the live fleet once B2's
+- [x] B4. ø context-pivot gate run at n≥3 on the live fleet once B2's
       scenario is stable, recording receipts in the journal.
 - [ ] B5. Thinking-models fleet probe: sanity-check the level→budget tier
       strawman (low=1k/med=4k/high=16k); verify `fast`-role sub-calls pin

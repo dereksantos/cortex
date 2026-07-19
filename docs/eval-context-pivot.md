@@ -281,3 +281,27 @@ CORTEX_LIVE_FLEET=1 go test ./cmd/cortex -run PivotEval_Live -v -timeout 1800s  
 - [`eval-design-example.md`](eval-design-example.md) — the Δ/ø house pattern
 - `cmd/cortex/context_eval_test.go`, `context_eval_live_test.go` — the invariant helpers and needle machinery this reuses
 - `cmd/cortex/context_tools_test.go`, `internal/tools/context_tools_test.go` — per-tool mechanics already covered (not re-tested here)
+
+## First gate runs — receipts (2026-07-18)
+
+Built as `cmd/cortex/context_pivot_eval_test.go` (Δ, in-suite, green) and
+`context_pivot_eval_live_test.go` (ø). Three ø runs on the chatterbox
+fleet, `qwen3-coder-q3`, window 6000, rung **L3**, 8 filler turns/phase.
+Probe measurements, not benchmarks:
+
+| run | ARM-ON migrated@pivot | ARM-ON B | ARM-OFF B | A-keep (both arms) | verdict |
+|---|---|---|---|---|---|
+| 1 | yes (4 evicts) | hit | hit | honest miss | PASS |
+| 2 | yes | hit | hit | honest miss | PASS |
+| 3 | yes | hit | **miss** | ON **confabulated** ("GLACIER-88") | FAIL |
+
+Read: **volition at L3 is solved** — migration fired 3/3, and ARM-OFF
+(declarations stripped) never migrated, so the instrument is honest.
+B-needle retention favored ARM-ON (3/3 vs 2/3), and ARM-ON answered
+probes from the intact prefix cache (~22 evaluated tokens, sub-second)
+where ARM-OFF paid a rebuild (~3.4k tokens, ~33s). The open problem the
+eval exposed is **selective keeping**: A-keep was lost in all six arms —
+ARM-ON over-evicts spans the pivot explicitly marked keep (once
+confabulating the answer instead of missing honestly). Next lever per
+step 6 of the build order: wording/system-prompt iteration on what
+"keep" means at migration time, then re-run; L0–L2 rungs unprobed.
