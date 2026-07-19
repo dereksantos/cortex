@@ -6,12 +6,16 @@
 // hosted proxies) get labels inferred from the model id via the
 // pattern table here. The two paths merge in EffectiveLabels.
 //
-// Phase 4 substrate. Role-map recommendation (Slice D) consumes
-// EffectiveLabels to pick a model for each role.
+// Phase 4 substrate. Consumed by the registry's PickForCapabilities
+// (registry.go) and by ModelInfo.thinkingMode-adjacent callers that need
+// to pick a model for a role.
 
 package llm
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Capability labels are the union of what real endpoints emit (Lemonade
 // uses these) and what the recommender consumes. Listed here as
@@ -192,8 +196,52 @@ func hasLabel(labels []string, want string) bool {
 	return false
 }
 
-// HasCapability returns true when m's effective labels include cap.
-// Convenience for role-map recommendation: HasCapability(m, CapCoding).
+// parseParamCount extracts a parameter count (in billions, returned as
+// the integer billions) from a model id. Recognizes "-30b-", "30B",
+// "0.6b", "1.5b", etc. Returns 0 when no count is detectable. Used by
+// InferContextClass here and by the registry Probes (probe_ollama.go,
+// probe_openai_compat.go, probe_openrouter.go) to fill ModelInfo.SizeBillion.
+func parseParamCount(modelID string) int {
+	lower := strings.ToLower(modelID)
+	// Walk through looking for "<digit><b>" patterns. Conservative —
+	// only matches digits-then-b separated by non-alphanumeric chars.
+	for i := 0; i < len(lower); i++ {
+		if !isDigit(lower[i]) {
+			continue
+		}
+		// Read up to next non-digit-non-dot.
+		j := i
+		for j < len(lower) && (isDigit(lower[j]) || lower[j] == '.') {
+			j++
+		}
+		if j >= len(lower) || lower[j] != 'b' {
+			i = j
+			continue
+		}
+		// Boundary check: char after 'b' must be non-alphanumeric or end-of-string.
+		if j+1 < len(lower) && isAlphanum(lower[j+1]) {
+			i = j
+			continue
+		}
+		// Boundary check on left: char before digit (if any) must be non-alphanumeric.
+		if i > 0 && isAlphanum(lower[i-1]) {
+			i = j
+			continue
+		}
+		num, err := strconv.ParseFloat(lower[i:j], 64)
+		if err == nil && num > 0 {
+			return int(num)
+		}
+		i = j
+	}
+	return 0
+}
+
+func isDigit(b byte) bool    { return b >= '0' && b <= '9' }
+func isAlphanum(b byte) bool { return isDigit(b) || (b >= 'a' && b <= 'z') }
+
+// HasCapability returns true when m's effective labels include cap, e.g.
+// HasCapability(m, CapCoding).
 func HasCapability(m CompatModel, cap string) bool {
 	for _, l := range EffectiveLabels(m) {
 		if l == cap {

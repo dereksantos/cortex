@@ -45,8 +45,8 @@ TODO (production sequence in docs/cortex-production-harness.md):
 [x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
     [removed 2026-07 — memory-tools pivot; seam now carries the memory index]
 [ ] Integrate eval suite into new harness — tracked in docs/completion-roadmap.md
-[ ] cortex model for cataloging and suggesting model setups based on system
-    resources — tracked as docs/completion-roadmap.md Track C1
+[x] cortex model for cataloging and suggesting model setups based on system
+    resources — docs/completion-roadmap.md Track C1
 [ ] Later (after harness is stable): cortex dream / think / dag integration —
     tracked in docs/completion-roadmap.md
 
@@ -295,6 +295,13 @@ func main() {
 	// See project.go.
 	if len(os.Args) >= 2 && os.Args[1] == "project" {
 		runProjectCLI(os.Args[2:])
+		return
+	}
+
+	// Model catalog + suggestion: `cortex model [--json]`
+	// (docs/completion-roadmap.md Track C1). See model.go.
+	if len(os.Args) >= 2 && os.Args[1] == "model" {
+		runModelCLI(os.Args[2:])
 		return
 	}
 

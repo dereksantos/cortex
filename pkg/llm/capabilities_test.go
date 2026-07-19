@@ -302,3 +302,22 @@ func TestHasCapability(t *testing.T) {
 		t.Errorf("did not expect embedding for qwen3-14b")
 	}
 }
+
+func TestParseParamCount(t *testing.T) {
+	cases := []struct {
+		id   string
+		want int
+	}{
+		{"qwen2.5-coder:7b", 7},
+		{"Qwen3-Coder-30B-A3B-Instruct-GGUF", 30},
+		{"qwen3-1.5b", 1},
+		{"llama-3.1-70b-instruct", 70},
+		{"random-model-no-size", 0},
+		{"some-7brand-fake", 0}, // 7b inside a word — should reject
+	}
+	for _, tc := range cases {
+		if got := parseParamCount(tc.id); got != tc.want {
+			t.Errorf("parseParamCount(%q) = %d want %d", tc.id, got, tc.want)
+		}
+	}
+}

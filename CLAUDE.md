@@ -83,6 +83,7 @@ Three capabilities distinguish it:
 | `cortex project <add\|list\|remove>` | Manage the project registry |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
+| `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/compact`, `/clear`, `/sessions`, `/model [name]`,
 `/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands ~`:237`, slash

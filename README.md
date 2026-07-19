@@ -277,6 +277,9 @@ cortex scan [--json] [--root <path>] [--register]
 cortex project <add|list|remove>    manage the project registry
 cortex discord                      run the Discord adapter
 cortex study-eval                   run the Study acceptance gate
+cortex model [--json]                catalog code/study role bindings + what
+                                  the backend serves, and suggest a config
+                                  models block sized to this machine's RAM
 ```
 
 | REPL command | Purpose |
