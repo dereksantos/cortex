@@ -2247,6 +2247,79 @@ func TestBashShellSyntax(t *testing.T) {
 			t.Errorf("approved depth-0 risky command should have run: %q", got)
 		}
 	})
+
+	// Phase 7 (docs/cortex-web.md, discord.go): approveRisky is gateShell's
+	// approval path for a quiet-but-human-present session (Discord) —
+	// checked independently of cs.quiet, unlike confirmRisky above.
+	t.Run("risky command approved via approveRisky while quiet", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
+			approveRisky: func(context.Context, string, string) (bool, bool) { return true, false }}
+		args, _ := json.Marshal(map[string]string{"command": "echo discord-approved | cat"})
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, "discord-approved") {
+			t.Errorf("approveRisky-approved command should have run: %q", got)
+		}
+	})
+
+	t.Run("risky command declined via approveRisky while quiet", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
+			approveRisky: func(context.Context, string, string) (bool, bool) { return false, false }}
+		args, _ := json.Marshal(map[string]string{"command": "echo discord-denied | cat"})
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "discord-denied") {
+			t.Errorf("declined command should not have run: %q", got)
+		}
+		if !strings.Contains(strings.ToLower(got), "declined") {
+			t.Errorf("expected a declined message, got %q", got)
+		}
+	})
+
+	// The timeout path must reproduce the exact headless-Blocked message
+	// (session_core.go's approveRisky docstring) — indistinguishable from
+	// "no approver at all" by design, unlike an explicit decline above.
+	t.Run("risky command approveRisky timeout reproduces the headless-blocked message", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
+			approveRisky: func(context.Context, string, string) (bool, bool) { return false, true }}
+		args, _ := json.Marshal(map[string]string{"command": "echo discord-timeout | cat"})
+		got, err := tools.Execute(context.Background(), tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "discord-timeout") {
+			t.Errorf("timed-out command should not have run: %q", got)
+		}
+		if !strings.Contains(strings.ToLower(got), "block") {
+			t.Errorf("expected the blocked message on timeout, got %q", got)
+		}
+		if strings.Contains(strings.ToLower(got), "declined") {
+			t.Errorf("timeout must read as blocked, not declined: %q", got)
+		}
+	})
+
+	// approveRisky must not be reachable inside a subagent, same as
+	// confirmRisky (M4.2).
+	t.Run("risky command blocked inside a subagent regardless of approveRisky", func(t *testing.T) {
+		cs := &CortexSession{classifyShell: stubRisky, quiet: true,
+			approveRisky: func(context.Context, string, string) (bool, bool) {
+				t.Fatal("approveRisky must not be invoked for a subagent-depth call")
+				return true, false
+			}}
+		ctx := withSubagentDepth(context.Background(), 1)
+		args, _ := json.Marshal(map[string]string{"command": "echo nested-approver | cat"})
+		got, err := tools.Execute(ctx, tc(FunctionBash, string(args)), cs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if strings.Contains(got, "nested-approver\n") {
+			t.Errorf("subagent-depth risky command should not run: %q", got)
+		}
+	})
 }
 
 // Regression: a quoted grep pattern must actually match. Before the tokenizer

@@ -66,7 +66,19 @@ type CortexSession struct {
 	// instead of dead air while a quiet session deliberates. nil (the
 	// default, including every non-served session) leaves send()'s quiet
 	// path on the plain blocking Send it already used.
-	onThinking    func(active bool)
+	onThinking func(active bool)
+	// approveRisky, when set, is gateShell's (tool_deps.go) approval path for
+	// a quiet (non-terminal) session that nonetheless has a human present
+	// out-of-band — Discord (docs/cortex-web.md Phase 7's interactive risk
+	// approval), unlike confirmRisky which requires !quiet (an interactive
+	// terminal). Returns approved=true to run the command; approved=false,
+	// timedOut=true reproduces gateShell's exact headless-Blocked message
+	// (today's behavior when no approver exists at all — the approval
+	// window lapsing is not distinguishable from "no approver" by design);
+	// approved=false, timedOut=false is an explicit decline. nil (the
+	// default, including every REPL/serve session) leaves gateShell's
+	// existing headless-Blocked fallback untouched.
+	approveRisky  func(ctx context.Context, reason, command string) (approved, timedOut bool)
 	SessionID     string
 	transcript    *os.File
 	capturer      *capture.Capture

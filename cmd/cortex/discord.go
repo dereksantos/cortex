@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,25 +15,38 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/dereksantos/cortex/internal/registry"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
-// Discord adapter. Cortex knows Discord and nothing else: this file is the only
-// place that imports discordgo, and there is no awareness of any orchestration
-// layer above it — such a layer wraps the whole `cortex discord` process
-// externally without cortex referencing it.
+// Discord adapter (docs/cortex-web.md Phase 7, decision D14). Cortex knows
+// Discord and nothing else: discord*.go is the only place that imports
+// discordgo (discord_client.go's discordAPI interface is the boundary
+// everything else in this package sees), and there is no awareness of any
+// orchestration layer above it — such a layer wraps the whole `cortex
+// discord` process externally without cortex referencing it.
 //
-// `cortex discord` runs the bot inside the Cortex binary, so it holds an in-memory
-// CortexSession and calls session.Turn directly — no subprocess, no per-message
-// cold start. A mutex serializes turns, which is what enforces "one session /
-// one change at a time" and bounds cost.
+// `cortex discord` runs the bot inside the Cortex binary and drives sessions
+// through the same SessionManager `cortex serve` uses (serve_session.go,
+// Phase 4) instead of the pre-Phase-7 bespoke sync.Mutex + wholesale
+// session-swap: one live *CortexSession per Discord channel
+// (discordBot.sessions), one turn at a time per session
+// (managedSession.mu — a non-blocking TryLock here, unlike serve's blocking
+// mutex, so a message that arrives mid-turn gets an immediate "still
+// working" reply instead of silently queuing behind it), different
+// channels' turns run concurrently.
 //
 // Session lifecycle is decided, not hardcoded: at ingress a small-model
-// classifier (classifyRoute, on the Cortex process's own reasoner) routes each message to
-// either CONTINUE the current change or START a new one. Biased to continue — a reset
-// is cheap because per-turn capture already persisted durable facts to .cortex/,
-// so retrieval carries the relevant context into a fresh session. !new / !continue
-// are manual overrides.
+// classifier (classifyRoute, on the channel's own session reasoner) routes
+// each message to either CONTINUE the current change or START a new one.
+// Biased to continue — a reset is cheap because per-turn capture already
+// persisted durable facts to .cortex/, so retrieval carries the relevant
+// context into a fresh session. !new / !continue are manual overrides, and
+// /sessions, /compact, /clear, /model, /stop are native application
+// commands (discord_commands.go, decision D12) mirroring the REPL's slash
+// commands. A shellrisk Risky command gets an interactive approve/deny
+// prompt (discord_risk.go) instead of headless-Blocked — the one place
+// Discord gains something the REPL already had: a human in the loop.
 
 const (
 	// discordMaxMessage is Discord's hard per-message character limit; replies
@@ -47,61 +61,131 @@ const (
 	routeConfidenceThreshold = 0.8
 )
 
-// discordBot holds the bot's mutable state. session is swapped wholesale on a
-// new change; the mutex serializes the entire handle path (route + turn +
-// compaction) so messages are processed one at a time.
+// discordBot holds the bot's mutable state. Every map is keyed by Discord
+// channel id — one live session, goal, active change, in-flight-turn
+// cancel, and status message per channel — guarded by mu.
 type discordBot struct {
+	mgr       *SessionManager
+	api       discordAPI
+	channelID string // legacy env scoping — restricts which channel/DMs respond (shouldRespond)
+	project   string // resolved project name; "" = CWD-implicit default (serve_session.go's Create/Resume)
+	risk      *riskApprovals
+
 	mu        sync.Mutex
-	session   *CortexSession
-	channelID string
-	goal      string // one-line description of the active task (first msg of the session)
-	change    string // active change branch, "" when none has been cut
+	sessions  map[string]string             // channelID -> live session id
+	goals     map[string]string             // channelID -> active-task goal (bias-to-continue router)
+	changes   map[string]string             // channelID -> active change branch
+	cancels   map[string]context.CancelFunc // channelID -> cancel for its in-flight turn
+	statusMsg map[string]string             // channelID -> id of its live progress status message
 }
 
-// runDiscordCLI implements `cortex discord`: connect to Discord and drive the
-// session. Token comes from DISCORD_BOT_TOKEN (env, like the OpenRouter key); an
-// optional DISCORD_CHANNEL_ID restricts the bot to one channel, and
-// DISCORD_SESSION_ID resumes a specific prior session.
+func newDiscordBot(mgr *SessionManager, api discordAPI, channelID, project string) *discordBot {
+	return &discordBot{
+		mgr:       mgr,
+		api:       api,
+		channelID: channelID,
+		project:   project,
+		risk:      newRiskApprovals(),
+		sessions:  make(map[string]string),
+		goals:     make(map[string]string),
+		changes:   make(map[string]string),
+		cancels:   make(map[string]context.CancelFunc),
+		statusMsg: make(map[string]string),
+	}
+}
+
+// newDiscordSessionFactory layers Discord's own default (EnableMemory —
+// every discord.go session has had memory enabled since before this
+// SessionManager rebase) on top of newProductionSession's shared
+// construction (serve_session.go) — the same base `cortex serve` uses, kept
+// untouched here since serve's sessions deliberately don't opt in on their
+// own.
+func newDiscordSessionFactory() sessionFactory {
+	return func() *CortexSession {
+		cs := newProductionSession()
+		cs.EnableMemory()
+		return cs
+	}
+}
+
+// runDiscordCLI implements `cortex discord`: connect to Discord and drive
+// sessions through the shared SessionManager. Token comes from
+// DISCORD_BOT_TOKEN (env, like the OpenRouter key); an optional
+// DISCORD_CHANNEL_ID restricts the bot to one channel, DISCORD_PROJECT
+// targets a registered project (--project's env equivalent; CWD-implicit
+// when unset), and DISCORD_SESSION_ID resumes a specific prior session into
+// DISCORD_CHANNEL_ID (it needs a channel to bind to under the per-channel
+// session model — set both or neither).
 func runDiscordCLI() error {
 	token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
 	if token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set — create a bot at https://discord.com/developers, enable the Message Content intent, and export its token")
 	}
 	channelID := strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID"))
+	project := strings.TrimSpace(os.Getenv("DISCORD_PROJECT"))
 
-	// quiet mutes terminal emission — the reply comes back via TurnResult and
-	// goes to Discord, while stderr stays a clean server log.
-	session := NewCortexSession()
-	session.quiet = true
-	if sid := strings.TrimSpace(os.Getenv("DISCORD_SESSION_ID")); sid != "" {
-		if err := session.ResumeTranscript(sid); err != nil {
-			log.Printf("resume %s: %v — starting fresh", sid, err)
-			session.StartTranscript()
-		} else {
-			session.showLoadedContext(session.SessionID)
-		}
-	} else {
-		session.StartTranscript()
+	reg, err := registry.New()
+	if err != nil {
+		return fmt.Errorf("failed to open project registry: %w", err)
 	}
-	session.EnableMemory()
-	bot := &discordBot{session: session, channelID: channelID}
-	defer bot.session.Close()
+	if project != "" {
+		if _, err := reg.Lookup(project); err != nil {
+			return fmt.Errorf("DISCORD_PROJECT %q: %w", project, err)
+		}
+	}
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		return fmt.Errorf("discord session: %w", err)
 	}
-	// Message events (not slash commands) so a turn can take minutes without
-	// hitting the 3s interaction-ack deadline. Message Content must be enabled in
-	// the developer portal for the content to arrive.
-	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
+	mgr := NewSessionManager(reg, newDiscordSessionFactory())
+	bot := newDiscordBot(mgr, dg, channelID, project)
+	defer bot.closeSessions()
+
+	// Message events (not exclusively slash commands) so a turn can take
+	// minutes without hitting the 3s interaction-ack deadline, plus
+	// reaction events for the 🛑-interrupt affordance (discord_progress.go)
+	// and interaction events for application commands + risk-approval
+	// buttons (discord_commands.go). Message Content must be enabled in the
+	// developer portal for message content to arrive.
+	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent |
+		discordgo.IntentGuildMessageReactions | discordgo.IntentDirectMessageReactions
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) { bot.handle(s, m) })
+	dg.AddHandler(func(s *discordgo.Session, ic *discordgo.InteractionCreate) { bot.handleInteraction(ic) })
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionAdd) { bot.handleReactionAdd(s, r) })
+	// Per-guild command registration (D12: "one startup call per guild")
+	// fires as each guild syncs in, making the commands available in that
+	// guild instantly rather than waiting out Discord's slow global
+	// propagation window.
+	dg.AddHandler(func(s *discordgo.Session, g *discordgo.GuildCreate) {
+		if err := registerDiscordCommands(bot.api, applicationID(s), g.ID); err != nil {
+			log.Printf("discord: %v", err)
+		}
+	})
 
 	if err := dg.Open(); err != nil {
 		return fmt.Errorf("discord connect: %w", err)
 	}
 	defer dg.Close()
-	log.Printf("discord: connected as %s — session %s%s", botLabel(dg), session.SessionID, channelScope(channelID))
+
+	// Global registration (guildID "") is what makes the commands available
+	// in DMs; per-guild registration above is the instant path for guilds.
+	if err := registerDiscordCommands(bot.api, applicationID(dg), ""); err != nil {
+		log.Printf("discord: %v", err)
+	}
+
+	if sid := strings.TrimSpace(os.Getenv("DISCORD_SESSION_ID")); sid != "" {
+		if channelID == "" {
+			log.Printf("discord: DISCORD_SESSION_ID set without DISCORD_CHANNEL_ID — ignoring (no channel to bind the resumed session to under the per-channel session model)")
+		} else if ms, err := mgr.GetOrResume(project, sid); err != nil {
+			log.Printf("discord: resume %s: %v — starting fresh per channel", sid, err)
+		} else {
+			bot.bindSession(channelID, ms.ID())
+			log.Printf("discord: resumed session %s for channel %s", ms.ID(), channelID)
+		}
+	}
+
+	log.Printf("discord: connected as %s%s", botLabel(dg), channelScope(channelID))
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -110,8 +194,18 @@ func runDiscordCLI() error {
 	return nil
 }
 
-// handle processes one Discord message: filters, applies a manual command if
-// present, otherwise routes (continue vs new change) and runs the turn.
+// closeSessions closes the transcript file handle on every session the
+// manager still holds live, at shutdown.
+func (b *discordBot) closeSessions() {
+	for _, id := range b.mgr.List() {
+		if ms, ok := b.mgr.Get(id); ok {
+			ms.cs.Close()
+		}
+	}
+}
+
+// handle processes one Discord message: a pending risk-approval reply, a
+// manual override command, or an ordinary turn.
 func (b *discordBot) handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author == nil || m.Author.Bot || (s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
 		return
@@ -124,51 +218,155 @@ func (b *discordBot) handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 	content := strings.TrimSpace(stripMention(m.Content, botID))
+
+	// A pending risky-command approval in this channel takes a bare
+	// yes/no reply as its resolution instead of an ordinary message — the
+	// fallback for clients without button support (discord_risk.go).
+	if b.risk.resolveText(m.ChannelID, content) {
+		return
+	}
+
 	cmd, arg := parseBotCommand(content)
-
-	// Serialize everything: a turn (or compaction) in flight blocks the next
-	// message until it finishes. This is the cost guard, not just correctness.
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	switch cmd {
 	case "status":
-		b.reply(s, m.ChannelID, b.statusLine())
+		b.send(m.ChannelID, b.statusLine(m.ChannelID))
 		return
 	case "continue":
-		b.reply(s, m.ChannelID, "continuing "+b.changeLabel())
+		b.send(m.ChannelID, "continuing "+b.changeLabel(m.ChannelID))
 		return
 	case "new":
 		name := arg
 		if name == "" {
 			name = "change"
 		}
-		b.startNewChange(name)
-		b.reply(s, m.ChannelID, "started "+b.changeLabel())
+		if b.startNewChange(m.ChannelID, name) != nil {
+			b.send(m.ChannelID, "started "+b.changeLabel(m.ChannelID))
+		} else {
+			b.send(m.ChannelID, "failed to start a new change — see the server log")
+		}
+		return
+	case "stop":
+		b.send(m.ChannelID, b.interrupt(m.ChannelID))
 		return
 	}
 
-	input := content
-	if input == "" {
+	b.runTurn(m.ChannelID, content)
+}
+
+// sessionFor resolves channelID's live session, creating one if the channel
+// has none yet, and (re-)wires its risk-approval hook to this channel —
+// idempotent, so it's safe to call on every resolution rather than only on
+// creation.
+func (b *discordBot) sessionFor(channelID string) (*managedSession, error) {
+	b.mu.Lock()
+	id := b.sessions[channelID]
+	b.mu.Unlock()
+
+	var ms *managedSession
+	var err error
+	if id != "" {
+		ms, err = b.mgr.GetOrResume(b.project, id)
+	}
+	if id == "" || err != nil {
+		if ms, err = b.mgr.Create(b.project); err != nil {
+			return nil, err
+		}
+		b.bindSession(channelID, ms.ID())
+	}
+	b.wireApproval(channelID, ms)
+	return ms, nil
+}
+
+// newSession starts and binds a brand-new session for channelID,
+// unconditionally (the /clear and !new/routed-reset path — sessionFor's
+// creation path is "no session yet"; this one is "discard the current
+// one").
+func (b *discordBot) newSession(channelID string) (*managedSession, error) {
+	ms, err := b.mgr.Create(b.project)
+	if err != nil {
+		return nil, err
+	}
+	b.bindSession(channelID, ms.ID())
+	b.wireApproval(channelID, ms)
+	return ms, nil
+}
+
+func (b *discordBot) bindSession(channelID, sessionID string) {
+	b.mu.Lock()
+	b.sessions[channelID] = sessionID
+	b.mu.Unlock()
+}
+
+// wireApproval installs channelID's interactive risk-approval hook
+// (session_core.go's approveRisky, tool_deps.go's gateShell) on ms —
+// Discord's Phase 7 alternative to headless-Blocked for a Risky shellrisk
+// verdict.
+func (b *discordBot) wireApproval(channelID string, ms *managedSession) {
+	ms.cs.approveRisky = func(ctx context.Context, reason, command string) (approved, timedOut bool) {
+		return b.risk.ask(ctx, b.api, channelID, reason, command, riskApprovalTimeout)
+	}
+}
+
+// runTurn resolves channelID's session, enforces "one turn at a time" via a
+// non-blocking TryLock (busy → an immediate reply instead of queuing —
+// Phase 7 sub-item 1), routes for a possible change reset, then runs the
+// turn with progress-as-edits and an interrupt hook wired to the turn's
+// ctx-cancel.
+func (b *discordBot) runTurn(channelID, input string) {
+	if strings.TrimSpace(input) == "" {
+		return
+	}
+	ms, err := b.sessionFor(channelID)
+	if err != nil {
+		b.send(channelID, "⚠️ failed to open a session: "+err.Error())
+		return
+	}
+	if !ms.mu.TryLock() {
+		b.send(channelID, "still working on the previous message — hang tight.")
 		return
 	}
 
-	// Route before the turn: a confident new_change resets to a fresh session +
-	// branch first, so the work lands in the right place.
-	b.maybeRouteNewChange(context.Background(), input)
+	// Route before the turn: a confident new_change resets to a fresh
+	// session first, same bias-to-continue policy as before the rebase.
+	// Switching sessions means releasing the old one's lock and acquiring
+	// the new session's instead.
+	if switched := b.maybeRouteNewChange(context.Background(), channelID, input, ms); switched != nil {
+		ms.mu.Unlock()
+		ms = switched
+		if !ms.mu.TryLock() {
+			// Unreachable in practice (a session this call just created),
+			// handled for completeness rather than assumed away.
+			b.send(channelID, "still working on the previous message — hang tight.")
+			return
+		}
+	}
+	defer ms.mu.Unlock()
 
-	stopTyping := keepTyping(s, m.ChannelID)
-	res, turnErr := b.session.Turn(context.Background(), input)
+	b.mgr.Touch(ms.ID())
+	b.mu.Lock()
+	if strings.TrimSpace(b.goals[channelID]) == "" {
+		b.goals[channelID] = input
+	}
+	b.mu.Unlock()
+
+	stopTyping := keepTyping(b.api, channelID)
+	statusID := b.startProgress(channelID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.setCancel(channelID, cancel)
+
+	res, turnErr := ms.cs.TurnWithProgress(ctx, input, b.progressSink(channelID, statusID))
+
+	cancel()
+	b.clearCancel(channelID)
 	stopTyping()
-
-	// First substantive message of a session establishes its goal — the
-	// reference the router compares later messages against.
-	if strings.TrimSpace(b.goal) == "" {
-		b.goal = input
-	}
+	b.finishProgress(channelID, statusID)
 
 	reply := res.Reply
-	if turnErr != nil {
+	switch {
+	case errors.Is(turnErr, context.Canceled):
+		reply = "🛑 interrupted"
+	case turnErr != nil:
 		log.Printf("discord: turn error: %v", turnErr)
 		if reply == "" {
 			reply = "⚠️ turn error: " + turnErr.Error()
@@ -177,11 +375,42 @@ func (b *discordBot) handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if strings.TrimSpace(reply) == "" {
 		reply = "(no reply)"
 	}
-	b.reply(s, m.ChannelID, reply)
+	b.send(channelID, reply)
 
-	// Reply sent — bound the session without making the user wait. Still inside
-	// the mutex, so the next message waits for compaction rather than racing it.
-	boundSession(b.session, turnErr)
+	// Reply sent — bound the session without making the user wait. Still
+	// holding ms.mu (deferred above), so a second message on this channel
+	// waits for compaction rather than racing it.
+	boundSession(ms.cs, turnErr)
+}
+
+// setCancel/clearCancel/interrupt implement Phase 7 sub-item 4's interrupt
+// affordance: a /stop command (discord_commands.go) or a 🛑 reaction on the
+// live status message (discord_progress.go) cancels the same context
+// TurnWithProgress is running on — the identical mechanism main.go's
+// Ctrl-C paths use (editor.Interruptible / signal.NotifyContext canceling
+// the ctx passed to Turn), just triggered by a Discord affordance instead
+// of a terminal keystroke.
+func (b *discordBot) setCancel(channelID string, cancel context.CancelFunc) {
+	b.mu.Lock()
+	b.cancels[channelID] = cancel
+	b.mu.Unlock()
+}
+
+func (b *discordBot) clearCancel(channelID string) {
+	b.mu.Lock()
+	delete(b.cancels, channelID)
+	b.mu.Unlock()
+}
+
+func (b *discordBot) interrupt(channelID string) string {
+	b.mu.Lock()
+	cancel := b.cancels[channelID]
+	b.mu.Unlock()
+	if cancel == nil {
+		return "nothing running to stop."
+	}
+	cancel()
+	return "🛑 stopping…"
 }
 
 // Route decision labels. routeNewChange is the only one that triggers a reset;
@@ -229,31 +458,32 @@ type routeDecision struct {
 	Why        string  `json:"why"`
 }
 
-// maybeRouteNewChange classifies the message against the active goal and, only on
-// a confident new_change, resets to a fresh session/branch. Fails safe: an empty
-// goal, an unavailable provider, any LLM/parse error, "continue", or
-// sub-threshold confidence all leave the current session untouched — a misread
-// degrades to "keep going", never a surprise reset. The classifier runs on the
-// loop's own small-model client (the same reasoner the shell gate uses).
-func (b *discordBot) maybeRouteNewChange(ctx context.Context, message string) {
-	if strings.TrimSpace(b.goal) == "" {
-		return // no active task to diverge from
+// maybeRouteNewChange classifies input against channelID's active goal and,
+// only on a confident new_change, starts a fresh session/branch and returns
+// it (nil means "keep going" — an empty goal, an unavailable provider, any
+// LLM/parse error, "continue", or sub-threshold confidence all leave the
+// current session untouched, so a misread degrades to "keep going", never a
+// surprise reset). The classifier runs on ms's own reasoner (the same
+// reasoner the shell gate uses).
+func (b *discordBot) maybeRouteNewChange(ctx context.Context, channelID, input string, ms *managedSession) *managedSession {
+	b.mu.Lock()
+	goal := b.goals[channelID]
+	b.mu.Unlock()
+	if strings.TrimSpace(goal) == "" {
+		return nil // no active task to diverge from
 	}
-	r := b.session.reasoner()
+	r := ms.cs.reasoner()
 	r.SetMaxTokens(routeMaxOutputTokens) // fresh client per call; bounding it here can't affect other reasoner() users
-	dec, ok := classifyRoute(ctx, r, message, b.goal)
-	if !ok {
-		return // fail-safe: any error keeps the current session
-	}
-	if dec.Decision != routeNewChange || dec.Confidence < routeConfidenceThreshold {
-		return
+	dec, ok := classifyRoute(ctx, r, input, goal)
+	if !ok || dec.Decision != routeNewChange || dec.Confidence < routeConfidenceThreshold {
+		return nil
 	}
 	name := strings.TrimSpace(dec.Name)
 	if name == "" {
-		name = slugifyChange(message)
+		name = slugifyChange(input)
 	}
 	log.Printf("discord: route → new change %q (conf %.2f: %s)", name, dec.Confidence, dec.Why)
-	b.startNewChange(name)
+	return b.startNewChange(channelID, name)
 }
 
 // classifyRoute runs the route-message classification. ok is false on any
@@ -298,71 +528,162 @@ func parseRouteDecision(resp string) (routeDecision, bool) {
 	return dec, true
 }
 
-// startNewChange resets to a fresh session and cuts a new change branch. Durable
-// facts already live in .cortex/ via per-turn capture, so the fresh session's
-// retrieval carries the relevant context forward — the reset is cheap. Git is
-// best-effort: a dirty tree is checkpointed first (only when already on a change
-// branch) so the new branch starts clean; if branching fails the session still
-// resets.
-func (b *discordBot) startNewChange(name string) {
+// startNewChange resets channelID to a fresh session and cuts a new change
+// branch. Durable facts already live in .cortex/ via per-turn capture, so
+// the fresh session's retrieval carries the relevant context forward — the
+// reset is cheap. Git is best-effort: a dirty tree is checkpointed first
+// (only when already on a change branch) so the new branch starts clean; if
+// branching fails the session still resets. Returns nil only when the new
+// session itself fails to start (the caller reports that as a failure; a
+// failed git checkpoint/branch is logged and otherwise ignored, same as
+// before the rebase).
+func (b *discordBot) startNewChange(channelID, name string) *managedSession {
 	if clean, _ := gitClean(); !clean {
-		if head, err := commitChange("checkpoint: " + b.goalOrWIP()); err == nil {
+		if head, err := commitChange("checkpoint: " + b.goalOrWIP(channelID)); err == nil {
 			log.Printf("discord: checkpointed WIP %s", head)
 		}
 	}
+	var change string
 	if branch, err := startChange(name); err != nil {
 		log.Printf("discord: change start %q: %v (resetting session only)", name, err)
-		b.change = ""
 	} else {
-		b.change = branch
+		change = branch
 		log.Printf("discord: started change %s", branch)
 	}
 
-	old := b.session
-	ns := NewCortexSession()
-	ns.quiet = true
-	ns.StartTranscript()
-	ns.EnableMemory()
-	b.session = ns
-	b.goal = ""
-	old.Close()
+	ms, err := b.newSession(channelID)
+	if err != nil {
+		log.Printf("discord: failed to start a new session for change %q: %v", name, err)
+		return nil
+	}
+	b.mu.Lock()
+	b.goals[channelID] = ""
+	b.changes[channelID] = change
+	b.mu.Unlock()
+	return ms
 }
 
-// reply sends text to a channel, chunked under Discord's per-message limit.
-func (b *discordBot) reply(s *discordgo.Session, channelID, text string) {
+// send delivers text to a channel, chunked under Discord's per-message limit.
+func (b *discordBot) send(channelID, text string) {
 	for _, chunk := range chunkMessage(text, discordMaxMessage) {
-		if _, err := s.ChannelMessageSend(channelID, chunk); err != nil {
+		if _, err := b.api.ChannelMessageSend(channelID, chunk); err != nil {
 			log.Printf("discord: send failed: %v", err)
 			return
 		}
 	}
 }
 
-func (b *discordBot) changeLabel() string {
-	if b.change != "" {
-		return "change " + b.change
+func (b *discordBot) changeLabel(channelID string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c := b.changes[channelID]; c != "" {
+		return "change " + c
 	}
-	return "session " + b.session.SessionID
+	if id := b.sessions[channelID]; id != "" {
+		return "session " + id
+	}
+	return "session (none yet)"
 }
 
-func (b *discordBot) goalOrWIP() string {
-	if strings.TrimSpace(b.goal) != "" {
-		return b.goal
+func (b *discordBot) goalOrWIP(channelID string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if g := strings.TrimSpace(b.goals[channelID]); g != "" {
+		return g
 	}
 	return "work in progress"
 }
 
-func (b *discordBot) statusLine() string {
-	goal := b.goal
+func (b *discordBot) statusLine(channelID string) string {
+	b.mu.Lock()
+	goal, id := b.goals[channelID], b.sessions[channelID]
+	b.mu.Unlock()
 	if strings.TrimSpace(goal) == "" {
 		goal = "(none yet)"
 	}
-	return fmt.Sprintf("%s · context %.0f%%\ngoal: %s", b.changeLabel(), 100*b.session.contextRatio(), goal)
+	ratio := 0.0
+	if id != "" {
+		if ms, ok := b.mgr.Get(id); ok {
+			ratio = ms.cs.contextRatio()
+		}
+	}
+	return fmt.Sprintf("%s · context %.0f%%\ngoal: %s", b.changeLabel(channelID), 100*ratio, goal)
 }
 
-// parseBotCommand recognizes the manual overrides. The first whitespace token
-// decides: "!status", "!continue", or "!new <name>"; anything else is an
-// ordinary message, returned with kind "".
+// sessionsText, compactText, clearText, and modelText are the native
+// application commands' bodies (discord_commands.go's runSlashCommand) —
+// Discord equivalents of the REPL's /sessions, /compact, /clear, /model
+// (main.go).
+func (b *discordBot) sessionsText(channelID string) string {
+	ms, err := b.sessionFor(channelID)
+	if err != nil {
+		return "⚠️ " + err.Error()
+	}
+	infos, err := listSessions(ms.cs.SessionsDir(), 15)
+	if err != nil || len(infos) == 0 {
+		return "no sessions found"
+	}
+	var out strings.Builder
+	for _, s := range infos {
+		marker := "  "
+		if s.ID == ms.cs.SessionID {
+			marker = "* "
+		}
+		preview := s.First
+		if preview == "" {
+			preview = "(no prompt)"
+		}
+		if r := []rune(preview); len(r) > 60 {
+			preview = string(r[:60]) + "…"
+		}
+		fmt.Fprintf(&out, "%s%s  %2d msgs  %s\n", marker, s.ID, s.Messages, preview)
+	}
+	return out.String()
+}
+
+func (b *discordBot) compactText(channelID string) string {
+	ms, err := b.sessionFor(channelID)
+	if err != nil {
+		return "⚠️ " + err.Error()
+	}
+	if !ms.mu.TryLock() {
+		return "still working on the previous message — try again shortly."
+	}
+	defer ms.mu.Unlock()
+	pct := 100 * ms.cs.contextRatio()
+	if err := ms.cs.Compact(context.Background()); err != nil {
+		return fmt.Sprintf("compact failed: %v", err)
+	}
+	return fmt.Sprintf("compacted (was %.0f%%) → session %s", pct, ms.cs.SessionID)
+}
+
+func (b *discordBot) clearText(channelID string) string {
+	ms, err := b.newSession(channelID)
+	if err != nil {
+		return "⚠️ failed to start a fresh session: " + err.Error()
+	}
+	b.mu.Lock()
+	b.goals[channelID] = ""
+	b.mu.Unlock()
+	return "cleared → session " + ms.ID()
+}
+
+func (b *discordBot) modelText(channelID, name string) string {
+	ms, err := b.sessionFor(channelID)
+	if err != nil {
+		return "⚠️ " + err.Error()
+	}
+	if name == "" {
+		return fmt.Sprintf("code:  %s @ %s\nstudy: %s @ %s",
+			ms.cs.Request.Model, ms.cs.Request.BaseURL, ms.cs.Study.Model, ms.cs.Study.Endpoint)
+	}
+	ms.cs.SetModel(name)
+	return "code model → " + name
+}
+
+// parseBotCommand recognizes the manual overrides. The first whitespace
+// token decides: "!status", "!continue", "!new <name>", or "!stop";
+// anything else is an ordinary message, returned with kind "".
 func parseBotCommand(content string) (kind, arg string) {
 	fields := strings.Fields(content)
 	if len(fields) == 0 {
@@ -375,6 +696,8 @@ func parseBotCommand(content string) (kind, arg string) {
 		return "continue", ""
 	case "!new":
 		return "new", strings.TrimSpace(strings.TrimPrefix(content, fields[0]))
+	case "!stop":
+		return "stop", ""
 	default:
 		return "", content
 	}
@@ -439,9 +762,9 @@ func chunkMessage(s string, max int) []string {
 
 // keepTyping shows the typing indicator immediately and refreshes it until the
 // returned stop func is called, so a multi-minute turn keeps the channel warm.
-func keepTyping(s *discordgo.Session, channelID string) (stop func()) {
+func keepTyping(api discordAPI, channelID string) (stop func()) {
 	done := make(chan struct{})
-	_ = s.ChannelTyping(channelID)
+	_ = api.ChannelTyping(channelID)
 	go func() {
 		t := time.NewTicker(typingRefresh)
 		defer t.Stop()
@@ -450,7 +773,7 @@ func keepTyping(s *discordgo.Session, channelID string) (stop func()) {
 			case <-done:
 				return
 			case <-t.C:
-				_ = s.ChannelTyping(channelID)
+				_ = api.ChannelTyping(channelID)
 			}
 		}
 	}()

@@ -295,16 +295,34 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 	case shellrisk.Blocked:
 		return fmt.Sprintf("refused by the safety gate (%s). This command will not run; choose a safer approach.", v.Reason), false
 	default:
+		blocked := fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason)
 		// A subagent (depth >= 1) has no human operator mid-loop — Risky is
 		// treated as Blocked, same as a headless session. Only the coder's own
-		// top-level bash call (depth 0) gets the interactive confirm prompt.
-		if subagentDepth(ctx) == 0 && cs != nil && !cs.quiet && cs.confirmRisky != nil {
+		// top-level bash call (depth 0) gets an interactive approval path.
+		if subagentDepth(ctx) != 0 || cs == nil {
+			return blocked, false
+		}
+		if !cs.quiet && cs.confirmRisky != nil {
 			q := fmt.Sprintf("\n⚠ risky command — %s\n    %s\n  run it? [y/N] ", v.Reason, command)
 			if cs.confirmRisky(q) {
 				return "", true
 			}
 			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
 		}
-		return fmt.Sprintf("blocked (risk: %s). No interactive approval is available in this session — re-issue a safer command, or ask the user to run it.", v.Reason), false
+		// approveRisky is Discord's non-terminal-but-human-present approval
+		// path (docs/cortex-web.md Phase 7) — checked independently of
+		// cs.quiet so a quiet served/headless session stays exactly as
+		// blocked as it is today unless it explicitly wires an approver.
+		if cs.approveRisky != nil {
+			approved, timedOut := cs.approveRisky(ctx, v.Reason, command)
+			if approved {
+				return "", true
+			}
+			if timedOut {
+				return blocked, false
+			}
+			return "declined by the user; not run. Ask before retrying, or use a safer command.", false
+		}
+		return blocked, false
 	}
 }

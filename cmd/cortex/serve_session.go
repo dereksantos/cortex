@@ -116,11 +116,17 @@ func (m *SessionManager) evictIfIdleLocked(id string) {
 
 // Create starts a brand-new session against project's workspace and tracks
 // it live. Returns registry.ErrProjectNotFound (wrapped) for an unregistered
-// project name.
+// project name. project == "" skips project targeting entirely, leaving
+// newSession()'s own default in place — the same no-op semantics
+// applyProjectFlag (project_workspace.go) already gives the CLI's
+// --project-less path; the Discord adapter (discord.go, docs/cortex-web.md
+// Phase 7) is this seam's other caller and has no project selection UI yet.
 func (m *SessionManager) Create(project string) (*managedSession, error) {
 	cs := m.newSession()
-	if err := applyProjectByName(cs, m.reg, project); err != nil {
-		return nil, err
+	if project != "" {
+		if err := applyProjectByName(cs, m.reg, project); err != nil {
+			return nil, err
+		}
 	}
 	cs.StartTranscript()
 	if cs.SessionID == "" {
@@ -143,8 +149,10 @@ func (m *SessionManager) Resume(project, id string) (*managedSession, error) {
 		return ms, nil
 	}
 	cs := m.newSession()
-	if err := applyProjectByName(cs, m.reg, project); err != nil {
-		return nil, err
+	if project != "" {
+		if err := applyProjectByName(cs, m.reg, project); err != nil {
+			return nil, err
+		}
 	}
 	if err := cs.ResumeTranscript(id); err != nil {
 		return nil, fmt.Errorf("failed to resume session %q for project %q: %w", id, project, err)
