@@ -142,7 +142,21 @@ func (cs *CortexSession) SetModel(model string) {
 	cs.Window = window
 }
 
+// windowSize resolves the code model's context window: learned (from an
+// observed overflow, C2) beats configured, mirroring studyWindow()'s
+// precedence. Consulting learnedWindows live only changes budget math
+// (contextRatio, compact digest sizing, outline-fold thresholds, recall's
+// gate) — it does not itself touch cs.ws's baked-in high/low watermarks,
+// which are only rebuilt at a natural boundary (session construction,
+// resume, or Compact()); the overflow handlers that write learnedWindows
+// already trigger a Compact() in the same breath, so the working set
+// catches up to the learned value at exactly that boundary.
 func (cs *CortexSession) windowSize() int {
+	if cs.Request != nil {
+		if w, ok := learnedWindows[cs.Request.Model]; ok {
+			return w
+		}
+	}
 	if cs.Window > 0 {
 		return cs.Window
 	}

@@ -30,6 +30,19 @@ func parseCtxSize(s string) int {
 	return 0
 }
 
+// learnWindow records an observed context-overflow limit for the code
+// model into the shared learnedWindows map (C2: extends the study-only
+// calibration in studyWindow() to the coder path) and updates cs.Window as
+// the session-local fallback so windowSize() is correct even if the model
+// name later changes underneath it (e.g. /model). Callers pair this with a
+// compaction (main.go's REPL loop, discord.go's boundSession) so the
+// working set's baked-in watermarks — which only recompute at a session
+// boundary — catch up to the learned value in the same breath it's learned.
+func (cs *CortexSession) learnWindow(real int) {
+	learnedWindows[cs.Request.Model] = real
+	cs.Window = real
+}
+
 func (cs *CortexSession) studyWindow() int {
 	if v := os.Getenv("CORTEX_LOOP_STUDY_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

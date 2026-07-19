@@ -1594,6 +1594,97 @@ func TestStudyWindowResolution(t *testing.T) {
 	}
 }
 
+// TestCodeWindowLearnedFromOverflow covers C2: the code role self-calibrates
+// on a context-overflow error the same way study already did via
+// studyWindow(). The first fixture is pkg/llm/context_overflow_test.go's
+// "lemonade wrapped llama-server" case verbatim (the wire shape pkg/llm
+// parses into a typed ContextOverflowError; cmd/cortex's parseCtxSize
+// regex-matches the same text out of err.Error() for the REPL/discord
+// recovery paths, per TestParseCtxSize above).
+func TestCodeWindowLearnedFromOverflow(t *testing.T) {
+	cases := []struct {
+		name       string
+		model      string
+		configured int
+		overflow   string // server message carrying the real limit
+		wantReal   int
+	}{
+		{
+			name:       "lemonade wrapped llama-server",
+			model:      "coder-a",
+			configured: 131072,
+			overflow:   "litellm.BadRequestError: request (41193 tokens) exceeds the available context size (16384 tokens)",
+			wantReal:   16384,
+		},
+		{
+			name:       "openrouter-shaped message",
+			model:      "coder-b",
+			configured: 8192,
+			overflow:   "local-gw (400): server error: llama-server request failed: request (5012 tokens) exceeds the available context size (4096 tokens)",
+			wantReal:   4096,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer delete(learnedWindows, tc.model)
+			cs := &CortexSession{Request: &AgentRequest{Model: tc.model}, Window: tc.configured}
+
+			// (b, baseline) configured wins before anything overflowed.
+			if got := cs.windowSize(); got != tc.configured {
+				t.Fatalf("windowSize() before overflow = %d, want configured %d", got, tc.configured)
+			}
+
+			real := parseCtxSize(tc.overflow)
+			if real != tc.wantReal {
+				t.Fatalf("parseCtxSize(%q) = %d, want %d", tc.overflow, real, tc.wantReal)
+			}
+			cs.learnWindow(real)
+
+			// (a) learnedWindows records it, keyed by the code model.
+			if got, ok := learnedWindows[tc.model]; !ok || got != tc.wantReal {
+				t.Errorf("learnedWindows[%q] = %d,%v, want %d,true", tc.model, got, ok, tc.wantReal)
+			}
+
+			// (b) subsequent window resolution for sizing prefers the learned
+			// value over the originally configured one.
+			if got := cs.windowSize(); got != tc.wantReal {
+				t.Errorf("windowSize() after overflow = %d, want learned %d", got, tc.wantReal)
+			}
+		})
+	}
+}
+
+// TestStudyWindowUnaffectedByCodeOverflow covers (c): learning the code
+// model's window from an overflow must not perturb study's own resolution,
+// and vice versa — learnedWindows is a single map shared by both roles, but
+// keyed per-model, so the two precedence chains (windowSize() for code,
+// studyWindow() for study) only interact when the roles are bound to the
+// literal same model name.
+func TestStudyWindowUnaffectedByCodeOverflow(t *testing.T) {
+	defer func() {
+		delete(learnedWindows, "coder-model")
+		delete(learnedWindows, "study-model")
+	}()
+	cs := &CortexSession{
+		Request: &AgentRequest{Model: "coder-model"},
+		Window:  131072,
+		Study:   ModelSpec{Model: "study-model", Window: 32768},
+	}
+	if got := cs.studyWindow(); got != 32768 {
+		t.Fatalf("studyWindow() before = %d, want configured 32768", got)
+	}
+	cs.learnWindow(16384) // simulate a coder-path overflow learn
+	if got := cs.studyWindow(); got != 32768 {
+		t.Errorf("studyWindow() after code-model learn = %d, want unaffected 32768", got)
+	}
+	// And the reverse: learning study's own window doesn't perturb the code
+	// model's already-learned resolution.
+	learnedWindows["study-model"] = 4096
+	if got := cs.windowSize(); got != 16384 {
+		t.Errorf("windowSize() after study-model learn = %d, want unaffected 16384 (code's own learned value)", got)
+	}
+}
+
 // newTestSession builds a persisted session in an isolated cwd.
 func newTestSession(t *testing.T) *CortexSession {
 	t.Helper()

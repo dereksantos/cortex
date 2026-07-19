@@ -466,7 +466,7 @@ func keepTyping(s *discordgo.Session, channelID string) (stop func()) {
 func boundSession(session *CortexSession, turnErr error) {
 	if turnErr != nil {
 		if real := parseCtxSize(turnErr.Error()); real > 0 {
-			session.Window = real
+			session.learnWindow(real)
 			if err := session.Compact(context.Background()); err != nil {
 				log.Printf("discord: compact after overflow failed: %v", err)
 			} else {
