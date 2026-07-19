@@ -37,13 +37,18 @@ TODO (production sequence in docs/cortex-production-harness.md):
 [x] Session transcripts + resume (raw JSONL in .cortex/sessions/, NOT the journal)
 [x] Capture at turn end — Tier 1 (structural, mechanical: every turn + /remember)
 [x] Capture Tier 2 (model-distilled insights, async on the reasoner, preemptible)
+    [removed 2026-07 — memory-tools pivot; seam now carries the memory index]
 [x] Eval 6a: per-session metrics (tokens/turns/captures/insights) → eval.cell_result + summary
-[ ] Eval 6b: learning-loop eval runner (cold vs warm memory) — design next
+[ ] Eval 6b: learning-loop eval runner (cold vs warm memory) — tracked as
+    docs/completion-roadmap.md Track B3
 [x] Compaction-as-study (red-gauge answer) + /clear + overflow recovery
 [x] Retrieval injection at turn start (Fast/Reflex; ephemeral per-turn; Think later)
-[ ] Integrate eval suite into new harness
-[ ] cortex model for cataloging and suggesting model setups based on system resources
-[ ] Later (after harness is stable): cortex dream / think / dag integration
+    [removed 2026-07 — memory-tools pivot; seam now carries the memory index]
+[ ] Integrate eval suite into new harness — tracked in docs/completion-roadmap.md
+[ ] cortex model for cataloging and suggesting model setups based on system
+    resources — tracked as docs/completion-roadmap.md Track C1
+[ ] Later (after harness is stable): cortex dream / think / dag integration —
+    tracked in docs/completion-roadmap.md
 
 */
 

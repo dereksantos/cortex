@@ -271,8 +271,12 @@ cortex turn [--session id] [--json] <input...>
                                   run one headless turn
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
+cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopback, bearer-token auth)
+cortex scan [--json] [--root <path>] [--register]
+                                  scan configured roots and list discovered projects
+cortex project <add|list|remove>    manage the project registry
 cortex discord                      run the Discord adapter
-cortex study-eval [code-grid|wm]    run Study evaluation probes
+cortex study-eval                   run the Study acceptance gate
 ```
 
 | REPL command | Purpose |
@@ -331,8 +335,12 @@ does not set one. Model roles may override the backend endpoint and key source.
   (enabled by default).
 
 Useful environment variables include `CORTEX_BACKEND`, `CORTEX_HOME`,
-`CORTEX_LOOP_STREAM`, `CORTEX_LOOP_RENDER`, `NO_COLOR`, and
-`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`.
+`CORTEX_LOOP_STREAM`, `CORTEX_LOOP_RENDER`, `CORTEX_LOOP_STUDY_WINDOW`,
+`CORTEX_STUDY_REPS`, `CORTEX_LOCAL_EMBED`, `CORTEX_HUGOT_ONNX`,
+`CORTEX_LOCAL_ONLY`, `CORTEX_TEMPERATURE`, `NO_COLOR`,
+`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`, and the provider auth
+fallbacks `OPEN_ROUTER_API_KEY` / `ANTHROPIC_API_KEY` used when config
+doesn't set `key_env`.
 
 ## Safety and privacy
 

@@ -481,6 +481,16 @@ Each tool is controlled by a boolean flag in `.cortex/config.json` under `tools`
 
 ---
 
+> **Historical — superseded by the SHIPPED banner above.** Everything from
+> here down (§5 Implementation Plan, §7 Success Criteria, §8 Future Work) is
+> the pre-implementation plan: it still talks about 5 tools and a standalone
+> `context_summarize`, but the shipped surface is 3 tools
+> (`context_evict`/`context_merge`/`context_adjust_watermarks`) with
+> `context_summarize` folded into `recall`'s `budget` argument (§4.2) and
+> `context_reorder` cut (§4.5). Kept for the historical record of what was
+> planned, not as a live task list — see `docs/completion-roadmap.md` for
+> what's actually still open.
+
 ## 5. Implementation Plan
 
 ### Phase 1: Core Infrastructure (1-2 weeks)

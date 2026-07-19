@@ -39,6 +39,15 @@ the ø layer is designed as an *instrument* that locates why the tools go
 unused (a volition ladder, below), not a single pass/fail gate that would sit
 red without saying anything.
 
+> **Update (2026-07-18): this prior is falsified.** Sessions from
+> 2026-06-11 through 2026-07-17 show the tools firing live: `recall`×1324,
+> `context_merge`×499, `context_evict`×435, `context_adjust_watermarks`×462,
+> plus `coding.context_rewrite`×328 in the journal. The ø volition question
+> is effectively answered — models do call these tools unprompted. The open
+> question this doc's design must now serve is the *benefit arm*: does that
+> curation causally improve retention over not curating? See
+> `docs/completion-roadmap.md` Track B2.
+
 ## Why the tools may never fire — hypotheses the eval must separate
 
 A wiring audit (2026-07-11) rules the boring explanation out and sharpens the

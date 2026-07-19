@@ -241,5 +241,3 @@ PROGRESS-REPL.md
 # Aider session artifacts (when used as a side-by-side tool)
 .aider*
 
-# compiled Cortex harness binary
-/cortex

@@ -15,8 +15,7 @@ import (
 
 // AgentRequest captures parameters to be sent to the agent via API call.
 type AgentRequest struct {
-	Model string `json:"model"`
-	// TODO(derek.s): Rename this to Journal once basic repl is established and integrate with journalling engine.
+	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
 	Temperature float64   `json:"temperature"`
 	Tools       []Tool    `json:"tools,omitempty"`

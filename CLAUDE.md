@@ -78,6 +78,9 @@ Three capabilities distinguish it:
 | `cortex turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
+| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, bearer-token authenticated) |
+| `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
+| `cortex project <add\|list\|remove>` | Manage the project registry |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
 | `cortex study-eval` | Study acceptance test (ø gate: goal-hit + clean-finalize + bounded; `CORTEX_STUDY_REPS` reps) |
 
@@ -155,11 +158,15 @@ were deleted outright — see [`docs/archive.md`](docs/archive.md). The embedder
 resolution helper `CortexSession.resolveEmbedder` is kept, reserved for that
 future swap.)
 
-Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_STUDY_REPS`,
-`CORTEX_LOOP_RENDER`, `NO_COLOR`, `DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
+Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_STUDY_REPS`
+(`CORTEX_STUDY_PROBE_TIMEOUT` seconds per probe), `CORTEX_LOOP_RENDER`,
+`CORTEX_LOOP_STREAM`, `CORTEX_LOCAL_ONLY`, `CORTEX_TEMPERATURE`,
+`CORTEX_COMPAT_TIMEOUT_SEC`, `CORTEX_LLM_DEBUG`, `NO_COLOR`,
+`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
 `CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot embedder default),
 `CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an arch-matched int8
-build).
+build), and the provider auth fallbacks `OPEN_ROUTER_API_KEY`/`OPEN_ROUTER_MODEL`
+and `ANTHROPIC_API_KEY` used when config doesn't set `key_env`.
 
 ## Journal — source of truth
 
