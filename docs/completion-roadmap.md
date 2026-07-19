@@ -82,7 +82,7 @@ performance claims until receipts exist.
       before B1 lands); report the L0–L3 conversion rung + retention grades
       per model. The offline Δ layer
       (`context_pivot_eval_test.go`) follows as the deterministic guard.
-- [ ] B3. Eval 6b — the cold-vs-warm learning-loop runner (the unmeasured
+- [x] B3. Eval 6b — the cold-vs-warm learning-loop runner (the unmeasured
       raison d'être: does accumulated memory make the agent better?).
       Design first per the harness doc, then build: two-arm run of the
       same task set — cold = fresh `.cortex/`, warm = seeded memory notes

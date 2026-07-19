@@ -125,3 +125,17 @@ the need. Start without it.
   `memory_write` / `memory_forget`.
 - **Frontmatter = timestamps only** (`created` / `updated`). Tags/source can be
   added if search precision proves insufficient.
+
+## Eval 6b — cold-vs-warm, first receipts (2026-07-18)
+
+`cmd/cortex/memory_coldwarm_live_test.go` (roadmap B3; gated
+`CORTEX_LIVE_FLEET=1`): same 3-task set, two arms differing only in
+prior `.cortex/` state — WARM seeded by real learning turns through the
+built binary (`memory_write` exercised live, incl. one retry), COLD
+fresh. First full run (qwen3-coder-q3, chatterbox fleet, 122s, 6/6):
+WARM recovered all three codewords (note-direct, search-among-
+distractors, journal-only via `study(.cortex/journal)`); COLD held the
+confabulation floor (honest misses, no invented codewords) and spent
+2–4× the output tokens and 2–3× the latency doing so. One probe run,
+not a benchmark — but the thesis's first measured receipt: memory paid
+off in both correctness and cost.
