@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,13 +69,62 @@ func testLoopsStore(t *testing.T) loops.Store {
 	return loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 }
 
-func doAuthedGet(t *testing.T, url, token string) *http.Response {
+// newTestServeServer starts an httptest server wrapping mux in
+// hostOriginMiddleware (serve.go), using the server's OWN bound port for
+// the allowlist — this mirrors runServeCLI's real bind-then-wrap sequence,
+// which needs the actual bound port (not a guess) so `--port` keeps
+// working. httptest.NewServer binds before its handler can learn its own
+// port, so the middleware is installed via a late-bound indirection: the
+// server starts with a thin forwarding handler, then — once the real port
+// is known — `handler` is assigned the real hostOriginMiddleware-wrapped
+// mux before the caller ever issues a request.
+func newTestServeServer(t *testing.T, mux http.Handler) *httptest.Server {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	var handler http.Handler
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}))
+	_, port, err := net.SplitHostPort(ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%s): %v", ts.Listener.Addr(), err)
+	}
+	handler = hostOriginMiddleware(port, mux)
+	return ts
+}
+
+// doGet issues a plain GET — under the 2026-07-19 Host/Origin allowlist
+// (serve.go's hostOriginMiddleware) a request from Go's own http.Client
+// against an httptest server already carries a correct Host header and no
+// Origin header, so nothing needs to be attached here. Named doGet (not
+// doAuthedGet) to mark that this is no longer standing in for a bearer
+// token — see SECURITY.md's posture note.
+func doGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return resp
+}
+
+// foreignHost is a Host header value that will never appear in a server's
+// Host/Origin allowlist (allowedHostSet, serve.go) regardless of which
+// port it's bound to — used below to prove an "/api/..." endpoint is
+// actually gated, now that a bearer token no longer exists to withhold.
+const foreignHost = "attacker.example"
+
+// doForeignHost issues method against url with the Host header forged to
+// foreignHost, so hostOriginMiddleware rejects it with 403 — the
+// replacement for the old "no bearer token" 401 checks (RequiresAuth
+// tests, one per endpoint) now that the gate is Host/Origin-based rather
+// than a shared secret.
+func doForeignHost(t *testing.T, method, url string, body io.Reader) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Host = foreignHost
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -87,10 +137,10 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 		"blog":   {Name: "blog", Root: "/tmp/blog"},
 		"cortex": {Name: "cortex", Root: "/tmp/cortex", Notes: "main repo"},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects", "tok")
+	resp := doGet(t, ts.URL+"/api/projects")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -116,10 +166,10 @@ func TestListProjectsEndpointReturnsRegisteredProjects(t *testing.T) {
 
 func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects", "tok")
+	resp := doGet(t, ts.URL+"/api/projects")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "[]" {
@@ -127,18 +177,15 @@ func TestListProjectsEndpointEmptyRegistryReturnsEmptyArrayNotNull(t *testing.T)
 	}
 }
 
-func TestListProjectsEndpointRequiresAuth(t *testing.T) {
+func TestListProjectsEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: "/tmp/blog"}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/projects")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/projects", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -157,10 +204,10 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 	)
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/blog/sessions")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -186,10 +233,10 @@ func TestListProjectSessionsEndpointListsNewestFirst(t *testing.T) {
 func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T) {
 	root := t.TempDir() // no .cortex/sessions dir created at all
 	reg := &fakeRegistry{projects: map[string]registry.Project{"fresh": {Name: "fresh", Root: root}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/fresh/sessions", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/fresh/sessions")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -202,10 +249,10 @@ func TestListProjectSessionsEndpointNoSessionsYetReturnsEmptyArray(t *testing.T)
 
 func TestListProjectSessionsEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/doesnotexist/sessions", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/doesnotexist/sessions")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)

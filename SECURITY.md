@@ -18,10 +18,31 @@ Please include:
 
 You can expect an initial response within 7 days. We'll work with you on a fix and a coordinated disclosure timeline.
 
+## `cortex serve`'s auth posture
+
+`cortex serve` binds loopback-only (`127.0.0.1`/`localhost`/`[::1]`) and, as
+of 2026-07-19, gates every `/api/...` request with a strict Host/Origin
+allowlist (`hostOriginMiddleware`, `cmd/cortex/serve.go`) instead of a
+bearer token. This is by design, not an oversight: on a loopback-only bind
+there is no network attacker to keep out with a secret — the actual threats
+are DNS rebinding (a malicious page gets a victim's browser to resolve some
+other hostname to `127.0.0.1`) and cross-site request forgery (a malicious
+page's browser issues a same-machine request on the victim's behalf). Both
+are Host/Origin problems, not authentication problems, and a bearer token
+carried in a URL query string is itself a leak surface (browser history,
+referrer headers, shell scrollback) that the allowlist avoids entirely. A
+bypass of the allowlist — a request whose Host or Origin should have been
+rejected but was accepted — is in scope for this policy, at the same tier
+as a shell-risk gate bypass below. If `cortex serve` ever binds to a
+non-loopback address, that build will need a real auth mechanism again;
+loopback-only is the precondition this posture depends on.
+
 ## Scope
 
 In scope:
 - The `cortex` CLI and its agentic turn loop
+- `cortex serve`'s Host/Origin allowlist (see above) — a request that
+  should be rejected by Host or Origin but is accepted anyway
 - The shell-risk gate (`internal/shellrisk`) — i.e. a command that should
   be classified Risky/Blocked but runs as Safe, or any bypass of the
   approval prompt

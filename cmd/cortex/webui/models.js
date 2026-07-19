@@ -7,9 +7,9 @@
 // project/session inputs shown only when the selected scope needs them)
 // plus a per-role text field + SET BY chip + Save button that PUTs a new
 // binding via PUT /api/models/{role}?scope=user|project|session[&project=]
-// [&session=]. Reuses el()/authToken()/apiFetch()/queryParam() from app.js
-// as plain global functions — no module system, index.html loads app.js
-// before this file.
+// [&session=]. Reuses el()/apiFetch()/queryParam() from app.js as plain
+// global functions — no module system, index.html loads app.js before
+// this file.
 
 // modelScopeState survives across loadModels() re-renders so the
 // operator's scope choice isn't lost after a save. Seeded from the
@@ -89,7 +89,7 @@ function saveBinding(role, value, status) {
   }
   fetch(url, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: value }),
   })
     .then((resp) => {

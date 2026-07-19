@@ -9,7 +9,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,10 +34,10 @@ func TestLandscapeEndpointReturnsScanReport(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
+	resp := doGet(t, ts.URL+"/api/landscape")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -64,10 +63,10 @@ func TestLandscapeEndpointNoRootsConfiguredIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
+	resp := doGet(t, ts.URL+"/api/landscape")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Errorf("status = %d, want 412", resp.StatusCode)
@@ -95,10 +94,10 @@ func TestLandscapeEndpointFallsBackToJournalWhenNoRootsPersisted(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
+	resp := doGet(t, ts.URL+"/api/landscape")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -133,11 +132,11 @@ func TestLandscapeEndpointReturnsScanReportIsLiveSource(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	before := time.Now().Add(-time.Second)
-	resp := doAuthedGet(t, ts.URL+"/api/landscape", "tok")
+	resp := doGet(t, ts.URL+"/api/landscape")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -174,10 +173,10 @@ func TestLandscapeRescanEndpointRunsScanAndAppendsJournalEvent(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/landscape/rescan", "tok", "")
+	resp := doPost(t, ts.URL+"/api/landscape/rescan", "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -212,50 +211,44 @@ func TestLandscapeRescanEndpointNoRootsIsTypedRefusal(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json") // never written
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/landscape/rescan", "tok", "")
+	resp := doPost(t, ts.URL+"/api/landscape/rescan", "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Errorf("status = %d, want 412", resp.StatusCode)
 	}
 }
 
-// TestLandscapeRescanEndpointRequiresAuth mirrors
-// TestLandscapeEndpointRequiresAuth for the new endpoint.
-func TestLandscapeRescanEndpointRequiresAuth(t *testing.T) {
+// TestLandscapeRescanEndpointRejectsForeignHost mirrors
+// TestLandscapeEndpointRejectsForeignHost for the new endpoint.
+func TestLandscapeRescanEndpointRejectsForeignHost(t *testing.T) {
 	homeDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/landscape/rescan", "application/json", nil)
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/landscape/rescan", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
-func TestLandscapeEndpointRequiresAuth(t *testing.T) {
+func TestLandscapeEndpointRejectsForeignHost(t *testing.T) {
 	homeDir := t.TempDir()
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, homeDir, testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/landscape")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/landscape", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

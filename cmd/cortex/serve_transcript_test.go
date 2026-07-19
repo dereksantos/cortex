@@ -7,7 +7,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,10 +29,10 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions/20260101-000000", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/blog/sessions/20260101-000000")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -63,10 +62,10 @@ func TestGetSessionEndpointReturnsTranscriptViewModel(t *testing.T) {
 
 func TestGetSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/doesnotexist/sessions/whatever", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/doesnotexist/sessions/whatever")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -78,30 +77,27 @@ func TestGetSessionEndpointUnknownSessionIDReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions/does-not-exist", "tok")
+	resp := doGet(t, ts.URL+"/api/projects/blog/sessions/does-not-exist")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
 }
 
-func TestGetSessionEndpointRequiresAuth(t *testing.T) {
+func TestGetSessionEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"blog": {Name: "blog", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/projects/blog/sessions/whatever")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/projects/blog/sessions/whatever", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

@@ -54,7 +54,7 @@ func TestIndexHTMLLoadsAppJSBeforeModelsJS(t *testing.T) {
 		t.Fatal("index.html does not load models.js")
 	}
 	if appIdx > modelsIdx {
-		t.Error("index.html loads app.js after models.js — models.js's authToken()/apiFetch() calls need app.js already loaded")
+		t.Error("index.html loads app.js after models.js — models.js's apiFetch() calls need app.js already loaded")
 	}
 }
 
@@ -88,9 +88,6 @@ func TestModelsScreenJSPutsBindingOnSave(t *testing.T) {
 	}
 	if !strings.Contains(src, "scope=") {
 		t.Error("models.js does not pass ?scope= on the PUT request")
-	}
-	if !strings.Contains(src, "Authorization") {
-		t.Error("models.js does not authenticate its PUT request")
 	}
 }
 

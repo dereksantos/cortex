@@ -53,7 +53,7 @@ func TestIndexHTMLLoadsAppJSBeforeLoopsJS(t *testing.T) {
 		t.Fatal("index.html does not load loops.js")
 	}
 	if appIdx > loopsIdx {
-		t.Error("index.html loads app.js after loops.js — loops.js's authToken()/apiFetch() calls need app.js already loaded")
+		t.Error("index.html loads app.js after loops.js — loops.js's apiFetch() calls need app.js already loaded")
 	}
 }
 
@@ -109,16 +109,6 @@ func TestLoopsScreenJSHasRunNowControl(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "/run-now") {
 		t.Error("loops.js does not target a .../run-now endpoint")
-	}
-}
-
-func TestLoopsScreenJSAuthenticatesWriteRequests(t *testing.T) {
-	data, err := fs.ReadFile(webUIFS(), "loops.js")
-	if err != nil {
-		t.Fatalf("ReadFile(loops.js): %v", err)
-	}
-	if !strings.Contains(string(data), "Authorization") {
-		t.Error("loops.js does not authenticate its write requests")
 	}
 }
 

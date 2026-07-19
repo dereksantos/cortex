@@ -6,7 +6,6 @@ package main
 import (
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -19,7 +18,7 @@ import (
 // asset (app.js) still serve their real embedded content.
 func TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	t.Chdir(t.TempDir()) // no cmd/cortex/webui/ reachable under this cwd
@@ -36,7 +35,6 @@ func TestWebUIServesEmbeddedAssetsWithNoFilesystemPresence(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to build request for %s: %v", tc.path, err)
 		}
-		req.Header.Set("Authorization", "Bearer tok")
 
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

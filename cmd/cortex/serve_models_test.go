@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +29,10 @@ func TestModelsEndpointReturnsRolesAndFleet(t *testing.T) {
 	t.Setenv("CORTEX_TEST_MODELS_KEY", "super-secret-value")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/models", "tok")
+	resp := doGet(t, ts.URL+"/api/models")
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -73,10 +72,10 @@ func TestModelsEndpointFleetUnreachableStillReturnsRoles(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/models", "tok")
+	resp := doGet(t, ts.URL+"/api/models")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -93,20 +92,17 @@ func TestModelsEndpointFleetUnreachableStillReturnsRoles(t *testing.T) {
 	}
 }
 
-func TestModelsEndpointRequiresAuth(t *testing.T) {
+func TestModelsEndpointRejectsForeignHost(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/models")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/models", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -116,14 +112,15 @@ func TestModelsEndpointRequiresAuth(t *testing.T) {
 // in-memory-only per docs/cortex-web.md Phase 4 and main.go's own /model
 // handler, a different mechanism entirely, so it's not accepted here yet).
 
-// doAuthedPut issues an authenticated PUT with a JSON body against url.
-func doAuthedPut(t *testing.T, url, token, body string) *http.Response {
+// doPut issues a PUT with a JSON body against url. No auth header: the
+// 2026-07-19 Host/Origin allowlist (serve.go's hostOriginMiddleware) needs
+// none from same-process Go clients — see SECURITY.md's posture note.
+func doPut(t *testing.T, url, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -140,10 +137,10 @@ func TestSetModelBindingUserScopeWritesAndUnknownFieldsSurvive(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=user", "tok", `{"model":"new-code-model","endpoint":"http://x.example"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=user", `{"model":"new-code-model","endpoint":"http://x.example"}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -191,10 +188,10 @@ func TestSetModelBindingResponseNeverIncludesSecretValue(t *testing.T) {
 	t.Setenv("CORTEX_TEST_SET_MODEL_KEY", "super-secret-write-value")
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=user", "tok", `{"key_env":"CORTEX_TEST_SET_MODEL_KEY"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=user", `{"key_env":"CORTEX_TEST_SET_MODEL_KEY"}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -216,10 +213,10 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 	projectRoot := t.TempDir()
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: projectRoot}}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), configPath, t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/study?scope=project&project=blog", "tok", `{"model":"proj-study-model"}`)
+	resp := doPut(t, ts.URL+"/api/models/study?scope=project&project=blog", `{"model":"proj-study-model"}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -259,10 +256,10 @@ func TestSetModelBindingProjectScopeWritesUnderProjectConfigAndLeavesUserConfigU
 
 func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=project", "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=project", `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
@@ -271,10 +268,10 @@ func TestSetModelBindingProjectScopeMissingProjectQueryReturns400(t *testing.T) 
 
 func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=project&project=doesnotexist", "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=project&project=doesnotexist", `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -283,10 +280,10 @@ func TestSetModelBindingProjectScopeUnknownProjectReturns404(t *testing.T) {
 
 func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/not-a-real-role?scope=user", "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/not-a-real-role?scope=user", `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
@@ -295,11 +292,11 @@ func TestSetModelBindingUnknownRoleReturns400(t *testing.T) {
 
 func TestSetModelBindingUnsupportedScopeReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	for _, scope := range []string{"", "bogus"} {
-		resp := doAuthedPut(t, ts.URL+"/api/models/code?scope="+scope, "tok", `{"model":"x"}`)
+		resp := doPut(t, ts.URL+"/api/models/code?scope="+scope, `{"model":"x"}`)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("scope=%q: status = %d, want 400", scope, resp.StatusCode)
@@ -326,10 +323,10 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 	}
 	id := created.ID()
 
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session="+id, "tok", `{"model":"session-code-model"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=session&session="+id, `{"model":"session-code-model"}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -371,10 +368,10 @@ func TestSetModelBindingSessionScopeSetsLiveSessionModelAndRevertsOnResume(t *te
 
 func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session&session=does-not-exist", "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=session&session=does-not-exist", `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
@@ -383,10 +380,10 @@ func TestSetModelBindingSessionScopeUnknownSessionReturns404(t *testing.T) {
 
 func TestSetModelBindingSessionScopeMissingSessionQueryReturns400(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/code?scope=session", "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/code?scope=session", `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
@@ -402,31 +399,24 @@ func TestSetModelBindingSessionScopeUnsupportedRoleReturns400(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPut(t, ts.URL+"/api/models/study?scope=session&session="+created.ID(), "tok", `{"model":"x"}`)
+	resp := doPut(t, ts.URL+"/api/models/study?scope=session&session="+created.ID(), `{"model":"x"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
-func TestSetModelBindingRequiresAuth(t *testing.T) {
+func TestSetModelBindingRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), filepath.Join(t.TempDir(), "config.json"), t.TempDir(), testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/api/models/code?scope=user", strings.NewReader(`{"model":"x"}`))
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPut, ts.URL+"/api/models/code?scope=user", strings.NewReader(`{"model":"x"}`))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

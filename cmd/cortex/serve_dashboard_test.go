@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,10 +23,10 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{
 		"plain": {Name: "plain", Root: root},
 	}}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/dashboard", "tok")
+	resp := doGet(t, ts.URL+"/api/dashboard")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -57,10 +56,10 @@ func TestDashboardEndpointReturnsViewModel(t *testing.T) {
 
 func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/dashboard", "tok")
+	resp := doGet(t, ts.URL+"/api/dashboard")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -74,17 +73,14 @@ func TestDashboardEndpointEmptyRegistryReturnsEmptyProjectsNotNull(t *testing.T)
 	}
 }
 
-func TestDashboardEndpointRequiresAuth(t *testing.T) {
+func TestDashboardEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/dashboard")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/dashboard", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

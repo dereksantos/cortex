@@ -343,7 +343,7 @@ cortex turn [--session id] [--json] <input...>
                                   run one headless turn
 cortex study <path> [goal...]       run the read-only Study subagent
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
-cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopback, bearer-token auth)
+cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist)
 cortex scan [--json] [--root <path>] [--register]
                                   scan configured roots and list discovered projects
 cortex project <add|list|remove>    manage the project registry

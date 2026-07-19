@@ -112,7 +112,7 @@ function openSessionButton(name) {
     btn.textContent = "Opening…";
     fetch("/api/projects/" + encodeURIComponent(name) + "/sessions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
+      headers: { "Content-Type": "application/json" },
       body: "{}",
     })
       .then((resp) => {

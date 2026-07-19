@@ -6,7 +6,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,14 +224,13 @@ func TestCreateSessionEndpointCreatesNewSession(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions", nil)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -260,7 +258,7 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -273,7 +271,6 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -297,14 +294,13 @@ func TestCreateSessionEndpointResumesWhenBodyNamesID(t *testing.T) {
 func TestCreateSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	reg := &fakeRegistry{}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/doesnotexist/sessions", nil)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -315,19 +311,16 @@ func TestCreateSessionEndpointUnknownProjectReturns404(t *testing.T) {
 	}
 }
 
-func TestCreateSessionEndpointRequiresAuth(t *testing.T) {
+func TestCreateSessionEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/projects/blog/sessions", "application/json", nil)
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/projects/blog/sessions", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

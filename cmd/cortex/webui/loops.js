@@ -4,13 +4,14 @@
 // table.loops/.toggle/.runlog classes from app.css: per-loop enable/
 // disable + run-now controls wired to POST /api/loops/{name}/enable|
 // disable|run-now, plus a create form wired to POST /api/loops. Reuses
-// el()/authToken()/apiFetch() from app.js as plain global functions — no
-// module system, index.html loads app.js before this file.
+// el()/apiFetch() from app.js as plain global functions — no module
+// system, index.html loads app.js before this file.
 
-// postJSON issues an authenticated POST against path with a JSON body (or
-// no body when omitted), returning the parsed JSON response.
+// postJSON issues a POST against path with a JSON body (or no body when
+// omitted), returning the parsed JSON response. No auth header needed —
+// see app.js's apiFetch.
 function postJSON(path, body) {
-  const opts = { method: "POST", headers: { Authorization: "Bearer " + authToken() } };
+  const opts = { method: "POST", headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);

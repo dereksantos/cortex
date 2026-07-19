@@ -53,7 +53,7 @@ func TestIndexHTMLLoadsAppJSBeforeLandscapeJS(t *testing.T) {
 		t.Fatal("index.html does not load landscape.js")
 	}
 	if appIdx > landscapeIdx {
-		t.Error("index.html loads app.js after landscape.js — landscape.js's authToken()/apiFetch() calls need app.js already loaded")
+		t.Error("index.html loads app.js after landscape.js — landscape.js's apiFetch() calls need app.js already loaded")
 	}
 }
 

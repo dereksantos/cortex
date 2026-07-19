@@ -93,7 +93,7 @@ func TestTurnStreamEndpointStreamsProgressAndResult(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -105,7 +105,6 @@ func TestTurnStreamEndpointStreamsProgressAndResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -170,14 +169,13 @@ func TestTurnStreamEndpointStreamsProgressAndResult(t *testing.T) {
 func TestTurnStreamEndpointUnknownSessionReturns404(t *testing.T) {
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: t.TempDir()}}}
 	mgr := NewSessionManager(reg, hermeticSessionFactory())
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/projects/blog/sessions/does-not-exist/turn/stream", strings.NewReader(`{"input":"hi"}`))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -188,11 +186,11 @@ func TestTurnStreamEndpointUnknownSessionReturns404(t *testing.T) {
 	}
 }
 
-func TestTurnStreamEndpointRequiresAuth(t *testing.T) {
+func TestTurnStreamEndpointRejectsForeignHost(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -200,12 +198,9 @@ func TestTurnStreamEndpointRequiresAuth(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	resp, err := http.Post(ts.URL+"/api/projects/blog/sessions/"+created.ID()+"/turn/stream", "application/json", strings.NewReader(`{"input":"hi"}`))
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/projects/blog/sessions/"+created.ID()+"/turn/stream", strings.NewReader(`{"input":"hi"}`))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }

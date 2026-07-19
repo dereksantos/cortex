@@ -263,12 +263,12 @@ func TestLoopSchedulerTickSkipsWhileRunNowInFlight(t *testing.T) {
 	started := make(chan struct{})
 	running := newRunningSet()
 	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, running)))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, running))
 	defer ts.Close()
 
 	runNowDone := make(chan *http.Response, 1)
 	go func() {
-		runNowDone <- doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+		runNowDone <- doPost(t, ts.URL+"/api/loops/nightly/run-now", "")
 	}()
 	// <-started only closes once the run-now firing's turn call has actually
 	// reached the scripted backend — which happens strictly after

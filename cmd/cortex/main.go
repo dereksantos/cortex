@@ -326,7 +326,8 @@ func main() {
 	}
 
 	// Local HTTP/SSE adapter: `cortex serve [--port <n>]` (Phase 4 / M4.1).
-	// Foreground, loopback-only, bearer-token-authenticated — see serve.go.
+	// Foreground, loopback-only, gated by a Host/Origin allowlist (no bearer
+	// token — 2026-07-19, SECURITY.md) — see serve.go.
 	if len(os.Args) >= 2 && os.Args[1] == "serve" {
 		runServeCLI(os.Args[2:])
 		return

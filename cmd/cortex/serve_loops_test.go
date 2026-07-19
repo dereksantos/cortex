@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,10 +25,10 @@ func TestListLoopsEndpointReturnsSpecsAndRunHistory(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
+	resp := doGet(t, ts.URL+"/api/loops")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -73,10 +72,10 @@ func TestListLoopsEndpointRowsCarryD11SelfPacingFields(t *testing.T) {
 	}
 
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
+	resp := doGet(t, ts.URL+"/api/loops")
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -99,10 +98,10 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedGet(t, ts.URL+"/api/loops", "tok")
+	resp := doGet(t, ts.URL+"/api/loops")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -116,30 +115,28 @@ func TestListLoopsEndpointEmptyStoreReturnsEmptyArray(t *testing.T) {
 	}
 }
 
-func TestListLoopsEndpointRequiresAuth(t *testing.T) {
+func TestListLoopsEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/loops")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodGet, ts.URL+"/api/loops", nil)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
-// doAuthedPost issues an authenticated POST with a JSON body against url —
-// mirrors serve_models_test.go's doAuthedPut for the sibling verb.
-func doAuthedPost(t *testing.T, url, token, body string) *http.Response {
+// doPost issues a POST with a JSON body against url — mirrors
+// serve_models_test.go's doPut for the sibling verb. No auth header: the
+// 2026-07-19 Host/Origin allowlist (serve.go's hostOriginMiddleware) needs
+// none from same-process Go clients — see SECURITY.md's posture note.
+func doPost(t *testing.T, url, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -155,10 +152,10 @@ func doAuthedPost(t *testing.T, url, token, body string) *http.Response {
 func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"nightly","project":"blog","prompt":"sweep TODOs","interval_minutes":60,"max_turns":25,"enabled":true}`)
+	resp := doPost(t, ts.URL+"/api/loops", `{"name":"nightly","project":"blog","prompt":"sweep TODOs","interval_minutes":60,"max_turns":25,"enabled":true}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -189,10 +186,10 @@ func TestCreateLoopEndpointCreatesLoop(t *testing.T) {
 func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 	store := loops.NewAt(filepath.Join(t.TempDir(), "loops.json"))
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/loops", "tok", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":3}`)
+	resp := doPost(t, ts.URL+"/api/loops", `{"name":"toohot","project":"blog","prompt":"go","interval_minutes":3}`)
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -210,18 +207,15 @@ func TestCreateLoopEndpointCadenceBelowFloorReturns400(t *testing.T) {
 	}
 }
 
-func TestCreateLoopEndpointRequiresAuth(t *testing.T) {
+func TestCreateLoopEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/loops", "application/json", strings.NewReader(`{"name":"x"}`))
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops", strings.NewReader(`{"name":"x"}`))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -249,10 +243,10 @@ func TestSetLoopEnabledEndpointTogglesFlag(t *testing.T) {
 			}
 
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet())))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", store, newRunningSet()))
 			defer ts.Close()
 
-			resp := doAuthedPost(t, ts.URL+"/api/loops/nightly"+tt.path, "tok", "")
+			resp := doPost(t, ts.URL+"/api/loops/nightly"+tt.path, "")
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -295,10 +289,10 @@ func TestSetLoopEnabledEndpointUnknownNameReturns404(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 			defer ts.Close()
 
-			resp := doAuthedPost(t, ts.URL+"/api/loops/ghost"+tt.path, "tok", "")
+			resp := doPost(t, ts.URL+"/api/loops/ghost"+tt.path, "")
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -333,10 +327,10 @@ func TestRunLoopEndpointFiresLoopAndReturnsRunHistory(t *testing.T) {
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, noopTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	resp := doPost(t, ts.URL+"/api/loops/nightly/run-now", "")
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -393,19 +387,19 @@ func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	mgr := NewSessionManager(reg, blockingTurnTestSessionFactoryStarted(t, started, release))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", store, newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", store, newRunningSet()))
 	defer ts.Close()
 
 	firstDone := make(chan *http.Response, 1)
 	go func() {
-		firstDone <- doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+		firstDone <- doPost(t, ts.URL+"/api/loops/nightly/run-now", "")
 	}()
 	// The first request's firing has reached the scripted backend, so
 	// handleRunLoop's running.tryStart has already claimed the guard —
 	// deterministic, no sleep.
 	<-started
 
-	secondResp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	secondResp := doPost(t, ts.URL+"/api/loops/nightly/run-now", "")
 	defer secondResp.Body.Close()
 	secondBody, err := io.ReadAll(secondResp.Body)
 	if err != nil {
@@ -427,7 +421,7 @@ func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
 
 	// The guard clears after completion: a third run-now must succeed
 	// rather than staying wedged at 409.
-	thirdResp := doAuthedPost(t, ts.URL+"/api/loops/nightly/run-now", "tok", "")
+	thirdResp := doPost(t, ts.URL+"/api/loops/nightly/run-now", "")
 	defer thirdResp.Body.Close()
 	if thirdResp.StatusCode != http.StatusOK {
 		t.Errorf("third run-now (after guard clears) status = %d, want 200", thirdResp.StatusCode)
@@ -447,10 +441,10 @@ func TestRunLoopEndpointOverlapReturns409(t *testing.T) {
 func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp := doAuthedPost(t, ts.URL+"/api/loops/ghost/run-now", "tok", "")
+	resp := doPost(t, ts.URL+"/api/loops/ghost/run-now", "")
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -461,22 +455,19 @@ func TestRunLoopEndpointUnknownNameReturns404(t *testing.T) {
 	}
 }
 
-func TestRunLoopEndpointRequiresAuth(t *testing.T) {
+func TestRunLoopEndpointRejectsForeignHost(t *testing.T) {
 	reg := &fakeRegistry{}
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/loops/nightly/run-now", "application/json", strings.NewReader(""))
-	if err != nil {
-		t.Fatalf("Post: %v", err)
-	}
+	resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops/nightly/run-now", strings.NewReader(""))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("status = %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
 	}
 }
 
-func TestSetLoopEnabledEndpointRequiresAuth(t *testing.T) {
+func TestSetLoopEnabledEndpointRejectsForeignHost(t *testing.T) {
 	tests := []struct {
 		name string
 		path string
@@ -487,16 +478,13 @@ func TestSetLoopEnabledEndpointRequiresAuth(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &fakeRegistry{}
-			ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet())))
+			ts := newTestServeServer(t, newServeMux(reg, testSessionManager(reg), "", "", testLoopsStore(t), newRunningSet()))
 			defer ts.Close()
 
-			resp, err := http.Post(ts.URL+"/api/loops/nightly"+tt.path, "application/json", strings.NewReader(""))
-			if err != nil {
-				t.Fatalf("Post: %v", err)
-			}
+			resp := doForeignHost(t, http.MethodPost, ts.URL+"/api/loops/nightly"+tt.path, strings.NewReader(""))
 			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", resp.StatusCode)
+			if resp.StatusCode != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", resp.StatusCode)
 			}
 		})
 	}

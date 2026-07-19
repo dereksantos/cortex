@@ -34,7 +34,7 @@ func TestSessionScreenAppJSReadsProjectAndSessionQueryParams(t *testing.T) {
 	}
 	src := string(data)
 	if !strings.Contains(src, `"project"`) || !strings.Contains(src, `"session"`) {
-		t.Error("app.js does not read ?project=<name>&session=<id> query params for the session screen (following authToken()'s ?token= precedent)")
+		t.Error("app.js does not read ?project=<name>&session=<id> query params for the session screen")
 	}
 }
 

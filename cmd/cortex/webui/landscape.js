@@ -3,7 +3,7 @@
 // (buildLandscapeViewModel) into the #landscape container using the
 // design-system .lgrid/.lbox/.lrow/table.projects/.privacy classes from
 // app.css. Kept as its own file per the mechanical JS size caps. Reuses
-// el()/authToken()/apiFetch() from app.js as plain global functions (no
+// el()/apiFetch() from app.js as plain global functions (no
 // module system) — index.html loads app.js before this file.
 
 // renderProbeBox appends one .lbox (Tools or Runtimes) listing each probe
@@ -71,12 +71,12 @@ function renderNoRootsCard(container) {
   );
 }
 
-// postJSON issues an authenticated POST with no body against an /api/...
-// path. apiFetch (app.js) is GET-only; this screen is the only one that
-// needs a POST (the Rescan button below), so the helper lives here rather
-// than growing app.js's shared surface.
+// postJSON issues a POST with no body against an /api/... path. apiFetch
+// (app.js) is GET-only; this screen is the only one that needs a POST (the
+// Rescan button below), so the helper lives here rather than growing
+// app.js's shared surface. No auth header needed — see app.js's apiFetch.
 function postJSON(path) {
-  return fetch(path, { method: "POST", headers: { Authorization: "Bearer " + authToken() } });
+  return fetch(path, { method: "POST" });
 }
 
 // fmtScannedAt renders a report's scanned_at (an RFC3339 string) as a local

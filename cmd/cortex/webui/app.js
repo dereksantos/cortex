@@ -7,7 +7,7 @@
 // ?project=&session=) is a query-param + class toggle via plain <a href>
 // navigation, not a router.
 //
-// This file keeps the core el()/authToken()/apiFetch() helpers plus the
+// This file keeps the core el()/apiFetch() helpers plus the
 // dashboard and session fetch calls (loadDashboard/loadSession) — several
 // structural tests read their endpoint URLs directly out of app.js's
 // source, so those two fetches stay here. The turn composer
@@ -38,41 +38,12 @@ function queryParam(name) {
   return new URLSearchParams(window.location.search).get(name) || "";
 }
 
-// authToken resolves the bearer token: "?token=" on the page URL `cortex
-// serve` prints, remembered in localStorage so later plain visits work.
-function authToken() {
-  const fromQuery = queryParam("token");
-  if (fromQuery) {
-    try {
-      localStorage.setItem("cortex.token", fromQuery);
-    } catch (e) {
-      /* storage unavailable: fall through to the query value */
-    }
-    return fromQuery;
-  }
-  try {
-    return localStorage.getItem("cortex.token") || "";
-  } catch (e) {
-    return "";
-  }
-}
-
-// renderNoTokenBanner explains the one recoverable setup state — no token
-// anywhere — instead of letting every screen surface a raw 401.
-function renderNoTokenBanner() {
-  document.body.prepend(
-    el("p", {
-      className: "no-token-banner",
-      textContent:
-        "No access token — open this page via the URL `cortex serve` prints " +
-        "(it ends in ?token=…); the page remembers it afterwards.",
-    }),
-  );
-}
-
-// apiFetch issues an authenticated GET against the given /api/... path.
+// apiFetch issues a GET against the given /api/... path. No auth header:
+// `cortex serve`'s 2026-07-19 auth model is a Host/Origin allowlist
+// (serve.go's hostOriginMiddleware), not a bearer token — a same-origin
+// request from this page needs no ceremony. See SECURITY.md.
 function apiFetch(path) {
-  return fetch(path, { headers: { Authorization: "Bearer " + authToken() } });
+  return fetch(path);
 }
 
 // activeScreen/showScreen are the entire "router": a query-param read plus
@@ -147,7 +118,7 @@ function renderTurnInput(container, project, session) {
       "/api/projects/" + encodeURIComponent(project) + "/sessions/" + encodeURIComponent(session) + "/turn/stream",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + authToken() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input: text }),
       },
     )
@@ -209,9 +180,6 @@ function loadSession() {
     });
 }
 
-if (!authToken()) {
-  renderNoTokenBanner();
-}
 showScreen();
 loadDashboard();
 loadSession();

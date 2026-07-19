@@ -46,7 +46,7 @@ func TestTurnStreamEndpointEmitsThinkingStartAndStop(t *testing.T) {
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, reasoningTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -58,7 +58,6 @@ func TestTurnStreamEndpointEmitsThinkingStartAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -139,7 +138,7 @@ func TestTurnEndpointDoesNotStreamOrSignalThinking(t *testing.T) {
 		return cs
 	}
 	mgr := NewSessionManager(reg, factory)
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	created, err := mgr.Create("blog")
@@ -151,7 +150,6 @@ func TestTurnEndpointDoesNotStreamOrSignalThinking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)

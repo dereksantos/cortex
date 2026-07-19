@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,7 +33,7 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	mgr1 := NewSessionManager(reg1, hermeticSessionFactory())
-	ts1 := httptest.NewServer(authMiddleware("tok", newServeMux(reg1, mgr1, "", "", testLoopsStore(t), newRunningSet())))
+	ts1 := newTestServeServer(t, newServeMux(reg1, mgr1, "", "", testLoopsStore(t), newRunningSet()))
 
 	// Create a session while the "first process" is live, so there is
 	// something for the second process to re-derive from disk.
@@ -42,7 +41,6 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer tok")
 	createResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -56,8 +54,8 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 		t.Fatal("created session id is empty")
 	}
 
-	projectsBefore := bodyString(t, doAuthedGet(t, ts1.URL+"/api/projects", "tok"))
-	sessionsBefore := bodyString(t, doAuthedGet(t, ts1.URL+"/api/projects/blog/sessions", "tok"))
+	projectsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects"))
+	sessionsBefore := bodyString(t, doGet(t, ts1.URL+"/api/projects/blog/sessions"))
 	ts1.Close()
 
 	// Simulate a restart: a fresh FileRegistry instance and a fresh
@@ -65,11 +63,11 @@ func TestServeListingsIdenticalAcrossManagerRestart(t *testing.T) {
 	// pointed at the very same on-disk projects.json and project root.
 	reg2 := registry.NewAt(regPath)
 	mgr2 := NewSessionManager(reg2, hermeticSessionFactory())
-	ts2 := httptest.NewServer(authMiddleware("tok", newServeMux(reg2, mgr2, "", "", testLoopsStore(t), newRunningSet())))
+	ts2 := newTestServeServer(t, newServeMux(reg2, mgr2, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts2.Close()
 
-	projectsAfter := bodyString(t, doAuthedGet(t, ts2.URL+"/api/projects", "tok"))
-	sessionsAfter := bodyString(t, doAuthedGet(t, ts2.URL+"/api/projects/blog/sessions", "tok"))
+	projectsAfter := bodyString(t, doGet(t, ts2.URL+"/api/projects"))
+	sessionsAfter := bodyString(t, doGet(t, ts2.URL+"/api/projects/blog/sessions"))
 
 	if projectsBefore != projectsAfter {
 		t.Errorf("projects listing changed across restart:\nbefore: %s\nafter:  %s", projectsBefore, projectsAfter)

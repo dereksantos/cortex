@@ -15,7 +15,6 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -27,7 +26,7 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	root := t.TempDir()
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	mgr := NewSessionManager(reg, streamTurnTestSessionFactory(t))
-	ts := httptest.NewServer(authMiddleware("tok", newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet())))
+	ts := newTestServeServer(t, newServeMux(reg, mgr, "", "", testLoopsStore(t), newRunningSet()))
 	defer ts.Close()
 
 	// 1. Create a session over the real HTTP surface (not mgr.Create
@@ -37,7 +36,6 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	if err != nil {
 		t.Fatalf("NewRequest(create): %v", err)
 	}
-	createReq.Header.Set("Authorization", "Bearer tok")
 	createResp, err := http.DefaultClient.Do(createReq)
 	if err != nil {
 		t.Fatalf("Do(create): %v", err)
@@ -62,7 +60,6 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	if err != nil {
 		t.Fatalf("NewRequest(turn/stream): %v", err)
 	}
-	turnReq.Header.Set("Authorization", "Bearer tok")
 	turnResp, err := http.DefaultClient.Do(turnReq)
 	if err != nil {
 		t.Fatalf("Do(turn/stream): %v", err)
@@ -110,7 +107,7 @@ func TestServeEndToEndSmokeCreateSessionTurnStreamAndTranscriptReflectsIt(t *tes
 	// 3. GET the transcript page endpoint and assert it reflects the turn
 	// just posted: the user's input, the bash tool call, its tool result,
 	// and the final assistant reply all appear in transcript order.
-	transcriptResp := doAuthedGet(t, ts.URL+"/api/projects/blog/sessions/"+created.ID, "tok")
+	transcriptResp := doGet(t, ts.URL+"/api/projects/blog/sessions/"+created.ID)
 	defer transcriptResp.Body.Close()
 	if transcriptResp.StatusCode != http.StatusOK {
 		t.Fatalf("transcript status = %d, want 200", transcriptResp.StatusCode)

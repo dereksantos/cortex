@@ -1,20 +1,23 @@
 // serve.go — `cortex serve` (Phase 4 / M4.1): a foreground HTTP/SSE adapter,
 // dispatched the same way study/turn/project/scan/change/discord are (see
-// main.go). Loopback-only, bearer-token-authenticated. This increment lands
-// the listener + auth middleware only; the real endpoint surface (projects,
-// sessions, turn, SSE, landscape, models) is M4.2.
+// main.go). Loopback-only. This increment lands the listener + auth
+// middleware only; the real endpoint surface (projects, sessions, turn,
+// SSE, landscape, models) is M4.2.
+//
+// 2026-07-19: the bearer-token model (D7, docs/cortex-web.md) was replaced
+// by a strict Host/Origin allowlist — see hostOriginMiddleware below and
+// SECURITY.md's posture note. There is no longer a shared secret to mint,
+// store, or carry in the URL.
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -52,69 +55,52 @@ func servePortFromArgs(args []string) int {
 // listener for `addr` (e.g. "127.0.0.1:7433" or "127.0.0.1:0" in tests).
 // Binding happens here (not inside (*http.Server).ListenAndServe) so tests
 // can assert loopback-ness against the real listener address before ever
-// starting to Serve.
-func newServeServer(addr string, handler http.Handler) (*http.Server, net.Listener, error) {
+// starting to Serve. The handler itself is built by buildHandler, called
+// with the ACTUAL bound port (not the requested one — "127.0.0.1:0"
+// resolves to whatever the OS picks) so hostOriginMiddleware's allowlist
+// always matches this bind, `--port` included.
+func newServeServer(addr string, buildHandler func(port string) http.Handler) (*http.Server, net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
-	srv := &http.Server{Handler: handler}
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		_ = ln.Close()
+		return nil, nil, fmt.Errorf("failed to parse bound address %s: %w", ln.Addr(), err)
+	}
+	srv := &http.Server{Handler: buildHandler(port)}
 	return srv, ln, nil
 }
 
-// generateServeToken returns a fresh random bearer token (hex-encoded).
-// Reuse-vs-mint policy lives in resolveServeToken; this is the pure minter.
-func generateServeToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("failed to generate serve token: %w", err)
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// resolveServeToken returns the serve bearer token and its file path,
-// REUSING the stored <userhome>/serve.token when it holds a usable value —
-// so a bookmarked tokened URL keeps working across restarts (the Jupyter
-// posture: one long-lived local secret, 0600, rather than one per run).
-// A missing or unusable file gets a freshly minted token written in place.
-func resolveServeToken() (string, string, error) {
+// cleanupLegacyServeToken removes a leftover <userhome>/serve.token file
+// from the pre-2026-07-19 bearer-token model (SECURITY.md) so a stale
+// on-disk secret doesn't linger now that nothing checks it. Best-effort and
+// silent on the common case (no file); any other removal failure is logged
+// but not fatal — it's cosmetic cleanup, not a precondition to serving.
+func cleanupLegacyServeToken() {
 	path, err := userhome.Path("serve.token")
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve serve.token path: %w", err)
+		return
 	}
-	if data, err := os.ReadFile(path); err == nil {
-		stored := strings.TrimSpace(string(data))
-		if len(stored) == 64 && isHex(stored) {
-			return stored, path, nil
-		}
+	if err := os.Remove(path); err == nil {
+		fmt.Fprintf(os.Stderr, "removed legacy serve.token (%s) — auth is now a Host/Origin allowlist, no bearer token\n", path)
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "could not remove legacy serve.token (%s): %v\n", path, err)
 	}
-	token, err := generateServeToken()
-	if err != nil {
-		return "", "", err
-	}
-	written, err := writeServeToken(token)
-	if err != nil {
-		return "", "", err
-	}
-	return token, written, nil
 }
 
-func isHex(s string) bool {
-	_, err := hex.DecodeString(s)
-	return err == nil
-}
-
-// serveURL is the ready-to-open page URL: the UI shell plus the ?token=
-// query param authToken() reads (app.js) — what the startup line prints
-// and maybeOpenBrowser launches.
-func serveURL(addr, token string) string {
-	return fmt.Sprintf("http://%s/?token=%s", addr, token)
+// serveURL is the ready-to-open page URL — plain, no query-string secret:
+// the 2026-07-19 Host/Origin allowlist (hostOriginMiddleware below) needs
+// nothing carried in the URL. What the startup line prints and
+// maybeOpenBrowser launches.
+func serveURL(addr string) string {
+	return fmt.Sprintf("http://%s/", addr)
 }
 
 // serveOpenFromArgs parses the open-browser preference from a
-// `cortex serve` argument list: opening the tokened URL is the DEFAULT
-// (the token dance should cost zero keystrokes); --no-open suppresses it
-// for headless and scripted runs.
+// `cortex serve` argument list: opening the page is the DEFAULT; --no-open
+// suppresses it for headless and scripted runs.
 func serveOpenFromArgs(args []string) bool {
 	for _, a := range args {
 		if a == "--no-open" {
@@ -150,43 +136,61 @@ func maybeOpenBrowser(open bool, url string) {
 	}
 }
 
-// writeServeToken writes token to <userhome>/serve.token, mode 0600
-// (user-only — same posture as configwrite.go's writeJSONDoc), creating the
-// user-home directory if needed. Returns the path written.
-func writeServeToken(token string) (string, error) {
-	path, err := userhome.Path("serve.token")
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve serve.token path: %w", err)
+// allowedHostSet returns the loopback Host/Origin values this bind
+// accepts: localhost, 127.0.0.1, and [::1], each paired with the ACTUAL
+// bound port (see newServeServer) — not the defaultServePort constant — so
+// `--port` keeps working.
+func allowedHostSet(port string) map[string]bool {
+	return map[string]bool{
+		"localhost:" + port: true,
+		"127.0.0.1:" + port: true,
+		"[::1]:" + port:     true,
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("failed to create user home directory: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
-		return "", fmt.Errorf("failed to write serve.token: %w", err)
-	}
-	return path, nil
 }
 
-// authMiddleware rejects any request whose Authorization header is not
-// exactly "Bearer <token>" with 401, before delegating to next. Every
-// `/api/...` endpoint runs behind this (GOAL.md §3 P4: "Token auth on every
-// endpoint" — read as every DATA endpoint). Paths outside "/api/" (the
-// static UI shell: "/", "/index.html", "/app.js", "/app.css") are exempt —
-// M5.3b's Decisions Log: a plain browser navigation can never attach a
-// custom Authorization header, so gating the shell itself would make the
-// web UI unreachable by any normal browser action. The shell carries no
-// sensitive data (structure only); every byte of real project/session data
-// still flows exclusively through the gated "/api/..." surface.
-func authMiddleware(token string, next http.Handler) http.Handler {
-	want := "Bearer " + token
+// hostOriginMiddleware is the 2026-07-19 replacement for the old
+// bearer-token authMiddleware (SECURITY.md's posture note): a strict
+// Host/Origin allowlist gates every "/api/..." request instead of a shared
+// secret, so there is nothing to mint, store, or leak via a URL.
+//
+// r.Host must be exactly one of localhost:<port>, 127.0.0.1:<port>, or
+// [::1]:<port>, where <port> is this bind's real listener port. This alone
+// defeats DNS rebinding: an attacker page can get a victim's browser to
+// resolve some other domain to 127.0.0.1, but the browser still sends
+// "Host: that-domain:<port>", which never matches the allowlist — browsers
+// set the Host header from the connection target and scripts cannot
+// override it.
+//
+// When an Origin header is present — browsers attach one to every
+// cross-origin fetch/XHR and cross-origin form POST, including the
+// text/plain-body trick sites use to dodge CORS preflight — it must ALSO
+// parse to a host in the same allowlist, or the request is rejected. This
+// is what stops cross-site POSTs a Host check alone would miss. Requests
+// with NO Origin header (curl, scripts, same-process tooling) pass this
+// leg — the Host check above still gates them, which is what keeps the API
+// scriptable without ceremony.
+//
+// Paths outside "/api/" (the static UI shell) are exempt, the same
+// carve-out authMiddleware used: gating "/" would make the shell
+// unreachable by a plain browser navigation, and the shell itself carries
+// no sensitive data — only "/api/..." touches real project/session data.
+func hostOriginMiddleware(port string, next http.Handler) http.Handler {
+	allowed := allowedHostSet(port)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get("Authorization") != want {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if !allowed[r.Host] {
+			http.Error(w, "forbidden: untrusted Host header", http.StatusForbidden)
 			return
+		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(origin)
+			if err != nil || !allowed[u.Host] {
+				http.Error(w, "forbidden: untrusted Origin header", http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -254,15 +258,11 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 // runServeCLI is the `cortex serve` entry point (dispatched from main.go),
 // following runScanCLI/runProjectCLI's established convention: this
 // os.Exit-driving wrapper itself is untested; the pure functions it
-// composes (servePortFromArgs, newServeServer, generateServeToken,
-// writeServeToken, authMiddleware, newServeMux) carry the coverage.
+// composes (servePortFromArgs, newServeServer, hostOriginMiddleware,
+// newServeMux) carry the coverage.
 func runServeCLI(args []string) {
 	port := servePortFromArgs(args)
-	token, tokenPath, err := resolveServeToken()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	cleanupLegacyServeToken()
 	reg, err := registry.New()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -292,7 +292,9 @@ func runServeCLI(args []string) {
 	running := newRunningSet()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	srv, ln, err := newServeServer(addr, authMiddleware(token, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore, running)))
+	srv, ln, err := newServeServer(addr, func(boundPort string) http.Handler {
+		return hostOriginMiddleware(boundPort, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore, running))
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -323,8 +325,8 @@ func runServeCLI(args []string) {
 			sched.Wait()
 		}()
 
-		pageURL := serveURL(ln.Addr().String(), token)
-		fmt.Printf("cortex serve listening — open %s\n(token file: %s; --no-open to suppress the browser)\n", pageURL, tokenPath)
+		pageURL := serveURL(ln.Addr().String())
+		fmt.Printf("cortex serve listening — open %s\n(loopback Host/Origin allowlist; --no-open to suppress the browser)\n", pageURL)
 		maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintln(os.Stderr, err)

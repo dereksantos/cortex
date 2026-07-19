@@ -2,64 +2,24 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/internal/userhome"
 )
 
-// resolveServeToken reuses the stored token across restarts (a bookmarked
-// tokened URL keeps working) and only mints a fresh one when none exists or
-// the stored value is unusable.
-func TestResolveServeTokenReusesExisting(t *testing.T) {
-	t.Setenv("CORTEX_HOME", t.TempDir())
-
-	first, path, err := resolveServeToken()
-	if err != nil {
-		t.Fatalf("first resolve: %v", err)
-	}
-	if len(first) != 64 {
-		t.Fatalf("token should be 32 random bytes hex-encoded, got %d chars", len(first))
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("token file should exist: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("token file mode = %v, want 0600", info.Mode().Perm())
-	}
-
-	second, _, err := resolveServeToken()
-	if err != nil {
-		t.Fatalf("second resolve: %v", err)
-	}
-	if second != first {
-		t.Errorf("restart must reuse the stored token: first %q, second %q", first, second)
-	}
-}
-
-func TestResolveServeTokenRegeneratesUnusable(t *testing.T) {
-	t.Setenv("CORTEX_HOME", t.TempDir())
-
-	// Seed a corrupt token file (too short / not hex).
-	if _, path, err := resolveServeToken(); err != nil {
-		t.Fatal(err)
-	} else if err := os.WriteFile(path, []byte("not-a-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tok, _, err := resolveServeToken()
-	if err != nil {
-		t.Fatalf("resolve after corruption: %v", err)
-	}
-	if len(tok) != 64 || tok == "not-a-token" {
-		t.Errorf("unusable stored token must be replaced, got %q", tok)
-	}
-}
-
-func TestServeURLCarriesToken(t *testing.T) {
-	got := serveURL("127.0.0.1:7433", "abc123")
-	want := "http://127.0.0.1:7433/?token=abc123"
+// serveURL is the ready-to-open page URL — plain, no token query string
+// (2026-07-19: the bearer-token model was replaced by a Host/Origin
+// allowlist, see SECURITY.md and serve.go's hostOriginMiddleware).
+func TestServeURLIsPlainNoTokenQueryString(t *testing.T) {
+	got := serveURL("127.0.0.1:7433")
+	want := "http://127.0.0.1:7433/"
 	if got != want {
 		t.Errorf("serveURL = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "token") {
+		t.Errorf("serveURL = %q should carry no token query string", got)
 	}
 }
 
@@ -84,6 +44,37 @@ func TestServeOpenFromArgs(t *testing.T) {
 	}
 }
 
+// cleanupLegacyServeToken removes a leftover serve.token file from the old
+// bearer-token model on startup (item 2 of the 2026-07-19 auth swap) — a
+// stale on-disk secret shouldn't linger once nothing checks it.
+func TestCleanupLegacyServeTokenRemovesExistingFile(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+
+	path, err := userhome.Path("serve.token")
+	if err != nil {
+		t.Fatalf("userhome.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("old-token"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cleanupLegacyServeToken()
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("serve.token should be removed, Stat err = %v", err)
+	}
+}
+
+// A missing serve.token (the common case, post-2026-07-19) must be a
+// silent no-op — no error, no panic.
+func TestCleanupLegacyServeTokenNoopWhenAbsent(t *testing.T) {
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	cleanupLegacyServeToken() // must not panic
+}
+
 func TestMaybeOpenBrowser(t *testing.T) {
 	var opened []string
 	orig := openBrowser
@@ -93,12 +84,12 @@ func TestMaybeOpenBrowser(t *testing.T) {
 	}
 	defer func() { openBrowser = orig }()
 
-	maybeOpenBrowser(false, "http://127.0.0.1:7433/?token=x")
+	maybeOpenBrowser(false, "http://127.0.0.1:7433/")
 	if len(opened) != 0 {
 		t.Fatalf("open=false must not launch a browser, got %v", opened)
 	}
-	maybeOpenBrowser(true, "http://127.0.0.1:7433/?token=x")
-	if len(opened) != 1 || !strings.Contains(opened[0], "token=x") {
-		t.Fatalf("open=true should launch the tokened URL exactly once, got %v", opened)
+	maybeOpenBrowser(true, "http://127.0.0.1:7433/")
+	if len(opened) != 1 || !strings.Contains(opened[0], "127.0.0.1:7433") {
+		t.Fatalf("open=true should launch the page URL exactly once, got %v", opened)
 	}
 }

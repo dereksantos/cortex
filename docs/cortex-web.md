@@ -212,7 +212,9 @@ Scope:
 
 - **`cmd/cortex serve`** — foreground HTTP server, localhost-bound (default
   port **7433**, flag-overridable), bearer token generated at start (printed
-  + written under `~/.cortex`). **Stdlib `net/http` + SSE only** (decided):
+  + written under `~/.cortex`; **superseded 2026-07-19 by a Host/Origin
+  allowlist — see D7 Rev 2 below and SECURITY.md**). **Stdlib `net/http` +
+  SSE only** (decided):
   zero new dependencies; `gorilla/websocket` in `go.mod` is transitive and
   stays unused. Endpoints
   (v0): projects (list, from registry), sessions per project (list/create/
@@ -247,7 +249,8 @@ multi-user.
 
 Tests: `httptest` per endpoint; concurrency test (two turns, one session →
 serialized; two sessions → parallel); flock contention test (two processes);
-token-auth reject; SSE event-order golden.
+Host/Origin-allowlist reject (2026-07-19 — was token-auth reject); SSE
+event-order golden.
 
 ## Phase 5 — The web UI
 
@@ -387,7 +390,7 @@ doc, not by drive-by divergence.
 | D4 | Machine-level state | hybrid: rebuildable specs as plain JSON under `~/.cortex/` (`projects.json`, `loops.json`); events (`landscape.scan`, `loop.run`) to a user-level journal at `~/.cortex/journal/` |
 | D5 | P3 registry format | plain JSON file (pointer-only, rebuildable from scan) |
 | D6 | P4 HTTP stack | stdlib `net/http` + SSE; zero new dependencies |
-| D7 | P4 port + auth | default `localhost:7433`, flag-overridable; generated bearer token printed + written under `~/.cortex` |
+| D7 | P4 port + auth | default `localhost:7433`, flag-overridable; generated bearer token printed + written under `~/.cortex`. **Rev 2 (2026-07-19, as-built, Derek's decision):** the bearer token is gone — replaced by a strict Host/Origin allowlist (`hostOriginMiddleware`, `cmd/cortex/serve.go`) gating every `/api/...` request. Rationale: on a loopback-only bind the threats are DNS rebinding and cross-site request forgery, both Host/Origin problems a shared secret doesn't actually solve any better than an allowlist does, and a token carried in a URL is its own leak surface (history, referrer, scrollback); the UI now works with zero auth ceremony. See SECURITY.md's posture note. |
 | D8 | P4 session lock | extract `internal/journal`'s portable `acquireExclusiveLock` into a shared internal package; per-session-file lock |
 | D9 | P5 UI stack | no-build vanilla JS via `go:embed`; no node toolchain, no vendored framework |
 | D10 | P6 triggers | intervals + manual run-now in v1; no cron parser; cron syntax may layer on later. **Rev 2 (2026-07-14, loops v2, as-built):** self-pacing borrowed from Claude Code's `/loop` skill — a firing may end its reply with `NEXT: <n>m — <reason>` (one-gap override, clamped [floor, 24h], reason journaled and shown in the UI) or `DONE — <reason>` (loop disables itself, reason persisted to the spec) |
