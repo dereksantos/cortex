@@ -70,18 +70,42 @@ as a managed cache over durable history.**
 Cortex is not trying to hide all state behind embeddings. Its transcript,
 journal, memory notes, and citations are inspectable files under `.cortex/`.
 
-## Quick start
+## Install
 
-You need Go 1.26 and an OpenAI-compatible model endpoint. The examples below
-cover a local Ollama server and hosted models through OpenRouter.
+You need Go 1.26 and an OpenAI-compatible model endpoint. Supported
+platforms are **darwin and linux**; Windows is not built or tested — CI
+excludes it because the eval-harness code relies on POSIX subprocess-group
+semantics (`syscall.Setpgid`, PID-group `SIGTERM`/`SIGKILL`) with no clean
+Windows equivalent (see `.github/workflows/test.yml`'s matrix comment).
 
-### 1. Build
+```bash
+go install github.com/dereksantos/cortex/cmd/cortex@latest
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/dereksantos/cortex.git
 cd cortex
 go build -o bin/cortex ./cmd/cortex
 ```
+
+Either way, confirm the binary runs:
+
+```bash
+cortex --version   # or ./bin/cortex --version
+```
+
+`cortex version` also works. The version string embeds the short git
+revision it was built from; override it at build time the standard way:
+`go build -ldflags "-X main.Version=1.2.3" -o bin/cortex ./cmd/cortex`.
+
+## Quick start
+
+### 1. Build
+
+Already done above — see [Install](#install). The commands below assume
+`./bin/cortex` (source build) or `cortex` (via `go install`) on your `PATH`.
 
 ### 2. Choose a backend
 
@@ -162,6 +186,15 @@ JSON
 ```bash
 ./bin/cortex
 ```
+
+On a genuine first run (no config, no prior session) `cortex` fires a
+one-time greeting turn before the prompt. With a working backend configured
+as above, that greeting is your first green turn — the model introduces
+itself and the REPL is ready. There is currently no interactive "paste your
+API key" prompt: if you skip step 2 and run `cortex` with nothing
+configured, it targets `localhost:4000` (the local LiteLLM/OpenAI-compatible
+default) and reports a connection error after a few retries instead — write
+one of the config files above and rerun.
 
 A useful first prompt:
 
@@ -294,6 +327,7 @@ an optional `model` argument pins a different model for one call. See
 
 ```text
 cortex                            interactive REPL
+cortex --version | cortex version   print the version and exit
 cortex resume [id]                  resume a session; defaults to latest
 cortex turn [--session id] [--json] <input...>
                                   run one headless turn
@@ -326,12 +360,9 @@ remember or forget something and the agent will use the `memory_*` tools.
 ## Configuration
 
 Configuration layers from user defaults to project overrides:
-
-1. `~/.cortex/config.json` (or `$CORTEX_HOME/config.json`)
-2. the nearest project `.cortex/config.json`
-
-Fields merge individually. `CORTEX_BACKEND` supplies the endpoint when config
-does not set one. Model roles may override the backend endpoint and key source.
+`~/.cortex/config.json` (or `$CORTEX_HOME/config.json`) → the nearest
+project `.cortex/config.json` → `CORTEX_BACKEND` (env, endpoint only).
+Fields merge individually.
 
 ```json
 {
@@ -343,35 +374,17 @@ does not set one. Model roles may override the backend endpoint and key source.
   "models": {
     "code":  { "model": "qwen/qwen3-coder", "window": 131072 },
     "study": { "model": "deepseek/deepseek-r1" }
-  },
-  "tools": {
-    "allow_delete": true,
-    "enable_web": true
   }
 }
 ```
 
-- **Roles:** `code` drives the coding agent; `study` drives Study and
-  summarization. Each can set `endpoint`, `model`, `window`, `max_tokens`,
-  `temperature`, `thinking`, and its key source.
-- **Secrets:** `key_env` names an environment variable; `key_service` names a
-  macOS Keychain item. Secret values do not belong in config.
-- **Deletion:** `tools.allow_delete: false` disables `remove_path`;
-  `tools.delete_root` changes its confinement root.
-- **Web:** `tools.enable_web: false` disables both public-web tools.
-- **Context controls:** all three are enabled by default and can be disabled
-  independently with `tools.enable_context_evict`, `enable_context_merge`,
-  and `enable_context_adjust_watermarks`.
-- **Agent:** `tools.enable_agent: false` disables the `agent` subagent tool
-  (enabled by default).
-
-Useful environment variables include `CORTEX_BACKEND`, `CORTEX_HOME`,
-`CORTEX_LOOP_STREAM`, `CORTEX_LOOP_RENDER`, `CORTEX_LOOP_STUDY_WINDOW`,
-`CORTEX_STUDY_REPS`, `CORTEX_LOCAL_EMBED`, `CORTEX_HUGOT_ONNX`,
-`CORTEX_LOCAL_ONLY`, `CORTEX_TEMPERATURE`, `NO_COLOR`,
-`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`, and the provider auth
-fallbacks `OPEN_ROUTER_API_KEY` / `ANTHROPIC_API_KEY` used when config
-doesn't set `key_env`.
+Two configurable roles: `code` (the agent) and `study` (Study + the
+summarizer); leaving `models` out entirely on an `openrouter` backend picks
+a curated free model for both. See
+[`docs/configuration.md`](docs/configuration.md) for the full picture:
+every `tools.*` gate, every environment variable, auth resolution, and the
+zero-config default — kept there as the single source so it can't drift
+across this file, `CLAUDE.md`, and itself.
 
 ## Safety and privacy
 
@@ -470,6 +483,7 @@ pkg/config/        layered configuration
 
 - [`CLAUDE.md`](CLAUDE.md) — operational guide for agents and contributors
 - [`ROADMAP.md`](ROADMAP.md) — current direction and status
+- [`docs/configuration.md`](docs/configuration.md) — every config field, `tools.*` gate, and env var
 - [`docs/context-architecture.md`](docs/context-architecture.md) — two-zone context and citation recall
 - [`docs/memory-tools.md`](docs/memory-tools.md) — model-driven durable memory
 - [`docs/engine-unification.md`](docs/engine-unification.md) — shared agent-loop design and shipped tracker

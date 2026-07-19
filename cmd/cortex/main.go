@@ -236,6 +236,15 @@ func printAvailableTools() {
 }
 
 func main() {
+	// `cortex --version` / `cortex version` prints the same string the REPL
+	// banner shows (display.go) and exits 0 — the standard "how do I check
+	// what I have installed" surface (docs/completion-roadmap.md Track E4).
+	// Checked first, ahead of every other subcommand/flag.
+	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
+		fmt.Println("cortex " + version())
+		os.Exit(0)
+	}
+
 	// The tool list is opt-in: strip --tools / --show-tools (if present) and
 	// remember it so printAvailableTools runs only when explicitly requested.
 	showTools := false

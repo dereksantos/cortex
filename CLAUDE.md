@@ -140,43 +140,31 @@ env. Loaded by `LoadConfig()` / `loadMergedConfig()` in `main.go`.
   "backend": { "type": "openrouter", "endpoint": "...", "key_env": "OPENROUTER_API_KEY" },
   "models": {
     "code":  { "model": "...", "window": 131072 },
-    "study": { "model": "..." },
-    "embed": { "endpoint": "https://api.cloudflare.com/client/v4/accounts/<id>/ai/v1",
-               "model": "@cf/baai/bge-large-en-v1.5", "key_env": "CLOUDFLARE_API_TOKEN" }
-  },
-  "tools": { "allow_delete": true, "delete_root": "" }
+    "study": { "model": "..." }
+  }
 }
 ```
 
 Roles: `code` (the agent) and `study` (the `Study` subagent + the summarizer +
 the shell-risk classifier — all three build their sub-LLM call off the study
 binding and pin reasoning effort off at the call site, docs/thinking-models.md).
-Auth is resolved at call time from `key_env` (env-var name) or `key_service`
-(macOS keychain) — never written to disk. `embed` stays parsed-but-reserved
-for a future semantic `memory_search`; the loop's hot path doesn't use it —
-`memory_search` is keyword over the small note corpus — but
-`CortexSession.resolveEmbedder` still resolves it, reserved for that future
-swap. The mechanical retrieve/rerank/Dream pipeline (`pkg/cognition/dag`,
-`internal/cognition`) and the blind-sampling study engine (`internal/study`)
-were deleted outright — see [`docs/archive.md`](docs/archive.md).
+`embed` stays parsed-but-reserved for a future semantic `memory_search`
+(`CortexSession.resolveEmbedder` still resolves it). The configurable role
+surface is exactly `code`/`study`/`embed` (`cmd/cortex/config.go`'s
+`rolePolicies`) — a 2026-07-18 audit (`docs/completion-roadmap.md` E1) found
+`hard-code`/`reason`/`fast`/`rerank`/`tools` genuinely dead and removed them;
+an old config naming one of those still loads, sits inert, and prints one
+stderr warning. The mechanical retrieve/rerank/Dream pipeline
+(`pkg/cognition/dag`, `internal/cognition`) and the blind-sampling study
+engine (`internal/study`) were deleted outright — see
+[`docs/archive.md`](docs/archive.md).
 
-The configurable role surface is exactly `code`/`study`/`embed`
-(`cmd/cortex/config.go`'s `rolePolicies`) — a 2026-07-18 audit
-(`docs/completion-roadmap.md` E1) found `hard-code`/`reason`/`fast`/`rerank`/
-`tools` genuinely dead (no `resolveBinding` call site outside tests) and
-removed them from the surface. A `models.<role>` key naming one of those in
-an old config.json still loads without error; it just sits inert, and
-`cortex` prints one stderr warning naming it.
-
-Env knobs: `CORTEX_{BACKEND,HOME}`, `CORTEX_LOOP_STUDY_WINDOW`, `CORTEX_STUDY_REPS`
-(`CORTEX_STUDY_PROBE_TIMEOUT` seconds per probe), `CORTEX_LOOP_RENDER`,
-`CORTEX_LOOP_STREAM`, `CORTEX_LOCAL_ONLY`, `CORTEX_TEMPERATURE`,
-`CORTEX_COMPAT_TIMEOUT_SEC`, `CORTEX_LLM_DEBUG`, `NO_COLOR`,
-`DISCORD_{BOT_TOKEN,CHANNEL_ID,SESSION_ID}`,
-`CORTEX_LOCAL_EMBED` (set falsey to skip the local Hugot embedder default),
-`CORTEX_HUGOT_ONNX` (pick the ONNX variant; default is an arch-matched int8
-build), and the provider auth fallbacks `OPEN_ROUTER_API_KEY`/`OPEN_ROUTER_MODEL`
-and `ANTHROPIC_API_KEY` used when config doesn't set `key_env`.
+**[`docs/configuration.md`](docs/configuration.md) is the authority** for
+every `tools.*` gate, every env var, auth resolution (`key_env`/
+`key_service`, no automatic provider-named fallback on this path), the
+`backend.type` supported set, and the zero-config curated-fleet default —
+kept in exactly one place so this section, the README, and the doc itself
+can't drift apart.
 
 ## Journal — source of truth
 
