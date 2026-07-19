@@ -14,9 +14,11 @@ import (
 // PersistBackend writes a resolved backend to the user config file at
 // path via read-modify-write (configwrite.go): the file's other
 // top-level fields, and other roles under "models", survive byte-for-
-// byte (GOAL.md §2). Touches "backend.type"; when b.Model is set, also
-// "models.<roleCode>.model" (and "models.<roleCode>.window" when b.Window
-// is set).
+// byte (GOAL.md §2). Touches "backend.type"; "backend.key_env"/
+// "backend.key_service" when b.KeyEnv/b.KeyService are set (bootstrap_wire.go
+// fills these in from b.Source before calling PersistBackend); when b.Model
+// is set, also "models.<roleCode>.model" (and "models.<roleCode>.window"
+// when b.Window is set).
 //
 // E1 + E2: code and study are the same agent-role model by default, so an
 // OpenRouter backend whose Model came from the curated table (curated.go)
@@ -29,6 +31,16 @@ func PersistBackend(path string, b ResolvedBackend) error {
 	}
 	if err := setJSONPath(doc, []string{"backend", "type"}, string(b.Backend)); err != nil {
 		return fmt.Errorf("failed to persist resolved backend: %w", err)
+	}
+	if b.KeyEnv != "" {
+		if err := setJSONPath(doc, []string{"backend", "key_env"}, b.KeyEnv); err != nil {
+			return fmt.Errorf("failed to persist resolved backend: %w", err)
+		}
+	}
+	if b.KeyService != "" {
+		if err := setJSONPath(doc, []string{"backend", "key_service"}, b.KeyService); err != nil {
+			return fmt.Errorf("failed to persist resolved backend: %w", err)
+		}
 	}
 	if b.Model != "" {
 		if err := setJSONPath(doc, []string{"models", roleCode, "model"}, b.Model); err != nil {

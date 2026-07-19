@@ -190,11 +190,21 @@ JSON
 On a genuine first run (no config, no prior session) `cortex` fires a
 one-time greeting turn before the prompt. With a working backend configured
 as above, that greeting is your first green turn — the model introduces
-itself and the REPL is ready. There is currently no interactive "paste your
-API key" prompt: if you skip step 2 and run `cortex` with nothing
-configured, it targets `localhost:4000` (the local LiteLLM/OpenAI-compatible
-default) and reports a connection error after a few retries instead — write
-one of the config files above and rerun.
+itself and the REPL is ready.
+
+If you skip step 2 entirely and just run `cortex` from a real terminal with
+**no** config file anywhere and no `$CORTEX_BACKEND` set, you don't need to
+write a config by hand: `cortex` walks you through it — asks for an
+OpenRouter API key (get one free at https://openrouter.ai/keys), stores it
+in the macOS Keychain, and writes `~/.cortex/config.json` with the curated
+free-model pick for you, before the greeting turn fires. Press Enter with
+no key to skip; `cortex` then falls back to targeting `localhost:4000` and
+reports a connection error after a few retries, same as before. This
+prompt only runs on the interactive REPL (`cortex` / `cortex resume`) from
+a real terminal — a piped/scripted/CI invocation with nothing configured
+prints one hint line instead and behaves exactly as it did before. See
+[`docs/configuration.md`](docs/configuration.md) for the full chain
+(env/Keychain key reuse, local Ollama detection) and what gets written.
 
 A useful first prompt:
 

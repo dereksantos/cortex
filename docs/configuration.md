@@ -135,13 +135,47 @@ per-process only; the config file is never rewritten. A failed/slow check
 (network down) just leaves the configured model unchanged — it never blocks
 startup.
 
-**What is not (yet) live:** an interactive first-run prompt that asks for
-and stores an OpenRouter key. `cmd/cortex/bootstrap.go` defines that chain
-(`BackendResolver` + `GuidedSetup`) but nothing in `main.go` calls
-`Resolve()` outside tests — running `cortex` with no config file at all
-does not prompt; it silently targets `localhost:4000` and fails to connect
-after three retries if nothing is listening there. Getting to a green turn
-today requires hand-writing (or copy-pasting) a config file as shown above.
+### Interactive first-run setup
+
+Running `cortex` (or `cortex resume`) from a real terminal with **no** user
+config, **no** project config, and **no** `$CORTEX_BACKEND` set is a true
+first run: before the REPL starts, `cortex` walks the `BackendResolver`
+chain (`cmd/cortex/bootstrap.go`) and, finding nothing already configured,
+runs `GuidedSetup` (`cmd/cortex/bootstrap_wire.go`):
+
+1. It prints a pointer to https://openrouter.ai/keys and prompts for a key
+   (`OpenRouter API key: `). Pressing Enter with no input skips setup —
+   `cortex` falls through to the previous behavior (targets
+   `localhost:4000`, reports a connection error) and nothing is written.
+2. A pasted key is stored in the macOS Keychain (service
+   `cortex-openrouter`, the same convention `pkg/secret` already uses) and
+   exported into the current process's environment so the very first turn
+   can use it immediately.
+3. The result is persisted to `~/.cortex/config.json` (`PersistBackend`):
+   `backend.type: "openrouter"`, `backend.key_service: "cortex-openrouter"`
+   (so a later launch finds the key without prompting again), and
+   `models.code`/`models.study` seeded from the curated table's top pick —
+   exactly the shape shown above, written for you.
+
+This entire flow is skipped — silently, unchanged from before — whenever
+any of the three bypass conditions holds (a user config file, a project
+`.cortex/config.json`, or `$CORTEX_BACKEND`), or when stdin isn't a
+terminal (a piped/CI/driver invocation): a **non-interactive** first run
+instead prints one hint line to stderr naming the config path and this
+doc, then proceeds exactly as before (targets `localhost:4000`, fails to
+connect after a few retries if nothing is listening there). Headless
+subcommands (`turn`, `study`, `scan`, `serve`, `discord`, …) never run this
+flow at all, whether or not stdin is a terminal — only the bare REPL entry
+points do.
+
+The `KeyProbe`/`OllamaProbe`/`SmokeProbe` stages of the chain are also live
+in production: an existing `$OPENROUTER_API_KEY` or an existing
+`cortex-openrouter` Keychain entry short-circuits the prompt (same
+persisted shape, `key_env`/`key_service` set accordingly), and a reachable
+local Ollama is tried before falling back to the guided prompt. The
+one-shot tool-call `SmokeProbe` itself is not wired in this pass — a stale
+curated pick still self-heals at every session start via the zero-config
+preflight check described above, which covers the same failure mode.
 
 ## `tools.*` gates
 

@@ -44,6 +44,17 @@ type ResolvedBackend struct {
 	// when Model came from the curated table (curated.go). Zero means
 	// "no opinion"; PersistBackend leaves window unset.
 	Window int
+	// KeyEnv/KeyService optionally record where the key for this backend
+	// can be found again: an env var name, or a macOS Keychain service
+	// name. The chain itself stays agnostic to key storage — KeyProbe and
+	// GuidedSetup only report whether a key was found/stored, not how —
+	// so Resolve() never sets these; production wiring (bootstrap_wire.go)
+	// fills them in from ResolvedBackend.Source after a successful
+	// Resolve(), and PersistBackend writes whichever is set into
+	// "backend.key_env"/"backend.key_service" so a fresh CortexSession's
+	// resolveKey(...) can find the key without the user re-entering it.
+	KeyEnv     string
+	KeyService string
 }
 
 // ErrNoBackend is returned when every chain stage is exhausted (config
