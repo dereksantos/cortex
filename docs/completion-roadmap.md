@@ -65,7 +65,7 @@ Everything is built; almost nothing is *measured*. This track turns the
 thesis into numbers. Frame all outcomes as measurements to run — no
 performance claims until receipts exist.
 
-- [ ] B1. Wire-gate fix (prereq): config-disabling a context tool refuses
+- [x] B1. Wire-gate fix (prereq): config-disabling a context tool refuses
       at dispatch but leaves the tool declaration on the wire
       (`IsToolEnabled` / `session_core.go`). Gates must strip declarations
       too — ARM-OFF in B4 depends on it.
