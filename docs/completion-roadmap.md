@@ -118,13 +118,13 @@ topics, fleet slot contention (`docs/refactor-status.md`).
 
 ## Track C — Completion features (checklist debt)
 
-- [ ] C1. `cortex model` — catalog + suggest model/role setups from system
+- [x] C1. `cortex model` — catalog + suggest model/role setups from system
       resources (`cmd/cortex/main.go:45`). Decision first: `pkg/llm`'s
       `Recommend()` engine is currently dead code (nothing calls it, and it
       defines a second parallel `Role` type — part of the role sprawl, per
       the 2026-07-17 session) — either wire it as this command's engine or
       delete it and build lean; don't leave it dormant.
-- [ ] C2. Code-model learned-window calibration: extend `learnedWindows`
+- [x] C2. Code-model learned-window calibration: extend `learnedWindows`
       beyond the study model (`cmd/cortex/tool_deps.go:39`) so the code
       role self-calibrates on overflow; compaction remains the fallback.
 - [x] C3. Study-eval telemetry to the journal sink: emit `study.result`
