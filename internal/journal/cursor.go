@@ -52,6 +52,9 @@ func (c *Cursor) Set(off Offset) error {
 		return fmt.Errorf("journal: write cursor tmp: %w", err)
 	}
 	if err := os.Rename(tmp, c.path); err != nil {
+		// Best-effort cleanup: the rename's own error is already returned
+		// below, and a leftover tmp file is harmless — the next Set()
+		// overwrites it (os.WriteFile truncates on create).
 		_ = os.Remove(tmp)
 		return fmt.Errorf("journal: rename cursor: %w", err)
 	}

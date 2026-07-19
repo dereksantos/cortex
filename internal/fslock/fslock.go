@@ -32,6 +32,9 @@ func OpenExclusive(path string, flag int, perm os.FileMode) (*os.File, error) {
 		return nil, fmt.Errorf("fslock: open %s: %w", path, err)
 	}
 	if err := flock(int(f.Fd()), true); err != nil {
+		// Best-effort close on the failed-lock path: the lock error is
+		// already returned below, and a Close failure here doesn't change
+		// that outcome — the fd is reclaimed at process exit regardless.
 		_ = f.Close()
 		return nil, fmt.Errorf("fslock: lock %s: %w", path, err)
 	}

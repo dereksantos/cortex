@@ -10,24 +10,35 @@ import (
 type Source string
 
 const (
+	// SourceClaude marks an event produced by Claude Code.
 	SourceClaude Source = "claude"
+	// SourceCursor marks an event produced by the Cursor editor.
 	SourceCursor Source = "cursor"
 	// Reserved for future integrations:
-	SourceCopilot  Source = "copilot"
+	// SourceCopilot marks an event produced by GitHub Copilot.
+	SourceCopilot Source = "copilot"
+	// SourceWindsurf marks an event produced by the Windsurf editor.
 	SourceWindsurf Source = "windsurf"
-	SourceGeneric  Source = "generic"
+	// SourceGeneric marks an event from a source with no dedicated constant.
+	SourceGeneric Source = "generic"
 )
 
 // EventType categorizes the type of development event
 type EventType string
 
 const (
+	// EventToolUse marks an event where the tool invoked a tool call.
 	EventToolUse EventType = "tool_use"
 	// Reserved for future event types:
-	EventEdit       EventType = "edit"
-	EventSearch     EventType = "search"
-	EventAgent      EventType = "agent"
-	EventBuild      EventType = "build"
+	// EventEdit marks a file-edit event.
+	EventEdit EventType = "edit"
+	// EventSearch marks a search/lookup event.
+	EventSearch EventType = "search"
+	// EventAgent marks a subagent dispatch event.
+	EventAgent EventType = "agent"
+	// EventBuild marks a build-command event.
+	EventBuild EventType = "build"
+	// EventTest marks a test-run event.
 	EventTest       EventType = "test"
 	EventUserPrompt EventType = "user_prompt" // User submitted a prompt
 	EventStop       EventType = "stop"        // Claude finished responding

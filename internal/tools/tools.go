@@ -266,6 +266,8 @@ func newTool(name, desc string, params map[string]any) Tool {
 
 // --- Tool declarations --------------------------------------------------
 
+// ReadFile is the read_file tool declaration: reads a whole file (or, above
+// the curation budget, its structural outline) or an exact 1-indexed line range.
 var ReadFile = newTool(FunctionReadFile,
 	"Read a file, or an exact line range of one. With just a path: the whole "+
 		"file, unless it's too large — then its structural outline (declarations/"+
@@ -279,6 +281,8 @@ var ReadFile = newTool(FunctionReadFile,
 		"end":   map[string]any{"type": "integer", "description": "Optional: 1-indexed last line (inclusive). Defaults to a bounded window after start when omitted."},
 	}, "path"))
 
+// WriteFile is the write_file tool declaration: writes (creating or
+// overwriting) the full contents of a file at a given path.
 var WriteFile = newTool(FunctionWriteFile,
 	"Write content to a file at the given path, creating or overwriting it.",
 	objectSchema(map[string]any{
@@ -286,6 +290,9 @@ var WriteFile = newTool(FunctionWriteFile,
 		"content": stringProp("The full contents to write to the file."),
 	}, "path", "content"))
 
+// EditFile is the edit_file tool declaration: exact-match (whitespace-
+// tolerant on retry) find/replace against an existing file, single edit or
+// an atomic batch via the edits array.
 var EditFile = newTool(FunctionEditFile,
 	"Replace text in a file. Matching is exact first; if that finds nothing it "+
 		"retries ignoring leading/trailing whitespace, so indentation needn't be "+
@@ -309,6 +316,8 @@ var EditFile = newTool(FunctionEditFile,
 		},
 	}, "path"))
 
+// StudyTool is the study tool declaration: hands a path + goal to the
+// read-only Study subagent and returns its digest.
 var StudyTool = newTool(FunctionStudy,
 	"Study a file or directory against a goal and get back a digest. A read-only "+
 		"subagent is handed a structural map of the target plus your goal; it reads the "+
@@ -321,6 +330,8 @@ var StudyTool = newTool(FunctionStudy,
 		"goal": stringProp("What you want to learn — the subagent reads the parts relevant to this and answers it."),
 	}, "path"))
 
+// AgentTool is the agent tool declaration: hands a bounded unit of
+// implementation work (read/write/edit/bash) to the Agent subagent.
 var AgentTool = newTool(FunctionAgent,
 	"Hand off one bounded unit of implementation work to a subagent: it reads, "+
 		"edits, and verifies (build/test via bash) against your goal, then reports "+
@@ -333,6 +344,9 @@ var AgentTool = newTool(FunctionAgent,
 		"model": stringProp("Model to run the subagent on; omit to run it as the model you are currently running as."),
 	}, "path"))
 
+// OutlineTool is the outline tool declaration: renders a path's structural
+// map (files/subdirs, or top-level declarations with line spans) to a
+// token budget, without reading file contents.
 var OutlineTool = newTool(FunctionOutline,
 	"Map a path structurally without reading its contents, filled breadth-first to "+
 		"a token budget. A directory lists its files/subdirs; a file lists its "+
@@ -345,12 +359,16 @@ var OutlineTool = newTool(FunctionOutline,
 		"budget": map[string]any{"type": "integer", "description": "Optional token budget for how much structure to expand (default a few thousand). A bigger budget expands more files/subdirs."},
 	}, "path"))
 
+// Bash is the bash tool declaration: runs a shell command behind the
+// shellrisk gate (safe runs, risky prompts, blocked refuses).
 var Bash = newTool(FunctionBash,
 	"Run a shell command via bash (pipes, redirects, and chaining are supported). A risk gate assesses each command: safe commands run immediately, risky ones (deletes, pushes, installs, network calls) need approval, and catastrophic ones are refused. Prefer the dedicated read_file/write_file/remove_path tools where they fit.",
 	objectSchema(map[string]any{
 		"command": stringProp("The command to run, e.g. 'go test ./...' or 'ls cmd'."),
 	}, "command"))
 
+// RemoveTool is the remove_path tool declaration: deletes a file or
+// directory, confined to the workspace (.git/.cortex/root refused).
 var RemoveTool = newTool(FunctionRemove,
 	"Delete a file or directory (recursively). Confined to the workspace: paths "+
 		"that escape it, the workspace root itself, and .git/.cortex are refused. "+
@@ -366,6 +384,8 @@ var RemoveTool = newTool(FunctionRemove,
 // (internal/memory). The model curates its own durable notes; the only
 // mechanical seam is the index injected at turn start. See docs/memory-tools.md.
 
+// MemoryWriteTool is the memory_write tool declaration: saves or updates a
+// durable, free-form note by name in the model-driven memory store.
 var MemoryWriteTool = newTool(FunctionMemoryWrite,
 	"Save a durable note — only for what would change how you act in a future session "+
 		"and that the code, git history, and journal don't already record: a decision and "+
@@ -377,12 +397,16 @@ var MemoryWriteTool = newTool(FunctionMemoryWrite,
 		"content": stringProp("The note body — free-form prose. State the fact and, where it helps, a pointer to the source (a file path, a journal turn)."),
 	}, "name", "content"))
 
+// MemoryReadTool is the memory_read tool declaration: reads one memory
+// note in full by name.
 var MemoryReadTool = newTool(FunctionMemoryRead,
 	"Read one memory note in full by name (names are listed in the memory index).",
 	objectSchema(map[string]any{
 		"name": stringProp("The note's name, as shown in the memory index."),
 	}, "name"))
 
+// MemorySearchTool is the memory_search tool declaration: keyword-searches
+// memory note names and bodies, returning matching names with one-line hooks.
 var MemorySearchTool = newTool(FunctionMemorySearch,
 	"Search memory notes by keyword and get back matching names with one-line hooks "+
 		"and their last-updated date. Use it to find a note when the index is long; "+
@@ -391,6 +415,8 @@ var MemorySearchTool = newTool(FunctionMemorySearch,
 		"query": stringProp("Keywords to match against note names and bodies."),
 	}, "query"))
 
+// MemoryForgetTool is the memory_forget tool declaration: deletes a memory
+// note by name.
 var MemoryForgetTool = newTool(FunctionMemoryForget,
 	"Delete a memory note by name — use when a note is wrong or obsolete and should "+
 		"no longer be recalled.",
@@ -398,6 +424,8 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 		"name": stringProp("The note's name, as shown in the memory index."),
 	}, "name"))
 
+// RecallTool is the recall tool declaration: resolves a session-outline
+// citation back to its verbatim messages, or a budgeted digest of them.
 var RecallTool = newTool(FunctionRecall,
 	"Fetch the verbatim messages behind a session-outline citation (the [@session/…#m…-…] coordinates on demoted turns). Use it when the outline line is not enough and you need the raw detail of an older turn. Pass budget to get a compact digest instead of the raw messages when the gist is enough.",
 	objectSchema(map[string]any{
@@ -406,12 +434,16 @@ var RecallTool = newTool(FunctionRecall,
 		"goal":     stringProp("Optional, with budget: what the digest should focus on. Default: the turn's key facts and decisions."),
 	}, "citation"))
 
+// FetchURLTool is the fetch_url tool declaration: fetches bounded readable
+// text from a public HTTP(S) URL (local/private destinations refused).
 var FetchURLTool = newTool(FunctionFetchURL,
 	"Fetch readable text from a public HTTP(S) URL. Responses are size-bounded; HTML scripts and styles are removed. Private and local network addresses are refused.",
 	objectSchema(map[string]any{
 		"url": stringProp("The public http or https URL to fetch."),
 	}, "url"))
 
+// WebSearchTool is the web_search tool declaration: searches the public web
+// and returns ranked results with titles, URLs, and snippets.
 var WebSearchTool = newTool(FunctionWebSearch,
 	"Search the public web and return compact ranked results with titles, URLs, and snippets. Use fetch_url to read a promising result in full.",
 	objectSchema(map[string]any{

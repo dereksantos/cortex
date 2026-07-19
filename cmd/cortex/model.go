@@ -374,28 +374,38 @@ func runModelCLI(args []string) {
 	}
 
 	cfg := LoadConfig()
-	ctx, cancel := context.WithTimeout(context.Background(), fleetDiscoveryTimeout+time.Second)
-	defer cancel()
-	catalog := buildModelCatalog(ctx, cfg)
 
-	ram, ramErr := totalSystemRAM()
-	if ramErr != nil {
-		ram = 0
-	}
-	suggestion := suggestModels(ram, runtime.GOARCH)
+	// The context's cancel (deferred below) must run before any exit, so the
+	// body that needs it lives in a closure returning an exit code — os.Exit
+	// does not run deferred calls.
+	exitCode := func() int {
+		ctx, cancel := context.WithTimeout(context.Background(), fleetDiscoveryTimeout+time.Second)
+		defer cancel()
+		catalog := buildModelCatalog(ctx, cfg)
 
-	if asJSON {
-		report := ModelReport{Catalog: catalog, Suggestion: suggestion}
-		b, err := json.MarshalIndent(report, "", "  ")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "model:", err)
-			os.Exit(1)
+		ram, ramErr := totalSystemRAM()
+		if ramErr != nil {
+			ram = 0
 		}
-		fmt.Println(string(b))
-		return
-	}
+		suggestion := suggestModels(ram, runtime.GOARCH)
 
-	fmt.Print(renderModelCatalog(catalog))
-	fmt.Println()
-	fmt.Print(renderModelSuggestion(suggestion))
+		if asJSON {
+			report := ModelReport{Catalog: catalog, Suggestion: suggestion}
+			b, err := json.MarshalIndent(report, "", "  ")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "model:", err)
+				return 1
+			}
+			fmt.Println(string(b))
+			return 0
+		}
+
+		fmt.Print(renderModelCatalog(catalog))
+		fmt.Println()
+		fmt.Print(renderModelSuggestion(suggestion))
+		return 0
+	}()
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }

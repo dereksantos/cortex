@@ -94,34 +94,44 @@ func runTurnCLI(args []string) {
 		session.StartTranscript()
 	}
 	session.EnableMemory()
-	defer session.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	res, turnErr := session.Turn(ctx, input)
+	// Run the turn (and its deferred cleanup: session.Close, stop) inside a
+	// closure so those defers fire before we exit — os.Exit does not run
+	// deferred calls, so it must happen outside their scope.
+	exitCode := func() int {
+		defer session.Close()
 
-	if session.turns > 0 {
-		session.emitSessionMetrics()
-	}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		res, turnErr := session.Turn(ctx, input)
 
-	if asJSON {
-		out := map[string]any{"session": session.SessionID, "reply": res.Reply}
+		if session.turns > 0 {
+			session.emitSessionMetrics()
+		}
+
+		if asJSON {
+			out := map[string]any{"session": session.SessionID, "reply": res.Reply}
+			if turnErr != nil {
+				out["error"] = turnErr.Error()
+				out["interrupted"] = res.Interrupted
+			}
+			b, _ := json.Marshal(out)
+			fmt.Println(string(b))
+		} else {
+			if turnErr != nil {
+				fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
+			}
+			if res.Reply != "" {
+				fmt.Println(res.Reply)
+			}
+			fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
+		}
 		if turnErr != nil {
-			out["error"] = turnErr.Error()
-			out["interrupted"] = res.Interrupted
+			return 1
 		}
-		b, _ := json.Marshal(out)
-		fmt.Println(string(b))
-	} else {
-		if turnErr != nil {
-			fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
-		}
-		if res.Reply != "" {
-			fmt.Println(res.Reply)
-		}
-		fmt.Fprintf(os.Stderr, "session: %s\n", session.SessionID)
-	}
-	if turnErr != nil {
-		os.Exit(1)
+		return 0
+	}()
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }

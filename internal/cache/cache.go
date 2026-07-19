@@ -1,3 +1,10 @@
+// Package cache implements the two-zone working-memory cache described in
+// docs/context-architecture.md: an append-stable prefix (system + a
+// deterministic outline of demoted turns + the memory index) and a
+// watermarked hydrated tail of the most recent turns. Older turns demote
+// mechanically to outline lines with citations rather than being
+// restructured or dropped. This file is the original design sketch that
+// grew into that doc; docs/context-architecture.md is the current spec.
 package cache
 
 /*

@@ -1,4 +1,6 @@
-// Forward-compatibility contract for the registry:
+// Package journal implements an append-only event log; see entry.go for the
+// package overview. This file holds the projector registry's
+// forward-compatibility contract:
 //
 //  1. Unknown type — the entry's type has no projectors registered at any
 //     version. Indexer treats per UnknownPolicy. Typical cause: an older

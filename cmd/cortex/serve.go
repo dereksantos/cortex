@@ -307,22 +307,32 @@ func runServeCLI(args []string) {
 	// part of the spec format. Stopped when runServeCLI returns (server
 	// error or, once graceful HTTP shutdown exists, a clean stop) so the
 	// scheduler never outlives the listener.
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	schedCtx, stopSched := context.WithCancel(context.Background())
-	sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now, running)
-	schedStopped := sched.Start(schedCtx, ticker.C)
-	defer func() {
-		stopSched()
-		<-schedStopped
-		sched.Wait()
-	}()
+	//
+	// The ticker/scheduler teardown defers must run before this process
+	// exits, so the serving loop lives in a closure returning an exit code
+	// — os.Exit does not run deferred calls.
+	exitCode := func() int {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		schedCtx, stopSched := context.WithCancel(context.Background())
+		sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now, running)
+		schedStopped := sched.Start(schedCtx, ticker.C)
+		defer func() {
+			stopSched()
+			<-schedStopped
+			sched.Wait()
+		}()
 
-	pageURL := serveURL(ln.Addr().String(), token)
-	fmt.Printf("cortex serve listening — open %s\n(token file: %s; --no-open to suppress the browser)\n", pageURL, tokenPath)
-	maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		pageURL := serveURL(ln.Addr().String(), token)
+		fmt.Printf("cortex serve listening — open %s\n(token file: %s; --no-open to suppress the browser)\n", pageURL, tokenPath)
+		maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}()
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
