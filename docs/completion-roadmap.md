@@ -69,7 +69,7 @@ performance claims until receipts exist.
       at dispatch but leaves the tool declaration on the wire
       (`IsToolEnabled` / `session_core.go`). Gates must strip declarations
       too — ARM-OFF in B4 depends on it.
-- [ ] B2. Context-pivot **live benefit eval first** (priority reordered by
+- [x] B2. Context-pivot **live benefit eval first** (priority reordered by
       the 2026-07-17 session evidence): the ø volition question is
       effectively answered — the tools fire live — so the open question is
       the *benefit arm*: does curation causally improve retention? Build
@@ -96,6 +96,17 @@ performance claims until receipts exist.
       strawman (low=1k/med=4k/high=16k); verify `fast`-role sub-calls pin
       effort off; only after the probe, decide on escalation defaults
       (`docs/thinking-models.md` open decisions).
+- [ ] B7. (Found during B2, 2026-07-18) Resume-revert contradiction:
+      `context_evict/merge/adjust_watermarks` mutations do NOT revert on
+      session resume — `writeSessionState`/`restoreSessionState`
+      (`cmd/cortex/session.go`) snapshots the outline + watermarks per
+      turn and replays the snapshot verbatim — contradicting
+      `docs/context-window-modification-tools.md` ("session-local …
+      revert on resume"), the `internal/tools/context.go` docstrings, and
+      CLAUDE.md. Decision needed: persist-by-design (fix the three docs)
+      or revert-by-policy (replay demotion policy instead of the
+      snapshot). Evidence: a resume-revert probe test failed exactly this
+      way during B2 (removed from the deliverable as out of scope).
 - [ ] B6. (Stretch) Retention-QA eval from `docs/context-architecture.md`
       — the eval that gates the outline zone becoming default. The
       100-turn prefill slope stays a manual run.
