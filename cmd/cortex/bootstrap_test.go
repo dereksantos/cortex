@@ -203,6 +203,52 @@ func TestBackendResolverChain(t *testing.T) {
 	}
 }
 
+// TestBackendResolverChainSeatsCuratedTopPick pins E2: both stages that seat
+// a fresh OpenRouter backend without a config-pinned model (the key-probe
+// hit and the guided-setup fallback) use curatedTopPick(), not a hardcoded
+// model string.
+func TestBackendResolverChainSeatsCuratedTopPick(t *testing.T) {
+	top := curatedTopPick()
+
+	t.Run("key probe hit", func(t *testing.T) {
+		r := &BackendResolver{
+			Config: &fakeConfigProbe{ok: false},
+			Key:    &fakeKeyProbe{source: "openrouter-env", ok: true},
+			Smoke:  &fakeSmokeProbe{},
+		}
+		got, err := r.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve(): %v", err)
+		}
+		if got.Model != top.ID {
+			t.Errorf("Resolve().Model = %q, want curated top pick %q", got.Model, top.ID)
+		}
+		if got.Window != top.Window {
+			t.Errorf("Resolve().Window = %d, want %d", got.Window, top.Window)
+		}
+	})
+
+	t.Run("guided setup fallback", func(t *testing.T) {
+		r := &BackendResolver{
+			Config: &fakeConfigProbe{ok: false},
+			Key:    &fakeKeyProbe{ok: false},
+			Ollama: &fakeOllamaProbe{up: false},
+			Guided: &fakeGuidedSetup{ok: true},
+			Smoke:  &fakeSmokeProbe{},
+		}
+		got, err := r.Resolve()
+		if err != nil {
+			t.Fatalf("Resolve(): %v", err)
+		}
+		if got.Model != top.ID {
+			t.Errorf("Resolve().Model = %q, want curated top pick %q", got.Model, top.ID)
+		}
+		if got.Window != top.Window {
+			t.Errorf("Resolve().Window = %d, want %d", got.Window, top.Window)
+		}
+	})
+}
+
 func TestBackendResolverChainNoBackends(t *testing.T) {
 	r := &BackendResolver{
 		Config: &fakeConfigProbe{ok: false},

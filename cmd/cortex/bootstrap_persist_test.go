@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,88 @@ func TestPersistBackendRoundTrip(t *testing.T) {
 	}
 	if !jsonEqual(t, doc["tools"], []byte(`{"allow_delete": false}`)) {
 		t.Errorf("tools field mutated: %s", doc["tools"])
+	}
+}
+
+// TestPersistBackendSeedsStudyFromCuratedPick pins E1+E2's "same model by
+// default" seam: persisting a freshly resolved OpenRouter backend (bootstrap
+// only ever resolves the code role) also seeds models.study with the same
+// model + window, so a bootstrap-only config doesn't leave the Study
+// subagent pointed at an empty model id.
+func TestPersistBackendSeedsStudyFromCuratedPick(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	pick := curatedTopPick()
+	resolved := ResolvedBackend{Source: "openrouter-guided", Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
+	if err := PersistBackend(path, resolved); err != nil {
+		t.Fatalf("PersistBackend: %v", err)
+	}
+
+	doc, err := readJSONDoc(path)
+	if err != nil {
+		t.Fatalf("readJSONDoc: %v", err)
+	}
+	var models map[string]ModelSpec
+	if err := json.Unmarshal(doc["models"], &models); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if models[roleCode].Model != pick.ID || models[roleCode].Window != pick.Window {
+		t.Errorf("models.code = %+v, want model=%q window=%d", models[roleCode], pick.ID, pick.Window)
+	}
+	if models[roleStudy].Model != pick.ID || models[roleStudy].Window != pick.Window {
+		t.Errorf("models.study = %+v, want model=%q window=%d (same model by default)", models[roleStudy], pick.ID, pick.Window)
+	}
+}
+
+// TestPersistBackendNeverClobbersExistingStudyPin pins the guard: a config
+// that already carries a models.study.model keeps it untouched, even when
+// PersistBackend seats a new OpenRouter code model.
+func TestPersistBackendNeverClobbersExistingStudyPin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	original := `{"models": {"study": {"model": "user/own-pin"}}}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	pick := curatedTopPick()
+	resolved := ResolvedBackend{Source: "openrouter-env", Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
+	if err := PersistBackend(path, resolved); err != nil {
+		t.Fatalf("PersistBackend: %v", err)
+	}
+
+	doc, err := readJSONDoc(path)
+	if err != nil {
+		t.Fatalf("readJSONDoc: %v", err)
+	}
+	var models map[string]ModelSpec
+	if err := json.Unmarshal(doc["models"], &models); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if models[roleStudy].Model != "user/own-pin" {
+		t.Errorf("models.study.model = %q, want unchanged %q", models[roleStudy].Model, "user/own-pin")
+	}
+}
+
+// TestPersistBackendOllamaDoesNotSeedStudy pins that the study-seeding step
+// is OpenRouter-specific: an Ollama backend (no Model set at all, per
+// BackendResolver's ollama-local stage) never touches models.study.
+func TestPersistBackendOllamaDoesNotSeedStudy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	resolved := ResolvedBackend{Source: "ollama-local", Backend: llm.BackendOllama}
+	if err := PersistBackend(path, resolved); err != nil {
+		t.Fatalf("PersistBackend: %v", err)
+	}
+
+	doc, err := readJSONDoc(path)
+	if err != nil {
+		t.Fatalf("readJSONDoc: %v", err)
+	}
+	if _, ok := doc["models"]; ok {
+		t.Errorf("models field present = %s, want absent (ollama-local sets no Model)", doc["models"])
 	}
 }
 

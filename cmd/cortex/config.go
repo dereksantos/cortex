@@ -442,6 +442,21 @@ func (c *Config) resolveBinding(role string, fleet Fleet) ModelSpec {
 	if spec.Model == "" {
 		spec.Model = selectModel(fleet, role)
 	}
+	if spec.Model == "" && c.isOpenRouter() && (role == roleCode || role == roleStudy) {
+		// E2: curated is the PRIMARY default — an OpenRouter backend with no
+		// models.<role> entry at all (the true zero-config case: just
+		// "backend": {"type": "openrouter", "key_env": "..."}) gets the
+		// curated table's top pick rather than an empty model id, which
+		// OpenRouter would otherwise reject outright. This is also what
+		// makes the startup preflight (preflight.go) reachable for a
+		// zero-config user: it only acts on a binding isCuratedModel
+		// recognizes.
+		pick := curatedTopPick()
+		spec.Model = pick.ID
+		if spec.Window == 0 {
+			spec.Window = pick.Window
+		}
+	}
 	spec = applyFleet(spec, fleet)
 	if c != nil {
 		// Re-stamp an EXPLICIT config override after applyFleet's

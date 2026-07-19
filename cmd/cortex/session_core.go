@@ -175,6 +175,7 @@ func NewCortexSession() *CortexSession {
 	args := CortexArgs(os.Args)
 	req := args.Request()
 	cfg := LoadConfig()
+	workspace := WorkspaceFromCWD()
 
 	var fleet Fleet
 	if !cfg.isOpenRouter() {
@@ -185,6 +186,14 @@ func NewCortexSession() *CortexSession {
 	}
 	code := cfg.resolveBinding(roleCode, fleet)
 	study := cfg.resolveBinding(roleStudy, fleet)
+
+	// E2: at startup (not the per-turn Send hot path), preflight a curated
+	// OpenRouter pick against the live catalog — cheap (one bounded
+	// ListModels call), and only on the openrouter+curated path. A model
+	// that's been retired since the curated table was written is swapped
+	// for this process only; the config file is never touched.
+	code, study = preflightCuratedModels(context.Background(), cfg, code, study,
+		modelSubstitutionJournalDir(workspace.ContextDir()), liveOpenRouterListModels)
 
 	if g := sharedSwapGroup(fleet, code, study); g != "" {
 		fmt.Println(withColor(fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g), yellow))
@@ -217,7 +226,7 @@ func NewCortexSession() *CortexSession {
 		Args:         &args,
 		Request:      req,
 		Config:       cfg,
-		workspace:    WorkspaceFromCWD(),
+		workspace:    workspace,
 		Window:       code.Window,
 		Study:        study,
 		Fleet:        fleet,

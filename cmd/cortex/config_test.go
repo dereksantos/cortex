@@ -81,6 +81,62 @@ func TestExistingThinkingFalseConfigByteForByte(t *testing.T) {
 	}
 }
 
+// TestResolveBindingOpenRouterZeroConfigDefaultsToCuratedTopPick pins E2's
+// "curated is primary" default end to end through the live resolution path:
+// an OpenRouter backend with no models.<role> entry at all (just
+// {"backend": {"type": "openrouter", ...}}, the true zero-config case) binds
+// the curated table's top pick, not an empty model id OpenRouter would
+// reject. This is also what makes the startup preflight reachable at all
+// for a zero-config user — it only acts on a binding isCuratedModel
+// recognizes.
+func TestResolveBindingOpenRouterZeroConfigDefaultsToCuratedTopPick(t *testing.T) {
+	cfg := &Config{Backend: Backend{Type: "openrouter", KeyEnv: "OPENROUTER_API_KEY"}}
+	top := curatedTopPick()
+
+	for _, role := range []string{roleCode, roleStudy} {
+		t.Run(role, func(t *testing.T) {
+			spec := cfg.resolveBinding(role, nil)
+			if spec.Model != top.ID {
+				t.Errorf("resolveBinding(%q).Model = %q, want curated top pick %q", role, spec.Model, top.ID)
+			}
+			if spec.Window != top.Window {
+				t.Errorf("resolveBinding(%q).Window = %d, want %d", role, spec.Window, top.Window)
+			}
+			if !isCuratedModel(spec.Model) {
+				t.Errorf("resolveBinding(%q).Model = %q is not recognized as curated; the startup preflight would never fire for it", role, spec.Model)
+			}
+		})
+	}
+}
+
+// TestResolveBindingOpenRouterExplicitModelWins pins that the zero-config
+// curated default only fires when nothing else set a model — an explicit
+// models.code.model in config always wins, unchanged from before this
+// track's work.
+func TestResolveBindingOpenRouterExplicitModelWins(t *testing.T) {
+	cfg := &Config{
+		Backend: Backend{Type: "openrouter"},
+		Models:  map[string]ModelSpec{roleCode: {Model: "anthropic/claude-haiku-4.5"}},
+	}
+	spec := cfg.resolveBinding(roleCode, nil)
+	if spec.Model != "anthropic/claude-haiku-4.5" {
+		t.Errorf("resolveBinding(code).Model = %q, want the explicit config pin unchanged", spec.Model)
+	}
+}
+
+// TestResolveBindingNonOpenRouterNoCuratedDefault pins that the curated
+// zero-config default is OpenRouter-specific: a LiteLLM-style backend with
+// no fleet and no config model keeps resolving to an empty model id (its
+// existing, pre-E2 behavior — fleet discovery is that backend's own
+// resolution path).
+func TestResolveBindingNonOpenRouterNoCuratedDefault(t *testing.T) {
+	var cfg *Config // nil config == the true no-config-file case
+	spec := cfg.resolveBinding(roleCode, nil)
+	if spec.Model != "" {
+		t.Errorf("resolveBinding(code).Model = %q, want empty for a nil (non-openrouter) config", spec.Model)
+	}
+}
+
 // TestEffortEscalationEnabled covers P5c's opt-in gate
 // (docs/thinking-models.md §5c): nil config, nil flag, and an explicit false
 // all default to disabled; only an explicit true enables it.

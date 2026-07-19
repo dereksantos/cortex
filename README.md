@@ -109,7 +109,35 @@ JSON
 #### Hosted: OpenRouter
 
 Keep the key in the environment; the config stores only its variable name.
-Replace the model IDs with the models you want for coding and Study.
+
+**Zero-config (curated free model).** Point the backend at OpenRouter and
+leave `models` out entirely — both roles fall back to a curated `:free`
+model chosen for large context and coding ability (`code` and `study` use
+the same model by default):
+
+```bash
+export OPENROUTER_API_KEY='...'
+mkdir -p .cortex
+cat > .cortex/config.json <<'JSON'
+{
+  "backend": {
+    "type": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1",
+    "key_env": "OPENROUTER_API_KEY"
+  }
+}
+JSON
+```
+
+The curated table lives in `cmd/cortex/curated.go`. At every session start,
+Cortex does one cheap, bounded (4s) check of OpenRouter's live catalog: if
+the curated pick has since been retired, it substitutes the next surviving
+curated model (or, failing that, discovers a `:free` model by name/context
+heuristic), prints one line naming old → new and why, and journals the
+event — all for that process only, never rewriting your config file.
+
+**Pinned models.** Replace the model IDs with the models you want for
+coding and Study:
 
 ```bash
 export OPENROUTER_API_KEY='...'

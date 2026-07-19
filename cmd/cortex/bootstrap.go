@@ -36,9 +36,14 @@ type ResolvedBackend struct {
 	Source string
 	// Backend is the pkg/llm.Backend to construct.
 	Backend llm.Backend
-	// Model is the model id to request (e.g. "openrouter/free").
+	// Model is the model id to request (e.g. curatedTopPick().ID).
 	// Empty lets the constructed client fall back to its own default.
 	Model string
+	// Window is the model's context window, carried alongside Model so
+	// PersistBackend can seed "models.<role>.window" — not just the id —
+	// when Model came from the curated table (curated.go). Zero means
+	// "no opinion"; PersistBackend leaves window unset.
+	Window int
 }
 
 // ErrNoBackend is returned when every chain stage is exhausted (config
@@ -90,11 +95,6 @@ type BackendResolver struct {
 	Smoke  SmokeProbe
 }
 
-// openRouterFreeModel is the free-tier auto-router model id used for
-// any stage that seats OpenRouter without a config-pinned model
-// (D1: no pinned ":free" id — the free catalog churns).
-const openRouterFreeModel = "openrouter/free"
-
 // smokeTest runs r.Smoke against b, treating a nil Smoke as an
 // always-pass stub (some callers — e.g. a config stage that already
 // trusts a previously smoke-tested backend — may not wire one).
@@ -116,7 +116,8 @@ func (r *BackendResolver) Resolve() (ResolvedBackend, error) {
 	}
 	if r.Key != nil {
 		if source, ok := r.Key.Probe(); ok {
-			b := ResolvedBackend{Source: source, Backend: llm.BackendOpenRouter, Model: openRouterFreeModel}
+			pick := curatedTopPick()
+			b := ResolvedBackend{Source: source, Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
 			if r.smokeTest(b) {
 				return b, nil
 			}
@@ -130,7 +131,8 @@ func (r *BackendResolver) Resolve() (ResolvedBackend, error) {
 	}
 	if r.Guided != nil {
 		if ok := r.Guided.Guide(); ok {
-			b := ResolvedBackend{Source: "openrouter-guided", Backend: llm.BackendOpenRouter, Model: openRouterFreeModel}
+			pick := curatedTopPick()
+			b := ResolvedBackend{Source: "openrouter-guided", Backend: llm.BackendOpenRouter, Model: pick.ID, Window: pick.Window}
 			if r.smokeTest(b) {
 				return b, nil
 			}
