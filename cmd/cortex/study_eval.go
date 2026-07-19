@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
@@ -150,6 +152,11 @@ type studyEvalRow struct {
 // CORTEX_STUDY_REPS. HARD gate: exits non-zero unless every probe passes.
 func runStudyEvalNav() {
 	session := NewCortexSession()
+	// One run ID covers every rep of this invocation — the eval.cell_result
+	// convention (emitSessionMetrics) keys RunID per session; here a
+	// study-eval "run" is the whole probe×rep sweep, not a single rep.
+	runID := "study-" + time.Now().UTC().Format("20060102-150405")
+	studyClassDir := filepath.Join(session.ContextDir(), "journal", "study")
 	reps := envInt("CORTEX_STUDY_REPS", envInt("CORTEX_NAV_REPS", 1)) // CORTEX_NAV_REPS kept as a deprecated alias
 	// Per-probe wall-clock cap: a probe that thrashes must FAIL FAST, never hang
 	// the gate. Override with CORTEX_STUDY_PROBE_TIMEOUT (seconds).
@@ -207,7 +214,12 @@ func runStudyEvalNav() {
 				}
 			}
 			b, _ := json.Marshal(row)
-			fmt.Println(string(b)) // JSONL — one row per (probe, rep)
+			fmt.Println(string(b)) // JSONL — one row per (probe, rep); drivers parse this, unchanged
+			if err := emitStudyResult(studyClassDir, row, runID, session.Study.Endpoint); err != nil {
+				// Best-effort — a journal write hiccup never fails the ø gate,
+				// same posture as emitSessionMetrics (session_runtime.go).
+				fmt.Fprintf(os.Stderr, "study-eval: journal: %v\n", err)
+			}
 		}
 	}
 
@@ -226,6 +238,76 @@ func runStudyEvalNav() {
 	if errs > 0 || passes != total {
 		os.Exit(1)
 	}
+}
+
+// studyResultPayload converts one eval rep's row into the journal's
+// study.result vocabulary (docs/study-subagent.md §5's alignment plan): the
+// shared grid fields ride the embedded journal.EvalCellResultPayload — the
+// same json tags emitSessionMetrics writes for eval.cell_result
+// (session_runtime.go), so one query schema reads both; the study-specific
+// discriminators with no home in that grid struct (goal-hit, stop-reason,
+// per-tool counts, bytes, the clamp/salvage signals, the rep index) are the
+// typed extension block, never flattened into Notes. Split out from the
+// write path (emitStudyResult) so the row→journal mapping is unit-testable
+// without a live fleet.
+func studyResultPayload(row studyEvalRow, runID, backend string) journal.StudyResultPayload {
+	return journal.StudyResultPayload{
+		EvalCellResultPayload: journal.EvalCellResultPayload{
+			SchemaVersion:        "1",
+			RunID:                runID,
+			Timestamp:            time.Now().UTC().Format(time.RFC3339),
+			ScenarioID:           row.Path,
+			Harness:              "study",
+			Provider:             "openai-compat",
+			Model:                row.Model,
+			Backend:              backend,
+			CortexVersion:        version(),
+			Thinking:             row.Thinking,
+			ReasoningTokens:      row.ReasoningTokens,
+			TokensIn:             row.InputTokens,
+			TokensOut:            row.OutputTokens,
+			LatencyMs:            row.LatencyMS,
+			AgentTurnsTotal:      row.Iterations,
+			TaskSuccess:          row.Pass,
+			TaskSuccessCriterion: "goal_hit_bounded_unclamped",
+			Notes:                row.Note,
+		},
+		Rep:              row.Rep,
+		GoalHit:          row.GoalHit,
+		StopReason:       row.StopReason,
+		FinalizeForced:   row.FinalizeForced,
+		Outlines:         row.Outlines,
+		Greps:            row.Greps,
+		Reads:            row.Reads,
+		ToolErrs:         row.ToolErrs,
+		ReadBytes:        row.ReadBytes,
+		Bounded:          row.Bounded,
+		PeakOutputTokens: row.PeakOutputTokens,
+		MaxTokensClamped: row.MaxTokensClamped,
+		Salvaged:         row.Salvaged,
+		Error:            row.Error,
+	}
+}
+
+// emitStudyResult appends one rep's row to the journal's study.result class
+// (.cortex/journal/study/), alongside the unchanged stdout JSONL row drivers
+// already parse. Mirrors emitSessionMetrics's journal.NewWriter path
+// (session_runtime.go) — FsyncPerBatch, since a study-eval row, like an
+// eval.cell_result row, is regeneratable in spirit by re-running the probe.
+func emitStudyResult(classDir string, row studyEvalRow, runID, backend string) error {
+	entry, err := journal.NewStudyResultEntry(studyResultPayload(row, runID, backend))
+	if err != nil {
+		return fmt.Errorf("study-eval: build study.result entry: %w", err)
+	}
+	w, err := journal.NewWriter(journal.WriterOpts{ClassDir: classDir, Fsync: journal.FsyncPerBatch})
+	if err != nil {
+		return fmt.Errorf("study-eval: open study.result writer: %w", err)
+	}
+	defer w.Close()
+	if _, err := w.Append(entry); err != nil {
+		return fmt.Errorf("study-eval: append study.result: %w", err)
+	}
+	return nil
 }
 
 // fillMechanical copies the engine's run stats into the eval row.
