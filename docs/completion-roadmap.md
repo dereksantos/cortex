@@ -158,7 +158,7 @@ study-eval rows visible via jq over the journal.
       dependency); (3) RunLoopFiring/changeStatusFor follow; (4) then the
       serve/webui move is mechanical. Steps 1–4 are OPTIONAL post-
       completion architecture work, not launch-blocking.
-- [ ] D3. Web Phase 7 — Discord parity (`docs/cortex-web.md`, decision
+- [x] D3. Web Phase 7 — Discord parity (`docs/cortex-web.md`, decision
       D14's gate has now effectively fired): rebase `discord.go` onto the
       Phase-4 SessionManager, native application commands, interactive
       risk approval (Risky prompts instead of headless-Blocked), progress
