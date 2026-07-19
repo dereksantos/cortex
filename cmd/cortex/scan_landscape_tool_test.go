@@ -26,9 +26,9 @@ func TestScanEnabled(t *testing.T) {
 // TestScanLandscapeToolRegistrationGate is the "absent ⇒ registered, false ⇒
 // absent" GOAL.md M2.6 assertion, at both halves: the base coder tool set
 // (toolSet) carries scan_landscape unconditionally (the declaration is
-// always present, matching every other tool), and the toolsExcept filtering
-// NewCortexSession applies for a disabled tool (same pattern as
-// FunctionRemove/allowDelete) actually drops it.
+// always present, matching every other tool), and the filterEnabledTools
+// pass NewCortexSession applies for every IsToolEnabled-gated tool (Track B
+// item B1) actually drops it when its gate is off.
 func TestScanLandscapeToolRegistrationGate(t *testing.T) {
 	found := false
 	for _, tl := range toolSet {
@@ -41,11 +41,8 @@ func TestScanLandscapeToolRegistrationGate(t *testing.T) {
 	}
 
 	no := false
-	cfg := &Config{Tools: ToolConfig{EnableScan: &no}}
-	filtered := toolSet
-	if !cfg.scanEnabled() {
-		filtered = toolsExcept(filtered, tools.FunctionScanLandscape)
-	}
+	cs := &CortexSession{Config: &Config{Tools: ToolConfig{EnableScan: &no}}}
+	filtered := filterEnabledTools(toolSet, cs.IsToolEnabled)
 	for _, tl := range filtered {
 		if tl.Function.Name == tools.FunctionScanLandscape {
 			t.Error("scan_landscape should have been dropped when tools.enable_scan is false")

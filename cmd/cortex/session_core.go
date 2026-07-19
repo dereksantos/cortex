@@ -198,9 +198,6 @@ func NewCortexSession() *CortexSession {
 	if !allowDelete {
 		req.Tools = toolsExcept(req.Tools, FunctionRemove)
 	}
-	if !cfg.scanEnabled() {
-		req.Tools = toolsExcept(req.Tools, tools.FunctionScanLandscape)
-	}
 
 	cs := &CortexSession{
 		Args:         &args,
@@ -215,6 +212,14 @@ func NewCortexSession() *CortexSession {
 		sessionStart: time.Now(),
 	}
 	cs.ws = cs.newWorkingSet(1)
+	// Strip declarations for every IsToolEnabled-gated tool that config
+	// disabled — scan_landscape, web_search/fetch_url, agent, context_* — so
+	// the model never sees a tool that dispatch would only ever refuse
+	// (docs/eval-context-pivot.md; Track B item B1). Reuses IsToolEnabled,
+	// dispatch's own gate (tools.go's Execute), as the single source of
+	// truth rather than a second parallel disabled-tool list; dispatch keeps
+	// its own check as defense-in-depth against a hallucinated tool name.
+	cs.Request.Tools = filterEnabledTools(cs.Request.Tools, cs.IsToolEnabled)
 	return cs
 }
 
@@ -369,6 +374,22 @@ func toolsExcept(ts []Tool, name string) []Tool {
 	out := make([]Tool, 0, len(ts))
 	for _, t := range ts {
 		if t.Function.Name != name {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// filterEnabledTools drops any declaration whose tool name the predicate
+// (IsToolEnabled in production) reports disabled. It is the wire-side half
+// of the config gates: dispatch's Execute already refuses a disabled tool
+// call, but until this filter ran, the declaration stayed on the wire
+// anyway — a model could see and call a tool that would only ever be
+// refused (docs/eval-context-pivot.md; Track B item B1).
+func filterEnabledTools(ts []Tool, enabled func(name string) bool) []Tool {
+	out := make([]Tool, 0, len(ts))
+	for _, t := range ts {
+		if enabled(t.Function.Name) {
 			out = append(out, t)
 		}
 	}
