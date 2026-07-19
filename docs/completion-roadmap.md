@@ -137,7 +137,7 @@ study-eval rows visible via jq over the journal.
 
 ## Track D — Structural cleanup (largest; last; parallelizable after B)
 
-- [ ] D1. Config consolidation: retire `pkg/config`'s dormant trees
+- [x] D1. Config consolidation: retire `pkg/config`'s dormant trees
       (`Modes`, `Routing`, `EnableGraph`, `EnableVector`, `WebPort`,
       `DatabaseURL`); migrate the four remaining importers
       (`session_runtime.go`, `internal/capture`, `internal/storage`,
@@ -167,7 +167,7 @@ code): `cmd/cortex/config.go` defines **8 roles** (`code`, `hard-code`,
 must pin models by hand. The session's recommendation (two forks left
 unconfirmed there; adopted here):
 
-- [ ] E1. Role collapse: the configurable surface becomes `code`+`study`
+- [x] E1. Role collapse: the configurable surface becomes `code`+`study`
       defined as *agent roles* under an `agent`-shaped config (same model
       by default); the other six roles are removed or demoted to
       internal/reserved. Lands together with D1 (they touch the same
