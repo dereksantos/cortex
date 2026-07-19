@@ -17,13 +17,25 @@ import (
 	"golang.org/x/net/html"
 )
 
+// defaultFetchTimeoutSec / defaultFetchMaxRedirects / defaultFetchMaxBodyBytes
+// are DefaultLimits()'s values (config-overridable via tools.fetch_url.*);
+// fetchUserAgent is not part of the config surface.
 const (
-	fetchTimeout      = 20 * time.Second
-	fetchMaxRedirects = 5
-	fetchMaxBodyBytes = 1 << 20 // Bound download and parsing work to 1 MiB.
-	fetchMaxTextBytes = MaxToolOutput
-	fetchUserAgent    = "Cortex/loop (+https://github.com/dereksantos/cortex)"
+	defaultFetchTimeoutSec   = 20
+	defaultFetchMaxRedirects = 5
+	defaultFetchMaxBodyBytes = 1 << 20 // Bound download and parsing work to 1 MiB.
+	fetchUserAgent           = "Cortex/loop (+https://github.com/dereksantos/cortex)"
 )
+
+// fetchMaxBodyBytes is the active (config-resolved) response-body ceiling —
+// exported as a func rather than a package-level int const now that it's
+// overridable; web_search.go shares it (both bound a DuckDuckGo/HTML fetch).
+func fetchMaxBodyBytes() int { return active.FetchMaxBodyBytes }
+
+// fetchMaxTextBytes is the active tool-output ceiling fetch_url's extracted
+// text is truncated to — shared with active.MaxToolOutput (both bound how
+// much text-shaped output reaches the model).
+func fetchMaxTextBytes() int { return active.MaxToolOutput }
 
 var fetchHTTPClient = newSafeHTTPClient()
 
@@ -65,12 +77,12 @@ func fetchURL(ctx context.Context, tc ToolCall) (string, error) {
 		return "", fmt.Errorf("fetch %s: HTTP %s", resp.Request.URL.Redacted(), resp.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(fetchMaxBodyBytes())+1))
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", resp.Request.URL.Redacted(), err)
 	}
-	if len(body) > fetchMaxBodyBytes {
-		return "", fmt.Errorf("fetch %s: response exceeds %d bytes", resp.Request.URL.Redacted(), fetchMaxBodyBytes)
+	if len(body) > fetchMaxBodyBytes() {
+		return "", fmt.Errorf("fetch %s: response exceeds %d bytes", resp.Request.URL.Redacted(), fetchMaxBodyBytes())
 	}
 
 	mediaType := responseMediaType(resp.Header.Get("Content-Type"), body)
@@ -90,7 +102,7 @@ func fetchURL(ctx context.Context, tc ToolCall) (string, error) {
 		text = "(no readable text)"
 	}
 
-	text, truncated := truncateUTF8(text, fetchMaxTextBytes)
+	text, truncated := truncateUTF8(text, fetchMaxTextBytes())
 	var out strings.Builder
 	fmt.Fprintf(&out, "URL: %s\n", resp.Request.URL.String())
 	if title != "" {
@@ -110,9 +122,9 @@ func newSafeHTTPClient() *http.Client {
 	transport.ResponseHeaderTimeout = 10 * time.Second
 	return &http.Client{
 		Transport: transport,
-		Timeout:   fetchTimeout,
+		Timeout:   time.Duration(active.FetchTimeoutSec) * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= fetchMaxRedirects {
+			if len(via) >= active.FetchMaxRedirects {
 				return errors.New("too many redirects")
 			}
 			_, err := validatePublicURL(req.URL.String())

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dereksantos/cortex/internal/cache"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
@@ -18,9 +19,6 @@ import (
 // sampling, no coverage targets, no curator/director.
 
 const (
-	// summaryCharsPerToken is the rough bytes-per-token estimate used to turn a
-	// token window into a character budget (matches the study engine's 4).
-	summaryCharsPerToken = 4
 	// summaryFillFraction sizes each chunk's INPUT to a fraction of the window,
 	// leaving the rest for the summary the model writes back.
 	summaryFillFraction = 0.5
@@ -56,7 +54,7 @@ func (cs *CortexSession) SummarizeText(ctx context.Context, content, goal string
 	if window <= 0 {
 		window = cs.studyWindow()
 	}
-	chunkChars := int(float64(window) * summaryFillFraction * summaryCharsPerToken)
+	chunkChars := int(float64(window) * summaryFillFraction * cache.CharsPerToken)
 	if chunkChars < 1024 {
 		chunkChars = 1024
 	}

@@ -27,11 +27,25 @@ func EstimateChatTokens(msgs []ChatMessage) int {
 	return total
 }
 
+// charsPerToken is pkg/llm's OWN copy of the rough bytes-per-token heuristic
+// — internal/cache.CharsPerToken (internal/cache/workingset.go) is the
+// authoritative constant everywhere else in the repo (P2 dedup:
+// docs/completion-roadmap.md's audit found this value triplicated at
+// internal/cache, cmd/cortex/summarize.go, and here). cmd/cortex's copy was
+// collapsed onto internal/cache.CharsPerToken directly; this one can't be:
+// pkg/ is the project's public-API layer and internal/ is private
+// implementation (CLAUDE.md's "Package structure"), so pkg/llm importing
+// internal/cache — even though Go's internal-package rule permits it,
+// since both share the module root — would cross that intentional layering
+// boundary. INVARIANT: keep this equal to internal/cache.CharsPerToken; a
+// PR changing one without the other is a bug.
+const charsPerToken = 4
+
 func estimateTokens(s string) int {
 	if s == "" {
 		return 0
 	}
-	n := len(s) / 4
+	n := len(s) / charsPerToken
 	if n == 0 {
 		return 1
 	}

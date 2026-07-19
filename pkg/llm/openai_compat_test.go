@@ -7,7 +7,46 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+// TestCompatTimeoutPrecedence covers P1's remaining leg: cmd/cortex's
+// network.compat_timeout_sec config field sets DefaultCompatTimeoutSec once
+// at session startup, but CORTEX_COMPAT_TIMEOUT_SEC (env) must still win
+// over it — the one field in the whole audit where env outranks config,
+// matching its subprocess-boundary rationale (docs/configuration.md).
+func TestCompatTimeoutPrecedence(t *testing.T) {
+	saved := DefaultCompatTimeoutSec
+	t.Cleanup(func() { DefaultCompatTimeoutSec = saved })
+
+	t.Run("unset env, unset override: historical 300s default", func(t *testing.T) {
+		DefaultCompatTimeoutSec = 300
+		if got := compatTimeout(); got != 300*time.Second {
+			t.Errorf("compatTimeout() = %v, want 300s", got)
+		}
+	})
+	t.Run("DefaultCompatTimeoutSec override applies when env unset", func(t *testing.T) {
+		DefaultCompatTimeoutSec = 120
+		if got := compatTimeout(); got != 120*time.Second {
+			t.Errorf("compatTimeout() = %v, want 120s (config-set default)", got)
+		}
+	})
+	t.Run("env wins over the config-set default", func(t *testing.T) {
+		DefaultCompatTimeoutSec = 120
+		t.Setenv("CORTEX_COMPAT_TIMEOUT_SEC", "45")
+		if got := compatTimeout(); got != 45*time.Second {
+			t.Errorf("compatTimeout() = %v, want 45s (env wins)", got)
+		}
+	})
+	t.Run("EndpointConfig.Timeout always wins over both", func(t *testing.T) {
+		DefaultCompatTimeoutSec = 120
+		t.Setenv("CORTEX_COMPAT_TIMEOUT_SEC", "45")
+		c := NewOpenAICompatClient(EndpointConfig{BaseURL: "http://example.invalid", Timeout: 7 * time.Second})
+		if c.httpClient.Timeout != 7*time.Second {
+			t.Errorf("client Timeout = %v, want 7s (explicit EndpointConfig.Timeout)", c.httpClient.Timeout)
+		}
+	})
+}
 
 func TestOpenAICompatGenerate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

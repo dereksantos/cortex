@@ -75,9 +75,11 @@ const defaultModel = ModelCoder
 // spin forever burning tokens. The smallest form of the "bounded" principle.
 const maxToolIterations = 100
 
-// maxToolOutput caps how much tool output we feed back into context. Defined
-// in the tools package; aliased here for the references in main.go.
-const maxToolOutput = tools.MaxToolOutput
+// maxToolOutput caps how much tool output we feed back into context. Mirrors
+// internal/tools' zero-config default (tools.DefaultLimits().MaxToolOutput);
+// used only by tests exercising that default — the live, config-resolvable
+// value lives in internal/tools' active Limits (see Config.toolLimits()).
+var maxToolOutput = tools.DefaultLimits().MaxToolOutput
 
 const (
 	// codeMaxOutputTokens / studyMaxOutputTokens cap each loop's per-turn OUTPUT
@@ -159,8 +161,10 @@ func version() string {
 // of the coder window) so curation stays the default even on a large-window
 // model — the whole point is to spend the coder's context on distilled signal,
 // not raw bytes it could technically hold. ~16k tok ≈ 64 KB ≈ 1600 lines:
-// ordinary source files still read whole; large files curate.
-const curationBudgetTokens = tools.CurationBudgetTokens
+// ordinary source files still read whole; large files curate. Mirrors
+// internal/tools' zero-config default; see maxToolOutput's doc comment above
+// for why this is a var pinned to the default rather than the live value.
+var curationBudgetTokens = tools.DefaultLimits().CurationBudgetTokens
 
 // promptGlyph is the input affordance at the end of the status line.
 const promptGlyph = tools.PromptGlyph

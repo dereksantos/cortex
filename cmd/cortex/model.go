@@ -117,12 +117,20 @@ func buildModelCatalog(ctx context.Context, cfg *Config) ModelCatalogReport {
 
 // maxServedModelsShown caps the text-rendered served-models list so a huge
 // OpenRouter catalog (hundreds of entries) doesn't flood the terminal; the
-// full list is still available via --json.
+// full list is still available via --json. Config-overridable via
+// limits.max_served_models_shown (Config.maxServedModelsShown); passed as an
+// explicit parameter to renderModelCatalog rather than a mutable package var
+// — runModelCLI is a one-shot CLI command with cfg already in scope, so
+// there's no reason to reach for process-wide state here.
 const maxServedModelsShown = 40
 
 // renderModelCatalog renders a ModelCatalogReport as the text `cortex
-// model` prints by default.
-func renderModelCatalog(r ModelCatalogReport) string {
+// model` prints by default. shownCap overrides maxServedModelsShown; <= 0
+// falls back to it.
+func renderModelCatalog(r ModelCatalogReport, shownCap int) string {
+	if shownCap <= 0 {
+		shownCap = maxServedModelsShown
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Cortex model catalog\n")
 	fmt.Fprintf(&b, "Backend: %s (%s)\n\n", r.BackendType, r.Endpoint)
@@ -155,8 +163,8 @@ func renderModelCatalog(r ModelCatalogReport) string {
 	fmt.Fprintf(&b, "):\n")
 	shown := r.ServedModels
 	truncated := false
-	if len(shown) > maxServedModelsShown {
-		shown = shown[:maxServedModelsShown]
+	if len(shown) > shownCap {
+		shown = shown[:shownCap]
 		truncated = true
 	}
 	for _, m := range shown {
@@ -171,7 +179,7 @@ func renderModelCatalog(r ModelCatalogReport) string {
 		}
 	}
 	if truncated {
-		fmt.Fprintf(&b, "  ... and %d more (see --json for the full list)\n", len(r.ServedModels)-maxServedModelsShown)
+		fmt.Fprintf(&b, "  ... and %d more (see --json for the full list)\n", len(r.ServedModels)-shownCap)
 	}
 	if len(r.ServedModels) == 0 {
 		fmt.Fprintf(&b, "  (none reported)\n")
@@ -374,6 +382,7 @@ func runModelCLI(args []string) {
 	}
 
 	cfg := LoadConfig()
+	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 
 	// The context's cancel (deferred below) must run before any exit, so the
 	// body that needs it lives in a closure returning an exit code — os.Exit
@@ -400,7 +409,7 @@ func runModelCLI(args []string) {
 			return 0
 		}
 
-		fmt.Print(renderModelCatalog(catalog))
+		fmt.Print(renderModelCatalog(catalog, cfg.maxServedModelsShown()))
 		fmt.Println()
 		fmt.Print(renderModelSuggestion(suggestion))
 		return 0

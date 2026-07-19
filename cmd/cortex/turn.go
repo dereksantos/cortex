@@ -123,7 +123,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	if maxTok <= 0 {
 		maxTok = codeMaxOutputTokens
 	}
-	maxIter := maxToolIterations
+	maxIter := cs.Config.maxToolIterations()
 	if maxIterOverride > 0 {
 		maxIter = maxIterOverride
 	}

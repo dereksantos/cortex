@@ -9,9 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/agent"
+	"github.com/dereksantos/cortex/internal/loops"
+	"github.com/dereksantos/cortex/internal/shellrisk"
+	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/internal/userhome"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -128,6 +133,55 @@ type ModelSpec struct {
 	// "high"), or {"budget": N} — see llm.Effort's UnmarshalJSON. The zero
 	// value means "unset" (JSON key absent).
 	Thinking llm.Effort `json:"thinking"`
+
+	// RequestTimeoutSec / MaxSendAttempts / RetryBackoffMs are the P1 timeout-
+	// unification config surface (docs/configuration.md): per-role overrides
+	// for the transport knobs that used to be hardcoded (cmd/cortex's
+	// requestTimeout/maxSendAttempts/retryBackoff, pkg/llm's
+	// defaultCompatTimeoutSec). 0 means "not set" — same unset-sentinel
+	// convention as MaxTokens/Window above, so an absent or explicit-0 key
+	// both fall through to the next tier (env, then the historical default).
+	// The coder's live request stamps these from the code role; every
+	// subagent request stamps them from the study role, EXCEPT the agent
+	// profile, which inherits the coder's live values (see
+	// study.go's subagentRequest) — it runs on the coder's model, so it
+	// should run on the coder's transport budget too.
+	RequestTimeoutSec int `json:"request_timeout_sec,omitempty"`
+	MaxSendAttempts   int `json:"max_send_attempts,omitempty"`
+	RetryBackoffMs    int `json:"retry_backoff_ms,omitempty"`
+}
+
+// timeout resolves this spec's per-request HTTP timeout: an explicit
+// request_timeout_sec wins, then CORTEX_COMPAT_TIMEOUT_SEC (the existing env
+// knob pkg/llm's compat client already honored — P1 unifies cmd/cortex's
+// transport path onto the same env override), then def (the caller's
+// path-specific historical default). See resolveTimeout below — this method
+// is the single place that precedence is encoded, called from every
+// timeout-consuming call site so they can't drift apart.
+func (s ModelSpec) timeout(def time.Duration) time.Duration {
+	if s.RequestTimeoutSec > 0 {
+		return time.Duration(s.RequestTimeoutSec) * time.Second
+	}
+	if v := strings.TrimSpace(os.Getenv("CORTEX_COMPAT_TIMEOUT_SEC")); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return def
+}
+
+func (s ModelSpec) maxAttempts(def int) int {
+	if s.MaxSendAttempts > 0 {
+		return s.MaxSendAttempts
+	}
+	return def
+}
+
+func (s ModelSpec) backoff(def time.Duration) time.Duration {
+	if s.RetryBackoffMs > 0 {
+		return time.Duration(s.RetryBackoffMs) * time.Millisecond
+	}
+	return def
 }
 
 func (s ModelSpec) maxOut(def int) int {
@@ -208,7 +262,20 @@ func (info ModelInfo) thinkingMode() string {
 
 type Fleet map[string]ModelInfo
 
-const fleetDiscoveryTimeout = 4 * time.Second
+// defaultFleetDiscoveryTimeout is the immutable historical default —
+// referenced ONLY by Config.fleetDiscoveryTimeout()'s fallback, never
+// reassigned, so that resolver keeps returning the true zero-config value
+// even after fleetDiscoveryTimeout (below) has been overridden by an
+// earlier session in the same process (tests construct many sessions/
+// configs per binary; a resolver that fell back to the mutable var would
+// leak one test's override into the next test's "zero config" expectation).
+const defaultFleetDiscoveryTimeout = 4 * time.Second
+
+// fleetDiscoveryTimeout is the LIVE value discoverFleet's internal
+// context.WithTimeout uses. NewCortexSession and runModelCLI set it once
+// from network.fleet_discovery_timeout_sec (via the resolver above); unset,
+// it stays defaultFleetDiscoveryTimeout.
+var fleetDiscoveryTimeout = defaultFleetDiscoveryTimeout
 
 func discoverFleet(ctx context.Context, endpoint string) Fleet {
 	ctx, cancel := context.WithTimeout(ctx, fleetDiscoveryTimeout)
@@ -345,6 +412,23 @@ type Config struct {
 	Models      map[string]ModelSpec `json:"models"`
 	Tools       ToolConfig           `json:"tools"`
 	Temperature *float64             `json:"temperature"`
+
+	// Subagents overrides the Study/Agent subagent profiles' bounds
+	// (internal/tools.Study / .Agent). A top-level section rather than
+	// models.study.subagent (the shape the original audit sketched) — see
+	// the docs/configuration.md naming-honesty note: the Agent profile runs
+	// on the CODER's live model, not the study role's, so nesting it under
+	// "models.study" would misrepresent which binding it actually uses.
+	Subagents SubagentsConfig `json:"subagents"`
+
+	// Limits, Network, Serve, Repl, and Discord are the remaining slices of
+	// the full-configurability surface (docs/configuration.md): every field
+	// is optional and 0/nil preserves today's hardcoded value.
+	Limits  LimitsConfig  `json:"limits"`
+	Network NetworkConfig `json:"network"`
+	Serve   ServeConfig   `json:"serve"`
+	Repl    ReplConfig    `json:"repl"`
+	Discord DiscordConfig `json:"discord"`
 }
 
 type ToolConfig struct {
@@ -371,6 +455,135 @@ type ToolConfig struct {
 	// nil-means-enabled Enable* fields above, which gate already-shipped
 	// tools rather than a new default-off behavior.
 	EnableEffortEscalation *bool `json:"enable_effort_escalation"`
+
+	// CurationBudgetTokens / MaxToolOutput / OutlineDefaultBudget override
+	// internal/tools' same-named constants (0 = today's value).
+	CurationBudgetTokens int `json:"curation_budget_tokens"`
+	MaxToolOutput        int `json:"max_tool_output"`
+	OutlineDefaultBudget int `json:"outline_default_budget"`
+
+	Read      ReadConfig      `json:"read"`
+	Grep      GrepConfig      `json:"grep"`
+	FetchURL  FetchURLConfig  `json:"fetch_url"`
+	WebSearch WebSearchConfig `json:"web_search"`
+}
+
+// ReadConfig overrides read_file's window/ceiling constants
+// (internal/tools.DefaultRangeLines/MaxRangeLines/maxReadBytes).
+type ReadConfig struct {
+	DefaultRangeLines int `json:"default_range_lines"`
+	MaxRangeLines     int `json:"max_range_lines"`
+	MaxReadBytes      int `json:"max_read_bytes"`
+}
+
+// GrepConfig overrides grep's caps (internal/tools grepMaxHits/grepLineCap/
+// grepMaxOutputBytes).
+type GrepConfig struct {
+	MaxHits        int `json:"max_hits"`
+	LineCap        int `json:"line_cap"`
+	MaxOutputBytes int `json:"max_output_bytes"`
+}
+
+// FetchURLConfig overrides fetch_url's timeout/redirect/body caps
+// (internal/tools fetchTimeout/fetchMaxRedirects/fetchMaxBodyBytes).
+type FetchURLConfig struct {
+	TimeoutSec   int `json:"timeout_sec"`
+	MaxRedirects int `json:"max_redirects"`
+	MaxBodyBytes int `json:"max_body_bytes"`
+}
+
+// WebSearchConfig overrides web_search's result-count defaults
+// (internal/tools defaultSearchMax/maximumSearchMax).
+type WebSearchConfig struct {
+	DefaultMaxResults int `json:"default_max_results"`
+	MaximumMaxResults int `json:"maximum_max_results"`
+}
+
+// SubagentProfileConfig overrides one subagent profile's agent.Bounds
+// fields (internal/tools.Study.Bounds / .Agent.Bounds).
+type SubagentProfileConfig struct {
+	MaxTokens       int `json:"max_tokens"`
+	MaxIter         int `json:"max_iter"`
+	ReadBudgetBytes int `json:"read_budget_bytes"`
+}
+
+// SubagentsConfig is the top-level "subagents" section (see the Config.Subagents
+// doc comment for the naming deviation from the audited models.study.subagent
+// nesting).
+type SubagentsConfig struct {
+	// SeedBudgetTokens overrides internal/tools.StudySeedBudget — the outline
+	// budget used to seed EITHER subagent profile before its loop starts
+	// (runSubagent calls deps.Outline(path, StudySeedBudget) once, shared by
+	// Study and Agent). It lives here, not duplicated under .Study/.Agent,
+	// because the underlying constant is genuinely shared, not per-profile.
+	SeedBudgetTokens int                   `json:"seed_budget_tokens"`
+	Study            SubagentProfileConfig `json:"study"`
+	Agent            SubagentProfileConfig `json:"agent"`
+}
+
+// LimitsConfig collects the assorted byte/count ceilings that don't belong to
+// a specific tool or subsystem (docs/configuration.md's `limits.*` section).
+type LimitsConfig struct {
+	MaxToolIterations      int `json:"max_tool_iterations"`
+	MaxInstructionBytes    int `json:"max_instruction_bytes"`
+	MemoryIndexCapChars    int `json:"memory_index_cap_chars"`
+	CaptureExcerptCapChars int `json:"capture_excerpt_cap_chars"`
+	MaxTaskContextChars    int `json:"max_task_context_chars"`
+	RouteMaxOutputTokens   int `json:"route_max_output_tokens"`
+	MaxServedModelsShown   int `json:"max_served_models_shown"`
+}
+
+// NetworkConfig collects bounded-probe timeouts (docs/configuration.md's
+// `network.*` section).
+type NetworkConfig struct {
+	FleetDiscoveryTimeoutSec int `json:"fleet_discovery_timeout_sec"`
+	PreflightTimeoutSec      int `json:"preflight_timeout_sec"`
+	// OllamaProbeTimeoutSec is parsed, merged, and validated like every
+	// other field here, but has NO resolver method: the probe it would
+	// configure (bootstrap_wire.go's ollamaLocalProbe) only ever runs
+	// during GuidedSetup on a true first run — no config file can exist yet
+	// at that point by construction (docs/configuration.md's "Interactive
+	// first-run setup") — so there is no reachable call site to read this
+	// field from. Kept in the schema for documentation parity with the rest
+	// of `network.*`; see bootstrap_wire.go's defaultOllamaProbeTimeout doc
+	// comment for the full explanation.
+	OllamaProbeTimeoutSec int `json:"ollama_probe_timeout_sec"`
+	// CompatTimeoutSec is a config surface for the existing
+	// CORTEX_COMPAT_TIMEOUT_SEC env var's fallback default (pkg/llm's
+	// defaultCompatTimeoutSec): unlike every other timeout field in this
+	// audit, ENV WINS OVER CONFIG here, matching the env knob's
+	// subprocess-boundary rationale (docs/configuration.md) — this field only
+	// adjusts the baseline compatTimeout() falls back to when the env var is
+	// unset AND no per-call EndpointConfig.Timeout override applies.
+	CompatTimeoutSec int `json:"compat_timeout_sec"`
+}
+
+// ServeConfig collects `cortex serve` tunables (docs/configuration.md's
+// `serve.*` section).
+type ServeConfig struct {
+	Port                   int `json:"port"`
+	SessionIdleTimeoutMin  int `json:"session_idle_timeout_min"`
+	LoopCadenceFloorMin    int `json:"loop_cadence_floor_min"`
+	LoopAutoDisableStrikes int `json:"loop_auto_disable_strikes"`
+	ProjectSessionsLimit   int `json:"project_sessions_limit"`
+}
+
+// ReplConfig collects the interactive REPL's display tunables
+// (docs/configuration.md's `repl.*` section).
+type ReplConfig struct {
+	TickerIntervalMs int `json:"ticker_interval_ms"`
+}
+
+// DiscordConfig collects the Discord adapter's tunables
+// (docs/configuration.md's `discord.*` section). RouteConfidenceThreshold is
+// a pointer (like Temperature) so an explicit 0 is distinguishable from
+// unset — 0 would otherwise be a legitimate (if unusual) "always continue"
+// setting, unlike the other fields here where 0 unambiguously means "unset".
+type DiscordConfig struct {
+	TypingRefreshSec         int      `json:"typing_refresh_sec"`
+	RiskApprovalTimeoutSec   int      `json:"risk_approval_timeout_sec"`
+	ProgressEditIntervalMs   int      `json:"progress_edit_interval_ms"`
+	RouteConfidenceThreshold *float64 `json:"route_confidence_threshold"`
 }
 
 func (c *Config) isOpenRouter() bool {
@@ -491,7 +704,17 @@ func findUp(rel string) string {
 
 func findConfigPath() string { return findUp(filepath.Join(".cortex", "config.json")) }
 
+// maxInstructionBytes is the historical AGENTS.md truncation default.
+// instructionBytesCap is the LIVE value readInstructions actually uses — a
+// package var (not this const directly) so NewCortexSession can set it once
+// from limits.max_instruction_bytes before the first AGENTS.md read
+// (CortexArgs.Request(), which runs before the rest of session construction
+// — see NewCortexSession's ordering comment). Unset (every test, every
+// caller that predates config.limits), it equals maxInstructionBytes —
+// today's behavior exactly.
 const maxInstructionBytes = 16384
+
+var instructionBytesCap = maxInstructionBytes
 
 func projectInstructions() string {
 	path := findUp("AGENTS.md")
@@ -502,7 +725,7 @@ func projectInstructions() string {
 }
 
 // readInstructions reads and trims an AGENTS.md at an exact path (no
-// upward search), truncating at maxInstructionBytes — the shared body
+// upward search), truncating at instructionBytesCap — the shared body
 // projectInstructions() (CWD-implicit, via findUp) and
 // Workspace.Instructions() (explicit root, workspace.go) both use, so the
 // two stay provably identical for the same resolved path.
@@ -512,8 +735,8 @@ func readInstructions(path string) string {
 		return ""
 	}
 	s := strings.TrimSpace(string(data))
-	if len(s) > maxInstructionBytes {
-		s = s[:maxInstructionBytes] + "\n...[AGENTS.md truncated]"
+	if len(s) > instructionBytesCap {
+		s = s[:instructionBytesCap] + "\n...[AGENTS.md truncated]"
 	}
 	return s
 }
@@ -548,7 +771,114 @@ func readConfigFile(path string) *Config {
 		return nil
 	}
 	warnUnknownRoles(&cfg, path)
+	if err := validateConfig(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "cortex: %s: invalid config: %v\n", path, err)
+		os.Exit(1)
+	}
 	return &cfg
+}
+
+// validateConfig rejects nonsensical values in the full-configurability
+// surface (docs/configuration.md) — but ONLY fields the config file actually
+// set: every field here uses 0/nil as its "not set" sentinel (matching the
+// pre-existing MaxTokens/Window convention), so a config that never mentions
+// a field can never trip this. A negative int is always nonsensical (every
+// field in this surface is a byte count, token count, duration, or attempt
+// count); route_confidence_threshold is checked against its own domain,
+// (0, 1]. readConfigFile calls this and exits fatally with the returned
+// error — kept a separate testable function (rather than folded into
+// readConfigFile) so config_test.go can exercise the rejection paths without
+// killing the test binary.
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	for role, m := range cfg.Models {
+		if err := nonNegative("models."+role+".request_timeout_sec", m.RequestTimeoutSec); err != nil {
+			return err
+		}
+		if err := nonNegative("models."+role+".max_send_attempts", m.MaxSendAttempts); err != nil {
+			return err
+		}
+		if err := nonNegative("models."+role+".retry_backoff_ms", m.RetryBackoffMs); err != nil {
+			return err
+		}
+	}
+	intFields := map[string]int{
+		"tools.curation_budget_tokens":         cfg.Tools.CurationBudgetTokens,
+		"tools.max_tool_output":                cfg.Tools.MaxToolOutput,
+		"tools.outline_default_budget":         cfg.Tools.OutlineDefaultBudget,
+		"tools.read.default_range_lines":       cfg.Tools.Read.DefaultRangeLines,
+		"tools.read.max_range_lines":           cfg.Tools.Read.MaxRangeLines,
+		"tools.read.max_read_bytes":            cfg.Tools.Read.MaxReadBytes,
+		"tools.grep.max_hits":                  cfg.Tools.Grep.MaxHits,
+		"tools.grep.line_cap":                  cfg.Tools.Grep.LineCap,
+		"tools.grep.max_output_bytes":          cfg.Tools.Grep.MaxOutputBytes,
+		"tools.fetch_url.timeout_sec":          cfg.Tools.FetchURL.TimeoutSec,
+		"tools.fetch_url.max_redirects":        cfg.Tools.FetchURL.MaxRedirects,
+		"tools.fetch_url.max_body_bytes":       cfg.Tools.FetchURL.MaxBodyBytes,
+		"tools.web_search.default_max_results": cfg.Tools.WebSearch.DefaultMaxResults,
+		"tools.web_search.maximum_max_results": cfg.Tools.WebSearch.MaximumMaxResults,
+
+		"subagents.seed_budget_tokens":      cfg.Subagents.SeedBudgetTokens,
+		"subagents.study.max_tokens":        cfg.Subagents.Study.MaxTokens,
+		"subagents.study.max_iter":          cfg.Subagents.Study.MaxIter,
+		"subagents.study.read_budget_bytes": cfg.Subagents.Study.ReadBudgetBytes,
+		"subagents.agent.max_tokens":        cfg.Subagents.Agent.MaxTokens,
+		"subagents.agent.max_iter":          cfg.Subagents.Agent.MaxIter,
+		"subagents.agent.read_budget_bytes": cfg.Subagents.Agent.ReadBudgetBytes,
+
+		"limits.max_tool_iterations":       cfg.Limits.MaxToolIterations,
+		"limits.max_instruction_bytes":     cfg.Limits.MaxInstructionBytes,
+		"limits.memory_index_cap_chars":    cfg.Limits.MemoryIndexCapChars,
+		"limits.capture_excerpt_cap_chars": cfg.Limits.CaptureExcerptCapChars,
+		"limits.max_task_context_chars":    cfg.Limits.MaxTaskContextChars,
+		"limits.route_max_output_tokens":   cfg.Limits.RouteMaxOutputTokens,
+		"limits.max_served_models_shown":   cfg.Limits.MaxServedModelsShown,
+
+		"network.fleet_discovery_timeout_sec": cfg.Network.FleetDiscoveryTimeoutSec,
+		"network.preflight_timeout_sec":       cfg.Network.PreflightTimeoutSec,
+		"network.ollama_probe_timeout_sec":    cfg.Network.OllamaProbeTimeoutSec,
+		"network.compat_timeout_sec":          cfg.Network.CompatTimeoutSec,
+
+		"serve.port":                      cfg.Serve.Port,
+		"serve.session_idle_timeout_min":  cfg.Serve.SessionIdleTimeoutMin,
+		"serve.loop_cadence_floor_min":    cfg.Serve.LoopCadenceFloorMin,
+		"serve.loop_auto_disable_strikes": cfg.Serve.LoopAutoDisableStrikes,
+		"serve.project_sessions_limit":    cfg.Serve.ProjectSessionsLimit,
+
+		"repl.ticker_interval_ms": cfg.Repl.TickerIntervalMs,
+
+		"discord.typing_refresh_sec":        cfg.Discord.TypingRefreshSec,
+		"discord.risk_approval_timeout_sec": cfg.Discord.RiskApprovalTimeoutSec,
+		"discord.progress_edit_interval_ms": cfg.Discord.ProgressEditIntervalMs,
+	}
+	// Deterministic order so a config with multiple bad fields always reports
+	// the same one first (map iteration order is randomized in Go).
+	keys := make([]string, 0, len(intFields))
+	for k := range intFields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if err := nonNegative(k, intFields[k]); err != nil {
+			return err
+		}
+	}
+	if t := cfg.Discord.RouteConfidenceThreshold; t != nil && (*t <= 0 || *t > 1) {
+		return fmt.Errorf("discord.route_confidence_threshold must be in (0, 1], got %v", *t)
+	}
+	return nil
+}
+
+// nonNegative rejects an explicit negative value for a field whose only
+// sentinel is 0 ("not set") — every field validateConfig checks is a count,
+// byte size, or millisecond/second duration, none of which can be negative.
+func nonNegative(field string, v int) error {
+	if v < 0 {
+		return fmt.Errorf("%s must be positive, got %d", field, v)
+	}
+	return nil
 }
 
 func userConfigPath() string {
@@ -573,7 +903,119 @@ func mergeConfig(base, over *Config) *Config {
 	if over.Temperature != nil {
 		out.Temperature = over.Temperature
 	}
+	out.Subagents = mergeSubagents(base.Subagents, over.Subagents)
+	out.Limits = mergeLimits(base.Limits, over.Limits)
+	out.Network = mergeNetwork(base.Network, over.Network)
+	out.Serve = mergeServe(base.Serve, over.Serve)
+	out.Repl = mergeRepl(base.Repl, over.Repl)
+	out.Discord = mergeDiscord(base.Discord, over.Discord)
 	return &out
+}
+
+// mergeIntField overrides base with over when over is non-zero — the shared
+// field-by-field rule every new int config field in this audit follows (0 =
+// "not set in this file", matching the pre-existing MaxTokens/Window
+// convention on ModelSpec).
+func mergeIntField(base, over int) int {
+	if over != 0 {
+		return over
+	}
+	return base
+}
+
+func mergeSubagentProfile(base, over SubagentProfileConfig) SubagentProfileConfig {
+	return SubagentProfileConfig{
+		MaxTokens:       mergeIntField(base.MaxTokens, over.MaxTokens),
+		MaxIter:         mergeIntField(base.MaxIter, over.MaxIter),
+		ReadBudgetBytes: mergeIntField(base.ReadBudgetBytes, over.ReadBudgetBytes),
+	}
+}
+
+func mergeSubagents(base, over SubagentsConfig) SubagentsConfig {
+	return SubagentsConfig{
+		SeedBudgetTokens: mergeIntField(base.SeedBudgetTokens, over.SeedBudgetTokens),
+		Study:            mergeSubagentProfile(base.Study, over.Study),
+		Agent:            mergeSubagentProfile(base.Agent, over.Agent),
+	}
+}
+
+func mergeLimits(base, over LimitsConfig) LimitsConfig {
+	return LimitsConfig{
+		MaxToolIterations:      mergeIntField(base.MaxToolIterations, over.MaxToolIterations),
+		MaxInstructionBytes:    mergeIntField(base.MaxInstructionBytes, over.MaxInstructionBytes),
+		MemoryIndexCapChars:    mergeIntField(base.MemoryIndexCapChars, over.MemoryIndexCapChars),
+		CaptureExcerptCapChars: mergeIntField(base.CaptureExcerptCapChars, over.CaptureExcerptCapChars),
+		MaxTaskContextChars:    mergeIntField(base.MaxTaskContextChars, over.MaxTaskContextChars),
+		RouteMaxOutputTokens:   mergeIntField(base.RouteMaxOutputTokens, over.RouteMaxOutputTokens),
+		MaxServedModelsShown:   mergeIntField(base.MaxServedModelsShown, over.MaxServedModelsShown),
+	}
+}
+
+func mergeNetwork(base, over NetworkConfig) NetworkConfig {
+	return NetworkConfig{
+		FleetDiscoveryTimeoutSec: mergeIntField(base.FleetDiscoveryTimeoutSec, over.FleetDiscoveryTimeoutSec),
+		PreflightTimeoutSec:      mergeIntField(base.PreflightTimeoutSec, over.PreflightTimeoutSec),
+		OllamaProbeTimeoutSec:    mergeIntField(base.OllamaProbeTimeoutSec, over.OllamaProbeTimeoutSec),
+		CompatTimeoutSec:         mergeIntField(base.CompatTimeoutSec, over.CompatTimeoutSec),
+	}
+}
+
+func mergeServe(base, over ServeConfig) ServeConfig {
+	return ServeConfig{
+		Port:                   mergeIntField(base.Port, over.Port),
+		SessionIdleTimeoutMin:  mergeIntField(base.SessionIdleTimeoutMin, over.SessionIdleTimeoutMin),
+		LoopCadenceFloorMin:    mergeIntField(base.LoopCadenceFloorMin, over.LoopCadenceFloorMin),
+		LoopAutoDisableStrikes: mergeIntField(base.LoopAutoDisableStrikes, over.LoopAutoDisableStrikes),
+		ProjectSessionsLimit:   mergeIntField(base.ProjectSessionsLimit, over.ProjectSessionsLimit),
+	}
+}
+
+func mergeRepl(base, over ReplConfig) ReplConfig {
+	return ReplConfig{TickerIntervalMs: mergeIntField(base.TickerIntervalMs, over.TickerIntervalMs)}
+}
+
+func mergeDiscord(base, over DiscordConfig) DiscordConfig {
+	out := DiscordConfig{
+		TypingRefreshSec:         mergeIntField(base.TypingRefreshSec, over.TypingRefreshSec),
+		RiskApprovalTimeoutSec:   mergeIntField(base.RiskApprovalTimeoutSec, over.RiskApprovalTimeoutSec),
+		ProgressEditIntervalMs:   mergeIntField(base.ProgressEditIntervalMs, over.ProgressEditIntervalMs),
+		RouteConfidenceThreshold: base.RouteConfidenceThreshold,
+	}
+	if over.RouteConfidenceThreshold != nil {
+		out.RouteConfidenceThreshold = over.RouteConfidenceThreshold
+	}
+	return out
+}
+
+func mergeRead(base, over ReadConfig) ReadConfig {
+	return ReadConfig{
+		DefaultRangeLines: mergeIntField(base.DefaultRangeLines, over.DefaultRangeLines),
+		MaxRangeLines:     mergeIntField(base.MaxRangeLines, over.MaxRangeLines),
+		MaxReadBytes:      mergeIntField(base.MaxReadBytes, over.MaxReadBytes),
+	}
+}
+
+func mergeGrep(base, over GrepConfig) GrepConfig {
+	return GrepConfig{
+		MaxHits:        mergeIntField(base.MaxHits, over.MaxHits),
+		LineCap:        mergeIntField(base.LineCap, over.LineCap),
+		MaxOutputBytes: mergeIntField(base.MaxOutputBytes, over.MaxOutputBytes),
+	}
+}
+
+func mergeFetchURL(base, over FetchURLConfig) FetchURLConfig {
+	return FetchURLConfig{
+		TimeoutSec:   mergeIntField(base.TimeoutSec, over.TimeoutSec),
+		MaxRedirects: mergeIntField(base.MaxRedirects, over.MaxRedirects),
+		MaxBodyBytes: mergeIntField(base.MaxBodyBytes, over.MaxBodyBytes),
+	}
+}
+
+func mergeWebSearch(base, over WebSearchConfig) WebSearchConfig {
+	return WebSearchConfig{
+		DefaultMaxResults: mergeIntField(base.DefaultMaxResults, over.DefaultMaxResults),
+		MaximumMaxResults: mergeIntField(base.MaximumMaxResults, over.MaximumMaxResults),
+	}
 }
 
 func mergeBackend(base, over Backend) Backend {
@@ -632,6 +1074,9 @@ func mergeSpec(base, over ModelSpec) ModelSpec {
 	if !over.Thinking.IsZero() {
 		base.Thinking = over.Thinking
 	}
+	base.RequestTimeoutSec = mergeIntField(base.RequestTimeoutSec, over.RequestTimeoutSec)
+	base.MaxSendAttempts = mergeIntField(base.MaxSendAttempts, over.MaxSendAttempts)
+	base.RetryBackoffMs = mergeIntField(base.RetryBackoffMs, over.RetryBackoffMs)
 	return base
 }
 
@@ -663,6 +1108,13 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 	if over.EnableEffortEscalation != nil {
 		base.EnableEffortEscalation = over.EnableEffortEscalation
 	}
+	base.CurationBudgetTokens = mergeIntField(base.CurationBudgetTokens, over.CurationBudgetTokens)
+	base.MaxToolOutput = mergeIntField(base.MaxToolOutput, over.MaxToolOutput)
+	base.OutlineDefaultBudget = mergeIntField(base.OutlineDefaultBudget, over.OutlineDefaultBudget)
+	base.Read = mergeRead(base.Read, over.Read)
+	base.Grep = mergeGrep(base.Grep, over.Grep)
+	base.FetchURL = mergeFetchURL(base.FetchURL, over.FetchURL)
+	base.WebSearch = mergeWebSearch(base.WebSearch, over.WebSearch)
 	return base
 }
 
@@ -671,4 +1123,212 @@ func mergeTools(base, over ToolConfig) ToolConfig {
 // off when the config or the flag itself is absent.
 func (c *Config) effortEscalationEnabled() bool {
 	return c != nil && c.Tools.EnableEffortEscalation != nil && *c.Tools.EnableEffortEscalation
+}
+
+// --- resolver methods -----------------------------------------------------
+//
+// Every method below returns the config-set value when explicit (non-zero),
+// else the parameter EXACTLY matching today's hardcoded constant — so a nil
+// *Config or a config that never mentions the field reproduces the old
+// behavior byte-for-byte. Grouped here rather than beside each call site so
+// the "what does 0/nil resolve to" answer lives in one place per field.
+
+func resolveInt(v, def int) int {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
+func (c *Config) maxToolIterations() int {
+	if c == nil {
+		return maxToolIterations
+	}
+	return resolveInt(c.Limits.MaxToolIterations, maxToolIterations)
+}
+
+func (c *Config) instructionBytesCap() int {
+	if c == nil {
+		return maxInstructionBytes
+	}
+	return resolveInt(c.Limits.MaxInstructionBytes, maxInstructionBytes)
+}
+
+func (c *Config) memoryIndexCapChars() int {
+	if c == nil {
+		return memoryIndexCap
+	}
+	return resolveInt(c.Limits.MemoryIndexCapChars, memoryIndexCap)
+}
+
+func (c *Config) captureExcerptCapChars() int {
+	if c == nil {
+		return captureExcerptCap
+	}
+	return resolveInt(c.Limits.CaptureExcerptCapChars, captureExcerptCap)
+}
+
+func (c *Config) maxTaskContextChars() int {
+	if c == nil {
+		return shellrisk.DefaultMaxTaskContextChars
+	}
+	return resolveInt(c.Limits.MaxTaskContextChars, shellrisk.DefaultMaxTaskContextChars)
+}
+
+func (c *Config) routeMaxOutputTokens() int {
+	if c == nil {
+		return routeMaxOutputTokens
+	}
+	return resolveInt(c.Limits.RouteMaxOutputTokens, routeMaxOutputTokens)
+}
+
+func (c *Config) maxServedModelsShown() int {
+	if c == nil {
+		return maxServedModelsShown
+	}
+	return resolveInt(c.Limits.MaxServedModelsShown, maxServedModelsShown)
+}
+
+func (c *Config) fleetDiscoveryTimeout() time.Duration {
+	if c == nil || c.Network.FleetDiscoveryTimeoutSec <= 0 {
+		return defaultFleetDiscoveryTimeout
+	}
+	return time.Duration(c.Network.FleetDiscoveryTimeoutSec) * time.Second
+}
+
+func (c *Config) preflightTimeout() time.Duration {
+	if c == nil || c.Network.PreflightTimeoutSec <= 0 {
+		return defaultOpenRouterPreflightTimeout
+	}
+	return time.Duration(c.Network.PreflightTimeoutSec) * time.Second
+}
+
+func (c *Config) servePort(def int) int {
+	if c == nil {
+		return def
+	}
+	return resolveInt(c.Serve.Port, def)
+}
+
+func (c *Config) sessionIdleTimeout() time.Duration {
+	if c == nil || c.Serve.SessionIdleTimeoutMin <= 0 {
+		return defaultSessionIdleTimeout
+	}
+	return time.Duration(c.Serve.SessionIdleTimeoutMin) * time.Minute
+}
+
+func (c *Config) loopCadenceFloorMin() int {
+	if c == nil {
+		return loops.DefaultCadenceFloorMinutes
+	}
+	return resolveInt(c.Serve.LoopCadenceFloorMin, loops.DefaultCadenceFloorMinutes)
+}
+
+func (c *Config) loopAutoDisableStrikes() int {
+	if c == nil {
+		return defaultLoopAutoDisableStrikes
+	}
+	return resolveInt(c.Serve.LoopAutoDisableStrikes, defaultLoopAutoDisableStrikes)
+}
+
+func (c *Config) projectSessionsLimit() int {
+	if c == nil {
+		return defaultProjectSessionsLimit
+	}
+	return resolveInt(c.Serve.ProjectSessionsLimit, defaultProjectSessionsLimit)
+}
+
+func (c *Config) tickerInterval() time.Duration {
+	if c == nil || c.Repl.TickerIntervalMs <= 0 {
+		return time.Second
+	}
+	return time.Duration(c.Repl.TickerIntervalMs) * time.Millisecond
+}
+
+func (c *Config) discordTypingRefresh() time.Duration {
+	if c == nil || c.Discord.TypingRefreshSec <= 0 {
+		return defaultTypingRefresh
+	}
+	return time.Duration(c.Discord.TypingRefreshSec) * time.Second
+}
+
+func (c *Config) discordRiskApprovalTimeout() time.Duration {
+	if c == nil || c.Discord.RiskApprovalTimeoutSec <= 0 {
+		return defaultRiskApprovalTimeout
+	}
+	return time.Duration(c.Discord.RiskApprovalTimeoutSec) * time.Second
+}
+
+func (c *Config) discordProgressEditInterval() time.Duration {
+	if c == nil || c.Discord.ProgressEditIntervalMs <= 0 {
+		return defaultProgressEditInterval
+	}
+	return time.Duration(c.Discord.ProgressEditIntervalMs) * time.Millisecond
+}
+
+func (c *Config) discordRouteConfidenceThreshold() float64 {
+	if c == nil || c.Discord.RouteConfidenceThreshold == nil {
+		return routeConfidenceThreshold
+	}
+	return *c.Discord.RouteConfidenceThreshold
+}
+
+// curationBudgetTokensCfg / maxToolOutputCfg / outlineDefaultBudgetCfg /
+// readCfg / grepCfg / fetchURLCfg / webSearchCfg resolve the internal/tools
+// caps (curation_budget_tokens, max_tool_output, outline_default_budget,
+// read.*, grep.*, fetch_url.*, web_search.*). internal/tools exposes these
+// as package vars (tools.CurationBudgetTokens etc. become tools.Limits, see
+// tools/limits.go) defaulting to the historical constants; NewCortexSession
+// calls tools.Configure(...) once at session construction with the resolved
+// values so every tool call site reads the same override without a second
+// config-plumbing path into internal/tools.
+func (c *Config) toolLimits() tools.Limits {
+	def := tools.DefaultLimits()
+	if c == nil {
+		return def
+	}
+	return tools.Limits{
+		CurationBudgetTokens: resolveInt(c.Tools.CurationBudgetTokens, def.CurationBudgetTokens),
+		MaxToolOutput:        resolveInt(c.Tools.MaxToolOutput, def.MaxToolOutput),
+		OutlineDefaultBudget: resolveInt(c.Tools.OutlineDefaultBudget, def.OutlineDefaultBudget),
+		DefaultRangeLines:    resolveInt(c.Tools.Read.DefaultRangeLines, def.DefaultRangeLines),
+		MaxRangeLines:        resolveInt(c.Tools.Read.MaxRangeLines, def.MaxRangeLines),
+		MaxReadBytes:         resolveInt(c.Tools.Read.MaxReadBytes, def.MaxReadBytes),
+		GrepMaxHits:          resolveInt(c.Tools.Grep.MaxHits, def.GrepMaxHits),
+		GrepLineCap:          resolveInt(c.Tools.Grep.LineCap, def.GrepLineCap),
+		GrepMaxOutputBytes:   resolveInt(c.Tools.Grep.MaxOutputBytes, def.GrepMaxOutputBytes),
+		FetchTimeoutSec:      resolveInt(c.Tools.FetchURL.TimeoutSec, def.FetchTimeoutSec),
+		FetchMaxRedirects:    resolveInt(c.Tools.FetchURL.MaxRedirects, def.FetchMaxRedirects),
+		FetchMaxBodyBytes:    resolveInt(c.Tools.FetchURL.MaxBodyBytes, def.FetchMaxBodyBytes),
+		DefaultSearchMax:     resolveInt(c.Tools.WebSearch.DefaultMaxResults, def.DefaultSearchMax),
+		MaximumSearchMax:     resolveInt(c.Tools.WebSearch.MaximumMaxResults, def.MaximumSearchMax),
+	}
+}
+
+// subagentBounds resolves one profile's agent.Bounds overrides
+// (subagents.study / subagents.agent), starting from the profile's own
+// registered defaults so an unset field falls back to the profile's shipped
+// value, not a generic zero.
+func (c *Config) subagentBounds(role string, def agent.Bounds) agent.Bounds {
+	if c == nil {
+		return def
+	}
+	var pc SubagentProfileConfig
+	switch role {
+	case roleStudy:
+		pc = c.Subagents.Study
+	default:
+		pc = c.Subagents.Agent
+	}
+	def.MaxTokens = resolveInt(pc.MaxTokens, def.MaxTokens)
+	def.MaxIter = resolveInt(pc.MaxIter, def.MaxIter)
+	def.ReadBudgetBytes = resolveInt(pc.ReadBudgetBytes, def.ReadBudgetBytes)
+	return def
+}
+
+func (c *Config) seedBudget() int {
+	if c == nil {
+		return tools.StudySeedBudget
+	}
+	return resolveInt(c.Subagents.SeedBudgetTokens, tools.StudySeedBudget)
 }

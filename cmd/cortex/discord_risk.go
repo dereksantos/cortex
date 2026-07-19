@@ -21,10 +21,18 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// defaultRiskApprovalTimeout is the immutable historical default — see
+// fleetDiscoveryTimeout's doc comment (config.go) for why
+// Config.discordRiskApprovalTimeout falls back to this const, never the
+// mutable riskApprovalTimeout var below.
+const defaultRiskApprovalTimeout = 120 * time.Second
+
 // riskApprovalTimeout is the default window a risky-command prompt stays
 // open before it lapses to the headless-Blocked behavior (D3 sub-item 3:
-// "default 120s").
-const riskApprovalTimeout = 120 * time.Second
+// "default 120s"). A var (not const): runDiscordCLI sets it once at startup
+// from discord.risk_approval_timeout_sec; unset, it stays
+// defaultRiskApprovalTimeout.
+var riskApprovalTimeout = defaultRiskApprovalTimeout
 
 // riskDecision is the resolution of one pending approval.
 type riskDecision int

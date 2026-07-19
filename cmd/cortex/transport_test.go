@@ -292,6 +292,30 @@ func TestSendDoesNotRetryClientErrors(t *testing.T) {
 	}
 }
 
+// TestSendHonorsPerRequestTimeout is a P1 wiring spot-check: an
+// AgentRequest.Timeout override actually reaches the transport client — it
+// cuts a request off even with an AMBIENT context that has no deadline of
+// its own, proving the enforcement is r.effectiveTimeout() (config-driven),
+// not just whatever the caller's ctx happens to carry.
+func TestSendHonorsPerRequestTimeout(t *testing.T) {
+	quickRetries(t)
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-block // hold the request open until the test ends
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	start := time.Now()
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL, Timeout: 50 * time.Millisecond}).Send(context.Background())
+	if err == nil {
+		t.Fatal("expected a timeout error from the per-request Timeout override")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Send took %v; the 50ms Timeout override should have cut it off quickly", elapsed)
+	}
+}
+
 func TestSendHonorsContextCancel(t *testing.T) {
 	quickRetries(t)
 	block := make(chan struct{})

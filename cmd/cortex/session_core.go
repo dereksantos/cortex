@@ -184,9 +184,18 @@ func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
 }
 
 func NewCortexSession() *CortexSession {
+	cfg := LoadConfig()
+	// instructionBytesCap must be set before args.Request() (below) reads
+	// AGENTS.md via projectInstructions() — the one call site that runs
+	// before the rest of this function's config-driven wiring.
+	instructionBytesCap = cfg.instructionBytesCap()
+	tools.Configure(cfg.toolLimits())
+	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
+	openRouterPreflightTimeout = cfg.preflightTimeout()
+	labelTickInterval = cfg.tickerInterval()
+
 	args := CortexArgs(os.Args)
 	req := args.Request()
-	cfg := LoadConfig()
 	workspace := WorkspaceFromCWD()
 
 	var fleet Fleet
@@ -217,6 +226,22 @@ func NewCortexSession() *CortexSession {
 	applyEffort(req, dialectFor(cfg.isOpenRouter()), code.Thinking)
 	req.MaxTokens = code.maxOut(codeMaxOutputTokens)
 	req.Temperature = code.temperature(defaultTemperature)
+	// P1 timeout unification: the coder's live request stamps its transport
+	// budget from the code role's config (models.code.request_timeout_sec /
+	// .max_send_attempts / .retry_backoff_ms), falling back to today's
+	// hardcoded defaults exactly.
+	req.Timeout = code.timeout(requestTimeout)
+	req.MaxAttempts = code.maxAttempts(maxSendAttempts)
+	req.Backoff = code.backoff(retryBackoff)
+
+	// network.compat_timeout_sec is the config surface for the existing
+	// CORTEX_COMPAT_TIMEOUT_SEC env var's fallback default (pkg/llm's
+	// DefaultCompatTimeoutSec) — env still wins over it. Set once here so
+	// every OpenAICompatClient this process constructs afterward (the study
+	// provider, the reasoner, any embedder) picks it up.
+	if cfg != nil && cfg.Network.CompatTimeoutSec > 0 {
+		llm.DefaultCompatTimeoutSec = cfg.Network.CompatTimeoutSec
+	}
 
 	if cfg.isOpenRouter() {
 		req.Usage = &usageInclude{Include: true}

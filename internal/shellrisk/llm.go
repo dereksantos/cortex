@@ -37,13 +37,24 @@ Only mark "risky" for a concrete reason above; if the command is ordinary projec
 Respond with ONLY a single JSON object, no prose:
 {"risk":"safe","reason":"<short reason>"}`
 
-// maxTaskContextChars bounds the task context folded into the classifier prompt
-// so a long turn can't bloat the small model's input (or crowd out the command).
-const maxTaskContextChars = 800
+// DefaultMaxTaskContextChars bounds the task context folded into the
+// classifier prompt so a long turn can't bloat the small model's input (or
+// crowd out the command). Exported so cmd/cortex's config resolver
+// (limits.max_task_context_chars) has a documented default to fall back to
+// — see Config.maxTaskContextChars in cmd/cortex/config.go.
+const DefaultMaxTaskContextChars = 800
 
 // ProviderClassifier builds the LLM-backed gray-zone ClassifyFn from a
-// provider. It is the tier-3 classifier Classify consults for commands that
-// cleared the deny-floor and missed the safe path.
+// provider, using DefaultMaxTaskContextChars. It is the tier-3 classifier
+// Classify consults for commands that cleared the deny-floor and missed the
+// safe path. See ProviderClassifierWithLimit for the config-bound variant.
+func ProviderClassifier(p llm.Provider, taskContext string) ClassifyFn {
+	return ProviderClassifierWithLimit(p, taskContext, DefaultMaxTaskContextChars)
+}
+
+// ProviderClassifierWithLimit is ProviderClassifier with an explicit
+// maxContextChars override (cmd/cortex's limits.max_task_context_chars); a
+// non-positive value falls back to DefaultMaxTaskContextChars.
 //
 // taskContext is the agent's current intent (typically the user's turn
 // request). It is folded into the prompt so the classifier can tell routine
@@ -54,12 +65,15 @@ const maxTaskContextChars = 800
 // Failure is fail-closed by construction: a transport error or an unparseable
 // response is returned as an error, which Classify turns into a Risky/
 // fail-closed verdict. The classifier is never allowed to default to Safe.
-func ProviderClassifier(p llm.Provider, taskContext string) ClassifyFn {
+func ProviderClassifierWithLimit(p llm.Provider, taskContext string, maxContextChars int) ClassifyFn {
+	if maxContextChars <= 0 {
+		maxContextChars = DefaultMaxTaskContextChars
+	}
 	return func(ctx context.Context, command string) (Level, string, error) {
 		var user strings.Builder
 		if tc := strings.TrimSpace(taskContext); tc != "" {
-			if len(tc) > maxTaskContextChars {
-				tc = tc[:maxTaskContextChars] + "…"
+			if len(tc) > maxContextChars {
+				tc = tc[:maxContextChars] + "…"
 			}
 			fmt.Fprintf(&user, "Task the agent is working on:\n%s\n\n", tc)
 		}

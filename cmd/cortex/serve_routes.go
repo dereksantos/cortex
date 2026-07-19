@@ -16,9 +16,17 @@ import (
 	"github.com/dereksantos/cortex/internal/registry"
 )
 
+// defaultProjectSessionsLimit is the immutable historical default — see
+// fleetDiscoveryTimeout's doc comment (config.go) for why
+// Config.projectSessionsLimit falls back to this const, never the mutable
+// projectSessionsLimit var below.
+const defaultProjectSessionsLimit = 50
+
 // projectSessionsLimit bounds how many sessions the listing endpoint
 // returns per project (newest first, matching listSessions' own ordering).
-const projectSessionsLimit = 50
+// A var: runServeCLI sets it once from serve.project_sessions_limit; unset,
+// it stays defaultProjectSessionsLimit.
+var projectSessionsLimit = defaultProjectSessionsLimit
 
 // sessionSummary is the serve-facing JSON shape for one session's listing
 // row. Deliberately a distinct type from sessionInfo (session.go) rather

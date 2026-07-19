@@ -15,16 +15,30 @@ import (
 // GOAL.md §6 M4.1.
 
 func TestServePortFromArgsDefaultsTo7433(t *testing.T) {
-	got := servePortFromArgs(nil)
+	got := servePortFromArgs(nil, defaultServePort)
 	if got != defaultServePort {
 		t.Errorf("servePortFromArgs(nil) = %d, want %d", got, defaultServePort)
 	}
 }
 
 func TestServePortFromArgsFlagOverrides(t *testing.T) {
-	got := servePortFromArgs([]string{"--port", "9090"})
+	got := servePortFromArgs([]string{"--port", "9090"}, defaultServePort)
 	if got != 9090 {
 		t.Errorf("servePortFromArgs(--port 9090) = %d, want 9090", got)
+	}
+}
+
+func TestServePortFromArgsConfigDefaultOverridesWhenNoFlag(t *testing.T) {
+	got := servePortFromArgs(nil, 8080)
+	if got != 8080 {
+		t.Errorf("servePortFromArgs(nil, 8080) = %d, want 8080", got)
+	}
+}
+
+func TestServePortFromArgsFlagWinsOverConfigDefault(t *testing.T) {
+	got := servePortFromArgs([]string{"--port", "9090"}, 8080)
+	if got != 9090 {
+		t.Errorf("servePortFromArgs(--port 9090, 8080) = %d, want 9090 (flag wins)", got)
 	}
 }
 

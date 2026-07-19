@@ -141,8 +141,8 @@ func TestReadRangeByteCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) > maxReadBytes+200 { // header + note slack
-		t.Errorf("read returned %d bytes, want bounded near maxReadBytes %d", len(out), maxReadBytes)
+	if len(out) > defaultMaxReadBytes+200 { // header + note slack
+		t.Errorf("read returned %d bytes, want bounded near defaultMaxReadBytes %d", len(out), defaultMaxReadBytes)
 	}
 	if !strings.Contains(out, "truncated") {
 		t.Errorf("a huge-line span should carry a truncation note:\n%.200s", out)

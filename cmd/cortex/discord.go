@@ -48,18 +48,31 @@ import (
 // prompt (discord_risk.go) instead of headless-Blocked — the one place
 // Discord gains something the REPL already had: a human in the loop.
 
-const (
-	// discordMaxMessage is Discord's hard per-message character limit; replies
-	// are chunked below it. Kept a hair under 2000 for safety.
-	discordMaxMessage = 1990
-	// typingRefresh re-triggers the typing indicator, which Discord clears after
-	// ~10s, so a long agent turn keeps showing "Cortex is typing…".
-	typingRefresh = 8 * time.Second
-	// routeConfidenceThreshold is the bar a new_change decision must clear to
-	// reset the session. Below it, continue — the bias-to-continue gate that
-	// keeps a misread from resetting live work.
-	routeConfidenceThreshold = 0.8
-)
+// discordMaxMessage is Discord's hard per-message character limit; replies
+// are chunked below it. Kept a hair under 2000 for safety. Not
+// config-overridable — see CLAUDE.md's "explicitly not exposed" list.
+const discordMaxMessage = 1990
+
+// defaultTypingRefresh is the immutable historical default — see
+// fleetDiscoveryTimeout's doc comment (config.go) for why
+// Config.discordTypingRefresh falls back to this const, never the mutable
+// typingRefresh var below.
+const defaultTypingRefresh = 8 * time.Second
+
+// typingRefresh re-triggers the typing indicator, which Discord clears after
+// ~10s, so a long agent turn keeps showing "Cortex is typing…". A var (not a
+// const): runDiscordCLI sets it once at startup from
+// discord.typing_refresh_sec; unset, it stays defaultTypingRefresh.
+var typingRefresh = defaultTypingRefresh
+
+// routeConfidenceThreshold is the bar a new_change decision must clear to
+// reset the session. Below it, continue — the bias-to-continue gate that
+// keeps a misread from resetting live work. Kept as the resolver default
+// (Config.discordRouteConfidenceThreshold) — maybeRouteNewChange reads the
+// per-session config value directly rather than this constant, since
+// discord.route_confidence_threshold's 0-vs-unset distinction needs the
+// *float64 pointer, which a plain var can't carry as cleanly.
+const routeConfidenceThreshold = 0.8
 
 // discordBot holds the bot's mutable state. Every map is keyed by Discord
 // channel id — one live session, goal, active change, in-flight-turn
@@ -116,7 +129,20 @@ func newDiscordSessionFactory() sessionFactory {
 // when unset), and DISCORD_SESSION_ID resumes a specific prior session into
 // DISCORD_CHANNEL_ID (it needs a channel to bind to under the per-channel
 // session model — set both or neither).
+// applyDiscordConfig sets the discord*.go package vars (typingRefresh,
+// riskApprovalTimeout, progressEditInterval) from cfg.Discord, once, before
+// any bot activity — the maybeRouteNewChange call sites read
+// routeMaxOutputTokens/routeConfidenceThreshold straight off the live
+// session's Config instead (per-session, not process-wide), since those two
+// are consulted through a *CortexSession that's already available there.
+func applyDiscordConfig(cfg *Config) {
+	typingRefresh = cfg.discordTypingRefresh()
+	riskApprovalTimeout = cfg.discordRiskApprovalTimeout()
+	progressEditInterval = cfg.discordProgressEditInterval()
+}
+
 func runDiscordCLI() error {
+	applyDiscordConfig(LoadConfig())
 	token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
 	if token == "" {
 		return fmt.Errorf("DISCORD_BOT_TOKEN is not set — create a bot at https://discord.com/developers, enable the Message Content intent, and export its token")
@@ -473,9 +499,9 @@ func (b *discordBot) maybeRouteNewChange(ctx context.Context, channelID, input s
 		return nil // no active task to diverge from
 	}
 	r := ms.cs.reasoner()
-	r.SetMaxTokens(routeMaxOutputTokens) // fresh client per call; bounding it here can't affect other reasoner() users
+	r.SetMaxTokens(ms.cs.Config.routeMaxOutputTokens()) // fresh client per call; bounding it here can't affect other reasoner() users
 	dec, ok := classifyRoute(ctx, r, input, goal)
-	if !ok || dec.Decision != routeNewChange || dec.Confidence < routeConfidenceThreshold {
+	if !ok || dec.Decision != routeNewChange || dec.Confidence < ms.cs.Config.discordRouteConfidenceThreshold() {
 		return nil
 	}
 	name := strings.TrimSpace(dec.Name)

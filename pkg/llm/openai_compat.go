@@ -24,16 +24,25 @@ import (
 	"time"
 )
 
-// defaultCompatTimeoutSec caps the HTTP request to an OpenAI-compat
+// DefaultCompatTimeoutSec caps the HTTP request to an OpenAI-compat
 // endpoint. Local inference servers behind this client (Lemonade,
 // llama.cpp, vLLM) can take a long time on large-context calls —
 // 30B-class models in particular routinely exceed a one-minute ceiling
 // for a single forward pass over ~10K input tokens. Override via the
-// CORTEX_COMPAT_TIMEOUT_SEC env var for slower hardware.
-const defaultCompatTimeoutSec = 300
+// CORTEX_COMPAT_TIMEOUT_SEC env var for slower hardware, or (below that
+// env var in precedence) via cmd/cortex's network.compat_timeout_sec config
+// field — cmd/cortex sets this var once at session construction from the
+// resolved config; env still wins over it when both are set (P1 timeout
+// unification, docs/configuration.md's `network.*` section: "env still
+// wins over config for this one, matching its subprocess-boundary
+// rationale"). A package var (not a const) is what makes that override
+// possible; 300 is the historical default, unchanged for anyone who never
+// touches either knob.
+var DefaultCompatTimeoutSec = 300
 
 // compatTimeout returns the per-request HTTP timeout, honoring
-// CORTEX_COMPAT_TIMEOUT_SEC when set to a positive integer.
+// CORTEX_COMPAT_TIMEOUT_SEC when set to a positive integer, else
+// DefaultCompatTimeoutSec.
 func compatTimeout() time.Duration {
 	if v := os.Getenv("CORTEX_COMPAT_TIMEOUT_SEC"); v != "" {
 		var secs int
@@ -41,7 +50,7 @@ func compatTimeout() time.Duration {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return defaultCompatTimeoutSec * time.Second
+	return time.Duration(DefaultCompatTimeoutSec) * time.Second
 }
 
 // EndpointConfig identifies one OpenAI-compatible endpoint. Name is a

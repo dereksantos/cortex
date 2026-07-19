@@ -190,10 +190,22 @@ func (envKeychainKeyProbe) Probe() (string, bool) {
 	return "", false
 }
 
-// ollamaProbeTimeout bounds the one /api/tags reachability check the
+// defaultOllamaProbeTimeout bounds the one /api/tags reachability check the
 // bootstrap chain's Ollama stage makes — Ollama is local, so this stays
 // short; a slow/absent daemon just falls through to the guided stage.
-const ollamaProbeTimeout = 2 * time.Second
+//
+// network.ollama_probe_timeout_sec exists in the config schema
+// (Config.ollamaProbeTimeout) for completeness with the rest of
+// docs/configuration.md's `network.*` section, but this probe only ever
+// runs from GuidedSetup on a TRUE first run — no user config, no project
+// config, no $CORTEX_BACKEND (docs/configuration.md "Interactive
+// first-run setup") — which means a config file setting this field can
+// never actually be loaded before this stage runs. Left a plain const
+// (not a var some call site overrides) for that reason: there is no
+// reachable production call site to wire it from.
+const defaultOllamaProbeTimeout = 2 * time.Second
+
+const ollamaProbeTimeout = defaultOllamaProbeTimeout
 
 // ollamaLocalProbe is the production OllamaProbe (bootstrap.go chain
 // stage 3): wraps pkg/llm's existing /api/tags reachability probe

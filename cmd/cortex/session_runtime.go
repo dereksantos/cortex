@@ -113,8 +113,9 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		summary += "\n[" + outcome + "]"
 	}
 	if answer != "" {
-		if len(answer) > captureExcerptCap {
-			answer = answer[:captureExcerptCap] + "…"
+		cap := cs.Config.captureExcerptCapChars()
+		if len(answer) > cap {
+			answer = answer[:cap] + "…"
 		}
 		summary += "\n→ " + answer
 	}

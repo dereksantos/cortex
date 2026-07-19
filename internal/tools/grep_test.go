@@ -43,16 +43,16 @@ func TestGrepNoMatches(t *testing.T) {
 func TestGrepCap(t *testing.T) {
 	dir := t.TempDir()
 	var b strings.Builder
-	for i := 0; i < grepMaxHits+50; i++ {
+	for i := 0; i < active.GrepMaxHits+50; i++ {
 		b.WriteString("match here\n")
 	}
 	os.WriteFile(filepath.Join(dir, "big.txt"), []byte(b.String()), 0o644)
-	out, err := grepFiles(context.Background(), dir, mustRe(t, "match"), grepMaxHits)
+	out, err := grepFiles(context.Background(), dir, mustRe(t, "match"), active.GrepMaxHits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(out, "big.txt:"); n > grepMaxHits {
-		t.Errorf("got %d hits, want <= cap %d", n, grepMaxHits)
+	if n := strings.Count(out, "big.txt:"); n > active.GrepMaxHits {
+		t.Errorf("got %d hits, want <= cap %d", n, active.GrepMaxHits)
 	}
 	if !strings.Contains(out, "capped at") {
 		t.Errorf("expected a capped note:\n%s", out)
@@ -69,7 +69,7 @@ func TestGrepCentersOnMatch(t *testing.T) {
 	padding := strings.Repeat("padding\n", (1<<20)/len("padding\n"))
 	os.WriteFile(filepath.Join(dir, "huge.jsonl"), []byte(line+"\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "large.jsonl"), []byte(padding+"LARGE_NEEDLE\n"), 0o644)
-	out, err := grepFiles(context.Background(), dir, mustRe(t, "NEEDLE"), grepMaxHits)
+	out, err := grepFiles(context.Background(), dir, mustRe(t, "NEEDLE"), active.GrepMaxHits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestGrepLongJSONLKeepsNearbyFact(t *testing.T) {
 	dir := t.TempDir()
 	line := strings.Repeat("x", 450) + "AGENTS.md" + strings.Repeat("y", 450) + "seed context" + strings.Repeat("z", 450)
 	os.WriteFile(filepath.Join(dir, "journal.jsonl"), []byte(line+"\n"), 0o644)
-	out, err := grepFiles(context.Background(), dir, mustRe(t, "seed context"), grepMaxHits)
+	out, err := grepFiles(context.Background(), dir, mustRe(t, "seed context"), active.GrepMaxHits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestGrepBinarySkip(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "bin"), []byte("match\x00match\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "text.txt"), []byte("match\n"), 0o644)
-	out, _ := grepFiles(context.Background(), dir, mustRe(t, "match"), grepMaxHits)
+	out, _ := grepFiles(context.Background(), dir, mustRe(t, "match"), active.GrepMaxHits)
 	if strings.Contains(out, "bin:") {
 		t.Errorf("binary file should be skipped:\n%s", out)
 	}
@@ -112,7 +112,7 @@ func TestGrepRespectsIgnoreSet(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
 	os.WriteFile(filepath.Join(dir, ".git", "secret.txt"), []byte("needle\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("needle\n"), 0o644)
-	out, _ := grepFiles(context.Background(), dir, mustRe(t, "needle"), grepMaxHits)
+	out, _ := grepFiles(context.Background(), dir, mustRe(t, "needle"), active.GrepMaxHits)
 	if strings.Contains(out, ".git/") {
 		t.Errorf(".git should be ignored:\n%s", out)
 	}

@@ -39,8 +39,10 @@ const defaultServePort = 7433
 const defaultSessionIdleTimeout = 30 * time.Minute
 
 // servePortFromArgs parses `--port <n>` out of a `cortex serve` argument
-// list, defaulting to defaultServePort when absent or malformed.
-func servePortFromArgs(args []string) int {
+// list, defaulting to def (defaultServePort, or serve.port when configured)
+// when absent or malformed. `--port` always wins over config when both are
+// given — an explicit flag is the more specific, more recent intent.
+func servePortFromArgs(args []string, def int) int {
 	for i, a := range args {
 		if a == "--port" && i+1 < len(args) {
 			if n, err := strconv.Atoi(args[i+1]); err == nil {
@@ -48,7 +50,7 @@ func servePortFromArgs(args []string) int {
 			}
 		}
 	}
-	return defaultServePort
+	return def
 }
 
 // newServeServer constructs the *http.Server and its real, already-bound
@@ -261,7 +263,10 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 // composes (servePortFromArgs, newServeServer, hostOriginMiddleware,
 // newServeMux) carry the coverage.
 func runServeCLI(args []string) {
-	port := servePortFromArgs(args)
+	cfg := LoadConfig()
+	port := servePortFromArgs(args, cfg.servePort(defaultServePort))
+	loops.CadenceFloorMinutes = cfg.loopCadenceFloorMin()
+	projectSessionsLimit = cfg.projectSessionsLimit()
 	cleanupLegacyServeToken()
 	reg, err := registry.New()
 	if err != nil {
@@ -269,7 +274,7 @@ func runServeCLI(args []string) {
 		os.Exit(1)
 	}
 	mgr := NewSessionManager(reg, newProductionSession)
-	mgr.SetIdleTimeout(defaultSessionIdleTimeout)
+	mgr.SetIdleTimeout(cfg.sessionIdleTimeout())
 
 	loopsStore, err := loops.New()
 	if err != nil {

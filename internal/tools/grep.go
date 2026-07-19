@@ -19,10 +19,12 @@ import (
 
 const FunctionGrep = "grep"
 
+// defaultGrepMaxHits / defaultGrepLineCap / defaultGrepMaxOutputBytes name
+// DefaultLimits()'s values (config-overridable via tools.grep.*).
 const (
-	grepMaxHits        = 100  // cap so a broad pattern can't flood context
-	grepLineCap        = 1200 // window width for a long matching line (centered on the match)
-	grepMaxOutputBytes = 6000 // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
+	defaultGrepMaxHits        = 100  // cap so a broad pattern can't flood context
+	defaultGrepLineCap        = 1200 // window width for a long matching line (centered on the match)
+	defaultGrepMaxOutputBytes = 6000 // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
 )
 
 var filenameLikeRe = regexp.MustCompile(`[A-Za-z0-9_-]\.[A-Za-z0-9]`)
@@ -66,7 +68,7 @@ func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		// not a harness failure — the model fixes the pattern and retries.
 		return fmt.Sprintf("invalid regex %q: %v (grep uses RE2 — no lookahead or backreferences)", pattern, err), nil
 	}
-	return grepFiles(ctx, resolveWorkdir(deps, root), re, grepMaxHits)
+	return grepFiles(ctx, resolveWorkdir(deps, root), re, active.GrepMaxHits)
 }
 
 func isBroadJournalGrep(root, pattern string) bool {
@@ -269,7 +271,7 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	var hits []string
 	hitBytes := 0
 	truncated := false
-	full := func() bool { return len(hits) >= cap || hitBytes >= grepMaxOutputBytes }
+	full := func() bool { return len(hits) >= cap || hitBytes >= active.GrepMaxOutputBytes }
 
 	scanFile := func(path, display string) error {
 		if full() {
@@ -345,23 +347,24 @@ func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (st
 	}
 	out := strings.Join(hits, "\n")
 	if truncated {
-		out += fmt.Sprintf("\n… (capped at %d matches / %dKB — narrow the pattern or path)", cap, grepMaxOutputBytes/1000)
+		out += fmt.Sprintf("\n… (capped at %d matches / %dKB — narrow the pattern or path)", cap, active.GrepMaxOutputBytes/1000)
 	}
 	return out, nil
 }
 
 // capLine returns a grepLineCap window CENTERED on match offset `at`, keeping a hit deep in a long (JSONL) line visible.
 func capLine(b []byte, at int) string {
+	lineCap := active.GrepLineCap
 	s := strings.TrimRight(string(b), "\r")
-	if len(s) <= grepLineCap {
+	if len(s) <= lineCap {
 		return s
 	}
-	start := at - grepLineCap/2
+	start := at - lineCap/2
 	if start < 0 {
 		start = 0
 	}
-	if start+grepLineCap > len(s) {
-		start = len(s) - grepLineCap
+	if start+lineCap > len(s) {
+		start = len(s) - lineCap
 	}
-	return "…" + s[start:start+grepLineCap] + "…"
+	return "…" + s[start:start+lineCap] + "…"
 }

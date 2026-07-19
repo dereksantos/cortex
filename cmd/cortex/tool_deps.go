@@ -86,7 +86,12 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: effortOffKwargs,
-		Timeout:            10 * time.Minute,
+		// P1: previously hardcoded 10*time.Minute, which bypassed
+		// CORTEX_COMPAT_TIMEOUT_SEC entirely. Now resolved the same way
+		// every other transport timeout in this audit is: an explicit
+		// models.study.request_timeout_sec wins, then the env var, then
+		// this 10-minute default — unchanged for anyone touching neither.
+		Timeout: cs.Study.timeout(10 * time.Minute),
 	})
 	p.SetModel(cs.Study.Model)
 	p.SetTemperature(cs.Study.temperature(defaultTemperature))
@@ -104,7 +109,8 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: effortOffKwargs,
-		Timeout:            10 * time.Minute,
+		// P1: see newStudyProvider's identical comment above.
+		Timeout: cs.Study.timeout(10 * time.Minute),
 	})
 	p.SetModel(cs.Study.Model)
 	p.SetTemperature(cs.Study.temperature(defaultTemperature))
@@ -190,6 +196,9 @@ func (cs *CortexSession) MemoryForget(name string) (string, error) {
 	return fmt.Sprintf("forgot note %q", name), nil
 }
 
+// memoryIndexCap is the historical memory-index truncation default.
+// Config-overridable via limits.memory_index_cap_chars — see
+// Config.memoryIndexCapChars.
 const memoryIndexCap = 4000
 
 func (cs *CortexSession) memoryIndexNote() string {
@@ -200,8 +209,9 @@ func (cs *CortexSession) memoryIndexNote() string {
 	if err != nil || strings.TrimSpace(idx) == "" {
 		return ""
 	}
-	if len(idx) > memoryIndexCap {
-		idx = idx[:memoryIndexCap] + "\n… (index truncated; memory_search to find the rest)"
+	cap := cs.Config.memoryIndexCapChars()
+	if len(idx) > cap {
+		idx = idx[:cap] + "\n… (index truncated; memory_search to find the rest)"
 	}
 	return "These are notes you saved in earlier sessions. Read the relevant ones with " +
 		"memory_read before answering.\n\n" + idx
@@ -266,7 +276,7 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 	// Gate at the curation budget, scaled down to the tail's low watermark on
 	// small windows: a recall bigger than the tail's drain target would flood
 	// the hydrated tail and immediately re-demote.
-	gate := tools.CurationBudgetTokens
+	gate := cs.Config.toolLimits().CurationBudgetTokens
 	if w := cs.windowSize() / 3; w < gate {
 		gate = w
 	}
@@ -284,7 +294,7 @@ func (cs *CortexSession) gateShell(ctx context.Context, command string) (string,
 		fn = cs.classifyShell
 		if fn == nil {
 			fn = func(ctx context.Context, command string) (shellrisk.Level, string, error) {
-				return shellrisk.ProviderClassifier(cs.reasoner(), cs.turnIntent)(ctx, command)
+				return shellrisk.ProviderClassifierWithLimit(cs.reasoner(), cs.turnIntent, cs.Config.maxTaskContextChars())(ctx, command)
 			}
 		}
 	}

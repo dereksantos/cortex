@@ -558,6 +558,9 @@ func requestFor(spec ModelSpec, system, seed string, toolset []Tool, maxTokens i
 			{Role: RoleSystem, Content: system},
 			{Role: RoleUser, Content: seed},
 		},
+		Timeout:     spec.timeout(requestTimeout),
+		MaxAttempts: spec.maxAttempts(maxSendAttempts),
+		Backoff:     spec.backoff(retryBackoff),
 	}
 	applyEffort(req, dialect, spec.Thinking)
 	return req

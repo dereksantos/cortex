@@ -167,7 +167,7 @@ func TestBuildModelCatalogLiteLLM(t *testing.T) {
 
 	// Rendering shouldn't panic and should surface both the role bindings
 	// and the served models.
-	text := renderModelCatalog(report)
+	text := renderModelCatalog(report, 0)
 	if !strings.Contains(text, "coder") || !strings.Contains(text, "reasoner-npu") {
 		t.Errorf("rendered catalog missing expected model ids:\n%s", text)
 	}
@@ -193,7 +193,7 @@ func TestBuildModelCatalogUnreachable(t *testing.T) {
 		t.Error("expected code role binding to still be present")
 	}
 
-	text := renderModelCatalog(report)
+	text := renderModelCatalog(report, 0)
 	if !strings.Contains(text, "unreachable") {
 		t.Errorf("rendered catalog should mention unreachable:\n%s", text)
 	}

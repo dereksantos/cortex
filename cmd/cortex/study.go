@@ -21,6 +21,13 @@ func (cs *CortexSession) Outline(path string, budget int) (string, error) {
 	return outline.Render(path, budget)
 }
 
+// SeedBudget resolves the outline budget used to seed a subagent (the
+// SeedBudgeter seam) — subagents.seed_budget_tokens, falling back to
+// tools.StudySeedBudget.
+func (cs *CortexSession) SeedBudget() int {
+	return cs.Config.seedBudget()
+}
+
 // specForRole resolves a subagent profile's config-bound model spec. Only the
 // study role has a binding of its own (the reasoner tag, thinking ON); it is
 // also the fallback for any profile when there is no live coder request to
@@ -54,6 +61,13 @@ func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentR
 		req.ChatTemplateKwargs = cs.Request.ChatTemplateKwargs
 		req.Reasoning = cs.Request.Reasoning
 		req.Temperature = cs.Request.Temperature
+		// P1: the agent profile runs on the coder's model, so it runs on the
+		// coder's transport budget too — not the study role's
+		// request_timeout_sec/max_send_attempts/retry_backoff_ms (see
+		// ModelSpec's doc comment in config.go).
+		req.Timeout = cs.Request.Timeout
+		req.MaxAttempts = cs.Request.MaxAttempts
+		req.Backoff = cs.Request.Backoff
 	}
 	if sa.Model != "" {
 		req.Model = sa.Model
@@ -127,6 +141,13 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 		return "", loopStats{}, fmt.Errorf("%s: subagent depth cap %d exceeded (called at depth %d)", sa.Name, sa.DepthCap, depth)
 	}
 	ctx = withSubagentDepth(ctx, depth+1)
+	// subagents.study / subagents.agent override this profile's registered
+	// Bounds (internal/tools.Study.Bounds / .Agent.Bounds). This mutates ONLY
+	// this local copy of sa (Subagent is a value type, passed by value all
+	// the way from tools.Lookup) — never the package-level tools.Study/.Agent
+	// vars, so sessions (and tests) with different config never see each
+	// other's overrides.
+	sa.Bounds = cs.Config.subagentBounds(sa.Role, sa.Bounds)
 	req := cs.subagentRequest(sa, seed)
 	if !cs.quiet {
 		fmt.Println(withColor(fmt.Sprintf("  run: %s via %s", sa.Name, req.Model), green))

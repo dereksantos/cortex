@@ -116,14 +116,15 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	if err != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("resolve project %q: %v", spec.Project, err)
-		return finalizeLoopFiring(spec, store, payload)
+		return finalizeLoopFiring(spec, store, payload, 0)
 	}
 
 	cs := newSession()
+	strikes := cs.Config.loopAutoDisableStrikes()
 	if err := applyProjectByName(cs, reg, spec.Project); err != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("apply project: %v", err)
-		return finalizeLoopFiring(spec, store, payload)
+		return finalizeLoopFiring(spec, store, payload, strikes)
 	}
 	cs.StartTranscript()
 	defer cs.Close()
@@ -146,12 +147,12 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	if turnErr != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = fmt.Sprintf("turn: %v", turnErr)
-		return finalizeLoopFiring(spec, store, payload)
+		return finalizeLoopFiring(spec, store, payload, strikes)
 	}
 	if result.StopReason == "max-iter" || result.StopReason == "token-budget" {
 		payload.Outcome = journal.LoopOutcomeFailed
 		payload.Reason = "budget"
-		return finalizeLoopFiring(spec, store, payload)
+		return finalizeLoopFiring(spec, store, payload, strikes)
 	}
 
 	if startErr == nil {
@@ -176,17 +177,28 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 			payload.NextMinutes = marker.NextMinutes
 		}
 	}
-	return finalizeLoopFiring(spec, store, payload)
+	return finalizeLoopFiring(spec, store, payload, strikes)
 }
+
+// defaultLoopAutoDisableStrikes is D11's original tuning: 3 consecutive
+// failed firings auto-disable a loop. Config-overridable via
+// serve.loop_auto_disable_strikes (Config.loopAutoDisableStrikes).
+const defaultLoopAutoDisableStrikes = 3
 
 // finalizeLoopFiring appends payload as the firing's loop.run journal
 // event, then applies whatever terminal state the outcome implies: a DONE
-// marker or a third consecutive "failed" outcome (loops.ConsecutiveFailures,
-// D11) disables the spec in store so the scheduler stops driving it —
-// both journaled by the very event finalizeLoopFiring just wrote, never a
-// second invented one. store may be nil (some callers don't care about
-// terminal-state persistence); a nil store just skips that half.
-func finalizeLoopFiring(spec loops.Spec, store loops.Store, payload journal.LoopRunPayload) error {
+// marker or `strikes` consecutive "failed" outcomes in a row
+// (loops.ConsecutiveFailures, D11) disables the spec in store so the
+// scheduler stops driving it — both journaled by the very event
+// finalizeLoopFiring just wrote, never a second invented one. store may be
+// nil (some callers don't care about terminal-state persistence); a nil
+// store just skips that half. strikes <= 0 falls back to
+// defaultLoopAutoDisableStrikes (the RunLoopFiring call sites before a
+// session — and therefore a Config — exists pass 0).
+func finalizeLoopFiring(spec loops.Spec, store loops.Store, payload journal.LoopRunPayload, strikes int) error {
+	if strikes <= 0 {
+		strikes = defaultLoopAutoDisableStrikes
+	}
 	if err := journal.AppendLoopRun(payload); err != nil {
 		return fmt.Errorf("failed to journal loop.run for %q: %w", spec.Name, err)
 	}
@@ -197,8 +209,8 @@ func finalizeLoopFiring(spec loops.Spec, store loops.Store, payload journal.Loop
 	case payload.Done:
 		disableLoop(store, spec.Name, "done: "+payload.NextReason)
 	case payload.Outcome == journal.LoopOutcomeFailed:
-		if n, err := loops.ConsecutiveFailures(spec.Name); err == nil && n >= 3 {
-			disableLoop(store, spec.Name, "3 consecutive failures")
+		if n, err := loops.ConsecutiveFailures(spec.Name); err == nil && n >= strikes {
+			disableLoop(store, spec.Name, fmt.Sprintf("%d consecutive failures", strikes))
 		}
 	}
 	return nil

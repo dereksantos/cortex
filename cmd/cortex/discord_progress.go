@@ -16,10 +16,19 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// defaultProgressEditInterval is the immutable historical default — see
+// fleetDiscoveryTimeout's doc comment (cmd/cortex/config.go) for why
+// Config.discordProgressEditInterval falls back to this const, never the
+// mutable progressEditInterval var below.
+const defaultProgressEditInterval = 1500 * time.Millisecond
+
 // progressEditInterval throttles status-message edits so a chatty turn
 // doesn't trip Discord's per-channel edit rate limit; the final state is
-// always posted regardless of throttling (finishProgress bypasses it).
-const progressEditInterval = 1500 * time.Millisecond
+// always posted regardless of throttling (finishProgress bypasses it). A var
+// (not const): runDiscordCLI sets it once at startup from
+// discord.progress_edit_interval_ms; unset, it stays
+// defaultProgressEditInterval.
+var progressEditInterval = defaultProgressEditInterval
 
 // statusStopEmoji is the reaction a user adds to the live status message to
 // interrupt the turn — the message-based analog of a slash /stop for

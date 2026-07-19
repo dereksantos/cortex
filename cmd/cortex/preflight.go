@@ -21,11 +21,19 @@ import (
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
+// defaultOpenRouterPreflightTimeout is the immutable historical default —
+// see fleetDiscoveryTimeout's doc comment (config.go) for why the resolver
+// (Config.preflightTimeout) falls back to this const, never the mutable
+// openRouterPreflightTimeout var below.
+const defaultOpenRouterPreflightTimeout = 4 * time.Second
+
 // openRouterPreflightTimeout bounds the one ListModels call the whole
 // substitution check makes — small enough that REPL startup latency stays
 // imperceptible even when OpenRouter is slow to answer, and this path only
 // runs at all when the backend is openrouter and a role bound a curated id.
-const openRouterPreflightTimeout = 4 * time.Second
+// A var: NewCortexSession sets it once from network.preflight_timeout_sec;
+// unset, it stays defaultOpenRouterPreflightTimeout.
+var openRouterPreflightTimeout = defaultOpenRouterPreflightTimeout
 
 // listModelsFn matches llm.OpenRouterClient.ListModels's shape. Production
 // wires it to a real client; tests fake it, so the preflight never touches

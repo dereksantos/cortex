@@ -1,10 +1,13 @@
 # Configuration
 
 The one page for configuring `cortex`: where config lives, what a minimal
-setup looks like, what the zero-config default does, every `tools.*` gate,
-and every environment variable that changes behavior. Everything below is
-verified against `cmd/cortex/config.go` and the code that reads each
-setting — no aspirational fields.
+setup looks like, what the zero-config default does, every `tools.*` gate
+and numeric cap, every `models.<role>`/`subagents`/`limits`/`network`/
+`serve`/`repl`/`discord` field, and every environment variable that changes
+behavior. Everything below is verified against `cmd/cortex/config.go` and
+the code that reads each setting — no aspirational fields. Every field on
+this page is optional; a config that never mentions a section behaves
+byte-identically to today's hardcoded value.
 
 This describes the config `cmd/cortex` itself reads (the layered
 `~/.cortex/config.json` → project `.cortex/config.json` → `CORTEX_BACKEND`
@@ -211,6 +214,28 @@ Example disabling deletion and web access:
 }
 ```
 
+## `tools.*` numeric caps
+
+The gates above turn tools on/off; these size them. All optional, all
+default to today's hardcoded value.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `curation_budget_tokens` | 16000 | `read_file` → `study` redirect threshold: a whole-file read estimated above this is refused and redirected to `study`. |
+| `max_tool_output` | 10000 | Cap on tool output chars fed back into context (bash, oversized reads). |
+| `outline_default_budget` | 4000 | `outline` tool's structure budget when the model omits one. |
+| `read.default_range_lines` | 200 | `read_file`'s window when `start` is given without `end`. |
+| `read.max_range_lines` | 800 | Cap on a single ranged `read_file`. |
+| `read.max_read_bytes` | 24000 | Per-read byte ceiling (bounds very-long-line spans the line cap alone can't). |
+| `grep.max_hits` | 100 | Cap on `grep` match count. |
+| `grep.line_cap` | 1200 | Window width for a long matching line (centered on the match). |
+| `grep.max_output_bytes` | 6000 | Total-output ceiling for one `grep` call. |
+| `fetch_url.timeout_sec` | 20 | HTTP timeout for `fetch_url`. |
+| `fetch_url.max_redirects` | 5 | Redirect cap for `fetch_url`. |
+| `fetch_url.max_body_bytes` | 1048576 (1 MiB) | Download/parse ceiling for `fetch_url` and `web_search`. |
+| `web_search.default_max_results` | 5 | `web_search`'s result count when the model omits `max_results`. |
+| `web_search.maximum_max_results` | 10 | Cap on `web_search`'s `max_results` argument. |
+
 ## Model fields (`models.<role>`)
 
 | Field | Meaning |
@@ -222,6 +247,102 @@ Example disabling deletion and web access:
 | `temperature` | Overrides `backend`/global temperature for this role. |
 | `key_env` / `key_service` | Per-role auth override (see Auth above). |
 | `thinking` | Reasoning-effort intent — `false`/`true` (legacy bool), a level string (`"off"`/`"on"`/`"low"`/`"medium"`/`"high"`), or `{"budget": N}`. See `docs/thinking-models.md`. Both live roles default to `"on"`. |
+| `request_timeout_sec` | Per-request HTTP timeout for this role's model calls. Precedence: this field → `CORTEX_COMPAT_TIMEOUT_SEC` (env) → the historical default (10 min for the coder/subagent transport path, `models.study`'s summarizer/shell-risk sub-calls included). |
+| `max_send_attempts` | Retry ceiling for a transient failure (transport error, 429/5xx) on this role's calls. Default 3. |
+| `retry_backoff_ms` | Base linear-backoff delay between retries (`attempt × retry_backoff_ms`). Default 500ms. |
+
+`request_timeout_sec`/`max_send_attempts`/`retry_backoff_ms` only exist under `models.code` and `models.study` — the coder's own turn and the `agent` subagent (which runs on the coder's live model) use `models.code`'s values; the `study` subagent plus the summarizer and shell-risk classifier (both of which build their sub-LLM client from the `study` binding) use `models.study`'s.
+
+## `subagents.*` — Study/Agent profile bounds
+
+```json
+{
+  "subagents": {
+    "seed_budget_tokens": 6000,
+    "study": { "max_tokens": 8192, "max_iter": 12, "read_budget_bytes": 96000 },
+    "agent": { "max_tokens": 8192, "max_iter": 20, "read_budget_bytes": 128000 }
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `seed_budget_tokens` | 6000 | Outline budget used to seed EITHER profile before its loop starts (shared — one constant, not per-profile, hence this lives at the top level rather than duplicated under `.study`/`.agent`). |
+| `study.max_tokens` / `study.max_iter` / `study.read_budget_bytes` | 8192 / 12 / 96000 | The `study` subagent's output-token cap, tool-call iteration cap, and cumulative read-byte budget. |
+| `agent.max_tokens` / `agent.max_iter` / `agent.read_budget_bytes` | 8192 / 20 / 128000 | The `agent` subagent's same three bounds. |
+
+**Naming honesty**: this section configures PROFILES (the `study` and `agent` subagents), not model roles — despite the name overlap with `models.study`, `subagents.agent` does **not** run on a "study" or "agent" role binding. The `agent` profile runs on the **coder's own live model** by default (an optional per-call `model` argument on the `agent` tool call can pin a different one). The original audit sketched this as `models.study.subagent.{study,agent}`; it landed as a top-level `subagents` section instead, because nesting it under `models.study` would have implied the `agent` profile is bound to the study role, which it isn't.
+
+## `limits.*` — assorted byte/count ceilings
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. |
+| `max_instruction_bytes` | 16384 | `AGENTS.md` truncation cap. |
+| `memory_index_cap_chars` | 4000 | Truncation cap on the injected memory-note index. |
+| `capture_excerpt_cap_chars` | 280 | Truncation cap on the final-answer excerpt the journal capture records. |
+| `max_task_context_chars` | 800 | Truncation cap on the turn context folded into the shell-risk classifier's prompt. |
+| `route_max_output_tokens` | 80 | Output-token cap on Discord's continue/new-change routing classifier. |
+| `max_served_models_shown` | 40 | Cap on the served-model list `cortex model` prints (the full list is still in `--json`). |
+
+## `network.*` — bounded-probe timeouts
+
+| Field | Default | Meaning |
+|---|---|---|
+| `fleet_discovery_timeout_sec` | 4 | Timeout for the `/model/info` fleet-discovery probe. |
+| `preflight_timeout_sec` | 4 | Timeout for the startup curated-model preflight's `ListModels` call. |
+| `ollama_probe_timeout_sec` | 2 | Timeout for the guided first-run setup's local-Ollama reachability check. **Not actually reachable in practice**: this probe only ever runs during `GuidedSetup` on a true first run (no user config, no project config, no `$CORTEX_BACKEND` — see "Interactive first-run setup" above), which by definition means no config file exists yet to set this field from. Kept in the schema for documentation parity with the rest of `network.*`. |
+| `compat_timeout_sec` | 300 | Sets the OpenAI-compatible client's fallback per-request timeout default (`pkg/llm`'s `DefaultCompatTimeoutSec`). Unlike every other timeout field on this page, **`CORTEX_COMPAT_TIMEOUT_SEC` (env) wins over this field** when both are set — matching the env knob's original subprocess-boundary rationale. A `models.<role>.request_timeout_sec` set explicitly still wins over both. |
+
+## `serve.*` — `cortex serve` tunables
+
+| Field | Default | Meaning |
+|---|---|---|
+| `port` | 7433 | Bind port when `--port` isn't passed on the command line (`--port` always wins over this). |
+| `session_idle_timeout_min` | 30 | How long an untouched live session stays in memory before `SessionManager` evicts it (a later request transparently re-hydrates from disk). |
+| `loop_cadence_floor_min` | 5 | Minimum non-zero interval a loop spec may run on (`internal/loops.CadenceFloorMinutes`). |
+| `loop_auto_disable_strikes` | 3 | Consecutive failed firings that auto-disable a loop (D11's self-pacing tuning). |
+| `project_sessions_limit` | 50 | Cap on how many sessions the `/api/projects/{name}/sessions` listing endpoint returns per project. |
+
+## `repl.*` — interactive REPL tunables
+
+| Field | Default | Meaning |
+|---|---|---|
+| `ticker_interval_ms` | 1000 | Wall-clock refresh period of the "thinking… Ns" elapsed label during a streaming turn. |
+
+The braille spinner set was removed (2026-07-19); there is deliberately no
+spinner-cadence knob. The line editor's own 90ms live-redraw tick
+(`internal/lineedit`) is a separate, lower-level rendering loop from the
+thinking-ticker above and was evaluated but left hardcoded — wiring it would
+add a second, easily-confused REPL timing knob for a redraw-smoothness
+concern nobody has asked to tune.
+
+## `discord.*` — Discord adapter tunables
+
+| Field | Default | Meaning |
+|---|---|---|
+| `typing_refresh_sec` | 8 | How often the typing indicator is re-triggered during a long turn. |
+| `risk_approval_timeout_sec` | 120 | How long a risky-command approval prompt stays open before lapsing to headless-Blocked. |
+| `progress_edit_interval_ms` | 1500 | Throttle on live status-message edits during a turn. |
+| `route_confidence_threshold` | 0.8 | Confidence bar the continue/new-change router must clear to reset the session; must be in `(0, 1]` when set. |
+
+`typing_refresh_sec`/`risk_approval_timeout_sec`/`progress_edit_interval_ms`
+are process-wide (set once at `cortex discord` startup);
+`route_max_output_tokens` (`limits.*`) and `route_confidence_threshold` are
+read per-session from the live `*CortexSession`'s config.
+
+## Validation
+
+Every field above is optional; 0 (or, for `route_confidence_threshold`,
+absent/`null`) means "not set — use the default." An EXPLICIT nonsensical
+value — negative for any of the count/byte/timeout fields, or
+`route_confidence_threshold` outside `(0, 1]` — is a fatal config-load error:
+`cortex` prints `cortex: <path>: invalid config: <field> must be positive,
+got <value>` (or the threshold-specific message) to stderr and exits 1
+rather than silently falling back to the default. Unknown keys anywhere
+under a recognized section (or an entirely unrecognized top-level section)
+are ignored, not errors — the same forward-compatible behavior
+`models.<role>`'s unknown-role warning already had.
 
 ## Environment variables
 
@@ -237,7 +358,7 @@ Example disabling deletion and web access:
 | `CORTEX_HUGOT_ONNX` | Picks a specific ONNX variant for the local embedder. |
 | `CORTEX_TEMPERATURE` | Pins sampling temperature for every request (mainly for deterministic eval runs); unset preserves each backend's own default. |
 | `CORTEX_LLM_DEBUG` | Non-empty dumps every outbound request/response body to stderr — debugging only, will print secrets in headers if you look; don't leave it on. |
-| `CORTEX_COMPAT_TIMEOUT_SEC` | Overrides the per-request HTTP timeout for OpenAI-compatible backends. |
+| `CORTEX_COMPAT_TIMEOUT_SEC` | Overrides the per-request HTTP timeout for every model call `cmd/cortex` makes — the coder turn, every subagent, the summarizer, and the shell-risk classifier — UNLESS the relevant `models.<role>.request_timeout_sec` is set explicitly (that always wins). Previously only reached `pkg/llm`'s OpenAI-compatible client; unified across the whole transport path in the same audit that added `network.compat_timeout_sec` (see above). |
 | `NO_COLOR` | Disables ANSI color output. |
 | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_SESSION_ID` | Discord adapter (`cortex discord`). |
 

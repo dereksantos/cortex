@@ -114,13 +114,40 @@ func TestProviderClassifier_TaskContext(t *testing.T) {
 
 	t.Run("over-long context is capped", func(t *testing.T) {
 		var got string
-		long := strings.Repeat("x", maxTaskContextChars+500)
+		long := strings.Repeat("x", DefaultMaxTaskContextChars+500)
 		fn := ProviderClassifier(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long)
 		if _, _, err := fn(context.Background(), "ls"); err != nil {
 			t.Fatal(err)
 		}
-		if strings.Count(got, "x") > maxTaskContextChars {
-			t.Errorf("context not capped: got %d x's, want <= %d", strings.Count(got, "x"), maxTaskContextChars)
+		if strings.Count(got, "x") > DefaultMaxTaskContextChars {
+			t.Errorf("context not capped: got %d x's, want <= %d", strings.Count(got, "x"), DefaultMaxTaskContextChars)
+		}
+	})
+
+	// TestProviderClassifierWithLimit's cases live here (not a separate
+	// func) so the "capped at the DEFAULT" case above and the "capped at an
+	// EXPLICIT override" case below read as one contract.
+	t.Run("cmd/cortex's limits.max_task_context_chars overrides the cap", func(t *testing.T) {
+		var got string
+		long := strings.Repeat("x", 400)
+		fn := ProviderClassifierWithLimit(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long, 100)
+		if _, _, err := fn(context.Background(), "ls"); err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(got, "x"); n > 100 {
+			t.Errorf("context not capped at the configured override: got %d x's, want <= 100", n)
+		}
+	})
+
+	t.Run("non-positive override falls back to DefaultMaxTaskContextChars", func(t *testing.T) {
+		var got string
+		long := strings.Repeat("x", DefaultMaxTaskContextChars+500)
+		fn := ProviderClassifierWithLimit(fakeProvider{resp: `{"risk":"safe","reason":"ok"}`, gotUser: &got}, long, 0)
+		if _, _, err := fn(context.Background(), "ls"); err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(got, "x"); n > DefaultMaxTaskContextChars {
+			t.Errorf("context not capped at the default: got %d x's, want <= %d", n, DefaultMaxTaskContextChars)
 		}
 	})
 }

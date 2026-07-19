@@ -62,7 +62,7 @@ func TestReadFileTooLargeNonGoGetsSkeleton(t *testing.T) {
 	for i := 0; i < 1200; i++ {
 		fmt.Fprintf(&sb, "def handler_%d(request):\n    return process(%d, request)\n\n", i, i)
 	}
-	if sb.Len() <= CurationBudgetTokens*4 {
+	if sb.Len() <= active.CurationBudgetTokens*4 {
 		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
 	}
 	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
@@ -92,7 +92,7 @@ func TestReadFileTooLargeNoStructureStillGetsSkeleton(t *testing.T) {
 	for i := 0; i < 3000; i++ {
 		fmt.Fprintf(&sb, "line of unstructured log content %d filler filler filler\n", i)
 	}
-	if sb.Len() <= CurationBudgetTokens*4 {
+	if sb.Len() <= active.CurationBudgetTokens*4 {
 		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
 	}
 	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {

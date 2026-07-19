@@ -179,7 +179,11 @@ every `tools.*` gate, every env var, auth resolution (`key_env`/
 `key_service`, no automatic provider-named fallback on this path), the
 `backend.type` supported set, and the zero-config curated-fleet default —
 kept in exactly one place so this section, the README, and the doc itself
-can't drift apart.
+can't drift apart. It also covers the full tunables surface beyond the
+minimal example above: per-role transport timeouts/retries, `subagents.*`
+(Study/Agent profile bounds), `tools.*` numeric caps, and the `limits`/
+`network`/`serve`/`repl`/`discord` sections — every field optional,
+defaulting to today's hardcoded value.
 
 ## Journal — source of truth
 

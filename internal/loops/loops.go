@@ -16,11 +16,20 @@ import (
 	"github.com/dereksantos/cortex/internal/userhome"
 )
 
-// CadenceFloorMinutes is the minimum non-zero interval a loop may run on
-// (D11 — tuned down from the original 15-minute floor to 5 minutes). An
-// IntervalMinutes of 0 means manual-run-only, not a cadence, so it is
-// exempt from the floor.
-const CadenceFloorMinutes = 5
+// DefaultCadenceFloorMinutes is the immutable historical default (D11 —
+// tuned down from the original 15-minute floor to 5 minutes). Referenced
+// ONLY by cmd/cortex's Config.loopCadenceFloorMin() resolver fallback,
+// never reassigned — see that method's sibling comments (config.go) for why
+// a resolver's fallback must be an immutable const, not the mutable
+// CadenceFloorMinutes var below (which a prior session/test in the same
+// process may have already overridden).
+const DefaultCadenceFloorMinutes = 5
+
+// CadenceFloorMinutes is the LIVE minimum non-zero interval a loop may run
+// on. An IntervalMinutes of 0 means manual-run-only, not a cadence, so it is
+// exempt from the floor. cmd/cortex's runServeCLI sets this once from
+// serve.loop_cadence_floor_min; unset, it stays DefaultCadenceFloorMinutes.
+var CadenceFloorMinutes = DefaultCadenceFloorMinutes
 
 // Spec is one loop definition (docs/cortex-web.md Phase 6): a named,
 // project-scoped recurring headless run. Triggers are intervals-or-manual

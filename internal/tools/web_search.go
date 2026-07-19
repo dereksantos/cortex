@@ -13,6 +13,9 @@ import (
 	"golang.org/x/net/html"
 )
 
+// defaultSearchMax / maximumSearchMax name DefaultLimits()'s values
+// (config-overridable via tools.web_search.default_max_results /
+// .maximum_max_results); searchEndpoint is not part of the config surface.
 const (
 	searchEndpoint   = "https://html.duckduckgo.com/html/"
 	defaultSearchMax = 5
@@ -40,10 +43,10 @@ func webSearch(ctx context.Context, tc ToolCall) (string, error) {
 		return "query is required", nil
 	}
 	if args.MaxResults == 0 {
-		args.MaxResults = defaultSearchMax
+		args.MaxResults = active.DefaultSearchMax
 	}
-	if args.MaxResults < 1 || args.MaxResults > maximumSearchMax {
-		return fmt.Sprintf("max_results must be between 1 and %d", maximumSearchMax), nil
+	if args.MaxResults < 1 || args.MaxResults > active.MaximumSearchMax {
+		return fmt.Sprintf("max_results must be between 1 and %d", active.MaximumSearchMax), nil
 	}
 
 	printToolAction(fmt.Sprintf("web_search(%s)", args.Query))
@@ -67,12 +70,12 @@ func webSearch(ctx context.Context, tc ToolCall) (string, error) {
 		return "", fmt.Errorf("web search: HTTP %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, fetchMaxBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(fetchMaxBodyBytes())+1))
 	if err != nil {
 		return "", fmt.Errorf("read search response: %w", err)
 	}
-	if len(body) > fetchMaxBodyBytes {
-		return "", fmt.Errorf("search response exceeds %d bytes", fetchMaxBodyBytes)
+	if len(body) > fetchMaxBodyBytes() {
+		return "", fmt.Errorf("search response exceeds %d bytes", fetchMaxBodyBytes())
 	}
 	results, err := parseSearchResults(body, args.MaxResults)
 	if err != nil {

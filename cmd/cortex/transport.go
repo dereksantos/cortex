@@ -83,6 +83,40 @@ type AgentRequest struct {
 	// (an OpenRouter request with effort "on" leaves Reasoning nil too).
 	Dialect llm.Dialect `json:"-"`
 	Effort  llm.Effort  `json:"-"`
+
+	// Timeout / MaxAttempts / Backoff (all json:"-") are the P1
+	// timeout-unification transport knobs: the per-request HTTP deadline,
+	// retry-attempt ceiling, and linear-backoff base. Zero means "use the
+	// package default" (requestTimeout / maxSendAttempts / retryBackoff) —
+	// so any AgentRequest built without going through requestFor or
+	// NewCortexSession's stamping (every existing test literal in this
+	// package) behaves exactly as before. See requestFor (loop.go) and
+	// NewCortexSession (session_core.go) for where these get stamped from a
+	// ModelSpec's config-resolved values.
+	Timeout     time.Duration `json:"-"`
+	MaxAttempts int           `json:"-"`
+	Backoff     time.Duration `json:"-"`
+}
+
+func (r *AgentRequest) effectiveTimeout() time.Duration {
+	if r.Timeout > 0 {
+		return r.Timeout
+	}
+	return requestTimeout
+}
+
+func (r *AgentRequest) effectiveMaxAttempts() int {
+	if r.MaxAttempts > 0 {
+		return r.MaxAttempts
+	}
+	return maxSendAttempts
+}
+
+func (r *AgentRequest) effectiveBackoff() time.Duration {
+	if r.Backoff > 0 {
+		return r.Backoff
+	}
+	return retryBackoff
 }
 
 // usageInclude is OpenRouter's request-side flag to return dollar cost in the
@@ -169,10 +203,14 @@ func applyPromptCache(msgs []Message, model string) {
 	}
 }
 
-// httpClient is shared by all model calls. The timeout is the backstop guard:
-// without it a server that accepts the request and never answers hangs the
-// REPL forever.
-var httpClient = &http.Client{Timeout: requestTimeout}
+// httpClient is shared by all model calls. It carries no fixed Timeout of
+// its own — the backstop guard (without which a server that accepts the
+// request and never answers would hang the REPL forever) is the per-request
+// context deadline sendOnce applies via r.effectiveTimeout(), which is what
+// makes a per-role request_timeout_sec override actually take effect: a
+// client-level Timeout here would silently re-impose the requestTimeout
+// default as a hard ceiling even when a config override asks for longer.
+var httpClient = &http.Client{}
 
 // Send runs one model call with bounded retry. Transient failures retry up to
 // maxSendAttempts with linear backoff; anything else returns immediately.
@@ -191,13 +229,15 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 	}
 	url := llm.NormalizeBaseURL(base) + "/chat/completions"
 
+	maxAttempts := r.effectiveMaxAttempts()
+	backoff := r.effectiveBackoff()
 	var lastErr error
-	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt-1) * retryBackoff):
+			case <-time.After(time.Duration(attempt-1) * backoff):
 			}
 			payload.Temperature = r.Temperature + float64(attempt-1)*0.4
 			if nb, mErr := json.Marshal(&payload); mErr == nil {
@@ -213,11 +253,16 @@ func (r *AgentRequest) Send(ctx context.Context) (*AgentResponse, error) {
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxSendAttempts, lastErr)
+	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
-// sendOnce performs a single HTTP round trip.
+// sendOnce performs a single HTTP round trip. The per-request deadline is
+// enforced via context (not httpClient.Timeout, which stays the process-wide
+// backstop) so r.Timeout — the P1 per-role override — takes effect without
+// needing a fresh *http.Client per call.
 func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (res *AgentResponse, retryable bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, r.effectiveTimeout())
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, false, fmt.Errorf("error building agent request: %w", err)
@@ -270,7 +315,7 @@ func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning fu
 	}
 	url := llm.NormalizeBaseURL(base) + "/chat/completions"
 
-	hc := llm.StreamHTTPClient(requestTimeout)
+	hc := llm.StreamHTTPClient(r.effectiveTimeout())
 
 	var started bool
 	guarded := func(s string) {
@@ -280,13 +325,15 @@ func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning fu
 		}
 	}
 
+	maxAttempts := r.effectiveMaxAttempts()
+	backoff := r.effectiveBackoff()
 	var lastErr error
-	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt-1) * retryBackoff):
+			case <-time.After(time.Duration(attempt-1) * backoff):
 			}
 		}
 		res, err := llm.StreamChat(ctx, hc, url, r.APIKey, b, guarded, onReasoning)
@@ -298,7 +345,7 @@ func (r *AgentRequest) SendStream(ctx context.Context, onContent, onReasoning fu
 		}
 		lastErr = err
 	}
-	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxSendAttempts, lastErr)
+	return nil, fmt.Errorf("model call failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
 // assembleStreamResponse maps the streamed aggregate into the wire

@@ -79,6 +79,16 @@ type Outliner interface {
 	Outline(path string, budget int) (rendered string, err error)
 }
 
+// SeedBudgeter exposes the outline token budget runSubagent uses to seed a
+// subagent profile (Study or Agent — the same budget is shared by both,
+// hence one method rather than a per-profile one) before its loop starts.
+// Config-overridable via subagents.seed_budget_tokens; StudySeedBudget
+// remains the constant default for headlessDeps and any caller that never
+// wires a config-bound override.
+type SeedBudgeter interface {
+	SeedBudget() int
+}
+
 // SubAgentRunner runs a Subagent profile on the shared engine. Satisfied by
 // *CortexSession (RunSubagent). The study tool is the only caller today.
 type SubAgentRunner interface {
@@ -138,6 +148,7 @@ type ToolDeps interface {
 	MemoryStore
 	Summarizer
 	Outliner
+	SeedBudgeter
 	SubAgentRunner
 	ShellGate
 	DeleteGate
@@ -166,6 +177,7 @@ type headlessDeps struct{}
 func (headlessDeps) Outline(string, int) (string, error) {
 	return "", errors.New("outline unavailable: no session")
 }
+func (headlessDeps) SeedBudget() int { return StudySeedBudget }
 func (headlessDeps) RunSubagent(context.Context, Subagent, string) (string, error) {
 	return "", errors.New("study unavailable: no session")
 }
@@ -584,16 +596,19 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 
 // --- Helpers shared across tools ----------------------------------------
 
-// CurationBudgetTokens is the read_file → study redirect threshold: a whole-file
-// read above this is refused and redirected to study, so the coder gets a
-// curated digest rather than a raw dump. Decoupled from the coder's window on
-// purpose — sizing the trigger to the window let a big-window model read
-// everything raw, defeating curation. (~4 bytes/token.)
-const CurationBudgetTokens = 16000
+// defaultCurationBudgetTokens is the read_file → study redirect threshold: a
+// whole-file read above this is refused and redirected to study, so the
+// coder gets a curated digest rather than a raw dump. Decoupled from the
+// coder's window on purpose — sizing the trigger to the window let a
+// big-window model read everything raw, defeating curation. (~4
+// bytes/token.) Config-overridable via tools.curation_budget_tokens — see
+// limits.go's active Limits and DefaultLimits().
+const defaultCurationBudgetTokens = 16000
 
-// MaxToolOutput caps how much tool output we feed back into context, so a
-// `cat` of a huge file (or `find` over a big tree) can't blow the window.
-const MaxToolOutput = 10000
+// defaultMaxToolOutput caps how much tool output we feed back into context,
+// so a `cat` of a huge file (or `find` over a big tree) can't blow the
+// window. Config-overridable via tools.max_tool_output.
+const defaultMaxToolOutput = 10000
 
 // printToolAction prints an indented, word-tagged tool-action line under the
 // current cortex turn, e.g. "  tool: read_file(go.mod)". The tool name shows
@@ -614,9 +629,10 @@ func printToolAction(action string) {
 
 // --- outline ------------------------------------------------------------
 
-// outlineDefaultBudget is the token budget the outline tool uses when the model
-// omits one — a few thousand tokens of structure, enough to orient.
-const outlineDefaultBudget = 4000
+// defaultOutlineBudget is the token budget the outline tool uses when the
+// model omits one — a few thousand tokens of structure, enough to orient.
+// Config-overridable via tools.outline_default_budget.
+const defaultOutlineBudget = 4000
 
 // outlineTool renders the structural map of a path (internal/outline). The path
 // arg is optional (default "."); budget controls how much structure to expand.
@@ -625,7 +641,7 @@ func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 	if p, _ := tc.StringArg("path"); strings.TrimSpace(p) != "" {
 		path = p
 	}
-	budget := outlineDefaultBudget
+	budget := active.OutlineDefaultBudget
 	if n, ok := tc.IntArg("budget"); ok && n > 0 {
 		budget = n
 	}
@@ -646,7 +662,7 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	}
 	goal, _ := tc.StringArg("goal")     // optional
 	sa.Model, _ = tc.StringArg("model") // optional per-call override; see Subagent.Model
-	ol, err := deps.Outline(path, StudySeedBudget)
+	ol, err := deps.Outline(path, deps.SeedBudget())
 	if err != nil {
 		return "", err
 	}
@@ -752,15 +768,17 @@ func recall(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 
 // --- read_file ----------------------------------------------------------
 
-// DefaultRangeLines is the window read_file returns when start is given without
-// end — enough to see a declaration plus context without the model having to
-// name an exact end. A range is bounded by construction, so it bypasses the
-// whole-file size gate.
-const DefaultRangeLines = 200
+// defaultDefaultRangeLines is the window read_file returns when start is
+// given without end — enough to see a declaration plus context without the
+// model having to name an exact end. A range is bounded by construction, so
+// it bypasses the whole-file size gate. Config-overridable via
+// tools.read.default_range_lines.
+const defaultDefaultRangeLines = 200
 
-// MaxRangeLines caps a single ranged read so a model can't ask for lines
-// 1–1000000 and pull a whole large file back through the gate it bypassed.
-const MaxRangeLines = 800
+// defaultMaxRangeLines caps a single ranged read so a model can't ask for
+// lines 1–1000000 and pull a whole large file back through the gate it
+// bypassed. Config-overridable via tools.read.max_range_lines.
+const defaultMaxRangeLines = 800
 
 func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	path, err := tc.StringArg("path")
@@ -776,7 +794,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if start, ok := tc.IntArg("start"); ok && start > 0 {
 		end, hasEnd := tc.IntArg("end")
 		if !hasEnd || end < start {
-			end = start + DefaultRangeLines - 1
+			end = start + active.DefaultRangeLines - 1
 		}
 		return readRange(fsPath, start, end)
 	}
@@ -786,7 +804,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 	// to the window let a big-window model read everything raw, defeating
 	// curation (2026-06-20). (~4 bytes/token.)
 	if info, statErr := os.Stat(fsPath); statErr == nil {
-		if estTokens := int(info.Size()) / 4; estTokens > CurationBudgetTokens {
+		if estTokens := int(info.Size()) / 4; estTokens > active.CurationBudgetTokens {
 			// Read the map before the territory: a too-large file (any language —
 			// outline.Render's regex/prose/positional tiers cover what go/ast
 			// doesn't) hands back its structural skeleton so the model can orient
@@ -818,8 +836,8 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 // clamped). Lines beyond EOF are silently dropped — asking past the end yields
 // what exists, not an error.
 func readRange(path string, start, end int) (string, error) {
-	if end-start+1 > MaxRangeLines {
-		end = start + MaxRangeLines - 1
+	if end-start+1 > active.MaxRangeLines {
+		end = start + active.MaxRangeLines - 1
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -845,6 +863,7 @@ func readRange(path string, start, end int) (string, error) {
 	// KB and blow up the context. Cap the bytes too, truncating at a line boundary
 	// with a visible note so the model greps for what it needs instead.
 	note := ""
+	maxReadBytes := active.MaxReadBytes
 	if len(body) > maxReadBytes {
 		cut := maxReadBytes
 		if nl := strings.LastIndexByte(body[:maxReadBytes], '\n'); nl > 0 {
@@ -856,10 +875,11 @@ func readRange(path string, start, end int) (string, error) {
 	return fmt.Sprintf("@%s:%d-%d\n%s%s", path, start, hi, body, note), nil
 }
 
-// maxReadBytes is the per-read byte ceiling — a span of very long lines can't
-// return more than this regardless of its line count, so a single read can't
-// explode the context. ~24 KB ≈ 6k tokens, ample for a real code span.
-const maxReadBytes = 24000
+// defaultMaxReadBytes is the per-read byte ceiling — a span of very long
+// lines can't return more than this regardless of its line count, so a
+// single read can't explode the context. ~24 KB ≈ 6k tokens, ample for a
+// real code span. Config-overridable via tools.read.max_read_bytes.
+const defaultMaxReadBytes = 24000
 
 // fileSkeleton returns the structural outline of any file (outline.Render:
 // go/ast for Go, a declaration/heading regex for other languages, a prose
@@ -1309,11 +1329,11 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	// Oversized output is studied, not lost: the full output spills to
 	// .cortex/shell/ and the model gets a cited digest plus the spill path
 	// to study deeper. Truncation is only the no-study fallback.
-	if len(result) > MaxToolOutput {
+	if len(result) > active.MaxToolOutput {
 		if studied, ok := studyShellOutput(ctx, deps, command, out); ok {
 			result = studied
 		} else {
-			result = result[:MaxToolOutput] + "\n...[output truncated]"
+			result = result[:active.MaxToolOutput] + "\n...[output truncated]"
 		}
 	}
 	// A non-zero exit is an observation, not a harness failure: hand the output
@@ -1336,11 +1356,12 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 
 // bashStudyWindow is the consuming-model window the shell-output study is
 // sized for, in tokens. Chosen so the engine's read-vs-study threshold
-// (window/2 tokens, after sample headroom) sits BELOW MaxToolOutput:
-// anything big enough to spill is always sampled into a bounded digest,
-// never passed through whole — passthrough would re-create the context
-// bloat the spill exists to avoid.
-const bashStudyWindow = MaxToolOutput / 2
+// (window/2 tokens, after sample headroom) sits BELOW the active
+// MaxToolOutput: anything big enough to spill is always sampled into a
+// bounded digest, never passed through whole — passthrough would re-create
+// the context bloat the spill exists to avoid. A func (not a const) since
+// MaxToolOutput is now config-resolvable at runtime.
+func bashStudyWindow() int { return active.MaxToolOutput / 2 }
 
 // spillShellOutput writes oversized command output under .cortex/shell/,
 // content-addressed (same output → same file) so repeated runs of an
@@ -1376,7 +1397,7 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 	}
 	printToolAction(fmt.Sprintf("output %d KB → summarize(%s)", len(out)/1024, spill))
 	goal := fmt.Sprintf("This is the output of `%s`. What does it show? Surface errors, failures, and anomalies first.", command)
-	digest, _, err := deps.Summarize(ctx, spill, goal, bashStudyWindow)
+	digest, _, err := deps.Summarize(ctx, spill, goal, bashStudyWindow())
 	if err != nil {
 		return "", false
 	}
