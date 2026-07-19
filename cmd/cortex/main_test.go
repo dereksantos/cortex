@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -388,31 +389,26 @@ func TestCtxColor(t *testing.T) {
 	}
 }
 
-// testFleet mirrors the live fleet for resolution tests.
+// testFleet mirrors the live fleet for resolution tests. qwen3-4b carries a
+// "fast" Role tag as fleet-discovery data only — no rolePolicy matches that
+// tag since E1's role collapse (docs/completion-roadmap.md), but the model
+// itself is still a useful non-thinking fixture for tests below that pin it
+// explicitly.
 var testFleet = Fleet{
 	"coder":        {Role: "coder", MaxInput: 131072, Thinking: true, SwapGroup: "igpu-8080"},
-	"coder80":      {Role: "coder", MaxInput: 131072, Thinking: false, SwapGroup: "igpu-8080", Experimental: true},
 	"reasoner":     {Role: "reasoner", MaxInput: 32768, Thinking: true, SwapGroup: "igpu-8080"},
 	"reasoner-npu": {Role: "reasoner", MaxInput: 32768, Thinking: true},
 	"qwen3-4b":     {Role: "fast", MaxInput: 131072, Thinking: false, SwapGroup: "igpu-8080"},
 	"embedder":     {Role: "embedder", MaxInput: 32768},
-	"reranker":     {Role: "reranker", MaxInput: 8192},
-	"xlam-1b-fc-r": {Role: "tool", MaxInput: 32768},
 }
 
-// selectModel picks a role's model from discovery by capability, with no model
-// names baked in source. Tiebreaks: code prefers the stable coder, hard-code the
-// experimental one; reason/study prefer swap-free silicon.
+// selectModel picks a role's model from discovery by capability, with no
+// model names baked in source. study prefers swap-free silicon.
 func TestSelectModel(t *testing.T) {
 	cases := []struct{ role, want string }{
 		{roleCode, "coder"},
-		{roleHardCode, "coder80"},
-		{roleReason, "reasoner-npu"},
 		{roleStudy, "reasoner-npu"},
-		{roleFast, "qwen3-4b"},
 		{roleEmbed, "embedder"},
-		{roleRerank, "reranker"},
-		{roleTools, "xlam-1b-fc-r"},
 	}
 	for _, c := range cases {
 		if got := selectModel(testFleet, c.role); got != c.want {
@@ -505,25 +501,10 @@ func TestResolveBinding(t *testing.T) {
 		}
 	})
 
-	// P5b: hard-code defaults to "high" effort (docs/thinking-models.md §5b) —
-	// a nil fleet so no thinking_mode degradation obscures the pure role
-	// default (testFleet's coder80 entry happens to report Thinking:false,
-	// which would otherwise drop it, correctly, per applyFleet's "none"
-	// degradation — a separate, already-covered concern).
-	t.Run("hard-code defaults to high effort", func(t *testing.T) {
-		if got := (&Config{}).resolveBinding(roleHardCode, nil); got.Thinking.Level != llm.EffortHigh {
-			t.Errorf("hard-code Thinking = %+v, want high", got.Thinking)
-		}
-	})
-
-	t.Run("non-thinking selected model carries no enable_thinking kwarg", func(t *testing.T) {
-		// fast → qwen3-4b (thinking:false, thinking_mode derives "none"): the
-		// off-policy default is dropped entirely (degradeForThinkingMode: a
-		// "none" model can't honor ANY ask).
-		if got := (&Config{}).resolveBinding(roleFast, testFleet); !got.Thinking.IsZero() {
-			t.Errorf("fast/qwen3-4b should not carry the kwarg, got %+v", got.Thinking)
-		}
-	})
+	// Role-default "off" degrading to unset for a "none" (non-thinking)
+	// fleet model is covered generically by TestApplyFleet's "drops
+	// enable_thinking for a non-thinking model" — no live role defaults to
+	// "off" since E1's role collapse removed the fast role.
 
 	t.Run("explicit config thinking survives a backend-non-thinking model", func(t *testing.T) {
 		// qwen3-4b is reported thinking:false by the backend, but it thinks by
@@ -694,6 +675,95 @@ func TestLoadMergedConfig(t *testing.T) {
 	})
 }
 
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it, so a test can assert on warnUnknownRoles' (or
+// any other) stderr message without letting it leak into `go test`'s own
+// output.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("io.Copy: %v", err)
+	}
+	return buf.String()
+}
+
+// E1 back-compat (docs/completion-roadmap.md): an old config.json with a
+// role key removed from the configurable surface (hard-code/reason/fast/
+// rerank/tools were audited dead and dropped) must still load without
+// error — the key sits inert in cfg.Models, unreachable from
+// resolveBinding/selectModel (both keyed off rolePolicies) — and produces
+// exactly one stderr warning naming it.
+func TestLoadMergedConfigUnknownRoleIgnoredWithWarning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{
+		"backend": {"type": "openrouter"},
+		"models": {
+			"code": {"model": "qwen/qwen3-coder:free"},
+			"hard-code": {"model": "old-hard-code-model"},
+			"rerank": {"model": "old-rerank-model"}
+		}
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = loadMergedConfig(path, "")
+	})
+
+	if cfg == nil {
+		t.Fatal("expected a non-nil config — unknown role keys must not error")
+	}
+	if cfg.Models["code"].Model != "qwen/qwen3-coder:free" {
+		t.Errorf("code model = %q, want the known role to still resolve", cfg.Models["code"].Model)
+	}
+	if !strings.Contains(stderr, "hard-code") || !strings.Contains(stderr, "rerank") {
+		t.Errorf("stderr warning = %q, want it to name both unknown roles", stderr)
+	}
+	if n := strings.Count(strings.TrimRight(stderr, "\n"), "\n"); n != 0 {
+		t.Errorf("stderr = %q, want exactly one warning line", stderr)
+	}
+	// The unknown role is never visited by resolveBinding/selectModel:
+	// nothing in rolePolicies matches it, so fleet auto-selection can't
+	// accidentally pick it.
+	if got := selectModel(testFleet, "hard-code"); got != "" {
+		t.Errorf("selectModel(hard-code) = %q, want empty — the role is unknown", got)
+	}
+}
+
+// A config with only known roles produces no warning at all — the warning
+// is strictly for the back-compat path, not a default nag.
+func TestLoadMergedConfigKnownRolesOnlyProducesNoWarning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"models": {"code": {"model": "x"}, "study": {"model": "y"}, "embed": {"model": "z"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stderr := captureStderr(t, func() {
+		loadMergedConfig(path, "")
+	})
+	if stderr != "" {
+		t.Errorf("stderr = %q, want no warning for an all-known-role config", stderr)
+	}
+}
+
 // A realistic /model/info payload (trimmed to the fields we read, plus extra
 // keys to prove we ignore them) for discovery tests.
 const fleetInfoJSON = `{"data":[
@@ -818,7 +888,7 @@ func TestBackendEndpoint(t *testing.T) {
 		if got := c.backendEndpoint(); got != "http://cfg-host:4000" {
 			t.Errorf("config = %q, want http://cfg-host:4000", got)
 		}
-		for _, role := range []string{roleCode, roleStudy, roleReason, roleEmbed} {
+		for _, role := range []string{roleCode, roleStudy, roleEmbed} {
 			s := c.resolveBinding(role, testFleet)
 			if s.Endpoint != "http://cfg-host:4000" {
 				t.Errorf("%s endpoint = %q, want backend address", role, s.Endpoint)
@@ -831,10 +901,10 @@ func TestBackendEndpoint(t *testing.T) {
 	t.Run("a role may pin its own endpoint", func(t *testing.T) {
 		c := &Config{
 			Backend: Backend{Endpoint: "http://cfg-host:4000"},
-			Models:  map[string]ModelSpec{roleRerank: {Endpoint: "http://rerank-host:8081"}},
+			Models:  map[string]ModelSpec{roleEmbed: {Endpoint: "http://embed-host:8081"}},
 		}
-		if s := c.resolveBinding(roleRerank, testFleet); s.Endpoint != "http://rerank-host:8081" {
-			t.Errorf("pinned endpoint = %q, want http://rerank-host:8081", s.Endpoint)
+		if s := c.resolveBinding(roleEmbed, testFleet); s.Endpoint != "http://embed-host:8081" {
+			t.Errorf("pinned endpoint = %q, want http://embed-host:8081", s.Endpoint)
 		}
 	})
 }

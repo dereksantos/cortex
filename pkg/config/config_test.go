@@ -95,8 +95,6 @@ func TestLoadAndSave(t *testing.T) {
 			OllamaURL:      "http://custom:11434",
 			OllamaModel:    "llama2:7b",
 			AnthropicModel: "claude-3-opus",
-			EnableGraph:    true,
-			EnableVector:   false,
 		}
 
 		if err := cfg.Save(configPath); err != nil {
@@ -119,9 +117,6 @@ func TestLoadAndSave(t *testing.T) {
 		}
 		if loaded.OllamaModel != cfg.OllamaModel {
 			t.Errorf("OllamaModel mismatch: got %s, want %s", loaded.OllamaModel, cfg.OllamaModel)
-		}
-		if loaded.EnableGraph != cfg.EnableGraph {
-			t.Errorf("EnableGraph mismatch: got %v, want %v", loaded.EnableGraph, cfg.EnableGraph)
 		}
 		if len(loaded.SkipPatterns) != len(cfg.SkipPatterns) {
 			t.Errorf("SkipPatterns length mismatch: got %d, want %d", len(loaded.SkipPatterns), len(cfg.SkipPatterns))
@@ -236,4 +231,68 @@ func TestConfigJSON(t *testing.T) {
 			t.Error("expected non-empty config file")
 		}
 	})
+}
+
+// TestTrimmedConfigRoundTripsSurvivingFields pins D1's post-trim surface
+// (docs/completion-roadmap.md): Modes/ModeConfig, Routing, EnableGraph,
+// EnableVector, WebPort, and DatabaseURL were deleted as dormant — parsed
+// by nothing outside pkg/config's own dead code (verified by grep: zero
+// reads in cmd/cortex, internal/capture, internal/storage, or pkg/llm).
+// Every field that DOES survive — including the Endpoints/Models registry
+// pkg/llm's ProviderFactory reads via ResolveModelRoute — must still
+// round-trip through Save/Load byte-for-field, so trimming the dormant
+// tree didn't disturb the fields the four remaining importers, and
+// ResolveModelRoute, actually consume.
+func TestTrimmedConfigRoundTripsSurvivingFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	want := &Config{
+		ContextDir:           "/proj/.cortex",
+		ProjectRoot:          "/proj",
+		GlobalDir:            "/home/user/.cortex",
+		ProjectID:            "proj-slug",
+		SkipPatterns:         []string{".git", "vendor"},
+		OllamaURL:            "http://localhost:11434",
+		OllamaModel:          "qwen2.5-coder:7b",
+		OllamaEmbeddingModel: "nomic-embed-text",
+		AnthropicModel:       "claude-haiku-4-5",
+		Endpoints: []EndpointDef{
+			{Name: "local-gw", BaseURL: "http://localhost:13305/v1"},
+		},
+		Models: &ModelsMap{
+			Code: &RoleAssignment{Endpoint: "local-gw", Model: "Qwen3-Coder-30B"},
+		},
+		DefaultModel: "local-gw/Qwen3-Coder-30B",
+	}
+
+	if err := want.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	switch {
+	case got.ContextDir != want.ContextDir,
+		got.ProjectRoot != want.ProjectRoot,
+		got.GlobalDir != want.GlobalDir,
+		got.ProjectID != want.ProjectID,
+		got.OllamaURL != want.OllamaURL,
+		got.OllamaModel != want.OllamaModel,
+		got.OllamaEmbeddingModel != want.OllamaEmbeddingModel,
+		got.AnthropicModel != want.AnthropicModel,
+		got.DefaultModel != want.DefaultModel:
+		t.Errorf("scalar field mismatch: got %+v, want %+v", got, want)
+	}
+	if len(got.SkipPatterns) != len(want.SkipPatterns) || got.SkipPatterns[0] != want.SkipPatterns[0] {
+		t.Errorf("SkipPatterns = %v, want %v", got.SkipPatterns, want.SkipPatterns)
+	}
+	if len(got.Endpoints) != 1 || got.Endpoints[0].Name != "local-gw" || got.Endpoints[0].BaseURL != want.Endpoints[0].BaseURL {
+		t.Errorf("Endpoints = %+v, want %+v", got.Endpoints, want.Endpoints)
+	}
+	if got.Models == nil || got.Models.Code == nil || got.Models.Code.Model != "Qwen3-Coder-30B" {
+		t.Errorf("Models.Code = %+v, want Model=Qwen3-Coder-30B", got.Models)
+	}
 }

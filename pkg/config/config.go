@@ -26,16 +26,6 @@ type Config struct {
 	// LLM settings - Anthropic (API key read from ANTHROPIC_API_KEY env var)
 	AnthropicModel string `json:"anthropic_model,omitempty"`
 
-	// Storage
-	DatabaseURL string `json:"database_url,omitempty"` // SQLite path override (default: .cortex/db/events.db)
-
-	// Web dashboard
-	WebPort int `json:"web_port,omitempty"`
-
-	// Cognitive mode tuning. DORMANT — parsed but read by nothing today; see
-	// ModeConfig for the redesign note.
-	Modes *ModeConfig `json:"modes,omitempty"`
-
 	// Multi-endpoint LLM registry (Phase 4 model-registry).
 	// Endpoints lists OpenAI-compatible servers Cortex should probe and
 	// route through; Models pins per-role model assignments. Both
@@ -52,30 +42,6 @@ type Config struct {
 	// preserves the compile-time fallback (currently
 	// qwen2.5-coder:1.5b via Ollama).
 	DefaultModel string `json:"default_model,omitempty"`
-
-	// Routing pins per-node-type model overrides for the executor's
-	// Router (docs/per-node-routing-plan.md slice 9). Maps a
-	// qualified node name ("decide.tool_call") to a model id any
-	// ProviderFactory can resolve. Takes precedence over the node's
-	// auto-detected Requires chain but loses to per-spawn
-	// Attrs["model"]. Operator escape hatch — first time the
-	// auto-pick is wrong, pin it here without editing code.
-	//
-	// Example:
-	//   "routing": {
-	//     "decide.tool_call":      "qwen3-1.7b-FLM",
-	//     "sense.classify_intent": "qwen3-1.7b-FLM",
-	//     "attend.compress":       "qwen3-4b-Instruct-2507-GGUF"
-	//   }
-	//
-	// Missing model ids fall through to the Requires chain rather
-	// than blocking the spawn — same graceful-degrade pattern as a
-	// stale Attrs["model"] override.
-	Routing map[string]string `json:"routing,omitempty"`
-
-	// Feature flags
-	EnableGraph  bool `json:"enable_graph"`
-	EnableVector bool `json:"enable_vector"`
 }
 
 // EndpointDef is one user-configured OpenAI-compatible endpoint.
@@ -304,73 +270,6 @@ func indexSlash(s string) int {
 	return -1
 }
 
-// ModeConfig provides per-mode tuning knobs.
-// All fields are optional — nil means use defaults.
-//
-// DORMANT (2026-06-27): these knobs drove the cognition subsystem — Think /
-// Dream / Digest proactive analysis and the retrieval pipeline that consumed
-// Capture / Search — which was deleted with the cognition DAG (see
-// docs/archive.md). Nothing in cmd/cortex reads any of these fields today; they
-// are still parsed from config (and the presets in presets.go still build them)
-// so existing config files don't error, but they are inert.
-//
-// TODO(future): redesign these as tuning for the proactive-analysis profile
-// that replaces the deleted stack — a `Reflect` subagent over model-driven
-// memory (docs/study-subagent.md "Future: a Reflect profile") rather than the
-// old Think/Dream/Digest modes — and re-wire them into the loop. Until that
-// design lands, treat the schema as a placeholder, not a contract: it will
-// change shape on re-integration.
-type ModeConfig struct {
-	Think   *ThinkModeConfig   `json:"think,omitempty"`
-	Dream   *DreamModeConfig   `json:"dream,omitempty"`
-	Digest  *DigestModeConfig  `json:"digest,omitempty"`
-	Capture *CaptureModeConfig `json:"capture,omitempty"`
-	Search  *SearchModeConfig  `json:"search,omitempty"`
-}
-
-// ThinkModeConfig controls Think mode behavior.
-type ThinkModeConfig struct {
-	Enabled            *bool  `json:"enabled,omitempty"`
-	MaxBudget          *int   `json:"max_budget,omitempty"`
-	MinBudget          *int   `json:"min_budget,omitempty"`
-	Mode               string `json:"mode,omitempty"` // "fast" or "full"
-	OperationTimeoutMs *int   `json:"operation_timeout_ms,omitempty"`
-}
-
-// DreamModeConfig controls Dream mode behavior.
-type DreamModeConfig struct {
-	Enabled         *bool `json:"enabled,omitempty"`
-	MaxBudget       *int  `json:"max_budget,omitempty"`
-	MinBudget       *int  `json:"min_budget,omitempty"`
-	IdleThresholdS  *int  `json:"idle_threshold_s,omitempty"`
-	GrowthDurationM *int  `json:"growth_duration_m,omitempty"`
-}
-
-// DigestModeConfig controls Digest mode behavior.
-type DigestModeConfig struct {
-	Enabled             *bool    `json:"enabled,omitempty"`
-	MaxMerges           *int     `json:"max_merges,omitempty"`
-	SimilarityThreshold *float64 `json:"similarity_threshold,omitempty"`
-}
-
-// CaptureModeConfig controls event capture behavior.
-type CaptureModeConfig struct {
-	Enabled *bool  `json:"enabled,omitempty"`
-	Queue   string `json:"queue,omitempty"` // "file" or "direct"
-}
-
-// SearchModeConfig controls search/retrieval behavior.
-type SearchModeConfig struct {
-	Enabled *bool  `json:"enabled,omitempty"`
-	Mode    string `json:"mode,omitempty"` // "fast" or "full"
-}
-
-// boolPtr is a helper for creating *bool values in config.
-func boolPtr(b bool) *bool { return &b }
-
-// intPtr is a helper for creating *int values in config.
-func intPtr(i int) *int { return &i }
-
 // Default returns a default configuration
 func Default() *Config {
 	projectRoot, _ := os.Getwd()
@@ -396,9 +295,6 @@ func Default() *Config {
 		OllamaModel:          "qwen2.5-coder:1.5b",
 		OllamaEmbeddingModel: "nomic-embed-text",
 		AnthropicModel:       "claude-haiku-4-5-20251001",
-		WebPort:              9090,
-		EnableGraph:          true,
-		EnableVector:         true,
 	}
 }
 
@@ -515,21 +411,6 @@ func mergeConfig(dst, src *Config) {
 	}
 	if src.AnthropicModel != "" {
 		dst.AnthropicModel = src.AnthropicModel
-	}
-	if src.DatabaseURL != "" {
-		dst.DatabaseURL = src.DatabaseURL
-	}
-	if src.WebPort != 0 {
-		dst.WebPort = src.WebPort
-	}
-	if src.Modes != nil {
-		dst.Modes = src.Modes
-	}
-	if src.EnableGraph {
-		dst.EnableGraph = true
-	}
-	if src.EnableVector {
-		dst.EnableVector = true
 	}
 	if len(src.SkipPatterns) > 0 {
 		dst.SkipPatterns = src.SkipPatterns

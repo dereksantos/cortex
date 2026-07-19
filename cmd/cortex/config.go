@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,15 +22,26 @@ const defaultEndpoint = "http://localhost:4000"
 const defaultTemperature = 1.0
 
 // Model roles. The harness routes each kind of work to a model binding.
+// Two are agent roles the user configures — code (the agent) and study
+// (the Study subagent + the summarizer + the shell-risk classifier, all of
+// which build their sub-LLM client from cs.Study and then pin effort off
+// at the call site — tool_deps.go's effortOffKwargs — rather than through a
+// separate role). embed stays parsed-but-reserved for a future semantic
+// memory_search (CortexSession.resolveEmbedder is the one live
+// resolveBinding(roleEmbed, ...) call site outside this file).
+//
+// hard-code/reason/fast/rerank/tools were audited 2026-07-18
+// (docs/completion-roadmap.md E1: role collapse) and found dead — no
+// resolveBinding call site anywhere outside rolePolicies/tests — and were
+// removed from the configurable surface. An old config.json with one of
+// those keys under "models" still loads without error; warnUnknownRoles
+// prints a one-line stderr warning naming it, and the key is otherwise
+// inert (never visited by resolveBinding/selectModel, which only iterate
+// or accept keys present in rolePolicies).
 const (
-	roleCode     = "code"
-	roleHardCode = "hard-code"
-	roleReason   = "reason"
-	roleFast     = "fast"
-	roleStudy    = "study"
-	roleEmbed    = "embed"
-	roleRerank   = "rerank"
-	roleTools    = "tools"
+	roleCode  = "code"
+	roleStudy = "study"
+	roleEmbed = "embed"
 )
 
 type rolePolicy struct {
@@ -43,14 +56,35 @@ type rolePolicy struct {
 }
 
 var rolePolicies = map[string]rolePolicy{
-	roleCode:     {tag: "coder", effort: llm.Effort{Level: llm.EffortOn}},
-	roleHardCode: {tag: "coder", preferExperimental: true, effort: llm.Effort{Level: llm.EffortHigh}},
-	roleReason:   {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
-	roleFast:     {tag: "fast", effort: llm.Effort{Level: llm.EffortOff}},
-	roleStudy:    {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
-	roleEmbed:    {tag: "embedder"},
-	roleRerank:   {tag: "reranker"},
-	roleTools:    {tag: "tool"},
+	roleCode:  {tag: "coder", effort: llm.Effort{Level: llm.EffortOn}},
+	roleStudy: {tag: "reasoner", preferSwapFree: true, effort: llm.Effort{Level: llm.EffortOn}},
+	roleEmbed: {tag: "embedder"},
+}
+
+// warnUnknownRoles prints a single stderr warning naming any models.<role>
+// keys in cfg that the live config surface no longer reads (E1's role
+// collapse — see the roleCode/roleStudy/roleEmbed doc comment above).
+// Back-compat: this never errors, and cfg itself is left untouched — an
+// unknown role simply sits inert in cfg.Models, unreachable from
+// resolveBinding/selectModel (both keyed off rolePolicies). source names
+// the config file the warning came from, for an operator with both a user
+// and a project config to know which one to edit.
+func warnUnknownRoles(cfg *Config, source string) {
+	if cfg == nil || len(cfg.Models) == 0 {
+		return
+	}
+	var unknown []string
+	for role := range cfg.Models {
+		if !knownRole(role) {
+			unknown = append(unknown, role)
+		}
+	}
+	if len(unknown) == 0 {
+		return
+	}
+	sort.Strings(unknown)
+	fmt.Fprintf(os.Stderr, "cortex: %s: ignoring unknown config role(s) %s; live roles are code, study (embed reserved)\n",
+		source, strings.Join(unknown, ", "))
 }
 
 func selectModel(fleet Fleet, role string) string {
@@ -498,6 +532,7 @@ func readConfigFile(path string) *Config {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil
 	}
+	warnUnknownRoles(&cfg, path)
 	return &cfg
 }
 

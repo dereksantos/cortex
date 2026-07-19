@@ -15,10 +15,10 @@ import (
 
 // fixedRoleFleet is deliberately small: one fleet entry tagged "reasoner"
 // (MaxInput 0, so applyFleet's Window-fill never fires — keeps the golden
-// simple) matches BOTH the "reason" and "study" roles (same tag), giving
-// coverage of "configured" (role "code", set explicitly below),
-// "fleet-auto" (roles "reason"/"study", picked from this fleet), and
-// "unbound" (every other role: no config entry, no matching fleet tag).
+// simple) matches the "study" role's tag, giving coverage of "configured"
+// (role "code", set explicitly below), "fleet-auto" (role "study", picked
+// from this fleet), and "unbound" (role "embed": no config entry, no
+// matching fleet tag).
 var fixedRoleFleet = Fleet{"study-model": {Role: "reasoner"}}
 
 func TestBuildModelsViewModelGolden(t *testing.T) {
@@ -50,22 +50,11 @@ func TestBuildModelsViewModelGolden(t *testing.T) {
 		// and the role default rides through.
 		row("code", "coder-explicit", `"on"`, "configured") + "," +
 		row("embed", "", "null", "unbound") + "," +
-		row("fast", "", `"off"`, "unbound") + "," +
-		// hard-code defaults to "high", but the fixture fleet's study-model
-		// entry doesn't mark itself thinking-capable (Thinking: false, no
-		// ThinkingMode), and hard-code doesn't resolve to that model anyway
-		// (no "coder" role tag in fixedRoleFleet) — so it stays unbound with
-		// no model, and TemplateKwargs' degradation never even runs; the
-		// role default rides straight through.
-		row("hard-code", "", `"high"`, "unbound") + "," +
-		// reason/study default to "on", but fixedRoleFleet's study-model entry
+		// study defaults to "on", but fixedRoleFleet's study-model entry
 		// doesn't mark thinking capability (Thinking: false, no
 		// ThinkingMode) — applyFleet's "none" degradation drops the "on"
 		// default to unset (null), same as it would drop an explicit "off".
-		row("reason", "study-model", "null", "fleet-auto") + "," +
-		row("rerank", "", "null", "unbound") + "," +
-		row("study", "study-model", "null", "fleet-auto") + "," +
-		row("tools", "", "null", "unbound") +
+		row("study", "study-model", "null", "fleet-auto") +
 		`],"fleet":{"study-model":{"MaxInput":0,"Role":"reasoner","Silicon":"",` +
 		`"Thinking":false,"SwapGroup":"","AlwaysWarm":false,"Experimental":false}}}`
 
@@ -87,13 +76,13 @@ func TestBuildModelsViewModelNilConfigEveryKnownRoleStillPresent(t *testing.T) {
 	for _, b := range vm.Bindings {
 		byRole[b.Role] = b
 	}
-	reason, ok := byRole["reason"]
-	if !ok || reason.Source != bindingSourceFleetAuto || reason.Binding.Model != "study-model" {
-		t.Errorf("Bindings[reason] = %+v, ok=%v, want Source=fleet-auto Model=study-model even with a nil config", reason, ok)
+	study, ok := byRole["study"]
+	if !ok || study.Source != bindingSourceFleetAuto || study.Binding.Model != "study-model" {
+		t.Errorf("Bindings[study] = %+v, ok=%v, want Source=fleet-auto Model=study-model even with a nil config", study, ok)
 	}
-	tools, ok := byRole["tools"]
-	if !ok || tools.Source != bindingSourceUnbound || tools.Binding.Model != "" {
-		t.Errorf("Bindings[tools] = %+v, ok=%v, want Source=unbound Model=\"\" with no config and no matching fleet tag", tools, ok)
+	embed, ok := byRole["embed"]
+	if !ok || embed.Source != bindingSourceUnbound || embed.Binding.Model != "" {
+		t.Errorf("Bindings[embed] = %+v, ok=%v, want Source=unbound Model=\"\" with no config and no matching fleet tag", embed, ok)
 	}
 }
 
@@ -103,7 +92,7 @@ func TestBuildModelsViewModelRolesSortedAlphabetically(t *testing.T) {
 	for _, b := range vm.Bindings {
 		roles = append(roles, b.Role)
 	}
-	want := []string{"code", "embed", "fast", "hard-code", "reason", "rerank", "study", "tools"}
+	want := []string{"code", "embed", "study"}
 	if len(roles) != len(want) {
 		t.Fatalf("roles = %v, want %v", roles, want)
 	}
