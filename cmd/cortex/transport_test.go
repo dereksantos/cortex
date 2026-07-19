@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // blockingServer returns a test server that replies with the given raw JSON
@@ -174,5 +175,186 @@ func TestChoiceReasoningNeverRoundTrips(t *testing.T) {
 	}
 	if msg.Content != "Answer." {
 		t.Errorf("Message.Content = %q, want %q (fence stripped)", msg.Content, "Answer.")
+	}
+}
+
+// quickRetries shrinks the retry backoff for the duration of a test.
+func quickRetries(t *testing.T) {
+	t.Helper()
+	saved := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = saved })
+}
+
+const okResponse = `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1}}`
+
+func TestSendRetriesTransientErrors(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(okResponse))
+	}))
+	defer srv.Close()
+
+	req := &AgentRequest{Model: "m", BaseURL: srv.URL}
+	res, err := req.Send(context.Background())
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("server saw %d calls, want 3 (two 503s then success)", calls)
+	}
+	if res.Choices[0].Message.Content != "ok" {
+		t.Errorf("unexpected response content %q", res.Choices[0].Message.Content)
+	}
+}
+
+// TestSendPerturbsTemperatureOnRetry locks the peg-500 escape: the first attempt
+// goes at temperature 0 (deterministic); a retry after a 5xx bumps the temperature
+// so the model can escape a deterministic generation the proxy can't parse.
+func TestSendPerturbsTemperatureOnRetry(t *testing.T) {
+	quickRetries(t)
+	var temps []float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Temperature float64 `json:"temperature"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		temps = append(temps, body.Temperature)
+		if len(temps) < 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write([]byte(okResponse))
+	}))
+	defer srv.Close()
+
+	if _, err := (&AgentRequest{Model: "m", BaseURL: srv.URL, Temperature: defaultTemperature}).Send(context.Background()); err != nil {
+		t.Fatalf("expected success on the perturbed retry, got %v", err)
+	}
+	if len(temps) < 2 {
+		t.Fatalf("want at least 2 attempts, got %d", len(temps))
+	}
+	if temps[0] != defaultTemperature {
+		t.Errorf("first attempt temp = %v, want default %v", temps[0], defaultTemperature)
+	}
+	if temps[1] <= temps[0] {
+		t.Errorf("retry temp = %v, want > first attempt %v (perturbed to escape the 500)", temps[1], temps[0])
+	}
+}
+
+func TestSendGivesUpAfterMaxAttempts(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background())
+	if err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != maxSendAttempts {
+		t.Errorf("server saw %d calls, want %d", calls, maxSendAttempts)
+	}
+}
+
+// A 4xx means the request itself is wrong (e.g. context overflow) — retrying
+// can't fix it and would just burn time, so exactly one attempt is made.
+func TestSendDoesNotRetryClientErrors(t *testing.T) {
+	quickRetries(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("context size (32768 tokens)"))
+	}))
+	defer srv.Close()
+
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 400")
+	}
+	if calls != 1 {
+		t.Errorf("server saw %d calls, want 1 (no retry on 4xx)", calls)
+	}
+	// The error must preserve the provider's message — study's window
+	// self-calibration parses it.
+	if !strings.Contains(err.Error(), "context size (32768 tokens)") {
+		t.Errorf("error should carry the response body, got %q", err)
+	}
+}
+
+func TestSendHonorsContextCancel(t *testing.T) {
+	quickRetries(t)
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-block // hold the request open until the test ends
+	}))
+	defer srv.Close()
+	defer close(block)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).Send(ctx)
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("Send took %v after cancel; should return promptly", elapsed)
+	}
+}
+
+// TestSendStreamHonorsContextCancel proves that SendStream respects context
+// cancellation during an in-flight SSE stream. This is the streaming path
+// that was missing cancellation support.
+func TestSendStreamHonorsContextCancel(t *testing.T) {
+	quickRetries(t)
+	// Track when client disconnects
+	clientDisconnected := make(chan struct{}, 1)
+	// Server that sends one SSE chunk then waits to see if client disconnects
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// Wait to see if client disconnects
+		select {
+		case <-clientDisconnected:
+			t.Logf("Server: client disconnected")
+		case <-time.After(2 * time.Second):
+			t.Logf("Server: no disconnect within 2s")
+		}
+	}))
+	defer func() {
+		select {
+		case clientDisconnected <- struct{}{}:
+		default:
+		}
+		srv.Close()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	t.Logf("Starting SendStream with %v timeout", 50*time.Millisecond)
+	_, err := (&AgentRequest{Model: "m", BaseURL: srv.URL}).SendStream(ctx, nil, nil)
+	elapsed := time.Since(start)
+	t.Logf("SendStream returned after %v with err=%v", elapsed, err)
+
+	if err == nil {
+		t.Fatal("expected context cancellation error, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("SendStream took %v after cancel; should return promptly", elapsed)
 	}
 }

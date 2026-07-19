@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSplitBlocks(t *testing.T) {
@@ -188,4 +190,285 @@ func stripANSI(s string) string {
 		i++
 	}
 	return b.String()
+}
+
+func TestHumanK(t *testing.T) {
+	tests := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"},
+		{999, "999"},
+		{1000, "1k"},
+		{1500, "1.5k"},
+		{8200, "8.2k"},
+		{65536, "65.5k"},
+		{1000000, "1M"},
+		{1048576, "1M"},
+		{1500000, "1.5M"},
+	}
+	for _, tt := range tests {
+		if got := humanK(tt.in); got != tt.want {
+			t.Errorf("humanK(%d) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestCtxColor(t *testing.T) {
+	win := 131072
+	tests := []struct {
+		used int
+		want string
+	}{
+		{0, green},
+		{win / 4, green},       // 25%
+		{win * 6 / 10, yellow}, // 60%
+		{win * 9 / 10, red},    // 90%
+		{win, red},             // full
+	}
+	for _, tt := range tests {
+		if got := ctxColor(tt.used, win); got != tt.want {
+			t.Errorf("ctxColor(%d/%d) = %q, want %q", tt.used, win, got, tt.want)
+		}
+	}
+}
+
+func TestSessionPrompt(t *testing.T) {
+	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
+	got := sess.Prompt()
+
+	for _, want := range []string{"cortex " + Version, ModelCoder, "8.2k/32.8k", promptGlyph} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Prompt() = %q, missing %q", got, want)
+		}
+	}
+
+	// The prompt is redrawn on every keystroke with only \r\033[K, which cannot
+	// erase an embedded newline — a \n here walks the line down one row per byte
+	// typed. The inter-turn blank line is the REPL loop's job, not Prompt()'s.
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("Prompt() must be a single line, got %q", got)
+	}
+}
+
+func TestStripToolMarkup(t *testing.T) {
+	content := "Let me check.\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
+	got := stripToolMarkup(content)
+	if got != "Let me check." {
+		t.Errorf("stripToolMarkup = %q, want %q", got, "Let me check.")
+	}
+}
+
+func TestMessageRender(t *testing.T) {
+	ts := time.Date(2026, 6, 8, 14, 23, 1, 0, time.UTC)
+	tests := []struct {
+		role string
+		icon string
+	}{
+		{"assistant", iconCortex},
+		{RoleSystem, iconCortex}, // default branch
+		{RoleTool, iconTool},
+		{RoleUser, iconUser},
+	}
+	for _, tt := range tests {
+		m := Message{Role: tt.role, Content: "hello"}
+		got := m.render(ts)
+		for _, want := range []string{tt.icon, "14:23:01", "hello"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("render(role=%s) = %q, missing %q", tt.role, got, want)
+			}
+		}
+	}
+}
+
+func TestContextRatio(t *testing.T) {
+	cs := CortexSession{Window: 1000, LastPromptTokens: 800}
+	if got := cs.contextRatio(); got != 0.8 {
+		t.Errorf("contextRatio = %v, want 0.8", got)
+	}
+	// The gauge color and the compact trigger share the same threshold.
+	if ctxColor(800, 1000) != red {
+		t.Error("gauge should be red exactly at compactThreshold")
+	}
+	if ctxColor(799, 1000) != yellow {
+		t.Error("gauge should be yellow just under compactThreshold")
+	}
+}
+
+func TestWireMessagesComposesEphemerally(t *testing.T) {
+	req := CortexArgs{}.Request() // system message only
+	sys := req.Messages[0].Content
+	req.Messages = append(req.Messages, Message{Role: RoleUser, Content: "add a field"})
+	userOrig := req.Messages[1].Content
+
+	t.Run("no ephemeral → everything unchanged", func(t *testing.T) {
+		wire := req.wireMessages()
+		if wire[0].Content != sys || wire[1].Content != userOrig {
+			t.Error("without ephemeral, no message should change")
+		}
+	})
+
+	t.Run("ephemeral occupies a separate slot after the stable prefix", func(t *testing.T) {
+		req.EphemeralSystem = "# memory\n- [decision] use pgx"
+		wire := req.wireMessages()
+
+		if wire[0].Content != sys {
+			t.Errorf("system message changed: got %q, want %q", wire[0].Content, sys)
+		}
+		if len(wire) != len(req.Messages)+1 {
+			t.Fatalf("wire length = %d, want %d", len(wire), len(req.Messages)+1)
+		}
+		if wire[1].Role != RoleUser || wire[1].Content != req.EphemeralSystem {
+			t.Errorf("wire[1] = %+v, want ephemeral user slot", wire[1])
+		}
+		if wire[2].Content != userOrig {
+			t.Errorf("original user message moved incorrectly: %q", wire[2].Content)
+		}
+		if req.Messages[0].Content != sys || req.Messages[1].Content != userOrig {
+			t.Error("stored messages must not be mutated by composition")
+		}
+	})
+
+	t.Run("ephemeral slot remains fixed while the tool loop appends", func(t *testing.T) {
+		req.Messages = append(req.Messages, Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}})
+		req.Messages = append(req.Messages, Message{Role: RoleTool, ToolCallID: "1", Content: "tool output"})
+		req.EphemeralSystem = "ctx"
+		wire := req.wireMessages()
+		if wire[0].Content != sys || wire[1].Content != "ctx" || wire[2].Content != userOrig {
+			t.Fatalf("wire prefix = %+v, want stable system, ephemeral slot, original user", wire[:3])
+		}
+		if wire[len(wire)-1].Content != "tool output" {
+			t.Error("tool-loop append missing from wire tail")
+		}
+	})
+}
+
+func TestWireMessagesTwoZones(t *testing.T) {
+	req := &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "u1"}, {Role: "assistant", Content: "a1"}, {Role: RoleUser, Content: "u2"}, {Role: "assistant", Content: "a2"}}}
+
+	t.Run("demoted turns are replaced by the outline", func(t *testing.T) {
+		req.OutlineBlock = "OUTLINE"
+		req.EphemeralSystem = "INDEX"
+		req.TailFrom = 3
+
+		wire := req.wireMessages()
+		// Wire: system, outline, index slot, u2, a2.
+		if len(wire) != 5 {
+			t.Errorf("wire length = %d, want 5", len(wire))
+		}
+		if wire[0].Content != "sys" {
+			t.Errorf("wire[0] = %q, want stable system", wire[0].Content)
+		}
+		if wire[1].Role != RoleUser || wire[1].Content != "OUTLINE" {
+			t.Errorf("wire[1] = {%q,%q}, want {%q,%q}", wire[1].Role, wire[1].Content, RoleUser, "OUTLINE")
+		}
+		if wire[2].Content != "INDEX" || wire[3].Content != "u2" || wire[4].Content != "a2" {
+			t.Errorf("wire suffix = %+v, want index, u2, a2", wire[2:])
+		}
+		// Stored Messages must not be mutated
+		if len(req.Messages) != 5 || req.Messages[1].Content != "u1" {
+			t.Errorf("stored Messages[1] = %q, want %q (not mutated)", req.Messages[1].Content, "u1")
+		}
+	})
+
+	t.Run("tail-only demotion without outline still drops demoted messages", func(t *testing.T) {
+		req.OutlineBlock = ""
+		req.EphemeralSystem = ""
+		req.TailFrom = 3
+
+		wire := req.wireMessages()
+		if len(wire) != 3 {
+			t.Errorf("wire length = %d, want 3", len(wire))
+		}
+		if wire[0].Content != "sys" {
+			t.Errorf("wire[0] = %q, want %q", wire[0].Content, "sys")
+		}
+		if wire[1].Content != "u2" {
+			t.Errorf("wire[1] = %q, want %q", wire[1].Content, "u2")
+		}
+		if wire[2].Content != "a2" {
+			t.Errorf("wire[2] = %q, want %q", wire[2].Content, "a2")
+		}
+	})
+
+	t.Run("zero values are a no-op", func(t *testing.T) {
+		req.OutlineBlock = ""
+		req.EphemeralSystem = ""
+		req.TailFrom = 0
+
+		wire := req.wireMessages()
+		if len(wire) != len(req.Messages) {
+			t.Errorf("wire length = %d, want %d", len(wire), len(req.Messages))
+		}
+		if wire[1].Content != "u1" {
+			t.Errorf("wire[1] = %q, want %q", wire[1].Content, "u1")
+		}
+	})
+}
+
+// applyPromptCache marks Anthropic cache breakpoints on the system message and
+// the end of prior history, and only for anthropic/* models. The default
+// (no-cache) message must marshal byte-identically so transcripts are untouched.
+func TestPromptCache(t *testing.T) {
+	mk := func() []Message {
+		return []Message{
+			{Role: RoleSystem, Content: "SYS"},
+			{Role: RoleUser, Content: "first task"},
+			{Role: "assistant", Content: "doing it"},
+			{Role: RoleUser, Content: "follow up"}, // current turn (last user)
+		}
+	}
+	cached := func(m Message) bool {
+		b, _ := json.Marshal(&m) // pointer, as addressable wire-slice elements are
+		return strings.Contains(string(b), "cache_control")
+	}
+
+	t.Run("default message marshals byte-identically (no cache_control)", func(t *testing.T) {
+		b, _ := json.Marshal(Message{Role: RoleUser, Content: "hi"})
+		if string(b) != `{"role":"user","content":"hi"}` {
+			t.Errorf("default marshal changed: %s", b)
+		}
+	})
+
+	t.Run("non-anthropic model is a no-op", func(t *testing.T) {
+		msgs := mk()
+		applyPromptCache(msgs, "z-ai/glm-4.6")
+		for i, m := range msgs {
+			if cached(m) {
+				t.Errorf("message %d should not be cached for a non-anthropic model", i)
+			}
+		}
+	})
+
+	t.Run("anthropic marks system + end-of-prior-history, not the current turn", func(t *testing.T) {
+		msgs := mk()
+		applyPromptCache(msgs, "anthropic/claude-haiku-4.5")
+		want := map[int]bool{0: true, 1: false, 2: true, 3: false} // sys + pre-current-user
+		for i, m := range msgs {
+			if cached(m) != want[i] {
+				t.Errorf("message %d (role %s) cached=%v, want %v", i, m.Role, cached(m), want[i])
+			}
+		}
+		// The cached system message must carry the structured content form.
+		b, _ := json.Marshal(&msgs[0])
+		if !strings.Contains(string(b), `"type":"ephemeral"`) || !strings.Contains(string(b), `"text":"SYS"`) {
+			t.Errorf("cached message not in content-parts form: %s", b)
+		}
+		// The real wire path marshals the message SLICE inside the payload —
+		// addressable elements must invoke the pointer marshaler there too.
+		wire, _ := json.Marshal(struct {
+			Messages []Message `json:"messages"`
+		}{msgs})
+		if got := strings.Count(string(wire), "cache_control"); got != 2 {
+			t.Errorf("wire payload should carry 2 cache breakpoints, got %d: %s", got, wire)
+		}
+	})
+
+	t.Run("first turn (no prior history) marks only the system message", func(t *testing.T) {
+		msgs := []Message{{Role: RoleSystem, Content: "SYS"}, {Role: RoleUser, Content: "hi"}}
+		applyPromptCache(msgs, "anthropic/claude-opus-4.8")
+		if !cached(msgs[0]) || cached(msgs[1]) {
+			t.Error("first turn should cache only the system message")
+		}
+	})
 }

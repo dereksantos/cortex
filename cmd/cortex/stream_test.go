@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/dereksantos/cortex/pkg/llm"
 )
 
 // sseHandler serves a fixed SSE body for any request path.
@@ -155,5 +157,14 @@ func TestStreamPrinterSuppressesToolMarkup(t *testing.T) {
 				t.Errorf("began = %v, want %v", began, tt.want != "")
 			}
 		})
+	}
+}
+
+func TestAssembleStreamResponsePreservesCachedTokens(t *testing.T) {
+	res := assembleStreamResponse(llm.StreamResult{Stats: llm.GenerationStats{
+		InputTokens: 100, OutputTokens: 20, CachedInputTokens: 75,
+	}})
+	if got := res.Usage.CachedPromptTokens(); got != 75 {
+		t.Fatalf("cached prompt tokens = %d, want 75", got)
 	}
 }
