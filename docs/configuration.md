@@ -331,17 +331,86 @@ are process-wide (set once at `cortex discord` startup);
 `route_max_output_tokens` (`limits.*`) and `route_confidence_threshold` are
 read per-session from the live `*CortexSession`'s config.
 
+## `context.*` — two-zone working-set fractions
+
+```json
+{
+  "context": {
+    "tail_high_fraction": 0.5,
+    "tail_drain_fraction": 0.333,
+    "outline_fraction": 0.125
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `tail_high_fraction` | 0.5 (W/2) | Fraction of the window at which the hydrated tail (zone B) triggers demotion — `docs/context-architecture.md`'s high watermark. |
+| `tail_drain_fraction` | 1/3 ≈ 0.333 (W/3) | Fraction of the window demotion drains the tail down to — the low watermark. Also gates `recall`'s output size (`tool_deps.go`). |
+| `outline_fraction` | 0.125 (W/8) | Fraction of the window the demoted-turn outline (zone A) may grow to before it folds via the summarizer. |
+
+**These are eval-verified defaults** — `cmd/cortex/context_eval_test.go`'s
+deterministic Δ suite and the live fleet eval
+(`context_eval_live_test.go`, `CORTEX_LIVE_FLEET=1`) both run at the
+defaults above (W/2, W/3, W/8); changing them moves the working set off the
+configuration those evals actually exercised. The loader enforces a safety
+inequality (below) so a bad combination fails fast at config load rather
+than surfacing as a live prompt-size regression.
+
+Each field is an independent fraction of the resolved window `W`
+(`windowSize()`) — a pointer, like `route_confidence_threshold`, so an
+explicit-but-invalid `0.0` is distinguishable from "not set." **Bit-identical
+subtlety**: when a field is unset, the resolver uses the ORIGINAL
+integer-division expression (`W/2`, `W/3`, `W/8`) verbatim, not
+`W * defaultFraction` — integer division and float multiplication are not
+guaranteed to agree for every `W`, and "omitted config reproduces today's
+value exactly" is the whole point of the defaults above. Float math (
+`int(float64(W) * fraction)`) only runs once a field is explicitly
+configured (`cmd/cortex/config.go`'s `tailHighWatermark`/
+`tailDrainWatermark`/`outlineBudget`).
+
+**The safety inequality**, enforced at load time whenever ANY field in this
+section is explicitly set (an absent `context` section skips validation
+entirely):
+
+- Each fraction must be in `(0, 1)`.
+- `tail_high_fraction` must be strictly greater than `tail_drain_fraction`
+  — demotion needs hysteresis (the tail must grow past the drain target
+  before demoting fires, or every turn re-triggers it).
+- `tail_high_fraction + outline_fraction + 0.16 <= 0.8` — the dormancy
+  inequality. `0.8` is the hardcoded compact-trigger threshold
+  (`compactThreshold`, `main.go`; Derek's option-2 decision keeps it out of
+  this config group). `0.16` (`contextPrefixHeadroom`, `config.go`) is a
+  conservative constant standing in for the two zone-A pieces this section
+  doesn't configure — the system prompt (+ AGENTS.md, capped by
+  `limits.max_instruction_bytes`) and the memory index (capped by
+  `limits.memory_index_cap_chars`) — sized against the smallest window these
+  caps would plausibly still run against (`fallbackWindow`, 32768) so a
+  smaller real window only makes the guarantee more conservative, never
+  less. At the shipped defaults this leaves a deliberately thin (0.015)
+  but real margin: `0.5 + 0.125 + 0.16 = 0.785 <= 0.8`.
+
+Unset fields resolve to their documented default fraction for these two
+cross-field checks — setting only `tail_high_fraction` still validates
+against the *default* `tail_drain_fraction`/`outline_fraction`, not a
+skipped check. A rejection names the inequality and the offending numbers,
+e.g. `context: tail_high_fraction (0.7000) + outline_fraction (0.2000) +
+prefix_headroom (0.1600, system prompt + memory index slack) = 1.0600
+exceeds the compact trigger (0.8000) — …`.
+
 ## Validation
 
-Every field above is optional; 0 (or, for `route_confidence_threshold`,
-absent/`null`) means "not set — use the default." An EXPLICIT nonsensical
-value — negative for any of the count/byte/timeout fields, or
-`route_confidence_threshold` outside `(0, 1]` — is a fatal config-load error:
-`cortex` prints `cortex: <path>: invalid config: <field> must be positive,
-got <value>` (or the threshold-specific message) to stderr and exits 1
-rather than silently falling back to the default. Unknown keys anywhere
-under a recognized section (or an entirely unrecognized top-level section)
-are ignored, not errors — the same forward-compatible behavior
+Every field above is optional; 0 (or, for `route_confidence_threshold` and
+every `context.*` fraction, absent/`null`) means "not set — use the
+default." An EXPLICIT nonsensical value — negative for any of the
+count/byte/timeout fields, `route_confidence_threshold` outside `(0, 1]`, or
+a `context.*` combination violating the range/hysteresis/dormancy invariants
+above — is a fatal config-load error: `cortex` prints `cortex: <path>:
+invalid config: <field> must be positive, got <value>` (or the
+threshold-/context-specific message) to stderr and exits 1 rather than
+silently falling back to the default. Unknown keys anywhere under a
+recognized section (or an entirely unrecognized top-level section) are
+ignored, not errors — the same forward-compatible behavior
 `models.<role>`'s unknown-role warning already had.
 
 ## Environment variables
@@ -373,3 +442,5 @@ runner, not a working knob.
   effort vocabulary and per-dialect translation.
 - [`docs/completion-roadmap.md`](completion-roadmap.md) — Track E1/E2 for
   why the role surface and curated fleet look the way they do.
+- [`docs/context-architecture.md`](context-architecture.md) — the two-zone
+  working-set design `context.*` configures the fractions of.

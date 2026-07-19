@@ -94,7 +94,8 @@ func TestContextReportStructure(t *testing.T) {
 	if !strings.Contains(got, "session outline") || !strings.Contains(got, "3 entries") {
 		t.Errorf("contextReport() missing the outline entry count; got:\n%s", got)
 	}
-	if !strings.Contains(got, "cap "+humanK(cs.windowSize()/8)+" = W/8") {
+	outlineCap := cs.Config.outlineBudget(cs.windowSize())
+	if !strings.Contains(got, "cap "+humanK(outlineCap)+" = "+fractionOfWindow(outlineCap, cs.windowSize())) {
 		t.Errorf("contextReport() missing the outline fold cap; got:\n%s", got)
 	}
 
@@ -114,12 +115,18 @@ func TestContextReportStructure(t *testing.T) {
 		t.Errorf("contextReport() missing the tail token count; got:\n%s", got)
 	}
 
-	// Zone B: watermarks, shown in tokens.
+	// Zone B: watermarks, shown in tokens plus the resolved fraction of the
+	// window (dynamic, not the historical hardcoded "W/2"/"W/3" labels — see
+	// fractionOfWindow — since these watermarks were RestoreState'd by hand
+	// above to values that aren't actually W/2 or W/3 of this fixture's
+	// window, which is exactly the "stale constant" bug fractionOfWindow
+	// fixes).
 	high, low := cs.ws.GetWatermarks()
-	if !strings.Contains(got, "demote above "+humanK(high)+" (W/2)") {
+	w := cs.windowSize()
+	if !strings.Contains(got, "demote above "+humanK(high)+" ("+fractionOfWindow(high, w)+")") {
 		t.Errorf("contextReport() missing the high watermark; got:\n%s", got)
 	}
-	if !strings.Contains(got, "drain to "+humanK(low)+" (W/3)") {
+	if !strings.Contains(got, "drain to "+humanK(low)+" ("+fractionOfWindow(low, w)+")") {
 		t.Errorf("contextReport() missing the low watermark; got:\n%s", got)
 	}
 

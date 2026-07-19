@@ -106,6 +106,24 @@ func TestZeroConfigResolversMatchHistoricalDefaults(t *testing.T) {
 			if got := cfg.subagentBounds("agent", agentDef); got != agentDef {
 				t.Errorf(`subagentBounds("agent", def) = %+v, want unchanged %+v`, got, agentDef)
 			}
+
+			// context.* resolvers: unset must reproduce the ORIGINAL integer-division
+			// expressions verbatim (ContextConfig's bit-identical-defaults subtlety) —
+			// pinned at an arbitrary non-round window (8000) so a future edit that
+			// swapped the unset branch for windowSize()*defaultFraction would still be
+			// caught by ANY of these three (int division and float-then-truncate can
+			// disagree by a token at some window sizes, even where they happen to
+			// agree at 8000).
+			const w = 8000
+			if got := cfg.tailHighWatermark(w); got != w/2 {
+				t.Errorf("tailHighWatermark(%d) = %d, want %d (w/2)", w, got, w/2)
+			}
+			if got := cfg.tailDrainWatermark(w); got != w/3 {
+				t.Errorf("tailDrainWatermark(%d) = %d, want %d (w/3)", w, got, w/3)
+			}
+			if got := cfg.outlineBudget(w); got != w/8 {
+				t.Errorf("outlineBudget(%d) = %d, want %d (w/8)", w, got, w/8)
+			}
 		})
 	}
 }
@@ -170,7 +188,8 @@ func TestConfigMergeNewSections(t *testing.T) {
 			"risk_approval_timeout_sec": 150,
 			"progress_edit_interval_ms": 2000,
 			"route_confidence_threshold": 0.9
-		}
+		},
+		"context": {"tail_high_fraction": 0.45, "tail_drain_fraction": 0.2, "outline_fraction": 0.1}
 	}`)
 	projPath := write(t, dir, "proj.json", `{
 		"models": {"code": {"max_send_attempts": 2}},
@@ -180,7 +199,8 @@ func TestConfigMergeNewSections(t *testing.T) {
 		"network": {"preflight_timeout_sec": 9},
 		"serve": {"port": 9001},
 		"repl": {"ticker_interval_ms": 500},
-		"discord": {"route_confidence_threshold": 0.5}
+		"discord": {"route_confidence_threshold": 0.5},
+		"context": {"outline_fraction": 0.08}
 	}`)
 
 	cfg := loadMergedConfig(userPath, projPath)
@@ -212,6 +232,9 @@ func TestConfigMergeNewSections(t *testing.T) {
 	}
 	if cfg.Discord.RouteConfidenceThreshold == nil || *cfg.Discord.RouteConfidenceThreshold != 0.5 {
 		t.Errorf("discord.route_confidence_threshold = %v, want project override 0.5", cfg.Discord.RouteConfidenceThreshold)
+	}
+	if cfg.Context.OutlineFraction == nil || *cfg.Context.OutlineFraction != 0.08 {
+		t.Errorf("context.outline_fraction = %v, want project override 0.08", cfg.Context.OutlineFraction)
 	}
 
 	// ...everything else inherits from the user layer untouched.
@@ -262,6 +285,10 @@ func TestConfigMergeNewSections(t *testing.T) {
 	}
 	if cfg.Discord.TypingRefreshSec != 10 || cfg.Discord.RiskApprovalTimeoutSec != 150 || cfg.Discord.ProgressEditIntervalMs != 2000 {
 		t.Errorf("discord.* not inherited: %+v", cfg.Discord)
+	}
+	if cfg.Context.TailHighFraction == nil || *cfg.Context.TailHighFraction != 0.45 ||
+		cfg.Context.TailDrainFraction == nil || *cfg.Context.TailDrainFraction != 0.2 {
+		t.Errorf("context.tail_high_fraction/tail_drain_fraction not inherited: %+v", cfg.Context)
 	}
 }
 
@@ -330,6 +357,19 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 		{"route_confidence_threshold = 1 (inclusive bound): valid", Config{Discord: DiscordConfig{RouteConfidenceThreshold: floatPtr(1)}}, false},
 		{"route_confidence_threshold = 0.5: valid", Config{Discord: DiscordConfig{RouteConfidenceThreshold: floatPtr(0.5)}}, false},
 		{"route_confidence_threshold unset (nil): valid", Config{Discord: DiscordConfig{}}, false},
+		{"context.* all unset: valid", Config{Context: ContextConfig{}}, false},
+		{"context.tail_high_fraction = 0: invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0)}}, true},
+		{"context.tail_high_fraction = 1: invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(1)}}, true},
+		{"context.tail_drain_fraction negative: invalid", Config{Context: ContextConfig{TailDrainFraction: floatPtr(-0.1)}}, true},
+		{"context.outline_fraction > 1: invalid", Config{Context: ContextConfig{OutlineFraction: floatPtr(1.5)}}, true},
+		{"context.tail_high_fraction <= tail_drain_fraction (no hysteresis): invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.3), TailDrainFraction: floatPtr(0.3)}}, true},
+		{"context.tail_high_fraction < tail_drain_fraction: invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.2), TailDrainFraction: floatPtr(0.4)}}, true},
+		{"context dormancy violation (explicit high+outline): invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.7), OutlineFraction: floatPtr(0.2)}}, true},
+		{"context dormancy violation (high alone against default outline): invalid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.65)}}, true},
+		{"context.* explicit defaults (0.5/0.333/0.125): valid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.5), TailDrainFraction: floatPtr(1.0 / 3.0), OutlineFraction: floatPtr(0.125)}}, false},
+		{"context.* tighter tail, more outline: valid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.4), TailDrainFraction: floatPtr(0.25), OutlineFraction: floatPtr(0.15)}}, false},
+		{"context.tail_high_fraction alone: valid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.45)}}, false},
+		{"context.outline_fraction alone: valid", Config{Context: ContextConfig{OutlineFraction: floatPtr(0.1)}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -128,13 +128,16 @@ func (cs *CortexSession) renderOutlineBlock() string {
 }
 
 // foldOutlineIfNeeded folds the oldest half of the outline entries into the
-// digest when the zone exceeds its budget (window/8). Rare by construction; a
-// summarizer failure just skips the fold — the outline stays big but correct.
+// digest when the zone exceeds its budget (window/8 by default, configurable
+// via context.outline_fraction — docs/configuration.md,
+// cs.Config.outlineBudget). Rare by construction; a summarizer failure just
+// skips the fold — the outline stays big but correct.
 func (cs *CortexSession) foldOutlineIfNeeded(ctx context.Context) {
 	if len(cs.outline) < 2 {
 		return
 	}
-	if cache.TokensOf(len(cs.renderOutlineBlock())) <= cs.windowSize()/8 {
+	budget := cs.Config.outlineBudget(cs.windowSize())
+	if cache.TokensOf(len(cs.renderOutlineBlock())) <= budget {
 		return
 	}
 	n := len(cs.outline) / 2
@@ -143,7 +146,7 @@ func (cs *CortexSession) foldOutlineIfNeeded(ctx context.Context) {
 		content += "\n\n"
 	}
 	content += cache.RenderOutline(cs.outline[:n])
-	digest, _, err := foldSummarize(ctx, cs, content, cs.windowSize()/8)
+	digest, _, err := foldSummarize(ctx, cs, content, budget)
 	if err != nil || strings.TrimSpace(digest) == "" {
 		return
 	}

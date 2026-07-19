@@ -176,11 +176,14 @@ func (cs *CortexSession) windowSize() int {
 }
 
 // newWorkingSet builds the demotion policy for the current window: the
-// hydrated tail may grow to half the window and drains to a third
-// (docs/context-architecture.md budgets). base is the message-log index
-// where turn content starts.
+// hydrated tail may grow to half the window and drains to a third by default
+// (docs/context-architecture.md budgets), both configurable as validated
+// fractions via context.tail_high_fraction / context.tail_drain_fraction
+// (docs/configuration.md, cs.Config.tailHighWatermark/tailDrainWatermark).
+// base is the message-log index where turn content starts.
 func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
-	return cache.New(base, cs.windowSize()/2, cs.windowSize()/3)
+	w := cs.windowSize()
+	return cache.New(base, cs.Config.tailHighWatermark(w), cs.Config.tailDrainWatermark(w))
 }
 
 func NewCortexSession() *CortexSession {
@@ -312,18 +315,25 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {
 	switch tc.Function.Name {
 	case "context_adjust_watermarks":
-		// Validate watermarks are within bounds (±W/4)
-		if cs != nil {
-			w := cs.windowSize()
-			bound := w / 4
+		// Validate watermarks are within bounds (±highWM/2 — mirrors
+		// internal/cache.WorkingSet.AdjustWatermarks' own clamp exactly, so
+		// this pre-check can't diverge from what dispatch will actually
+		// enforce. Derived from the LIVE high watermark rather than
+		// windowSize()/4: with context.tail_high_fraction now configurable
+		// (docs/configuration.md), highWM is no longer guaranteed to equal
+		// W/2, so a windowSize()-only bound could reject (or wrongly accept)
+		// deltas AdjustWatermarks itself would judge differently.
+		if cs != nil && cs.ws != nil {
+			high, _ := cs.ws.GetWatermarks()
+			bound := high / 2
 			if highDelta, _ := tc.IntArg("high_delta"); highDelta != 0 {
 				if highDelta < -bound || highDelta > bound {
-					return false, fmt.Sprintf("high_delta %d is out of bounds (±%d for window size %d)", highDelta, bound, w)
+					return false, fmt.Sprintf("high_delta %d is out of bounds (±%d for current high watermark %d)", highDelta, bound, high)
 				}
 			}
 			if lowDelta, _ := tc.IntArg("low_delta"); lowDelta != 0 {
 				if lowDelta < -bound || lowDelta > bound {
-					return false, fmt.Sprintf("low_delta %d is out of bounds (±%d for window size %d)", lowDelta, bound, w)
+					return false, fmt.Sprintf("low_delta %d is out of bounds (±%d for current high watermark %d)", lowDelta, bound, high)
 				}
 			}
 		}

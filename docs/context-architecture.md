@@ -63,6 +63,14 @@
 > - **`recall` is gated at `min(CurationBudgetTokens, W/3)`** — a recall
 >   bigger than the tail's drain target would flood the hydrated tail and
 >   immediately re-demote.
+> - **2026-07-19: the tail high/low watermarks and the outline cap became a
+>   validated config group** — `context.tail_high_fraction` /
+>   `context.tail_drain_fraction` / `context.outline_fraction`
+>   (`docs/configuration.md`), defaulting to exactly W/2, W/3, W/8. The
+>   loader enforces the dormancy inequality this doc's Budgets section
+>   argues for (below) at load time, so a config that would make the
+>   hardcoded 0.8 compact trigger reachable under normal demotion is
+>   rejected before the session ever starts.
 >
 > **Owner.** `cmd/cortex` (turn assembly) + `internal/cache` (the working-set
 > model — the sketch file becomes the package).

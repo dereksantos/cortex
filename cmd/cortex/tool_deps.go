@@ -273,11 +273,15 @@ func (cs *CortexSession) Recall(citation string) (string, error) {
 		b.WriteString("\n\n")
 	}
 
-	// Gate at the curation budget, scaled down to the tail's low watermark on
-	// small windows: a recall bigger than the tail's drain target would flood
-	// the hydrated tail and immediately re-demote.
+	// Gate at the curation budget, scaled down to the tail's low (drain)
+	// watermark on small windows: a recall bigger than the tail's drain
+	// target would flood the hydrated tail and immediately re-demote. Uses
+	// the resolved drain watermark (context.tail_drain_fraction, default
+	// W/3 — docs/configuration.md, cs.Config.tailDrainWatermark) rather than
+	// windowSize()/3 directly, so this gate always tracks whatever
+	// newWorkingSet actually built the session's working set with.
 	gate := cs.Config.toolLimits().CurationBudgetTokens
-	if w := cs.windowSize() / 3; w < gate {
+	if w := cs.Config.tailDrainWatermark(cs.windowSize()); w < gate {
 		gate = w
 	}
 	rendered := b.String()

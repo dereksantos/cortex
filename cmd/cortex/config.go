@@ -429,6 +429,16 @@ type Config struct {
 	Serve   ServeConfig   `json:"serve"`
 	Repl    ReplConfig    `json:"repl"`
 	Discord DiscordConfig `json:"discord"`
+
+	// Context configures the two-zone working-set fractions
+	// (docs/context-architecture.md's budgets: tail high/low watermark and
+	// outline cap, expressed as fractions of the window W). Derek's decision
+	// (option 2, 2026-07-19): ONE validated config group — the 0.8
+	// compact-trigger threshold (compactThreshold, main.go) stays hardcoded,
+	// not part of this surface. See ContextConfig's doc comment for the
+	// bit-identical-defaults subtlety and validateContextConfig for the
+	// enforced invariants.
+	Context ContextConfig `json:"context"`
 }
 
 type ToolConfig struct {
@@ -584,6 +594,108 @@ type DiscordConfig struct {
 	RiskApprovalTimeoutSec   int      `json:"risk_approval_timeout_sec"`
 	ProgressEditIntervalMs   int      `json:"progress_edit_interval_ms"`
 	RouteConfidenceThreshold *float64 `json:"route_confidence_threshold"`
+}
+
+// ContextConfig configures the two-zone working set's three fractions of the
+// window W (docs/context-architecture.md): the tail's demote (high) and
+// drain (low) watermarks, and the outline's fold cap. Fields are pointers —
+// like ModelSpec.Temperature / DiscordConfig.RouteConfidenceThreshold — so an
+// explicit-but-invalid 0.0 is distinguishable from "not set" (a plain float64
+// zero value could never be rejected as out-of-range by validateContextConfig,
+// since it would be indistinguishable from an absent field).
+//
+// BIT-IDENTICAL-DEFAULTS SUBTLETY: the fractions this section's defaults
+// document (0.5, 1/3, 0.125) are NOT what the resolvers below compute when a
+// field is unset. today's hardcoded watermarks are the INTEGER-DIVISION
+// expressions windowSize()/2, windowSize()/3, windowSize()/8 — and integer
+// division is not the same function as float multiplication (e.g. W=10:
+// W/3=3 but int(10 * (1.0/3.0))=3 too, yet W=8: W/3=2 while
+// int(8*(1.0/3.0))=2.666→2 — these happen to agree often but are not
+// guaranteed to for every W, and drift is exactly what "bit-identical" rules
+// out). So an unset field must fall back to the ORIGINAL integer-division
+// expression verbatim, not to `windowSize() * defaultFraction` — see
+// tailHighWatermark/tailDrainWatermark/outlineBudget below, which do exactly
+// that. Float math only ever runs when a field is explicitly configured.
+type ContextConfig struct {
+	TailHighFraction  *float64 `json:"tail_high_fraction"`
+	TailDrainFraction *float64 `json:"tail_drain_fraction"`
+	OutlineFraction   *float64 `json:"outline_fraction"`
+}
+
+// defaultTailHighFraction / defaultTailDrainFraction / defaultOutlineFraction
+// document, as floats, what today's hardcoded integer-division watermarks
+// (W/2, W/3, W/8) are EQUIVALENT to. Used ONLY by validateContextConfig to
+// evaluate the hysteresis/dormancy inequalities against an unconfigured
+// field's effective fraction — so setting only ONE of the three fields still
+// gets checked against the other two's real (default) behavior, not skipped.
+// The runtime resolvers do NOT use these consts; see ContextConfig's doc
+// comment for why.
+const (
+	defaultTailHighFraction  = 0.5
+	defaultTailDrainFraction = 1.0 / 3.0
+	defaultOutlineFraction   = 0.125
+)
+
+// contextPrefixHeadroom is the conservative fixed-fraction allowance the
+// dormancy inequality (validateContextConfig) reserves for zone A's other two
+// pieces — the system prompt (+ AGENTS.md, capped by maxInstructionBytes) and
+// the memory index (capped by memoryIndexCap) — neither of which is one of
+// the three configurable fractions. Both caps are byte/char ceilings, not
+// fractions of W, so expressing them as "a fraction of W" requires picking a
+// reference window; erring conservative means picking the SMALLEST window
+// these caps would plausibly still run against (a smaller window makes the
+// same absolute overhead a LARGER fraction of it), which is fallbackWindow
+// (32768 — the zero-fleet-info default, main.go's config.go const):
+//
+//	(maxInstructionBytes + memoryIndexCap) / CharsPerToken / fallbackWindow
+//	= (16384 + 4000) / 4 / 32768 ≈ 0.1555, rounded UP to 0.16 for margin.
+//
+// docs/context-architecture.md's own reasoning is that today's defaults
+// (W/2 + W/8 = 0.625) leave the 0.8 compact trigger unreachable given the
+// remaining zones — this const makes that implicit slack an explicit,
+// checkable number: 0.5 + 0.125 + 0.16 = 0.785 <= 0.8, a deliberately thin
+// (0.015) but real margin.
+const contextPrefixHeadroom = 0.16
+
+// validateContextConfig rejects a nonsensical context.* fraction group.
+// Called by validateConfig ONLY when at least one field is explicitly set
+// (matching this file's existing only-validate-what-was-set convention) —
+// an absent "context" section is untouched. Unset individual fields resolve
+// to their documented default fraction for the two cross-field inequalities
+// below, so a config that sets only tail_high_fraction still gets checked
+// against the DEFAULT drain and outline fractions, not skipped.
+func validateContextConfig(c ContextConfig) error {
+	if c.TailHighFraction == nil && c.TailDrainFraction == nil && c.OutlineFraction == nil {
+		return nil
+	}
+	high := defaultTailHighFraction
+	if c.TailHighFraction != nil {
+		high = *c.TailHighFraction
+		if high <= 0 || high >= 1 {
+			return fmt.Errorf("context.tail_high_fraction must be in (0, 1), got %v", high)
+		}
+	}
+	drain := defaultTailDrainFraction
+	if c.TailDrainFraction != nil {
+		drain = *c.TailDrainFraction
+		if drain <= 0 || drain >= 1 {
+			return fmt.Errorf("context.tail_drain_fraction must be in (0, 1), got %v", drain)
+		}
+	}
+	outline := defaultOutlineFraction
+	if c.OutlineFraction != nil {
+		outline = *c.OutlineFraction
+		if outline <= 0 || outline >= 1 {
+			return fmt.Errorf("context.outline_fraction must be in (0, 1), got %v", outline)
+		}
+	}
+	if high <= drain {
+		return fmt.Errorf("context: tail_high_fraction (%.4f) must be greater than tail_drain_fraction (%.4f) so demotion has hysteresis — the tail must be allowed to grow above the drain target before demoting fires, or every turn re-triggers demotion", high, drain)
+	}
+	if sum := high + outline + contextPrefixHeadroom; sum > compactThreshold {
+		return fmt.Errorf("context: tail_high_fraction (%.4f) + outline_fraction (%.4f) + prefix_headroom (%.4f, system prompt + memory index slack) = %.4f exceeds the compact trigger (%.4f) — normal demotion could make the 80%% compact threshold reachable; lower tail_high_fraction and/or outline_fraction", high, outline, contextPrefixHeadroom, sum, compactThreshold)
+	}
+	return nil
 }
 
 func (c *Config) isOpenRouter() bool {
@@ -793,6 +905,9 @@ func validateConfig(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
+	if err := validateContextConfig(cfg.Context); err != nil {
+		return err
+	}
 	for role, m := range cfg.Models {
 		if err := nonNegative("models."+role+".request_timeout_sec", m.RequestTimeoutSec); err != nil {
 			return err
@@ -909,6 +1024,7 @@ func mergeConfig(base, over *Config) *Config {
 	out.Serve = mergeServe(base.Serve, over.Serve)
 	out.Repl = mergeRepl(base.Repl, over.Repl)
 	out.Discord = mergeDiscord(base.Discord, over.Discord)
+	out.Context = mergeContext(base.Context, over.Context)
 	return &out
 }
 
@@ -983,6 +1099,24 @@ func mergeDiscord(base, over DiscordConfig) DiscordConfig {
 	}
 	if over.RouteConfidenceThreshold != nil {
 		out.RouteConfidenceThreshold = over.RouteConfidenceThreshold
+	}
+	return out
+}
+
+// mergeContext threads a project-level override over the user-level default,
+// field-by-field like mergeDiscord's RouteConfidenceThreshold (a pointer
+// override — a project config that sets one fraction doesn't clobber the
+// other two from the user config).
+func mergeContext(base, over ContextConfig) ContextConfig {
+	out := base
+	if over.TailHighFraction != nil {
+		out.TailHighFraction = over.TailHighFraction
+	}
+	if over.TailDrainFraction != nil {
+		out.TailDrainFraction = over.TailDrainFraction
+	}
+	if over.OutlineFraction != nil {
+		out.OutlineFraction = over.OutlineFraction
 	}
 	return out
 }
@@ -1324,6 +1458,34 @@ func (c *Config) subagentBounds(role string, def agent.Bounds) agent.Bounds {
 	def.MaxIter = resolveInt(pc.MaxIter, def.MaxIter)
 	def.ReadBudgetBytes = resolveInt(pc.ReadBudgetBytes, def.ReadBudgetBytes)
 	return def
+}
+
+// tailHighWatermark / tailDrainWatermark / outlineBudget resolve the two-zone
+// working set's three fractions (docs/context-architecture.md, docs/configuration.md's
+// `context.*` section) against a resolved window w. Per ContextConfig's doc
+// comment: an unset field falls back to the ORIGINAL integer-division
+// expression (w/2, w/3, w/8) verbatim — NOT `int(float64(w) * defaultFraction)`
+// — so omitted config reproduces today's watermarks bit-for-bit; only an
+// EXPLICIT fraction switches to float math.
+func (c *Config) tailHighWatermark(w int) int {
+	if c == nil || c.Context.TailHighFraction == nil {
+		return w / 2
+	}
+	return int(float64(w) * *c.Context.TailHighFraction)
+}
+
+func (c *Config) tailDrainWatermark(w int) int {
+	if c == nil || c.Context.TailDrainFraction == nil {
+		return w / 3
+	}
+	return int(float64(w) * *c.Context.TailDrainFraction)
+}
+
+func (c *Config) outlineBudget(w int) int {
+	if c == nil || c.Context.OutlineFraction == nil {
+		return w / 8
+	}
+	return int(float64(w) * *c.Context.OutlineFraction)
 }
 
 func (c *Config) seedBudget() int {

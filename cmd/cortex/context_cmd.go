@@ -90,19 +90,35 @@ func (cs *CortexSession) systemPromptLine() string {
 }
 
 // outlineSummaryLine reports the demoted-turn outline's size: entry count,
-// the fold budget (window/8, per foldOutlineIfNeeded), and whether a folded
-// digest is currently riding the front of the zone. "" when there is
+// the fold budget (window/8 by default, per foldOutlineIfNeeded — configurable
+// via context.outline_fraction, cs.Config.outlineBudget), and whether a
+// folded digest is currently riding the front of the zone. "" when there is
 // nothing demoted yet.
 func (cs *CortexSession) outlineSummaryLine() string {
 	if len(cs.outline) == 0 && cs.outlineFolded == "" {
 		return ""
 	}
 	block := cs.renderOutlineBlock()
-	detail := fmt.Sprintf("%d entries (cap %s = W/8)", len(cs.outline), humanK(cs.windowSize()/8))
+	w := cs.windowSize()
+	outlineCap := cs.Config.outlineBudget(w)
+	detail := fmt.Sprintf("%d entries (cap %s = %s)", len(cs.outline), humanK(outlineCap), fractionOfWindow(outlineCap, w))
 	if cs.outlineFolded != "" {
 		detail += ", folded digest present"
 	}
 	return row("session outline", humanK(cache.TokensOf(len(block)))+" tok", detail)
+}
+
+// fractionOfWindow formats part/whole as the resolved fraction actually in
+// force — "0.500×W" — rather than a label baked in for the historical
+// hardcoded W/2, W/3, W/8 values, so /context stays accurate once
+// context.tail_high_fraction / context.tail_drain_fraction /
+// context.outline_fraction (docs/configuration.md) are configured away from
+// their defaults.
+func fractionOfWindow(part, whole int) string {
+	if whole <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%.3f×W", float64(part)/float64(whole))
 }
 
 // memoryIndexLine reports the injected memory-index note's size and note
@@ -134,14 +150,18 @@ func (cs *CortexSession) hydratedTailLine() string {
 }
 
 // watermarksLine reports the working set's demote/drain thresholds in
-// tokens. "" when there is no working set yet.
+// tokens, plus the fraction of the window each resolves to (dynamic — see
+// fractionOfWindow — since context.tail_high_fraction / .tail_drain_fraction
+// (docs/configuration.md) may have moved them off the historical W/2, W/3).
+// "" when there is no working set yet.
 func (cs *CortexSession) watermarksLine() string {
 	if cs.ws == nil {
 		return ""
 	}
 	high, low := cs.ws.GetWatermarks()
-	return fmt.Sprintf("  %-20s demote above %s (W/2), drain to %s (W/3)\n",
-		"watermarks", humanK(high), humanK(low))
+	w := cs.windowSize()
+	return fmt.Sprintf("  %-20s demote above %s (%s), drain to %s (%s)\n",
+		"watermarks", humanK(high), fractionOfWindow(high, w), humanK(low), fractionOfWindow(low, w))
 }
 
 // lastRequestLine reports the most recent model call's prompt/cache usage,
