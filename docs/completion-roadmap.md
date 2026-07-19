@@ -116,7 +116,7 @@ topics, fleet slot contention (`docs/refactor-status.md`).
 - [ ] C2. Code-model learned-window calibration: extend `learnedWindows`
       beyond the study model (`cmd/cortex/tool_deps.go:39`) so the code
       role self-calibrates on overflow; compaction remains the fallback.
-- [ ] C3. Study-eval telemetry to the journal sink: emit `study.result`
+- [x] C3. Study-eval telemetry to the journal sink: emit `study.result`
       rows sharing the `EvalCellResultPayload` vocabulary alongside the
       current stdout JSONL (the deferred wiring in
       `docs/study-subagent.md` §5).
