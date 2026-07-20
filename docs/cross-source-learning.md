@@ -414,3 +414,27 @@ backfill once 2c exists; 2f needs all of the above.
    it into any project's own memory, that changes. Recommendation: ship
    notes-only first; let the ø eval's G1 lift number answer this
    empirically before adding raw-journal reads.
+
+## Gate receipts (2026-07-20)
+
+Four ø runs on the chatterbox fleet (qwen3-coder-q3, n=3 each), the
+iterate-the-harness loop working as designed:
+- Run 1: infrastructure only — fleet auto-discovery picked a down model
+  group; nothing under test executed. Fix: per-home model pinning.
+- Run 2: mechanism live, two real defects caught by the gates it was
+  built for — the recurrence detector counted boilerplate vocabulary
+  (noise project merged into the group; G2/G3 fail) and LearnUser
+  declined valid promotions 2/3 (the slice-1 conservatism, again).
+- Fixes: document-frequency distinctiveness (df<=2 or 2df<P) with the
+  exact leak as a regression case; affirmative promotion posture.
+- Run 3: G1/G2/G4 pass, G3 failed only on a rep where promotion was
+  declined (rescored: provenance judges promoted notes; declines are
+  G1's department, slice-1 precedent).
+- Run 4 (final): **ALL FOUR GATES PASS, 3/3 clean** — promotion fired
+  every rep, ARM-ON recall 3/3 vs ARM-OFF 0/3, exact [a b] provenance
+  every rep, zero noise leakage, ~2s per learn pass (budget 120s).
+
+The cross-source story is now receipted end to end: sessions in
+separate projects -> project notes -> deterministic recurrence
+detection -> promoted user-tier memory with provenance -> index
+injection into a fresh project's very next session.
