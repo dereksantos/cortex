@@ -187,7 +187,8 @@ every `tools.*` gate, every env var, auth resolution (`key_env`/
 kept in exactly one place so this section, the README, and the doc itself
 can't drift apart. It also covers the full tunables surface beyond the
 minimal example above: per-role transport timeouts/retries, `subagents.*`
-(Study/Agent profile bounds), `tools.*` numeric caps, and the `limits`/
+(Study/Agent profile bounds), `tools.*` numeric caps, the `prompt` section (`prompt.file` replaces the
+built-in system prompt, `prompt.append` extends it), and the `limits`/
 `network`/`serve`/`repl`/`discord` sections — every field optional,
 defaulting to today's hardcoded value.
 
