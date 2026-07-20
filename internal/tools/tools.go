@@ -566,6 +566,38 @@ var Learn = Subagent{
 	DepthCap: 0,
 }
 
+// LearnUser is the cross-project promotion subagent profile
+// (docs/cross-source-learning.md piece 1's promotion half, piece 2's link
+// rules): the machine-wide counterpart to Learn. It never touches the
+// filesystem or the journal — its toolset is exactly
+// memory_read/memory_search/memory_write, since its whole job is deciding,
+// from a mechanically-detected candidate group's note bodies plus the user
+// index, whether to promote one synthesized note to the user tier. No
+// outline/grep/read_file (it doesn't need code — see learnUserSystem), no
+// memory_forget (retraction stays the coder's/a human's judgment call, same
+// exclusion as Learn), no recursion (DepthCap 0).
+//
+// UNLIKE Study and Agent, LearnUser is deliberately NOT Register()'d and
+// carries no Declaration: never offered to the coder as a callable tool
+// mid-conversation. Its only entry points are `cortex learn --user` and the
+// loop scheduler's kind:"learn"+scope:"user" firing (both
+// cmd/cortex/learn_user.go), which call RunSubagent directly — same shape as
+// Learn's own two entry points. Bounds default lower than Learn's (a single
+// candidate group's notes, not a whole capture-window digest);
+// subagents.learn_user overrides via Config.subagentBounds, same mechanism
+// as Study/Agent/Learn. Runs on the study role's model by default
+// (cmd/cortex's subagentRequest special-cases Role=="learn_user" alongside
+// "study"/"learn" so it does NOT inherit a coder's live model) — like Learn,
+// it can run with no coder session live at all (a scheduled loop firing).
+var LearnUser = Subagent{
+	Name:     "learn_user",
+	Role:     "learn_user",
+	System:   learnUserSystem,
+	Tools:    []Tool{MemoryReadTool, MemorySearchTool, MemoryWriteTool},
+	Bounds:   agent.Bounds{MaxTokens: 4_096, MaxIter: 8, ReadBudgetBytes: 32_000},
+	DepthCap: 0,
+}
+
 // init registers Study and Agent on the shared subagent registry so Execute's
 // generic dispatch (see Lookup in Execute) resolves their tool names back to
 // the right profile — the same path any future inheritor (reflect, dream)

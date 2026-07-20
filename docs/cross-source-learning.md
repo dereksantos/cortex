@@ -1,15 +1,30 @@
 # Cross-source learning — slice 2: the TOGETHER
 
-> **Status: DESIGN (2026-07-19).** Slice 1 ([`docs/learning-loop.md`](learning-loop.md),
-> gate GREEN 2026-07-19) proved background learning within one project — a
-> bounded `Learn` subagent reads a project's own journal and writes notes
-> into that project's own `.cortex/memory/`. Its own "Out of scope" section
-> named this doc explicitly: *"Cross-source / cross-project connection...
-> slice 2, its own doc, only if this slice's gate goes green and a consumer
-> is named for it too."* Gate is green; this doc names the consumer and
-> specs the mechanism. No code lands with this doc — same discipline as
-> [`docs/think-dream-eval.md`](think-dream-eval.md) and `learning-loop.md`
-> before it.
+> **Status: DESIGN (2026-07-19), partially BUILT (2026-07-20).** Slice 1
+> ([`docs/learning-loop.md`](learning-loop.md), gate GREEN 2026-07-19) proved
+> background learning within one project — a bounded `Learn` subagent reads
+> a project's own journal and writes notes into that project's own
+> `.cortex/memory/`. Its own "Out of scope" section named this doc
+> explicitly: *"Cross-source / cross-project connection... slice 2, its own
+> doc, only if this slice's gate goes green and a consumer is named for it
+> too."* Gate is green; this doc names the consumer and specs the mechanism.
+>
+> Landed so far (Δ gate green, `cmd/cortex/learn_user_eval_test.go` +
+> `internal/tools/learn_user_test.go`): slice **2a** (the user-tier store +
+> injection + shadowing + manual `scope` hatch) and **2b** (the serve/capture
+> gap fixes) shipped 2026-07-19 — see `docs/memory-tools.md`'s "User-tier
+> memory — piece 1 shipped" note. **2c's promotion half** (deterministic
+> candidate detection + the `LearnUser` subagent + `Spec.Scope`/
+> `roleLearnUser` plumbing + `cortex learn --user`) and **2d's promotion
+> un-link rule** (Δ4) shipped 2026-07-20 — `cmd/cortex/learn_user.go`. Still
+> open: 2d's OTHER half (`Learn`/`LearnUser` writing `[[links]]` in the first
+> place — no prompt extension landed, so there is nothing live to un-link
+> yet beyond what a human writes by hand via `memory_write`), the `loop.run`-
+> as-a-second-input-class idea floated in piece 3 item 3 (LearnUser today
+> reads ONLY other projects' memory indices, no cursor, as decision 4
+> describes — it does not yet notice cross-project *loop-failure* patterns),
+> piece 4 (the web dashboard), and the ø gate (G1–G4). See each section
+> below for the inline built/not-built marker.
 
 Derek's framing (2026-07-19): the web track "can bring together context over
 time from many sources and learn from it and connect it all together."
@@ -87,7 +102,15 @@ only fires on ≥2-project recurrence), and if the user index ever needs
 4000 chars, promotion has gotten too permissive, visible on the dashboard
 before it's visible in a growing prompt.
 
-**Who writes it — the honest mechanism.** The per-project `Learn` pass
+**Who writes it — the honest mechanism. BUILT 2026-07-20** (`internal/loops.Spec.Scope`,
+`cmd/cortex/learn_user.go`'s `RunLearnUserPass`/`detectCandidateGroups`/
+`LearnUser`, `cortex learn --user`) — every decision below shipped as
+specified, with one implementation choice not pinned by the design: the
+harness invokes `LearnUser` **once per candidate group** (not one batched
+call across every group) so the mechanical `preparePromotionWrite` step
+always knows exactly which source-project list a given `memory_write` call
+belongs to (needed for decision 3's provenance line — see its note below).
+The per-project `Learn` pass
 cannot detect cross-project recurrence; it only ever sees one project's
 journal, by design. Decision: a **new loop `Scope`**, not a new `Kind`.
 `internal/loops.Spec` gains `Scope` (`""`/`"project"` = today; `"user"` =
@@ -112,23 +135,39 @@ to look at, model decides what's worth saving:
 2. **Model-driven, one bounded call.** Candidate groups (bounded count and
    chars) go to a `LearnUser` subagent profile — same shape as `Learn`
    minus filesystem tools (it doesn't need `outline`/`grep`/`read_file`,
-   only `memory_read`/`memory_search`/`memory_write` against both stores)
-   — which decides per group whether the notes describe the same fact and,
-   if so, writes one synthesized user-tier note. The model, not the
-   overlap heuristic, decides worth-saving.
-3. **Provenance is a body convention, not new frontmatter.**
-   `memory-tools.md` already fixed frontmatter to timestamps only. Instead
-   `LearnUser`'s prompt ends every promoted note with a fixed line:
-   `Promoted from: <project-a>, <project-b>` — plain text, fixed format,
-   grep-able by the Δ gate without a schema change.
-4. **No cursor for this pass, by design.** Unlike per-project `Learn`
-   (cursors a journal offset), the user-level pass reads current note
-   state, not an event stream — no natural offset. It re-scans every
-   registered project's index each firing: cheap by construction (indices
-   are capped, registries are expected small), idempotent via the same
-   "check the target before writing" discipline `Learn` already uses. A
-   registry large enough to make full-rescan expensive is a sizing problem
-   for later (flagged in Sizing, not solved here).
+   only `memory_read`/`memory_search`/`memory_write`) — which decides per
+   group whether the notes describe the same fact and, if so, writes one
+   synthesized user-tier note. The model, not the overlap heuristic,
+   decides worth-saving. (One call PER remaining candidate group, not one
+   batched call across every group — see the mechanism's built-status note
+   above.)
+3. **Provenance is a body convention, not new frontmatter. BUILT, mechanically
+   enforced rather than left to the model.** `memory-tools.md` already fixed
+   frontmatter to timestamps only. `LearnUser`'s prompt explicitly tells the
+   model NOT to write its own `Promoted from:` line; instead
+   `cmd/cortex/learn_user.go`'s `preparePromotionWrite` (wired through
+   `study.go`'s `dispatcherFor`) appends `Promoted from: <project-a>,
+   <project-b>` mechanically from the candidate group the harness already
+   knows, to every `memory_write` the profile issues — plain text, fixed
+   format, grep-able by the Δ gate (`TestRunLearnUserPassPromotesWithProvenanceLine`),
+   and correct regardless of what the live model actually produced (Δ2: "no
+   more, no fewer" holds by construction, not by trusting model instruction-
+   following).
+4. **No cursor for this pass, by design — dedup made deterministic, not just
+   model-driven. BUILT.** Unlike per-project `Learn` (cursors a journal
+   offset), the user-level pass reads current note state, not an event
+   stream — no natural offset. It re-scans every registered project's index
+   each firing: cheap by construction (indices are capped via
+   `recurrenceMaxNotesPerProject`/`recurrenceMaxNoteChars`, registries are
+   expected small). Idempotence is enforced ONE LEVEL MORE MECHANICALLY than
+   "check the target before writing" (which is still true — the model also
+   sees the user index in its seed): `groupAlreadyPromoted` scans the user
+   tier for an existing note whose `Promoted from:` line names EXACTLY this
+   candidate group's project set, and skips calling the model at all when
+   one exists — the re-run test (`TestRunLearnUserPassDedupSkipsAlreadyPromotedGroup`)
+   asserts zero additional model round-trips, not just zero additional
+   notes. A registry large enough to make full-rescan expensive is a sizing
+   problem for later (flagged in Sizing, not solved here).
 
 **Manual escape hatch: yes.** `memory_write`/`memory_read`/`memory_search`/
 `memory_forget` gain an optional `scope` argument (`"project"` default,
@@ -170,13 +209,24 @@ substrate (`resolveEmbedder`, kept per `memory-tools.md`) remains the
 evidence-gated door — revisit only if keyword search plus wiki-links
 measurably misses real connections.
 
-**Links across promotion.** A promoted project note may link
-(`[[local-only]]`) to a note that never got promoted. Decision:
-**promotion drops (un-links) any wikilink whose target isn't present in
-the destination tier** — the text survives as plain words, not brackets. A
-bracketed reference the reader's tier can't resolve is worse than none.
-Mechanical and deterministic (check target existence before writing) — the
-Δ gate's link-integrity invariant is exactly this check.
+**Links across promotion. BUILT 2026-07-20** (`cmd/cortex/learn_user.go`'s
+`unlinkAbsentTargets`, wired into `preparePromotionWrite` — the same
+promotion write path decision 3 above appends provenance in). A promoted
+project note may link (`[[local-only]]`) to a note that never got promoted.
+Decision: **promotion drops (un-links) any wikilink whose target isn't
+present in the destination tier** — the text survives as plain words, not
+brackets. A bracketed reference the reader's tier can't resolve is worse
+than none. Mechanical and deterministic (check target existence — against
+the user tier's CURRENT `Store.List()`, including any note the same
+promotion pass already wrote — before writing); the Δ gate's link-integrity
+invariant is exactly this check
+(`TestRunLearnUserPassPromotionUnlinksAbsentTarget`,
+`TestUnlinkAbsentTargetsStripsOnlyUnresolvableLinks`). NOT built: the OTHER
+half of piece 2 (extending `Learn`/`LearnUser`'s prompts to actually WRITE
+`[[name]]` links in the first place, "if this fact relates to an existing
+note, link it") — this un-link rule fires on any wikilink a note happens to
+contain (including one a human wrote by hand via `memory_write`), but
+nothing yet prompts a background pass to add one.
 
 ## 3. Multi-source intake
 
@@ -193,27 +243,40 @@ Mechanical and deterministic (check target existence before writing) — the
    journal class or event type — the capture event just stops being blind
    to two of the coder's read-only tools. This is the minimal capture
    addition the brief asked to spec, confirmed necessary above.
-3. **Structural: cursor generalized to (source-class, scope).**
-   `learnCursorDir`/`captureClassDir` (`learn.go`) hardcode the `capture`
-   class today — generalize both to take a class name, each with its own
-   cursor dir (`.cortex/journal/learn/<class>/.cursor`). At **project
-   scope**, `capture` stays the only class worth reading — once the two
-   fixes above land, every adapter (REPL, headless `turn`, discord,
-   serve/web) already funnels into it. At **user scope**, `LearnUser`
-   reads a second class: the **`loop.run` journal**
-   (`internal/journal/loop.go`), already user-level (every loop firing
-   across every project logs there) — its own independent cursor lets
-   `LearnUser` notice things no single project's capture stream could ever
-   contain, e.g. "the daily blog-sync loop has failed three firings
-   running" — genuinely cross-project signal. Landscape scans stay out of
-   `LearnUser`'s input (inventory, not learnable fact material).
+3. **Structural: cursor generalized to (source-class, scope). PARTIALLY
+   BUILT 2026-07-20 — the SCOPE half only, via `internal/loops.Spec.Scope`
+   (see the "Who writes it" section above) + `loop_run.go`'s
+   `RunLoopFiring` branching a `Kind:"learn"` spec to `runLearnFiring`
+   (`Scope` unset/`"project"`) or `runLearnUserFiring` (`Scope:"user"`) —
+   both share the exact same `finalizeLoopFiring`/`journal.AppendLoopRun`
+   choke point every other loop firing already uses, confirmed still
+   user-level per its own doc comment
+   (`TestRunLoopFiringLearnUserScopeRunsPromotionPassAndJournals`). NOT
+   built: `learnCursorDir`/`captureClassDir`'s own generalization to an
+   explicit `(class, scope)` parameter, and — the actual payoff this item
+   describes — `LearnUser` reading the `loop.run` journal as a SECOND input
+   class at all.** `LearnUser` as shipped has no cursor and no journal
+   input whatsoever (per decision 4 above, "no cursor for this pass, by
+   design" — the ENTIRE mechanism, not just the note-index half): its only
+   input is other projects' current memory-note state, mechanically
+   re-scanned every firing. Noticing cross-project *loop-failure* patterns
+   ("the daily blog-sync loop has failed three firings running") is real,
+   useful, and NOT built — it needs its own cursor (this item's original
+   motivation) since `loop.run` is a genuine event stream, unlike the
+   note-index scan. Left for a follow-up slice once this one has live
+   receipts to justify the added surface (mirrors open question 5's
+   "ship notes-only first" posture, extended to this second class).
 
-**Bounds.** `LearnUser` gets its own `subagents.learn_user` config section
-— same three fields (`max_tokens`/`max_iter`/`read_budget_bytes`) as
-`subagents.study`/`agent`/`learn`, same `Config.subagentBounds` mechanism
-keyed off a new `roleLearnUser` constant. Model: the `study` role binding,
-same rationale as `Learn` — a background pass has no live coder model to
-inherit.
+**Bounds. BUILT.** `LearnUser` gets its own `subagents.learn_user` config
+section — same three fields (`max_tokens`/`max_iter`/`read_budget_bytes`)
+as `subagents.study`/`agent`/`learn`, same `Config.subagentBounds`
+mechanism keyed off a new `roleLearnUser` constant (`cmd/cortex/config.go`).
+Model: the `study` role binding, same rationale as `Learn` — a background
+pass has no live coder model to inherit
+(`TestSubagentRequestLearnUserProfileStaysOnStudyBinding`). Defaults tuned
+lower than `Learn`'s (4096/8/32000 vs. 8192/12/96000) since one candidate
+group's notes is a smaller seed than a whole capture-window digest — see
+`docs/configuration.md`'s `subagents.*` table.
 
 ## 4. The web surface as reader
 
@@ -251,14 +314,14 @@ Same discipline as `learning-loop.md`: Δ (deterministic, no model) first,
 
 ### Δ — deterministic
 
-| # | Invariant |
-|---|---|
-| Δ1 | **Promotion is deterministic up to the model call.** Fixed project-note fixtures → the candidate-detection step (overlap across projects) produces the same candidate groups every run; only the `LearnUser` call itself is scripted-`Sender`. |
-| Δ2 | **Provenance line present and correctly attributed.** Every user-tier note from a scripted `LearnUser` pass carries `Promoted from: <projects>` naming exactly the source projects — no more, no fewer. |
-| Δ3 | **Shadowing resolves project-first.** A project note and a user note sharing a name: `memory_read(name)` (no scope) returns the project body; `memory_search` surfaces both, tagged by tier. |
-| Δ4 | **Link integrity across promotion.** A project note linking `[[local-only]]`, where `local-only` isn't promoted: the promoted note no longer contains `[[local-only]]` in bracket form. A link whose target *is* present in the destination tier survives unchanged. |
-| Δ5 | **Per-source cursors are independent.** Advancing the project-scope `capture` cursor doesn't move the user-scope `loop.run` cursor or vice versa; zero new `loop.run` entries since cursor ⇒ no model call. |
-| Δ6 | **Local-only.** `journal.AssertLocalOnly` holds for the `loop.run` reader and the user-tier store's write path — no outbound path, carried over from slice 1 and `CLAUDE.md`. |
+| # | Invariant | Status |
+|---|---|---|
+| Δ1 | **Promotion is deterministic up to the model call.** Fixed project-note fixtures → the candidate-detection step (overlap across projects) produces the same candidate groups every run; only the `LearnUser` call itself is scripted-`Sender`. | **GREEN** — `TestDetectCandidateGroupsThresholdBoundary`, `TestDetectCandidateGroupsDeterministic`, `TestRunLearnUserPassNoCandidatesMakesNoModelCall` (zero-candidate short-circuit, scripted sender proves zero requests). |
+| Δ2 | **Provenance line present and correctly attributed.** Every user-tier note from a scripted `LearnUser` pass carries `Promoted from: <projects>` naming exactly the source projects — no more, no fewer. | **GREEN** — `TestRunLearnUserPassPromotesWithProvenanceLine` (mechanically enforced, not model-trusted — see decision 3's built-status note above). |
+| Δ3 | **Shadowing resolves project-first.** A project note and a user note sharing a name: `memory_read(name)` (no scope) returns the project body; `memory_search` surfaces both, tagged by tier. | **GREEN**, landed with piece 2a (2026-07-19), unchanged by this slice. |
+| Δ4 | **Link integrity across promotion.** A project note linking `[[local-only]]`, where `local-only` isn't promoted: the promoted note no longer contains `[[local-only]]` in bracket form. A link whose target *is* present in the destination tier survives unchanged. | **GREEN** — `TestRunLearnUserPassPromotionUnlinksAbsentTarget`, `TestUnlinkAbsentTargetsStripsOnlyUnresolvableLinks`. |
+| Δ5 | **Per-source cursors are independent.** Advancing the project-scope `capture` cursor doesn't move the user-scope `loop.run` cursor or vice versa; zero new `loop.run` entries since cursor ⇒ no model call. | **NOT APPLICABLE YET** — `LearnUser` doesn't read `loop.run` at all in this slice (piece 3 item 3's cursor-generalization half is unbuilt; see that section). `TestRunLoopFiringKindLearnProjectScopeStillUsesLearnEngine` covers the adjacent regression (Scope unset must still route to the existing project-scope `Learn` cursor, unaffected). |
+| Δ6 | **Local-only.** `journal.AssertLocalOnly` holds for the `loop.run` reader and the user-tier store's write path — no outbound path, carried over from slice 1 and `CLAUDE.md`. | **HOLDS BY CONSTRUCTION** — `learn_user.go` introduces no network/export code path at all (registry + `internal/memory` are both local-filesystem-only); nothing new to assert against. |
 
 ### ø — agentic, live-gated (`CORTEX_LIVE_FLEET=1`)
 
@@ -282,14 +345,14 @@ project B** is then asked the question only that fact answers.
 
 ## Sizing
 
-| Slice | Scope | Size |
-|---|---|---|
-| 2a | User-tier store + injection + shadowing + manual `scope` hatch (piece 1 minus promotion) | S |
-| 2b | Serve/capture gap fixes: `EnableMemory()` on serve, `turnArtifacts` web-tool recording | S — do first; 2c/2d are pointless without it |
-| 2c | `LearnUser` promotion: candidate detection + subagent + `Scope`/`roleLearnUser` plumbing + `loop.run` cursor | M |
-| 2d | Wiki-links: prompt extension + promotion un-link rule | S |
-| 2e | Dashboard memory screen: list/read/delete + recent activity | M |
-| 2f | Δ + ø gate | M |
+| Slice | Scope | Size | Status |
+|---|---|---|---|
+| 2a | User-tier store + injection + shadowing + manual `scope` hatch (piece 1 minus promotion) | S | **DONE** (2026-07-19) |
+| 2b | Serve/capture gap fixes: `EnableMemory()` on serve, `turnArtifacts` web-tool recording | S — do first; 2c/2d are pointless without it | **DONE** (2026-07-19) |
+| 2c | `LearnUser` promotion: candidate detection + subagent + `Scope`/`roleLearnUser` plumbing + `loop.run` cursor | M | **PARTIAL** (2026-07-20) — candidate detection + subagent + `Scope`/`roleLearnUser` plumbing DONE (`cmd/cortex/learn_user.go`); the `loop.run` cursor (LearnUser reading loop-failure patterns as a second input class) is NOT built — see piece 3 item 3's built-status note |
+| 2d | Wiki-links: prompt extension + promotion un-link rule | S | **PARTIAL** (2026-07-20) — the promotion un-link rule (Δ4) DONE; the prompt extension (`Learn`/`LearnUser` actually writing `[[links]]`) NOT built |
+| 2e | Dashboard memory screen: list/read/delete + recent activity | M | not started (owned separately — the web dashboard) |
+| 2f | Δ + ø gate | M | Δ green for everything landed above (see the Δ table's Status column); ø not run |
 
 Order: 2b → 2a → 2d → 2c → 2e → 2f. 2b unblocks everything else being
 meaningful; 2a/2d are cheap and mostly independent of 2c; 2c carries the
@@ -317,21 +380,29 @@ backfill once 2c exists; 2f needs all of the above.
 
 ## Open questions for Derek
 
-1. **Candidate-recurrence threshold.** Piece 1's overlap check needs a
-   concrete threshold before Δ1 is testable. Recommendation: start
-   conservative (likely under-promoting) since G2's precision floor
-   punishes over-promotion harder than a missed lift punishes G1 — tune
-   from real `LearnUser` receipts, not priors.
+1. **Candidate-recurrence threshold. DECIDED conservatively, per the
+   recommendation below, 2026-07-20.** `cmd/cortex/learn_user.go`'s
+   `recurrenceMinSharedTerms = 3` (two notes from different projects must
+   share ≥3 distinctive terms, each ≥`recurrenceMinTermLen` (5) runes,
+   lowercase alphanumeric — a shared "the"/"test" doesn't count) — a
+   placeholder starting point per its own doc comment, explicitly flagged
+   to tune from real `LearnUser` receipts once the ø gate has live data, not
+   from priors. Piece 1's overlap check needs a concrete threshold before
+   Δ1 is testable. Recommendation: start conservative (likely
+   under-promoting) since G2's precision floor punishes over-promotion
+   harder than a missed lift punishes G1 — tune from real `LearnUser`
+   receipts, not priors.
 2. **Registry-scale ceiling for the no-cursor design.** Full-rescan-every-
    firing is fine at today's registry sizes. Recommendation: ship as
    designed; revisit only if `LearnUser`'s own G3 measurement shows it's
    already a problem.
-3. **Same-tier-by-default link scoping.** This doc assumes a link resolves
-   within its own note's tier unless explicitly prefixed
-   (`[[user:name]]`), and promotion un-links unpromoted cross-tier
-   targets. Recommendation: ship the un-link rule (deterministic,
-   testable); leave explicit cross-tier prefix syntax unimplemented until
-   a real note needs it.
+3. **Same-tier-by-default link scoping. DONE per the recommendation,
+   2026-07-20** — `unlinkAbsentTargets` ships exactly the un-link rule
+   (deterministic, testable — Δ4); no `[[user:name]]` explicit cross-tier
+   prefix syntax was implemented, per "leave it unimplemented until a real
+   note needs it." This doc assumes a link resolves within its own note's
+   tier unless explicitly prefixed (`[[user:name]]`), and promotion
+   un-links unpromoted cross-tier targets.
 4. **Dashboard delete scope for shadowed notes.** Same-name project/user
    notes: show as two tier-tagged rows, or only the shadowing (project)
    one with a note that a user-tier note exists underneath?

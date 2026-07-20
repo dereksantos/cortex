@@ -162,6 +162,42 @@ If a window truly has nothing this specific — most turns are routine edits or 
 
 Tools: outline/grep/read_file to check the code behind a turn if needed; memory_read/memory_search to check the index; memory_write to save or update.`
 
+// learnUserSystem is the LearnUser profile's system prompt
+// (docs/cross-source-learning.md piece 1's promotion half): a machine-wide
+// background pass that decides whether a mechanically-detected cross-project
+// recurrence is actually the same durable fact, and if so promotes it to the
+// shared user-tier memory. Unlike Learn, it never sees code or a journal —
+// its only inputs are a CANDIDATE GROUP (notes from >=2 projects a
+// deterministic overlap check flagged) and the user memory index, and its
+// only write surface is memory_write against the user tier.
+//
+// The prompt deliberately tells the model NOT to write its own "Promoted
+// from" line: cmd/cortex's dispatcherFor intercepts every memory_write this
+// profile issues (preparePromotionWrite, learn_user.go) and appends the
+// correct one mechanically from the candidate group the harness already
+// knows — the same "harness decides what it gets to look at, model decides
+// what's worth saving" split memory-tools.md and learning-loop.md both use,
+// pushed one step further here because the exact source-project list is
+// harness-known data, not something worth asking a small model to transcribe
+// correctly (docs/cross-source-learning.md Δ2: "no more, no fewer").
+//
+// UNLIKE Study and Agent (and like Learn), LearnUser is deliberately NOT
+// Register()'d and carries no Declaration: not offered to the coder as a
+// callable tool. Its only entry point is cmd/cortex/learn_user.go's
+// RunLearnUserPass (via `cortex learn --user` or the loop scheduler's
+// kind:"learn"+scope:"user" firing).
+const learnUserSystem = `You are a background pass that looks for the SAME fact recurring across multiple projects on this machine and, when it does, promotes it to the shared cross-project memory tier.
+
+You are given a CANDIDATE GROUP: notes from two or more different projects that a mechanical check flagged as textually similar, plus the USER MEMORY INDEX (what's already promoted — do not duplicate).
+
+Read the candidate notes carefully. If they genuinely describe the same durable fact, decision, constraint, or pattern — not just a coincidental word overlap between unrelated notes — call memory_write once with a short kebab-case name and a body stating the fact in general, project-independent terms (drop anything specific to only one project; a fact worth promoting is one that's actually true everywhere it was seen). If the group is already covered by an existing user-tier note, or the notes only share vocabulary but describe different things, write nothing.
+
+Do not name a scope on memory_write — every note you write lands in the user tier automatically, regardless of what you pass. Do not write your own "Promoted from" line — one is added for you automatically from the candidate group's actual source projects.
+
+If you promote a note, reply with a short summary naming what you saved. If you decide NOT to promote this group, reply with exactly NO_PROMOTION and nothing else.
+
+Tools: memory_read/memory_search to check the user index further; memory_write to promote.`
+
 // studySeed builds the subagent's opening user message: the goal, the path, and
 // the structural outline it starts from.
 func StudySeed(goal, path, ol string) string {

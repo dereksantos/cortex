@@ -54,6 +54,18 @@ type Spec struct {
 	// omitempty keeps every existing loops.json entry (written before Kind
 	// existed) unmarshaling to "" == KindTurn, unchanged.
 	Kind string `json:"kind,omitempty"`
+	// Scope is orthogonal to Kind (docs/cross-source-learning.md piece 1's
+	// promotion half): "" (the zero value) or ScopeProject is today's
+	// project-scoped firing (Kind picks the engine, Scope picks what it
+	// reads/writes — for a KindLearn spec, ScopeProject's is the existing
+	// per-project Learn pass); ScopeUser on a KindLearn spec instead runs
+	// the machine-wide LearnUser promotion pass (cmd/cortex/learn_user.go)
+	// over every registered project's memory index — Project is not
+	// resolved or required in that case (RunLearnUserPass iterates the
+	// registry itself). Scope is meaningless for a KindTurn spec today;
+	// omitempty keeps every existing loops.json entry (written before Scope
+	// existed) unmarshaling to "" == ScopeProject, unchanged.
+	Scope string `json:"scope,omitempty"`
 	// Prompt is the coder-turn prompt for a KindTurn loop. For a KindLearn
 	// loop it is optional: when set, it's passed to the Learn subagent as an
 	// extra focus hint on top of its standard extraction goal; empty is a
@@ -70,6 +82,12 @@ type Spec struct {
 const (
 	KindTurn  = "turn"
 	KindLearn = "learn"
+)
+
+// Loop scopes — see Spec.Scope's doc comment.
+const (
+	ScopeProject = "project"
+	ScopeUser    = "user"
 )
 
 // ErrLoopNotFound is returned by Lookup and Remove when no loop with the

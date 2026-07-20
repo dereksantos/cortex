@@ -113,8 +113,16 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	// docs/learning-loop.md: a kind:"learn" spec runs the Learn subagent over
 	// the project's journal instead of a coder Turn — same scheduler, cadence
 	// floor, and three-strike disable (learn.go's runLearnFiring reuses
-	// finalizeLoopFiring below), different firing engine.
+	// finalizeLoopFiring below), different firing engine. Scope is
+	// orthogonal to Kind (docs/cross-source-learning.md piece 1's promotion
+	// half): a kind:"learn" spec additionally carrying scope:"user" runs the
+	// machine-wide LearnUser promotion pass instead of the per-project Learn
+	// pass — same journaled-outcome contract, different firing engine again
+	// (learn_user.go's runLearnUserFiring).
 	if spec.Kind == loops.KindLearn {
+		if spec.Scope == loops.ScopeUser {
+			return runLearnUserFiring(ctx, spec, reg, store, newSession)
+		}
 		return runLearnFiring(ctx, spec, reg, store, newSession)
 	}
 

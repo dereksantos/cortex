@@ -53,7 +53,7 @@ func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentR
 	dialect := dialectFor(cs.Config.isOpenRouter())
 	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
 	inheritedModel := ""
-	if sa.Role != roleStudy && sa.Role != roleLearn && cs.Request != nil {
+	if sa.Role != roleStudy && sa.Role != roleLearn && sa.Role != roleLearnUser && cs.Request != nil {
 		inheritedModel = cs.Request.Model
 		req.Model = cs.Request.Model
 		req.BaseURL = cs.Request.BaseURL
@@ -177,6 +177,21 @@ func (cs *CortexSession) dispatcherFor(sa tools.Subagent) AgentDispatcher {
 	return DispatchFunc(func(ctx context.Context, call ToolCall) string {
 		if !allow[call.Function.Name] {
 			return "Error: " + call.Function.Name + " is not available here."
+		}
+		// LearnUser's promotion write path (docs/cross-source-learning.md
+		// pieces 1+2, learn_user.go's preparePromotionWrite): every
+		// memory_write call it issues is rewritten here BEFORE the
+		// generic dispatch below — scope forced to "user" (LearnUser only
+		// ever writes the user tier), the body's wikilinks un-linked
+		// against what's really in the user tier right now, and a
+		// provenance line appended mechanically — so both invariants hold
+		// regardless of what the live model actually wrote.
+		if sa.Role == roleLearnUser && call.Function.Name == tools.FunctionMemoryWrite {
+			rewritten, err := cs.preparePromotionWrite(ctx, call)
+			if err != nil {
+				return "Error: " + err.Error()
+			}
+			call = rewritten
 		}
 		call, err := tools.ConfinePath(call, cs.root())
 		if err != nil {

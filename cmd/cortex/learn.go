@@ -343,8 +343,16 @@ func RunLearningPass(ctx context.Context, cs *CortexSession, focus string) (Lear
 // runLearnCLI is `cortex learn [--project <name>]`: a one-shot headless
 // learning pass over the current (or named) project's journal since the
 // last learn cursor. Always exits 0 — "nothing worth saving" is a normal,
-// common outcome, not a failure (docs/learning-loop.md).
+// common outcome, not a failure (docs/learning-loop.md). `cortex learn
+// --user` (learn_user.go's userFlag/runLearnUserCLI,
+// docs/cross-source-learning.md piece 1) instead runs the machine-wide
+// cross-project promotion pass over every registered project's memory
+// index, ignoring --project (there is no single project to scope it to).
 func runLearnCLI(args []string) {
+	if userFlag(args) {
+		runLearnUserCLI(args)
+		return
+	}
 	project, _ := parseProjectFlag(args)
 
 	cs := NewCortexSession()
