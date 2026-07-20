@@ -134,27 +134,33 @@ Then STOP and report what you changed and how you verified it. Be concise and co
 // no task-shaped reason to save. Shaped after the deleted
 // internal/cognition.DreamAnalysisPrompt's category taxonomy (decisions/
 // patterns/constraints/corrections + a NO_INSIGHT escape) — salvaged for its
-// SHAPE, not its code — composed with memory-tools.md's "saving is rare"
-// discipline so Learn doesn't just re-implement per-turn hoarding one layer
-// removed from the coder. Learn is not offered to the coder as a callable
-// tool (no Declaration, not Registered) — its only entry points are `cortex
+// SHAPE, not its code. Learn is not offered to the coder as a callable tool
+// (no Declaration, not Registered) — its only entry points are `cortex
 // learn` and the loop scheduler's kind:"learn" firing (both cmd/cortex), so
 // this prompt never needs to defend against being invoked mid-conversation.
-const learnSystem = `You are a background learning pass over a coding session that has already happened. You don't talk to the user and nothing you do interrupts them — you run afterward, on a bounded budget, looking for what the coder should have saved to memory but didn't.
+//
+// Deliberately does NOT carry memory-tools.md's "saving is rare"/"if in
+// doubt, don't save" discipline: that posture is written for the coder,
+// deciding in the moment whether ITS OWN turn is worth interrupting itself
+// over. Learn runs after the fact, specifically over what the coder already
+// declined to save — inheriting the coder's own hesitation here would make
+// Learn a no-op by construction. A live gate run (docs/think-dream-eval.md's
+// G2) caught exactly this: a scanned turn stated two specific facts with "no
+// need to save," and the first cut of this prompt took that caveat at face
+// value and answered NO_INSIGHT. The posture below narrows what counts
+// (specific, durable, not already indexed) rather than how readily it's
+// applied.
+const learnSystem = `You are a background pass that reviews a finished coding session for facts the coder should have saved to memory but didn't. You are the safety net, not the coder: you decide for yourself, you do not defer to what the coder chose to do in the moment.
 
-You're given the MEMORY INDEX (notes already saved) and a window of TURNS from the session journal — what actually happened, prompts and outcomes — that no note yet covers.
+You are given the MEMORY INDEX (notes already saved) and TURNS from the session journal (what was said and done) that no note yet covers.
 
-Look for what's durable and NOT already in the index:
-- decisions — a choice that was made, and why
-- patterns — a reusable approach worth remembering
-- constraints — something to avoid, or a boundary that was learned
-- corrections — a mistake made once that shouldn't be repeated
+Scan the TURNS for specific facts not already in the MEMORY INDEX: identifiers, codewords (e.g. "GARNET-77"), exact quantities (e.g. "14 shards"), decisions, or constraints. If you find one, call memory_write to save it — even if the turn also says something like "no need to save this" or "just thinking out loud." That phrase describes what the coder chose in the moment; it is not a reason for you to skip a fact that is actually there. Skipping a specific fact you can see is the exact failure this pass exists to catch.
 
-Saving is rare: most turns are routine edits or exploratory reads that produce nothing worth a note, and anything already covered by an existing note is not a new insight. Only save what would change how a future session acts, and that the code, git history, and journal do not already record on their own. If a fact fits an existing note, update it (memory_write with that note's name) rather than duplicating it.
+Name each note with whichever fits: decisions (a choice and why), patterns (a reusable approach), constraints (something to avoid or a boundary), corrections (a mistake not to repeat). If none fit, use "note" — the label matters less than saving the fact. Before writing, check the index so you update an existing note instead of duplicating it.
 
-Your tools: outline/grep/read_file to look at the actual code behind a turn if the summary alone isn't enough to judge it; memory_read/memory_search to check whether something is already saved; memory_write to save or update a note.
+If a window truly has nothing this specific — most turns are routine edits or reads — answer with exactly NO_INSIGHT and nothing else. Otherwise, call memory_write for what you found, then reply with a short summary naming the notes you saved (don't repeat their bodies).
 
-When you're done: if you found nothing worth saving — the common case — answer with exactly NO_INSIGHT and nothing else. Otherwise, answer with a short plain-prose summary of what you saved and why (name the notes, don't repeat their bodies).`
+Tools: outline/grep/read_file to check the code behind a turn if needed; memory_read/memory_search to check the index; memory_write to save or update.`
 
 // studySeed builds the subagent's opening user message: the goal, the path, and
 // the structural outline it starts from.

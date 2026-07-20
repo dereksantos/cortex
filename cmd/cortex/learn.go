@@ -9,10 +9,15 @@
 // foreground turn, cmd/cortex/session_runtime.go's captureTurn) since the
 // last learn cursor, hand the window to the Learn subagent
 // (internal/tools.Learn) alongside the memory index, and let it decide what
-// (if anything) is worth a memory_write. The ONLY mechanical step is
-// windowing the journal and advancing the cursor — same discipline as
+// (if anything) is worth a memory_write. The mechanical step is windowing
+// the journal and advancing the cursor — same discipline as
 // memory-tools.md's index injection: the model decides what's worth saving,
-// the harness only decides what it gets to look at.
+// the harness only decides what it gets to look at. One exception to
+// "windowing only": formatLearnEntry/learnFullTurnText recover a truncated
+// entry's full turn text from the session transcript before handing it to
+// the model — still mechanical (no model call, no judgment about what's
+// worth saving), just making sure a durable fact stated past the capture
+// class's own truncation points is actually visible to look at.
 package main
 
 import (
@@ -65,11 +70,18 @@ func learnCursorDir(cs *CortexSession) string {
 }
 
 // learnEntry is one capture.event turn reduced to what the digest needs.
+// SessionID/TurnNo are the coordinate pair back into that turn's session
+// transcript (session_runtime.go's captureTurn stamps Context.SessionID and
+// Metadata["turn"]); either may be zero-value for an older or hand-seeded
+// capture entry that predates this, in which case learnFullTurnText simply
+// can't recover anything extra for it.
 type learnEntry struct {
-	Offset journal.Offset
-	TS     time.Time
-	Prompt string
-	Result string
+	Offset    journal.Offset
+	TS        time.Time
+	Prompt    string
+	Result    string
+	SessionID string
+	TurnNo    int
 }
 
 // scanCaptureWindow reads every capture.event entry past the learn cursor, in
@@ -116,7 +128,14 @@ func scanCaptureWindow(cs *CortexSession) ([]learnEntry, journal.Offset, error) 
 			continue
 		}
 		prompt, _ := ev.ToolInput["user_prompt"].(string)
-		entries = append(entries, learnEntry{Offset: e.Offset, TS: e.TS, Prompt: prompt, Result: ev.ToolResult})
+		turnNo := 0
+		if n, ok := ev.Metadata["turn"].(float64); ok { // json.Unmarshal decodes numbers as float64
+			turnNo = int(n)
+		}
+		entries = append(entries, learnEntry{
+			Offset: e.Offset, TS: e.TS, Prompt: prompt, Result: ev.ToolResult,
+			SessionID: ev.Context.SessionID, TurnNo: turnNo,
+		})
 	}
 	return entries, tail, nil
 }
@@ -132,11 +151,73 @@ func truncateLearnField(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// formatLearnEntry renders one turn as a single digest line.
-func formatLearnEntry(e learnEntry) string {
+// learnFullTurnCapChars bounds one turn's full-transcript pull
+// (learnFullTurnText) when the capture-summary line would otherwise
+// truncate it. Generous relative to the capture/digest caps (280/200/300)
+// so a durable fact stated anywhere in a conversational turn survives, but
+// still bounded — a single verbose turn must not be able to blow the
+// digest budget (learnDigestCapChars) on its own.
+const learnFullTurnCapChars = 3000
+
+// learnFullTurnText renders the verbatim messages of one turn straight from
+// its session transcript — the same durable source tool_deps.go's Recall
+// resolves citations against — bounded to learnFullTurnCapChars. It exists
+// because the capture class's own fields are already lossy by the time
+// they reach here: session_runtime.go's captureTurn caps the assistant
+// excerpt at capture time (captureExcerptCapChars, default 280), and even
+// the untruncated user prompt it stores gets cut a second, harsher time by
+// formatLearnEntry's digest caps (learnPromptCapChars/learnResultCapChars)
+// — a durable fact stated partway through an otherwise-ordinary turn (e.g.
+// after ~130 chars of unrelated preamble) can fall past either cut. Pulling
+// the raw transcript recovers what the capture summary can't.
+//
+// ok is false when the transcript isn't resolvable (no session id/turn
+// number on the entry — e.g. a hand-seeded test fixture or a capture event
+// that predates this metadata — an unreadable session file, or a turn
+// number not present in it); the caller falls back to the capture-summary
+// line in that case.
+func learnFullTurnText(sessionsDir, sessionID string, turnNo int) (string, bool) {
+	if sessionID == "" || turnNo <= 0 {
+		return "", false
+	}
+	msgs, turns, err := loadTranscript(filepath.Join(sessionsDir, sessionID+".jsonl"))
+	if err != nil {
+		return "", false
+	}
+	var b strings.Builder
+	found := false
+	for i, m := range msgs {
+		if i >= len(turns) || turns[i] != turnNo {
+			continue
+		}
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
+		found = true
+		fmt.Fprintf(&b, "%s: %s\n", m.Role, content)
+	}
+	if !found {
+		return "", false
+	}
+	return truncateLearnField(b.String(), learnFullTurnCapChars), true
+}
+
+// formatLearnEntry renders one turn as a single digest line. When the
+// capture-summary fields would be truncated by the digest caps, it prefers
+// the turn's full text pulled straight from the session transcript
+// (learnFullTurnText) — "prefer the turns the digest flags": the transcript
+// read only happens for turns that actually need it, not on every entry, so
+// the common case (a short turn that already fits) costs nothing extra.
+func formatLearnEntry(sessionsDir string, e learnEntry) string {
+	ts := e.TS.UTC().Format(time.RFC3339)
+	if len(e.Prompt) > learnPromptCapChars || len(e.Result) > learnResultCapChars {
+		if full, ok := learnFullTurnText(sessionsDir, e.SessionID, e.TurnNo); ok {
+			return fmt.Sprintf("- [%s] %s\n", ts, full)
+		}
+	}
 	prompt := truncateLearnField(e.Prompt, learnPromptCapChars)
 	result := truncateLearnField(e.Result, learnResultCapChars)
-	ts := e.TS.UTC().Format(time.RFC3339)
 	if result == "" {
 		return fmt.Sprintf("- [%s] %s\n", ts, prompt)
 	}
@@ -147,8 +228,10 @@ func formatLearnEntry(e learnEntry) string {
 // goal, the memory index (what's already saved, so Learn doesn't duplicate
 // it), and the capped digest of unscanned turns. focus is an optional extra
 // hint (a loop spec's Prompt, when Kind is "learn"); empty is the normal
-// case.
-func learnSeed(memoryIndex string, entries []learnEntry, focus string) string {
+// case. sessionsDir is where formatLearnEntry looks up a truncated entry's
+// full turn text (learnFullTurnText); "" is fine — entries without a
+// resolvable session/turn just fall back to their capture-summary line.
+func learnSeed(memoryIndex string, entries []learnEntry, focus string, sessionsDir string) string {
 	var b strings.Builder
 	b.WriteString("GOAL: find durable decisions, patterns, constraints, or corrections in the turns below that are not already saved in the memory index.\n")
 	if strings.TrimSpace(focus) != "" {
@@ -164,7 +247,7 @@ func learnSeed(memoryIndex string, entries []learnEntry, focus string) string {
 	fmt.Fprintf(&b, "\nTURNS since the last learning pass (%d):\n", len(entries))
 	used, shown := 0, 0
 	for _, e := range entries {
-		line := formatLearnEntry(e)
+		line := formatLearnEntry(sessionsDir, e)
 		if used+len(line) > learnDigestCapChars && shown > 0 {
 			fmt.Fprintf(&b, "… %d more turns omitted (over the digest budget)\n", len(entries)-shown)
 			break
@@ -222,7 +305,7 @@ func RunLearningPass(ctx context.Context, cs *CortexSession, focus string) (Lear
 	if cs.memory != nil {
 		idx, _ = cs.memory.Index()
 	}
-	seed := learnSeed(idx, entries, focus)
+	seed := learnSeed(idx, entries, focus, cs.SessionsDir())
 
 	before := cs.captures
 	digest, _, err := cs.runSubagentStats(ctx, tools.Learn, seed)

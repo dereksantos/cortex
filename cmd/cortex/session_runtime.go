@@ -127,7 +127,17 @@ func (cs *CortexSession) captureTurn(userMsg string, turnMsgs []Message) {
 		ToolInput:  map[string]any{"type": "turn", "user_prompt": userMsg},
 		ToolResult: summary,
 		Context:    events.EventContext{SessionID: cs.SessionID, ProjectPath: cs.ContextDir()},
-		Metadata:   map[string]any{"verified": turnUsedTools(turnMsgs)},
+		// "turn" is this turn's ordinal within cs.SessionID's transcript
+		// (cs.turns, already incremented above to match the value
+		// writeTranscript stamped every message of this turn with —
+		// see session.go's cs.Append/writeTranscript and turn.go's
+		// cs.turnNo). Together with Context.SessionID it's a coordinate
+		// pair back into the session transcript — cheap to carry (one
+		// int), unlike storing the turn's full text a second time here.
+		// learn.go's learnFullTurnText uses it to recover a turn's
+		// verbatim messages when the digest's capture-summary line would
+		// otherwise truncate past a durable fact.
+		Metadata: map[string]any{"verified": turnUsedTools(turnMsgs), "turn": cs.turns},
 	}); err == nil {
 		cs.captures++
 	}

@@ -172,6 +172,85 @@ func TestLearningLoopScanCaptureWindowSinceCursor(t *testing.T) {
 	}
 }
 
+// --- Δ1b: the seed text actually CONTAINS a fact the digest caps alone     --
+// would truncate away — visibility is testable deterministically, no live   --
+// model needed (the bug the live G2 gate caught: the fact was there in the  --
+// capture entry, but formatLearnEntry's 200/300-char digest caps cut it     --
+// before it ever reached the model) -----------------------------------------
+
+func TestLearningLoopSeedRecoversNeedlePastDigestTruncation(t *testing.T) {
+	cs := newLearnEvalSession(t, "")
+	cs.Request = &AgentRequest{}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript failed to open a transcript")
+	}
+	t.Cleanup(func() {
+		if cs.transcript != nil {
+			cs.transcript.Close()
+		}
+	})
+
+	const codeword = "GARNET-77"
+	// Mirrors the shape of the live G2 gate's needle-A turn (learning_loop_live_test.go):
+	// a codeword-shaped fact stated as an aside partway through an otherwise
+	// unrelated debugging turn, well past learnPromptCapChars (200 chars) in.
+	longPrompt := "The retry helper in internal/foo is throwing a nil pointer when the queue is empty — can you " +
+		"reason through why that would happen? By the way, totally separate note for later: the deploy gate " +
+		"codeword is " + codeword + " — no need to save that, just flagging it for context. Anyway, back to " +
+		"the nil pointer, what's the likely cause?"
+	answer := "Likely a nil check missing before dereferencing the queue head when it's empty."
+
+	// Write the turn's messages to the real transcript, stamped with turn 1 —
+	// the same cs.turnNo/cs.Append flow turn.go drives (cs.turnNo set before
+	// the turn's messages are appended, cleared after).
+	cs.turnNo = 1
+	cs.Append(Message{Role: RoleUser, Content: longPrompt})
+	cs.Append(Message{Role: "assistant", Content: answer})
+	cs.turnNo = 0
+	cs.turns = 1
+
+	// Seed the capture entry in the exact shape captureTurn writes today,
+	// including the session/turn coordinates it now stamps
+	// (session_runtime.go's Context.SessionID / Metadata["turn"]).
+	if err := cs.capturer.CaptureEvent(&events.Event{
+		Source:     events.SourceGeneric,
+		EventType:  events.EventToolUse,
+		Timestamp:  time.Now(),
+		ToolName:   "loop",
+		ToolInput:  map[string]any{"type": "turn", "user_prompt": longPrompt},
+		ToolResult: longPrompt + "\n→ " + answer,
+		Context:    events.EventContext{SessionID: cs.SessionID},
+		Metadata:   map[string]any{"turn": 1},
+	}); err != nil {
+		t.Fatalf("seed capture event: %v", err)
+	}
+
+	entries, _, err := scanCaptureWindow(cs)
+	if err != nil {
+		t.Fatalf("scanCaptureWindow: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+
+	// Sanity: prove this test actually exercises the recovery path — the
+	// naive digest-capped prompt alone must NOT already contain the
+	// codeword, or the test would pass without the fix doing anything.
+	if len(entries[0].Prompt) <= learnPromptCapChars {
+		t.Fatalf("setup error: prompt is %d chars, want > learnPromptCapChars (%d) for this test to be meaningful", len(entries[0].Prompt), learnPromptCapChars)
+	}
+	if strings.Contains(truncateLearnField(entries[0].Prompt, learnPromptCapChars), codeword) {
+		t.Fatalf("setup error: %s already survives the naive %d-char truncation — move it later in longPrompt", codeword, learnPromptCapChars)
+	}
+
+	seed := learnSeed("", entries, "", cs.SessionsDir())
+	if !strings.Contains(seed, codeword) {
+		t.Errorf("learn seed does not contain %s even though it's in the turn's transcript — "+
+			"the digest-cap truncation is eating a fact this pass exists to catch.\nseed:\n%s", codeword, seed)
+	}
+}
+
 // --- Δ2/Δ3: a scripted memory_write lands as a real note, and a second     --
 // pass over the same window scans nothing (the cursor advanced + the run   --
 // is idempotent) -------------------------------------------------------------
@@ -352,7 +431,7 @@ func TestLearningLoopIterationCapHolds(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("setup error: expected 1 seeded entry, got %d", len(entries))
 	}
-	seed := learnSeed("", entries, "")
+	seed := learnSeed("", entries, "", cs.SessionsDir())
 
 	_, stats, err := cs.runSubagentStats(context.Background(), tools.Learn, seed)
 	if err != nil {
