@@ -105,3 +105,72 @@ func TestDashboardListRowOpensNewestSessionOrCreates(t *testing.T) {
 		t.Error("openOrCreateSession is not shared between the cards button, the list row click, and the list button")
 	}
 }
+
+// TestDashboardJSRendersMissingRootChip pins the fix for a registered
+// project whose root directory no longer exists: dashboard.js must render
+// a compact "path missing" chip off buildDashboardViewModel's Missing flag
+// instead of ever formatting a raw ChangeError string, and must not offer
+// an Open session button/click for it (nothing to open).
+func TestDashboardJSRendersMissingRootChip(t *testing.T) {
+	src := readWebUIAsset(t, "dashboard.js")
+	if !strings.Contains(src, "p.missing") {
+		t.Error("dashboard.js does not branch on the view-model's missing flag")
+	}
+	if !strings.Contains(src, "path missing") {
+		t.Error(`dashboard.js does not render a "path missing" chip for a missing project root`)
+	}
+	if !strings.Contains(src, "if (!p.missing) metaKids.push(openSessionButton(p.name));") {
+		t.Error("dashboard.js's card view does not hide the Open session button for a missing-root project")
+	}
+}
+
+// TestDashboardJSChangeErrorChipCarriesTitleForTruncation pins that a
+// genuine git-error chip (root exists, not a repo) still carries the full
+// error text via title — CSS truncates the chip's visible text to one
+// line, so the full message must survive somewhere accessible.
+func TestDashboardJSChangeErrorChipCarriesTitleForTruncation(t *testing.T) {
+	src := readWebUIAsset(t, "dashboard.js")
+	if !strings.Contains(src, "props.title = p.change_error") {
+		t.Error("dashboard.js's change-error chip does not carry the full error text via a title attribute")
+	}
+}
+
+// TestDashboardCSSChipTruncatesToOneLine pins the .chip max-width/ellipsis
+// rule that keeps a long change-error or "path missing" chip from
+// overflowing its card/row.
+func TestDashboardCSSChipTruncatesToOneLine(t *testing.T) {
+	src := readWebUIAsset(t, "app.css")
+	if !strings.Contains(src, "text-overflow: ellipsis") {
+		t.Error("app.css does not define a text-overflow: ellipsis rule for .chip")
+	}
+}
+
+// TestDashboardCSSListTableIsFixedLayout pins the .plist table-layout:
+// fixed rule dashboard.js's list-view table opts into (renderProjectsList)
+// so the path/branch columns can't blow the actions column out of the
+// viewport — auto layout sizes columns from cells' intrinsic content
+// width, which ignores a nowrap cell's max-width/ellipsis entirely.
+func TestDashboardCSSListTableIsFixedLayout(t *testing.T) {
+	cssSrc := readWebUIAsset(t, "app.css")
+	if !strings.Contains(cssSrc, "table-layout: fixed") {
+		t.Error("app.css does not define a table-layout: fixed rule for the projects list table")
+	}
+	jsSrc := readWebUIAsset(t, "dashboard.js")
+	if !strings.Contains(jsSrc, `classList.add("plist")`) {
+		t.Error("dashboard.js's list-view table is not tagged with the .plist fixed-layout class")
+	}
+}
+
+// TestDashboardCSSTableScrollFallback pins the overflow-x fallback wrapper
+// (same convention as .toolfeed) so a table that still can't fit scrolls
+// itself, never the page body.
+func TestDashboardCSSTableScrollFallback(t *testing.T) {
+	cssSrc := readWebUIAsset(t, "app.css")
+	if !strings.Contains(cssSrc, ".table-scroll") || !strings.Contains(cssSrc, "overflow-x: auto") {
+		t.Error("app.css does not define a .table-scroll overflow-x fallback")
+	}
+	jsSrc := readWebUIAsset(t, "dashboard.js")
+	if !strings.Contains(jsSrc, `"table-scroll"`) {
+		t.Error("dashboard.js does not wrap the list-view table in a .table-scroll container")
+	}
+}

@@ -202,6 +202,12 @@ body {
   border-radius: 999px;
   padding: 2px 9px;
   white-space: nowrap;
+  /* a chip's text (e.g. a raw git error message) can run arbitrarily long
+     — cap it to the chip's own containing block and ellipsize rather than
+     overflowing the card/row; the full text still rides the title attr. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chip.ok {
@@ -483,6 +489,56 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* .plist: the projects list-view table only (dashboard.js's
+   renderProjectsList) — NOT the shared table.loops rule below, which
+   loops.js/models.js also use with different column counts. Auto layout
+   sizes a column by its cells' *intrinsic* content width, which ignores
+   max-width/overflow/text-overflow on a nowrap cell entirely — that's why
+   .list-path's ellipsis rule above didn't actually bite before this.
+   table-layout: fixed makes column widths come from these declared widths
+   instead, so the path/branch cells truncate for real and the actions
+   column (last, unclipped) always stays fully visible. */
+.plist {
+  table-layout: fixed;
+}
+
+.plist th:nth-child(1),
+.plist td:nth-child(1) {
+  width: 15%;
+}
+
+.plist th:nth-child(2),
+.plist td:nth-child(2) {
+  width: 23%;
+}
+
+.plist th:nth-child(3),
+.plist td:nth-child(3) {
+  width: 72px;
+}
+
+.plist th:nth-child(4),
+.plist td:nth-child(4) {
+  width: 90px;
+}
+
+.plist th:nth-child(6),
+.plist td:nth-child(6) {
+  width: 120px;
+}
+
+/* table.loops's 5th column here (path) is deliberately left unconstrained
+   — under table-layout: fixed it takes whatever space remains after the
+   columns above, which is exactly what .list-path's own max-width/
+   ellipsis needs to work with. */
+
+/* .table-scroll: overflow-x fallback for any table that can still overflow
+   its container at very narrow viewports — same convention as .toolfeed
+   above. The page body itself must never scroll horizontally. */
+.table-scroll {
+  overflow-x: auto;
 }
 
 .rail {

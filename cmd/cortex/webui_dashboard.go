@@ -27,6 +27,7 @@ import (
 type dashboardProject struct {
 	Name         string           `json:"name"`
 	Root         string           `json:"root"`
+	Missing      bool             `json:"missing,omitempty"`
 	Branch       string           `json:"branch"`
 	ActiveChange bool             `json:"active_change"`
 	Clean        bool             `json:"clean"`
@@ -50,6 +51,12 @@ type dashboardViewModel struct {
 // sessions directory yet" is treated as a genuine error and fails the
 // build, mirroring handleListProjectSessions' existing os.ErrNotExist
 // special-case.
+//
+// A project whose root directory no longer exists on disk (moved, deleted,
+// an unmounted volume) is flagged Missing instead: git and session listing
+// are skipped entirely (both would just surface the same "no such file or
+// directory" as a raw, unhelpful ChangeError), leaving the UI to render one
+// compact "path missing" state rather than a raw os/exec error string.
 func buildDashboardViewModel(reg registry.Registry) (dashboardViewModel, error) {
 	projects, err := reg.List()
 	if err != nil {
@@ -69,6 +76,12 @@ func buildDashboardViewModel(reg registry.Registry) (dashboardViewModel, error) 
 			continue
 		}
 		dp := dashboardProject{Name: p.Name, Root: p.Root, Sessions: []sessionSummary{}}
+
+		if _, statErr := os.Stat(p.Root); statErr != nil && os.IsNotExist(statErr) {
+			dp.Missing = true
+			vm.Projects = append(vm.Projects, dp)
+			continue
+		}
 
 		ws, err := NewWorkspace(p.Root)
 		if err != nil {

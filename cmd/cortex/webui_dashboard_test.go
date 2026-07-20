@@ -117,6 +117,43 @@ func TestBuildDashboardViewModelNonGitProjectSurfacesChangeError(t *testing.T) {
 	}
 }
 
+// TestBuildDashboardViewModelMissingRootIsFlaggedNotRawError pins that a
+// registered project whose root directory no longer exists on disk renders
+// as Missing=true with everything else zeroed — not a raw
+// "change status: git rev-parse ...: chdir ...: no such file or directory"
+// ChangeError, which is what changeStatusFor would otherwise surface (the
+// webui bug this guards: that raw string rendering straight into the card/
+// row UI).
+func TestBuildDashboardViewModelMissingRootIsFlaggedNotRawError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "does-not-exist")
+	reg := &fakeRegistry{projects: map[string]registry.Project{
+		"gone": {Name: "gone", Root: root},
+	}}
+	vm, err := buildDashboardViewModel(reg)
+	if err != nil {
+		t.Fatalf("buildDashboardViewModel: %v", err)
+	}
+	if len(vm.Projects) != 1 {
+		t.Fatalf("got %d projects, want 1", len(vm.Projects))
+	}
+	p := vm.Projects[0]
+	if !p.Missing {
+		t.Error("Missing = false, want true for a nonexistent project root")
+	}
+	if p.ChangeError != "" {
+		t.Errorf("ChangeError = %q, want empty — a missing root must skip git entirely, not surface its raw error", p.ChangeError)
+	}
+	if p.Branch != "" || p.Clean || p.ActiveChange {
+		t.Errorf("missing-root project got branch=%q clean=%v active=%v, want all zero values", p.Branch, p.Clean, p.ActiveChange)
+	}
+	if p.Sessions == nil {
+		t.Error("Sessions = nil, want an empty (non-nil) slice")
+	}
+	if len(p.Sessions) != 0 {
+		t.Errorf("Sessions = %v, want empty — a missing root must skip session listing entirely", p.Sessions)
+	}
+}
+
 // A root-less project (any Registry implementation could hand one back —
 // the legacy daemon-era projects.json schema had no "root" field) must be
 // skipped, never resolved: NewWorkspace("") lands on the process CWD, so a
