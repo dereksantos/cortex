@@ -232,7 +232,13 @@ func hostOriginMiddleware(port string, next http.Handler) http.Handler {
 // .../disable, the single-field-toggle pair. M6.7e adds
 // POST /api/loops/{name}/run-now, reusing mgr.newSession as the
 // sessionFactory RunLoopFiring (loop_run.go, M6.3) needs — no new
-// newServeMux parameter, same reasoning as M4.2c2b2 above.
+// newServeMux parameter, same reasoning as M4.2c2b2 above. docs/
+// cross-source-learning.md piece 4 adds GET /api/memory (list, tier-tagged),
+// GET /api/memory/note (one note's full body), and DELETE /api/memory/note
+// (the human correction loop routed to the real Store.Forget path) —
+// serve_memory.go, backed by webui_memory.go's buildMemoryViewModel; reg is
+// already threaded in for the project lookup, same as every other
+// project-scoped route above.
 func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir string, loopsStore loops.Store, running *runningSet) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/", webUIHandler())
@@ -256,6 +262,9 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 	mux.HandleFunc("POST /api/loops/{name}/enable", handleSetLoopEnabled(loopsStore, true))
 	mux.HandleFunc("POST /api/loops/{name}/disable", handleSetLoopEnabled(loopsStore, false))
 	mux.HandleFunc("POST /api/loops/{name}/run-now", handleRunLoop(loopsStore, reg, mgr.newSession, running))
+	mux.HandleFunc("GET /api/memory", handleListMemory(reg))
+	mux.HandleFunc("GET /api/memory/note", handleGetMemoryNote(reg))
+	mux.HandleFunc("DELETE /api/memory/note", handleDeleteMemoryNote(reg))
 	return mux
 }
 

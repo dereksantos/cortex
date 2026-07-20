@@ -16,8 +16,15 @@ import (
 )
 
 const (
-	maxJSFileLines  = 300
-	maxTotalJSLines = 1200
+	maxJSFileLines = 300
+	// maxTotalJSLines rose from 1200 with the memory screen's memory.js
+	// (docs/cross-source-learning.md piece 4, ~225 lines): the per-file cap
+	// above is the real regression guard against any one screen growing
+	// into a framework; the total is a sanity ceiling that grows in step
+	// with each new legitimate screen (dashboard/session/landscape/models/
+	// loops/memory today) rather than gating a 7th screen from existing at
+	// all.
+	maxTotalJSLines = 1500
 )
 
 func TestWebUIJavaScriptSizeCaps(t *testing.T) {
