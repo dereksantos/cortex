@@ -111,6 +111,80 @@ func TestDetectCandidateGroupsThresholdBoundary(t *testing.T) {
 	}
 }
 
+// TestDetectCandidateGroupsFiltersNoiseProjectViaDocumentFrequency is the
+// exact C-leak scenario from the slice-2 gate's live run 2
+// (learn_user_live_test.go's needle design): projects A and B independently
+// record the SAME fact and share its distinctive vocabulary, but ALL THREE
+// notes (A, B, and unrelated noise project C) share generic seeding
+// boilerplate — "please remember this for future sessions" — that alone
+// clears the raw 5+ rune / recurrenceMinSharedTerms bar. Before the
+// document-frequency filter (isDistinctiveTerm), that boilerplate overlap
+// alone was enough to pull C into the A-B candidate group even though C's
+// actual fact shares nothing with A/B. After the filter, "please"/
+// "remember"/"future"/"sessions" appear in all 3 contributing projects
+// (df=3, not <= distinctiveDFFloor and not < half of 3) so they no longer
+// count toward ANY pair's shared-term total — only the real fact vocabulary
+// (shared by exactly A and B, df=2) does, so C stays out.
+func TestDetectCandidateGroupsFiltersNoiseProjectViaDocumentFrequency(t *testing.T) {
+	mk := func(project, body string) candidateNote {
+		return candidateNote{Project: project, Name: project + "-note", Body: body, terms: significantTerms(body)}
+	}
+	notes := []candidateNote{
+		mk("a", "please remember this for future sessions: our fleet gateway service has one shared codeword everyone must use, vermilion"),
+		mk("b", "please remember this for future sessions: our fleet gateway service has one shared codeword everyone must use, vermilion"),
+		mk("c", "please remember this for future sessions: our on-call escalation rotation pager alias is codeword azure"),
+	}
+
+	groups := detectCandidateGroups(notes)
+	if len(groups) != 1 {
+		t.Fatalf("detectCandidateGroups() = %d groups, want exactly 1 (a+b only): %+v", len(groups), groups)
+	}
+	got := groups[0].projects()
+	want := []string{"a", "b"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("group projects = %v, want %v — noise project c must not join via shared boilerplate alone", got, want)
+	}
+}
+
+// TestDetectCandidateGroupsDocumentFrequencyStillGroupsLegitThreeProjectRecurrence
+// covers the other side of the same filter: a fact genuinely recurring
+// across THREE projects (not just two) must still form one candidate group,
+// even though its shared vocabulary now has df=3. The registry here also
+// has 4 unrelated noise projects (numProjects=7 total), so the fact terms'
+// df=3 is a small minority (2*3=6 < 7) and passes isDistinctiveTerm's
+// half-of-numProjects clause — proving the filter doesn't degenerate into a
+// flat "at most 2 projects" cap as the registry grows.
+func TestDetectCandidateGroupsDocumentFrequencyStillGroupsLegitThreeProjectRecurrence(t *testing.T) {
+	mk := func(project, body string) candidateNote {
+		return candidateNote{Project: project, Name: project + "-note", Body: body, terms: significantTerms(body)}
+	}
+	notes := []candidateNote{
+		mk("a", "our shared deployment pipeline always retries with exponential backoff timing"),
+		mk("b", "our shared deployment pipeline always retries with exponential backoff timing"),
+		mk("c", "our shared deployment pipeline always retries with exponential backoff timing"),
+		mk("noise1", "completely different topic about frontend styling choices this quarter"),
+		mk("noise2", "an unrelated database migration effort scheduled for next month"),
+		mk("noise3", "internal tooling for release notes generation and changelog drafts"),
+		mk("noise4", "office network configuration and vpn access policy documentation"),
+	}
+
+	groups := detectCandidateGroups(notes)
+	if len(groups) != 1 {
+		t.Fatalf("detectCandidateGroups() = %d groups, want exactly 1 (a+b+c): %+v", len(groups), groups)
+	}
+	got := groups[0].projects()
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("group projects = %v, want %v", got, want)
+	}
+	for i, p := range want {
+		if got[i] != p {
+			t.Errorf("group projects = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
 // TestDetectCandidateGroupsDeterministic proves Δ1's "same fixtures, same
 // groups every run, same order" invariant — a set/map-backed union-find has
 // no natural iteration order, so this specifically guards the sortKey

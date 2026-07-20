@@ -46,21 +46,93 @@ import (
 
 // recurrenceMinSharedTerms is the candidate-recurrence threshold
 // (docs/cross-source-learning.md open question 1): the minimum number of
-// distinctive terms (>= recurrenceMinTermLen runes each, lowercase,
-// alphanumeric) two notes from DIFFERENT projects must share before the
+// DISTINCTIVE terms (>= recurrenceMinTermLen runes each, lowercase,
+// alphanumeric, AND passing the document-frequency filter below — see
+// isDistinctiveTerm) two notes from DIFFERENT projects must share before the
 // deterministic detector treats them as the same recurring fact. Derek's
 // recommendation on open question 1 was to start conservative — "likely
 // under-promoting" — since G2's precision floor (over-promotion) punishes
 // harder than a missed lift (G1) does; this value is that conservative
-// starting point. TUNE FROM REAL LearnUser RECEIPTS, NOT PRIORS, once the ø
-// gate (G1/G2) has live promotion data to look at — this is a placeholder,
-// not a measured constant.
+// starting point. A live gate run (slice-2 gate run 2) found the ORIGINAL
+// version of this rule — counting ANY 5+ rune term, distinctive or not —
+// let a noise project's note join an unrelated candidate group: every
+// seeded note shared generic phrasing ("remember", "future", "sessions")
+// that alone crossed this threshold between projects with nothing else in
+// common. The document-frequency filter (distinctiveDF/isDistinctiveTerm)
+// fixes that by counting only terms that are NOT common across most of the
+// registry, so the threshold value itself didn't need to change — only what
+// counts as a "shared term" did. TUNE FROM REAL LearnUser RECEIPTS, NOT
+// PRIORS, once the ø gate (G1/G2) has live promotion data to look at — this
+// is a placeholder, not a measured constant.
 const recurrenceMinSharedTerms = 3
 
 // recurrenceMinTermLen excludes short/common words from the overlap count —
 // a shared "the" or "test" proves nothing; a shared 5+ letter/digit token is
 // far more likely to be a real shared identifier, decision word, or concept.
 const recurrenceMinTermLen = 5
+
+// distinctiveDFFloor is the document-frequency filter's unconditional
+// floor: a term appearing in notes from AT MOST this many distinct projects
+// always counts as distinctive, regardless of how large the registry is.
+// The base recurrence case IS exactly two projects sharing a fact, so the
+// floor has to be at least 2 or the detector could never find the simplest
+// case it exists to find; a third project happening to share the same term
+// is exactly the boilerplate/generic-phrasing signal the filter exists to
+// catch (slice-2 gate run 2's C-leak: every seeded note shared "remember
+// this for future sessions" regardless of topic).
+const distinctiveDFFloor = 2
+
+// distinctiveDF computes, for every term appearing in notes' precomputed
+// term sets, its PROJECT-level document frequency — the number of DISTINCT
+// PROJECTS (not notes; a project with several notes repeating a term still
+// counts once) whose notes contain that term. Project-level, not note-
+// level, because the recurrence question is "how many different projects
+// use this word", not "how many notes" — a chatty single project must not
+// inflate a term's apparent commonness.
+func distinctiveDF(notes []candidateNote) map[string]int {
+	byTerm := map[string]map[string]bool{}
+	for _, n := range notes {
+		for t := range n.terms {
+			if byTerm[t] == nil {
+				byTerm[t] = map[string]bool{}
+			}
+			byTerm[t][n.Project] = true
+		}
+	}
+	df := make(map[string]int, len(byTerm))
+	for t, projects := range byTerm {
+		df[t] = len(projects)
+	}
+	return df
+}
+
+// isDistinctiveTerm reports whether a term counts as DISTINCTIVE for the
+// recurrence overlap check, given its project-level document frequency df
+// and numProjects (the count of distinct projects contributing ANY note to
+// this detection pass — the whole registry scan, not just the pair being
+// compared). No curated stopword list: a term is judged purely by how many
+// of the CONTRIBUTING projects happen to use it.
+//
+// Rule: distinctive if df <= distinctiveDFFloor (2), OR df is less than
+// half of numProjects. The floor is what does the actual work at the
+// registry sizes this pass runs against today (a handful of projects, not
+// hundreds) — it's exactly "shared by the pair being compared and nobody
+// else", which both catches the boilerplate case (a term shared by ALL
+// contributing projects, e.g. seeding phrasing repeated verbatim by every
+// note regardless of topic, has df == numProjects > 2 as soon as a third
+// project exists) and preserves the simplest true-recurrence case (df == 2,
+// always distinctive via the floor). The half-of-numProjects clause is what
+// keeps the rule from silently degenerating as the registry grows: without
+// it, a term genuinely shared by 3 projects out of 50 would be judged "too
+// common" forever under a flat cap, even though 3-of-50 is a small,
+// meaningfully rare minority — exactly the shape open question 1
+// anticipates a real recurring fact taking once the registry is large.
+func isDistinctiveTerm(df, numProjects int) bool {
+	if df <= distinctiveDFFloor {
+		return true
+	}
+	return 2*df < numProjects
+}
 
 // recurrenceMaxNotesPerProject / recurrenceMaxNoteChars bound how much of a
 // project's own memory the mechanical detector reads — "capped read per
@@ -197,11 +269,32 @@ func collectProjectNotes(reg registry.Registry) ([]candidateNote, error) {
 // detectCandidateGroups is the mechanical, no-model recurrence detector
 // (docs/cross-source-learning.md piece 1's step 1): unions any two notes
 // from DIFFERENT projects that share >= recurrenceMinSharedTerms
-// distinctive terms, then returns every connected component that spans >=2
+// DISTINCTIVE terms (isDistinctiveTerm — generic/boilerplate vocabulary
+// common across most contributing projects doesn't count, even if it's a
+// 5+ rune word), then returns every connected component that spans >=2
 // distinct projects as one candidate group. Deterministic — fixed note
 // fixtures always produce the same groups, in the same order (Δ1).
 func detectCandidateGroups(notes []candidateNote) []candidateGroup {
 	n := len(notes)
+
+	projectSet := map[string]bool{}
+	for _, note := range notes {
+		projectSet[note.Project] = true
+	}
+	numProjects := len(projectSet)
+
+	df := distinctiveDF(notes)
+	distinctiveTerms := make([]map[string]bool, n)
+	for i, note := range notes {
+		dt := make(map[string]bool, len(note.terms))
+		for t := range note.terms {
+			if isDistinctiveTerm(df[t], numProjects) {
+				dt[t] = true
+			}
+		}
+		distinctiveTerms[i] = dt
+	}
+
 	parent := make([]int, n)
 	for i := range parent {
 		parent[i] = i
@@ -224,7 +317,7 @@ func detectCandidateGroups(notes []candidateNote) []candidateGroup {
 			if notes[i].Project == notes[j].Project {
 				continue
 			}
-			if sharedTermCount(notes[i].terms, notes[j].terms) >= recurrenceMinSharedTerms {
+			if sharedTermCount(distinctiveTerms[i], distinctiveTerms[j]) >= recurrenceMinSharedTerms {
 				union(i, j)
 			}
 		}

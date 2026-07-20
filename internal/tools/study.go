@@ -186,11 +186,33 @@ Tools: outline/grep/read_file to check the code behind a turn if needed; memory_
 // callable tool. Its only entry point is cmd/cortex/learn_user.go's
 // RunLearnUserPass (via `cortex learn --user` or the loop scheduler's
 // kind:"learn"+scope:"user" firing).
+//
+// Concrete-trigger revision, slice-2 gate run 2 (2026-07-20): the
+// mechanical detector (cmd/cortex/learn_user.go's detectCandidateGroups)
+// found a real cross-project candidate group, but the model declined it
+// two reps running. Same shape of failure learnSystem's own comment above
+// describes fixing for the project-tier Learn pass (a live gate run caught
+// the first cut of that prompt taking a coder's "no need to save" caveat
+// at face value): a model reasoning in the moment sees a fact already
+// sitting in each project's own memory and, without a concrete example
+// telling it otherwise, treats "it's already saved" as a reason to do
+// nothing. That reasoning is backwards for THIS pass specifically —
+// project-tier notes are invisible outside their own project, which is
+// the entire reason promotion exists — so this revision states the
+// affirmative trigger case in-prompt (two projects independently
+// recording the same codeword/identifier/quantity) and names the exact
+// wrong reasoning to reject, mirroring learnSystem's "that phrase ... is
+// not a reason to skip" framing. The no-spam side (unrelated facts,
+// single-project facts) is unchanged.
 const learnUserSystem = `You are a background pass that looks for the SAME fact recurring across multiple projects on this machine and, when it does, promotes it to the shared cross-project memory tier.
 
 You are given a CANDIDATE GROUP: notes from two or more different projects that a mechanical check flagged as textually similar, plus the USER MEMORY INDEX (what's already promoted — do not duplicate).
 
-Read the candidate notes carefully. If they genuinely describe the same durable fact, decision, constraint, or pattern — not just a coincidental word overlap between unrelated notes — call memory_write once with a short kebab-case name and a body stating the fact in general, project-independent terms (drop anything specific to only one project; a fact worth promoting is one that's actually true everywhere it was seen). If the group is already covered by an existing user-tier note, or the notes only share vocabulary but describe different things, write nothing.
+Promote when the notes genuinely describe the same durable fact, decision, constraint, or pattern — not just a coincidental word overlap between unrelated notes. The clearest case, and the one you must not talk yourself out of: two or more DIFFERENT projects independently recorded the same codeword, identifier, or exact quantity (for example, two projects each note that "the shared gateway service's codeword is VERMILION-9"). That IS the promotion case — call memory_write. Do not decline it just because the fact is already saved in each project's own notes; "it's already saved in the projects" is the exact failure this pass exists to catch, not a reason to do nothing. A project's own memory notes are invisible to every OTHER project — nothing except this pass ever moves a fact from one project's notes to where a different project can see it. If you decline a real recurring fact for that reason, no project besides the ones that already recorded it will ever learn it, promotion never happens, and this pass has done nothing.
+
+Decline (write nothing) when the notes only share vocabulary but describe different things — a coincidental word overlap, not the same fact — or when what looks like recurrence is really one project's fact plus generic boilerplate phrasing rather than a second project independently confirming it, or when the group is already covered by an existing user-tier note. A fact that only ONE project actually holds is not a promotion candidate regardless of how it got flagged.
+
+If you promote, call memory_write once with a short kebab-case name and a body stating the fact in general, project-independent terms (drop anything specific to only one project; a fact worth promoting is one that's actually true everywhere it was seen).
 
 Do not name a scope on memory_write — every note you write lands in the user tier automatically, regardless of what you pass. Do not write your own "Promoted from" line — one is added for you automatically from the candidate group's actual source projects.
 
