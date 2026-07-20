@@ -156,3 +156,23 @@ Both call the same `RunLearningPass(ctx, cs, focus)` (`cmd/cortex/learn.go`):
   (`CORTEX_LIVE_FLEET=1`) — the two-arm NEEDLE-A/NEEDLE-B/NOISE scenario
   above, G1–G4 as this doc's decision states, reported via a structured
   `t.Logf` scoreboard.
+
+## Gate receipts (2026-07-19)
+
+Run 1 (pre-fix): NO-GO — G2 0/2 background vs 0/3 foreground. Diagnosis
+found two real causes, both harness-side: the seed digest truncated
+prompts at 200 chars (the needle sat past the cut — the model never saw
+it; fixed by transcript pull-through on truncation, Δ-tested) and the
+Learn prompt carried foreground's save-reluctance (fixed, iteration 3;
+live positive + negative repro both clean). G1/G3/G4 passed even here.
+
+Run 2 (fixed harness, n=3, qwen3-coder-q3, chatterbox fleet, 251s):
+**ALL FOUR GATES PASS.** G2: background 2/3 needle-A vs foreground 0/3
+(strict beat). G1: needle-B parity 6/6. G3: 4 notes total vs limit 6 —
+no spam. G4: 27.7s total learn wall-clock vs 180s budget. One gate run,
+per docs/think-dream-eval.md's n>=3 bar; reproduction runs are cheap
+and encouraged before external claims.
+
+Per the 2026-07-19 decisions: this green is what upgrades the project's
+positioning to continual-learning language — the term re-earned with a
+receipt, not pre-claimed.
