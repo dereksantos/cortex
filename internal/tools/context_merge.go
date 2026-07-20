@@ -17,7 +17,7 @@ func contextMerge(tc ToolCall, deps ToolDeps) (string, error) {
 		return "", fmt.Errorf("range_end is required: %w", err)
 	}
 
-	printToolAction(fmt.Sprintf("context_merge(%s, %s)", startCitation, endCitation))
+	printToolAction(deps, fmt.Sprintf("context_merge(%s, %s)", startCitation, endCitation))
 
 	merged, err := deps.MergeOutlineEntries(startCitation, endCitation)
 	if err != nil {

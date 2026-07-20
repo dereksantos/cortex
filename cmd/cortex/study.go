@@ -36,22 +36,24 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 	return cs.Study
 }
 
-// subagentRequest builds a profile's opening request. Study draws from the
-// study role binding; any other profile (agent) inherits the coder's live
-// request — model, endpoint, key, and effort wire fields, so it follows
-// /model switches and defaults to running as the model that spawned it. A
-// per-call sa.Model (the agent tool's optional "model" argument) then pins
-// just the model name on that binding — and when that pin actually diverges
-// from the inherited model, the inherited effort wire fields are cleared
-// rather than silently carried over to a different model
-// (docs/thinking-models.md known seam bug #2): they're re-derived to "on"
-// only if the fleet says the pinned model can actually reason
-// (hybrid/levels/always), else left neutral (send nothing).
+// subagentRequest builds a profile's opening request. Study and Learn draw
+// from the study role binding (Learn, docs/learning-loop.md, has no "coder's
+// current model" to inherit in the first place — it can run with no coder
+// session live at all, e.g. a scheduled loop firing); any other profile
+// (agent) inherits the coder's live request — model, endpoint, key, and
+// effort wire fields, so it follows /model switches and defaults to running
+// as the model that spawned it. A per-call sa.Model (the agent tool's
+// optional "model" argument) then pins just the model name on that
+// binding — and when that pin actually diverges from the inherited model,
+// the inherited effort wire fields are cleared rather than silently carried
+// over to a different model (docs/thinking-models.md known seam bug #2):
+// they're re-derived to "on" only if the fleet says the pinned model can
+// actually reason (hybrid/levels/always), else left neutral (send nothing).
 func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
 	dialect := dialectFor(cs.Config.isOpenRouter())
 	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
 	inheritedModel := ""
-	if sa.Role != roleStudy && cs.Request != nil {
+	if sa.Role != roleStudy && sa.Role != roleLearn && cs.Request != nil {
 		inheritedModel = cs.Request.Model
 		req.Model = cs.Request.Model
 		req.BaseURL = cs.Request.BaseURL

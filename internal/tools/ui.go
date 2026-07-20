@@ -7,6 +7,7 @@ package tools
 import (
 	"fmt"
 	"os"
+	"time"
 )
 
 // PromptGlyph is the input affordance at the end of the status line and the
@@ -39,4 +40,14 @@ func Color(v, c string) string {
 		return v
 	}
 	return fmt.Sprintf("%s%s%s", c, v, Reset)
+}
+
+// TimestampPrefix renders the "HH:MM:SS  " gutter shown before every printed
+// line — user/assistant turns (cmd/cortex's gutterPrefix) and tool-action
+// lines (printToolAction) alike — so a scrolled session stays vertically
+// aligned regardless of which side printed the line. Always gray (2026-07-19):
+// the timestamp no longer carries a per-role/per-tool color, so it reads as
+// one consistent margin rather than a row of color-coded tags.
+func TimestampPrefix() string {
+	return fmt.Sprintf("%s  ", Color(time.Now().Format("15:04:05"), Gray))
 }

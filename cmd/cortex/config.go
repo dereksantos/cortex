@@ -47,6 +47,17 @@ const (
 	roleCode  = "code"
 	roleStudy = "study"
 	roleEmbed = "embed"
+	// roleLearn is NOT a models.<role> binding — there is no models.learn
+	// config surface, and it is deliberately absent from rolePolicies below.
+	// The Learn subagent (internal/tools.Learn, docs/learning-loop.md)
+	// always runs on the study role's binding, exactly like Study itself.
+	// This constant exists only so subagentRequest can recognize Learn
+	// alongside roleStudy and skip the coder-inherit override (a background
+	// pass has no live coder request to inherit — see its call site's
+	// comment), and so subagentBounds can resolve subagents.learn bounds
+	// independently of subagents.study. Mirrors tools.Learn.Role's literal
+	// "learn" string the same way roleStudy mirrors tools.FunctionStudy.
+	roleLearn = "learn"
 )
 
 type rolePolicy struct {
@@ -529,6 +540,12 @@ type SubagentsConfig struct {
 	SeedBudgetTokens int                   `json:"seed_budget_tokens"`
 	Study            SubagentProfileConfig `json:"study"`
 	Agent            SubagentProfileConfig `json:"agent"`
+	// Learn overrides the background learning-loop subagent's bounds
+	// (internal/tools.Learn.Bounds) — docs/learning-loop.md. A separate
+	// section from .Study even though Learn runs on the study role's model
+	// binding: the two profiles' bounds are independently tunable (Learn's
+	// budget is about background cost, Study's about foreground latency).
+	Learn SubagentProfileConfig `json:"learn"`
 }
 
 // LimitsConfig collects the assorted byte/count ceilings that don't belong to
@@ -942,6 +959,9 @@ func validateConfig(cfg *Config) error {
 		"subagents.agent.max_tokens":        cfg.Subagents.Agent.MaxTokens,
 		"subagents.agent.max_iter":          cfg.Subagents.Agent.MaxIter,
 		"subagents.agent.read_budget_bytes": cfg.Subagents.Agent.ReadBudgetBytes,
+		"subagents.learn.max_tokens":        cfg.Subagents.Learn.MaxTokens,
+		"subagents.learn.max_iter":          cfg.Subagents.Learn.MaxIter,
+		"subagents.learn.read_budget_bytes": cfg.Subagents.Learn.ReadBudgetBytes,
 
 		"limits.max_tool_iterations":       cfg.Limits.MaxToolIterations,
 		"limits.max_instruction_bytes":     cfg.Limits.MaxInstructionBytes,
@@ -1052,6 +1072,7 @@ func mergeSubagents(base, over SubagentsConfig) SubagentsConfig {
 		SeedBudgetTokens: mergeIntField(base.SeedBudgetTokens, over.SeedBudgetTokens),
 		Study:            mergeSubagentProfile(base.Study, over.Study),
 		Agent:            mergeSubagentProfile(base.Agent, over.Agent),
+		Learn:            mergeSubagentProfile(base.Learn, over.Learn),
 	}
 }
 
@@ -1451,6 +1472,8 @@ func (c *Config) subagentBounds(role string, def agent.Bounds) agent.Bounds {
 	switch role {
 	case roleStudy:
 		pc = c.Subagents.Study
+	case roleLearn:
+		pc = c.Subagents.Learn
 	default:
 		pc = c.Subagents.Agent
 	}

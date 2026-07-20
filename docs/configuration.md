@@ -253,25 +253,27 @@ default to today's hardcoded value.
 
 `request_timeout_sec`/`max_send_attempts`/`retry_backoff_ms` only exist under `models.code` and `models.study` — the coder's own turn and the `agent` subagent (which runs on the coder's live model) use `models.code`'s values; the `study` subagent plus the summarizer and shell-risk classifier (both of which build their sub-LLM client from the `study` binding) use `models.study`'s.
 
-## `subagents.*` — Study/Agent profile bounds
+## `subagents.*` — Study/Agent/Learn profile bounds
 
 ```json
 {
   "subagents": {
     "seed_budget_tokens": 6000,
     "study": { "max_tokens": 8192, "max_iter": 12, "read_budget_bytes": 96000 },
-    "agent": { "max_tokens": 8192, "max_iter": 20, "read_budget_bytes": 128000 }
+    "agent": { "max_tokens": 8192, "max_iter": 20, "read_budget_bytes": 128000 },
+    "learn": { "max_tokens": 8192, "max_iter": 12, "read_budget_bytes": 96000 }
   }
 }
 ```
 
 | Field | Default | Meaning |
 |---|---|---|
-| `seed_budget_tokens` | 6000 | Outline budget used to seed EITHER profile before its loop starts (shared — one constant, not per-profile, hence this lives at the top level rather than duplicated under `.study`/`.agent`). |
+| `seed_budget_tokens` | 6000 | Outline budget used to seed EITHER profile before its loop starts (shared — one constant, not per-profile, hence this lives at the top level rather than duplicated under `.study`/`.agent`/`.learn`). |
 | `study.max_tokens` / `study.max_iter` / `study.read_budget_bytes` | 8192 / 12 / 96000 | The `study` subagent's output-token cap, tool-call iteration cap, and cumulative read-byte budget. |
 | `agent.max_tokens` / `agent.max_iter` / `agent.read_budget_bytes` | 8192 / 20 / 128000 | The `agent` subagent's same three bounds. |
+| `learn.max_tokens` / `learn.max_iter` / `learn.read_budget_bytes` | 8192 / 12 / 96000 | The background learning-loop subagent's (`docs/learning-loop.md`) same three bounds — a separate section from `.study` even though `learn` also runs on the study role's model binding (see below), since the two profiles' bounds are independently tunable. |
 
-**Naming honesty**: this section configures PROFILES (the `study` and `agent` subagents), not model roles — despite the name overlap with `models.study`, `subagents.agent` does **not** run on a "study" or "agent" role binding. The `agent` profile runs on the **coder's own live model** by default (an optional per-call `model` argument on the `agent` tool call can pin a different one). The original audit sketched this as `models.study.subagent.{study,agent}`; it landed as a top-level `subagents` section instead, because nesting it under `models.study` would have implied the `agent` profile is bound to the study role, which it isn't.
+**Naming honesty**: this section configures PROFILES (the `study`, `agent`, and `learn` subagents), not model roles — despite the name overlap with `models.study`, `subagents.agent` does **not** run on a "study" or "agent" role binding. The `agent` profile runs on the **coder's own live model** by default (an optional per-call `model` argument on the `agent` tool call can pin a different one); `learn` runs on the **study role's binding**, exactly like `study` itself (it has no coder session to inherit from — it can run from a scheduled loop firing with no coder turn live at all). The original audit sketched this as `models.study.subagent.{study,agent}`; it landed as a top-level `subagents` section instead, because nesting it under `models.study` would have implied the `agent` profile is bound to the study role, which it isn't.
 
 ## `limits.*` — assorted byte/count ceilings
 

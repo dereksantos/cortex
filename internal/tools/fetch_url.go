@@ -43,7 +43,7 @@ type fetchURLArgs struct {
 	URL string `json:"url"`
 }
 
-func fetchURL(ctx context.Context, tc ToolCall) (string, error) {
+func fetchURL(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	var args fetchURLArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return "invalid fetch_url arguments: " + err.Error(), nil
@@ -57,7 +57,7 @@ func fetchURL(ctx context.Context, tc ToolCall) (string, error) {
 		return "fetch_url refused: " + err.Error(), nil
 	}
 
-	printToolAction(fmt.Sprintf("fetch_url(%s)", u.String()))
+	printToolAction(deps, fmt.Sprintf("fetch_url(%s)", u.String()))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {

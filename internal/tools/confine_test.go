@@ -137,7 +137,7 @@ func TestReadRangeByteCap(t *testing.T) {
 	p := filepath.Join(dir, "huge.jsonl")
 	line := strings.Repeat("x", 3000) + "\n"
 	os.WriteFile(p, []byte(strings.Repeat(line, 50)), 0o644)
-	out, err := readRange(p, 1, 50)
+	out, err := readRange(headlessDeps{}, p, 1, 50)
 	if err != nil {
 		t.Fatal(err)
 	}

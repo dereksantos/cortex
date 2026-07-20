@@ -59,6 +59,7 @@ func (f *fakeMemoryStore) MemoryForget(name string) (string, error) {
 	delete(f.notes, name)
 	return "", nil
 }
+func (f *fakeMemoryStore) Quiet() bool { return false }
 
 func TestScanLandscapeIsRegisteredForCoderOnly(t *testing.T) {
 	if !toolListContains(All, FunctionScanLandscape) {

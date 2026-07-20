@@ -58,7 +58,12 @@ Three capabilities distinguish it:
    `captureTurn()` records each turn (files edited, commands run, final answer)
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
-   [`docs/memory-tools.md`](docs/memory-tools.md).
+   [`docs/memory-tools.md`](docs/memory-tools.md). A background counterpart —
+   the **learning loop** (`cortex learn`; the `Learn` subagent,
+   `internal/tools/tools.go`) — mines that same journal off the coder's
+   critical path for what the foreground had no task-shaped reason to save,
+   writing through the same memory store the index above already reads. See
+   [`docs/learning-loop.md`](docs/learning-loop.md).
 3. **`study` — a bounded read-only subagent.** `study(path, goal)` runs the
    `Study` profile on the shared `runLoop` engine (`cmd/cortex/study.go`): seeded
    with a structural `outline` of the target plus the goal, it works a small
@@ -77,8 +82,9 @@ Three capabilities distinguish it:
 | `cortex resume [id]` | Resume a prior session (default: latest) |
 | `cortex turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
+| `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
-| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, bearer-token authenticated) |
+| `cortex serve [--port <n>]` | Local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist; no bearer token — 2026-07-19) |
 | `cortex scan [--json] [--root <path>] [--register]` | Scan configured roots and list discovered projects |
 | `cortex project <add\|list\|remove>` | Manage the project registry |
 | `cortex discord` | Discord adapter (token from `DISCORD_BOT_TOKEN`) |
@@ -233,6 +239,8 @@ go test ./...                # full suite
 - `cmd/cortex/main.go` — REPL, `CortexSession` (composition root), `Turn`, dispatch, config
 - `cmd/cortex/loop.go` — the `runLoop` engine + the `Sender`/`AgentDispatcher`/`Toolset`/`Bounds`/`Progress` seams + `requestFor`
 - `cmd/cortex/study.go` — the `Study` subagent wiring (`RunSubagent`, `dispatcherFor`, `Outline`) + telemetry
+- `cmd/cortex/learn.go` — the learning loop (`docs/learning-loop.md`): `RunLearningPass`, the journal-window/cursor mechanics, `cortex learn`, and the `loop_run.go` `kind:"learn"` firing
+- `internal/loops/` — the loop spec store (`Spec`, incl. `Kind`) + scheduler (`Due`, cadence floor, three-strike disable)
 - `cmd/cortex/summarize.go` — free-text summarizer (compaction + shell-output)
 - `internal/agent/` — the shared tool-call vocabulary (`Tool`, `ToolCall`, `Bounds`); imports only the stdlib
 - `internal/tools/` — the agent's tool surface (`Execute`, the tool decls, `grep`, the `Study` profile, `ConfinePath`/`TargetedRead`)

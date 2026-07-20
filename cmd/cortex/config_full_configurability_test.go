@@ -106,6 +106,10 @@ func TestZeroConfigResolversMatchHistoricalDefaults(t *testing.T) {
 			if got := cfg.subagentBounds("agent", agentDef); got != agentDef {
 				t.Errorf(`subagentBounds("agent", def) = %+v, want unchanged %+v`, got, agentDef)
 			}
+			learnDef := agent.Bounds{MaxTokens: 333, MaxIter: 12, ReadBudgetBytes: 96_000}
+			if got := cfg.subagentBounds(roleLearn, learnDef); got != learnDef {
+				t.Errorf(`subagentBounds(learn, def) = %+v, want unchanged %+v`, got, learnDef)
+			}
 
 			// context.* resolvers: unset must reproduce the ORIGINAL integer-division
 			// expressions verbatim (ContextConfig's bit-identical-defaults subtlety) —
@@ -547,6 +551,40 @@ func TestSubagentRequestAgentProfileInheritsCoderTransportBudget(t *testing.T) {
 	}
 }
 
+// TestSubagentRequestLearnProfileStaysOnStudyBinding covers
+// docs/learning-loop.md's model-binding decision: Learn (Role=="learn")
+// runs on the study role's binding, exactly like Study itself — NOT the
+// coder's live model the way Agent does — because a background pass has no
+// "coder's current model" to inherit from in the first place (it can run
+// with no coder session live at all, e.g. a scheduled loop firing). Proven
+// two ways: (1) with a live coder Request present, Learn must NOT pick up
+// its model (unlike Agent, which does — the preceding test); (2) with NO
+// live coder Request at all (the loop-firing shape), Learn must still
+// resolve cleanly off the study binding rather than panicking on a nil
+// cs.Request.
+func TestSubagentRequestLearnProfileStaysOnStudyBinding(t *testing.T) {
+	study := ModelSpec{Model: "study-m", Endpoint: "http://study.example", RequestTimeoutSec: 111}
+	coder := &AgentRequest{
+		Model: "coder-live", BaseURL: "http://coder.example", APIKey: "sk-live",
+		Timeout: 222 * time.Second, MaxAttempts: 5, Backoff: 3 * time.Second,
+	}
+
+	withCoder := &CortexSession{Study: study, Request: coder}
+	learnReq := withCoder.subagentRequest(tools.Subagent{Role: roleLearn}, "seed")
+	if learnReq.Model != study.Model {
+		t.Errorf("learn profile Model = %q, want the study binding's %q (not the coder's live %q)", learnReq.Model, study.Model, coder.Model)
+	}
+	if learnReq.Timeout != 111*time.Second {
+		t.Errorf("learn profile Timeout = %v, want study role's 111s", learnReq.Timeout)
+	}
+
+	withoutCoder := &CortexSession{Study: study}
+	learnReq2 := withoutCoder.subagentRequest(tools.Subagent{Role: roleLearn}, "seed")
+	if learnReq2.Model != study.Model {
+		t.Errorf("learn profile Model with no live coder request = %q, want the study binding's %q", learnReq2.Model, study.Model)
+	}
+}
+
 // TestConfigSubagentBoundsOverridesReachProfile is the second wiring
 // spot-check: subagents.study/.agent config actually reaches the Study/Agent
 // profile's runtime Bounds, via runSubagentStats' local sa.Bounds override —
@@ -597,6 +635,38 @@ func TestConfigSubagentBoundsOverridesReachProfile(t *testing.T) {
 	req := requestFor(ModelSpec{Model: "m", Endpoint: "http://example.test"}, "sys", "seed", nil, sa.Bounds.MaxTokens, dialectFor(false))
 	if req.MaxTokens != 4242 {
 		t.Errorf("wire req.MaxTokens = %d, want 4242 (the config-overridden bound)", req.MaxTokens)
+	}
+}
+
+// TestConfigSubagentLearnBoundsOverrideReachesProfile is
+// TestConfigSubagentBoundsOverridesReachProfile's Learn counterpart:
+// subagents.learn config reaches internal/tools.Learn's runtime Bounds
+// independently of subagents.study/.agent — proving Learn didn't
+// accidentally alias Study's config section (a real risk since both run on
+// the study role's model binding, per the preceding test).
+func TestConfigSubagentLearnBoundsOverrideReachesProfile(t *testing.T) {
+	originalLearnBounds := tools.Learn.Bounds
+	t.Cleanup(func() {
+		if tools.Learn.Bounds != originalLearnBounds {
+			t.Errorf("tools.Learn.Bounds was mutated: got %+v, want unchanged %+v", tools.Learn.Bounds, originalLearnBounds)
+		}
+	})
+
+	cfg := &Config{Subagents: SubagentsConfig{
+		Study: SubagentProfileConfig{MaxTokens: 4242, MaxIter: 3, ReadBudgetBytes: 5000},
+		Learn: SubagentProfileConfig{MaxTokens: 999, MaxIter: 4, ReadBudgetBytes: 6000},
+	}}
+
+	sa := tools.Learn
+	sa.Bounds = cfg.subagentBounds(sa.Role, sa.Bounds)
+	if sa.Bounds.MaxTokens != 999 {
+		t.Errorf("overridden Learn Bounds.MaxTokens = %d, want 999 (not Study's 4242 — the sections must not alias)", sa.Bounds.MaxTokens)
+	}
+	if sa.Bounds.MaxIter != 4 {
+		t.Errorf("overridden Learn Bounds.MaxIter = %d, want 4", sa.Bounds.MaxIter)
+	}
+	if sa.Bounds.ReadBudgetBytes != 6000 {
+		t.Errorf("overridden Learn Bounds.ReadBudgetBytes = %d, want 6000", sa.Bounds.ReadBudgetBytes)
 	}
 }
 

@@ -34,6 +34,8 @@ type streamPrinter struct {
 	md         *markdownRenderer // nil → raw token streaming; set → block-buffered render
 	pending    string            // md path: prose not yet flushed as a complete block
 	gutterOpen bool              // md path: gutter printed, first block not yet joined to it
+	printedAny bool              // md path: at least one block already written this response
+	blankAfter bool              // md path: the last line written to the sink was blank
 	// onStatus drives a "thinking..." indicator when there's no standalone spinner
 	// (the anchored REPL): on=true with the latest reasoning tail, on=false when
 	// the answer starts. nil in the normal spinner path.
@@ -231,9 +233,11 @@ func (p *streamPrinter) onContent(s string) {
 }
 
 // begin stops the spinner and prints the assistant gutter once, on the first
-// visible content. The gutter is left open (no trailing newline) so the first
-// fragment — raw bytes, or the first rendered block with its leading margin
-// trimmed — sits on the same line as the timestamp.
+// visible content. A blank line precedes it — breathing room from whatever
+// printed last (a prompt, a tool-action line, a prior step's breadcrumb) —
+// then the gutter is left open (no trailing newline) so the first fragment —
+// raw bytes, or the first rendered block with its leading margin trimmed —
+// sits on the same line as the timestamp.
 func (p *streamPrinter) begin() {
 	if p.began {
 		return
@@ -247,7 +251,8 @@ func (p *streamPrinter) begin() {
 	if p.onStatus != nil {
 		p.onStatus(false, "") // answer started — clear the thinking status
 	}
-	fmt.Fprint(p.writer(), gutterPrefix(Message{Role: "assistant"}.gutter(), time.Now()))
+	fmt.Fprintln(p.writer())
+	fmt.Fprint(p.writer(), gutterPrefix(time.Now()))
 	p.gutterOpen = p.md != nil // render mode: first block joins this line
 	p.began = true
 }
@@ -276,17 +281,35 @@ func (p *streamPrinter) emit(s string) {
 // are skipped so separators don't leave gaps. The first block after the gutter
 // has its leading margin trimmed so it joins the timestamp line; later blocks
 // flow beneath at glamour's own indent.
+//
+// A heading block (isHeadingBlock — splitBlocks always isolates headings onto
+// their own block) gets a blank line on each side, so it reads as a section
+// break rather than sitting flush against the surrounding prose. blankAfter
+// tracks whether the sink's last line was already blank, so two adjacent
+// headings (or a heading right after the response's own leading blank line)
+// share one blank line instead of stacking two.
 func (p *streamPrinter) writeBlock(b string) {
 	if strings.TrimSpace(b) == "" {
 		return
 	}
 	p.begin()
+	heading := isHeadingBlock(b)
+	if heading && p.printedAny && !p.blankAfter {
+		fmt.Fprintln(p.writer())
+		p.blankAfter = true
+	}
 	out := p.md.render(b)
 	if p.gutterOpen {
 		out = trimLeadingIndent(out)
 		p.gutterOpen = false
 	}
 	fmt.Fprintln(p.writer(), out)
+	p.printedAny = true
+	p.blankAfter = false
+	if heading {
+		fmt.Fprintln(p.writer())
+		p.blankAfter = true
+	}
 }
 
 // finish flushes any held-back tail (when no marker ever appeared) plus, in
@@ -303,12 +326,20 @@ func (p *streamPrinter) finish() bool {
 		p.writeBlock(p.pending)
 		p.pending = ""
 	}
-	// Raw mode terminates the streamed line here; render mode already newline-
-	// terminated every block in writeBlock. A trailing blank line gives the
-	// answer breathing room before the next prompt or status notice.
-	if p.began && p.md == nil {
-		fmt.Fprintln(p.writer())
-		fmt.Fprintln(p.writer())
+	// A trailing blank line gives the answer breathing room before the next
+	// prompt or status notice, in both modes. Raw mode's last streamed byte
+	// left its line un-terminated (fmt.Fprint never appends a newline), so it
+	// needs one Fprintln to close that line plus one for the blank line;
+	// render mode already newline-terminated its last block in writeBlock, so
+	// one is enough — and none at all if the last block was a heading, which
+	// already left blankAfter true.
+	if p.began {
+		if p.md == nil {
+			fmt.Fprintln(p.writer())
+		}
+		if !p.blankAfter {
+			fmt.Fprintln(p.writer())
+		}
 	}
 	return p.began
 }
@@ -337,7 +368,7 @@ func (p *streamPrinter) breadcrumb(res *AgentResponse) {
 		return
 	}
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(gray, time.Now()), withColor(line, gray))
+		gutterPrefix(time.Now()), withColor(line, gray))
 	p.crumbed = true // thoughtStat: skip, this step's trace already showed
 }
 
@@ -391,7 +422,7 @@ func (p *streamPrinter) thoughtStat(res *AgentResponse) {
 	}
 	line := fmt.Sprintf("thought %ds | %s tok", int(elapsed.Seconds()), humanK(tok))
 	fmt.Fprintf(p.writer(), "%s%s\n",
-		gutterPrefix(gray, time.Now()), withColor(line, gray))
+		gutterPrefix(time.Now()), withColor(line, gray))
 }
 
 // collapseLine flattens s to a single whitespace-collapsed line, capped at cap

@@ -7,28 +7,18 @@ import (
 	"time"
 )
 
-// gutter reports the role color for a message line. The REPL is glyph-free
-// by decision (2026-07-19): there is no per-role icon anymore, so the
-// timestamp itself carries the color that used to sit on the dropped icon
-// (❯◆▸✻) — gray is reserved for secondary/note lines (streaming.go's
-// breadcrumb and thought-stat).
-func (m Message) gutter() (color string) {
-	switch m.Role {
-	case RoleUser:
-		return cyan
-	case RoleTool:
-		return green
-	default:
-		return blue
-	}
-}
-
-func gutterPrefix(color string, ts time.Time) string {
-	return fmt.Sprintf("%s  ", withColor(ts.Format("15:04:05"), color))
+// gutterPrefix renders the "HH:MM:SS  " shown before every printed line. The
+// REPL is glyph-free by decision (2026-07-19): there is no per-role icon
+// anymore, and the timestamp no longer carries a per-role color either
+// (2026-07-19) — every timestamp, on every line (user/assistant/tool alike),
+// is plain gray so the gutter reads as one consistent margin rather than a
+// row of role-coded tags.
+func gutterPrefix(ts time.Time) string {
+	return fmt.Sprintf("%s  ", withColor(ts.Format("15:04:05"), gray))
 }
 
 func (m Message) render(ts time.Time) string {
-	return gutterPrefix(m.gutter(), ts) + m.Content
+	return gutterPrefix(ts) + m.Content
 }
 
 func (m Message) Print() {

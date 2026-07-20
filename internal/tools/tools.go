@@ -137,6 +137,16 @@ type WatermarkAdjuster interface {
 	AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error)
 }
 
+// Quieter reports whether terminal emission is suppressed (headless `cortex
+// turn`, serve, discord). It's cross-cutting infra rather than a domain
+// capability, so printToolAction (and any narrow consumer like
+// scanLandscape, which otherwise needs only MemoryStore) can depend on just
+// this instead of the whole ToolDeps surface — same segregation this file
+// applies to every other embedded piece of ToolDeps.
+type Quieter interface {
+	Quiet() bool
+}
+
 // ToolDeps is the union Execute's big switch consumes — assembled from the parts
 // by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
 // outline) takes none of these; a memory tool depends only on MemoryStore; the
@@ -152,8 +162,7 @@ type ToolDeps interface {
 	SubAgentRunner
 	ShellGate
 	DeleteGate
-	// Quiet reports whether terminal emission is suppressed (headless mode).
-	Quiet() bool
+	Quieter
 	// Recaller resolves an outline citation back to the raw transcript messages
 	// it stands for (docs/context-architecture.md: demotion is recoverable).
 	Recaller
@@ -509,10 +518,41 @@ var Agent = Subagent{
 	DepthCap:    1, // may spawn one nested subagent — see docs/agent-tool.md decision 3.
 }
 
+// Learn is the background learning-loop subagent profile — docs/learning-loop.md,
+// the smallest honest slice of the historical Think/Dream design
+// (docs/think-dream-eval.md), gated on that doc's Δ/ø bar. Read-mostly like
+// Study (outline/grep/read_file), plus the two memory-recall tools
+// (memory_read/memory_search) to check what's already saved, plus
+// memory_write — the ONE write surface Learn gets, since its entire job is
+// depositing durable notes the foreground coder didn't. No bash/write_file/
+// edit_file (Learn never touches the filesystem beyond reading it), no
+// memory_forget (retracting a note is judgment call enough to stay the
+// coder's), no recursion (DepthCap 0, same as Study).
+//
+// UNLIKE Study and Agent, Learn is deliberately NOT Register()'d and carries
+// no Declaration: it is never offered to the coder as a callable tool mid-
+// conversation — its only two entry points are `cortex learn` and the loop
+// scheduler's kind:"learn" firing (both cmd/cortex/learn.go), which call
+// RunSubagent directly. Bounds default Study-like (subagents.learn overrides
+// via Config.subagentBounds, same mechanism as Study/Agent). Runs on the
+// study role's model by default (cmd/cortex's subagentRequest special-cases
+// Role=="learn" alongside "study" so it does NOT inherit the coder's live
+// model the way Agent does) — a background pass has no "coder's current
+// model" to inherit from in the first place (it can run with no coder
+// session live at all, e.g. a scheduled loop firing).
+var Learn = Subagent{
+	Name:     "learn",
+	Role:     "learn",
+	System:   learnSystem,
+	Tools:    []Tool{OutlineTool, GrepTool, ReadFile, MemoryReadTool, MemorySearchTool, MemoryWriteTool},
+	Bounds:   agent.Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
+	DepthCap: 0,
+}
+
 // init registers Study and Agent on the shared subagent registry so Execute's
 // generic dispatch (see Lookup in Execute) resolves their tool names back to
 // the right profile — the same path any future inheritor (reflect, dream)
-// will use.
+// will use. Learn is deliberately NOT registered here — see its doc comment.
 func init() {
 	Register(Study)
 	Register(Agent)
@@ -574,9 +614,9 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	case FunctionRecall:
 		return recall(ctx, tc, deps)
 	case FunctionFetchURL:
-		return fetchURL(ctx, tc)
+		return fetchURL(ctx, tc, deps)
 	case FunctionWebSearch:
-		return webSearch(ctx, tc)
+		return webSearch(ctx, tc, deps)
 	case FunctionContextEvict:
 		return contextEvict(tc, deps)
 	case FunctionContextMerge:
@@ -610,12 +650,24 @@ const defaultCurationBudgetTokens = 16000
 // window. Config-overridable via tools.max_tool_output.
 const defaultMaxToolOutput = 10000
 
-// printToolAction prints an indented, word-tagged tool-action line under the
-// current cortex turn, e.g. "  tool: read_file(go.mod)". The tool name shows
-// in green; its argument list is dimmed so the verb reads first. Plain
-// ASCII by decision (2026-07-19) — the REPL dropped its icon set, so the
-// "tool:" tag itself (not a color) carries the meaning under NO_COLOR too.
-func printToolAction(action string) {
+// printToolAction prints a timestamped, word-tagged tool-action line under
+// the current cortex turn, e.g. "15:04:05  tool: read_file(go.mod)". The
+// timestamp matches gutterPrefix's "HH:MM:SS  " format so tool lines stay
+// vertically aligned with user/assistant lines; the tool name shows in
+// green, its argument list dimmed so the verb reads first. Plain ASCII by
+// decision (2026-07-19) — the REPL dropped its icon set, so the "tool:" tag
+// itself (not a color) carries the meaning under NO_COLOR too.
+//
+// Gated on deps.Quiet(): headless `cortex turn --json` and the served/Discord
+// sessions set it precisely so this stays off their stdout — a served turn's
+// tool calls are already reported through the Progress seam (loop.go), so
+// printing here too was pure duplication onto the server process's own
+// console, ANSI codes included (2026-07-19). Takes just Quieter, not the
+// full ToolDeps — the only capability this needs.
+func printToolAction(deps Quieter, action string) {
+	if deps.Quiet() {
+		return
+	}
 	name, args := action, ""
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
@@ -624,7 +676,7 @@ func printToolAction(action string) {
 	if args != "" {
 		line += Color(args, Gray)
 	}
-	fmt.Printf("  %s\n", line)
+	fmt.Printf("%s%s\n", TimestampPrefix(), line)
 }
 
 // --- outline ------------------------------------------------------------
@@ -645,7 +697,7 @@ func outlineTool(tc ToolCall, deps ToolDeps) (string, error) {
 	if n, ok := tc.IntArg("budget"); ok && n > 0 {
 		budget = n
 	}
-	printToolAction(fmt.Sprintf("outline(%s)", path))
+	printToolAction(deps, fmt.Sprintf("outline(%s)", path))
 	return outline.Render(resolveWorkdir(deps, path), budget)
 }
 
@@ -695,7 +747,7 @@ func memoryWrite(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("memory_write(%s)", name))
+	printToolAction(deps, fmt.Sprintf("memory_write(%s)", name))
 	return deps.MemoryWrite(name, content)
 }
 
@@ -704,7 +756,7 @@ func memoryRead(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("memory_read(%s)", name))
+	printToolAction(deps, fmt.Sprintf("memory_read(%s)", name))
 	return deps.MemoryRead(name)
 }
 
@@ -713,7 +765,7 @@ func memorySearch(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("memory_search(%s)", query))
+	printToolAction(deps, fmt.Sprintf("memory_search(%s)", query))
 	return deps.MemorySearch(query)
 }
 
@@ -722,7 +774,7 @@ func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("memory_forget(%s)", name))
+	printToolAction(deps, fmt.Sprintf("memory_forget(%s)", name))
 	return deps.MemoryForget(name)
 }
 
@@ -737,11 +789,11 @@ func recall(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	budget, _ := tc.IntArg("budget")
 	if budget <= 0 {
-		printToolAction(fmt.Sprintf("recall(%s)", citation))
+		printToolAction(deps, fmt.Sprintf("recall(%s)", citation))
 		return deps.Recall(citation)
 	}
 
-	printToolAction(fmt.Sprintf("recall(%s, budget=%d)", citation, budget))
+	printToolAction(deps, fmt.Sprintf("recall(%s, budget=%d)", citation, budget))
 	raw, err := deps.Recall(citation)
 	if err != nil {
 		return "", err
@@ -796,7 +848,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 		if !hasEnd || end < start {
 			end = start + active.DefaultRangeLines - 1
 		}
-		return readRange(fsPath, start, end)
+		return readRange(deps, fsPath, start, end)
 	}
 	// Curation budget: a whole-file read above CurationBudgetTokens is refused
 	// and redirected to study, so the coder gets a CURATED digest rather than a
@@ -811,7 +863,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 			// and target a region (read_file(start,end), study for curated
 			// content, or bash sed for an exact range) instead of dead-ending.
 			if skel := fileSkeleton(fsPath); skel != "" {
-				printToolAction(fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
+				printToolAction(deps, fmt.Sprintf("read_file(%s) → skeleton (~%dk tokens, too large)", path, estTokens/1000))
 				return fmt.Sprintf("%s is ~%d tokens — too large to read whole. Its structural outline is below; "+
 					"read_file(%q, start, end) an exact span, study(%q, goal) for curated content, or bash `sed -n 'A,Bp' %s` for a raw range.\n\n%s",
 					path, estTokens, path, path, path, skel), nil
@@ -822,7 +874,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 				path, info.Size(), estTokens, path)
 		}
 	}
-	printToolAction(fmt.Sprintf("read_file(%s)", path))
+	printToolAction(deps, fmt.Sprintf("read_file(%s)", path))
 	data, err := os.ReadFile(fsPath)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
@@ -835,7 +887,7 @@ func readFile(tc ToolCall, deps ToolDeps) (string, error) {
 // sees exactly which lines it got (and a truncation note when the request was
 // clamped). Lines beyond EOF are silently dropped — asking past the end yields
 // what exists, not an error.
-func readRange(path string, start, end int) (string, error) {
+func readRange(deps ToolDeps, path string, start, end int) (string, error) {
 	if end-start+1 > active.MaxRangeLines {
 		end = start + active.MaxRangeLines - 1
 	}
@@ -856,7 +908,7 @@ func readRange(path string, start, end int) (string, error) {
 	if hi > len(lines) {
 		hi = len(lines)
 	}
-	printToolAction(fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
+	printToolAction(deps, fmt.Sprintf("read_file(%s:%d-%d)", path, start, hi))
 	body := strings.Join(lines[start-1:hi], "\n")
 	// Byte ceiling: the line clamp alone doesn't bound a span of VERY long lines
 	// (minified JSON, journal JSONL — ~2.6 KB/line), which could return hundreds of
@@ -906,7 +958,7 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
+	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
 	if err := os.WriteFile(resolveWorkdir(deps, path), []byte(content), 0644); err != nil {
@@ -952,9 +1004,9 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	multi := len(edits) > 0
 	if !multi {
 		edits = []editOp{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
-		printToolAction(fmt.Sprintf("edit_file(%s)", a.Path))
+		printToolAction(deps, fmt.Sprintf("edit_file(%s)", a.Path))
 	} else {
-		printToolAction(fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
+		printToolAction(deps, fmt.Sprintf("edit_file(%s, %s)", a.Path, countNoun(len(edits), "edit")))
 	}
 
 	// Filesystem access goes through the session's workdir anchor; messages
@@ -1236,7 +1288,7 @@ func removePath(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(fmt.Sprintf("remove_path(%s)", path))
+	printToolAction(deps, fmt.Sprintf("remove_path(%s)", path))
 	if err := os.RemoveAll(abs); err != nil {
 		return "", fmt.Errorf("remove %s: %w", path, err)
 	}
@@ -1312,7 +1364,7 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if f := strings.Fields(command); len(f) > 0 {
 		leadBin = f[0]
 	}
-	printToolAction(fmt.Sprintf("bash(%s)", command))
+	printToolAction(deps, fmt.Sprintf("bash(%s)", command))
 
 	// Full shell semantics via `bash -c`: pipes, redirects, and chaining all
 	// work. The risk gate above (with its non-negotiable deny-floor) is what
@@ -1395,7 +1447,7 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 	if err != nil {
 		return "", false
 	}
-	printToolAction(fmt.Sprintf("output %d KB → summarize(%s)", len(out)/1024, spill))
+	printToolAction(deps, fmt.Sprintf("output %d KB → summarize(%s)", len(out)/1024, spill))
 	goal := fmt.Sprintf("This is the output of `%s`. What does it show? Surface errors, failures, and anomalies first.", command)
 	digest, _, err := deps.Summarize(ctx, spill, goal, bashStudyWindow())
 	if err != nil {

@@ -33,7 +33,7 @@ type webSearchResult struct {
 	Snippet string
 }
 
-func webSearch(ctx context.Context, tc ToolCall) (string, error) {
+func webSearch(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	var args webSearchArgs
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 		return "invalid web_search arguments: " + err.Error(), nil
@@ -49,7 +49,7 @@ func webSearch(ctx context.Context, tc ToolCall) (string, error) {
 		return fmt.Sprintf("max_results must be between 1 and %d", active.MaximumSearchMax), nil
 	}
 
-	printToolAction(fmt.Sprintf("web_search(%s)", args.Query))
+	printToolAction(deps, fmt.Sprintf("web_search(%s)", args.Query))
 
 	form := url.Values{"q": []string{args.Query}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, searchEndpoint, strings.NewReader(form.Encode()))

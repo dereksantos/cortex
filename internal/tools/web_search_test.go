@@ -48,7 +48,7 @@ func TestWebSearchReturnsRankedResults(t *testing.T) {
 		return &http.Response{StatusCode: 200, Status: "200 OK", Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(page)), Request: req}, nil
 	})}
 
-	got, err := webSearch(context.Background(), searchCall("go context cancellation", 0))
+	got, err := webSearch(context.Background(), searchCall("go context cancellation", 0), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestWebSearchReturnsRankedResults(t *testing.T) {
 
 func TestWebSearchValidatesArguments(t *testing.T) {
 	for _, tc := range []ToolCall{searchCall(" ", 0), searchCall("query", 11)} {
-		got, err := webSearch(context.Background(), tc)
+		got, err := webSearch(context.Background(), tc, headlessDeps{})
 		if err != nil {
 			t.Fatal(err)
 		}

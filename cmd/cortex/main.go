@@ -175,7 +175,6 @@ const (
 	red    = tools.Red
 	cyan   = tools.Cyan
 	green  = tools.Green
-	blue   = tools.Blue
 	yellow = tools.Yellow
 	gray   = tools.Gray
 	reset  = tools.Reset
@@ -318,6 +317,16 @@ func main() {
 		return
 	}
 
+	// One-shot headless learning pass: `cortex learn [--project <name>]`
+	// (docs/learning-loop.md). Runs the background Learn subagent over the
+	// current (or named) project's journal since the last learn cursor and
+	// prints a short plain report — always exits 0, since "nothing worth
+	// saving" is a normal outcome, not a failure. See learn.go.
+	if len(os.Args) >= 2 && os.Args[1] == "learn" {
+		runLearnCLI(os.Args[2:])
+		return
+	}
+
 	// Landscape scan: `cortex scan [--json] [--root <path>]` (Phase 2 /
 	// M2.5). Uses persisted scan.roots or --root; refuses (never a blind
 	// $HOME sweep) when neither is available — see scan.go.
@@ -371,8 +380,8 @@ func main() {
 	}
 
 	// Interactive-REPL-only backend bootstrap (docs/completion-roadmap.md
-	// Gate E): every headless subcommand above (`turn`, `study`, `scan`,
-	// `project`, `model`, `change`, `serve`, `discord`, `study-eval`)
+	// Gate E): every headless subcommand above (`turn`, `learn`, `study`,
+	// `scan`, `project`, `model`, `change`, `serve`, `discord`, `study-eval`)
 	// already returned, so this only ever runs for the bare `cortex` /
 	// `cortex resume` REPL entry points. On a true first run (no user
 	// config, no project config, no $CORTEX_BACKEND) with stdin attached

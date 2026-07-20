@@ -37,21 +37,25 @@ var ScanLandscapeTool = newTool(FunctionScanLandscape,
 
 // scanLandscape probes the resolved home directory for known agent harnesses
 // and local model runtimes and renders a compact text summary. It takes no
-// tool-call arguments; ToolCall carries none for this tool. deps is narrowed
-// to MemoryStore (Interface Segregation, per this package's doc comment) —
-// scanLandscape needs only MemoryWrite, not the full ToolDeps surface.
+// tool-call arguments; ToolCall carries none for this tool. deps is
+// MemoryStore + Quieter (Interface Segregation, per this package's doc
+// comment) — scanLandscape's only needs are MemoryWrite and printToolAction's
+// display gate, not the full ToolDeps surface.
 //
 // Unlike headless `cortex scan` (cmd/cortex/scan.go), this coder-only tool
 // additionally writes a fixed-name "landscape" note to the CURRENT project's
 // memory store — GOAL.md §3 P2's "only the scan_landscape coder tool writes
 // one" — via the same deps.MemoryWrite path the memory_write tool uses, so
 // the note is written identically to a model-driven write.
-func scanLandscape(deps MemoryStore) (string, error) {
+func scanLandscape(deps interface {
+	MemoryStore
+	Quieter
+}) (string, error) {
 	home, err := homeDirFunc()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	printToolAction("scan_landscape()")
+	printToolAction(deps, "scan_landscape()")
 	found, err := landscape.ScanHarnesses(home, landscape.Caps{})
 	if err != nil {
 		return "", fmt.Errorf("scan harnesses: %w", err)

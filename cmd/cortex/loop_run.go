@@ -110,6 +110,14 @@ func parseLoopMarker(reply string) (loopMarker, bool) {
 // runTurnCLI/SessionManager.Create); tests inject a hermetic session
 // pointed at a scripted httptest backend.
 func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, store loops.Store, newSession sessionFactory) error {
+	// docs/learning-loop.md: a kind:"learn" spec runs the Learn subagent over
+	// the project's journal instead of a coder Turn — same scheduler, cadence
+	// floor, and three-strike disable (learn.go's runLearnFiring reuses
+	// finalizeLoopFiring below), different firing engine.
+	if spec.Kind == loops.KindLearn {
+		return runLearnFiring(ctx, spec, reg, store, newSession)
+	}
+
 	payload := journal.LoopRunPayload{Name: spec.Name, Project: spec.Project}
 
 	proj, err := reg.Lookup(spec.Project)

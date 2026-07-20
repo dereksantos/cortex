@@ -44,8 +44,20 @@ var CadenceFloorMinutes = DefaultCadenceFloorMinutes
 // Empty for a loop nobody/nothing has disabled, or one a human disabled by
 // hand via the enable/disable toggle (which never sets this field).
 type Spec struct {
-	Name            string `json:"name"`
-	Project         string `json:"project"`
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	// Kind selects the firing engine: "" (the zero value) or KindTurn is
+	// today's coder-turn loop (RunLoopFiring runs Prompt as a Turn); KindLearn
+	// is the background learning-loop pass (docs/learning-loop.md — the SAME
+	// scheduler, cadence floor, and three-strike disable, but the firing runs
+	// the Learn subagent over the project's journal instead of a coder turn).
+	// omitempty keeps every existing loops.json entry (written before Kind
+	// existed) unmarshaling to "" == KindTurn, unchanged.
+	Kind string `json:"kind,omitempty"`
+	// Prompt is the coder-turn prompt for a KindTurn loop. For a KindLearn
+	// loop it is optional: when set, it's passed to the Learn subagent as an
+	// extra focus hint on top of its standard extraction goal; empty is a
+	// normal, common Learn loop.
 	Prompt          string `json:"prompt"`
 	IntervalMinutes int    `json:"interval_minutes,omitempty"`
 	MaxTurns        int    `json:"max_turns,omitempty"`
@@ -53,6 +65,12 @@ type Spec struct {
 	Enabled         bool   `json:"enabled"`
 	DisabledReason  string `json:"disabled_reason,omitempty"`
 }
+
+// Loop kinds — see Spec.Kind's doc comment.
+const (
+	KindTurn  = "turn"
+	KindLearn = "learn"
+)
 
 // ErrLoopNotFound is returned by Lookup and Remove when no loop with the
 // given name is registered — including when loops.json does not exist

@@ -37,7 +37,7 @@ func TestFetchURLExtractsReadableHTML(t *testing.T) {
 		}, nil
 	})}
 
-	got, err := fetchURL(context.Background(), fetchCall("https://example.com/page"))
+	got, err := fetchURL(context.Background(), fetchCall("https://example.com/page"), headlessDeps{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestFetchURLRefusesUnsafeURLsBeforeRequest(t *testing.T) {
 		"https://user:password@example.com/",
 	} {
 		t.Run(rawURL, func(t *testing.T) {
-			got, err := fetchURL(context.Background(), fetchCall(rawURL))
+			got, err := fetchURL(context.Background(), fetchCall(rawURL), headlessDeps{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +94,7 @@ func TestFetchURLRejectsUnsupportedContent(t *testing.T) {
 		}, nil
 	})}
 
-	_, err := fetchURL(context.Background(), fetchCall("https://example.com/image.png"))
+	_, err := fetchURL(context.Background(), fetchCall("https://example.com/image.png"), headlessDeps{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported content type") {
 		t.Fatalf("error = %v, want unsupported content type", err)
 	}

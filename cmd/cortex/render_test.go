@@ -69,6 +69,30 @@ func TestSplitBlocks(t *testing.T) {
 			wantBlocks: []string{"~~~\ncode\n~~~"},
 			wantRest:   "",
 		},
+		{
+			name:       "heading isolated even without a following blank line",
+			pending:    "## Header\nbody text\n\n",
+			wantBlocks: []string{"## Header", "body text"},
+			wantRest:   "",
+		},
+		{
+			name:       "heading isolated from preceding prose without a blank line",
+			pending:    "lead in\n### Header\n\n",
+			wantBlocks: []string{"lead in", "### Header"},
+			wantRest:   "",
+		},
+		{
+			name:       "consecutive headings each isolated",
+			pending:    "# One\n## Two\n\n",
+			wantBlocks: []string{"# One", "## Two"},
+			wantRest:   "",
+		},
+		{
+			name:       "heading inside a fence is not isolated",
+			pending:    "```\n## not a heading\n```\n",
+			wantBlocks: []string{"```\n## not a heading\n```"},
+			wantRest:   "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -120,6 +144,45 @@ func TestStreamPrinterRawPathUnchanged(t *testing.T) {
 	p.finish()
 	if !strings.Contains(buf.String(), "plain text") {
 		t.Errorf("raw path mangled output: %q", buf.String())
+	}
+}
+
+// TestStreamPrinterPadsHeadings checks that a heading gets a blank line on
+// each side (so it reads as a section break) and that two headings placed
+// back-to-back in the source (no blank line between them) share that one
+// blank rather than stacking two.
+func TestStreamPrinterPadsHeadings(t *testing.T) {
+	md := newMarkdownRenderer(80)
+	if md == nil {
+		t.Fatal("renderer build failed")
+	}
+	var buf strings.Builder
+	p := &streamPrinter{out: &buf, md: md}
+	p.emit("# Title\n\nlead paragraph\n\n## Section\n### Sub\n\ntrailing paragraph\n")
+	p.finish()
+
+	lines := strings.Split(stripANSI(buf.String()), "\n")
+	find := func(want string) int {
+		for i, l := range lines {
+			if strings.Contains(l, want) {
+				return i
+			}
+		}
+		t.Fatalf("line containing %q not found in %q", want, lines)
+		return -1
+	}
+
+	// Every transition here touches a heading on at least one side (Title,
+	// Section, and Sub are all headings), so each pair of consecutive content
+	// lines should be separated by exactly one blank line — never zero
+	// (no padding) and never two (doubled padding, e.g. from Section's
+	// after-blank stacking with Sub's own before-blank).
+	content := []int{find("Title"), find("lead paragraph"), find("Section"), find("Sub"), find("trailing paragraph")}
+	for i := 1; i < len(content); i++ {
+		if gap := content[i] - content[i-1]; gap != 2 {
+			t.Errorf("expected exactly one blank line between lines %d and %d, got gap %d: %q",
+				content[i-1], content[i], gap, lines)
+		}
 	}
 }
 
@@ -259,29 +322,18 @@ func TestStripToolMarkup(t *testing.T) {
 	}
 }
 
-// TestMessageRender covers the de-glyphed gutter (2026-07-19): there is no
-// per-role icon anymore, so render() is checked for the timestamp + content
-// only, plus that gutter() still resolves the expected role color.
+// TestMessageRender covers the de-glyphed, uniformly-gray gutter (2026-07-19):
+// there is no per-role icon and no per-role timestamp color anymore, so
+// render() is checked for the gray timestamp + content only, the same for
+// every role.
 func TestMessageRender(t *testing.T) {
 	ts := time.Date(2026, 6, 8, 14, 23, 1, 0, time.UTC)
-	tests := []struct {
-		role  string
-		color string
-	}{
-		{"assistant", blue},
-		{RoleSystem, blue}, // default branch
-		{RoleTool, green},
-		{RoleUser, cyan},
-	}
-	for _, tt := range tests {
-		m := Message{Role: tt.role, Content: "hello"}
-		if got := m.gutter(); got != tt.color {
-			t.Errorf("gutter(role=%s) color = %q, want %q", tt.role, got, tt.color)
-		}
+	for _, role := range []string{"assistant", RoleSystem, RoleTool, RoleUser} {
+		m := Message{Role: role, Content: "hello"}
 		got := m.render(ts)
-		for _, want := range []string{"14:23:01", "hello"} {
+		for _, want := range []string{"14:23:01", "hello", gray} {
 			if !strings.Contains(got, want) {
-				t.Errorf("render(role=%s) = %q, missing %q", tt.role, got, want)
+				t.Errorf("render(role=%s) = %q, missing %q", role, got, want)
 			}
 		}
 	}

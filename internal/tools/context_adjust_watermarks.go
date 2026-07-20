@@ -11,7 +11,7 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 	highDelta, _ := tc.IntArg("high_delta")
 	lowDelta, _ := tc.IntArg("low_delta")
 
-	printToolAction(fmt.Sprintf("context_adjust_watermarks(high_delta=%d, low_delta=%d)", highDelta, lowDelta))
+	printToolAction(deps, fmt.Sprintf("context_adjust_watermarks(high_delta=%d, low_delta=%d)", highDelta, lowDelta))
 
 	oldHigh, oldLow, newHigh, newLow, err := deps.AdjustWatermarks(highDelta, lowDelta)
 	if err != nil {

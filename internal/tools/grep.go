@@ -53,7 +53,7 @@ func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if p, _ := tc.StringArg("path"); strings.TrimSpace(p) != "" {
 		root = p
 	}
-	printToolAction(fmt.Sprintf("grep(%s, %s)", pattern, root))
+	printToolAction(deps, fmt.Sprintf("grep(%s, %s)", pattern, root))
 	// Filesystem access goes through the session's workdir anchor (the "."
 	// default included); the display line above keeps the relative path. The
 	// broad-journal heuristic keys on the RELATIVE root — the shape the model

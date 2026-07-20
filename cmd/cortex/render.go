@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/dereksantos/cortex/internal/lineedit"
 	"golang.org/x/term"
 )
@@ -48,16 +50,39 @@ type markdownRenderer struct {
 	tr *glamour.TermRenderer
 }
 
+// headingStyle is glamour's built-in dark style with the literal "## "/"### "
+// markdown prefixes stripped from H2-H6 — the heading's color/bold already
+// carries the hierarchy, so the hashmarks were pure noise. H1 is untouched;
+// its colored badge never had a "#" prefix to begin with.
+//
+// The shared Heading.BlockSuffix ("\n", applied to every level, H1 included)
+// is cleared too: since each block streams through its own independent
+// Render call, that suffix survives render()'s Trim as a lone-reset blank
+// line embedded inside the heading's own output — writeBlock (streaming.go)
+// now adds heading padding explicitly and deterministically, so this
+// glamour-internal one would only double it up.
+var headingStyle = func() ansi.StyleConfig {
+	s := styles.DarkStyleConfig
+	s.Heading.BlockSuffix = ""
+	s.H2.Prefix = ""
+	s.H3.Prefix = ""
+	s.H4.Prefix = ""
+	s.H5.Prefix = ""
+	s.H6.Prefix = ""
+	return s
+}()
+
 // newMarkdownRenderer builds a renderer word-wrapped to width. Returns nil on
-// failure so callers degrade to plain text. WithStandardStyle("dark") — never
-// WithAutoStyle, which emits OSC 10/11 escape queries the cbreak input reader
-// would swallow (see internal/repltui for the same caveat).
+// failure so callers degrade to plain text. Uses headingStyle (dark, minus
+// hashmark prefixes) via WithStyles — never WithAutoStyle, which emits OSC
+// 10/11 escape queries the cbreak input reader would swallow (see
+// internal/repltui for the same caveat).
 func newMarkdownRenderer(width int) *markdownRenderer {
 	if width < 1 {
 		width = 80
 	}
 	tr, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
+		glamour.WithStyles(headingStyle),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
@@ -146,12 +171,29 @@ func trimLinePadding(line string) string {
 	return trimmed
 }
 
+// headingLinePattern matches an ATX heading opener (CommonMark: 1-6 "#"
+// followed by whitespace or end-of-line) — used to isolate a heading into its
+// own block even when the model's markdown omits the blank line that
+// conventionally follows it, so writeBlock can always pad a heading on sight.
+var headingLinePattern = regexp.MustCompile(`^#{1,6}(\s|$)`)
+
+// isHeadingBlock reports whether b (a block from splitBlocks) is a heading —
+// always true for a heading block since splitBlocks isolates heading lines,
+// but computed from content rather than assumed so a heading-only block is
+// still recognized however it arrived.
+func isHeadingBlock(b string) bool {
+	first, _, _ := strings.Cut(strings.TrimSpace(b), "\n")
+	return headingLinePattern.MatchString(first)
+}
+
 // splitBlocks segments accumulated stream content into complete markdown blocks
 // plus the unfinished remainder, which the caller re-feeds as more arrives.
 //
 // A block is a maximal run of lines that renders as one markdown unit:
 //   - a fenced code block, from an opening ``` (or ~~~) line through its close,
-//   - otherwise a paragraph/list/heading group terminated by a blank line.
+//   - an ATX heading line, isolated on its own even without a following blank
+//     line, so it can always get its own padding (see isHeadingBlock),
+//   - otherwise a paragraph/list group terminated by a blank line.
 //
 // Only newline-terminated lines are eligible to flush; the trailing partial
 // line is always carried forward (more bytes may complete it — including the
@@ -170,6 +212,7 @@ func splitBlocks(pending string) (blocks []string, rest string) {
 	for i < len(complete) {
 		trimmed := strings.TrimSpace(complete[i])
 		isFence := strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+		isHeading := !inFence && headingLinePattern.MatchString(trimmed)
 		switch {
 		case isFence && !inFence:
 			// Opening fence: flush any prose block accumulated before it.
@@ -187,6 +230,15 @@ func splitBlocks(pending string) (blocks []string, rest string) {
 			inFence = false
 		case inFence:
 			i++ // code line, keep buffering until the close
+		case isHeading:
+			// Heading line: flush any prose accumulated before it, then the
+			// heading is its own single-line block.
+			if i > start {
+				blocks = append(blocks, join(complete[start:i]))
+			}
+			blocks = append(blocks, complete[i])
+			i++
+			start = i
 		case trimmed == "":
 			// Blank line ends a prose block; the blank itself is a separator.
 			if i > start {

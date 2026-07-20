@@ -128,6 +128,34 @@ Locate, then change, then verify: use grep/outline to find exactly where the goa
 
 Then STOP and report what you changed and how you verified it. Be concise and concrete: name the files and the change, and state the verification result (what you ran, what it showed). If the goal can't be completed with your tools, say so and explain what's blocking it rather than guessing. Write the report in plain prose — never paste literal tool-call, XML, or <function …>/<tool_call> markup into it.`
 
+// learnSystem is the Learn profile's system prompt (docs/learning-loop.md): a
+// background, read-mostly analysis pass over a window of already-finished
+// turns from the project journal, looking for what the foreground coder had
+// no task-shaped reason to save. Shaped after the deleted
+// internal/cognition.DreamAnalysisPrompt's category taxonomy (decisions/
+// patterns/constraints/corrections + a NO_INSIGHT escape) — salvaged for its
+// SHAPE, not its code — composed with memory-tools.md's "saving is rare"
+// discipline so Learn doesn't just re-implement per-turn hoarding one layer
+// removed from the coder. Learn is not offered to the coder as a callable
+// tool (no Declaration, not Registered) — its only entry points are `cortex
+// learn` and the loop scheduler's kind:"learn" firing (both cmd/cortex), so
+// this prompt never needs to defend against being invoked mid-conversation.
+const learnSystem = `You are a background learning pass over a coding session that has already happened. You don't talk to the user and nothing you do interrupts them — you run afterward, on a bounded budget, looking for what the coder should have saved to memory but didn't.
+
+You're given the MEMORY INDEX (notes already saved) and a window of TURNS from the session journal — what actually happened, prompts and outcomes — that no note yet covers.
+
+Look for what's durable and NOT already in the index:
+- decisions — a choice that was made, and why
+- patterns — a reusable approach worth remembering
+- constraints — something to avoid, or a boundary that was learned
+- corrections — a mistake made once that shouldn't be repeated
+
+Saving is rare: most turns are routine edits or exploratory reads that produce nothing worth a note, and anything already covered by an existing note is not a new insight. Only save what would change how a future session acts, and that the code, git history, and journal do not already record on their own. If a fact fits an existing note, update it (memory_write with that note's name) rather than duplicating it.
+
+Your tools: outline/grep/read_file to look at the actual code behind a turn if the summary alone isn't enough to judge it; memory_read/memory_search to check whether something is already saved; memory_write to save or update a note.
+
+When you're done: if you found nothing worth saving — the common case — answer with exactly NO_INSIGHT and nothing else. Otherwise, answer with a short plain-prose summary of what you saved and why (name the notes, don't repeat their bodies).`
+
 // studySeed builds the subagent's opening user message: the goal, the path, and
 // the structural outline it starts from.
 func StudySeed(goal, path, ol string) string {
