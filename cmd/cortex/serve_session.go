@@ -209,9 +209,14 @@ func (m *SessionManager) List() []string {
 // newProductionSession is the real (non-test) sessionFactory: identical
 // construction to runTurnCLI/discord.go's own NewCortexSession() usage,
 // with output quieted since a server has no interactive terminal to render
-// markdown/prompts to.
+// markdown/prompts to. Also wires memory + capture (EnableMemory), matching
+// cli.go/main.go/discord.go's own production sessions — every serve/web-UI
+// turn now gets memory tools, the turn-start index injection, and a
+// captureTurn record, the same as every other adapter (docs/memory-tools.md,
+// docs/cross-source-learning.md's "Code-reality check").
 func newProductionSession() *CortexSession {
 	cs := NewCortexSession()
 	cs.quiet = true
+	cs.EnableMemory()
 	return cs
 }

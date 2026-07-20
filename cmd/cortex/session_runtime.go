@@ -62,8 +62,20 @@ func (cs *CortexSession) newSpecEmbedder(spec ModelSpec) llm.Embedder {
 
 const captureExcerptCap = 280
 
+// Bounds for the web-tool artifact lines turnArtifacts records — the same
+// "bounded" discipline captureExcerptCap already applies to the final
+// answer, extended to web_search/fetch_url so a large page or a chatty
+// result list can't blow up the capture summary (docs/cross-source-learning.md
+// piece 3's second capture-prerequisite fix).
+const (
+	webArtifactTitleCapChars   = 80 // per-result title/URL cap in a searched: line
+	webArtifactResultsShown    = 3  // top-N search results recorded per call
+	webArtifactExcerptCapChars = 200
+)
+
 func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
-	var files, cmds []string
+	results := toolResultsByID(turnMsgs)
+	var files, cmds, searches, fetches []string
 	seen := map[string]bool{}
 	for _, m := range turnMsgs {
 		for _, tc := range m.ToolCalls {
@@ -78,6 +90,16 @@ func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
 					seen["c:"+c] = true
 					cmds = append(cmds, c)
 				}
+			case FunctionWebSearch:
+				if q, err := tc.StringArg("query"); err == nil && q != "" && !seen["sw:"+q] {
+					seen["sw:"+q] = true
+					searches = append(searches, formatWebSearchArtifact(q, results[tc.ID]))
+				}
+			case FunctionFetchURL:
+				if u, err := tc.StringArg("url"); err == nil && u != "" && !seen["fu:"+u] {
+					seen["fu:"+u] = true
+					fetches = append(fetches, formatFetchURLArtifact(u, results[tc.ID]))
+				}
 			}
 		}
 		if m.Role != RoleUser && m.Role != RoleTool && len(m.ToolCalls) == 0 && strings.TrimSpace(m.Content) != "" {
@@ -91,7 +113,74 @@ func turnArtifacts(turnMsgs []Message) (outcome, answer string) {
 	if len(cmds) > 0 {
 		parts = append(parts, "ran: "+strings.Join(cmds, "; "))
 	}
+	if len(searches) > 0 {
+		parts = append(parts, "searched: "+strings.Join(searches, " | "))
+	}
+	if len(fetches) > 0 {
+		parts = append(parts, "fetched: "+strings.Join(fetches, " | "))
+	}
 	return strings.Join(parts, " | "), answer
+}
+
+// toolResultsByID indexes turnMsgs' tool-result messages by ToolCallID.
+// web_search/fetch_url are the only calls whose capture-worthy detail
+// (result count, titles/URLs, response size) lives in what the tool
+// returned rather than in the call's own arguments — files/cmds only need
+// the args (path/command), so they never needed this lookup.
+func toolResultsByID(turnMsgs []Message) map[string]string {
+	out := make(map[string]string)
+	for _, m := range turnMsgs {
+		if m.Role == RoleTool && m.ToolCallID != "" {
+			out[m.ToolCallID] = m.Content
+		}
+	}
+	return out
+}
+
+// formatWebSearchArtifact renders one web_search call's capture line: the
+// query plus a bounded look at what it found. result is the tool's raw
+// returned text (internal/tools' formatSearchResults output: "N. Title\n
+// URL\n   Snippet", blank-line separated) — parsed defensively since it's
+// free text the tool owns, not a schema this package shares with it.
+func formatWebSearchArtifact(query, result string) string {
+	q := truncate(query, webArtifactTitleCapChars)
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return fmt.Sprintf("%q (no result captured)", q)
+	}
+	if result == "(no search results)" {
+		return fmt.Sprintf("%q: 0 results", q)
+	}
+	entries := strings.Split(result, "\n\n")
+	var top []string
+	for i, entry := range entries {
+		if i >= webArtifactResultsShown {
+			break
+		}
+		lines := strings.SplitN(entry, "\n", 3)
+		if len(lines) < 2 {
+			continue
+		}
+		title := strings.TrimPrefix(strings.TrimSpace(lines[0]), fmt.Sprintf("%d. ", i+1))
+		url := strings.TrimSpace(lines[1])
+		top = append(top, fmt.Sprintf("%s (%s)", truncate(title, webArtifactTitleCapChars), url))
+	}
+	return fmt.Sprintf("%q: %d result(s): %s", q, len(entries), strings.Join(top, "; "))
+}
+
+// formatFetchURLArtifact renders one fetch_url call's capture line: the URL
+// plus a bounded excerpt of what came back. result is the tool's raw
+// returned text (internal/tools' fetchURL output — "URL: ...\nTitle:
+// ...\nContent-Type: ...\n\n<extracted text>"); size is that captured text's
+// length, not the original HTTP response's (fetch_url already caps that
+// internally before this package ever sees it).
+func formatFetchURLArtifact(rawURL, result string) string {
+	result = strings.TrimSpace(result)
+	if result == "" {
+		return fmt.Sprintf("%s (no result captured)", rawURL)
+	}
+	excerpt := truncate(strings.Join(strings.Fields(result), " "), webArtifactExcerptCapChars)
+	return fmt.Sprintf("%s (%d bytes): %s", rawURL, len(result), excerpt)
 }
 
 func turnUsedTools(turnMsgs []Message) bool {

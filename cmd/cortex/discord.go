@@ -110,9 +110,11 @@ func newDiscordBot(mgr *SessionManager, api discordAPI, channelID, project strin
 // newDiscordSessionFactory layers Discord's own default (EnableMemory —
 // every discord.go session has had memory enabled since before this
 // SessionManager rebase) on top of newProductionSession's shared
-// construction (serve_session.go) — the same base `cortex serve` uses, kept
-// untouched here since serve's sessions deliberately don't opt in on their
-// own.
+// construction (serve_session.go) — the same base `cortex serve` uses.
+// newProductionSession itself now also calls EnableMemory (the
+// docs/cross-source-learning.md serve-capture-gap fix), so this second call
+// is a harmless no-op re-wire; kept explicit so Discord's own memory-on
+// intent stays legible here even if serve's default ever changes.
 func newDiscordSessionFactory() sessionFactory {
 	return func() *CortexSession {
 		cs := newProductionSession()

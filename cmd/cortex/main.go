@@ -67,6 +67,8 @@ const (
 	FunctionRemove    = tools.FunctionRemove
 	FunctionOutline   = tools.FunctionOutline
 	FunctionGrep      = tools.FunctionGrep
+	FunctionWebSearch = tools.FunctionWebSearch
+	FunctionFetchURL  = tools.FunctionFetchURL
 )
 
 const defaultModel = ModelCoder
