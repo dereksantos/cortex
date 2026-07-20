@@ -392,11 +392,24 @@ func luContainsName(names []string, want string) bool {
 // tier (G2/G3's raw material), then grade ARM-ON (same home) and ARM-OFF
 // (a wholly separate, never-touched home+root — see the file header's
 // "ARM-OFF isolation" section).
-func luRunRep(t *testing.T, bin, endpoint string, rep int) luRepResult {
+// luWriteHomeConfig pins the code/study models in a temp home's user config
+// so subprocess model selection never depends on fleet auto-discovery (the
+// first gate run died on discovery picking a down model group). The endpoint
+// still rides CORTEX_BACKEND, which outranks the file's backend block.
+func luWriteHomeConfig(t *testing.T, home, model string) {
+	t.Helper()
+	cfg := fmt.Sprintf(`{"models":{"code":{"model":%q},"study":{"model":%q}}}`, model, model)
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write home config: %v", err)
+	}
+}
+
+func luRunRep(t *testing.T, bin, endpoint, model string, rep int) luRepResult {
 	t.Helper()
 	res := luRepResult{rep: rep}
 
 	onHome := t.TempDir()
+	luWriteHomeConfig(t, onHome, model)
 	rootA, rootB, rootC, rootD := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 
 	luProjectAdd(t, bin, onHome, "a", rootA)
@@ -452,6 +465,7 @@ func luRunRep(t *testing.T, bin, endpoint string, rep int) luRepResult {
 	// see the file header's "ARM-OFF isolation" section for why this beats
 	// a copy-then-delete of onHome.
 	offHome := t.TempDir()
+	luWriteHomeConfig(t, offHome, model)
 	rootDOff := t.TempDir()
 	luProjectAdd(t, bin, offHome, "d", rootDOff)
 	offReply := luRunTurn(t, bin, offHome, endpoint, rootDOff, "probe-off", luProbeQuestion)
@@ -492,6 +506,7 @@ func TestLearnUser_Live(t *testing.T) {
 	}
 
 	endpoint := liveEnv("CORTEX_LEARN_USER_LIVE_ENDPOINT", "http://localhost:4000")
+	model := liveEnv("CORTEX_LEARN_USER_LIVE_MODEL", "qwen3-coder-q3")
 	reps := liveEnvInt("CORTEX_LEARN_USER_LIVE_REPS", 3)
 	if reps < 3 {
 		reps = 3 // G1's lift comparison needs n>=3, same floor as every sibling live eval
@@ -502,7 +517,7 @@ func TestLearnUser_Live(t *testing.T) {
 	for i := 0; i < reps; i++ {
 		rep := i + 1
 		t.Run(fmt.Sprintf("rep-%d", rep), func(t *testing.T) {
-			results = append(results, luRunRep(t, bin, endpoint, rep))
+			results = append(results, luRunRep(t, bin, endpoint, model, rep))
 		})
 	}
 
