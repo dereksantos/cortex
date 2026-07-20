@@ -451,6 +451,40 @@ button {
   padding-top: 0;
 }
 
+/* projects screen's cards/list view switcher + the multi-project grid */
+.projects-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 12px;
+}
+
+.cards.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+.list-name {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+
+.list-row {
+  cursor: pointer;
+}
+
+.list-row:hover {
+  background: var(--panel-2);
+}
+
+.list-path {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail {
   display: flex;
   flex-direction: column;
@@ -890,7 +924,8 @@ table.loops td {
 
 @media (max-width: 760px) {
   .dash,
-  .lgrid {
+  .lgrid,
+  .cards.grid {
     grid-template-columns: 1fr;
   }
 }

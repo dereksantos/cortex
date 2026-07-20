@@ -48,13 +48,19 @@ function relativeAgo(iso) {
   return hours < 24 ? hours + "h ago" : Math.round(hours / 24) + "d ago";
 }
 
-// newestNonEmpty returns a project's most recently touched non-empty
-// session, or null when it has none yet.
-function newestNonEmpty(sessions) {
-  const nonEmpty = (sessions || []).filter((s) => s.messages > 0);
-  return nonEmpty.length === 0
+// mostRecent returns the session with the latest mod_time (any session,
+// empty or not — "last activity" on a project), or null if there are none.
+function mostRecent(sessions) {
+  return (sessions || []).length === 0
     ? null
-    : nonEmpty.reduce((a, b) => (new Date(a.mod_time) > new Date(b.mod_time) ? a : b));
+    : sessions.reduce((a, b) => (new Date(a.mod_time) > new Date(b.mod_time) ? a : b));
+}
+
+// newestNonEmpty returns a project's most recently touched non-empty
+// session, or null when it has none yet — the session a session-view
+// navigation should land on (an empty session has nothing to show).
+function newestNonEmpty(sessions) {
+  return mostRecent((sessions || []).filter((s) => s.messages > 0));
 }
 
 // sessionRow builds one two-line session row for a project card: the
@@ -206,7 +212,7 @@ function renderProjectCard(p, cap) {
 // or the button would.
 function renderProjectListRow(table, p) {
   const sessions = p.sessions || [];
-  const last = newestNonEmpty(sessions) ? sessions.reduce((a, b) => (a.mod_time > b.mod_time ? a : b)) : null;
+  const last = mostRecent(sessions);
 
   const tr = el("tr", { className: "list-row" });
   tr.addEventListener("click", () => openOrCreateSession(p));
