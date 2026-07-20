@@ -50,6 +50,22 @@ func TestStore_WriteReadUpdateForget(t *testing.T) {
 	}
 }
 
+func TestStore_IndexDeterministicOnTimestampTie(t *testing.T) {
+	s, _ := New(t.TempDir())
+	// Same calendar day (day-granularity render) => equal updated timestamp.
+	now := time.Date(2026, 7, 19, 9, 0, 0, 0, time.UTC)
+	_, _ = s.Write("deploy", "We deploy on Mondays.", now)
+	_, _ = s.Write("auth", "JWT bearer tokens.", now)
+
+	first, _ := s.Index()
+	for i := 0; i < 20; i++ {
+		again, _ := s.Index()
+		if again != first {
+			t.Fatalf("index not stable across calls (tie on updated):\n first: %q\n iter%d: %q", first, i, again)
+		}
+	}
+}
+
 func TestStore_IndexAndSearch(t *testing.T) {
 	s, _ := New(t.TempDir())
 	now := time.Now()

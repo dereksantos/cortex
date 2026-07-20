@@ -192,7 +192,12 @@ func (s *Store) listLocked() ([]NoteMeta, error) {
 			Updated: frontmatterTime(b, "updated"),
 		})
 	}
-	sort.Slice(metas, func(i, j int) bool { return metas[i].Updated.After(metas[j].Updated) })
+	sort.Slice(metas, func(i, j int) bool {
+		if !metas[i].Updated.Equal(metas[j].Updated) {
+			return metas[i].Updated.After(metas[j].Updated)
+		}
+		return metas[i].Name < metas[j].Name
+	})
 	return metas, nil
 }
 
