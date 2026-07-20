@@ -244,7 +244,7 @@ func TestLearningLoopSeedRecoversNeedlePastDigestTruncation(t *testing.T) {
 		t.Fatalf("setup error: %s already survives the naive %d-char truncation — move it later in longPrompt", codeword, learnPromptCapChars)
 	}
 
-	seed := learnSeed("", entries, "", cs.SessionsDir())
+	seed := learnSeed("", "", entries, "", cs.SessionsDir())
 	if !strings.Contains(seed, codeword) {
 		t.Errorf("learn seed does not contain %s even though it's in the turn's transcript — "+
 			"the digest-cap truncation is eating a fact this pass exists to catch.\nseed:\n%s", codeword, seed)
@@ -277,7 +277,7 @@ func TestLearningLoopScriptedMemoryWriteLandsRealNoteAndAdvancesCursor(t *testin
 	// The note is REAL: readable straight off disk via the same store the
 	// coder's own memory_read/memory_search tools use, and INDEX.md was
 	// regenerated (internal/memory.Store.Write's contract).
-	body, err := cs.MemoryRead("retry-backoff-standard")
+	body, err := cs.MemoryRead("retry-backoff-standard", "")
 	if err != nil {
 		t.Fatalf("MemoryRead: %v", err)
 	}
@@ -313,6 +313,75 @@ func TestLearningLoopScriptedMemoryWriteLandsRealNoteAndAdvancesCursor(t *testin
 	}
 	if backend.callCount() != callsBefore {
 		t.Errorf("re-run made %d more model round-trips, want 0 (nothing new to scan)", backend.callCount()-callsBefore)
+	}
+}
+
+// --- piece-5 groundwork: the project-scope Learn pass reads the user-tier  --
+// index (to avoid duplicating a promoted fact) but its own memory_write     --
+// stays project-scoped (docs/cross-source-learning.md) -----------------------
+
+// TestLearningLoopSeedIncludesUserMemoryIndex proves the seed RunLearningPass
+// hands the Learn subagent carries a USER MEMORY INDEX section when the user
+// tier has notes, AND that Learn's own scripted memory_write (which never
+// names a scope, matching its system prompt) still lands on the PROJECT
+// store — cross-project PROMOTION (a LearnUser subagent actually writing the
+// user tier) is explicitly the next slice's piece, not built here.
+func TestLearningLoopSeedIncludesUserMemoryIndex(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("CORTEX_HOME", t.TempDir())
+	backend := newLearnScriptedBackend(t)
+	cs := &CortexSession{quiet: true, Study: ModelSpec{Model: "learn-m", Endpoint: backend.url()}}
+	cs.EnableMemory()
+	if cs.userMemory == nil {
+		t.Fatal("EnableMemory should wire the user memory store")
+	}
+	if _, err := cs.userMemory.Write("cross-project-fact", "already promoted: use linear backoff everywhere.", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	seedCaptureTurn(t, cs, "unrelated turn text", "→ done")
+
+	backend.toolCallRound(1, memoryWriteCall("c1", "project-fact", "a project-local fact, not the promoted one."))
+	backend.finalRound(2, "saved a note")
+
+	if _, err := RunLearningPass(context.Background(), cs, ""); err != nil {
+		t.Fatalf("RunLearningPass: %v", err)
+	}
+
+	wire := backend.wireAt(1)
+	if len(wire) == 0 {
+		t.Fatal("no wire captured for round 1")
+	}
+	var seed string
+	for _, m := range wire {
+		if m.Role == RoleUser {
+			seed = m.Content
+		}
+	}
+	if !strings.Contains(seed, "USER MEMORY INDEX") {
+		t.Errorf("seed should carry a USER MEMORY INDEX section:\n%s", seed)
+	}
+	if !strings.Contains(seed, "cross-project-fact") {
+		t.Errorf("seed should list the user-tier note by name:\n%s", seed)
+	}
+
+	// Learn's own memory_write stays project-scoped in this slice: the note
+	// it wrote lands in the PROJECT store, not the user tier.
+	if body, err := cs.memory.Read("project-fact"); err != nil || !strings.Contains(body, "project-local") {
+		t.Errorf("Learn's memory_write should land on the project tier: body=%q err=%v", body, err)
+	}
+	if _, err := cs.userMemory.Read("project-fact"); err == nil {
+		t.Error("Learn's memory_write must NOT reach the user tier in this slice")
+	}
+}
+
+// TestLearnSeedOmitsUserSectionWhenEmpty is the unit-level complement: an
+// empty userIndex omits the section entirely rather than printing a hollow
+// header, matching memoryIndexNote's own "omit, don't render empty" contract
+// for the turn-start injection.
+func TestLearnSeedOmitsUserSectionWhenEmpty(t *testing.T) {
+	seed := learnSeed("(no notes saved yet)", "", nil, "", "")
+	if strings.Contains(seed, "USER MEMORY INDEX") {
+		t.Errorf("empty userIndex should omit the section header:\n%s", seed)
 	}
 }
 
@@ -431,7 +500,7 @@ func TestLearningLoopIterationCapHolds(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("setup error: expected 1 seeded entry, got %d", len(entries))
 	}
-	seed := learnSeed("", entries, "", cs.SessionsDir())
+	seed := learnSeed("", "", entries, "", cs.SessionsDir())
 
 	_, stats, err := cs.runSubagentStats(context.Background(), tools.Learn, seed)
 	if err != nil {

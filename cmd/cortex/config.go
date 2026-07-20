@@ -551,13 +551,21 @@ type SubagentsConfig struct {
 // LimitsConfig collects the assorted byte/count ceilings that don't belong to
 // a specific tool or subsystem (docs/configuration.md's `limits.*` section).
 type LimitsConfig struct {
-	MaxToolIterations      int `json:"max_tool_iterations"`
-	MaxInstructionBytes    int `json:"max_instruction_bytes"`
-	MemoryIndexCapChars    int `json:"memory_index_cap_chars"`
-	CaptureExcerptCapChars int `json:"capture_excerpt_cap_chars"`
-	MaxTaskContextChars    int `json:"max_task_context_chars"`
-	RouteMaxOutputTokens   int `json:"route_max_output_tokens"`
-	MaxServedModelsShown   int `json:"max_served_models_shown"`
+	MaxToolIterations   int `json:"max_tool_iterations"`
+	MaxInstructionBytes int `json:"max_instruction_bytes"`
+	MemoryIndexCapChars int `json:"memory_index_cap_chars"`
+	// UserMemoryIndexCapChars caps the user-tier memory index injected ahead
+	// of the project-tier one (docs/cross-source-learning.md piece 1) —
+	// independently of MemoryIndexCapChars. Default 1500, deliberately
+	// smaller than the project cap: the user tier is meant to stay few
+	// (promotion only fires on cross-project recurrence), so a small cap also
+	// doubles as a soft precision signal — an index that keeps hitting it
+	// means promotion has gotten too permissive.
+	UserMemoryIndexCapChars int `json:"user_memory_index_cap_chars"`
+	CaptureExcerptCapChars  int `json:"capture_excerpt_cap_chars"`
+	MaxTaskContextChars     int `json:"max_task_context_chars"`
+	RouteMaxOutputTokens    int `json:"route_max_output_tokens"`
+	MaxServedModelsShown    int `json:"max_served_models_shown"`
 }
 
 // NetworkConfig collects bounded-probe timeouts (docs/configuration.md's
@@ -963,13 +971,14 @@ func validateConfig(cfg *Config) error {
 		"subagents.learn.max_iter":          cfg.Subagents.Learn.MaxIter,
 		"subagents.learn.read_budget_bytes": cfg.Subagents.Learn.ReadBudgetBytes,
 
-		"limits.max_tool_iterations":       cfg.Limits.MaxToolIterations,
-		"limits.max_instruction_bytes":     cfg.Limits.MaxInstructionBytes,
-		"limits.memory_index_cap_chars":    cfg.Limits.MemoryIndexCapChars,
-		"limits.capture_excerpt_cap_chars": cfg.Limits.CaptureExcerptCapChars,
-		"limits.max_task_context_chars":    cfg.Limits.MaxTaskContextChars,
-		"limits.route_max_output_tokens":   cfg.Limits.RouteMaxOutputTokens,
-		"limits.max_served_models_shown":   cfg.Limits.MaxServedModelsShown,
+		"limits.max_tool_iterations":         cfg.Limits.MaxToolIterations,
+		"limits.max_instruction_bytes":       cfg.Limits.MaxInstructionBytes,
+		"limits.memory_index_cap_chars":      cfg.Limits.MemoryIndexCapChars,
+		"limits.user_memory_index_cap_chars": cfg.Limits.UserMemoryIndexCapChars,
+		"limits.capture_excerpt_cap_chars":   cfg.Limits.CaptureExcerptCapChars,
+		"limits.max_task_context_chars":      cfg.Limits.MaxTaskContextChars,
+		"limits.route_max_output_tokens":     cfg.Limits.RouteMaxOutputTokens,
+		"limits.max_served_models_shown":     cfg.Limits.MaxServedModelsShown,
 
 		"network.fleet_discovery_timeout_sec": cfg.Network.FleetDiscoveryTimeoutSec,
 		"network.preflight_timeout_sec":       cfg.Network.PreflightTimeoutSec,
@@ -1078,13 +1087,14 @@ func mergeSubagents(base, over SubagentsConfig) SubagentsConfig {
 
 func mergeLimits(base, over LimitsConfig) LimitsConfig {
 	return LimitsConfig{
-		MaxToolIterations:      mergeIntField(base.MaxToolIterations, over.MaxToolIterations),
-		MaxInstructionBytes:    mergeIntField(base.MaxInstructionBytes, over.MaxInstructionBytes),
-		MemoryIndexCapChars:    mergeIntField(base.MemoryIndexCapChars, over.MemoryIndexCapChars),
-		CaptureExcerptCapChars: mergeIntField(base.CaptureExcerptCapChars, over.CaptureExcerptCapChars),
-		MaxTaskContextChars:    mergeIntField(base.MaxTaskContextChars, over.MaxTaskContextChars),
-		RouteMaxOutputTokens:   mergeIntField(base.RouteMaxOutputTokens, over.RouteMaxOutputTokens),
-		MaxServedModelsShown:   mergeIntField(base.MaxServedModelsShown, over.MaxServedModelsShown),
+		MaxToolIterations:       mergeIntField(base.MaxToolIterations, over.MaxToolIterations),
+		MaxInstructionBytes:     mergeIntField(base.MaxInstructionBytes, over.MaxInstructionBytes),
+		MemoryIndexCapChars:     mergeIntField(base.MemoryIndexCapChars, over.MemoryIndexCapChars),
+		UserMemoryIndexCapChars: mergeIntField(base.UserMemoryIndexCapChars, over.UserMemoryIndexCapChars),
+		CaptureExcerptCapChars:  mergeIntField(base.CaptureExcerptCapChars, over.CaptureExcerptCapChars),
+		MaxTaskContextChars:     mergeIntField(base.MaxTaskContextChars, over.MaxTaskContextChars),
+		RouteMaxOutputTokens:    mergeIntField(base.RouteMaxOutputTokens, over.RouteMaxOutputTokens),
+		MaxServedModelsShown:    mergeIntField(base.MaxServedModelsShown, over.MaxServedModelsShown),
 	}
 }
 
@@ -1314,6 +1324,16 @@ func (c *Config) memoryIndexCapChars() int {
 		return memoryIndexCap
 	}
 	return resolveInt(c.Limits.MemoryIndexCapChars, memoryIndexCap)
+}
+
+// userMemoryIndexCapChars resolves the user-tier memory index's cap,
+// independently of the project-tier one — docs/cross-source-learning.md
+// piece 1, config field limits.user_memory_index_cap_chars.
+func (c *Config) userMemoryIndexCapChars() int {
+	if c == nil {
+		return userMemoryIndexCap
+	}
+	return resolveInt(c.Limits.UserMemoryIndexCapChars, userMemoryIndexCap)
 }
 
 func (c *Config) captureExcerptCapChars() int {

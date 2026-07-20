@@ -78,11 +78,18 @@ type CortexSession struct {
 	// approved=false, timedOut=false is an explicit decline. nil (the
 	// default, including every REPL/serve session) leaves gateShell's
 	// existing headless-Blocked fallback untouched.
-	approveRisky  func(ctx context.Context, reason, command string) (approved, timedOut bool)
-	SessionID     string
-	transcript    *os.File
-	capturer      *capture.Capture
-	memory        *memory.Store
+	approveRisky func(ctx context.Context, reason, command string) (approved, timedOut bool)
+	SessionID    string
+	transcript   *os.File
+	capturer     *capture.Capture
+	memory       *memory.Store // project-tier notes (.cortex/memory)
+	// userMemory is the cross-project tier (~/.cortex/memory, via
+	// internal/userhome) — the SAME internal/memory.Store type as memory,
+	// pointed at the user's home instead of the project's .cortex dir
+	// (docs/cross-source-learning.md piece 1). Wired alongside memory by
+	// EnableMemory; nil has the identical "memory unavailable" behavior the
+	// project tier already has when no .cortex workspace exists.
+	userMemory    *memory.Store
 	ws            *cache.WorkingSet
 	outline       []cache.OutlineEntry
 	outlineFolded string // digest of previously folded outline entries (P4); rides the front of the outline zone

@@ -43,18 +43,23 @@ type (
 // structurally (asserted at the composition root in main.go).
 
 // MemoryStore is the model-driven note surface (memory_* tools). See
-// internal/memory and docs/memory-tools.md.
+// internal/memory and docs/memory-tools.md. Every method's scope is the
+// optional tool-call arg ("project" default | "user",
+// docs/cross-source-learning.md piece 1) — "" means the caller-specific
+// default: MemoryWrite/MemoryForget default to "project" (never touch the
+// wrong tier on an unset scope); MemoryRead shadows project-over-user;
+// MemorySearch spans both, tier-tagging each hit.
 type MemoryStore interface {
 	// MemoryWrite creates or updates a named note and returns a confirmation
 	// (the normalized name).
-	MemoryWrite(name, content string) (result string, err error)
+	MemoryWrite(name, content, scope string) (result string, err error)
 	// MemoryRead returns one note's body in full.
-	MemoryRead(name string) (body string, err error)
+	MemoryRead(name, scope string) (body string, err error)
 	// MemorySearch returns notes matching the query as a formatted list (name —
 	// hook — updated date), ready to hand back as the tool result.
-	MemorySearch(query string) (results string, err error)
+	MemorySearch(query, scope string) (results string, err error)
 	// MemoryForget removes a note and returns a confirmation.
-	MemoryForget(name string) (result string, err error)
+	MemoryForget(name, scope string) (result string, err error)
 }
 
 // Recaller resolves an outline citation back to the raw transcript messages
@@ -209,16 +214,16 @@ func (headlessDeps) GateShell(ctx context.Context, command string) (string, bool
 }
 func (headlessDeps) AllowDelete() (string, bool) { return "", false }
 func (headlessDeps) Quiet() bool                 { return false }
-func (headlessDeps) MemoryWrite(string, string) (string, error) {
+func (headlessDeps) MemoryWrite(string, string, string) (string, error) {
 	return "", errors.New("memory unavailable: no session")
 }
-func (headlessDeps) MemoryRead(string) (string, error) {
+func (headlessDeps) MemoryRead(string, string) (string, error) {
 	return "", errors.New("memory unavailable: no session")
 }
-func (headlessDeps) MemorySearch(string) (string, error) {
+func (headlessDeps) MemorySearch(string, string) (string, error) {
 	return "", errors.New("memory unavailable: no session")
 }
-func (headlessDeps) MemoryForget(string) (string, error) {
+func (headlessDeps) MemoryForget(string, string) (string, error) {
 	return "", errors.New("memory unavailable: no session")
 }
 func (headlessDeps) Recall(string) (string, error) {
@@ -405,6 +410,14 @@ var RemoveTool = newTool(FunctionRemove,
 // (internal/memory). The model curates its own durable notes; the only
 // mechanical seam is the index injected at turn start. See docs/memory-tools.md.
 
+// scopeProp is the optional scope arg shared by all four memory tools
+// (docs/cross-source-learning.md piece 1): "project" (this codebase, the
+// default) or "user" (every project on this machine — reserve for facts
+// true everywhere, not just here).
+func scopeProp(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc, "enum": []string{"project", "user"}}
+}
+
 // MemoryWriteTool is the memory_write tool declaration: saves or updates a
 // durable, free-form note by name in the model-driven memory store.
 var MemoryWriteTool = newTool(FunctionMemoryWrite,
@@ -416,6 +429,7 @@ var MemoryWriteTool = newTool(FunctionMemoryWrite,
 	objectSchema(map[string]any{
 		"name":    stringProp("Short kebab-case identifier for the note, e.g. 'auth-token-rotation'. Reusing a name updates that note."),
 		"content": stringProp("The note body — free-form prose. State the fact and, where it helps, a pointer to the source (a file path, a journal turn)."),
+		"scope":   scopeProp("Optional: \"project\" (default, this codebase) or \"user\" (true across every project — rare)."),
 	}, "name", "content"))
 
 // MemoryReadTool is the memory_read tool declaration: reads one memory
@@ -423,7 +437,8 @@ var MemoryWriteTool = newTool(FunctionMemoryWrite,
 var MemoryReadTool = newTool(FunctionMemoryRead,
 	"Read one memory note in full by name (names are listed in the memory index).",
 	objectSchema(map[string]any{
-		"name": stringProp("The note's name, as shown in the memory index."),
+		"name":  stringProp("The note's name, as shown in the memory index."),
+		"scope": scopeProp("Optional: \"project\" or \"user\". Omitted checks project first, then user (a project note of the same name wins)."),
 	}, "name"))
 
 // MemorySearchTool is the memory_search tool declaration: keyword-searches
@@ -434,6 +449,7 @@ var MemorySearchTool = newTool(FunctionMemorySearch,
 		"then memory_read the ones that look relevant.",
 	objectSchema(map[string]any{
 		"query": stringProp("Keywords to match against note names and bodies."),
+		"scope": scopeProp("Optional: \"project\" or \"user\". Omitted searches both, tagging each result's tier."),
 	}, "query"))
 
 // MemoryForgetTool is the memory_forget tool declaration: deletes a memory
@@ -442,7 +458,8 @@ var MemoryForgetTool = newTool(FunctionMemoryForget,
 	"Delete a memory note by name — use when a note is wrong or obsolete and should "+
 		"no longer be recalled.",
 	objectSchema(map[string]any{
-		"name": stringProp("The note's name, as shown in the memory index."),
+		"name":  stringProp("The note's name, as shown in the memory index."),
+		"scope": scopeProp("Optional: \"project\" (default) or \"user\" — deletes only from that tier."),
 	}, "name"))
 
 // RecallTool is the recall tool declaration: resolves a session-outline
@@ -738,6 +755,24 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 // session-backed store via ToolDeps. The session formats the result (so the
 // tools package needn't import the memory types).
 
+// scopeArg pulls the optional scope arg off a memory tool call; missing or
+// unparseable is "" (each MemoryStore method's own caller-specific default —
+// see MemoryStore's doc comment), never an error.
+func scopeArg(tc ToolCall) string {
+	scope, _ := tc.StringArg("scope")
+	return scope
+}
+
+// scopeSuffix renders ", scope=user" for the tool-action line when scope is
+// explicitly "user"; "" otherwise (including the default "project", which
+// stays implicit to match every pre-existing action line).
+func scopeSuffix(scope string) string {
+	if strings.ToLower(strings.TrimSpace(scope)) == "user" {
+		return ", scope=user"
+	}
+	return ""
+}
+
 func memoryWrite(tc ToolCall, deps ToolDeps) (string, error) {
 	name, err := tc.StringArg("name")
 	if err != nil {
@@ -747,8 +782,9 @@ func memoryWrite(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(deps, fmt.Sprintf("memory_write(%s)", name))
-	return deps.MemoryWrite(name, content)
+	scope := scopeArg(tc)
+	printToolAction(deps, fmt.Sprintf("memory_write(%s%s)", name, scopeSuffix(scope)))
+	return deps.MemoryWrite(name, content, scope)
 }
 
 func memoryRead(tc ToolCall, deps ToolDeps) (string, error) {
@@ -756,8 +792,9 @@ func memoryRead(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(deps, fmt.Sprintf("memory_read(%s)", name))
-	return deps.MemoryRead(name)
+	scope := scopeArg(tc)
+	printToolAction(deps, fmt.Sprintf("memory_read(%s%s)", name, scopeSuffix(scope)))
+	return deps.MemoryRead(name, scope)
 }
 
 func memorySearch(tc ToolCall, deps ToolDeps) (string, error) {
@@ -765,8 +802,9 @@ func memorySearch(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(deps, fmt.Sprintf("memory_search(%s)", query))
-	return deps.MemorySearch(query)
+	scope := scopeArg(tc)
+	printToolAction(deps, fmt.Sprintf("memory_search(%s%s)", query, scopeSuffix(scope)))
+	return deps.MemorySearch(query, scope)
 }
 
 func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
@@ -774,8 +812,9 @@ func memoryForget(tc ToolCall, deps ToolDeps) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	printToolAction(deps, fmt.Sprintf("memory_forget(%s)", name))
-	return deps.MemoryForget(name)
+	scope := scopeArg(tc)
+	printToolAction(deps, fmt.Sprintf("memory_forget(%s%s)", name, scopeSuffix(scope)))
+	return deps.MemoryForget(name, scope)
 }
 
 // recall resolves an outline citation to its verbatim messages. With a budget

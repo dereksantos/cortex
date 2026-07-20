@@ -281,11 +281,23 @@ default to today's hardcoded value.
 |---|---|---|
 | `max_tool_iterations` | 100 | Bounds the coder turn's tool-call loop. |
 | `max_instruction_bytes` | 16384 | `AGENTS.md` truncation cap. |
-| `memory_index_cap_chars` | 4000 | Truncation cap on the injected memory-note index. |
+| `memory_index_cap_chars` | 4000 | Truncation cap on the injected PROJECT-tier memory-note index. |
+| `user_memory_index_cap_chars` | 1500 | Truncation cap on the injected USER-tier memory-note index (`~/.cortex/memory`, shared across every project on the machine) — independent of `memory_index_cap_chars`; the user tier renders first, above it, in the turn-start injection. See `docs/cross-source-learning.md` piece 1. |
 | `capture_excerpt_cap_chars` | 280 | Truncation cap on the final-answer excerpt the journal capture records. |
 | `max_task_context_chars` | 800 | Truncation cap on the turn context folded into the shell-risk classifier's prompt. |
 | `route_max_output_tokens` | 80 | Output-token cap on Discord's continue/new-change routing classifier. |
 | `max_served_models_shown` | 40 | Cap on the served-model list `cortex model` prints (the full list is still in `--json`). |
+
+### Memory tiers and the `scope` tool arg
+
+`memory_write`/`memory_read`/`memory_search`/`memory_forget` all take an
+optional `scope` argument: `"project"` (this codebase's `.cortex/memory` —
+the default for write/forget) or `"user"` (`~/.cortex/memory`, shared across
+every project on the machine). An unscoped `memory_read` shadows
+project-over-user (a same-named project note wins silently); an unscoped
+`memory_search` spans both tiers, tagging each hit `[project]`/`[user]`. No
+config gate — every session with memory enabled gets both tiers. See
+`docs/cross-source-learning.md` piece 1 and `docs/memory-tools.md`.
 
 ## `network.*` — bounded-probe timeouts
 
@@ -446,3 +458,7 @@ runner, not a working knob.
   why the role surface and curated fleet look the way they do.
 - [`docs/context-architecture.md`](context-architecture.md) — the two-zone
   working-set design `context.*` configures the fractions of.
+- [`docs/memory-tools.md`](memory-tools.md) — the model-driven memory tools
+  the `limits.*` memory-index caps and the `scope` arg govern.
+- [`docs/cross-source-learning.md`](cross-source-learning.md) — the user
+  memory tier, its shadowing rules, and the cross-project promotion design.

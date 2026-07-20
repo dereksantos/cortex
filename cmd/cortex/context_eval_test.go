@@ -394,7 +394,7 @@ func TestTurnMemoryIndexKeepsSystemStable(t *testing.T) {
 	backend := newContextEvalBackend(t)
 	cs := newContextEvalSession(t, backend, 4000)
 	cs.EnableMemory()
-	if _, err := cs.MemoryWrite("cache-marker", "A durable cache marker."); err != nil {
+	if _, err := cs.MemoryWrite("cache-marker", "A durable cache marker.", ""); err != nil {
 		t.Fatal(err)
 	}
 	system := cs.Request.Messages[0].Content

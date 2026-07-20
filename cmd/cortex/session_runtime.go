@@ -11,15 +11,29 @@ import (
 	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/loopui"
 	"github.com/dereksantos/cortex/internal/memory"
+	"github.com/dereksantos/cortex/internal/userhome"
 	"github.com/dereksantos/cortex/pkg/config"
 	"github.com/dereksantos/cortex/pkg/events"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
 
+// EnableMemory wires both memory tiers (docs/cross-source-learning.md piece
+// 1): the project-tier store under this project's .cortex/memory (unchanged
+// from before this doc — cs.memory) and the user-tier store at
+// ~/.cortex/memory (internal/userhome.Path — cs.userMemory), the SAME
+// internal/memory.Store implementation pointed at a different root, shared
+// by every project on the machine. A failure to resolve either root (e.g. no
+// writable home directory) leaves that tier nil, which every memory tool and
+// memoryIndexNote already treat as "unavailable" rather than a fatal error.
 func (cs *CortexSession) EnableMemory() {
 	dir := cs.ContextDir()
 	if mem, err := memory.New(dir); err == nil {
 		cs.memory = mem
+	}
+	if userDir, err := userhome.Path("memory"); err == nil {
+		if userMem, err := memory.New(userDir); err == nil {
+			cs.userMemory = userMem
+		}
 	}
 	cfg := &config.Config{ContextDir: dir, ProjectRoot: filepath.Dir(dir)}
 	cs.capturer = capture.New(cfg)

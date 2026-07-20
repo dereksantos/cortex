@@ -139,3 +139,21 @@ confabulation floor (honest misses, no invented codewords) and spent
 2–4× the output tokens and 2–3× the latency doing so. One probe run,
 not a benchmark — but the thesis's first measured receipt: memory paid
 off in both correctness and cost.
+
+## User-tier memory — piece 1 shipped (2026-07-19)
+
+`docs/cross-source-learning.md` piece 1 is built: a second
+`internal/memory.Store` at `~/.cortex/memory` (`cs.userMemory`, wired
+alongside the existing project store by `EnableMemory`), rendered **before**
+the project tier in `memoryIndexNote()`'s turn-start injection, each tier
+capped independently (`limits.memory_index_cap_chars` / new
+`limits.user_memory_index_cap_chars`, default 1500). All four memory tools
+gained an optional `scope` arg (`"project"` default | `"user"`); an unscoped
+`memory_read` shadows project-over-user, an unscoped `memory_search` spans
+both tiers tagging each hit `[project]`/`[user]`. The project-scope `Learn`
+pass now also reads the user index (to avoid duplicating a promoted fact)
+but its own `memory_write` stays project-scoped — the `LearnUser` subagent
+that actually *writes* the user tier via cross-project promotion is the next
+slice piece (2c), not built here. See `docs/cross-source-learning.md` for
+the full design and the remaining pieces (wiki-links, multi-source intake,
+the web dashboard).

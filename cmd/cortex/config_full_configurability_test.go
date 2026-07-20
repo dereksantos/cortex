@@ -41,6 +41,9 @@ func TestZeroConfigResolversMatchHistoricalDefaults(t *testing.T) {
 			if got := cfg.memoryIndexCapChars(); got != memoryIndexCap {
 				t.Errorf("memoryIndexCapChars() = %d, want %d", got, memoryIndexCap)
 			}
+			if got := cfg.userMemoryIndexCapChars(); got != userMemoryIndexCap {
+				t.Errorf("userMemoryIndexCapChars() = %d, want %d", got, userMemoryIndexCap)
+			}
 			if got := cfg.captureExcerptCapChars(); got != captureExcerptCap {
 				t.Errorf("captureExcerptCapChars() = %d, want %d", got, captureExcerptCap)
 			}
@@ -168,6 +171,7 @@ func TestConfigMergeNewSections(t *testing.T) {
 			"max_tool_iterations": 120,
 			"max_instruction_bytes": 20000,
 			"memory_index_cap_chars": 5000,
+			"user_memory_index_cap_chars": 2000,
 			"capture_excerpt_cap_chars": 300,
 			"max_task_context_chars": 900,
 			"route_max_output_tokens": 90,
@@ -276,7 +280,8 @@ func TestConfigMergeNewSections(t *testing.T) {
 		t.Errorf("tools.web_search not inherited: %+v", cfg.Tools.WebSearch)
 	}
 	if cfg.Limits.MaxToolIterations != 120 || cfg.Limits.MaxInstructionBytes != 20000 ||
-		cfg.Limits.MemoryIndexCapChars != 5000 || cfg.Limits.CaptureExcerptCapChars != 300 ||
+		cfg.Limits.MemoryIndexCapChars != 5000 || cfg.Limits.UserMemoryIndexCapChars != 2000 ||
+		cfg.Limits.CaptureExcerptCapChars != 300 ||
 		cfg.Limits.MaxTaskContextChars != 900 || cfg.Limits.MaxServedModelsShown != 50 {
 		t.Errorf("limits.* not inherited: %+v", cfg.Limits)
 	}
@@ -351,6 +356,7 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 		{"negative subagents.study.max_tokens: invalid", Config{Subagents: SubagentsConfig{Study: SubagentProfileConfig{MaxTokens: neg}}}, true},
 		{"negative subagents.seed_budget_tokens: invalid", Config{Subagents: SubagentsConfig{SeedBudgetTokens: neg}}, true},
 		{"negative limits.max_tool_iterations: invalid", Config{Limits: LimitsConfig{MaxToolIterations: neg}}, true},
+		{"negative limits.user_memory_index_cap_chars: invalid", Config{Limits: LimitsConfig{UserMemoryIndexCapChars: neg}}, true},
 		{"negative network.fleet_discovery_timeout_sec: invalid", Config{Network: NetworkConfig{FleetDiscoveryTimeoutSec: neg}}, true},
 		{"negative serve.port: invalid", Config{Serve: ServeConfig{Port: neg}}, true},
 		{"negative repl.ticker_interval_ms: invalid", Config{Repl: ReplConfig{TickerIntervalMs: neg}}, true},

@@ -231,11 +231,25 @@ func formatLearnEntry(sessionsDir string, e learnEntry) string {
 // case. sessionsDir is where formatLearnEntry looks up a truncated entry's
 // full turn text (learnFullTurnText); "" is fine — entries without a
 // resolvable session/turn just fall back to their capture-summary line.
-func learnSeed(memoryIndex string, entries []learnEntry, focus string, sessionsDir string) string {
+//
+// userIndex is the user-tier memory index (docs/cross-source-learning.md
+// piece 1's groundwork for slice 2's cross-project promotion): Learn stays
+// project-scoped in THIS slice — it still only ever calls memory_write
+// against the project store (its system prompt never mentions a scope arg,
+// so an unset scope always resolves to "project") — but seeing the user
+// index lets it avoid re-saving, at the project tier, a fact that's already
+// promoted cross-project. "" (no user store, or an empty one) omits the
+// section entirely rather than printing a hollow header.
+func learnSeed(memoryIndex, userIndex string, entries []learnEntry, focus string, sessionsDir string) string {
 	var b strings.Builder
 	b.WriteString("GOAL: find durable decisions, patterns, constraints, or corrections in the turns below that are not already saved in the memory index.\n")
 	if strings.TrimSpace(focus) != "" {
 		fmt.Fprintf(&b, "FOCUS: %s\n", strings.TrimSpace(focus))
+	}
+	if strings.TrimSpace(userIndex) != "" {
+		b.WriteString("\nUSER MEMORY INDEX (already saved cross-project — do not duplicate at the project tier):\n")
+		b.WriteString(userIndex)
+		b.WriteString("\n")
 	}
 	b.WriteString("\nMEMORY INDEX (already saved — do not duplicate; update instead if a fact fits):\n")
 	if strings.TrimSpace(memoryIndex) == "" {
@@ -305,7 +319,11 @@ func RunLearningPass(ctx context.Context, cs *CortexSession, focus string) (Lear
 	if cs.memory != nil {
 		idx, _ = cs.memory.Index()
 	}
-	seed := learnSeed(idx, entries, focus, cs.SessionsDir())
+	userIdx := ""
+	if cs.userMemory != nil {
+		userIdx, _ = cs.userMemory.Index()
+	}
+	seed := learnSeed(idx, userIdx, entries, focus, cs.SessionsDir())
 
 	before := cs.captures
 	digest, _, err := cs.runSubagentStats(ctx, tools.Learn, seed)

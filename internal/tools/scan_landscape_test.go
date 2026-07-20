@@ -37,7 +37,7 @@ type fakeMemoryStore struct {
 	writeCall int
 }
 
-func (f *fakeMemoryStore) MemoryWrite(name, content string) (string, error) {
+func (f *fakeMemoryStore) MemoryWrite(name, content, scope string) (string, error) {
 	f.writeCall++
 	if f.writeErr != nil {
 		return "", f.writeErr
@@ -48,14 +48,14 @@ func (f *fakeMemoryStore) MemoryWrite(name, content string) (string, error) {
 	f.notes[name] = content
 	return "saved note \"" + name + "\"", nil
 }
-func (f *fakeMemoryStore) MemoryRead(name string) (string, error) {
+func (f *fakeMemoryStore) MemoryRead(name, scope string) (string, error) {
 	if body, ok := f.notes[name]; ok {
 		return body, nil
 	}
 	return "", errors.New("not found")
 }
-func (f *fakeMemoryStore) MemorySearch(string) (string, error) { return "", nil }
-func (f *fakeMemoryStore) MemoryForget(name string) (string, error) {
+func (f *fakeMemoryStore) MemorySearch(string, string) (string, error) { return "", nil }
+func (f *fakeMemoryStore) MemoryForget(name, scope string) (string, error) {
 	delete(f.notes, name)
 	return "", nil
 }

@@ -142,25 +142,92 @@ var citationRe = regexp.MustCompile(`^@session/([A-Za-z0-9-]+)#m(\d+)-(\d+)$`)
 
 const memUnavailable = "memory is unavailable in this session (no .cortex workspace)"
 
-func (cs *CortexSession) MemoryWrite(name, content string) (string, error) {
-	if cs.memory == nil {
-		return memUnavailable, nil
+// scopeProject / scopeUser are the two memory tiers a scope arg can name
+// (docs/cross-source-learning.md piece 1). scopeProject is also the default
+// for write/forget (an unspecified scope never writes or deletes cross-
+// project by accident); memory_read's no-scope path shadows project over
+// user instead (see MemoryRead), and memory_search's no-scope path searches
+// both (see MemorySearch) — each tool's own default is documented at its
+// call site since the three differ by design, not by omission.
+const (
+	scopeProject = "project"
+	scopeUser    = "user"
+)
+
+// normalizeScope maps a tool call's optional scope argument to one of the two
+// tiers, defaulting unset/unrecognized input to scopeProject — the safe
+// default for a write or delete (never touches the wrong tier silently).
+func normalizeScope(scope string) string {
+	if strings.ToLower(strings.TrimSpace(scope)) == scopeUser {
+		return scopeUser
 	}
-	saved, err := cs.memory.Write(name, content, time.Now())
+	return scopeProject
+}
+
+// storeFor resolves the memory.Store + tier label for an explicit scope
+// (scopeProject or scopeUser, via normalizeScope). Read and search have
+// their own tier-spanning defaults for an UNSET scope and call the
+// underlying stores directly instead of going through this helper.
+func (cs *CortexSession) storeFor(scope string) (*memory.Store, string) {
+	if normalizeScope(scope) == scopeUser {
+		return cs.userMemory, scopeUser
+	}
+	return cs.memory, scopeProject
+}
+
+func (cs *CortexSession) MemoryWrite(name, content, scope string) (string, error) {
+	store, tier := cs.storeFor(scope)
+	if store == nil {
+		return fmt.Sprintf("%s memory is unavailable in this session", tier), nil
+	}
+	saved, err := store.Write(name, content, time.Now())
 	if err != nil {
 		return "", err
 	}
 	cs.captures++
-	return fmt.Sprintf("saved note %q", saved), nil
+	return fmt.Sprintf("saved note %q (%s)", saved, tier), nil
 }
 
-func (cs *CortexSession) MemoryRead(name string) (string, error) {
-	if cs.memory == nil {
-		return memUnavailable, nil
-	}
-	body, err := cs.memory.Read(name)
-	if os.IsNotExist(err) {
+// MemoryRead resolves a name against an explicit tier when scope is set; with
+// scope unset it shadows project over user (docs/cross-source-learning.md:
+// "project shadows user" — a project note of the same name wins silently, so
+// a project can locally override a cross-project fact without deleting the
+// promoted one). A miss on the checked tier(s) is a friendly observation, not
+// an error, matching the pre-existing single-tier behavior.
+func (cs *CortexSession) MemoryRead(name, scope string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(scope))
+	if s == "" {
+		if cs.memory == nil && cs.userMemory == nil {
+			return memUnavailable, nil
+		}
+		if cs.memory != nil {
+			body, err := cs.memory.Read(name)
+			if err == nil {
+				return body, nil
+			}
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+		}
+		if cs.userMemory != nil {
+			body, err := cs.userMemory.Read(name)
+			if err == nil {
+				return body, nil
+			}
+			if !os.IsNotExist(err) {
+				return "", err
+			}
+		}
 		return fmt.Sprintf("no note named %q (check the memory index, or memory_search for it)", name), nil
+	}
+
+	store, tier := cs.storeFor(s)
+	if store == nil {
+		return fmt.Sprintf("%s memory is unavailable in this session", tier), nil
+	}
+	body, err := store.Read(name)
+	if os.IsNotExist(err) {
+		return fmt.Sprintf("no note named %q in %s memory (check the memory index, or memory_search for it)", name, tier), nil
 	}
 	if err != nil {
 		return "", err
@@ -168,63 +235,132 @@ func (cs *CortexSession) MemoryRead(name string) (string, error) {
 	return body, nil
 }
 
-func (cs *CortexSession) MemorySearch(query string) (string, error) {
-	if cs.memory == nil {
+// MemorySearch searches an explicit tier when scope is set; with scope unset
+// it searches BOTH tiers and tags every hit ([project]/[user]) so a same-name
+// collision that MemoryRead's shadowing would hide is still visible here
+// (docs/cross-source-learning.md piece 1).
+func (cs *CortexSession) MemorySearch(query, scope string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(scope))
+	if s != "" {
+		store, tier := cs.storeFor(s)
+		if store == nil {
+			return fmt.Sprintf("%s memory is unavailable in this session", tier), nil
+		}
+		hits, err := store.Search(query)
+		if err != nil {
+			return "", err
+		}
+		if len(hits) == 0 {
+			return fmt.Sprintf("no notes match %q", query), nil
+		}
+		return renderMemoryHits(hits, tier), nil
+	}
+
+	if cs.memory == nil && cs.userMemory == nil {
 		return memUnavailable, nil
 	}
-	hits, err := cs.memory.Search(query)
-	if err != nil {
-		return "", err
+	var lines []string
+	if cs.memory != nil {
+		hits, err := cs.memory.Search(query)
+		if err != nil {
+			return "", err
+		}
+		if rendered := renderMemoryHits(hits, scopeProject); rendered != "" {
+			lines = append(lines, rendered)
+		}
 	}
-	if len(hits) == 0 {
+	if cs.userMemory != nil {
+		hits, err := cs.userMemory.Search(query)
+		if err != nil {
+			return "", err
+		}
+		if rendered := renderMemoryHits(hits, scopeUser); rendered != "" {
+			lines = append(lines, rendered)
+		}
+	}
+	if len(lines) == 0 {
 		return fmt.Sprintf("no notes match %q", query), nil
 	}
-	return renderMemoryHits(hits), nil
+	return strings.Join(lines, "\n"), nil
 }
 
-func (cs *CortexSession) MemoryForget(name string) (string, error) {
-	if cs.memory == nil {
-		return memUnavailable, nil
+func (cs *CortexSession) MemoryForget(name, scope string) (string, error) {
+	store, tier := cs.storeFor(scope)
+	if store == nil {
+		return fmt.Sprintf("%s memory is unavailable in this session", tier), nil
 	}
-	removed, err := cs.memory.Forget(name)
+	removed, err := store.Forget(name)
 	if err != nil {
 		return "", err
 	}
 	if !removed {
-		return fmt.Sprintf("no note named %q to forget", name), nil
+		return fmt.Sprintf("no note named %q to forget in %s memory", name, tier), nil
 	}
-	return fmt.Sprintf("forgot note %q", name), nil
+	return fmt.Sprintf("forgot note %q (%s)", name, tier), nil
 }
 
-// memoryIndexCap is the historical memory-index truncation default.
-// Config-overridable via limits.memory_index_cap_chars — see
+// memoryIndexCap is the historical (project-tier) memory-index truncation
+// default. Config-overridable via limits.memory_index_cap_chars — see
 // Config.memoryIndexCapChars.
 const memoryIndexCap = 4000
 
+// userMemoryIndexCap is the user-tier memory index's truncation default —
+// independently of memoryIndexCap, and deliberately smaller (see
+// LimitsConfig.UserMemoryIndexCapChars's doc comment). Config-overridable via
+// limits.user_memory_index_cap_chars — see Config.userMemoryIndexCapChars.
+const userMemoryIndexCap = 1500
+
+// memoryIndexNote renders the turn-start memory injection: the user tier
+// FIRST, then the project tier (docs/cross-source-learning.md piece 1) — a
+// cross-project fact is the more load-bearing one to keep visible, so it
+// leads. Each tier is capped INDEPENDENTLY (project: memoryIndexCap /
+// limits.memory_index_cap_chars; user: userMemoryIndexCap /
+// limits.user_memory_index_cap_chars) and clearly labeled so the model can
+// tell which tier a note belongs to. Either section is omitted when that
+// tier has no notes (or no store); the whole note is "" when both are empty,
+// preserving the pre-existing "no injection" behavior for a project with no
+// memory at all.
 func (cs *CortexSession) memoryIndexNote() string {
-	if cs.memory == nil {
-		return ""
+	var sections []string
+	if cs.userMemory != nil {
+		if idx, err := cs.userMemory.Index(); err == nil && strings.TrimSpace(idx) != "" {
+			idx = capIndex(idx, cs.Config.userMemoryIndexCapChars())
+			sections = append(sections, "## User memory (every project on this machine)\n\n"+idx)
+		}
 	}
-	idx, err := cs.memory.Index()
-	if err != nil || strings.TrimSpace(idx) == "" {
-		return ""
+	if cs.memory != nil {
+		if idx, err := cs.memory.Index(); err == nil && strings.TrimSpace(idx) != "" {
+			idx = capIndex(idx, cs.Config.memoryIndexCapChars())
+			sections = append(sections, "## Project memory (this codebase)\n\n"+idx)
+		}
 	}
-	cap := cs.Config.memoryIndexCapChars()
-	if len(idx) > cap {
-		idx = idx[:cap] + "\n… (index truncated; memory_search to find the rest)"
+	if len(sections) == 0 {
+		return ""
 	}
 	return "These are notes you saved in earlier sessions. Read the relevant ones with " +
-		"memory_read before answering.\n\n" + idx
+		"memory_read before answering.\n\n" + strings.Join(sections, "\n\n")
 }
 
-func renderMemoryHits(hits []memory.NoteMeta) string {
+// capIndex truncates a rendered index to cap chars with a visible "truncated"
+// note pointing at memory_search — shared by both tiers' independent caps.
+func capIndex(idx string, cap int) string {
+	if len(idx) > cap {
+		return idx[:cap] + "\n… (index truncated; memory_search to find the rest)"
+	}
+	return idx
+}
+
+// renderMemoryHits renders search hits with a leading tier tag ([project] /
+// [user]) on each line, so a cross-tier search result is unambiguous even
+// though memory_read's shadowing hides the same collision. "" for no hits.
+func renderMemoryHits(hits []memory.NoteMeta, tier string) string {
 	var b strings.Builder
 	for _, m := range hits {
 		when := ""
 		if !m.Updated.IsZero() {
 			when = " (updated " + m.Updated.UTC().Format("2006-01-02") + ")"
 		}
-		fmt.Fprintf(&b, "- %s — %s%s\n", m.Name, m.Hook, when)
+		fmt.Fprintf(&b, "- [%s] %s — %s%s\n", tier, m.Name, m.Hook, when)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

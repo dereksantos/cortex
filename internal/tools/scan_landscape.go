@@ -73,7 +73,11 @@ func scanLandscape(deps interface {
 		RuntimeCount: len(runtimes),
 	})
 
-	if _, err := deps.MemoryWrite(landscapeMemoryNoteName, result); err != nil {
+	// Explicit "project": the landscape note is always written to THIS
+	// project's memory store, never the user tier (docs/cross-source-
+	// learning.md piece 1's scope arg) — a home-directory survey is
+	// per-machine-per-project context, not a cross-project fact.
+	if _, err := deps.MemoryWrite(landscapeMemoryNoteName, result, "project"); err != nil {
 		return "", fmt.Errorf("write landscape memory note: %w", err)
 	}
 

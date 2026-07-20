@@ -13,12 +13,31 @@ import (
 
 // TestMain disables the self-contained local embedder for the whole package so
 // EnableRetrieval-driven tests never trigger a background model download.
-// Tests that want it can re-enable via t.Setenv.
+// Tests that want it can re-enable via t.Setenv. It also defaults CORTEX_HOME
+// to a process-wide temp dir when unset: EnableMemory (session_runtime.go)
+// wires a user-tier memory store at userhome.Path("memory") alongside the
+// project store (docs/cross-source-learning.md piece 1), and many tests call
+// EnableMemory without their own CORTEX_HOME override — without this default
+// those tests would create/touch ~/.cortex on the real machine running them.
+// Tests that need their own isolated (or shared-but-distinct) user home still
+// set CORTEX_HOME explicitly via t.Setenv, which wins for the duration of
+// that test.
 func TestMain(m *testing.M) {
 	if os.Getenv("CORTEX_LOCAL_EMBED") == "" {
 		_ = os.Setenv("CORTEX_LOCAL_EMBED", "0")
 	}
-	os.Exit(m.Run())
+	homeDir := ""
+	if os.Getenv("CORTEX_HOME") == "" {
+		if dir, err := os.MkdirTemp("", "cortex-test-home-"); err == nil {
+			_ = os.Setenv("CORTEX_HOME", dir)
+			homeDir = dir
+		}
+	}
+	code := m.Run()
+	if homeDir != "" {
+		_ = os.RemoveAll(homeDir)
+	}
+	os.Exit(code)
 }
 
 // tc builds a ToolCall with the given name and raw JSON-string arguments,
