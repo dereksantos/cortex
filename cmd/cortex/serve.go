@@ -18,9 +18,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dereksantos/cortex/internal/loops"
@@ -261,8 +263,20 @@ func newServeMux(reg registry.Registry, mgr *SessionManager, configPath, homeDir
 // following runScanCLI/runProjectCLI's established convention: this
 // os.Exit-driving wrapper itself is untested; the pure functions it
 // composes (servePortFromArgs, newServeServer, hostOriginMiddleware,
-// newServeMux) carry the coverage.
+// newServeMux) carry the coverage. `cortex serve stop`/`status` (serve_stop.go)
+// are handled first and return before touching config, the registry, or
+// the network beyond serve.pid and (for status) a single request against
+// an already-running instance.
 func runServeCLI(args []string) {
+	if len(args) > 0 && args[0] == "stop" {
+		runServeStopCLI()
+		return
+	}
+	if len(args) > 0 && args[0] == "status" {
+		runServeStatusCLI()
+		return
+	}
+
 	cfg := LoadConfig()
 	port := servePortFromArgs(args, cfg.servePort(defaultServePort))
 	loops.CadenceFloorMinutes = cfg.loopCadenceFloorMin()
@@ -296,13 +310,38 @@ func runServeCLI(args []string) {
 	// direction.
 	running := newRunningSet()
 
+	// startedAt is recorded once here and threaded into BOTH serve.pid
+	// (writeServePID below, read back by `cortex serve status`) and
+	// GET /api/status (handleStatus) — the two surfaces derive uptime from
+	// the same instant so they can never disagree.
+	startedAt := time.Now()
+	mux := newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore, running)
+	mux.HandleFunc("GET /api/status", handleStatus(startedAt, mgr, loopsStore))
+
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv, ln, err := newServeServer(addr, func(boundPort string) http.Handler {
-		return hostOriginMiddleware(boundPort, newServeMux(reg, mgr, userConfigPath(), homeDir, loopsStore, running))
+		return hostOriginMiddleware(boundPort, mux)
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+
+	_, boundPort, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	boundPortNum, err := strconv.Atoi(boundPort)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeServePID(os.Getpid(), boundPortNum, startedAt); err != nil {
+		// Non-fatal: `cortex serve stop`/`status` degrade to "not found"
+		// rather than "found but wrong", and serving itself doesn't depend
+		// on this file existing.
+		fmt.Fprintln(os.Stderr, "warning: failed to write serve.pid:", err)
 	}
 
 	// M6.8: the serve-resident scheduler (docs/cortex-web.md Phase 6 —
@@ -312,29 +351,61 @@ func runServeCLI(args []string) {
 	// interval (1 minute) just needs to be finer than the 15-minute
 	// cadence floor (internal/loops.CadenceFloorMinutes); it is not itself
 	// part of the spec format. Stopped when runServeCLI returns (server
-	// error or, once graceful HTTP shutdown exists, a clean stop) so the
-	// scheduler never outlives the listener.
+	// error, or a graceful SIGTERM/SIGINT-triggered stop — see drainServe,
+	// serve_drain.go) so the scheduler never outlives the listener.
 	//
-	// The ticker/scheduler teardown defers must run before this process
-	// exits, so the serving loop lives in a closure returning an exit code
-	// — os.Exit does not run deferred calls.
+	// The ticker/scheduler teardown must run before this process exits, so
+	// the serving loop lives in a closure returning an exit code —
+	// os.Exit does not run deferred calls.
 	exitCode := func() int {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		schedCtx, stopSched := context.WithCancel(context.Background())
 		sched := newLoopScheduler(loopsStore, reg, mgr.newSession, time.Now, running)
 		schedStopped := sched.Start(schedCtx, ticker.C)
-		defer func() {
+
+		pageURL := serveURL(ln.Addr().String())
+		fmt.Printf("cortex serve listening — open %s\n(loopback Host/Origin allowlist; --no-open to suppress the browser; `cortex serve stop` to shut down)\n", pageURL)
+		maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
+
+		// Graceful shutdown (design item 2): SIGTERM/SIGINT triggers
+		// drainServe (serve_drain.go) — Shutdown + scheduler teardown — on
+		// its own goroutine; srv.Serve runs on another. Whichever finishes
+		// first decides the exit code; the teardown steps are safe to
+		// re-run (see drainServe's doc comment) so there's no ordering
+		// hazard between the two branches below.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sigCh)
+
+		serveErrCh := make(chan error, 1)
+		go func() { serveErrCh <- srv.Serve(ln) }()
+
+		drainErrCh := make(chan error, 1)
+		go func() { drainErrCh <- drainServe(sigCh, srv, stopSched, schedStopped, sched, 10*time.Second) }()
+
+		var result error
+		select {
+		case result = <-serveErrCh:
+			// srv.Serve returned on its own (a real listen/accept error —
+			// SIGTERM/SIGINT would surface here as http.ErrServerClosed via
+			// the drain branch below, not this one). Tear the scheduler
+			// down directly since drainServe's goroutine is still parked on
+			// <-sigCh and will never get to it.
 			stopSched()
 			<-schedStopped
 			sched.Wait()
-		}()
-
-		pageURL := serveURL(ln.Addr().String())
-		fmt.Printf("cortex serve listening — open %s\n(loopback Host/Origin allowlist; --no-open to suppress the browser)\n", pageURL)
-		maybeOpenBrowser(serveOpenFromArgs(args), pageURL)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(os.Stderr, err)
+		case drainErr := <-drainErrCh:
+			// A signal fired: drainServe already ran the full teardown
+			// (Shutdown + stopSched + Wait). srv.Serve(ln) is now returning
+			// http.ErrServerClosed on its own goroutine — drain it so it
+			// doesn't leak past this function returning.
+			<-serveErrCh
+			result = drainErr
+		}
+		removeServePID()
+		if result != nil && result != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, result)
 			return 1
 		}
 		return 0
