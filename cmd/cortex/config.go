@@ -58,6 +58,14 @@ const (
 	// independently of subagents.study. Mirrors tools.Learn.Role's literal
 	// "learn" string the same way roleStudy mirrors tools.FunctionStudy.
 	roleLearn = "learn"
+	// roleLearnUser is LearnUser's role constant (docs/cross-source-learning.md
+	// piece 1's promotion half, cmd/cortex/learn_user.go) — the machine-wide
+	// cross-project promotion pass, mirroring roleLearn exactly: not a
+	// models.<role> binding (LearnUser also runs on the study role's
+	// binding, no coder session to inherit from — a scheduled loop firing
+	// again), just a tag subagentRequest/subagentBounds special-case so
+	// subagents.learn_user resolves independently of subagents.learn.
+	roleLearnUser = "learn_user"
 )
 
 type rolePolicy struct {
@@ -441,6 +449,13 @@ type Config struct {
 	Repl    ReplConfig    `json:"repl"`
 	Discord DiscordConfig `json:"discord"`
 
+	// Prompt customizes the system prompt (docs/configuration.md's
+	// `prompt.*` section): File replaces the built-in base prompt
+	// (unreadable/empty degrades to the built-in with a stderr warning —
+	// see prompt.go's resolvePrompt), Append rides after the base and
+	// before any AGENTS.md section.
+	Prompt PromptConfig `json:"prompt"`
+
 	// Context configures the two-zone working-set fractions
 	// (docs/context-architecture.md's budgets: tail high/low watermark and
 	// outline cap, expressed as fractions of the window W). Derek's decision
@@ -546,6 +561,13 @@ type SubagentsConfig struct {
 	// binding: the two profiles' bounds are independently tunable (Learn's
 	// budget is about background cost, Study's about foreground latency).
 	Learn SubagentProfileConfig `json:"learn"`
+	// LearnUser overrides the cross-project promotion subagent's bounds
+	// (internal/tools.LearnUser.Bounds) — docs/cross-source-learning.md
+	// piece 1's promotion half. A separate section from .Learn even though
+	// both run on the study role's binding: LearnUser's per-call seed is one
+	// candidate group (small), not a whole capture window, so its bounds are
+	// independently tunable from the project-scope pass.
+	LearnUser SubagentProfileConfig `json:"learn_user"`
 }
 
 // LimitsConfig collects the assorted byte/count ceilings that don't belong to
@@ -607,6 +629,13 @@ type ServeConfig struct {
 // (docs/configuration.md's `repl.*` section).
 type ReplConfig struct {
 	TickerIntervalMs int `json:"ticker_interval_ms"`
+}
+
+// PromptConfig customizes the system prompt (docs/configuration.md's
+// `prompt.*` section); consumed by prompt.go's resolvePrompt.
+type PromptConfig struct {
+	File   string `json:"file"`
+	Append string `json:"append"`
 }
 
 // DiscordConfig collects the Discord adapter's tunables
@@ -1054,6 +1083,7 @@ func mergeConfig(base, over *Config) *Config {
 	out.Repl = mergeRepl(base.Repl, over.Repl)
 	out.Discord = mergeDiscord(base.Discord, over.Discord)
 	out.Context = mergeContext(base.Context, over.Context)
+	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	return &out
 }
 
@@ -1082,6 +1112,7 @@ func mergeSubagents(base, over SubagentsConfig) SubagentsConfig {
 		Study:            mergeSubagentProfile(base.Study, over.Study),
 		Agent:            mergeSubagentProfile(base.Agent, over.Agent),
 		Learn:            mergeSubagentProfile(base.Learn, over.Learn),
+		LearnUser:        mergeSubagentProfile(base.LearnUser, over.LearnUser),
 	}
 }
 
@@ -1494,6 +1525,8 @@ func (c *Config) subagentBounds(role string, def agent.Bounds) agent.Bounds {
 		pc = c.Subagents.Study
 	case roleLearn:
 		pc = c.Subagents.Learn
+	case roleLearnUser:
+		pc = c.Subagents.LearnUser
 	default:
 		pc = c.Subagents.Agent
 	}
@@ -1536,4 +1569,17 @@ func (c *Config) seedBudget() int {
 		return tools.StudySeedBudget
 	}
 	return resolveInt(c.Subagents.SeedBudgetTokens, tools.StudySeedBudget)
+}
+
+// mergePrompt overlays prompt.* field-by-field: a set field in the project
+// config wins over the user config, empty preserves.
+func mergePrompt(base, over PromptConfig) PromptConfig {
+	out := base
+	if over.File != "" {
+		out.File = over.File
+	}
+	if over.Append != "" {
+		out.Append = over.Append
+	}
+	return out
 }

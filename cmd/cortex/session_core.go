@@ -29,14 +29,19 @@ func (a CortexArgs) Request() *AgentRequest {
 	}
 }
 
-// systemPromptContent builds the system message content: the base
-// SystemPrompt plus an optional "# Project instructions (AGENTS.md)"
-// section when instructions is non-empty. Shared by CortexArgs.Request()
-// (CWD-implicit, via projectInstructions()) and applyProjectByName
-// (project_workspace.go, M3.5's --project, via Workspace.Instructions())
-// so the two stay provably identical modulo their instructions source.
+// systemPromptContent builds the system message content: the base prompt
+// (built-in SystemPrompt, or prompt.file's replacement — promptBase, set by
+// configurePrompt), then any prompt.append text, then an optional
+// "# Project instructions (AGENTS.md)" section when instructions is
+// non-empty. Shared by CortexArgs.Request() (CWD-implicit, via
+// projectInstructions()) and applyProjectByName (project_workspace.go,
+// M3.5's --project, via Workspace.Instructions()) so the two stay provably
+// identical modulo their instructions source.
 func systemPromptContent(instructions string) string {
-	content := SystemPrompt
+	content := promptBase
+	if promptAppend != "" {
+		content += "\n\n# Additional instructions\n\n" + promptAppend
+	}
 	if instructions != "" {
 		content += "\n\n# Project instructions (AGENTS.md)\n\n" + instructions
 	}
@@ -198,7 +203,11 @@ func NewCortexSession() *CortexSession {
 	// instructionBytesCap must be set before args.Request() (below) reads
 	// AGENTS.md via projectInstructions() — the one call site that runs
 	// before the rest of this function's config-driven wiring.
+	// configurePrompt has the same ordering constraint (args.Request() builds
+	// the system message) and additionally must run AFTER the cap is set,
+	// since prompt.file truncates at instructionBytesCap.
 	instructionBytesCap = cfg.instructionBytesCap()
+	configurePrompt(cfg)
 	tools.Configure(cfg.toolLimits())
 	fleetDiscoveryTimeout = cfg.fleetDiscoveryTimeout()
 	openRouterPreflightTimeout = cfg.preflightTimeout()
