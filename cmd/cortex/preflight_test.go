@@ -75,25 +75,80 @@ func TestPreflightCuratedModelsSkipsNonOpenRouter(t *testing.T) {
 	}
 }
 
-// TestPreflightCuratedModelsSkipsNonCuratedModel pins that a bound model
-// outside the curated table (a user's own pin) is left entirely alone, with
-// no network call at all.
+// TestPreflightCuratedModelsSkipsNonCuratedModel pins the self_heal:false
+// posture: a bound model outside the curated table (a user's own pin) is
+// left entirely alone, with no network call at all. With self-healing on
+// (the default) pinned models ARE checked — see
+// TestPreflightSubstitutesMissingPinnedModel.
 func TestPreflightCuratedModelsSkipsNonCuratedModel(t *testing.T) {
 	calls := 0
 	listModels := func(context.Context) ([]llm.OpenRouterModel, error) {
 		calls++
 		return nil, nil
 	}
+	cfg := openrouterCfg()
+	off := false
+	cfg.Network.SelfHeal = &off
 	code := ModelSpec{Model: "anthropic/claude-haiku-4.5"}
 	study := ModelSpec{Model: "some/other-model"}
 
-	gotCode, gotStudy := preflightCuratedModels(context.Background(), openrouterCfg(), code, study, t.TempDir(), listModels)
+	gotCode, gotStudy := preflightCuratedModels(context.Background(), cfg, code, study, t.TempDir(), listModels)
 
 	if calls != 0 {
-		t.Errorf("listModels called %d times, want 0 when neither binding is a curated id", calls)
+		t.Errorf("listModels called %d times, want 0 when self_heal is off and neither binding is curated", calls)
 	}
 	if gotCode != code || gotStudy != study {
 		t.Errorf("bindings changed: got (%+v, %+v), want unchanged", gotCode, gotStudy)
+	}
+}
+
+// TestPreflightSubstitutesMissingPinnedModel pins the self-healing default
+// (docs/model-self-healing.md §3): a user-pinned model that has vanished
+// from the live catalog is substituted at session start — session-only,
+// journaled — instead of failing the first turn.
+func TestPreflightSubstitutesMissingPinnedModel(t *testing.T) {
+	top := curatedTopPick()
+	served := []llm.OpenRouterModel{{ID: top.ID, ContextLength: top.Window}}
+	dir := t.TempDir()
+	code := ModelSpec{Model: "vendor/retired-model"}
+	study := ModelSpec{Model: top.ID}
+
+	var gotCode, gotStudy ModelSpec
+	stderr := captureStderr(t, func() {
+		gotCode, gotStudy = preflightCuratedModels(context.Background(), openrouterCfg(),
+			code, study, dir, fakeListModels(served, nil))
+	})
+
+	if gotCode.Model != top.ID {
+		t.Errorf("pinned code model = %q, want substituted %q", gotCode.Model, top.ID)
+	}
+	if gotStudy.Model != top.ID {
+		t.Errorf("study model = %q, want untouched %q", gotStudy.Model, top.ID)
+	}
+	if !strings.Contains(stderr, "vendor/retired-model") {
+		t.Errorf("stderr missing the old pin: %q", stderr)
+	}
+	subs := readModelSubstitutions(t, dir)
+	if len(subs) != 1 || subs[0].Old != "vendor/retired-model" {
+		t.Errorf("journal = %+v, want one substitution for the retired pin", subs)
+	}
+}
+
+// TestPreflightPinnedModelStillServedUntouched pins that self-healing's
+// wider preflight still never touches a pinned model that IS served.
+func TestPreflightPinnedModelStillServedUntouched(t *testing.T) {
+	served := []llm.OpenRouterModel{
+		{ID: "vendor/my-pin", ContextLength: 200000},
+		{ID: curatedTopPick().ID, ContextLength: curatedTopPick().Window},
+	}
+	code := ModelSpec{Model: "vendor/my-pin"}
+	study := ModelSpec{Model: "vendor/my-pin"}
+
+	gotCode, gotStudy := preflightCuratedModels(context.Background(), openrouterCfg(),
+		code, study, t.TempDir(), fakeListModels(served, nil))
+
+	if gotCode != code || gotStudy != study {
+		t.Errorf("served pin changed: got (%+v, %+v), want unchanged", gotCode, gotStudy)
 	}
 }
 
@@ -135,6 +190,9 @@ func TestPreflightCuratedModelsMissingSubstitutesNextCurated(t *testing.T) {
 	served := []llm.OpenRouterModel{
 		{ID: survivor.ID, ContextLength: survivor.Window},
 		{ID: "some/unrelated-model:free", ContextLength: 4096},
+		// Served, so the self-healing default's wider preflight (which now
+		// checks pinned models too) leaves the study binding alone.
+		{ID: "not-curated/model", ContextLength: 8192},
 	}
 	dir := t.TempDir()
 

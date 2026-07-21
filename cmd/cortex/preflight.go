@@ -42,9 +42,12 @@ type listModelsFn func(context.Context) ([]llm.OpenRouterModel, error)
 
 // preflightCuratedModels checks code and study's bound models against
 // OpenRouter's live catalog ONE time (a single listModels call shared by
-// both roles) and substitutes any curated pick that's no longer served. A
-// role whose bound model isn't in curatedFreeModels is left alone — the
-// preflight only second-guesses picks it (or a prior bootstrap run) made.
+// both roles) and substitutes any bound model that's no longer served.
+// Under network.self_heal (the default, docs/model-self-healing.md §3) that
+// covers EVERY OpenRouter binding — a user's own pin included, since a
+// retired pin would otherwise fail the first turn; with the gate off, the
+// preflight keeps its strict historical posture and only second-guesses
+// picks it (or a prior bootstrap run) made from the curated table.
 // Substitution never rewrites the user's config file: it mutates the
 // in-memory ModelSpec for this process only, prints one stderr line per
 // substitution, and journals the event to journalDir. A network failure (or
@@ -54,7 +57,8 @@ func preflightCuratedModels(ctx context.Context, cfg *Config, code, study ModelS
 	if !cfg.isOpenRouter() {
 		return code, study
 	}
-	if !isCuratedModel(code.Model) && !isCuratedModel(study.Model) {
+	checkAll := cfg.selfHealEnabled()
+	if !checkAll && !isCuratedModel(code.Model) && !isCuratedModel(study.Model) {
 		return code, study
 	}
 
@@ -76,10 +80,10 @@ func preflightCuratedModels(ctx context.Context, cfg *Config, code, study ModelS
 		}
 	}
 
-	if isCuratedModel(code.Model) {
+	if checkAll || isCuratedModel(code.Model) {
 		code = substituteIfMissing(code, roleCode, servedSet, servedFree, journalDir)
 	}
-	if isCuratedModel(study.Model) {
+	if checkAll || isCuratedModel(study.Model) {
 		study = substituteIfMissing(study, roleStudy, servedSet, servedFree, journalDir)
 	}
 	return code, study
