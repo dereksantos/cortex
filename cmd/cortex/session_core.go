@@ -62,15 +62,15 @@ type CortexSession struct {
 	deadModels map[string]modelErrClass
 	// healList is the healing ladder's catalog fetch, injectable for tests;
 	// nil means liveOpenRouterListModels (the production default).
-	healList listModelsFn
-	Config           *Config
-	workspace        *Workspace
-	deleteRoot       string
-	allowDelete      bool
-	quiet            bool
-	confirmRisky     func(question string) bool
-	classifyShell    shellrisk.ClassifyFn
-	turnIntent       string
+	healList      listModelsFn
+	Config        *Config
+	workspace     *Workspace
+	deleteRoot    string
+	allowDelete   bool
+	quiet         bool
+	confirmRisky  func(question string) bool
+	classifyShell shellrisk.ClassifyFn
+	turnIntent    string
 	// onThinking, when set, is invoked with active=true on the first
 	// reasoning delta of a model call and active=false once its answer
 	// content starts (or the call ends without one) — the served-session SSE

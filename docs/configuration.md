@@ -301,12 +301,13 @@ project-over-user (a same-named project note wins silently); an unscoped
 config gate — every session with memory enabled gets both tiers. See
 `docs/cross-source-learning.md` piece 1 and `docs/memory-tools.md`.
 
-## `network.*` — bounded-probe timeouts
+## `network.*` — bounded-probe timeouts and self-healing
 
 | Field | Default | Meaning |
 |---|---|---|
 | `fleet_discovery_timeout_sec` | 4 | Timeout for the `/model/info` fleet-discovery probe. |
-| `preflight_timeout_sec` | 4 | Timeout for the startup curated-model preflight's `ListModels` call. |
+| `preflight_timeout_sec` | 4 | Timeout for the startup model preflight's `ListModels` call — also bounds the healing ladder's mid-session catalog fetch. |
+| `self_heal` | `true` | Model self-healing (`docs/model-self-healing.md`). On: a model call failing with a healable class (model unknown/retired; rate-limited or 5xx after the transport's own retries) marks the model dead for the session, walks the curated `:free` ladder (then catalog discovery), and re-issues the same pending request on the replacement — one stderr notice + a `model.substitution` journal event per switch, `model.failure` when nothing recovers. The startup preflight also substitutes a **pinned** OpenRouter model missing from the live catalog. Off: the preflight reverts to curated-picks-only and a failing model simply surfaces its classified error. OpenRouter only — there is no free suite behind a local endpoint. The config file is never rewritten either way. |
 | `ollama_probe_timeout_sec` | 2 | Timeout for the guided first-run setup's local-Ollama reachability check. **Not actually reachable in practice**: this probe only ever runs during `GuidedSetup` on a true first run (no user config, no project config, no `$CORTEX_BACKEND` — see "Interactive first-run setup" above), which by definition means no config file exists yet to set this field from. Kept in the schema for documentation parity with the rest of `network.*`. |
 | `compat_timeout_sec` | 300 | Sets the OpenAI-compatible client's fallback per-request timeout default (`pkg/llm`'s `DefaultCompatTimeoutSec`). Unlike every other timeout field on this page, **`CORTEX_COMPAT_TIMEOUT_SEC` (env) wins over this field** when both are set — matching the env knob's original subprocess-boundary rationale. A `models.<role>.request_timeout_sec` set explicitly still wins over both. |
 

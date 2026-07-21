@@ -15,6 +15,13 @@ removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.
 for what existed before and why it went.
 
 ### Added
+- Model self-healing (`docs/model-self-healing.md`): typed classification of
+  model-call failures; a mid-session healing ladder that falls back onto the
+  curated free OpenRouter suite and re-issues the pending request on the
+  replacement; startup preflight coverage for pinned models; classified
+  turn-error diagnosis lines; `model.failure` journal receipts and a recent
+  model-events section in `cortex model`. Gated by `network.self_heal`
+  (default on).
 - Persistent, resumable Cortex REPL, a headless `turn` driver, a `cortex serve`
   web UI, and a Discord adapter.
 - Bounded two-zone session context with citation-grounded demotion, outline
