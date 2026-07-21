@@ -286,7 +286,12 @@ func (r *AgentRequest) sendOnce(ctx context.Context, url string, body []byte) (r
 
 	if resp.StatusCode != http.StatusOK {
 		transient := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-		return nil, transient, fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, transient, &modelCallError{
+			Status: resp.StatusCode,
+			Class:  classifyStatus(resp.StatusCode, string(respBody)),
+			Model:  r.Model,
+			Detail: string(respBody),
+		}
 	}
 
 	var response AgentResponse
