@@ -642,6 +642,9 @@ func main() {
 			fmt.Println(withColor("interrupted", yellow))
 		default:
 			fmt.Printf("turn error: %v\n", err)
+			if d := diagnoseModelError(err); d != "" {
+				fmt.Println(withColor(d, yellow))
+			}
 			// An overflow error names the code model's real window: learn it
 			// (the gauge and read_file guard self-correct, C2) and compact so
 			// the next request fits. The failed request is in the digest; the

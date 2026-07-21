@@ -120,6 +120,9 @@ func runTurnCLI(args []string) {
 		} else {
 			if turnErr != nil {
 				fmt.Fprintf(os.Stderr, "turn error: %v\n", turnErr)
+				if d := diagnoseModelError(turnErr); d != "" {
+					fmt.Fprintln(os.Stderr, d)
+				}
 			}
 			if res.Reply != "" {
 				fmt.Println(res.Reply)

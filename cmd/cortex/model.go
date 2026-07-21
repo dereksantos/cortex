@@ -412,6 +412,10 @@ func runModelCLI(args []string) {
 		fmt.Print(renderModelCatalog(catalog, cfg.maxServedModelsShown()))
 		fmt.Println()
 		fmt.Print(renderModelSuggestion(suggestion))
+		if events := renderRecentModelEvents(modelSubstitutionJournalDir(WorkspaceFromCWD().ContextDir())); events != "" {
+			fmt.Println()
+			fmt.Print(events)
+		}
 		return 0
 	}()
 	if exitCode != 0 {
