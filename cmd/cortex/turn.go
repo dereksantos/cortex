@@ -161,7 +161,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	}
 	ts.AfterToolResult = onAfterToolResult
 
-	_, stats, err := runLoop(ctx, cs.coderSender(), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	_, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens

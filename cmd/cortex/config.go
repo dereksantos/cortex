@@ -595,6 +595,12 @@ type LimitsConfig struct {
 type NetworkConfig struct {
 	FleetDiscoveryTimeoutSec int `json:"fleet_discovery_timeout_sec"`
 	PreflightTimeoutSec      int `json:"preflight_timeout_sec"`
+	// SelfHeal gates model self-healing (docs/model-self-healing.md):
+	// mid-session fallback onto the curated :free suite when a model call
+	// fails with a healable class, plus the startup preflight's willingness
+	// to substitute a PINNED model missing from the live catalog. Default
+	// true; set false to restore the strict "never touch my pin" posture.
+	SelfHeal *bool `json:"self_heal"`
 	// OllamaProbeTimeoutSec is parsed, merged, and validated like every
 	// other field here, but has NO resolver method: the probe it would
 	// configure (bootstrap_wire.go's ollamaLocalProbe) only ever runs
@@ -1135,7 +1141,27 @@ func mergeNetwork(base, over NetworkConfig) NetworkConfig {
 		PreflightTimeoutSec:      mergeIntField(base.PreflightTimeoutSec, over.PreflightTimeoutSec),
 		OllamaProbeTimeoutSec:    mergeIntField(base.OllamaProbeTimeoutSec, over.OllamaProbeTimeoutSec),
 		CompatTimeoutSec:         mergeIntField(base.CompatTimeoutSec, over.CompatTimeoutSec),
+		SelfHeal:                 mergeBoolPtr(base.SelfHeal, over.SelfHeal),
 	}
+}
+
+// mergeBoolPtr is field-by-field override for optional bools: an explicit
+// project-level value (non-nil) wins, else the user-level value survives.
+func mergeBoolPtr(base, over *bool) *bool {
+	if over != nil {
+		return over
+	}
+	return base
+}
+
+// selfHealEnabled reports whether model self-healing is on
+// (docs/model-self-healing.md) — default true when the config or the field
+// is absent, mirroring deleteEnabled's posture.
+func (c *Config) selfHealEnabled() bool {
+	if c == nil || c.Network.SelfHeal == nil {
+		return true
+	}
+	return *c.Network.SelfHeal
 }
 
 func mergeServe(base, over ServeConfig) ServeConfig {

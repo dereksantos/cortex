@@ -158,7 +158,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
 	bounds := sa.Bounds
 	bounds.EscalateEffort = cs.Config.effortEscalationEnabled()
-	digest, stats, err := runLoop(ctx, cs.blockingSender(), req, ts, bounds, nil, appendMsg, nil)
+	digest, stats, err := runLoop(ctx, cs.healingSender(sa.Role, cs.blockingSender()), req, ts, bounds, nil, appendMsg, nil)
 	// Fold the subagent's billed usage into the session totals (it does not set
 	// LastPromptTokens — that gauge belongs to the coder's own context).
 	cs.tokensIn += stats.InputTokens

@@ -56,6 +56,13 @@ type CortexSession struct {
 	Window           int
 	Study            ModelSpec
 	Fleet            Fleet
+	// deadModels marks models the healing ladder (heal.go) found failing
+	// this session — skipped by later candidate walks. Session-local by
+	// design; nothing persists except the journal receipts.
+	deadModels map[string]modelErrClass
+	// healList is the healing ladder's catalog fetch, injectable for tests;
+	// nil means liveOpenRouterListModels (the production default).
+	healList listModelsFn
 	Config           *Config
 	workspace        *Workspace
 	deleteRoot       string
