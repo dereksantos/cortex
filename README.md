@@ -9,23 +9,28 @@
        alt="The word CORTEX seeded as live cells in Conway's Game of Life, evolving into soup and then recalled back to the exact original">
 </p>
 
-**A coding agent built for long-running sessions and small models.**
+**A coding harness that prunes its own context, keeps its own notes, and
+learns as it goes — built for long sessions with small, local models.**
 
-Cortex is a local-first coding harness that actively manages its own working
-memory. Recent work stays verbatim, older turns become a cited outline, and the
-original conversation remains available on demand. Durable decisions live in
-notes the agent curates itself.
+I built Cortex because I kept re-explaining myself to my own tools. Long
+sessions have a familiar shape: the context window fills up, something has
+to give, and what gives is usually the thing you said an hour ago that
+actually mattered. Cortex is built to give up less.
 
-The goal: let a capable small or local model keep working coherently without
-repeatedly starting over—or reaching for a larger model to compensate for a
-poorly managed context window.
+The window is treated as a cache, not a diary. Recent work stays verbatim.
+Older turns prune down to a compact, cited outline the agent can reach back
+through at any time — the exact conversation is always one `recall` away.
+Decisions worth keeping become named notes the model writes itself. And
+between sessions, a background learning pass mines the turn journal for the
+things nobody had a reason to save in the moment, so the harness knows more
+about your project next week than it did today.
+
+I use Cortex every day to build Cortex. It's experimental — the harness
+holds up, the memory policy is still being tuned — and everything it
+decides lives in plain files under `.cortex/`, so none of it is invisible.
 
 [`Quick start`](#quick-start) · [`How memory works`](#how-working-memory-works) ·
 [`Project status`](#project-status) · [`Roadmap`](ROADMAP.md)
-
-> **Experimental:** Cortex is research-grade software used daily by its author.
-> The core harness works, but configuration, compatibility, and memory policy
-> are still evolving.
 
 ## See it work
 
@@ -51,32 +56,38 @@ cortex  The earlier decision was to preserve the stable prompt prefix and
 The outline is compact context, not lossy storage. The append-only transcript
 remains the source of truth.
 
-## Why Cortex?
+## The idea
 
-Most coding agents eventually make a blunt trade: keep expanding the prompt,
-truncate old work, summarize the whole conversation, or move to a model with a
-larger window. Cortex explores a different approach: **treat the context window
-as a managed cache over durable history.**
+A context window is a cache, not a diary. Most of what happened earlier in a
+session stops being relevant to the next step long before the conversation
+ends — but throwing it away, or blending it into one big paraphrase, throws
+away exactly the detail you'll want back the moment it matters again.
 
-| A typical long session | Cortex |
-|---|---|
-| The transcript grows until it is truncated | The active working set stays bounded |
-| A broad summary replaces exact history | Outline entries retain citations to exact messages |
-| Old details are injected speculatively | The agent recalls relevant detail on demand |
-| Durable memory is extracted automatically | The agent deliberately curates named notes |
-| Large repositories are poured into context | A bounded Study subagent reads targeted spans |
-| A bigger model compensates for context pressure | Context management is designed to help smaller models |
+Cortex treats the window that way on purpose. Recent turns stay verbatim.
+Older ones fold into a short, cited outline — just enough for the agent to
+recognize "I already did this" or "we decided that" — and when it needs the
+actual words, `recall` fetches them, exactly as they were, from the
+transcript still sitting on disk. The stable part of the prompt doesn't get
+rewritten every turn either, which is friendlier to prompt caching and, on
+local hardware, to your patience.
 
-Cortex is not trying to hide all state behind embeddings. Its transcript,
-journal, memory notes, and citations are inspectable files under `.cortex/`.
+Durable memory works the same way: deliberately, not automatically. The
+agent writes a note when something is worth remembering past this session —
+a decision, a constraint, a preference — in its own words, under a name it
+chooses, and reads an index of those notes every turn, so it always knows
+what it knows. A background learning pass (`cortex learn`) picks up what
+the foreground had no reason to write down, mining the turn journal off the
+critical path and writing through the same note store.
+
+None of this hides behind embeddings or a store you can't see into.
+Sessions, notes, journal, and citations all live as plain files under
+`.cortex/` — inspect them, edit them, delete them if you want a clean start.
 
 ## Install
 
-You need Go 1.26 and an OpenAI-compatible model endpoint. Supported
-platforms are **darwin and linux**; Windows is not built or tested — CI
-excludes it because the eval-harness code relies on POSIX subprocess-group
-semantics (`syscall.Setpgid`, PID-group `SIGTERM`/`SIGKILL`) with no clean
-Windows equivalent (see `.github/workflows/test.yml`'s matrix comment).
+You need Go 1.26 and an OpenAI-compatible model endpoint. Cortex runs on
+**macOS and Linux**; Windows isn't built or tested yet — the harness leans
+on POSIX process-group semantics.
 
 ```bash
 go install github.com/dereksantos/cortex/cmd/cortex@latest
@@ -153,12 +164,13 @@ cat > .cortex/config.json <<'JSON'
 JSON
 ```
 
-The curated table lives in `cmd/cortex/curated.go`. At every session start,
-Cortex does one cheap, bounded (4s) check of OpenRouter's live catalog: if
-the curated pick has since been retired, it substitutes the next surviving
-curated model (or, failing that, discovers a `:free` model by name/context
-heuristic), prints one line naming old → new and why, and journals the
-event — all for that process only, never rewriting your config file.
+The curated table lives in `cmd/cortex/curated.go`, and Cortex keeps
+sessions on a working model by itself: if a model — curated or pinned — has
+been retired, or starts failing mid-session, Cortex heals onto the next
+curated pick, prints one line naming old → new and why, and journals the
+receipt (`cortex model` shows the recent ones). Your config file is never
+rewritten. See [`docs/model-self-healing.md`](docs/model-self-healing.md)
+and `network.self_heal` in [`docs/configuration.md`](docs/configuration.md).
 
 **Pinned models.** Replace the model IDs with the models you want for
 coding and Study:
@@ -192,19 +204,13 @@ one-time greeting turn before the prompt. With a working backend configured
 as above, that greeting is your first green turn — the model introduces
 itself and the REPL is ready.
 
-If you skip step 2 entirely and just run `cortex` from a real terminal with
-**no** config file anywhere and no `$CORTEX_BACKEND` set, you don't need to
-write a config by hand: `cortex` walks you through it — asks for an
-OpenRouter API key (get one free at https://openrouter.ai/keys), stores it
-in the macOS Keychain, and writes `~/.cortex/config.json` with the curated
-free-model pick for you, before the greeting turn fires. Press Enter with
-no key to skip; `cortex` then falls back to targeting `localhost:4000` and
-reports a connection error after a few retries, same as before. This
-prompt only runs on the interactive REPL (`cortex` / `cortex resume`) from
-a real terminal — a piped/scripted/CI invocation with nothing configured
-prints one hint line instead and behaves exactly as it did before. See
-[`docs/configuration.md`](docs/configuration.md) for the full chain
-(env/Keychain key reuse, local Ollama detection) and what gets written.
+If you skip step 2 entirely and run `cortex` from a real terminal with no
+config anywhere, it walks you through setup: asks for an OpenRouter API key
+(free at https://openrouter.ai/keys), stores it in the macOS Keychain, and
+writes `~/.cortex/config.json` with the curated free-model pick before the
+greeting fires. Press Enter with no key to skip. Piped/scripted/CI
+invocations get one hint line instead. See
+[`docs/configuration.md`](docs/configuration.md) for the full chain.
 
 A useful first prompt:
 
@@ -269,11 +275,15 @@ Cortex separates three things that are often conflated:
    `memory_forget` to maintain free-form notes.
 
 `recall` bridges the working set back to the transcript. `/compact` remains a
-manual summarization safety net, not the primary memory mechanism.
+manual summarization safety net, not the primary memory mechanism. Each turn
+is also captured to an append-only journal — the record `study` can read on
+demand and the background learning pass (`cortex learn`) mines for notes
+worth promoting.
 
 Read the full designs in
-[`docs/context-architecture.md`](docs/context-architecture.md) and
-[`docs/memory-tools.md`](docs/memory-tools.md).
+[`docs/context-architecture.md`](docs/context-architecture.md),
+[`docs/memory-tools.md`](docs/memory-tools.md), and
+[`docs/learning-loop.md`](docs/learning-loop.md).
 
 ## What Cortex can do
 
@@ -292,16 +302,13 @@ Read the full designs in
   implementation work — it reads, edits, and verifies (via `bash`) against a
   goal, then reports back what it did.
 
-The Study subagent is intentionally narrower than the coder: it can only use
-`outline`, `grep`, and targeted `read_file`. It cannot edit, run commands,
-access the parent conversation, write memory, or recursively invoke Study.
-The `agent` subagent is broader than Study — it can write, edit, and run
-`bash` — but stays bounded: it is capped to one level of nesting, any Risky
-shell command inside it is treated as Blocked (no interactive operator on
-that seam), and it excludes the same session-scoped tools Study excludes
-(`recall`, the memory tools, the context tools). By default it runs as the
-same model the coder is currently running as (following `/model` switches);
-an optional `model` argument pins a different model for one call. See
+The Study subagent is intentionally narrower than the coder: `outline`,
+`grep`, and targeted `read_file` only — no edits, no commands, no access to
+the parent conversation, no recursion. The `agent` subagent is broader — it
+can write, edit, and run `bash` — but stays bounded: one level of nesting,
+Risky shell treated as Blocked, and none of the session-scoped tools
+(`recall`, memory, context). It runs as the coder's current model unless a
+per-call `model` argument pins another. See
 [`docs/agent-tool.md`](docs/agent-tool.md) for the design decisions and
 `tools.enable_agent` in Configuration to disable it.
 
@@ -342,6 +349,7 @@ cortex resume [id]                  resume a session; defaults to latest
 cortex turn [--session id] [--json] <input...>
                                   run one headless turn
 cortex study <path> [goal...]       run the read-only Study subagent
+cortex learn [--project <name>]     run one background learning pass over the journal
 cortex change <start|commit|status> local one-change-at-a-time git lifecycle
 cortex serve [--port <n>]           local HTTP/SSE adapter for the web UI (loopback-only, Host/Origin allowlist)
 cortex scan [--json] [--root <path>] [--register]
@@ -450,7 +458,10 @@ Start with [`docs/context-architecture.md`](docs/context-architecture.md),
 
 - interactive, headless, resumable, and Discord-driven sessions;
 - bounded two-zone context with exact-message recall;
-- durable model-curated notes and append-only turn capture;
+- durable model-curated notes, append-only turn capture, and a background
+  learning pass over the journal (`cortex learn`);
+- model self-healing: discovery, classified failure diagnosis, and fallback
+  onto a curated free suite when a model is retired or failing;
 - coding, navigation, shell, public-web, and context-curation tools;
 - separate code and Study model bindings across OpenAI-compatible backends.
 
@@ -460,7 +471,7 @@ Start with [`docs/context-architecture.md`](docs/context-architecture.md),
 - model/backend compatibility and reliable tool calling;
 - long-horizon retention and recall evaluation;
 - configuration stability and context-management policy;
-- the next cognition/Think/Dream layer, if evidence justifies reviving it.
+- continual learning beyond the current journal-mining pass.
 
 **Deliberately deferred**
 
@@ -502,6 +513,8 @@ pkg/config/        layered configuration
 - [`docs/configuration.md`](docs/configuration.md) — every config field, `tools.*` gate, and env var
 - [`docs/context-architecture.md`](docs/context-architecture.md) — two-zone context and citation recall
 - [`docs/memory-tools.md`](docs/memory-tools.md) — model-driven durable memory
+- [`docs/learning-loop.md`](docs/learning-loop.md) — the background learning pass over the journal
+- [`docs/model-self-healing.md`](docs/model-self-healing.md) — model discovery, fallback, and diagnosis
 - [`docs/engine-unification.md`](docs/engine-unification.md) — shared agent-loop design and shipped tracker
 - [`docs/study-subagent.md`](docs/study-subagent.md) — bounded read-only Study architecture
 - [`docs/archive.md`](docs/archive.md) — the system before Cortex centered on Cortex

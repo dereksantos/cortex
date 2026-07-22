@@ -23,7 +23,7 @@ func TestReadmeSurface(t *testing.T) {
 
 	t.Run("documents every command", func(t *testing.T) {
 		for _, cmd := range []string{
-			"cortex", "resume", "turn", "study", "change", "serve", "scan", "project", "discord", "study-eval", "model", "version",
+			"cortex", "resume", "turn", "study", "learn", "change", "serve", "scan", "project", "discord", "study-eval", "model", "version",
 		} {
 			if !strings.Contains(readme, cmd) {
 				t.Errorf("README.md does not mention command %q", cmd)
