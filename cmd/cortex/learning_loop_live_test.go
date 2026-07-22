@@ -52,6 +52,15 @@
 //	                       have. Wall-clock is the enforced budget; a later
 //	                       slice can add token accounting if this gate proves
 //	                       too coarse.)
+//	G5 Why over what     — ARM-BACKGROUND never saves the decoy: the scenario
+//	                       plants a real file in the workspace and a turn
+//	                       that reads a constant out of it, so the fact is
+//	                       fully recoverable from the tree (the freshest
+//	                       "what"). A note restating it would go stale and
+//	                       contradict the tree — learnSystem's why-over-what
+//	                       paragraph exists to prevent exactly this write.
+//	                       Additive to think-dream-eval.md's ø table (which
+//	                       stands unchanged); see docs/learning-loop.md.
 //
 // Reported, not gated (per the doc): which rep's learn pass actually wrote
 // the winning note, latency distribution, and false-positive note content.
@@ -90,6 +99,30 @@ const (
 	llNeedleBCodeword = "PRISM-08"   // explicit "remember that..." — both arms should catch it
 )
 
+// llDecoyConst/llDecoyValue are G5's why-over-what decoy: a constant planted
+// in a REAL workspace file (llWriteDecoyFile) and read aloud by a scenario
+// turn. Unlike the needles, this fact IS re-derivable — the tree is its
+// freshest source — so a Learn pass tuned to why-over-what must not save it.
+const (
+	llDecoyConst = "maxQueueRetries"
+	llDecoyValue = "7"
+	llDecoyPath  = "internal/foo/retry.go"
+)
+
+// llWriteDecoyFile plants the decoy source file the what-decoy turn reads.
+func llWriteDecoyFile(t *testing.T, ws string) {
+	t.Helper()
+	dir := filepath.Join(ws, filepath.Dir(llDecoyPath))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir decoy dir: %v", err)
+	}
+	src := "package foo\n\n// maxQueueRetries bounds transient-queue retry attempts.\nconst " +
+		llDecoyConst + " = " + llDecoyValue + "\n"
+	if err := os.WriteFile(filepath.Join(ws, llDecoyPath), []byte(src), 0o644); err != nil {
+		t.Fatalf("write decoy file: %v", err)
+	}
+}
+
 // llScriptedTurn is one turn in the shared scripted session, in order.
 type llScriptedTurn struct {
 	label string
@@ -114,6 +147,15 @@ func llScenario(noiseTurns int) []llScriptedTurn {
 			label: "needle-b-explicit",
 			input: "Please remember this for future sessions: our incident severity escalation marker is the codeword " +
 				llNeedleBCodeword + " — that's what we page on-call with when a Sev1 breaches its SLA.",
+		},
+		{
+			// G5's what-decoy: the answer passes through the turn (and so
+			// the journal), but the fact's freshest source is the file
+			// itself — saving it as a memory note is the exact staleness
+			// trap learnSystem's why-over-what paragraph forbids.
+			label: "what-decoy-read",
+			input: "Read " + llDecoyPath + " and tell me what " + llDecoyConst + " is currently set to — " +
+				"just read it, don't change anything.",
 		},
 	}
 	for i := 1; i <= noiseTurns; i++ {
@@ -186,7 +228,31 @@ func llMemoryNoteCount(ws string) int {
 type llRepResult struct {
 	needleAHit, needleBHit bool
 	noteCount              int
+	decoySaved             bool          // G5: a note restates the tree-recoverable decoy
 	learnElapsed           time.Duration // zero for ARM-FOREGROUND
+}
+
+// llDecoyNoteSaved reports whether any memory note restates the decoy —
+// G5's measurement, greping note bodies for the planted constant's name.
+func llDecoyNoteSaved(ws string) bool {
+	dir := filepath.Join(ws, ".cortex", "memory")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || e.Name() == "INDEX.md" {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(body), llDecoyConst) {
+			return true
+		}
+	}
+	return false
 }
 
 // llRunArm runs the shared scenario into a fresh workspace, optionally
@@ -197,6 +263,7 @@ type llRepResult struct {
 func llRunArm(t *testing.T, bin string, background bool, noiseTurns int) llRepResult {
 	t.Helper()
 	ws := t.TempDir()
+	llWriteDecoyFile(t, ws)
 
 	for _, turn := range llScenario(noiseTurns) {
 		llRunTurn(t, bin, ws, turn.label, turn.input)
@@ -213,6 +280,7 @@ func llRunArm(t *testing.T, bin string, background bool, noiseTurns int) llRepRe
 	res.needleAHit = strings.Contains(aReply, llNeedleACodeword)
 	res.needleBHit = strings.Contains(bReply, llNeedleBCodeword)
 	res.noteCount = llMemoryNoteCount(ws)
+	res.decoySaved = llDecoyNoteSaved(ws)
 	return res
 }
 
@@ -221,12 +289,12 @@ func llRunArm(t *testing.T, bin string, background bool, noiseTurns int) llRepRe
 func llReportScoreboard(t *testing.T, fg, bg []llRepResult) {
 	t.Helper()
 	t.Logf("--- learning-loop scoreboard (rep x arm) ---")
-	t.Logf("%-4s %-12s %-10s %-10s %6s %10s", "rep", "arm", "needle-a", "needle-b", "notes", "learn_ms")
+	t.Logf("%-4s %-12s %-10s %-10s %6s %6s %10s", "rep", "arm", "needle-a", "needle-b", "notes", "decoy", "learn_ms")
 	for i := range fg {
-		t.Logf("%-4d %-12s %-10v %-10v %6d %10s", i+1, "foreground", fg[i].needleAHit, fg[i].needleBHit, fg[i].noteCount, "-")
+		t.Logf("%-4d %-12s %-10v %-10v %6d %6v %10s", i+1, "foreground", fg[i].needleAHit, fg[i].needleBHit, fg[i].noteCount, fg[i].decoySaved, "-")
 	}
 	for i := range bg {
-		t.Logf("%-4d %-12s %-10v %-10v %6d %10dms", i+1, "background", bg[i].needleAHit, bg[i].needleBHit, bg[i].noteCount, bg[i].learnElapsed.Milliseconds())
+		t.Logf("%-4d %-12s %-10v %-10v %6d %6v %10dms", i+1, "background", bg[i].needleAHit, bg[i].needleBHit, bg[i].noteCount, bg[i].decoySaved, bg[i].learnElapsed.Milliseconds())
 	}
 }
 
@@ -329,6 +397,21 @@ func TestLearningLoop_Live(t *testing.T) {
 		if totalMS > budgetMS {
 			t.Errorf("learn-pass wall-clock %dms exceeds the pinned budget %dms — a background pass that wins G2 "+
 				"by burning an unbounded budget fails the 'simplified' premise", totalMS, budgetMS)
+		}
+	})
+
+	// G5 — why over what: the background pass never saves the decoy, a fact
+	// whose freshest source is the tree (learnSystem's why-over-what
+	// paragraph). Gated on the background arm only — the foreground coder's
+	// in-the-moment choices are its own discipline (memory-tools.md), not
+	// this eval's subject.
+	t.Run("G5_why_over_what", func(t *testing.T) {
+		for i, r := range bgResults {
+			if r.decoySaved {
+				t.Errorf("rep %d: background saved a note restating %s — a tree-recoverable fact; "+
+					"why-over-what violated (the note goes stale the moment %s changes)",
+					i+1, llDecoyConst, llDecoyPath)
+			}
 		}
 	})
 }

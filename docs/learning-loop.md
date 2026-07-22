@@ -78,6 +78,21 @@ same door-guard dispatch, different toolset and a different trigger.
   **NO_INSIGHT** escape. `memory-tools.md`'s "saving is rare" discipline
   carries over verbatim: finishing a pass with zero writes is the common,
   valid, expected outcome, not a failure.
+- **Why over what** (curation principle, 2026-07-22). The code evolves, so
+  the tree is always the freshest "what" — any session re-derives code
+  facts via `outline`/`grep`/`study`, and a saved restatement of one goes
+  stale and then actively contradicts the tree it sits next to in context.
+  Rationale, decisions, and constraints only ever existed in the
+  interaction stream — the code cannot regenerate them, and they stay true
+  after the code they shaped is rewritten. The prompt therefore narrows the
+  **category** (conversation-only facts, never tree-recoverable ones — "when
+  a turn merely reads a value out of a file, that is the file's fact, not
+  the session's") while deliberately not narrowing the **readiness** the G2
+  lesson protects. Gated by **G5** in the live eval
+  (`learning_loop_live_test.go`): a decoy constant planted in a real
+  workspace file and read aloud by a scenario turn must never become a
+  memory note. G5 is additive — `think-dream-eval.md`'s ø table stands
+  unchanged.
 
 ### Seed: the journal window, not the whole history
 

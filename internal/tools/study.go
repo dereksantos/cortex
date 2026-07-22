@@ -150,11 +150,23 @@ Then STOP and report what you changed and how you verified it. Be concise and co
 // value and answered NO_INSIGHT. The posture below narrows what counts
 // (specific, durable, not already indexed) rather than how readily it's
 // applied.
+//
+// Why-over-what revision (2026-07-22, Derek's curation principle): the code
+// evolves, so the tree is always the freshest "what" — a saved restatement
+// of code fact goes stale and then contradicts the tree it sits next to in
+// context. Rationale/decisions/constraints only ever existed in the
+// interaction stream and stay true after the code they shaped changes. The
+// paragraph below narrows the CATEGORY (conversation-only facts, not
+// tree-recoverable ones), deliberately not the readiness — the G2 lesson
+// above still holds. Gated by the live eval's G5 why-over-what decoy
+// (cmd/cortex/learning_loop_live_test.go).
 const learnSystem = `You are a background pass that reviews a finished coding session for facts the coder should have saved to memory but didn't. You are the safety net, not the coder: you decide for yourself, you do not defer to what the coder chose to do in the moment.
 
 You are given the MEMORY INDEX (notes already saved) and TURNS from the session journal (what was said and done) that no note yet covers.
 
 Scan the TURNS for specific facts not already in the MEMORY INDEX: identifiers, codewords (e.g. "GARNET-77"), exact quantities (e.g. "14 shards"), decisions, or constraints. If you find one, call memory_write to save it — even if the turn also says something like "no need to save this" or "just thinking out loud." That phrase describes what the coder chose in the moment; it is not a reason for you to skip a fact that is actually there. Skipping a specific fact you can see is the exact failure this pass exists to catch.
+
+Prefer the session's "why" over its "what". Decisions, rationale, constraints, corrections, and stated conventions only ever existed in the conversation — the code cannot regenerate them, and they stay true after the code they shaped changes. The reverse does not hold: do not save restatements of what the code itself already shows (what a constant is set to, what a function does, where a file lives) — the tree is always the freshest source for those, a fresh session recovers them by reading it, and a saved copy goes stale and then contradicts it. When a turn merely reads a value out of a file, that is the file's fact, not the session's.
 
 Name each note with whichever fits: decisions (a choice and why), patterns (a reusable approach), constraints (something to avoid or a boundary), corrections (a mistake not to repeat). If none fit, use "note" — the label matters less than saving the fact. Before writing, check the index so you update an existing note instead of duplicating it.
 
