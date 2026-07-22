@@ -85,15 +85,25 @@ Sessions, notes, journal, and citations all live as plain files under
 
 ## Install
 
-You need Go 1.26 and an OpenAI-compatible model endpoint. Cortex runs on
-**macOS and Linux**; Windows isn't built or tested yet — the harness leans
-on POSIX process-group semantics.
+Cortex runs on **macOS and Linux** (Windows isn't built or tested yet — the
+harness leans on POSIX process-group semantics). You'll also want a model
+to talk to — local or hosted; [Quick start](#quick-start) covers both.
+
+**One line** — installs the latest release binary to `~/.local/bin`
+(read [`scripts/install.sh`](scripts/install.sh) first if you like; while
+binary releases are still new it falls back to `go install`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dereksantos/cortex/main/scripts/install.sh | bash
+```
+
+**With Go 1.26+**:
 
 ```bash
 go install github.com/dereksantos/cortex/cmd/cortex@latest
 ```
 
-Or build from source:
+**Or build from source**:
 
 ```bash
 git clone https://github.com/dereksantos/cortex.git
@@ -110,6 +120,26 @@ cortex --version   # or ./bin/cortex --version
 `cortex version` also works. The version string embeds the short git
 revision it was built from; override it at build time the standard way:
 `go build -ldflags "-X main.Version=1.2.3" -o bin/cortex ./cmd/cortex`.
+
+### Or hand it to your agent
+
+Already working with a coding agent? Paste this and let it do the setup:
+
+```text
+Install the Cortex coding harness (github.com/dereksantos/cortex) on this
+machine:
+
+1. Run: curl -fsSL https://raw.githubusercontent.com/dereksantos/cortex/main/scripts/install.sh | bash
+   (or `go install github.com/dereksantos/cortex/cmd/cortex@latest` if a
+   Go 1.26+ toolchain is available and you prefer it).
+2. Verify `cortex --version` prints a version, and tell me what it printed.
+3. Read the "Quick start" section of
+   https://raw.githubusercontent.com/dereksantos/cortex/main/README.md and
+   set up `.cortex/config.json` in my current project. Ask me one question
+   first: local Ollama model, or an OpenRouter API key?
+4. Don't launch cortex yourself — it's an interactive REPL. Just tell me
+   it's ready and that I start it by running `cortex`.
+```
 
 ## Quick start
 

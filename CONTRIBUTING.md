@@ -101,6 +101,30 @@ Commit messages: short, imperative, and specific about the change; a
 `type: summary` prefix (`fix:`, `feat:`, `docs:`, `refactor:`, `test:`,
 `chore:`) is a reasonable convention but not enforced.
 
+## Releases (maintainer)
+
+Releases are tag-driven: pushing a `v*` tag runs
+`.github/workflows/release.yml`, which invokes GoReleaser
+(`.goreleaser.yaml`) to cross-compile darwin/linux × amd64/arm64
+(`CGO_ENABLED=0`), attach checksummed archives to a GitHub Release, and
+generate grouped notes from conventional-commit prefixes. The flow:
+
+1. Move `CHANGELOG.md`'s `[Unreleased]` content under a new
+   `## [X.Y.Z] — YYYY-MM-DD` heading (leave a fresh empty `Unreleased`).
+2. `git commit -am "chore(release): vX.Y.Z"`
+3. `git tag -a vX.Y.Z -m "vX.Y.Z"`
+4. `git push origin main --follow-tags`
+
+Optional local dry-run before tagging:
+`goreleaser release --snapshot --clean --skip=publish`.
+
+Versioning is pre-1.0 semver: minor bumps may carry breaking changes,
+patch releases are fixes only. `scripts/install.sh` downloads whatever
+the latest release is — its archive-name reconstruction must stay in sync
+with `.goreleaser.yaml`'s `name_template` (both files say so). The
+Homebrew-tap section in `.goreleaser.yaml` stays commented until the tap
+repo and its token secret exist.
+
 ## Privacy
 
 The journal (`.cortex/journal/`) is local-only by design — nothing in it

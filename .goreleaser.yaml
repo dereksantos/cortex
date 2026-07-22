@@ -1,0 +1,92 @@
+# GoReleaser config (docs/model-self-healing.md era release plumbing; the
+# process itself is documented in CONTRIBUTING.md). Triggered by
+# .github/workflows/release.yml on a v* tag push. Free/OSS tier only.
+#
+# The archive name_template below is load-bearing: scripts/install.sh
+# reconstructs it (cortex_<version>_<os>_<arch>.tar.gz) to download the
+# right asset — change one, change both.
+version: 2
+
+project_name: cortex
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cortex
+    main: ./cmd/cortex
+    binary: cortex
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: "Features"
+      regexp: "^feat"
+      order: 0
+    - title: "Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - "^docs"
+      - "^test"
+      - "^chore"
+
+release:
+  github:
+    owner: dereksantos
+    name: cortex
+  draft: false
+  prerelease: auto
+  header: |
+    See [CHANGELOG.md](https://github.com/dereksantos/cortex/blob/main/CHANGELOG.md)
+    for the curated summary of this release. Install:
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/dereksantos/cortex/main/scripts/install.sh | bash
+    ```
+
+# Homebrew tap — enable once (1) the dereksantos/homebrew-tap repo exists and
+# (2) HOMEBREW_TAP_GITHUB_TOKEN (fine-grained PAT, contents:write on that one
+# repo) is set as an Actions secret. Until then this stays commented so a tag
+# push can't fail at the tap-push step. Casks, not brews: GoReleaser v2.10+
+# deprecated the brews section for pre-built binaries.
+#
+# homebrew_casks:
+#   - name: cortex
+#     binaries:
+#       - cortex
+#     repository:
+#       owner: dereksantos
+#       name: homebrew-tap
+#       branch: main
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     homepage: "https://github.com/dereksantos/cortex"
+#     description: "Coding harness that prunes its own context, keeps its own notes, and learns as it goes — built for small local models"
