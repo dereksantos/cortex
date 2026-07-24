@@ -60,12 +60,15 @@ LiteLLM/local-gw — one protocol is the simplicity win), role routing,
 keychain keys, learned windows, XML tool-call fallback.
 
 **Need:**
-- HTTP timeout and bounded retry on `AgentRequest.Send` — today
-  `http.Client{}` has **no timeout**; a hung local server hangs the REPL.
-- Context-overflow handling for the *code* model (learned windows currently
-  only serve study).
-- Model catalog (existing TODO): a static table mapping system resources →
-  suggested role bindings. A table, not a service. Prior art: models.dev.
+- ~~HTTP timeout and bounded retry on `AgentRequest.Send`~~ — done: every
+  backend sets an `http.Client` timeout (`pkg/llm/openrouter.go:90`,
+  `openai_compat.go:147`, `anthropic.go:46`, `ollama.go:38`).
+- ~~Context-overflow handling for the *code* model~~ — done: shipped under
+  completion-roadmap C2 (`cmd/cortex/tool_deps.go`'s `learnWindow`), no
+  longer study-only.
+- ~~Model catalog (existing TODO)~~ — done: `cortex model` (`cmd/cortex/model.go`)
+  catalogs code/study role bindings and suggests a `models` config block
+  from detected system RAM.
 
 **Don't:** a provider zoo (everything local speaks OpenAI wire); streaming
 (polish, not production); native Anthropic/Gemini adapters until something
@@ -77,8 +80,10 @@ needs them.
 bash (stronger than most harnesses' default), tool-output truncation.
 
 **Need:**
-- Interrupt: Ctrl-C cancels the in-flight model call / tool instead of killing
-  the REPL (plumb `context.Context` through `Send` and `Execute`).
+- ~~Interrupt: Ctrl-C cancels the in-flight model call / tool instead of
+  killing the REPL~~ — done: `signal.NotifyContext` (`main.go:444`) plumbs a
+  cancelable context through the turn; `TurnResult.Interrupted` (`turn.go`)
+  reports it.
 - Possibly a dedicated `grep` tool — opencode and Claude Code both found models
   use structured search tools more reliably than bash invocations; small
   models more so. Defer until eval evidence; `bash grep/find` covers it today.
@@ -221,13 +226,11 @@ convention, status line, VCS-stamped version, table-driven tests.
   No pricing table yet, so `CostUSD=0` — tokens are the portable metric. This
   is the substrate the learning-curve eval (6b) stands on: you can't plot a
   curve without per-session rows.
-- Harness-level eval integration — **6b (next): the learning-loop runner.** A
-  `loop eval` mode (mirroring `study-eval`) that runs a fixture task set
-  cold (empty `.cortex/`) vs warm (after a priming session), scoring whether
-  capture+retrieve makes session N beat session 0 — Tier 2a scoped to the
-  loop. Its own self-contained runner (the `internal/eval/v2` grid framework
-  that was once the alternative host has since been removed). Emits the same
-  `EvalCellResultPayload` rows (`ContextStrategy=cold|warm`).
+- ~~Harness-level eval integration — 6b (next): the learning-loop runner~~ —
+  done: the learning-loop gate (`cmd/cortex/learning_loop_eval_test.go` +
+  `learning_loop_live_test.go`) scores whether the background `Learn` pass
+  makes a later session beat an earlier one, cold vs. warm — see
+  [`learning-loop.md`](learning-loop.md).
 
 **Don't:** dashboards (the daemon was retired for a reason); telemetry; logs
 beyond the journal.

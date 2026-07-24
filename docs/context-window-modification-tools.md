@@ -411,8 +411,8 @@ func contextReorder(tc ToolCall, deps ToolDeps) (string, error) {
   "name": "context_adjust_watermarks",
   "description": "Dynamically adjust the working set watermarks (high and low) by the given deltas. Use when you want to reserve more space for active turns or tighten the budget for exploratory phases.",
   "parameters": {
-    "high_delta": {"type": "integer", "description": "Change to high watermark (positive = more space, negative = less). Range: -W/4 to +W/4."},
-    "low_delta": {"type": "integer", "description": "Change to low watermark (positive = more space, negative = less). Range: -W/4 to +W/4."}
+    "high_delta": {"type": "integer", "description": "Change to high watermark (positive = more space, negative = less). Range: -W/4 to +W/4 (see footnote¹)."},
+    "low_delta": {"type": "integer", "description": "Change to low watermark (positive = more space, negative = less). Range: -W/4 to +W/4 (see footnote¹)."}
   }
 }
 ```
@@ -451,10 +451,20 @@ func contextAdjustWatermarks(tc ToolCall, deps ToolDeps) (string, error) {
 ```
 
 **Safety considerations**:
-- Deltas bounded (±W/4 to prevent abuse)
+- Deltas bounded (±W/4 to prevent abuse, at defaults — see footnote¹)
 - Invariant maintained (lowWM <= highWM)
 - No immediate demotion (adjustment is passive)
 - All adjustments journaled
+
+¹ **Precise bound (as-built):** `internal/cache/workingset.go`'s
+`AdjustWatermarks` computes `maxDelta := ws.highWM / 2`, not a fixed `W/4`.
+That equals `±W/4` only at the default `tail_high_fraction` (0.5, i.e.
+`highWM ≈ W/2`) on the *first* call — and it's recomputed off the
+**current, possibly-already-mutated** `highWM` each call, so a config with a
+non-default fraction, or a run with prior adjustments already applied,
+bounds the next delta to `±(current highWM)/2`, not `±W/4` of the original
+window. `±W/4` is the right mental model at defaults; the code is
+authoritative for the exact number in any other state.
 
 ---
 

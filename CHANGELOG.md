@@ -15,6 +15,10 @@ removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.
 for what existed before and why it went.
 
 ### Added
+- Curl installer (`scripts/install.sh`, checksum-verified, `go install`
+  fallback) and a tag-driven GoReleaser release pipeline
+  (`.goreleaser.yaml`, `.github/workflows/release.yml`); the README's
+  "hand it to your agent" paste-ready install prompt.
 - Model self-healing (`docs/model-self-healing.md`): typed classification of
   model-call failures; a mid-session healing ladder that falls back onto the
   curated free OpenRouter suite and re-issues the pending request on the
@@ -22,8 +26,28 @@ for what existed before and why it went.
   turn-error diagnosis lines; `model.failure` journal receipts and a recent
   model-events section in `cortex model`. Gated by `network.self_heal`
   (default on).
+- A background learning loop (`docs/learning-loop.md`): `cortex learn` and
+  the loop scheduler's `kind:"learn"` firing run a bounded Learn subagent
+  over the journal since the last cursor, writing durable notes through the
+  same memory store the turn-start index reads from — curated by a
+  why-over-what principle (rationale and decisions, never code facts, so
+  notes can't go stale against the tree). User-tier memory (dual
+  project/user stores, scoped tools, tiered index injection) and a
+  cross-project `LearnUser` promotion pass generalize recurring
+  project-tier notes up to the user tier (`docs/cross-source-learning.md`).
+- A general-purpose `agent` tool (`docs/agent-tool.md`): a bounded
+  implementation subagent — Study's read tools plus `write_file`/
+  `edit_file`/`bash` — for handing off one self-contained unit of work
+  end to end, gated by `tools.enable_agent`.
+- `cortex scan` / `cortex project` and the coder-only `scan_landscape` tool:
+  discover local AI-tool harnesses and runtimes, and maintain the
+  multi-project registry `cortex serve` and the loop scheduler read from.
+- `prompt.file` / `prompt.append` config for system-prompt customization —
+  replace or extend the built-in system prompt.
 - Persistent, resumable Cortex REPL, a headless `turn` driver, a `cortex serve`
-  web UI, and a Discord adapter.
+  web UI, and a Discord adapter. The web UI now includes a dashboard,
+  a projects screen, and a memory screen (tier-tagged note browsing, note
+  view/delete, and recent learning activity).
 - Bounded two-zone session context with citation-grounded demotion, outline
   folding, persistent restoration, and exact-message `recall`.
 - Model-driven durable memory through `memory_write`, `memory_read`,

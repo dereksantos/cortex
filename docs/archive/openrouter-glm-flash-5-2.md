@@ -243,7 +243,7 @@ After configuration:
 
 ## Related Documentation
 
-- [Cortex README](../README.md)
-- [Cortex Configuration](../CLAUDE.md#configuration)
+- [Cortex README](../../README.md)
+- [Cortex Configuration](../../CLAUDE.md#configuration)
 - [OpenRouter Models](https://openrouter.ai/models)
 - [GLM Flash 5.2](https://openrouter.ai/models/zhipu/glm-flash-5-2)

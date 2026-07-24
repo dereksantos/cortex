@@ -239,7 +239,11 @@ output     MaxTokens (existing reserve)
   the citations, so nothing becomes unreachable.
 - Steady-state prompt size is bounded by
   `envelope + outline cap + index + tail high-watermark + output` — flat
-  forever. `/compact` is repurposed to force a demotion+fold manually.
+  forever. `/compact` stays the classic study-based wholesale compaction
+  (chunk-and-fold via `compactSummarize`, `cmd/cortex/session.go`'s
+  `Compact`) — kept as a safety net for pathological single-turn blowups,
+  not repointed at the mechanical demotion/fold path (see the status note
+  above).
 
 ## Turn-time flow (hot path is mechanical)
 
@@ -270,7 +274,7 @@ window.
 | Outline entry renderer | reuse `captureTurn`'s distillation | **reuse** |
 | `recall(citation)` | `internal/tools` + a `ToolDeps` method | **new (trivial)** |
 | Outline fold | existing `Summarize` | **reuse** |
-| `Compact` | retired after P2 (kept as `/compact` = force demote+fold) | **retire** |
+| `Compact` | kept as-is, unreachable in normal operation post-P2 (`/compact` still calls the original chunk-and-fold `Compact`, `cmd/cortex/session.go:466`, not the mechanical demote/fold path) | **keep (safety net)** |
 | Anthropic `cache_control` | breakpoint at end of zone A (today: system + last-user) | **change** |
 | Transcript / resume | unchanged log; resume replays through the same policy | **reuse** |
 

@@ -122,7 +122,7 @@ type SubAgentRunner interface {
 var Study = Subagent{
 	Name: "study", Role: "study", System: studySystem,
 	Tools:  []Tool{OutlineTool, GrepTool, ReadFile},
-	Bounds: Bounds{MaxTokens: 12_000, MaxIter: 10, ReadBudgetBytes: 96_000},
+	Bounds: Bounds{MaxTokens: 8_192, MaxIter: 12, ReadBudgetBytes: 96_000},
 }
 ```
 
@@ -319,12 +319,12 @@ package tools
 
 const FunctionGrep = "grep"
 
-// grep is PURE (filesystem only) — a ToolCall method, like outline; no ToolDeps.
-func (tc ToolCall) Grep(root string) (string, error) // root scopes the walk; ConfinePath already vetted the path
+func grep(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) // root scopes the walk; ConfinePath already vetted the path
 
 const (
-	grepMaxHits     = 100      // cap so a broad pattern can't flood context
-	grepMaxFileSize = 1 << 20  // skip files larger than 1 MiB
+	defaultGrepMaxHits        = 100  // cap so a broad pattern can't flood context
+	defaultGrepLineCap        = 1200 // window width for a long matching line, centered on the match
+	defaultGrepMaxOutputBytes = 6000 // total-output ceiling: long-line hits (journal JSONL) flood a small model's window even after the per-line cap
 )
 
 // grepFiles walks root (reusing projectscan.LoadIgnoreSet), matches re per line,
@@ -332,8 +332,24 @@ const (
 // bufio — no exec. CHECKS ctx.Err() in the walk so the per-request deadline /
 // cancellation actually interrupts a scan of a huge tree (a bare WalkDir would
 // ignore the deadline).
-func grepFiles(ctx context.Context, root, pattern string, cap int) (string, error)
+func grepFiles(ctx context.Context, root string, re *regexp.Regexp, cap int) (string, error)
 ```
+
+**As-built note:** `ToolCall` moved to `internal/agent` during the engine
+unification, so `grep` is a free function `grep(ctx, tc, deps)` dispatched by
+name (`grep.go:47`), not a `ToolCall` method as sketched above; `grepFiles`
+(`grep.go:263`) takes a compiled `*regexp.Regexp`, not a pattern string. The
+caps also grew a third member: `defaultGrepMaxOutputBytes` (6000) is a
+**total-output ceiling** across all hits — added alongside the original
+`defaultGrepMaxHits`/line-cap because a broad match over long lines (e.g.
+journal JSONL) could flood a small model's context even with the per-hit
+cap and hit count capped; `defaultGrepLineCap` (1200) windows a long
+matching line **centered on the match** rather than truncating from the line
+head, so the match itself always survives the window. These two were the
+keystone fixes that drove the ø study-eval gate green during the engine
+unification (grep match-centering + the output ceiling stop the
+journal-spiral → fleet-overload cascade the earlier line-head-truncating
+cap allowed).
 
 ### Decisions for grep
 
@@ -499,15 +515,17 @@ added field discriminates that failure:
   operation too, not just under the eval — it feeds debugging and the eval reads the
   same record. **One shape, emitted every run** — never measure eval-only
   instrumentation that's absent in production.
-  - **Shipped status (deferred):** the eval emits the full `StudyEvalResult`-shaped
+  - **Shipped status:** the eval emits the full `StudyEvalResult`-shaped
     row — every mechanical field (`stop_reason`, `outlines`/`greps`/`reads`/`tool_errs`,
     `read_bytes`/`bounded`, tokens incl. `peak_output_tokens`/`max_tokens_clamped`) — as
     **stdout JSONL** (`studyEvalRow`), which is the real ø discrimination and what
     `verify-study.sh` asserts (`json:"read_bytes|bounded"`). The **journal-sink**
-    alignment (a `study.result` entry sharing `EvalCellResultPayload`'s vocabulary) was
-    **deferred** to keep the refactor's net source LOC inside the contracted band; the
-    row shape is identical, so adding the `journal.NewWriter` path later is a thin wiring
-    change, not a new format.
+    alignment landed too: `internal/journal/study.go` defines `TypeStudyResult`
+    (`study.result`) and `StudyResultPayload` (embeds `EvalCellResultPayload`, plus
+    the study-specific extension block — `goal_hit`, `stop_reason`, per-tool counts,
+    …); `cmd/cortex/study_eval.go`'s `emitStudyResult` writes one entry per rep into
+    `.cortex/journal/study/` alongside the stdout row (best-effort — a journal-write
+    hiccup never fails the ø gate). Same shape, two sinks, as designed.
 
 ### Align with the canonical eval sink (don't invent a third format)
 
@@ -785,4 +803,11 @@ _Append-only._
   `sa.Bounds.MaxTokens` into `requestFor`; the profile literals carry it explicitly.
   A profile with `MaxTokens` unset would silently reintroduce the 2026-06-28 north
   runaway — so it is part of the `Bounds` "safety net" list, not optional.
+- **2026-07-24** **`Study`'s bounds retuned** (`internal/tools/tools.go`): `MaxTokens`
+  12K→**8,192**, `MaxIter` 10→**12**, `ReadBudgetBytes` unchanged at 96,000. Lower
+  `MaxTokens` reaches the runaway clamp faster and leaves wall-clock room for
+  `runLoop`'s salvage re-ask (§1's `Bounds` comment); the extra iterations offset
+  that with more locate-then-read room. Noted here rather than silently rewriting
+  the 2026-06-28 entry above — the invariant it records (mandatory, non-zero
+  `MaxTokens`) still holds, only the tuned values moved.
 ```

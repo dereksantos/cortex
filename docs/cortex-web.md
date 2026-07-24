@@ -234,12 +234,12 @@ Scope:
   they share nothing in-process). Idle sessions evict; resume re-hydrates
   from the transcript.
 - **Single-writer session lock** — per-session-file lock; second opener gets
-  a clear "session busy in another process" error. Implementation (decided):
-  extract the journal's portable `acquireExclusiveLock`
-  (`internal/journal/lock_unix.go` / `lock_windows.go`) into a shared
-  internal package and reuse it — sessions get the same guarantee segments
-  already have. This fixes today's latent REPL-vs-adapter corruption and is a
-  prerequisite for *any* second surface.
+  a clear "session busy in another process" error. Implementation (as-built):
+  the journal's portable file lock was extracted to `internal/fslock`
+  (`fslock.Lock`; `flock_windows.go` on Windows) and reused by the journal
+  writer itself (`internal/journal/writer.go`) — sessions get the same
+  guarantee segments already have. This fixes today's latent REPL-vs-adapter
+  corruption and is a prerequisite for *any* second surface.
 - Design: handlers accept small interfaces (`SessionManager`, `Registry`)
   and are `httptest`-testable without a model; the live loop behind a scripted
   `Sender` fake as in existing loop tests.
@@ -263,7 +263,7 @@ Scope:
 - **Views**: project dashboard (registry + per-project session list + change
   status), session view (transcript render + input box + live SSE progress),
   landscape view (Phase 2 report, rendered), and a models view — role
-  bindings (code/study/reason/fast/embed) across the three scopes with a
+  bindings (code/study/embed) across the three scopes with a
   scope switcher, an effective-model column showing where each binding
   resolves from, and the discovered fleet (`/model/info`) to pick from.
 - **Implementation posture (decided): no-build vanilla JS.** Hand-written
@@ -391,7 +391,7 @@ doc, not by drive-by divergence.
 | D5 | P3 registry format | plain JSON file (pointer-only, rebuildable from scan) |
 | D6 | P4 HTTP stack | stdlib `net/http` + SSE; zero new dependencies |
 | D7 | P4 port + auth | default `localhost:7433`, flag-overridable; generated bearer token printed + written under `~/.cortex`. **Rev 2 (2026-07-19, as-built, Derek's decision):** the bearer token is gone — replaced by a strict Host/Origin allowlist (`hostOriginMiddleware`, `cmd/cortex/serve.go`) gating every `/api/...` request. Rationale: on a loopback-only bind the threats are DNS rebinding and cross-site request forgery, both Host/Origin problems a shared secret doesn't actually solve any better than an allowlist does, and a token carried in a URL is its own leak surface (history, referrer, scrollback); the UI now works with zero auth ceremony. See SECURITY.md's posture note. |
-| D8 | P4 session lock | extract `internal/journal`'s portable `acquireExclusiveLock` into a shared internal package; per-session-file lock |
+| D8 | P4 session lock | extract `internal/journal`'s portable file lock into a shared internal package; per-session-file lock. **As-built:** landed as `internal/fslock` (`fslock.Lock`), used by `internal/journal/writer.go` |
 | D9 | P5 UI stack | no-build vanilla JS via `go:embed`; no node toolchain, no vendored framework |
 | D10 | P6 triggers | intervals + manual run-now in v1; no cron parser; cron syntax may layer on later. **Rev 2 (2026-07-14, loops v2, as-built):** self-pacing borrowed from Claude Code's `/loop` skill — a firing may end its reply with `NEXT: <n>m — <reason>` (one-gap override, clamped [floor, 24h], reason journaled and shown in the UI) or `DONE — <reason>` (loop disables itself, reason persisted to the spec) |
 | D11 | P6 bounds (provisional) | ~~cadence floor 15 min~~ → **floor 5 min** (loops v2), default daily, 25-turn + token cap per run, overlap suppression; tune from `loop.run` history. **Rev 2:** three consecutive `failed` runs auto-disable the loop (`DisabledReason: "3 consecutive failures"`, streak resets on success) — the ralph three-strike discipline applied to loops |

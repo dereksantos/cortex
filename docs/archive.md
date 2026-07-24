@@ -215,5 +215,16 @@ the root [`ROADMAP.md`](../ROADMAP.md); the doc is in git history.
 - **CI**: `release.yml` (cross-platform `cortex` binaries) and `eval.yml`
   (eval runs). `test.yml` was repointed to build `cmd/cortex`.
 
-No Cortex distribution pipeline exists yet; rebuild one when Cortex is
-ready to ship.
+A new distribution pipeline shipped 2026-07-22: a curl installer
+(`scripts/install.sh`, with `go install` fallback) and a GoReleaser
+release workflow (`.goreleaser.yaml`, `.github/workflows/release.yml`).
+
+## Model-pinning notes for `zhipu/glm-flash-5-2` (archived 2026-07-24)
+
+[`openrouter-glm-flash-5-2.md`](archive/openrouter-glm-flash-5-2.md) and
+[`quickref-glm-flash-5-2.md`](archive/quickref-glm-flash-5-2.md) documented
+pinning that OpenRouter model as the code role. The model was never part of
+the curated free fleet (`cmd/cortex/curated.go`) and nothing in the tree
+references it; both docs also predate the `/model` REPL command's final
+shape. Kept for the config-pinning walkthrough, which still illustrates the
+`models.code` override pattern.

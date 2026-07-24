@@ -302,6 +302,32 @@ satisfied by the tool vocabulary move; the request/response `Message` types were
 simply never relocated (no cycle risk either way, since `internal/agent` still
 imports only `pkg/llm`). The phase is marked ☑ for the topology work that shipped.
 
+**As-built drift (2026-07-24).** All seam names below survive; several
+signatures grew params/returns after this doc was written, as the engine
+picked up salvage, live status, and thinking-model support. Code is
+authoritative for exact shapes — this note just flags where they diverge:
+
+- **`Sender.Send`** now returns `(resp *AgentResponse, streamed bool, err
+  error)` — the extra `streamed` bool reports whether the sender already
+  echoed assistant prose to the terminal, so the caller doesn't double-print
+  (`cmd/cortex/loop.go:31-33`).
+- **`runLoop`** gained two trailing params — `appendMsg func(Message)` (the
+  caller's message-recording hook: `cs.Append` for the coder, a plain slice
+  append for a subagent) and `onStatusUpdate func(lastPromptTokens, maxTokens
+  int)` (drives the REPL's live context gauge) — and now returns `(string,
+  loopStats, error)` instead of just `(string, error)` (`loop.go:193`).
+- **`requestFor`** gained a trailing `dialect llm.Dialect` param selecting the
+  effort-translation dialect (`llm.DialectTemplateKwargs` vs
+  `llm.DialectOpenRouter`) per docs/thinking-models.md (`loop.go:546`).
+- **`Bounds`** gained `TokenBudget int` and `EscalateEffort bool` (the
+  stuck-guard's one-shot reasoning-effort escalation, off by default —
+  `internal/agent`'s `Bounds` struct).
+- **`Toolset`** gained `BeforeBatch func()` and `AfterToolResult func()`
+  hooks alongside `Tools`/`Dispatch`.
+- **`streamingSender()`** was renamed **`coderSender()`** (`loop.go:585`) —
+  same role (the coder turn's round-trip sender), name changed to stop
+  implying it's the only sender that streams.
+
 ## Verification
 
 Run `scripts/verify-study.sh` after each phase — it's the executable form of the

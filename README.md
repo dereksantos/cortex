@@ -358,6 +358,7 @@ per-call `model` argument pins another. See
 | `remove_path` | Delete within the workspace; root, `.git`, and `.cortex` are refused. |
 | `web_search` | Search the public web for ranked titles, URLs, and snippets. |
 | `fetch_url` | Fetch bounded text from a public HTTP(S) URL; private/local destinations are refused. |
+| `scan_landscape` | Survey known agent harnesses and local model runtimes under the user's home directory — read-only, existence-only, never walks projects; writes a project-scoped `landscape` memory note. |
 | `memory_write`, `memory_read` | Create/update a durable named note, or read one in full. |
 | `memory_search`, `memory_forget` | Find notes by keyword, or remove an obsolete note. |
 | `recall` | Fetch exact messages behind a session-outline citation; pass `budget` for a compact digest instead. |
@@ -400,6 +401,8 @@ helper, and writing table-driven tests):
 
 | REPL command | Purpose |
 |---|---|
+| `/help` | List the slash commands. |
+| `/context` | Show the current session's context-window map — the stable prefix vs. hydrated tail, plus the last request's prompt/cache usage. |
 | `/compact` | Summarize the conversation now as a safety net. |
 | `/clear` | Start a fresh session. |
 | `/sessions` | List persisted session IDs. |

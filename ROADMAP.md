@@ -40,6 +40,15 @@ harness; the web app is a parallel track with its own self-contained plan
   `web_search` + SSRF-safe `fetch_url`.
 - **Layered config + multi-backend** — `pkg/llm` providers (Anthropic,
   Ollama, OpenRouter, OpenAI-compatible); per-role `code` / `study` models.
+- **Model self-healing** — a mid-session `Sender` decorator that detects a
+  healable failure (model missing, rate-limited, or erroring after the
+  transport's own retries), marks the model dead for the session, and
+  rebinds to a live replacement from the curated ladder without dropping the
+  in-flight turn. See [`docs/model-self-healing.md`](docs/model-self-healing.md).
+- **Background learning loop** — `cortex learn` runs a bounded `Learn`
+  subagent over the journal since the last cursor, off the coder's critical
+  path, writing durable notes through the same memory store the turn-start
+  index reads. See [`docs/learning-loop.md`](docs/learning-loop.md).
 - **Headless + adapters** — `cortex turn` (one-shot), `cortex change` (git
   lifecycle), `cortex discord`.
 
@@ -91,14 +100,15 @@ different shape or is recorded below.)
    dispatchable subagent the coder can hand a
    goal to, built on the registered `Subagent` profile system
    (`internal/tools/study.go`) rather than beside it. The registry was built
-   for inheritors (`tools.go:433` — "the same path any future inheritor …
-   will use"); Study stays untouched as the read-only profile. This
+   for inheritors (`internal/tools/tools.go`'s `init` registration comment —
+   "the same path any future inheritor … will use"); Study stays untouched
+   as the read-only profile. This
    supersedes the don't-build list's "subagents/task tool" entry in
    [`docs/cortex-production-harness.md`](docs/cortex-production-harness.md) —
    the Cortex-native answer it deferred to now exists. Slices, in order:
-   1. **Per-profile seeding** — the shared dispatch path hardwires
+   1. **Per-profile seeding** — the shared dispatch path hardwired
       `StudySeed(goal, path, outline)` for every profile
-      (`internal/tools/tools.go:579`); move seed construction into the
+      (`internal/tools/tools.go`); move seed construction into the
       profile (a `Seed func` field or equivalent). Red/green: existing study
       tests stay green, byte-identical Study seed.
    2. **Explicit depth policy** — replace the blanket no-recursion rule with
@@ -161,12 +171,12 @@ decisions live there, not here.
 
 One verification note for its Phase 3, from a 2026-07-10 code audit: the
 implicit-CWD coupling is **five** sites, not the three the doc names —
-`findUp` (`cmd/cortex/config.go:314`, backing both `contextDir()` and
+`findUp` (`cmd/cortex/config.go`, backing both `contextDir()` and
 config/AGENTS.md discovery), the two distinct tool confiners
-(`internal/tools/confine.go:37` and the delete-path confiner at
-`internal/tools/tools.go:1148`), the `deleteRoot` derivation
-(`cmd/cortex/session_core.go:137`), and `config.Default()`
-(`pkg/config/config.go:376`). The `Workspace` threading slices should cover
+(`internal/tools/confine.go` and the delete-path confiner
+`removePath` in `internal/tools/tools.go`), the `deleteRoot` derivation
+(`cmd/cortex/session_core.go`), and `config.Default()`
+(`pkg/config/config.go`). The `Workspace` threading slices should cover
 all five.
 
 ## Working-memory thesis (the bet)

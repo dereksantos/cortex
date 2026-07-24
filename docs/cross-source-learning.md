@@ -23,8 +23,10 @@
 > as-a-second-input-class idea floated in piece 3 item 3 (LearnUser today
 > reads ONLY other projects' memory indices, no cursor, as decision 4
 > describes — it does not yet notice cross-project *loop-failure* patterns),
-> piece 4 (the web dashboard), and the ø gate (G1–G4). See each section
-> below for the inline built/not-built marker.
+> and the ø gate (G1–G4). Piece 4 (the web dashboard) shipped 2026-07-20
+> (`cmd/cortex/serve_memory.go` + `webui_memory.go`) — see its section below
+> for the as-built divergence from this doc's original spec. See each
+> section below for the inline built/not-built marker.
 
 Derek's framing (2026-07-19): the web track "can bring together context over
 time from many sources and learn from it and connect it all together."
@@ -58,15 +60,16 @@ Three claims from the brief needed verification; two were wrong:
   discord's bot handler runs through the same `SessionManager` → `cs.Turn()`
   path serve uses. `Turn` calls `cs.captureTurn(...)` at
   `cmd/cortex/turn.go:179` unconditionally. Confirmed working.
-- **Serve-driven sessions are NOT already captured.**
+- **Serve-driven sessions were NOT already captured, at design time.**
   `cmd/cortex/serve_session.go`'s `newProductionSession()` — the factory the
-  entire `cortex serve` / web UI surface uses — never calls
+  entire `cortex serve` / web UI surface uses — did not call
   `EnableMemory()`. `captureTurn` no-ops when `cs.capturer == nil`
   (`session_runtime.go:107`), and every memory tool needs `cs.memory !=
-  nil`. **Every turn run through the web UI today is invisible to the
-  journal and to memory.** Discord's factory patches this with one line;
-  serve's factory never got it. Piece 3 specs the fix as a prerequisite,
-  not a new feature.
+  nil`. **Every turn run through the web UI was invisible to the journal
+  and to memory.** Discord's factory had patched this with one line; serve's
+  factory hadn't gotten it yet. Piece 3 specs the fix as a prerequisite, not
+  a new feature — **shipped 2026-07-19** as piece 2b, `serve_session.go:220`
+  now calls `EnableMemory()` (see the "2b" line in the status banner above).
 - **`web_search`/`fetch_url` results are captured only weakly.**
   `session_runtime.go`'s `turnArtifacts` special-cases
   `FunctionWriteFile`/`FunctionEditFile`/`FunctionBash` for the capture
@@ -280,9 +283,9 @@ group's notes is a smaller seed than a whole capture-window digest — see
 
 ## 4. The web surface as reader
 
-Within the existing `webui_*.go` (Go view-model, golden-tested) +
-`serve_*.go` (HTTP handler) + `go:embed` no-build-JS convention already
-used by the dashboard/landscape/loops screens:
+**BUILT 2026-07-20.** Within the existing `webui_*.go` (Go view-model,
+golden-tested) + `serve_*.go` (HTTP handler) + `go:embed` no-build-JS
+convention already used by the dashboard/landscape/loops screens:
 
 - **`GET /api/memory`** — per-project note lists (name, hook, updated) for
   every registered project plus the user tier, composed the way
@@ -303,6 +306,18 @@ used by the dashboard/landscape/loops screens:
   one place a human, not a model, retracts memory directly — matching
   `memory-tools.md`'s stance that retraction judgment stays out of
   `Learn`'s own toolset.
+
+**As-built divergence from the spec above:** the shipped routes
+(`cmd/cortex/serve_memory.go`) use query params, not the `{scope}/{name}`
+path-param shape this section specs. `GET /api/memory` takes a required
+`?project=<name>` (the note-list handler needs a project to compose the
+dashboard-style view against — there's no unscoped "list everything"
+form). `GET /api/memory/note` and `DELETE /api/memory/note` both take
+`?tier=&name=&project=` — `tier` (`"project"`/`"user"`) is the wire name
+for what this section calls `scope`, and `project` is required when
+`tier=project`. The behavior specced above (names-only list, one explicit
+tier per read/delete, `hostOriginMiddleware` gating) matches as designed;
+only the URL shape differs.
 
 No new screen-framework concept — the fourth instance of the dashboard/
 landscape/loops pattern, not a new one.
@@ -351,7 +366,7 @@ project B** is then asked the question only that fact answers.
 | 2b | Serve/capture gap fixes: `EnableMemory()` on serve, `turnArtifacts` web-tool recording | S — do first; 2c/2d are pointless without it | **DONE** (2026-07-19) |
 | 2c | `LearnUser` promotion: candidate detection + subagent + `Scope`/`roleLearnUser` plumbing + `loop.run` cursor | M | **PARTIAL** (2026-07-20) — candidate detection + subagent + `Scope`/`roleLearnUser` plumbing DONE (`cmd/cortex/learn_user.go`); the `loop.run` cursor (LearnUser reading loop-failure patterns as a second input class) is NOT built — see piece 3 item 3's built-status note |
 | 2d | Wiki-links: prompt extension + promotion un-link rule | S | **PARTIAL** (2026-07-20) — the promotion un-link rule (Δ4) DONE; the prompt extension (`Learn`/`LearnUser` actually writing `[[links]]`) NOT built |
-| 2e | Dashboard memory screen: list/read/delete + recent activity | M | not started (owned separately — the web dashboard) |
+| 2e | Dashboard memory screen: list/read/delete + recent activity | M | **DONE** (2026-07-20) — `GET /api/memory`, `GET /api/memory/note`, `DELETE /api/memory/note` (`cmd/cortex/serve_memory.go` + `webui_memory.go`), registered in `serve.go`; see the "The web surface as reader" section for the as-built wire-shape divergence from this doc's spec |
 | 2f | Δ + ø gate | M | Δ green for everything landed above (see the Δ table's Status column); ø not run |
 
 Order: 2b → 2a → 2d → 2c → 2e → 2f. 2b unblocks everything else being

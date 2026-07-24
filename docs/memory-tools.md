@@ -17,10 +17,10 @@ few tools + free-form named files + a tiny index, the model curates it.
 
 | Tool | Does |
 |---|---|
-| `memory_write(name, content)` | Create or update a named note. Model picks the name (kebab-case); update if it exists, else create. |
-| `memory_read(name)` | Read one note in full. |
-| `memory_search(query)` | Find relevant notes — returns names + snippets (keyword over the small note corpus; embeddings optional later). |
-| `memory_forget(name)` | Remove a note (hard delete — `os.Remove` in `internal/memory/store.go`; idempotent, not reversible). |
+| `memory_write(name, content, scope?)` | Create or update a named note. Model picks the name (kebab-case); update if it exists, else create. |
+| `memory_read(name, scope?)` | Read one note in full. |
+| `memory_search(query, scope?)` | Find relevant notes — returns names + snippets (keyword over the small note corpus; embeddings optional later). |
+| `memory_forget(name, scope?)` | Remove a note (hard delete — `os.Remove` in `internal/memory/store.go`; idempotent, not reversible). |
 | `study(.cortex/journal …)` | Reuse the navigator on the raw journal/transcript for detail no note captured. |
 
 That's it. No pre-turn retrieval, no rerank, no auto-distill.

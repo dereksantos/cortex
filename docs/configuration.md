@@ -91,10 +91,10 @@ OpenRouter's `401 No cookie auth credentials found`).
 subagent, the summarizer, and the shell-risk classifier. They typically
 point at the same model. A third role, `embed`, is parsed but **reserved**
 — nothing on a live path resolves it yet (kept for a future semantic
-`memory_search`). Six other role names that used to appear in older
-configs or docs (`hard-code`, `reason`, `fast`, `rerank`, `tools`, and any
-other unrecognized key under `models`) are inert: loading a config with one
-just prints a one-line stderr warning and ignores the key.
+`memory_search`). Five other role names that used to appear in older
+configs or docs (`hard-code`, `reason`, `fast`, `rerank`, `tools`) are
+inert, and so is any other unrecognized key under `models`: loading a
+config with one just prints a one-line stderr warning and ignores the key.
 
 Minimal pinned example:
 
@@ -446,7 +446,8 @@ ignored, not errors — the same forward-compatible behavior
 | `CORTEX_LOOP_STREAM` | `0`/`false`/`no`/`off` disables token streaming. |
 | `CORTEX_LOOP_RENDER` | `0`/`false`/`no`/`off` disables the rendered/anchored turn UI, falling back to raw streaming. |
 | `CORTEX_LOOP_STUDY_WINDOW` | Overrides the `study` subagent's context window. |
-| `CORTEX_STUDY_REPS` | Rep count for `cortex study-eval` (dev/CI, not needed for normal use). |
+| `CORTEX_STUDY_REPS` | Rep count for `cortex study-eval` (dev/CI, not needed for normal use). `CORTEX_NAV_REPS` is a deprecated alias, still honored as a fallback. |
+| `CORTEX_STUDY_PROBE_TIMEOUT` | Per-probe wall-clock cap, in seconds, for `cortex study-eval` — a thrashing probe fails fast instead of hanging the gate. Default `300`. |
 | `CORTEX_LOCAL_EMBED` | Falsey disables the local Hugot embedder default. |
 | `CORTEX_HUGOT_ONNX` | Picks a specific ONNX variant for the local embedder. |
 | `CORTEX_TEMPERATURE` | Pins sampling temperature for every request (mainly for deterministic eval runs); unset preserves each backend's own default. |
@@ -454,6 +455,7 @@ ignored, not errors — the same forward-compatible behavior
 | `CORTEX_COMPAT_TIMEOUT_SEC` | Overrides the per-request HTTP timeout for every model call `cmd/cortex` makes — the coder turn, every subagent, the summarizer, and the shell-risk classifier — UNLESS the relevant `models.<role>.request_timeout_sec` is set explicitly (that always wins). Previously only reached `pkg/llm`'s OpenAI-compatible client; unified across the whole transport path in the same audit that added `network.compat_timeout_sec` (see above). |
 | `NO_COLOR` | Disables ANSI color output. |
 | `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_SESSION_ID` | Discord adapter (`cortex discord`). |
+| `DISCORD_PROJECT` | Registered project the Discord bot binds to (CWD-implicit when unset); an unrecognized name fails `cortex discord` at startup with a fatal error. |
 
 Not listed: `CORTEX_LOCAL_ONLY` exists in `pkg/llm` but currently has no
 caller reachable from `cmd/cortex` — it is orphaned from a deleted eval

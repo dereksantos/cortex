@@ -92,8 +92,10 @@ Three capabilities distinguish it:
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
-`/model [name]`, `/quit`. Dispatch is in `cmd/cortex/main.go` (subcommands
-~`:237`, slash commands ~`:400`). `/help` lists the commands; `/context`
+`/model [name]`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
+subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
+commands are the `input ==` checks inside the REPL's input loop (`for {`).
+`/help` lists the commands; `/context`
 (`cmd/cortex/context_cmd.go`) renders a plain-text map of the two-zone
 context window (docs/context-architecture.md) for the current session —
 stable prefix (system prompt, outline, memory index) vs. hydrated tail
@@ -116,7 +118,9 @@ the anchored status row (`internal/lineedit/live.go`).
 
 Registered in `internal/tools/tools.go` (`All` + dispatch in
 `tools.Execute()`): `read_file`, `write_file`, `edit_file`, `study`, `agent`, `outline`,
-`grep`, `bash`, `remove_path`, `web_search`, `fetch_url`, `recall` (resolves a session-outline citation
+`grep`, `bash`, `remove_path`, `web_search`, `fetch_url`, `scan_landscape`
+(coder-only, home-scoped survey of local agent harnesses/model runtimes;
+existence-only, never walks projects), `recall` (resolves a session-outline citation
 to the verbatim demoted messages; coder-only — not in the Study profile), and
 the model-driven memory tools
 `memory_write`, `memory_read`, `memory_search`, `memory_forget`
