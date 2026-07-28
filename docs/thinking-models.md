@@ -265,7 +265,7 @@ else ever lands.
 
 ## B5 fleet probe — receipts (2026-07-18)
 
-Report-only probe (roadmap Track B5) on the chatterbox fleet; sanity
+Report-only probe (roadmap Track B5) on the local fleet; sanity
 measurements, not benchmarks. Three verdicts against this doc's open
 decisions:
 

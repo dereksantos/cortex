@@ -6,7 +6,7 @@
 > design time: `docs/memory-tools.md` P1–P4 fully implemented; web track
 > M1–M6 merged (`9816235`); engine/study refactor and thinking-models P1–P6
 > on the main line; full gate green; branch `Cortex` backed up to the
-> chatterbox remote.
+> private backup remote.
 >
 > Amended same day with findings from Derek's own cortex analysis sessions
 > (`.cortex/sessions/20260717-003116` role/config launch pass,

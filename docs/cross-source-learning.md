@@ -432,7 +432,7 @@ backfill once 2c exists; 2f needs all of the above.
 
 ## Gate receipts (2026-07-20)
 
-Four ø runs on the chatterbox fleet (qwen3-coder-q3, n=3 each), the
+Four ø runs on the local fleet (qwen3-coder-q3, n=3 each), the
 iterate-the-harness loop working as designed:
 - Run 1: infrastructure only — fleet auto-discovery picked a down model
   group; nothing under test executed. Fix: per-home model pinning.

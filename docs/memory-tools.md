@@ -132,7 +132,7 @@ the need. Start without it.
 `CORTEX_LIVE_FLEET=1`): same 3-task set, two arms differing only in
 prior `.cortex/` state — WARM seeded by real learning turns through the
 built binary (`memory_write` exercised live, incl. one retry), COLD
-fresh. First full run (qwen3-coder-q3, chatterbox fleet, 122s, 6/6):
+fresh. First full run (qwen3-coder-q3, local fleet, 122s, 6/6):
 WARM recovered all three codewords (note-direct, search-among-
 distractors, journal-only via `study(.cortex/journal)`); COLD held the
 confabulation floor (honest misses, no invented codewords) and spent

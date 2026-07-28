@@ -285,7 +285,7 @@ CORTEX_LIVE_FLEET=1 go test ./cmd/cortex -run PivotEval_Live -v -timeout 1800s  
 ## First gate runs — receipts (2026-07-18)
 
 Built as `cmd/cortex/context_pivot_eval_test.go` (Δ, in-suite, green) and
-`context_pivot_eval_live_test.go` (ø). Three ø runs on the chatterbox
+`context_pivot_eval_live_test.go` (ø). Three ø runs on the local
 fleet, `qwen3-coder-q3`, window 6000, rung **L3**, 8 filler turns/phase.
 Probe measurements, not benchmarks:
 

@@ -181,7 +181,7 @@ it; fixed by transcript pull-through on truncation, Δ-tested) and the
 Learn prompt carried foreground's save-reluctance (fixed, iteration 3;
 live positive + negative repro both clean). G1/G3/G4 passed even here.
 
-Run 2 (fixed harness, n=3, qwen3-coder-q3, chatterbox fleet, 251s):
+Run 2 (fixed harness, n=3, qwen3-coder-q3, local fleet, 251s):
 **ALL FOUR GATES PASS.** G2: background 2/3 needle-A vs foreground 0/3
 (strict beat). G1: needle-B parity 6/6. G3: 4 notes total vs limit 6 —
 no spam. G4: 27.7s total learn wall-clock vs 180s budget. One gate run,
