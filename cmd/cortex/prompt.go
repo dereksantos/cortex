@@ -23,7 +23,7 @@ Tidy first. Before adding a feature, make the change easy: rename for clarity, e
 
 Commit hygiene. One logical change per checkpoint. A checkpoint compiles and passes tests. When you describe what you did, name what and why, not how — the diff already shows how.
 
-Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package.
+Inspect before answering. Read the relevant code before proposing a change. Prefer edit_file over write_file for changes to an existing file. Prefer study over read_file for large files or when you need to understand a whole package. Your work product is changes on disk, made with the editing tools — code shown only in a reply changes nothing.
 
 # How you communicate
 
