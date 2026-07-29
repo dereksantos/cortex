@@ -48,14 +48,14 @@ type TurnResult struct {
 // attached (M4.2b3's SSE handler is its only caller today); both delegate to
 // the unexported turn so there's exactly one implementation.
 func (cs *CortexSession) Turn(ctx context.Context, input string) (TurnResult, error) {
-	return cs.turn(ctx, input, nil, 0, 0)
+	return cs.turn(ctx, input, nil, 0, 0, FinalizeInteractive)
 }
 
 // TurnWithProgress is Turn with p (may be nil) wired into runLoop's existing
 // Progress seam (cmd/cortex/loop.go) — the same breadcrumb sink the REPL's
 // live display already drives, just not previously reachable from Turn().
 func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p Progress) (TurnResult, error) {
-	return cs.turn(ctx, input, p, 0, 0)
+	return cs.turn(ctx, input, p, 0, 0, FinalizeInteractive)
 }
 
 // TurnWithBudget is Turn with per-run bound overrides (D11's loop-firing
@@ -65,10 +65,12 @@ func (cs *CortexSession) TurnWithProgress(ctx context.Context, input string, p P
 // Zero means "use the normal default" for either. RunLoopFiring
 // (loop_run.go) is its only caller today.
 func (cs *CortexSession) TurnWithBudget(ctx context.Context, input string, maxIter, tokenBudget int) (TurnResult, error) {
-	return cs.turn(ctx, input, nil, maxIter, tokenBudget)
+	// A loop firing has no interlocutor: a forced finalize must not end by
+	// asking whether to continue — nobody is there to answer.
+	return cs.turn(ctx, input, nil, maxIter, tokenBudget, FinalizeSubagent)
 }
 
-func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress, maxIterOverride, tokenBudget int) (TurnResult, error) {
+func (cs *CortexSession) turn(ctx context.Context, input string, progress Progress, maxIterOverride, tokenBudget int, finalize FinalizeStyle) (TurnResult, error) {
 	// Stamp transcript entries with this turn's ordinal (resume replays them
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
@@ -127,7 +129,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	if maxIterOverride > 0 {
 		maxIter = maxIterOverride
 	}
-	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch}
+	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher(), BeforeBatch: cs.coderBeforeBatch, Finalize: finalize}
 	bounds := Bounds{MaxTokens: maxTok, MaxIter: maxIter, TokenBudget: tokenBudget, EscalateEffort: cs.Config.effortEscalationEnabled()}
 
 	// Sample actual-vs-estimated context fill on every model round-trip (not

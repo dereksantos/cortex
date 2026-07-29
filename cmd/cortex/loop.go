@@ -64,6 +64,9 @@ type Toolset struct {
 	Dispatch        AgentDispatcher
 	BeforeBatch     func()
 	AfterToolResult func()
+	// Finalize selects the forced-finalize closing (see FinalizeStyle). Zero
+	// value = FinalizeSubagent, so subagent callers need no change.
+	Finalize FinalizeStyle
 }
 
 // Bounds are the independent ceilings; whichever trips first forces finalize.
@@ -162,10 +165,62 @@ func stuckHint(class string) string {
 // not a main-loop special case.
 const noProgressNudge = "Harness note: that tool call was byte-identical to the previous one and produced the same result. Repeating it will not yield new information — try a different command or approach, or stop and report what you've found."
 
-// finalizePrompt asks for the answer with tools withheld when a bound forced the
-// loop to stop, so a budget-exhausted run still produces a grounded digest
-// rather than nothing.
-const finalizePrompt = "You've reached the limit for this turn. Stop calling tools and answer now from what you've already gathered. Name the concrete symbols, functions, files, and relationships that answer the goal; do not say you need more exploration. Be concise."
+// FinalizeStyle selects how a forced finalize should END. The honesty core is
+// shared; only the closing differs, because the callers differ in who is
+// listening: an interactive turn has a next turn (the user can say "continue"),
+// a subagent has no interlocutor and must hand its caller a complete digest.
+type FinalizeStyle int
+
+const (
+	// FinalizeSubagent (the zero value — every existing Toolset literal) ends
+	// with an open-items list, never a question: nobody is there to answer it.
+	FinalizeSubagent FinalizeStyle = iota
+	// FinalizeInteractive ends by offering to continue on the open items —
+	// the session persists, so the offer is actionable.
+	FinalizeInteractive
+)
+
+// finalizeCause maps a stop reason to the phrase the finalize prompt leads
+// with. One generic "you've reached the limit" hid five different causes
+// (the 2026-07-27 launch-assessment transcript read a mid-run backend
+// failure as a budget problem); naming the cause keeps the transcript — and
+// the model's framing of its own answer — diagnosable.
+func finalizeCause(stop string) string {
+	switch stop {
+	case "max-iter":
+		return "the tool-call limit for this turn"
+	case "token-budget":
+		return "the token budget for this run"
+	case "read-budget":
+		return "the read budget for this run"
+	case "no-progress", "stuck":
+		return "repeated tool calls that were not making progress"
+	case "error-recovered":
+		return "a backend error that interrupted the run"
+	default:
+		return "a limit"
+	}
+}
+
+// finalizePromptFor asks for the answer with tools withheld when a bound forced
+// the loop to stop, so a budget-exhausted run still produces a grounded digest
+// rather than nothing. The old single prompt's "do not say you need more
+// exploration" was engineered against hedge-refusal (a weak model emitting "I'd
+// need to look further" as the entire answer) but overcorrected into forced
+// confidence: an under-explored run invented findings to fill the gaps (the
+// 2026-07-27 launch-assessment confabulation). This version holds both failure
+// modes apart: report what was verified, name what wasn't — never guess.
+func finalizePromptFor(stop string, style FinalizeStyle) string {
+	p := "Your exploration was stopped by " + finalizeCause(stop) + ". Stop calling tools and answer now. " +
+		"Report only what you verified in the tool output above, naming the concrete files, symbols, and relationships you actually saw. " +
+		"Anything the goal needs that you did not verify, state plainly as unverified — do not fill gaps with plausible guesses, and do not present an unverified claim as a finding."
+	switch style {
+	case FinalizeInteractive:
+		return p + " Close by listing the open items and asking whether to continue investigating them. Be concise."
+	default:
+		return p + " Close with a short list of the open items still unverified. Be concise."
+	}
+}
 
 // reFinalizePrompt is the salvage ask when the first finalize came back EMPTY — a
 // reasoning model that spent its whole completion budget deliberating and emitted
@@ -377,7 +432,7 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 	}
 	stats.StopReason = stop
 	stats.FinalizeForced = true
-	content, finalStats, err := finalizeLoop(ctx, send, req, &stats, appendMsg, lastObservation)
+	content, finalStats, err := finalizeLoop(ctx, send, req, finalizePromptFor(stop, ts.Finalize), &stats, appendMsg, lastObservation)
 	// Restore the advertised tools: finalize withheld them, but the caller's
 	// request (cs.Request for the coder) is long-lived and reused next turn.
 	req.Tools = ts.Tools
@@ -391,10 +446,10 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 // (docs/thinking-models.md §5a): tools are withheld, so this is a pure
 // formatting ask — generalizes P4's clamp-gated salvage-only fix to every
 // finalize send, unconditionally.
-func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
+func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt string, stats *loopStats, appendMsg func(Message), lastObservation string) (string, loopStats, error) {
 	req.Tools = nil
 	defer disableEffortForSend(req)()
-	appendMsg(Message{Role: RoleUser, Content: finalizePrompt})
+	appendMsg(Message{Role: RoleUser, Content: prompt})
 	res, _, err := send.Send(ctx, req)
 	if err != nil {
 		stats.StopReason = "error"
