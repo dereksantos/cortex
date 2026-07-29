@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -114,3 +115,42 @@ func assembleTools(cs *CortexSession) []Tool {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestPrintStartupWarning pins the fix for headless `cortex turn --json`
+// leaking startup preflight diagnostics (missing model discovery, shared
+// swap_group) onto stdout ahead of the JSON object, which broke machine
+// consumers. NewCortexSession now routes both warnings through this single
+// helper called with os.Stderr; this test pins the helper's own contract —
+// it writes to whatever io.Writer it is given (and only that writer) — so a
+// future call site can't regress back to fmt.Println(stdout) without this
+// test catching the signature change.
+func TestPrintStartupWarning(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{
+			name: "swap_group warning",
+			msg:  `warning: code (qwen3-coder-q3) and study (study) share swap_group "cuda-8090" — they evict each other every turn; route one to different silicon`,
+		},
+		{
+			name: "model discovery unavailable note",
+			msg:  "note: model discovery unavailable at http://localhost:11434 — set backend in .cortex/config.json or pin models",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printStartupWarning(&buf, c.msg)
+
+			got := buf.String()
+			if !strings.Contains(got, c.msg) {
+				t.Errorf("printStartupWarning(%q): output %q does not contain the message", c.msg, got)
+			}
+			if !strings.HasSuffix(got, "\n") {
+				t.Errorf("printStartupWarning(%q): output %q should end with a newline", c.msg, got)
+			}
+		})
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,6 +206,15 @@ func (cs *CortexSession) newWorkingSet(base int) *cache.WorkingSet {
 	return cache.New(base, cs.Config.tailHighWatermark(w), cs.Config.tailDrainWatermark(w))
 }
 
+// printStartupWarning writes a colored startup preflight diagnostic (model
+// discovery unavailable, shared swap_group, …) to w. These are
+// operator-facing status, not turn output, so callers always pass
+// os.Stderr — stdout must stay machine-clean for headless `turn --json`
+// consumers (the session id is already stderr-only for the same reason).
+func printStartupWarning(w io.Writer, msg string) {
+	fmt.Fprintln(w, withColor(msg, yellow))
+}
+
 func NewCortexSession() *CortexSession {
 	cfg := LoadConfig()
 	// instructionBytesCap must be set before args.Request() (below) reads
@@ -228,7 +238,7 @@ func NewCortexSession() *CortexSession {
 	if !cfg.isOpenRouter() {
 		fleet = discoverFleet(context.Background(), cfg.backendEndpoint())
 		if fleet == nil {
-			fmt.Println(withColor(fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()), yellow))
+			printStartupWarning(os.Stderr, fmt.Sprintf("note: model discovery unavailable at %s — set backend in .cortex/config.json or pin models", cfg.backendEndpoint()))
 		}
 	}
 	code := cfg.resolveBinding(roleCode, fleet)
@@ -243,7 +253,7 @@ func NewCortexSession() *CortexSession {
 		modelSubstitutionJournalDir(workspace.ContextDir()), liveOpenRouterListModels)
 
 	if g := sharedSwapGroup(fleet, code, study); g != "" {
-		fmt.Println(withColor(fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g), yellow))
+		printStartupWarning(os.Stderr, fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g))
 	}
 
 	req.Model = code.Model
