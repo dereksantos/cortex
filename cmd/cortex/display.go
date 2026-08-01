@@ -28,8 +28,11 @@ func (m Message) Print() {
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
-	// Use LastPromptTokens which is updated in Append() to reflect current context
-	gauge := withColor(fmt.Sprintf("%s/%s", humanK(cs.LastPromptTokens), humanK(win)), ctxColor(cs.LastPromptTokens, win))
+	// The gauge is the fixed-spatial two-zone bar (contextbar.go) by
+	// default; ctxColor still keys off LastPromptTokens (the last request's
+	// actual billed size, not the bar's own head+tail estimate) — same
+	// green/yellow/red threshold semantics as before this bar existed.
+	gauge := withColor(cs.renderGauge(promptGaugeCells), ctxColor(cs.LastPromptTokens, win))
 	cost := ""
 	if cs.costUSD > 0 {
 		cost = withColor(" | "+humanCost(cs.costUSD), gray)

@@ -36,6 +36,7 @@ func (cs *CortexSession) contextReport() string {
 	}
 	fmt.Fprintf(&b, "context window: %s / %s tokens (%d%%)  model: %s\n",
 		humanK(cs.LastPromptTokens), humanK(win), pct, cs.Request.Model)
+	b.WriteString(cs.renderGauge(contextReportGaugeCells) + "\n")
 
 	b.WriteString("\nzone A - stable prefix (cached across turns)\n")
 	for _, line := range []string{cs.systemPromptLine(), cs.outlineSummaryLine(), cs.memoryIndexLine()} {
@@ -69,6 +70,19 @@ func row(label, tokens, detail string) string {
 	return line + "\n"
 }
 
+// systemPromptTokens returns the system message's token size, 0 when there
+// is no system message yet (e.g. a bare CortexSession in a test).
+func (cs *CortexSession) systemPromptTokens() int {
+	if cs.Request == nil || len(cs.Request.Messages) == 0 {
+		return 0
+	}
+	content := cs.Request.Messages[0].Content
+	if content == "" {
+		return 0
+	}
+	return cache.TokensOf(len(content))
+}
+
 // systemPromptLine reports the system message's token size, splitting out
 // an injected AGENTS.md body (systemPromptContent's agentsMarker) when
 // present. "" when there is no system message yet (e.g. a bare CortexSession
@@ -86,7 +100,16 @@ func (cs *CortexSession) systemPromptLine() string {
 		agents := content[i+len(agentsMarker):]
 		detail = fmt.Sprintf("(includes AGENTS.md %s)", humanK(cache.TokensOf(len(agents))))
 	}
-	return row("system prompt", humanK(cache.TokensOf(len(content)))+" tok", detail)
+	return row("system prompt", humanK(cs.systemPromptTokens())+" tok", detail)
+}
+
+// outlineTokens returns the demoted-turn outline's rendered token size, 0
+// when there is nothing demoted yet.
+func (cs *CortexSession) outlineTokens() int {
+	if len(cs.outline) == 0 && cs.outlineFolded == "" {
+		return 0
+	}
+	return cache.TokensOf(len(cs.renderOutlineBlock()))
 }
 
 // outlineSummaryLine reports the demoted-turn outline's size: entry count,
@@ -98,14 +121,13 @@ func (cs *CortexSession) outlineSummaryLine() string {
 	if len(cs.outline) == 0 && cs.outlineFolded == "" {
 		return ""
 	}
-	block := cs.renderOutlineBlock()
 	w := cs.windowSize()
 	outlineCap := cs.Config.outlineBudget(w)
 	detail := fmt.Sprintf("%d entries (cap %s = %s)", len(cs.outline), humanK(outlineCap), fractionOfWindow(outlineCap, w))
 	if cs.outlineFolded != "" {
 		detail += ", folded digest present"
 	}
-	return row("session outline", humanK(cache.TokensOf(len(block)))+" tok", detail)
+	return row("session outline", humanK(cs.outlineTokens())+" tok", detail)
 }
 
 // fractionOfWindow formats part/whole as the resolved fraction actually in
@@ -121,6 +143,19 @@ func fractionOfWindow(part, whole int) string {
 	return fmt.Sprintf("%.3f×W", float64(part)/float64(whole))
 }
 
+// memoryIndexTokens returns the injected memory-index note's token size, 0
+// when memory isn't wired for this session or has no notes yet.
+func (cs *CortexSession) memoryIndexTokens() int {
+	if cs.memory == nil {
+		return 0
+	}
+	notes, err := cs.memory.List()
+	if err != nil || len(notes) == 0 {
+		return 0
+	}
+	return cache.TokensOf(len(cs.memoryIndexNote()))
+}
+
 // memoryIndexLine reports the injected memory-index note's size and note
 // count. "" when memory isn't wired for this session or has no notes yet.
 func (cs *CortexSession) memoryIndexLine() string {
@@ -131,8 +166,17 @@ func (cs *CortexSession) memoryIndexLine() string {
 	if err != nil || len(notes) == 0 {
 		return ""
 	}
-	note := cs.memoryIndexNote()
-	return row("memory index", humanK(cache.TokensOf(len(note)))+" tok", fmt.Sprintf("%d notes", len(notes)))
+	return row("memory index", humanK(cs.memoryIndexTokens())+" tok", fmt.Sprintf("%d notes", len(notes)))
+}
+
+// headTokens sums zone A's stable-prefix token cost — system prompt +
+// session outline + memory index — the same three components
+// systemPromptLine/outlineSummaryLine/memoryIndexLine break out line-by-line
+// for /context. Also the context gauge bar's (contextbar.go) left (head)
+// segment size, so both consumers share this one sum instead of each
+// recomputing the cache.TokensOf arithmetic.
+func (cs *CortexSession) headTokens() int {
+	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens()
 }
 
 // hydratedTailLine reports the hydrated tail's turn range and size. "" when

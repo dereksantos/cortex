@@ -190,7 +190,7 @@ func TestConfigMergeNewSections(t *testing.T) {
 			"loop_auto_disable_strikes": 4,
 			"project_sessions_limit": 60
 		},
-		"repl": {"ticker_interval_ms": 2000},
+		"repl": {"ticker_interval_ms": 2000, "gauge": "ascii"},
 		"discord": {
 			"typing_refresh_sec": 10,
 			"risk_approval_timeout_sec": 150,
@@ -237,6 +237,9 @@ func TestConfigMergeNewSections(t *testing.T) {
 	}
 	if cfg.Repl.TickerIntervalMs != 500 {
 		t.Errorf("repl.ticker_interval_ms = %d, want project override 500", cfg.Repl.TickerIntervalMs)
+	}
+	if cfg.Repl.Gauge != "ascii" {
+		t.Errorf("repl.gauge = %q, want inherited user value \"ascii\" (project layer doesn't set it)", cfg.Repl.Gauge)
 	}
 	if cfg.Discord.RouteConfidenceThreshold == nil || *cfg.Discord.RouteConfidenceThreshold != 0.5 {
 		t.Errorf("discord.route_confidence_threshold = %v, want project override 0.5", cfg.Discord.RouteConfidenceThreshold)
@@ -360,6 +363,11 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 		{"negative network.fleet_discovery_timeout_sec: invalid", Config{Network: NetworkConfig{FleetDiscoveryTimeoutSec: neg}}, true},
 		{"negative serve.port: invalid", Config{Serve: ServeConfig{Port: neg}}, true},
 		{"negative repl.ticker_interval_ms: invalid", Config{Repl: ReplConfig{TickerIntervalMs: neg}}, true},
+		{"repl.gauge unset: valid", Config{Repl: ReplConfig{}}, false},
+		{"repl.gauge = braille: valid", Config{Repl: ReplConfig{Gauge: "braille"}}, false},
+		{"repl.gauge = ascii: valid", Config{Repl: ReplConfig{Gauge: "ascii"}}, false},
+		{"repl.gauge = numeric: valid", Config{Repl: ReplConfig{Gauge: "numeric"}}, false},
+		{"repl.gauge = bogus: invalid", Config{Repl: ReplConfig{Gauge: "bogus"}}, true},
 		{"negative discord.typing_refresh_sec: invalid", Config{Discord: DiscordConfig{TypingRefreshSec: neg}}, true},
 		{"route_confidence_threshold = 0: invalid", Config{Discord: DiscordConfig{RouteConfidenceThreshold: floatPtr(0)}}, true},
 		{"route_confidence_threshold > 1: invalid", Config{Discord: DiscordConfig{RouteConfidenceThreshold: floatPtr(1.5)}}, true},

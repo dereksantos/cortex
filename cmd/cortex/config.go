@@ -635,6 +635,10 @@ type ServeConfig struct {
 // (docs/configuration.md's `repl.*` section).
 type ReplConfig struct {
 	TickerIntervalMs int `json:"ticker_interval_ms"`
+	// Gauge selects the prompt-row/context-report gauge style
+	// (contextbar.go's resolveGaugeStyle): "braille" (default, unset also
+	// means this), "ascii", or "numeric" (the pre-bar "used/window" text).
+	Gauge string `json:"gauge"`
 }
 
 // PromptConfig customizes the system prompt (docs/configuration.md's
@@ -1047,6 +1051,11 @@ func validateConfig(cfg *Config) error {
 	if t := cfg.Discord.RouteConfidenceThreshold; t != nil && (*t <= 0 || *t > 1) {
 		return fmt.Errorf("discord.route_confidence_threshold must be in (0, 1], got %v", *t)
 	}
+	switch cfg.Repl.Gauge {
+	case "", "braille", "ascii", "numeric":
+	default:
+		return fmt.Errorf("repl.gauge must be one of \"braille\", \"ascii\", \"numeric\", got %q", cfg.Repl.Gauge)
+	}
 	return nil
 }
 
@@ -1175,7 +1184,14 @@ func mergeServe(base, over ServeConfig) ServeConfig {
 }
 
 func mergeRepl(base, over ReplConfig) ReplConfig {
-	return ReplConfig{TickerIntervalMs: mergeIntField(base.TickerIntervalMs, over.TickerIntervalMs)}
+	gauge := base.Gauge
+	if over.Gauge != "" {
+		gauge = over.Gauge
+	}
+	return ReplConfig{
+		TickerIntervalMs: mergeIntField(base.TickerIntervalMs, over.TickerIntervalMs),
+		Gauge:            gauge,
+	}
 }
 
 func mergeDiscord(base, over DiscordConfig) DiscordConfig {

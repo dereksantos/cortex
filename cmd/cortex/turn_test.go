@@ -623,11 +623,25 @@ func TestTurnContextGaugeUpdatesMidTurn(t *testing.T) {
 		t.Errorf("currentContextSize = %d, want > 0", current)
 	}
 
-	// Verify the prompt shows current context size
+	// Verify the prompt reflects the current context. Default style is the
+	// two-zone gauge bar (contextbar.go, replacing the old exact
+	// "LastPromptTokens/window" scalar) — check its bracket/divider
+	// structure renders; exact fill-per-token math is pinned precisely in
+	// contextbar_test.go.
 	prompt := cs.Prompt()
-	// The gauge should show the current context size in the format X/Y where Y is window size
-	// After the final model response, LastPromptTokens = 700, window = 128000 = 128k
-	if !strings.Contains(prompt, "700/128k") {
-		t.Errorf("Prompt() = %q, expected to contain '700/128k' (context size)", prompt)
+	if !strings.Contains(prompt, "[") || !strings.Contains(prompt, "|") || !strings.Contains(prompt, "]") {
+		t.Errorf("Prompt() = %q, expected the two-zone gauge bar ([head|tail...])", prompt)
+	}
+
+	// repl.gauge = "numeric" still renders a scalar "used/window" form, now
+	// off the bar's own head(zone A)+tail(zone B) figures rather than
+	// LastPromptTokens — renderContextBar is a pure function of
+	// head/tail/window/cells/style (contextbar.go) with no access to the
+	// provider's billed LastPromptTokens, which /context's header line still
+	// shows verbatim, unchanged, from real usage.
+	cs.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}
+	want := humanK(cs.headTokens()+cs.ws.TailTokens()) + "/" + humanK(cs.windowSize())
+	if numeric := cs.Prompt(); !strings.Contains(numeric, want) {
+		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, want)
 	}
 }

@@ -300,10 +300,26 @@ func TestSessionPrompt(t *testing.T) {
 	sess := &CortexSession{Request: CortexArgs{}.Request(), LastPromptTokens: 8200}
 	got := sess.Prompt()
 
-	for _, want := range []string{"cortex " + Version, ModelCoder, "8.2k/32.8k", promptGlyph} {
+	for _, want := range []string{"cortex " + Version, ModelCoder, promptGlyph} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Prompt() = %q, missing %q", got, want)
 		}
+	}
+	// The old exact "8.2k/32.8k" (LastPromptTokens/window) scalar left the
+	// prompt row for the default two-zone gauge bar (contextbar.go) — check
+	// its structure renders instead.
+	if !strings.Contains(got, "[") || !strings.Contains(got, "|") || !strings.Contains(got, "]") {
+		t.Errorf("Prompt() = %q, missing the two-zone gauge bar ([head|tail...])", got)
+	}
+
+	// repl.gauge = "numeric" still renders that old scalar form, now off the
+	// bar's own head(zone A)+tail(zone B) figures rather than
+	// LastPromptTokens (renderContextBar is a pure function of
+	// head/tail/window/cells/style — see contextbar.go).
+	sess.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}
+	wantNumeric := humanK(sess.headTokens()) + "/" + humanK(sess.windowSize())
+	if numeric := sess.Prompt(); !strings.Contains(numeric, wantNumeric) {
+		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, wantNumeric)
 	}
 
 	// The prompt is redrawn on every keystroke with only \r\033[K, which cannot
