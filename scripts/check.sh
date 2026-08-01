@@ -27,8 +27,21 @@ run_fmt() {
   # Exclude vendor/, .cortex/ (session snapshots — frozen historical
   # copies that may pre-date gofmt rule changes), and test/evals/
   # (eval-target source trees not part of the cortex module).
-  local unformatted
-  unformatted="$(gofmt -l . | grep -Ev '^(vendor|\.cortex|test/evals)/' || true)"
+  # gofmt reports unparseable files on stderr and exits non-zero —
+  # capture both so a syntax error fails the gate instead of slipping
+  # through the -l list silently.
+  local listing parse_errors unformatted
+  local fmt_status=0
+  listing="$(gofmt -l . 2>&1)" || fmt_status=$?
+  if [[ $fmt_status -ne 0 ]]; then
+    parse_errors="$(echo "$listing" | grep -Ev '^\./?(vendor|\.cortex|test/evals)/' || true)"
+    if [[ -n "$parse_errors" ]]; then
+      echo "✖ gofmt: parse errors:" >&2
+      echo "$parse_errors" >&2
+      return 1
+    fi
+  fi
+  unformatted="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|test/evals)/' || true)"
   if [[ -n "$unformatted" ]]; then
     echo "✖ gofmt: the following files are not formatted:" >&2
     echo "$unformatted" >&2
@@ -86,7 +99,13 @@ case "${1:-all}" in
   fmt)  run_fmt ;;
   vet)  run_vet ;;
   lint) run_lint ;;
-  all)  run_fmt && run_vet && run_lint ;;
+  # NOT `run_fmt && run_vet && run_lint`: failures inside a && list
+  # don't trip errexit, so that form printed "✓ checks passed" and
+  # exited 0 even when vet failed. Sequential statements let set -e
+  # stop at the first failing check, as documented above.
+  all)  run_fmt
+        run_vet
+        run_lint ;;
   *)    echo "Usage: $0 [fmt|vet|lint|all]" >&2; exit 2 ;;
 esac
 
