@@ -9,7 +9,8 @@
 // the old "used/window" numeric gauge did (docs/context-architecture.md's
 // two-zone design: a stable prefix, a hydrated tail, and the free window
 // past both). repl.gauge (docs/configuration.md) selects the rendering
-// style: "braille" (default), "ascii", or "numeric" (the old x/y form).
+// style: "blocks" (default), "braille", "ascii", or "numeric" (the old x/y
+// form).
 package main
 
 import "strings"
@@ -18,32 +19,40 @@ import "strings"
 type gaugeStyle int
 
 const (
-	gaugeBraille gaugeStyle = iota // default: braille density ramp
+	gaugeBlocks  gaugeStyle = iota // default: block-element (eighth-block) ramp
+	gaugeBraille                   // braille density ramp
 	gaugeASCII                     // ASCII density ramp (no unicode)
 	gaugeNumeric                   // the old "used/window" scalar text
 )
 
 // resolveGaugeStyle maps the repl.gauge config string to a gaugeStyle.
-// Unrecognized or unset values fall back to braille — validateConfig
-// already rejects anything outside {"", "braille", "ascii", "numeric"}
-// before this ever runs, so this fallback is just defense in depth.
+// Unrecognized or unset values fall back to blocks — validateConfig
+// already rejects anything outside {"", "blocks", "braille", "ascii",
+// "numeric"} before this ever runs, so this fallback is just defense in
+// depth.
 func resolveGaugeStyle(s string) gaugeStyle {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "braille":
+		return gaugeBraille
 	case "ascii":
 		return gaugeASCII
 	case "numeric":
 		return gaugeNumeric
 	default:
-		return gaugeBraille
+		return gaugeBlocks
 	}
 }
 
-// brailleRamp and asciiRamp are density ramps from "emptiest" (index 0) to
-// "solid" (the last index), used to render a fill cell's fractional
-// remainder as a single character. Braille has 9 levels (dot count 0..8, a
-// full glyph is 8 dots); ASCII has 5, kept structure-safe (no braille
-// unicode) for terminals/fonts that don't render it.
+// blocksRamp, brailleRamp, and asciiRamp are density ramps from "emptiest"
+// (index 0) to "solid" (the last index), used to render a fill cell's
+// fractional remainder as a single character. Blocks is the Unicode Block
+// Elements lower-eighth set (U+2581–U+2588, the sparkline ramp) — 9 levels
+// counting the empty space, near-universal font coverage, reads as a solid
+// level meter. Braille has 9 levels too (dot count 0..8) but renders as dot
+// texture and needs decent font support; ASCII has 5, kept structure-safe
+// for terminals/fonts that render neither.
 var (
+	blocksRamp  = []rune(" ▁▂▃▄▅▆▇█")
 	brailleRamp = []rune("⠀⡀⡄⡆⡇⣇⣧⣷⣿")
 	asciiRamp   = []rune(" .:=#")
 )
@@ -91,8 +100,11 @@ func renderContextBar(head, tail, window, cells int, style gaugeStyle) string {
 		cells = 1
 	}
 
-	ramp := brailleRamp
-	if style == gaugeASCII {
+	ramp := blocksRamp
+	switch style {
+	case gaugeBraille:
+		ramp = brailleRamp
+	case gaugeASCII:
 		ramp = asciiRamp
 	}
 
@@ -151,10 +163,10 @@ func humanFraction(used, window int) string {
 
 // gaugeStyle resolves this session's configured repl.gauge style. cs.Config
 // may be nil (e.g. a bare session in a test) — that's "unset", not an
-// error, so it defaults to braille like an empty string would.
+// error, so it defaults to blocks like an empty string would.
 func (cs *CortexSession) gaugeStyle() gaugeStyle {
 	if cs.Config == nil {
-		return gaugeBraille
+		return gaugeBlocks
 	}
 	return resolveGaugeStyle(cs.Config.Repl.Gauge)
 }

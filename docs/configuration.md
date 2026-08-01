@@ -333,7 +333,7 @@ config gate — every session with memory enabled gets both tiers. See
 | Field | Default | Meaning |
 |---|---|---|
 | `ticker_interval_ms` | 1000 | Wall-clock refresh period of the "thinking… Ns" elapsed label during a streaming turn. |
-| `gauge` | `"braille"` | Style of the two-zone context gauge bar shown in the prompt row and `/context`: `"braille"` (density-ramp fill, 9 levels), `"ascii"` (structure-safe fallback ramp, 5 levels, no unicode), or `"numeric"` (the pre-bar "used/window" text). |
+| `gauge` | `"blocks"` | Style of the two-zone context gauge bar shown in the prompt row and `/context`: `"blocks"` (Unicode Block Elements eighth-block sparkline ramp, 9 levels), `"braille"` (braille density-ramp fill, 9 levels), `"ascii"` (structure-safe fallback ramp, 5 levels, no unicode), or `"numeric"` (the pre-bar "used/window" text). |
 
 The braille spinner set was removed (2026-07-19); there is deliberately no
 spinner-cadence knob. The line editor's own 90ms live-redraw tick

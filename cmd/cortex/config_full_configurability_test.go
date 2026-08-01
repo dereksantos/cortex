@@ -385,6 +385,7 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 		{"negative serve.port: invalid", Config{Serve: ServeConfig{Port: neg}}, true},
 		{"negative repl.ticker_interval_ms: invalid", Config{Repl: ReplConfig{TickerIntervalMs: neg}}, true},
 		{"repl.gauge unset: valid", Config{Repl: ReplConfig{}}, false},
+		{"repl.gauge = blocks: valid", Config{Repl: ReplConfig{Gauge: "blocks"}}, false},
 		{"repl.gauge = braille: valid", Config{Repl: ReplConfig{Gauge: "braille"}}, false},
 		{"repl.gauge = ascii: valid", Config{Repl: ReplConfig{Gauge: "ascii"}}, false},
 		{"repl.gauge = numeric: valid", Config{Repl: ReplConfig{Gauge: "numeric"}}, false},

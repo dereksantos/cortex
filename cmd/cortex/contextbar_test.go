@@ -7,11 +7,39 @@ import (
 	"github.com/dereksantos/cortex/internal/cache"
 )
 
-// TestRenderContextBarBraille pins exact rendered strings for representative
-// head/tail/window/cells combinations in the default braille style: full
-// cells solid ('⣿'), a boundary cell at a proportional density level, blank
-// (space) past both segments, and the literal '|' divider exactly at the
-// head/tail token boundary.
+// TestRenderContextBarBlocks pins exact rendered strings for representative
+// head/tail/window/cells combinations in the default blocks style (the
+// Unicode Block Elements eighth-block sparkline ramp): full cells solid
+// ('█'), a boundary cell at a proportional level, blank (space) past both
+// segments, and the literal '|' divider exactly at the head/tail token
+// boundary.
+func TestRenderContextBarBlocks(t *testing.T) {
+	tests := []struct {
+		name                      string
+		head, tail, window, cells int
+		want                      string
+	}{
+		{"sample state: 9k head, 22k tail, 128k window, 12 cells", 9000, 22000, 128000, 12, "[▇|██▁        ]"},
+		{"half window each, exact half-cell boundary", 500, 500, 2000, 10, "[██▄|██▄    ]"},
+		{"zero tail: nothing hydrated yet", 500, 0, 2000, 10, "[██▄|       ]"},
+		{"zero head: nothing in zone A yet", 0, 500, 2000, 10, "[|██▄       ]"},
+		{"exact cell boundary: no partial cell either side", 1000, 1000, 2000, 10, "[█████|█████]"},
+		{"head alone exceeds window: divider pinned at right edge", 3000, 500, 2000, 10, "[██████████|]"},
+		{"head+tail exceed window, head alone fits: tail clamps", 1200, 1200, 2000, 10, "[██████|████]"},
+		{"small cell count", 5, 5, 100, 4, "[▂|▂  ]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderContextBar(tt.head, tt.tail, tt.window, tt.cells, gaugeBlocks)
+			if got != tt.want {
+				t.Errorf("renderContextBar(%d, %d, %d, %d, blocks) = %q, want %q", tt.head, tt.tail, tt.window, tt.cells, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRenderContextBarBraille pins the same representative cases in the
+// selectable braille density-ramp style.
 func TestRenderContextBarBraille(t *testing.T) {
 	tests := []struct {
 		name                      string
@@ -104,7 +132,7 @@ func TestRenderContextBarWindowZeroFallback(t *testing.T) {
 		{"window negative (defensive)", 100, 50, -5, "150/-5"},
 	}
 	for _, tt := range tests {
-		for _, style := range []gaugeStyle{gaugeBraille, gaugeASCII} {
+		for _, style := range []gaugeStyle{gaugeBlocks, gaugeBraille, gaugeASCII} {
 			got := renderContextBar(tt.head, tt.tail, tt.window, 12, style)
 			if got != tt.want {
 				t.Errorf("%s (style=%d): renderContextBar = %q, want %q", tt.name, style, got, tt.want)
@@ -142,20 +170,21 @@ func TestRenderContextBarNonPositiveCells(t *testing.T) {
 
 // TestResolveGaugeStyle covers the repl.gauge string -> gaugeStyle mapping,
 // including case-insensitivity/trimming and the "unset or unrecognized
-// falls back to braille" default (validateConfig is the actual gate against
+// falls back to blocks" default (validateConfig is the actual gate against
 // bogus values reaching here at all).
 func TestResolveGaugeStyle(t *testing.T) {
 	tests := []struct {
 		in   string
 		want gaugeStyle
 	}{
-		{"", gaugeBraille},
+		{"", gaugeBlocks},
+		{"blocks", gaugeBlocks},
 		{"braille", gaugeBraille},
 		{"ascii", gaugeASCII},
 		{"ASCII", gaugeASCII},
 		{"  ascii  ", gaugeASCII},
 		{"numeric", gaugeNumeric},
-		{"bogus", gaugeBraille},
+		{"bogus", gaugeBlocks},
 	}
 	for _, tt := range tests {
 		if got := resolveGaugeStyle(tt.in); got != tt.want {
@@ -182,7 +211,7 @@ func TestCortexSessionRenderGaugeUsesHeadTokensAndTailTokens(t *testing.T) {
 	if !strings.Contains(got, "[") || !strings.Contains(got, "]") {
 		t.Fatalf("renderGauge() with nil cs.ws = %q, want a rendered bar", got)
 	}
-	want := renderContextBar(cs.headTokens(), 0, cs.windowSize(), 10, gaugeBraille)
+	want := renderContextBar(cs.headTokens(), 0, cs.windowSize(), 10, gaugeBlocks)
 	if got != want {
 		t.Errorf("renderGauge() = %q, want %q (headTokens/0 tail/windowSize)", got, want)
 	}
@@ -190,7 +219,7 @@ func TestCortexSessionRenderGaugeUsesHeadTokensAndTailTokens(t *testing.T) {
 	cs.ws = cs.newWorkingSet(1)
 	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: 2, Tokens: 300})
 	got = cs.renderGauge(10)
-	want = renderContextBar(cs.headTokens(), cs.ws.TailTokens(), cs.windowSize(), 10, gaugeBraille)
+	want = renderContextBar(cs.headTokens(), cs.ws.TailTokens(), cs.windowSize(), 10, gaugeBlocks)
 	if got != want {
 		t.Errorf("renderGauge() after AddTurn = %q, want %q", got, want)
 	}
