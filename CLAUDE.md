@@ -54,7 +54,12 @@ Three capabilities distinguish it:
 2. **Model-driven memory + per-turn capture.** The agent curates durable
    free-form notes through the `memory_write/read/search/forget` tools
    (`internal/memory`); the note index is injected at turn start
-   (`memoryIndexNote`) so a fresh session knows what it can recall. Separately,
+   (`memoryIndexNote`) so a fresh session knows what it can recall. Discovered
+   [Agent Skills](https://agentskills.io/specification) — `<name>/SKILL.md`
+   playbooks under `.cortex/skills` et al (`internal/skills`) — are indexed
+   the same way, injected adjacent to the memory index: only name+description
+   sit in context until the model reads a skill's `SKILL.md` with `read_file`
+   on demand, per the standard's progressive-disclosure design. Separately,
    `captureTurn()` records each turn (files edited, commands run, final answer)
    to the append-only journal — mechanical, no model — the record
    `study(.cortex/journal)` reads on demand. See
@@ -193,7 +198,7 @@ can't drift apart. It also covers the full tunables surface beyond the
 minimal example above: per-role transport timeouts/retries, `subagents.*`
 (Study/Agent profile bounds), `tools.*` numeric caps, the `prompt` section (`prompt.file` replaces the
 built-in system prompt, `prompt.append` extends it), and the `limits`/
-`network`/`serve`/`repl`/`discord` sections — every field optional,
+`network`/`serve`/`repl`/`discord`/`skills` sections — every field optional,
 defaulting to today's hardcoded value.
 
 ## Journal — source of truth

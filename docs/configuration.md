@@ -3,8 +3,8 @@
 The one page for configuring `cortex`: where config lives, what a minimal
 setup looks like, what the zero-config default does, every `tools.*` gate
 and numeric cap, every `models.<role>`/`subagents`/`limits`/`network`/
-`serve`/`repl`/`discord` field, and every environment variable that changes
-behavior. Everything below is verified against `cmd/cortex/config.go` and
+`serve`/`repl`/`discord`/`skills` field, and every environment variable that
+changes behavior. Everything below is verified against `cmd/cortex/config.go` and
 the code that reads each setting — no aspirational fields. Every field on
 this page is optional; a config that never mentions a section behaves
 byte-identically to today's hardcoded value.
@@ -422,6 +422,54 @@ skipped check. A rejection names the inequality and the offending numbers,
 e.g. `context: tail_high_fraction (0.7000) + outline_fraction (0.2000) +
 prefix_headroom (0.1600, system prompt + memory index slack) = 1.0600
 exceeds the compact trigger (0.8000) — …`.
+
+## `skills.*` — Agent Skills discovery
+
+Cortex discovers [Agent Skills](https://agentskills.io/specification) (the
+open, Linux-Foundation-governed standard): a directory `<name>/` containing a
+`SKILL.md` whose YAML frontmatter declares `name` (must equal the directory
+name) and `description`. Only `name`+`description` are ever injected into
+context — the progressive-disclosure design the spec calls for; the body,
+and any `scripts/`/`references/`/`assets/` it points at, load on demand via
+`read_file`, exactly like any other file. See `internal/skills`.
+
+```json
+{
+  "skills": {
+    "enabled": true,
+    "index_max": 20,
+    "dirs": ["/absolute/path/to/skills"]
+  }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Availability kill-switch for discovery + index injection (nil/absent means enabled, like `tools.enable_web`). |
+| `index_max` | 20 | Caps how many discovered skills the turn-start index lists; over-cap discovery appends one line noting how many were omitted rather than truncating silently. |
+| `dirs` | (unset) | Overrides the four default discovery roots below **entirely** (not merged) when non-empty. |
+
+Absent `dirs`, discovery walks these four roots, in precedence order —
+project wins over user, cortex-native wins over compat:
+
+1. `./.cortex/skills`
+2. `./.claude/skills` (Claude Code compat)
+3. `./.agents/skills` (Codex/generic compat)
+4. `~/.cortex/skills` (`$CORTEX_HOME/skills` when set)
+
+A name collision across roots resolves to the FIRST root that defines it —
+later roots' same-named skill is silently shadowed. An invalid `SKILL.md`
+(bad name charset, name/directory mismatch, description out of the spec's
+1-1024 char range, missing frontmatter, or a description folded across
+multiple lines — unsupported in v1, see `internal/skills`' package comment)
+is skipped with one warning line on stderr; it never blocks discovery of the
+rest.
+
+The rendered index is injected at turn start alongside the memory index
+(`cmd/cortex/turn.go`), in the same fixed wire slot — coder-only: the
+Study/Learn/Agent subagent profiles are seeded from their own static system
+prompt and never see it. `/context` surfaces it as a "skills index" line in
+zone A when non-empty.
 
 ## Validation
 

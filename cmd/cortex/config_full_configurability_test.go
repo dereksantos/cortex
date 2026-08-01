@@ -131,6 +131,16 @@ func TestZeroConfigResolversMatchHistoricalDefaults(t *testing.T) {
 			if got := cfg.outlineBudget(w); got != w/8 {
 				t.Errorf("outlineBudget(%d) = %d, want %d (w/8)", w, got, w/8)
 			}
+
+			if got := cfg.skillsEnabled(); !got {
+				t.Errorf("skillsEnabled() = %v, want true (nil/absent means enabled)", got)
+			}
+			if got := cfg.skillsIndexMax(); got != skillsIndexMaxDefault {
+				t.Errorf("skillsIndexMax() = %d, want %d", got, skillsIndexMaxDefault)
+			}
+			if got := cfg.skillsDirsOverride(); got != nil {
+				t.Errorf("skillsDirsOverride() = %v, want nil", got)
+			}
 		})
 	}
 }
@@ -197,7 +207,8 @@ func TestConfigMergeNewSections(t *testing.T) {
 			"progress_edit_interval_ms": 2000,
 			"route_confidence_threshold": 0.9
 		},
-		"context": {"tail_high_fraction": 0.45, "tail_drain_fraction": 0.2, "outline_fraction": 0.1}
+		"context": {"tail_high_fraction": 0.45, "tail_drain_fraction": 0.2, "outline_fraction": 0.1},
+		"skills": {"enabled": true, "index_max": 15, "dirs": ["/tmp/user-skills"]}
 	}`)
 	projPath := write(t, dir, "proj.json", `{
 		"models": {"code": {"max_send_attempts": 2}},
@@ -207,6 +218,7 @@ func TestConfigMergeNewSections(t *testing.T) {
 		"network": {"preflight_timeout_sec": 9},
 		"serve": {"port": 9001},
 		"repl": {"ticker_interval_ms": 500},
+		"skills": {"index_max": 5},
 		"discord": {"route_confidence_threshold": 0.5},
 		"context": {"outline_fraction": 0.08}
 	}`)
@@ -246,6 +258,9 @@ func TestConfigMergeNewSections(t *testing.T) {
 	}
 	if cfg.Context.OutlineFraction == nil || *cfg.Context.OutlineFraction != 0.08 {
 		t.Errorf("context.outline_fraction = %v, want project override 0.08", cfg.Context.OutlineFraction)
+	}
+	if cfg.Skills.IndexMax != 5 {
+		t.Errorf("skills.index_max = %d, want project override 5", cfg.Skills.IndexMax)
 	}
 
 	// ...everything else inherits from the user layer untouched.
@@ -301,6 +316,12 @@ func TestConfigMergeNewSections(t *testing.T) {
 	if cfg.Context.TailHighFraction == nil || *cfg.Context.TailHighFraction != 0.45 ||
 		cfg.Context.TailDrainFraction == nil || *cfg.Context.TailDrainFraction != 0.2 {
 		t.Errorf("context.tail_high_fraction/tail_drain_fraction not inherited: %+v", cfg.Context)
+	}
+	if cfg.Skills.Enabled == nil || !*cfg.Skills.Enabled {
+		t.Errorf("skills.enabled not inherited: %+v", cfg.Skills)
+	}
+	if len(cfg.Skills.Dirs) != 1 || cfg.Skills.Dirs[0] != "/tmp/user-skills" {
+		t.Errorf("skills.dirs not inherited (project layer doesn't set it): %+v", cfg.Skills.Dirs)
 	}
 }
 
@@ -388,6 +409,9 @@ func TestValidateConfigRejectsBadValues(t *testing.T) {
 		{"context.* tighter tail, more outline: valid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.4), TailDrainFraction: floatPtr(0.25), OutlineFraction: floatPtr(0.15)}}, false},
 		{"context.tail_high_fraction alone: valid", Config{Context: ContextConfig{TailHighFraction: floatPtr(0.45)}}, false},
 		{"context.outline_fraction alone: valid", Config{Context: ContextConfig{OutlineFraction: floatPtr(0.1)}}, false},
+		{"negative skills.index_max: invalid", Config{Skills: SkillsConfig{IndexMax: neg}}, true},
+		{"positive skills.index_max: valid", Config{Skills: SkillsConfig{IndexMax: 5}}, false},
+		{"skills.* unset: valid", Config{Skills: SkillsConfig{}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

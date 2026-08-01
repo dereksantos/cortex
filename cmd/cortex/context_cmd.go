@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/cache"
+	"github.com/dereksantos/cortex/internal/skills"
 )
 
 // agentsMarker is the exact separator systemPromptContent (session_core.go)
@@ -39,7 +40,7 @@ func (cs *CortexSession) contextReport() string {
 	b.WriteString(cs.renderGauge(contextReportGaugeCells) + "\n")
 
 	b.WriteString("\nzone A - stable prefix (cached across turns)\n")
-	for _, line := range []string{cs.systemPromptLine(), cs.outlineSummaryLine(), cs.memoryIndexLine()} {
+	for _, line := range []string{cs.systemPromptLine(), cs.outlineSummaryLine(), cs.memoryIndexLine(), cs.skillsIndexLine()} {
 		if line != "" {
 			b.WriteString(line)
 		}
@@ -169,14 +170,33 @@ func (cs *CortexSession) memoryIndexLine() string {
 	return row("memory index", humanK(cs.memoryIndexTokens())+" tok", fmt.Sprintf("%d notes", len(notes)))
 }
 
+// skillsIndexTokens returns the injected skills-index note's token size, 0
+// when skills discovery is disabled (skills.enabled: false) or finds
+// nothing.
+func (cs *CortexSession) skillsIndexTokens() int {
+	return cache.TokensOf(len(cs.skillsIndexNote()))
+}
+
+// skillsIndexLine reports the injected skills-index note's size and
+// discovered-skill count. "" when there is nothing to show (mirrors
+// memoryIndexLine's empty behavior).
+func (cs *CortexSession) skillsIndexLine() string {
+	note := cs.skillsIndexNote()
+	if note == "" {
+		return ""
+	}
+	count := len(skills.Discover(cs.skillsDirs()))
+	return row("skills index", humanK(cache.TokensOf(len(note)))+" tok", fmt.Sprintf("%d skills", count))
+}
+
 // headTokens sums zone A's stable-prefix token cost — system prompt +
-// session outline + memory index — the same three components
-// systemPromptLine/outlineSummaryLine/memoryIndexLine break out line-by-line
-// for /context. Also the context gauge bar's (contextbar.go) left (head)
-// segment size, so both consumers share this one sum instead of each
-// recomputing the cache.TokensOf arithmetic.
+// session outline + memory index + skills index — the same components
+// systemPromptLine/outlineSummaryLine/memoryIndexLine/skillsIndexLine break
+// out line-by-line for /context. Also the context gauge bar's
+// (contextbar.go) left (head) segment size, so both consumers share this one
+// sum instead of each recomputing the cache.TokensOf arithmetic.
 func (cs *CortexSession) headTokens() int {
-	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens()
+	return cs.systemPromptTokens() + cs.outlineTokens() + cs.memoryIndexTokens() + cs.skillsIndexTokens()
 }
 
 // hydratedTailLine reports the hydrated tail's turn range and size. "" when

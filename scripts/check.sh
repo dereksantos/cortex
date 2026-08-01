@@ -34,7 +34,7 @@ run_fmt() {
   local fmt_status=0
   listing="$(gofmt -l . 2>&1)" || fmt_status=$?
   if [[ $fmt_status -ne 0 ]]; then
-    parse_errors="$(echo "$listing" | grep -Ev '^\./?(vendor|\.cortex|test/evals)/' || true)"
+    parse_errors="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|test/evals)/' || true)"
     if [[ -n "$parse_errors" ]]; then
       echo "✖ gofmt: parse errors:" >&2
       echo "$parse_errors" >&2

@@ -111,10 +111,20 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	cs.Append(Message{Role: RoleUser, Content: input})
 	cs.turnIntent = input
 
-	// Put the memory index in its fixed wire slot. Never mutate the stored
-	// system message: that would invalidate the prompt cache from byte zero and
-	// append duplicate indexes on every turn.
+	// Put the memory index (and, adjacent to it, the skills index) in the
+	// fixed wire slot. Never mutate the stored system message: that would
+	// invalidate the prompt cache from byte zero and append duplicate
+	// indexes on every turn. Both notes are coder-only — subagentRequest
+	// (study.go) builds a subagent's opening request from its own static
+	// System + seed and never touches this slot, so neither index reaches
+	// Study/Learn/Agent.
 	note := cs.memoryIndexNote()
+	if skillsNote := cs.skillsIndexNote(); skillsNote != "" {
+		if note != "" {
+			note += "\n\n"
+		}
+		note += skillsNote
+	}
 	cs.Request.EphemeralSystem = note
 	if note != "" {
 		cs.injections++

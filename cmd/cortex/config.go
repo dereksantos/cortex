@@ -465,6 +465,29 @@ type Config struct {
 	// bit-identical-defaults subtlety and validateContextConfig for the
 	// enforced invariants.
 	Context ContextConfig `json:"context"`
+
+	// Skills configures Agent Skills discovery (agentskills.io) — coder-only
+	// playbooks discovered under .cortex/skills et al and indexed at turn
+	// start alongside the memory index (docs/configuration.md's `skills.*`
+	// section; see internal/skills and cmd/cortex/skills.go).
+	Skills SkillsConfig `json:"skills"`
+}
+
+// SkillsConfig collects Agent Skills discovery tunables
+// (docs/configuration.md's `skills.*` section).
+type SkillsConfig struct {
+	// Enabled gates discovery and index injection entirely. Nil means
+	// enabled — an availability kill-switch (like tools.enable_web), not
+	// consent.
+	Enabled *bool `json:"enabled"`
+	// IndexMax caps how many discovered skills the turn-start index lists;
+	// 0/unset falls back to skillsIndexMaxDefault (20).
+	IndexMax int `json:"index_max"`
+	// Dirs overrides the four default discovery roots (./.cortex/skills,
+	// ./.claude/skills, ./.agents/skills, ~/.cortex/skills) ENTIRELY when
+	// non-empty — it does not merge with them. Earlier entries win on a name
+	// collision (internal/skills.Discover's precedence rule).
+	Dirs []string `json:"dirs"`
 }
 
 type ToolConfig struct {
@@ -1035,6 +1058,8 @@ func validateConfig(cfg *Config) error {
 		"discord.typing_refresh_sec":        cfg.Discord.TypingRefreshSec,
 		"discord.risk_approval_timeout_sec": cfg.Discord.RiskApprovalTimeoutSec,
 		"discord.progress_edit_interval_ms": cfg.Discord.ProgressEditIntervalMs,
+
+		"skills.index_max": cfg.Skills.IndexMax,
 	}
 	// Deterministic order so a config with multiple bad fields always reports
 	// the same one first (map iteration order is randomized in Go).
@@ -1099,6 +1124,7 @@ func mergeConfig(base, over *Config) *Config {
 	out.Discord = mergeDiscord(base.Discord, over.Discord)
 	out.Context = mergeContext(base.Context, over.Context)
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
+	out.Skills = mergeSkills(base.Skills, over.Skills)
 	return &out
 }
 
@@ -1223,6 +1249,22 @@ func mergeContext(base, over ContextConfig) ContextConfig {
 		out.OutlineFraction = over.OutlineFraction
 	}
 	return out
+}
+
+// mergeSkills overrides field-by-field like every other section, EXCEPT
+// Dirs: an explicit project-level `skills.dirs` replaces the user-level list
+// wholesale rather than appending to it (matching SkillsConfig.Dirs's own
+// doc comment — "entirely", not merged).
+func mergeSkills(base, over SkillsConfig) SkillsConfig {
+	dirs := base.Dirs
+	if len(over.Dirs) > 0 {
+		dirs = over.Dirs
+	}
+	return SkillsConfig{
+		Enabled:  mergeBoolPtr(base.Enabled, over.Enabled),
+		IndexMax: mergeIntField(base.IndexMax, over.IndexMax),
+		Dirs:     dirs,
+	}
 }
 
 func mergeRead(base, over ReadConfig) ReadConfig {
@@ -1624,4 +1666,37 @@ func mergePrompt(base, over PromptConfig) PromptConfig {
 		out.Append = over.Append
 	}
 	return out
+}
+
+// skillsIndexMaxDefault is how many discovered skills the turn-start index
+// lists before falling back to an "N more omitted" line — config-overridable
+// via skills.index_max (cmd/cortex/skills.go).
+const skillsIndexMaxDefault = 20
+
+// skillsEnabled reports whether Agent Skills discovery+injection is on.
+// Nil/absent means enabled — an availability kill-switch, not consent,
+// matching scanEnabled/deleteEnabled's posture.
+func (c *Config) skillsEnabled() bool {
+	if c == nil || c.Skills.Enabled == nil {
+		return true
+	}
+	return *c.Skills.Enabled
+}
+
+// skillsIndexMax resolves skills.index_max, falling back to
+// skillsIndexMaxDefault when unset.
+func (c *Config) skillsIndexMax() int {
+	if c == nil {
+		return skillsIndexMaxDefault
+	}
+	return resolveInt(c.Skills.IndexMax, skillsIndexMaxDefault)
+}
+
+// skillsDirsOverride returns skills.dirs verbatim; nil c or an empty list
+// means "use the four defaults" (cmd/cortex/skills.go's skillsDirs).
+func (c *Config) skillsDirsOverride() []string {
+	if c == nil {
+		return nil
+	}
+	return c.Skills.Dirs
 }
