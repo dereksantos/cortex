@@ -117,11 +117,12 @@ func TestContextConfigDormancyInvariant(t *testing.T) {
 	}
 }
 
-// TestContextReportRendersConfiguredFractions pins that /context
-// (context_cmd.go's watermarksLine/outlineSummaryLine) reflects a NON-default
-// context.* config end to end — the resolved absolute watermarks AND their
-// fraction labels — rather than the historical hardcoded "(W/2)"/"(W/3)"/
-// "= W/8" text that would silently go stale once these fractions became
+// TestContextReportRendersConfiguredFractions pins that /context's tail
+// legend row (context_cmd.go's tailLegendDetail, which folds the old
+// separate watermarks row in) reflects a NON-default context.* config end
+// to end — the resolved absolute watermarks it reads straight off
+// ws.GetWatermarks() — rather than the historical hardcoded "W/2"/"W/3"
+// figures that would silently go stale once these fractions became
 // configurable.
 func TestContextReportRendersConfiguredFractions(t *testing.T) {
 	f := floatPtr
@@ -147,18 +148,15 @@ func TestContextReportRendersConfiguredFractions(t *testing.T) {
 	}
 
 	got := cs.contextReport()
-	if !strings.Contains(got, "demote above "+humanK(wantHigh)+" (0.400×W)") {
-		t.Errorf("contextReport() should render the configured high watermark (%d, 0.400×W); got:\n%s", wantHigh, got)
+	if !strings.Contains(got, "demote >"+humanK(wantHigh)) {
+		t.Errorf("contextReport() should render the configured high watermark (%d); got:\n%s", wantHigh, got)
 	}
-	if !strings.Contains(got, "drain to "+humanK(wantLow)+" (0.200×W)") {
-		t.Errorf("contextReport() should render the configured drain watermark (%d, 0.200×W); got:\n%s", wantLow, got)
+	if !strings.Contains(got, "drain to "+humanK(wantLow)) {
+		t.Errorf("contextReport() should render the configured drain watermark (%d); got:\n%s", wantLow, got)
 	}
-	if !strings.Contains(got, "cap "+humanK(wantOutlineCap)+" = 0.100×W") {
-		t.Errorf("contextReport() should render the configured outline cap (%d, 0.100×W); got:\n%s", wantOutlineCap, got)
-	}
-	// Negative check: the stale hardcoded labels must be gone now that a
-	// non-default config is in play.
-	for _, stale := range []string{"(W/2)", "(W/3)", "= W/8"} {
+	// Negative check: the historical hardcoded fraction labels must never
+	// reappear now that a non-default config is in play.
+	for _, stale := range []string{"(W/2)", "(W/3)", "= W/8", "×W"} {
 		if strings.Contains(got, stale) {
 			t.Errorf("contextReport() still contains the stale hardcoded label %q with a configured non-default context; got:\n%s", stale, got)
 		}

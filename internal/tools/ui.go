@@ -19,13 +19,14 @@ const PromptGlyph = ">"
 
 // ANSI color codes.
 const (
-	Red    = "\033[31m"
-	Cyan   = "\033[36m"
-	Green  = "\033[32m"
-	Blue   = "\033[34m"
-	Yellow = "\033[33m"
-	Gray   = "\033[90m" // bright black, for dim status text
-	Reset  = "\033[0m"
+	Red     = "\033[31m"
+	Cyan    = "\033[36m"
+	Green   = "\033[32m"
+	Blue    = "\033[34m"
+	Magenta = "\033[35m"
+	Yellow  = "\033[33m"
+	Gray    = "\033[90m" // bright black, for dim status text
+	Reset   = "\033[0m"
 )
 
 // colorDisabled honors the NO_COLOR convention (https://no-color.org): any

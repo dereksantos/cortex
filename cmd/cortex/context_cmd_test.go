@@ -61,86 +61,75 @@ func TestContextReportStructure(t *testing.T) {
 	cs := seededContextSession(t)
 	got := cs.contextReport()
 
-	// Section headers — the two-zone architecture made visible.
-	for _, want := range []string{
-		"context window:",
-		"zone A - stable prefix (cached across turns)",
-		"zone B - hydrated tail (recent turns verbatim)",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("contextReport() missing section %q; got:\n%s", want, got)
+	// Header: model, window, turn count (ws.TotalTurns() == 3).
+	if !strings.Contains(got, "context — context-report-test-model") {
+		t.Errorf("contextReport() missing header model; got:\n%s", got)
+	}
+	if !strings.Contains(got, humanK(cs.windowSize())+" window") {
+		t.Errorf("contextReport() missing window size; got:\n%s", got)
+	}
+	if !strings.Contains(got, "turn 3") {
+		t.Errorf("contextReport() missing turn count; got:\n%s", got)
+	}
+
+	// Cache headline: 400 prompt, 380 cached -> 95% hit, 20 evaluated.
+	if !strings.Contains(got, "95%") || !strings.Contains(got, "hit last turn") {
+		t.Errorf("contextReport() missing the cache hit rate; got:\n%s", got)
+	}
+	if !strings.Contains(got, "20 evaluated of 400 prompt") {
+		t.Errorf("contextReport() missing the evaluated/prompt figures; got:\n%s", got)
+	}
+
+	// The grid: 8 rows, each starting with a "<offset>k" gutter as its own
+	// field (distinguishing it from a legend row, whose first field is a
+	// glyph, or the header/cache lines, whose first field is plain text).
+	gridLines := 0
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(stripANSI(line))
+		if len(fields) > 0 && strings.HasSuffix(fields[0], "k") {
+			gridLines++
 		}
 	}
-
-	// Header line: model name and the LastPromptTokens/window gauge.
-	if !strings.Contains(got, "model: context-report-test-model") {
-		t.Errorf("contextReport() missing model name; got:\n%s", got)
-	}
-	if !strings.Contains(got, humanK(cs.LastPromptTokens)+" / "+humanK(cs.windowSize())) {
-		t.Errorf("contextReport() missing the prompt/window gauge; got:\n%s", got)
+	if gridLines < gridRows {
+		t.Errorf("contextReport() should render %d grid rows, found %d; got:\n%s", gridRows, gridLines, got)
 	}
 
-	// Zone A: system prompt + AGENTS.md split.
-	sysContent := cs.Request.Messages[0].Content
-	wantSysTok := humanK(cache.TokensOf(len(sysContent)))
-	if !strings.Contains(got, "system prompt") || !strings.Contains(got, wantSysTok+" tok") {
-		t.Errorf("contextReport() missing system prompt row (%s tok); got:\n%s", wantSysTok, got)
-	}
-	if !strings.Contains(got, "includes AGENTS.md") {
-		t.Errorf("contextReport() should call out the injected AGENTS.md body; got:\n%s", got)
+	// Legend: system row.
+	wantSysTok := gridTokenLabel(cs.systemPromptTokens())
+	if !strings.Contains(got, "system") || !strings.Contains(got, wantSysTok) {
+		t.Errorf("contextReport() missing system legend row (%s); got:\n%s", wantSysTok, got)
 	}
 
-	// Zone A: session outline — 3 entries (outlineFixture), cap = window/8.
-	if !strings.Contains(got, "session outline") || !strings.Contains(got, "3 entries") {
+	// Legend: outline row — 3 entries (outlineFixture), spanning citation
+	// from the first entry's start to the last entry's end.
+	if !strings.Contains(got, "outline") || !strings.Contains(got, "3 entries") {
 		t.Errorf("contextReport() missing the outline entry count; got:\n%s", got)
 	}
-	outlineCap := cs.Config.outlineBudget(cs.windowSize())
-	if !strings.Contains(got, "cap "+humanK(outlineCap)+" = "+fractionOfWindow(outlineCap, cs.windowSize())) {
-		t.Errorf("contextReport() missing the outline fold cap; got:\n%s", got)
+	wantCitation := "@session/20260701-143210#m1-20"
+	if !strings.Contains(got, "recall") || !strings.Contains(got, wantCitation) {
+		t.Errorf("contextReport() missing the outline recall citation %q; got:\n%s", wantCitation, got)
 	}
 
-	// Zone A: memory index — 2 notes.
-	if !strings.Contains(got, "memory index") || !strings.Contains(got, "2 notes") {
+	// Legend: memory row — 2 notes.
+	if !strings.Contains(got, "memory") || !strings.Contains(got, "2 notes") {
 		t.Errorf("contextReport() missing the memory note count; got:\n%s", got)
 	}
 
-	// Zone B: hydrated tail — 1 demoted, 2 hydrated (turns 2-3), 70 tail tokens.
-	if !strings.Contains(got, "turns 2-3") {
-		t.Errorf("contextReport() missing the hydrated turn range; got:\n%s", got)
+	// Legend: tail row folds in the old watermarks row — hydrated count
+	// (2 = 3 total - 1 demoted) plus the demote/drain thresholds.
+	if !strings.Contains(got, "2 turns verbatim") {
+		t.Errorf("contextReport() missing the hydrated turn count; got:\n%s", got)
 	}
-	if !strings.Contains(got, "2 turns hydrated, 1 demoted to outline") {
-		t.Errorf("contextReport() missing the hydrated/demoted counts; got:\n%s", got)
-	}
-	if !strings.Contains(got, humanK(cs.ws.TailTokens())+" tok") {
-		t.Errorf("contextReport() missing the tail token count; got:\n%s", got)
-	}
-
-	// Zone B: watermarks, shown in tokens plus the resolved fraction of the
-	// window (dynamic, not the historical hardcoded "W/2"/"W/3" labels — see
-	// fractionOfWindow — since these watermarks were RestoreState'd by hand
-	// above to values that aren't actually W/2 or W/3 of this fixture's
-	// window, which is exactly the "stale constant" bug fractionOfWindow
-	// fixes).
 	high, low := cs.ws.GetWatermarks()
-	w := cs.windowSize()
-	if !strings.Contains(got, "demote above "+humanK(high)+" ("+fractionOfWindow(high, w)+")") {
-		t.Errorf("contextReport() missing the high watermark; got:\n%s", got)
-	}
-	if !strings.Contains(got, "drain to "+humanK(low)+" ("+fractionOfWindow(low, w)+")") {
-		t.Errorf("contextReport() missing the low watermark; got:\n%s", got)
-	}
-
-	// Last request: prompt/cached/evaluated derived from the reported usage.
-	if !strings.Contains(got, "last request: "+humanK(400)+" prompt, "+humanK(380)+" cached (95% cache hit), "+humanK(20)+" evaluated") {
-		t.Errorf("contextReport() missing the last-request line; got:\n%s", got)
+	if !strings.Contains(got, "demote >"+humanK(high)) || !strings.Contains(got, "drain to "+humanK(low)) {
+		t.Errorf("contextReport() missing the tail row's folded watermarks; got:\n%s", got)
 	}
 }
 
 // TestContextReportOmitsUntrackedSections covers the "omit, don't invent"
 // rule: a bare session with no memory store, no outline, no working set, and
-// no reported usage yet must not fabricate a number for any of those — the
-// corresponding rows (and even their zone header, for zone B when there is
-// truly nothing to show) are simply absent, and the call must not panic.
+// no reported usage yet must not fabricate a legend row for any of those —
+// the corresponding rows are simply absent, and the call must not panic.
 func TestContextReportOmitsUntrackedSections(t *testing.T) {
 	cs := &CortexSession{
 		Window: 4000,
@@ -161,20 +150,127 @@ func TestContextReportOmitsUntrackedSections(t *testing.T) {
 	}()
 
 	for _, absent := range []string{
-		"memory index",
-		"session outline",
-		"demoted to outline",
-		"watermarks",
-		"last request:",
-		"AGENTS.md",
+		"memory",
+		"outline",
+		"turns verbatim",
+		"demote >",
+		"◂ demote",
 	} {
 		if strings.Contains(got, absent) {
 			t.Errorf("contextReport() on a bare session should omit %q, got:\n%s", absent, got)
 		}
 	}
-	// The always-available header and zone A still render (there's a real
-	// system prompt to report), even though every optional row is empty.
-	if !strings.Contains(got, "context window:") || !strings.Contains(got, "zone A") {
-		t.Errorf("contextReport() should still render the header and zone A; got:\n%s", got)
+
+	// Fresh session: no request made yet, so the cache headline reports
+	// zone A's assembled size instead of a misleading "0 / window".
+	if !strings.Contains(got, "no requests yet") {
+		t.Errorf("contextReport() should show the fresh-session cache headline; got:\n%s", got)
+	}
+	if !strings.Contains(got, "zone A assembled at "+humanK(cs.headTokens())) {
+		t.Errorf("contextReport() fresh-session headline missing the assembled size; got:\n%s", got)
+	}
+
+	// The header and system legend row still render (there's a real system
+	// prompt), even though every other row is empty.
+	if !strings.Contains(got, "context — bare-model") {
+		t.Errorf("contextReport() should still render the header; got:\n%s", got)
+	}
+	if !strings.Contains(got, "system") {
+		t.Errorf("contextReport() should still render the system legend row; got:\n%s", got)
+	}
+}
+
+func TestContextHeaderLine(t *testing.T) {
+	cs := seededContextSession(t)
+	got := stripANSI(cs.contextHeaderLine())
+	want := "context — context-report-test-model · " + humanK(cs.windowSize()) + " window · turn 3"
+	if got != want {
+		t.Errorf("contextHeaderLine() = %q, want %q", got, want)
+	}
+}
+
+func TestContextHeaderLineNoWorkingSetYet(t *testing.T) {
+	cs := &CortexSession{
+		Window:  4000,
+		Request: &AgentRequest{Model: "m"},
+	}
+	got := stripANSI(cs.contextHeaderLine())
+	if !strings.HasSuffix(got, "turn 0") {
+		t.Errorf("contextHeaderLine() = %q, want a trailing turn 0 (no working set yet)", got)
+	}
+}
+
+// TestCacheHeadlineLineThresholds pins the hit-rate color thresholds: green
+// at/above 80%, yellow at/above 40%, red below.
+func TestCacheHeadlineLineThresholds(t *testing.T) {
+	tests := []struct {
+		name           string
+		prompt, cached int
+		wantColor      string
+	}{
+		{"green at exactly 80%", 100, 80, green},
+		{"green above 80%", 100, 95, green},
+		{"yellow at exactly 40%", 100, 40, yellow},
+		{"yellow between thresholds", 100, 60, yellow},
+		{"red below 40%", 100, 10, red},
+		{"red at zero", 100, 0, red},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cs := &CortexSession{LastPromptTokens: tt.prompt, LastCachedTokens: tt.cached}
+			got := cs.cacheHeadlineLine()
+			if !strings.Contains(got, tt.wantColor) {
+				t.Errorf("cacheHeadlineLine() = %q, want it to carry color %q", got, tt.wantColor)
+			}
+		})
+	}
+}
+
+func TestCacheHeadlineLineFreshSession(t *testing.T) {
+	cs := &CortexSession{
+		Request: &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "short prompt"}}},
+	}
+	got := stripANSI(cs.cacheHeadlineLine())
+	want := "prefix cache  — no requests yet · zone A assembled at " + humanK(cs.headTokens())
+	if got != want {
+		t.Errorf("cacheHeadlineLine() = %q, want %q", got, want)
+	}
+}
+
+// TestGridLegendLinesOmitEmptyComponents covers the per-row omission rule
+// directly against gridLegendLines, independent of the full report: with
+// only a system prompt populated and the window sized to exactly match it
+// (no free space left over either), the system row is the only one shown.
+func TestGridLegendLinesOmitEmptyComponents(t *testing.T) {
+	cs := &CortexSession{
+		Request: &AgentRequest{
+			Model:    "m",
+			Messages: []Message{{Role: RoleSystem, Content: "a system prompt with some content"}},
+		},
+	}
+	cs.Window = cs.systemPromptTokens()
+
+	lines := cs.gridLegendLines()
+	if len(lines) != 1 {
+		t.Fatalf("gridLegendLines() = %d lines, want 1 (system only); got: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "system") {
+		t.Errorf("gridLegendLines()[0] = %q, want the system row", lines[0])
+	}
+}
+
+func TestOutlineSpanCitation(t *testing.T) {
+	cs := &CortexSession{outline: outlineFixture()}
+	got := cs.outlineSpanCitation()
+	want := "@session/20260701-143210#m1-20"
+	if got != want {
+		t.Errorf("outlineSpanCitation() = %q, want %q", got, want)
+	}
+}
+
+func TestOutlineSpanCitationEmpty(t *testing.T) {
+	cs := &CortexSession{}
+	if got := cs.outlineSpanCitation(); got != "" {
+		t.Errorf("outlineSpanCitation() on an empty outline = %q, want \"\"", got)
 	}
 }

@@ -61,13 +61,10 @@ var (
 	asciiRamp   = []rune(" .:=#")
 )
 
-// promptGaugeCells and contextReportGaugeCells are the two widths the same
-// bar renders at: compact for the always-on prompt row, wider for the
-// on-demand /context report.
-const (
-	promptGaugeCells        = 12
-	contextReportGaugeCells = 32
-)
+// promptGaugeCells is the prompt row's compact bar width — the only caller
+// of renderContextBar left since /context switched to the square glyph grid
+// (context_grid.go, context_cmd.go).
+const promptGaugeCells = 12
 
 // renderContextBar draws the fixed-spatial two-zone context gauge:
 //
@@ -206,20 +203,6 @@ func (cs *CortexSession) gaugeStyle() gaugeStyle {
 // turn completes — tail is 0 then, same as "nothing hydrated yet".
 func (cs *CortexSession) renderGauge(cells int) string {
 	return renderContextBar(cs.headTokens(), cs.tailTokens(), cs.windowSize(), cells, cs.gaugeStyle())
-}
-
-// contextReportGaugeStyle keeps /context always drawing the fixed-spatial
-// bar (contextReportGaugeCells wide) even now that the prompt row's default
-// flipped to the numeric gaugeZones form: the report's whole reason to
-// exist is showing the window as a spatial map, so an unset/zones config
-// falls back to blocks here. Any explicitly configured bar or numeric style
-// still passes through unchanged — /context has always respected repl.gauge
-// for those, and that isn't changing.
-func contextReportGaugeStyle(s gaugeStyle) gaugeStyle {
-	if s == gaugeZones {
-		return gaugeBlocks
-	}
-	return s
 }
 
 // tailTokens is zone B's current token count — cs.ws may be nil before the

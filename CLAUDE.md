@@ -101,10 +101,12 @@ REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
 commands are the `input ==` checks inside the REPL's input loop (`for {`).
 `/help` lists the commands; `/context`
-(`cmd/cortex/context_cmd.go`) renders a plain-text map of the two-zone
-context window (docs/context-architecture.md) for the current session —
-stable prefix (system prompt, outline, memory index) vs. hydrated tail
-(recent turns, watermarks), plus the last request's prompt/cache usage.
+(`cmd/cortex/context_cmd.go` + `context_grid.go`) renders the current
+session's two-zone context window (docs/context-architecture.md) as a fixed
+8×16 glyph grid spanning the whole model window — one glyph per component
+(system prompt, outline, memory index, skills index, hydrated tail, free
+space), a demote-watermark tick, and a legend — under a header and a
+prefix-cache health headline.
 Memory is model-driven — ask in natural language ("remember that …" /
 "forget the … note") and the agent calls the memory tools; the old
 `/remember` and `/forget` slash commands were removed with the mechanical

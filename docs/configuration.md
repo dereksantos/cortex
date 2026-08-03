@@ -333,7 +333,7 @@ config gate — every session with memory enabled gets both tiers. See
 | Field | Default | Meaning |
 |---|---|---|
 | `ticker_interval_ms` | 1000 | Wall-clock refresh period of the "thinking… Ns" elapsed label during a streaming turn. |
-| `gauge` | `"zones"` | Style of the two-zone context gauge shown in the prompt row: `"zones"` (default — two humanized numbers separated by a divider character, e.g. `10k` + divider + `100k`; zone A/head and the divider render gray, zone B/tail carries the green→yellow→red pressure color — near-limit is the only state that shouts), `"blocks"` (Unicode Block Elements eighth-block sparkline ramp bar, 9 levels), `"braille"` (braille density-ramp fill bar, 9 levels), `"ascii"` (structure-safe fallback ramp bar, 5 levels, no unicode), or `"numeric"` (the pre-bar "used/window" text). `/context` always renders one of the fixed-spatial bar styles regardless of this setting — falling back to `"blocks"` when unset/`"zones"` — since its whole point is showing the window as a spatial map. |
+| `gauge` | `"zones"` | Style of the two-zone context gauge shown in the prompt row: `"zones"` (default — two humanized numbers separated by a divider character, e.g. `10k` + divider + `100k`; zone A/head and the divider render gray, zone B/tail carries the green→yellow→red pressure color — near-limit is the only state that shouts), `"blocks"` (Unicode Block Elements eighth-block sparkline ramp bar, 9 levels), `"braille"` (braille density-ramp fill bar, 9 levels), `"ascii"` (structure-safe fallback ramp bar, 5 levels, no unicode), or `"numeric"` (the pre-bar "used/window" text). This setting is prompt-row-only — `/context` renders its own fixed 8×16 glyph grid over the whole model window (`cmd/cortex/context_grid.go`) regardless of `gauge`. |
 
 The braille spinner set was removed (2026-07-19); there is deliberately no
 spinner-cadence knob. The line editor's own 90ms live-redraw tick
@@ -468,8 +468,8 @@ rest.
 The rendered index is injected at turn start alongside the memory index
 (`cmd/cortex/turn.go`), in the same fixed wire slot — coder-only: the
 Study/Learn/Agent subagent profiles are seeded from their own static system
-prompt and never see it. `/context` surfaces it as a "skills index" line in
-zone A when non-empty.
+prompt and never see it. `/context` surfaces it as a `skills` row (░ glyph)
+in the grid legend when non-empty.
 
 ## Validation
 

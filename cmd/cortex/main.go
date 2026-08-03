@@ -174,12 +174,14 @@ const promptGlyph = tools.PromptGlyph
 // Color palette and the NO_COLOR-aware wrapper live in the ui package;
 // aliased here so the many call sites in main.go read unchanged.
 const (
-	red    = tools.Red
-	cyan   = tools.Cyan
-	green  = tools.Green
-	yellow = tools.Yellow
-	gray   = tools.Gray
-	reset  = tools.Reset
+	red     = tools.Red
+	cyan    = tools.Cyan
+	green   = tools.Green
+	blue    = tools.Blue
+	magenta = tools.Magenta
+	yellow  = tools.Yellow
+	gray    = tools.Gray
+	reset   = tools.Reset
 )
 
 func withColor(v string, c string) string { return tools.Color(v, c) }
