@@ -28,11 +28,14 @@ func (m Message) Print() {
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
-	// The gauge is the fixed-spatial two-zone bar (contextbar.go) by
-	// default; ctxColor still keys off LastPromptTokens (the last request's
-	// actual billed size, not the bar's own head+tail estimate) — same
-	// green/yellow/red threshold semantics as before this bar existed.
-	gauge := withColor(cs.renderGauge(promptGaugeCells), ctxColor(cs.LastPromptTokens, win))
+	// The gauge is the two-zone numeric form (contextbar.go's gaugeZones) by
+	// default; coloredGauge composes its per-zone coloring (gray head/gray
+	// divider/pressure-colored tail) or, for the selectable bar styles, the
+	// single ctxColor wrap that predates gaugeZones. ctxColor keys off
+	// LastPromptTokens (the last request's actual billed size, not the
+	// gauge's own head+tail estimate) — same green/yellow/red threshold
+	// semantics as before this style existed.
+	gauge := cs.coloredGauge(promptGaugeCells, win)
 	cost := ""
 	if cs.costUSD > 0 {
 		cost = withColor(" | "+humanCost(cs.costUSD), gray)

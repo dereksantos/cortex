@@ -9,8 +9,9 @@
 // the old "used/window" numeric gauge did (docs/context-architecture.md's
 // two-zone design: a stable prefix, a hydrated tail, and the free window
 // past both). repl.gauge (docs/configuration.md) selects the rendering
-// style: "blocks" (default), "braille", "ascii", or "numeric" (the old x/y
-// form).
+// style: "zones" (default — two humanized numbers, "<headK>|<tailK>"),
+// "blocks", "braille", "ascii" (the fixed-spatial bar in three ramps), or
+// "numeric" (the old x/y form).
 package main
 
 import "strings"
@@ -19,19 +20,22 @@ import "strings"
 type gaugeStyle int
 
 const (
-	gaugeBlocks  gaugeStyle = iota // default: block-element (eighth-block) ramp
-	gaugeBraille                   // braille density ramp
-	gaugeASCII                     // ASCII density ramp (no unicode)
+	gaugeZones   gaugeStyle = iota // default: two-zone numeric "<headK>|<tailK>" text
+	gaugeBlocks                    // block-element (eighth-block) ramp bar
+	gaugeBraille                   // braille density ramp bar
+	gaugeASCII                     // ASCII density ramp bar (no unicode)
 	gaugeNumeric                   // the old "used/window" scalar text
 )
 
 // resolveGaugeStyle maps the repl.gauge config string to a gaugeStyle.
-// Unrecognized or unset values fall back to blocks — validateConfig
-// already rejects anything outside {"", "blocks", "braille", "ascii",
+// Unrecognized or unset values fall back to zones — validateConfig already
+// rejects anything outside {"", "zones", "blocks", "braille", "ascii",
 // "numeric"} before this ever runs, so this fallback is just defense in
 // depth.
 func resolveGaugeStyle(s string) gaugeStyle {
 	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "blocks":
+		return gaugeBlocks
 	case "braille":
 		return gaugeBraille
 	case "ascii":
@@ -39,7 +43,7 @@ func resolveGaugeStyle(s string) gaugeStyle {
 	case "numeric":
 		return gaugeNumeric
 	default:
-		return gaugeBlocks
+		return gaugeZones
 	}
 }
 
@@ -86,6 +90,10 @@ const (
 // '|') is always plain ASCII, even in braille style.
 //
 // Edge cases:
+//   - style == gaugeZones: always renderZoneGauge(head, tail) — the two
+//     humanized zone numbers, with no window/cells dependency at all (a
+//     window <= 0 has no special meaning for that form, unlike the bar
+//     styles below).
 //   - window <= 0: there is no fixed span to draw against — fall back to
 //     the old "head+tail/window" numeric form.
 //   - style == gaugeNumeric: always the numeric form, any window.
@@ -93,6 +101,9 @@ const (
 //     available; the divider still renders, pinned at the right edge of the
 //     fill area when head alone consumes it all.
 func renderContextBar(head, tail, window, cells int, style gaugeStyle) string {
+	if style == gaugeZones {
+		return renderZoneGauge(head, tail)
+	}
 	if window <= 0 || style == gaugeNumeric {
 		return humanFraction(head+tail, window)
 	}
@@ -161,24 +172,82 @@ func humanFraction(used, window int) string {
 	return humanK(used) + "/" + humanK(window)
 }
 
+// zoneDivider is the character between the two zone numbers in the
+// gaugeZones style — the same '|' the bar styles draw at the head/tail
+// boundary, so the divider carries one consistent meaning across styles.
+const zoneDivider = "|"
+
+// renderZoneGauge renders the gaugeZones style's plain, color-free text:
+// "<headK>|<tailK>", e.g. "10k|100k" for a 10,000-token stable prefix and a
+// 100,000-token hydrated tail (both via humanK). Pure so it's unit-testable
+// without ANSI; the session-level color composition — gray on the head
+// number and the divider, the pressure color on the tail number — lives in
+// coloredGauge below, which is the only caller that needs to color the two
+// halves differently.
+func renderZoneGauge(head, tail int) string {
+	return humanK(head) + zoneDivider + humanK(tail)
+}
+
 // gaugeStyle resolves this session's configured repl.gauge style. cs.Config
 // may be nil (e.g. a bare session in a test) — that's "unset", not an
-// error, so it defaults to blocks like an empty string would.
+// error, so it defaults to zones like an empty string would.
 func (cs *CortexSession) gaugeStyle() gaugeStyle {
 	if cs.Config == nil {
-		return gaugeBlocks
+		return gaugeZones
 	}
 	return resolveGaugeStyle(cs.Config.Repl.Gauge)
 }
 
-// renderGauge draws the two-zone context bar at the given width using this
-// session's current head (zone A stable prefix) / tail (zone B hydrated
-// tail) / window figures and configured style. cs.ws may be nil before the
-// first turn completes — tail is 0 then, same as "nothing hydrated yet".
+// renderGauge draws the two-zone context gauge at the given width (for the
+// bar styles; ignored by gaugeZones) using this session's current head (zone
+// A stable prefix) / tail (zone B hydrated tail) / window figures and
+// configured style. Returns plain, color-free text — see coloredGauge for
+// the prompt row's colored composition. cs.ws may be nil before the first
+// turn completes — tail is 0 then, same as "nothing hydrated yet".
 func (cs *CortexSession) renderGauge(cells int) string {
-	tail := 0
-	if cs.ws != nil {
-		tail = cs.ws.TailTokens()
+	return renderContextBar(cs.headTokens(), cs.tailTokens(), cs.windowSize(), cells, cs.gaugeStyle())
+}
+
+// contextReportGaugeStyle keeps /context always drawing the fixed-spatial
+// bar (contextReportGaugeCells wide) even now that the prompt row's default
+// flipped to the numeric gaugeZones form: the report's whole reason to
+// exist is showing the window as a spatial map, so an unset/zones config
+// falls back to blocks here. Any explicitly configured bar or numeric style
+// still passes through unchanged — /context has always respected repl.gauge
+// for those, and that isn't changing.
+func contextReportGaugeStyle(s gaugeStyle) gaugeStyle {
+	if s == gaugeZones {
+		return gaugeBlocks
 	}
-	return renderContextBar(cs.headTokens(), tail, cs.windowSize(), cells, cs.gaugeStyle())
+	return s
+}
+
+// tailTokens is zone B's current token count — cs.ws may be nil before the
+// first turn completes, which reads as zero (nothing hydrated yet) rather
+// than an error.
+func (cs *CortexSession) tailTokens() int {
+	if cs.ws == nil {
+		return 0
+	}
+	return cs.ws.TailTokens()
+}
+
+// coloredGauge composes the prompt row's colored gauge. Every bar style
+// (blocks/braille/ascii/numeric) keeps the single ctxColor wrap that
+// predates the zones style — the whole bar shifts green->yellow->red
+// together as the window fills. gaugeZones is the one exception the design
+// calls for: zone A (head) and the '|' divider render gray — deliberately
+// boring, since the stable prefix isn't where risk lives — while zone B
+// (tail) alone carries the pressure color, so a near-limit tail is the only
+// state that visually shouts. win is the model window (cs.windowSize()) the
+// caller already has; ctxColor keys off cs.LastPromptTokens (the last
+// request's actual billed size), same as before this style existed.
+func (cs *CortexSession) coloredGauge(cells, win int) string {
+	pressure := ctxColor(cs.LastPromptTokens, win)
+	if cs.gaugeStyle() != gaugeZones {
+		return withColor(cs.renderGauge(cells), pressure)
+	}
+	return withColor(humanK(cs.headTokens()), gray) +
+		withColor(zoneDivider, gray) +
+		withColor(humanK(cs.tailTokens()), pressure)
 }

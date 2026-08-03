@@ -306,14 +306,24 @@ func TestSessionPrompt(t *testing.T) {
 		}
 	}
 	// The old exact "8.2k/32.8k" (LastPromptTokens/window) scalar left the
-	// prompt row for the default two-zone gauge bar (contextbar.go) — check
-	// its structure renders instead.
-	if !strings.Contains(got, "[") || !strings.Contains(got, "|") || !strings.Contains(got, "]") {
-		t.Errorf("Prompt() = %q, missing the two-zone gauge bar ([head|tail...])", got)
+	// prompt row for the default two-zone gauge (contextbar.go's gaugeZones)
+	// — check its "<headK>|<tailK>" structure renders instead. Zones has no
+	// brackets (that's the bar styles' structure, not the default). The
+	// head/divider/tail are each colored separately (coloredGauge), so an
+	// ANSI reset sits between them — strip color before matching the text.
+	wantZones := humanK(sess.headTokens()) + zoneDivider + humanK(sess.tailTokens())
+	if !strings.Contains(stripANSI(got), wantZones) {
+		t.Errorf("Prompt() = %q, missing the two-zone gauge %q", got, wantZones)
 	}
 
-	// repl.gauge = "numeric" still renders that old scalar form, now off the
-	// bar's own head(zone A)+tail(zone B) figures rather than
+	// repl.gauge = "blocks" still renders the fixed-spatial bracket bar.
+	sess.Config = &Config{Repl: ReplConfig{Gauge: "blocks"}}
+	if bar := sess.Prompt(); !strings.Contains(bar, "[") || !strings.Contains(bar, "|") || !strings.Contains(bar, "]") {
+		t.Errorf("Prompt() with repl.gauge=blocks = %q, missing the bar structure ([head|tail...])", bar)
+	}
+
+	// repl.gauge = "numeric" still renders the old scalar form, now off the
+	// gauge's own head(zone A)+tail(zone B) figures rather than
 	// LastPromptTokens (renderContextBar is a pure function of
 	// head/tail/window/cells/style — see contextbar.go).
 	sess.Config = &Config{Repl: ReplConfig{Gauge: "numeric"}}

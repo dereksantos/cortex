@@ -659,9 +659,12 @@ type ServeConfig struct {
 type ReplConfig struct {
 	TickerIntervalMs int `json:"ticker_interval_ms"`
 	// Gauge selects the prompt-row/context-report gauge style
-	// (contextbar.go's resolveGaugeStyle): "blocks" (default, unset also
-	// means this), "braille", "ascii", or "numeric" (the pre-bar
-	// "used/window" text).
+	// (contextbar.go's resolveGaugeStyle): "zones" (default, unset also
+	// means this — the two-zone numeric "<headK>|<tailK>" text, gray head
+	// and divider, pressure-colored tail), "blocks", "braille", "ascii"
+	// (the fixed-spatial bar in three ramps; /context always renders one of
+	// these regardless of this setting when it's unset/"zones"), or
+	// "numeric" (the pre-bar "used/window" text).
 	Gauge string `json:"gauge"`
 }
 
@@ -1078,9 +1081,9 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("discord.route_confidence_threshold must be in (0, 1], got %v", *t)
 	}
 	switch cfg.Repl.Gauge {
-	case "", "blocks", "braille", "ascii", "numeric":
+	case "", "zones", "blocks", "braille", "ascii", "numeric":
 	default:
-		return fmt.Errorf("repl.gauge must be one of \"blocks\", \"braille\", \"ascii\", \"numeric\", got %q", cfg.Repl.Gauge)
+		return fmt.Errorf("repl.gauge must be one of \"zones\", \"blocks\", \"braille\", \"ascii\", \"numeric\", got %q", cfg.Repl.Gauge)
 	}
 	return nil
 }

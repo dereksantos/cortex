@@ -170,21 +170,22 @@ func TestRenderContextBarNonPositiveCells(t *testing.T) {
 
 // TestResolveGaugeStyle covers the repl.gauge string -> gaugeStyle mapping,
 // including case-insensitivity/trimming and the "unset or unrecognized
-// falls back to blocks" default (validateConfig is the actual gate against
+// falls back to zones" default (validateConfig is the actual gate against
 // bogus values reaching here at all).
 func TestResolveGaugeStyle(t *testing.T) {
 	tests := []struct {
 		in   string
 		want gaugeStyle
 	}{
-		{"", gaugeBlocks},
+		{"", gaugeZones},
+		{"zones", gaugeZones},
 		{"blocks", gaugeBlocks},
 		{"braille", gaugeBraille},
 		{"ascii", gaugeASCII},
 		{"ASCII", gaugeASCII},
 		{"  ascii  ", gaugeASCII},
 		{"numeric", gaugeNumeric},
-		{"bogus", gaugeBlocks},
+		{"bogus", gaugeZones},
 	}
 	for _, tt := range tests {
 		if got := resolveGaugeStyle(tt.in); got != tt.want {
@@ -197,7 +198,9 @@ func TestResolveGaugeStyle(t *testing.T) {
 // integration check that renderGauge (the CortexSession-level wrapper) wires
 // headTokens()/cs.ws.TailTokens()/windowSize() into renderContextBar
 // correctly, and that a nil cs.ws (no turn completed yet) is treated as
-// zero tail rather than panicking.
+// zero tail rather than panicking. Style is pinned explicitly to gaugeBlocks
+// (via repl.gauge = "blocks") so this test's bracket/divider assertions
+// don't depend on whatever the default style happens to be.
 func TestCortexSessionRenderGaugeUsesHeadTokensAndTailTokens(t *testing.T) {
 	cs := &CortexSession{
 		Window: 2000,
@@ -205,6 +208,7 @@ func TestCortexSessionRenderGaugeUsesHeadTokensAndTailTokens(t *testing.T) {
 			Model:    "m",
 			Messages: []Message{{Role: RoleSystem, Content: "system"}},
 		},
+		Config: &Config{Repl: ReplConfig{Gauge: "blocks"}},
 	}
 	// No cs.ws yet — must not panic, and must render with tail=0.
 	got := cs.renderGauge(10)
@@ -222,5 +226,79 @@ func TestCortexSessionRenderGaugeUsesHeadTokensAndTailTokens(t *testing.T) {
 	want = renderContextBar(cs.headTokens(), cs.ws.TailTokens(), cs.windowSize(), 10, gaugeBlocks)
 	if got != want {
 		t.Errorf("renderGauge() after AddTurn = %q, want %q", got, want)
+	}
+}
+
+// TestRenderZoneGauge pins renderZoneGauge's exact "<headK>|<tailK>" text
+// for representative cases, including the doc example (10k head, 100k
+// tail) and humanK's own rounding behavior (sub-1000 stays a bare integer,
+// no "k" suffix).
+func TestRenderZoneGauge(t *testing.T) {
+	tests := []struct {
+		name       string
+		head, tail int
+		want       string
+	}{
+		{"zero/zero", 0, 0, "0|0"},
+		{"doc example: 10k head, 100k tail", 10000, 100000, "10k|100k"},
+		{"sub-1000 stays bare (no k suffix)", 500, 999, "500|999"},
+		{"humanK rounding: 9000/22000 (sample state)", 9000, 22000, "9k|22k"},
+		{"non-round-thousand: humanK keeps one decimal", 1500, 2500, "1.5k|2.5k"},
+		{"large: millions", 1_200_000, 500, "1.2M|500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderZoneGauge(tt.head, tt.tail)
+			if got != tt.want {
+				t.Errorf("renderZoneGauge(%d, %d) = %q, want %q", tt.head, tt.tail, got, tt.want)
+			}
+			// renderContextBar must delegate to renderZoneGauge for
+			// gaugeZones, ignoring window/cells entirely.
+			for _, window := range []int{0, -5, 128000} {
+				if bar := renderContextBar(tt.head, tt.tail, window, 12, gaugeZones); bar != tt.want {
+					t.Errorf("renderContextBar(gaugeZones, window=%d) = %q, want %q", window, bar, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestColoredGaugeZonesColorsEachZoneDifferently checks the prompt row's
+// zones composition: zone A (head) and the '|' divider render gray, zone B
+// (tail) carries the pressure color (ctxColor) instead — the point of the
+// design being that a near-limit tail is the only state that visually
+// shouts. Per repo precedent (render_test.go's TestMessageRender), ANSI
+// color codes are pinned directly via Contains rather than stripped, but the
+// ordering check confirms gray wraps the head number and precedes the tail's
+// pressure-colored number.
+func TestColoredGaugeZonesColorsEachZoneDifferently(t *testing.T) {
+	cs := &CortexSession{
+		Window: 128000,
+		Request: &AgentRequest{
+			Model:    "m",
+			Messages: []Message{{Role: RoleSystem, Content: strings.Repeat("x", 40000)}}, // ~10k head tokens
+		},
+		LastPromptTokens: 110000, // pushes ctxColor into red
+	}
+	cs.ws = cs.newWorkingSet(1)
+	cs.ws.AddTurn(cache.TurnSpan{Start: 1, End: 2, Tokens: 100000}) // ~100k tail tokens
+
+	got := cs.coloredGauge(promptGaugeCells, cs.windowSize())
+
+	headStr := humanK(cs.headTokens())
+	tailStr := humanK(cs.tailTokens())
+	pressure := ctxColor(cs.LastPromptTokens, cs.windowSize())
+
+	if !strings.Contains(got, gray+headStr) {
+		t.Errorf("coloredGauge() = %q, want gray to wrap the head number %q", got, headStr)
+	}
+	if !strings.Contains(got, gray+zoneDivider) {
+		t.Errorf("coloredGauge() = %q, want gray to wrap the '|' divider", got)
+	}
+	if !strings.Contains(got, pressure+tailStr) {
+		t.Errorf("coloredGauge() = %q, want the pressure color %q to wrap the tail number %q", got, pressure, tailStr)
+	}
+	if idx := strings.Index(got, gray); idx == -1 || idx > strings.Index(got, pressure+tailStr) {
+		t.Errorf("coloredGauge() = %q, want gray (head) to precede the pressure-colored tail", got)
 	}
 }

@@ -37,7 +37,7 @@ func (cs *CortexSession) contextReport() string {
 	}
 	fmt.Fprintf(&b, "context window: %s / %s tokens (%d%%)  model: %s\n",
 		humanK(cs.LastPromptTokens), humanK(win), pct, cs.Request.Model)
-	b.WriteString(cs.renderGauge(contextReportGaugeCells) + "\n")
+	b.WriteString(renderContextBar(cs.headTokens(), cs.tailTokens(), win, contextReportGaugeCells, contextReportGaugeStyle(cs.gaugeStyle())) + "\n")
 
 	b.WriteString("\nzone A - stable prefix (cached across turns)\n")
 	for _, line := range []string{cs.systemPromptLine(), cs.outlineSummaryLine(), cs.memoryIndexLine(), cs.skillsIndexLine()} {
