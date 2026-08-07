@@ -281,6 +281,61 @@ func TestLoadMergedConfig(t *testing.T) {
 	})
 }
 
+// TestReadConfigFileWarnsOnMalformedJSON pins the distinction between a config
+// that is absent and one that is broken. Both fall back to the lower layer, but
+// only the broken one says so: a real user config sat inert for weeks with a
+// single missing brace while cortex quietly served the zero-config fallback,
+// and nothing on any surface mentioned it.
+func TestReadConfigFileWarnsOnMalformedJSON(t *testing.T) {
+	// The malformed fixture is the shape the real breakage took: an inner
+	// object left open, so the key after it nests instead of closing the file.
+	const malformed = `{
+  "backend": { "type": "litellm", "endpoint": "http://chatterbox:4000" },
+  "models": {
+    "code": { "model": "some/model", "window": 500000
+  },
+  "scan": { "roots": ["/tmp"] }
+}`
+
+	tests := []struct {
+		name     string
+		write    bool
+		body     string
+		wantNil  bool
+		wantWarn bool
+	}{
+		{name: "malformed json warns and falls back", write: true, body: malformed, wantNil: true, wantWarn: true},
+		{name: "valid json loads silently", write: true, body: `{"backend":{"type":"ollama"}}`, wantNil: false, wantWarn: false},
+		{name: "absent file is silent", write: false, wantNil: true, wantWarn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if tc.write {
+				if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+
+			var cfg *Config
+			out := captureStderr(t, func() { cfg = readConfigFile(path) })
+
+			if got := cfg == nil; got != tc.wantNil {
+				t.Errorf("readConfigFile returned nil=%v, want nil=%v", got, tc.wantNil)
+			}
+			warned := strings.Contains(out, "malformed config")
+			if warned != tc.wantWarn {
+				t.Errorf("warned=%v, want %v; stderr=%q", warned, tc.wantWarn, out)
+			}
+			if tc.wantWarn && !strings.Contains(out, path) {
+				t.Errorf("warning omits the offending path; stderr=%q", out)
+			}
+		})
+	}
+}
+
 // captureStderr redirects os.Stderr for the duration of fn and returns
 // everything written to it, so a test can assert on warnUnknownRoles' (or
 // any other) stderr message without letting it leak into `go test`'s own

@@ -971,6 +971,14 @@ func readConfigFile(path string) *Config {
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		// An absent file is a choice; a malformed one is a mistake, and
+		// silently treating the two alike let a user config with one missing
+		// brace sit inert for weeks while cortex quietly served the
+		// zero-config fallback. Warn and fall back to the lower layer rather
+		// than exiting the way validateConfig does below — a syntax slip
+		// should not lock anyone out of their own REPL. stderr, never stdout,
+		// so `turn --json` stays machine-clean.
+		fmt.Fprintf(os.Stderr, "cortex: %s: ignoring malformed config: %v\n", path, err)
 		return nil
 	}
 	warnUnknownRoles(&cfg, path)
