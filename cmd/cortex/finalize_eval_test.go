@@ -227,6 +227,73 @@ func TestForcedFinalize_CauseAndHonesty(t *testing.T) {
 	}
 }
 
+// TestSalvageClampedFinalize_NeverPresentsUnfinishedWorkAsDone pins the honesty
+// contract on the clamped-salvage branch, which never inherited the one
+// finalizePromptFor already carries.
+//
+// The 2026-08-07 polyglot run is the case this exists for: on beer-song and
+// book-store the model read the stub, read the test, ran the tests, then wrote
+// the implementation into chat and hit the completion ceiling with zero write
+// calls. The old salvage asked only for "a concise final answer to the goal",
+// and the model duly answered "I have implemented the Song, Verses, and Verse
+// functions in beer_song.go" over a file it had never touched — a confabulated
+// success the harness itself elicited.
+//
+// Two properties are pinned, and the second matters as much as the first: the
+// prompt must constrain what may be CLAIMED without prescribing what must be
+// DONE. A salvage that told the model to go write the file would also fire on
+// discussion turns, where producing no edit is correct, and would push unwanted
+// edits into the tree.
+func TestSalvageClampedFinalize_NeverPresentsUnfinishedWorkAsDone(t *testing.T) {
+	// CompletionTokens == Bounds.MaxTokens is the clamp signature (accountUsage);
+	// non-empty content routes to the clamped salvage rather than the empty one.
+	const clampedProse = "I will implement the Song, Verses, and Verse functions in beer_song.go. I'll start by"
+	script := []scriptStep{
+		{resp: fakeResp("", []ToolCall{readCall("c1", "beer_song.go")}, 10, 4)},
+		{resp: fakeResp(clampedProse, nil, 10, 100)},
+		{resp: fakeResp("I did not finish: beer_song.go is unchanged.", nil, 5, 5)},
+	}
+	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
+		return "OBS for " + call.Function.Arguments
+	})
+	_, stats, msgs := runScripted(t, script, Toolset{Tools: nil, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 100})
+
+	if !stats.MaxTokensClamped {
+		t.Fatalf("MaxTokensClamped = false; the script did not reproduce the clamp")
+	}
+	if !stats.Salvaged {
+		t.Fatalf("Salvaged = false; the clamped-salvage branch never fired")
+	}
+	prompt := lastUserMessage(t, msgs)
+
+	tests := []struct {
+		name    string
+		phrase  string
+		wantIn  bool
+		because string
+	}{
+		{"honesty clause", "never present work you did not finish as done", true,
+			"without it the model narrates the goal as accomplished"},
+		{"still asks for brevity", "at most five sentences", true,
+			"the original runaway-tripwire purpose must survive"},
+		{"no write instruction", "write_file", false,
+			"prescribing an edit would fire on discussion turns too"},
+		{"no edit instruction", "edit_file", false,
+			"prescribing an edit would fire on discussion turns too"},
+		{"does not demand disk changes", "to disk", false,
+			"the salvage constrains claims, never actions"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Contains(prompt, tc.phrase); got != tc.wantIn {
+				t.Errorf("clamped-salvage prompt contains %q = %v, want %v — %s\nprompt: %q",
+					tc.phrase, got, tc.wantIn, tc.because, prompt)
+			}
+		})
+	}
+}
+
 // TestForcedFinalize_StyleSplit pins the two closings: interactive offers to
 // continue; subagent (the zero value) lists open items and never asks a
 // question — a subagent has no interlocutor to answer one.

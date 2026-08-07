@@ -232,7 +232,24 @@ const reFinalizePrompt = "Your previous reply was empty — you spent the whole 
 // running into the completion ceiling. That answer is usually verbose and fails
 // the eval's runaway tripwire; ask for a compact rewrite, then mark the run
 // salvaged if the rewrite succeeds.
-const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewrite it now as a concise final answer in at most five sentences. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
+//
+// The honesty clause is not decoration. This prompt was written for the study
+// path, where the clamped answer is a digest and brevity is the only goal. On a
+// coding turn the same ask is actively dangerous: a model cut off while writing
+// an implementation into chat satisfies "give a concise final answer to the
+// goal" by narrating the goal as accomplished. The 2026-08-07 polyglot run
+// caught exactly that — two exercises with zero write calls whose salvaged
+// answer opened "I have implemented the Song, Verses, and Verse functions",
+// scoring as a clean finalize over an untouched file. finalizePromptFor already
+// holds this line ("never guess"); the clamped branch simply never inherited it.
+//
+// Deliberately intent-NEUTRAL: it constrains what may be claimed, never what
+// must be done. An instruction to go write the file would fire on discussion
+// turns too, where producing no edit is the correct outcome, and push unwanted
+// changes into the tree — a worse failure than the one being fixed. Telling the
+// truth about what happened is safe on every turn; telling the model to edit is
+// not.
+const rewriteClampedPrompt = "Your previous reply hit the completion limit. Rewrite it now as a concise final answer in at most five sentences. Describe only what you actually completed — never present work you did not finish as done. Keep only the facts needed to answer the goal; do not add tool calls or extra reasoning."
 
 // runLoop is THE engine. It iterates send → dispatch → re-send until the model
 // answers with no tool calls (clean finalize) or a bound trips, then finalizes
