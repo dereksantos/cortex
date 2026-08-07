@@ -83,6 +83,13 @@ itself writes at the end of a headless turn (`emitSessionMetrics`, into the
 workspace's own journal) rather than re-derived here — the benchmark reports
 what the harness actually billed.
 
+A turn cut short at `--timeout` is interrupted (SIGINT, with a hard kill as
+backstop) so it can close its transcript cleanly, but cortex only emits that
+metrics row after a turn *completes* — so a timed-out exercise usually reports
+zero tokens. Those rows are excluded from the summary's token totals and
+medians, and the report says how many rows it covered, rather than averaging in
+zeroes that would understate the real cost.
+
 ## Failure classes
 
 Exactly one per non-passing exercise; passing rows carry `""`. Precedence runs

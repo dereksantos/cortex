@@ -127,13 +127,20 @@ func WriteRunMeta(path string, m RunMeta) error {
 
 // Summary is the end-of-run report computed from the rows.
 type Summary struct {
-	Total        int
-	Passed       int
-	ClassCounts  map[string]int
+	Total       int
+	Passed      int
+	ClassCounts map[string]int
+
+	// Token stats cover only the rows that reported accounting. A turn cut
+	// short can die before cortex writes its metrics row, and folding those
+	// zeroes into the median would understate the real cost — so they are
+	// excluded and counted separately.
 	TokensIn     int
 	TokensOut    int
 	MedTokensIn  int
 	MedTokensOut int
+	TokenRows    int
+
 	WallMsTotal  int64
 	WallMsMedian int64
 }
@@ -141,8 +148,7 @@ type Summary struct {
 // Summarize computes pass@1 and the token/wall-clock distribution.
 func Summarize(rows []Row) Summary {
 	s := Summary{Total: len(rows), ClassCounts: map[string]int{}}
-	in := make([]int, 0, len(rows))
-	out := make([]int, 0, len(rows))
+	var in, out []int
 	wall := make([]int64, 0, len(rows))
 	for _, r := range rows {
 		if r.Pass {
@@ -150,12 +156,16 @@ func Summarize(rows []Row) Summary {
 		} else {
 			s.ClassCounts[r.FailureClass]++
 		}
+		s.WallMsTotal += r.WallMs
+		wall = append(wall, r.WallMs)
+		if r.TokensIn == 0 && r.TokensOut == 0 {
+			continue
+		}
+		s.TokenRows++
 		s.TokensIn += r.TokensIn
 		s.TokensOut += r.TokensOut
-		s.WallMsTotal += r.WallMs
 		in = append(in, r.TokensIn)
 		out = append(out, r.TokensOut)
-		wall = append(wall, r.WallMs)
 	}
 	s.MedTokensIn = medianInt(in)
 	s.MedTokensOut = medianInt(out)
@@ -224,8 +234,12 @@ func PrintSummary(w io.Writer, m RunMeta, rows []Row) {
 			fmt.Fprintf(w, "  %-14s %d\n", c, n)
 		}
 	}
-	fmt.Fprintf(w, "tokens in     %d total, %d median\n", s.TokensIn, s.MedTokensIn)
-	fmt.Fprintf(w, "tokens out    %d total, %d median\n", s.TokensOut, s.MedTokensOut)
+	scope := ""
+	if s.TokenRows != s.Total {
+		scope = fmt.Sprintf(" (over the %d/%d rows that reported accounting)", s.TokenRows, s.Total)
+	}
+	fmt.Fprintf(w, "tokens in     %d total, %d median%s\n", s.TokensIn, s.MedTokensIn, scope)
+	fmt.Fprintf(w, "tokens out    %d total, %d median%s\n", s.TokensOut, s.MedTokensOut, scope)
 	fmt.Fprintf(w, "wall clock    %s total, %s median\n",
 		roundDur(time.Duration(s.WallMsTotal)*time.Millisecond),
 		roundDur(time.Duration(s.WallMsMedian)*time.Millisecond))

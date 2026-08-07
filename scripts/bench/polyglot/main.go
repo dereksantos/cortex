@@ -335,9 +335,14 @@ func runCortexTurn(o *options, cortexBin, work, benchHome, prompt string) turnRe
 	cmd := exec.CommandContext(ctx, cortexBin, "turn", "--json", prompt)
 	cmd.Dir = work
 	cmd.Env = benchEnv(benchHome, o.temperature)
-	// Give cortex a moment to unwind (closing the transcript, flushing the
-	// metrics row) after the context kill before we reap it.
-	cmd.WaitDelay = 10 * time.Second
+	// On timeout, interrupt rather than kill. `cortex turn` installs a
+	// SIGINT handler, so this lets it unwind — closing the transcript so the
+	// final line isn't truncated mid-write, and flushing what accounting it
+	// has. The default CommandContext behaviour (SIGKILL) forfeits both, and
+	// a timed-out exercise is exactly the one whose evidence matters most.
+	// WaitDelay is the hard backstop if it ignores the signal.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 20 * time.Second
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

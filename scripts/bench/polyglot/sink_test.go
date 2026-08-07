@@ -67,14 +67,15 @@ func TestRowAlwaysCarriesFailureClass(t *testing.T) {
 
 func TestSummarize(t *testing.T) {
 	tests := []struct {
-		name        string
-		rows        []Row
-		wantPassed  int
-		wantRate    float64
-		wantClasses map[string]int
-		wantMedIn   int
-		wantTotIn   int
-		wantMedWall int64
+		name          string
+		rows          []Row
+		wantPassed    int
+		wantRate      float64
+		wantClasses   map[string]int
+		wantMedIn     int
+		wantTotIn     int
+		wantMedWall   int64
+		wantTokenRows int
 	}{
 		{
 			name:        "no rows summarizes to zero without dividing by zero",
@@ -88,22 +89,41 @@ func TestSummarize(t *testing.T) {
 				{FailureClass: ClassChatMode, TokensIn: 20, WallMs: 2000},
 				{FailureClass: ClassWrongCode, TokensIn: 40, WallMs: 9000},
 			},
-			wantPassed:  1,
-			wantRate:    0.25,
-			wantClasses: map[string]int{ClassWrongCode: 2, ClassChatMode: 1},
-			wantMedIn:   20, // lower median of 10,20,30,40
-			wantTotIn:   100,
-			wantMedWall: 2000,
+			wantPassed:    1,
+			wantRate:      0.25,
+			wantClasses:   map[string]int{ClassWrongCode: 2, ClassChatMode: 1},
+			wantMedIn:     20, // lower median of 10,20,30,40
+			wantTotIn:     100,
+			wantMedWall:   2000,
+			wantTokenRows: 4,
 		},
 		{
-			name:        "an all-pass run reports no classes",
-			rows:        []Row{{Pass: true, TokensIn: 5, WallMs: 500}, {Pass: true, TokensIn: 7, WallMs: 700}},
-			wantPassed:  2,
-			wantRate:    1,
-			wantClasses: map[string]int{},
-			wantMedIn:   5,
-			wantTotIn:   12,
-			wantMedWall: 500,
+			name:          "an all-pass run reports no classes",
+			rows:          []Row{{Pass: true, TokensIn: 5, WallMs: 500}, {Pass: true, TokensIn: 7, WallMs: 700}},
+			wantPassed:    2,
+			wantRate:      1,
+			wantClasses:   map[string]int{},
+			wantMedIn:     5,
+			wantTotIn:     12,
+			wantMedWall:   500,
+			wantTokenRows: 2,
+		},
+		{
+			// A killed turn can die before cortex flushes its metrics row.
+			// Folding that 0 into the median would understate the real cost.
+			name: "rows with no accounting are excluded from the token stats",
+			rows: []Row{
+				{Pass: true, TokensIn: 30, TokensOut: 3, WallMs: 1000},
+				{FailureClass: ClassTimeout, WallMs: 600000},
+				{FailureClass: ClassTimeout, WallMs: 600000},
+			},
+			wantPassed:    1,
+			wantRate:      1.0 / 3,
+			wantClasses:   map[string]int{ClassTimeout: 2},
+			wantMedIn:     30,
+			wantTotIn:     30,
+			wantMedWall:   600000,
+			wantTokenRows: 1,
 		},
 	}
 	for _, tt := range tests {
@@ -132,6 +152,9 @@ func TestSummarize(t *testing.T) {
 			if s.WallMsMedian != tt.wantMedWall {
 				t.Errorf("WallMsMedian = %d, want %d", s.WallMsMedian, tt.wantMedWall)
 			}
+			if s.TokenRows != tt.wantTokenRows {
+				t.Errorf("TokenRows = %d, want %d", s.TokenRows, tt.wantTokenRows)
+			}
 		})
 	}
 }
@@ -159,6 +182,8 @@ func TestPrintSummary(t *testing.T) {
 		"FAIL beer-song",
 		"qwen3-coder-q3",
 		"7e0611e77b54",
+		// The token line must say what it covers when some rows reported none.
+		"over the 1/2 rows that reported accounting",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary is missing %q\n---\n%s", want, out)
