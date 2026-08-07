@@ -56,8 +56,9 @@ run_vet() {
   # eval-target source trees not part of the cortex module. List the
   # real package roots explicitly. (./integrations/... existed pre-
   # audit-D1 and is gone now; do not re-add unless the directory is
-  # restored.)
-  if ! go vet ./cmd/... ./internal/... ./pkg/... 2>&1; then
+  # restored.) ./scripts/... holds benchmark drivers — not part of the
+  # cortex binary's import graph, but still ours to keep compiling.
+  if ! go vet ./cmd/... ./internal/... ./pkg/... ./scripts/... 2>&1; then
     echo "" >&2
     echo "✖ go vet: errors above" >&2
     return 1
