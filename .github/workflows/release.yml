@@ -7,29 +7,72 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+# Least privilege, declared at the job that needs it rather than the
+# workflow root. id-token/attestations are what the SLSA provenance step
+# needs to mint a signing certificate; contents:write is what publishing
+# the GitHub Release needs.
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
+      # Every action below is pinned to a commit SHA, not a tag: a tag is
+      # mutable and can be repointed by anyone who compromises the action's
+      # repo, which is the standard Actions supply-chain attack. The
+      # trailing comment records the human-readable version the SHA maps to.
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # GoReleaser's changelog needs full history.
           fetch-depth: 0
+          # Don't leave the job token in .git/config for later steps —
+          # nothing here pushes back to the repo.
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          # Exact patch pin, not the floating "1.26": release binaries
+          # should be reproducible from the tag, and the patch level is
+          # load-bearing for the stdlib CVEs govulncheck tracks. Bump
+          # this deliberately, together with go.mod's toolchain directive.
+          go-version: "1.26.5"
+          check-latest: false
+
+      # Fail the release before it builds anything if a dependency's
+      # content doesn't match go.sum.
+      - name: Verify module checksums
+        run: go mod verify
+
+      # A release must never publish binaries with known-reachable vulns.
+      # This is the same gate test.yml runs per-push, repeated here so a
+      # tag can't be cut from a commit that skipped CI.
+      - name: Scan for vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # SLSA build provenance: cryptographically attests that these exact
+      # archives were built by this workflow from this commit. Consumers
+      # can verify with `gh attestation verify <file> --repo dereksantos/cortex`,
+      # which is what makes a tampered mirror of the release detectable.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/checksums.txt

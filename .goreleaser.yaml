@@ -11,7 +11,18 @@ project_name: cortex
 
 before:
   hooks:
-    - go mod tidy
+    # Verify, never mutate. The old `go mod tidy` hook rewrote go.mod/go.sum
+    # during the release, so the artifacts wouldn't necessarily correspond to
+    # the dependency set that was reviewed and scanned at the tagged commit.
+    # Tidiness is enforced per-push by CI instead.
+    - go mod verify
+
+# Strip paths that leak the builder's filesystem layout into the binary and
+# make two builds of the same commit differ.
+gomod:
+  mod: mod
+
+report_sizes: true
 
 builds:
   - id: cortex
@@ -27,6 +38,14 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.Version={{ .Version }}
+    # Reproducibility: -trimpath drops the builder's absolute paths from the
+    # binary, and mod_timestamp pins the archive/binary mtime to the commit
+    # date instead of "whenever CI happened to run". Together they let anyone
+    # rebuild the tag and get bit-identical output to compare against the
+    # published provenance attestation.
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
   - id: default
@@ -41,23 +60,14 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# The auto-generated commit changelog is off. v0.3.0 is the first tag this
+# repo has ever pushed, so GoReleaser would have no previous tag to diff
+# against and would dump every feat/fix since the beginning — over a
+# thousand commits — into the release body. CHANGELOG.md is the curated
+# summary and the release header links straight to it. Revisit once there
+# is a previous tag to diff against and the generated range is meaningful.
 changelog:
-  sort: asc
-  use: github
-  groups:
-    - title: "Features"
-      regexp: "^feat"
-      order: 0
-    - title: "Fixes"
-      regexp: "^fix"
-      order: 1
-    - title: "Other"
-      order: 999
-  filters:
-    exclude:
-      - "^docs"
-      - "^test"
-      - "^chore"
+  disable: true
 
 release:
   github:
@@ -73,20 +83,7 @@ release:
     curl -fsSL https://raw.githubusercontent.com/dereksantos/cortex/main/scripts/install.sh | bash
     ```
 
-# Homebrew tap — enable once (1) the dereksantos/homebrew-tap repo exists and
-# (2) HOMEBREW_TAP_GITHUB_TOKEN (fine-grained PAT, contents:write on that one
-# repo) is set as an Actions secret. Until then this stays commented so a tag
-# push can't fail at the tap-push step. Casks, not brews: GoReleaser v2.10+
-# deprecated the brews section for pre-built binaries.
-#
-# homebrew_casks:
-#   - name: cortex
-#     binaries:
-#       - cortex
-#     repository:
-#       owner: dereksantos
-#       name: homebrew-tap
-#       branch: main
-#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-#     homepage: "https://github.com/dereksantos/cortex"
-#     description: "Coding harness that prunes its own context, keeps its own notes, and learns as it goes — built for small local models"
+# No Homebrew tap. Deliberate: a tap is a second distribution channel with
+# its own repo and a long-lived cross-repo write token, and the curl
+# installer plus `go install` already cover macOS and Linux. Revisit only
+# if there's real demand.

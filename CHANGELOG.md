@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 2026-07: the Cortex slimdown
+## [Unreleased]
+
+## [0.3.0] - 2026-08-07 — the Cortex slimdown
+
+First published release: the earlier `0.1.0` and `0.2.0-alpha` sections
+below were never tagged and no binary was ever distributed for them.
 
 The active product is a single binary, `cmd/cortex`: an interactive coding
 agent for small and local models with working memory built in. The daemon,
