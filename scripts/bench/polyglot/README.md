@@ -33,6 +33,7 @@ Flags (`--list` prints the corpus and exits):
 | `--window` | `131072` | context window, tokens |
 | `--temperature` | `0` | sampling temperature |
 | `--backend` / `--endpoint` | `litellm` / `http://chatterbox:4000` | where the model is served |
+| `--key-env` / `--key-service` | — | where a remote backend's API key lives (env var / keychain service). Only the *name* is written to the workspace config and `run.json` — never the key |
 | `--timeout` | `10m` | per-exercise budget for the cortex turn |
 | `--test-timeout` | `2m` | per-exercise budget for `go test ./...` |
 | `--run-id` | UTC timestamp | run directory name |

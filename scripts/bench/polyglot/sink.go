@@ -85,6 +85,9 @@ type RunMeta struct {
 	BackendType string   `json:"backend_type"`
 	Endpoint    string   `json:"endpoint"`
 	ToolGates   []string `json:"tool_gates,omitempty"`
+	// Auth names where the backend key came from ("key_service=..."), never
+	// the key itself.
+	Auth string `json:"auth,omitempty"`
 
 	CortexCommit string `json:"cortex_commit"`
 	CortexDirty  bool   `json:"cortex_dirty"`

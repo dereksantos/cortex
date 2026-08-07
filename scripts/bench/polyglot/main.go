@@ -59,6 +59,8 @@ type options struct {
 	temperature float64
 	backendType string
 	endpoint    string
+	keyEnv      string
+	keyService  string
 	turnTimeout time.Duration
 	testTimeout time.Duration
 	list        bool
@@ -85,6 +87,8 @@ func parseFlags() *options {
 	flag.Float64Var(&o.temperature, "temperature", 0, "sampling temperature")
 	flag.StringVar(&o.backendType, "backend", defaultBackendType, "cortex backend.type")
 	flag.StringVar(&o.endpoint, "endpoint", defaultEndpoint, "backend endpoint")
+	flag.StringVar(&o.keyEnv, "key-env", "", "env var holding the backend API key (remote backends)")
+	flag.StringVar(&o.keyService, "key-service", "", "keychain service holding the backend API key (remote backends)")
 	flag.DurationVar(&o.turnTimeout, "timeout", 10*time.Minute, "per-exercise wall-clock budget for the cortex turn")
 	flag.DurationVar(&o.testTimeout, "test-timeout", 2*time.Minute, "per-exercise budget for `go test ./...`")
 	flag.BoolVar(&o.list, "list", false, "list the discovered exercises and exit")
@@ -167,6 +171,7 @@ func run() error {
 		BackendType:     o.backendType,
 		Endpoint:        o.endpoint,
 		ToolGates:       []string{"enable_web=false", "enable_scan=false"},
+		Auth:            authLabel(o),
 		CortexCommit:    commit,
 		CortexDirty:     dirty,
 		CortexBin:       cortexBin,
@@ -430,8 +435,17 @@ func benchEnv(benchHome string, temperature float64) []string {
 // the user config and CORTEX_BACKEND, so the run is reproducible regardless
 // of what the host machine has configured.
 func writeWorkspaceConfig(path string, o *options) error {
+	backend := map[string]any{"type": o.backendType, "endpoint": o.endpoint}
+	// Auth is named, never inlined: the config file lands in the run
+	// directory alongside the transcripts, so it must never hold a secret.
+	if o.keyEnv != "" {
+		backend["key_env"] = o.keyEnv
+	}
+	if o.keyService != "" {
+		backend["key_service"] = o.keyService
+	}
 	cfg := map[string]any{
-		"backend": map[string]any{"type": o.backendType, "endpoint": o.endpoint},
+		"backend": backend,
 		"models": map[string]any{
 			"code":  map[string]any{"model": o.model, "window": o.window},
 			"study": map[string]any{"model": o.studyModel, "window": o.window},
@@ -500,6 +514,18 @@ func gitHead(dir string) (string, bool) {
 	}
 	status, _ := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
 	return strings.TrimSpace(string(sha)), len(bytes.TrimSpace(status)) > 0
+}
+
+// authLabel records WHERE the backend key came from, never the key.
+func authLabel(o *options) string {
+	switch {
+	case o.keyService != "":
+		return "key_service=" + o.keyService
+	case o.keyEnv != "":
+		return "key_env=" + o.keyEnv
+	default:
+		return "none"
+	}
 }
 
 func exerciseNames(exs []Exercise) []string {
