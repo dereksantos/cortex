@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/outline"
@@ -636,6 +638,22 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		}
 	}
 
+	// Inside a subagent, time the call and let its announcement out on the far
+	// side with the elapsed time and a result summary (nesting.go). The coder's
+	// own calls take the direct path: their line is already on screen, printed
+	// before the call ran.
+	if !inSubagent() {
+		return dispatchTool(ctx, tc, deps)
+	}
+	beginNestedCall()
+	start := time.Now()
+	out, err := dispatchTool(ctx, tc, deps)
+	finishNestedCall(time.Since(start), out, err)
+	return out, err
+}
+
+// dispatchTool routes one tool call to its implementation.
+func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
@@ -713,19 +731,46 @@ const defaultMaxToolOutput = 10000
 // printing here too was pure duplication onto the server process's own
 // console, ANSI codes included (2026-07-19). Takes just Quieter, not the
 // full ToolDeps — the only capability this needs.
+//
+// Inside a subagent the line is held back rather than printed here
+// (captureAction, nesting.go): it comes out indented one level per depth once
+// the call finishes, carrying its elapsed time and result summary.
 func printToolAction(deps Quieter, action string) {
 	if deps.Quiet() {
 		return
 	}
+	if captureAction(action) {
+		return
+	}
+	fmt.Println(formatToolAction("", action, ""))
+}
+
+// formatToolAction renders one tool-action line: the gutter timestamp, the
+// nesting margin, the green verb, the dimmed argument list, and — for a
+// finished nested call — a dimmed "elapsed  summary" tail. The argument list
+// is the part that gives when the whole thing outgrows the terminal, since the
+// verb and the tail are the parts you can't reconstruct. Width 0 (piped, CI)
+// clips nothing.
+func formatToolAction(indent, action, suffix string) string {
 	name, args := action, ""
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
+	}
+	if w := termWidth(); w > 0 && args != "" {
+		fixed := len(gutterPad) + utf8.RuneCountInString(indent+"tool: "+name)
+		if suffix != "" {
+			fixed += 2 + utf8.RuneCountInString(suffix)
+		}
+		args = clipRunes(args, w-fixed)
 	}
 	line := Color("tool: "+name, Green)
 	if args != "" {
 		line += Color(args, Gray)
 	}
-	fmt.Printf("%s%s\n", TimestampPrefix(), line)
+	if suffix != "" {
+		line += Color("  "+suffix, Gray)
+	}
+	return TimestampPrefix() + indent + line
 }
 
 // --- outline ------------------------------------------------------------
@@ -771,7 +816,17 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	if seedFn == nil {
 		seedFn = StudySeed
 	}
+	// The subagent's own call is announced at the CALLER's level; everything
+	// its loop then does prints one level in, between this line and the done
+	// line below (nesting.go). Pushing here — the tool-call path — and not in
+	// the session's RunSubagent is deliberate: nesting is relative to a parent
+	// tool call, so a one-off `cortex study`/`cortex learn` (no parent) keeps
+	// printing flat at the margin, exactly as it does today.
+	printToolAction(deps, subagentAction(sa.Name, path, goal))
+	frame := pushNest(sa.Name)
 	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
+	popNest()
+	printSubagentDone(deps, frame, digest, err)
 	if err != nil {
 		return "", err
 	}

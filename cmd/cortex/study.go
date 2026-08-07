@@ -152,7 +152,13 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	sa.Bounds = cs.Config.subagentBounds(sa.Role, sa.Bounds)
 	req := cs.subagentRequest(sa, seed)
 	if !cs.quiet {
-		fmt.Println(withColor(fmt.Sprintf("  run: %s via %s", sa.Name, req.Model), green))
+		// The banner sits in the same column as the subagent's tool lines:
+		// tools.IndentPrefix() is the nesting margin the tools package is
+		// already printing at (two spaces per subagent level, "" for a one-off
+		// `cortex study` with no parent call), and the timestamp gutter keeps
+		// it on the same left margin as every other line in the transcript.
+		fmt.Println(tools.TimestampPrefix() + tools.IndentPrefix() +
+			withColor(fmt.Sprintf("run: %s via %s", sa.Name, req.Model), green))
 	}
 	ts := Toolset{Tools: sa.Tools, Dispatch: cs.dispatcherFor(sa)}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }

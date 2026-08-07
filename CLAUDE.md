@@ -119,7 +119,18 @@ actions print as `  tool: verb(args)` (`internal/tools/tools.go`'s
 per-role icon (`cmd/cortex/display.go`'s `gutter`); the "thinking" indicator
 is a static label with only its elapsed-seconds tick moving (no animated
 spinner frames) in both the plain spinner (`internal/loopui/spinner.go`) and
-the anchored status row (`internal/lineedit/live.go`).
+the anchored status row (`internal/lineedit/live.go`). Two things print
+*under* a tool line, both plain-text by the same rule (`+`/`-`,
+indentation, and color only — no connectors or box-drawing):
+`edit_file`/`write_file` render the change as a bounded unified diff
+(`internal/tools/diff.go` — collapsed context, capped height, `… N more
+lines` for the rest), and a subagent's own calls (`study`, `agent`) nest
+two spaces per depth between the parent's action line and a closing
+`<name> done: N calls, …` line, each announced once on completion with
+its elapsed time and a one-line result summary
+(`internal/tools/nesting.go`). Both honor the existing degradation
+paths: `deps.Quiet()`, `NO_COLOR`, `CORTEX_LOOP_RENDER=0`, and a non-TTY
+stdout (no width, so no clipping).
 
 ## The agent's tools
 

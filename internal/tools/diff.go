@@ -32,11 +32,16 @@ func printFileDiff(deps Quieter, before, after string) {
 	if deps.Quiet() || richRenderDisabled {
 		return
 	}
-	emitLines(renderDiff(before, after, diffOptions{Width: termWidth()}))
+	emitLines(renderDiff(before, after, diffOptions{Width: termWidth(), Indent: indentPrefix()}))
 }
 
-// emitLines writes already-rendered lines to the terminal.
+// emitLines writes already-rendered lines to the terminal — or, inside a
+// subagent, buffers them onto the call's held-back announcement so they land
+// under the line they belong to (nesting.go).
 func emitLines(lines []string) {
+	if captureExtra(lines) {
+		return
+	}
 	for _, l := range lines {
 		fmt.Println(l)
 	}
