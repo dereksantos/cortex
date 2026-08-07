@@ -51,6 +51,14 @@ cortex  The earlier decision was to preserve the stable prompt prefix and
 The outline is compact context, not lossy storage. The append-only transcript
 remains the source of truth.
 
+`/context` shows you the state of that window at any point in the session —
+what each zone is holding, where the demote watermark sits, and how much of
+the prompt the provider served from cache:
+
+![The /context map: a glyph grid spanning a 256k window, showing the system
+prompt, memory index, and hydrated tail against free space, with the demote
+watermark marked](docs/assets/context-map.png)
+
 ## The idea
 
 A context window is a cache, not a diary. Most of what happened earlier in a
