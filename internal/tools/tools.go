@@ -1032,10 +1032,42 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
-	if err := os.WriteFile(resolveWorkdir(deps, path), []byte(content), 0644); err != nil {
+	fsPath := resolveWorkdir(deps, path)
+	// Read the outgoing content BEFORE the write so the diff below has a
+	// before-side. A missing file reads as "" — which renderDiff shows as a
+	// new file, the honest form for a create. Best-effort: an unreadable
+	// existing file just yields a whole-content diff, never a failed write.
+	before, diffable := priorContent(deps, fsPath)
+	if err := os.WriteFile(fsPath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
+	if diffable {
+		printFileDiff(deps, before, content)
+	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+}
+
+// priorContent reads a file's current contents for the diff's before-side.
+// ok=false means "don't render a diff at all": output is suppressed anyway, or
+// the file is unreadable, or it's too big to diff — cases where guessing ""
+// would libel an overwrite as a brand-new file. A missing file is the one
+// absence that IS meaningful: ("", true), which renders as a create.
+func priorContent(deps Quieter, fsPath string) (string, bool) {
+	if deps.Quiet() || richRenderDisabled {
+		return "", false
+	}
+	info, err := os.Stat(fsPath)
+	if os.IsNotExist(err) {
+		return "", true
+	}
+	if err != nil || info.Size() > diffMaxInputBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 // --- edit_file ----------------------------------------------------------
@@ -1110,6 +1142,10 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if err := os.WriteFile(fsPath, []byte(content), info.Mode()); err != nil {
 		return "", fmt.Errorf("write %s: %w", a.Path, err)
 	}
+	// The edit landed: show WHAT changed under the action line. edit_file
+	// already holds both sides in memory (data was read above, content is the
+	// applied result), so the diff costs nothing but the rendering.
+	printFileDiff(deps, string(data), content)
 	if multi {
 		return fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), nil
 	}
