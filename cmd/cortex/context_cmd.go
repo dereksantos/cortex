@@ -39,25 +39,38 @@ const (
 
 // contextReport renders the /context map described in the package doc
 // comment above: header, cache-health headline, the 128-cell grid, then the
-// legend.
+// legend. This is the plain scrolling form — what a pipe, NO_COLOR, or
+// CORTEX_LOOP_RENDER=0 gets, unchanged. The interactive TTY path wraps the
+// same lines in the alternate-screen inspector (context_view.go).
 func (cs *CortexSession) contextReport() string {
-	var b strings.Builder
+	return strings.Join(cs.contextReportLines(), "\n")
+}
 
-	b.WriteString(cs.contextHeaderLine() + "\n\n")
-	b.WriteString(cs.cacheHeadlineLine() + "\n\n")
+// contextReportLines is contextReport split into its rows, so the inspector
+// can page them without re-splitting a joined string (and so the report's
+// blank-line structure is stated once, here, rather than as scattered "\n\n"
+// concatenations). Joining these with "\n" reproduces the pre-inspector
+// report byte for byte: the trailing-blank trim below stands in for the
+// TrimRight the builder form ended with.
+func (cs *CortexSession) contextReportLines() []string {
+	lines := []string{
+		cs.contextHeaderLine(),
+		"",
+		cs.cacheHeadlineLine(),
+		"",
+	}
 
 	win := cs.windowSize()
 	placement := computeContextGrid(cs.gridComponents(), cs.tailTokens(), win)
-	for _, line := range coloredContextGridLines(placement, win, cs.gridHighWatermark()) {
-		b.WriteString(line + "\n")
-	}
-	b.WriteString("\n")
+	lines = append(lines, coloredContextGridLines(placement, win, cs.gridHighWatermark())...)
+	lines = append(lines, "")
 
-	for _, line := range cs.gridLegendLines() {
-		b.WriteString(line + "\n")
-	}
+	lines = append(lines, cs.gridLegendLines()...)
 
-	return strings.TrimRight(b.String(), "\n")
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // contextHeaderLine renders "context — <model> · <window>k window · turn

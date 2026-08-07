@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/term"
@@ -24,6 +25,14 @@ type Terminal struct {
 	fd      int
 	old     *termState
 	history *History
+
+	// mu guards the two pieces of terminal-wide state a background goroutine
+	// can observe: the live pinned prompt (so Inspect can park it instead of
+	// racing it for keystrokes) and whether an inspector currently holds the
+	// alternate screen (so Close, which the signal handler calls, can unwind it).
+	mu     sync.Mutex
+	anchor *Anchor
+	inAlt  bool
 }
 
 // SetHistory wires the recall list used by ↑/↓ and Ctrl-R. Nil disables it.
@@ -56,8 +65,12 @@ func Open(in *os.File, out io.Writer) (*Terminal, error) {
 	return t, nil
 }
 
-// Close disables bracketed paste and restores the saved terminal state.
+// Close disables bracketed paste and restores the saved terminal state. It
+// leaves the alternate screen first: this is the path installSignalRestore
+// takes on a fatal signal, and a killed process must never strand the user on
+// an inspector's scratch buffer with their scrollback apparently gone.
 func (t *Terminal) Close() error {
+	t.leaveAlt()
 	io.WriteString(t.out, "\x1b[?2004l")
 	return setTermios(t.fd, t.old)
 }
@@ -82,6 +95,107 @@ func (t *Terminal) width() int {
 		return 80
 	}
 	return w
+}
+
+// size is the current terminal geometry, re-read on every inspector frame so a
+// resize needs no signal handling — the idle poll picks it up within one tick.
+// Falls back to a conventional 80x24 when the fd carries no geometry (a pipe,
+// or a test Terminal built around an in-memory writer).
+func (t *Terminal) size() (cols, rows int) {
+	w, h, err := term.GetSize(t.fd)
+	if err != nil || w <= 0 || h <= 0 {
+		return 80, 24
+	}
+	return w, h
+}
+
+// Inspect takes over the terminal with a full-screen scrollable view of v and
+// returns once the user leaves it (q / ESC / Ctrl-C / Ctrl-D). The user's
+// scrollback is restored byte-for-byte: nothing is written to the primary
+// buffer between entering and leaving the alternate screen. See inspect.go for
+// the harness contract and for how a new view adopts it.
+//
+// Input is leased, never opened alongside whatever already owns the keyboard —
+// see leaseInput.
+func (t *Terminal) Inspect(v View) error {
+	src, release := t.leaseInput()
+	defer release()
+	return t.inspectWith(v, src)
+}
+
+// inspectWith is Inspect minus the input lease — the seam the tests drive with
+// a scripted key source and an in-memory writer, so enter/restore, resize, and
+// panic behavior are all exercised without a TTY.
+func (t *Terminal) inspectWith(v View, src pollSource) error {
+	t.enterAlt()
+	defer t.leaveAlt()
+	return runInspect(t.out, src, t.size, v)
+}
+
+// leaseInput hands the inspector exclusive use of the keystroke stream and a
+// func that gives it back.
+//
+// The contention this resolves: during a turn the REPL pins an editable prompt
+// via Anchor, whose key loop runs in a background goroutine and owns the fd.
+// Opening a second reader alongside it is a known failure mode — Anchor.Confirm
+// exists precisely because a competing Terminal.ReadLine made the two fight for
+// every keystroke and the answer never landed. So an inspector does not open
+// one either. When an anchor is live it is suspended: its key loop keeps being
+// the only reader of the fd and forwards raw bytes to the inspector, and its
+// drawing is held back so it can't paint the pinned prompt over the alternate
+// screen (Anchor.Suspend). With no anchor live — the /context case, dispatched
+// from the REPL's input loop between turns — there is no competing reader at
+// all and a plain source over the fd is correct.
+//
+// Suspend-and-forward is chosen over Confirm's serve-it-inline approach because
+// an inspector is a modal, whole-screen, many-keystroke mode rather than a
+// one-key question that fits on the anchor's status row; the anchor's two-row
+// layout invariant (see its doc comment) stays intact because the block is
+// erased for the duration and redrawn unchanged afterwards.
+func (t *Terminal) leaseInput() (pollSource, func()) {
+	t.mu.Lock()
+	a := t.anchor
+	t.mu.Unlock()
+	if a != nil {
+		return a.Suspend()
+	}
+	return newReaderSource(t.fd), func() {}
+}
+
+// enterAlt switches to the alternate screen and hides the cursor. Idempotent,
+// so a nested call can't emit a second 1049h (which would discard the state the
+// first one saved).
+func (t *Terminal) enterAlt() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.inAlt {
+		return
+	}
+	io.WriteString(t.out, altScreenOn+cursorHide)
+	t.inAlt = true
+}
+
+// leaveAlt restores the cursor and the primary screen buffer. Idempotent, and
+// safe to call from Close on a terminal that never opened an inspector.
+func (t *Terminal) leaveAlt() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.inAlt {
+		return
+	}
+	io.WriteString(t.out, cursorShow+altScreenOff)
+	t.inAlt = false
+}
+
+// setAnchor records (or clears) the live pinned prompt so leaseInput knows
+// whether a background key loop already owns the fd.
+func (t *Terminal) setAnchor(a *Anchor) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.anchor = a
+	t.mu.Unlock()
 }
 
 // ReadLine renders prompt and edits one line until Enter. Returns io.EOF on
@@ -187,8 +301,8 @@ func (t *Terminal) ReadLinePrefilled(prompt, prefill string) (string, error) {
 			buf.killToStart()
 		case keyKillWord:
 			buf.killWord()
-		case keyUnknown, keyAbort:
-			continue // no state change → no redraw
+		case keyUnknown, keyAbort, keyPageUp, keyPageDown:
+			continue // no state change → no redraw (paging belongs to the inspector)
 		}
 		redraw()
 	}

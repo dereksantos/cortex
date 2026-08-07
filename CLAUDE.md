@@ -106,7 +106,18 @@ session's two-zone context window (docs/context-architecture.md) as a fixed
 8×16 glyph grid spanning the whole model window — one glyph per component
 (system prompt, outline, memory index, skills index, hydrated tail, free
 space), a demote-watermark tick, and a legend — under a header and a
-prefix-cache health headline.
+prefix-cache health headline. On an interactive TTY that map opens in the
+**inspector** (`internal/lineedit/inspect.go`): an alternate-screen, scrollable
+view that restores the user's scrollback byte-for-byte on exit. The REPL stays
+scrollback-native by default; the inspector is the on-demand escape hatch for
+the few surfaces that want a whole screen, and `/context`
+(`cmd/cortex/context_view.go`) is its first consumer — a view implements only
+`Title`/`Lines(width)` and calls `Terminal.Inspect`. It is strictly an
+enhancement: no TTY, `NO_COLOR`, or `CORTEX_LOOP_RENDER=0` all keep the plain
+scrolling report, byte for byte. While a turn's pinned prompt is live the
+inspector does not open a competing reader — the anchor is suspended and its
+key loop forwards raw bytes, the same "serve it from the loop that owns the
+terminal" rule `Anchor.Confirm` follows.
 Memory is model-driven — ask in natural language ("remember that …" /
 "forget the … note") and the agent calls the memory tools; the old
 `/remember` and `/forget` slash commands were removed with the mechanical

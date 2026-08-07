@@ -247,7 +247,7 @@ func printAvailableTools() {
 // name appears without hardcoding the exact prose.
 var helpLines = []string{
 	"/help              show this list",
-	"/context           show the current session's context-window map",
+	"/context           open the current session's context-window map (q to close)",
 	"/compact           distill the session via study, freeing context",
 	"/clear             reset the conversation and start a fresh session",
 	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
@@ -581,6 +581,16 @@ func main() {
 			continue
 		}
 		if input == "/context" {
+			// On an interactive TTY the map opens as a full-screen inspector
+			// (alt screen; scrollback restored byte-for-byte on exit). Piped
+			// stdout, NO_COLOR, or CORTEX_LOOP_RENDER=0 keep the plain
+			// scrolling report — see context_view.go. A harness failure falls
+			// back to that same report rather than swallowing the command.
+			if contextInspectable(editor) {
+				if err := editor.Inspect(contextView{cs: session}); err == nil {
+					continue
+				}
+			}
 			fmt.Println(session.contextReport())
 			continue
 		}

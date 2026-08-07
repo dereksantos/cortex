@@ -24,6 +24,7 @@ type Anchor struct {
 	out     io.Writer
 	src     *readerSource
 	widthFn func() int
+	term    *Terminal // owner, so Stop can clear itself from Terminal.leaseInput
 
 	mu     sync.Mutex
 	prompt string
@@ -36,6 +37,7 @@ type Anchor struct {
 	activity string // status-row label; "" hides the row
 
 	confirm *confirmState // in-flight y/N question, served by the key loop
+	susp    *suspendState // in-flight inspector lease, served by the key loop
 
 	stop chan struct{}
 	done chan struct{} // closed when both the key loop and ticker have exited
@@ -60,6 +62,7 @@ func (t *Terminal) Anchor(prompt, seed string) (*Anchor, context.Context) {
 		out:     t.out,
 		src:     newReaderSource(t.fd),
 		widthFn: t.width,
+		term:    t,
 		prompt:  prompt,
 		buf:     &buffer{},
 		cancel:  cancel,
@@ -69,6 +72,7 @@ func (t *Terminal) Anchor(prompt, seed string) (*Anchor, context.Context) {
 	if seed != "" {
 		setBuffer(a.buf, seed)
 	}
+	t.setAnchor(a)
 	a.mu.Lock()
 	a.drawLocked()
 	a.mu.Unlock()
@@ -167,12 +171,106 @@ func (a *Anchor) handleConfirmByte(b byte) {
 	c.res <- answer
 }
 
+// suspendState is an in-flight inspector lease. The anchor's key loop already
+// owns the terminal during a turn, so an inspector must be fed from THAT loop
+// for the same reason a confirmation must (see confirmState): a second reader
+// on the fd makes the two fight for each keystroke. Unlike a confirmation,
+// though, an inspector also takes the *screen* — so while a lease is out the
+// anchor stops drawing entirely and parks its output in pending, which resume
+// flushes into scrollback once the alternate screen is gone.
+type suspendState struct {
+	keys    chan byte
+	pending []string
+}
+
+// Suspend parks the anchor for the duration of an inspector and returns the key
+// source the inspector should read plus the func that restores the prompt. The
+// pinned block is erased immediately (so the primary screen is clean before the
+// alternate screen goes up and clean again when it comes down), drawing is
+// suppressed, and the key loop forwards raw bytes to the returned source.
+//
+// Raw bytes, not decoded events: the inspector does its own escape decoding
+// (including the bare-ESC timeout), so bytes must pass through in order and
+// uninterpreted. The key loop only ever hands handleByte the *first* byte of a
+// keystroke, but since a suspended handleByte returns immediately, the loop
+// comes straight back for the continuation bytes and those flow through too.
+func (a *Anchor) Suspend() (pollSource, func()) {
+	a.mu.Lock()
+	if a.susp != nil { // already leased — hand back an inert source
+		a.mu.Unlock()
+		return &suspendedKeys{}, func() {}
+	}
+	s := &suspendState{keys: make(chan byte, 256)}
+	a.eraseLocked() // must run before susp is set; drawing is suppressed after
+	a.susp = s
+	a.mu.Unlock()
+	return &suspendedKeys{s: s, stop: a.stop}, a.resume
+}
+
+// resume ends an inspector lease: the output held back while the alternate
+// screen was up is flushed into scrollback in arrival order, then the pinned
+// prompt is redrawn exactly as it was.
+func (a *Anchor) resume() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.susp
+	a.susp = nil
+	if s == nil {
+		return
+	}
+	for _, line := range s.pending {
+		io.WriteString(a.out, line+"\r\n")
+	}
+	a.drawLocked()
+}
+
+// suspendedKeys is the pollSource an inspector reads while the anchor is
+// parked: bytes arrive from the anchor's key loop over a channel, and the
+// timeout that would come from cbreak's VTIME is supplied here instead so the
+// inspector's idle repaint and bare-ESC detection work identically.
+type suspendedKeys struct {
+	s    *suspendState
+	stop chan struct{}
+}
+
+func (k *suspendedKeys) next() (byte, error) {
+	for {
+		b, timedOut, err := k.firstByte()
+		if err != nil {
+			return 0, err
+		}
+		if !timedOut {
+			return b, nil
+		}
+	}
+}
+
+func (k *suspendedKeys) firstByte() (byte, bool, error) {
+	if k.s == nil {
+		return 0, false, io.EOF
+	}
+	select {
+	case b := <-k.s.keys:
+		return b, false, nil
+	case <-k.stop: // the turn ended under us — close the inspector
+		return 0, false, io.EOF
+	case <-time.After(inspectPoll):
+		return 0, true, nil
+	}
+}
+
 // EmitLine prints one line of turn output above the pinned prompt, then redraws
 // the prompt beneath it. s should not contain a trailing newline (the pipe
 // reader splits on newlines); embedded ANSI is fine.
 func (a *Anchor) EmitLine(s string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.susp != nil {
+		// An inspector holds the alternate screen. Writing here would paint over
+		// it and the line would never reach scrollback; hold it for resume.
+		a.susp.pending = append(a.susp.pending, s)
+		return
+	}
 	a.eraseLocked()
 	io.WriteString(a.out, s+"\r\n")
 	a.drawLocked()
@@ -216,6 +314,7 @@ func (a *Anchor) SetPrompt(prompt string) {
 // Stop halts the editor goroutines, erases the pinned block, and returns the
 // current line so the caller can seed the next prompt with it.
 func (a *Anchor) Stop() string {
+	a.term.setAnchor(nil)
 	close(a.stop)
 	<-a.done
 	a.cancel()
@@ -256,8 +355,19 @@ func (a *Anchor) keyLoop() {
 // sequence's bytes arrive in the same burst, so a timeout means a bare ESC.
 func (a *Anchor) handleByte(b byte) (interrupt bool) {
 	a.mu.Lock()
+	susp := a.susp
 	confirming := a.confirm != nil
 	a.mu.Unlock()
+	if susp != nil {
+		// An inspector is up: this loop stays the fd's only reader and forwards
+		// the byte verbatim (see Suspend). A full buffer means the inspector has
+		// stopped draining, so the byte is dropped rather than blocking the loop.
+		select {
+		case susp.keys <- b:
+		default:
+		}
+		return false
+	}
 	if confirming {
 		a.handleConfirmByte(b)
 		return false
@@ -325,7 +435,7 @@ func (a *Anchor) applyEvent(ev keyEvent) {
 	case keyKillWord:
 		a.buf.killWord()
 	default:
-		return // Enter, Up/Down, Ctrl-R, unknown — no live change
+		return // Enter, Up/Down, PgUp/PgDn, Ctrl-R, unknown — no live change
 	}
 	a.refreshInputLocked()
 }
@@ -385,8 +495,13 @@ func (a *Anchor) eraseLocked() {
 
 // drawLocked renders the status row (if any) and the input row, parking the
 // cursor on the input row at the edit column, and records how many rows the
-// block now occupies.
+// block now occupies. Inert while an inspector holds the screen (Suspend):
+// every redraw path funnels through here, so one guard covers the tick loop,
+// status updates, and buffer edits alike.
 func (a *Anchor) drawLocked() {
+	if a.susp != nil {
+		return
+	}
 	width := a.widthFn()
 	var b strings.Builder
 	rows := 1

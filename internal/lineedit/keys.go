@@ -15,8 +15,10 @@ const (
 	keyDelete
 	keyLeft
 	keyRight
-	keyUp   // reserved for history (currently a no-op)
-	keyDown // reserved for history (currently a no-op)
+	keyUp       // reserved for history (currently a no-op)
+	keyDown     // reserved for history (currently a no-op)
+	keyPageUp   // inert at the prompt; scrolls in the inspector (inspect.go)
+	keyPageDown // inert at the prompt; scrolls in the inspector (inspect.go)
 	keyHome
 	keyEnd
 	keyWordLeft
@@ -206,6 +208,10 @@ func interpretCSI(params string, final byte, src byteSource) (keyEvent, error) {
 			return keyEvent{kind: keyEnd}, nil
 		case "3":
 			return keyEvent{kind: keyDelete}, nil
+		case "5":
+			return keyEvent{kind: keyPageUp}, nil
+		case "6":
+			return keyEvent{kind: keyPageDown}, nil
 		case "200":
 			return decodePaste(src)
 		}
