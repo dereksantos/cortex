@@ -7,7 +7,10 @@ package tools
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // PromptGlyph is the input affordance at the end of the status line and the
@@ -41,6 +44,32 @@ func Color(v, c string) string {
 		return v
 	}
 	return fmt.Sprintf("%s%s%s", c, v, Reset)
+}
+
+// richRenderDisabled honors the same CORTEX_LOOP_RENDER=0 escape hatch
+// cmd/cortex's renderEnabled reads: with it set, the terminal falls back to
+// the plainest output the REPL has — which now also means the flat one-line
+// tool actions, with no diff body under a file edit. Read once at startup,
+// like colorDisabled; tests set it directly.
+var richRenderDisabled = isOff(os.Getenv("CORTEX_LOOP_RENDER"))
+
+func isOff(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return true
+	}
+	return false
+}
+
+// termWidth is the column count of stdout, or 0 when stdout is not a terminal
+// (piped, CI, the test harness). 0 means "don't truncate": a non-TTY consumer
+// gets the raw, unclipped line, matching how every other render path here
+// degrades. A package var so tests can pin a width without a pty.
+var termWidth = func() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 0
 }
 
 // TimestampPrefix renders the "HH:MM:SS  " gutter shown before every printed

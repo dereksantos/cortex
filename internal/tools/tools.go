@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/dereksantos/cortex/internal/agent"
 	"github.com/dereksantos/cortex/internal/outline"
@@ -636,6 +638,22 @@ func Execute(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		}
 	}
 
+	// Inside a subagent, time the call and let its announcement out on the far
+	// side with the elapsed time and a result summary (nesting.go). The coder's
+	// own calls take the direct path: their line is already on screen, printed
+	// before the call ran.
+	if !inSubagent() {
+		return dispatchTool(ctx, tc, deps)
+	}
+	beginNestedCall()
+	start := time.Now()
+	out, err := dispatchTool(ctx, tc, deps)
+	finishNestedCall(time.Since(start), out, err)
+	return out, err
+}
+
+// dispatchTool routes one tool call to its implementation.
+func dispatchTool(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	name := tc.Function.Name
 	switch name {
 	case FunctionReadFile:
@@ -713,19 +731,46 @@ const defaultMaxToolOutput = 10000
 // printing here too was pure duplication onto the server process's own
 // console, ANSI codes included (2026-07-19). Takes just Quieter, not the
 // full ToolDeps — the only capability this needs.
+//
+// Inside a subagent the line is held back rather than printed here
+// (captureAction, nesting.go): it comes out indented one level per depth once
+// the call finishes, carrying its elapsed time and result summary.
 func printToolAction(deps Quieter, action string) {
 	if deps.Quiet() {
 		return
 	}
+	if captureAction(action) {
+		return
+	}
+	fmt.Println(formatToolAction("", action, ""))
+}
+
+// formatToolAction renders one tool-action line: the gutter timestamp, the
+// nesting margin, the green verb, the dimmed argument list, and — for a
+// finished nested call — a dimmed "elapsed  summary" tail. The argument list
+// is the part that gives when the whole thing outgrows the terminal, since the
+// verb and the tail are the parts you can't reconstruct. Width 0 (piped, CI)
+// clips nothing.
+func formatToolAction(indent, action, suffix string) string {
 	name, args := action, ""
 	if i := strings.IndexByte(action, '('); i >= 0 {
 		name, args = action[:i], action[i:]
+	}
+	if w := termWidth(); w > 0 && args != "" {
+		fixed := len(gutterPad) + utf8.RuneCountInString(indent+"tool: "+name)
+		if suffix != "" {
+			fixed += 2 + utf8.RuneCountInString(suffix)
+		}
+		args = clipRunes(args, w-fixed)
 	}
 	line := Color("tool: "+name, Green)
 	if args != "" {
 		line += Color(args, Gray)
 	}
-	fmt.Printf("%s%s\n", TimestampPrefix(), line)
+	if suffix != "" {
+		line += Color("  "+suffix, Gray)
+	}
+	return TimestampPrefix() + indent + line
 }
 
 // --- outline ------------------------------------------------------------
@@ -771,7 +816,17 @@ func runSubagent(ctx context.Context, tc ToolCall, deps ToolDeps, sa Subagent) (
 	if seedFn == nil {
 		seedFn = StudySeed
 	}
+	// The subagent's own call is announced at the CALLER's level; everything
+	// its loop then does prints one level in, between this line and the done
+	// line below (nesting.go). Pushing here — the tool-call path — and not in
+	// the session's RunSubagent is deliberate: nesting is relative to a parent
+	// tool call, so a one-off `cortex study`/`cortex learn` (no parent) keeps
+	// printing flat at the margin, exactly as it does today.
+	printToolAction(deps, subagentAction(sa.Name, path, goal))
+	frame := pushNest(sa.Name)
 	digest, err := deps.RunSubagent(ctx, sa, seedFn(goal, path, ol))
+	popNest()
+	printSubagentDone(deps, frame, digest, err)
 	if err != nil {
 		return "", err
 	}
@@ -1032,10 +1087,42 @@ func writeFile(tc ToolCall, deps ToolDeps) (string, error) {
 	printToolAction(deps, fmt.Sprintf("write_file(%s, %d bytes)", path, len(content)))
 	// Filesystem access goes through the session's workdir anchor; messages
 	// keep the model-visible relative path (workdir.go).
-	if err := os.WriteFile(resolveWorkdir(deps, path), []byte(content), 0644); err != nil {
+	fsPath := resolveWorkdir(deps, path)
+	// Read the outgoing content BEFORE the write so the diff below has a
+	// before-side. A missing file reads as "" — which renderDiff shows as a
+	// new file, the honest form for a create. Best-effort: an unreadable
+	// existing file just yields a whole-content diff, never a failed write.
+	before, diffable := priorContent(deps, fsPath)
+	if err := os.WriteFile(fsPath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
+	if diffable {
+		printFileDiff(deps, before, content)
+	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+}
+
+// priorContent reads a file's current contents for the diff's before-side.
+// ok=false means "don't render a diff at all": output is suppressed anyway, or
+// the file is unreadable, or it's too big to diff — cases where guessing ""
+// would libel an overwrite as a brand-new file. A missing file is the one
+// absence that IS meaningful: ("", true), which renders as a create.
+func priorContent(deps Quieter, fsPath string) (string, bool) {
+	if deps.Quiet() || richRenderDisabled {
+		return "", false
+	}
+	info, err := os.Stat(fsPath)
+	if os.IsNotExist(err) {
+		return "", true
+	}
+	if err != nil || info.Size() > diffMaxInputBytes {
+		return "", false
+	}
+	data, err := os.ReadFile(fsPath)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 // --- edit_file ----------------------------------------------------------
@@ -1110,6 +1197,10 @@ func editFile(tc ToolCall, deps ToolDeps) (string, error) {
 	if err := os.WriteFile(fsPath, []byte(content), info.Mode()); err != nil {
 		return "", fmt.Errorf("write %s: %w", a.Path, err)
 	}
+	// The edit landed: show WHAT changed under the action line. edit_file
+	// already holds both sides in memory (data was read above, content is the
+	// applied result), so the diff costs nothing but the rendering.
+	printFileDiff(deps, string(data), content)
 	if multi {
 		return fmt.Sprintf("edited %s (%s, %s)", a.Path, countNoun(len(edits), "edit"), countNoun(total, "replacement")), nil
 	}
