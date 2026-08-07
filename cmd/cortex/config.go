@@ -32,8 +32,9 @@ const defaultTemperature = 1.0
 // which build their sub-LLM client from cs.Study and then pin effort off
 // at the call site — tool_deps.go's effortOffKwargs — rather than through a
 // separate role). embed stays parsed-but-reserved for a future semantic
-// memory_search (CortexSession.resolveEmbedder is the one live
-// resolveBinding(roleEmbed, ...) call site outside this file).
+// memory_search: CortexSession.resolveEmbedder is the one
+// resolveBinding(roleEmbed, ...) call site outside this file, and nothing
+// calls it yet — memory_search is text-based today.
 //
 // hard-code/reason/fast/rerank/tools were audited 2026-07-18
 // (docs/completion-roadmap.md E1: role collapse) and found dead — no

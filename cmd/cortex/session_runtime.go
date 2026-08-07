@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -39,24 +38,17 @@ func (cs *CortexSession) EnableMemory() {
 	cs.capturer = capture.New(cfg)
 }
 
+// resolveEmbedder resolves the `embed` role to a remote OpenAI-compatible
+// embedder, or nil when the role is unbound. Nil is the normal case: nothing
+// wires an embedder into capture today, and memory_search is text-based.
+//
+// The in-process Hugot embedder that used to back this as a local default was
+// removed — it downloaded an ONNX model on first use to serve a semantic-search
+// path that no caller reached, and dragged x/crypto/ssh and x/net through
+// hugot.DownloadModel for the privilege. The remote path below is the seam a
+// future semantic memory_search would build on; see docs/memory-tools.md.
 func (cs *CortexSession) resolveEmbedder() llm.Embedder {
-	if e := cs.newSpecEmbedder(cs.Config.resolveBinding(roleEmbed, cs.Fleet)); e != nil {
-		return e
-	}
-	if !localEmbedEnabled() {
-		return nil
-	}
-	h := llm.NewHugotEmbedder()
-	h.Warm()
-	return h
-}
-
-func localEmbedEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CORTEX_LOCAL_EMBED"))) {
-	case "0", "false", "off", "no":
-		return false
-	}
-	return true
+	return cs.newSpecEmbedder(cs.Config.resolveBinding(roleEmbed, cs.Fleet))
 }
 
 func (cs *CortexSession) newSpecEmbedder(spec ModelSpec) llm.Embedder {

@@ -3,8 +3,9 @@
 // Mirrors openai_compat.go (chat) for the /embeddings endpoint. Used to
 // reach a hosted embedding model behind an OpenAI-shaped proxy — in
 // particular the fleet's dedicated CPU `embedder` served by LiteLLM at
-// local-gw:4000. Kept separate from HugotEmbedder (in-process, pure Go)
-// so callers can pick network-vs-local without dragging in the ONNX stack.
+// local-gw:4000. This is the only Embedder implementation: the in-process
+// Hugot/ONNX one was removed, so embedding is a network capability or
+// nothing.
 package llm
 
 import (

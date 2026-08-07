@@ -19,6 +19,16 @@ Claude Code host integration described by the earlier 0.2.0-alpha work were
 removed when the project was slimmed down; see [`docs/archive.md`](docs/archive.md)
 for what existed before and why it went.
 
+### Removed
+- The in-process Hugot/ONNX embedder (`pkg/llm/hugot.go`) and its local
+  `CORTEX_LOCAL_EMBED` default. It downloaded `all-MiniLM-L12-v2` on first
+  use to serve a semantic-search path no caller reached — `SetEmbedder` was
+  never invoked, so the embedding branch in capture was permanently dead.
+  Removing it drops the binary from 23.9 MB to 17.2 MB and eliminates the
+  `x/crypto/ssh` attack surface that `hugot.DownloadModel` pulled in. The
+  `embed` role and the remote OpenAI-compatible embedder remain as the seam
+  a future semantic `memory_search` would build on.
+
 ### Added
 - Curl installer (`scripts/install.sh`, checksum-verified, `go install`
   fallback) and a tag-driven GoReleaser release pipeline

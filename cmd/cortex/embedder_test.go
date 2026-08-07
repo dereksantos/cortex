@@ -64,13 +64,13 @@ func TestResolveEmbedder_CloudConfig(t *testing.T) {
 	}
 }
 
-// TestResolveEmbedder_LocalDefaultDisabled confirms that with no fleet/config
-// embedder and the local embedder opted out, resolveEmbedder yields nil (Reflex
-// then uses text search) rather than downloading a model.
-func TestResolveEmbedder_LocalDefaultDisabled(t *testing.T) {
-	t.Setenv("CORTEX_LOCAL_EMBED", "0")
+// TestResolveEmbedder_UnboundYieldsNil confirms that with no embed role bound,
+// resolveEmbedder yields nil — callers fall back to text search — rather than
+// standing up a local model. This is the default posture now that the
+// in-process Hugot embedder is gone.
+func TestResolveEmbedder_UnboundYieldsNil(t *testing.T) {
 	cs := &CortexSession{Config: &Config{}}
 	if e := cs.resolveEmbedder(); e != nil {
-		t.Fatalf("expected nil embedder when local disabled and no fleet, got %T", e)
+		t.Fatalf("expected nil embedder when the embed role is unbound, got %T", e)
 	}
 }

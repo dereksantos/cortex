@@ -23,9 +23,6 @@ import (
 // set CORTEX_HOME explicitly via t.Setenv, which wins for the duration of
 // that test.
 func TestMain(m *testing.M) {
-	if os.Getenv("CORTEX_LOCAL_EMBED") == "" {
-		_ = os.Setenv("CORTEX_LOCAL_EMBED", "0")
-	}
 	homeDir := ""
 	if os.Getenv("CORTEX_HOME") == "" {
 		if dir, err := os.MkdirTemp("", "cortex-test-home-"); err == nil {

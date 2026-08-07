@@ -497,7 +497,6 @@ ignored, not errors — the same forward-compatible behavior
 | `CORTEX_LOOP_STUDY_WINDOW` | Overrides the `study` subagent's context window. |
 | `CORTEX_STUDY_REPS` | Rep count for `cortex study-eval` (dev/CI, not needed for normal use). `CORTEX_NAV_REPS` is a deprecated alias, still honored as a fallback. |
 | `CORTEX_STUDY_PROBE_TIMEOUT` | Per-probe wall-clock cap, in seconds, for `cortex study-eval` — a thrashing probe fails fast instead of hanging the gate. Default `300`. |
-| `CORTEX_LOCAL_EMBED` | Falsey disables the local Hugot embedder default. |
 | `CORTEX_HUGOT_ONNX` | Picks a specific ONNX variant for the local embedder. |
 | `CORTEX_TEMPERATURE` | Pins sampling temperature for every request (mainly for deterministic eval runs); unset preserves each backend's own default. |
 | `CORTEX_LLM_DEBUG` | Non-empty dumps every outbound request/response body to stderr — debugging only, will print secrets in headers if you look; don't leave it on. |

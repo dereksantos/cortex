@@ -203,7 +203,9 @@ Roles: `code` (the agent) and `study` (the `Study` subagent + the summarizer +
 the shell-risk classifier — all three build their sub-LLM call off the study
 binding and pin reasoning effort off at the call site, docs/thinking-models.md).
 `embed` stays parsed-but-reserved for a future semantic `memory_search`
-(`CortexSession.resolveEmbedder` still resolves it). The configurable role
+(`CortexSession.resolveEmbedder` maps it to a remote OpenAI-compatible
+embedder, but nothing calls that yet — `memory_search` is text-based, and
+the in-process Hugot/ONNX embedder was deleted 2026-08-07). The configurable role
 surface is exactly `code`/`study`/`embed` (`cmd/cortex/config.go`'s
 `rolePolicies`) — a 2026-07-18 audit (`docs/completion-roadmap.md` E1) found
 `hard-code`/`reason`/`fast`/`rerank`/`tools` genuinely dead and removed them;

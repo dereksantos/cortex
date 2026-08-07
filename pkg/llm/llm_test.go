@@ -447,39 +447,3 @@ func TestFallbackEmbedder(t *testing.T) {
 		}
 	})
 }
-
-func TestHugotEmbedder_LazyInit(t *testing.T) {
-	// Test that HugotEmbedder is created without immediately loading the model
-	embedder := NewHugotEmbedder()
-	if embedder == nil {
-		t.Fatal("NewHugotEmbedder returned nil")
-	}
-
-	// The model should not be loaded yet
-	if embedder.pipeline != nil {
-		t.Error("pipeline should not be loaded until first use")
-	}
-
-	// Model name should be set to default
-	if embedder.ModelName() != DefaultHugotModel {
-		t.Errorf("expected model name %q, got %q", DefaultHugotModel, embedder.ModelName())
-	}
-}
-
-func TestHugotEmbedder_WithCustomModel(t *testing.T) {
-	customModel := "sentence-transformers/paraphrase-MiniLM-L6-v2"
-	embedder := NewHugotEmbedderWithModel(customModel)
-
-	if embedder.ModelName() != customModel {
-		t.Errorf("expected model name %q, got %q", customModel, embedder.ModelName())
-	}
-}
-
-func TestHugotEmbedder_WithPath(t *testing.T) {
-	path := "/some/model/path"
-	embedder := NewHugotEmbedderWithPath(path)
-
-	if embedder.modelPath != path {
-		t.Errorf("expected model path %q, got %q", path, embedder.modelPath)
-	}
-}
