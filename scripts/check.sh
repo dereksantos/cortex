@@ -25,8 +25,12 @@ cd "$repo_root"
 
 run_fmt() {
   # Exclude vendor/, .cortex/ (session snapshots — frozen historical
-  # copies that may pre-date gofmt rule changes), and test/evals/
-  # (eval-target source trees not part of the cortex module).
+  # copies that may pre-date gofmt rule changes), .claude/ (agent
+  # worktrees: nested checkouts carrying their own .cortex/, including
+  # benchmark scratch full of model-authored Go that is under test, not
+  # ours to format), and test/evals/ (eval-target source trees not part
+  # of the cortex module). The patterns anchor at the repo root, so a
+  # nested .cortex/ only gets skipped via its .claude/ prefix.
   # gofmt reports unparseable files on stderr and exits non-zero —
   # capture both so a syntax error fails the gate instead of slipping
   # through the -l list silently.
@@ -34,14 +38,14 @@ run_fmt() {
   local fmt_status=0
   listing="$(gofmt -l . 2>&1)" || fmt_status=$?
   if [[ $fmt_status -ne 0 ]]; then
-    parse_errors="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|test/evals)/' || true)"
+    parse_errors="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|\.claude|test/evals)/' || true)"
     if [[ -n "$parse_errors" ]]; then
       echo "✖ gofmt: parse errors:" >&2
       echo "$parse_errors" >&2
       return 1
     fi
   fi
-  unformatted="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|test/evals)/' || true)"
+  unformatted="$(echo "$listing" | grep -Ev '^(vendor|\.cortex|\.claude|test/evals)/' || true)"
   if [[ -n "$unformatted" ]]; then
     echo "✖ gofmt: the following files are not formatted:" >&2
     echo "$unformatted" >&2
