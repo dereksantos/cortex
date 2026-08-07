@@ -12,11 +12,6 @@
 **A coding harness that prunes its own context, keeps its own notes, and
 learns as it goes — built for long sessions with small, local models.**
 
-I built Cortex because I kept re-explaining myself to my own tools. Long
-sessions have a familiar shape: the context window fills up, something has
-to give, and what gives is usually the thing you said an hour ago that
-actually mattered. Cortex is built to give up less.
-
 The window is treated as a cache, not a diary. Recent work stays verbatim.
 Older turns prune down to a compact, cited outline the agent can reach back
 through at any time — the exact conversation is always one `recall` away.

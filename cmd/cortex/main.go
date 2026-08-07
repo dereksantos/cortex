@@ -264,6 +264,46 @@ func printHelp() {
 	}
 }
 
+// usageLines is the `cortex --help` body: every subcommand main() dispatches
+// on, one line each. Kept as a var next to helpLines (the REPL's /help) for
+// the same reason — TestUsageFlag asserts every subcommand name appears
+// without pinning the prose.
+var usageLines = []string{
+	"cortex                                    interactive REPL (default)",
+	"cortex resume [id]                        resume a prior session (default: latest)",
+	"cortex turn [--session id] [--json] ...   headless single turn; session id to stderr",
+	"cortex study <path> [goal...]             one-off study; prints the digest",
+	"cortex learn [--project <name>]           background learning pass over the journal",
+	"cortex change <start|commit|status>       git change lifecycle (local git only)",
+	"cortex serve [--port <n>]                 local HTTP/SSE adapter for the web UI",
+	"cortex scan [--json] [--root <path>]      scan configured roots for projects",
+	"cortex project <add|list|remove>          manage the project registry",
+	"cortex discord                            Discord adapter (DISCORD_BOT_TOKEN)",
+	"cortex model [--json]                     show model role bindings and what's served",
+	"cortex study-eval                         study acceptance test",
+	"cortex version                            print the version and exit",
+}
+
+// printUsage is the CLI-level counterpart to printHelp: `cortex --help`
+// lists the subcommands and global flags, then points at /help for the
+// slash commands that only exist once the REPL is running. Without it
+// `cortex --help` fell through into the REPL, which reads as a hang.
+func printUsage() {
+	fmt.Println("cortex " + version())
+	fmt.Println()
+	fmt.Println(withColor("Usage:", cyan))
+	for _, line := range usageLines {
+		fmt.Println("  " + line)
+	}
+	fmt.Println()
+	fmt.Println(withColor("Flags:", cyan))
+	fmt.Println("  --help, -h        show this list")
+	fmt.Println("  --version, -v     print the version and exit")
+	fmt.Println("  --tools           list the agent's registered tools at startup")
+	fmt.Println()
+	fmt.Println("Inside the REPL, type /help for the slash commands.")
+}
+
 func main() {
 	// `cortex --version` / `cortex version` prints the same string the REPL
 	// banner shows (display.go) and exits 0 — the standard "how do I check
@@ -271,6 +311,14 @@ func main() {
 	// Checked first, ahead of every other subcommand/flag.
 	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
 		fmt.Println("cortex " + version())
+		os.Exit(0)
+	}
+
+	// `cortex --help` / `-h` / `help` prints the subcommand usage and exits 0.
+	// Checked alongside --version, ahead of every subcommand: without it the
+	// flag fell through to the REPL and looked like a hang.
+	if len(os.Args) >= 2 && (os.Args[1] == "--help" || os.Args[1] == "-h" || os.Args[1] == "help") {
+		printUsage()
 		os.Exit(0)
 	}
 
