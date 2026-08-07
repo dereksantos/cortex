@@ -262,8 +262,11 @@ func runExercise(o *options, ex Exercise, runDir, benchHome, cortexBin string) R
 	writeFileBestEffort(filepath.Join(runDir, "transcripts", ex.Name+".log"), turn.output)
 
 	// Copy the session transcript out of the workdir so the row's reference
-	// survives even if the work tree is later cleaned.
-	if turn.sessionID != "" {
+	// survives even if the work tree is later cleaned. With no session there
+	// is no transcript, and the row must not carry a dangling reference.
+	if turn.sessionID == "" {
+		row.TranscriptPath = ""
+	} else {
 		src := filepath.Join(contextDir, "sessions", turn.sessionID+".jsonl")
 		if err := copyFile(src, row.TranscriptPath); err != nil {
 			row.TranscriptPath = src
