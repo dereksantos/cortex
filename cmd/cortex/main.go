@@ -127,7 +127,7 @@ const compactGoal = "Summarize this coding session for continuation: the user's 
 
 // Version is the semantic base shown in the status line. It's a var (not const)
 // so a release build can override it: go build -ldflags "-X main.Version=1.2.3".
-var Version = "0.1.0"
+var Version = "0.3.0"
 
 // version returns the display version: the semantic base plus the short git
 // revision (and a -dirty marker) when the binary was built from a VCS checkout.
