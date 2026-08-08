@@ -9,7 +9,7 @@ toolchain go1.26.5
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/charmbracelet/glamour v1.0.0
+	github.com/charmbracelet/glamour/v2 v2.0.1
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/viterin/vek v0.4.3
 	golang.org/x/net v0.52.0
