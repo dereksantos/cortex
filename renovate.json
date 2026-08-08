@@ -2,5 +2,21 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Renovate skips Go indirect dependencies by default, which left golang.org/x/text and github.com/yuin/goldmark sitting on versions govulncheck flags as reachable with no PR to fix them. Both reach live code (lineedit, the markdown renderer) through direct deps, so 'indirect' says nothing about whether a vulnerability is exploitable here.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "enabled": true
+    },
+    {
+      "description": "GitHub Actions are pinned to commit SHAs, not tags — a tag is mutable and repointable by whoever compromises the action's repo. helpers:pinGitHubActionDigests keeps Renovate updating the digest in place instead of filing PRs that revert the pin to a tag (which is why #67/#62/#58 were closed).",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    }
+  ],
+  "postUpdateOptions": [
+    "gomodTidy"
   ]
 }
