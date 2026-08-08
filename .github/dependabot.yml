@@ -1,0 +1,32 @@
+# Renovate owns dependency updates in this repo, not Dependabot.
+#
+# Both bots were running and filing duplicate PRs for the same bump (#68 and
+# #64 were both golang.org/x/net v0.55.0). Renovate is the one that's actually
+# configured — see renovate.json, which covers Go direct AND indirect deps and
+# pins GitHub Action digests. Dependabot doesn't know about the SHA pinning, so
+# its Action PRs revert it; #67/#62/#58 were closed for that.
+#
+# This file turns off Dependabot VERSION updates by setting the PR limit to 0
+# for every ecosystem in play.
+#
+# IMPORTANT — this file cannot turn off Dependabot SECURITY updates. Those are
+# controlled solely by a repository setting (Settings > Advanced Security >
+# Dependabot security updates), with no configuration-file equivalent, and
+# `open-pull-requests-limit: 0` is documented as affecting version updates
+# only. Flip that toggle to complete the handover; until then, expect
+# Dependabot to keep opening security PRs that duplicate Renovate's.
+#
+# https://docs.github.com/en/code-security/dependabot/dependabot-security-updates/configuring-dependabot-security-updates
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
