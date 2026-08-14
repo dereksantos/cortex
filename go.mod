@@ -5,7 +5,7 @@ go 1.26.0
 // Pinned to the patch level that carries the stdlib security fixes
 // govulncheck tracks; CI (test.yml, release.yml) pins the same version.
 // Bump all three together.
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
