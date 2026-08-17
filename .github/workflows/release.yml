@@ -41,7 +41,7 @@ jobs:
           # should be reproducible from the tag, and the patch level is
           # load-bearing for the stdlib CVEs govulncheck tracks. Bump
           # this deliberately, together with go.mod's toolchain directive.
-          go-version: "1.26.5"
+          go-version: "1.26.6"
           check-latest: false
 
       # Fail the release before it builds anything if a dependency's
