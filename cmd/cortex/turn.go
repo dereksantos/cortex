@@ -173,7 +173,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	}
 	ts.AfterToolResult = onAfterToolResult
 
-	_, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens
@@ -190,7 +190,19 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: lastAssistantText(turnMsgs), StopReason: stats.StopReason}, nil
+	// content is runLoop's own engineered answer (clean-finalize or a salvage
+	// re-ask) — the authoritative reply. lastAssistantText is a last-resort
+	// fallback ONLY: if runLoop still came back empty (salvage itself failed),
+	// prefer showing stale prior prose over showing nothing. Do not swap the
+	// order — re-deriving the reply from lastAssistantText unconditionally is
+	// the bug this replaced: a genuinely empty final turn (no tool calls, no
+	// content, not necessarily token-clamped) would silently surface an
+	// earlier, pre-tool-call message as if it were the finished answer.
+	reply := content
+	if reply == "" {
+		reply = lastAssistantText(turnMsgs)
+	}
+	return TurnResult{Reply: reply, StopReason: stats.StopReason}, nil
 }
 
 func lastAssistantText(turnMsgs []Message) string {

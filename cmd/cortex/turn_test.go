@@ -344,12 +344,70 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 		t.Fatalf("turn: %v", err)
 	}
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
-	// finalize (tools withheld) — far below the maxToolIterations cap.
-	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+1 {
+	// finalize (tools withheld) — this fixture keeps answering tool_calls with
+	// empty content even with tools withheld, so the finalize's own empty-answer
+	// salvage fires once more (still empty) before giving up — far below the
+	// maxToolIterations cap.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
 	if calls >= maxToolIterations {
 		t.Errorf("guard failed: ran to the iteration cap (%d)", calls)
+	}
+}
+
+// TestTurnReturnsSalvagedAnswerNotStalePreToolText locks down the live bug
+// this fix addresses: a model's PRE-tool-call chatter ("I'll run this
+// command.") must never resurface as the turn's Reply when the model's real
+// final round comes back empty. Round 1 answers with tool_calls (and some
+// throwaway prose); round 2 is a natural finish — no tool_calls, empty
+// content, NOT clamped (its answer landed nowhere the blocking path can see,
+// per docs/thinking-models.md) — which must trigger the empty-answer salvage;
+// round 3 (tools withheld, the salvage re-ask) supplies the real answer.
+// Before the fix, cs.Turn() discarded runLoop's own answer and re-derived the
+// reply via lastAssistantText, which walked backward past the empty round 2
+// straight to round 1's stale chatter.
+func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Tool call, plus throwaway prose that must NOT survive as the reply.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"I'll run this command.","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// Natural finish: no tool_calls, empty content, NOT clamped
+			// (completion_tokens well under any cap) — the exact live failure mode.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			// The salvage re-ask.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"Confirmed: hi was printed."}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":5}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "run echo hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "Confirmed: hi was printed." {
+		t.Errorf("Reply = %q, want the salvaged answer, not stale pre-tool-call text", res.Reply)
 	}
 }
 

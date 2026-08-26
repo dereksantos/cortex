@@ -342,11 +342,15 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		appendMsg(msg)
 
 		// No tool calls → the model answered. That prose IS the result — unless it's
-		// EMPTY because the model spiraled to the token clamp on this turn, which we
-		// salvage with one terse re-ask rather than returning nothing.
+		// EMPTY, which we salvage with one terse re-ask rather than returning nothing.
+		// Not gated on stats.MaxTokensClamped: a hybrid-reasoning model can also land
+		// here empty WITHOUT hitting the clamp (its answer landed entirely in a
+		// reasoning channel the blocking path doesn't parse, or it just stopped) —
+		// docs/thinking-models.md's blocking-path gap. salvageEmptyFinalize is a
+		// no-op re-ask cost only when triggered, so this is safe unconditionally.
 		if len(msg.ToolCalls) == 0 {
 			answer := strings.TrimSpace(msg.Content)
-			if answer == "" && stats.MaxTokensClamped {
+			if answer == "" {
 				if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
 					req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
 					return a2, stats, nil
@@ -480,7 +484,9 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 	msg := res.Choices[0].Message
 	appendMsg(msg)
 	answer := strings.TrimSpace(msg.Content)
-	if answer == "" && stats.MaxTokensClamped {
+	// Not gated on stats.MaxTokensClamped — see the matching comment at the
+	// main loop's empty-answer branch above.
+	if answer == "" {
 		if a2 := salvageEmptyFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
 			answer = a2
 		}
@@ -507,10 +513,13 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 }
 
 // salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor when
-// a finish came back EMPTY because a reasoning model burned its whole budget
-// deliberating (the max-tokens clamp → no prose). Returns the salvaged answer (and
-// stamps stop_reason + Salvaged) or "". Gated by the empty-clamp signature at both
-// call sites, so a healthy run (always prose) never triggers it. Like every
+// a finish came back EMPTY — whether because a reasoning model burned its whole
+// budget deliberating (the max-tokens clamp → no prose) or because it just
+// stopped with nothing in the content channel (no clamp; e.g. its answer landed
+// in a reasoning channel the blocking path doesn't parse). Returns the salvaged
+// answer (and stamps stop_reason + Salvaged) or "". Gated only by the empty
+// answer itself at both call sites, so a healthy run (always prose) never
+// triggers it. Like every
 // finalize send (docs/thinking-models.md §5a), this re-ask always goes out
 // with effort OFF — P4 introduced this gated on stats.DeliberationClamped;
 // P5a generalizes it to every finalize/salvage send unconditionally, since

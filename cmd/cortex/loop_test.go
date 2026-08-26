@@ -451,6 +451,114 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	})
 }
 
+// TestRunLoopSalvagesNaturalEmptyUnclampedFinish locks down the live failure
+// mode this fix addresses: a hybrid-reasoning model returns an empty final
+// message with NO tool calls and does NOT hit the token clamp — its answer
+// landed in a reasoning channel the blocking path never parses, or it just
+// stopped (docs/thinking-models.md's blocking-path gap). Before this fix the
+// salvage was gated on stats.MaxTokensClamped (false here), so this empty
+// answer was accepted as-is and turn.go's caller (lastAssistantText) then
+// silently resurfaced a stale PRE-tool-call assistant message as if it were
+// the finished answer. The salvage must fire on any empty final answer,
+// clamped or not.
+func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // the salvage re-ask
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		}
+		return fakeResp("", nil, 1, 5), false, nil // empty, NOT clamped (out << MaxTokens), no tool calls
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 3}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if stats.MaxTokensClamped {
+		t.Fatalf("test setup bug: response should not read as clamped")
+	}
+	if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
+		t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+	}
+}
+
+// TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish is the forced-finalize
+// counterpart to TestRunLoopSalvagesNaturalEmptyUnclampedFinish above: the
+// SAME empty-but-not-clamped failure mode, but hit via the forced-finalize
+// path (max-iter/stuck/read-budget) rather than a natural mid-loop finish.
+// Both call sites share the fix, so both need the coverage.
+func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	var finalizes int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil { // forced finalize, tools withheld
+			finalizes++
+			if finalizes == 1 {
+				return fakeResp("", nil, 1, 5), false, nil // empty, NOT clamped (out << MaxTokens)
+			}
+			return fakeResp("salvaged answer", nil, 1, 5), false, nil
+		}
+		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" })
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if !stats.FinalizeForced {
+		t.Errorf("FinalizeForced = false, want true (max-iter should force finalize)")
+	}
+	if stats.MaxTokensClamped {
+		t.Fatalf("test setup bug: response should not read as clamped")
+	}
+	if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
+		t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
+	}
+	if finalizes != 2 {
+		t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
+	}
+}
+
+// TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty proves the widened
+// gate is still bounded: when EVERY finalize attempt (initial + the one
+// salvage re-ask) comes back empty and there's no frequency-candidate pattern
+// to fall back on, runLoop returns cleanly with an empty answer — exactly two
+// finalize network calls, no error, no infinite retry.
+func TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+	var finalizes int
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		if r.Tools == nil {
+			finalizes++
+			return fakeResp("", nil, 1, 5), false, nil // always empty, never clamped
+		}
+		return fakeResp("", []ToolCall{readCall("c", "p")}, 1, 1), false, nil
+	})
+	disp := DispatchFunc(func(context.Context, ToolCall) string { return "obs" }) // no candidate pattern
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 2}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if content != "" {
+		t.Errorf("content = %q, want empty (nothing salvageable)", content)
+	}
+	if stats.StopReason != "max-iter" {
+		t.Errorf("stop = %q, want max-iter (no salvage succeeded to relabel it)", stats.StopReason)
+	}
+	if finalizes != 2 {
+		t.Errorf("finalize calls = %d, want exactly 2 (bounded: one empty + one failed salvage, no retry storm)", finalizes)
+	}
+}
+
 // TestRunLoopDetectsStuckErrorLoop reproduces the live coder hang: the model
 // alternates a no-op edit (always "Error: …identical; nothing to change") with a
 // read (always succeeds). The byte-identical no-progress guard only sees
