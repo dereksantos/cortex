@@ -654,3 +654,56 @@ func TestTurnContextGaugeUpdatesMidTurn(t *testing.T) {
 		t.Errorf("Prompt() with repl.gauge=numeric = %q, want to contain %q", numeric, want)
 	}
 }
+
+// TestStartStopActivitySetsPhase pins startActivity's phase side effect: a
+// running tool is busy time and should light the same "thinking" glyph as
+// reasoning, without needing a live anchor attached (nil cs.live must not
+// panic — the common case in headless/test sessions).
+func TestStartStopActivitySetsPhase(t *testing.T) {
+	cs := &CortexSession{Request: CortexArgs{}.Request()}
+	if cs.phase != phaseIdle {
+		t.Fatalf("setup: phase = %v, want phaseIdle", cs.phase)
+	}
+	cs.startActivity("bash(echo hi)")
+	if cs.phase != phaseThinking {
+		t.Errorf("phase after startActivity = %v, want phaseThinking", cs.phase)
+	}
+	// stopActivity only clears the anchor's status-row label (SetActivity(""))
+	// — it does not itself change the phase (the next model round-trip or the
+	// turn's own end-of-turn defer does that), so the phase should still read
+	// busy right after a tool call ends.
+	cs.stopActivity()
+	if cs.phase != phaseThinking {
+		t.Errorf("phase after stopActivity = %v, want phaseThinking (unchanged)", cs.phase)
+	}
+}
+
+// TestTurnPhaseIdleAfterCompletion guards turn()'s own phase bookkeeping: it
+// should enter phaseThinking at the start and — via its deferred setPhase —
+// land back on phaseIdle once the turn (including a mid-turn tool call) fully
+// resolves, even though nothing observes the phase while live.
+func TestTurnPhaseIdleAfterCompletion(t *testing.T) {
+	quickRetries(t)
+	body := sseBody(
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"tool1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo one\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":500,"completion_tokens":50}}`,
+		`{"choices":[{"delta":{"role":"assistant","content":"done"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`{"choices":[],"usage":{"prompt_tokens":600,"completion_tokens":10}}`,
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Window: 128000, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "system"}}}}
+
+	if _, err := cs.Turn(context.Background(), "test"); err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if cs.phase != phaseIdle {
+		t.Errorf("phase after Turn() = %v, want phaseIdle", cs.phase)
+	}
+}

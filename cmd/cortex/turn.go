@@ -9,6 +9,7 @@ import (
 )
 
 func (cs *CortexSession) startActivity(label string) {
+	cs.setPhase(phaseThinking) // a running tool is busy time, same light as reasoning
 	if cs.live != nil {
 		cs.live.SetActivity(label)
 	}
@@ -75,6 +76,9 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// into spans); cleared on exit so seed/compaction writes stay unstamped.
 	cs.turnNo = cs.turns + 1
 	defer func() { cs.turnNo = 0 }()
+
+	cs.setPhase(phaseThinking)
+	defer cs.setPhase(phaseIdle)
 
 	turnStart := len(cs.Request.Messages)
 	// Lazy init covers sessions built without NewCortexSession (tests, adapters):

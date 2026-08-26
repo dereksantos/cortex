@@ -308,6 +308,15 @@ func (a *Anchor) SetPrompt(prompt string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.prompt = prompt
+	// Every other redraw path in this file pairs erase+draw; this one didn't,
+	// which was invisible while its only callers ran with the status row
+	// already hidden (a redraw-without-erase onto a 1-row block just
+	// overwrites itself). It stops being invisible the moment a caller
+	// invokes SetPrompt while the status row is live (2-row block): drawing
+	// from the cursor's current position — parked on the input row, the
+	// bottom of the block — rather than the block's top pushes a fresh line
+	// onto the terminal instead of overwriting it.
+	a.eraseLocked()
 	a.drawLocked()
 }
 
