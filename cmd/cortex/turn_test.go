@@ -344,12 +344,61 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 		t.Fatalf("turn: %v", err)
 	}
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
-	// finalize (tools withheld) — far below the maxToolIterations cap.
-	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+1 {
+	// finalize. This fixture keeps returning tool_calls even with tools
+	// withheld, so the empty-answer salvage fires once more (still empty)
+	// before giving up.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
 	if calls >= maxToolIterations {
 		t.Errorf("guard failed: ran to the iteration cap (%d)", calls)
+	}
+}
+
+// TestTurnReturnsSalvagedAnswerNotStalePreToolText: round 1 answers with
+// tool_calls plus throwaway prose; round 2 is a natural, unclamped empty
+// finish; round 3 (salvage) supplies the real answer. Reply must be round
+// 3's answer, not round 1's stale prose.
+func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Tool call, plus throwaway prose that must NOT survive as the reply.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"I'll run this command.","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// Natural finish: no tool_calls, empty content, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			// The salvage re-ask.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"Confirmed: hi was printed."}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":5}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "run echo hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "Confirmed: hi was printed." {
+		t.Errorf("Reply = %q, want the salvaged answer, not stale pre-tool-call text", res.Reply)
 	}
 }
 

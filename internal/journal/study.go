@@ -49,6 +49,8 @@ type StudyResultPayload struct {
 	PeakOutputTokens int  `json:"peak_output_tokens"`
 	MaxTokensClamped bool `json:"max_tokens_clamped"`
 	Salvaged         bool `json:"salvaged,omitempty"`
+	// SalvagedUnclamped narrows Salvaged — see loopStats.SalvagedUnclamped.
+	SalvagedUnclamped bool `json:"salvaged_unclamped,omitempty"`
 
 	// Error carries the run error (if any) for a failed rep; empty on a
 	// normal completion, scored or not.

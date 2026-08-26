@@ -173,7 +173,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	}
 	ts.AfterToolResult = onAfterToolResult
 
-	_, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens
@@ -190,7 +190,14 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: lastAssistantText(turnMsgs), StopReason: stats.StopReason}, nil
+	// content is runLoop's own answer, already salvage-checked; use it first.
+	// lastAssistantText is a last-resort fallback only, for when runLoop's own
+	// salvage also came back empty.
+	reply := content
+	if reply == "" {
+		reply = lastAssistantText(turnMsgs)
+	}
+	return TurnResult{Reply: reply, StopReason: stats.StopReason}, nil
 }
 
 func lastAssistantText(turnMsgs []Message) string {

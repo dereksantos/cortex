@@ -86,14 +86,18 @@ type loopStats struct {
 	InputTokens      int
 	OutputTokens     int
 	Cost             float64
-	LastPromptTokens int    // most recent prompt_tokens (the live context gauge)
-	LastCachedTokens int    // most recent provider-reported cached prompt tokens (0 if unreported)
-	PeakOutputTokens int    // max completion tokens on any single request
-	MaxTokensClamped bool   // any request hit Bounds.MaxTokens (runaway tripwire)
-	Salvaged         bool   // an empty clamped finish was recovered by one terse re-ask
-	Iterations       int    // model rounds consumed
-	StopReason       string // clean-finalize|salvaged-finalize|max-iter|read-budget|no-progress|deadline|error
-	FinalizeForced   bool   // answered because a bound dragged finalize out
+	LastPromptTokens int  // most recent prompt_tokens (the live context gauge)
+	LastCachedTokens int  // most recent provider-reported cached prompt tokens (0 if unreported)
+	PeakOutputTokens int  // max completion tokens on any single request
+	MaxTokensClamped bool // any request hit Bounds.MaxTokens (runaway tripwire)
+	Salvaged         bool // an empty clamped finish was recovered by one terse re-ask
+	// SalvagedUnclamped: recovered from empty WITHOUT MaxTokensClamped — the
+	// model just stopped with nothing, not a budget-burn spiral. Both share
+	// StopReason "salvaged-finalize"; this is the field that tells them apart.
+	SalvagedUnclamped bool
+	Iterations        int    // model rounds consumed
+	StopReason        string // clean-finalize|salvaged-finalize|max-iter|read-budget|no-progress|deadline|error
+	FinalizeForced    bool   // answered because a bound dragged finalize out
 
 	Outlines  int
 	Greps     int
@@ -341,17 +345,22 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// assistant(tool_calls) → tool(result) ordering.
 		appendMsg(msg)
 
-		// No tool calls → the model answered. That prose IS the result — unless it's
-		// EMPTY because the model spiraled to the token clamp on this turn, which we
-		// salvage with one terse re-ask rather than returning nothing.
+		// No tool calls → the model answered. That prose IS the result — unless
+		// it's EMPTY, salvaged with one terse re-ask instead of returning
+		// nothing. Not gated on MaxTokensClamped: a hybrid-reasoning model can
+		// also land here empty without hitting the clamp (docs/thinking-models.md's
+		// blocking-path gap).
 		if len(msg.ToolCalls) == 0 {
 			answer := strings.TrimSpace(msg.Content)
-			if answer == "" && stats.MaxTokensClamped {
+			if answer == "" {
+				wasClamped := stats.MaxTokensClamped
 				if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
+					stats.SalvagedUnclamped = !wasClamped
 					req.Tools = ts.Tools // salvage withheld them; restore for the caller's reuse
 					return a2, stats, nil
 				}
 				if a2 := salvageObservationFinalize(lastObservation, &stats); a2 != "" {
+					stats.SalvagedUnclamped = !wasClamped
 					req.Tools = ts.Tools
 					return a2, stats, nil
 				}
@@ -480,12 +489,18 @@ func finalizeLoop(ctx context.Context, send Sender, req *AgentRequest, prompt st
 	msg := res.Choices[0].Message
 	appendMsg(msg)
 	answer := strings.TrimSpace(msg.Content)
-	if answer == "" && stats.MaxTokensClamped {
+	// Not gated on MaxTokensClamped — see runLoop's empty-answer branch above.
+	if answer == "" {
+		wasClamped := stats.MaxTokensClamped
 		if a2 := salvageEmptyFinalize(ctx, send, req, stats, appendMsg); a2 != "" {
 			answer = a2
+			stats.SalvagedUnclamped = !wasClamped
 		}
 		if answer == "" {
-			answer = salvageObservationFinalize(lastObservation, stats)
+			if a2 := salvageObservationFinalize(lastObservation, stats); a2 != "" {
+				answer = a2
+				stats.SalvagedUnclamped = !wasClamped
+			}
 		}
 	}
 	if answer != "" && stats.MaxTokensClamped && !stats.Salvaged {
@@ -506,18 +521,13 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 	return "The bounded tool evidence identifies " + m[1] + " as the most frequent candidate."
 }
 
-// salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor when
-// a finish came back EMPTY because a reasoning model burned its whole budget
-// deliberating (the max-tokens clamp → no prose). Returns the salvaged answer (and
-// stamps stop_reason + Salvaged) or "". Gated by the empty-clamp signature at both
-// call sites, so a healthy run (always prose) never triggers it. Like every
-// finalize send (docs/thinking-models.md §5a), this re-ask always goes out
-// with effort OFF — P4 introduced this gated on stats.DeliberationClamped;
-// P5a generalizes it to every finalize/salvage send unconditionally, since
-// tools are withheld here too and pleading for brevity while still letting
-// the model reason was the exact failure this turns into an actual control.
-// stats.DeliberationClamped is still recorded (accountUsage) for eval
-// attribution even though it no longer gates this mutation.
+// salvageEmptyFinalize re-asks ONCE (tools withheld) with a hard brevity floor
+// when a finish came back EMPTY — clamped or not. Gated only on the empty
+// answer, so a healthy run never triggers it. Every finalize send goes out
+// with effort OFF (docs/thinking-models.md §5a) — P4 introduced this gated on
+// DeliberationClamped; P5a generalized it to every finalize/salvage send.
+// DeliberationClamped is still recorded for eval attribution even though it
+// no longer gates this.
 func salvageEmptyFinalize(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) string {
 	req.Tools = nil
 	defer disableEffortForSend(req)()
