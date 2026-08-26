@@ -340,6 +340,66 @@ func TestSessionPrompt(t *testing.T) {
 	}
 }
 
+// TestPhaseGlyph pins the state light's shape per phase — the character
+// alone must carry the state (NO_COLOR strips the rest), so this checks the
+// glyph independent of color.
+func TestPhaseGlyph(t *testing.T) {
+	tests := []struct {
+		phase turnPhase
+		want  string
+	}{
+		{phaseIdle, "○"},
+		{phaseThinking, "◐"},
+		{phaseStreaming, "●"},
+	}
+	for _, tt := range tests {
+		got := stripANSI(phaseGlyph(tt.phase))
+		if got != tt.want {
+			t.Errorf("phaseGlyph(%v) = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
+// TestPromptReflectsPhase checks the state light actually rides along in
+// Prompt()'s output — the glyph is only useful at the far left of the real
+// bar, not just in isolation — and that idle deliberately reads at lower
+// contrast than the active phases (dim gray vs. the aixterm bright variants),
+// per the "brighter while busy" request.
+func TestPromptReflectsPhase(t *testing.T) {
+	sess := &CortexSession{Request: CortexArgs{}.Request()}
+
+	sess.phase = phaseIdle
+	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("○", gray)) {
+		t.Errorf("idle Prompt() = %q, want to start with the dim gray ○", got)
+	}
+	sess.phase = phaseThinking
+	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("◐", blinkBrightCyan)) {
+		t.Errorf("thinking Prompt() = %q, want to start with the blinking bright cyan ◐", got)
+	}
+	sess.phase = phaseStreaming
+	if got := sess.Prompt(); !strings.HasPrefix(got, withColor("●", brightGreen)) {
+		t.Errorf("streaming Prompt() = %q, want to start with the bright green ●", got)
+	}
+}
+
+// TestSetPhaseUpdatesFieldWithoutLive checks setPhase is safe (and takes
+// effect) with no anchor attached — the common case outside an interactive,
+// anchored turn (headless sessions, tests, non-anchored REPL input).
+func TestSetPhaseUpdatesFieldWithoutLive(t *testing.T) {
+	sess := &CortexSession{Request: CortexArgs{}.Request()}
+	if sess.live != nil {
+		t.Fatal("setup: expected no live anchor")
+	}
+	sess.setPhase(phaseThinking) // must not panic on a nil cs.live
+	if sess.phase != phaseThinking {
+		t.Errorf("phase = %v, want phaseThinking", sess.phase)
+	}
+	sess.setPhase(phaseIdle)
+	if sess.phase != phaseIdle {
+		t.Errorf("phase = %v, want phaseIdle", sess.phase)
+	}
+}
+
 func TestStripToolMarkup(t *testing.T) {
 	content := "Let me check.\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>"
 	got := stripToolMarkup(content)
