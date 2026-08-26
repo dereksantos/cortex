@@ -190,14 +190,9 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	// content is runLoop's own engineered answer (clean-finalize or a salvage
-	// re-ask) — the authoritative reply. lastAssistantText is a last-resort
-	// fallback ONLY: if runLoop still came back empty (salvage itself failed),
-	// prefer showing stale prior prose over showing nothing. Do not swap the
-	// order — re-deriving the reply from lastAssistantText unconditionally is
-	// the bug this replaced: a genuinely empty final turn (no tool calls, no
-	// content, not necessarily token-clamped) would silently surface an
-	// earlier, pre-tool-call message as if it were the finished answer.
+	// content is runLoop's own answer, already salvage-checked; use it first.
+	// lastAssistantText is a last-resort fallback only, for when runLoop's own
+	// salvage also came back empty.
 	reply := content
 	if reply == "" {
 		reply = lastAssistantText(turnMsgs)

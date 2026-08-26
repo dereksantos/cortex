@@ -344,10 +344,9 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 		t.Fatalf("turn: %v", err)
 	}
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
-	// finalize (tools withheld) — this fixture keeps answering tool_calls with
-	// empty content even with tools withheld, so the finalize's own empty-answer
-	// salvage fires once more (still empty) before giving up — far below the
-	// maxToolIterations cap.
+	// finalize. This fixture keeps returning tool_calls even with tools
+	// withheld, so the empty-answer salvage fires once more (still empty)
+	// before giving up.
 	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
@@ -356,17 +355,10 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 	}
 }
 
-// TestTurnReturnsSalvagedAnswerNotStalePreToolText locks down the live bug
-// this fix addresses: a model's PRE-tool-call chatter ("I'll run this
-// command.") must never resurface as the turn's Reply when the model's real
-// final round comes back empty. Round 1 answers with tool_calls (and some
-// throwaway prose); round 2 is a natural finish — no tool_calls, empty
-// content, NOT clamped (its answer landed nowhere the blocking path can see,
-// per docs/thinking-models.md) — which must trigger the empty-answer salvage;
-// round 3 (tools withheld, the salvage re-ask) supplies the real answer.
-// Before the fix, cs.Turn() discarded runLoop's own answer and re-derived the
-// reply via lastAssistantText, which walked backward past the empty round 2
-// straight to round 1's stale chatter.
+// TestTurnReturnsSalvagedAnswerNotStalePreToolText: round 1 answers with
+// tool_calls plus throwaway prose; round 2 is a natural, unclamped empty
+// finish; round 3 (salvage) supplies the real answer. Reply must be round
+// 3's answer, not round 1's stale prose.
 func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
@@ -382,8 +374,7 @@ func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
 				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
 			)))
 		case 2:
-			// Natural finish: no tool_calls, empty content, NOT clamped
-			// (completion_tokens well under any cap) — the exact live failure mode.
+			// Natural finish: no tool_calls, empty content, not clamped.
 			w.Write([]byte(sseBody(
 				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
 				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,

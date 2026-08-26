@@ -322,6 +322,9 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 		if finalizes != 2 {
 			t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 		}
+		if stats.SalvagedUnclamped {
+			t.Errorf("SalvagedUnclamped = true, want false (this recovery was clamped)")
+		}
 	})
 	t.Run("natural empty clamped finish is salvaged", func(t *testing.T) {
 		// The live failure mode: the model returns NO tool calls with EMPTY content
@@ -451,16 +454,8 @@ func TestRunLoopSalvagesEmptyClampedFinalize(t *testing.T) {
 	})
 }
 
-// TestRunLoopSalvagesNaturalEmptyUnclampedFinish locks down the live failure
-// mode this fix addresses: a hybrid-reasoning model returns an empty final
-// message with NO tool calls and does NOT hit the token clamp — its answer
-// landed in a reasoning channel the blocking path never parses, or it just
-// stopped (docs/thinking-models.md's blocking-path gap). Before this fix the
-// salvage was gated on stats.MaxTokensClamped (false here), so this empty
-// answer was accepted as-is and turn.go's caller (lastAssistantText) then
-// silently resurfaced a stale PRE-tool-call assistant message as if it were
-// the finished answer. The salvage must fire on any empty final answer,
-// clamped or not.
+// TestRunLoopSalvagesNaturalEmptyUnclampedFinish: an empty final message with
+// no tool calls and no clamp must still trigger the salvage.
 func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
@@ -483,13 +478,14 @@ func TestRunLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
 		t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
 	}
+	if !stats.SalvagedUnclamped {
+		t.Errorf("SalvagedUnclamped = false, want true (recovery was unclamped)")
+	}
 }
 
-// TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish is the forced-finalize
-// counterpart to TestRunLoopSalvagesNaturalEmptyUnclampedFinish above: the
-// SAME empty-but-not-clamped failure mode, but hit via the forced-finalize
-// path (max-iter/stuck/read-budget) rather than a natural mid-loop finish.
-// Both call sites share the fix, so both need the coverage.
+// TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish is the same case via
+// the forced-finalize path (max-iter/stuck/read-budget) instead of a natural
+// mid-loop finish — both call sites share the fix.
 func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
@@ -520,16 +516,17 @@ func TestFinalizeLoopSalvagesNaturalEmptyUnclampedFinish(t *testing.T) {
 	if content != "salvaged answer" || stats.StopReason != "salvaged-finalize" {
 		t.Errorf("content=%q stop=%q, want salvaged answer/salvaged-finalize", content, stats.StopReason)
 	}
+	if !stats.SalvagedUnclamped {
+		t.Errorf("SalvagedUnclamped = false, want true")
+	}
 	if finalizes != 2 {
 		t.Errorf("finalize calls = %d, want 2 (one empty + one salvage)", finalizes)
 	}
 }
 
-// TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty proves the widened
-// gate is still bounded: when EVERY finalize attempt (initial + the one
-// salvage re-ask) comes back empty and there's no frequency-candidate pattern
-// to fall back on, runLoop returns cleanly with an empty answer — exactly two
-// finalize network calls, no error, no infinite retry.
+// TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty: when every
+// finalize attempt comes back empty, runLoop still returns cleanly —
+// exactly two calls, no retry storm.
 func TestFinalizeLoopUnclampedEmptyWithNoCandidateReturnsEmpty(t *testing.T) {
 	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
