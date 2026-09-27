@@ -294,3 +294,48 @@ func TestAnchorSetPromptRedraws(t *testing.T) {
 		t.Errorf("prompt field = %q, want %q", a.prompt, newPrompt)
 	}
 }
+
+// TestAnchorSetPromptErasesLiveStatusRow guards the bug a caller-driven state
+// light in the prompt (e.g. a "thinking"/"streaming" indicator refreshed on
+// every reasoning delta) exposed: SetPrompt's only two original callers
+// (turn.go's onStatusUpdate/onAfterToolResult) always fired with the status
+// row already hidden, so a redraw without a preceding erase looked correct —
+// it just overwrote a 1-row block. The moment something calls SetPrompt WHILE
+// the status row is live (a 2-row block), drawing from the cursor's resting
+// position — the input row, the bottom of the block — instead of the block's
+// top pushes a fresh line onto the terminal instead of overwriting it, which
+// is exactly the runaway-scrolling symptom this test would have caught.
+func TestAnchorSetPromptErasesLiveStatusRow(t *testing.T) {
+	a, out := newTestAnchor("> ", "", 80)
+	a.mu.Lock()
+	a.activity = "thinking... 1s"
+	a.refreshStatusLocked() // status row now live: a 2-row block
+	a.mu.Unlock()
+	if a.rows != 2 {
+		t.Fatalf("setup: rows = %d, want 2 (status row live)", a.rows)
+	}
+	out.Reset()
+
+	a.SetPrompt("> [700/128k] ")
+
+	raw := out.String()
+	// A correct redraw over a live 2-row block must step up over the status
+	// row (eraseLocked's "\033[1A") before clearing and repainting — the same
+	// pattern every other mutator in this file (refreshStatusLocked,
+	// refreshInputLocked, handleConfirmByte) already follows. Its absence is
+	// exactly the missing-erase bug: the new content lands below the old
+	// block instead of on top of it.
+	if !strings.Contains(raw, "\033[1A") {
+		t.Errorf("SetPrompt over a live status row did not step up before redrawing; raw = %q", raw)
+	}
+	if a.rows != 2 {
+		t.Errorf("rows after SetPrompt = %d, want 2 (status row still live)", a.rows)
+	}
+	// A second call in a row (the realistic case — a phase light refreshed on
+	// every reasoning delta) must erase every time, not just the first.
+	out.Reset()
+	a.SetPrompt("> [900/128k] ")
+	if !strings.Contains(out.String(), "\033[1A") {
+		t.Errorf("second SetPrompt over a live status row did not step up before redrawing")
+	}
+}

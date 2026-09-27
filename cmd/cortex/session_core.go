@@ -127,6 +127,8 @@ type CortexSession struct {
 	md      *markdownRenderer
 	mdWidth int
 	live    *lineedit.Anchor
+
+	phase turnPhase // one-char state light at the far left of Prompt(); see display.go
 }
 
 func (cs *CortexSession) markdown() *markdownRenderer {

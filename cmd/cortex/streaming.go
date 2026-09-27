@@ -460,7 +460,19 @@ func (cs *CortexSession) send(ctx context.Context) (res *AgentResponse, streamed
 	// the anchor's pipe). Always streaming here (anchored mode requires it).
 	if cs.live != nil {
 		cs.live.SetThinking(true, "")
-		p := &streamPrinter{md: cs.markdown(), onStatus: cs.live.SetThinking, start: time.Now()}
+		// Wrap the anchor's own SetThinking so the state light tracks the same
+		// on/off transition: on -> thinking (reasoning), off -> streaming (the
+		// answer has started). This fires on every tick and reasoning chunk;
+		// setPhase only redraws the prompt when the phase actually changes.
+		onStatus := func(on bool, tail string) {
+			if on {
+				cs.setPhase(phaseThinking)
+			} else {
+				cs.setPhase(phaseStreaming)
+			}
+			cs.live.SetThinking(on, tail)
+		}
+		p := &streamPrinter{md: cs.markdown(), onStatus: onStatus, start: time.Now()}
 		p.startTicker()
 		res, err = cs.Request.SendStream(ctx, p.onContent, p.onReasoning)
 		p.stopTicker() // before the clear below, so no straggler tick redraws

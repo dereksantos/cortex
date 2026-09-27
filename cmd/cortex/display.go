@@ -25,6 +25,64 @@ func (m Message) Print() {
 	fmt.Println(m.render(time.Now()))
 }
 
+// turnPhase is the coder's current state relative to the model: idle
+// (resting on the prompt, waiting for input), thinking (reasoning or running
+// a tool — nothing user-facing yet), or streaming (answer content is
+// printing). It drives the one-character state light at the far left of
+// Prompt() — see phaseGlyph.
+type turnPhase int
+
+const (
+	phaseIdle turnPhase = iota
+	phaseThinking
+	phaseStreaming
+)
+
+// brightCyan and brightGreen are the aixterm "bright" SGR variants of the
+// palette's existing cyan and green — the same hues Prompt() already uses
+// elsewhere (cyan for the trailing promptGlyph, green for the gauge's
+// healthy state), just at higher contrast. Used only for the state light's
+// active phases, so it visibly pops against idle's already-dim gray rather
+// than introducing a color the rest of the bar doesn't.
+const (
+	brightCyan  = "\033[96m"
+	brightGreen = "\033[92m"
+)
+
+// phaseGlyph renders the state light: one static ASCII character whose shape
+// (not just its color) carries the state, so it still reads under NO_COLOR —
+// "." idle, "*" thinking (reasoning or a running tool), "~" streaming. Plain
+// 7-bit ASCII with no blink or animation frames, per the REPL's plain-text
+// typography (the 2026-07-19 sweep); only the caller-driven phase changes it.
+// "~" rather than ">" for streaming so it can't be mistaken for promptGlyph.
+func phaseGlyph(p turnPhase) string {
+	switch p {
+	case phaseThinking:
+		return withColor("*", brightCyan)
+	case phaseStreaming:
+		return withColor("~", brightGreen)
+	default:
+		return withColor(".", gray)
+	}
+}
+
+// setPhase updates the state light and, while a turn is anchored, redraws the
+// prompt so the change shows immediately. It is a no-op when the phase is
+// unchanged: the streaming status callback fires on every one-second tick and
+// every reasoning chunk, and redrawing the whole prompt for each of those
+// would repaint the bar continuously for no visible change. Reports whether
+// the phase changed.
+func (cs *CortexSession) setPhase(p turnPhase) bool {
+	if cs.phase == p {
+		return false
+	}
+	cs.phase = p
+	if cs.live != nil {
+		cs.live.SetPrompt(cs.Prompt())
+	}
+	return true
+}
+
 func (cs *CortexSession) Prompt() string {
 	win := cs.windowSize()
 	status := withColor(fmt.Sprintf("cortex %s | %s | ", version(), cs.Request.Model), gray)
@@ -40,7 +98,7 @@ func (cs *CortexSession) Prompt() string {
 	if cs.costUSD > 0 {
 		cost = withColor(" | "+humanCost(cs.costUSD), gray)
 	}
-	return fmt.Sprintf("%s%s%s  %s ", status, gauge, cost, withColor(promptGlyph, cyan))
+	return fmt.Sprintf("%s %s%s%s  %s ", phaseGlyph(cs.phase), status, gauge, cost, withColor(promptGlyph, cyan))
 }
 
 func streamingEnabled() bool {
