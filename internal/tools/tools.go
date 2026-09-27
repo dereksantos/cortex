@@ -1539,7 +1539,9 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	}
 	// Attribution backstop: if attribution is enabled and the command is a
 	// git commit without the trailer, add it using git interpret-trailers.
-	command = maybeAddAttributionTrailer(command, deps)
+	if updated, _ := maybeAddAttributionTrailer(command, deps); updated != command {
+		command = updated
+	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
 	if f := strings.Fields(command); len(f) > 0 {
@@ -1639,54 +1641,42 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 }
 
 // maybeAddAttributionTrailer checks if the command is a git commit and adds
-// the attribution trailer if enabled. It uses git interpret-trailers to ensure
-// idempotency (no duplicate trailers). Returns the potentially modified command.
-func maybeAddAttributionTrailer(command string, deps ToolDeps) string {
-	// Only apply to git commit commands - be more precise than substring match
+// the attribution trailer if enabled. Returns the potentially modified command
+// and a note about whether attribution was applied.
+func maybeAddAttributionTrailer(command string, deps ToolDeps) (string, bool) {
+	// Only apply to git commit commands - check for single "git commit" invocation
+	// (no &&, ;, | or newline - those indicate chained commands)
+	if strings.ContainsAny(command, "&;|") || strings.Contains(command, "\n") {
+		return command, false
+	}
+
 	fields := strings.Fields(command)
-	if len(fields) == 0 || fields[0] != "git" {
-		return command
+	if len(fields) < 2 || fields[0] != "git" || fields[1] != "commit" {
+		return command, false
 	}
 
-	// Find "commit" in the command
-	hasCommit := false
-	for i, f := range fields {
-		if f == "commit" {
-			hasCommit = true
-			// Also check if it's not part of another word like "commit-msg"
-			if i+1 < len(fields) && strings.HasPrefix(fields[i+1], "-") {
-				// This is "git commit -m" or similar, not "git commit-msg"
-				hasCommit = true
-				break
-			}
-		}
-	}
-	if !hasCommit {
-		return command
-	}
-
-	// Check if attribution is enabled via AttributionProvider
+	// Check if attribution is enabled
 	if !deps.AttributionEnabled() {
-		return command
+		return command, false
 	}
 
-	// Get the model name from deps
-	modelName := deps.AttributionCommit("")
-	if modelName == "" {
-		return command
+	// Get the full trailer from deps (model already substituted)
+	trailer := deps.AttributionCommit("")
+	if trailer == "" {
+		return command, false
 	}
 
-	// Check if the command already has --trailer flag
-	if strings.Contains(command, " --trailer ") || strings.Contains(command, "--trailer=") {
-		return command
+	// Check if the command already has --trailer flag or the trailer text
+	if strings.Contains(command, " --trailer ") || strings.Contains(command, "--trailer=") ||
+		strings.Contains(command, trailer) {
+		return command, false
 	}
 
-	// Safely quote the model name for shell
-	quotedModel := quoteShellArg(modelName)
+	// Safely quote the trailer for shell
+	quotedTrailer := quoteShellArg(trailer)
 
 	// Append --trailer flag
-	trailer := "Co-Authored-By: Cortex " + quotedModel
-	return command + " --trailer=" + quoteShellArg(trailer)
+	return command + " --trailer=" + quotedTrailer, true
 }
 
 // quoteShellArg quotes a string for safe use in a shell command.

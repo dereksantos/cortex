@@ -973,25 +973,8 @@ func readInstructions(path string) string {
 
 // LoadConfig is a variable so tests can override it to control config loading.
 // In production, it loads the merged config and applies attribution defaults.
-var LoadConfig = func() *Config {
-	cfg := loadMergedConfig(userConfigPath(), findConfigPath())
-	if cfg != nil {
-		applyAttributionDefaults(cfg)
-	}
-	return cfg
-}
-
-func applyAttributionDefaults(cfg *Config) {
-	// Set default commit template if not set
-	if cfg.Attribution.Commit == nil {
-		defaultCommit := "Co-Authored-By: Cortex (<model>)"
-		cfg.Attribution.Commit = &defaultCommit
-	}
-	// Set default PR footer if not set
-	if cfg.Attribution.PR == nil {
-		defaultPR := "Generated with Cortex"
-		cfg.Attribution.PR = &defaultPR
-	}
+func LoadConfig() *Config {
+	return loadMergedConfig(userConfigPath(), findConfigPath())
 }
 
 func loadMergedConfig(userPath, projectPath string) *Config {
@@ -1796,14 +1779,21 @@ func (c *Config) attributionEnabled() bool {
 // by the model name if includeModel is true. Returns "" when disabled or unset.
 // The default template is "Co-Authored-By: Cortex (<model>)" when enabled and unset.
 func (c *Config) attributionCommit(model string) string {
-	if !c.attributionEnabled() || c.Attribution.Commit == nil {
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
 		return ""
 	}
-	// Empty string pointer disables attribution
-	if *c.Attribution.Commit == "" {
-		return ""
+
+	// Use default commit template if not set
+	commit := "Co-Authored-By: Cortex (<model>)"
+	if c.Attribution.Commit != nil {
+		// Empty string pointer disables attribution
+		if *c.Attribution.Commit == "" {
+			return ""
+		}
+		commit = *c.Attribution.Commit
 	}
-	commit := *c.Attribution.Commit
+
 	// Check if includeModel is explicitly false
 	if c.Attribution.IncludeModel != nil && !*c.Attribution.IncludeModel {
 		// Remove the model part if present
@@ -1818,21 +1808,19 @@ func (c *Config) attributionCommit(model string) string {
 // attributionPR returns the PR footer. Returns "" when disabled or unset.
 // The default footer is "Generated with Cortex" when enabled and unset.
 func (c *Config) attributionPR() string {
-	if !c.attributionEnabled() || c.Attribution.PR == nil {
+	// Check if attribution is enabled (nil/absent = enabled)
+	if !c.attributionEnabled() {
 		return ""
 	}
-	// Empty string pointer disables attribution
-	if *c.Attribution.PR == "" {
-		return ""
-	}
-	return *c.Attribution.PR
-}
 
-// attributionIncludeModel reports whether the model name should be included
-// in attribution markers.
-func (c *Config) attributionIncludeModel() bool {
-	if c == nil || c.Attribution.IncludeModel == nil {
-		return true
+	// Use default PR footer if not set
+	pr := "Generated with Cortex"
+	if c.Attribution.PR != nil {
+		// Empty string pointer disables attribution
+		if *c.Attribution.PR == "" {
+			return ""
+		}
+		pr = *c.Attribution.PR
 	}
-	return *c.Attribution.IncludeModel
+	return pr
 }

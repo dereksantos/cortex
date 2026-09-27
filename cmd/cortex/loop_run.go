@@ -179,7 +179,7 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 					modelName = codeSpec.Model
 				}
 			}
-			if head, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), modelName); commitErr == nil {
+			if head, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), modelName, cs.Config); commitErr == nil {
 				payload.ChangeRef = branch + "@" + head
 			}
 		}

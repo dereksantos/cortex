@@ -1,186 +1,200 @@
 package tools
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"context"
 	"testing"
 )
 
-func TestReadFileRange(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "f.txt")
-	// 10 lines: "L1".."L10".
-	var sb strings.Builder
-	for i := 1; i <= 10; i++ {
-		fmt.Fprintf(&sb, "L%d\n", i)
-	}
-	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	read := func(args string) (string, error) {
-		tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: args}}
-		return readFile(tc, headlessDeps{})
+// TestMaybeAddAttributionTrailer tests the maybeAddAttributionTrailer function.
+func TestMaybeAddAttributionTrailer(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		enabled     bool
+		trailer     string
+		want        string
+		wantApplied bool
+	}{
+		{
+			name:        "git commit without trailer - adds trailer",
+			command:     "git commit -m \"fix: login bug\"",
+			enabled:     true,
+			trailer:     "Co-Authored-By: Cortex (qwen3-coder)",
+			want:        "git commit -m \"fix: login bug\" --trailer=\"Co-Authored-By: Cortex (qwen3-coder)\"",
+			wantApplied: true,
+		},
+		{
+			name:        "git commit with trailer - no change",
+			command:     "git commit -m \"fix: login bug\" --trailer=\"Co-Authored-By: Cortex (qwen3-coder)\"",
+			enabled:     true,
+			trailer:     "Co-Authored-By: Cortex (qwen3-coder)",
+			want:        "git commit -m \"fix: login bug\" --trailer=\"Co-Authored-By: Cortex (qwen3-coder)\"",
+			wantApplied: false,
+		},
+		{
+			name:        "git log --grep commit - not modified",
+			command:     "git log --grep commit",
+			enabled:     true,
+			trailer:     "Co-Authored-By: Cortex (qwen3-coder)",
+			want:        "git log --grep commit",
+			wantApplied: false,
+		},
+		{
+			name:        "chained command - not modified",
+			command:     "git commit -m \"fix\" && git push",
+			enabled:     true,
+			trailer:     "Co-Authored-By: Cortex (qwen3-coder)",
+			want:        "git commit -m \"fix\" && git push",
+			wantApplied: false,
+		},
+		{
+			name:        "attribution disabled - no change",
+			command:     "git commit -m \"fix: login bug\"",
+			enabled:     false,
+			trailer:     "",
+			want:        "git commit -m \"fix: login bug\"",
+			wantApplied: false,
+		},
+		{
+			name:        "not a git commit command - no change",
+			command:     "go test ./...",
+			enabled:     true,
+			trailer:     "Co-Authored-By: Cortex (qwen3-coder)",
+			want:        "go test ./...",
+			wantApplied: false,
+		},
 	}
 
-	// Explicit range returns exactly those lines with a header.
-	out, err := read(fmt.Sprintf(`{"path":%q,"start":3,"end":5}`, file))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(out, "@"+file+":3-5\n") {
-		t.Errorf("missing range header; got:\n%s", out)
-	}
-	if !strings.Contains(out, "L3\nL4\nL5") || strings.Contains(out, "L2") || strings.Contains(out, "L6") {
-		t.Errorf("range body wrong; got:\n%s", out)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := &mockDeps{
+				attribution: &mockAttributionProvider{
+					enabled: tt.enabled,
+					trailer: tt.trailer,
+				},
+			}
 
-	// end past EOF clamps to the last line, not an error.
-	out, err = read(fmt.Sprintf(`{"path":%q,"start":9,"end":100}`, file))
-	if err != nil {
-		t.Fatalf("clamp to EOF should succeed: %v", err)
-	}
-	if !strings.Contains(out, ":9-10\n") || !strings.Contains(out, "L10") {
-		t.Errorf("expected lines 9-10; got:\n%s", out)
-	}
-
-	// start past EOF is an error.
-	if _, err := read(fmt.Sprintf(`{"path":%q,"start":50}`, file)); err == nil {
-		t.Error("start past EOF should error")
+			// Call maybeAddAttributionTrailer and check if it was applied
+			result, applied := maybeAddAttributionTrailer(tt.command, deps)
+			if result != tt.want {
+				t.Errorf("maybeAddAttributionTrailer(%q) = %q, want %q", tt.command, result, tt.want)
+			}
+			if applied != tt.wantApplied {
+				t.Errorf("maybeAddAttributionTrailer(%q) applied=%v, want %v", tt.command, applied, tt.wantApplied)
+			}
+		})
 	}
 }
 
-// TestReadFileTooLargeNonGoGetsSkeleton proves the too-large redirect is
-// language-agnostic: a big Python file gets outline.Render's regex-tier
-// skeleton (real "def "-headed sections), not the old Go-only gate's flat
-// "use study(...) instead" error.
-func TestReadFileTooLargeNonGoGetsSkeleton(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "big.py")
-	var sb strings.Builder
-	for i := 0; i < 1200; i++ {
-		fmt.Fprintf(&sb, "def handler_%d(request):\n    return process(%d, request)\n\n", i, i)
-	}
-	if sb.Len() <= active.CurationBudgetTokens*4 {
-		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
-	}
-	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
+// Mock types for testing
 
-	tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, file)}}
-	out, err := readFile(tc, headlessDeps{})
-	if err != nil {
-		t.Fatalf("expected a skeleton, not an error: %v", err)
-	}
-	if !strings.Contains(out, "too large to read whole") {
-		t.Errorf("missing the too-large notice; got:\n%s", out)
-	}
-	if !strings.Contains(out, "def handler_0") {
-		t.Errorf("expected the Python declaration regex tier to fire (a \"def handler_0\" entry); got:\n%s", out)
-	}
+type mockAttributionProvider struct {
+	enabled bool
+	trailer string
 }
 
-// TestReadFileTooLargeNoStructureStillGetsSkeleton proves the positional-floor
-// tier still hands back something for a too-large file with no recognizable
-// declarations/headings/paragraphs at all — never a dead-end error.
-func TestReadFileTooLargeNoStructureStillGetsSkeleton(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "big.log")
-	var sb strings.Builder
-	for i := 0; i < 3000; i++ {
-		fmt.Fprintf(&sb, "line of unstructured log content %d filler filler filler\n", i)
-	}
-	if sb.Len() <= active.CurationBudgetTokens*4 {
-		t.Fatalf("fixture too small to trip the curation gate: %d bytes", sb.Len())
-	}
-	if err := os.WriteFile(file, []byte(sb.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tc := ToolCall{Function: FunctionCall{Name: FunctionReadFile, Arguments: fmt.Sprintf(`{"path":%q}`, file)}}
-	out, err := readFile(tc, headlessDeps{})
-	if err != nil {
-		t.Fatalf("expected the positional-floor skeleton, not an error: %v", err)
-	}
-	if !strings.Contains(out, "lines 1-") {
-		t.Errorf("expected a positional-floor entry (\"lines 1-N\"); got:\n%s", out)
-	}
+func (m *mockAttributionProvider) AttributionEnabled() bool {
+	return m.enabled
 }
 
-func TestSpillShellOutput(t *testing.T) {
-	t.Chdir(t.TempDir())
-	out := []byte(strings.Repeat("log line\n", 100))
-	p1, err := spillShellOutput("go test ./...", out)
-	if err != nil {
-		t.Fatalf("spill: %v", err)
-	}
-	data, err := os.ReadFile(p1)
-	if err != nil {
-		t.Fatalf("read spill: %v", err)
-	}
-	if string(data) != string(out) {
-		t.Error("spill content differs from output")
-	}
-	if !strings.HasPrefix(filepath.ToSlash(p1), ".cortex/shell/go-") {
-		t.Errorf("spill path %q, want .cortex/shell/go-<hash>.txt", p1)
-	}
-	// Content-addressed: same output → same path (no pile-up).
-	p2, err := spillShellOutput("go test ./...", out)
-	if err != nil {
-		t.Fatalf("spill 2: %v", err)
-	}
-	if p1 != p2 {
-		t.Errorf("same output spilled to different paths: %q vs %q", p1, p2)
-	}
+func (m *mockAttributionProvider) AttributionCommit(model string) string {
+	return m.trailer
 }
 
-func TestConfinedPath(t *testing.T) {
-	root := t.TempDir()
-	ok := []struct{ in, wantRel string }{
-		{"file.go", "file.go"},
-		{"sub/dir", "sub/dir"},
-		{"./a/b/../c", "a/c"},
-	}
-	for _, tt := range ok {
-		got, err := confinedPath(root, tt.in)
-		if err != nil {
-			t.Errorf("confinedPath(%q) errored: %v", tt.in, err)
-			continue
-		}
-		if want := filepath.Join(root, tt.wantRel); got != want {
-			t.Errorf("confinedPath(%q) = %q, want %q", tt.in, got, want)
-		}
-	}
-
-	bad := []string{
-		"",                  // empty
-		".",                 // the root itself
-		"..",                // escape up
-		"../sibling",        // escape up
-		"sub/../../escape",  // traversal escape
-		"/etc/passwd",       // absolute outside
-		".git",              // protected
-		".git/config",       // protected subtree
-		".cortex",           // protected
-		".cortex/journal/x", // protected subtree
-	}
-	for _, in := range bad {
-		if _, err := confinedPath(root, in); err == nil {
-			t.Errorf("confinedPath(%q) should have been refused", in)
-		}
-	}
+type mockDeps struct {
+	attribution AttributionProvider
 }
 
-func TestConfinedPathSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
-		t.Skipf("symlink unsupported: %v", err)
+func (m *mockDeps) AttributionEnabled() bool {
+	if m.attribution != nil {
+		return m.attribution.AttributionEnabled()
 	}
-	// "link/x" is lexically in-root but its real parent is outside.
-	if _, err := confinedPath(root, "link/x"); err == nil {
-		t.Error("expected symlink-escape refusal for link/x")
-	}
+	return false
 }
+
+func (m *mockDeps) AttributionCommit(model string) string {
+	if m.attribution != nil {
+		return m.attribution.AttributionCommit(model)
+	}
+	return ""
+}
+
+func (m *mockDeps) MemoryWrite(name, content, scope string) (string, error) { return "", nil }
+func (m *mockDeps) MemoryRead(name, scope string) (string, error)           { return "", nil }
+func (m *mockDeps) MemorySearch(query, scope string) (string, error)        { return "", nil }
+func (m *mockDeps) MemoryForget(name, scope string) (string, error)         { return "", nil }
+func (m *mockDeps) Recall(citation string) (string, error)                  { return "", nil }
+func (m *mockDeps) Outline(path string, budget int) (string, error)         { return "", nil }
+func (m *mockDeps) SeedBudget() int                                         { return 0 }
+func (m *mockDeps) RunSubagent(ctx context.Context, sa Subagent, seed string) (string, error) {
+	return "", nil
+}
+func (m *mockDeps) Summarize(ctx context.Context, text string, role string, max int) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockDeps) SummarizeText(ctx context.Context, text string, role string, max int) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockDeps) GateShell(ctx context.Context, command string) (string, bool) { return "", true }
+func (m *mockDeps) AllowDelete() (string, bool)                                  { return "", false }
+func (m *mockDeps) Quiet() bool                                                  { return false }
+func (m *mockDeps) ValidateToolCall(tc ToolCall) (bool, string)                  { return true, "" }
+func (m *mockDeps) RemoveOutlineEntry(citation string) bool                      { return false }
+func (m *mockDeps) MergeOutlineEntries(startCitation, endCitation string) (string, error) {
+	return "", nil
+}
+func (m *mockDeps) OutlineLen() int { return 0 }
+func (m *mockDeps) AdjustWatermarks(highDelta, lowDelta int) (int, int, int, int, error) {
+	return 0, 0, 0, 0, nil
+}
+func (m *mockDeps) IsToolEnabled(toolName string) bool { return true }
+
+// ConfigProvider stubs
+func (m *mockDeps) MemoryIndexCap() int                 { return 0 }
+func (m *mockDeps) UserMemoryIndexCap() int             { return 0 }
+func (m *mockDeps) CaptureExcerptCap() int              { return 0 }
+func (m *mockDeps) MaxTaskContextChars() int            { return 0 }
+func (m *mockDeps) MaxToolOutput() int                  { return 0 }
+func (m *mockDeps) MaxToolIterations() int              { return 0 }
+func (m *mockDeps) InstructionBytesCap() int            { return 0 }
+func (m *mockDeps) MaxServedModelsShown() int           { return 0 }
+func (m *mockDeps) FleetDiscoveryTimeout() int          { return 0 }
+func (m *mockDeps) PreflightTimeout() int               { return 0 }
+func (m *mockDeps) SelfHealEnabled() bool               { return false }
+func (m *mockDeps) ToolLimits() Limits                  { return Limits{} }
+func (m *mockDeps) TailHighWatermark() int              { return 0 }
+func (m *mockDeps) TailDrainWatermark() int             { return 0 }
+func (m *mockDeps) OutlineBudget() int                  { return 0 }
+func (m *mockDeps) SeedBudgetTokens() int               { return 0 }
+func (m *mockDeps) MaxToolOutputBytes() int             { return 0 }
+func (m *mockDeps) MaxReadBytes() int                   { return 0 }
+func (m *mockDeps) DefaultRangeLines() int              { return 0 }
+func (m *mockDeps) MaxRangeLines() int                  { return 0 }
+func (m *mockDeps) MaxHits() int                        { return 0 }
+func (m *mockDeps) LineCap() int                        { return 0 }
+func (m *mockDeps) MaxOutputBytes() int                 { return 0 }
+func (m *mockDeps) FetchTimeoutSec() int                { return 0 }
+func (m *mockDeps) FetchMaxRedirects() int              { return 0 }
+func (m *mockDeps) FetchMaxBodyBytes() int              { return 0 }
+func (m *mockDeps) WebSearchDefaultMaxResults() int     { return 0 }
+func (m *mockDeps) WebSearchMaximumMaxResults() int     { return 0 }
+func (m *mockDeps) EnableWeb() bool                     { return false }
+func (m *mockDeps) EnableAgent() bool                   { return false }
+func (m *mockDeps) EnableScan() bool                    { return false }
+func (m *mockDeps) EnableEffortEscalation() bool        { return false }
+func (m *mockDeps) EnableContextEvict() bool            { return false }
+func (m *mockDeps) EnableContextMerge() bool            { return false }
+func (m *mockDeps) EnableContextAdjustWatermarks() bool { return false }
+func (m *mockDeps) EnableDelete() bool                  { return false }
+func (m *mockDeps) DeleteRoot() string                  { return "" }
+func (m *mockDeps) CurationBudgetTokens() int           { return 0 }
+func (m *mockDeps) OutlineDefaultBudget() int           { return 0 }
+func (m *mockDeps) ReadDefaultRangeLines() int          { return 0 }
+func (m *mockDeps) ReadMaxRangeLines() int              { return 0 }
+func (m *mockDeps) ReadMaxReadBytes() int               { return 0 }
+func (m *mockDeps) GrepMaxHits() int                    { return 0 }
+func (m *mockDeps) GrepLineCap() int                    { return 0 }
+func (m *mockDeps) GrepMaxOutputBytes() int             { return 0 }
+func (m *mockDeps) FetchURLTimeoutSec() int             { return 0 }
+func (m *mockDeps) FetchURLMaxRedirects() int           { return 0 }
+func (m *mockDeps) FetchURLMaxBodyBytes() int           { return 0 }

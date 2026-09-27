@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 )
@@ -126,90 +125,6 @@ func startChange(name string) (string, error) {
 	return startChangeIn("", name)
 }
 
-// appendTrailerToMessage appends the trailer to the commit message using
-// git interpret-trailers to ensure idempotency (no duplicate trailers).
-// Returns the modified message and whether a trailer was added.
-func appendTrailerToMessage(message, trailer string) (string, bool) {
-	if trailer == "" {
-		return message, false
-	}
-	// Use git interpret-trailers to check if the trailer already exists
-	// and append it if not. We do this by trying to append and checking
-	// if the output changed.
-	tempMsg := message
-	// Create a temp file with the message
-	tempFile, err := os.CreateTemp("", "cortex-trailer-*.txt")
-	if err != nil {
-		// Fallback to simple string matching if temp file creation fails
-		return simpleAppendTrailer(message, trailer)
-	}
-	defer os.Remove(tempFile.Name())
-
-	if _, err := tempFile.Write([]byte(tempMsg)); err != nil {
-		tempFile.Close()
-		return simpleAppendTrailer(message, trailer)
-	}
-	tempFile.Close()
-
-	// Parse the trailer key and value
-	trailerKey := strings.TrimSpace(strings.Split(trailer, ":")[0])
-
-	// Check if the trailer already exists using git parse
-	cmd := exec.Command("git", "interpret-trailers", "--parse")
-	cmd.Stdin = strings.NewReader(tempMsg)
-	output, err := cmd.CombinedOutput()
-	if err != nil || strings.Contains(string(output), trailerKey) {
-		// Trailer exists or git failed, use fallback
-		return simpleAppendTrailer(message, trailer)
-	}
-
-	// Now use interpret-trailers to add the trailer
-	cmd = exec.Command("git", "interpret-trailers", "--if-exists addIfDifferent", "--trailer "+quoteGitTrailer(trailer))
-	cmd.Stdin = strings.NewReader(tempMsg)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		return simpleAppendTrailer(message, trailer)
-	}
-	trimmedOutput := strings.TrimSpace(string(output))
-	if trimmedOutput == tempMsg {
-		// Trailer was already present and identical
-		return message, false
-	}
-	// Trailer was added or message was rewritten
-	return trimmedOutput, true
-}
-
-// quoteGitTrailer quotes a trailer for safe use with git interpret-trailers.
-func quoteGitTrailer(trailer string) string {
-	// If the trailer contains spaces or special characters, quote it
-	if strings.ContainsAny(trailer, " \t\n\"'\\$`!#%&(){}[]|;&*?<>") {
-		// Use double quotes and escape internal double quotes and backslashes
-		trailer = strings.ReplaceAll(trailer, `\`, `\\`)
-		trailer = strings.ReplaceAll(trailer, `"`, `\"`)
-		return `"` + trailer + `"`
-	}
-	return trailer
-}
-
-// simpleAppendTrailer is a fallback when git interpret-trailers is not available
-// or fails. It does basic string matching which is less robust.
-func simpleAppendTrailer(message, trailer string) (string, bool) {
-	if trailer == "" {
-		return message, false
-	}
-	// Check if the trailer already exists using a simpler approach
-	trailerPrefix := strings.TrimSpace(strings.Split(trailer, ":")[0])
-	lines := strings.Split(message, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, trailerPrefix+":") || strings.HasPrefix(line, trailerPrefix+" ") {
-			return message, false
-		}
-	}
-	// Append the trailer
-	return message + "\n\n" + trailer, true
-}
-
 // commitChangeIn stages everything and commits on dir's active change
 // branch. It requires being on a change branch (so an automated commit
 // can't land on main or a feature branch by accident) and refuses an empty
@@ -254,35 +169,29 @@ func commitChange(message string) (string, error) {
 // change branch, appending the attribution trailer. It requires being on a
 // change branch and refuses an empty commit. Local only.
 //
-// The trailer is appended using git interpret-trailers to ensure idempotency
-// (no duplicate trailers). The model name is substituted for "<model>" in the
-// template if the config's include_model is true (default). When disabled or
-// the template is empty, falls back to a plain commit.
-func commitChangeWithAttribution(dir, message, model string) (string, error) {
-	// Load config for attribution settings
-	cfg := LoadConfig()
-	if cfg == nil {
-		// Fallback: no config, no attribution
-		return commitChangeIn(dir, message)
-	}
-
+// The trailer is appended using git interpret-trailers with --trailer to
+// ensure idempotency (no duplicate trailers). The model name is substituted
+// for "<model>" in the template if the config's include_model is true
+// (default). When disabled or the template is empty, falls back to a plain
+// commit.
+func commitChangeWithAttribution(dir, message, model string, cfg *Config) (string, error) {
 	// Build the trailer
-	trailer := cfg.attributionCommit(model)
+	trailer := ""
+	if cfg != nil {
+		trailer = cfg.attributionCommit(model)
+	}
 	if trailer == "" {
 		// Attribution disabled or no template
 		return commitChangeIn(dir, message)
 	}
 
-	// Use git interpret-trailers to append the trailer
-	// Create a temp file with the message and use interpret-trailers
-	cmd := exec.Command("git", "interpret-trailers", "--if-exists=addIfDifferent")
+	// Use git interpret-trailers to append the trailer with --trailer flag
+	cmd := exec.Command("git", "interpret-trailers", "--if-exists", "addIfDifferent", "--trailer", trailer)
 	cmd.Dir = dir
-	cmd.Stdin = strings.NewReader(message + "\n\n" + trailer)
+	cmd.Stdin = strings.NewReader(message)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Fallback to simple append if git interpret-trailers fails
-		finalMessage, _ := simpleAppendTrailer(message, trailer)
-		return commitChangeIn(dir, finalMessage)
+		return "", fmt.Errorf("failed to add attribution trailer: %w", err)
 	}
 	finalMessage := strings.TrimSpace(string(output))
 	return commitChangeIn(dir, finalMessage)
@@ -346,7 +255,7 @@ func runChangeCLI(args []string) error {
 				model = spec.Model
 			}
 		}
-		head, err := commitChangeWithAttribution("", message, model)
+		head, err := commitChangeWithAttribution("", message, model, cfg)
 		if err != nil {
 			return err
 		}

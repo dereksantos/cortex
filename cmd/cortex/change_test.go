@@ -1,35 +1,146 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// appendTrailerToMessage tests the trailer append logic.
-func TestAppendTrailerToMessage(t *testing.T) {
+// TestCommitChangeWithAttribution tests the commitChangeWithAttribution function
+// with a temporary git repository to verify idempotency and correct trailer behavior.
+func TestCommitChangeWithAttribution(t *testing.T) {
 	tests := []struct {
-		name      string
-		message   string
-		trailer   string
-		want      string
-		wantAdded bool
+		name              string
+		message           string
+		trailer           string
+		alreadyHasTrailer bool
+		otherTrailer      string
+		enabled           bool
+		wantTrailerCount  int
 	}{
-		{"no trailer", "fix login", "", "fix login", false},
-		{"trailer added", "fix login", "Co-Authored-By: Cortex (qwen3-coder)", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", true},
-		{"trailer already exists", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", "Co-Authored-By: Cortex (qwen3-coder)", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", false},
-		{"trailer with spaces", "fix login", "Co-Authored-By: Cortex", "fix login\n\nCo-Authored-By: Cortex", true},
-		{"empty message", "", "Co-Authored-By: Cortex", "\n\nCo-Authored-By: Cortex", true},
+		{
+			name:              "no trailer - adds one",
+			message:           "fix: login bug",
+			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
+			alreadyHasTrailer: false,
+			enabled:           true,
+			wantTrailerCount:  1,
+		},
+		{
+			name:              "same trailer already present - no duplicate",
+			message:           "fix: login bug\n\nCo-Authored-By: Cortex (qwen3-coder)",
+			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
+			alreadyHasTrailer: true,
+			enabled:           true,
+			wantTrailerCount:  1,
+		},
+		{
+			name:              "different trailer - both kept",
+			message:           "fix: login bug\n\nCo-Authored-By: Alice <a@example.com>",
+			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
+			alreadyHasTrailer: false,
+			otherTrailer:      "Co-Authored-By: Alice <a@example.com>",
+			enabled:           true,
+			wantTrailerCount:  2,
+		},
+		{
+			name:              "attribution disabled - no trailer",
+			message:           "fix: login bug",
+			trailer:           "",
+			alreadyHasTrailer: false,
+			enabled:           false,
+			wantTrailerCount:  0,
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, added := appendTrailerToMessage(tt.message, tt.trailer)
-			if got != tt.want {
-				t.Errorf("appendTrailerToMessage(%q, %q) = %q, want %q", tt.message, tt.trailer, got, tt.want)
+			tmpDir := t.TempDir()
+			// Initialize git repo
+			gitCmd(t, tmpDir, "init")
+			gitCmd(t, tmpDir, "config", "user.name", "Test User")
+			gitCmd(t, tmpDir, "config", "user.email", "test@example.com")
+
+			// Create initial commit on main
+			filePath := filepath.Join(tmpDir, "test.txt")
+			os.WriteFile(filePath, []byte("initial"), 0o644)
+			gitCmd(t, tmpDir, "add", "test.txt")
+			gitCmd(t, tmpDir, "commit", "-m", "initial")
+
+			// Create and checkout change branch
+			gitCmd(t, tmpDir, "checkout", "-b", "cortex/test")
+
+			// Modify file to make it dirty
+			os.WriteFile(filePath, []byte("modified"), 0o644)
+
+			// Build message
+			message := tt.message
+			if tt.alreadyHasTrailer && tt.otherTrailer != "" {
+				// Message already has another trailer
+			} else if tt.alreadyHasTrailer {
+				// Message already has the same trailer (don't add again)
 			}
-			if added != tt.wantAdded {
-				t.Errorf("appendTrailerToMessage(%q, %q) added=%v, want %v", tt.message, tt.trailer, added, tt.wantAdded)
+
+			// Mock config for attribution
+			var cfg *Config
+			if tt.enabled {
+				enabled := true
+				cfg = &Config{
+					Attribution: AttributionConfig{
+						Enabled: &enabled,
+						Commit:  &tt.trailer,
+					},
+				}
+			}
+
+			// Commit with attribution
+			_, err := commitChangeWithAttribution(tmpDir, message, "qwen3-coder", cfg)
+			if err != nil {
+				t.Fatalf("commitChangeWithAttribution failed: %v", err)
+			}
+
+			// Count trailers in the last commit
+			output, err := gitCmdOutput(t, tmpDir, "log", "-1", "--format=%B")
+			if err != nil {
+				t.Fatalf("git log failed: %v", err)
+			}
+
+			trailerCount := countTrailers(output, "Co-Authored-By")
+			if trailerCount != tt.wantTrailerCount {
+				t.Errorf("trailer count = %d, want %d. Output:\n%s", trailerCount, tt.wantTrailerCount, output)
 			}
 		})
 	}
+}
+
+func countTrailers(message, key string) int {
+	count := 0
+	lines := strings.Split(message, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, key+":") {
+			count++
+		}
+	}
+	return count
+}
+
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	_, err := gitCmdOutput(t, dir, args...)
+	if err != nil {
+		t.Fatalf("git %s failed in %s: %v", strings.Join(args, " "), dir, err)
+	}
+}
+
+func gitCmdOutput(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(output)), err
 }
 
 // slugifyChange feeds branch names, so it must stay within safe ref characters

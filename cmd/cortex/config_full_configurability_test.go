@@ -809,31 +809,40 @@ func TestAttributionCommitDefaults(t *testing.T) {
 		IncludeModel: nil,
 	}}
 
-	// Without defaults applied, nil should return empty
+	// With defaults, nil should return the default values
 	commit := cfg.attributionCommit("qwen3-coder")
-	if commit != "" {
-		t.Errorf("attributionCommit (nil) = %q, want empty", commit)
+	if commit != "Co-Authored-By: Cortex (qwen3-coder)" {
+		t.Errorf("attributionCommit (nil) = %q, want \"Co-Authored-By: Cortex (qwen3-coder)\"", commit)
 	}
 
 	pr := cfg.attributionPR()
-	if pr != "" {
-		t.Errorf("attributionPR (nil) = %q, want empty", pr)
-	}
-
-	// Apply defaults manually to test
-	defaultCommit := "Co-Authored-By: Cortex (<model>)"
-	defaultPR := "Generated with Cortex"
-	cfg.Attribution.Commit = &defaultCommit
-	cfg.Attribution.PR = &defaultPR
-
-	commit = cfg.attributionCommit("qwen3-coder")
-	if commit != "Co-Authored-By: Cortex (qwen3-coder)" {
-		t.Errorf("attributionCommit (with defaults) = %q, want \"Co-Authored-By: Cortex (qwen3-coder)\"", commit)
-	}
-
-	pr = cfg.attributionPR()
 	if pr != "Generated with Cortex" {
-		t.Errorf("attributionPR (with defaults) = %q, want \"Generated with Cortex\"", pr)
+		t.Errorf("attributionPR (nil) = %q, want \"Generated with Cortex\"", pr)
+	}
+
+	// Test with include_model=false
+	no := false
+	cfg.Attribution.IncludeModel = &no
+	commit = cfg.attributionCommit("qwen3-coder")
+	if commit != "Co-Authored-By: Cortex" {
+		t.Errorf("attributionCommit (include_model=false) = %q, want \"Co-Authored-By: Cortex\"", commit)
+	}
+
+	// Test with explicit commit template - reset include_model to default (nil)
+	defaultCommit := "Co-Authored-By: AI Bot (<model>)"
+	cfg.Attribution.Commit = &defaultCommit
+	cfg.Attribution.IncludeModel = nil
+	commit = cfg.attributionCommit("claude-sonnet")
+	if commit != "Co-Authored-By: AI Bot (claude-sonnet)" {
+		t.Errorf("attributionCommit (explicit) = %q, want \"Co-Authored-By: AI Bot (claude-sonnet)\"", commit)
+	}
+
+	// Test with empty string (disables)
+	empty := ""
+	cfg.Attribution.Commit = &empty
+	commit = cfg.attributionCommit("claude-sonnet")
+	if commit != "" {
+		t.Errorf("attributionCommit (empty) = %q, want empty", commit)
 	}
 }
 
@@ -894,10 +903,9 @@ func TestAttributionCommitEmptyStringDisables(t *testing.T) {
 func TestAttributionDisabled(t *testing.T) {
 	no := false
 	cfg := &Config{Attribution: AttributionConfig{
-		Enabled:      &no,
-		Commit:       stringPtr("Co-Authored-By: Cortex (<model>)"),
-		PR:           stringPtr("Generated with Cortex"),
-		IncludeModel: nil,
+		Enabled: &no,
+		Commit:  stringPtr("Co-Authored-By: Cortex (<model>)"),
+		PR:      stringPtr("Generated with Cortex"),
 	}}
 
 	commit := cfg.attributionCommit("qwen3-coder")
