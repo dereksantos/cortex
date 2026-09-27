@@ -55,7 +55,9 @@ override), and the OpenRouter key in the macOS keychain
    checked out at the base commit, dependencies in the `testbed` conda env).
    Start a container, copy in a static linux cortex binary and the pinned
    `.cortex/config.json`, add `.cortex/` to `.git/info/exclude`, and verify
-   `HEAD == base_commit`. Any failure here is `env_error` — the agent never ran.
+   that `base_commit` is an ancestor of the image's `HEAD` (the published
+   images add one `SWE-bench` setup commit on top of it; `setup.log` records
+   `base..HEAD`). Any failure here is `env_error` — the agent never ran.
 2. **The agent.** `cortex turn --json "<prompt>"` in `/testbed`, with the
    conda env activated, `CORTEX_HOME=/tmp/cortex-home`, temperature 0. The
    prompt is the issue text verbatim plus one paragraph of task statement
@@ -64,7 +66,7 @@ override), and the OpenRouter key in the macOS keychain
    `FAIL_TO_PASS` or `PASS_TO_PASS`, so they cannot leak into a prompt.
    Web tools are off (`tools.enable_web: false`) and model substitution is off
    (`network.self_heal: false`).
-3. **Artifacts.** `git add -A && git diff --cached <base_commit>` is the
+3. **Artifacts.** `git add -A && git diff --cached <image HEAD>` is the
    prediction (`.cortex/` excluded). The session transcript is the
    trajectory (`trajs/<id>.jsonl`); the container's whole `.cortex/` and
    `CORTEX_HOME` are copied out too.

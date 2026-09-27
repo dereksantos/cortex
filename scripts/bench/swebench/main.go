@@ -10,7 +10,7 @@
 //	start a container, copy a static linux cortex binary + a pinned config in
 //	`cortex turn --json "<issue + task statement>"` inside /testbed
 //	  (no hints, no test patch, no test names — the issue text only)
-//	`git diff` against the base commit → the prediction; copy the session
+//	`git diff` against the image HEAD (base commit + one SWE-bench setup commit) → the prediction; copy the session
 //	  transcript (the trajectory) and the whole .cortex/ out
 //	score the prediction with `python -m swebench.harness.run_evaluation`
 //	classify, then append to predictions.jsonl + results.jsonl (fsynced)
@@ -348,6 +348,7 @@ func (r *runner) instance(ctx context.Context, in Instance, usageStart float64) 
 		row.Error = err.Error()
 		return finish(true)
 	}
+	imageHead := ""
 	setup := []struct {
 		label string
 		fn    func() (string, error)
@@ -359,7 +360,16 @@ func (r *runner) instance(ctx context.Context, in Instance, usageStart float64) 
 		}},
 		{"cp cortex", func() (string, error) { return dockerRun(ctx, "cp", r.cortexLinux, name+":/usr/local/bin/cortex") }},
 		{"cp config", func() (string, error) { return dockerRun(ctx, "cp", cfgPath, name+":/testbed/.cortex/config.json") }},
-		{"head", func() (string, error) { return execIn(ctx, name, "git -C /testbed rev-parse HEAD") }},
+		// The published images carry one "SWE-bench" setup commit on top of
+		// base_commit; the harness applies predictions to that same HEAD, so
+		// the requirement is "base_commit is an ancestor of HEAD", and the
+		// prediction is diffed against HEAD (imageHead), not base_commit.
+		{"head", func() (string, error) {
+			return execIn(ctx, name, "cd /testbed && git merge-base --is-ancestor "+in.BaseCommit+" HEAD && git rev-parse HEAD")
+		}},
+		{"base..HEAD", func() (string, error) {
+			return execIn(ctx, name, "cd /testbed && git log --oneline "+in.BaseCommit+"..HEAD && git diff --stat "+in.BaseCommit+" HEAD | tail -5")
+		}},
 		{"status", func() (string, error) { return execIn(ctx, name, "git -C /testbed status --porcelain | head -20") }},
 		{"cortex version", func() (string, error) { return execIn(ctx, name, "cortex version 2>&1 | head -3") }},
 	}
@@ -372,11 +382,8 @@ func (r *runner) instance(ctx context.Context, in Instance, usageStart float64) 
 			return finish(true)
 		}
 		if s.label == "head" {
-			row.BaseCommitOK = strings.TrimSpace(out) == in.BaseCommit
-			if !row.BaseCommitOK {
-				row.Error = fmt.Sprintf("container HEAD %s != base_commit %s", out, in.BaseCommit)
-				return finish(true)
-			}
+			imageHead = strings.TrimSpace(out)
+			row.BaseCommitOK = imageHead != ""
 		}
 	}
 	row.SetupMs = time.Since(start).Milliseconds()
@@ -394,7 +401,7 @@ func (r *runner) instance(ctx context.Context, in Instance, usageStart float64) 
 
 	// --- 3. artifacts: prediction, trajectory, cortex state ---------------
 	patch, perr := execRaw(ctx, name, fmt.Sprintf(
-		"cd /testbed && git add -A >/dev/null 2>&1; git -c core.fileMode=false diff --cached %s", in.BaseCommit))
+		"cd /testbed && git add -A >/dev/null 2>&1; git -c core.fileMode=false diff --cached %s", imageHead))
 	if perr != nil {
 		row.Error = strings.TrimSpace(row.Error + "; diff: " + perr.Error())
 	}
