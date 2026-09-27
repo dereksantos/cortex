@@ -52,6 +52,13 @@ func (cs *CortexSession) specForRole(role string) ModelSpec {
 func (cs *CortexSession) subagentRequest(sa tools.Subagent, seed string) *AgentRequest {
 	dialect := dialectFor(cs.Config.isOpenRouter())
 	req := requestFor(cs.specForRole(sa.Role), sa.System, seed, sa.Tools, sa.Bounds.MaxTokens, dialect)
+	// Subagents ride the same pinned upstream as the coder and report their
+	// cost the same way — otherwise a study/agent call is served by whatever
+	// provider OpenRouter picks, and its spend is invisible in the totals.
+	req.Provider = cs.Config.providerRouting()
+	if cs.Config.isOpenRouter() {
+		req.Usage = &usageInclude{Include: true}
+	}
 	inheritedModel := ""
 	if sa.Role != roleStudy && sa.Role != roleLearn && sa.Role != roleLearnUser && cs.Request != nil {
 		inheritedModel = cs.Request.Model

@@ -284,6 +284,7 @@ func NewCortexSession() *CortexSession {
 	if cfg.isOpenRouter() {
 		req.Usage = &usageInclude{Include: true}
 	}
+	req.Provider = cfg.providerRouting()
 
 	allowDelete := cfg.deleteEnabled()
 	deleteRoot := "."

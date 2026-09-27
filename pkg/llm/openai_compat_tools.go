@@ -19,13 +19,14 @@ import (
 // (the inline cost field that ride along). Standard OpenAI servers
 // just return token counts in `usage` by default.
 type compatToolsRequest struct {
-	Model              string         `json:"model"`
-	MaxTokens          int            `json:"max_tokens"`
-	Messages           []ChatMessage  `json:"messages"`
-	Tools              []ToolSpec     `json:"tools,omitempty"`
-	ToolChoice         any            `json:"tool_choice,omitempty"`
-	Temperature        *float64       `json:"temperature,omitempty"`
-	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+	Model              string           `json:"model"`
+	MaxTokens          int              `json:"max_tokens"`
+	Messages           []ChatMessage    `json:"messages"`
+	Tools              []ToolSpec       `json:"tools,omitempty"`
+	ToolChoice         any              `json:"tool_choice,omitempty"`
+	Temperature        *float64         `json:"temperature,omitempty"`
+	ChatTemplateKwargs map[string]any   `json:"chat_template_kwargs,omitempty"`
+	Provider           *ProviderRouting `json:"provider,omitempty"`
 }
 
 type compatToolsResponse struct {
@@ -80,6 +81,7 @@ func (c *OpenAICompatClient) GenerateWithTools(ctx context.Context, msgs []ChatM
 		ToolChoice:         toolChoice,
 		Temperature:        c.temperature,
 		ChatTemplateKwargs: c.chatTemplateKwargs,
+		Provider:           c.provider,
 	}
 
 	bb, err := c.doRaw(ctx, "/chat/completions", body)

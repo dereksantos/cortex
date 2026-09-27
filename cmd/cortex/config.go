@@ -425,6 +425,12 @@ type Backend struct {
 	Endpoint   string `json:"endpoint"`
 	KeyEnv     string `json:"key_env"`
 	KeyService string `json:"key_service"`
+	// Provider is OpenRouter's provider-routing object
+	// (`{"order":["novita/fp8"],"allow_fallbacks":false}`), attached to
+	// every model request cortex sends — coder, subagents, summarizer, shell
+	// classifier — so one session is served by one pinned upstream. Only
+	// honored when type is "openrouter"; ignored (never sent) otherwise.
+	Provider *llm.ProviderRouting `json:"provider,omitempty"`
 }
 
 type Config struct {
@@ -1324,7 +1330,23 @@ func mergeBackend(base, over Backend) Backend {
 	if over.KeyService != "" {
 		base.KeyService = over.KeyService
 	}
+	// The routing object replaces wholesale rather than merging field by
+	// field: a project pinning {order:[X], allow_fallbacks:false} must not
+	// inherit a user-level `only`/`ignore` list that could contradict it.
+	if !over.Provider.IsZero() {
+		base.Provider = over.Provider
+	}
 	return base
+}
+
+// providerRouting is the OpenRouter provider-routing object to attach to
+// every model request, or nil when none is configured or the backend is not
+// OpenRouter (a local/LiteLLM endpoint must never see the unknown field).
+func (c *Config) providerRouting() *llm.ProviderRouting {
+	if !c.isOpenRouter() || c.Backend.Provider.IsZero() {
+		return nil
+	}
+	return c.Backend.Provider
 }
 
 func mergeModels(base, over map[string]ModelSpec) map[string]ModelSpec {

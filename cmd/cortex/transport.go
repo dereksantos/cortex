@@ -68,6 +68,10 @@ type AgentRequest struct {
 	// Usage opts into OpenRouter's cost reporting (usage:{include:true}); set
 	// only for OpenRouter so local backends never see an unknown field.
 	Usage *usageInclude `json:"usage,omitempty"`
+	// Provider is OpenRouter's provider-routing object (backend.provider in
+	// config): pin the upstream and forbid fallback. OpenRouter-only, like
+	// Usage — stamped from Config.providerRouting(), nil everywhere else.
+	Provider *llm.ProviderRouting `json:"provider,omitempty"`
 	// Reasoning is OpenRouter's request-body `reasoning: {...}` field
 	// (docs/thinking-models.md §2); set only for OpenRouter, mirroring how
 	// Usage above is OpenRouter-only — local backends speak

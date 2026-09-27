@@ -86,6 +86,7 @@ func (cs *CortexSession) newStudyProvider(maxTokens int) *llm.OpenAICompatClient
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: effortOffKwargs,
+		Provider:           cs.Config.providerRouting(),
 		// P1: previously hardcoded 10*time.Minute, which bypassed
 		// CORTEX_COMPAT_TIMEOUT_SEC entirely. Now resolved the same way
 		// every other transport timeout in this audit is: an explicit
@@ -109,6 +110,7 @@ func (cs *CortexSession) reasoner() *llm.OpenAICompatClient {
 		BaseURL:            base,
 		APIKey:             resolveKey(cs.Study),
 		ChatTemplateKwargs: effortOffKwargs,
+		Provider:           cs.Config.providerRouting(),
 		// P1: see newStudyProvider's identical comment above.
 		Timeout: cs.Study.timeout(10 * time.Minute),
 	})

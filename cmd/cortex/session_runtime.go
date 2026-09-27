@@ -287,6 +287,7 @@ func (cs *CortexSession) emitSessionMetrics() {
 		ReasoningTokens:       cs.reasoningTokens,
 		TokensIn:              cs.tokensIn,
 		TokensOut:             cs.tokensOut,
+		CostUSD:               cs.costUSD,
 		InjectedContextTokens: cs.injectedChars / 4,
 		LatencyMs:             time.Since(cs.sessionStart).Milliseconds(),
 		AgentTurnsTotal:       cs.turns,
