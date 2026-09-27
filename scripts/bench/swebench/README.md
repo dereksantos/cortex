@@ -40,7 +40,7 @@ override), and the OpenRouter key in the macOS keychain
 | `--model` / `--study-model` | `qwen/qwen3-coder` / same | OpenRouter model ids; one model for both roles by default (one system) |
 | `--provider` | `novita/fp8` | OpenRouter provider order (slugs or endpoint tags) |
 | `--allow-fallbacks` | `false` | let OpenRouter route elsewhere when the pinned provider fails |
-| `--require-parameters` | `true` | only route to providers supporting every request parameter (tools) |
+| `--require-parameters` | `false` | only route to providers supporting every request parameter. Off because cortex's role-default effort ("on") always sends `reasoning: {enabled: true}` on OpenRouter, which no qwen3-coder endpoint supports: with this on, every request 404s ("No endpoints found that can handle the requested parameters"); with it off OpenRouter ignores the field. The provider stays pinned by `--provider` + `--allow-fallbacks=false`. |
 | `--window` / `--temperature` | `131072` / `0` | cortex context window, sampling temperature |
 | `--budget` / `--instance-cap` / `--est-first` | `5` / `1.0` / `1.0` | spend guard, USD |
 | `--timeout` | `40m` | wall clock for one cortex turn |

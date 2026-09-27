@@ -90,7 +90,7 @@ func parseFlags() *options {
 	flag.StringVar(&o.studyModel, "study-model", "", "model id for the study role (default: --model, so the system is one model)")
 	flag.StringVar(&o.providerTags, "provider", "novita/fp8", "OpenRouter provider order (comma-separated slugs/tags); empty = no pin")
 	flag.BoolVar(&o.allowFallbck, "allow-fallbacks", false, "let OpenRouter fall back to other providers")
-	flag.BoolVar(&o.requireParms, "require-parameters", true, "route only to providers supporting every request parameter")
+	flag.BoolVar(&o.requireParms, "require-parameters", false, "route only to providers supporting every request parameter (cortex always sends `reasoning` on OpenRouter, which no qwen3-coder endpoint supports — see README)")
 	flag.IntVar(&o.window, "window", 131072, "cortex context window (tokens)")
 	flag.Float64Var(&o.temperature, "temperature", 0, "sampling temperature")
 	flag.StringVar(&o.endpoint, "endpoint", "https://openrouter.ai/api/v1", "OpenRouter API root")
