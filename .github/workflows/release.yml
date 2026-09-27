@@ -37,11 +37,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          # Exact patch pin, not the floating "1.26": release binaries
+          # Exact patch pin, not the floating "1.27": release binaries
           # should be reproducible from the tag, and the patch level is
           # load-bearing for the stdlib CVEs govulncheck tracks. Bump
           # this deliberately, together with go.mod's toolchain directive.
-          go-version: "1.26.6"
+          go-version: "1.27.1"
           check-latest: false
 
       # Fail the release before it builds anything if a dependency's
