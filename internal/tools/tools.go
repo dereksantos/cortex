@@ -1642,8 +1642,26 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 // the attribution trailer if enabled. It uses git interpret-trailers to ensure
 // idempotency (no duplicate trailers). Returns the potentially modified command.
 func maybeAddAttributionTrailer(command string, deps ToolDeps) string {
-	// Only apply to git commit commands
-	if !strings.Contains(command, "git commit") {
+	// Only apply to git commit commands - be more precise than substring match
+	fields := strings.Fields(command)
+	if len(fields) == 0 || fields[0] != "git" {
+		return command
+	}
+
+	// Find "commit" in the command
+	hasCommit := false
+	for i, f := range fields {
+		if f == "commit" {
+			hasCommit = true
+			// Also check if it's not part of another word like "commit-msg"
+			if i+1 < len(fields) && strings.HasPrefix(fields[i+1], "-") {
+				// This is "git commit -m" or similar, not "git commit-msg"
+				hasCommit = true
+				break
+			}
+		}
+	}
+	if !hasCommit {
 		return command
 	}
 
@@ -1652,11 +1670,35 @@ func maybeAddAttributionTrailer(command string, deps ToolDeps) string {
 		return command
 	}
 
-	// Get the model name from the session's config
-	// We need to access the Models map to get the code model
-	// Since we can't directly access Config, we need a different approach
-	// For now, return the command as-is since we don't have model name access
-	return command
+	// Get the model name from deps
+	modelName := deps.AttributionCommit("")
+	if modelName == "" {
+		return command
+	}
+
+	// Check if the command already has --trailer flag
+	if strings.Contains(command, " --trailer ") || strings.Contains(command, "--trailer=") {
+		return command
+	}
+
+	// Safely quote the model name for shell
+	quotedModel := quoteShellArg(modelName)
+
+	// Append --trailer flag
+	trailer := "Co-Authored-By: Cortex " + quotedModel
+	return command + " --trailer=" + quoteShellArg(trailer)
+}
+
+// quoteShellArg quotes a string for safe use in a shell command.
+func quoteShellArg(s string) string {
+	// If the string contains spaces, quotes, or special characters, quote it
+	if strings.ContainsAny(s, " \t\n\"'\\$`!#%&(){}[]|;&*?<>") || s == "" {
+		// Use double quotes and escape internal double quotes and backslashes
+		s = strings.ReplaceAll(s, `\`, `\\`)
+		s = strings.ReplaceAll(s, `"`, `\"`)
+		return `"` + s + `"`
+	}
+	return s
 }
 
 // --- Qwen XML tool-call recovery ---------------------------------------

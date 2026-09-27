@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -125,19 +126,6 @@ func startChange(name string) (string, error) {
 	return startChangeIn("", name)
 }
 
-// appendAttributionToMessage appends the attribution trailer to the commit
-// message, using git interpret-trailers to ensure idempotency (no duplicate
-// trailers even when the same trailer already exists).
-func appendAttributionToMessage(message, trailer string) string {
-	if trailer == "" {
-		return message
-	}
-	// git interpret-trailers --append adds the trailer, and if the trailer
-	// already exists, it's a no-op (idempotent).
-	// We write the trailer to a temp file and use interpret-trailers to append.
-	return message + "\n\n" + trailer
-}
-
 // appendTrailerToMessage appends the trailer to the commit message using
 // git interpret-trailers to ensure idempotency (no duplicate trailers).
 // Returns the modified message and whether a trailer was added.
@@ -145,7 +133,71 @@ func appendTrailerToMessage(message, trailer string) (string, bool) {
 	if trailer == "" {
 		return message, false
 	}
-	// Check if the trailer already exists
+	// Use git interpret-trailers to check if the trailer already exists
+	// and append it if not. We do this by trying to append and checking
+	// if the output changed.
+	tempMsg := message
+	// Create a temp file with the message
+	tempFile, err := os.CreateTemp("", "cortex-trailer-*.txt")
+	if err != nil {
+		// Fallback to simple string matching if temp file creation fails
+		return simpleAppendTrailer(message, trailer)
+	}
+	defer os.Remove(tempFile.Name())
+
+	if _, err := tempFile.Write([]byte(tempMsg)); err != nil {
+		tempFile.Close()
+		return simpleAppendTrailer(message, trailer)
+	}
+	tempFile.Close()
+
+	// Parse the trailer key and value
+	trailerKey := strings.TrimSpace(strings.Split(trailer, ":")[0])
+
+	// Check if the trailer already exists using git parse
+	cmd := exec.Command("git", "interpret-trailers", "--parse")
+	cmd.Stdin = strings.NewReader(tempMsg)
+	output, err := cmd.CombinedOutput()
+	if err != nil || strings.Contains(string(output), trailerKey) {
+		// Trailer exists or git failed, use fallback
+		return simpleAppendTrailer(message, trailer)
+	}
+
+	// Now use interpret-trailers to add the trailer
+	cmd = exec.Command("git", "interpret-trailers", "--if-exists addIfDifferent", "--trailer "+quoteGitTrailer(trailer))
+	cmd.Stdin = strings.NewReader(tempMsg)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return simpleAppendTrailer(message, trailer)
+	}
+	trimmedOutput := strings.TrimSpace(string(output))
+	if trimmedOutput == tempMsg {
+		// Trailer was already present and identical
+		return message, false
+	}
+	// Trailer was added or message was rewritten
+	return trimmedOutput, true
+}
+
+// quoteGitTrailer quotes a trailer for safe use with git interpret-trailers.
+func quoteGitTrailer(trailer string) string {
+	// If the trailer contains spaces or special characters, quote it
+	if strings.ContainsAny(trailer, " \t\n\"'\\$`!#%&(){}[]|;&*?<>") {
+		// Use double quotes and escape internal double quotes and backslashes
+		trailer = strings.ReplaceAll(trailer, `\`, `\\`)
+		trailer = strings.ReplaceAll(trailer, `"`, `\"`)
+		return `"` + trailer + `"`
+	}
+	return trailer
+}
+
+// simpleAppendTrailer is a fallback when git interpret-trailers is not available
+// or fails. It does basic string matching which is less robust.
+func simpleAppendTrailer(message, trailer string) (string, bool) {
+	if trailer == "" {
+		return message, false
+	}
+	// Check if the trailer already exists using a simpler approach
 	trailerPrefix := strings.TrimSpace(strings.Split(trailer, ":")[0])
 	lines := strings.Split(message, "\n")
 	for _, line := range lines {
@@ -202,10 +254,10 @@ func commitChange(message string) (string, error) {
 // change branch, appending the attribution trailer. It requires being on a
 // change branch and refuses an empty commit. Local only.
 //
-// If enabled is true and the config provides a trailer template, the trailer
-// is appended to the commit message using git interpret-trailers to ensure
-// idempotency (no duplicate trailers). The model name is substituted for
-// "<model>" in the template if includeModel is true.
+// The trailer is appended using git interpret-trailers to ensure idempotency
+// (no duplicate trailers). The model name is substituted for "<model>" in the
+// template if the config's include_model is true (default). When disabled or
+// the template is empty, falls back to a plain commit.
 func commitChangeWithAttribution(dir, message, model string) (string, error) {
 	// Load config for attribution settings
 	cfg := LoadConfig()
@@ -221,20 +273,19 @@ func commitChangeWithAttribution(dir, message, model string) (string, error) {
 		return commitChangeIn(dir, message)
 	}
 
-	// Append trailer to message
-	finalMessage, added := appendTrailerToMessage(message, trailer)
-
-	// Use git interpret-trailers to ensure idempotency
-	if added {
-		// Write the message to a temp file and use interpret-trailers
-		// Actually, we can just use git commit with --trailer after the fact
-		// Or we can use interpret-trailers to rewrite the commit message
-		// Let's use a simpler approach: just commit with the modified message
-		// and verify the trailer was added
+	// Use git interpret-trailers to append the trailer
+	// Create a temp file with the message and use interpret-trailers
+	cmd := exec.Command("git", "interpret-trailers", "--if-exists=addIfDifferent")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(message + "\n\n" + trailer)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Fallback to simple append if git interpret-trailers fails
+		finalMessage, _ := simpleAppendTrailer(message, trailer)
 		return commitChangeIn(dir, finalMessage)
 	}
-
-	return commitChangeIn(dir, message)
+	finalMessage := strings.TrimSpace(string(output))
+	return commitChangeIn(dir, finalMessage)
 }
 
 // slugifyChange turns a free-text change name into a safe branch suffix:
@@ -287,7 +338,15 @@ func runChangeCLI(args []string) error {
 		if message == "" {
 			return fmt.Errorf("usage: cortex change commit <message>")
 		}
-		head, err := commitChange(message)
+		// Load config to get the model name for attribution
+		cfg := LoadConfig()
+		model := ""
+		if cfg != nil && cfg.Models != nil {
+			if spec, ok := cfg.Models["code"]; ok {
+				model = spec.Model
+			}
+		}
+		head, err := commitChangeWithAttribution("", message, model)
 		if err != nil {
 			return err
 		}

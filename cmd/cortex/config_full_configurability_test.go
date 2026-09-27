@@ -797,3 +797,170 @@ func TestRunServeCLIWiresLoopCadenceFloor(t *testing.T) {
 		t.Errorf("loops.CadenceFloorMinutes with empty config = %d, want default %d", loops.CadenceFloorMinutes, loops.DefaultCadenceFloorMinutes)
 	}
 }
+
+// TestAttributionCommitDefaults covers the default commit trailer and PR
+// footer when attribution is enabled but the config doesn't set them.
+func TestAttributionCommitDefaults(t *testing.T) {
+	// Test with nil config (no defaults applied yet)
+	cfg := &Config{Attribution: AttributionConfig{
+		Enabled:      boolPtr(true),
+		Commit:       nil,
+		PR:           nil,
+		IncludeModel: nil,
+	}}
+
+	// Without defaults applied, nil should return empty
+	commit := cfg.attributionCommit("qwen3-coder")
+	if commit != "" {
+		t.Errorf("attributionCommit (nil) = %q, want empty", commit)
+	}
+
+	pr := cfg.attributionPR()
+	if pr != "" {
+		t.Errorf("attributionPR (nil) = %q, want empty", pr)
+	}
+
+	// Apply defaults manually to test
+	defaultCommit := "Co-Authored-By: Cortex (<model>)"
+	defaultPR := "Generated with Cortex"
+	cfg.Attribution.Commit = &defaultCommit
+	cfg.Attribution.PR = &defaultPR
+
+	commit = cfg.attributionCommit("qwen3-coder")
+	if commit != "Co-Authored-By: Cortex (qwen3-coder)" {
+		t.Errorf("attributionCommit (with defaults) = %q, want \"Co-Authored-By: Cortex (qwen3-coder)\"", commit)
+	}
+
+	pr = cfg.attributionPR()
+	if pr != "Generated with Cortex" {
+		t.Errorf("attributionPR (with defaults) = %q, want \"Generated with Cortex\"", pr)
+	}
+}
+
+// TestAttributionCommitWithIncludeModel covers include_model true (default).
+func TestAttributionCommitWithIncludeModel(t *testing.T) {
+	yes := true
+	cfg := &Config{Attribution: AttributionConfig{
+		Enabled:      boolPtr(true),
+		Commit:       stringPtr("Co-Authored-By: Cortex (<model>)"),
+		PR:           stringPtr("Generated with Cortex"),
+		IncludeModel: &yes,
+	}}
+
+	commit := cfg.attributionCommit("claude-sonnet")
+	if commit != "Co-Authored-By: Cortex (claude-sonnet)" {
+		t.Errorf("attributionCommit = %q, want \"Co-Authored-By: Cortex (claude-sonnet)\"", commit)
+	}
+}
+
+// TestAttributionCommitWithoutModel covers include_model false.
+func TestAttributionCommitWithoutModel(t *testing.T) {
+	no := false
+	cfg := &Config{Attribution: AttributionConfig{
+		Enabled:      boolPtr(true),
+		Commit:       stringPtr("Co-Authored-By: Cortex (<model>)"),
+		PR:           stringPtr("Generated with Cortex"),
+		IncludeModel: &no,
+	}}
+
+	commit := cfg.attributionCommit("claude-sonnet")
+	// When include_model is false, the model part should be stripped
+	if commit != "Co-Authored-By: Cortex" {
+		t.Errorf("attributionCommit = %q, want \"Co-Authored-By: Cortex\" (model part stripped)", commit)
+	}
+}
+
+// TestAttributionCommitEmptyStringDisables covers that an explicit empty
+// string for commit disables commit attribution while leaving PR enabled.
+func TestAttributionCommitEmptyStringDisables(t *testing.T) {
+	cfg := &Config{Attribution: AttributionConfig{
+		Enabled: boolPtr(true),
+		Commit:  stringPtr(""),
+		PR:      stringPtr("Generated with Cortex"),
+	}}
+
+	commit := cfg.attributionCommit("qwen3-coder")
+	if commit != "" {
+		t.Errorf("attributionCommit = %q, want empty string (disabled)", commit)
+	}
+
+	pr := cfg.attributionPR()
+	if pr != "Generated with Cortex" {
+		t.Errorf("attributionPR = %q, want \"Generated with Cortex\" (still enabled)", pr)
+	}
+}
+
+// TestAttributionDisabled covers that disabled attribution returns empty strings.
+func TestAttributionDisabled(t *testing.T) {
+	no := false
+	cfg := &Config{Attribution: AttributionConfig{
+		Enabled:      &no,
+		Commit:       stringPtr("Co-Authored-By: Cortex (<model>)"),
+		PR:           stringPtr("Generated with Cortex"),
+		IncludeModel: nil,
+	}}
+
+	commit := cfg.attributionCommit("qwen3-coder")
+	if commit != "" {
+		t.Errorf("attributionCommit = %q, want empty (disabled)", commit)
+	}
+
+	pr := cfg.attributionPR()
+	if pr != "" {
+		t.Errorf("attributionPR = %q, want empty (disabled)", pr)
+	}
+}
+
+// TestMergeAttribution covers merging of attribution configs.
+func TestMergeAttribution(t *testing.T) {
+	base := AttributionConfig{
+		Enabled:      boolPtr(true),
+		Commit:       stringPtr("Co-Authored-By: Cortex (<model>)"),
+		PR:           stringPtr("Generated with Cortex"),
+		IncludeModel: nil,
+	}
+
+	// Project overrides only commit
+	project := AttributionConfig{
+		Commit: stringPtr("Co-Authored-By: AI Bot"),
+	}
+
+	merged := mergeAttribution(base, project)
+	if merged.Enabled == nil || *merged.Enabled != true {
+		t.Errorf("merged.Enabled = %v, want enabled=true", merged.Enabled)
+	}
+	if *merged.Commit != "Co-Authored-By: AI Bot" {
+		t.Errorf("merged.Commit = %q, want \"Co-Authored-By: AI Bot\"", *merged.Commit)
+	}
+	if merged.PR == nil || *merged.PR != "Generated with Cortex" {
+		t.Errorf("merged.PR = %q, want \"Generated with Cortex\" (inherited)", *merged.PR)
+	}
+	if merged.IncludeModel != nil {
+		t.Errorf("merged.IncludeModel = %v, want nil (inherited)", merged.IncludeModel)
+	}
+}
+
+// TestMergeAttributionExplicitEmptyDisables covers that an explicit empty
+// string in the override disables that surface.
+func TestMergeAttributionExplicitEmptyDisables(t *testing.T) {
+	base := AttributionConfig{
+		Enabled: boolPtr(true),
+		Commit:  stringPtr("Co-Authored-By: Cortex"),
+		PR:      stringPtr("Generated with Cortex"),
+	}
+
+	// Project overrides commit with empty string to disable it
+	project := AttributionConfig{
+		Commit: stringPtr(""),
+	}
+
+	merged := mergeAttribution(base, project)
+	if merged.Commit == nil || *merged.Commit != "" {
+		t.Errorf("merged.Commit = %v, want empty string (disabled)", merged.Commit)
+	}
+	if merged.PR == nil || *merged.PR != "Generated with Cortex" {
+		t.Errorf("merged.PR = %q, want \"Generated with Cortex\" (not disabled)", *merged.PR)
+	}
+}
+
+func stringPtr(s string) *string { return &s }

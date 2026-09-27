@@ -175,8 +175,8 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 		if clean, cleanErr := gitCleanIn(proj.Root); cleanErr == nil && !clean {
 			modelName := ""
 			if cs.Config != nil {
-				if spec, ok := cs.Config.Models["code"]; ok {
-					modelName = spec.Model
+				if codeSpec, ok := cs.Config.Models["code"]; ok {
+					modelName = codeSpec.Model
 				}
 			}
 			if head, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), modelName); commitErr == nil {

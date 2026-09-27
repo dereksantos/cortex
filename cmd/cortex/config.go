@@ -488,11 +488,12 @@ type AttributionConfig struct {
 	// Commit is the trailer template (git interpret-trailers format). The
 	// special token "<model>" is replaced with the model name if includeModel
 	// is true. An empty string disables commit attribution while leaving PR
-	// attribution enabled.
-	Commit string `json:"commit"`
+	// attribution enabled. An explicit "" (empty string pointer) disables it.
+	Commit *string `json:"commit"`
 	// PR is the footer added to pull request bodies. An empty string disables
-	// PR attribution while leaving commit attribution enabled.
-	PR string `json:"pr"`
+	// PR attribution while leaving commit attribution enabled. An explicit ""
+	// (empty string pointer) disables it.
+	PR *string `json:"pr"`
 	// IncludeModel adds the model name to commit trailers and PR footers.
 	// true by default — useful for benchmark attribution, but consider that
 	// model names change between runs.
@@ -970,8 +971,27 @@ func readInstructions(path string) string {
 	return s
 }
 
-func LoadConfig() *Config {
-	return loadMergedConfig(userConfigPath(), findConfigPath())
+// LoadConfig is a variable so tests can override it to control config loading.
+// In production, it loads the merged config and applies attribution defaults.
+var LoadConfig = func() *Config {
+	cfg := loadMergedConfig(userConfigPath(), findConfigPath())
+	if cfg != nil {
+		applyAttributionDefaults(cfg)
+	}
+	return cfg
+}
+
+func applyAttributionDefaults(cfg *Config) {
+	// Set default commit template if not set
+	if cfg.Attribution.Commit == nil {
+		defaultCommit := "Co-Authored-By: Cortex (<model>)"
+		cfg.Attribution.Commit = &defaultCommit
+	}
+	// Set default PR footer if not set
+	if cfg.Attribution.PR == nil {
+		defaultPR := "Generated with Cortex"
+		cfg.Attribution.PR = &defaultPR
+	}
 }
 
 func loadMergedConfig(userPath, projectPath string) *Config {
@@ -1315,10 +1335,12 @@ func mergeAttribution(base, over AttributionConfig) AttributionConfig {
 	if over.Enabled != nil {
 		out.Enabled = over.Enabled
 	}
-	if over.Commit != "" {
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.Commit != nil {
 		out.Commit = over.Commit
 	}
-	if over.PR != "" {
+	// Overriding with a non-nil pointer (including empty string) takes precedence
+	if over.PR != nil {
 		out.PR = over.PR
 	}
 	if over.IncludeModel != nil {
@@ -1772,23 +1794,38 @@ func (c *Config) attributionEnabled() bool {
 
 // attributionCommit returns the commit trailer template, with "<model>" replaced
 // by the model name if includeModel is true. Returns "" when disabled or unset.
+// The default template is "Co-Authored-By: Cortex (<model>)" when enabled and unset.
 func (c *Config) attributionCommit(model string) string {
-	if !c.attributionEnabled() || c.Attribution.Commit == "" {
+	if !c.attributionEnabled() || c.Attribution.Commit == nil {
 		return ""
 	}
-	commit := c.Attribution.Commit
-	if c.Attribution.IncludeModel != nil && *c.Attribution.IncludeModel && model != "" {
+	// Empty string pointer disables attribution
+	if *c.Attribution.Commit == "" {
+		return ""
+	}
+	commit := *c.Attribution.Commit
+	// Check if includeModel is explicitly false
+	if c.Attribution.IncludeModel != nil && !*c.Attribution.IncludeModel {
+		// Remove the model part if present
+		commit = strings.ReplaceAll(commit, " (<model>)", "")
+	} else if model != "" {
+		// Substitute <model> with the actual model name
 		commit = strings.ReplaceAll(commit, "<model>", model)
 	}
 	return commit
 }
 
 // attributionPR returns the PR footer. Returns "" when disabled or unset.
+// The default footer is "Generated with Cortex" when enabled and unset.
 func (c *Config) attributionPR() string {
-	if !c.attributionEnabled() || c.Attribution.PR == "" {
+	if !c.attributionEnabled() || c.Attribution.PR == nil {
 		return ""
 	}
-	return c.Attribution.PR
+	// Empty string pointer disables attribution
+	if *c.Attribution.PR == "" {
+		return ""
+	}
+	return *c.Attribution.PR
 }
 
 // attributionIncludeModel reports whether the model name should be included

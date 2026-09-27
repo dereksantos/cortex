@@ -492,30 +492,29 @@ AI disclosure.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Gates attribution entirely. `false` turns off all markers. |
-| `commit` | (unset) | Trailer template for commits. The special token `<model>` is replaced with the model name if `include_model` is true. An empty string disables commit attribution while leaving PR attribution enabled. |
-| `pr` | (unset) | Footer added to pull request bodies. An empty string disables PR attribution while leaving commit attribution enabled. |
-| `include_model` | `true` | Adds the model name to commit trailers and PR footers. Use `false` if your workflow doesn't want model-specific attribution. |
+| `commit` | `Co-Authored-By: Cortex (<model>)` | Trailer template for commits. The special token `<model>` is replaced with the model name if `include_model` is true (default). An explicit empty string (`""`) disables commit attribution while leaving PR attribution enabled. |
+| `pr` | `Generated with Cortex` | Footer added to pull request bodies. An explicit empty string (`""`) disables PR attribution while leaving commit attribution enabled. |
+| `include_model` | `true` | Adds the model name to commit trailers and PR footers. Use `false` if your workflow doesn't want model-specific attribution. When `false`, the ` (<model>)` part is stripped from the commit trailer. |
 
 ### How it works
 
-- **`cortex change commit`**: The attribution trailer is appended to the commit
-  message using `git interpret-trailers --append`, ensuring idempotency (no
+- **`cortex change commit`**: The attribution trailer is appended using `git
+  interpret-trailers --if-exists addIfDifferent`, ensuring idempotency (no
   duplicate trailers even if the same trailer already exists).
   
 - **Agent-driven commits** (`loop` run, `discord` checkpoint): The agent is
   instructed to include the attribution trailer in its commit message. The
-  shell-risk backstop adds the trailer as a safety net if the agent forgets
-  to include it.
+  shell-risk backstop adds `--trailer` to the `git commit` command as a safety
+  net if the agent forgets to include it.
 
 - **PR attribution**: When the PR body is composed, the PR footer is appended
-  if configured. This is currently a manual step for the agent; the backstop
-  adds it when the PR is created.
+  if configured. This is currently a manual step for the agent.
 
 ### Open questions
 
-- Which noreply address should the trailer use? Today's defaults use a
-  placeholder format; customize the `commit` field to use your preferred
-  address.
+- Which noreply address should the trailer use? The default `Co-Authored-By:
+  Cortex (<model>)` uses a placeholder format; customize the `commit` field to
+  use your preferred address.
 
 - Should the model name go in the trailer? It's useful for benchmark
   attribution, but model names change between runs. Set `include_model` to
