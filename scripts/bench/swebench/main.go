@@ -401,7 +401,10 @@ func (r *runner) instance(ctx context.Context, in Instance, usageStart float64) 
 
 	// --- 3. artifacts: prediction, trajectory, cortex state ---------------
 	patch, perr := execRaw(ctx, name, fmt.Sprintf(
-		"cd /testbed && git add -A >/dev/null 2>&1; git -c core.fileMode=false diff --cached %s", imageHead))
+		// --binary: an agent-created binary file (a pickle it wrote while
+		// reproducing) otherwise renders as "Binary files differ", which
+		// `git apply` rejects — forcing the harness onto its `patch` fallback.
+		"cd /testbed && git add -A >/dev/null 2>&1; git -c core.fileMode=false diff --cached --binary %s", imageHead))
 	if perr != nil {
 		row.Error = strings.TrimSpace(row.Error + "; diff: " + perr.Error())
 	}
