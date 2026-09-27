@@ -345,6 +345,21 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	return true // unknown tools enabled by default
 }
 
+// AttributionProvider implementation for *CortexSession
+func (cs *CortexSession) AttributionEnabled() bool {
+	if cs.Config == nil {
+		return false
+	}
+	return cs.Config.attributionEnabled()
+}
+
+func (cs *CortexSession) AttributionCommit(model string) string {
+	if cs.Config == nil {
+		return ""
+	}
+	return cs.Config.attributionCommit(model)
+}
+
 // ValidateToolCall provides dynamic validation for tool calls beyond config.
 // Returns (true, "") if valid, (false, message) if invalid.
 func (cs *CortexSession) ValidateToolCall(tc ToolCall) (bool, string) {

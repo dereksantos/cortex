@@ -472,6 +472,31 @@ type Config struct {
 	// start alongside the memory index (docs/configuration.md's `skills.*`
 	// section; see internal/skills and cmd/cortex/skills.go).
 	Skills SkillsConfig `json:"skills"`
+
+	// Attribution configures markers added to commits and PRs that Cortex
+	// authors (docs/configuration.md's `attribution.*` section). When
+	// enabled, commits get a Co-Authored-By trailer; PRs get a footer.
+	Attribution AttributionConfig `json:"attribution"`
+}
+
+// AttributionConfig collects configurable attribution markers for Cortex-authored
+// commits and PRs (docs/configuration.md's `attribution.*` section).
+type AttributionConfig struct {
+	// Enabled gates attribution entirely. Nil means enabled — an availability
+	// kill-switch, not consent. When disabled, no trailers or footers are added.
+	Enabled *bool `json:"enabled"`
+	// Commit is the trailer template (git interpret-trailers format). The
+	// special token "<model>" is replaced with the model name if includeModel
+	// is true. An empty string disables commit attribution while leaving PR
+	// attribution enabled.
+	Commit string `json:"commit"`
+	// PR is the footer added to pull request bodies. An empty string disables
+	// PR attribution while leaving commit attribution enabled.
+	PR string `json:"pr"`
+	// IncludeModel adds the model name to commit trailers and PR footers.
+	// true by default — useful for benchmark attribution, but consider that
+	// model names change between runs.
+	IncludeModel *bool `json:"include_model"`
 }
 
 // SkillsConfig collects Agent Skills discovery tunables
@@ -1138,6 +1163,7 @@ func mergeConfig(base, over *Config) *Config {
 	out.Context = mergeContext(base.Context, over.Context)
 	out.Prompt = mergePrompt(base.Prompt, over.Prompt)
 	out.Skills = mergeSkills(base.Skills, over.Skills)
+	out.Attribution = mergeAttribution(base.Attribution, over.Attribution)
 	return &out
 }
 
@@ -1278,6 +1304,27 @@ func mergeSkills(base, over SkillsConfig) SkillsConfig {
 		IndexMax: mergeIntField(base.IndexMax, over.IndexMax),
 		Dirs:     dirs,
 	}
+}
+
+// mergeAttribution threads a project-level override over the user-level default,
+// field-by-field. Enabled and IncludeModel are pointer overrides (project
+// config can flip the switch without clobbering other fields); Commit and PR
+// are simple string overrides.
+func mergeAttribution(base, over AttributionConfig) AttributionConfig {
+	out := base
+	if over.Enabled != nil {
+		out.Enabled = over.Enabled
+	}
+	if over.Commit != "" {
+		out.Commit = over.Commit
+	}
+	if over.PR != "" {
+		out.PR = over.PR
+	}
+	if over.IncludeModel != nil {
+		out.IncludeModel = over.IncludeModel
+	}
+	return out
 }
 
 func mergeRead(base, over ReadConfig) ReadConfig {
@@ -1712,4 +1759,43 @@ func (c *Config) skillsDirsOverride() []string {
 		return nil
 	}
 	return c.Skills.Dirs
+}
+
+// attributionEnabled reports whether attribution is on. Nil/absent means
+// enabled — an availability kill-switch, not consent.
+func (c *Config) attributionEnabled() bool {
+	if c == nil || c.Attribution.Enabled == nil {
+		return true
+	}
+	return *c.Attribution.Enabled
+}
+
+// attributionCommit returns the commit trailer template, with "<model>" replaced
+// by the model name if includeModel is true. Returns "" when disabled or unset.
+func (c *Config) attributionCommit(model string) string {
+	if !c.attributionEnabled() || c.Attribution.Commit == "" {
+		return ""
+	}
+	commit := c.Attribution.Commit
+	if c.Attribution.IncludeModel != nil && *c.Attribution.IncludeModel && model != "" {
+		commit = strings.ReplaceAll(commit, "<model>", model)
+	}
+	return commit
+}
+
+// attributionPR returns the PR footer. Returns "" when disabled or unset.
+func (c *Config) attributionPR() string {
+	if !c.attributionEnabled() || c.Attribution.PR == "" {
+		return ""
+	}
+	return c.Attribution.PR
+}
+
+// attributionIncludeModel reports whether the model name should be included
+// in attribution markers.
+func (c *Config) attributionIncludeModel() bool {
+	if c == nil || c.Attribution.IncludeModel == nil {
+		return true
+	}
+	return *c.Attribution.IncludeModel
 }

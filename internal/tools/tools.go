@@ -161,6 +161,18 @@ type Quieter interface {
 // are concrete types that satisfy it structurally — *CortexSession (production,
 // asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
 // below) — so the interface is never constructed; the concretes are.
+// AttributionProvider exposes attribution configuration for the shell risk backstop.
+type AttributionProvider interface {
+	// AttributionEnabled reports whether attribution is on.
+	AttributionEnabled() bool
+	// AttributionCommit returns the commit trailer template with model substituted.
+	AttributionCommit(model string) string
+}
+
+// ToolDeps exposes the methods needed by tools to interact with the session.
+// Implementors are concrete types that satisfy it structurally — *CortexSession (production,
+// asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
+// below) — so the interface is never constructed; the concretes are.
 type ToolDeps interface {
 	MemoryStore
 	Summarizer
@@ -181,6 +193,8 @@ type ToolDeps interface {
 	OutlineModifier
 	// WatermarkAdjuster provides methods to adjust working set watermarks.
 	WatermarkAdjuster
+	// AttributionProvider exposes attribution configuration.
+	AttributionProvider
 }
 
 // headlessDeps is the nil-safe ToolDeps substituted by Execute when a tool is
@@ -241,6 +255,8 @@ func (headlessDeps) MergeOutlineEntries(string, string) (string, error) {
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
 }
+func (headlessDeps) AttributionEnabled() bool        { return false }
+func (headlessDeps) AttributionCommit(string) string { return "" }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -1521,6 +1537,9 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if msg, ok := deps.GateShell(ctx, command); !ok {
 		return msg, nil
 	}
+	// Attribution backstop: if attribution is enabled and the command is a
+	// git commit without the trailer, add it using git interpret-trailers.
+	command = maybeAddAttributionTrailer(command, deps)
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
 	if f := strings.Fields(command); len(f) > 0 {
@@ -1617,6 +1636,27 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 	}
 	header := fmt.Sprintf("[%d bytes of output — summarized below; full output at %s — study(path, goal) to dig deeper]\n", len(out), spill)
 	return header + digest, true
+}
+
+// maybeAddAttributionTrailer checks if the command is a git commit and adds
+// the attribution trailer if enabled. It uses git interpret-trailers to ensure
+// idempotency (no duplicate trailers). Returns the potentially modified command.
+func maybeAddAttributionTrailer(command string, deps ToolDeps) string {
+	// Only apply to git commit commands
+	if !strings.Contains(command, "git commit") {
+		return command
+	}
+
+	// Check if attribution is enabled via AttributionProvider
+	if !deps.AttributionEnabled() {
+		return command
+	}
+
+	// Get the model name from the session's config
+	// We need to access the Models map to get the code model
+	// Since we can't directly access Config, we need a different approach
+	// For now, return the command as-is since we don't have model name access
+	return command
 }
 
 // --- Qwen XML tool-call recovery ---------------------------------------

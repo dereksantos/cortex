@@ -95,6 +95,14 @@ func (cs *CortexSession) SessionsDir() string {
 	return sessionsDir()
 }
 
+// GetConfig returns the session's config, or nil if unavailable.
+func (cs *CortexSession) GetConfig() *Config {
+	if cs == nil {
+		return nil
+	}
+	return cs.Config
+}
+
 // openTranscript opens a session file and takes an exclusive cross-process
 // lock on it (see internal/fslock). A second process that tries to open the
 // same session gets a clear "session busy" error instead of silently

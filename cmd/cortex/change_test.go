@@ -1,6 +1,36 @@
 package main
 
-import "testing"
+import (
+	"testing"
+)
+
+// appendTrailerToMessage tests the trailer append logic.
+func TestAppendTrailerToMessage(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   string
+		trailer   string
+		want      string
+		wantAdded bool
+	}{
+		{"no trailer", "fix login", "", "fix login", false},
+		{"trailer added", "fix login", "Co-Authored-By: Cortex (qwen3-coder)", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", true},
+		{"trailer already exists", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", "Co-Authored-By: Cortex (qwen3-coder)", "fix login\n\nCo-Authored-By: Cortex (qwen3-coder)", false},
+		{"trailer with spaces", "fix login", "Co-Authored-By: Cortex", "fix login\n\nCo-Authored-By: Cortex", true},
+		{"empty message", "", "Co-Authored-By: Cortex", "\n\nCo-Authored-By: Cortex", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, added := appendTrailerToMessage(tt.message, tt.trailer)
+			if got != tt.want {
+				t.Errorf("appendTrailerToMessage(%q, %q) = %q, want %q", tt.message, tt.trailer, got, tt.want)
+			}
+			if added != tt.wantAdded {
+				t.Errorf("appendTrailerToMessage(%q, %q) added=%v, want %v", tt.message, tt.trailer, added, tt.wantAdded)
+			}
+		})
+	}
+}
 
 // slugifyChange feeds branch names, so it must stay within safe ref characters
 // and never produce a leading/trailing/doubled dash or an empty suffix.
