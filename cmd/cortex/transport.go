@@ -142,8 +142,15 @@ type streamOptions struct {
 //     is what the outline stands in for
 //
 // The stored Messages are never mutated, so nothing accumulates and the transcript stays clean.
-// Returns r.Messages unchanged if there's nothing to insert or demote.
+// The result is passed through wireSafe, so every message on the wire is one a
+// strict provider accepts.
 func (r *AgentRequest) wireMessages() []Message {
+	return wireSafe(r.composeWire())
+}
+
+// composeWire assembles the two-zone layout wireMessages describes. Returns
+// r.Messages unchanged if there's nothing to insert or demote.
+func (r *AgentRequest) composeWire() []Message {
 	if len(r.Messages) == 0 {
 		return r.Messages
 	}
@@ -183,6 +190,62 @@ func (r *AgentRequest) wireMessages() []Message {
 	out = append(out, r.Messages[start:]...)
 
 	return out
+}
+
+// emptyToolResult stands in for a tool result with no output text.
+const emptyToolResult = "(no output)"
+
+// wireSafe returns msgs with the two shapes strict providers reject repaired,
+// copying on write so the stored transcript (the lossless record) is untouched:
+//
+//   - a role=tool message with empty content. Cohere via OpenRouter 400s the
+//     whole request ("all elements in tool_results must have the 'outputs'
+//     property specified"), so a silent command like `true` ended the turn as
+//     a false backend error (#115).
+//   - tool-call arguments that are not a JSON object. The model's malformed
+//     emission already got its parse error back as the tool result; replaying
+//     the raw string 400s every later request ("tool arguments must be a
+//     stringified JSON object"), poisoning the session for good (#116).
+//     Repairing on the wire, not in the transcript, also heals sessions that
+//     are already poisoned.
+func wireSafe(msgs []Message) []Message {
+	out := msgs
+	copied := false
+	for i := range msgs {
+		m := msgs[i]
+		changed := false
+		if m.Role == RoleTool && strings.TrimSpace(m.Content) == "" {
+			m.Content = emptyToolResult
+			changed = true
+		}
+		callsCopied := false
+		for j, tc := range m.ToolCalls {
+			if isJSONObject(tc.Function.Arguments) {
+				continue
+			}
+			if !callsCopied {
+				m.ToolCalls = append([]ToolCall(nil), m.ToolCalls...)
+				callsCopied = true
+			}
+			m.ToolCalls[j].Function.Arguments = "{}"
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if !copied {
+			out = append([]Message(nil), msgs...)
+			copied = true
+		}
+		out[i] = m
+	}
+	return out
+}
+
+// isJSONObject reports whether s parses as a JSON object.
+func isJSONObject(s string) bool {
+	var v map[string]json.RawMessage
+	return json.Unmarshal([]byte(s), &v) == nil && v != nil
 }
 
 // applyPromptCache marks Anthropic prompt-cache breakpoints on the wire messages

@@ -382,3 +382,95 @@ func TestSendStreamHonorsContextCancel(t *testing.T) {
 		t.Errorf("SendStream took %v after cancel; should return promptly", elapsed)
 	}
 }
+
+func TestWireSafe(t *testing.T) {
+	call := func(args string) ToolCall {
+		tc := ToolCall{ID: "c1", Type: "function"}
+		tc.Function.Name = "edit_file"
+		tc.Function.Arguments = args
+		return tc
+	}
+	tests := []struct {
+		name        string
+		in          Message
+		wantContent string
+		wantArgs    string
+	}{
+		{"empty tool result gets a placeholder", Message{Role: RoleTool, ToolCallID: "c1", Content: ""}, emptyToolResult, ""},
+		{"whitespace-only tool result gets a placeholder", Message{Role: RoleTool, ToolCallID: "c1", Content: " \n"}, emptyToolResult, ""},
+		{"non-empty tool result is untouched", Message{Role: RoleTool, ToolCallID: "c1", Content: "ok"}, "ok", ""},
+		{"empty assistant content is not a tool result", Message{Role: "assistant", Content: ""}, "", ""},
+		{"malformed args become an empty object", Message{Role: "assistant", ToolCalls: []ToolCall{call(`{"path": "a.go", "edits": [}`)}}, "", "{}"},
+		{"empty args become an empty object", Message{Role: "assistant", ToolCalls: []ToolCall{call("")}}, "", "{}"},
+		{"non-object JSON args become an empty object", Message{Role: "assistant", ToolCalls: []ToolCall{call(`"a.go"`)}}, "", "{}"},
+		{"valid args are untouched", Message{Role: "assistant", ToolCalls: []ToolCall{call(`{"path": "a.go"}`)}}, "", `{"path": "a.go"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stored := []Message{tt.in}
+			orig := tt.in.Content
+			var origArgs string
+			if len(tt.in.ToolCalls) > 0 {
+				origArgs = tt.in.ToolCalls[0].Function.Arguments
+			}
+
+			got := wireSafe(stored)[0]
+			if got.Content != tt.wantContent {
+				t.Errorf("content = %q, want %q", got.Content, tt.wantContent)
+			}
+			if len(got.ToolCalls) > 0 && got.ToolCalls[0].Function.Arguments != tt.wantArgs {
+				t.Errorf("arguments = %q, want %q", got.ToolCalls[0].Function.Arguments, tt.wantArgs)
+			}
+			if stored[0].Content != orig {
+				t.Errorf("stored content mutated: %q", stored[0].Content)
+			}
+			if len(stored[0].ToolCalls) > 0 && stored[0].ToolCalls[0].Function.Arguments != origArgs {
+				t.Errorf("stored arguments mutated: %q", stored[0].ToolCalls[0].Function.Arguments)
+			}
+		})
+	}
+}
+
+func TestWireMessagesRepairsPoisonedHistory(t *testing.T) {
+	bad := ToolCall{ID: "c1", Type: "function"}
+	bad.Function.Name = "edit_file"
+	bad.Function.Arguments = `{"edits": [}`
+	req := CortexArgs{}.Request()
+	req.Messages = append(req.Messages,
+		Message{Role: RoleUser, Content: "add Mode"},
+		Message{Role: "assistant", ToolCalls: []ToolCall{bad}},
+		Message{Role: RoleTool, ToolCallID: "c1", Content: "Error: parse edit_file args: invalid character '}'"},
+		Message{Role: "assistant", ToolCalls: []ToolCall{{ID: "c2", Type: "function"}}},
+		Message{Role: RoleTool, ToolCallID: "c2", Content: ""},
+	)
+
+	b, err := json.Marshal(req.wireMessages())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire []struct {
+		Role      string `json:"role"`
+		Content   *string
+		ToolCalls []struct {
+			Function struct {
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for i, m := range wire {
+		if m.Role == RoleTool && (m.Content == nil || *m.Content == "") {
+			t.Errorf("wire[%d]: tool message has empty content", i)
+		}
+		for _, tc := range m.ToolCalls {
+			if !isJSONObject(tc.Function.Arguments) {
+				t.Errorf("wire[%d]: arguments %q are not a JSON object", i, tc.Function.Arguments)
+			}
+		}
+	}
+	if req.Messages[2].ToolCalls[0].Function.Arguments != `{"edits": [}` {
+		t.Error("stored transcript must keep the model's raw emission")
+	}
+}
