@@ -64,10 +64,43 @@ and expects `models.<role>.window` to be set by hand. There is no
 Anthropic-native or Ollama-native request path in `cmd/cortex` — every
 backend receives the same OpenAI-style chat-completions request body.
 
+### `backend.provider` — OpenRouter provider routing
+
+OpenRouter serves most open-weight models from several upstream providers
+that differ in quantization, context length and sampling; by default it
+load-balances across them and silently falls back on error. To make one
+session one reproducible system (benchmarks, regression comparisons), pin the
+upstream and forbid fallback:
+
+```json
+{
+  "backend": {
+    "type": "openrouter",
+    "key_service": "cortex-openrouter",
+    "provider": { "order": ["novita/fp8"], "allow_fallbacks": false }
+  }
+}
+```
+
+The object is sent verbatim as OpenRouter's request-body
+[`provider`](https://openrouter.ai/docs/features/provider-routing) field on
+**every** model request cortex makes — the coder, the `study`/`agent`/`learn`
+subagents, the summarizer and the shell-risk classifier. Supported keys:
+`order`, `only`, `ignore` (provider slugs like `"novita"` or endpoint tags like
+`"novita/fp8"`), `allow_fallbacks`, `require_parameters`, `quantizations`,
+`data_collection`. It is honored only when `backend.type` is `"openrouter"`
+(never sent to any other backend), and a project-layer `provider` replaces a
+user-layer one wholesale rather than merging key by key. With
+`allow_fallbacks: false` a provider outage surfaces as an error — pair it with
+`network.self_heal: false` if the model must not be substituted either.
+
 ## Auth
 
 - `key_env` — the **name** of an environment variable holding the API key.
-  Read at call time (`os.Getenv`); never written to disk.
+  Read at call time (`os.Getenv`); never written to disk. Every variable
+  named by a `key_env` (backend or per-role) is also stripped from the
+  environment of the agent's `bash` tool, so a model running `env` cannot
+  copy cortex's credential into a transcript (`internal/tools/shellenv.go`).
 - `key_service` — a macOS Keychain service name, read via
   `security find-generic-password -s <service> -w`. Used only if `key_env`
   is unset or its variable is empty.

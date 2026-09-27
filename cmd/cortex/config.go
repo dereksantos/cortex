@@ -1339,6 +1339,26 @@ func mergeBackend(base, over Backend) Backend {
 	return base
 }
 
+// secretEnvNames lists every environment variable this config names as an
+// API key source (backend.key_env and each models.<role>.key_env). The bash
+// tool strips these from its shell's environment (internal/tools/shellenv.go)
+// so a model's `env` can never copy cortex's own credential into a transcript.
+func (c *Config) secretEnvNames() []string {
+	if c == nil {
+		return nil
+	}
+	var out []string
+	if c.Backend.KeyEnv != "" {
+		out = append(out, c.Backend.KeyEnv)
+	}
+	for _, m := range c.Models {
+		if m.KeyEnv != "" {
+			out = append(out, m.KeyEnv)
+		}
+	}
+	return out
+}
+
 // providerRouting is the OpenRouter provider-routing object to attach to
 // every model request, or nil when none is configured or the backend is not
 // OpenRouter (a local/LiteLLM endpoint must never see the unknown field).

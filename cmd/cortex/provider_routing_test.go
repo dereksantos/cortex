@@ -9,6 +9,41 @@ import (
 	"github.com/dereksantos/cortex/internal/tools"
 )
 
+func TestSecretEnvNames(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want map[string]bool
+	}{
+		{"nil config", nil, map[string]bool{}},
+		{"backend only", &Config{Backend: Backend{KeyEnv: "OPENROUTER_API_KEY"}}, map[string]bool{"OPENROUTER_API_KEY": true}},
+		{
+			"backend + role keys",
+			&Config{
+				Backend: Backend{KeyEnv: "A_KEY", KeyService: "svc"},
+				Models:  map[string]ModelSpec{"code": {KeyEnv: "B_KEY"}, "study": {Model: "m"}},
+			},
+			map[string]bool{"A_KEY": true, "B_KEY": true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := map[string]bool{}
+			for _, n := range tt.cfg.secretEnvNames() {
+				got[n] = true
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("secretEnvNames=%v want %v", got, tt.want)
+			}
+			for n := range tt.want {
+				if !got[n] {
+					t.Errorf("missing %s in %v", n, got)
+				}
+			}
+		})
+	}
+}
+
 // backend.provider (OpenRouter provider routing) must reach the wire on every
 // request path — the coder's AgentRequest, subagent requests — and only on
 // the OpenRouter backend. A reproducible benchmark run depends on this: an
