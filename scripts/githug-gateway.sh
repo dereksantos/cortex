@@ -7,6 +7,8 @@
 #   GITHUG_AGENT_KEY   the agent's bearer key (ghg_…), from the 600 secrets file
 #   GITHUG_GATEWAY     gateway origin (default https://githug.ai)
 #   GITHUG_REPO        owner/repo (default: the origin remote of the current checkout)
+#   GITHUG_RUN_ID      optional id of the run minting the token (e.g. a loop tick); the
+#                      gateway records it with the mint so every token traces to its run
 #
 # Modes:
 #   scripts/githug-gateway.sh token            → prints a fresh token (for GH_TOKEN)
@@ -26,11 +28,13 @@ repo_from_origin() {
   git config --get remote.origin.url 2>/dev/null | sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##'
 }
 REPO="${GITHUG_REPO:-$(repo_from_origin)}"
+# Restricted to a JSON-safe charset so it can be spliced into the body unescaped.
+RUN=$(printf '%s' "${GITHUG_RUN_ID:-}" | tr -cd 'A-Za-z0-9._:-' | cut -c1-120)
 
 fetch() {
   curl -fsS -X POST "$GATEWAY/v1/token" \
     -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-    -d "{\"repo\":\"$REPO\"}"
+    -d "{\"repo\":\"$REPO\",\"run\":\"$RUN\"}"
 }
 json_field() { # $1 = json, $2 = top-level string field
   printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
