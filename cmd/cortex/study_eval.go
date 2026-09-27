@@ -133,6 +133,9 @@ type studyEvalRow struct {
 	PeakOutputTokens int     `json:"peak_output_tokens"`
 	MaxTokensClamped bool    `json:"max_tokens_clamped"`
 	Salvaged         bool    `json:"salvaged"`
+	// SalvagedUnclamped narrows Salvaged — see loopStats.SalvagedUnclamped's
+	// doc comment. Read alongside Salvaged/MaxTokensClamped, not instead of them.
+	SalvagedUnclamped bool `json:"salvaged_unclamped"`
 	// Thinking and ReasoningTokens are the eval-telemetry reasoning-model
 	// attribution (same json vocabulary as journal.EvalCellResultPayload —
 	// see docs/study-subagent.md §5's alignment plan): Thinking is the
@@ -272,20 +275,21 @@ func studyResultPayload(row studyEvalRow, runID, backend string) journal.StudyRe
 			TaskSuccessCriterion: "goal_hit_bounded_unclamped",
 			Notes:                row.Note,
 		},
-		Rep:              row.Rep,
-		GoalHit:          row.GoalHit,
-		StopReason:       row.StopReason,
-		FinalizeForced:   row.FinalizeForced,
-		Outlines:         row.Outlines,
-		Greps:            row.Greps,
-		Reads:            row.Reads,
-		ToolErrs:         row.ToolErrs,
-		ReadBytes:        row.ReadBytes,
-		Bounded:          row.Bounded,
-		PeakOutputTokens: row.PeakOutputTokens,
-		MaxTokensClamped: row.MaxTokensClamped,
-		Salvaged:         row.Salvaged,
-		Error:            row.Error,
+		Rep:               row.Rep,
+		GoalHit:           row.GoalHit,
+		StopReason:        row.StopReason,
+		FinalizeForced:    row.FinalizeForced,
+		Outlines:          row.Outlines,
+		Greps:             row.Greps,
+		Reads:             row.Reads,
+		ToolErrs:          row.ToolErrs,
+		ReadBytes:         row.ReadBytes,
+		Bounded:           row.Bounded,
+		PeakOutputTokens:  row.PeakOutputTokens,
+		MaxTokensClamped:  row.MaxTokensClamped,
+		Salvaged:          row.Salvaged,
+		SalvagedUnclamped: row.SalvagedUnclamped,
+		Error:             row.Error,
 	}
 }
 
@@ -326,6 +330,7 @@ func fillMechanical(row *studyEvalRow, stats loopStats) {
 	row.PeakOutputTokens = stats.PeakOutputTokens
 	row.MaxTokensClamped = stats.MaxTokensClamped
 	row.Salvaged = stats.Salvaged
+	row.SalvagedUnclamped = stats.SalvagedUnclamped
 	row.ReasoningTokens = stats.ReasoningTokens
 }
 

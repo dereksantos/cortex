@@ -173,7 +173,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	}
 	ts.AfterToolResult = onAfterToolResult
 
-	_, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
+	content, stats, err := runLoop(ctx, cs.healingSender(roleCode, cs.coderSender()), cs.Request, ts, bounds, progress, cs.Append, onStatusUpdate)
 	cs.Request.EphemeralSystem = ""
 	cs.turns++
 	cs.tokensIn += stats.InputTokens
@@ -190,15 +190,5 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	turnMsgs := cs.Request.Messages[turnStart:]
 	cs.captureTurn(input, turnMsgs)
 
-	return TurnResult{Reply: lastAssistantText(turnMsgs), StopReason: stats.StopReason}, nil
-}
-
-func lastAssistantText(turnMsgs []Message) string {
-	for i := len(turnMsgs) - 1; i >= 0; i-- {
-		m := turnMsgs[i]
-		if m.Role == "assistant" && strings.TrimSpace(m.Content) != "" {
-			return m.Content
-		}
-	}
-	return ""
+	return TurnResult{Reply: content, StopReason: stats.StopReason}, nil
 }

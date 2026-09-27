@@ -16,74 +16,6 @@ import (
 	"github.com/dereksantos/cortex/internal/journal"
 )
 
-// lastAssistantText is what a headless Turn caller relays back to its transport,
-// so it must return the model's actual prose — the final assistant message with
-// content — and skip tool-call-only (empty-content) assistant messages.
-func TestLastAssistantText(t *testing.T) {
-	tests := []struct {
-		name string
-		msgs []Message
-		want string
-	}{
-		{
-			name: "empty turn",
-			msgs: nil,
-			want: "",
-		},
-		{
-			name: "single assistant answer",
-			msgs: []Message{
-				{Role: RoleUser, Content: "hi"},
-				{Role: "assistant", Content: "hello"},
-			},
-			want: "hello",
-		},
-		{
-			name: "skips tool-call-only assistant message",
-			msgs: []Message{
-				{Role: RoleUser, Content: "read the file"},
-				{Role: "assistant", ToolCalls: []ToolCall{{ID: "1"}}}, // no content
-				{Role: RoleTool, ToolCallID: "1", Content: "file body"},
-				{Role: "assistant", Content: "here is what it says"},
-			},
-			want: "here is what it says",
-		},
-		{
-			name: "returns the LAST assistant prose, not the first",
-			msgs: []Message{
-				{Role: "assistant", Content: "let me check"},
-				{Role: RoleTool, ToolCallID: "1", Content: "result"},
-				{Role: "assistant", Content: "final answer"},
-			},
-			want: "final answer",
-		},
-		{
-			name: "whitespace-only content is not a reply",
-			msgs: []Message{
-				{Role: "assistant", Content: "real answer"},
-				{Role: "assistant", Content: "   \n"},
-			},
-			want: "real answer",
-		},
-		{
-			name: "ignores trailing tool result",
-			msgs: []Message{
-				{Role: "assistant", Content: "answer before tool"},
-				{Role: RoleTool, ToolCallID: "9", Content: "tool output that is not a reply"},
-			},
-			want: "answer before tool",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := lastAssistantText(tt.msgs); got != tt.want {
-				t.Errorf("lastAssistantText() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // contextSessionEntries re-reads the just-written session transcript and
 // returns every "context" entry's sample — the diagnostic record this test
 // exists to prove is actually on disk, not just held in memory.
@@ -344,12 +276,104 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 		t.Fatalf("turn: %v", err)
 	}
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
-	// finalize (tools withheld) — far below the maxToolIterations cap.
-	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+1 {
+	// finalize. This fixture keeps returning tool_calls even with tools
+	// withheld, so the empty-answer salvage fires once more (still empty)
+	// before giving up.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
 	if calls >= maxToolIterations {
 		t.Errorf("guard failed: ran to the iteration cap (%d)", calls)
+	}
+}
+
+// TestTurnReturnsSalvagedAnswerNotStalePreToolText: round 1 answers with
+// tool_calls plus throwaway prose; round 2 is a natural, unclamped empty
+// finish; round 3 (salvage) supplies the real answer. Reply must be round
+// 3's answer, not round 1's stale prose.
+func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Tool call, plus throwaway prose that must NOT survive as the reply.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"I'll run this command.","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// Natural finish: no tool_calls, empty content, not clamped.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			// The salvage re-ask.
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"Confirmed: hi was printed."}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":5}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "run echo hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "Confirmed: hi was printed." {
+		t.Errorf("Reply = %q, want the salvaged answer, not stale pre-tool-call text", res.Reply)
+	}
+}
+
+// TestTurnEmptyUnsalvageableReturnsEmptyNotStale: round 1 carries tool_calls
+// plus throwaway prose; every later round (the natural finish AND the salvage
+// re-ask) comes back empty. The reply must be empty — not round 1's stale
+// pre-tool prose — and the stop reason must say the turn ended empty.
+func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
+	quickRetries(t)
+	t.Chdir(t.TempDir())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"I'll run this command.","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	res, err := cs.Turn(context.Background(), "run echo hi")
+	if err != nil {
+		t.Fatalf("turn: %v", err)
+	}
+	if res.Reply != "" {
+		t.Errorf("Reply = %q, want empty (nothing salvageable), not stale pre-tool text", res.Reply)
+	}
+	if res.StopReason != "empty-finalize" {
+		t.Errorf("StopReason = %q, want empty-finalize", res.StopReason)
+	}
+	if calls != 3 {
+		t.Errorf("model calls = %d, want 3 (tool round, empty finish, one salvage)", calls)
 	}
 }
 
