@@ -467,7 +467,9 @@ type turnEnvelope struct {
 // process environment (`-e OPENROUTER_API_KEY` with no value makes docker
 // read it from there) — never argv, where `ps` would show it.
 func (r *runner) runTurn(ctx context.Context, name, prompt string, usageStart float64) turnResult {
-	const script = `source /opt/miniconda3/bin/activate && conda activate testbed && exec cortex turn --json "$1"`
+	// Capture the prompt and clear the positional args first: conda's
+	// `activate` script reads "$@" and would treat the prompt as an env name.
+	const script = `prompt="$1"; set --; source /opt/miniconda3/bin/activate && conda activate testbed && exec cortex turn --json "$prompt"`
 	cmd := exec.Command("docker", "exec", "-w", "/testbed",
 		"-e", "OPENROUTER_API_KEY",
 		"-e", "CORTEX_HOME=/tmp/cortex-home",
