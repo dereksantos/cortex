@@ -30,10 +30,10 @@ package main
 //
 //	CORTEX_LIVE_FLEET=1 go test ./cmd/cortex/ -run ContextPivotEval_Live -v -timeout 1800s
 //
-// Tunables (defaults target the fleet's 80b qwen, matching context_eval_live_test.go):
+// Tunables (defaults target the fleet's default coder, matching context_eval_live_test.go):
 //
 //	CORTEX_PIVOT_EVAL_ENDPOINT  backend base URL   (default http://localhost:4000)
-//	CORTEX_PIVOT_EVAL_MODEL     coder model tag    (default qwen3-coder-q3)
+//	CORTEX_PIVOT_EVAL_MODEL     coder model tag    (default qwen3.8-27b)
 //	CORTEX_PIVOT_EVAL_STUDY     summarizer tag     (default glm-4.7-flash)
 //	CORTEX_PIVOT_EVAL_WINDOW    session window     (default 6000; smaller = tighter pressure, faster)
 //	CORTEX_PIVOT_EVAL_TURNS     filler turns/phase (default 8)
@@ -369,7 +369,7 @@ func TestContextPivotEval_Live(t *testing.T) {
 		t.Skip("set CORTEX_LIVE_FLEET=1 to run the live pivot eval")
 	}
 	endpoint := liveEnv("CORTEX_PIVOT_EVAL_ENDPOINT", "http://localhost:4000")
-	model := liveEnv("CORTEX_PIVOT_EVAL_MODEL", "qwen3-coder-q3")
+	model := liveEnv("CORTEX_PIVOT_EVAL_MODEL", liveDefaultCoderModel)
 	study := liveEnv("CORTEX_PIVOT_EVAL_STUDY", "glm-4.7-flash")
 	window := liveEnvInt("CORTEX_PIVOT_EVAL_WINDOW", 6000)
 	fillers := liveEnvInt("CORTEX_PIVOT_EVAL_TURNS", 8)
