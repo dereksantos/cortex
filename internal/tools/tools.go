@@ -154,25 +154,22 @@ type Quieter interface {
 	Quiet() bool
 }
 
-// ToolDeps is the union Execute's big switch consumes — assembled from the parts
-// by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
-// outline) takes none of these; a memory tool depends only on MemoryStore; the
-// study tool needs Outliner (to seed) + SubAgentRunner (to run). The implementors
-// are concrete types that satisfy it structurally — *CortexSession (production,
-// asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
-// below) — so the interface is never constructed; the concretes are.
-// AttributionProvider exposes the commit-attribution trailer for the shell
-// risk backstop. The provider resolves it fully itself (the code role's
-// resolved model included) — AttributionCommit returns "" when attribution
-// is disabled or no commit trailer is configured.
+// AttributionProvider exposes the commit-attribution trailer for the bash
+// tool's git-commit backstop (maybeAddAttributionTrailer). The provider
+// resolves it fully itself (the code role's resolved model included) —
+// AttributionCommit returns "" when attribution is disabled or no commit
+// trailer is configured.
 type AttributionProvider interface {
 	// AttributionCommit returns the commit trailer to add to a git commit
 	// (model already substituted), or "" for none.
 	AttributionCommit() string
 }
 
-// ToolDeps exposes the methods needed by tools to interact with the session.
-// Implementors are concrete types that satisfy it structurally — *CortexSession (production,
+// ToolDeps is the union Execute's big switch consumes — assembled from the parts
+// by embedding, not hand-listed. A pure tool (read_file body, edit_file, grep,
+// outline) takes none of these; a memory tool depends only on MemoryStore; the
+// study tool needs Outliner (to seed) + SubAgentRunner (to run). The implementors
+// are concrete types that satisfy it structurally — *CortexSession (production,
 // asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
 // below) — so the interface is never constructed; the concretes are.
 type ToolDeps interface {
@@ -1533,12 +1530,11 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 		return "", fmt.Errorf("empty command")
 	}
 	// Attribution backstop BEFORE the risk gate: when attribution is on and
-	// the command is a bare git commit without the trailer, add it — the
+	// the command is a single git commit without the trailer, add it — the
 	// gate must classify (and a confirm prompt must show) the command that
-	// will actually run, not a pre-rewrite version of it.
-	if updated, _ := maybeAddAttributionTrailer(command, deps); updated != command {
-		command = updated
-	}
+	// will actually run, not a pre-rewrite version of it. A commit it could
+	// not safely rewrite gets attributionNote appended to its result instead.
+	command, attributionNote := maybeAddAttributionTrailer(command, deps)
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts.
@@ -1587,7 +1583,10 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 			leadBin == "grep" && strings.TrimSpace(result) == "" {
 			return "(no matches)", nil
 		}
-		return result + "\n[exit error: " + runErr.Error() + "]", nil
+		result += "\n[exit error: " + runErr.Error() + "]"
+	}
+	if attributionNote != "" {
+		result += "\n" + attributionNote
 	}
 	return result, nil
 }
@@ -1641,53 +1640,6 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 	}
 	header := fmt.Sprintf("[%d bytes of output — summarized below; full output at %s — study(path, goal) to dig deeper]\n", len(out), spill)
 	return header + digest, true
-}
-
-// maybeAddAttributionTrailer checks if the command is a bare git commit and
-// adds the attribution trailer if one is configured. Returns the potentially
-// modified command and whether attribution was applied. An empty trailer
-// (attribution disabled, or no commit template) is a no-op.
-func maybeAddAttributionTrailer(command string, deps ToolDeps) (string, bool) {
-	// Only apply to a single "git commit" invocation - no &&, ;, | or newline,
-	// those indicate chained commands where a rewrite would change semantics.
-	if strings.ContainsAny(command, "&;|") || strings.Contains(command, "\n") {
-		return command, false
-	}
-
-	fields := strings.Fields(command)
-	if len(fields) < 2 || fields[0] != "git" || fields[1] != "commit" {
-		return command, false
-	}
-
-	// Get the full trailer from deps (model already substituted); empty means
-	// attribution is off or unconfigured - no change.
-	trailer := deps.AttributionCommit()
-	if trailer == "" {
-		return command, false
-	}
-
-	// Check if the command already has --trailer flag or the trailer text
-	if strings.Contains(command, " --trailer ") || strings.Contains(command, "--trailer=") ||
-		strings.Contains(command, trailer) {
-		return command, false
-	}
-
-	// Safely quote the trailer for the shell
-	quotedTrailer := quoteShellArg(trailer)
-
-	// Append --trailer flag
-	return command + " --trailer=" + quotedTrailer, true
-}
-
-// quoteShellArg quotes a string for safe use in a bash -c command using
-// POSIX single-quote escaping: the value is wrapped in '...' and each ' is
-// replaced with '\” (end the quote, an escaped quote, restart the quote).
-// No expansion happens inside single quotes, so a template containing $,
-// backticks or & can never be evaluated by the shell. A lone backslash before
-// the quote (\') is NOT enough: backslashes are literal inside single quotes,
-// so the enclosing quote would be left unterminated.
-func quoteShellArg(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // --- Qwen XML tool-call recovery ---------------------------------------
