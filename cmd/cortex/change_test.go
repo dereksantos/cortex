@@ -8,50 +8,47 @@ import (
 	"testing"
 )
 
-// TestCommitChangeWithAttribution tests the commitChangeWithAttribution function
-// with a temporary git repository to verify idempotency and correct trailer behavior.
+// TestCommitChangeWithAttribution exercises commitChangeWithAttribution in a
+// temp git repo: it must produce exactly one trailer, be idempotent when the
+// message already carries it, keep an unrelated trailer, and leave the
+// commit plain when attribution is disabled (the real Enabled=false path,
+// not a nil config).
 func TestCommitChangeWithAttribution(t *testing.T) {
+	disabled := false
 	tests := []struct {
-		name              string
-		message           string
-		trailer           string
-		alreadyHasTrailer bool
-		otherTrailer      string
-		enabled           bool
-		wantTrailerCount  int
+		name             string
+		message          string
+		cfg              *Config
+		wantAttributed   bool
+		wantTrailerCount int
 	}{
 		{
-			name:              "no trailer - adds one",
-			message:           "fix: login bug",
-			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
-			alreadyHasTrailer: false,
-			enabled:           true,
-			wantTrailerCount:  1,
+			name:             "no trailer - adds one",
+			message:          "fix: login bug",
+			cfg:              &Config{Models: map[string]ModelSpec{"code": {Model: "qwen3-coder"}}},
+			wantAttributed:   true,
+			wantTrailerCount: 1,
 		},
 		{
-			name:              "same trailer already present - no duplicate",
-			message:           "fix: login bug\n\nCo-Authored-By: Cortex (qwen3-coder)",
-			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
-			alreadyHasTrailer: true,
-			enabled:           true,
-			wantTrailerCount:  1,
+			name:             "same trailer already present - no duplicate",
+			message:          "fix: login bug\n\nCo-Authored-By: Cortex (qwen3-coder)",
+			cfg:              &Config{Models: map[string]ModelSpec{"code": {Model: "qwen3-coder"}}},
+			wantAttributed:   true,
+			wantTrailerCount: 1,
 		},
 		{
-			name:              "different trailer - both kept",
-			message:           "fix: login bug\n\nCo-Authored-By: Alice <a@example.com>",
-			trailer:           "Co-Authored-By: Cortex (qwen3-coder)",
-			alreadyHasTrailer: false,
-			otherTrailer:      "Co-Authored-By: Alice <a@example.com>",
-			enabled:           true,
-			wantTrailerCount:  2,
+			name:             "different trailer - both kept",
+			message:          "fix: login bug\n\nCo-Authored-By: Alice <a@example.com>",
+			cfg:              &Config{Models: map[string]ModelSpec{"code": {Model: "qwen3-coder"}}},
+			wantAttributed:   true,
+			wantTrailerCount: 2,
 		},
 		{
-			name:              "attribution disabled - no trailer",
-			message:           "fix: login bug",
-			trailer:           "",
-			alreadyHasTrailer: false,
-			enabled:           false,
-			wantTrailerCount:  0,
+			name:             "attribution disabled (Enabled=false) - no trailer",
+			message:          "fix: login bug",
+			cfg:              &Config{Attribution: AttributionConfig{Enabled: &disabled}, Models: map[string]ModelSpec{"code": {Model: "qwen3-coder"}}},
+			wantAttributed:   false,
+			wantTrailerCount: 0,
 		},
 	}
 
@@ -65,7 +62,9 @@ func TestCommitChangeWithAttribution(t *testing.T) {
 
 			// Create initial commit on main
 			filePath := filepath.Join(tmpDir, "test.txt")
-			os.WriteFile(filePath, []byte("initial"), 0o644)
+			if err := os.WriteFile(filePath, []byte("initial"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			gitCmd(t, tmpDir, "add", "test.txt")
 			gitCmd(t, tmpDir, "commit", "-m", "initial")
 
@@ -73,32 +72,17 @@ func TestCommitChangeWithAttribution(t *testing.T) {
 			gitCmd(t, tmpDir, "checkout", "-b", "cortex/test")
 
 			// Modify file to make it dirty
-			os.WriteFile(filePath, []byte("modified"), 0o644)
-
-			// Build message
-			message := tt.message
-			if tt.alreadyHasTrailer && tt.otherTrailer != "" {
-				// Message already has another trailer
-			} else if tt.alreadyHasTrailer {
-				// Message already has the same trailer (don't add again)
-			}
-
-			// Mock config for attribution
-			var cfg *Config
-			if tt.enabled {
-				enabled := true
-				cfg = &Config{
-					Attribution: AttributionConfig{
-						Enabled: &enabled,
-						Commit:  &tt.trailer,
-					},
-				}
+			if err := os.WriteFile(filePath, []byte("modified"), 0o644); err != nil {
+				t.Fatal(err)
 			}
 
 			// Commit with attribution
-			_, err := commitChangeWithAttribution(tmpDir, message, "qwen3-coder", cfg)
+			_, attributed, err := commitChangeWithAttribution(tmpDir, tt.message, tt.cfg)
 			if err != nil {
 				t.Fatalf("commitChangeWithAttribution failed: %v", err)
+			}
+			if attributed != tt.wantAttributed {
+				t.Errorf("attributed = %v, want %v", attributed, tt.wantAttributed)
 			}
 
 			// Count trailers in the last commit

@@ -76,6 +76,44 @@ func resolvePrompt(cfg *Config) (base, appendix string) {
 	return base, strings.TrimSpace(cfg.Prompt.Append)
 }
 
+// attributionPromptLine is the single system-prompt line the issue asks for
+// when attribution is on (its item 3): one principle, no recipe — commits
+// end with the configured trailer, PR bodies with the footer. It never
+// names the trailer text itself: the backstops (internal/tools' --trailer
+// on git commit, change.go's interpret-trailers on `cortex change commit`)
+// enforce the configured value, and a prompt that spelled it out would
+// drift from the config. The loop-firing path rides it in the per-run
+// prompt (loop_run.go) rather than the cached system message; a REPL
+// session's stable system prefix carries nothing here, the backstops carry
+// the same guarantee. Returns "" when attribution is off or nothing is
+// configured.
+func (c *Config) attributionPromptLine() string {
+	// A nil config behaves like an empty one (attribution enabled, both
+	// surfaces) — the same nil-tolerant rule the other attribution
+	// accessors use, so a loop session with no config still gets the line.
+	if c == nil {
+		c = &Config{}
+	}
+	if !c.attributionEnabled() {
+		return ""
+	}
+	commit, pr := "", ""
+	if c.Attribution.Commit == nil || *c.Attribution.Commit != "" {
+		commit = "git commits"
+	}
+	if c.Attribution.PR == nil || *c.Attribution.PR != "" {
+		pr = "pull request bodies"
+	}
+	switch {
+	case commit != "" && pr != "":
+		return "Attribute the work you author: " + commit + " and " + pr + " end with the attribution marker your configuration specifies."
+	case commit != "":
+		return "Attribute the work you author: " + commit + " end with the attribution marker your configuration specifies."
+	default:
+		return "Attribute the work you author: " + pr + " end with the attribution marker your configuration specifies."
+	}
+}
+
 // readPromptFile reads a prompt.file path: ~ expands to the home directory,
 // a relative path resolves upward from CWD (findUp — the same rule AGENTS.md
 // and .cortex/config.json already follow, so ".cortex/prompt.md" works from

@@ -161,12 +161,14 @@ type Quieter interface {
 // are concrete types that satisfy it structurally — *CortexSession (production,
 // asserted at the composition root in main.go) and headlessDeps (the nil-safe stub
 // below) — so the interface is never constructed; the concretes are.
-// AttributionProvider exposes attribution configuration for the shell risk backstop.
+// AttributionProvider exposes the commit-attribution trailer for the shell
+// risk backstop. The provider resolves it fully itself (the code role's
+// resolved model included) — AttributionCommit returns "" when attribution
+// is disabled or no commit trailer is configured.
 type AttributionProvider interface {
-	// AttributionEnabled reports whether attribution is on.
-	AttributionEnabled() bool
-	// AttributionCommit returns the commit trailer template with model substituted.
-	AttributionCommit(model string) string
+	// AttributionCommit returns the commit trailer to add to a git commit
+	// (model already substituted), or "" for none.
+	AttributionCommit() string
 }
 
 // ToolDeps exposes the methods needed by tools to interact with the session.
@@ -255,8 +257,7 @@ func (headlessDeps) MergeOutlineEntries(string, string) (string, error) {
 func (headlessDeps) AdjustWatermarks(int, int) (int, int, int, int, error) {
 	return 0, 0, 0, 0, errors.New("watermark adjustment unavailable: no session")
 }
-func (headlessDeps) AttributionEnabled() bool        { return false }
-func (headlessDeps) AttributionCommit(string) string { return "" }
+func (headlessDeps) AttributionCommit() string { return "" }
 
 // Tool names — the canonical identifiers on the wire and in the dispatcher.
 const (
@@ -1531,16 +1532,18 @@ func bash(ctx context.Context, tc ToolCall, deps ToolDeps) (string, error) {
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("empty command")
 	}
+	// Attribution backstop BEFORE the risk gate: when attribution is on and
+	// the command is a bare git commit without the trailer, add it — the
+	// gate must classify (and a confirm prompt must show) the command that
+	// will actually run, not a pre-rewrite version of it.
+	if updated, _ := maybeAddAttributionTrailer(command, deps); updated != command {
+		command = updated
+	}
 	// Risk gate (replaces the static allowlist). A refused/declined command
 	// returns its explanation as the tool result — not an error — so the model
 	// reads the reason plainly and adapts.
 	if msg, ok := deps.GateShell(ctx, command); !ok {
 		return msg, nil
-	}
-	// Attribution backstop: if attribution is enabled and the command is a
-	// git commit without the trailer, add it using git interpret-trailers.
-	if updated, _ := maybeAddAttributionTrailer(command, deps); updated != command {
-		command = updated
 	}
 	// leadBin is the first token, used only for the grep-empty heuristic below.
 	leadBin := ""
@@ -1640,12 +1643,13 @@ func studyShellOutput(ctx context.Context, deps ToolDeps, command string, out []
 	return header + digest, true
 }
 
-// maybeAddAttributionTrailer checks if the command is a git commit and adds
-// the attribution trailer if enabled. Returns the potentially modified command
-// and a note about whether attribution was applied.
+// maybeAddAttributionTrailer checks if the command is a bare git commit and
+// adds the attribution trailer if one is configured. Returns the potentially
+// modified command and whether attribution was applied. An empty trailer
+// (attribution disabled, or no commit template) is a no-op.
 func maybeAddAttributionTrailer(command string, deps ToolDeps) (string, bool) {
-	// Only apply to git commit commands - check for single "git commit" invocation
-	// (no &&, ;, | or newline - those indicate chained commands)
+	// Only apply to a single "git commit" invocation - no &&, ;, | or newline,
+	// those indicate chained commands where a rewrite would change semantics.
 	if strings.ContainsAny(command, "&;|") || strings.Contains(command, "\n") {
 		return command, false
 	}
@@ -1655,13 +1659,9 @@ func maybeAddAttributionTrailer(command string, deps ToolDeps) (string, bool) {
 		return command, false
 	}
 
-	// Check if attribution is enabled
-	if !deps.AttributionEnabled() {
-		return command, false
-	}
-
-	// Get the full trailer from deps (model already substituted)
-	trailer := deps.AttributionCommit("")
+	// Get the full trailer from deps (model already substituted); empty means
+	// attribution is off or unconfigured - no change.
+	trailer := deps.AttributionCommit()
 	if trailer == "" {
 		return command, false
 	}
@@ -1672,23 +1672,22 @@ func maybeAddAttributionTrailer(command string, deps ToolDeps) (string, bool) {
 		return command, false
 	}
 
-	// Safely quote the trailer for shell
+	// Safely quote the trailer for the shell
 	quotedTrailer := quoteShellArg(trailer)
 
 	// Append --trailer flag
 	return command + " --trailer=" + quotedTrailer, true
 }
 
-// quoteShellArg quotes a string for safe use in a shell command.
+// quoteShellArg quotes a string for safe use in a bash -c command using
+// POSIX single-quote escaping: the value is wrapped in '...' and each ' is
+// replaced with '\” (end the quote, an escaped quote, restart the quote).
+// No expansion happens inside single quotes, so a template containing $,
+// backticks or & can never be evaluated by the shell. A lone backslash before
+// the quote (\') is NOT enough: backslashes are literal inside single quotes,
+// so the enclosing quote would be left unterminated.
 func quoteShellArg(s string) string {
-	// If the string contains spaces, quotes, or special characters, quote it
-	if strings.ContainsAny(s, " \t\n\"'\\$`!#%&(){}[]|;&*?<>") || s == "" {
-		// Use double quotes and escape internal double quotes and backslashes
-		s = strings.ReplaceAll(s, `\`, `\\`)
-		s = strings.ReplaceAll(s, `"`, `\"`)
-		return `"` + s + `"`
-	}
-	return s
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // --- Qwen XML tool-call recovery ---------------------------------------

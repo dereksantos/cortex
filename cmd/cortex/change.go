@@ -130,9 +130,6 @@ func startChange(name string) (string, error) {
 // can't land on main or a feature branch by accident) and refuses an empty
 // commit. Local only. An empty dir defaults to the process's working
 // directory.
-//
-// If config and model are provided, the attribution trailer is appended
-// using git interpret-trailers to ensure idempotency.
 func commitChangeIn(dir, message string) (string, error) {
 	branch, err := currentBranchIn(dir)
 	if err != nil {
@@ -158,31 +155,28 @@ func commitChangeIn(dir, message string) (string, error) {
 	return head, nil
 }
 
-// commitChange stages everything and commits on the active change branch. It
-// requires being on a change branch (so an automated commit can't land on main
-// or a feature branch by accident) and refuses an empty commit. Local only.
-func commitChange(message string) (string, error) {
-	return commitChangeIn("", message)
-}
-
 // commitChangeWithAttribution stages everything and commits on the active
-// change branch, appending the attribution trailer. It requires being on a
-// change branch and refuses an empty commit. Local only.
+// change branch, appending the attribution trailer when attribution is
+// enabled (cfg.attributionCommit non-empty). It requires being on a change
+// branch and refuses an empty commit. Local only.
 //
-// The trailer is appended using git interpret-trailers with --trailer to
-// ensure idempotency (no duplicate trailers). The model name is substituted
-// for "<model>" in the template if the config's include_model is true
-// (default). When disabled or the template is empty, falls back to a plain
-// commit.
-func commitChangeWithAttribution(dir, message, model string, cfg *Config) (string, error) {
-	// Build the trailer
+// The trailer is appended with git interpret-trailers --if-exists
+// addIfDifferent, so a message that already carries it is committed
+// unchanged. The model name is the one cfg resolves for the code role —
+// the same binding the agent turns on — substituted for "<model>" unless
+// include_model is false. Returns the short commit hash and whether the
+// commit actually carries the trailer (false for plain commits: attribution
+// disabled, empty template, or a nil config that resolved no model — the
+// last is the CLI's zero-config default, where the trailer would read a
+// literal "<model>").
+func commitChangeWithAttribution(dir, message string, cfg *Config) (string, bool, error) {
 	trailer := ""
 	if cfg != nil {
-		trailer = cfg.attributionCommit(model)
+		trailer = cfg.attributionCommit(cfg.resolveBinding(roleCode, nil).Model)
 	}
 	if trailer == "" {
-		// Attribution disabled or no template
-		return commitChangeIn(dir, message)
+		head, err := commitChangeIn(dir, message)
+		return head, false, err
 	}
 
 	// Use git interpret-trailers to append the trailer with --trailer flag
@@ -191,10 +185,11 @@ func commitChangeWithAttribution(dir, message, model string, cfg *Config) (strin
 	cmd.Stdin = strings.NewReader(message)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("failed to add attribution trailer: %w", err)
+		return "", false, fmt.Errorf("failed to add attribution trailer: %w", err)
 	}
 	finalMessage := strings.TrimSpace(string(output))
-	return commitChangeIn(dir, finalMessage)
+	head, err := commitChangeIn(dir, finalMessage)
+	return head, true, err
 }
 
 // slugifyChange turns a free-text change name into a safe branch suffix:
@@ -247,15 +242,7 @@ func runChangeCLI(args []string) error {
 		if message == "" {
 			return fmt.Errorf("usage: cortex change commit <message>")
 		}
-		// Load config to get the model name for attribution
-		cfg := LoadConfig()
-		model := ""
-		if cfg != nil && cfg.Models != nil {
-			if spec, ok := cfg.Models["code"]; ok {
-				model = spec.Model
-			}
-		}
-		head, err := commitChangeWithAttribution("", message, model, cfg)
+		head, _, err := commitChangeWithAttribution("", message, LoadConfig())
 		if err != nil {
 			return err
 		}

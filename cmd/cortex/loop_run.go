@@ -159,6 +159,15 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 	// bound-forced stop is not a Go error (the engine still finalizes and
 	// answers), so it must be detected here, not via turnErr.
 	prompt := spec.Prompt + "\n\n" + loopSelfPacingInstruction
+	// attributionPromptLine, when attribution is on, tells the firing's agent
+	// how commits and PRs it authors are attributed (the issue's item 3). It
+	// rides the prompt, not the system message: a fired session's system
+	// prompt is the stable cache prefix, and a per-run line would invalidate
+	// it on every firing. The bash backstop in internal/tools (the --trailer
+	// on git commit) is the safety net for when the model forgets.
+	if line := cs.Config.attributionPromptLine(); line != "" {
+		prompt += "\n\n" + line
+	}
 	result, turnErr := cs.TurnWithBudget(ctx, prompt, spec.MaxTurns, spec.MaxTokens)
 	if turnErr != nil {
 		payload.Outcome = journal.LoopOutcomeFailed
@@ -173,14 +182,13 @@ func RunLoopFiring(ctx context.Context, spec loops.Spec, reg registry.Registry, 
 
 	if startErr == nil {
 		if clean, cleanErr := gitCleanIn(proj.Root); cleanErr == nil && !clean {
-			modelName := ""
-			if cs.Config != nil {
-				if codeSpec, ok := cs.Config.Models["code"]; ok {
-					modelName = codeSpec.Model
-				}
-			}
-			if head, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), modelName, cs.Config); commitErr == nil {
+			// The commit carries the attribution trailer only when attribution
+			// is on and the trailer template resolved one — recorded on the
+			// journal event (payload.Attributed) so compliance is measured,
+			// not assumed (the issue's item 4).
+			if head, attributed, commitErr := commitChangeWithAttribution(proj.Root, fmt.Sprintf("loop: %s", spec.Name), cs.Config); commitErr == nil {
 				payload.ChangeRef = branch + "@" + head
+				payload.Attributed = attributed
 			}
 		}
 	}

@@ -971,8 +971,6 @@ func readInstructions(path string) string {
 	return s
 }
 
-// LoadConfig is a variable so tests can override it to control config loading.
-// In production, it loads the merged config and applies attribution defaults.
 func LoadConfig() *Config {
 	return loadMergedConfig(userConfigPath(), findConfigPath())
 }
@@ -1775,10 +1773,14 @@ func (c *Config) attributionEnabled() bool {
 	return *c.Attribution.Enabled
 }
 
-// attributionCommit returns the commit trailer template, with "<model>" replaced
-// by the model name if includeModel is true. Returns "" when disabled or unset.
-// The default template is "Co-Authored-By: Cortex (<model>)" when enabled and unset.
+// attributionCommit returns the commit trailer, with the model name
+// substituted for the "<model>" token. It is nil-safe: a nil config behaves
+// like an empty one (attribution enabled, default template). Returns "" when
+// attribution is disabled or the commit template is explicitly "".
 func (c *Config) attributionCommit(model string) string {
+	if c == nil {
+		c = &Config{}
+	}
 	// Check if attribution is enabled (nil/absent = enabled)
 	if !c.attributionEnabled() {
 		return ""
@@ -1794,20 +1796,27 @@ func (c *Config) attributionCommit(model string) string {
 		commit = *c.Attribution.Commit
 	}
 
-	// Check if includeModel is explicitly false
 	if c.Attribution.IncludeModel != nil && !*c.Attribution.IncludeModel {
-		// Remove the model part if present
+		// Model part requested off: strip it from the template.
 		commit = strings.ReplaceAll(commit, " (<model>)", "")
 	} else if model != "" {
-		// Substitute <model> with the actual model name
+		// Substitute <model> with the actual model name.
 		commit = strings.ReplaceAll(commit, "<model>", model)
+	} else {
+		// No model to substitute (unset config, zero-config fleet default):
+		// drop the placeholder so no literal "<model>" ever lands in a commit.
+		commit = strings.ReplaceAll(commit, " (<model>)", "")
 	}
 	return commit
 }
 
-// attributionPR returns the PR footer. Returns "" when disabled or unset.
-// The default footer is "Generated with Cortex" when enabled and unset.
+// attributionPR returns the PR footer. It is nil-safe like
+// attributionCommit. Returns "" when attribution is disabled or the PR
+// footer is explicitly ""; the default footer is "Generated with Cortex".
 func (c *Config) attributionPR() string {
+	if c == nil {
+		c = &Config{}
+	}
 	// Check if attribution is enabled (nil/absent = enabled)
 	if !c.attributionEnabled() {
 		return ""

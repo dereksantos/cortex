@@ -345,17 +345,16 @@ func (cs *CortexSession) IsToolEnabled(toolName string) bool {
 	return true // unknown tools enabled by default
 }
 
-// AttributionProvider implementation for *CortexSession
-func (cs *CortexSession) AttributionEnabled() bool {
-	if cs.Config == nil {
-		return false
-	}
-	return cs.Config.attributionEnabled()
-}
-
-func (cs *CortexSession) AttributionCommit(model string) string {
-	if cs.Config == nil {
-		return ""
+// AttributionProvider implementation for *CortexSession. The session resolves
+// the model itself — cs.Request.Model is the code role's binding
+// NewCortexSession resolved for the Turn — so the trailer always names the
+// model that actually authored the commit (never a literal "<model>"). A nil
+// Config still yields the default-enabled trailer (Config.attributionCommit
+// is nil-safe).
+func (cs *CortexSession) AttributionCommit() string {
+	model := ""
+	if cs != nil && cs.Request != nil {
+		model = cs.Request.Model
 	}
 	return cs.Config.attributionCommit(model)
 }
