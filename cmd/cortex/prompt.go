@@ -49,6 +49,10 @@ In long sessions, older turns appear only as an outline with @session/… citati
 var (
 	promptBase   = SystemPrompt
 	promptAppend = ""
+	// promptAttribution is the attribution line (configureAttributionPrompt);
+	// "" until a session configures it, so an unconfigured prompt is the
+	// built-in one verbatim.
+	promptAttribution = ""
 )
 
 // configurePrompt resolves the prompt.* config section into the live prompt
@@ -76,42 +80,36 @@ func resolvePrompt(cfg *Config) (base, appendix string) {
 	return base, strings.TrimSpace(cfg.Prompt.Append)
 }
 
-// attributionPromptLine is the single system-prompt line the issue asks for
-// when attribution is on (its item 3): one principle, no recipe — commits
-// end with the configured trailer, PR bodies with the footer. It never
-// names the trailer text itself: the backstops (internal/tools' --trailer
-// on git commit, change.go's interpret-trailers on `cortex change commit`)
-// enforce the configured value, and a prompt that spelled it out would
-// drift from the config. The loop-firing path rides it in the per-run
-// prompt (loop_run.go) rather than the cached system message; a REPL
-// session's stable system prefix carries nothing here, the backstops carry
-// the same guarantee. Returns "" when attribution is off or nothing is
-// configured.
-func (c *Config) attributionPromptLine() string {
-	// A nil config behaves like an empty one (attribution enabled, both
-	// surfaces) — the same nil-tolerant rule the other attribution
-	// accessors use, so a loop session with no config still gets the line.
-	if c == nil {
-		c = &Config{}
-	}
-	if !c.attributionEnabled() {
-		return ""
-	}
-	commit, pr := "", ""
-	if c.Attribution.Commit == nil || *c.Attribution.Commit != "" {
-		commit = "git commits"
-	}
-	if c.Attribution.PR == nil || *c.Attribution.PR != "" {
-		pr = "pull request bodies"
-	}
+// attributionPromptLine is the system-prompt line the attribution config
+// contributes when it is on: one principle, no recipe — commit messages the
+// agent authors end with the configured trailer, pull request bodies with
+// the configured footer, both spelled out verbatim so the model can write
+// them. model is substituted into the trailer by attributionCommit's rules.
+// Returns "" when attribution is disabled or both surfaces are "". The PR
+// footer has no mechanical backstop (Cortex never composes a PR body
+// itself), so this line is its only delivery; commits are also covered by
+// the bash tool's --trailer backstop and change.go's interpret-trailers path.
+func (c *Config) attributionPromptLine(model string) string {
+	commit, pr := c.attributionCommit(model), c.attributionPR()
 	switch {
 	case commit != "" && pr != "":
-		return "Attribute the work you author: " + commit + " and " + pr + " end with the attribution marker your configuration specifies."
+		return fmt.Sprintf("Attribution: end every git commit message you author with the trailer line %q, and end every pull request body you write with the line %q.", commit, pr)
 	case commit != "":
-		return "Attribute the work you author: " + commit + " end with the attribution marker your configuration specifies."
+		return fmt.Sprintf("Attribution: end every git commit message you author with the trailer line %q.", commit)
+	case pr != "":
+		return fmt.Sprintf("Attribution: end every pull request body you write with the line %q.", pr)
 	default:
-		return "Attribute the work you author: " + pr + " end with the attribution marker your configuration specifies."
+		return ""
 	}
+}
+
+// configureAttributionPrompt sets the attribution line systemPromptContent
+// appends. NewCortexSession calls it once, after the code model is resolved
+// and before the first request is built, so every coder session (REPL,
+// `cortex turn`, serve/web, discord, loop firings) carries it in its stable
+// system prefix rather than per turn.
+func configureAttributionPrompt(cfg *Config, model string) {
+	promptAttribution = cfg.attributionPromptLine(model)
 }
 
 // readPromptFile reads a prompt.file path: ~ expands to the home directory,

@@ -32,14 +32,18 @@ func (a CortexArgs) Request() *AgentRequest {
 
 // systemPromptContent builds the system message content: the base prompt
 // (built-in SystemPrompt, or prompt.file's replacement — promptBase, set by
-// configurePrompt), then any prompt.append text, then an optional
-// "# Project instructions (AGENTS.md)" section when instructions is
-// non-empty. Shared by CortexArgs.Request() (CWD-implicit, via
-// projectInstructions()) and applyProjectByName (project_workspace.go,
-// M3.5's --project, via Workspace.Instructions()) so the two stay provably
-// identical modulo their instructions source.
+// configurePrompt), then the attribution line when attribution is on
+// (promptAttribution, set by configureAttributionPrompt), then any
+// prompt.append text, then an optional "# Project instructions (AGENTS.md)"
+// section when instructions is non-empty. Shared by CortexArgs.Request()
+// (CWD-implicit, via projectInstructions()) and applyProjectByName
+// (project_workspace.go, M3.5's --project, via Workspace.Instructions()) so
+// the two stay provably identical modulo their instructions source.
 func systemPromptContent(instructions string) string {
 	content := promptBase
+	if promptAttribution != "" {
+		content += "\n\n" + promptAttribution
+	}
 	if promptAppend != "" {
 		content += "\n\n# Additional instructions\n\n" + promptAppend
 	}
@@ -233,7 +237,6 @@ func NewCortexSession() *CortexSession {
 	labelTickInterval = cfg.tickerInterval()
 
 	args := CortexArgs(os.Args)
-	req := args.Request()
 	workspace := WorkspaceFromCWD()
 
 	var fleet Fleet
@@ -258,6 +261,11 @@ func NewCortexSession() *CortexSession {
 		printStartupWarning(os.Stderr, fmt.Sprintf("warning: code (%s) and study (%s) share swap_group %q — they evict each other every turn; route one to different silicon", code.Model, study.Model, g))
 	}
 
+	// The attribution line names the resolved code model in its trailer, so
+	// it is configured only now — after resolution, before args.Request()
+	// builds the system message.
+	configureAttributionPrompt(cfg, code.Model)
+	req := args.Request()
 	req.Model = code.Model
 	req.BaseURL = code.Endpoint
 	req.APIKey = resolveKey(code)

@@ -12,28 +12,79 @@ import (
 	"github.com/dereksantos/cortex/internal/registry"
 )
 
-// TestAttributionPromptLine covers the system-prompt line the issue asks for
-// (item 3): present when attribution is on, absent when disabled, and sized
-// to the surfaces actually configured (commit, PR, or both).
+// TestAttributionPromptLine covers the system-prompt line: it spells out the
+// resolved trailer (model substituted) and the PR footer verbatim, is sized
+// to the surfaces actually configured (commit, PR, or both), and is absent
+// when attribution is disabled or both surfaces are "".
 func TestAttributionPromptLine(t *testing.T) {
 	no := false
 	yes := true
 	empty := ""
+	commit := "Signed-off-by: Bot <bot@example.com>"
+	footer := "Made by a bot"
+	both := `Attribution: end every git commit message you author with the trailer line "Co-Authored-By: Cortex (qwen3-coder)", and end every pull request body you write with the line "Generated with Cortex".`
 	tests := []struct {
 		name string
 		cfg  *Config
 		want string
 	}{
-		{"nil config", nil, "Attribute the work you author: git commits and pull request bodies end with the attribution marker your configuration specifies."},
-		{"zero config", &Config{}, "Attribute the work you author: git commits and pull request bodies end with the attribution marker your configuration specifies."},
+		{"nil config", nil, both},
+		{"zero config", &Config{}, both},
 		{"disabled", &Config{Attribution: AttributionConfig{Enabled: &no}}, ""},
-		{"commit disabled, PR on", &Config{Attribution: AttributionConfig{Enabled: &yes, Commit: &empty}}, "Attribute the work you author: pull request bodies end with the attribution marker your configuration specifies."},
-		{"PR disabled, commit on", &Config{Attribution: AttributionConfig{Enabled: &yes, PR: &empty}}, "Attribute the work you author: git commits end with the attribution marker your configuration specifies."},
+		{"both surfaces empty", &Config{Attribution: AttributionConfig{Commit: &empty, PR: &empty}}, ""},
+		{"commit disabled, PR on", &Config{Attribution: AttributionConfig{Enabled: &yes, Commit: &empty}},
+			`Attribution: end every pull request body you write with the line "Generated with Cortex".`},
+		{"PR disabled, commit on", &Config{Attribution: AttributionConfig{Enabled: &yes, PR: &empty}},
+			`Attribution: end every git commit message you author with the trailer line "Co-Authored-By: Cortex (qwen3-coder)".`},
+		{"custom templates", &Config{Attribution: AttributionConfig{Commit: &commit, PR: &footer}},
+			`Attribution: end every git commit message you author with the trailer line "Signed-off-by: Bot <bot@example.com>", and end every pull request body you write with the line "Made by a bot".`},
+		{"include_model false", &Config{Attribution: AttributionConfig{IncludeModel: &no, PR: &empty}},
+			`Attribution: end every git commit message you author with the trailer line "Co-Authored-By: Cortex".`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.attributionPromptLine(); got != tt.want {
+			if got := tt.cfg.attributionPromptLine("qwen3-coder"); got != tt.want {
 				t.Errorf("attributionPromptLine() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSystemPromptCarriesAttribution checks the composed coder system prompt
+// (systemPromptContent — what CortexArgs.Request() and applyProjectByName
+// build every session's system message from) carries the trailer and the PR
+// footer when attribution is on, and neither when it is disabled.
+func TestSystemPromptCarriesAttribution(t *testing.T) {
+	no := false
+	empty := ""
+	tests := []struct {
+		name        string
+		cfg         *Config
+		wantTrailer bool
+		wantFooter  bool
+	}{
+		{"enabled by default (no config)", nil, true, true},
+		{"enabled explicitly", &Config{Attribution: AttributionConfig{Enabled: boolPtr(true)}}, true, true},
+		{"disabled", &Config{Attribution: AttributionConfig{Enabled: &no}}, false, false},
+		{"pr footer off", &Config{Attribution: AttributionConfig{PR: &empty}}, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetPrompt(t)
+			configurePrompt(tt.cfg)
+			configureAttributionPrompt(tt.cfg, "m-code")
+			got := systemPromptContent("agents body")
+			if has := strings.Contains(got, "Co-Authored-By: Cortex (m-code)"); has != tt.wantTrailer {
+				t.Errorf("system prompt has trailer = %v, want %v", has, tt.wantTrailer)
+			}
+			if has := strings.Contains(got, "Generated with Cortex"); has != tt.wantFooter {
+				t.Errorf("system prompt has PR footer = %v, want %v", has, tt.wantFooter)
+			}
+			if !tt.wantTrailer && !tt.wantFooter && strings.Contains(got, "Attribution:") {
+				t.Errorf("disabled attribution still left a line in the system prompt")
+			}
+			if !strings.HasPrefix(got, SystemPrompt) || !strings.Contains(got, agentsMarker+"agents body") {
+				t.Errorf("attribution line must sit between the base prompt and AGENTS.md without displacing either")
 			}
 		})
 	}
@@ -90,6 +141,21 @@ func TestAttributionCommitEmptyModelRealConfig(t *testing.T) {
 	if got := cfg.attributionCommit(""); got != "Generated-With: Agent" {
 		t.Errorf("custom template, empty model = %q, want %q", got, "Generated-With: Agent")
 	}
+	// A bare (unparenthesized) token is dropped too, as is it with
+	// include_model=false and a known model.
+	bare := "Assisted-by: Cortex <model>"
+	no := false
+	for _, c := range []struct {
+		cfg   *Config
+		model string
+	}{
+		{&Config{Attribution: AttributionConfig{Commit: &bare}}, ""},
+		{&Config{Attribution: AttributionConfig{Commit: &bare, IncludeModel: &no}}, "m1"},
+	} {
+		if got := c.cfg.attributionCommit(c.model); got != "Assisted-by: Cortex" {
+			t.Errorf("bare-token template, model %q = %q, want %q", c.model, got, "Assisted-by: Cortex")
+		}
+	}
 }
 
 // writeFileAndCaptureServer is a two-round scripted backend that records the
@@ -116,13 +182,14 @@ func writeFileAndCaptureServer(t *testing.T, bodies *[]string) *httptest.Server 
 
 // TestRunLoopFiringJournalsAttributedCommit proves the issue's items 3+4 end
 // to end: a loop firing whose session has a model and attribution on (a)
-// sends a prompt that carries the attribution line, (b) lands its commit
-// WITH the trailer, and (c) records Attributed=true on the loop.run journal
-// event.
+// sends a system prompt that carries the attribution line with the resolved
+// trailer, (b) lands its commit WITH the trailer, and (c) records
+// Attributed=true on the loop.run journal event.
 func TestRunLoopFiringJournalsAttributedCommit(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	root := initGitFixture(t, "main", false)
 	t.Chdir(root)
+	resetPrompt(t)
 
 	reg := &fakeRegistry{projects: map[string]registry.Project{"blog": {Name: "blog", Root: root}}}
 	spec := loops.Spec{Name: "nightly", Project: "blog", Prompt: "leave a note"}
@@ -130,9 +197,14 @@ func TestRunLoopFiringJournalsAttributedCommit(t *testing.T) {
 	var bodies []string
 	srv := writeFileAndCaptureServer(t, &bodies)
 	wrapped := func() *CortexSession {
+		cfg := &Config{Models: map[string]ModelSpec{"code": {Model: "loop-model"}}}
+		// The same order NewCortexSession uses: the attribution line is
+		// configured from the resolved code model before Request() builds
+		// the system message.
+		configureAttributionPrompt(cfg, "loop-model")
 		cs := &CortexSession{quiet: true, Request: CortexArgs{}.Request()}
 		cs.Request.BaseURL = srv.URL
-		cs.Config = &Config{Models: map[string]ModelSpec{"code": {Model: "loop-model"}}}
+		cs.Config = cfg
 		cs.Request.Model = "loop-model"
 		return cs
 	}
@@ -165,19 +237,23 @@ func TestRunLoopFiringJournalsAttributedCommit(t *testing.T) {
 		t.Errorf("commit message lacks the attributed trailer:\n%s", body)
 	}
 
-	// The loop's prompt carried the attribution line (item 3).
+	// The session's system prompt carried the attribution line, naming the
+	// resolved trailer and the PR footer verbatim (item 3).
 	if len(bodies) == 0 {
 		t.Fatal("no backend requests recorded")
 	}
-	if !strings.Contains(bodies[0], "attribution marker") {
-		t.Errorf("loop prompt did not carry the attribution line; request body:\n%s", bodies[0])
+	for _, want := range []string{"Co-Authored-By: Cortex (loop-model)", "Generated with Cortex"} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("first request did not carry %q; request body:\n%s", want, bodies[0])
+		}
 	}
 }
 
-// TestRunLoopFiringNoModelJournalsUnattributedCommit is the zero-config case:
-// with no model resolvable the commit is made plain (no literal "<model>"),
-// and the journal records Attributed=false rather than a false positive.
-func TestRunLoopFiringNoModelJournalsUnattributedCommit(t *testing.T) {
+// TestRunLoopFiringNoModelJournalsAttributedCommit is the zero-config case
+// (no config at all, so no model resolvable from config): attribution is on
+// by default, the commit carries the model-less default trailer (never a
+// literal "<model>"), and the journal records Attributed=true.
+func TestRunLoopFiringNoModelJournalsAttributedCommit(t *testing.T) {
 	t.Setenv("CORTEX_HOME", t.TempDir())
 	root := initGitFixture(t, "main", false)
 	t.Chdir(root)
@@ -197,19 +273,23 @@ func TestRunLoopFiringNoModelJournalsUnattributedCommit(t *testing.T) {
 	if got.Outcome != "success" {
 		t.Fatalf("Outcome = %q, want success", got.Outcome)
 	}
-	if got.Attributed {
-		t.Errorf("Attributed = true, want false (no model resolvable)")
+	if !got.Attributed {
+		t.Errorf("Attributed = false, want true (attribution is on by default)")
 	}
 	if got.ChangeRef == "" {
 		t.Fatal("ChangeRef is empty, want a branch@hash reference")
 	}
 
-	// The plain commit must NOT carry a literal "<model>" placeholder.
+	// The commit carries the model-less default trailer exactly once, and
+	// never a literal "<model>" placeholder.
 	body, err := gitCmdOutput(t, root, "log", "-1", "--format=%B")
 	if err != nil {
 		t.Fatalf("git log: %v", err)
 	}
 	if strings.Contains(body, "<model>") {
 		t.Errorf("commit message contains a literal <model> placeholder:\n%s", body)
+	}
+	if n := countTrailers(body, "Co-Authored-By"); n != 1 || !strings.Contains(body, "Co-Authored-By: Cortex") {
+		t.Errorf("commit message should carry exactly one default trailer, got %d:\n%s", n, body)
 	}
 }

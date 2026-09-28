@@ -801,7 +801,7 @@ func TestRunServeCLIWiresLoopCadenceFloor(t *testing.T) {
 // TestAttributionCommitDefaults covers the default commit trailer and PR
 // footer when attribution is enabled but the config doesn't set them.
 func TestAttributionCommitDefaults(t *testing.T) {
-	// Test with nil config (no defaults applied yet)
+	// Commit, PR and IncludeModel unset: the accessors supply the defaults.
 	cfg := &Config{Attribution: AttributionConfig{
 		Enabled:      boolPtr(true),
 		Commit:       nil,
@@ -809,7 +809,7 @@ func TestAttributionCommitDefaults(t *testing.T) {
 		IncludeModel: nil,
 	}}
 
-	// With defaults, nil should return the default values
+	// Unset fields resolve to the built-in trailer and footer.
 	commit := cfg.attributionCommit("qwen3-coder")
 	if commit != "Co-Authored-By: Cortex (qwen3-coder)" {
 		t.Errorf("attributionCommit (nil) = %q, want \"Co-Authored-By: Cortex (qwen3-coder)\"", commit)
@@ -937,11 +937,11 @@ func TestMergeAttribution(t *testing.T) {
 	if merged.Enabled == nil || *merged.Enabled != true {
 		t.Errorf("merged.Enabled = %v, want enabled=true", merged.Enabled)
 	}
-	if *merged.Commit != "Co-Authored-By: AI Bot" {
-		t.Errorf("merged.Commit = %q, want \"Co-Authored-By: AI Bot\"", *merged.Commit)
+	if merged.Commit == nil || *merged.Commit != "Co-Authored-By: AI Bot" {
+		t.Errorf("merged.Commit = %v, want \"Co-Authored-By: AI Bot\"", merged.Commit)
 	}
 	if merged.PR == nil || *merged.PR != "Generated with Cortex" {
-		t.Errorf("merged.PR = %q, want \"Generated with Cortex\" (inherited)", *merged.PR)
+		t.Errorf("merged.PR = %v, want \"Generated with Cortex\" (inherited)", merged.PR)
 	}
 	if merged.IncludeModel != nil {
 		t.Errorf("merged.IncludeModel = %v, want nil (inherited)", merged.IncludeModel)
@@ -967,7 +967,7 @@ func TestMergeAttributionExplicitEmptyDisables(t *testing.T) {
 		t.Errorf("merged.Commit = %v, want empty string (disabled)", merged.Commit)
 	}
 	if merged.PR == nil || *merged.PR != "Generated with Cortex" {
-		t.Errorf("merged.PR = %q, want \"Generated with Cortex\" (not disabled)", *merged.PR)
+		t.Errorf("merged.PR = %v, want \"Generated with Cortex\" (not disabled)", merged.PR)
 	}
 }
 
