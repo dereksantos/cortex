@@ -40,7 +40,7 @@ import (
 const (
 	defaultEndpoint    = "http://chatterbox:4000"
 	defaultBackendType = "litellm"
-	defaultModel       = "qwen3-coder-q3"
+	defaultModel       = "qwen3.8-27b"
 	defaultStudyModel  = "study"
 	defaultWindow      = 131072
 	polyglotRepoURL    = "https://github.com/Aider-AI/polyglot-benchmark.git"

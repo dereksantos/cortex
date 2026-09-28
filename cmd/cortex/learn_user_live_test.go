@@ -506,7 +506,7 @@ func TestLearnUser_Live(t *testing.T) {
 	}
 
 	endpoint := liveEnv("CORTEX_LEARN_USER_LIVE_ENDPOINT", "http://localhost:4000")
-	model := liveEnv("CORTEX_LEARN_USER_LIVE_MODEL", "qwen3-coder-q3")
+	model := liveEnv("CORTEX_LEARN_USER_LIVE_MODEL", liveDefaultCoderModel)
 	reps := liveEnvInt("CORTEX_LEARN_USER_LIVE_REPS", 3)
 	if reps < 3 {
 		reps = 3 // G1's lift comparison needs n>=3, same floor as every sibling live eval

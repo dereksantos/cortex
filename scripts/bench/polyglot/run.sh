@@ -13,7 +13,7 @@
 # Usage:
 #   ./scripts/bench/polyglot/run.sh --only 3                  # smoke test
 #   ./scripts/bench/polyglot/run.sh --exercise wordy,matrix
-#   ./scripts/bench/polyglot/run.sh --model coder-cuda --timeout 15m
+#   ./scripts/bench/polyglot/run.sh --model qwen3.8-27b --timeout 15m
 #   ./scripts/bench/polyglot/run.sh                           # FULL 39-exercise slice
 #
 # The full slice occupies the local GPU for hours. Run it deliberately.
