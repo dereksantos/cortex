@@ -101,122 +101,6 @@ func TestWorkspaceFromCWDMatchesExplicitRootInstructions(t *testing.T) {
 	if resolvedPath(t, implicitPath) != resolvedPath(t, explicitPath) {
 		t.Errorf("Instructions path mismatch:\nimplicit=%q\nexplicit=%q", implicitPath, explicitPath)
 	}
-	// Also proves Workspace.Instructions() agrees with the pre-existing
-	// CWD-implicit projectInstructions() free function (still used by
-	// CortexArgs.Request() until --project wiring lands in M3.5).
-	freePath, free := projectInstructions()
-	if free != implicitInst {
-		t.Errorf("Workspace.Instructions() diverges from projectInstructions(): workspace=%q free=%q", implicitInst, free)
-	}
-	if resolvedPath(t, freePath) != resolvedPath(t, implicitPath) {
-		t.Errorf("projectInstructions() diverges in resolved path: workspace=%q free=%q", implicitPath, freePath)
-	}
-}
-
-// TestResolveInstructionFileFixtureDirs is the table-driven core of
-// instruction-file resolution (#147): for a fixture root carrying a given
-// mix of candidate files, resolveInstructionFile returns the FIRST entry in
-// agentInstructionFiles that exists — no concatenation, AGENTS.md always
-// wins. NewWorkspace (explicit root, no search) is the root the resolver is
-// exercised through, since resolution is per-root; the CWD-implicit
-// projectInstructions() path resolves the same root (its WorkspaceFromCWD()
-// root) through the same helper.
-func TestResolveInstructionFileFixtureDirs(t *testing.T) {
-	tests := []struct {
-		name     string
-		files    map[string]string // rel path under root -> content
-		wantPath string            // "" = no instruction file at all
-		wantBody string            // expected resolved file content (trimmed)
-	}{
-		{
-			name:     "AGENTS.md only",
-			files:    map[string]string{"AGENTS.md": "agents body\n"},
-			wantPath: "AGENTS.md",
-			wantBody: "agents body",
-		},
-		{
-			name:     "CLAUDE.md only",
-			files:    map[string]string{"CLAUDE.md": "claude body\n"},
-			wantPath: "CLAUDE.md",
-			wantBody: "claude body",
-		},
-		{
-			name: "both AGENTS.md and CLAUDE.md — AGENTS.md wins",
-			files: map[string]string{
-				"AGENTS.md": "agents body\n",
-				"CLAUDE.md": "claude body\n",
-			},
-			wantPath: "AGENTS.md",
-			wantBody: "agents body",
-		},
-		{
-			name:     "copilot-instructions.md only",
-			files:    map[string]string{filepath.Join(".github", "copilot-instructions.md"): "copilot body\n"},
-			wantPath: filepath.Join(".github", "copilot-instructions.md"),
-			wantBody: "copilot body",
-		},
-		{
-			name: "all three — first in the list wins, no concatenation",
-			files: map[string]string{
-				"AGENTS.md": "agents body\n",
-				"CLAUDE.md": "claude body\n",
-				filepath.Join(".github", "copilot-instructions.md"): "copilot body\n",
-			},
-			wantPath: "AGENTS.md",
-			wantBody: "agents body",
-		},
-		{
-			name:     "neither",
-			files:    map[string]string{},
-			wantPath: "",
-			wantBody: "",
-		},
-		{
-			name: "neither (unrelated files only)",
-			files: map[string]string{
-				"README.md": "readme\n",
-				"agents.md": "lowercase is not AGENTS.md\n",
-			},
-			wantPath: "",
-			wantBody: "",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			for rel, content := range tc.files {
-				p := filepath.Join(root, rel)
-				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-					t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
-				}
-				if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-					t.Fatalf("write %s: %v", rel, err)
-				}
-			}
-
-			got := resolveInstructionFile(root)
-			want := ""
-			if tc.wantPath != "" {
-				want = filepath.Join(root, tc.wantPath)
-			}
-			if got != want {
-				t.Fatalf("resolveInstructionFile = %q, want %q", got, want)
-			}
-
-			// The resolved path reads as the expected body (the contract
-			// readInstructions then applies on top — trim + cap).
-			if tc.wantBody == "" {
-				return
-			}
-			data, err := os.ReadFile(got)
-			if err != nil {
-				t.Fatalf("read resolved file: %v", err)
-			}
-			if strings.TrimSpace(string(data)) != tc.wantBody {
-				t.Errorf("resolved file body = %q, want %q", strings.TrimSpace(string(data)), tc.wantBody)
-			}
-		})
-	}
 }
 
 // TestResolveInstructionFileMatchesWorkspaceRoot pins the per-root contract
@@ -257,25 +141,27 @@ func TestResolveInstructionFileMatchesWorkspaceRoot(t *testing.T) {
 // acceptance over the WORKSPACE leg: for a fixture root carrying a given mix
 // of candidate files, Workspace.Instructions() returns the FIRST
 // agentInstructionFiles entry present (AGENTS.md, then CLAUDE.md, then
-// .github/copilot-instructions.md) — trimmed, capped, never concatenated.
-// The oversized case also pins the dynamic truncation marker introduced in
-// step 2 (it names the file it came from).
+// .github/copilot-instructions.md) — trimmed, capped, never concatenated —
+// and names the file it resolved. The oversized case also pins the dynamic
+// truncation marker (it names the file it came from).
 func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
 	oversized := strings.Repeat("x", maxInstructionBytes+100)
 	tests := []struct {
 		name     string
 		files    map[string]string // rel path under root -> content
+		wantPath string            // "" = no instruction file at all
 		wantBody string            // "" = no instructions section at all
-		wantCap  bool              // body must be capped at instructionBytesCap + marker
 	}{
 		{
 			name:     "AGENTS.md only",
 			files:    map[string]string{"AGENTS.md": "agents body\n"},
+			wantPath: "AGENTS.md",
 			wantBody: "agents body",
 		},
 		{
 			name:     "CLAUDE.md only",
 			files:    map[string]string{"CLAUDE.md": "claude body\n"},
+			wantPath: "CLAUDE.md",
 			wantBody: "claude body",
 		},
 		{
@@ -284,11 +170,13 @@ func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
 				"AGENTS.md": "agents body\n",
 				"CLAUDE.md": "claude body\n",
 			},
+			wantPath: "AGENTS.md",
 			wantBody: "agents body",
 		},
 		{
 			name:     "copilot-instructions.md only",
 			files:    map[string]string{filepath.Join(".github", "copilot-instructions.md"): "copilot body\n"},
+			wantPath: filepath.Join(".github", "copilot-instructions.md"),
 			wantBody: "copilot body",
 		},
 		{
@@ -298,8 +186,8 @@ func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
 		{
 			name:     "oversized file is capped",
 			files:    map[string]string{"CLAUDE.md": oversized},
+			wantPath: "CLAUDE.md",
 			wantBody: strings.Repeat("x", maxInstructionBytes) + "\n...[CLAUDE.md truncated]",
-			wantCap:  true,
 		},
 	}
 	for _, tc := range tests {
@@ -318,7 +206,7 @@ func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewWorkspace: %v", err)
 			}
-			_, got := ws.Instructions()
+			path, got := ws.Instructions()
 			if want := tc.wantBody; got != want {
 				if len(got) > 120 {
 					got = got[:120] + "…"
@@ -328,8 +216,15 @@ func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
 				}
 				t.Fatalf("Instructions() = %q, want %q", got, want)
 			}
-			if tc.wantCap && len(tc.wantBody) != maxInstructionBytes+len("\n...[CLAUDE.md truncated]") {
-				t.Fatalf("test bug: capped wantBody is %d bytes, want cap+marker length", len(tc.wantBody))
+			// The resolved path is the expected candidate file (or "" when none
+			// exists) — the per-root half of the resolution the body above
+			// pins through the readInstructions trim+cap.
+			wantPath := ""
+			if tc.wantPath != "" {
+				wantPath = filepath.Join(root, tc.wantPath)
+			}
+			if path != wantPath {
+				t.Errorf("Instructions() path = %q, want %q", path, wantPath)
 			}
 		})
 	}

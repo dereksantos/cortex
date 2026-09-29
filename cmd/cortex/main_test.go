@@ -328,8 +328,38 @@ func TestProjectInstructionsInjection(t *testing.T) {
 	})
 
 	t.Run("found in a parent directory", func(t *testing.T) {
-		// The .cortex dir anchors the project root (findUp(".cortex")), so a
-		// file at that root is reached from a nested subdirectory.
+		root := t.TempDir()
+		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from the root"), 0644)
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		t.Chdir(child)
+
+		if sys := (CortexArgs{}).Request().Messages[0].Content; !strings.Contains(sys, "from the root") {
+			t.Error("AGENTS.md in an ancestor directory should be found")
+		}
+	})
+
+	t.Run("CLAUDE.md is found in a parent directory", func(t *testing.T) {
+		// No AGENTS.md anywhere: the ancestor walk resolves CLAUDE.md the
+		// same way it resolves AGENTS.md, and the header names the file.
+		root := t.TempDir()
+		os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("root claude\n"), 0644)
+		child := filepath.Join(root, "a", "b")
+		os.MkdirAll(child, 0755)
+		t.Chdir(child)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "root claude") {
+			t.Error("CLAUDE.md in an ancestor directory should be found")
+		}
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\nroot claude") {
+			t.Error("CLAUDE.md body must follow the project-instructions separator naming CLAUDE.md")
+		}
+	})
+
+	t.Run("found at the .cortex-anchored root from a nested directory", func(t *testing.T) {
+		// A .cortex dir anchors the project root (findUp(".cortex")); the file
+		// at that root is reached from a nested subdirectory too.
 		root := t.TempDir()
 		os.MkdirAll(filepath.Join(root, ".cortex"), 0755)
 		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from the root"), 0644)
@@ -343,11 +373,11 @@ func TestProjectInstructionsInjection(t *testing.T) {
 	})
 
 	t.Run("CLAUDE.md is appended when AGENTS.md is absent", func(t *testing.T) {
-		// A .cortex dir anchors WorkspaceFromCWD (and thus
-		// projectInstructions) at THIS dir: without it, findUp(".cortex")
-		// walks the test runner's whole home chain — on a machine whose
-		// home tree contains an AGENTS.md, the ancestor file would win and
-		// the subtest could never observe the CWD's CLAUDE.md.
+		// A .cortex dir anchors WorkspaceFromCWD (and thus fileLabel) at THIS
+		// dir: without it, findUp(".cortex") walks the test runner's whole
+		// home chain — on a machine whose home tree contains an AGENTS.md,
+		// the ancestor file would win and the subtest could never observe the
+		// CWD's CLAUDE.md.
 		dir := t.TempDir()
 		os.MkdirAll(filepath.Join(dir, ".cortex"), 0755)
 		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("CLAUDE conventions\n"), 0644)

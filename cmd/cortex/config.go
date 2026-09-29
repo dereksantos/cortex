@@ -948,9 +948,8 @@ var agentInstructionFiles = []string{
 // resolveInstructionFile returns the path of the first entry in
 // agentInstructionFiles that exists as a regular file under root (or "" when
 // none do). root is taken as given — this is the per-root half of instruction
-// resolution; the CWD-implicit caller (projectInstructions) passes its
-// WorkspaceFromCWD()-derived root so nested dirs resolve upward, exactly
-// like AGENTS.md did before the list existed.
+// resolution: projectInstructions walks it upward from the CWD (findUp
+// semantics) and Workspace.Instructions applies it to an explicit root.
 func resolveInstructionFile(root string) string {
 	for _, rel := range agentInstructionFiles {
 		if p := filepath.Join(root, rel); regular(p) {
@@ -973,27 +972,29 @@ const maxInstructionBytes = 16384
 var instructionBytesCap = maxInstructionBytes
 
 // projectInstructions resolves and reads the CWD-implicit project
-// instructions: the working directory is searched first (the fresh
-// workspace's own files win), then the upward chain via findUp(".cortex")
-// the way WorkspaceFromCWD anchors the root — and at that root the first
-// agentInstructionFiles entry present (AGENTS.md, then CLAUDE.md, then
-// .github/copilot-instructions.md) is read. No concatenation: exactly one
-// file is ever loaded. It returns the resolved file's path ("" when none
-// exists) alongside its body, so the caller can name the file in the
-// system-prompt section header (systemPromptContent's label) — the seed
-// shows which file it came from (#147).
+// instructions: starting at the working directory and walking up to the
+// filesystem root, the FIRST directory holding any entry of
+// agentInstructionFiles (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md) wins, and within that directory the first
+// file in priority order is read — exactly findUp semantics with the
+// priority list applied per level (an ancestor's AGENTS.md beats a
+// deeper dir's CLAUDE.md; no concatenation: exactly one file is ever
+// loaded). It returns the resolved file's path ("" when none exists) alongside
+// its body, so the caller can name the file in the system-prompt section
+// header (systemPromptContent's label) — the seed shows which file it came
+// from (#147).
 func projectInstructions() (path, instructions string) {
-	for _, rel := range agentInstructionFiles {
-		if p := filepath.Join(wd(), rel); regular(p) {
+	dir := wd()
+	for {
+		if p := resolveInstructionFile(dir); p != "" {
 			return p, readInstructions(p)
 		}
-	}
-	if ws := WorkspaceFromCWD(); ws.Root != "" && ws.Root != wd() {
-		if p := resolveInstructionFile(ws.Root); p != "" {
-			return p, readInstructions(p)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", ""
 		}
+		dir = parent
 	}
-	return "", ""
 }
 
 // fileLabel renders a resolved instruction file's path as the name

@@ -343,16 +343,18 @@ The list is deliberately short and documented in the code: every entry is a
 file a real repo ships, and the order encodes intent (a repo with several
 still loads exactly one).
 
-Search rule: the working directory is checked first (a fresh workspace's own
-files win), then the project root anchored by `findUp(".cortex")` the way
-`WorkspaceFromCWD` derives it — so a nested subdirectory resolves the root's
-file, exactly as `AGENTS.md` behaved before the list existed. The loaded file
-is trimmed, truncated at `limits.max_instruction_bytes` (with a marker naming
-the file), and appended to the system prompt as a
+Search rule: the walk starts at the working directory and goes up to the
+filesystem root — the nearest directory from the CWD upward that contains any
+candidate file wins, and within that directory the first file in the
+priority order above is the one loaded (findUp semantics with the list
+applied per level — an ancestor's `AGENTS.md` beats a deeper directory's
+`CLAUDE.md`). The loaded file is trimmed, truncated at
+`limits.max_instruction_bytes` (with a marker naming the file), and appended
+to the system prompt as a
 `# Project instructions (<file>)` section — the header names the file, and
 `/context`'s system legend row shows it, so the seed always says where it came
-from. When no candidate file exists anywhere, no section is added (behavior
-identical to the old AGENTS.md-only rule).
+from. When no candidate file exists anywhere up the chain, no section is
+added (behavior identical to the old AGENTS.md-only rule).
 
 The explicit-root leg (`--project`, serve) resolves the same list at the
 project root via `Workspace.Instructions()`; the two legs are provably
