@@ -48,7 +48,7 @@ func (cs *CortexSession) recoveryClassDir() string {
 // turn's transcript. role is the role binding that was running ("code" or
 // "study"), the same vocabulary model.substitution / model.failure receipts
 // use.
-func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason string, maxTokensClamped, salvagedUnclamped bool) {
+func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason, outcome string, maxTokensClamped, salvagedUnclamped bool) {
 	if role == "" {
 		return // no role to attribute — skip the receipt
 	}
@@ -60,6 +60,7 @@ func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason s
 		Model:             model,
 		Role:              role,
 		Path:              path,
+		Outcome:           outcome,
 		StopReason:        stopReason,
 		MaxTokensClamped:  maxTokensClamped,
 		SalvagedUnclamped: salvagedUnclamped,
@@ -79,12 +80,14 @@ func (cs *CortexSession) appendReasoningFallback(role, path, model, stopReason s
 // never to req.Messages. Unlike cs.Append, it must not touch the wire
 // conversation: the note is a human-readable marker of a harness-side event,
 // and appending a system message mid-conversation would put a non-leading
-// system message into every later request and the resumable session log.
-// No-op when the transcript is not started (bare test constructions), the
-// same best-effort posture as writeTranscript.
+// system message into every later request and the resumable session log. It
+// is written under a distinct kindNote so loadSession (cortex resume) skips
+// it — it is never part of the model-visible history, only of the
+// human-readable transcript. No-op when the transcript is not started (bare
+// test constructions), the same best-effort posture as writeTranscript.
 func (cs *CortexSession) transcriptNote(content string) {
 	if cs.transcript == nil {
 		return
 	}
-	cs.writeEntry(sessionEntry{Kind: kindMessage, Turn: cs.turnNo, Message: Message{Role: RoleSystem, Content: content}})
+	cs.writeEntry(sessionEntry{Kind: kindNote, Turn: cs.turnNo, Message: Message{Role: RoleSystem, Content: content}})
 }

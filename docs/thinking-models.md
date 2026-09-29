@@ -345,21 +345,26 @@ fall-through goes straight to the existing prompt-based salvage
 (`salvageEmptyFinalize` / `salvageObservationFinalize`).
 
 **Journal receipt and transcript record.** Every recovery that actually
-recovers a non-empty answer appends one `recovery.reasoning_fallback` entry
-to the project-scope class dir (`.cortex/journal/recovery/`) — best-effort,
-a failed write is swallowed, the recovery itself already ran — and a short
-system note is written to the session transcript, so the fallback is visible
-in both run history and the session JSONL. The note is transcript-only by
-design: it is **never** appended to `req.Messages` (the wire conversation and
-the resumable session log), because a system message in the middle of a
-conversation is not part of the model-visible history and some chat
-templates reject or mishandle system messages that aren't first. The
-journal receipt is the authoritative record. The receipt records the model that
-needed it, the role (`code`/`study`), the path that fired it, the stop
-reason, and the clamp state, so telemetry shows *which models keep needing
-it* per project (see docs/journal.md's writer-class taxonomy and
-`cmd/cortex/recovery_journal.go`). `loopStats.ReasoningFallback` is set on
-the run's in-memory stats the same way, for the study-eval / session-metrics
-rows. The receipt fires on recovery *success only* — an empty retry that fell
-through to the prompt-based salvage records `ReasoningFallback = false` (the
-salvage path's own `Salvaged`/`SalvagedUnclamped` attribution stands).
+recovers the round appends one `recovery.reasoning_fallback` entry to the
+project-scope class dir (`.cortex/journal/recovery/`) — best-effort, a
+failed write is swallowed, the recovery itself already ran — and a short
+note is written to the session transcript, so the fallback is visible in
+both run history and the session JSONL. The note is written under a distinct
+`kindNote` entry: `loadSession` (`cortex resume`) skips `kindNote`, so it is
+transcript-only by construction — it is **never** part of the wire
+conversation or the model-visible history, because a system message in the
+middle of a conversation is not part of that history and some chat templates
+reject or mishandle system messages that aren't first. The journal receipt is
+the authoritative record. The receipt records the model that needed it, the
+role (`code`/`study`), the path that fired it, how the retry recovered the
+round (`outcome`: `answer` when the retry returned prose, `tool_calls` when
+it returned calls that were dispatched), the stop reason, and the clamp
+state, so telemetry shows *which models keep needing it* per project (see
+docs/journal.md's writer-class taxonomy and `cmd/cortex/recovery_journal.go`).
+`loopStats.ReasoningFallback` (with `loopStats.ReasoningFallbackOutcome`) is
+set on the run's in-memory stats the same way, for the study-eval /
+session-metrics rows. The receipt fires when the retry recovers the round —
+as prose *or* as tool calls — and **not** when the retry also came back empty
+and fell through to the prompt-based salvage (that records
+`ReasoningFallback = false`; the salvage path's own `Salvaged`/
+`SalvagedUnclamped` attribution stands).

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -49,6 +50,18 @@ func TestAccountUsageReasoningTokens(t *testing.T) {
 func readCall(id, path string) ToolCall {
 	args, _ := json.Marshal(map[string]any{"path": path})
 	return ToolCall{ID: id, Type: "function", Function: FunctionCall{Name: tools.FunctionReadFile, Arguments: string(args)}}
+}
+
+// rolesOf renders a message slice's role sequence for failure diagnostics.
+func rolesOf(msgs []Message) string {
+	var b strings.Builder
+	for i, m := range msgs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(m.Role)
+	}
+	return "[" + b.String() + "]"
 }
 
 // TestCoderLoopCharacterization locks the coder loop's behavior — the message
@@ -671,6 +684,10 @@ func TestRunLoopSalvagesEmptyFinishWithReasoningOffRetry(t *testing.T) {
 				t.Errorf("stop=%q salvaged=%v reasoningFallback=%v, want salvaged-finalize/true/true",
 					stats.StopReason, stats.Salvaged, stats.ReasoningFallback)
 			}
+			if stats.ReasoningFallbackOutcome != journal.OutcomeAnswer {
+				t.Errorf("ReasoningFallbackOutcome = %q, want %q (the retry answered with prose)",
+					stats.ReasoningFallbackOutcome, journal.OutcomeAnswer)
+			}
 			if !stats.SalvagedUnclamped {
 				t.Errorf("SalvagedUnclamped = false, want true (the empty finish was not clamped)")
 			}
@@ -792,8 +809,96 @@ func TestRunLoopReasoningOffRetryToolCallsDispatch(t *testing.T) {
 	if stats.StopReason != "clean-finalize" {
 		t.Errorf("stop = %q, want clean-finalize (the loop continued; the retry was a tool round, not an answer)", stats.StopReason)
 	}
-	if stats.ReasoningFallback {
-		t.Errorf("ReasoningFallback = true, want false (the retry's tool calls were dispatched, not recovered as an answer)")
+	// The fallback DID fire and recover the turn (with tool calls), so it is
+	// recorded for telemetry even though the loop continued rather than
+	// returning an answer: flag set, outcome = tool_calls.
+	if !stats.ReasoningFallback {
+		t.Errorf("ReasoningFallback = false, want true (the off-retry recovered the round with tool calls)")
+	}
+	if stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallbackOutcome = %q, want %q", stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
+	}
+}
+
+// TestRunLoopReasoningOffRetryRecoversXMLToolCalls: a Qwen-style model (the
+// exact target of #149) can answer the reasoning-off retry with native XML
+// tool-call markup in its content instead of structured tool_calls. The
+// recovery must run the SAME XML recovery the main round applies — parse the
+// calls out of the content, dispatch them, and NOT return the raw markup as
+// the turn's final prose.
+func TestRunLoopReasoningOffRetryRecoversXMLToolCalls(t *testing.T) {
+	req := &AgentRequest{Model: "m", Messages: []Message{{Role: RoleSystem, Content: "s"}}}
+	applyEffort(req, llm.DialectTemplateKwargs, llm.Effort{Level: llm.EffortOn})
+	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }
+
+	sends := 0
+	var retrySawOff bool
+	var dispatched []string
+	xml := "<tool_call>\n<function=read_file>\n<parameter=path>\ngo.mod\n</parameter>\n</function>\n</tool_call>"
+	send := SenderFunc(func(_ context.Context, r *AgentRequest) (*AgentResponse, bool, error) {
+		sends++
+		switch sends {
+		case 1:
+			return fakeResp("", nil, 1, 5), false, nil // empty finish, reasoning on
+		case 2:
+			// The off-retry: the Qwen model answers with native XML tool-call
+			// markup in its content, NOT structured tool_calls.
+			retrySawOff = r.Effort.Level == llm.EffortOff
+			return fakeResp(xml, nil, 1, 8), false, nil
+		case 3:
+			return fakeResp("recovered answer", nil, 1, 8), false, nil // normal round after the tool result
+		default:
+			t.Fatalf("send %d: unexpected extra send", sends)
+			return nil, false, nil
+		}
+	})
+	disp := DispatchFunc(func(_ context.Context, call ToolCall) string {
+		dispatched = append(dispatched, call.Function.Name)
+		return "OBS:" + call.Function.Name
+	})
+	content, stats, err := runLoop(context.Background(), send, req,
+		Toolset{Tools: []Tool{tools.ReadFile}, Dispatch: disp},
+		Bounds{MaxTokens: 100, MaxIter: 5}, nil, appendMsg, nil)
+	if err != nil {
+		t.Fatalf("runLoop: %v", err)
+	}
+	if !retrySawOff {
+		t.Error("the retry send did not go out with reasoning pinned off")
+	}
+	if len(dispatched) != 1 || dispatched[0] != tools.FunctionReadFile {
+		t.Errorf("dispatched = %v, want [read_file] (the retry's XML tool call must be dispatched, not returned as prose)", dispatched)
+	}
+	if content != "recovered answer" {
+		t.Errorf("content = %q, want recovered answer — NOT the raw <tool_call> markup", content)
+	}
+	if strings.Contains(content, "function=read_file") || strings.Contains(content, "tool_call") {
+		t.Errorf("content leaked raw tool-call markup: %q", content)
+	}
+	// system, assistant(tool_calls), tool(result), assistant — no doubled or
+	// leftover empty assistant (the dropped empty finish did not survive).
+	if len(req.Messages) != 4 {
+		t.Fatalf("len(req.Messages) = %d, want 4 (system, assistant(tool_calls), tool, assistant): %v", len(req.Messages), rolesOf(req.Messages))
+	}
+	// The retry's assistant message carries the parsed call (not the raw markup).
+	assistant := req.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 ||
+		assistant.ToolCalls[0].Function.Name != tools.FunctionReadFile {
+		t.Errorf("assistant message = %+v, want one parsed read_file tool call", assistant)
+	}
+	if strings.Contains(assistant.Content, "function=read_file") {
+		t.Errorf("assistant content still carries raw markup: %q", assistant.Content)
+	}
+	if toolMsg := req.Messages[2]; toolMsg.Role != RoleTool {
+		t.Errorf("message 2 role = %q, want a tool result following the assistant(tool_calls)", toolMsg.Role)
+	}
+	if finalMsg := req.Messages[3]; finalMsg.Role != "assistant" || finalMsg.Content != "recovered answer" {
+		t.Errorf("final message = %+v, want the assistant's recovered answer", finalMsg)
+	}
+	// The fallback fired and recovered the round with tool calls, so the engine
+	// records it (flag + outcome) for telemetry, exactly as TestRunLoopReasoningOffRetryToolCallsDispatch pins.
+	if !stats.ReasoningFallback || stats.ReasoningFallbackOutcome != journal.OutcomeToolCalls {
+		t.Errorf("ReasoningFallback=%v outcome=%q, want true/%q (the off-retry recovered the round with tool calls)",
+			stats.ReasoningFallback, stats.ReasoningFallbackOutcome, journal.OutcomeToolCalls)
 	}
 }
 

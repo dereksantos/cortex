@@ -27,16 +27,33 @@ const (
 	ReasoningFallbackPathNatural = "natural"
 )
 
+// Outcome values for ReasoningFallbackPayload.Outcome: the two shapes the
+// reasoning-off retry can recover the round in.
+const (
+	// OutcomeAnswer: the retry returned prose — used as the turn's answer.
+	OutcomeAnswer = "answer"
+	// OutcomeToolCalls: the retry returned tool calls — dispatched like a
+	// normal round, the loop continues.
+	OutcomeToolCalls = "tool_calls"
+)
+
 // ReasoningFallbackPayload is one fallback receipt. Change is never
 // included: the recovery is a re-send of the SAME request with a different
 // effort, not a model substitution (which is what model.substitution
 // records) — there is no old→new model pair to record. The receipt names
 // the model that needed the fallback (Model), the role that was running
-// (Role), which path fired it (Path), and enough context for a reader to
-// correlate with the surrounding turn (the stop reason the recovery
-// attributed, the clamp state at the time) without re-deriving it from the
-// transcript.
+// (Role), which path fired it (Path), how the retry recovered the round
+// (Outcome — the retry answered with prose or with tool calls), and enough
+// context for a reader to correlate with the surrounding turn (the stop
+// reason the recovery attributed, the clamp state at the time) without
+// re-deriving it from the transcript.
 type ReasoningFallbackPayload struct {
+	// Outcome is how the reasoning-off retry recovered the round: OutcomeAnswer
+	// (it answered with prose, returned as the turn's answer) or OutcomeToolCalls
+	// (it answered with tool calls, dispatched like a normal round). Lets a
+	// reader tell the two recoveries apart — the tool-call path continues the
+	// loop rather than ending it.
+	Outcome string `json:"outcome,omitempty"`
 	// Model is the in-flight model id the recovery ran against — the model
 	// that spent its turn deliberating and came back empty. The field the
 	// issue #149 telemetry asks for ("which models keep needing it").

@@ -182,7 +182,7 @@ func (cs *CortexSession) turn(ctx context.Context, input string, progress Progre
 	// recovery journal — the role code is fixed here (the coder turn), so the
 	// closure is the composition root's, not the engine's.
 	ts.OnReasoningFallback = func(stats loopStats) {
-		cs.appendReasoningFallback(roleCode, journal.ReasoningFallbackPathNatural, cs.Request.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.appendReasoningFallback(roleCode, journal.ReasoningFallbackPathNatural, cs.Request.Model, stats.StopReason, stats.ReasoningFallbackOutcome, stats.MaxTokensClamped, stats.SalvagedUnclamped)
 		cs.transcriptNote(reasoningFallbackNote())
 	}
 

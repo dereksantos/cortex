@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dereksantos/cortex/internal/agent"
+	"github.com/dereksantos/cortex/internal/journal"
 	"github.com/dereksantos/cortex/internal/tools"
 	"github.com/dereksantos/cortex/pkg/llm"
 )
@@ -112,9 +113,16 @@ type loopStats struct {
 	// calls). Distinguished from Salvaged so a model that keeps needing it
 	// shows up in telemetry separately from the prompt-based salvages.
 	ReasoningFallback bool
-	Iterations        int    // model rounds consumed
-	StopReason        string // clean-finalize|salvaged-finalize|empty-finalize|max-iter|read-budget|no-progress|deadline|error
-	FinalizeForced    bool   // answered because a bound dragged finalize out
+	// ReasoningFallbackOutcome names HOW the #149 off-retry recovered the
+	// round: journal.OutcomeAnswer (it answered with prose, returned as the
+	// turn's answer) or journal.OutcomeToolCalls (it answered with tool
+	// calls, dispatched like a normal round). Only meaningful when
+	// ReasoningFallback is set; the journal receipt and telemetry both read
+	// it so the two recoveries can be told apart.
+	ReasoningFallbackOutcome string
+	Iterations               int    // model rounds consumed
+	StopReason               string // clean-finalize|salvaged-finalize|empty-finalize|max-iter|read-budget|no-progress|deadline|error
+	FinalizeForced           bool   // answered because a bound dragged finalize out
 
 	Outlines  int
 	Greps     int
@@ -357,15 +365,15 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		msg := res.Choices[0].Message
 		// Recover Qwen-native XML tool calls the proxy didn't normalize, so a
 		// call isn't silently lost (empty tool_calls reads as a final answer).
-		if len(msg.ToolCalls) == 0 {
-			if calls := parseXMLToolCalls(msg.Content); len(calls) > 0 {
-				msg.ToolCalls = calls
-				msg.Content = stripToolMarkup(msg.Content)
-			}
-		}
-		// Append the assistant message BEFORE any tool results: the API requires
-		// assistant(tool_calls) → tool(result) ordering.
-		appendMsg(msg)
+		recoverXMLToolCalls(&msg)
+		// This round's assistant message is appended at the dispatch point
+		// below (before any tool results) — UNLESS it's an empty natural finish
+		// that the issue #149 off-retry may replace: in that case only the
+		// message that survives the retry decision is appended, so the wire and
+		// the resumable transcript (cs.Append writes both) never carry the
+		// dropped empty turn (which would read as "assistant(empty),
+		// assistant(…)", a shape providers reject when the retry returns tool
+		// calls). The retry's prose result is appended right before it returns.
 
 		// No tool calls → the model answered. That prose IS the result — unless
 		// it's EMPTY, salvaged with one terse re-ask instead of returning
@@ -375,9 +383,19 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 		// tool-carrying message below; the empty-finish gate is checked BEFORE
 		// that happens, so the fall-through dispatch runs in the same round.)
 		finishedNaturally := len(msg.ToolCalls) == 0
+		// The issue #149 off-retry fires only on a NATURAL empty finish — no
+		// tool calls AND no content — from a role whose reasoning is ON
+		// (req.Effort.Level != EffortOff; EffortUnset is treated as on). It
+		// must NOT fire on a tool round that happens to return empty content
+		// with tool calls (a common Qwen shape): that is an ordinary tool round
+		// that the empty-finish recovery was never written for, and retrying it
+		// would drop the tool call. finishedNaturally (len(ToolCalls)==0) is
+		// checked alongside the empty content so only a bare empty answer
+		// qualifies.
+		retryableEmptyFinish := finishedNaturally && strings.TrimSpace(msg.Content) == "" && req.Effort.Level != llm.EffortOff
 		if finishedNaturally {
 			answer := strings.TrimSpace(msg.Content)
-			if answer == "" && req.Effort.Level != llm.EffortOff {
+			if retryableEmptyFinish {
 				// Issue #149: an empty finish from a role whose reasoning is on
 				// (a Qwen-style model that spent its whole turn deliberating) is
 				// recovered by re-sending the SAME request once with reasoning
@@ -385,41 +403,56 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				// falling through to the prompt-based salvages. Recovery, not
 				// policy: the configured effort default is never changed, and
 				// roles that already run with reasoning off never trigger it.
-				// The empty assistant message appended above is dropped first so
-				// the retry is byte-identical to the request that came back
-				// empty — a trailing empty turn would not be the same request
-				// (and providers reject the transcript shape it would produce
-				// when the retry returns tool calls).
-				if len(req.Messages) > 0 {
-					req.Messages = req.Messages[:len(req.Messages)-1]
-				}
-				retry := salvageEmptyReasoningRetry(ctx, send, req, &stats, appendMsg)
+				// The empty assistant message is NOT appended yet: the retry
+				// re-sends the request it came back empty WITHOUT the empty turn
+				// (a trailing empty turn would not be the same request, and
+				// providers reject the transcript shape it would produce when the
+				// retry returns tool calls), so only the message that survives the
+				// decision below is appended — the retry's (replacing the empty
+				// one) or the original empty one on fall-through.
+				retry := salvageEmptyReasoningRetry(ctx, send, req, &stats)
 				if retry != nil && len(retry.ToolCalls) > 0 {
 					// The retry returned TOOL CALLS, not an answer: it is an
-					// ordinary tool round. Replace the empty message and fall
-					// through to the dispatch below — the model's requested
-					// actions are neither dropped nor left dangling without
-					// results.
+					// ordinary tool round. It replaces the dropped empty message;
+					// the append happens at the round's dispatch point below (the
+					// tool-round appendMsg), so the model's requested actions are
+					// neither dropped nor left dangling without results. The
+					// fallback fired and recovered the turn, so it is recorded
+					// (receipt + flag) just like the prose recovery.
 					msg = *retry
 					finishedNaturally = false
+					stats.ReasoningFallback = true
+					stats.ReasoningFallbackOutcome = journal.OutcomeToolCalls
 				} else if a2 := retryText(retry); a2 != "" {
 					stats.Salvaged = true
 					stats.ReasoningFallback = true
+					stats.ReasoningFallbackOutcome = journal.OutcomeAnswer
 					stats.SalvagedUnclamped = !stats.MaxTokensClamped
 					stats.StopReason = "salvaged-finalize"
+					appendMsg(*retry)
 					if ts.OnReasoningFallback != nil {
 						ts.OnReasoningFallback(stats)
 					}
 					req.Tools = ts.Tools
 					return a2, stats, nil
 				} else if retry != nil {
-					// The retry also came back empty (or errored): re-append the
-					// empty assistant message so the transcript mirrors the wire
-					// conversation, then fall through to the prompt-based salvages.
-					appendMsg(*retry)
+					// The retry also came back empty (or errored): fall through to
+					// the prompt-based salvages with the ORIGINAL empty message
+					// standing in for the round (appended once, below), so the
+					// transcript mirrors the wire conversation — the empty message
+					// is written once, not twice.
+					stats.ReasoningFallback = false
+					stats.ReasoningFallbackOutcome = ""
+				}
+				if ts.OnReasoningFallback != nil && stats.ReasoningFallback {
+					ts.OnReasoningFallback(stats)
 				}
 			}
 			if finishedNaturally {
+				// Natural finish: append the original message so the transcript
+				// mirrors the wire conversation (one empty message, not two),
+				// then re-run the prompt-based salvage chain from it.
+				appendMsg(msg)
 				if answer == "" {
 					wasClamped := stats.MaxTokensClamped
 					if a2 := salvageEmptyFinalize(ctx, send, req, &stats, appendMsg); a2 != "" {
@@ -448,6 +481,14 @@ func runLoop(ctx context.Context, send Sender, req *AgentRequest, ts Toolset, b 
 				return answer, stats, nil
 			}
 		}
+
+		// A natural finish always returns from inside the block above (clean,
+		// salvaged, or empty-finalize). Reaching here means the model asked for
+		// tool calls — either a normal tool round, or one the issue #149
+		// off-retry recovered above (replacing the dropped empty message) — and
+		// the assistant message must be on the wire before any tool results (the
+		// API ordering invariant).
+		appendMsg(msg)
 
 		// No-progress guard: a weak model can re-issue the identical batch
 		// forever. Track consecutive repeats and break before it burns the run.
@@ -601,18 +642,20 @@ func salvageObservationFinalize(obs string, stats *loopStats) string {
 // is recovered by re-sending the SAME request once with reasoning pinned off.
 // The role's configured effort is untouched (recovery, not policy): the
 // one-shot mutation rides the same pattern as disableEffortForSend's existing
-// uses and is restored before return. The caller drops the empty assistant
-// message BEFORE calling this, so the retry is byte-identical to the request
-// that came back empty. The result is the whole retry message, not just its
-// text: it can come back with tool calls (the model had work to do), and the
-// caller dispatches those like any normal tool round (continue the loop) —
-// the message is already appended here, in the assistant(tool_calls) position
-// the API requires. A retry that also comes back empty (or errors) returns
-// nil/empty text and the caller re-appends the empty message (or nothing,
-// on error) before falling through to the existing salvage chain. Exactly one
-// retry per empty finish, enforced by construction: the caller invokes this
-// at most once per empty branch.
-func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats, appendMsg func(Message)) *Message {
+// uses and is restored before return. The caller must NOT have appended the
+// empty assistant message yet (it appends only the message that survives the
+// retry decision), so the retry re-sends the request that came back empty
+// byte-identically — a trailing empty turn would not be the same request.
+//
+// The result is the whole retry message, not just its text, with the SAME
+// Qwen-XML tool-call recovery the main round applies (recoverXMLToolCalls):
+// for exactly the Qwen models this issue targets, a reasoning-off retry can
+// answer with native <tool_call> markup rather than structured
+// tool_calls, and without the recovery that markup would be returned as the
+// turn's final prose instead of dispatched. A retry that also comes back
+// empty (or errors) returns nil. Exactly one retry per empty finish, enforced
+// by construction: the caller invokes this at most once per empty branch.
+func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequest, stats *loopStats) *Message {
 	restore := disableEffortForSend(req)
 	defer restore()
 	res, _, err := send.Send(ctx, req)
@@ -621,8 +664,27 @@ func salvageEmptyReasoningRetry(ctx context.Context, send Sender, req *AgentRequ
 	}
 	accountUsage(stats, res, req.MaxTokens)
 	msg := res.Choices[0].Message
-	appendMsg(msg)
+	recoverXMLToolCalls(&msg)
 	return &msg
+}
+
+// recoverXMLToolCalls recovers Qwen-native XML tool calls the proxy didn't
+// normalize into structured tool_calls, in place: when the message carries no
+// tool calls but its content parses as <tool_call>…</tool_call> markup,
+// the parsed calls become the message's tool calls and the raw markup is
+// stripped from the content. Shared by the main round (runLoop) and the issue
+// #149 off-retry (salvageEmptyReasoningRetry) so a Qwen model that answers
+// either with native XML gets its calls dispatched rather than returned as
+// prose. A no-op when the message already has tool calls or the content has
+// no parseable calls.
+func recoverXMLToolCalls(msg *Message) {
+	if msg == nil || len(msg.ToolCalls) > 0 {
+		return
+	}
+	if calls := parseXMLToolCalls(msg.Content); len(calls) > 0 {
+		msg.ToolCalls = calls
+		msg.Content = stripToolMarkup(msg.Content)
+	}
 }
 
 // retryText reports a retry message's trimmed content ("" when it carries
@@ -636,13 +698,14 @@ func retryText(msg *Message) string {
 
 // reasoningFallbackNote is the transcript marker for a fired issue #149
 // fallback (issue #149: "record the fallback in the transcript"). A short
-// system line, written ONLY to the transcript (cs.transcriptNote — never
-// appended to req.Messages, which is the wire conversation and the resumable
-// session log): a mid-conversation system message is not part of the
-// model-visible history and some chat templates reject or mishandle system
-// messages that aren't first. The journal receipt (recovery.reasoning_fallback)
-// is the authoritative record; the transcript line keeps the fallback visible
-// in the human-readable log.
+// harness line written to the session JSONL under a distinct kindNote entry —
+// loadSession (cortex resume) skips kindNote, so it is never part of the
+// model-visible history or the wire conversation, only of the human-readable
+// transcript. Writing it as a plain kindMessage system line would put a
+// non-leading system message into the resumed conversation (some chat
+// templates reject or mishandle system messages that aren't first). The
+// journal receipt (recovery.reasoning_fallback) is the authoritative record;
+// the transcript note keeps the fallback visible in the human-readable log.
 func reasoningFallbackNote() string {
 	return "Harness note: the previous reply came back empty (the model's reasoning consumed the whole completion). The same request was re-sent once with reasoning disabled and recovered an answer."
 }

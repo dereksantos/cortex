@@ -166,7 +166,7 @@ func (cs *CortexSession) runSubagentStats(ctx context.Context, sa tools.Subagent
 	// own request is the model that needed the fallback; the role is the
 	// subagent's ("study").
 	ts.OnReasoningFallback = func(stats loopStats) {
-		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.MaxTokensClamped, stats.SalvagedUnclamped)
+		cs.appendReasoningFallback(sa.Role, journal.ReasoningFallbackPathNatural, req.Model, stats.StopReason, stats.ReasoningFallbackOutcome, stats.MaxTokensClamped, stats.SalvagedUnclamped)
 		cs.transcriptNote(reasoningFallbackNote())
 	}
 	appendMsg := func(m Message) { req.Messages = append(req.Messages, m) }

@@ -13,6 +13,7 @@ func TestReasoningFallback_RoundTrip(t *testing.T) {
 		Model:             "qwen3-32b:free",
 		Role:              "code",
 		Path:              ReasoningFallbackPathNatural,
+		Outcome:           OutcomeToolCalls,
 		StopReason:        "salvaged-finalize",
 		MaxTokensClamped:  false,
 		SalvagedUnclamped: true,
@@ -32,8 +33,8 @@ func TestReasoningFallback_RoundTrip(t *testing.T) {
 		t.Fatalf("ParseReasoningFallback: %v", err)
 	}
 	if got.Model != in.Model || got.Role != in.Role || got.Path != in.Path ||
-		got.StopReason != in.StopReason || got.MaxTokensClamped != in.MaxTokensClamped ||
-		got.SalvagedUnclamped != in.SalvagedUnclamped {
+		got.Outcome != in.Outcome || got.StopReason != in.StopReason ||
+		got.MaxTokensClamped != in.MaxTokensClamped || got.SalvagedUnclamped != in.SalvagedUnclamped {
 		t.Errorf("round-trip mismatch: got %+v, want %+v", got, in)
 	}
 }

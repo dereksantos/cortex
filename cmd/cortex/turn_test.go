@@ -806,3 +806,172 @@ func TestTurnPhaseIdleAfterCompletion(t *testing.T) {
 		t.Errorf("phase after Turn() = %v, want phaseIdle", cs.phase)
 	}
 }
+
+// fallbackTranscriptEntries re-reads the session JSONL on disk and returns the
+// raw entries whose kind matches want ("" for the default message entries).
+func fallbackTranscriptEntries(t *testing.T, cs *CortexSession, want string) []sessionEntry {
+	t.Helper()
+	path := filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading transcript: %v", err)
+	}
+	var out []sessionEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e sessionEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("bad transcript line %q: %v", line, err)
+		}
+		if e.Kind == want {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestTurnReasoningFallbackKeepsTranscriptConsistent: the issue #149
+// off-retry recovers an empty finish with a tool call. The dropped empty
+// assistant message must NOT outlive the retry in the resumable session
+// log: reload with loadSession and assert there is no "assistant, then
+// assistant" shape (and no mid-conversation system note) — the transcript is
+// consistent with the wire conversation (assistant(tool_calls) → tool →
+// assistant).
+func TestTurnReasoningFallbackKeepsTranscriptConsistent(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			// Natural finish: empty, no tool calls (reasoning consumed the turn).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		case 2:
+			// The reasoning-off retry: a tool call (the work the deliberation hid).
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"go.mod\"}"}}]}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		default:
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+		}
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "fix the build"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// Reload the resumable log exactly as `cortex resume` does.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	// No mid-conversation system message (the transcript note is kindNote,
+	// which loadSession skips).
+	for i, m := range msgs {
+		if m.Role == RoleSystem && i != 0 {
+			t.Errorf("loaded message %d is a non-leading system message: %+v (the note must not be resumable)", i, m)
+		}
+	}
+	// No "assistant followed by assistant" shape, and no empty assistant at
+	// all — the dropped empty finish did not survive in the log.
+	for i, m := range msgs {
+		if m.Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
+			t.Errorf("loaded message %d is an empty assistant with no tool calls: the dropped empty finish survived in the log", i)
+		}
+		if i > 0 && msgs[i-1].Role == "assistant" {
+			t.Errorf("loaded message %d is an assistant message directly after another assistant: the transcript is not consistent with the wire conversation", i)
+		}
+	}
+}
+
+// TestTurnReasoningFallbackNoteIsNotResumable: the issue #149 transcript note
+// must be written under a distinct kindNote entry so `cortex resume`
+// (loadSession) never loads it back as a message. It is visible in the JSONL
+// (human-readable) but absent from the resumed wire conversation.
+func TestTurnReasoningFallbackNoteIsNotResumable(t *testing.T) {
+	quickRetries(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Write([]byte(sseBody(
+				`{"choices":[{"delta":{"role":"assistant","content":""}}]}`,
+				`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+				`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+			)))
+			return
+		}
+		w.Write([]byte(sseBody(
+			`{"choices":[{"delta":{"role":"assistant","content":"recovered answer"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}`,
+		)))
+	}))
+	defer srv.Close()
+
+	cs := &CortexSession{workspace: ws, Request: &AgentRequest{Model: "m", BaseURL: srv.URL,
+		Messages: []Message{{Role: RoleSystem, Content: "s"}}}}
+	cs.StartTranscript()
+	if cs.transcript == nil {
+		t.Fatal("StartTranscript did not open a transcript")
+	}
+	t.Cleanup(func() { cs.transcript.Close() })
+	if _, err := cs.Turn(context.Background(), "hi"); err != nil {
+		t.Fatalf("Turn: %v", err)
+	}
+
+	// The note is present in the JSONL under kindNote (human-readable).
+	notes := fallbackTranscriptEntries(t, cs, kindNote)
+	if len(notes) != 1 {
+		t.Fatalf("got %d kindNote entries, want 1 (the fallback transcript note)", len(notes))
+	}
+	if !strings.Contains(notes[0].Content, "re-sent once with reasoning disabled") {
+		t.Errorf("kindNote content = %q, want the reasoning-fallback note", notes[0].Content)
+	}
+
+	// And it is NOT loaded back as a message on resume.
+	msgs, _, _, err := loadSession(filepath.Join(cs.SessionsDir(), cs.SessionID+".jsonl"))
+	if err != nil {
+		t.Fatalf("loadSession: %v", err)
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "re-sent once with reasoning disabled") {
+			t.Errorf("loadSession returned the transcript note as a message: %+v", m)
+		}
+	}
+}
