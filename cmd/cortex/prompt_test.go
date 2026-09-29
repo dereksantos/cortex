@@ -160,19 +160,23 @@ func TestMergePromptConfig(t *testing.T) {
 	}
 }
 
-// The built-in prompt must encode the four working-style preferences
-// (2026-07-20): verify-first, clarify ambiguity with the user, delegation to
-// subagents, simple communication, and honest scoping. Keyword checks are
-// deliberately loose — they pin that a principle survives future rewrites,
-// not its exact wording.
+// The built-in prompt must encode the working-style preferences
+// (2026-07-20, extended 2026-09-28 by issue #148): verify-first, clarify
+// ambiguity with the user, delegation to subagents, simple communication,
+// honest scoping, connect-it-through (done only when the path that needs the
+// change reaches it — traced from the entry point), and docs updated with
+// behavior changes. Keyword checks are deliberately loose — they pin that a
+// principle survives future rewrites, not its exact wording.
 func TestDefaultPromptEncodesWorkingStyle(t *testing.T) {
 	lower := strings.ToLower(SystemPrompt)
 	for _, principle := range []string{
-		"test",     // verify-first: tests before the change
-		"delegate", // reasoning model handing bounded work to subagents
-		"ask",      // clarify with the user when ambiguous
-		"simple",   // simplicity in code and in replies
-		"scope",    // scope + feasibility, optimistic but realistic
+		"test",        // verify-first: tests before the change
+		"delegate",    // reasoning model handing bounded work to subagents
+		"ask",         // clarify with the user when ambiguous
+		"simple",      // simplicity in code and in replies
+		"scope",       // scope + feasibility, optimistic but realistic
+		"entry point", // connect it all the way through: trace from the entry point, not just the new unit
+		"document",    // update the docs describing changed behavior in the same change
 	} {
 		if !strings.Contains(lower, principle) {
 			t.Errorf("built-in prompt no longer mentions %q — a core working-style principle was dropped", principle)
