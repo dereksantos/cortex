@@ -278,8 +278,11 @@ func TestTurnStopsRepeatedToolCalls(t *testing.T) {
 	// Guard fires at maxRepeatedToolCalls identical batches, then one forced
 	// finalize. This fixture keeps returning tool_calls even with tools
 	// withheld, so the empty-answer salvage fires once more (still empty)
-	// before giving up.
-	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+2 {
+	// before giving up. The role runs with reasoning ON (the code role's
+	// default), so step 2's forced-finalize on-retry fires when the forced
+	// finalize comes back empty (still tool_calls, no visible content), for
+	// one extra model call — hence +3, not +2.
+	if calls < maxRepeatedToolCalls || calls > maxRepeatedToolCalls+3 {
 		t.Errorf("model called %d times, want ~%d (guard should break the loop)", calls, maxRepeatedToolCalls)
 	}
 	if calls >= maxToolIterations {
@@ -335,9 +338,10 @@ func TestTurnReturnsSalvagedAnswerNotStalePreToolText(t *testing.T) {
 }
 
 // TestTurnEmptyUnsalvageableReturnsEmptyNotStale: round 1 carries tool_calls
-// plus throwaway prose; every later round (the natural finish AND the salvage
-// re-ask) comes back empty. The reply must be empty — not round 1's stale
-// pre-tool prose — and the stop reason must say the turn ended empty.
+// plus throwaway prose; every later round (the natural finish, the one
+// reasoning-off retry of issue #149, and the salvage re-ask) comes back
+// empty. The reply must be empty — not round 1's stale pre-tool prose — and
+// the stop reason must say the turn ended empty.
 func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	quickRetries(t)
 	t.Chdir(t.TempDir())
@@ -372,8 +376,8 @@ func TestTurnEmptyUnsalvageableReturnsEmptyNotStale(t *testing.T) {
 	if res.StopReason != "empty-finalize" {
 		t.Errorf("StopReason = %q, want empty-finalize", res.StopReason)
 	}
-	if calls != 3 {
-		t.Errorf("model calls = %d, want 3 (tool round, empty finish, one salvage)", calls)
+	if calls != 4 {
+		t.Errorf("model calls = %d, want 4 (tool round, empty finish, one reasoning-off retry, one salvage)", calls)
 	}
 }
 

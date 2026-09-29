@@ -533,7 +533,7 @@ func TestCoderDispatchInterruptedAppendsAllResults(t *testing.T) {
 		return fakeResp("", calls, 1, 1), false, nil
 	})
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher()}
-	_, _, err := runLoop(ctx, send, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append, nil)
+	_, _, err := runLoop(ctx, send, cs, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append, nil)
 	if err == nil {
 		t.Fatal("expected a canceled-context error")
 	}
@@ -565,7 +565,7 @@ func TestCoderDispatchHappyPath(t *testing.T) {
 		return fakeResp("done", nil, 1, 1), false, nil
 	})
 	ts := Toolset{Tools: cs.Request.Tools, Dispatch: cs.coderDispatcher()}
-	if _, _, err := runLoop(context.Background(), send, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append, nil); err != nil {
+	if _, _, err := runLoop(context.Background(), send, cs, cs.Request, ts, Bounds{MaxTokens: 100, MaxIter: 100}, nil, cs.Append, nil); err != nil {
 		t.Fatalf("runLoop: %v", err)
 	}
 

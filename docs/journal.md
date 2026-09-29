@@ -56,9 +56,9 @@ Why files (not a SQL engine) for the write side:
 ## The ten principles
 
 1. **CQRS, explicit.** Journal = write side. Storage layer = read side (JSONL-with-in-memory-indexes, not SQLite). The read side is regeneratable; the journal is not.
-2. **The journal contains inputs AND decisions AND corrections.** Raw events (`capture.event`) and derivations/grades that reference their sources by offset. Today the live derivation/grade classes are `study.result`, `eval.cell_result`, `model.failure`, `model.substitution`, and `loop.run`; the original `dream.*` / `reflect.*` / `resolve.*` / `think.*` / `feedback.*` classes this principle was written against are defined but dormant — see Writer-class taxonomy. Provenance is structural, not metadata.
+2. **The journal contains inputs AND decisions AND corrections.** Raw events (`capture.event`) and derivations/grades that reference their sources by offset. Today the live derivation/grade classes are `study.result`, `eval.cell_result`, `model.failure`, `model.substitution`, `recovery.reasoning_fallback`, and `loop.run`; the original `dream.*` / `reflect.*` / `resolve.*` / `think.*` / `feedback.*` classes this principle was written against are defined but dormant — see Writer-class taxonomy. Provenance is structural, not metadata.
 3. **External substrates stay external.** Claude transcripts, user memory files, git, project docs would be observed and recorded as `observation.X` entries at content-hash + time, not copied wholesale — the `observation` writer-class (`internal/journal/observation.go`) is defined but has no live writer today. Producers retain ownership either way.
-4. **fsync is per-writer-class.** Input boundary (`capture/`) fsyncs every entry — input loss is permanent. Every other live class today (`eval/`, `study/`, `model/`, `loop/`, `landscape/`) fsyncs per batch — derivation loss is recoverable by re-running whatever produced it.
+4. **fsync is per-writer-class.** Input boundary (`capture/`) fsyncs every entry — input loss is permanent. Every other live class today (`eval/`, `study/`, `model/`, `recovery/`, `loop/`, `landscape/`) fsyncs per batch — derivation loss is recoverable by re-running whatever produced it.
 5. **Retractions are append-only entries.** Historically, a `/cortex-forget` slash command wrote a `feedback.retraction` referencing the offset to forget — the append-only *pattern* is the durable idea, but that command and the `feedback` class it drove are both gone. Forgetting today goes through the `memory_forget` tool over the separate model-driven memory store (`docs/memory-tools.md`), not a journal projection.
 6. **Local-only by default; jq-readable by default.** Privacy and trust are design invariants. JSONL, no encryption unless opt-in, no remote sync unless explicit.
 7. **Indexer runs in-daemon AND as one-shot CLI.** *(Historical — written before the May 2026 daemon retirement; see the note above. There is no daemon and no `cortex journal ingest`/`rebuild` CLI today — `study` and `cortex learn` read the journal directly instead. The underlying point survives: capture never blocks on anything reading it downstream.)*
@@ -78,6 +78,7 @@ The logical journal is partitioned on disk by *who wrote it*. Each writer-class 
 | **eval** | project | `.cortex/journal/eval/` | `eval.cell_result` | per batch | `cmd/cortex/session_runtime.go` (`emitSessionMetrics`) | end of each REPL session — per-session telemetry, not the old eval-grid framework that type once served |
 | **study** | project | `.cortex/journal/study/` | `study.result` | per batch | `cmd/cortex/study_eval.go` (`emitStudyResult`) | each `cortex study-eval` rep |
 | **model** | project | `.cortex/journal/model/` | `model.failure`, `model.substitution` | per batch | `cmd/cortex/heal.go` (`journalModelFailure`); `cmd/cortex/preflight.go` (`reportSubstitution`) | a role's model errors mid-session and self-heals; preflight substitutes an unserved curated model at startup |
+| **recovery** | project | `.cortex/journal/recovery/` | `recovery.reasoning_fallback` | per batch | `cmd/cortex/recovery_journal.go` (`appendReasoningFallback`) | an empty finish from a reasoning-on role is recovered by the issue #149 one-shot reasoning retry (natural-finish off-retry or forced-finalize on-retry) — telemetry for which models keep needing it |
 | **loop** | **machine** (`~/.cortex/journal/`) | `journal/loop/` | `loop.run` | per batch | `cmd/cortex/loop_run.go`, `cmd/cortex/serve_scheduler.go` (`journal.AppendLoopRun`) | each background loop firing (e.g. `cortex learn`), across all projects on the machine |
 | **landscape** | **machine** (`~/.cortex/journal/`) | `journal/landscape/` | `landscape.scan` | per batch | `cmd/cortex/scan.go`, `internal/tools/scan_landscape.go` (`journal.AppendLandscapeScan`) | `cortex scan` / the `scan_landscape` tool discovering projects under configured roots |
 
@@ -95,7 +96,7 @@ These writer-classes' Go types and constructors still exist in `internal/journal
 | **feedback** | `feedback.correction`, `feedback.confirmation`, `feedback.retraction` | corrections against derivations, incl. the old `/cortex-forget` |
 | **replay** | `replay.counterfactual` | counterfactual re-execution (see principle 8 above) |
 
-That's 6 live classes + 7 dormant classes = 13 defined writer-classes today, against the 8 this section originally described. There is no "collective exhaustion" invariant to state anymore — the taxonomy is whatever `internal/journal` currently defines, and liveness is a fact about call sites, not a design constant. Mutual exclusivity still holds: each entry type belongs to exactly one writer-class.
+That's 7 live classes + 7 dormant classes = 14 defined writer-classes today, against the 8 this section originally described. There is no "collective exhaustion" invariant to state anymore — the taxonomy is whatever `internal/journal` currently defines, and liveness is a fact about call sites, not a design constant. Mutual exclusivity still holds: each entry type belongs to exactly one writer-class.
 
 ## Directory layout
 
@@ -104,7 +105,7 @@ Not every class lives under the project. Most do — `.cortex/journal/<class>/` 
 - **loop** (`internal/journal/loop.go:80`) — loop firings aren't scoped to one project; the scheduler and the web UI's run-history view want one machine-wide stream.
 - **landscape** (`internal/journal/landscape.go:60`) — scan results describe the registry of projects on the machine, so they can't live inside any single project's tree.
 
-Every other live class (`capture`, `eval`, `study`, `model`) is project-scoped, one `.cortex/journal/` tree per project, matching the rest of this document's per-project framing.
+Every other live class (`capture`, `eval`, `study`, `model`, `recovery`) is project-scoped, one `.cortex/journal/` tree per project, matching the rest of this document's per-project framing.
 
 ## Entry schema discipline
 

@@ -296,3 +296,57 @@ decisions:
    Prerequisites before enabling: fleet serving exposes
    reasoning_content/reasoning_tokens on the cuda group, and blocking-
    path reasoning accounting parity (P1 gap, now live-confirmed).
+
+## Reasoning-fallback recovery (issue #149)
+
+A reasoning-ON role can spend its whole turn deliberating and come back with
+**nothing** — no content, no tool calls. That is the budget-burn failure this
+doc's §4 names, and the B5 probe (§B5 fleet probe, verdict 3) caught it live:
+on `coder` every non-off tier hit the token cap with empty visible content.
+The engine's answer is a one-shot, role-scoped **recovery** — not a policy
+change.
+
+**The rule.** When a finish comes back empty from a role whose resolved
+effort is non-off (`req.Effort.Level != EffortOff`), the engine re-sends the
+**same request once** with reasoning pinned in the opposite direction, and
+uses the retry's answer if it is non-empty:
+
+- **Natural branch** (`salvageEmptyReasoningRetry`, `cmd/cortex/loop.go`) —
+  the empty finish is a plain mid-loop answer with no tool calls. The retry
+  pins reasoning **off**: a Qwen-style model that was mid-deliberation often
+  produces its answer once the deliberation channel is suppressed.
+- **Forced-finalize branch** (`finalizeLoop`, `cmd/cortex/loop.go`) — a bound
+  (max-iter, stuck, read-budget, …) tripped and the forced finalize itself
+  came back empty. The forced finalize *always* goes out with reasoning off
+  (§5a), so the recovery is the mirror: it re-sends the **same prompt once
+  with reasoning pinned on**.
+
+Roles that already run with reasoning **off** never pay for it: there is no
+opposite direction to fall back to, so the recovery is skipped entirely and
+the existing prompt-based salvage chain runs unchanged.
+
+**Recovery, not policy.** The configured effort default is never touched.
+The one-shot mutation rides the same pattern as `disableEffortForSend`'s
+existing uses — pin for the one send, restore the role's configured level
+before return — so a role's `thinking` setting in config is unchanged
+afterward. This is deliberately NOT §5's escalation primitive (a standing
+per-role policy); it is a one-shot in-flight recovery of a single empty
+finish. It fires **at most once per empty finish**, enforced by construction
+(the caller invokes the recovery at most once per empty branch), so a model
+that keeps coming back empty cannot trigger a retry storm — the second empty
+fall-through goes straight to the existing prompt-based salvage
+(`salvageEmptyFinalize` / `salvageObservationFinalize`).
+
+**Journal receipt.** Every recovery that actually recovers a non-empty answer
+appends one `recovery.reasoning_fallback` entry to the project-scope class
+dir (`.cortex/journal/recovery/`), best-effort — a failed write is
+swallowed, the recovery itself already ran. The receipt records the model
+that needed it, the role (`code`/`study`), which path fired it (natural
+off-retry vs forced on-retry), the stop reason, and the clamp state, so
+telemetry shows *which models keep needing it* per project (see
+docs/journal.md's writer-class taxonomy and
+`cmd/cortex/recovery_journal.go`). `loopStats.ReasoningFallback` is set on
+the run's in-memory stats the same way, for the study-eval / session-metrics
+rows. The receipt fires on recovery *success only* — an empty retry that fell
+through to the prompt-based salvage records `ReasoningFallback = false` (the
+salvage path's own `Salvaged`/`SalvagedUnclamped` attribution stands).
