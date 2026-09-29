@@ -36,8 +36,14 @@ read input → run agentic tool calls → capture the turn → curate context �
 ```
 
 Sessions accumulate across turns and persist as raw JSONL transcripts in
-`.cortex/sessions/<id>.jsonl` (resumable). The agent reads `AGENTS.md` from
-the repo root into its seed if present.
+`.cortex/sessions/<id>.jsonl` (resumable). The agent seeds its system prompt
+from the repo's instruction file, resolved priority-ordered with first match
+winning (no concatenation): `AGENTS.md`, then `CLAUDE.md`, then
+`.github/copilot-instructions.md` — checked in the CWD first, then at the
+project root anchored by `findUp(".cortex")` (nested dirs resolve the root's
+file); the loaded file is capped at `limits.max_instruction_bytes` and the
+system prompt's `# Project instructions (<file>)` header (and `/context`'s
+system legend row) names which file it came from.
 
 Three capabilities distinguish it:
 

@@ -33,7 +33,7 @@ func TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD(t *testing.
 	elsewhere := t.TempDir()
 	t.Chdir(elsewhere)
 
-	cs := &CortexSession{Request: &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: systemPromptContent("")}}}}
+	cs := &CortexSession{Request: &AgentRequest{Messages: []Message{{Role: RoleSystem, Content: systemPromptContent("", "")}}}}
 	if err := applyProjectByName(cs, reg, "blog"); err != nil {
 		t.Fatalf("applyProjectByName: %v", err)
 	}
@@ -62,12 +62,16 @@ func TestApplyProjectByNameRunsAgainstRegisteredRootFromUnrelatedCWD(t *testing.
 		t.Errorf("root() = %q, want %q (confinement root must follow --project, not CWD)", got, wantRoot)
 	}
 
-	wantInst := want.Instructions()
+	_, wantInst := want.Instructions()
 	if wantInst == "" {
 		t.Fatal("fixture AGENTS.md instructions unexpectedly empty")
 	}
 	if !strings.Contains(cs.Request.Messages[0].Content, wantInst) {
 		t.Errorf("system prompt does not carry the project's AGENTS.md instructions %q: got %q", wantInst, cs.Request.Messages[0].Content)
+	}
+	// #147: the section header names the loaded file.
+	if !strings.Contains(cs.Request.Messages[0].Content, "# Project instructions (AGENTS.md)") {
+		t.Errorf("system prompt section header should name AGENTS.md; got %q", cs.Request.Messages[0].Content)
 	}
 }
 

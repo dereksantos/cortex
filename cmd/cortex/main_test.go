@@ -328,14 +328,55 @@ func TestProjectInstructionsInjection(t *testing.T) {
 	})
 
 	t.Run("found in a parent directory", func(t *testing.T) {
+		// The .cortex dir anchors the project root (findUp(".cortex")), so a
+		// file at that root is reached from a nested subdirectory.
 		root := t.TempDir()
+		os.MkdirAll(filepath.Join(root, ".cortex"), 0755)
 		os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from the root"), 0644)
 		child := filepath.Join(root, "a", "b")
 		os.MkdirAll(child, 0755)
 		t.Chdir(child)
 
 		if sys := (CortexArgs{}).Request().Messages[0].Content; !strings.Contains(sys, "from the root") {
-			t.Error("AGENTS.md in an ancestor directory should be found")
+			t.Error("AGENTS.md at the .cortex-anchored project root should be found from a subdirectory")
+		}
+	})
+
+	t.Run("CLAUDE.md is appended when AGENTS.md is absent", func(t *testing.T) {
+		// A .cortex dir anchors WorkspaceFromCWD (and thus
+		// projectInstructions) at THIS dir: without it, findUp(".cortex")
+		// walks the test runner's whole home chain — on a machine whose
+		// home tree contains an AGENTS.md, the ancestor file would win and
+		// the subtest could never observe the CWD's CLAUDE.md.
+		dir := t.TempDir()
+		os.MkdirAll(filepath.Join(dir, ".cortex"), 0755)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("CLAUDE conventions\n"), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "CLAUDE conventions") {
+			t.Error("CLAUDE.md body should be seeded when AGENTS.md is absent")
+		}
+		// The seeded body must follow the shared agentsMarker separator —
+		// the same structural contract the AGENTS.md subtest above checks,
+		// and the header must name the loaded file (#147).
+		if !strings.Contains(sys, agentsMarkerPrefix+"CLAUDE.md)\n\nCLAUDE conventions") {
+			t.Error("CLAUDE.md body must follow the project-instructions separator naming CLAUDE.md")
+		}
+	})
+
+	t.Run("AGENTS.md beats CLAUDE.md — no concatenation", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents wins\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("claude loses\n"), 0644)
+		t.Chdir(dir)
+
+		sys := CortexArgs{}.Request().Messages[0].Content
+		if !strings.Contains(sys, "agents wins") {
+			t.Error("AGENTS.md body should be seeded")
+		}
+		if strings.Contains(sys, "claude loses") {
+			t.Error("CLAUDE.md body must not appear when AGENTS.md wins — no concatenation")
 		}
 	})
 

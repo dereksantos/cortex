@@ -19,15 +19,15 @@ func TestSystemPromptContentDefault(t *testing.T) {
 	resetPrompt(t)
 	configurePrompt(nil)
 
-	if got := systemPromptContent(""); got != SystemPrompt {
+	if got := systemPromptContent("", ""); got != SystemPrompt {
 		t.Errorf("nil config must yield the built-in prompt verbatim; got %d bytes, want %d", len(got), len(SystemPrompt))
 	}
-	got := systemPromptContent("do the thing")
+	got := systemPromptContent("AGENTS.md", "do the thing")
 	if !strings.HasPrefix(got, SystemPrompt) {
 		t.Error("instructions must ride after the base prompt, not replace it")
 	}
-	if !strings.Contains(got, agentsMarker+"do the thing") {
-		t.Error("AGENTS.md body must follow the agentsMarker separator")
+	if !strings.Contains(got, agentsMarkerPrefix+"AGENTS.md)\n\ndo the thing") {
+		t.Error("the instructions body must follow the agentsMarker separator naming the loaded file")
 	}
 }
 
@@ -40,7 +40,7 @@ func TestConfigurePromptFileReplacesBase(t *testing.T) {
 	}
 
 	configurePrompt(&Config{Prompt: PromptConfig{File: path}})
-	got := systemPromptContent("")
+	got := systemPromptContent("", "")
 	if got != "You are a custom agent." {
 		t.Errorf("prompt.file must replace the built-in base (trimmed); got %q", got)
 	}
@@ -49,7 +49,7 @@ func TestConfigurePromptFileReplacesBase(t *testing.T) {
 func TestConfigurePromptFileMissingFallsBack(t *testing.T) {
 	resetPrompt(t)
 	configurePrompt(&Config{Prompt: PromptConfig{File: filepath.Join(t.TempDir(), "nope.md")}})
-	if got := systemPromptContent(""); got != SystemPrompt {
+	if got := systemPromptContent("", ""); got != SystemPrompt {
 		t.Error("a missing prompt.file must fall back to the built-in prompt")
 	}
 }
@@ -62,7 +62,7 @@ func TestConfigurePromptFileEmptyFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	configurePrompt(&Config{Prompt: PromptConfig{File: path}})
-	if got := systemPromptContent(""); got != SystemPrompt {
+	if got := systemPromptContent("", ""); got != SystemPrompt {
 		t.Error("a whitespace-only prompt.file must fall back to the built-in prompt")
 	}
 }
@@ -83,7 +83,7 @@ func TestConfigurePromptFileRelativeFindsUp(t *testing.T) {
 	t.Chdir(nested)
 
 	configurePrompt(&Config{Prompt: PromptConfig{File: filepath.Join(".cortex", "prompt.md")}})
-	if got := systemPromptContent(""); got != "from the repo root" {
+	if got := systemPromptContent("", ""); got != "from the repo root" {
 		t.Errorf("a relative prompt.file must resolve upward like AGENTS.md/config.json; got %q", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestConfigurePromptFileTruncatesAtCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	configurePrompt(&Config{Prompt: PromptConfig{File: path}})
-	got := systemPromptContent("")
+	got := systemPromptContent("", "")
 	if !strings.HasSuffix(got, "[prompt truncated]") {
 		t.Errorf("an over-cap prompt.file must be truncated with a marker; got %q", got)
 	}
@@ -113,15 +113,15 @@ func TestConfigurePromptAppend(t *testing.T) {
 	resetPrompt(t)
 	configurePrompt(&Config{Prompt: PromptConfig{Append: "Always answer in haiku."}})
 
-	got := systemPromptContent("agents body")
-	base := strings.SplitN(got, agentsMarker, 2)[0]
+	got := systemPromptContent("AGENTS.md", "agents body")
+	base := strings.SplitN(got, agentsMarkerPrefix, 2)[0]
 	if !strings.HasPrefix(base, SystemPrompt) {
 		t.Error("append must extend the base prompt, not replace it")
 	}
 	if !strings.Contains(base, "Always answer in haiku.") {
 		t.Error("prompt.append must appear in the system section")
 	}
-	if strings.Index(got, "Always answer in haiku.") > strings.Index(got, agentsMarker) {
+	if strings.Index(got, "Always answer in haiku.") > strings.Index(got, agentsMarkerPrefix) {
 		t.Error("prompt.append must ride BEFORE the AGENTS.md section")
 	}
 }
@@ -134,7 +134,7 @@ func TestConfigurePromptFileAndAppendCompose(t *testing.T) {
 		t.Fatal(err)
 	}
 	configurePrompt(&Config{Prompt: PromptConfig{File: path, Append: "Extra rule."}})
-	got := systemPromptContent("")
+	got := systemPromptContent("", "")
 	if !strings.HasPrefix(got, "Custom base.") || !strings.Contains(got, "Extra rule.") {
 		t.Errorf("file+append must compose (file replaces base, append follows); got %q", got)
 	}

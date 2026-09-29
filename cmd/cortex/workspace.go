@@ -72,11 +72,21 @@ func (w *Workspace) ContextDir() string { return filepath.Join(w.Root, ".cortex"
 // SessionsDir is the workspace's session transcript directory.
 func (w *Workspace) SessionsDir() string { return filepath.Join(w.ContextDir(), "sessions") }
 
-// Instructions reads and returns the workspace's AGENTS.md content
-// (trimmed, truncated at maxInstructionBytes), or "" if absent/unreadable —
-// identical contract to the existing projectInstructions().
-func (w *Workspace) Instructions() string {
-	return readInstructions(filepath.Join(w.Root, "AGENTS.md"))
+// Instructions resolves and returns the workspace's project instructions:
+// the first entry of agentInstructionFiles present at w.Root (AGENTS.md
+// first, then CLAUDE.md, then .github/copilot-instructions.md — no
+// concatenation), trimmed and truncated at the instruction cap with a
+// marker naming the file. It returns the resolved file's path ("" when none
+// exists) alongside its body — the identical contract to
+// projectInstructions(), which resolves the same file at the CWD-implicit
+// root — so the caller can name the loaded file (systemPromptContent's
+// label, #147).
+func (w *Workspace) Instructions() (path, instructions string) {
+	p := resolveInstructionFile(w.Root)
+	if p == "" {
+		return "", ""
+	}
+	return p, readInstructions(p)
 }
 
 // ConfinePath vets a tool call's path argument against this workspace's

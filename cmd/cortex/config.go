@@ -933,6 +933,33 @@ func findUp(rel string) string {
 
 func findConfigPath() string { return findUp(filepath.Join(".cortex", "config.json")) }
 
+// agentInstructionFiles is the priority-ordered list of agent-instruction
+// files a repo may keep its conventions in. resolveInstructionFile returns
+// the FIRST one present at a given root — no concatenation, so a repo with
+// several still loads exactly one (AGENTS.md, the cross-harness convention,
+// always wins). Keep the list short and documented: each entry is a file a
+// real repo ships, and the order encodes intent.
+var agentInstructionFiles = []string{
+	"AGENTS.md",
+	"CLAUDE.md",
+	filepath.Join(".github", "copilot-instructions.md"),
+}
+
+// resolveInstructionFile returns the path of the first entry in
+// agentInstructionFiles that exists as a regular file under root (or "" when
+// none do). root is taken as given — this is the per-root half of instruction
+// resolution; the CWD-implicit caller (projectInstructions) passes its
+// WorkspaceFromCWD()-derived root so nested dirs resolve upward, exactly
+// like AGENTS.md did before the list existed.
+func resolveInstructionFile(root string) string {
+	for _, rel := range agentInstructionFiles {
+		if p := filepath.Join(root, rel); regular(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // maxInstructionBytes is the historical AGENTS.md truncation default.
 // instructionBytesCap is the LIVE value readInstructions actually uses — a
 // package var (not this const directly) so NewCortexSession can set it once
@@ -945,27 +972,85 @@ const maxInstructionBytes = 16384
 
 var instructionBytesCap = maxInstructionBytes
 
-func projectInstructions() string {
-	path := findUp("AGENTS.md")
+// projectInstructions resolves and reads the CWD-implicit project
+// instructions: the working directory is searched first (the fresh
+// workspace's own files win), then the upward chain via findUp(".cortex")
+// the way WorkspaceFromCWD anchors the root — and at that root the first
+// agentInstructionFiles entry present (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md) is read. No concatenation: exactly one
+// file is ever loaded. It returns the resolved file's path ("" when none
+// exists) alongside its body, so the caller can name the file in the
+// system-prompt section header (systemPromptContent's label) — the seed
+// shows which file it came from (#147).
+func projectInstructions() (path, instructions string) {
+	for _, rel := range agentInstructionFiles {
+		if p := filepath.Join(wd(), rel); regular(p) {
+			return p, readInstructions(p)
+		}
+	}
+	if ws := WorkspaceFromCWD(); ws.Root != "" && ws.Root != wd() {
+		if p := resolveInstructionFile(ws.Root); p != "" {
+			return p, readInstructions(p)
+		}
+	}
+	return "", ""
+}
+
+// fileLabel renders a resolved instruction file's path as the name
+// systemPromptContent's "# Project instructions (<file>)" header and the
+// /context system legend row show: the path relative to the workspace root
+// when the file lies under one (a copilot-instructions.md at the root's
+// .github/ subdir → ".github/copilot-instructions.md"), the basename
+// otherwise ("AGENTS.md", "CLAUDE.md"). Pure function of (path, workspace
+// root) — never a filesystem read. "" when no file resolved.
+func fileLabel(path string) string {
 	if path == "" {
 		return ""
 	}
-	return readInstructions(path)
+	if ws := WorkspaceFromCWD(); ws.Root != "" {
+		if rel, err := filepath.Rel(ws.Root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return filepath.Base(path)
 }
 
-// readInstructions reads and trims an AGENTS.md at an exact path (no
-// upward search), truncating at instructionBytesCap — the shared body
-// projectInstructions() (CWD-implicit, via findUp) and
-// Workspace.Instructions() (explicit root, workspace.go) both use, so the
-// two stay provably identical for the same resolved path.
+// wd is os.Getwd() or "" — a tiny seam so a failure can't propagate into
+// instruction resolution (an unreadable CWD degrades to "no CWD files").
+func wd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
+// regular reports whether path exists and is a regular file (os.Stat
+// follows symlinks, so a linked-to file counts).
+func regular(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
+}
+
+// readInstructions reads and trims the instruction file at an exact path (no
+// upward search), truncating at instructionBytesCap with a marker that names
+// the file (basename) it came from — so the system prompt and anything that
+// echoes the seed can say which file was loaded (#147). The shared body
+// projectInstructions() (CWD-implicit root) and Workspace.Instructions()
+// (explicit root, workspace.go) both use after resolveInstructionFile, so
+// the two stay provably identical for the same resolved path. An empty path
+// (no file resolved) or an unreadable file yields "".
 func readInstructions(path string) string {
+	if path == "" {
+		return ""
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	s := strings.TrimSpace(string(data))
 	if len(s) > instructionBytesCap {
-		s = s[:instructionBytesCap] + "\n...[AGENTS.md truncated]"
+		s = s[:instructionBytesCap] + "\n...[" + filepath.Base(path) + " truncated]"
 	}
 	return s
 }

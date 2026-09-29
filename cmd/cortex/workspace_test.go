@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -89,20 +90,328 @@ func TestWorkspaceFromCWDMatchesExplicitRootInstructions(t *testing.T) {
 		t.Fatalf("NewWorkspace: %v", err)
 	}
 
-	implicitInst := implicit.Instructions()
-	explicitInst := explicit.Instructions()
+	implicitPath, implicitInst := implicit.Instructions()
+	explicitPath, explicitInst := explicit.Instructions()
 	if implicitInst == "" {
 		t.Fatal("implicit Instructions() is empty, want the fixture AGENTS.md content")
 	}
 	if implicitInst != explicitInst {
 		t.Errorf("Instructions mismatch:\nimplicit=%q\nexplicit=%q", implicitInst, explicitInst)
 	}
+	if resolvedPath(t, implicitPath) != resolvedPath(t, explicitPath) {
+		t.Errorf("Instructions path mismatch:\nimplicit=%q\nexplicit=%q", implicitPath, explicitPath)
+	}
 	// Also proves Workspace.Instructions() agrees with the pre-existing
 	// CWD-implicit projectInstructions() free function (still used by
 	// CortexArgs.Request() until --project wiring lands in M3.5).
-	if free := projectInstructions(); free != implicitInst {
+	freePath, free := projectInstructions()
+	if free != implicitInst {
 		t.Errorf("Workspace.Instructions() diverges from projectInstructions(): workspace=%q free=%q", implicitInst, free)
 	}
+	if resolvedPath(t, freePath) != resolvedPath(t, implicitPath) {
+		t.Errorf("projectInstructions() diverges in resolved path: workspace=%q free=%q", implicitPath, freePath)
+	}
+}
+
+// TestResolveInstructionFileFixtureDirs is the table-driven core of
+// instruction-file resolution (#147): for a fixture root carrying a given
+// mix of candidate files, resolveInstructionFile returns the FIRST entry in
+// agentInstructionFiles that exists — no concatenation, AGENTS.md always
+// wins. NewWorkspace (explicit root, no search) is the root the resolver is
+// exercised through, since resolution is per-root; the CWD-implicit
+// projectInstructions() path resolves the same root (its WorkspaceFromCWD()
+// root) through the same helper.
+func TestResolveInstructionFileFixtureDirs(t *testing.T) {
+	tests := []struct {
+		name     string
+		files    map[string]string // rel path under root -> content
+		wantPath string            // "" = no instruction file at all
+		wantBody string            // expected resolved file content (trimmed)
+	}{
+		{
+			name:     "AGENTS.md only",
+			files:    map[string]string{"AGENTS.md": "agents body\n"},
+			wantPath: "AGENTS.md",
+			wantBody: "agents body",
+		},
+		{
+			name:     "CLAUDE.md only",
+			files:    map[string]string{"CLAUDE.md": "claude body\n"},
+			wantPath: "CLAUDE.md",
+			wantBody: "claude body",
+		},
+		{
+			name: "both AGENTS.md and CLAUDE.md — AGENTS.md wins",
+			files: map[string]string{
+				"AGENTS.md": "agents body\n",
+				"CLAUDE.md": "claude body\n",
+			},
+			wantPath: "AGENTS.md",
+			wantBody: "agents body",
+		},
+		{
+			name:     "copilot-instructions.md only",
+			files:    map[string]string{filepath.Join(".github", "copilot-instructions.md"): "copilot body\n"},
+			wantPath: filepath.Join(".github", "copilot-instructions.md"),
+			wantBody: "copilot body",
+		},
+		{
+			name: "all three — first in the list wins, no concatenation",
+			files: map[string]string{
+				"AGENTS.md": "agents body\n",
+				"CLAUDE.md": "claude body\n",
+				filepath.Join(".github", "copilot-instructions.md"): "copilot body\n",
+			},
+			wantPath: "AGENTS.md",
+			wantBody: "agents body",
+		},
+		{
+			name:     "neither",
+			files:    map[string]string{},
+			wantPath: "",
+			wantBody: "",
+		},
+		{
+			name: "neither (unrelated files only)",
+			files: map[string]string{
+				"README.md": "readme\n",
+				"agents.md": "lowercase is not AGENTS.md\n",
+			},
+			wantPath: "",
+			wantBody: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for rel, content := range tc.files {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", rel, err)
+				}
+			}
+
+			got := resolveInstructionFile(root)
+			want := ""
+			if tc.wantPath != "" {
+				want = filepath.Join(root, tc.wantPath)
+			}
+			if got != want {
+				t.Fatalf("resolveInstructionFile = %q, want %q", got, want)
+			}
+
+			// The resolved path reads as the expected body (the contract
+			// readInstructions then applies on top — trim + cap).
+			if tc.wantBody == "" {
+				return
+			}
+			data, err := os.ReadFile(got)
+			if err != nil {
+				t.Fatalf("read resolved file: %v", err)
+			}
+			if strings.TrimSpace(string(data)) != tc.wantBody {
+				t.Errorf("resolved file body = %q, want %q", strings.TrimSpace(string(data)), tc.wantBody)
+			}
+		})
+	}
+}
+
+// TestResolveInstructionFileMatchesWorkspaceRoot pins the per-root contract
+// both instruction legs share: an explicit NewWorkspace(root) and the CWD
+// chain (the working directory itself, as a root) resolve the SAME file —
+// so Workspace.Instructions() (--project, serve) and projectInstructions()
+// (CWD-implicit) stay in agreement for a repo where the file sits in the
+// working directory (the fresh-workspace case) or the explicit root.
+func TestResolveInstructionFileMatchesWorkspaceRoot(t *testing.T) {
+	root := newFixtureRepo(t) // AGENTS.md at the root, .cortex, nested sub/pkg
+	explicit, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatalf("NewWorkspace: %v", err)
+	}
+
+	// From the root directory itself (as a CWD-derived root would be):
+	t.Chdir(root)
+	if cwdRoot, err := os.Getwd(); err == nil {
+		if got, want := resolveInstructionFile(cwdRoot), resolveInstructionFile(explicit.Root); resolvedPath(t, got) != resolvedPath(t, want) {
+			t.Errorf("instruction file resolved differently by CWD root vs explicit root: %q vs %q", got, want)
+		}
+	}
+
+	// From a nested subdirectory: WorkspaceFromCWD anchors at the fixture
+	// root (findUp(".cortex")), so the per-root resolver resolves the
+	// fixture's file from the nested CWD too — the same file the explicit
+	// root resolves.
+	t.Chdir(filepath.Join(root, "sub", "pkg"))
+	if got, want := resolveInstructionFile(WorkspaceFromCWD().Root), resolveInstructionFile(explicit.Root); resolvedPath(t, got) != resolvedPath(t, want) {
+		t.Errorf("nested CWD: WorkspaceFromCWD root vs explicit root resolve differently: %q vs %q", got, want)
+	}
+	if filepath.Base(resolveInstructionFile(explicit.Root)) != "AGENTS.md" {
+		t.Errorf("explicit root should resolve the fixture AGENTS.md")
+	}
+}
+
+// TestWorkspaceInstructionsFixtureDirs is the table-driven core of #147's
+// acceptance over the WORKSPACE leg: for a fixture root carrying a given mix
+// of candidate files, Workspace.Instructions() returns the FIRST
+// agentInstructionFiles entry present (AGENTS.md, then CLAUDE.md, then
+// .github/copilot-instructions.md) — trimmed, capped, never concatenated.
+// The oversized case also pins the dynamic truncation marker introduced in
+// step 2 (it names the file it came from).
+func TestWorkspaceInstructionsFixtureDirs(t *testing.T) {
+	oversized := strings.Repeat("x", maxInstructionBytes+100)
+	tests := []struct {
+		name     string
+		files    map[string]string // rel path under root -> content
+		wantBody string            // "" = no instructions section at all
+		wantCap  bool              // body must be capped at instructionBytesCap + marker
+	}{
+		{
+			name:     "AGENTS.md only",
+			files:    map[string]string{"AGENTS.md": "agents body\n"},
+			wantBody: "agents body",
+		},
+		{
+			name:     "CLAUDE.md only",
+			files:    map[string]string{"CLAUDE.md": "claude body\n"},
+			wantBody: "claude body",
+		},
+		{
+			name: "both — AGENTS.md wins, CLAUDE.md is not concatenated",
+			files: map[string]string{
+				"AGENTS.md": "agents body\n",
+				"CLAUDE.md": "claude body\n",
+			},
+			wantBody: "agents body",
+		},
+		{
+			name:     "copilot-instructions.md only",
+			files:    map[string]string{filepath.Join(".github", "copilot-instructions.md"): "copilot body\n"},
+			wantBody: "copilot body",
+		},
+		{
+			name:  "neither",
+			files: map[string]string{"README.md": "readme\n"},
+		},
+		{
+			name:     "oversized file is capped",
+			files:    map[string]string{"CLAUDE.md": oversized},
+			wantBody: strings.Repeat("x", maxInstructionBytes) + "\n...[CLAUDE.md truncated]",
+			wantCap:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for rel, content := range tc.files {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+				}
+				if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", rel, err)
+				}
+			}
+			ws, err := NewWorkspace(root)
+			if err != nil {
+				t.Fatalf("NewWorkspace: %v", err)
+			}
+			_, got := ws.Instructions()
+			if want := tc.wantBody; got != want {
+				if len(got) > 120 {
+					got = got[:120] + "…"
+				}
+				if len(want) > 120 {
+					want = want[:120] + "…"
+				}
+				t.Fatalf("Instructions() = %q, want %q", got, want)
+			}
+			if tc.wantCap && len(tc.wantBody) != maxInstructionBytes+len("\n...[CLAUDE.md truncated]") {
+				t.Fatalf("test bug: capped wantBody is %d bytes, want cap+marker length", len(tc.wantBody))
+			}
+		})
+	}
+}
+
+// TestProjectInstructionsEquivalence pins the CWD-implicit leg
+// (projectInstructions, session_core.go's CortexArgs.Request) against the
+// explicit Workspace.Instructions() leg for the same fixture: a fresh
+// workspace (file in the CWD itself) and a .cortex-anchored repo (file at
+// the root, CWD nested) must both load the identical body — the contract
+// M3.1 proved for AGENTS.md, now holding across the whole
+// agentInstructionFiles list.
+func TestProjectInstructionsEquivalence(t *testing.T) {
+	tests := []struct {
+		name     string
+		files    map[string]string // under the root
+		wantBody string
+	}{
+		{"fresh workspace, AGENTS.md in CWD", map[string]string{"AGENTS.md": "agents body\n"}, "agents body"},
+		{"fresh workspace, CLAUDE.md in CWD", map[string]string{"CLAUDE.md": "claude body\n"}, "claude body"},
+		{"fresh workspace, both — AGENTS.md wins", map[string]string{"AGENTS.md": "agents body\n", "CLAUDE.md": "claude body\n"}, "agents body"},
+		{"fresh workspace, neither", map[string]string{"README.md": "readme\n"}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for rel, content := range tc.files {
+				if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", rel, err)
+				}
+			}
+			t.Chdir(root)
+			ws, err := NewWorkspace(root)
+			if err != nil {
+				t.Fatalf("NewWorkspace: %v", err)
+			}
+			wsPath, got := ws.Instructions()
+			if want := tc.wantBody; got != want {
+				t.Errorf("Workspace.Instructions() = %q, want %q", got, want)
+			}
+			freePath, free := projectInstructions()
+			if free != tc.wantBody {
+				t.Errorf("projectInstructions() = %q, want %q", free, tc.wantBody)
+			}
+			// #147: both legs resolve the SAME file (path, not just body).
+			if wsPath != "" && resolvedPath(t, wsPath) != resolvedPath(t, freePath) {
+				t.Errorf("leg paths diverge: workspace=%q free=%q", wsPath, freePath)
+			}
+		})
+	}
+
+	t.Run(".cortex-anchored repo, file at the root, CWD nested", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".cortex"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("root claude\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		nested := filepath.Join(root, "a", "b")
+		if err := os.MkdirAll(nested, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(nested)
+
+		ws := WorkspaceFromCWD()
+		if ws.Root == "" || resolvedPath(t, ws.Root) != resolvedPath(t, root) {
+			t.Fatalf("WorkspaceFromCWD root = %q, want the fixture root (anchored by .cortex)", ws.Root)
+		}
+		wsPath, got := ws.Instructions()
+		if want := "root claude"; got != want {
+			t.Errorf("Workspace.Instructions() = %q, want %q", got, want)
+		}
+		freePath, free := projectInstructions()
+		if free != "root claude" {
+			t.Errorf("projectInstructions() = %q, want %q (must resolve the ancestor root's file from the nested CWD)", free, "root claude")
+		}
+		// #147: both legs resolve the SAME file.
+		if wsPath != "" && resolvedPath(t, wsPath) != resolvedPath(t, freePath) {
+			t.Errorf("leg paths diverge: workspace=%q free=%q", wsPath, freePath)
+		}
+	})
 }
 
 func TestWorkspaceFromCWDMatchesExplicitRootConfinement(t *testing.T) {
