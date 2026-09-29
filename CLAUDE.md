@@ -85,7 +85,7 @@ Three capabilities distinguish it:
 |---|---|
 | `cortex` | Interactive REPL (default) |
 | `cortex resume [id]` | Resume a prior session (default: latest) |
-| `cortex turn [--session id] [--json] <input...>` | Headless single turn (drivers/scripts); session id → stderr |
+| `cortex turn [--session id] [--plan] [--json] <input...>` | Headless single turn (drivers/scripts); `--plan` runs plan-then-execute (one planning turn, then each step as its own turn); session id → stderr |
 | `cortex study <path> [goal...]` | One-off study (the `Study` subagent); prints the digest |
 | `cortex learn [--project <name>]` | One-off background learning pass (the `Learn` subagent) over the journal since the last cursor; prints a short report |
 | `cortex change <start\|commit\|status>` | Git change lifecycle — one reviewable change at a time (local git only) |
@@ -97,7 +97,7 @@ Three capabilities distinguish it:
 | `cortex model [--json]` | Catalog code/study role bindings + what the backend serves; suggest a `models` config block from detected RAM |
 
 REPL slash commands: `/help`, `/context`, `/compact`, `/clear`, `/sessions`,
-`/model [name]`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
+`/model [name]`, `/plan <task>`, `/quit`. Dispatch is in `cmd/cortex/main.go`'s `main()`:
 subcommands are the `os.Args[1]` if-chain before the REPL loop starts, slash
 commands are the `input ==` checks inside the REPL's input loop (`for {`).
 `/help` lists the commands; `/context`

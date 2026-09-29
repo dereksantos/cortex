@@ -249,6 +249,7 @@ var helpLines = []string{
 	"/help              show this list",
 	"/context           open the current session's context-window map (q to close)",
 	"/compact           distill the session via study, freeing context",
+	"/plan <task>       plan-then-execute: one planning turn, then each step as its own turn",
 	"/clear             reset the conversation and start a fresh session",
 	"/sessions          list saved sessions (resume at startup: cortex resume <id>)",
 	"/model [name]      show the code/study model bindings, or switch the coding model",
@@ -271,7 +272,7 @@ func printHelp() {
 var usageLines = []string{
 	"cortex                                    interactive REPL (default)",
 	"cortex resume [id]                        resume a prior session (default: latest)",
-	"cortex turn [--session id] [--json] ...   headless single turn; session id to stderr",
+	"cortex turn [--session id] [--plan] [--json] ...   headless turn; --plan runs plan-then-execute; session id to stderr",
 	"cortex study <path> [goal...]             one-off study; prints the digest",
 	"cortex learn [--project <name>]           background learning pass over the journal",
 	"cortex change <start|commit|status>       git change lifecycle (local git only)",
@@ -611,6 +612,29 @@ func main() {
 		}
 		if input == "/compact" {
 			compactNow(session, "manual compact")
+			continue
+		}
+
+		// /plan <task> runs the plan-then-execute path (#150): one planning
+		// turn, then each step as its own turn with the project's checks in
+		// between. The task is the rest of the line; a bare /plan with no
+		// task prints the usage hint. The per-step report is printed to the
+		// REPL exactly as the headless `cortex turn --plan` prints it.
+		if input == "/plan" || strings.HasPrefix(input, "/plan ") {
+			task := strings.TrimSpace(strings.TrimPrefix(input, "/plan"))
+			if task == "" {
+				fmt.Println(withColor("usage: /plan <task>  (plan-then-execute: one planning turn, then each step as its own turn)", gray))
+				continue
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			plan, planErr := session.TurnWithPlan(ctx, task)
+			stop()
+			if planErr != nil {
+				fmt.Fprintf(os.Stderr, "plan error: %v\n", planErr)
+			}
+			if plan.Reply != "" {
+				fmt.Println(plan.Reply)
+			}
 			continue
 		}
 
